@@ -11691,9 +11691,17 @@ fn validate_structure_builtin_type_redefinition_errors(
             StructureItemDesc::Pstr_primitive(vd) => {
                 validate_value_description_identity_arity_error(vd, arena)?;
             }
-            StructureItemDesc::Pstr_eval(_)
-            | StructureItemDesc::Pstr_value(_)
-            | StructureItemDesc::Pstr_typext(_)
+            StructureItemDesc::Pstr_eval(inner) => {
+                let (expr_idx, _attrs) = &**inner;
+                validate_expression_builtin_type_redefinition_errors(*expr_idx, arena)?;
+            }
+            StructureItemDesc::Pstr_value(inner) => {
+                let (_rec_flag, bindings) = &**inner;
+                for binding in bindings {
+                    validate_expression_builtin_type_redefinition_errors(binding.pvb_expr, arena)?;
+                }
+            }
+            StructureItemDesc::Pstr_typext(_)
             | StructureItemDesc::Pstr_exception(_)
             | StructureItemDesc::Pstr_open(_) => {}
         }
@@ -11783,7 +11791,185 @@ fn validate_module_expr_builtin_type_redefinition_errors(
         ModuleExprDesc::Pmod_extension(extension) => {
             validate_payload_builtin_type_redefinition_errors(&extension.1, arena)
         }
-        ModuleExprDesc::Pmod_ident(_) | ModuleExprDesc::Pmod_unpack(_) => Ok(()),
+        ModuleExprDesc::Pmod_unpack(expr_idx) => {
+            validate_expression_builtin_type_redefinition_errors(*expr_idx, arena)
+        }
+        ModuleExprDesc::Pmod_ident(_) => Ok(()),
+    }
+}
+
+fn validate_expression_builtin_type_redefinition_errors(
+    expr_idx: ExprIdx,
+    arena: &mut ParseArena,
+) -> PpxResult<()> {
+    let expr = arena.get_expr(expr_idx).clone();
+    match &*expr.pexp_desc {
+        ExpressionDesc::Pexp_let(inner) => {
+            let (_rec_flag, bindings, body) = &**inner;
+            for binding in bindings {
+                validate_expression_builtin_type_redefinition_errors(binding.pvb_expr, arena)?;
+            }
+            validate_expression_builtin_type_redefinition_errors(*body, arena)
+        }
+        ExpressionDesc::Pexp_fun(fun) => {
+            if let Some(default) = fun.default {
+                validate_expression_builtin_type_redefinition_errors(default, arena)?;
+            }
+            validate_expression_builtin_type_redefinition_errors(fun.rhs, arena)
+        }
+        ExpressionDesc::Pexp_apply(apply) => {
+            validate_expression_builtin_type_redefinition_errors(apply.funct, arena)?;
+            for (_label, arg) in &apply.args {
+                validate_expression_builtin_type_redefinition_errors(*arg, arena)?;
+            }
+            Ok(())
+        }
+        ExpressionDesc::Pexp_match(inner) | ExpressionDesc::Pexp_try(inner) => {
+            let (scrutinee, cases) = &**inner;
+            validate_expression_builtin_type_redefinition_errors(*scrutinee, arena)?;
+            for case in cases {
+                if let Some(guard) = case.pc_guard {
+                    validate_expression_builtin_type_redefinition_errors(guard, arena)?;
+                }
+                validate_expression_builtin_type_redefinition_errors(case.pc_rhs, arena)?;
+            }
+            Ok(())
+        }
+        ExpressionDesc::Pexp_tuple(items) | ExpressionDesc::Pexp_array(items) => {
+            for item in items.iter() {
+                validate_expression_builtin_type_redefinition_errors(*item, arena)?;
+            }
+            Ok(())
+        }
+        ExpressionDesc::Pexp_construct(_, arg) => {
+            if let Some(arg) = arg {
+                validate_expression_builtin_type_redefinition_errors(*arg, arena)?;
+            }
+            Ok(())
+        }
+        ExpressionDesc::Pexp_variant(inner) => {
+            let (_label, arg) = &**inner;
+            if let Some(arg) = arg {
+                validate_expression_builtin_type_redefinition_errors(*arg, arena)?;
+            }
+            Ok(())
+        }
+        ExpressionDesc::Pexp_record(inner) => {
+            let (fields, spread) = &**inner;
+            for field in fields {
+                validate_expression_builtin_type_redefinition_errors(field.expr, arena)?;
+            }
+            if let Some(spread) = spread {
+                validate_expression_builtin_type_redefinition_errors(*spread, arena)?;
+            }
+            Ok(())
+        }
+        ExpressionDesc::Pexp_field(owner, _)
+        | ExpressionDesc::Pexp_assert(owner)
+        | ExpressionDesc::Pexp_await(owner)
+        | ExpressionDesc::Pexp_comptime_compile_error(owner)
+        | ExpressionDesc::Pexp_comptime_build_variant(owner)
+        | ExpressionDesc::Pexp_comptime_variant_case(owner)
+        | ExpressionDesc::Pexp_comptime_build_record(owner)
+        | ExpressionDesc::Pexp_comptime_record_field(owner) => {
+            validate_expression_builtin_type_redefinition_errors(*owner, arena)
+        }
+        ExpressionDesc::Pexp_setfield(inner) => {
+            let (owner, _field, value) = &**inner;
+            validate_expression_builtin_type_redefinition_errors(*owner, arena)?;
+            validate_expression_builtin_type_redefinition_errors(*value, arena)
+        }
+        ExpressionDesc::Pexp_ifthenelse(inner) => {
+            let (condition, then_expr, else_expr) = &**inner;
+            validate_expression_builtin_type_redefinition_errors(*condition, arena)?;
+            validate_expression_builtin_type_redefinition_errors(*then_expr, arena)?;
+            if let Some(else_expr) = else_expr {
+                validate_expression_builtin_type_redefinition_errors(*else_expr, arena)?;
+            }
+            Ok(())
+        }
+        ExpressionDesc::Pexp_sequence(first, second) => {
+            validate_expression_builtin_type_redefinition_errors(*first, arena)?;
+            validate_expression_builtin_type_redefinition_errors(*second, arena)
+        }
+        ExpressionDesc::Pexp_while(condition, body) => {
+            validate_expression_builtin_type_redefinition_errors(*condition, arena)?;
+            validate_expression_builtin_type_redefinition_errors(*body, arena)
+        }
+        ExpressionDesc::Pexp_for(inner) => {
+            let (_pat, start, stop, _direction, body) = &**inner;
+            validate_expression_builtin_type_redefinition_errors(*start, arena)?;
+            validate_expression_builtin_type_redefinition_errors(*stop, arena)?;
+            validate_expression_builtin_type_redefinition_errors(*body, arena)
+        }
+        ExpressionDesc::Pexp_for_of(inner)
+        | ExpressionDesc::Pexp_for_await_of(inner)
+        | ExpressionDesc::Pexp_inline_for(inner) => {
+            let (_pat, iterable, body) = &**inner;
+            validate_expression_builtin_type_redefinition_errors(*iterable, arena)?;
+            validate_expression_builtin_type_redefinition_errors(*body, arena)
+        }
+        ExpressionDesc::Pexp_constraint(inner) => {
+            let (inner_expr, _typ) = &**inner;
+            validate_expression_builtin_type_redefinition_errors(*inner_expr, arena)
+        }
+        ExpressionDesc::Pexp_coerce(inner) => {
+            let (inner_expr, _from_typ, _to_typ) = &**inner;
+            validate_expression_builtin_type_redefinition_errors(*inner_expr, arena)
+        }
+        ExpressionDesc::Pexp_send(inner) => {
+            let (owner, _method) = &**inner;
+            validate_expression_builtin_type_redefinition_errors(*owner, arena)
+        }
+        ExpressionDesc::Pexp_letmodule(inner) => {
+            let (_name, mod_expr_idx, body) = &**inner;
+            let mod_expr = arena.get_mod_expr(*mod_expr_idx).clone();
+            validate_module_expr_builtin_type_redefinition_errors(&mod_expr, arena)?;
+            validate_expression_builtin_type_redefinition_errors(*body, arena)
+        }
+        ExpressionDesc::Pexp_letexception(inner) => {
+            let (_extension, body) = &**inner;
+            validate_expression_builtin_type_redefinition_errors(*body, arena)
+        }
+        ExpressionDesc::Pexp_newtype(inner) => {
+            let (_name, body) = &**inner;
+            validate_expression_builtin_type_redefinition_errors(*body, arena)
+        }
+        ExpressionDesc::Pexp_pack(mod_expr_idx) => {
+            let mod_expr = arena.get_mod_expr(*mod_expr_idx).clone();
+            validate_module_expr_builtin_type_redefinition_errors(&mod_expr, arena)
+        }
+        ExpressionDesc::Pexp_open(inner) => {
+            let (_override_flag, _lid, body) = &**inner;
+            validate_expression_builtin_type_redefinition_errors(*body, arena)
+        }
+        ExpressionDesc::Pexp_extension(extension) => {
+            validate_payload_builtin_type_redefinition_errors(&extension.1, arena)
+        }
+        ExpressionDesc::Pexp_comptime_field(inner) => {
+            let (value, field) = &**inner;
+            validate_expression_builtin_type_redefinition_errors(*value, arena)?;
+            validate_expression_builtin_type_redefinition_errors(*field, arena)
+        }
+        ExpressionDesc::Pexp_comptime_record(inner) => {
+            let (_typ, fields) = &**inner;
+            validate_expression_builtin_type_redefinition_errors(*fields, arena)
+        }
+        ExpressionDesc::Pexp_comptime_variant(inner) => {
+            let (_typ, constructor, payload) = &**inner;
+            validate_expression_builtin_type_redefinition_errors(*constructor, arena)?;
+            if let Some(payload) = payload {
+                validate_expression_builtin_type_redefinition_errors(*payload, arena)?;
+            }
+            Ok(())
+        }
+        ExpressionDesc::Pexp_ident(_)
+        | ExpressionDesc::Pexp_constant(_)
+        | ExpressionDesc::Pexp_break
+        | ExpressionDesc::Pexp_continue
+        | ExpressionDesc::Pexp_jsx_element(_)
+        | ExpressionDesc::Pexp_comptime_typeinfo(_)
+        | ExpressionDesc::Pexp_comptime_typename(_) => Ok(()),
     }
 }
 

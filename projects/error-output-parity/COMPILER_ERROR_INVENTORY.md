@@ -941,7 +941,9 @@ with a reason after checking raise sites.
     - Covered by
       `tests/error_output_parity/compiler/fixtures/identity_wrong_type.res`
       and
-      `tests/error_output_parity/compiler/fixtures/identity_wrong_type_signature.resi`.
+      `tests/error_output_parity/compiler/fixtures/identity_wrong_type_signature.resi`,
+      plus the expression-contained local module traversal case in
+      `tests/error_output_parity/compiler/fixtures/identity_wrong_type_let_module.res`.
 - `compiler/ml/cmi_format.ml`
   - `Not_an_interface`
     - Covered by
