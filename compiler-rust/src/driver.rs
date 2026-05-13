@@ -3722,6 +3722,7 @@ fn type_mod_error_to_anyhow(
             loc,
             field_name,
             from_type,
+            alternatives,
         }) => UserDiagnostic::new(
             format_unbound_record_field_report(
                 type_ctx,
@@ -3731,6 +3732,7 @@ fn type_mod_error_to_anyhow(
                 *loc,
                 field_name,
                 *from_type,
+                alternatives,
             ),
             2,
         )
@@ -9793,6 +9795,7 @@ fn format_unbound_record_field_report(
     loc: LocIdx,
     field_name: &str,
     from_type: Option<TypeExprRef>,
+    alternatives: &[String],
 ) -> String {
     const INFO: &str = "\x1b[1;33m";
     const RESET: &str = "\x1b[0m";
@@ -9868,6 +9871,15 @@ fn format_unbound_record_field_report(
             raw_message.push_str(
                 "  Only records have fields that can be accessed with dot notation.",
             );
+            if let Some(hint) = spellcheck_hint(
+                field_name.rsplit('.').next().unwrap_or(field_name),
+                alternatives,
+            ) {
+                raw_message.push('\n');
+                raw_message.push_str("Hint: Did you mean ");
+                raw_message.push_str(hint);
+                raw_message.push('?');
+            }
             return format_compiler_error_report_raw_message(
                 arena,
                 source,
@@ -9899,6 +9911,17 @@ fn format_unbound_record_field_report(
             message.push_str(": VALUE}");
             message.push_str(RESET);
         }
+    }
+
+    if let Some(hint) = spellcheck_hint(
+        field_name.rsplit('.').next().unwrap_or(field_name),
+        alternatives,
+    ) {
+        let mut raw_message = format_message_with_compiler_indentation(&message);
+        raw_message.push_str("Hint: Did you mean ");
+        raw_message.push_str(hint);
+        raw_message.push('?');
+        return format_compiler_error_report_raw_message(arena, source, filename, loc, &raw_message);
     }
 
     format_compiler_error_report(arena, source, filename, loc, &message)

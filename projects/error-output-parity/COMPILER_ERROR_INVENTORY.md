@@ -269,7 +269,13 @@ with a reason after checking raise sites.
 - `Method_mismatch`: covered by
   `tests/error_output_parity/compiler/fixtures/typetexp_method_mismatch.res`.
 - `Unbound_label`: covered for an untyped record literal with no label in
-  scope by `tests/error_output_parity/compiler/fixtures/unbound_label.res`.
+  scope by `tests/error_output_parity/compiler/fixtures/unbound_label.res`,
+  receiver-specific array/non-record messages by
+  `tests/error_output_parity/compiler/fixtures/unbound_label_array_receiver.res`
+  and
+  `tests/error_output_parity/compiler/fixtures/unbound_label_non_record_receiver.res`,
+  and the label spellcheck hint by
+  `tests/error_output_parity/compiler/fixtures/unbound_label_spellcheck.res`.
 - `Unbound_modtype`: covered by
   `tests/error_output_parity/compiler/fixtures/unbound_modtype.res` and the
   signature-item lookup path in

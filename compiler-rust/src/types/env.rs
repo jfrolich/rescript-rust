@@ -932,6 +932,11 @@ impl Env {
             .collect()
     }
 
+    /// Iterate over visible label bindings.
+    pub fn iter_labels(&self) -> impl Iterator<Item = (&Ident, &LabelDescription)> {
+        self.labels.iter().map(|(id, l)| (id, l.as_ref()))
+    }
+
     // ========================================================================
     // Module Bindings
     // ========================================================================

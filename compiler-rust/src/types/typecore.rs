@@ -803,6 +803,7 @@ pub enum TypeCoreError {
         loc: LocIdx,
         field_name: String,
         from_type: Option<TypeExprRef>,
+        alternatives: Vec<String>,
     },
 
     /// Object type spread/inheritance used with a non-object type.
@@ -4866,6 +4867,7 @@ fn type_pattern_record(
         field_name: String,
         source_pos: i32,
         label: Option<crate::types::LabelDescription>,
+        alternatives: Vec<String>,
     }
 
     let mut pending_fields = Vec::new();
@@ -4909,6 +4911,13 @@ fn type_pattern_record(
             field_name,
             source_pos: idx as i32,
             label,
+            alternatives: unbound_label_alternatives(
+                tctx.arena,
+                env,
+                &mut tctx.persistent_env,
+                ctx,
+                &resolved_lid,
+            ),
         });
     }
 
@@ -5008,6 +5017,7 @@ fn type_pattern_record(
                     loc: field.lid.loc,
                     field_name: field.field_name,
                     from_type: None,
+                    alternatives: field.alternatives,
                 });
             }
             let field_ty = ctx.new_var(None);
@@ -16433,6 +16443,7 @@ fn type_record(
         field: &'a crate::parser::ast::ExpressionRecordField,
         field_name: &'a str,
         disambiguated: Option<crate::types::LabelDescription>,
+        alternatives: Vec<String>,
     }
 
     // Match OCaml typecore.ml type_record_elem_list:
@@ -16526,6 +16537,13 @@ fn type_record(
             field,
             field_name,
             disambiguated,
+            alternatives: unbound_label_alternatives(
+                tctx.arena,
+                env,
+                &mut tctx.persistent_env,
+                ctx,
+                resolved_lid,
+            ),
         });
     }
     explicit_fields.sort_by_key(|entry| {
@@ -16691,6 +16709,7 @@ fn type_record(
                         loc: field.lid.loc,
                         field_name: field_name.to_string(),
                         from_type: None,
+                        alternatives: explicit_field.alternatives.clone(),
                     });
                 };
 
@@ -17921,6 +17940,13 @@ fn type_field(
                 loc: field_lid.loc,
                 field_name: tctx.longident_to_string(&resolved_lid),
                 from_type: Some(ty_exp_repr),
+                alternatives: unbound_label_alternatives(
+                    tctx.arena,
+                    env,
+                    &mut tctx.persistent_env,
+                    tctx.type_ctx,
+                    &resolved_lid,
+                ),
             });
         }
         let record_ty = tctx.type_ctx.new_var(None);
@@ -19785,6 +19811,41 @@ fn unbound_constructor_alternatives(
                     })
                     .collect()
             })
+            .unwrap_or_default(),
+        Longident::Lapply(_, _) => Vec::new(),
+    }
+}
+
+fn label_names_from_signature(sig: &crate::types::decl::Signature) -> Vec<String> {
+    sig.iter()
+        .flat_map(|item| match item {
+            crate::types::decl::SignatureItem::SigType(_, decl, _) => match &decl.type_kind {
+                crate::types::decl::TypeKind::TypeRecord(labels, _) => labels
+                    .iter()
+                    .map(|label| label.ld_id.name().to_string())
+                    .collect::<Vec<_>>(),
+                _ => Vec::new(),
+            },
+            _ => Vec::new(),
+        })
+        .collect()
+}
+
+fn unbound_label_alternatives(
+    arena: &ParseArena,
+    env: &Env,
+    pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
+    ctx: &TypeContext,
+    lid: &Longident,
+) -> Vec<String> {
+    match lid {
+        Longident::Lident(_) => env
+            .iter_labels()
+            .map(|(id, _)| id.name().to_string())
+            .collect(),
+        Longident::Ldot(prefix, _) => env
+            .resolve_module_lid_raw(prefix, arena, pers_env, ctx)
+            .map(|(_, sig)| label_names_from_signature(&sig))
             .unwrap_or_default(),
         Longident::Lapply(_, _) => Vec::new(),
     }
