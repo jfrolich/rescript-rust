@@ -1,0 +1,13 @@
+
+  Syntax error!
+  tests/syntax_tests/data/parsing/errors/structure/attributePayloadComma.res:1:19
+
+  1 │ @deriving(abstract, accessors)
+  2 │ type t = {x: int}
+  3 │ 
+
+  Did you forget a `)` here?
+
+;;accessors[@@deriving abstract]
+type nonrec t = {
+  x: int }

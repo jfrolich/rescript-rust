@@ -87,4 +87,5 @@ error,85,tests/syntax_tests/data/parsing/errors/structure/moduleTypeMissingEqual
 error,86,tests/syntax_tests/data/parsing/errors/other/invalidHashHash.res,tests/syntax_tests/data/parsing/errors/other/expected/invalidHashHash.res.txt
 error,87,tests/syntax_tests/data/parsing/errors/structure/externalMissingPrimitive.res,tests/syntax_tests/data/parsing/errors/structure/expected/externalMissingPrimitive.res.txt
 error,88,tests/syntax_tests/data/parsing/errors/typeDef/variantConstructorName.res,tests/syntax_tests/data/parsing/errors/typeDef/expected/variantConstructorName.res.txt
+error,89,tests/syntax_tests/data/parsing/errors/structure/attributePayloadComma.res,tests/syntax_tests/data/parsing/errors/structure/expected/attributePayloadComma.res.txt
 warning,22,tests/syntax_tests/data/ppx/react/warnings/optionalReactElement.res,tests/syntax_tests/data/ppx/react/warnings/expected/optionalReactElement.res.txt

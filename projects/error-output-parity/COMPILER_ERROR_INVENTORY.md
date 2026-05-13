@@ -667,6 +667,13 @@ with a reason after checking raise sites.
       `tests/error_output_parity/compiler/fixtures/variant_constructor_lowercase_name.res`
       and
       `tests/error_output_parity/compiler/fixtures/variant_constructor_reserved_keyword.res`.
+  - `parse_payload` stops attribute payload structure parsing at a comma before
+    `Parser.expect Rparen`, preserving the reference parser diagnostic and
+    recovery AST for unsupported comma-separated payloads
+    - Covered through `res_parser` by
+      `tests/syntax_tests/data/parsing/errors/structure/attributePayloadComma.res`
+      and through `bsc` by
+      `tests/error_output_parity/compiler/fixtures/attribute_payload_comma.res`.
 - `compiler/syntax/src/jsx_v4.ml`
   - `check_multiple_components` rejects more than one `@react.component`
     definition in the same module before generated React type lookups can mask
@@ -851,6 +858,10 @@ with a reason after checking raise sites.
   - `Ast_derive_abstract.is_abstract` invalid config
     - Covered by
       `tests/error_output_parity/compiler/fixtures/deriving_abstract_invalid_config.res`.
+  - `Ast_derive_abstract.is_abstract` rejects combining `abstract` with any
+    other deriving action
+    - Covered by
+      `tests/error_output_parity/compiler/fixtures/deriving_abstract_conflict.res`.
   - `Ast_derive_util.not_applicable` warnings for `accessors`
     - Covered for abstract and open types by
       `tests/error_output_parity/compiler/fixtures/deriving_accessors_not_applicable_abstract.res`

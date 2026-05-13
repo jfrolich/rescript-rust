@@ -5441,7 +5441,7 @@ pub fn parse_payload(p: &mut Parser<'_>) -> Payload {
         // (Expression items already consumed the semicolon above)
 
         // Stop if we hit the closing paren or EOF
-        if p.token == Token::Rparen || p.token == Token::Eof {
+        if matches!(p.token, Token::Rparen | Token::Comma | Token::Eof) {
             break;
         }
     }
