@@ -729,6 +729,13 @@ with a reason after checking raise sites.
       `tests/error_output_parity/compiler/fixtures/jsx_external_duplicate_component_attr.res`
       and
       `tests/error_output_parity/compiler/fixtures/jsx_signature_duplicate_component_attr.resi`.
+  - `transform_structure_item` and `transform_signature_item` reject mixing
+    `@react.component` with `@react.componentWithProps` on one external or
+    signature item
+    - Covered by
+      `tests/error_output_parity/compiler/fixtures/jsx_external_mixed_component_attrs.res`
+      and
+      `tests/error_output_parity/compiler/fixtures/jsx_signature_mixed_component_attrs.resi`.
   - `modified_binding` rejects unlabelled props on plain component functions,
     and `modified_binding_old` rejects `@react.component` on non-functions
     - Covered by
