@@ -278,7 +278,8 @@ with a reason after checking raise sites.
   `tests/error_output_parity/compiler/fixtures/typetexp_method_mismatch.res`.
 - `Unbound_label`: covered for an untyped record literal with no label in
   scope by `tests/error_output_parity/compiler/fixtures/unbound_label.res`,
-  receiver-specific array/non-record messages by
+  receiver-specific option/array/non-record messages by
+  `tests/error_output_parity/compiler/fixtures/unbound_label_option_receiver.res`,
   `tests/error_output_parity/compiler/fixtures/unbound_label_array_receiver.res`
   and
   `tests/error_output_parity/compiler/fixtures/unbound_label_non_record_receiver.res`,
