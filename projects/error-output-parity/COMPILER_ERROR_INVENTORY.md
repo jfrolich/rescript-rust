@@ -1468,6 +1468,9 @@ with a reason after checking raise sites.
   - GADT constructor result syntax without `type rec`
     - Covered by
       `tests/error_output_parity/compiler/fixtures/gadt_requires_type_rec.res`.
+  - Numeric polymorphic variant literals outside the int32 range
+    - Covered by
+      `tests/error_output_parity/compiler/fixtures/polyvariant_numeric_overflow.res`.
   - `%identity` primitive arity validation
     - Covered by
       `tests/error_output_parity/compiler/fixtures/identity_wrong_type.res`
