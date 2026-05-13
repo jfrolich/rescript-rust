@@ -13,7 +13,8 @@ use log::debug;
 use rayon::prelude::*;
 use rescript_compiler::binary_ast::{
     Dependencies, extract_signature_deps, extract_structure_deps, ppx,
-    write_signature_ast_current_with_extra_deps, write_structure_ast_current_with_extra_deps,
+    write_signature_ast_current_with_extra_deps_and_builtin_ppx,
+    write_structure_ast_current_with_extra_deps_and_builtin_ppx,
 };
 use rescript_compiler::parser::{Parser, code_frame, jsx_ppx, let_unwrap_ppx, module};
 use std::path::{Path, PathBuf};
@@ -512,6 +513,7 @@ fn generate_ast(
     let source_path_str = file_path.to_string_lossy().to_string();
     let bsc_flags = config::flatten_flags(&package.config.compiler_flags);
     let open_deps = open_dependencies_from_bsc_flags(&bsc_flags);
+    let no_builtin_ppx = bsc_flags.iter().any(|flag| flag == "-bs-no-builtin-ppx");
     let jsx_version = rust_parser_effective_jsx_version(build_state.project_context.get_root_config());
     let let_unwrap_enabled =
         rust_parser_let_unwrap_enabled(build_state.project_context.get_root_config(), &package.config);
@@ -531,6 +533,7 @@ fn generate_ast(
             &open_deps,
             jsx_version,
             let_unwrap_enabled,
+            no_builtin_ppx,
             store_ast,
             in_process,
         )
@@ -734,6 +737,7 @@ fn generate_ast_with_rust_parser(
     extra_deps: &[String],
     jsx_version: i32,
     let_unwrap_enabled: bool,
+    no_builtin_ppx: bool,
     store_ast: bool,
     in_process: bool,
 ) -> anyhow::Result<(
@@ -782,18 +786,23 @@ fn generate_ast_with_rust_parser(
                     .map_err(|e| anyhow!(e))?;
 
             let (signature, deps) = if in_process {
-                let signature = ppx::rewrite_signature(&signature, parser.arena_mut())
-                    .map_err(|e| anyhow!("PPX rewrite failed: {e}"))?;
+                let signature = if no_builtin_ppx {
+                    signature
+                } else {
+                    ppx::rewrite_signature(&signature, parser.arena_mut())
+                        .map_err(|e| anyhow!("PPX rewrite failed: {e}"))?
+                };
                 let mut deps = extract_signature_deps(parser.arena(), &signature);
                 deps.extend(extra_deps.iter().cloned());
                 (signature, Some(deps))
             } else {
-                write_signature_ast_current_with_extra_deps(
+                write_signature_ast_current_with_extra_deps_and_builtin_ppx(
                     ast_output_path,
                     source_path_for_ast,
                     parser.arena_mut(),
                     &signature,
                     extra_deps,
+                    !no_builtin_ppx,
                 )
                 .with_context(|| format!("Failed to write {}", ast_output_path.display()))?;
                 (signature, None)
@@ -840,8 +849,12 @@ fn generate_ast_with_rust_parser(
                     .map_err(|e| anyhow!(e))?;
 
             let (structure, deps) = if in_process {
-                let structure = ppx::rewrite_structure(&structure, parser.arena_mut())
-                    .map_err(|e| anyhow!("PPX rewrite failed: {e}"))?;
+                let structure = if no_builtin_ppx {
+                    structure
+                } else {
+                    ppx::rewrite_structure(&structure, parser.arena_mut())
+                        .map_err(|e| anyhow!("PPX rewrite failed: {e}"))?
+                };
                 let structure = rescript_compiler::binary_ast::writer::apply_no_export_config(
                     parser.arena_mut(),
                     structure,
@@ -850,12 +863,13 @@ fn generate_ast_with_rust_parser(
                 deps.extend(extra_deps.iter().cloned());
                 (structure, Some(deps))
             } else {
-                write_structure_ast_current_with_extra_deps(
+                write_structure_ast_current_with_extra_deps_and_builtin_ppx(
                     ast_output_path,
                     source_path_for_ast,
                     parser.arena_mut(),
                     &structure,
                     extra_deps,
+                    !no_builtin_ppx,
                 )
                 .with_context(|| format!("Failed to write {}", ast_output_path.display()))?;
                 (structure, None)

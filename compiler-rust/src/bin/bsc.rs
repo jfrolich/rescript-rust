@@ -10,7 +10,8 @@
 
 use anyhow::{anyhow, Context, Result};
 use rescript_compiler::binary_ast::{
-    ppx, write_signature_ast_current, write_structure_ast_current,
+    ppx, write_signature_ast_current_with_extra_deps_and_builtin_ppx,
+    write_structure_ast_current_with_extra_deps_and_builtin_ppx,
 };
 use rescript_compiler::cmi::cmi_format;
 use rescript_compiler::driver::{
@@ -102,6 +103,7 @@ struct Options {
     no_check_div_by_zero: bool,
     cross_module_inline: bool,
     no_assert_false: bool,
+    no_builtin_ppx: bool,
     make_runtime: bool,
     read_cmi: bool,
 }
@@ -226,6 +228,7 @@ fn run() -> Result<()> {
                 "-bs-no-check-div-by-zero" => opts.no_check_div_by_zero = true,
                 "-bs-cross-module-opt" => opts.cross_module_inline = true,
                 "-bs-noassertfalse" => opts.no_assert_false = true,
+                "-bs-no-builtin-ppx" => opts.no_builtin_ppx = true,
                 "-w" => {
                     if let Some(val) = args.next() {
                         opts.warning_specs.push(val);
@@ -267,7 +270,12 @@ fn run() -> Result<()> {
         .ok_or_else(|| anyhow!("Missing input file"))?;
 
     if opts.bs_ast {
-        return generate_ast(&input, opts.output, opts.dump_parsetree_sexp_locs);
+        return generate_ast(
+            &input,
+            opts.output,
+            opts.dump_parsetree_sexp_locs,
+            opts.no_builtin_ppx,
+        );
     }
 
     let ext = input.extension().and_then(|s| s.to_str()).unwrap_or("");
@@ -318,6 +326,7 @@ fn run() -> Result<()> {
         check_div_by_zero: !opts.no_check_div_by_zero,
         cross_module_inline: opts.cross_module_inline,
         no_assert_false: opts.no_assert_false,
+        no_builtin_ppx: opts.no_builtin_ppx,
         nopervasives: opts.nopervasives,
         module_name: opts.module_name.clone(),
         package_name: opts.package_name.clone(),
@@ -354,6 +363,7 @@ fn generate_ast(
     input: &Path,
     output: Option<PathBuf>,
     dump_parsetree_sexp_locs: bool,
+    no_builtin_ppx: bool,
 ) -> Result<()> {
     // Read file as raw bytes, converting each byte to a char (Latin-1 encoding).
     // This matches OCaml's byte-level string handling where each byte is a character.
@@ -408,15 +418,26 @@ fn generate_ast(
         }
 
         if dump_parsetree_sexp_locs {
-            let rewritten = ppx::rewrite_signature(&signature, parser.arena_mut())
-                .map_err(|e| anyhow!("PPX rewrite failed: {e}"))?;
+            let rewritten = if no_builtin_ppx {
+                signature.clone()
+            } else {
+                ppx::rewrite_signature(&signature, parser.arena_mut())
+                    .map_err(|e| anyhow!("PPX rewrite failed: {e}"))?
+            };
             let mut stderr = std::io::stderr();
             sexp_locs::print_signature(&rewritten, parser.arena(), &mut stderr);
             let _ = stderr.write_all(b"\n");
         }
 
-        write_signature_ast_current(&out_path, &source_path, parser.arena_mut(), &signature)
-            .with_context(|| format!("Failed to write {}", out_path.display()))?;
+        write_signature_ast_current_with_extra_deps_and_builtin_ppx(
+            &out_path,
+            &source_path,
+            parser.arena_mut(),
+            &signature,
+            &[],
+            !no_builtin_ppx,
+        )
+        .with_context(|| format!("Failed to write {}", out_path.display()))?;
     } else {
         // Parse structure (implementation file)
         let structure = module::parse_structure(&mut parser);
@@ -425,15 +446,26 @@ fn generate_ast(
         }
 
         if dump_parsetree_sexp_locs {
-            let rewritten = ppx::rewrite_structure(&structure, parser.arena_mut())
-                .map_err(|e| anyhow!("PPX rewrite failed: {e}"))?;
+            let rewritten = if no_builtin_ppx {
+                structure.clone()
+            } else {
+                ppx::rewrite_structure(&structure, parser.arena_mut())
+                    .map_err(|e| anyhow!("PPX rewrite failed: {e}"))?
+            };
             let mut stderr = std::io::stderr();
             sexp_locs::print_structure(&rewritten, parser.arena(), &mut stderr);
             let _ = stderr.write_all(b"\n");
         }
 
-        write_structure_ast_current(&out_path, &source_path, parser.arena_mut(), &structure)
-            .with_context(|| format!("Failed to write {}", out_path.display()))?;
+        write_structure_ast_current_with_extra_deps_and_builtin_ppx(
+            &out_path,
+            &source_path,
+            parser.arena_mut(),
+            &structure,
+            &[],
+            !no_builtin_ppx,
+        )
+        .with_context(|| format!("Failed to write {}", out_path.display()))?;
     }
 
     Ok(())

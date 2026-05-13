@@ -1033,6 +1033,12 @@ with a reason after checking raise sites.
   - `%ffi` async arrow payloads remain rejected even when Flow emits a warning
     - Covered by
       `tests/error_output_parity/compiler/fixtures/ffi_async_arrow_warning_error.res`.
+- `compiler/frontend/ppx_entry.ml`
+  - `-bs-no-builtin-ppx` returns after config/JSX preprocessing and skips
+    `Bs_builtin_ppx.mapper`, leaving `%raw` uninterpreted for
+    `Builtin_attributes.error_of_extension`
+    - Covered by
+      `tests/error_output_parity/compiler/cases/no_builtin_raw_extension.res`.
 - `compiler/frontend/bs_builtin_ppx.ml`
   - `%%private` empty structure payload rejection
     - Covered by

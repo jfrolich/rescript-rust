@@ -130,13 +130,36 @@ pub fn write_structure_ast_current_with_extra_deps(
     ast: &Structure,
     extra_deps: &[String],
 ) -> io::Result<()> {
-    // 1. Apply built-in PPX transformations (FFI encoding for externals, etc.)
-    let rewritten_ast = ppx::rewrite_structure(ast, arena).map_err(|e| {
-        io::Error::new(
-            io::ErrorKind::InvalidData,
-            format!("PPX rewrite failed: {e}"),
-        )
-    })?;
+    write_structure_ast_current_with_extra_deps_and_builtin_ppx(
+        output_path,
+        source_path,
+        arena,
+        ast,
+        extra_deps,
+        true,
+    )
+}
+
+/// Write a current-format structure AST, optionally applying built-in PPX first.
+pub fn write_structure_ast_current_with_extra_deps_and_builtin_ppx(
+    output_path: &Path,
+    source_path: &str,
+    arena: &mut crate::parse_arena::ParseArena,
+    ast: &Structure,
+    extra_deps: &[String],
+    builtin_ppx: bool,
+) -> io::Result<()> {
+    // 1. Optionally apply built-in PPX transformations (FFI encoding for externals, etc.)
+    let rewritten_ast = if builtin_ppx {
+        ppx::rewrite_structure(ast, arena).map_err(|e| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("PPX rewrite failed: {e}"),
+            )
+        })?
+    } else {
+        ast.clone()
+    };
 
     // 2. Process @@config attributes (e.g., no_export wrapping)
     let rewritten_ast = apply_no_export_config(arena, rewritten_ast);
@@ -174,13 +197,36 @@ pub fn write_signature_ast_current_with_extra_deps(
     ast: &Signature,
     extra_deps: &[String],
 ) -> io::Result<()> {
-    // 1. Apply built-in PPX transformations (FFI encoding for externals, etc.)
-    let rewritten_ast = ppx::rewrite_signature(ast, arena).map_err(|e| {
-        io::Error::new(
-            io::ErrorKind::InvalidData,
-            format!("PPX rewrite failed: {e}"),
-        )
-    })?;
+    write_signature_ast_current_with_extra_deps_and_builtin_ppx(
+        output_path,
+        source_path,
+        arena,
+        ast,
+        extra_deps,
+        true,
+    )
+}
+
+/// Write a current-format signature AST, optionally applying built-in PPX first.
+pub fn write_signature_ast_current_with_extra_deps_and_builtin_ppx(
+    output_path: &Path,
+    source_path: &str,
+    arena: &mut crate::parse_arena::ParseArena,
+    ast: &Signature,
+    extra_deps: &[String],
+    builtin_ppx: bool,
+) -> io::Result<()> {
+    // 1. Optionally apply built-in PPX transformations (FFI encoding for externals, etc.)
+    let rewritten_ast = if builtin_ppx {
+        ppx::rewrite_signature(ast, arena).map_err(|e| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("PPX rewrite failed: {e}"),
+            )
+        })?
+    } else {
+        ast.clone()
+    };
 
     // 2. Extract dependencies from the rewritten AST and merge explicit opens.
     let mut deps = extract_signature_deps(arena, &rewritten_ast);

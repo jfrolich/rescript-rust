@@ -1368,6 +1368,8 @@ pub struct CompilerOptions {
     pub cross_module_inline: bool,
     /// Mirror `Clflags.no_assert_false` / `-bs-noassertfalse`.
     pub no_assert_false: bool,
+    /// Mirror `Js_config.no_builtin_ppx` / `-bs-no-builtin-ppx`.
+    pub no_builtin_ppx: bool,
     /// When true, do not implicitly open Pervasives and Stdlib.
     pub nopervasives: bool,
     /// The module name being compiled. Used to filter self-opens.
@@ -1419,6 +1421,7 @@ impl Default for CompilerOptions {
             check_div_by_zero: true,
             cross_module_inline: false,
             no_assert_false: false,
+            no_builtin_ppx: false,
             nopervasives: false,
             module_name: None,
             package_name: None,
@@ -1529,8 +1532,12 @@ fn preprocess_signature_for_typecheck_with_source(
         signature
     };
 
-    ppx::rewrite_signature(&signature, arena)
-        .map_err(|e| ppx_error_to_anyhow(e, arena, source, filename))
+    if options.no_builtin_ppx {
+        Ok(signature)
+    } else {
+        ppx::rewrite_signature(&signature, arena)
+            .map_err(|e| ppx_error_to_anyhow(e, arena, source, filename))
+    }
 }
 
 fn preprocess_signature_for_typecheck_inner(
@@ -1544,7 +1551,11 @@ fn preprocess_signature_for_typecheck_inner(
         signature
     };
 
-    ppx::rewrite_signature(&signature, arena)
+    if options.no_builtin_ppx {
+        Ok(signature)
+    } else {
+        ppx::rewrite_signature(&signature, arena)
+    }
 }
 
 fn ppx_error_to_anyhow(
@@ -10299,19 +10310,23 @@ pub fn compile_source_to_js_with_options(
         structure
     };
 
-    let ppx_warnings = ppx::collect_raw_js_warnings(&structure, parser.arena_mut());
-    ppx_warnings_have_errors |=
-        emit_ppx_warnings(parser.arena(), source, filename, options, &ppx_warnings);
+    let structure = if options.no_builtin_ppx {
+        structure
+    } else {
+        let ppx_warnings = ppx::collect_raw_js_warnings(&structure, parser.arena_mut());
+        ppx_warnings_have_errors |=
+            emit_ppx_warnings(parser.arena(), source, filename, options, &ppx_warnings);
 
-    // Expand extension points (%%raw, %raw, %re, %%private) without touching externals
-    let structure = ppx::expand_extensions(&structure, parser.arena_mut())
-        .map_err(|e| ppx_error_to_anyhow(e, parser.arena(), source, filename))?;
+        // Expand extension points (%%raw, %raw, %re, %%private) without touching externals
+        let structure = ppx::expand_extensions(&structure, parser.arena_mut())
+            .map_err(|e| ppx_error_to_anyhow(e, parser.arena(), source, filename))?;
 
-    // Rewrite expressions: desugar pipe (->), setter (#=), property access (##),
-    // await, tagged templates, encode externals, and apply spice mapper rewrites.
-    // spice is handled here, so avoid running a second top-level spice expansion pass.
-    let structure = ppx::rewrite_structure(&structure, parser.arena_mut())
-        .map_err(|e| ppx_error_to_anyhow(e, parser.arena(), source, filename))?;
+        // Rewrite expressions: desugar pipe (->), setter (#=), property access (##),
+        // await, tagged templates, encode externals, and apply spice mapper rewrites.
+        // spice is handled here, so avoid running a second top-level spice expansion pass.
+        ppx::rewrite_structure(&structure, parser.arena_mut())
+            .map_err(|e| ppx_error_to_anyhow(e, parser.arena(), source, filename))?
+    };
 
     // Type check
     crate::ident::Ident::set_current_time(OCAML_NON_PREDEF_STAMP_START);
@@ -11397,13 +11412,17 @@ pub fn typecheck_and_dump_sexp<W: std::io::Write>(
             structure
         };
 
-        let ppx_warnings = ppx::collect_raw_js_warnings(&structure, parser.arena_mut());
-        let _ = emit_ppx_warnings(parser.arena(), source, filename, options, &ppx_warnings);
+        let structure = if options.no_builtin_ppx {
+            structure
+        } else {
+            let ppx_warnings = ppx::collect_raw_js_warnings(&structure, parser.arena_mut());
+            let _ = emit_ppx_warnings(parser.arena(), source, filename, options, &ppx_warnings);
 
-        let structure = ppx::expand_extensions(&structure, parser.arena_mut())
-            .map_err(|e| ppx_error_to_anyhow(e, parser.arena(), source, filename))?;
-        let structure = ppx::rewrite_structure(&structure, parser.arena_mut())
-            .map_err(|e| ppx_error_to_anyhow(e, parser.arena(), source, filename))?;
+            let structure = ppx::expand_extensions(&structure, parser.arena_mut())
+                .map_err(|e| ppx_error_to_anyhow(e, parser.arena(), source, filename))?;
+            ppx::rewrite_structure(&structure, parser.arena_mut())
+                .map_err(|e| ppx_error_to_anyhow(e, parser.arena(), source, filename))?
+        };
 
         // Type check
         crate::ident::Ident::set_current_time(OCAML_NON_PREDEF_STAMP_START);
@@ -12554,10 +12573,14 @@ pub fn typecheck_stored_structure_and_dump_sexp<W: std::io::Write>(
         structure
     };
 
-    let structure = ppx::expand_extensions(&structure, &mut arena)
-        .map_err(|e| anyhow!("PPX rewrite failed: {e}"))?;
-    let structure = ppx::rewrite_structure(&structure, &mut arena)
-        .map_err(|e| anyhow!("PPX rewrite failed: {e}"))?;
+    let structure = if options.no_builtin_ppx {
+        structure
+    } else {
+        let structure = ppx::expand_extensions(&structure, &mut arena)
+            .map_err(|e| anyhow!("PPX rewrite failed: {e}"))?;
+        ppx::rewrite_structure(&structure, &mut arena)
+            .map_err(|e| anyhow!("PPX rewrite failed: {e}"))?
+    };
 
     crate::ident::Ident::set_current_time(OCAML_NON_PREDEF_STAMP_START);
     let id_gen = IdGenerator::with_start_stamp(OCAML_NON_PREDEF_STAMP_START);
@@ -12986,8 +13009,12 @@ pub fn compile_source_in_process(
     } else {
         structure
     };
-    let structure = ppx::rewrite_structure(&structure, parser.arena_mut())
-        .map_err(|e| ppx_error_to_anyhow(e, parser.arena(), source, filename))?;
+    let structure = if options.no_builtin_ppx {
+        structure
+    } else {
+        ppx::rewrite_structure(&structure, parser.arena_mut())
+            .map_err(|e| ppx_error_to_anyhow(e, parser.arena(), source, filename))?
+    };
     let structure =
         crate::binary_ast::writer::apply_no_export_config(parser.arena_mut(), structure);
 
