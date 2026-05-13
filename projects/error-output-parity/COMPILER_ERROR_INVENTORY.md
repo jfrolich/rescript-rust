@@ -677,7 +677,13 @@ with a reason after checking raise sites.
   - `mk_record_from_props` rejects JSX spread props unless the spread appears
     before named props, and also rejects multiple spreads
     - Covered by
-      `tests/error_output_parity/compiler/fixtures/jsx_spread_after_prop.res`.
+      `tests/error_output_parity/compiler/fixtures/jsx_spread_after_prop.res`
+      and the top-level-expression PPX traversal case in
+      `tests/error_output_parity/compiler/fixtures/jsx_spread_after_prop_toplevel_expr.res`.
+  - `transform_expr` rejects invalid JSX tag names before generated React type
+    lookups can mask the PPX error
+    - Covered by
+      `tests/error_output_parity/compiler/fixtures/jsx_invalid_tag_trailing_dot.res`.
   - `transform_structure_item` and `transform_signature_item` reject duplicate
     `@react.component` attributes on externals and signatures
     - Covered by
@@ -708,11 +714,17 @@ with a reason after checking raise sites.
     prop inside `@react.component` definitions before generated React type
     lookups can mask the PPX error
     - Covered by
-      `tests/error_output_parity/compiler/fixtures/jsx_component_key_prop.res`.
+      `tests/error_output_parity/compiler/fixtures/jsx_component_key_prop.res`
+      and the included-structure traversal case in
+      `tests/error_output_parity/compiler/fixtures/jsx_component_key_prop_include.res`.
   - `make_label_decls` rejects duplicate `@react.component` prop names before
     the generated props type can mask the PPX error
     - Covered by
-      `tests/error_output_parity/compiler/fixtures/jsx_component_duplicate_prop.res`.
+      `tests/error_output_parity/compiler/fixtures/jsx_component_duplicate_prop.res`,
+      `tests/error_output_parity/compiler/fixtures/jsx_component_duplicate_prop_include.res`,
+      `tests/error_output_parity/compiler/fixtures/jsx_component_duplicate_prop_external.res`,
+      and
+      `tests/error_output_parity/compiler/fixtures/jsx_component_duplicate_prop_signature.resi`.
 - `compiler/syntax/src/res_scanner.ml`
   - Fixed-width string escape diagnostics for short decimal, incomplete hex,
     incomplete unicode, decimal overflow, and surrogate unicode escapes
