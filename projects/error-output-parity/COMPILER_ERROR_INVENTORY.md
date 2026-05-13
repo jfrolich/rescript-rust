@@ -385,7 +385,8 @@ with a reason after checking raise sites.
     `tests/error_output_parity/compiler/fixtures/recursive_abbrev.res`.
 - `Cycle_in_def`
   - Covered by
-    `tests/error_output_parity/compiler/fixtures/cycle_in_def.res`.
+    `tests/error_output_parity/compiler/fixtures/cycle_in_def.res` and
+    `tests/error_output_parity/compiler/fixtures/parameters_differ.res`.
 - `Definition_mismatch`
   - Covered for constructor-name and constructor-payload mismatches in an
     equation plus variant representation by
@@ -402,7 +403,7 @@ with a reason after checking raise sites.
     `tests/error_output_parity/compiler/fixtures/type_clash_recursive_manifest.res`.
 - `Parameters_differ`
   - Covered by
-    `tests/error_output_parity/compiler/fixtures/parameters_differ.res`.
+    `tests/error_output_parity/compiler/fixtures/parameters_differ_object_poly_recursion.res`.
 - `Null_arity_external`
   - Covered by
     `tests/error_output_parity/compiler/fixtures/null_arity_external.res`.

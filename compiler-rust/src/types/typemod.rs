@@ -3134,6 +3134,12 @@ pub enum TypeModError {
         loc: LocIdx,
         trace: Vec<(TypeExprRef, TypeExprRef)>,
     },
+    /// A recursive abbreviation expansion does not satisfy its constraints.
+    ConstraintFailed {
+        loc: LocIdx,
+        actual: TypeExprRef,
+        expected: TypeExprRef,
+    },
     /// A manifest type and explicit record/variant representation do not agree.
     DefinitionMismatch {
         loc: LocIdx,
@@ -3210,6 +3216,13 @@ pub enum TypeModError {
         loc: LocIdx,
         name: String,
         ty: TypeExprRef,
+    },
+    /// A recursive type abbreviation is used with non-regular parameters.
+    ParametersDiffer {
+        loc: LocIdx,
+        path: Path,
+        actual: TypeExprRef,
+        expected: TypeExprRef,
     },
     /// Invalid type declaration attribute usage.
     InvalidAttribute { loc: LocIdx, message: String },
@@ -5066,6 +5079,330 @@ fn check_type_declaration_abbrev_cycle(
     }
 }
 
+fn type_exprs_equal_for_abbrev_recursion(
+    ctx: &crate::types::context::TypeContext,
+    left: TypeExprRef,
+    right: TypeExprRef,
+    seen: &mut HashSet<(TypeExprRef, TypeExprRef)>,
+) -> bool {
+    let left = ctx.repr(left);
+    let right = ctx.repr(right);
+    if left == right {
+        return true;
+    }
+    if !seen.insert((left, right)) {
+        return true;
+    }
+
+    let left_desc = (*ctx.get_desc(left)).clone();
+    let right_desc = (*ctx.get_desc(right)).clone();
+    match (left_desc, right_desc) {
+        (
+            TypeDesc::Tarrow {
+                arg: left_arg,
+                ret: left_ret,
+                ..
+            },
+            TypeDesc::Tarrow {
+                arg: right_arg,
+                ret: right_ret,
+                ..
+            },
+        ) => {
+            arg_labels_equal_for_abbrev_recursion(&left_arg.lbl, &right_arg.lbl)
+                && type_exprs_equal_for_abbrev_recursion(ctx, left_arg.typ, right_arg.typ, seen)
+                && type_exprs_equal_for_abbrev_recursion(ctx, left_ret, right_ret, seen)
+        }
+        (TypeDesc::Ttuple(left_items), TypeDesc::Ttuple(right_items)) => {
+            type_expr_lists_equal_for_abbrev_recursion(ctx, &left_items, &right_items)
+        }
+        (
+            TypeDesc::Tconstr {
+                path: left_path,
+                args: left_args,
+                ..
+            },
+            TypeDesc::Tconstr {
+                path: right_path,
+                args: right_args,
+                ..
+            },
+        ) => {
+            left_path.same(&right_path)
+                && type_expr_lists_equal_for_abbrev_recursion(ctx, &left_args, &right_args)
+        }
+        (TypeDesc::Tlink(left_next), _) | (TypeDesc::Tsubst(left_next), _) => {
+            type_exprs_equal_for_abbrev_recursion(ctx, left_next, right, seen)
+        }
+        (_, TypeDesc::Tlink(right_next)) | (_, TypeDesc::Tsubst(right_next)) => {
+            type_exprs_equal_for_abbrev_recursion(ctx, left, right_next, seen)
+        }
+        (
+            TypeDesc::Tpoly {
+                body: left_body,
+                vars: left_vars,
+            },
+            TypeDesc::Tpoly {
+                body: right_body,
+                vars: right_vars,
+            },
+        ) => {
+            left_vars.len() == right_vars.len()
+                && left_vars
+                    .iter()
+                    .zip(right_vars.iter())
+                    .all(|(left_var, right_var)| {
+                        type_exprs_equal_for_abbrev_recursion(ctx, *left_var, *right_var, seen)
+                    })
+                && type_exprs_equal_for_abbrev_recursion(ctx, left_body, right_body, seen)
+        }
+        (
+            TypeDesc::Tpackage {
+                path: left_path,
+                lids: left_lids,
+                args: left_args,
+            },
+            TypeDesc::Tpackage {
+                path: right_path,
+                lids: right_lids,
+                args: right_args,
+            },
+        ) => {
+            left_path.same(&right_path)
+                && left_lids == right_lids
+                && type_expr_lists_equal_for_abbrev_recursion(ctx, &left_args, &right_args)
+        }
+        (TypeDesc::Tnil, TypeDesc::Tnil) => true,
+        _ => false,
+    }
+}
+
+fn arg_labels_equal_for_abbrev_recursion(
+    left: &crate::types::asttypes::ArgLabel,
+    right: &crate::types::asttypes::ArgLabel,
+) -> bool {
+    match (left, right) {
+        (crate::types::asttypes::ArgLabel::Nolabel, crate::types::asttypes::ArgLabel::Nolabel) => {
+            true
+        }
+        (
+            crate::types::asttypes::ArgLabel::Labelled(left),
+            crate::types::asttypes::ArgLabel::Labelled(right),
+        )
+        | (
+            crate::types::asttypes::ArgLabel::Optional(left),
+            crate::types::asttypes::ArgLabel::Optional(right),
+        ) => left.txt == right.txt,
+        _ => false,
+    }
+}
+
+fn type_var_name_for_abbrev_recursion(
+    ctx: &crate::types::context::TypeContext,
+    ty: TypeExprRef,
+) -> Option<String> {
+    match &*ctx.get_desc(ctx.repr(ty)) {
+        TypeDesc::Tvar(name) | TypeDesc::Tunivar(name) => name.clone(),
+        _ => None,
+    }
+}
+
+fn instance_parameterized_type_keep_names_for_abbrev_recursion(
+    ctx: &crate::types::context::TypeContext,
+    params: &[TypeExprRef],
+    body: TypeExprRef,
+) -> (Vec<TypeExprRef>, TypeExprRef) {
+    let (fresh_params, fresh_body) =
+        crate::types::ctype::instance_parameterized_type(ctx, params, body);
+    for (param, fresh_param) in params.iter().zip(fresh_params.iter()) {
+        let Some(name) = type_var_name_for_abbrev_recursion(ctx, *param) else {
+            continue;
+        };
+        let fresh_param = ctx.repr(*fresh_param);
+        let replacement = match &*ctx.get_desc(fresh_param) {
+            TypeDesc::Tvar(_) => Some(TypeDesc::Tvar(Some(name))),
+            TypeDesc::Tunivar(_) => Some(TypeDesc::Tunivar(Some(name))),
+            _ => None,
+        };
+        if let Some(replacement) = replacement {
+            ctx.set_desc(fresh_param, replacement);
+        }
+    }
+    (fresh_params, fresh_body)
+}
+
+fn type_expr_lists_equal_for_abbrev_recursion(
+    ctx: &crate::types::context::TypeContext,
+    left: &[TypeExprRef],
+    right: &[TypeExprRef],
+) -> bool {
+    left.len() == right.len()
+        && left.iter().zip(right.iter()).all(|(left, right)| {
+            type_exprs_equal_for_abbrev_recursion(ctx, *left, *right, &mut HashSet::new())
+        })
+}
+
+fn check_type_abbrev_recursion_regular(
+    ctx: &crate::types::context::TypeContext,
+    env: &Env,
+    loc: LocIdx,
+    target_path: &Path,
+    current_path: &Path,
+    expected_args: &[TypeExprRef],
+    prev_expansions: &[Path],
+    ty: TypeExprRef,
+    should_check_path: &dyn Fn(&Path) -> bool,
+    find_decl: &dyn Fn(&Path) -> Option<crate::types::TypeDeclaration>,
+    visited: &mut HashSet<TypeExprRef>,
+) -> TypeModResult<()> {
+    let ty = ctx.repr(ty);
+    if !visited.insert(ty) {
+        return Ok(());
+    }
+
+    match (*ctx.get_desc(ty)).clone() {
+        TypeDesc::Tconstr { path, args, .. } => {
+            if path.same(target_path) {
+                if !type_expr_lists_equal_for_abbrev_recursion(ctx, expected_args, &args) {
+                    return Err(TypeModError::ParametersDiffer {
+                        loc,
+                        path: current_path.clone(),
+                        actual: ty,
+                        expected: ctx.new_constr(target_path.clone(), expected_args.to_vec()),
+                    });
+                }
+            } else if should_check_path(&path)
+                && !prev_expansions
+                    .iter()
+                    .any(|expanded_path| expanded_path.same(&path))
+                && let Some(decl) = find_decl(&path)
+                && let Some(body0) = decl.type_manifest
+            {
+                let (params, body) =
+                    crate::types::ctype::instance_parameterized_type(ctx, &decl.type_params, body0);
+                let mut unify_state = crate::types::ctype::UnifyState::new();
+                unify_state.set_env(env);
+                let same_arity = params.len() == args.len();
+                let params_unify = same_arity
+                    && params.iter().zip(args.iter()).all(|(param, arg)| {
+                        crate::types::ctype::unify(ctx, &mut unify_state, *param, *arg).is_ok()
+                    });
+                if !params_unify {
+                    return Err(TypeModError::ConstraintFailed {
+                        loc,
+                        actual: ty,
+                        expected: ctx.new_constr(path.clone(), decl.type_params.clone()),
+                    });
+                }
+                let mut next_expansions = prev_expansions.to_vec();
+                next_expansions.push(path.clone());
+                check_type_abbrev_recursion_regular(
+                    ctx,
+                    env,
+                    loc,
+                    target_path,
+                    &path,
+                    expected_args,
+                    &next_expansions,
+                    body,
+                    should_check_path,
+                    find_decl,
+                    visited,
+                )?;
+            }
+
+            for arg in args {
+                check_type_abbrev_recursion_regular(
+                    ctx,
+                    env,
+                    loc,
+                    target_path,
+                    current_path,
+                    expected_args,
+                    prev_expansions,
+                    arg,
+                    should_check_path,
+                    find_decl,
+                    visited,
+                )?;
+            }
+            Ok(())
+        }
+        TypeDesc::Tpoly { body, vars } => {
+            let (_, body) = crate::types::ctype::instance_poly(ctx, true, false, &vars, body);
+            check_type_abbrev_recursion_regular(
+                ctx,
+                env,
+                loc,
+                target_path,
+                current_path,
+                expected_args,
+                prev_expansions,
+                body,
+                should_check_path,
+                find_decl,
+                visited,
+            )
+        }
+        _ => {
+            let mut children = Vec::new();
+            crate::types::btype::iter_type_expr(ctx, ty, |child| children.push(child));
+            for child in children {
+                check_type_abbrev_recursion_regular(
+                    ctx,
+                    env,
+                    loc,
+                    target_path,
+                    current_path,
+                    expected_args,
+                    prev_expansions,
+                    child,
+                    should_check_path,
+                    find_decl,
+                    visited,
+                )?;
+            }
+            Ok(())
+        }
+    }
+}
+
+fn check_type_declaration_abbrev_recursion(
+    ctx: &crate::types::context::TypeContext,
+    env: &Env,
+    loc: LocIdx,
+    target_path: &Path,
+    internal_decl: &crate::types::TypeDeclaration,
+    should_check_path: &dyn Fn(&Path) -> bool,
+    find_decl: &dyn Fn(&Path) -> Option<crate::types::TypeDeclaration>,
+) -> TypeModResult<()> {
+    if internal_decl.type_params.is_empty() {
+        return Ok(());
+    }
+    let Some(manifest) = internal_decl.type_manifest else {
+        return Ok(());
+    };
+
+    let (args, body) = instance_parameterized_type_keep_names_for_abbrev_recursion(
+        ctx,
+        &internal_decl.type_params,
+        manifest,
+    );
+    check_type_abbrev_recursion_regular(
+        ctx,
+        env,
+        loc,
+        target_path,
+        target_path,
+        &args,
+        &[],
+        body,
+        should_check_path,
+        find_decl,
+        &mut HashSet::new(),
+    )
+}
+
 fn type_expr_mentions_path(
     ctx: &crate::types::context::TypeContext,
     ty: TypeExprRef,
@@ -5105,6 +5442,15 @@ fn check_type_declaration_abbrev_cycles(
             ctx,
             parser_decl.ptype_loc,
             id.name().to_string(),
+            &type_path,
+            internal_decl,
+            &should_check_path,
+            &find_decl,
+        )?;
+        check_type_declaration_abbrev_recursion(
+            ctx,
+            env,
+            parser_decl.ptype_loc,
             &type_path,
             internal_decl,
             &should_check_path,
@@ -18214,14 +18560,6 @@ fn type_structure_item<'a>(
                 tctx.type_variables = saved_type_variables;
             }
 
-            check_type_declaration_abbrev_cycles(
-                ctx,
-                &new_env,
-                &declared_type_ids,
-                decls,
-                &internal_decls_for_generalize,
-            )?;
-
             // OCaml: Ctype.end_def() + generalize_decl for each declaration
             ctx.end_def();
             for decl in &internal_decls_for_generalize {
@@ -18249,6 +18587,14 @@ fn type_structure_item<'a>(
             for ty in &env_desc_types_for_generalize {
                 crate::types::ctype::generalize(ctx, *ty);
             }
+
+            check_type_declaration_abbrev_cycles(
+                ctx,
+                &new_env,
+                &declared_type_ids,
+                decls,
+                &internal_decls_for_generalize,
+            )?;
 
             for typed_decl in &typed_tree_decls {
                 if let Some((name, loc)) = find_unbound_type_var_in_typed_type_decl(ctx, typed_decl)

@@ -3838,6 +3838,25 @@ fn type_mod_error_to_anyhow(
             2,
         )
         .into(),
+        TypeModError::ConstraintFailed {
+            loc,
+            actual,
+            expected,
+        } => UserDiagnostic::new(
+            format_compiler_error_report(
+                arena,
+                source,
+                filename,
+                *loc,
+                &format!(
+                    "Constraints are not satisfied in this type.\nType {} should be an instance of {}",
+                    format_type_expr(type_ctx, *actual),
+                    format_type_expr(type_ctx, *expected)
+                ),
+            ),
+            2,
+        )
+        .into(),
         TypeModError::DefinitionMismatch { loc, ty, detail } => UserDiagnostic::new(
             format_definition_mismatch_report(
                 type_ctx,
@@ -4054,6 +4073,27 @@ fn type_mod_error_to_anyhow(
                 &format!(
                     "The definition of {name} contains a cycle:\n{}",
                     format_type_expr(type_ctx, *ty)
+                ),
+            ),
+            2,
+        )
+        .into(),
+        TypeModError::ParametersDiffer {
+            loc,
+            path,
+            actual,
+            expected,
+        } => UserDiagnostic::new(
+            format_compiler_error_report(
+                arena,
+                source,
+                filename,
+                *loc,
+                &format!(
+                    "In the definition of {}, type {} should be {}",
+                    path.name(),
+                    format_type_expr(type_ctx, *actual),
+                    format_type_expr(type_ctx, *expected)
                 ),
             ),
             2,
