@@ -195,20 +195,22 @@ fn lookup_rebind_constructor<'a>(
     tctx: &mut TypeCheckContext<'a>,
     env: &Env,
     lid: &Located<LidentIdx>,
-) -> Option<(Path, crate::types::decl::ConstructorDescription)> {
-    let longident = tctx.arena.get_longident(lid.txt);
-    match longident {
+) -> TypeModResult<(Path, crate::types::decl::ConstructorDescription)> {
+    let longident = tctx.resolve_lid(lid.txt).clone();
+    let result = match &longident {
         Longident::Lident(name_idx) => {
             let name = tctx.arena.get_string(*name_idx);
-            let desc = env.find_constructor(name).ok()?.clone();
-            let path = match &desc.cstr_tag {
-                crate::types::decl::ConstructorTag::CstrExtension(path) => path.clone(),
-                _ => Path::pident(Ident::create_persistent(name)),
-            };
-            Some((path, desc))
+            env.find_constructor(name).ok().map(|desc| {
+                let desc = desc.clone();
+                let path = match &desc.cstr_tag {
+                    crate::types::decl::ConstructorTag::CstrExtension(path) => path.clone(),
+                    _ => Path::pident(Ident::create_persistent(name)),
+                };
+                (path, desc)
+            })
         }
         Longident::Ldot(_, _) => crate::types::typecore::lookup_constructor_in_module(
-            longident,
+            &longident,
             tctx.arena,
             env,
             &mut tctx.persistent_env,
@@ -216,7 +218,12 @@ fn lookup_rebind_constructor<'a>(
             None,
         ),
         Longident::Lapply(_, _) => None,
-    }
+    };
+    result.ok_or_else(|| {
+        TypeModError::CoreError(crate::types::typecore::unbound_constructor_lookup_error(
+            tctx, env, lid.loc, &longident,
+        ))
+    })
 }
 
 fn rebind_constructor_arguments(
@@ -18450,13 +18457,8 @@ fn type_structure_item<'a>(
                         )
                     }
                     crate::parser::ast::ExtensionConstructorKind::Pext_rebind(lid) => {
-                        let (rebind_path, rebind_desc) = lookup_rebind_constructor(tctx, env, lid)
-                            .ok_or_else(|| {
-                                TypeModError::ModuleNotFound(format!(
-                                    "constructor {}",
-                                    arena.get_string(ec.pext_name.txt)
-                                ))
-                            })?;
+                        let (rebind_path, rebind_desc) =
+                            lookup_rebind_constructor(tctx, env, lid)?;
                         let (inst_args, cstr_res) =
                             crate::types::instance_constructor(ctx, &rebind_desc);
                         if crate::types::ctype::unify(
@@ -18814,13 +18816,8 @@ fn type_structure_item<'a>(
                     )
                 }
                 crate::parser::ast::ExtensionConstructorKind::Pext_rebind(lid) => {
-                    let (rebind_path, rebind_desc) = lookup_rebind_constructor(tctx, env, lid)
-                        .ok_or_else(|| {
-                            TypeModError::ModuleNotFound(format!(
-                                "constructor {}",
-                                arena.get_string(ext_constr.pext_name.txt)
-                            ))
-                        })?;
+                    let (rebind_path, rebind_desc) =
+                        lookup_rebind_constructor(tctx, env, lid)?;
                     let ext_args = rebind_constructor_arguments(&rebind_desc);
                     (
                         crate::types::typedtree::ExtensionConstructorKind::Text_rebind(

@@ -19649,6 +19649,21 @@ fn unbound_module_prefix_error(
     narrowed_module_lookup_error(tctx, env, loc, prefix)
 }
 
+pub(crate) fn unbound_constructor_lookup_error(
+    tctx: &mut TypeCheckContext<'_>,
+    env: &Env,
+    loc: LocIdx,
+    lid: &Longident,
+) -> TypeCoreError {
+    if let Some(error) = unbound_module_prefix_error(tctx, env, loc, lid) {
+        return error;
+    }
+    TypeCoreError::UnboundConstructor {
+        loc,
+        lid: lid.clone(),
+    }
+}
+
 // OCaml Typetexp.find_component narrows failed qualified lookups by checking
 // each module prefix before reporting the original unbound identifier.
 fn narrowed_module_lookup_error(
