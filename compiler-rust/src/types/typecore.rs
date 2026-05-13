@@ -2122,6 +2122,9 @@ fn transl_type_inner(
 
             let (path, type_decl) = resolve_type_constructor_path(tctx, env, longident);
             let Some(decl) = type_decl else {
+                if let Some(error) = unbound_module_prefix_error(tctx, env, lid.loc, longident) {
+                    return Err(error);
+                }
                 if let Some(error) =
                     cannot_scrape_alias_type_constructor_error(tctx, env, lid.loc, longident)
                 {
@@ -19439,31 +19442,64 @@ fn unbound_module_prefix_error(
     let Longident::Ldot(prefix, _) = lid else {
         return None;
     };
+    narrowed_module_lookup_error(tctx, env, loc, prefix)
+}
+
+// OCaml Typetexp.find_component narrows failed qualified lookups by checking
+// each module prefix before reporting the original unbound identifier.
+fn narrowed_module_lookup_error(
+    tctx: &mut TypeCheckContext<'_>,
+    env: &Env,
+    loc: LocIdx,
+    lid: &Longident,
+) -> Option<TypeCoreError> {
+    if let Longident::Ldot(prefix, _) = lid
+        && let Some(error) = narrowed_module_lookup_error(tctx, env, loc, prefix)
+    {
+        return Some(error);
+    }
+
     let Some(module_path) = env.resolve_module_access_path_for_lid(
-        prefix,
+        lid,
         tctx.arena,
         &mut tctx.persistent_env,
         tctx.type_ctx,
     ) else {
         return Some(TypeCoreError::UnboundModule {
             loc,
-            name: tctx.longident_to_string(prefix),
+            name: tctx.longident_to_string(lid),
         });
     };
 
-    if let Ok(md) = env.lookup_module(&module_path)
-        && matches!(
-            md.md_type,
-            crate::types::decl::ModuleType::MtyFunctor { .. }
-        )
-    {
-        return Some(TypeCoreError::AccessFunctorAsStructure {
-            loc,
-            lid: prefix.as_ref().clone(),
-        });
-    }
+    module_structure_lookup_error(tctx, env, loc, lid, &module_path)
+}
 
-    None
+fn module_structure_lookup_error(
+    tctx: &mut TypeCheckContext<'_>,
+    env: &Env,
+    loc: LocIdx,
+    lid: &Longident,
+    module_path: &Path,
+) -> Option<TypeCoreError> {
+    let Ok(md) = env.lookup_module(module_path) else {
+        return None;
+    };
+
+    match crate::types::typemod::scrape_alias_module_type(
+        &md.md_type,
+        env,
+        &mut tctx.persistent_env,
+        tctx.type_ctx,
+    ) {
+        Some(crate::types::decl::ModuleType::MtyFunctor { .. }) => {
+            Some(TypeCoreError::AccessFunctorAsStructure {
+                loc,
+                lid: lid.clone(),
+            })
+        }
+        None => module_alias_error_for_lid(tctx, env, loc, lid),
+        Some(_) => None,
+    }
 }
 
 fn unbound_value_alternatives(

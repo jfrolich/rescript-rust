@@ -202,10 +202,12 @@ with a reason after checking raise sites.
 
 - `Unbound_module`: covered for the generated JSX `ReactDOM` lookup by
   `tests/error_output_parity/compiler/fixtures/jsx_generated_unbound_reactdom.res`
-  and for direct module access by
-  `tests/error_output_parity/compiler/fixtures/unbound_module.res`, plus the
-  module-type alias lookup path in
-  `tests/error_output_parity/compiler/fixtures/module_type_alias_unbound_module.res`
+  and for direct module access by `tests/error_output_parity/compiler/fixtures/unbound_module.res`.
+  Additional coverage includes the qualified type-constructor parent lookup path
+  in
+  `tests/error_output_parity/compiler/fixtures/unbound_type_constructor_parent_module.res`,
+  the module-type alias lookup path in
+  `tests/error_output_parity/compiler/fixtures/module_type_alias_unbound_module.res`,
   and the `with module` right-hand side lookup paths in
   `tests/error_output_parity/compiler/fixtures/with_module_equation_unbound_module.res`
   and
