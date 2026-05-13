@@ -367,14 +367,6 @@ fn parser_warning_attribute_payload<'a>(
     Some((spec.as_ref(), expr.pexp_loc))
 }
 
-fn normalized_warning_spec(spec: &str, errflag: bool) -> std::borrow::Cow<'_, str> {
-    if errflag && !matches!(spec.chars().next(), Some('@' | '+' | '-')) {
-        std::borrow::Cow::Owned(format!("@{spec}"))
-    } else {
-        std::borrow::Cow::Borrowed(spec)
-    }
-}
-
 fn apply_warning_attribute(
     tctx: &mut TypeCheckContext<'_>,
     arena: &ParseArena,
@@ -397,8 +389,12 @@ fn apply_warning_attribute(
             };
 
             let mut config = WarningConfig::new();
-            let normalized = normalized_warning_spec(spec, errflag);
-            if config.parse(normalized.as_ref()).is_err() {
+            let parsed = if errflag {
+                config.parse_as_error(spec)
+            } else {
+                config.parse(spec)
+            };
+            if parsed.is_err() {
                 tctx.report_warning(
                     name.loc,
                     Warning::AttributePayload {

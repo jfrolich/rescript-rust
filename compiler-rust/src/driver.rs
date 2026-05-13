@@ -1455,12 +1455,7 @@ fn warning_config_for_options(options: &CompilerOptions) -> WarningConfig {
         let _ = config.parse(spec);
     }
     for spec in &options.warning_error_specs {
-        let normalized = match spec.chars().next() {
-            Some('@' | '+' | '-') => spec.to_string(),
-            Some(_) => format!("@{spec}"),
-            None => String::new(),
-        };
-        let _ = config.parse(&normalized);
+        let _ = config.parse_as_error(spec);
     }
     config
 }

@@ -628,6 +628,44 @@ impl WarningConfig {
         Ok(())
     }
 
+    /// Parse a warning-as-error specification.
+    ///
+    /// This mirrors OCaml's `Warnings.parse_options true`: `+n` and uppercase
+    /// letters set the error flag, `-n` and lowercase letters clear it, and
+    /// `@n` both enables the warning and marks it as an error.
+    pub fn parse_as_error(&mut self, spec: &str) -> Result<(), String> {
+        let mut chars = spec.chars().peekable();
+
+        while let Some(c) = chars.next() {
+            match c {
+                '+' => self.apply_modifier(&mut chars, |_, error| *error = true)?,
+                '-' => self.apply_modifier(&mut chars, |_, error| *error = false)?,
+                '@' => self.apply_modifier(&mut chars, |active, error| {
+                    *active = true;
+                    *error = true;
+                })?,
+                'A'..='Z' => {
+                    for n in letter_warnings(c.to_ascii_lowercase()) {
+                        if n < self.errors.len() {
+                            self.errors[n] = true;
+                        }
+                    }
+                }
+                'a'..='z' => {
+                    for n in letter_warnings(c) {
+                        if n < self.errors.len() {
+                            self.errors[n] = false;
+                        }
+                    }
+                }
+                ' ' | '\t' | '\n' => {}
+                _ => return Err(format!("invalid warning specification: {}", c)),
+            }
+        }
+
+        Ok(())
+    }
+
     fn apply_modifier<F>(
         &mut self,
         chars: &mut std::iter::Peekable<std::str::Chars<'_>>,
@@ -907,6 +945,26 @@ mod tests {
         assert!(!config.active[2]);
         assert!(config.active[3]);
         assert!(config.errors[3]);
+    }
+
+    #[test]
+    fn test_warning_config_parse_as_error() {
+        let mut config = WarningConfig::new();
+        config.parse("-26").unwrap();
+        config.parse_as_error("+26").unwrap();
+
+        assert!(!config.active[26]);
+        assert!(config.errors[26]);
+
+        config.parse_as_error("-26").unwrap();
+
+        assert!(!config.active[26]);
+        assert!(!config.errors[26]);
+
+        config.parse_as_error("@26").unwrap();
+
+        assert!(config.active[26]);
+        assert!(config.errors[26]);
     }
 
     #[test]

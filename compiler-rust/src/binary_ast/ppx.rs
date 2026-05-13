@@ -1032,18 +1032,13 @@ fn collect_raw_js_warnings_from_structure_item(
     }
 }
 
-fn normalized_warning_spec(spec: &str, errflag: bool) -> Cow<'_, str> {
-    if errflag && !matches!(spec.chars().next(), Some('@' | '+' | '-')) {
-        Cow::Owned(format!("@{spec}"))
-    } else {
-        Cow::Borrowed(spec)
-    }
-}
-
 fn warning_spec_parse_ok(spec: &str, errflag: bool) -> bool {
     let mut config = WarningConfig::new();
-    let normalized = normalized_warning_spec(spec, errflag);
-    config.parse(normalized.as_ref()).is_ok()
+    if errflag {
+        config.parse_as_error(spec).is_ok()
+    } else {
+        config.parse(spec).is_ok()
+    }
 }
 
 fn collect_builtin_warning_attribute(

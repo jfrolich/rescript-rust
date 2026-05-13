@@ -1226,12 +1226,7 @@ impl<'a> TypeCheckContext<'a> {
 
     /// Apply a `@warnerror`/`@@warnerror` payload.
     pub fn apply_warning_error_spec(&mut self, spec: &str) {
-        let normalized = match spec.chars().next() {
-            Some('@' | '+' | '-') => spec.to_string(),
-            Some(_) => format!("@{spec}"),
-            None => String::new(),
-        };
-        let _ = self.warning_config.parse(&normalized);
+        let _ = self.warning_config.parse_as_error(spec);
     }
 
     /// Get the newtype level.

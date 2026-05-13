@@ -664,6 +664,12 @@ with a reason after checking raise sites.
       `tests/error_output_parity/compiler/cases/bs_ast_parse_error.res`
       and
       `tests/error_output_parity/compiler/cases/bs_iast_parse_error.resi`.
+- `bsc -warn-error` CLI handling
+  - Warning-as-error specifications use OCaml's `Warnings.parse_options true`
+    semantics, so `-warn-error +A` sets the error flags rather than merely
+    activating warnings
+    - Covered by
+      `tests/error_output_parity/compiler/cases/warn_error_unused_variable.res`.
 - `compiler/syntax/src/res_core.ml`
   - `parse_external_def` requires the `=` before an external primitive name
     - Covered through `res_parser` by
