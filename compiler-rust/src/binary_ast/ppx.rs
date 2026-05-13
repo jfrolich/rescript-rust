@@ -514,6 +514,89 @@ fn flow_like_raw_js_parse_message(
     }
 }
 
+fn first_non_whitespace_after_keyword(code: &str, keyword: &str) -> Option<(usize, char)> {
+    let trimmed = code.trim_start();
+    let leading = code.len() - trimmed.len();
+    let after_keyword = trimmed.strip_prefix(keyword)?;
+    if after_keyword
+        .chars()
+        .next()
+        .is_some_and(|ch| ch.is_ascii_alphanumeric() || ch == '_' || ch == '$')
+    {
+        return None;
+    }
+
+    let after_keyword_offset = leading + keyword.len();
+    let rest = code.get(after_keyword_offset..)?;
+    let rest_trimmed = rest.trim_start();
+    let token_offset = after_keyword_offset + rest.len() - rest_trimmed.len();
+    let token = rest_trimmed.chars().next()?;
+    Some((token_offset, token))
+}
+
+fn flow_like_raw_js_program_parse_warning(
+    code: &str,
+    oxc_message: &str,
+    start_offset: usize,
+    end_offset: usize,
+) -> (String, usize, usize) {
+    for keyword in ["let", "const", "var"] {
+        if let Some((token_offset, '=')) = first_non_whitespace_after_keyword(code, keyword) {
+            return (
+                "Unexpected token `=`, expected an identifier".to_string(),
+                token_offset,
+                token_offset,
+            );
+        }
+    }
+
+    for keyword in ["class", "function"] {
+        if let Some((token_offset, '{')) = first_non_whitespace_after_keyword(code, keyword) {
+            return (
+                "Unexpected token `{`, expected an identifier".to_string(),
+                token_offset,
+                token_offset,
+            );
+        }
+    }
+
+    if oxc_message == "A 'return' statement can only be used within a function body." {
+        return (
+            "Illegal return statement".to_string(),
+            start_offset,
+            end_offset,
+        );
+    }
+
+    if oxc_message == "Expected `}` but found `EOF`" {
+        return (
+            "Unexpected end of input, expected the token `}`".to_string(),
+            start_offset,
+            end_offset,
+        );
+    }
+
+    if oxc_message == "Unexpected token" {
+        if start_offset >= code.trim_end().len() {
+            return (
+                "Unexpected end of input".to_string(),
+                start_offset,
+                end_offset,
+            );
+        }
+
+        if let Some(token) = code.get(start_offset..).and_then(|s| s.chars().next()) {
+            return (
+                format!("Unexpected token `{token}`"),
+                start_offset,
+                end_offset,
+            );
+        }
+    }
+
+    (oxc_message.to_string(), start_offset, end_offset)
+}
+
 fn raw_js_expression_parse_warning(
     code: &str,
     payload_loc: LocIdx,
@@ -563,7 +646,12 @@ fn raw_js_program_parse_warning(
     let first_label = first_error.labels.as_ref().and_then(|labels| labels.first());
     let start_offset = first_label.map_or_else(|| code.len(), |label| label.offset());
     let end_offset = first_label.map_or(start_offset, |label| label.offset() + label.len());
-    let message = flow_like_raw_js_parse_message(code, &first_error.to_string(), start_offset);
+    let (message, start_offset, end_offset) = flow_like_raw_js_program_parse_warning(
+        code,
+        &first_error.to_string(),
+        start_offset,
+        end_offset,
+    );
     let loc = raw_js_warning_loc(
         code,
         payload_loc,

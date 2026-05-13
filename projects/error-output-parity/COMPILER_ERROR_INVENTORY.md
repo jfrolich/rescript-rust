@@ -669,6 +669,10 @@ with a reason after checking raise sites.
     expression JavaScript
     - Covered by
       `tests/error_output_parity/compiler/fixtures/raw_expr_invalid_js_warning.res`.
+  - `Ast_payload.raw_as_string_exp_exn` Flow parser warning for invalid
+    `%%raw` program JavaScript
+    - Covered by
+      `tests/error_output_parity/compiler/fixtures/raw_structure_invalid_js_warning.res`.
   - `%ffi` non-string and non-function-string payload rejection
     - Covered by
       `tests/error_output_parity/compiler/fixtures/ffi_non_string.res`
