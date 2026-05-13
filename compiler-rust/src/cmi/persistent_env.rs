@@ -1472,7 +1472,7 @@ impl PersistentEnv {
             experimental_let_unwrap_for_structure(&structure, &options, parser.arena());
         let jsx_version = jsx_version_for_structure(&structure, &options, parser.arena());
         let structure = if let Some(jsx_version) = jsx_version {
-            jsx_ppx::transform_structure(structure, jsx_version, parser.arena_mut())
+            jsx_ppx::transform_structure_result(structure, jsx_version, parser.arena_mut()).ok()?
         } else {
             structure
         };

@@ -671,6 +671,12 @@ with a reason after checking raise sites.
     before named props, and also rejects multiple spreads
     - Covered by
       `tests/error_output_parity/compiler/fixtures/jsx_spread_after_prop.res`.
+  - `transform_structure_item` and `transform_signature_item` reject duplicate
+    `@react.component` attributes on externals and signatures
+    - Covered by
+      `tests/error_output_parity/compiler/fixtures/jsx_external_duplicate_component_attr.res`
+      and
+      `tests/error_output_parity/compiler/fixtures/jsx_signature_duplicate_component_attr.resi`.
   - `get_fn_name` rejects destructuring bindings annotated as JSX components
     before generated React type lookups can mask the PPX error
     - Covered by

@@ -29,7 +29,7 @@ use crate::location::Location;
 use crate::parse_arena::{ExprIdx, LocIdx, ModExprIdx, ParseArena, StrIdx};
 use crate::parser::ast::{
     ArgLabel as ParserArgLabel, Attribute, Constant, Expression, ExpressionDesc, JsxElement,
-    JsxProp, ModuleExpr, ModuleExprDesc, ModuleType, ModuleTypeDesc, PatternDesc, Payload,
+    JsxProp, ModuleExpr, ModuleExprDesc, ModuleTypeDesc, PatternDesc, Payload,
     Signature, SignatureItemDesc, Structure, StructureItemDesc,
 };
 use crate::parser::{Longident, Parser, code_frame, jsx_ppx, module};
@@ -56,8 +56,6 @@ const LET_UNWRAP_UNSUPPORTED_TYPE_MSG: &str =
 const POLYVARIANT_INT_TOO_LARGE_MSG: &str =
     "Integer literal exceeds int32 range. Use float or BigInt if larger values are required.";
 const REACT_COMPONENT_DESTRUCTURE_MSG: &str = "JSX component calls cannot be destructured.";
-const REACT_COMPONENT_MULTIPLE_DEFINITIONS_MSG: &str =
-    "Only one component definition is allowed for each module. Move to a submodule or other file if necessary.";
 const REACT_COMPONENT_KEY_PROP_MSG: &str = "Key cannot be accessed inside of a component. Don't \
                                            worry - you can always key a component from its parent!";
 const REACT_COMPONENT_DUPLICATE_PROP_MSG_PREFIX: &str = "The prop `";
@@ -1263,48 +1261,6 @@ fn reject_invalid_react_component_destructure_in_structure(
     Ok(())
 }
 
-fn reject_multiple_react_components_in_structure(
-    structure: &Structure,
-    arena: &ParseArena,
-    source: &str,
-    filename: &str,
-) -> Result<()> {
-    if let Some(loc) = multiple_react_component_loc_in_structure(structure, arena) {
-        return Err(UserDiagnostic::new(
-            format_compiler_error_report_from_location(
-                source,
-                filename,
-                &loc,
-                REACT_COMPONENT_MULTIPLE_DEFINITIONS_MSG,
-            ),
-            2,
-        )
-        .into());
-    }
-    Ok(())
-}
-
-fn reject_multiple_react_components_in_signature(
-    signature: &Signature,
-    arena: &ParseArena,
-    source: &str,
-    filename: &str,
-) -> Result<()> {
-    if let Some(loc) = multiple_react_component_loc_in_signature(signature, arena) {
-        return Err(UserDiagnostic::new(
-            format_compiler_error_report_from_location(
-                source,
-                filename,
-                &loc,
-                REACT_COMPONENT_MULTIPLE_DEFINITIONS_MSG,
-            ),
-            2,
-        )
-        .into());
-    }
-    Ok(())
-}
-
 fn reject_invalid_jsx_spread_props_in_structure(
     structure: &Structure,
     arena: &ParseArena,
@@ -1654,185 +1610,6 @@ fn jsx_prop_is_key(prop: &JsxProp, arena: &ParseArena) -> bool {
             arena.get_string(name.txt) == "key"
         }
         JsxProp::Spreading { .. } => false,
-    }
-}
-
-fn multiple_react_component_loc_in_structure(
-    structure: &Structure,
-    arena: &ParseArena,
-) -> Option<Location> {
-    let mut has_component = false;
-    for item in structure {
-        match &*item.pstr_desc {
-            StructureItemDesc::Pstr_primitive(vd)
-                if has_react_component_attr(&vd.pval_attributes, arena)
-                    && !has_react_component_with_props_attr(&vd.pval_attributes, arena) =>
-            {
-                if has_component {
-                    return Some(arena.to_location(item.pstr_loc));
-                }
-                has_component = true;
-            }
-            StructureItemDesc::Pstr_value(value) => {
-                for binding in &value.1 {
-                    if has_react_component_attr(&binding.pvb_attributes, arena) {
-                        if has_component {
-                            return Some(arena.to_location(item.pstr_loc));
-                        }
-                        has_component = true;
-                    }
-                }
-            }
-            StructureItemDesc::Pstr_module(module_binding) => {
-                if let Some(loc) = multiple_react_component_loc_in_module_expr(
-                    arena.get_mod_expr(module_binding.pmb_expr),
-                    arena,
-                ) {
-                    return Some(loc);
-                }
-            }
-            StructureItemDesc::Pstr_recmodule(module_bindings) => {
-                for module_binding in module_bindings.iter() {
-                    if let Some(loc) = multiple_react_component_loc_in_module_expr(
-                        arena.get_mod_expr(module_binding.pmb_expr),
-                        arena,
-                    ) {
-                        return Some(loc);
-                    }
-                }
-            }
-            StructureItemDesc::Pstr_modtype(module_type_decl) => {
-                if let Some(module_type_idx) = module_type_decl.pmtd_type
-                    && let Some(loc) = multiple_react_component_loc_in_module_type(
-                        arena.get_mod_type(module_type_idx),
-                        arena,
-                    )
-                {
-                    return Some(loc);
-                }
-            }
-            StructureItemDesc::Pstr_include(include_decl) => {
-                if let Some(loc) = multiple_react_component_loc_in_module_expr(
-                    arena.get_mod_expr(include_decl.pincl_mod),
-                    arena,
-                ) {
-                    return Some(loc);
-                }
-            }
-            _ => {}
-        }
-    }
-    None
-}
-
-fn multiple_react_component_loc_in_signature(
-    signature: &Signature,
-    arena: &ParseArena,
-) -> Option<Location> {
-    let mut has_component = false;
-    for item in signature {
-        match &*item.psig_desc {
-            SignatureItemDesc::Psig_value(vd)
-                if has_react_component_attr(&vd.pval_attributes, arena) =>
-            {
-                if has_component {
-                    return Some(arena.to_location(item.psig_loc));
-                }
-                has_component = true;
-            }
-            SignatureItemDesc::Psig_module(module_decl) => {
-                if let Some(loc) = multiple_react_component_loc_in_module_type(
-                    arena.get_mod_type(module_decl.pmd_type),
-                    arena,
-                )
-                {
-                    return Some(loc);
-                }
-            }
-            SignatureItemDesc::Psig_recmodule(module_decls) => {
-                for module_decl in module_decls.iter() {
-                    if let Some(loc) = multiple_react_component_loc_in_module_type(
-                        arena.get_mod_type(module_decl.pmd_type),
-                        arena,
-                    ) {
-                        return Some(loc);
-                    }
-                }
-            }
-            SignatureItemDesc::Psig_modtype(module_type_decl) => {
-                if let Some(module_type_idx) = module_type_decl.pmtd_type
-                    && let Some(loc) = multiple_react_component_loc_in_module_type(
-                        arena.get_mod_type(module_type_idx),
-                        arena,
-                    )
-                {
-                    return Some(loc);
-                }
-            }
-            SignatureItemDesc::Psig_include(include_decl) => {
-                if let Some(loc) = multiple_react_component_loc_in_module_type(
-                    arena.get_mod_type(include_decl.pincl_mod),
-                    arena,
-                ) {
-                    return Some(loc);
-                }
-            }
-            _ => {}
-        }
-    }
-    None
-}
-
-fn multiple_react_component_loc_in_module_expr(
-    module_expr: &ModuleExpr,
-    arena: &ParseArena,
-) -> Option<Location> {
-    match &*module_expr.pmod_desc {
-        ModuleExprDesc::Pmod_structure(structure) => {
-            multiple_react_component_loc_in_structure(structure, arena)
-        }
-        ModuleExprDesc::Pmod_functor(functor) => {
-            multiple_react_component_loc_in_module_expr(arena.get_mod_expr(functor.2), arena)
-        }
-        ModuleExprDesc::Pmod_apply(lhs, rhs) => {
-            multiple_react_component_loc_in_module_expr(arena.get_mod_expr(*lhs), arena).or_else(
-                || multiple_react_component_loc_in_module_expr(arena.get_mod_expr(*rhs), arena),
-            )
-        }
-        ModuleExprDesc::Pmod_constraint(inner, module_type_idx) => {
-            multiple_react_component_loc_in_module_expr(arena.get_mod_expr(*inner), arena).or_else(
-                || {
-                    multiple_react_component_loc_in_module_type(
-                        arena.get_mod_type(*module_type_idx),
-                        arena,
-                    )
-                },
-            )
-        }
-        _ => None,
-    }
-}
-
-fn multiple_react_component_loc_in_module_type(
-    module_type: &ModuleType,
-    arena: &ParseArena,
-) -> Option<Location> {
-    match &*module_type.pmty_desc {
-        ModuleTypeDesc::Pmty_signature(signature) => {
-            multiple_react_component_loc_in_signature(signature, arena)
-        }
-        ModuleTypeDesc::Pmty_functor(functor) => {
-            multiple_react_component_loc_in_module_type(arena.get_mod_type(functor.2), arena)
-        }
-        ModuleTypeDesc::Pmty_with(inner) => {
-            let (module_type_idx, _) = &**inner;
-            multiple_react_component_loc_in_module_type(arena.get_mod_type(*module_type_idx), arena)
-        }
-        ModuleTypeDesc::Pmty_typeof(module_expr_idx) => multiple_react_component_loc_in_module_expr(
-            arena.get_mod_expr(*module_expr_idx),
-            arena,
-        ),
-        _ => None,
     }
 }
 
@@ -2532,10 +2309,14 @@ fn preprocess_signature_for_typecheck_with_source(
     source: &str,
     filename: &str,
 ) -> Result<Signature> {
-    if options.jsx_version.is_some() {
-        reject_multiple_react_components_in_signature(&signature, arena, source, filename)?;
-    }
-    preprocess_signature_for_typecheck_inner(signature, options, arena)
+    let signature = if let Some(jsx_version) = options.jsx_version {
+        jsx_ppx::transform_signature_result(signature, jsx_version, arena)
+            .map_err(|e| jsx_ppx_error_to_anyhow(e, arena, source, filename))?
+    } else {
+        signature
+    };
+
+    ppx::rewrite_signature(&signature, arena)
         .map_err(|e| ppx_error_to_anyhow(e, arena, source, filename))
 }
 
@@ -2593,6 +2374,20 @@ fn ppx_error_to_anyhow(
         }
         UserDiagnostic::new(report, 2).into()
     }
+}
+
+fn jsx_ppx_error_to_anyhow(
+    err: jsx_ppx::JsxPreprocessorError,
+    arena: &ParseArena,
+    source: &str,
+    filename: &str,
+) -> anyhow::Error {
+    let loc = arena.to_location(err.loc);
+    UserDiagnostic::new(
+        format_compiler_error_report_from_location(source, filename, &loc, &err.message),
+        2,
+    )
+    .into()
 }
 
 fn emit_ppx_warnings(
@@ -11270,12 +11065,6 @@ pub fn compile_source_to_js_with_options(
     let jsx_version = jsx_version_for_structure(&structure, options, parser.arena());
     let structure = if let Some(jsx_version) = jsx_version {
         reject_invalid_jsx_spread_props_in_structure(&structure, parser.arena(), source, filename)?;
-        reject_multiple_react_components_in_structure(
-            &structure,
-            parser.arena(),
-            source,
-            filename,
-        )?;
         reject_invalid_react_component_destructure_in_structure(
             &structure,
             parser.arena(),
@@ -11299,7 +11088,8 @@ pub fn compile_source_to_js_with_options(
             source,
             filename,
         )?;
-        jsx_ppx::transform_structure(structure, jsx_version, parser.arena_mut())
+        jsx_ppx::transform_structure_result(structure, jsx_version, parser.arena_mut())
+            .map_err(|e| jsx_ppx_error_to_anyhow(e, parser.arena(), source, filename))?
     } else {
         structure
     };
@@ -12361,12 +12151,6 @@ pub fn typecheck_and_dump_sexp<W: std::io::Write>(
                 source,
                 filename,
             )?;
-            reject_multiple_react_components_in_structure(
-                &structure,
-                parser.arena(),
-                source,
-                filename,
-            )?;
             reject_invalid_react_component_destructure_in_structure(
                 &structure,
                 parser.arena(),
@@ -12390,7 +12174,8 @@ pub fn typecheck_and_dump_sexp<W: std::io::Write>(
                 source,
                 filename,
             )?;
-            jsx_ppx::transform_structure(structure, jsx_version, parser.arena_mut())
+            jsx_ppx::transform_structure_result(structure, jsx_version, parser.arena_mut())
+                .map_err(|e| jsx_ppx_error_to_anyhow(e, parser.arena(), source, filename))?
         } else {
             structure
         };
@@ -13546,7 +13331,8 @@ pub fn typecheck_stored_structure_and_dump_sexp<W: std::io::Write>(
 
     let jsx_version = jsx_version_for_structure(&structure, options, &arena);
     let structure = if let Some(jsx_version) = jsx_version {
-        jsx_ppx::transform_structure(structure, jsx_version, &mut arena)
+        jsx_ppx::transform_structure_result(structure, jsx_version, &mut arena)
+            .map_err(|e| anyhow!("PPX rewrite failed: {e}"))?
     } else {
         structure
     };
@@ -13965,12 +13751,6 @@ pub fn compile_source_in_process(
     let jsx_version = jsx_version_for_structure(&structure, options, parser.arena());
     let structure = if let Some(jsx_version) = jsx_version {
         reject_invalid_jsx_spread_props_in_structure(&structure, parser.arena(), source, filename)?;
-        reject_multiple_react_components_in_structure(
-            &structure,
-            parser.arena(),
-            source,
-            filename,
-        )?;
         reject_invalid_react_component_destructure_in_structure(
             &structure,
             parser.arena(),
@@ -13994,7 +13774,8 @@ pub fn compile_source_in_process(
             source,
             filename,
         )?;
-        jsx_ppx::transform_structure(structure, jsx_version, parser.arena_mut())
+        jsx_ppx::transform_structure_result(structure, jsx_version, parser.arena_mut())
+            .map_err(|e| jsx_ppx_error_to_anyhow(e, parser.arena(), source, filename))?
     } else {
         structure
     };

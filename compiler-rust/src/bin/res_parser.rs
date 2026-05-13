@@ -183,11 +183,17 @@ fn main() {
         }
 
         // Apply JSX PPX transformation and emit JSX preprocessor warnings.
-        let (signature, jsx_warnings) = jsx_ppx::transform_signature_with_warnings(
+        let (signature, jsx_warnings) = match jsx_ppx::transform_signature_with_warnings_result(
             signature,
             args.jsx_version,
             parser.arena_mut(),
-        );
+        ) {
+            Ok(result) => result,
+            Err(err) => {
+                eprintln!("{err}");
+                process::exit(1);
+            }
+        };
         print_jsx_preprocessor_warnings(&source, &filename, &jsx_warnings, &mut io::stderr());
 
         // Apply AST conversion round-trip if requested (for testing)
@@ -296,11 +302,17 @@ fn main() {
         }
 
         // Apply JSX PPX transformation and emit JSX preprocessor warnings.
-        let (structure, jsx_warnings) = jsx_ppx::transform_structure_with_warnings(
+        let (structure, jsx_warnings) = match jsx_ppx::transform_structure_with_warnings_result(
             structure,
             args.jsx_version,
             parser.arena_mut(),
-        );
+        ) {
+            Ok(result) => result,
+            Err(err) => {
+                eprintln!("{err}");
+                process::exit(1);
+            }
+        };
         print_jsx_preprocessor_warnings(&source, &filename, &jsx_warnings, &mut io::stderr());
 
         // Apply AST conversion round-trip if requested (for testing)

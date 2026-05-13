@@ -11,7 +11,7 @@
 //! - Key props use `jsxKeyed`/`jsxsKeyed` instead
 //! - `@react.component` transforms functions to accept props record
 
-use std::borrow::Cow;
+use std::{borrow::Cow, fmt};
 
 use super::ast::*;
 use super::longident::Longident;
@@ -38,6 +38,8 @@ pub struct JsxConfig {
     pub has_component: bool,
     /// File name (without extension, capitalized) for module naming
     pub file_name: String,
+    /// First fatal PPX diagnostic found while transforming.
+    pub fatal_error: Option<JsxPreprocessorError>,
 }
 
 impl Default for JsxConfig {
@@ -48,6 +50,7 @@ impl Default for JsxConfig {
             nested_modules: vec![],
             has_component: false,
             file_name: String::new(),
+            fatal_error: None,
         }
     }
 }
@@ -110,6 +113,27 @@ pub struct JsxPreprocessorWarning {
     pub message: String,
 }
 
+/// Fatal JSX PPX diagnostic.
+#[derive(Debug, Clone)]
+pub struct JsxPreprocessorError {
+    pub loc: Location,
+    pub message: String,
+}
+
+impl fmt::Display for JsxPreprocessorError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for JsxPreprocessorError {}
+
+pub type JsxPreprocessorResult<T> = Result<T, JsxPreprocessorError>;
+
+const DUPLICATE_REACT_COMPONENT_ATTR_MSG: &str =
+    "Only one JSX component call can exist on a component at one time";
+const MULTIPLE_COMPONENT_DEFINITIONS_MSG: &str = "Only one component definition is allowed for each module. Move to a submodule or other file if necessary.";
+
 // ============================================================================
 // Public API
 // ============================================================================
@@ -120,8 +144,19 @@ pub fn transform_structure(
     initial_version: i32,
     arena: &mut ParseArena,
 ) -> Structure {
-    let (structure, _) = transform_structure_with_warnings(structure, initial_version, arena);
-    structure
+    transform_structure_result(structure, initial_version, arena)
+        .expect("JSX PPX transform failed")
+}
+
+/// Transform a structure, applying JSX PPX transformations.
+pub fn transform_structure_result(
+    structure: Structure,
+    initial_version: i32,
+    arena: &mut ParseArena,
+) -> JsxPreprocessorResult<Structure> {
+    let (structure, _) =
+        transform_structure_with_warnings_result(structure, initial_version, arena)?;
+    Ok(structure)
 }
 
 /// Transform a structure and collect JSX preprocessor warnings.
@@ -130,6 +165,16 @@ pub fn transform_structure_with_warnings(
     initial_version: i32,
     arena: &mut ParseArena,
 ) -> (Structure, Vec<JsxPreprocessorWarning>) {
+    transform_structure_with_warnings_result(structure, initial_version, arena)
+        .expect("JSX PPX transform failed")
+}
+
+/// Transform a structure and collect JSX preprocessor warnings.
+pub fn transform_structure_with_warnings_result(
+    structure: Structure,
+    initial_version: i32,
+    arena: &mut ParseArena,
+) -> JsxPreprocessorResult<(Structure, Vec<JsxPreprocessorWarning>)> {
     // Extract file name from first item's location
     let file_name = structure
         .first()
@@ -146,9 +191,12 @@ pub fn transform_structure_with_warnings(
     let mut result = vec![];
     for item in structure {
         let items = transform_structure_item_multi(item, &mut config, arena, &mut warnings);
+        if let Some(error) = config.fatal_error.take() {
+            return Err(error);
+        }
         result.extend(items);
     }
-    (result, warnings)
+    Ok((result, warnings))
 }
 
 /// Transform a signature, applying JSX PPX transformations
@@ -157,8 +205,19 @@ pub fn transform_signature(
     initial_version: i32,
     arena: &mut ParseArena,
 ) -> Signature {
-    let (signature, _) = transform_signature_with_warnings(signature, initial_version, arena);
-    signature
+    transform_signature_result(signature, initial_version, arena)
+        .expect("JSX PPX transform failed")
+}
+
+/// Transform a signature, applying JSX PPX transformations.
+pub fn transform_signature_result(
+    signature: Signature,
+    initial_version: i32,
+    arena: &mut ParseArena,
+) -> JsxPreprocessorResult<Signature> {
+    let (signature, _) =
+        transform_signature_with_warnings_result(signature, initial_version, arena)?;
+    Ok(signature)
 }
 
 /// Transform a signature and collect JSX preprocessor warnings.
@@ -167,6 +226,16 @@ pub fn transform_signature_with_warnings(
     initial_version: i32,
     arena: &mut ParseArena,
 ) -> (Signature, Vec<JsxPreprocessorWarning>) {
+    transform_signature_with_warnings_result(signature, initial_version, arena)
+        .expect("JSX PPX transform failed")
+}
+
+/// Transform a signature and collect JSX preprocessor warnings.
+pub fn transform_signature_with_warnings_result(
+    signature: Signature,
+    initial_version: i32,
+    arena: &mut ParseArena,
+) -> JsxPreprocessorResult<(Signature, Vec<JsxPreprocessorWarning>)> {
     // Extract file name from first item's location
     let file_name = signature
         .first()
@@ -182,9 +251,12 @@ pub fn transform_signature_with_warnings(
     let mut result = vec![];
     for item in signature {
         let items = transform_signature_item_multi(item, &mut config, arena);
+        if let Some(error) = config.fatal_error.take() {
+            return Err(error);
+        }
         result.extend(items);
     }
-    (result, vec![])
+    Ok((result, vec![]))
 }
 
 // ============================================================================
@@ -227,13 +299,29 @@ fn transform_structure_item_multi(
 
     // Handle Pstr_primitive (external) with potential @react.component
     if let StructureItemDesc::Pstr_primitive(vd) = &*item.pstr_desc {
-        if has_react_component_attr(arena, &vd.pval_attributes) {
-            return transform_react_component_external(
-                (**vd).clone(),
-                &item.pstr_loc,
-                config,
-                arena,
-            );
+        let component_attr_count = count_react_component_attrs(arena, &vd.pval_attributes);
+        let component_with_props_attr_count =
+            count_react_component_with_props_attrs(arena, &vd.pval_attributes);
+
+        match (component_attr_count, component_with_props_attr_count) {
+            (0, 0) => {}
+            (_, 1) => {}
+            (1, 0) => {
+                return transform_react_component_external(
+                    (**vd).clone(),
+                    &item.pstr_loc,
+                    config,
+                    arena,
+                );
+            }
+            _ => {
+                set_fatal_error(
+                    config,
+                    item.pstr_loc,
+                    DUPLICATE_REACT_COMPONENT_ATTR_MSG,
+                );
+                return vec![item];
+            }
         }
     }
 
@@ -423,14 +511,7 @@ fn transform_react_component_binding(
     arena: &mut ParseArena,
     warnings: &mut Vec<JsxPreprocessorWarning>,
 ) -> (Option<StructureItem>, ValueBinding, Option<ValueBinding>) {
-    // Check for multiple components in the same module (OCaml: check_multiple_components)
-    if config.has_component {
-        eprintln!(
-            "Only one component definition is allowed for each module. Move to a submodule or other file if necessary. (at {:?})",
-            pstr_loc
-        );
-    }
-    config.has_component = true;
+    check_multiple_components(config, *pstr_loc);
 
     // Get function name and location from pattern
     let binding_pat = arena.get_pat(binding.pvb_pat).clone();
@@ -1847,8 +1928,19 @@ fn transform_signature_item_multi(
 
     // Handle Psig_value with potential @react.component
     if let SignatureItemDesc::Psig_value(vd) = &*item.psig_desc {
-        if has_react_component_attr(arena, &vd.pval_attributes) {
-            return transform_react_component_sig((**vd).clone(), &item.psig_loc, config, arena);
+        match count_react_component_attrs(arena, &vd.pval_attributes) {
+            0 => {}
+            1 => {
+                return transform_react_component_sig((**vd).clone(), &item.psig_loc, config, arena);
+            }
+            _ => {
+                set_fatal_error(
+                    config,
+                    item.psig_loc,
+                    DUPLICATE_REACT_COMPONENT_ATTR_MSG,
+                );
+                return vec![item];
+            }
         }
     }
 
@@ -1868,14 +1960,7 @@ fn transform_react_component_sig(
     config: &mut JsxConfig,
     arena: &mut ParseArena,
 ) -> Vec<SignatureItem> {
-    // Check for multiple components in the same module (OCaml: check_multiple_components)
-    if config.has_component {
-        eprintln!(
-            "Only one component definition is allowed for each module. Move to a submodule or other file if necessary. (at {:?})",
-            loc
-        );
-    }
-    config.has_component = true;
+    check_multiple_components(config, *loc);
 
     // Check for sharedProps: @react.component(:sharedProps<T>)
     let core_type_of_attr = core_type_of_attrs(arena, &vd.pval_attributes);
@@ -2011,14 +2096,7 @@ fn transform_react_component_external(
     config: &mut JsxConfig,
     arena: &mut ParseArena,
 ) -> Vec<StructureItem> {
-    // Check for multiple components in the same module (OCaml: check_multiple_components)
-    if config.has_component {
-        eprintln!(
-            "Only one component definition is allowed for each module. Move to a submodule or other file if necessary. (at {:?})",
-            loc
-        );
-    }
-    config.has_component = true;
+    check_multiple_components(config, *loc);
 
     // Check for sharedProps: @react.component(:sharedProps<T>)
     let core_type_of_attr = core_type_of_attrs(arena, &vd.pval_attributes);
@@ -2305,6 +2383,37 @@ fn has_react_component_with_props_attr(arena: &ParseArena, attrs: &Attributes) -
 fn is_react_component_with_props_attr(arena: &ParseArena, attr: &Attribute) -> bool {
     let name = arena.get_string(attr.0.txt);
     matches!(name, "react.componentWithProps" | "jsx.componentWithProps")
+}
+
+fn count_react_component_attrs(arena: &ParseArena, attrs: &Attributes) -> usize {
+    attrs
+        .iter()
+        .filter(|attr| is_react_component_attr(arena, attr))
+        .count()
+}
+
+fn count_react_component_with_props_attrs(arena: &ParseArena, attrs: &Attributes) -> usize {
+    attrs
+        .iter()
+        .filter(|attr| is_react_component_with_props_attr(arena, attr))
+        .count()
+}
+
+fn check_multiple_components(config: &mut JsxConfig, loc: Location) {
+    if config.has_component {
+        set_fatal_error(config, loc, MULTIPLE_COMPONENT_DEFINITIONS_MSG);
+    } else {
+        config.has_component = true;
+    }
+}
+
+fn set_fatal_error(config: &mut JsxConfig, loc: Location, message: &str) {
+    if config.fatal_error.is_none() {
+        config.fatal_error = Some(JsxPreprocessorError {
+            loc,
+            message: message.to_string(),
+        });
+    }
 }
 
 /// Extract core type from @react.component(:sharedProps<T>) attribute
