@@ -612,11 +612,12 @@ impl<'src> Scanner<'src> {
                     // Add content before the escape (including the backslash)
                     result.push_str(self.substring(chunk_start, self.offset));
                     result.push('\\');
+                    let escape_start_pos = self.position();
                     self.next(); // consume backslash
 
                     // Check if this is a decimal escape that needs conversion
                     let escape_start = self.offset;
-                    self.scan_string_escape_sequence_text(&start_pos);
+                    self.scan_string_escape_sequence_text(&escape_start_pos);
                     let escape_end = self.offset;
 
                     // Check if it was a 3-digit decimal escape
@@ -664,25 +665,13 @@ impl<'src> Scanner<'src> {
                 self.next();
             }
             '0'..='9' => {
-                // Decimal escape \NNN (up to 3 digits)
-                for _ in 0..3 {
-                    if self.ch.is_ascii_digit() {
-                        self.next();
-                    } else {
-                        break;
-                    }
-                }
+                // Decimal escape \NNN, exactly three digits.
+                self.scan_string_escape_digits(start_pos, 3, 10, 255);
             }
             'x' => {
                 // Hex escape \xNN
                 self.next();
-                for _ in 0..2 {
-                    if self.ch.is_ascii_hexdigit() {
-                        self.next();
-                    } else {
-                        break;
-                    }
-                }
+                self.scan_string_escape_digits(start_pos, 2, 16, 255);
             }
             'u' => {
                 self.next();
@@ -696,14 +685,8 @@ impl<'src> Scanner<'src> {
                         self.next();
                     }
                 } else {
-                    // Unicode escape \uNNNN
-                    for _ in 0..4 {
-                        if self.ch.is_ascii_hexdigit() {
-                            self.next();
-                        } else {
-                            break;
-                        }
-                    }
+                    // Unicode escape \uNNNN, exactly four hex digits.
+                    self.scan_string_escape_digits(start_pos, 4, 16, 0x10FFFF);
                 }
             }
             c if c == EOF_CHAR => {
@@ -718,6 +701,44 @@ impl<'src> Scanner<'src> {
                 // Unknown escape - skip the character
                 self.next();
             }
+        }
+    }
+
+    fn scan_string_escape_digits(
+        &mut self,
+        start_pos: &Position,
+        digits: usize,
+        base: u32,
+        max: u32,
+    ) {
+        let mut value = 0;
+
+        for _ in 0..digits {
+            let Some(digit) = self.ch.to_digit(base) else {
+                let end_pos = self.position();
+                let message = if self.ch == EOF_CHAR {
+                    "unclosed escape sequence"
+                } else {
+                    "unknown escape sequence"
+                };
+                self.error(
+                    start_pos.clone(),
+                    end_pos,
+                    DiagnosticCategory::message(message),
+                );
+                return;
+            };
+            self.next();
+            value = (value * base) + digit;
+        }
+
+        if value > max || (0xD800..0xE000).contains(&value) {
+            let end_pos = self.position();
+            self.error(
+                start_pos.clone(),
+                end_pos,
+                DiagnosticCategory::message("escape sequence is invalid unicode code point"),
+            );
         }
     }
 

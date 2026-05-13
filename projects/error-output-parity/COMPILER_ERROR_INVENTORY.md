@@ -645,6 +645,20 @@ with a reason after checking raise sites.
       `tests/error_output_parity/compiler/cases/bs_ast_parse_error.res`
       and
       `tests/error_output_parity/compiler/cases/bs_iast_parse_error.resi`.
+- `compiler/syntax/src/res_scanner.ml`
+  - Fixed-width string escape diagnostics for short decimal, incomplete hex,
+    incomplete unicode, decimal overflow, and surrogate unicode escapes
+    - Covered by
+      `tests/error_output_parity/compiler/fixtures/string_escape_short_decimal.res`,
+      `tests/error_output_parity/compiler/fixtures/string_escape_invalid_hex.res`,
+      `tests/error_output_parity/compiler/fixtures/string_escape_invalid_unicode.res`,
+      `tests/error_output_parity/compiler/fixtures/string_escape_decimal_overflow.res`,
+      and
+      `tests/error_output_parity/compiler/fixtures/string_escape_unicode_surrogate.res`.
+- `compiler/frontend/ast_utf8_string.ml`
+  - JavaScript string `\u{...}` codepoint escape validation after parsing
+    - Covered by
+      `tests/error_output_parity/compiler/fixtures/string_escape_codepoint_overflow.res`.
 - `compiler/ml/builtin_attributes.ml`
   - `error_of_extension` rejects uninterpreted expression, type, pattern,
     module expression, structure, and signature extension points
