@@ -253,6 +253,20 @@ with a reason after checking raise sites.
   `tests/error_output_parity/compiler/fixtures/not_a_variant_type_spread.res`.
 - `Not_subtype`: covered by
   `tests/error_output_parity/compiler/fixtures/not_subtype_variant_spread.res`.
+  `Ctype.subtype_context` diagnostic subcases are covered by
+  `tests/error_output_parity/compiler/fixtures/coerce_primitive_to_variant_not_unboxed.res`,
+  `tests/error_output_parity/compiler/fixtures/coerce_primitive_to_variant_no_catchall.res`,
+  `tests/error_output_parity/compiler/fixtures/coerce_variant_to_primitive_payload_not_unboxed.res`,
+  `tests/error_output_parity/compiler/fixtures/coerce_variant_to_primitive_inline_record.res`,
+  `tests/error_output_parity/compiler/fixtures/coerce_variant_to_primitive_null_as.res`,
+  `tests/error_output_parity/compiler/fixtures/coerce_variant_to_primitive_missing_as.res`,
+  `tests/error_output_parity/compiler/fixtures/coerce_variant_to_primitive_mismatched_as.res`,
+  `tests/error_output_parity/compiler/fixtures/coerce_variant_to_primitive_unboxed_payload_mismatch.res`,
+  `tests/error_output_parity/compiler/fixtures/coerce_variant_unboxed_configuration_mismatch.res`,
+  `tests/error_output_parity/compiler/fixtures/coerce_variant_tag_configuration_mismatch.res`,
+  `tests/error_output_parity/compiler/fixtures/coerce_variant_constructor_count_mismatch.res`,
+  and
+  `tests/error_output_parity/compiler/fixtures/coerce_different_type_kinds.res`.
 - `Inlined_record_expected`: covered by
   `tests/error_output_parity/compiler/fixtures/inlined_record_expected.res`.
 - `Invalid_extension_constructor_payload`: covered by
