@@ -667,10 +667,18 @@ pub enum TypeCoreError {
     },
 
     /// Too many arguments.
-    TooManyArguments(bool, TypeExprRef),
+    TooManyArguments {
+        loc: LocIdx,
+        in_function: bool,
+        ty: TypeExprRef,
+    },
 
     /// Abstract wrong label.
-    AbstractWrongLabel(ArgLabel, TypeExprRef),
+    AbstractWrongLabel {
+        loc: LocIdx,
+        label: crate::types::ArgLabel,
+        ty: TypeExprRef,
+    },
 
     /// Scoping let module.
     ScopingLetModule(String, TypeExprRef),
@@ -15062,30 +15070,69 @@ fn type_function(
             }
         };
 
-        // Match OCaml's filter_arrow path: compiler/ml/typecore.ml:3601-3603
-        // calls compiler/ml/ctype.ml:2862-2864 `filter_arrow`, whose first step
-        // is `expand_head_trace`/`expand_head_unif` (ctype.ml:2849-2852).
-        // If the expected type expands to an arrow with matching label, reuse
-        // its argument/result types directly; otherwise introduce a fresh arrow
-        // and unify against expected type.
+        // Match OCaml's filter_arrow path: compiler/ml/typecore.ml:3601-3609.
+        // For a type variable, filter_arrow links it to a fresh arrow. For an
+        // arrow, the label must match exactly. If it is an arrow with the wrong
+        // label, type_function raises Abstract_wrong_label instead of trying to
+        // unify a synthetic arrow through the mismatch.
         let expected_inst = crate::types::instance(ctx, expected_ty);
         let expanded_expected = crate::types::ctype::expand_head_unif(ctx, env, expected_inst);
-        let expanded_desc = ctx.get_desc(expanded_expected);
-        let mut expected_arrow = match &*expanded_desc {
-            TypeDesc::Tarrow { arg, ret, .. } if arg.lbl == ctx_label => Some((arg.typ, *ret)),
-            _ => None,
+        enum FilterArrow {
+            Arrow(TypeExprRef, TypeExprRef),
+            LinkVar(i32),
+            Mismatch,
+        }
+        let filter_arrow = {
+            let expanded_desc = ctx.get_desc(expanded_expected);
+            let result = match &*expanded_desc {
+                TypeDesc::Tvar(_) => FilterArrow::LinkVar(ctx.get_level(expanded_expected)),
+                TypeDesc::Tarrow { arg, ret, .. } if arg.lbl.same_label(&ctx_label) => {
+                    FilterArrow::Arrow(arg.typ, *ret)
+                }
+                _ => FilterArrow::Mismatch,
+            };
+            drop(expanded_desc);
+            result
         };
-        drop(expanded_desc);
+        let expected_arrow = match filter_arrow {
+            FilterArrow::Arrow(param_ty, return_ty) => Some((param_ty, return_ty)),
+            FilterArrow::LinkVar(level) => {
+                let param_ty = ctx.alloc_type_at_level(TypeDesc::Tvar(None), level);
+                let return_ty = ctx.alloc_type_at_level(TypeDesc::Tvar(None), level);
+                let arrow_ty = ctx.alloc_type_at_level(
+                    TypeDesc::Tarrow {
+                        arg: TypeArg::new(ctx_label.clone(), param_ty),
+                        ret: return_ty,
+                        commutable: Commutable::Cok,
+                        arity: arity_opt,
+                    },
+                    level,
+                );
+                crate::types::ctype::link_type(ctx, expanded_expected, arrow_ty);
+                Some((param_ty, return_ty))
+            }
+            FilterArrow::Mismatch => None,
+        };
         let (mut param_ty, return_ty) = match expected_arrow {
             Some((param_ty, return_ty)) => (param_ty, return_ty),
             _ => {
-                let param_ty = ctx.new_var(None);
-                let return_ty = ctx.new_var(None);
-                let func_ty = ctx.new_arrow(ctx_label.clone(), param_ty, return_ty, arity_opt);
-                // Match OCaml type_function/filter_arrow decomposition against
-                // the instantiated expected arrow shape.
-                unify_expression_types(tctx, loc, func_ty, expected_inst, None)?;
-                (param_ty, return_ty)
+                let expanded_original =
+                    crate::types::ctype::expand_head(tctx.type_ctx, env, expected_ty);
+                let original_desc = tctx.type_ctx.get_desc(expanded_original);
+                let is_arrow = matches!(&*original_desc, TypeDesc::Tarrow { .. });
+                drop(original_desc);
+                if is_arrow {
+                    return Err(TypeCoreError::AbstractWrongLabel {
+                        loc,
+                        label: ctx_label.clone(),
+                        ty: expanded_original,
+                    });
+                }
+                return Err(TypeCoreError::TooManyArguments {
+                    loc,
+                    in_function: false,
+                    ty: crate::types::instance(tctx.type_ctx, expected_ty),
+                });
             }
         };
 

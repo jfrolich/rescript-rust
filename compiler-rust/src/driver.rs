@@ -3334,6 +3334,32 @@ fn type_mod_error_to_anyhow(
             )
             .into()
         }
+        TypeModError::CoreError(TypeCoreError::TooManyArguments {
+            loc,
+            in_function,
+            ty,
+        }) => UserDiagnostic::new(
+            format_too_many_arguments_report(
+                type_ctx,
+                arena,
+                source,
+                filename,
+                *loc,
+                *in_function,
+                *ty,
+            ),
+            2,
+        )
+        .into(),
+        TypeModError::CoreError(TypeCoreError::AbstractWrongLabel { loc, label, ty }) => {
+            UserDiagnostic::new(
+                format_abstract_wrong_label_report(
+                    type_ctx, arena, source, filename, *loc, label, *ty,
+                ),
+                2,
+            )
+            .into()
+        }
         TypeModError::CoreError(TypeCoreError::ApplyWrongLabel { loc, label, ty }) => {
             UserDiagnostic::new(
                 format_apply_wrong_label_report(
@@ -9778,6 +9804,55 @@ fn format_apply_non_function_report(
         }
     }
 
+    format_compiler_error_report(arena, source, filename, loc, &message)
+}
+
+fn format_too_many_arguments_report(
+    type_ctx: &TypeContext,
+    arena: &ParseArena,
+    source: &str,
+    filename: &str,
+    loc: LocIdx,
+    in_function: bool,
+    ty: TypeExprRef,
+) -> String {
+    let message = if in_function {
+        format!(
+            "This function expects too many arguments,\nit should have type {}",
+            format_type_expr(type_ctx, ty)
+        )
+    } else {
+        format!(
+            "This expression should not be a function,\nthe expected type is {}",
+            format_type_expr(type_ctx, ty)
+        )
+    };
+    format_compiler_error_report(arena, source, filename, loc, &message)
+}
+
+fn format_abstract_wrong_label_report(
+    type_ctx: &TypeContext,
+    arena: &ParseArena,
+    source: &str,
+    filename: &str,
+    loc: LocIdx,
+    label: &TypeArgLabel,
+    ty: TypeExprRef,
+) -> String {
+    let label_mark = match label {
+        TypeArgLabel::Nolabel => "but its first argument is not labelled".to_string(),
+        TypeArgLabel::Labelled(label) => {
+            format!("but its first argument is labelled ~{}", label.txt)
+        }
+        TypeArgLabel::Optional(label) => {
+            format!("but its first argument is labelled ?{}", label.txt)
+        }
+    };
+    let message = format!(
+        "This function should have type {}\n{}",
+        format_type_expr(type_ctx, ty),
+        label_mark
+    );
     format_compiler_error_report(arena, source, filename, loc, &message)
 }
 
