@@ -510,6 +510,20 @@ fn params_is_single_extern_unit(params: &Params) -> bool {
     )
 }
 
+fn params_first_arg_is_const(params: &Params) -> bool {
+    matches!(
+        params,
+        Params::Params(param_specs)
+            if matches!(
+                param_specs.first(),
+                Some(Param {
+                    arg_type: Attr::ArgCst(_),
+                    ..
+                })
+            )
+    )
+}
+
 fn external_desc_is_plain_get(desc: &ExternalDesc) -> bool {
     desc.get_name.is_some()
         && desc.val_name.is_none()
@@ -522,6 +536,33 @@ fn external_desc_is_plain_get(desc: &ExternalDesc) -> bool {
         && !desc.set_index
         && !desc.get_index
         && !desc.splice
+}
+
+fn external_desc_is_plain_set(desc: &ExternalDesc) -> bool {
+    desc.set_name.is_some()
+        && desc.val_name.is_none()
+        && desc.call_name.is_none()
+        && !desc.module_as_val
+        && desc.external_module_name.is_none()
+        && desc.send_name.is_none()
+        && desc.new_name.is_none()
+        && desc.get_name.is_none()
+        && !desc.set_index
+        && !desc.get_index
+        && !desc.splice
+}
+
+fn external_desc_is_plain_send(desc: &ExternalDesc) -> bool {
+    desc.send_name.is_some()
+        && desc.val_name.is_none()
+        && desc.call_name.is_none()
+        && !desc.module_as_val
+        && desc.external_module_name.is_none()
+        && desc.new_name.is_none()
+        && desc.set_name.is_none()
+        && desc.get_name.is_none()
+        && !desc.set_index
+        && !desc.get_index
 }
 
 fn external_desc_is_plain_obj(desc: &ExternalDesc) -> bool {
@@ -761,6 +802,54 @@ fn validate_return_wrapper_result_type(
     Ok(())
 }
 
+fn validate_variadic_arg_type_errors(
+    args: &[TypeArg],
+    external_loc: LocIdx,
+    arena: &mut ParseArena,
+) -> PpxResult<()> {
+    let Some(last_arg) = args.last() else {
+        return Ok(());
+    };
+
+    if matches!(last_arg.lbl, ArgLabel::Optional(_)) {
+        return Err(PpxError::at_loc(
+            external_loc,
+            "@variadic expect the last type to be a non optional",
+        ));
+    }
+
+    let typ = arena.get_core_type(last_arg.typ).clone();
+    let array_error = || {
+        PpxError::at_loc(
+            external_loc,
+            "@variadic expect the last type to be an array",
+        )
+    };
+
+    if matches!(&*typ.ptyp_desc, CoreTypeDesc::Ptyp_any) {
+        return Err(array_error());
+    }
+
+    if !matches!(refine_arg_type(true, &typ, arena), Attr::Nothing) {
+        return Err(array_error());
+    }
+
+    match &*typ.ptyp_desc {
+        CoreTypeDesc::Ptyp_constr(inner) => {
+            let (ref lid, ref args) = **inner;
+            if args.len() == 1 {
+                if let Longident::Lident(name) = arena.get_longident(lid.txt) {
+                    if arena.get_string(*name) == "array" {
+                        return Ok(());
+                    }
+                }
+            }
+            Err(array_error())
+        }
+        _ => Err(array_error()),
+    }
+}
+
 fn validate_external_arg_type_errors(args: &[TypeArg], arena: &ParseArena) -> PpxResult<()> {
     for arg in args {
         validate_external_core_type_arg_errors(arena.get_core_type(arg.typ), arena)?;
@@ -803,7 +892,6 @@ fn validate_external_attribute_errors(
     validate_external_attribute_payload_errors(&vd.pval_attributes, prim_name.as_str(), arena)?;
     validate_external_arg_type_errors(&args, arena)?;
 
-    let (params, arity) = build_arg_type_specs(&vd_type, arena);
     let desc = parse_external_attrs(
         &vd.pval_attributes,
         prim_name.as_str(),
@@ -813,6 +901,12 @@ fn validate_external_attribute_errors(
     );
 
     validate_return_wrapper_result_type(&desc.return_wrapper, &result_type, vd.pval_loc, arena)?;
+
+    if !desc.mk_obj && desc.splice {
+        validate_variadic_arg_type_errors(&args, vd.pval_loc, arena)?;
+    }
+
+    let (params, arity) = build_arg_type_specs(&vd_type, arena);
 
     if desc.set_index && !external_desc_is_plain_set_index(&desc) {
         return Err(PpxError::at_loc(
@@ -861,21 +955,70 @@ fn validate_external_attribute_errors(
             ));
         }
 
+        if external_desc_is_plain_send(&desc) {
+            if arity == 0 {
+                return Err(PpxError::at_loc(
+                    vd.pval_loc,
+                    "Ill defined attribute @send(the external needs to be a regular function call with at least one argument)",
+                ));
+            }
+
+            if params_first_arg_is_const(&params) {
+                return Err(PpxError::at_loc(
+                    vd.pval_loc,
+                    "Ill defined attribute @send(first argument can't be const)",
+                ));
+            }
+        } else if desc.send_name.is_some() {
+            return Err(PpxError::at_loc(
+                vd.pval_loc,
+                "You used a FFI attribute that can't be used with @send",
+            ));
+        }
+
         if desc.new_name.is_some() && !external_desc_is_plain_new(&desc) {
             return Err(PpxError::at_loc(
                 vd.pval_loc,
                 "Conflicting attributes: Attribute found that conflicts with %@new",
             ));
         }
-    }
 
-    // OCaml Ast_external_process.external_desc_of_non_obj rejects `@get`
-    // externals with a single unit argument before emitting FFI metadata.
-    if external_desc_is_plain_get(&desc) && arity == 1 && params_is_single_extern_unit(&params) {
-        return Err(PpxError::at_loc(
-            vd.pval_loc,
-            "Ill defined attribute @get (unit argument is not allowed)",
-        ));
+        if external_desc_is_plain_set(&desc) {
+            if arity != 2 {
+                return Err(PpxError::at_loc(
+                    vd.pval_loc,
+                    "Ill defined attribute @set (two args required)",
+                ));
+            }
+        } else if desc.set_name.is_some() {
+            return Err(PpxError::at_loc(
+                vd.pval_loc,
+                "conflict attributes found with @set",
+            ));
+        }
+
+        if external_desc_is_plain_get(&desc) {
+            if arity != 1 {
+                return Err(PpxError::at_loc(
+                    vd.pval_loc,
+                    "Ill defined attribute @get (only one argument)",
+                ));
+            }
+
+            // OCaml Ast_external_process.external_desc_of_non_obj rejects `@get`
+            // externals with a single unit argument before emitting FFI metadata.
+            if params_is_single_extern_unit(&params) {
+                return Err(PpxError::at_loc(
+                    vd.pval_loc,
+                    "Ill defined attribute @get (unit argument is not allowed)",
+                ));
+            }
+        } else if desc.get_name.is_some() {
+            return Err(PpxError::at_loc(
+                vd.pval_loc,
+                "Attribute found that conflicts with @get",
+            ));
+        }
     }
 
     // OCaml Ast_external_process.process_obj rejects non-empty primitive names

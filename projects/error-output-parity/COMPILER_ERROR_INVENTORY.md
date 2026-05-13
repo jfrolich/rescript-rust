@@ -669,6 +669,26 @@ with a reason after checking raise sites.
       `tests/error_output_parity/compiler/fixtures/bs_external_get_index_wrong_arity.res`
       and
       `tests/error_output_parity/compiler/fixtures/bs_external_set_index_wrong_arity.res`.
+  - `@send` plain external argument-shape validation
+    - Covered for no-argument, const first-argument, and later conflict-catch
+      cases by
+      `tests/error_output_parity/compiler/fixtures/bs_external_send_no_args.res`,
+      `tests/error_output_parity/compiler/fixtures/bs_external_send_const_first_arg.res`,
+      and
+      `tests/error_output_parity/compiler/fixtures/bs_external_send_new_conflict.res`.
+  - `@set`/`@get` plain external arity and unit-argument validation
+    - Covered by
+      `tests/error_output_parity/compiler/fixtures/bs_external_set_wrong_arity.res`,
+      `tests/error_output_parity/compiler/fixtures/bs_external_get_wrong_arity.res`,
+      and
+      `tests/error_output_parity/compiler/fixtures/bs_external_get_unit_arg.res`.
+  - `@set`/`@get` conflict catches and earlier `@variadic` last-argument
+    validation
+    - Covered by
+      `tests/error_output_parity/compiler/fixtures/bs_external_set_get_conflict.res`,
+      `tests/error_output_parity/compiler/fixtures/bs_external_set_variadic_conflict.res`,
+      and
+      `tests/error_output_parity/compiler/fixtures/bs_external_get_variadic_conflict.res`.
 
 ## Include Mismatch Surfaces
 
