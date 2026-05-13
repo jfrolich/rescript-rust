@@ -486,9 +486,10 @@ with a reason after checking raise sites.
 ## `compiler/frontend/bs_syntaxerr.ml`
 
 - `Unsupported_predicates`
-  - Open: raise sites are in `compiler/frontend/ast_attributes.ml` while
-    processing method `@get`/`@set` payload predicates. A reduced normal
-    `.res` fixture still needs to be added.
+  - Covered for method `@get` and `@set` payload predicates by
+    `tests/error_output_parity/compiler/fixtures/bs_get_unsupported_predicate.res`
+    and
+    `tests/error_output_parity/compiler/fixtures/bs_set_unsupported_predicate.res`.
 - `Conflict_bs_bs_this_bs_meth`
   - No active raise site found in the current source; keep listed so the
     variant is rechecked if frontend attribute handling changes.
