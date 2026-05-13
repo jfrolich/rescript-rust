@@ -611,7 +611,7 @@ fn parse_atomic_pattern(p: &mut Parser<'_>) -> Pattern {
             p.expect(Token::Lparen);
 
             let name_loc = match &p.token {
-                Token::Uident(name) | Token::Lident(name) => {
+                Token::Uident(name) => {
                     let name = name.to_string();
                     let loc = p.mk_loc_current();
                     p.next();
@@ -619,11 +619,8 @@ fn parse_atomic_pattern(p: &mut Parser<'_>) -> Pattern {
                     with_loc(str_idx, loc)
                 }
                 _ => {
-                    p.err(DiagnosticCategory::Message(
-                        "Expected module name".to_string(),
-                    ));
-                    let str_idx = p.arena_mut().intern("Error");
-                    with_loc(str_idx, p.mk_loc_current())
+                    let str_idx = p.arena_mut().intern("_");
+                    mknoloc(str_idx)
                 }
             };
 

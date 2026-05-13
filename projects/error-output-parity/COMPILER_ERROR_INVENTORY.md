@@ -1078,6 +1078,10 @@ with a reason after checking raise sites.
       `tests/error_output_parity/compiler/fixtures/parser_dict_pattern_key_not_string.res`
       and
       `tests/error_output_parity/compiler/fixtures/parser_dict_pattern_field_equal.res`.
+  - First-class module patterns accept uppercase module names only, leaving
+    lowercase names to the same `Rparen` recovery path as OCaml
+    - Covered through `bsc` by
+      `tests/error_output_parity/compiler/fixtures/parser_module_pattern_lowercase_name.res`.
   - Switch parsing rejects empty case lists, and if-let emits the experimental
     parser diagnostic before type checking
     - Covered through `bsc` by
