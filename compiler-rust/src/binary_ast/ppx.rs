@@ -10304,6 +10304,58 @@ fn validate_type_declaration_builtin_type_redefinition_error(
     Ok(())
 }
 
+fn core_type_get_uncurry_arity_aux(
+    typ_idx: CoreTypeIdx,
+    acc: i32,
+    arena: &ParseArena,
+) -> i32 {
+    let typ = arena.get_core_type(typ_idx);
+    match &*typ.ptyp_desc {
+        CoreTypeDesc::Ptyp_arrow(inner) => {
+            let (_arg, ret, _arity) = &**inner;
+            core_type_get_uncurry_arity_aux(*ret, acc + 1, arena)
+        }
+        CoreTypeDesc::Ptyp_poly(inner) => {
+            let (_vars, typ_idx) = &**inner;
+            core_type_get_uncurry_arity_aux(*typ_idx, acc, arena)
+        }
+        _ => acc,
+    }
+}
+
+fn core_type_get_curry_arity(typ_idx: CoreTypeIdx, arena: &ParseArena) -> i32 {
+    let typ = arena.get_core_type(typ_idx);
+    match &*typ.ptyp_desc {
+        CoreTypeDesc::Ptyp_arrow(inner) => {
+            let (_arg, _ret, arity) = &**inner;
+            arena
+                .get_arity(*arity)
+                .unwrap_or_else(|| core_type_get_uncurry_arity_aux(typ_idx, 0, arena))
+        }
+        _ => core_type_get_uncurry_arity_aux(typ_idx, 0, arena),
+    }
+}
+
+fn core_type_is_arity_one(typ_idx: CoreTypeIdx, arena: &ParseArena) -> bool {
+    core_type_get_curry_arity(typ_idx, arena) == 1
+}
+
+fn validate_value_description_identity_arity_error(
+    vd: &ValueDescription,
+    arena: &ParseArena,
+) -> PpxResult<()> {
+    let [byte_name] = vd.pval_prim.as_slice() else {
+        return Ok(());
+    };
+    if arena.get_string(*byte_name) == "%identity" && !core_type_is_arity_one(vd.pval_type, arena) {
+        return Err(PpxError::at_loc(
+            vd.pval_loc,
+            "%identity expects a function type of the form 'a => 'b (arity 1)",
+        ));
+    }
+    Ok(())
+}
+
 fn validate_with_constraint_builtin_type_redefinition_errors(
     constraint: &WithConstraint,
     arena: &mut ParseArena,
@@ -10366,9 +10418,11 @@ fn validate_structure_builtin_type_redefinition_errors(
                 let (extension, _attrs) = &**inner;
                 validate_payload_builtin_type_redefinition_errors(&extension.1, arena)?;
             }
+            StructureItemDesc::Pstr_primitive(vd) => {
+                validate_value_description_identity_arity_error(vd, arena)?;
+            }
             StructureItemDesc::Pstr_eval(_)
             | StructureItemDesc::Pstr_value(_)
-            | StructureItemDesc::Pstr_primitive(_)
             | StructureItemDesc::Pstr_typext(_)
             | StructureItemDesc::Pstr_exception(_)
             | StructureItemDesc::Pstr_open(_) => {}
@@ -10416,8 +10470,10 @@ fn validate_signature_builtin_type_redefinition_errors(
                 let (extension, _attrs) = &**inner;
                 validate_payload_builtin_type_redefinition_errors(&extension.1, arena)?;
             }
-            SignatureItemDesc::Psig_value(_)
-            | SignatureItemDesc::Psig_typext(_)
+            SignatureItemDesc::Psig_value(vd) => {
+                validate_value_description_identity_arity_error(vd, arena)?;
+            }
+            SignatureItemDesc::Psig_typext(_)
             | SignatureItemDesc::Psig_exception(_)
             | SignatureItemDesc::Psig_open(_) => {}
         }

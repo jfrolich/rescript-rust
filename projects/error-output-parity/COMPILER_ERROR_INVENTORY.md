@@ -672,6 +672,12 @@ with a reason after checking raise sites.
     - Checked against source-level probes. Normal `.res` source is rejected by
       parser diagnostics before these frontend branches are observable through
       the current ReScript syntax.
+- `compiler/frontend/bs_ast_invariant.ml`
+  - `%identity` primitive arity validation
+    - Covered by
+      `tests/error_output_parity/compiler/fixtures/identity_wrong_type.res`
+      and
+      `tests/error_output_parity/compiler/fixtures/identity_wrong_type_signature.resi`.
 - `compiler/ml/cmi_format.ml`
   - `Not_an_interface`
     - Covered by
