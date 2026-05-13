@@ -4954,10 +4954,9 @@ fn parse_module_definition(
                 with_loc(n_idx, loc)
             }
             _ => {
-                p.err(DiagnosticCategory::Message(
-                    "Expected module name".to_string(),
-                ));
-                return None;
+                p.err(DiagnosticCategory::Uident(p.token.clone().into_owned()));
+                let error_idx = p.arena_mut().intern("_");
+                mknoloc(error_idx)
             }
         };
 
@@ -5092,10 +5091,8 @@ fn parse_module_declaration(
             with_loc(n_idx, loc)
         }
         _ => {
-            p.err(DiagnosticCategory::Message(
-                "Expected module name".to_string(),
-            ));
-            let error_idx = p.arena_mut().intern("Error");
+            p.err(DiagnosticCategory::Uident(p.token.clone().into_owned()));
+            let error_idx = p.arena_mut().intern("_");
             mknoloc(error_idx)
         }
     };

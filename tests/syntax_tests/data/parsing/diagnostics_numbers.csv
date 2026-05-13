@@ -95,3 +95,4 @@ error,93,tests/syntax_tests/data/parsing/errors/other/switchCaseEmptyBeforeBrace
 error,94,tests/syntax_tests/data/parsing/errors/other/switchCaseEofRhs.res,tests/syntax_tests/data/parsing/errors/other/expected/switchCaseEofRhs.res.txt
 warning,22,tests/syntax_tests/data/ppx/react/warnings/optionalReactElement.res,tests/syntax_tests/data/ppx/react/warnings/expected/optionalReactElement.res.txt
 error,95,tests/syntax_tests/data/parsing/errors/scanner/unclosedTemplate.res,tests/syntax_tests/data/parsing/errors/scanner/expected/unclosedTemplate.res.txt
+error,96,tests/syntax_tests/data/parsing/errors/structure/moduleNameNumber.res,tests/syntax_tests/data/parsing/errors/structure/expected/moduleNameNumber.res.txt
