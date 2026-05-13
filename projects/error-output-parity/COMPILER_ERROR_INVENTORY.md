@@ -66,8 +66,10 @@ with a reason after checking raise sites.
   `tests/error_output_parity/compiler/fixtures/polymorphic_label.res`.
 - `Empty_record_literal`: covered by
   `tests/error_output_parity/compiler/fixtures/empty_record_literal.res`.
-- `Constructor_arity_mismatch`: covered by
-  `tests/error_output_parity/compiler/fixtures/constructor_arity_mismatch.res`.
+- `Constructor_arity_mismatch`: covered for positional payloads and inline-record
+  payloads by
+  `tests/error_output_parity/compiler/fixtures/constructor_arity_mismatch.res` and
+  `tests/error_output_parity/compiler/fixtures/constructor_arity_inline_record_missing.res`.
 - `Label_mismatch`: covered by
   `tests/error_output_parity/compiler/fixtures/label_mismatch.res`.
 - `Pattern_type_clash`: covered by
