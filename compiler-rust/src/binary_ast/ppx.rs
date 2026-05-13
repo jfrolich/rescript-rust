@@ -1232,6 +1232,26 @@ fn payload_single_string_literal_with_loc<'a>(
     }
 }
 
+fn payload_single_record_fields_without_spread<'a>(
+    payload: &'a Payload,
+    arena: &'a ParseArena,
+) -> Option<&'a Vec<ExpressionRecordField>> {
+    match payload {
+        Payload::PStr(items) if items.len() == 1 => {
+            if let StructureItemDesc::Pstr_eval(eval_inner) = &*items[0].pstr_desc {
+                let (expr, _) = &**eval_inner;
+                if let ExpressionDesc::Pexp_record(record) = &*arena.get_expr(*expr).pexp_desc {
+                    if record.1.is_none() {
+                        return Some(&record.0);
+                    }
+                }
+            }
+            None
+        }
+        _ => None,
+    }
+}
+
 fn payload_string_literals(payload: &Payload, arena: &ParseArena) -> Option<Vec<String>> {
     match payload {
         Payload::PStr(items) if items.is_empty() => Some(Vec::new()),
@@ -10455,8 +10475,26 @@ fn validate_expression_extension_payload_error(
                 "%ffi extension can only be applied to a string containing a JavaScript function such as \"(x) => ...\"",
             )),
         },
+        "obj" => validate_obj_extension_payload_error(payload, ext_name.loc, arena),
         _ => Ok(()),
     }
+}
+
+fn validate_obj_extension_payload_error(
+    payload: &Payload,
+    ext_loc: LocIdx,
+    arena: &mut ParseArena,
+) -> PpxResult<()> {
+    let Some(fields) = payload_single_record_fields_without_spread(payload, arena) else {
+        return Err(PpxError::at_loc(ext_loc, "Expect a record expression here"));
+    };
+    for field in fields {
+        let lid = arena.get_longident(field.lid.txt);
+        if !matches!(lid, Longident::Lident(_)) {
+            return Err(PpxError::at_loc(field.lid.loc, "invalid js label "));
+        }
+    }
+    Ok(())
 }
 
 fn validate_structure_extension_payload_error(
