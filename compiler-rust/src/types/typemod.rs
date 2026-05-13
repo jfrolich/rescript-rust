@@ -7239,6 +7239,92 @@ fn alias_of_module_type(
     }
 }
 
+fn is_recursive_module_placeholder_type(mty: &crate::types::decl::ModuleType) -> bool {
+    matches!(
+        mty,
+        crate::types::decl::ModuleType::MtyIdent(Path::Pident(id))
+            if id.name() == "#recmod#"
+    )
+}
+
+fn module_lid_references_recursive_placeholder(
+    lid: &crate::parser::longident::Longident,
+    arena: &ParseArena,
+    env: &Env,
+) -> bool {
+    use crate::parser::longident::Longident;
+
+    match lid {
+        Longident::Lident(mod_idx) => {
+            let mod_name = arena.get_string(*mod_idx);
+            env.find_module_with_id(mod_name)
+                .map(|(_, md)| is_recursive_module_placeholder_type(&md.md_type))
+                .unwrap_or(false)
+        }
+        Longident::Ldot(prefix, _) => {
+            module_lid_references_recursive_placeholder(prefix, arena, env)
+        }
+        Longident::Lapply(functor_lid, arg_lid) => {
+            module_lid_references_recursive_placeholder(functor_lid, arena, env)
+                || module_lid_references_recursive_placeholder(arg_lid, arena, env)
+        }
+    }
+}
+
+fn recursive_module_reference_loc_in_module_expr(
+    env: &Env,
+    arena: &ParseArena,
+    mod_expr: &ParsedModuleExpr,
+) -> Option<LocIdx> {
+    match &*mod_expr.pmod_desc {
+        ParsedModuleExprDesc::Pmod_ident(lid) => {
+            let longident = arena.get_longident(lid.txt);
+            module_lid_references_recursive_placeholder(longident, arena, env).then_some(lid.loc)
+        }
+        ParsedModuleExprDesc::Pmod_apply(functor_idx, arg_idx) => {
+            let functor_expr = arena.get_mod_expr(*functor_idx);
+            recursive_module_reference_loc_in_module_expr(env, arena, functor_expr).or_else(|| {
+                let arg_expr = arena.get_mod_expr(*arg_idx);
+                recursive_module_reference_loc_in_module_expr(env, arena, arg_expr)
+            })
+        }
+        ParsedModuleExprDesc::Pmod_constraint(inner_idx, _) => {
+            let inner = arena.get_mod_expr(*inner_idx);
+            recursive_module_reference_loc_in_module_expr(env, arena, inner)
+        }
+        _ => None,
+    }
+}
+
+fn check_recursive_module_reference_lid(
+    lid: &Located<LidentIdx>,
+    arena: &ParseArena,
+    env: &Env,
+) -> TypeModResult<()> {
+    let longident = arena.get_longident(lid.txt);
+    if module_lid_references_recursive_placeholder(longident, arena, env) {
+        Err(TypeModError::CoreError(
+            TypeCoreError::IllegalReferenceToRecursiveModule { loc: lid.loc },
+        ))
+    } else {
+        Ok(())
+    }
+}
+
+fn check_recursive_module_reference_module_expr(
+    env: &Env,
+    arena: &ParseArena,
+    mod_expr: &ParsedModuleExpr,
+) -> TypeModResult<()> {
+    if let Some(loc) = recursive_module_reference_loc_in_module_expr(env, arena, mod_expr) {
+        Err(TypeModError::CoreError(
+            TypeCoreError::IllegalReferenceToRecursiveModule { loc },
+        ))
+    } else {
+        Ok(())
+    }
+}
+
 fn lookup_module_alias_by_lid<'b>(
     lid: &crate::parser::longident::Longident,
     arena: &ParseArena,
@@ -12014,6 +12100,7 @@ fn translate_module_type_to_decl_with_typed_hint<'a>(
         }
         PMtyDesc::Pmty_typeof(me_idx) => {
             let me = arena.get_mod_expr(*me_idx);
+            check_recursive_module_reference_module_expr(env, arena, me)?;
             lookup_module_type_from_parsed_module_expr(tctx, env, arena, me)
                 .map(|mty| {
                     remove_module_type_aliases_for_typeof(
@@ -12028,6 +12115,7 @@ fn translate_module_type_to_decl_with_typed_hint<'a>(
                 ))
         }
         PMtyDesc::Pmty_alias(lid) => {
+            check_recursive_module_reference_lid(lid, arena, env)?;
             let longident = tctx.resolve_lid(lid.txt).clone();
             let path = lookup_module_path_by_lid(
                 &longident,
@@ -12272,6 +12360,7 @@ fn approx_modtype<'a>(
             Ok(DeclMty::MtyIdent(path))
         }
         PMtyDesc::Pmty_alias(lid) => {
+            check_recursive_module_reference_lid(lid, arena, env)?;
             let longident = tctx.resolve_lid(lid.txt).clone();
             let path = lookup_module_path_by_lid(
                 &longident,
@@ -12320,6 +12409,7 @@ fn approx_modtype<'a>(
         }
         PMtyDesc::Pmty_typeof(me_idx) => {
             let me = arena.get_mod_expr(*me_idx);
+            check_recursive_module_reference_module_expr(env, arena, me)?;
             lookup_module_type_from_parsed_module_expr(tctx, env, arena, me).ok_or(
                 TypeModError::InvalidModuleExpr(arena.to_location(mty.pmty_loc)),
             )
@@ -15070,10 +15160,12 @@ fn transl_modtype<'a>(
         }
         PMtyDesc::Pmty_typeof(me_idx) => {
             let me = arena.get_mod_expr(*me_idx);
+            check_recursive_module_reference_module_expr(env, arena, me)?;
             let typed_me = type_module_type_of_expr(tctx, env, arena, me)?;
             TMtyDesc::Tmty_typeof(Box::new(typed_me))
         }
         PMtyDesc::Pmty_alias(lid) => {
+            check_recursive_module_reference_lid(lid, arena, env)?;
             let longident = tctx.resolve_lid(lid.txt).clone();
             let path = lookup_module_path_by_lid(
                 &longident,

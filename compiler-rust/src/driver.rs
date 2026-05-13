@@ -3190,6 +3190,19 @@ fn type_mod_error_to_anyhow(
             )
             .into()
         }
+        TypeModError::CoreError(TypeCoreError::IllegalReferenceToRecursiveModule { loc }) => {
+            UserDiagnostic::new(
+                format_compiler_error_report(
+                    arena,
+                    source,
+                    filename,
+                    *loc,
+                    "Illegal recursive module reference",
+                ),
+                2,
+            )
+            .into()
+        }
         TypeModError::CoreError(TypeCoreError::UnboundConstructor { loc, lid }) => {
             UserDiagnostic::new(
                 format_unbound_constructor_report(arena, source, filename, *loc, lid),

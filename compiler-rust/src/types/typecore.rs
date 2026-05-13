@@ -525,6 +525,9 @@ pub enum TypeCoreError {
         path: Path,
     },
 
+    /// A recursive module references one of the modules being approximated.
+    IllegalReferenceToRecursiveModule { loc: LocIdx },
+
     /// Unbound constructor identifier.
     UnboundConstructor { loc: LocIdx, lid: Longident },
 
