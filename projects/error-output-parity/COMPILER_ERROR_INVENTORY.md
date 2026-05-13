@@ -1250,16 +1250,21 @@ with a reason after checking raise sites.
       `tests/error_output_parity/compiler/fixtures/deriving_abstract_conflict.res`.
   - `Ast_derive_util.not_applicable` warnings for `accessors`
     - Covered for abstract and open types by
-      `tests/error_output_parity/compiler/fixtures/deriving_accessors_not_applicable_abstract.res`
+      `tests/error_output_parity/compiler/fixtures/deriving_accessors_not_applicable_abstract.res`,
+      `tests/error_output_parity/compiler/fixtures/deriving_accessors_not_applicable_open.res`,
+      `tests/error_output_parity/compiler/fixtures/deriving_accessors_not_applicable_abstract_signature.resi`,
       and
-      `tests/error_output_parity/compiler/fixtures/deriving_accessors_not_applicable_open.res`.
+      `tests/error_output_parity/compiler/fixtures/deriving_accessors_not_applicable_open_signature.resi`.
   - `Ast_derive_util.not_applicable` warnings for `jsConverter`
     - Covered for regular variants, non-polyvariant abstract types, and open
       types by
       `tests/error_output_parity/compiler/fixtures/deriving_jsconverter_not_applicable_variant.res`,
       `tests/error_output_parity/compiler/fixtures/deriving_jsconverter_not_applicable_abstract.res`,
+      `tests/error_output_parity/compiler/fixtures/deriving_jsconverter_not_applicable_open.res`,
+      `tests/error_output_parity/compiler/fixtures/deriving_jsconverter_not_applicable_variant_signature.resi`,
+      `tests/error_output_parity/compiler/fixtures/deriving_jsconverter_not_applicable_abstract_signature.resi`,
       and
-      `tests/error_output_parity/compiler/fixtures/deriving_jsconverter_not_applicable_open.res`.
+      `tests/error_output_parity/compiler/fixtures/deriving_jsconverter_not_applicable_open_signature.resi`.
 - `compiler/frontend/ast_exp_handle_external.ml`
   - `%debugger` payload rejection
     - Covered by

@@ -1004,7 +1004,12 @@ fn collect_raw_js_warnings_from_structure_item(
         }
         StructureItemDesc::Pstr_type(inner) => {
             let (_rec_flag, tdcls) = &**inner;
-            collect_deriving_not_applicable_warnings(tdcls, arena, warnings);
+            collect_deriving_not_applicable_warnings(
+                tdcls,
+                arena,
+                warnings,
+                DerivingExpansionContext::StructureItem,
+            );
         }
         StructureItemDesc::Pstr_module(mb) => {
             collect_raw_js_warnings_from_mod_expr_idx(mb.pmb_expr, arena, warnings);
@@ -1689,8 +1694,16 @@ fn collect_signature_warnings_from_item(
             let (_, attrs) = &**inner;
             collect_unused_bs_attributes(attrs, arena, warnings);
         }
-        SignatureItemDesc::Psig_type(_)
-        | SignatureItemDesc::Psig_typext(_)
+        SignatureItemDesc::Psig_type(inner) => {
+            let (_rec_flag, tdcls) = &**inner;
+            collect_deriving_not_applicable_warnings(
+                tdcls,
+                arena,
+                warnings,
+                DerivingExpansionContext::SignatureItem,
+            );
+        }
+        SignatureItemDesc::Psig_typext(_)
         | SignatureItemDesc::Psig_exception(_)
         | SignatureItemDesc::Psig_open(_) => {}
     }
@@ -9478,18 +9491,48 @@ fn validate_deriving_attr_payload(payload: &Payload, arena: &ParseArena) -> PpxR
     Ok(())
 }
 
-fn push_deriving_not_applicable_warnings(
+#[derive(Clone, Copy)]
+enum DerivingExpansionContext {
+    StructureItem,
+    SignatureItem,
+}
+
+impl DerivingExpansionContext {
+    fn runs_structure_gen(self) -> bool {
+        matches!(self, DerivingExpansionContext::StructureItem)
+    }
+
+    fn runs_signature_gen(self) -> bool {
+        true
+    }
+}
+
+fn push_deriving_not_applicable_warning(
     loc: LocIdx,
     deriving_name: &str,
     warnings: &mut Vec<PpxWarning>,
 ) {
-    for _ in 0..2 {
-        warnings.push(PpxWarning {
-            loc,
-            warning: Warning::BsDeriveWarning {
-                message: format!("{deriving_name} not applicable to this type"),
-            },
-        });
+    warnings.push(PpxWarning {
+        loc,
+        warning: Warning::BsDeriveWarning {
+            message: format!("{deriving_name} not applicable to this type"),
+        },
+    });
+}
+
+fn push_deriving_not_applicable_warnings(
+    loc: LocIdx,
+    deriving_name: &str,
+    warnings: &mut Vec<PpxWarning>,
+    context: DerivingExpansionContext,
+) {
+    // OCaml Ast_derive.gen_structure_signature invokes both structure_gen and
+    // signature_gen. Ast_derive.gen_signature invokes only signature_gen.
+    if context.runs_structure_gen() {
+        push_deriving_not_applicable_warning(loc, deriving_name, warnings);
+    }
+    if context.runs_signature_gen() {
+        push_deriving_not_applicable_warning(loc, deriving_name, warnings);
     }
 }
 
@@ -9510,8 +9553,9 @@ fn js_converter_not_applicable(tdcl: &TypeDeclaration, arena: &ParseArena) -> bo
 
 fn collect_deriving_not_applicable_warnings(
     tdcls: &[TypeDeclaration],
-    arena: &mut ParseArena,
+    arena: &ParseArena,
     warnings: &mut Vec<PpxWarning>,
+    context: DerivingExpansionContext,
 ) {
     if validate_deriving_accessors_for_tdcls(tdcls, arena).is_err() {
         return;
@@ -9529,6 +9573,7 @@ fn collect_deriving_not_applicable_warnings(
                             tdcl.ptype_loc,
                             "accessors",
                             warnings,
+                            context,
                         );
                     }
                 }
@@ -9540,6 +9585,7 @@ fn collect_deriving_not_applicable_warnings(
                             tdcl.ptype_loc,
                             "jsConverter",
                             warnings,
+                            context,
                         );
                     }
                 }
@@ -9552,7 +9598,7 @@ fn collect_deriving_not_applicable_warnings(
 /// Parse @deriving attribute to extract derive actions
 fn parse_deriving_actions(
     attrs: &[Attribute],
-    arena: &mut ParseArena,
+    arena: &ParseArena,
 ) -> (Vec<DeriveAction>, Vec<Attribute>) {
     let mut actions = vec![];
     let mut remaining_attrs = vec![];
@@ -9589,7 +9635,7 @@ fn parse_deriving_actions(
 fn parse_deriving_expr(
     expr_desc: &ExpressionDesc,
     actions: &mut Vec<DeriveAction>,
-    arena: &mut ParseArena,
+    arena: &ParseArena,
 ) {
     match expr_desc {
         // Simple identifier: @deriving(accessors)
@@ -9667,7 +9713,7 @@ fn parse_deriving_expr(
 }
 
 /// Check if abstract config is `light` in @deriving({abstract: light})
-fn check_abstract_light_config(expr: &Expression, arena: &mut ParseArena) -> bool {
+fn check_abstract_light_config(expr: &Expression, arena: &ParseArena) -> bool {
     match &*expr.pexp_desc {
         ExpressionDesc::Pexp_ident(lid_loc) => {
             let lid = arena.get_longident(lid_loc.txt);
@@ -9682,7 +9728,7 @@ fn check_abstract_light_config(expr: &Expression, arena: &mut ParseArena) -> boo
 }
 
 /// Check if an expression configures newType to true
-fn check_new_type_config(expr: &Expression, arena: &mut ParseArena) -> bool {
+fn check_new_type_config(expr: &Expression, arena: &ParseArena) -> bool {
     match &*expr.pexp_desc {
         // {newType: true} or just `newType`
         ExpressionDesc::Pexp_ident(lid_loc) => {
@@ -11882,7 +11928,7 @@ fn handle_deriving_type(
 
 fn validate_deriving_accessors_for_tdcls(
     tdcls: &[TypeDeclaration],
-    arena: &mut ParseArena,
+    arena: &ParseArena,
 ) -> PpxResult<()> {
     let Some(last_tdcl) = tdcls.last() else {
         return Ok(());
