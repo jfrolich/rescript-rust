@@ -659,6 +659,11 @@ with a reason after checking raise sites.
       `tests/error_output_parity/compiler/fixtures/bs_external_module_import_missing_with.res`,
       and
       `tests/error_output_parity/compiler/fixtures/bs_external_module_import_non_string_value.res`.
+  - `@get_index`/`@set_index` non-empty primitive-name validation
+    - Covered by
+      `tests/error_output_parity/compiler/fixtures/bs_external_get_index_named_primitive.res`
+      and
+      `tests/error_output_parity/compiler/fixtures/bs_external_set_index_named_primitive.res`.
 
 ## Include Mismatch Surfaces
 

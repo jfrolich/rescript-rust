@@ -666,6 +666,7 @@ fn validate_plain_obj_arg_type_errors(
 
 fn validate_external_attribute_payload_errors(
     attrs: &[Attribute],
+    prim_name: &str,
     arena: &ParseArena,
 ) -> PpxResult<()> {
     for (attr_name, payload) in attrs {
@@ -700,6 +701,22 @@ fn validate_external_attribute_payload_errors(
                 };
                 if scopes.is_empty() {
                     return Err(PpxError::at_loc(attr_name.loc, "Illegal attributes"));
+                }
+            }
+            "set_index" => {
+                if !prim_name.is_empty() {
+                    return Err(PpxError::at_loc(
+                        attr_name.loc,
+                        "@set_index this particular external's name needs to be a placeholder empty string",
+                    ));
+                }
+            }
+            "get_index" => {
+                if !prim_name.is_empty() {
+                    return Err(PpxError::at_loc(
+                        attr_name.loc,
+                        "@get_index this particular external's name needs to be a placeholder empty string",
+                    ));
                 }
             }
             "return" => {
@@ -783,7 +800,7 @@ fn validate_external_attribute_errors(
     let vd_type = arena.get_core_type(vd.pval_type).clone();
     let (args, result_type) = list_of_arrow(&vd_type, arena);
 
-    validate_external_attribute_payload_errors(&vd.pval_attributes, arena)?;
+    validate_external_attribute_payload_errors(&vd.pval_attributes, prim_name.as_str(), arena)?;
     validate_external_arg_type_errors(&args, arena)?;
 
     let (params, arity) = build_arg_type_specs(&vd_type, arena);
