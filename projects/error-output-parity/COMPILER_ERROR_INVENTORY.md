@@ -133,14 +133,14 @@ with a reason after checking raise sites.
   `tests/error_output_parity/compiler/fixtures/too_many_arguments.res`.
 - `Abstract_wrong_label`: covered by
   `tests/error_output_parity/compiler/fixtures/abstract_wrong_label.res`.
-- `Scoping_let_module`: checked against the `Pexp_letmodule` raise site in
-  `compiler/ml/typecore.ml`. Normal `.res` source probes found so far are
-  rejected earlier by the body `type_expect` path and surface as
-  `Expr_type_clash` or `Pattern_type_clash`; keep this variant listed until a
-  direct source-level repro is found or the raise site is proven unreachable.
-  The valid arity-one local module primitive probe in
-  `tests/error_output_parity/compiler/fixtures/let_module_escape_value.res`
-  still reaches the earlier `Expr_type_clash` escape reporter.
+- `Scoping_let_module`: source-unreachable from normal ReScript. The
+  `Pexp_letmodule` raise site in `compiler/ml/typecore.ml` is after typing the
+  local module body with `type_expect`; source-level probes that make the local
+  module type escape are rejected during that body expectation as
+  `Expr_type_clash` or `Pattern_type_clash` before the later `unify_var` can
+  raise `Scoping_let_module`. The valid arity-one local module primitive probe
+  in `tests/error_output_parity/compiler/fixtures/let_module_escape_value.res`
+  covers the observable earlier escape reporter.
 - `Uncurried_arity_mismatch`: covered by
   `tests/error_output_parity/compiler/fixtures/unlabelled_arity_mismatch.res`.
 - `Field_not_optional`: covered for pattern and expression raise sites by
