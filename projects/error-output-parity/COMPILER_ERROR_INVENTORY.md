@@ -73,7 +73,9 @@ with a reason after checking raise sites.
 - `Pattern_type_clash`: covered by
   `tests/error_output_parity/compiler/fixtures/pattern_type_clash.res`
   and the local GADT constraint expansion subcase in
-  `tests/error_output_parity/compiler/fixtures/recursive_local_constraint.res`.
+  `tests/error_output_parity/compiler/fixtures/recursive_local_constraint.res`,
+  plus the local let-module function parameter escape subcase in
+  `tests/error_output_parity/compiler/fixtures/let_module_escape_function_param.res`.
 - `Or_pattern_type_clash`: covered by
   `tests/error_output_parity/compiler/fixtures/or_pattern_type_clash.res`.
 - `Expr_type_clash`: covered by

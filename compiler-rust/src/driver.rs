@@ -5866,6 +5866,13 @@ fn format_pattern_type_clash_report(
         type_clash_display_type(type_ctx, trace, false, expected),
     ));
     message.push_str(RESET);
+    if let Some(path) = type_clash_escape_constructor_path(type_ctx, trace) {
+        message.push('\n');
+        message.push_str("The type constructor ");
+        message.push_str(&path);
+        message.push_str(" would escape its scope");
+        return format_compiler_error_report(arena, source, filename, loc, &message);
+    }
     append_pattern_option_type_clash_help(type_ctx, actual, expected, &mut message);
     let is_polyvariant_explanation =
         append_polyvariant_type_clash_help(type_ctx, trace, &mut message);

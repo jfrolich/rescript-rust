@@ -19,6 +19,7 @@ Implementation rule: when a fixture exposes a mismatch, start from the OCaml
 source. The Rust change should model the OCaml implementation 1:1 where the
 local architecture permits: use the same error constructor, raise/report site,
 control flow, recovery behavior, location choice, and renderer before adjusting
-final text.
+final text. Do not paper over differences in the harness; make the compiler
+produce OCaml's diagnostic output byte-for-byte.
 
 Use `cases.tsv` when a fixture needs custom compiler flags.

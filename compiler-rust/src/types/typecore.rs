@@ -37,8 +37,8 @@ use crate::parser::ast::{
 use crate::parser::longident::Longident;
 use crate::types::type_expr::TypeExprRefSet;
 use crate::types::typedtree::{
-    ApplyArg, ArrowArg, Constant, EnvRef, Expression, ExpressionDesc, Pattern, PatternDesc,
-    ValueBinding,
+    ApplyArg, ArrowArg, Constant, EnvRef, Expression, ExpressionDesc, FunctionParam,
+    FunctionParamPattern, PatExtra, Pattern, PatternDesc, ValueBinding,
 };
 use crate::types::{
     Commutable, Env, Path, RowField, TypeArg, TypeContext, TypeDesc, TypeError, TypeExprRef,
@@ -19219,15 +19219,92 @@ fn letmodule_local_escape_type(
     found
 }
 
-fn letmodule_local_escape_expression_site(
+// OCaml enforces `let module` scoping through the unification that happens
+// while typing the exposed body. Preserve that diagnostic split here: an
+// escaping function parameter reports like `Pattern_type_clash`, while an
+// escaping result expression reports like `Expr_type_clash`.
+enum LetModuleLocalEscapeSite {
+    Pattern { loc: LocIdx, ty: TypeExprRef },
+    Expression { loc: LocIdx, ty: TypeExprRef },
+}
+
+fn letmodule_local_escape_pattern_site(
     ctx: &TypeContext,
-    expr: &Expression,
+    pat: &Pattern,
     module_id: &Ident,
 ) -> Option<(LocIdx, TypeExprRef)> {
     let own_escape = || {
         let escaped_ty =
+            letmodule_local_escape_type(ctx, pat.pat_type, module_id, &mut HashSet::new())?;
+        let loc = pat
+            .pat_extra
+            .iter()
+            .find_map(|(extra, loc, _)| {
+                matches!(extra, PatExtra::Tpat_constraint(_)).then_some(*loc)
+            })
+            .unwrap_or(pat.pat_loc);
+        Some((loc, escaped_ty))
+    };
+
+    if let Some(escape) = own_escape() {
+        return Some(escape);
+    }
+
+    match &pat.pat_desc {
+        PatternDesc::Tpat_alias(inner, _, _) => {
+            letmodule_local_escape_pattern_site(ctx, inner, module_id)
+        }
+        PatternDesc::Tpat_variant(_, Some(arg), _) => {
+            letmodule_local_escape_pattern_site(ctx, arg, module_id)
+        }
+        PatternDesc::Tpat_or(left, right, _) => letmodule_local_escape_pattern_site(
+            ctx, left, module_id,
+        )
+        .or_else(|| letmodule_local_escape_pattern_site(ctx, right, module_id)),
+        PatternDesc::Tpat_tuple(items)
+        | PatternDesc::Tpat_array(items)
+        | PatternDesc::Tpat_construct(_, _, items) => items
+            .iter()
+            .find_map(|item| letmodule_local_escape_pattern_site(ctx, item, module_id)),
+        PatternDesc::Tpat_record(fields, _) => fields
+            .iter()
+            .find_map(|(_, _, field_pat, _)| {
+                letmodule_local_escape_pattern_site(ctx, field_pat, module_id)
+            }),
+        PatternDesc::Tpat_any
+        | PatternDesc::Tpat_var(_, _)
+        | PatternDesc::Tpat_constant(_)
+        | PatternDesc::Tpat_variant(_, None, _) => None,
+    }
+}
+
+fn letmodule_local_escape_function_param_site(
+    ctx: &TypeContext,
+    param: &FunctionParam,
+    module_id: &Ident,
+) -> Option<(LocIdx, TypeExprRef)> {
+    match &param.pat {
+        FunctionParamPattern::Simple(pat) => {
+            letmodule_local_escape_pattern_site(ctx, pat, module_id)
+        }
+        FunctionParamPattern::Nested(params) => params
+            .iter()
+            .find_map(|param| letmodule_local_escape_function_param_site(ctx, param, module_id)),
+    }
+}
+
+fn letmodule_local_escape_expression_site(
+    ctx: &TypeContext,
+    expr: &Expression,
+    module_id: &Ident,
+) -> Option<LetModuleLocalEscapeSite> {
+    let own_escape = || {
+        let escaped_ty =
             letmodule_local_escape_type(ctx, expr.exp_type, module_id, &mut HashSet::new())?;
-        Some((expr.exp_loc, escaped_ty))
+        Some(LetModuleLocalEscapeSite::Expression {
+            loc: expr.exp_loc,
+            ty: escaped_ty,
+        })
     };
 
     match &expr.exp_desc {
@@ -19237,9 +19314,25 @@ fn letmodule_local_escape_expression_site(
         | ExpressionDesc::Texp_sequence(_, body) => {
             letmodule_local_escape_expression_site(ctx, body, module_id).or_else(own_escape)
         }
-        ExpressionDesc::Texp_function { body, .. } => body
+        ExpressionDesc::Texp_function { params, body, .. } => params
             .iter()
-            .find_map(|case| letmodule_local_escape_expression_site(ctx, &case.c_rhs, module_id))
+            .find_map(|param| {
+                letmodule_local_escape_function_param_site(ctx, param, module_id).map(
+                    |(loc, ty)| LetModuleLocalEscapeSite::Pattern { loc, ty },
+                )
+            })
+            .or_else(|| {
+                body.iter().find_map(|case| {
+                    letmodule_local_escape_pattern_site(ctx, &case.c_lhs, module_id).map(
+                        |(loc, ty)| LetModuleLocalEscapeSite::Pattern { loc, ty },
+                    )
+                })
+            })
+            .or_else(|| {
+                body.iter().find_map(|case| {
+                    letmodule_local_escape_expression_site(ctx, &case.c_rhs, module_id)
+                })
+            })
             .or_else(own_escape),
         ExpressionDesc::Texp_ifthenelse(_, ifso, ifnot) => letmodule_local_escape_expression_site(
             ctx, ifso, module_id,
@@ -19717,9 +19810,12 @@ fn type_letmodule(
             rewritten_ty,
             expected_ty,
         );
-        if let Some((escape_loc, escaped_ty)) =
-            letmodule_local_escape_expression_site(ctx, &typed_body, &mod_id)
+        if let Some(escape_site) = letmodule_local_escape_expression_site(ctx, &typed_body, &mod_id)
         {
+            let (escape_loc, escaped_ty, is_pattern) = match escape_site {
+                LetModuleLocalEscapeSite::Pattern { loc, ty } => (loc, ty, true),
+                LetModuleLocalEscapeSite::Expression { loc, ty } => (loc, ty, false),
+            };
             let top_is_package = matches!(
                 &*ctx.get_desc(ctx.repr(rewritten_ty)),
                 TypeDesc::Tpackage { .. }
@@ -19732,6 +19828,12 @@ fn type_letmodule(
             } else {
                 (escape_loc, vec![(escaped_ty, letmodule_ty)])
             };
+            if is_pattern && !top_is_package {
+                return Err(TypeCoreError::PatternTypeClash {
+                    loc: Some(loc),
+                    trace,
+                });
+            }
             return Err(TypeCoreError::ExprTypeClash {
                 loc,
                 trace,
