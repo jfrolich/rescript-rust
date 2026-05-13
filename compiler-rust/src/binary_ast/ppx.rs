@@ -987,6 +987,9 @@ fn collect_raw_js_warnings_from_structure_item(
     warnings: &mut Vec<PpxWarning>,
 ) {
     match &*item.pstr_desc {
+        StructureItemDesc::Pstr_primitive(vd) => {
+            collect_obj_optional_as_warnings(vd, arena, warnings);
+        }
         StructureItemDesc::Pstr_eval(inner) => {
             let (expr, _attrs) = &**inner;
             collect_raw_js_warnings_from_expr_idx(*expr, arena, warnings);
@@ -1025,6 +1028,46 @@ fn collect_raw_js_warnings_from_structure_item(
             }
         }
         _ => {}
+    }
+}
+
+fn attr_named(attrs: &[Attribute], name: &str, arena: &ParseArena) -> bool {
+    attrs
+        .iter()
+        .any(|(attr_name, _)| arena.get_string(attr_name.txt) == name)
+}
+
+fn collect_obj_optional_as_warnings(
+    vd: &ValueDescription,
+    arena: &ParseArena,
+    warnings: &mut Vec<PpxWarning>,
+) {
+    if !attr_named(vd.pval_attributes.as_slice(), "obj", arena) {
+        return;
+    }
+
+    let vd_type = arena.get_core_type(vd.pval_type);
+    let (args, _) = list_of_arrow(vd_type, arena);
+    for arg in args {
+        if !matches!(arg.lbl, ArgLabel::Optional(_)) {
+            continue;
+        }
+        let arg_type = arena.get_core_type(arg.typ);
+        for (attr_name, _) in arg_type.ptyp_attributes.iter() {
+            if arena.get_string(attr_name.txt) == "as" {
+                // OCaml leaves @as unused for optional @obj arguments, then
+                // warns once during FFI processing and once during the
+                // remaining unused-attribute sweep.
+                for _ in 0..2 {
+                    warnings.push(PpxWarning {
+                        loc: attr_name.loc,
+                        warning: Warning::BsUnusedAttribute {
+                            name: "as".to_string(),
+                        },
+                    });
+                }
+            }
+        }
     }
 }
 

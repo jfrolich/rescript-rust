@@ -37,6 +37,7 @@ use crate::types::sexp_typedtree::{
     print_typed_signature, print_typed_signature_with_locs, print_typed_structure,
     print_typed_structure_with_locs,
 };
+use crate::diagnostics::WarningConfig;
 use crate::types::typecore::{JsxPropKind, TypeCoreError, TypeCoreWarning};
 use crate::types::typemod::{TypeExtensionMismatch, TypeModError};
 use crate::types::{
@@ -1619,6 +1620,22 @@ fn apply_warning_options(tctx: &mut TypeCheckContext<'_>, options: &CompilerOpti
     }
 }
 
+fn warning_config_for_options(options: &CompilerOptions) -> WarningConfig {
+    let mut config = WarningConfig::new();
+    for spec in &options.warning_specs {
+        let _ = config.parse(spec);
+    }
+    for spec in &options.warning_error_specs {
+        let normalized = match spec.chars().next() {
+            Some('@' | '+' | '-') => spec.to_string(),
+            Some(_) => format!("@{spec}"),
+            None => String::new(),
+        };
+        let _ = config.parse(&normalized);
+    }
+    config
+}
+
 pub fn jsx_version_for_structure(
     structure: &Structure,
     options: &CompilerOptions,
@@ -1743,14 +1760,22 @@ fn emit_ppx_warnings(
     arena: &ParseArena,
     source: &str,
     filename: &str,
+    options: &CompilerOptions,
     warnings: &[ppx::PpxWarning],
-) {
+) -> bool {
     if warnings.is_empty() {
-        return;
+        return false;
     }
 
+    let warning_config = warning_config_for_options(options);
+    let mut has_error = false;
     let mut stderr = std::io::stderr();
     for warning in warnings {
+        if !warning_config.is_active(&warning.warning) {
+            continue;
+        }
+        let is_error = warning_config.is_error(&warning.warning);
+        has_error |= is_error;
         let output = format_compiler_warning_report(
             arena,
             source,
@@ -1758,12 +1783,13 @@ fn emit_ppx_warnings(
             &TypeCoreWarning {
                 loc: warning.loc,
                 warning: warning.warning.clone(),
-                is_error: false,
+                is_error,
             },
         );
         let _ = std::io::Write::write_all(&mut stderr, output.as_bytes());
     }
     let _ = std::io::Write::flush(&mut stderr);
+    has_error
 }
 
 fn reject_invalid_polyvariant_int_literals_in_structure(
@@ -5067,9 +5093,11 @@ fn format_compiler_warning_report(
             | crate::diagnostics::Warning::UnusedVariableStrict { .. }
     );
     let mut after_blank = false;
-    for (idx, line) in warning.warning.message().lines().enumerate() {
+    let message = warning.warning.message();
+    for (idx, line) in message.lines().enumerate() {
         let indent_line = match warning.warning {
             crate::diagnostics::Warning::NonClosedRecordPattern { .. } => idx == 0,
+            crate::diagnostics::Warning::BsUnusedAttribute { .. } => idx == 0,
             crate::diagnostics::Warning::PartialMatch { .. } => {
                 idx < 2 || line.starts_with("Hint:")
             }
@@ -5084,6 +5112,9 @@ fn format_compiler_warning_report(
         if line.is_empty() {
             after_blank = true;
         }
+        output.push('\n');
+    }
+    if message.ends_with('\n') {
         output.push('\n');
     }
     output.push('\n');
@@ -10374,7 +10405,8 @@ pub fn compile_source_to_js_with_options(
     )?;
     let config_warnings = validate_file_config_from_structure(&structure, parser.arena())
         .map_err(|err| config_payload_error_to_anyhow(err, parser.arena(), source, filename))?;
-    emit_ppx_warnings(parser.arena(), source, filename, &config_warnings);
+    let mut ppx_warnings_have_errors =
+        emit_ppx_warnings(parser.arena(), source, filename, options, &config_warnings);
     let file_directives = extract_file_directives_from_structure(&structure, parser.arena())
         .map_err(|err| directive_payload_error_to_anyhow(err, parser.arena(), source, filename))?;
     let debug = debug_for_structure(&structure, options, parser.arena());
@@ -10415,7 +10447,8 @@ pub fn compile_source_to_js_with_options(
     };
 
     let ppx_warnings = ppx::collect_raw_js_warnings(&structure, parser.arena_mut());
-    emit_ppx_warnings(parser.arena(), source, filename, &ppx_warnings);
+    ppx_warnings_have_errors |=
+        emit_ppx_warnings(parser.arena(), source, filename, options, &ppx_warnings);
 
     // Expand extension points (%%raw, %raw, %re, %%private) without touching externals
     let structure = ppx::expand_extensions(&structure, parser.arena_mut())
@@ -10490,7 +10523,7 @@ pub fn compile_source_to_js_with_options(
         return Err(persistent_env_error_to_anyhow(error, filename));
     }
     emit_type_warnings(parser.arena(), source, filename, &tctx.warnings);
-    if type_warnings_have_errors(&tctx.warnings) {
+    if ppx_warnings_have_errors || type_warnings_have_errors(&tctx.warnings) {
         return Err(UserDiagnostic::new(String::new(), 2).into());
     }
 
@@ -11076,7 +11109,7 @@ pub fn typecheck_interface_source(
     }
     let config_warnings = validate_file_config_from_signature(&signature, parser.arena())
         .map_err(|err| config_payload_error_to_anyhow(err, parser.arena(), source, filename))?;
-    emit_ppx_warnings(parser.arena(), source, filename, &config_warnings);
+    let _ = emit_ppx_warnings(parser.arena(), source, filename, options, &config_warnings);
     let experimental_let_unwrap =
         experimental_let_unwrap_for_signature(&signature, options, parser.arena());
     let signature = preprocess_signature_for_typecheck_with_source(
@@ -11390,7 +11423,7 @@ pub fn typecheck_and_dump_sexp<W: std::io::Write>(
         }
         let config_warnings = validate_file_config_from_signature(&signature, parser.arena())
             .map_err(|err| config_payload_error_to_anyhow(err, parser.arena(), source, filename))?;
-        emit_ppx_warnings(parser.arena(), source, filename, &config_warnings);
+        let _ = emit_ppx_warnings(parser.arena(), source, filename, options, &config_warnings);
         let experimental_let_unwrap =
             experimental_let_unwrap_for_signature(&signature, options, parser.arena());
         let signature = preprocess_signature_for_typecheck_with_source(
@@ -11481,7 +11514,7 @@ pub fn typecheck_and_dump_sexp<W: std::io::Write>(
         };
 
         let ppx_warnings = ppx::collect_raw_js_warnings(&structure, parser.arena_mut());
-        emit_ppx_warnings(parser.arena(), source, filename, &ppx_warnings);
+        let _ = emit_ppx_warnings(parser.arena(), source, filename, options, &ppx_warnings);
 
         let structure = ppx::expand_extensions(&structure, parser.arena_mut())
             .map_err(|e| ppx_error_to_anyhow(e, parser.arena(), source, filename))?;
@@ -13030,7 +13063,7 @@ pub fn compile_source_in_process(
     }
     let config_warnings = validate_file_config_from_structure(&structure, parser.arena())
         .map_err(|err| config_payload_error_to_anyhow(err, parser.arena(), source, filename))?;
-    emit_ppx_warnings(parser.arena(), source, filename, &config_warnings);
+    let _ = emit_ppx_warnings(parser.arena(), source, filename, options, &config_warnings);
     let experimental_let_unwrap =
         experimental_let_unwrap_for_structure(&structure, options, parser.arena());
     reject_disabled_let_unwrap_in_structure(
@@ -13730,7 +13763,7 @@ pub fn typecheck_interface_in_process(
     }
     let config_warnings = validate_file_config_from_signature(&signature, parser.arena())
         .map_err(|err| config_payload_error_to_anyhow(err, parser.arena(), source, filename))?;
-    emit_ppx_warnings(parser.arena(), source, filename, &config_warnings);
+    let _ = emit_ppx_warnings(parser.arena(), source, filename, options, &config_warnings);
     let signature = preprocess_signature_for_typecheck_with_source(
         signature,
         options,

@@ -469,7 +469,8 @@ impl Warning {
             Warning::BsUnusedAttribute { name } => {
                 format!(
                     "Unused attribute: @{}\n\
-                     This attribute has no effect here.",
+                     This attribute has no effect here.\n\
+                     For example, some attributes are only meaningful in externals.\n",
                     name
                 )
             }
@@ -558,6 +559,7 @@ impl WarningConfig {
         };
         // Apply default warning configuration
         config.parse("-40-42-44-45-48-60-6-52-9").ok();
+        config.parse("@5@6@101@109").ok();
         config
     }
 
