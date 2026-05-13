@@ -7,7 +7,7 @@ use std::borrow::Cow;
 use std::collections::HashSet;
 
 use super::ast::*;
-use super::core::{ast_helper, mknoloc, recover, with_loc};
+use super::core::{ast_helper, err_invalid_variant_ident, mknoloc, recover, with_loc};
 use super::diagnostics::DiagnosticCategory;
 use super::grammar;
 use super::grammar::Grammar;
@@ -1944,6 +1944,7 @@ fn parse_poly_variant_type(p: &mut Parser<'_>) -> CoreType {
 /// Parse a simple polymorphic variant type starting with #.
 fn parse_poly_variant_type_simple(p: &mut Parser<'_>) -> CoreType {
     let start_pos_idx = p.start_pos_idx();
+    let hash_start_pos = p.start_pos;
     p.expect(Token::Hash);
 
     let tag: Label = match &p.token {
@@ -1972,10 +1973,8 @@ fn parse_poly_variant_type_simple(p: &mut Parser<'_>) -> CoreType {
             tag
         }
         _ => {
-            p.err(DiagnosticCategory::Message(
-                "Expected variant tag after #".to_string(),
-            ));
-            Cow::Borrowed("error")
+            err_invalid_variant_ident(p, hash_start_pos);
+            Cow::Borrowed("")
         }
     };
 
@@ -2247,6 +2246,7 @@ fn parse_single_row_field_with_attrs(p: &mut Parser<'_>, attrs: Attributes) -> O
     if p.token == Token::Hash {
         // Tagged row field: #tag or #tag(args)
         let hash_start_idx = p.start_pos_idx();
+        let hash_start_pos = p.start_pos;
         p.next();
         let tag: Loc<Label> = match &p.token {
             Token::Lident(name) | Token::Uident(name) => {
@@ -2287,10 +2287,8 @@ fn parse_single_row_field_with_attrs(p: &mut Parser<'_>, attrs: Attributes) -> O
                 with_loc(Cow::Borrowed("false"), loc)
             }
             _ => {
-                p.err(DiagnosticCategory::Message(
-                    "Expected variant tag after #".to_string(),
-                ));
-                mknoloc(Cow::Borrowed("error"))
+                err_invalid_variant_ident(p, hash_start_pos);
+                mknoloc(Cow::Borrowed(""))
             }
         };
 
@@ -2387,6 +2385,7 @@ fn parse_row_fields(p: &mut Parser<'_>) -> Vec<RowField> {
             // Tagged row field: #tag or #tag(args)
             // Capture the # position for location - OCaml includes # in the tag location
             let hash_start_idx = p.start_pos_idx();
+            let hash_start_pos = p.start_pos;
             p.next();
             let tag: Loc<Label> = match &p.token {
                 Token::Lident(name) | Token::Uident(name) => {
@@ -2427,10 +2426,8 @@ fn parse_row_fields(p: &mut Parser<'_>) -> Vec<RowField> {
                     with_loc(Cow::Borrowed("false"), loc)
                 }
                 _ => {
-                    p.err(DiagnosticCategory::Message(
-                        "Expected variant tag after #".to_string(),
-                    ));
-                    mknoloc(Cow::Borrowed("error"))
+                    err_invalid_variant_ident(p, hash_start_pos);
+                    mknoloc(Cow::Borrowed(""))
                 }
             };
 

@@ -6,7 +6,9 @@
 use std::borrow::Cow;
 
 use super::ast::*;
-use super::core::{ast_helper, mknoloc, recover, template_literal_attr, with_loc};
+use super::core::{
+    ast_helper, err_invalid_variant_ident, mknoloc, recover, template_literal_attr, with_loc,
+};
 use super::diagnostics::DiagnosticCategory;
 use super::grammar::{self, Grammar};
 use super::longident::Longident;
@@ -1615,6 +1617,7 @@ fn parse_template_literal_pattern(p: &mut Parser<'_>, start_pos_idx: PosIdx) -> 
 /// Parse a polymorphic variant pattern (#Tag or #Tag(pat) or #...type).
 fn parse_poly_variant_pattern(p: &mut Parser<'_>) -> Pattern {
     let start_pos_idx = p.start_pos_idx();
+    let hash_start_pos = p.start_pos;
     p.expect(Token::Hash);
 
     // Handle #...type - type constraint pattern
@@ -1659,10 +1662,8 @@ fn parse_poly_variant_pattern(p: &mut Parser<'_>) -> Pattern {
             tag
         }
         _ => {
-            p.err(DiagnosticCategory::Message(
-                "Expected variant tag after #".to_string(),
-            ));
-            Cow::Borrowed("error")
+            err_invalid_variant_ident(p, hash_start_pos);
+            Cow::Borrowed("")
         }
     };
 

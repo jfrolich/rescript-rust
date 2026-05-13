@@ -9,7 +9,8 @@ use crate::parse_arena::{ExprIdx, LidentIdx, LocIdx, Located, ParseArena, PosIdx
 
 use super::ast::*;
 use super::core::{
-    ExprContext, ast_helper, if_let_attr, make_braces_attr, mknoloc, recover, with_loc,
+    ExprContext, ast_helper, err_invalid_variant_ident, if_let_attr, make_braces_attr, mknoloc,
+    recover, with_loc,
 };
 use super::diagnostics::DiagnosticCategory;
 use super::grammar;
@@ -2204,6 +2205,7 @@ pub fn parse_atomic_expr(p: &mut Parser<'_>) -> Expression {
         }
         Token::Hash => {
             // Polyvariant: #tag or #tag(arg)
+            let hash_start_pos = p.start_pos;
             p.next();
             let tag: Label = match &p.token {
                 Token::Lident(name) | Token::Uident(name) => {
@@ -2231,10 +2233,8 @@ pub fn parse_atomic_expr(p: &mut Parser<'_>) -> Expression {
                     tag
                 }
                 _ => {
-                    p.err(DiagnosticCategory::Message(
-                        "Expected variant tag after #".to_string(),
-                    ));
-                    Cow::Borrowed("error")
+                    err_invalid_variant_ident(p, hash_start_pos);
+                    Cow::Borrowed("")
                 }
             };
 

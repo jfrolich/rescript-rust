@@ -33,6 +33,22 @@ pub fn mknoloc<T>(txt: T) -> Loc<T> {
     }
 }
 
+const VARIANT_IDENT_MESSAGE: &str = "A polymorphic variant (e.g. #id) must start with an alphabetical letter or be a number (e.g. #742)";
+
+/// Report an invalid polymorphic variant tag like OCaml's parse_hash_ident.
+pub fn err_invalid_variant_ident(p: &mut Parser<'_>, hash_start_pos: Position) {
+    if p.token == Token::Eof {
+        p.err_unexpected_at(hash_start_pos);
+    } else {
+        p.err_at(
+            hash_start_pos,
+            p.end_pos,
+            DiagnosticCategory::Message(VARIANT_IDENT_MESSAGE.to_string()),
+        );
+        p.next();
+    }
+}
+
 // ============================================================================
 // Error Recovery
 // ============================================================================
