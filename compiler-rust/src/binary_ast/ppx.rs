@@ -1009,6 +1009,13 @@ fn validate_external_attribute_errors(
             return Err(PpxError::at_loc(vd.pval_loc, reason));
         }
 
+        if desc.module_as_val && desc.new_name_from_payload && desc.val_name.is_none() {
+            return Err(PpxError::at_loc(
+                vd.pval_loc,
+                "Incorrect FFI attribute found: (@new should not carry a payload here)",
+            ));
+        }
+
         if desc.call_name.is_some() && !external_desc_is_plain_call(&desc) {
             return Err(PpxError::at_loc(
                 vd.pval_loc,
@@ -1100,6 +1107,11 @@ fn validate_external_attribute_errors(
 
     if external_desc_is_plain_obj(&desc) {
         validate_plain_obj_arg_type_errors(&vd_type, vd.pval_loc, arena)?;
+    } else if desc.mk_obj {
+        return Err(PpxError::at_loc(
+            vd.pval_loc,
+            "Attribute found that conflicts with @obj",
+        ));
     }
 
     Ok(())
@@ -2106,6 +2118,7 @@ struct ExternalDesc {
     call_name: Option<String>,
     send_name: Option<String>,
     new_name: Option<String>,
+    new_name_from_payload: bool,
     get_name: Option<String>,
     set_name: Option<String>,
     get_index: bool,
@@ -2128,6 +2141,7 @@ impl Default for ExternalDesc {
             call_name: None,
             send_name: None,
             new_name: None,
+            new_name_from_payload: false,
             get_name: None,
             set_name: None,
             get_index: false,
@@ -2224,9 +2238,9 @@ fn parse_external_attrs(
                 );
             }
             "new" => {
-                desc.new_name = Some(
-                    get_payload_string(payload, arena).unwrap_or_else(|| prim_name.to_string()),
-                );
+                let payload_name = get_payload_string(payload, arena);
+                desc.new_name_from_payload = payload_name.is_some();
+                desc.new_name = Some(payload_name.unwrap_or_else(|| prim_name.to_string()));
             }
             "get" => {
                 desc.get_name = Some(
