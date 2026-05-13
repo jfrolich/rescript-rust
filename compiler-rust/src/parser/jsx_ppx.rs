@@ -2739,10 +2739,6 @@ fn extract_args_rec(
             // Key cannot be accessed inside of a component
             let label_name = get_label(arena, arg_label);
             if label_name == "key" {
-                eprintln!(
-                    "Key cannot be accessed inside of a component. Don't worry - you can always key a component from its parent! (at {:?})",
-                    expr.pexp_loc
-                );
                 return;
             }
 

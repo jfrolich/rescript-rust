@@ -658,6 +658,11 @@ with a reason after checking raise sites.
     before generated React type lookups can mask the PPX error
     - Covered by
       `tests/error_output_parity/compiler/fixtures/jsx_component_destructure.res`.
+  - `recursively_transform_named_args_for_make` rejects the reserved `key`
+    prop inside `@react.component` definitions before generated React type
+    lookups can mask the PPX error
+    - Covered by
+      `tests/error_output_parity/compiler/fixtures/jsx_component_key_prop.res`.
 - `compiler/syntax/src/res_scanner.ml`
   - Fixed-width string escape diagnostics for short decimal, incomplete hex,
     incomplete unicode, decimal overflow, and surrogate unicode escapes
