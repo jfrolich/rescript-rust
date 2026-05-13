@@ -852,6 +852,10 @@ with a reason after checking raise sites.
   - `Ast_derive_projector.invalid_config`
     - Covered by
       `tests/error_output_parity/compiler/fixtures/deriving_accessors_invalid_config.res`.
+  - `Ast_derive_projector.raise_unsupported_vaiant_record_arg` for
+    `@deriving(accessors)` on variant inline-record constructor payloads
+    - Covered by
+      `tests/error_output_parity/compiler/fixtures/deriving_accessors_inline_record.res`.
   - `Ast_derive_js_mapper.handle_config` invalid config
     - Covered by
       `tests/error_output_parity/compiler/fixtures/deriving_jsconverter_invalid_config.res`.
