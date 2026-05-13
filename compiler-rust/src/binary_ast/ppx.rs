@@ -685,6 +685,20 @@ fn external_desc_is_plain_new(desc: &ExternalDesc) -> bool {
         && !desc.get_index
 }
 
+fn external_desc_is_module_as_class(desc: &ExternalDesc) -> bool {
+    desc.module_as_val
+        && desc.new_name.is_some()
+        && desc.val_name.is_none()
+        && desc.call_name.is_none()
+        && desc.external_module_name.is_none()
+        && desc.send_name.is_none()
+        && desc.set_name.is_none()
+        && desc.get_name.is_none()
+        && !desc.set_index
+        && !desc.get_index
+        && desc.scopes.is_empty()
+}
+
 fn validate_plain_obj_arg_type_errors(
     vd_type: &CoreType,
     external_loc: LocIdx,
@@ -1064,7 +1078,10 @@ fn validate_external_attribute_errors(
             ));
         }
 
-        if desc.new_name.is_some() && !external_desc_is_plain_new(&desc) {
+        if desc.new_name.is_some()
+            && !external_desc_is_plain_new(&desc)
+            && !external_desc_is_module_as_class(&desc)
+        {
             return Err(PpxError::at_loc(
                 vd.pval_loc,
                 "Conflicting attributes: Attribute found that conflicts with %@new",
@@ -1125,6 +1142,12 @@ fn validate_external_attribute_errors(
             vd.pval_loc,
             "Attribute found that conflicts with @obj",
         ));
+    }
+
+    if !desc.mk_obj {
+        let result_is_unit = is_unit_type(&result_type, arena);
+        let ffi = build_ffi_type(&desc, prim_name.as_str(), arity, result_is_unit, params);
+        validate_ffi_names(&ffi, vd.pval_loc)?;
     }
 
     Ok(())
@@ -2843,6 +2866,87 @@ fn check_external_relative(vd: &ValueDescription, arena: &mut ParseArena) -> boo
 /// Check if a path string is a package-relative path (starts with "./" or "../").
 fn is_package_relative_path(s: &str) -> bool {
     s.starts_with("./") || s.starts_with("../")
+}
+
+fn valid_js_char(c: char) -> bool {
+    c.is_ascii_alphanumeric() || c == '_' || c == '$'
+}
+
+fn valid_first_js_char(c: char) -> bool {
+    c.is_ascii_alphabetic() || c == '_' || c == '$'
+}
+
+fn valid_ident(s: &str) -> bool {
+    let mut chars = s.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    valid_js_char(first) && valid_first_js_char(first) && chars.all(valid_js_char)
+}
+
+fn validate_global_name(name: &str, loc: LocIdx) -> PpxResult<()> {
+    if valid_ident(name) || name.split('.').all(valid_ident) {
+        return Ok(());
+    }
+    Err(PpxError::at_loc(
+        loc,
+        format!("Not a valid global name {name}"),
+    ))
+}
+
+fn validate_external_module_name(
+    module_name: &ExternalModuleName,
+    loc: Option<LocIdx>,
+) -> PpxResult<()> {
+    if module_name.bundle.is_empty()
+        || matches!(
+            &module_name.module_bind_name,
+            ModuleBindName::PhintName(name) if name.is_empty()
+        )
+    {
+        return Err(match loc {
+            Some(loc) => PpxError::at_loc(loc, "empty name encountered"),
+            None => PpxError::message("empty name encountered"),
+        });
+    }
+    Ok(())
+}
+
+fn validate_ffi_names(ffi: &FfiType, loc: LocIdx) -> PpxResult<()> {
+    match ffi {
+        FfiType::FfiBs { external_spec, .. } => match external_spec {
+            ExternalSpec::JsVar { name, .. } => validate_global_name(name, loc),
+            ExternalSpec::JsModuleAsVar(module_name)
+            | ExternalSpec::JsModuleAsFn {
+                external_module_name: module_name,
+                ..
+            }
+            | ExternalSpec::JsModuleAsClass(module_name) => {
+                validate_external_module_name(module_name, None)
+            }
+            ExternalSpec::JsCall {
+                name,
+                external_module_name,
+                ..
+            }
+            | ExternalSpec::JsNew {
+                name,
+                external_module_name,
+                ..
+            } => {
+                if let Some(module_name) = external_module_name {
+                    validate_external_module_name(module_name, Some(loc))?;
+                }
+                validate_global_name(name, loc)
+            }
+            ExternalSpec::JsSend { .. }
+            | ExternalSpec::JsSet { .. }
+            | ExternalSpec::JsGet { .. }
+            | ExternalSpec::JsGetIndex { .. }
+            | ExternalSpec::JsSetIndex { .. } => Ok(()),
+        },
+        _ => Ok(()),
+    }
 }
 
 /// Check if an FFI external spec contains relative paths.

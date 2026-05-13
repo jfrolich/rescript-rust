@@ -1609,7 +1609,8 @@ fn ppx_error_to_anyhow(
         };
         UserDiagnostic::new(report, 2).into()
     } else {
-        anyhow!("PPX rewrite failed: {err}")
+        UserDiagnostic::new(format_compiler_error_report_for_file(filename, err.message_text()), 2)
+            .into()
     }
 }
 
