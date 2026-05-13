@@ -100,6 +100,11 @@ with a reason after checking raise sites.
   `tests/error_output_parity/compiler/fixtures/package_local_type_escape.res`,
   and the optional arrow argument hidden-type printer subcase in
   `tests/error_output_parity/compiler/fixtures/expr_type_clash_optional_hidden_arg.res`,
+  and curried/uncurried function arity-shape subcases in
+  `tests/error_output_parity/compiler/fixtures/expr_type_clash_curried_expected_uncurried.res`,
+  `tests/error_output_parity/compiler/fixtures/expr_type_clash_uncurried_expected_curried.res`,
+  and
+  `tests/error_output_parity/compiler/fixtures/expr_type_clash_curried_value_expected_uncurried.res`,
   and the field-access option-receiver branch in
   `tests/error_output_parity/compiler/fixtures/field_access_option_receiver_type_clash.res`.
 - `Multiply_bound_variable`: covered by
