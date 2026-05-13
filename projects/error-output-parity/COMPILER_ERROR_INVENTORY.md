@@ -1008,6 +1008,34 @@ with a reason after checking raise sites.
     checking
     - Covered through `bsc` by
       `tests/error_output_parity/compiler/fixtures/parser_jsx_uppercase_prop.res`.
+  - `parse_jsx_children` rejects the removed spread-child syntax before JSX
+    PPX expansion
+    - Covered through `bsc` by
+      `tests/error_output_parity/compiler/fixtures/parser_jsx_spread_children.res`.
+  - `parse_record_expr` rejects both non-initial record spreads and spreads
+    without any updated fields
+    - Covered through `bsc` by
+      `tests/error_output_parity/compiler/fixtures/parser_record_spread_second.res`
+      and
+      `tests/error_output_parity/compiler/fixtures/parser_record_spread_no_update.res`.
+  - Tuple parsing rejects singleton tuples in expression and type contexts
+    - Covered through `bsc` by
+      `tests/error_output_parity/compiler/fixtures/parser_tuple_single_expression.res`
+      and
+      `tests/error_output_parity/compiler/fixtures/parser_tuple_single_type.res`.
+  - Type declaration parsing rejects record fields written with `=`, unquoted
+    object fields, and local type definitions inside functions
+    - Covered through `bsc` by
+      `tests/error_output_parity/compiler/fixtures/parser_record_type_field_equal.res`,
+      `tests/error_output_parity/compiler/fixtures/parser_object_unquoted_field_type.res`,
+      and
+      `tests/error_output_parity/compiler/fixtures/parser_type_definition_in_function.res`.
+  - Structure and signature item parsers reject single-`@` attributes with no
+    attached node, preserving the standalone-attribute suggestion
+    - Covered through `bsc` by
+      `tests/error_output_parity/compiler/fixtures/parser_standalone_attribute_structure.res`
+      and
+      `tests/error_output_parity/compiler/fixtures/parser_standalone_attribute_signature.resi`.
 - `compiler/syntax/src/jsx_v4.ml`
   - `check_multiple_components` rejects more than one `@react.component`
     definition in the same module before generated React type lookups can mask

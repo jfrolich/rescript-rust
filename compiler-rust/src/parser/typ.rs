@@ -1652,7 +1652,7 @@ fn parse_record_or_object_type(p: &mut Parser<'_>) -> CoreType {
     p.expect(Token::Lbrace);
 
     // Check for object type: {. ... } or {.. ... }
-    let _is_object = p.token == Token::Dot || p.token == Token::DotDot;
+    let is_object = p.token == Token::Dot || p.token == Token::DotDot;
     let closed = if p.token == Token::DotDot {
         p.next();
         ClosedFlag::Open
@@ -1705,9 +1705,9 @@ fn parse_record_or_object_type(p: &mut Parser<'_>) -> CoreType {
             ptyp_attributes: Attributes::new(),
         }
     } else {
-        // Check for inline record syntax in wrong position: { name: ... } where object type expected
-        // OCaml: when inline_types_context is None and token is Lident, emit error
-        if !has_inline_context && matches!(p.token, Token::Lident(_)) {
+        // Check for inline record syntax in wrong position: { name: ... } where object type expected.
+        // Object markers (`{. ...}` / `{.. ...}`) go through OCaml's object-field parser instead.
+        if !has_inline_context && !is_object && matches!(p.token, Token::Lident(_)) {
             p.err(DiagnosticCategory::Message(
                 "An inline record type declaration is only allowed in a variant constructor's declaration or nested inside of a record type declaration".to_string(),
             ));
@@ -1789,7 +1789,13 @@ fn parse_object_fields(p: &mut Parser<'_>) -> Vec<ObjectField> {
 
         // Handle optional field: name?: typ
         let name = match &p.token {
-            Token::Lident(n) => Some(n.to_string()),
+            Token::Lident(n) => {
+                let name = n.to_string();
+                p.err(DiagnosticCategory::Message(
+                    super::core::error_messages::object_quoted_field_name(&name),
+                ));
+                Some(name)
+            }
             Token::String(s) => Some(s.to_string()),
             _ => None,
         };

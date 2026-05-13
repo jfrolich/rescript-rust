@@ -227,6 +227,10 @@ pub mod error_messages {
          ...b}` wouldn't make sense, as `b` would override every field of `a` \
          anyway.";
 
+    /// Error message for record expression spread without any updated fields.
+    pub const RECORD_SPREAD_WITHOUT_UPDATE: &str =
+        "Record spread needs at least one field that's updated";
+
     /// Error message for dict expression spread.
     pub const DICT_EXPR_SPREAD: &str = "Dict literals do not support spread (`...`) yet.";
 
@@ -299,6 +303,14 @@ pub mod error_messages {
             "Cannot use keyword `{}` as a record field name. Suggestion: rename it (e.g. `{}_`)\n  \
              If you need the field to be \"{}\" at runtime, annotate the field: `@as(\"{}\") {}_ : ...`",
             keyword_txt, keyword_txt, keyword_txt, keyword_txt, keyword_txt
+        )
+    }
+
+    /// Generate error message for unquoted object type field names.
+    pub fn object_quoted_field_name(name: &str) -> String {
+        format!(
+            "An object type declaration needs quoted field names. Did you mean \"{}\"?",
+            name
         )
     }
 }

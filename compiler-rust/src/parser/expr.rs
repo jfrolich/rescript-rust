@@ -4000,6 +4000,11 @@ fn parse_braced_or_record_expr(p: &mut Parser<'_>) -> Expression {
         }
         p.optional(&Token::Comma);
         let fields = parse_record_fields(p);
+        if fields.is_empty() {
+            p.err(DiagnosticCategory::Message(
+                super::core::error_messages::RECORD_SPREAD_WITHOUT_UPDATE.to_string(),
+            ));
+        }
         p.expect(Token::Rbrace);
         let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
         let spread_idx = p.arena_mut().push_expr(spread);
