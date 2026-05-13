@@ -1151,6 +1151,9 @@ with a reason after checking raise sites.
       `tests/error_output_parity/compiler/fixtures/bs_unused_string_signature_value.resi`,
       and the JSX post-transform value-prop case
       `tests/error_output_parity/compiler/fixtures/jsx_component_value_string_attr.res`.
+      The full warning-name set (`@as`, `@config`, `@ignore`, `@int`,
+      `@optional`, `@string`, `@unwrap`) is covered by those plus
+      `tests/error_output_parity/compiler/fixtures/bs_unused_builtin_attrs_value.res`.
   - GADT constructor result syntax without `type rec`
     - Covered by
       `tests/error_output_parity/compiler/fixtures/gadt_requires_type_rec.res`.
