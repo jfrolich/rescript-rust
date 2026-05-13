@@ -3491,9 +3491,20 @@ fn type_mod_error_to_anyhow(
             )
             .into()
         }
-        TypeModError::CoreError(TypeCoreError::UnboundConstructor { loc, lid }) => {
+        TypeModError::CoreError(TypeCoreError::UnboundConstructor {
+            loc,
+            lid,
+            alternatives,
+        }) => {
             UserDiagnostic::new(
-                format_unbound_constructor_report(arena, source, filename, *loc, lid),
+                format_unbound_constructor_report(
+                    arena,
+                    source,
+                    filename,
+                    *loc,
+                    lid,
+                    alternatives,
+                ),
                 2,
             )
             .into()
@@ -3779,8 +3790,12 @@ fn type_mod_error_to_anyhow(
             2,
         )
         .into(),
-        TypeModError::UnboundModtype { loc, lid } => UserDiagnostic::new(
-            format_unbound_modtype_report(arena, source, filename, *loc, lid),
+        TypeModError::UnboundModtype {
+            loc,
+            lid,
+            alternatives,
+        } => UserDiagnostic::new(
+            format_unbound_modtype_report(arena, source, filename, *loc, lid, alternatives),
             2,
         )
         .into(),
@@ -4785,15 +4800,27 @@ fn format_unbound_modtype_report(
     filename: &str,
     loc: LocIdx,
     lid: &Longident,
+    alternatives: &[String],
 ) -> String {
     let name = format_longident_for_report(arena, lid);
-    format_compiler_error_report(
-        arena,
-        source,
-        filename,
-        loc,
-        &format!("Unbound module type {name}"),
-    )
+    if let Some(hint) = spellcheck_hint(&name, alternatives) {
+        let mut raw_message = String::new();
+        raw_message.push_str("  Unbound module type ");
+        raw_message.push_str(&name);
+        raw_message.push('\n');
+        raw_message.push_str("Hint: Did you mean ");
+        raw_message.push_str(hint);
+        raw_message.push('?');
+        format_compiler_error_report_raw_message(arena, source, filename, loc, &raw_message)
+    } else {
+        format_compiler_error_report(
+            arena,
+            source,
+            filename,
+            loc,
+            &format!("Unbound module type {name}"),
+        )
+    }
 }
 
 fn format_invalid_variable_name_report(
@@ -5633,16 +5660,25 @@ fn format_unbound_constructor_report(
     filename: &str,
     loc: LocIdx,
     lid: &Longident,
+    alternatives: &[String],
 ) -> String {
     const INFO: &str = "\x1b[1;33m";
     const DIM: &str = "\x1b[2m";
     const RESET: &str = "\x1b[0m";
 
     let name = format_longident_for_report(arena, lid);
-    let message = format!(
+    let mut message = format!(
         "{INFO}The variant constructor {name} can't be found.{RESET}\n\n- If it's defined in another module or file, bring it into scope by:\n  - Prefixing it with said module name: {INFO}TheModule.{name}{RESET}\n  - Or specifying its type: {INFO}let theValue: TheModule.theType = {name}{RESET}\n- Constructors and modules are both capitalized. Did you want the latter?\n  Then instead of {DIM}let foo = Bar{RESET}, try {INFO}module Foo = Bar{RESET}."
     );
-    format_compiler_error_report(arena, source, filename, loc, &message)
+    if let Some(hint) = spellcheck_hint(&name, alternatives) {
+        message = format_message_with_compiler_indentation(&message);
+        message.push_str("Hint: Did you mean ");
+        message.push_str(hint);
+        message.push('?');
+        format_compiler_error_report_raw_message(arena, source, filename, loc, &message)
+    } else {
+        format_compiler_error_report(arena, source, filename, loc, &message)
+    }
 }
 
 fn format_message_with_compiler_indentation(message: &str) -> String {

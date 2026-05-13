@@ -892,6 +892,11 @@ impl Env {
             .collect()
     }
 
+    /// Iterate over visible constructor bindings.
+    pub fn iter_constructors(&self) -> impl Iterator<Item = (&Ident, &ConstructorDescription)> {
+        self.constrs.iter().map(|(id, c)| (id, c.as_ref()))
+    }
+
     // ========================================================================
     // Label Bindings
     // ========================================================================
@@ -1220,6 +1225,11 @@ impl Env {
             .find_by_name_with_id(name)
             .map(|(id, decl)| (id, decl.as_ref()))
             .ok_or_else(|| EnvError::ModuleNotFound(name.to_string()))
+    }
+
+    /// Iterate over visible module type bindings.
+    pub fn iter_modtypes(&self) -> impl Iterator<Item = (&Ident, &ModtypeDeclaration)> {
+        self.modtypes.iter().map(|(id, mtd)| (id, mtd.as_ref()))
     }
 
     /// Find a module type by path.

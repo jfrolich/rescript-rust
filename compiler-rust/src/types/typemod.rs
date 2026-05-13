@@ -3121,6 +3121,8 @@ pub enum TypeModError {
         loc: LocIdx,
         /// Missing module type path.
         lid: Longident,
+        /// Visible module type names for spellchecking.
+        alternatives: Vec<String>,
     },
     /// Signature mismatch.
     SignatureMismatch {
@@ -7266,11 +7268,46 @@ fn lookup_modtype_path_or_error<'b>(
     ctx: &'b crate::types::context::TypeContext,
 ) -> TypeModResult<Path> {
     lookup_modtype_path_by_lid(lid, arena, env, pers_env, ctx).ok_or_else(|| {
+        let alternatives = unbound_modtype_alternatives(lid, arena, env, pers_env, ctx);
         TypeModError::UnboundModtype {
             loc,
             lid: lid.clone(),
+            alternatives,
         }
     })
+}
+
+fn unbound_modtype_alternatives<'b>(
+    lid: &crate::parser::longident::Longident,
+    arena: &ParseArena,
+    env: &Env,
+    pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
+    ctx: &'b crate::types::context::TypeContext,
+) -> Vec<String> {
+    match lid {
+        crate::parser::longident::Longident::Lident(_) => env
+            .iter_modtypes()
+            .map(|(id, _)| id.name().to_string())
+            .collect(),
+        crate::parser::longident::Longident::Ldot(prefix, _) => {
+            lookup_module_type_by_lid(prefix, arena, env, pers_env, ctx)
+                .and_then(|mty| match mty {
+                    crate::types::decl::ModuleType::MtySignature(sig) => Some(
+                        sig.iter()
+                            .filter_map(|item| match item {
+                                crate::types::decl::SignatureItem::SigModtype(id, _) => {
+                                    Some(id.name().to_string())
+                                }
+                                _ => None,
+                            })
+                            .collect(),
+                    ),
+                    _ => None,
+                })
+                .unwrap_or_default()
+        }
+        crate::parser::longident::Longident::Lapply(_, _) => Vec::new(),
+    }
 }
 
 fn alias_of_module_type(

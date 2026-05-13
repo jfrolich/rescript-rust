@@ -577,7 +577,11 @@ pub enum TypeCoreError {
     IllegalReferenceToRecursiveModule { loc: LocIdx },
 
     /// Unbound constructor identifier.
-    UnboundConstructor { loc: LocIdx, lid: Longident },
+    UnboundConstructor {
+        loc: LocIdx,
+        lid: Longident,
+        alternatives: Vec<String>,
+    },
 
     /// Unbound type constructor identifier.
     UnboundTypeConstructor { loc: LocIdx, lid: Longident },
@@ -15625,9 +15629,11 @@ fn type_construct(
                         desc.clone(),
                     ),
                     Err(_) => {
+                        let alternatives = unbound_constructor_alternatives(tctx, env, &longident);
                         return Err(TypeCoreError::UnboundConstructor {
                             loc: lid.loc,
                             lid: longident,
+                            alternatives,
                         });
                     }
                 },
@@ -15654,9 +15660,11 @@ fn type_construct(
                 ) {
                     Some((path, desc)) => (path, desc),
                     None => {
+                        let alternatives = unbound_constructor_alternatives(tctx, env, &longident);
                         return Err(TypeCoreError::UnboundConstructor {
                             loc: lid.loc,
                             lid: longident,
+                            alternatives,
                         });
                     }
                 }
@@ -19678,9 +19686,11 @@ pub(crate) fn unbound_constructor_lookup_error(
     if let Some(error) = unbound_module_prefix_error(tctx, env, loc, lid) {
         return error;
     }
+    let alternatives = unbound_constructor_alternatives(tctx, env, lid);
     TypeCoreError::UnboundConstructor {
         loc,
         lid: lid.clone(),
+        alternatives,
     }
 }
 
@@ -19734,6 +19744,44 @@ fn unbound_module_alternatives(
                             Some(id.name().to_string())
                         }
                         _ => None,
+                    })
+                    .collect()
+            })
+            .unwrap_or_default(),
+        Longident::Lapply(_, _) => Vec::new(),
+    }
+}
+
+fn unbound_constructor_alternatives(
+    tctx: &mut TypeCheckContext<'_>,
+    env: &Env,
+    lid: &Longident,
+) -> Vec<String> {
+    match lid {
+        Longident::Lident(_) => env
+            .iter_constructors()
+            .map(|(id, _)| id.name().to_string())
+            .collect(),
+        Longident::Ldot(prefix, _) => env
+            .resolve_module_lid_raw(prefix, tctx.arena, &mut tctx.persistent_env, tctx.type_ctx)
+            .map(|(_, sig)| {
+                sig.iter()
+                    .flat_map(|item| match item {
+                        crate::types::decl::SignatureItem::SigType(_, decl, _) => {
+                            match &decl.type_kind {
+                                crate::types::decl::TypeKind::TypeVariant(constructors) => {
+                                    constructors
+                                        .iter()
+                                        .map(|cstr| cstr.cd_id.name().to_string())
+                                        .collect::<Vec<_>>()
+                                }
+                                _ => Vec::new(),
+                            }
+                        }
+                        crate::types::decl::SignatureItem::SigTypext(id, _, _) => {
+                            vec![id.name().to_string()]
+                        }
+                        _ => Vec::new(),
                     })
                     .collect()
             })
