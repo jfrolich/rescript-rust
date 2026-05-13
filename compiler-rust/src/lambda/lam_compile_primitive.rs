@@ -611,6 +611,7 @@ impl LambdaCompiler {
                 dynamic_import,
                 transformed_jsx,
             } => self.compile_js_call(
+                loc,
                 prim_name,
                 arg_types,
                 ffi,

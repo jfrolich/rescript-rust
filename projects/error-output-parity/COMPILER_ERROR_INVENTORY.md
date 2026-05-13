@@ -861,6 +861,10 @@ with a reason after checking raise sites.
   - `Unknown_builtin_primitive`
     - Covered by
       `tests/error_output_parity/compiler/fixtures/unknown_builtin_primitive.res`.
+- `compiler/core/lam_convert.ml`
+  - `Ffi_normal` rejects normal external primitives in the JavaScript backend
+    - Covered by
+      `tests/error_output_parity/compiler/cases/no_builtin_normal_external.res`.
 - `compiler/ml/translmod.ml`
   - `Fragile_pattern_in_toplevel`
     - Covered by
