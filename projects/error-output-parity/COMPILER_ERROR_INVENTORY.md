@@ -107,8 +107,9 @@ with a reason after checking raise sites.
   `tests/error_output_parity/compiler/fixtures/expr_type_clash_curried_value_expected_uncurried.res`,
   and the field-access option-receiver branch in
   `tests/error_output_parity/compiler/fixtures/field_access_option_receiver_type_clash.res`.
-- `Ctype.Tags` / `Typetexp.Variant_tags` hash-collision diagnostics from
-  expression and pattern unification are covered by
+- `Ctype.Tags` / `Typetexp.Variant_tags` hash-collision diagnostics from row
+  type translation and expression/pattern unification are covered by
+  `tests/error_output_parity/compiler/fixtures/polyvariant_hash_collision_type.res`,
   `tests/error_output_parity/compiler/fixtures/polyvariant_hash_collision.res`
   and
   `tests/error_output_parity/compiler/fixtures/polyvariant_hash_collision_pattern.res`.
