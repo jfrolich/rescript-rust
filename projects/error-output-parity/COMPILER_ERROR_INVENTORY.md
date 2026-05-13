@@ -535,9 +535,15 @@ with a reason after checking raise sites.
     `tests/error_output_parity/compiler/fixtures/bs_conflict_get_index_module.res`
     and
     `tests/error_output_parity/compiler/fixtures/bs_conflict_set_index_module.res`.
-    Additional conflict-message branches in
-    `compiler/frontend/ast_external_process.ml` still need representative
-    fixtures.
+    Covered for the remaining observable `compiler/frontend/ast_external_process.ml`
+    conflict-message branches by
+    `tests/error_output_parity/compiler/fixtures/bs_conflict_module_send.res`,
+    `tests/error_output_parity/compiler/fixtures/bs_conflict_module_val.res`,
+    `tests/error_output_parity/compiler/fixtures/bs_conflict_module_value_new.res`,
+    `tests/error_output_parity/compiler/fixtures/bs_conflict_new_get.res`,
+    `tests/error_output_parity/compiler/fixtures/bs_conflict_val_call_send.res`,
+    and
+    `tests/error_output_parity/compiler/fixtures/bs_conflict_val_value_new.res`.
 - `Illegal_attribute`
   - Covered for `@module` arity and empty `@scope` by
     `tests/error_output_parity/compiler/fixtures/bs_external_illegal_module_many_strings.res`

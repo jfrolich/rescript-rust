@@ -569,6 +569,68 @@ fn external_desc_is_plain_set_index(desc: &ExternalDesc) -> bool {
         && !desc.splice
 }
 
+fn module_as_val_conflict_reason(desc: &ExternalDesc) -> Option<&'static str> {
+    if !desc.module_as_val {
+        return None;
+    }
+
+    if desc.send_name.is_some() {
+        return Some(
+            "Conflicting attributes: @module is for imports from a module, @send does not need import a module ",
+        );
+    }
+
+    let has_conflicting_shape = desc.external_module_name.is_some()
+        || desc.call_name.is_some()
+        || desc.set_name.is_some()
+        || desc.get_name.is_some()
+        || !desc.scopes.is_empty();
+    let has_conflicting_new_val = desc.new_name.is_some() && desc.val_name.is_some();
+
+    if has_conflicting_shape || has_conflicting_new_val {
+        Some("Conflicting attributes: Attribute found that conflicts with @module.")
+    } else {
+        None
+    }
+}
+
+fn external_desc_is_plain_call(desc: &ExternalDesc) -> bool {
+    desc.call_name.is_some()
+        && desc.val_name.is_none()
+        && !desc.module_as_val
+        && desc.send_name.is_none()
+        && desc.new_name.is_none()
+        && desc.set_name.is_none()
+        && desc.get_name.is_none()
+        && !desc.set_index
+        && !desc.get_index
+}
+
+fn external_desc_is_plain_val(desc: &ExternalDesc) -> bool {
+    desc.val_name.is_some()
+        && desc.call_name.is_none()
+        && !desc.module_as_val
+        && desc.send_name.is_none()
+        && desc.new_name.is_none()
+        && desc.set_name.is_none()
+        && desc.get_name.is_none()
+        && !desc.set_index
+        && !desc.get_index
+        && !desc.splice
+}
+
+fn external_desc_is_plain_new(desc: &ExternalDesc) -> bool {
+    desc.new_name.is_some()
+        && desc.val_name.is_none()
+        && desc.call_name.is_none()
+        && !desc.module_as_val
+        && desc.send_name.is_none()
+        && desc.set_name.is_none()
+        && desc.get_name.is_none()
+        && !desc.set_index
+        && !desc.get_index
+}
+
 fn validate_plain_obj_arg_type_errors(
     vd_type: &CoreType,
     arena: &ParseArena,
@@ -729,6 +791,33 @@ fn validate_external_attribute_errors(
             vd.pval_loc,
             "Conflicting attributes: Attribute found that conflicts with %@get_index",
         ));
+    }
+
+    if !desc.mk_obj {
+        if let Some(reason) = module_as_val_conflict_reason(&desc) {
+            return Err(PpxError::at_loc(vd.pval_loc, reason));
+        }
+
+        if desc.call_name.is_some() && !external_desc_is_plain_call(&desc) {
+            return Err(PpxError::at_loc(
+                vd.pval_loc,
+                "Conflicting attributes: Attribute found that conflicts with %@val",
+            ));
+        }
+
+        if desc.val_name.is_some() && !external_desc_is_plain_val(&desc) {
+            return Err(PpxError::at_loc(
+                vd.pval_loc,
+                "Conflicting attributes: Attribute found that conflicts with %@val",
+            ));
+        }
+
+        if desc.new_name.is_some() && !external_desc_is_plain_new(&desc) {
+            return Err(PpxError::at_loc(
+                vd.pval_loc,
+                "Conflicting attributes: Attribute found that conflicts with %@new",
+            ));
+        }
     }
 
     // OCaml Ast_external_process.external_desc_of_non_obj rejects `@get`
