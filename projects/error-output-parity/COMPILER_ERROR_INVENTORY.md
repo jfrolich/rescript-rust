@@ -941,6 +941,17 @@ with a reason after checking raise sites.
   - `%ffi` async arrow payloads remain rejected even when Flow emits a warning
     - Covered by
       `tests/error_output_parity/compiler/fixtures/ffi_async_arrow_warning_error.res`.
+- `compiler/frontend/bs_builtin_ppx.ml`
+  - `%%private` empty structure payload rejection
+    - Covered by
+      `tests/build_tests/super_errors/fixtures/private_without_body.res`.
+  - `%%private` non-structure payload rejection for `PTyp`, `PSig`, and `PPat`
+    payloads
+    - Covered by
+      `tests/error_output_parity/compiler/fixtures/builtin_private_extension_type_payload.res`,
+      `tests/error_output_parity/compiler/fixtures/builtin_private_extension_signature_payload.res`,
+      and
+      `tests/error_output_parity/compiler/fixtures/builtin_private_extension_pattern_payload.res`.
 - `compiler/frontend/ast_exp_extension.ml`
   - `%obj` non-record payload rejection
     - Covered by

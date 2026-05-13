@@ -5473,15 +5473,8 @@ fn handle_private_extension(
     payload: &Payload,
     loc: LocIdx,
     arena: &mut ParseArena,
-) -> Vec<StructureItem> {
-    // Extract structure items from payload
-    let items = match payload {
-        Payload::PStr(items) if !items.is_empty() => items,
-        _ => {
-            // Invalid payload - just return empty (OCaml would error)
-            return vec![];
-        }
-    };
+) -> PpxResult<Vec<StructureItem>> {
+    let items = private_extension_structure_items(payload, loc)?;
 
     // Rewrite the items first (for string transformations etc.)
     let rewritten_items: Vec<StructureItem> = items
@@ -5489,7 +5482,23 @@ fn handle_private_extension(
         .flat_map(|item| rewrite_structure_item(item, arena))
         .collect();
 
-    wrap_in_local_module(rewritten_items, loc, arena)
+    Ok(wrap_in_local_module(rewritten_items, loc, arena))
+}
+
+fn private_extension_structure_items<'a>(
+    payload: &'a Payload,
+    loc: LocIdx,
+) -> PpxResult<&'a Vec<StructureItem>> {
+    match payload {
+        Payload::PStr(items) if !items.is_empty() => Ok(items),
+        Payload::PStr(_) => Err(PpxError::at_loc(
+            loc,
+            "%%private extension expects a definition as its argument. Example: %%private(let a = \"Hello\")",
+        )),
+        Payload::PSig(_) | Payload::PTyp(_) | Payload::PPat(_) => {
+            Err(PpxError::at_loc(loc, "private extension is not support"))
+        }
+    }
 }
 
 /// Wraps a set of structure items into a local module + open pair.
@@ -15986,19 +15995,10 @@ pub fn expand_extensions(
             while i < structure.len() && is_private_extension(&structure[i], arena) {
                 if let StructureItemDesc::Pstr_extension(inner) = &*structure[i].pstr_desc {
                     let (ext, _attrs) = &**inner;
-                    let (_ext_name, payload) = ext;
-                    match payload {
-                        Payload::PStr(items) if !items.is_empty() => {
-                            for item in items.iter() {
-                                accumulated_items.extend(expand_extensions_item(item, arena)?);
-                            }
-                        }
-                        _ => {
-                            return Err(PpxError::at_loc(
-                                structure[i].pstr_loc,
-                                "%%private extension expects a definition as its argument. Example: %%private(let a = \"Hello\")",
-                            ));
-                        }
+                    let (ext_name, payload) = ext;
+                    let items = private_extension_structure_items(payload, ext_name.loc)?;
+                    for item in items.iter() {
+                        accumulated_items.extend(expand_extensions_item(item, arena)?);
                     }
                 }
                 i += 1;
@@ -16055,7 +16055,7 @@ fn expand_extensions_item(
                     ext_name.loc,
                 )])
             } else if name == "private" {
-                handle_private_extension(payload, item.pstr_loc, arena)
+                handle_private_extension(payload, ext_name.loc, arena)
             } else {
                 Ok(vec![item.clone()])
             }
@@ -16603,7 +16603,7 @@ fn rewrite_structure_item_no_spice(
                 vec![handle_raw_structure(item, payload, arena, ext_name.loc)]
             } else if name == "private" {
                 // %%private(let x = ...) -> module local_N = { let x = ... } ; open! local_N
-                handle_private_extension(payload, item.pstr_loc, arena).unwrap_or_default()
+                handle_private_extension(payload, ext_name.loc, arena).unwrap_or_default()
             } else {
                 // Rewrite payload for string transformation
                 vec![StructureItem {
