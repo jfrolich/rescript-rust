@@ -1304,6 +1304,9 @@ with a reason after checking raise sites.
       `tests/error_output_parity/compiler/fixtures/config_warn_error_unused_variable.res`
       and
       `tests/error_output_parity/compiler/fixtures/config_warn_error_raw_warning.res`.
+  - `process_directives` rejects non-string file-level `@@directive` payloads
+    - Covered by
+      `tests/error_output_parity/compiler/fixtures/directive_non_string.res`.
   - `Ast_payload.ident_or_record_as_config` invalid payload warning
     - Covered by
       `tests/error_output_parity/compiler/fixtures/config_invalid_payload_warning.res`.
