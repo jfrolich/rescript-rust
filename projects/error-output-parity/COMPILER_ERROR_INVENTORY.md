@@ -260,8 +260,18 @@ with a reason after checking raise sites.
   Additional coverage includes the qualified type-constructor parent lookup path
   in
   `tests/error_output_parity/compiler/fixtures/unbound_type_constructor_parent_module.res`,
+  the `Str` special message branch in
+  `tests/error_output_parity/compiler/fixtures/unbound_module_str.res`,
+  the module spellcheck branch in
+  `tests/error_output_parity/compiler/fixtures/unbound_module_spellcheck.res`,
+  the `module type of` lookup paths in
+  `tests/error_output_parity/compiler/fixtures/module_type_of_unbound_module.res`
+  and
+  `tests/error_output_parity/compiler/fixtures/module_type_of_unbound_qualified_module.res`,
   the module-type alias lookup path in
   `tests/error_output_parity/compiler/fixtures/module_type_alias_unbound_module.res`,
+  the extension-rebind lookup path in
+  `tests/error_output_parity/compiler/fixtures/rebind_unbound_qualified_module.res`,
   and the `with module` right-hand side lookup paths in
   `tests/error_output_parity/compiler/fixtures/with_module_equation_unbound_module.res`
   and
@@ -343,8 +353,12 @@ with a reason after checking raise sites.
   and the label spellcheck hint by
   `tests/error_output_parity/compiler/fixtures/unbound_label_spellcheck.res`.
 - `Unbound_modtype`: covered by
-  `tests/error_output_parity/compiler/fixtures/unbound_modtype.res` and the
-  signature-item lookup path in
+  `tests/error_output_parity/compiler/fixtures/unbound_modtype.res`, the
+  qualified module-type path in
+  `tests/error_output_parity/compiler/fixtures/unbound_modtype_qualified.res`,
+  the spellcheck branch in
+  `tests/error_output_parity/compiler/fixtures/unbound_modtype_spellcheck.res`,
+  and the signature-item lookup path in
   `tests/error_output_parity/compiler/fixtures/signature_unbound_modtype.res`.
 - `Access_functor_as_structure`: covered by
   `tests/error_output_parity/compiler/fixtures/access_functor_as_structure.res`.
