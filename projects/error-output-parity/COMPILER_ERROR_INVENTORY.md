@@ -265,6 +265,11 @@ with a reason after checking raise sites.
   `tests/error_output_parity/compiler/fixtures/coerce_variant_unboxed_configuration_mismatch.res`,
   `tests/error_output_parity/compiler/fixtures/coerce_variant_tag_configuration_mismatch.res`,
   `tests/error_output_parity/compiler/fixtures/coerce_variant_constructor_count_mismatch.res`,
+  `tests/error_output_parity/compiler/fixtures/coerce_record_optional_to_required.res`,
+  `tests/error_output_parity/compiler/fixtures/coerce_record_required_to_optional.res`,
+  `tests/error_output_parity/compiler/fixtures/coerce_record_left_as_runtime_mismatch.res`,
+  `tests/error_output_parity/compiler/fixtures/coerce_record_right_as_runtime_mismatch.res`,
+  `tests/error_output_parity/compiler/fixtures/coerce_record_missing_field.res`,
   and
   `tests/error_output_parity/compiler/fixtures/coerce_different_type_kinds.res`.
 - `Inlined_record_expected`: covered by
