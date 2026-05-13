@@ -6321,9 +6321,14 @@ fn parse_for_rest(
         }
         Token::In => {
             if await_kw {
-                p.err(DiagnosticCategory::Message(
-                    "A `for await` loop must use `of`, like `for await item of items`.".to_string(),
-                ));
+                p.err_at(
+                    p.arena().get_position(start_pos_idx).clone(),
+                    p.end_pos,
+                    DiagnosticCategory::Message(
+                        "A `for await` loop must use `of`, like `for await item of items`."
+                            .to_string(),
+                    ),
+                );
             }
             p.next();
             let start_expr = parse_expr(p);

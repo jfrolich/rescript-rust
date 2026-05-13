@@ -1036,6 +1036,34 @@ with a reason after checking raise sites.
       `tests/error_output_parity/compiler/fixtures/parser_standalone_attribute_structure.res`
       and
       `tests/error_output_parity/compiler/fixtures/parser_standalone_attribute_signature.resi`.
+  - Expression parsing rejects unparenthesized type constraints, non-identifier
+    tagged-template receivers, and labelled call arguments written with `:` or
+    `:?`
+    - Covered through `bsc` by
+      `tests/error_output_parity/compiler/fixtures/parser_expression_constraint_needs_parens.res`,
+      `tests/error_output_parity/compiler/fixtures/parser_tagged_template_limited_receiver.res`,
+      `tests/error_output_parity/compiler/fixtures/parser_labelled_argument_missing_equal.res`,
+      and
+      `tests/error_output_parity/compiler/fixtures/parser_optional_labelled_argument_missing_equal.res`.
+  - `for` parsing rejects missing `in`/`of`, and rejects `for await ... in`
+    before type checking
+    - Covered through `bsc` by
+      `tests/error_output_parity/compiler/fixtures/parser_for_loop_missing_in_or_of.res`
+      and
+      `tests/error_output_parity/compiler/fixtures/parser_for_await_in.res`.
+  - `let?` parser diagnostics reject recursive bindings and signature items
+    - Covered through `bsc` by
+      `tests/error_output_parity/compiler/fixtures/parser_let_unwrap_rec.res`
+      and
+      `tests/error_output_parity/compiler/fixtures/parser_let_unwrap_signature.resi`.
+  - Type declaration parsing rejects module-qualified declaration names,
+    misplaced record field doc comments, and multiple inline records at the
+    same generated field path
+    - Covered through `bsc` by
+      `tests/error_output_parity/compiler/fixtures/parser_type_declaration_longident.res`,
+      `tests/error_output_parity/compiler/fixtures/parser_record_doc_comment_field_position.res`,
+      and
+      `tests/error_output_parity/compiler/fixtures/parser_multiple_inline_record_definitions.res`.
 - `compiler/syntax/src/jsx_v4.ml`
   - `check_multiple_components` rejects more than one `@react.component`
     definition in the same module before generated React type lookups can mask
