@@ -52,7 +52,7 @@ pub struct ConstructorTag {
 /// Runtime representation selected for an untagged variant constructor.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ConstructorRuntimeTag {
-    Int(i32),
+    Int(i64),
     String(String),
     Float(String),
     BigInt(String),

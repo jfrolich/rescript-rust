@@ -68,7 +68,7 @@ pub enum TagInfo {
 pub enum AttributePayload {
     Empty,
     Str(String),
-    Int(i32),
+    Int(i64),
     Float(String),
     BigInt(String),
     Bool(bool),

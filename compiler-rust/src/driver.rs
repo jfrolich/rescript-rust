@@ -3839,6 +3839,7 @@ fn type_mod_error_to_anyhow(
             2,
         )
         .into(),
+        TypeModError::FatalError { message } => UserDiagnostic::new(message.clone(), 2).into(),
         TypeModError::ConstraintFailed {
             loc,
             actual,
@@ -8353,7 +8354,10 @@ fn variant_constructor_as_payload(
             crate::types::decl::AttributePayload::Str(_) => {
                 Some(VariantConstructorAsPayload::String)
             }
-            crate::types::decl::AttributePayload::Int(_) => Some(VariantConstructorAsPayload::Int),
+            crate::types::decl::AttributePayload::Int(_)
+            | crate::types::decl::AttributePayload::IntLiteral(_) => {
+                Some(VariantConstructorAsPayload::Int)
+            }
             crate::types::decl::AttributePayload::Float(_) => {
                 Some(VariantConstructorAsPayload::Float)
             }

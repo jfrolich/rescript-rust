@@ -706,6 +706,7 @@ fn format_constructor_attributes(attrs: &[Attribute]) -> String {
                 AttributePayload::Ident(value) => value.clone(),
                 AttributePayload::Str(value) => format!("\"{value}\""),
                 AttributePayload::Int(value) => value.to_string(),
+                AttributePayload::IntLiteral(value) => value.clone(),
                 AttributePayload::Float(value) | AttributePayload::BigInt(value) => value.clone(),
                 AttributePayload::Bool(true) => "true".to_string(),
                 AttributePayload::Bool(false) => "false".to_string(),

@@ -471,6 +471,9 @@ fn constructor_runtime_tag(
             crate::types::decl::AttributePayload::Int(value) => {
                 Some(ConstructorRuntimeTag::Int(*value))
             }
+            crate::types::decl::AttributePayload::IntLiteral(value) => {
+                crate::types::decl::parse_ocaml_int_literal(value).map(ConstructorRuntimeTag::Int)
+            }
             crate::types::decl::AttributePayload::Str(value) => {
                 Some(ConstructorRuntimeTag::String(value.clone()))
             }
@@ -506,6 +509,11 @@ fn lower_tag_info_attributes(attrs: &[crate::types::decl::Attribute]) -> Vec<Tag
                 }
                 crate::types::decl::AttributePayload::Int(value) => {
                     TagAttributePayload::Int(*value)
+                }
+                crate::types::decl::AttributePayload::IntLiteral(value) => {
+                    crate::types::decl::parse_ocaml_int_literal(value)
+                        .map(TagAttributePayload::Int)
+                        .unwrap_or(TagAttributePayload::Empty)
                 }
                 crate::types::decl::AttributePayload::Float(value) => {
                     TagAttributePayload::Float(value.clone())

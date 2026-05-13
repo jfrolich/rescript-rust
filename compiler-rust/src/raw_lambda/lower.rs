@@ -612,7 +612,9 @@ fn lower_constant(constant: Constant) -> Constant {
             comment: Some(PointerInfo::Constructor(tag)),
         } => {
             let i = match tag.runtime_tag.as_ref() {
-                Some(ConstructorRuntimeTag::Int(runtime_int)) => *runtime_int,
+                Some(ConstructorRuntimeTag::Int(runtime_int)) => {
+                    i32::try_from(*runtime_int).unwrap_or(i)
+                }
                 _ => i,
             };
             match tag.name.as_str() {

@@ -807,6 +807,8 @@ with a reason after checking raise sites.
   `tests/error_output_parity/compiler/fixtures/untagged_invalid_as_annotation.res`.
 - `Duplicated_bs_as`: covered by
   `tests/error_output_parity/compiler/fixtures/untagged_duplicate_as.res`.
+- `Ast_payload.is_single_int` overflow through `@as(...)`: covered by
+  `tests/error_output_parity/compiler/fixtures/untagged_as_int_overflow.res`.
 - `InvalidVariantTagAnnotation`: covered by
   `tests/error_output_parity/compiler/fixtures/untagged_invalid_tag_annotation.res`.
 - `TagFieldNameConflict`: covered by

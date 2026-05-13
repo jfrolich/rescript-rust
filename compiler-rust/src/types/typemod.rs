@@ -286,12 +286,9 @@ fn parser_attr_to_decl_attr(
                                     crate::types::decl::AttributePayload::BigInt(value.to_string())
                                 }
                                 Some(_) => crate::types::decl::AttributePayload::Structure(vec![]),
-                                None => value
-                                    .parse::<i32>()
-                                    .map(crate::types::decl::AttributePayload::Int)
-                                    .unwrap_or_else(|_| {
-                                        crate::types::decl::AttributePayload::Structure(vec![])
-                                    }),
+                                None => {
+                                    crate::types::decl::AttributePayload::IntLiteral(value.to_string())
+                                }
                             },
                             crate::parser::ast::Constant::Float(value, _) => {
                                 crate::types::decl::AttributePayload::Float(value.to_string())
@@ -3134,6 +3131,8 @@ pub enum TypeModError {
         loc: LocIdx,
         trace: Vec<(TypeExprRef, TypeExprRef)>,
     },
+    /// Raw fatal compiler exception message.
+    FatalError { message: String },
     /// A recursive abbreviation expansion does not satisfy its constraints.
     ConstraintFailed {
         loc: LocIdx,
@@ -4553,7 +4552,7 @@ fn ast_untagged_variant_error(loc: Location, error: AstUntaggedVariantError) -> 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 enum VariantRuntimeTag {
     String(String),
-    Int(i32),
+    Int(i64),
     Float(String),
     BigInt(String),
     Bool(bool),
@@ -4581,6 +4580,17 @@ fn process_variant_as_attributes(
             }
             crate::types::decl::AttributePayload::Int(value) => {
                 Some(VariantRuntimeTag::Int(*value))
+            }
+            crate::types::decl::AttributePayload::IntLiteral(value) => {
+                match crate::types::decl::parse_ocaml_int_literal(value) {
+                    Some(value) => Some(VariantRuntimeTag::Int(value)),
+                    None => {
+                        return Err(TypeModError::FatalError {
+                            message: "Fatal error: exception Failure(\"int_of_string\")\n"
+                                .to_string(),
+                        });
+                    }
+                }
             }
             crate::types::decl::AttributePayload::Float(value) => {
                 Some(VariantRuntimeTag::Float(value.clone()))
