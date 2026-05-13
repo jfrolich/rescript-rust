@@ -1095,6 +1095,21 @@ with a reason after checking raise sites.
       `tests/error_output_parity/compiler/fixtures/bs_variadic_attr_last_arg.res`,
       and
       `tests/error_output_parity/compiler/fixtures/bs_variadic_non_array_last_arg.res`.
+- `compiler/frontend/external_ffi_types.ml`
+  - `valid_global_name` rejects invalid global/call/constructor names
+    - Covered by
+      `tests/error_output_parity/compiler/fixtures/bs_external_invalid_global_name.res`,
+      `tests/error_output_parity/compiler/fixtures/bs_external_invalid_call_name.res`,
+      and
+      `tests/error_output_parity/compiler/fixtures/bs_external_invalid_new_name.res`.
+  - `check_external_module_name` rejects empty module bundles and bind names
+    - Covered by
+      `tests/error_output_parity/compiler/fixtures/bs_external_empty_module_as_var.res`,
+      `tests/error_output_parity/compiler/fixtures/bs_external_empty_module_as_fn.res`,
+      `tests/error_output_parity/compiler/fixtures/bs_external_empty_module_as_class.res`,
+      `tests/error_output_parity/compiler/fixtures/bs_external_empty_module_bind_name.res`,
+      and
+      `tests/error_output_parity/compiler/fixtures/bs_external_empty_module_name.res`.
 
 ## Include Mismatch Surfaces
 
