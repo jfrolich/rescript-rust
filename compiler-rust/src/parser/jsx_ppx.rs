@@ -142,6 +142,7 @@ const DUPLICATE_REACT_COMPONENT_ATTR_MSG: &str =
 const MULTIPLE_COMPONENT_DEFINITIONS_MSG: &str = "Only one component definition is allowed for each module. Move to a submodule or other file if necessary.";
 const COMPONENT_WITH_PROPS_EXTERNAL_MSG: &str = "Components cannot be defined as externals when using @react.componentWithProps.\n\nIf you intended to define an external for a React component using a props type,\nuse the type React.component<props> instead.\nAlternatively, use @react.component for an external definition with labeled arguments.";
 const COMPONENT_WITH_PROPS_FORWARD_REF_MSG: &str = "Components using React.forwardRef cannot use @react.componentWithProps. Use @react.component instead.";
+const COMPONENT_KEY_PROP_MSG: &str = "Key cannot be accessed inside of a component. Don't worry - you can always key a component from its parent!";
 const COMPONENT_PROPS_NEED_LABELLED_MSG: &str = "React: props need to be labelled arguments.\nIf you are working with refs be sure to wrap with React.forwardRef.\nIf your component doesn't have any props use () or _ instead of a name.";
 const COMPONENT_CALL_NEEDS_FUNCTION_MSG: &str =
     "JSX component calls can only be on function definitions or component wrappers (forwardRef, memo).";
@@ -577,8 +578,12 @@ fn transform_react_component_binding(
         .collect();
 
     // Extract labeled arguments from the function (use inner expression to handle forwardRef)
-    let (args, newtypes, _, jsx_warnings) = recursively_extract_named_args(arena, &inner_expr);
+    let (args, newtypes, _, jsx_warnings, key_error_loc) =
+        recursively_extract_named_args(arena, &inner_expr);
     warnings.extend(jsx_warnings);
+    if let Some(loc) = key_error_loc {
+        set_fatal_error(config, loc, COMPONENT_KEY_PROP_MSG);
+    }
 
     // Build named type list for props
     let named_type_list: Vec<NamedType> = args
@@ -3091,12 +3096,21 @@ fn recursively_extract_named_args(
     Vec<StringLoc>,
     Option<CoreType>,
     Vec<JsxPreprocessorWarning>,
+    Option<Location>,
 ) {
     let mut args = vec![];
     let mut newtypes = vec![];
     let mut warnings = vec![];
-    extract_args_rec(arena, expr, &mut args, &mut newtypes, &mut warnings);
-    (args, newtypes, None, warnings)
+    let mut key_error_loc = None;
+    extract_args_rec(
+        arena,
+        expr,
+        &mut args,
+        &mut newtypes,
+        &mut warnings,
+        &mut key_error_loc,
+    );
+    (args, newtypes, None, warnings, key_error_loc)
 }
 
 fn extract_args_rec(
@@ -3105,6 +3119,7 @@ fn extract_args_rec(
     args: &mut Vec<ExtractedArg>,
     newtypes: &mut Vec<StringLoc>,
     warnings: &mut Vec<JsxPreprocessorWarning>,
+    key_error_loc: &mut Option<Location>,
 ) {
     match &*expr.pexp_desc {
         ExpressionDesc::Pexp_fun(inner) => {
@@ -3120,6 +3135,9 @@ fn extract_args_rec(
             // Key cannot be accessed inside of a component
             let label_name = get_label(arena, arg_label);
             if label_name == "key" {
+                if key_error_loc.is_none() {
+                    *key_error_loc = Some(expr.pexp_loc);
+                }
                 return;
             }
 
@@ -3133,7 +3151,7 @@ fn extract_args_rec(
                 if matches!(arg_label, ArgLabel::Nolabel) {
                     // Continue extracting from body even for skipped args (e.g., forwardRef (_, _ref) => ...)
                     let rhs_expr: &Expression = arena.get_expr(*rhs);
-                    extract_args_rec(arena, rhs_expr, args, newtypes, warnings);
+                    extract_args_rec(arena, rhs_expr, args, newtypes, warnings, key_error_loc);
                     return;
                 }
             }
@@ -3162,7 +3180,7 @@ fn extract_args_rec(
                 });
 
                 let rhs_expr: &Expression = arena.get_expr(*rhs);
-                extract_args_rec(arena, rhs_expr, args, newtypes, warnings);
+                extract_args_rec(arena, rhs_expr, args, newtypes, warnings, key_error_loc);
             } else if matches!(arg_label, ArgLabel::Nolabel) {
                 // For forwardRef, capture unlabeled 'ref' or '_ref' argument
                 let alias = get_alias_from_pattern(arena, lhs_pat, arg_label);
@@ -3179,19 +3197,19 @@ fn extract_args_rec(
                 }
                 // Continue extracting from body even for ref
                 let rhs_expr: &Expression = arena.get_expr(*rhs);
-                extract_args_rec(arena, rhs_expr, args, newtypes, warnings);
+                extract_args_rec(arena, rhs_expr, args, newtypes, warnings, key_error_loc);
             }
         }
         ExpressionDesc::Pexp_newtype(inner) => {
             let (ref name, ref body_idx) = **inner;
             newtypes.push(name.clone());
             let body: &Expression = arena.get_expr(*body_idx);
-            extract_args_rec(arena, body, args, newtypes, warnings);
+            extract_args_rec(arena, body, args, newtypes, warnings, key_error_loc);
         }
         ExpressionDesc::Pexp_constraint(inner) => {
             let (ref inner_idx, _) = **inner;
             let inner: &Expression = arena.get_expr(*inner_idx);
-            extract_args_rec(arena, inner, args, newtypes, warnings);
+            extract_args_rec(arena, inner, args, newtypes, warnings, key_error_loc);
         }
         _ => {}
     }
@@ -3691,6 +3709,15 @@ fn transform_structure_item_desc(
             StructureItemDesc::Pstr_modtype(Box::new(transform_module_type_declaration(
                 *mt, config, arena,
             )))
+        }
+        StructureItemDesc::Pstr_include(incl) => {
+            let mod_expr = arena.get_mod_expr(incl.pincl_mod).clone();
+            let transformed = transform_module_expr(mod_expr, config, arena, warnings);
+            StructureItemDesc::Pstr_include(Box::new(IncludeDeclaration {
+                pincl_mod: arena.push_mod_expr(transformed),
+                pincl_loc: incl.pincl_loc,
+                pincl_attributes: incl.pincl_attributes,
+            }))
         }
         other => other,
     }
