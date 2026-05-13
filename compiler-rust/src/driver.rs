@@ -2769,6 +2769,17 @@ fn type_mod_error_to_anyhow(
             2,
         )
         .into(),
+        TypeModError::CannotScrapeAlias { loc, path } => UserDiagnostic::new(
+            format_compiler_error_report(
+                arena,
+                source,
+                filename,
+                *loc,
+                &format!("This is an alias for module {}, which is missing", path.name()),
+            ),
+            2,
+        )
+        .into(),
         TypeModError::IllegalValueName { loc, name } => UserDiagnostic::new(
             format_compiler_error_report_from_external_location(
                 type_ctx,

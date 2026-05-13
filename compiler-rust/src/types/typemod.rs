@@ -3272,6 +3272,13 @@ pub enum TypeModError {
         /// Normalized dangling path.
         expanded: Path,
     },
+    /// A module type alias could not be scraped because its target is missing.
+    CannotScrapeAlias {
+        /// Source location to report.
+        loc: LocIdx,
+        /// Missing alias target path.
+        path: Path,
+    },
     /// A value identifier rejected by `Env.check_value_name`.
     IllegalValueName {
         /// Declaration location to report.
@@ -8824,6 +8831,55 @@ fn parent_path_for_module_type(mty: &crate::types::decl::ModuleType) -> Option<P
     }
 }
 
+fn cannot_scrape_alias_path_for_module_type<'a>(
+    tctx: &mut TypeCheckContext<'a>,
+    env: &Env,
+    mty: &crate::types::decl::ModuleType,
+) -> Option<Path> {
+    use crate::types::decl::ModuleType as DeclMty;
+
+    let DeclMty::MtyAlias(_, path) = mty else {
+        return None;
+    };
+    crate::types::typecore::alias_target_for_module_path(
+        path,
+        env,
+        &mut tctx.persistent_env,
+        tctx.type_ctx,
+    )
+    .or_else(|| Some(path.clone()))
+}
+
+fn check_module_type_extracts_signature<'a>(
+    tctx: &mut TypeCheckContext<'a>,
+    env: &Env,
+    mty: &crate::types::decl::ModuleType,
+    loc: LocIdx,
+) -> TypeModResult<()> {
+    use crate::types::decl::ModuleType as DeclMty;
+
+    if resolve_mod_type_to_sig(mty, Some(env), &mut tctx.persistent_env, tctx.type_ctx).is_some() {
+        return Ok(());
+    }
+
+    match scrape_alias_module_type(mty, env, &mut tctx.persistent_env, tctx.type_ctx) {
+        Some(DeclMty::MtySignature(_)) => Ok(()),
+        Some(DeclMty::MtyAlias(_, path)) => Err(TypeModError::CannotScrapeAlias { loc, path }),
+        Some(_) => Err(TypeModError::CoreError(TypeCoreError::SignatureExpected {
+            loc,
+        })),
+        None => {
+            if let Some(path) = cannot_scrape_alias_path_for_module_type(tctx, env, mty) {
+                Err(TypeModError::CannotScrapeAlias { loc, path })
+            } else {
+                Err(TypeModError::CoreError(TypeCoreError::SignatureExpected {
+                    loc,
+                }))
+            }
+        }
+    }
+}
+
 pub(crate) fn force_package_modtype_translation_for_core_type<'a>(
     tctx: &mut TypeCheckContext<'a>,
     env: &Env,
@@ -11901,6 +11957,12 @@ fn translate_module_type_to_decl_with_typed_hint<'a>(
                 arena,
                 arena.get_mod_type(*body_idx),
                 typed_body_hint,
+            )?;
+            check_module_type_extracts_signature(
+                tctx,
+                env,
+                &base_mty,
+                arena.get_mod_type(*body_idx).pmty_loc,
             )?;
             check_with_constraint_components(
                 tctx,
@@ -14987,6 +15049,12 @@ fn transl_modtype<'a>(
             let typed_body = transl_modtype(tctx, env, arena, body)?;
             let base_mty = decl_module_type_from_typed(&typed_body);
             if let Some(base_mty) = base_mty.as_ref() {
+                check_module_type_extracts_signature(
+                    tctx,
+                    env,
+                    base_mty,
+                    body.pmty_loc,
+                )?;
                 check_with_constraint_components(
                     tctx,
                     env,
