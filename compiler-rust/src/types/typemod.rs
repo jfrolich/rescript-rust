@@ -22187,14 +22187,33 @@ fn type_structure_item<'a>(
                 }
             }
 
-            // The result type for the extension constructors
-            let ext_res_ty = tctx.type_ctx.new_generic_constr(path.clone(), vec![]);
-
             // OCaml typedecl.ml: begin_def/end_def/generalize around type extension
             // constructor translation, matching Pstr_exception treatment. This ensures
             // arg types are at GENERIC_LEVEL so instance() creates fresh copies.
             tctx.type_variables.clear();
             ctx.begin_def();
+
+            let mut typed_params = Vec::new();
+            let mut typed_param_type_refs = Vec::new();
+            for (ct, v) in &ext.ptyext_params {
+                let (typed_ct, ty_ref) = transl_type(tctx, env, arena.get_core_type(*ct))?;
+                typed_param_type_refs.push(ty_ref);
+                let variance = match v {
+                    ParserVariance::Covariant => TypesVariance::covariant(),
+                    ParserVariance::Contravariant => TypesVariance::contravariant(),
+                    ParserVariance::Invariant => TypesVariance::null(),
+                };
+                typed_params.push((typed_ct, variance));
+            }
+            let allowed_type_params: HashSet<TypeExprRef> = typed_param_type_refs
+                .iter()
+                .map(|ty_ref| ctx.repr(*ty_ref))
+                .collect();
+
+            // The result type for non-GADT extension constructors. OCaml passes
+            // `typext_params` through `make_constructor`, so use the extension
+            // parameter nodes rather than the original declaration parameters.
+            let ext_res_ty = ctx.new_generic_constr(path.clone(), typed_param_type_refs.clone());
 
             // Translate constructors and register them in the environment
             let mut typed_constructors = Vec::new();
@@ -22332,11 +22351,25 @@ fn type_structure_item<'a>(
                             }
                         };
                         let (typed_ret, ext_ret_ty) = match ret {
-	                        Some(ct) => {
-	                            let (typed_ct, ty_ref) =
-	                                transl_type(tctx, env, arena.get_core_type(*ct))?;
-	                            (Some(typed_ct), Some(ty_ref))
-	                        }
+                            Some(ct) => {
+                                let ret_type = arena.get_core_type(*ct);
+                                let (typed_ct, ty_ref) = transl_type(tctx, env, ret_type)?;
+                                let ret_repr = ctx.repr(ty_ref);
+                                let ret_matches_extension = matches!(
+                                    &*ctx.get_desc(ret_repr),
+                                    crate::types::type_expr::TypeDesc::Tconstr { path: ret_path, .. }
+                                        if ret_path.same(&path)
+                                );
+                                if !ret_matches_extension {
+                                    return Err(TypeModError::ConstraintFailed {
+                                        loc: ret_type.ptyp_loc,
+                                        actual: ty_ref,
+                                        expected: ctx
+                                            .new_constr(path.clone(), typed_param_type_refs.clone()),
+                                    });
+                                }
+                                (Some(typed_ct), Some(ty_ref))
+                            }
                             None => (None, None),
                         };
                         (
@@ -22459,30 +22492,13 @@ fn type_structure_item<'a>(
 
             // OCaml typedecl.ml: end_def and generalize constructor arg types
             ctx.end_def();
+            for ty_ref in &typed_param_type_refs {
+                crate::types::generalize(ctx, *ty_ref);
+            }
             for ty_ref in &ext_types_to_generalize {
                 crate::types::generalize(ctx, *ty_ref);
             }
 
-            // Translate params
-            let mut typed_params = Vec::new();
-            let mut typed_param_type_refs = Vec::new();
-            for (ct, v) in &ext.ptyext_params {
-                let (typed_ct, ty_ref) = transl_type(tctx, env, arena.get_core_type(*ct))?;
-                typed_param_type_refs.push(ty_ref);
-                let variance = match v {
-                    ParserVariance::Covariant => TypesVariance::covariant(),
-                    ParserVariance::Contravariant => TypesVariance::contravariant(),
-                    ParserVariance::Invariant => TypesVariance::null(),
-                };
-                typed_params.push((typed_ct, variance));
-            }
-            for ty_ref in &typed_param_type_refs {
-                crate::types::generalize(ctx, *ty_ref);
-            }
-            let allowed_type_params: HashSet<TypeExprRef> = typed_param_type_refs
-                .iter()
-                .map(|ty_ref| ctx.repr(*ty_ref))
-                .collect();
             for ext_cstr in &mut typed_constructors {
                 ext_cstr.ext_type.ext_type_params = typed_param_type_refs.clone();
                 if let crate::types::typedtree::ExtensionConstructorKind::Text_decl(

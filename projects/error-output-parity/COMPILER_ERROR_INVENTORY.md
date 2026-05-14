@@ -600,9 +600,12 @@ with a reason after checking raise sites.
     `tests/error_output_parity/compiler/fixtures/definition_mismatch_payload.res`.
 - `Constraint_failed`
   - Covered for GADT constructor return-type validation, exception result-type
-    validation, and recursive abbreviation expansion parameter validation by
+    validation, type-extension constructor result-type validation, and recursive
+    abbreviation expansion parameter validation by
     `tests/error_output_parity/compiler/fixtures/constraint_failed_constructor_return.res`,
     `tests/error_output_parity/compiler/fixtures/exception_wrong_result.res`,
+    `tests/error_output_parity/compiler/fixtures/extension_wrong_result.res`,
+    `tests/error_output_parity/compiler/fixtures/extension_wrong_result_param.res`,
     and
     `tests/error_output_parity/compiler/fixtures/constraint_failed_recursion.res`.
 - `Inconsistent_constraint`
