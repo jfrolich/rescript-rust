@@ -877,6 +877,12 @@ impl PersistentEnv {
         self.compiling_module = module_name;
     }
 
+    pub fn is_compiling_module(&self, module_name: &str) -> bool {
+        self.compiling_module
+            .as_deref()
+            .is_some_and(|compiling| compiling == module_name)
+    }
+
     /// Add a directory to the load path.
     pub fn add_load_path(&mut self, path: PathBuf) {
         if !self.load_path.contains(&path) {

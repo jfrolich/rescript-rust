@@ -1196,6 +1196,8 @@ pub struct TypeCheckContext<'a> {
     pub force_fresh_local_float: bool,
     /// Mirrors OCaml's Experimental_features.LetUnwrap during type checking.
     pub experimental_let_unwrap: bool,
+    /// Mirrors OCaml's Clflags.transparent_modules from `-no-alias-deps`.
+    pub transparent_modules: bool,
     /// When inside Pexp_constraint, the GENERIC constraint type. Used by
     /// type_match_cases_batch_non_gadt to create fresh instances per case
     /// body, matching OCaml's behavior where ty_res is generic.
@@ -1272,6 +1274,7 @@ impl<'a> TypeCheckContext<'a> {
             persistent_manifest_type_lookup_depth: 0,
             force_fresh_local_float: false,
             experimental_let_unwrap: false,
+            transparent_modules: false,
             generic_constraint_body_ty: None,
             module_expr_semantic_types: HashMap::new(),
             applicative_functor_body_depth: 0,

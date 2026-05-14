@@ -10104,6 +10104,60 @@ pub fn lookup_module_path_by_lid<'b>(
     }
 }
 
+fn lookup_module_path_for_module_expr<'a>(
+    tctx: &mut TypeCheckContext<'a>,
+    env: &Env,
+    arena: &'a ParseArena,
+    lid: &Longident,
+    load: bool,
+    loc: LocIdx,
+) -> TypeModResult<Path> {
+    if tctx.transparent_modules
+        && !load
+        && let Longident::Lident(mod_idx) = lid
+    {
+        let mod_name = arena.get_string(*mod_idx);
+        if let Ok((id, md)) = env.find_module_with_id(mod_name) {
+            return Ok(md
+                .md_path
+                .clone()
+                .unwrap_or_else(|| Path::pident(id.clone())));
+        }
+
+        if tctx
+            .persistent_env
+            .as_ref()
+            .is_some_and(|pers| pers.is_compiling_module(mod_name))
+        {
+            let error = crate::types::typecore::unbound_module_lookup_error(tctx, env, loc, lid);
+            return Err(TypeModError::CoreError(error));
+        }
+
+        let has_cmi = tctx
+            .persistent_env
+            .as_ref()
+            .is_some_and(|pers| pers.has_known_module_without_loading(mod_name));
+        if !has_cmi {
+            tctx.report_warning(
+                arena.none_loc(),
+                Warning::NoCmiFile {
+                    name: mod_name.to_string(),
+                    reason: None,
+                },
+            );
+        }
+        return Ok(Path::pident(Ident::create_persistent(mod_name)));
+    }
+
+    lookup_module_path_by_lid(lid, arena, env, &mut tctx.persistent_env, tctx.type_ctx).ok_or_else(
+        || {
+            TypeModError::CoreError(crate::types::typecore::unbound_module_lookup_error(
+                tctx, env, loc, lid,
+            ))
+        },
+    )
+}
+
 /// Look up a module-type path by longident in the module-type namespace.
 /// This mirrors OCaml `Typetexp.find_modtype` / `transl_modtype_longident`.
 pub fn lookup_modtype_path_by_lid<'b>(
@@ -17295,14 +17349,8 @@ fn type_module_expr_with_alias<'a>(
             // Module identifier: M
             // Look up the module path in the environment
             let longident = tctx.resolve_lid(lid.txt).clone();
-            let path = lookup_module_path_by_lid(
-                &longident,
-                arena,
-                env,
-                &mut tctx.persistent_env,
-                tctx.type_ctx,
-            )
-            .unwrap_or_else(|| path_from_longident(&longident, |idx| arena.get_string(idx)));
+            let path =
+                lookup_module_path_for_module_expr(tctx, env, arena, &longident, !alias, loc)?;
             let aliasable = !env.is_functor_arg_path(&path);
             let mod_type = if alias && aliasable {
                 None

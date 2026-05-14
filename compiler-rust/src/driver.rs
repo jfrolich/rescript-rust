@@ -1375,6 +1375,8 @@ pub struct CompilerOptions {
     pub cross_module_inline: bool,
     /// Mirror `Clflags.no_assert_false` / `-bs-noassertfalse`.
     pub no_assert_false: bool,
+    /// Mirror `Clflags.transparent_modules` / `-no-alias-deps`.
+    pub transparent_modules: bool,
     /// Mirror `Js_config.no_builtin_ppx` / `-bs-no-builtin-ppx`.
     pub no_builtin_ppx: bool,
     /// External `-ppx` rewriters, in command-line order.
@@ -1430,6 +1432,7 @@ impl Default for CompilerOptions {
             check_div_by_zero: true,
             cross_module_inline: false,
             no_assert_false: false,
+            transparent_modules: false,
             no_builtin_ppx: false,
             external_ppxs: Vec::new(),
             nopervasives: false,
@@ -1447,6 +1450,15 @@ impl Default for CompilerOptions {
 impl CompilerOptions {
     fn preserve_canonical_typedtree(&self) -> bool {
         self.dump_typed_sexp || self.dump_typed_sexp_locs || self.capture_intermediates
+    }
+
+    fn current_unit_name(&self) -> Option<String> {
+        self.module_name.clone().or_else(|| {
+            self.source_filename
+                .as_deref()
+                .map(module_name_from_source_filename)
+                .filter(|name| !name.is_empty())
+        })
     }
 }
 
@@ -10993,6 +11005,7 @@ pub fn compile_source_to_js_with_options(
     type_ctx.set_preserve_canonical_typedtree(options.preserve_canonical_typedtree());
     let mut tctx = TypeCheckContext::new(&type_ctx, parser.arena());
     tctx.experimental_let_unwrap = experimental_let_unwrap;
+    tctx.transparent_modules = options.transparent_modules;
     apply_warning_options(&mut tctx, options);
     apply_file_config_warning_options(&mut tctx, &file_config);
     let mut env = initial_env(&type_ctx);
@@ -11004,13 +11017,15 @@ pub fn compile_source_to_js_with_options(
     pers_env.set_load_path(load_path.clone());
     pers_env.set_open_modules(options.open_modules.clone());
     pers_env.set_jsx_version(options.jsx_version);
+    let current_unit_name = options.current_unit_name();
+    pers_env.set_compiling_module(current_unit_name.clone());
     load_pervasives(
         &mut pers_env,
         &mut env,
         &type_ctx,
         &options.open_modules,
         options.nopervasives,
-        options.module_name.as_deref(),
+        current_unit_name.as_deref(),
     );
 
     // Store persistent env in the type check context for module resolution
@@ -11727,6 +11742,7 @@ pub fn typecheck_interface_source(
     type_ctx.set_preserve_canonical_typedtree(options.preserve_canonical_typedtree());
     let mut tctx = TypeCheckContext::new(&type_ctx, parser.arena());
     tctx.experimental_let_unwrap = experimental_let_unwrap;
+    tctx.transparent_modules = options.transparent_modules;
     apply_warning_options(&mut tctx, options);
     apply_file_config_warning_options(&mut tctx, &file_config);
     let mut env = initial_env(&type_ctx);
@@ -11738,13 +11754,15 @@ pub fn typecheck_interface_source(
     pers_env.set_load_path(load_path.clone());
     pers_env.set_open_modules(options.open_modules.clone());
     pers_env.set_jsx_version(options.jsx_version);
+    let current_unit_name = options.current_unit_name();
+    pers_env.set_compiling_module(current_unit_name.clone());
     load_pervasives(
         &mut pers_env,
         &mut env,
         &type_ctx,
         &options.open_modules,
         options.nopervasives,
-        options.module_name.as_deref(),
+        current_unit_name.as_deref(),
     );
 
     tctx.set_persistent_env(pers_env);
@@ -12058,6 +12076,7 @@ pub fn typecheck_and_dump_sexp<W: std::io::Write>(
         type_ctx.set_preserve_canonical_typedtree(true);
         let mut tctx = TypeCheckContext::new(&type_ctx, parser.arena());
         tctx.experimental_let_unwrap = experimental_let_unwrap;
+        tctx.transparent_modules = options.transparent_modules;
         apply_warning_options(&mut tctx, options);
         apply_file_config_warning_options(&mut tctx, &file_config);
         let mut env = initial_env(&type_ctx);
@@ -12068,13 +12087,15 @@ pub fn typecheck_and_dump_sexp<W: std::io::Write>(
         pers_env.set_load_path(load_path);
         pers_env.set_open_modules(options.open_modules.clone());
         pers_env.set_jsx_version(options.jsx_version);
+        let current_unit_name = options.current_unit_name();
+        pers_env.set_compiling_module(current_unit_name.clone());
         load_pervasives(
             &mut pers_env,
             &mut env,
             &type_ctx,
             &options.open_modules,
             options.nopervasives,
-            options.module_name.as_deref(),
+            current_unit_name.as_deref(),
         );
         tctx.set_persistent_env(pers_env);
 
@@ -12149,6 +12170,7 @@ pub fn typecheck_and_dump_sexp<W: std::io::Write>(
         type_ctx.set_preserve_canonical_typedtree(true);
         let mut tctx = TypeCheckContext::new(&type_ctx, parser.arena());
         tctx.experimental_let_unwrap = experimental_let_unwrap;
+        tctx.transparent_modules = options.transparent_modules;
         apply_warning_options(&mut tctx, options);
         apply_file_config_warning_options(&mut tctx, &file_config);
         let mut env = initial_env(&type_ctx);
@@ -12159,13 +12181,15 @@ pub fn typecheck_and_dump_sexp<W: std::io::Write>(
         pers_env.set_load_path(load_path);
         pers_env.set_open_modules(options.open_modules.clone());
         pers_env.set_jsx_version(options.jsx_version);
+        let current_unit_name = options.current_unit_name();
+        pers_env.set_compiling_module(current_unit_name.clone());
         load_pervasives(
             &mut pers_env,
             &mut env,
             &type_ctx,
             &options.open_modules,
             options.nopervasives,
-            options.module_name.as_deref(),
+            current_unit_name.as_deref(),
         );
         tctx.set_persistent_env(pers_env);
 
@@ -13322,6 +13346,7 @@ pub fn typecheck_stored_structure_and_dump_sexp<W: std::io::Write>(
     type_ctx.set_preserve_canonical_typedtree(true);
     let mut tctx = TypeCheckContext::new(&type_ctx, &arena);
     tctx.experimental_let_unwrap = experimental_let_unwrap;
+    tctx.transparent_modules = options.transparent_modules;
     apply_warning_options(&mut tctx, options);
     apply_file_config_warning_options(&mut tctx, &file_config);
     let mut env = initial_env(&type_ctx);
@@ -13332,13 +13357,15 @@ pub fn typecheck_stored_structure_and_dump_sexp<W: std::io::Write>(
     pers_env.set_load_path(load_path);
     pers_env.set_open_modules(options.open_modules.clone());
     pers_env.set_jsx_version(options.jsx_version);
+    let current_unit_name = options.current_unit_name();
+    pers_env.set_compiling_module(current_unit_name.clone());
     load_pervasives(
         &mut pers_env,
         &mut env,
         &type_ctx,
         &options.open_modules,
         options.nopervasives,
-        options.module_name.as_deref(),
+        current_unit_name.as_deref(),
     );
     tctx.set_persistent_env(pers_env);
 
@@ -13370,6 +13397,7 @@ pub fn typecheck_stored_signature_and_dump_sexp<W: std::io::Write>(
     type_ctx.set_preserve_canonical_typedtree(true);
     let mut tctx = TypeCheckContext::new(&type_ctx, &arena);
     tctx.experimental_let_unwrap = experimental_let_unwrap;
+    tctx.transparent_modules = options.transparent_modules;
     apply_warning_options(&mut tctx, options);
     apply_file_config_warning_options(&mut tctx, &file_config);
     let mut env = initial_env(&type_ctx);
@@ -13380,13 +13408,15 @@ pub fn typecheck_stored_signature_and_dump_sexp<W: std::io::Write>(
     pers_env.set_load_path(load_path);
     pers_env.set_open_modules(options.open_modules.clone());
     pers_env.set_jsx_version(options.jsx_version);
+    let current_unit_name = options.current_unit_name();
+    pers_env.set_compiling_module(current_unit_name.clone());
     load_pervasives(
         &mut pers_env,
         &mut env,
         &type_ctx,
         &options.open_modules,
         options.nopervasives,
-        options.module_name.as_deref(),
+        current_unit_name.as_deref(),
     );
     tctx.set_persistent_env(pers_env);
 
@@ -14005,6 +14035,7 @@ pub fn compile_preprocessed_structure_in_process_until_js(
     type_ctx.set_preserve_canonical_typedtree(options.preserve_canonical_typedtree());
     let mut tctx = TypeCheckContext::new(&type_ctx, arena);
     tctx.experimental_let_unwrap = options.experimental_let_unwrap || file_config.let_unwrap;
+    tctx.transparent_modules = options.transparent_modules;
     apply_warning_options(&mut tctx, options);
     apply_file_config_warning_options(&mut tctx, &file_config);
     let mut env = initial_env(&type_ctx);
@@ -14016,14 +14047,14 @@ pub fn compile_preprocessed_structure_in_process_until_js(
     pers_env.set_open_modules(options.open_modules.clone());
     pers_env.set_jsx_version(options.jsx_version);
     pers_env.set_nopervasives(options.nopervasives);
-    pers_env.set_compiling_module(options.module_name.clone());
+    pers_env.set_compiling_module(Some(module_name.to_string()));
     load_pervasives(
         &mut pers_env,
         &mut env,
         &type_ctx,
         &options.open_modules,
         options.nopervasives,
-        options.module_name.as_deref(),
+        Some(module_name),
     );
 
     tctx.set_persistent_env(pers_env);
@@ -14475,6 +14506,7 @@ pub fn typecheck_preprocessed_signature_in_process(
     type_ctx.set_preserve_canonical_typedtree(options.preserve_canonical_typedtree());
     let mut tctx = TypeCheckContext::new(&type_ctx, arena);
     tctx.experimental_let_unwrap = options.experimental_let_unwrap || file_config.let_unwrap;
+    tctx.transparent_modules = options.transparent_modules;
     apply_warning_options(&mut tctx, options);
     apply_file_config_warning_options(&mut tctx, &file_config);
     let mut env = initial_env(&type_ctx);
@@ -14486,14 +14518,14 @@ pub fn typecheck_preprocessed_signature_in_process(
     pers_env.set_open_modules(options.open_modules.clone());
     pers_env.set_jsx_version(options.jsx_version);
     pers_env.set_nopervasives(options.nopervasives);
-    pers_env.set_compiling_module(options.module_name.clone());
+    pers_env.set_compiling_module(Some(module_name.to_string()));
     load_pervasives(
         &mut pers_env,
         &mut env,
         &type_ctx,
         &options.open_modules,
         options.nopervasives,
-        options.module_name.as_deref(),
+        Some(module_name),
     );
 
     tctx.set_persistent_env(pers_env);
@@ -14581,6 +14613,7 @@ pub fn typecheck_implementation_in_process(
     type_ctx.set_preserve_canonical_typedtree(options.preserve_canonical_typedtree());
     let mut tctx = TypeCheckContext::new(&type_ctx, parser.arena());
     tctx.experimental_let_unwrap = options.experimental_let_unwrap || file_config.let_unwrap;
+    tctx.transparent_modules = options.transparent_modules;
     apply_warning_options(&mut tctx, options);
     apply_file_config_warning_options(&mut tctx, &file_config);
     let mut env = initial_env(&type_ctx);
@@ -14592,14 +14625,14 @@ pub fn typecheck_implementation_in_process(
     pers_env.set_open_modules(options.open_modules.clone());
     pers_env.set_jsx_version(options.jsx_version);
     pers_env.set_nopervasives(options.nopervasives);
-    pers_env.set_compiling_module(options.module_name.clone());
+    pers_env.set_compiling_module(Some(module_name.to_string()));
     load_pervasives(
         &mut pers_env,
         &mut env,
         &type_ctx,
         &options.open_modules,
         options.nopervasives,
-        options.module_name.as_deref(),
+        Some(module_name),
     );
 
     tctx.set_persistent_env(pers_env);

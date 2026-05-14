@@ -388,6 +388,8 @@ with a reason after checking raise sites.
   `tests/error_output_parity/compiler/fixtures/module_type_of_unbound_qualified_module.res`,
   the module-type alias lookup path in
   `tests/error_output_parity/compiler/fixtures/module_type_alias_unbound_module.res`,
+  the module-expression alias lookup path in
+  `tests/error_output_parity/compiler/fixtures/module_alias_unbound_module.res`,
   the extension-rebind lookup path in
   `tests/error_output_parity/compiler/fixtures/rebind_unbound_qualified_module.res`,
   and the `with module` right-hand side lookup paths in
@@ -934,6 +936,13 @@ with a reason after checking raise sites.
   - `Illegal_value_name`
     - Covered by
       `tests/error_output_parity/compiler/cases/illegal_value_name.res`.
+  - `Warnings.No_cmi_file` from `lookup_module ~load:false` under
+    `-no-alias-deps`
+    - Covered by
+      `tests/error_output_parity/compiler/cases/no_cmi_file_warning.res`.
+    - The current-unit branch still reports `Unbound_module` without the CMI
+      warning, covered by
+      `tests/error_output_parity/compiler/cases/module_alias_current_unit_no_alias_deps.res`.
   - Delayed unused value/type/module warnings for implementation bindings
     hidden by an explicit module constraint
     - Covered by
