@@ -271,14 +271,31 @@ fn format_include_error(
             expected,
             error,
         } => {
+            let actual = format_module_type(type_ctx, actual);
+            let expected = format_module_type(type_ctx, expected);
             output.push_str("  At position functor (");
             output.push_str(param.name());
             output.push_str(") -> <here>\n");
-            output.push_str("  Modules do not match: ");
-            output.push_str(&format_module_type(type_ctx, actual));
-            output.push_str(" is not included in ");
-            output.push_str(&format_module_type(type_ctx, expected));
-            output.push('\n');
+            if actual.contains('\n')
+                && expected.contains('\n')
+                && actual.contains(" = ")
+                && expected.contains(" = ")
+            {
+                output.push_str("  Modules do not match:\n");
+                output.push_str("    ");
+                output.push_str(&actual);
+                output.push('\n');
+                output.push_str("  is not included in\n");
+                output.push_str("    ");
+                output.push_str(&expected);
+                output.push('\n');
+            } else {
+                output.push_str("  Modules do not match: ");
+                output.push_str(&actual);
+                output.push_str(" is not included in ");
+                output.push_str(&expected);
+                output.push('\n');
+            }
             format_functor_body_error(type_ctx, filename, param, error, output);
         }
         IncludeModError::AtModtype { name, error } => {
@@ -311,7 +328,7 @@ fn format_include_error(
             }
             output.push_str("  ");
             output.push_str(&code_frame::format_location(
-                filename,
+                &location_filename(type_ctx, filename, &expected.type_loc),
                 &expected.type_loc.loc_start,
                 &expected.type_loc.loc_end,
             ));
@@ -319,7 +336,7 @@ fn format_include_error(
             output.push_str("    Expected declaration\n");
             output.push_str("  ");
             output.push_str(&code_frame::format_location(
-                filename,
+                &location_filename(type_ctx, filename, &actual.type_loc),
                 &actual.type_loc.loc_start,
                 &actual.type_loc.loc_end,
             ));
@@ -346,7 +363,7 @@ fn format_include_error(
             output.push('\n');
             output.push_str("  ");
             output.push_str(&code_frame::format_location(
-                filename,
+                &location_filename(type_ctx, filename, &expected.ext_loc),
                 &expected.ext_loc.loc_start,
                 &expected.ext_loc.loc_end,
             ));
@@ -354,7 +371,7 @@ fn format_include_error(
             output.push_str("    Expected declaration\n");
             output.push_str("  ");
             output.push_str(&code_frame::format_location(
-                filename,
+                &location_filename(type_ctx, filename, &actual.ext_loc),
                 &actual.ext_loc.loc_start,
                 &actual.ext_loc.loc_end,
             ));
@@ -369,7 +386,7 @@ fn format_include_error(
             output.push_str("' is required but not provided\n");
             output.push_str("  ");
             output.push_str(&code_frame::format_location(
-                filename,
+                &location_filename(type_ctx, filename, loc),
                 &loc.loc_start,
                 &loc.loc_end,
             ));
@@ -390,7 +407,7 @@ fn format_include_error(
             output.push('\n');
             output.push_str("  ");
             output.push_str(&code_frame::format_location(
-                filename,
+                &location_filename(type_ctx, filename, &expected.val_loc),
                 &expected.val_loc.loc_start,
                 &expected.val_loc.loc_end,
             ));
@@ -398,7 +415,7 @@ fn format_include_error(
             output.push_str("    Expected declaration\n");
             output.push_str("  ");
             output.push_str(&code_frame::format_location(
-                filename,
+                &location_filename(type_ctx, filename, &actual.val_loc),
                 &actual.val_loc.loc_start,
                 &actual.val_loc.loc_end,
             ));
@@ -456,6 +473,13 @@ fn is_compact_type_declaration_mismatch(error: &IncludeModError) -> bool {
         IncludeModError::TypeDeclarationMismatch { detail, .. }
             if detail == "Their variances do not agree."
     )
+}
+
+fn location_filename(type_ctx: &TypeContext, fallback: &str, loc: &Location) -> String {
+    type_ctx
+        .resolve_cmi_longident_component(loc.loc_start.file_name)
+        .filter(|name| !name.is_empty() && name != "_none_")
+        .unwrap_or_else(|| fallback.to_string())
 }
 
 fn format_functor_body_error(

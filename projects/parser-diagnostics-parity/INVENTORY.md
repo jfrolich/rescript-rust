@@ -289,6 +289,45 @@ Variant-constructor mismatch coverage now includes:
   `Record_representation`; the other `Includecore.type_mismatch` constructors
   above are covered by byte-for-byte OCaml/Rust fixtures.
 
+`compiler/ml/includemod.ml:23-39` defines the higher-level module inclusion
+symptoms. Coverage now includes:
+
+1. `Includemod.Missing_field`
+   - covered by `tests/error_output_parity/compiler/fixtures/not_included_missing_value.res`
+2. `Includemod.Value_descriptions`
+   - covered by `tests/error_output_parity/compiler/fixtures/not_included_value_mismatch.res`
+3. `Includemod.Type_declarations`
+   - covered by the `not_included_type_*`, `not_included_record_*`, and
+     `not_included_variant_*` fixtures above.
+4. `Includemod.Extension_constructors`
+   - covered by `tests/error_output_parity/compiler/fixtures/not_included_extension_mismatch.res`
+5. `Includemod.Module_types`
+   - covered by `tests/error_output_parity/compiler/fixtures/not_included_module_mismatch.res`
+   - functor-body alias formatting is covered by
+     `tests/error_output_parity/compiler/fixtures/not_included_functor_arg_module_alias_mismatch.res`
+6. `Includemod.Modtype_infos`
+   - covered by `tests/error_output_parity/compiler/fixtures/not_included_modtype_mismatch.res`
+7. `Includemod.Modtype_permutation`
+   - covered by `tests/error_output_parity/compiler/fixtures/modtype_permutation.res`
+8. `Includemod.Interface_mismatch`
+   - covered by `tests/error_output_parity/compiler/cases/compunit_value_mismatch.res`
+9. `Includemod.Unbound_module_path`
+   - covered by `tests/error_output_parity/compiler/cases/include_unbound_module_path.res`
+
+`Includemod.Unbound_modtype_path` and `Includemod.Invalid_module_alias`
+reachability notes:
+
+- `Unbound_modtype_path` is raised from
+  `compiler/ml/includemod.ml:92-95` only after the same environment has already
+  indicated that the module-type path may expand. Ordinary ReScript source
+  probes with an unbound module type reach `Typetexp.Unbound_modtype` before
+  inclusion.
+- `Invalid_module_alias` is guarded by `Env.is_functor_arg` in
+  `compiler/ml/includemod.ml:209-211`. Source probes with functor-argument
+  aliases currently report the surrounding `Module_types` mismatch; no direct
+  ReScript source fixture is currently known that prints
+  `Module <path> cannot be aliased`.
+
 ### 5.2 Compiled Interface Format Diagnostics
 
 `compiler/ml/cmi_format.ml:18-21` defines compiled-interface reader errors.
@@ -301,6 +340,11 @@ These are covered through direct `.cmi` cases in
    - covered by `tests/error_output_parity/compiler/cases/cmi_wrong_version.cmi`
 3. `Cmi_format.Corrupted_interface`
    - covered by `tests/error_output_parity/compiler/cases/cmi_corrupted.cmi`
+
+`compiler/ml/cmt_format.ml:69-70` defines `Cmt_format.Not_a_typedtree`.
+It is covered by `tests/error_output_parity/compiler/cases/gentype_stale_cmti.res`,
+where `-bs-gentype` selects a stale `.cmti` containing only CMI data and both
+compilers print `Fatal error: exception Cmt_format.Error(_)`.
 
 ## 6. Formatting and Presentation Contract
 

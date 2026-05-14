@@ -4495,6 +4495,12 @@ fn compiled_interface_file_exists(options: &CompilerOptions, source_file: &str) 
         .any(|dir| dir.join(&uncapitalized).exists() || dir.join(&filename).exists())
 }
 
+fn interface_cmi_name(source_file: &str) -> String {
+    let mut intf = std::path::PathBuf::from(source_file);
+    intf.set_extension("cmi");
+    intf.to_string_lossy().into_owned()
+}
+
 fn push_compiler_error_report_header_from_location(
     output: &mut String,
     source: &str,
@@ -11104,6 +11110,16 @@ pub fn compile_source_to_js_with_options(
         options,
         Some(has_resi),
     );
+    check_compunit_inclusion_for_errors(
+        &mut tctx,
+        &type_ctx,
+        &env,
+        &typed_structure,
+        source_file_for_interface,
+        source,
+        filename,
+        has_resi,
+    )?;
 
     // OCaml's type_implementation_more calls normalize_signature ONLY when there
     // is no .resi file (Mli_exists branch skips it). Match this behavior:
@@ -11613,6 +11629,122 @@ fn report_compunit_inclusion_warnings(
     let loc = tctx.arena.none_loc();
     for warning in warnings {
         tctx.report_warning(loc, warning);
+    }
+}
+
+fn direct_compunit_error_location(
+    error: &crate::types::includemod::IncludeModError,
+) -> Option<&Location> {
+    use crate::types::includemod::IncludeModError;
+
+    match error {
+        IncludeModError::ValueTypeMismatch { actual, .. } => Some(&actual.val_loc),
+        IncludeModError::TypeDeclarationMismatch { actual, .. } => Some(&actual.type_loc),
+        IncludeModError::MissingField { loc, .. } => Some(loc),
+        IncludeModError::SignatureMismatch(errors) if errors.len() == 1 => {
+            direct_compunit_error_location(&errors[0])
+        }
+        _ => None,
+    }
+}
+
+fn format_compiler_error_report_raw_message_from_location(
+    source: &str,
+    filename: &str,
+    loc: &Location,
+    message: &str,
+) -> String {
+    let mut output = String::new();
+
+    push_compiler_error_report_header_from_location(&mut output, source, filename, loc);
+    output.push_str(message);
+    if !message.ends_with('\n') {
+        output.push('\n');
+    }
+    output.push('\n');
+    output
+}
+
+fn format_compunit_mismatch_report(
+    type_ctx: &TypeContext,
+    source: &str,
+    filename: &str,
+    impl_name: &str,
+    intf_name: &str,
+    error: &crate::types::includemod::IncludeModError,
+) -> String {
+    let file_loc = Location::in_file(StrIdx::default());
+    let loc = direct_compunit_error_location(error).unwrap_or(&file_loc);
+    let mut message = String::new();
+    message.push_str("  The implementation ");
+    message.push_str(impl_name);
+    message.push('\n');
+    message.push_str("  does not match the interface ");
+    message.push_str(intf_name);
+    message.push_str(":\n");
+    message.push_str(&crate::types::includemod::format_error_without_signature_header(
+        type_ctx, filename, error,
+    ));
+    format_compiler_error_report_raw_message_from_location(source, filename, loc, &message)
+}
+
+fn check_compunit_inclusion_for_errors(
+    tctx: &mut TypeCheckContext<'_>,
+    type_ctx: &TypeContext,
+    env: &Env,
+    typed_structure: &crate::types::typedtree::Structure,
+    source_file: &str,
+    source: &str,
+    filename: &str,
+    has_resi: bool,
+) -> Result<()> {
+    if !has_resi || !source_file.ends_with(".res") {
+        return Ok(());
+    }
+
+    let module_name = module_name_from_source_filename(source_file);
+    if module_name.is_empty() {
+        return Ok(());
+    }
+
+    let Some(pers) = &mut tctx.persistent_env else {
+        return Ok(());
+    };
+    let source_dir = std::path::Path::new(source_file)
+        .parent()
+        .map(|d| d.to_path_buf())
+        .unwrap_or_else(|| std::path::PathBuf::from("."));
+    if !pers.load_path_contains(&source_dir) {
+        pers.add_load_path(source_dir);
+    }
+    let _ = pers.find_pers_struct(&module_name, type_ctx);
+    let Some(target_sig) = pers.read_raw_sig_shared(&module_name, type_ctx) else {
+        return Ok(());
+    };
+
+    let mut inclusion_warnings = Vec::new();
+    match crate::types::includemod::compunit_with_warnings(
+        type_ctx,
+        env,
+        source_file,
+        &typed_structure.str_type,
+        &interface_cmi_name(source_file),
+        target_sig.as_ref(),
+        &mut inclusion_warnings,
+    ) {
+        Ok(_) => Ok(()),
+        Err(error) => Err(UserDiagnostic::new(
+            format_compunit_mismatch_report(
+                type_ctx,
+                source,
+                filename,
+                source_file,
+                &interface_cmi_name(source_file),
+                &error,
+            ),
+            2,
+        )
+        .into()),
     }
 }
 
