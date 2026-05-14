@@ -1481,17 +1481,23 @@ with a reason after checking raise sites.
       `tests/error_output_parity/compiler/fixtures/scanner_unclosed_template.res`.
 - `compiler/frontend/ast_utf8_string.ml`
   - `Invalid_unicode_codepoint_escape` for JavaScript string `\u{...}`
-    codepoint escape validation after parsing
+    codepoint escape validation after parsing, covering overflow, non-hex
+    content, and missing closing brace branches
     - Covered by
-      `tests/error_output_parity/compiler/fixtures/string_escape_codepoint_overflow.res`.
+      `tests/error_output_parity/compiler/fixtures/string_escape_codepoint_overflow.res`,
+      `tests/error_output_parity/compiler/fixtures/string_escape_codepoint_invalid_hex.res`,
+      and
+      `tests/error_output_parity/compiler/fixtures/string_escape_codepoint_unclosed.res`.
   - `Invalid_hex_escape`, `Invalid_unicode_escape`, and `Invalid_code_point`
     for JavaScript string fixed-width escape validation reached through template
     literal patterns, which bypass the normal string scanner and call
     `Ast_utf8_string.transform` from `Ast_utf8_string_interp.transform_pat`
-    - Covered for invalid `\x`, invalid `\u`, and UTF-8 codepoint-offset
-      reporting by
+    - Covered for short and non-hex `\x`, short and non-hex `\u`, and UTF-8
+      codepoint-offset reporting by
       `tests/error_output_parity/compiler/fixtures/template_pattern_invalid_hex_escape.res`,
+      `tests/error_output_parity/compiler/fixtures/template_pattern_invalid_hex_digit.res`,
       `tests/error_output_parity/compiler/fixtures/template_pattern_invalid_unicode_escape.res`,
+      `tests/error_output_parity/compiler/fixtures/template_pattern_invalid_unicode_digit.res`,
       and
       `tests/error_output_parity/compiler/fixtures/template_pattern_utf8_codepoint_escape.res`.
   - `Unterminated_backslash` is source-unreachable from normal `.res`/`.resi`
