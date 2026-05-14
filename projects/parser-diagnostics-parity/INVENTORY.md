@@ -370,6 +370,28 @@ right-hand-side check:
 1. `Rec_check.Illegal_letrec_expr`
    - covered by `tests/error_output_parity/compiler/fixtures/illegal_letrec_expr.res`
 
+### 5.5 Frontend Reachability Notes
+
+`compiler/frontend/ast_exp_apply.ml` has defensive diagnostics for malformed
+rewritten pipe/property applications:
+
+- `invalid ## syntax`
+- `Invalid pipe syntax...`
+- `Js object ## expect syntax like obj##(paint (a,b))`
+- fallback `invalid %s syntax`
+
+Direct ReScript probes for malformed `##`/`->` applications are rejected by the
+parser first, before the builtin PPX mapper reaches these branches. Current
+coverage therefore lives on the parser diagnostics that mask them, plus the
+reachable `#=` branch:
+`tests/error_output_parity/compiler/fixtures/invalid_hash_set_assignment.res`.
+
+`compiler/frontend/ast_external.ml` has defensive checks for `pval_prim = []`
+and `pval_prim` with more than one primitive string. Ordinary ReScript external
+syntax requires exactly one primitive string and parser probes such as
+`external x: int = ("a", "b")` report the earlier external-syntax diagnostic
+instead of reaching `Ast_external`.
+
 ## 6. Formatting and Presentation Contract
 
 `compiler/ml/location.ml` defines the warning/error output contract consumed by parser diagnostics:
