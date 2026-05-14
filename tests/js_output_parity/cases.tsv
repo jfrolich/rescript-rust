@@ -5,6 +5,7 @@ tests/js_output_parity/fixtures/js_expression_patterns.res
 tests/js_output_parity/fixtures/function_call_patterns.res	
 tests/js_output_parity/fixtures/advanced_output_patterns.res	
 tests/js_output_parity/fixtures/control_module_patterns.res	
+tests/js_output_parity/fixtures/module_pack_patterns.res
 tests/js_output_parity/fixtures/external_edge_patterns.res	
 tests/js_output_parity/fixtures/variant_representation_patterns.res	
 tests/js_output_parity/fixtures/tella_sparse_record.res	

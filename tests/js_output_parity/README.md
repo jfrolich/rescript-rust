@@ -49,6 +49,9 @@ Current focused coverage:
   `continue`, `break`, mutually recursive functions, recursive modules,
   functors, lazy values, directives, extensible variants, and exception payload
   patterns.
+- `module_pack_patterns.res`: first-class module packing/unpacking,
+  package-returning functions, package arrays, `let module` bindings, local
+  module aliases, and functor application over unpacked modules.
 - `external_edge_patterns.res`: nested scopes, nullable/null-undefined returns,
   `@string`/`@int` marshalling, tagged templates, `@this` callbacks, constant
   args, property get/set, dynamic import, and module-await lowering.
