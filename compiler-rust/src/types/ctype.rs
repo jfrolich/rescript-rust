@@ -3919,7 +3919,13 @@ fn subtype_variant_constructors(
         let Some(right) = cstrs2_by_name.get(left.cd_id.name()) else {
             return Err(subtype_error(trace));
         };
-        subtype_constructor_arguments(ctx, env, visited, trace, left, right)?;
+        if subtype_constructor_arguments(ctx, env, visited, trace, left, right).is_err() {
+            // OCaml compiler/ml/ctype.ml:3863-3905 treats constructor payload
+            // subtyping as a boolean while checking variant-to-variant
+            // coercion, then records the root variant subtype failure with no
+            // nested Different_type_kinds context.
+            return Err(subtype_error(trace));
+        }
     }
     Ok(())
 }
