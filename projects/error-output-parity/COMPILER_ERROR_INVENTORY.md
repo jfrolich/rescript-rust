@@ -728,8 +728,12 @@ with a reason after checking raise sites.
   - Covered by
     `tests/error_output_parity/compiler/fixtures/boxed_and_unboxed.res`.
 - `Nonrec_gadt`
-  - Covered by
-    `tests/error_output_parity/compiler/fixtures/nonrec_gadt.res`.
+  - Covered for structure and signature items, including non-first
+    constructors in the declaration, by
+    `tests/error_output_parity/compiler/fixtures/nonrec_gadt.res`,
+    `tests/error_output_parity/compiler/fixtures/nonrec_gadt_later_constructor.res`,
+    and
+    `tests/error_output_parity/compiler/fixtures/nonrec_gadt_signature.resi`.
 - `Variant_runtime_representation_mismatch`
   - Covered for spread-time unboxed and `@tag` mismatches by
     `tests/error_output_parity/compiler/fixtures/variant_spread_unboxed_mismatch.res`
@@ -1353,6 +1357,7 @@ with a reason after checking raise sites.
     - Covered through `bsc` by
       `tests/error_output_parity/compiler/fixtures/parser_invalid_bigint_literal.res`,
       `tests/error_output_parity/compiler/fixtures/parser_jsx_invalid_name.res`,
+      `tests/error_output_parity/compiler/fixtures/parser_jsx_bad_name_number.res`,
       `tests/error_output_parity/compiler/fixtures/parser_jsx_expected_identifier_after_dot.res`,
       `tests/error_output_parity/compiler/fixtures/parser_jsx_trailing_hyphen.res`,
       `tests/error_output_parity/compiler/fixtures/parser_jsx_closing_name_mismatch.res`,
@@ -1468,6 +1473,7 @@ with a reason after checking raise sites.
       `tests/error_output_parity/compiler/fixtures/scanner_exotic_empty_identifier.res`,
       `tests/error_output_parity/compiler/fixtures/scanner_exotic_identifier_linebreak.res`,
       `tests/error_output_parity/compiler/fixtures/scanner_exotic_identifier_unclosed.res`,
+      `tests/error_output_parity/compiler/fixtures/parser_js_string_invalid_escape_recovery.res`,
       `tests/error_output_parity/compiler/fixtures/scanner_exponent_missing_digits.res`,
       `tests/error_output_parity/compiler/fixtures/scanner_unclosed_comment.res`,
       `tests/error_output_parity/compiler/fixtures/scanner_unclosed_string.res`,
@@ -1892,8 +1898,10 @@ with a reason after checking raise sites.
 - `compiler/frontend/ast_tuple_pattern_flatten.ml`
   - Qualified record fields while destructuring a packed module raise
     `Not supported pattern match on modules`
-    - Covered by
-      `tests/error_output_parity/compiler/fixtures/module_record_pattern_qualified.res`.
+    - Covered by record-literal and pattern-match forms:
+      `tests/error_output_parity/compiler/fixtures/module_record_pattern_qualified.res`
+      and
+      `tests/error_output_parity/compiler/fixtures/module_pattern_match_qualified.res`.
 - `compiler/frontend/bs_ast_invariant.ml`
   - `Bs_unused_attribute` warning 101 for unused built-in ReScript
     attributes on values
@@ -2221,10 +2229,39 @@ only the wrapper variant:
   `tests/error_output_parity/compiler/fixtures/not_included_value_mismatch.res`)
 - type declaration mismatch (covered by
   `tests/error_output_parity/compiler/fixtures/not_included_type_mismatch.res`)
+- type declaration mismatch sub-reasons for arity, privacy, kind,
+  constraints, manifest, variance, immediate, unboxed representation, and
+  tagged variants (covered by
+  `tests/error_output_parity/compiler/fixtures/not_included_type_arity.res`,
+  `tests/error_output_parity/compiler/fixtures/not_included_type_privacy.res`,
+  `tests/error_output_parity/compiler/fixtures/not_included_type_kind.res`,
+  `tests/error_output_parity/compiler/fixtures/not_included_type_constraint_param.res`,
+  `tests/error_output_parity/compiler/fixtures/not_included_type_manifest.res`,
+  `tests/error_output_parity/compiler/fixtures/not_included_type_variance.res`,
+  `tests/error_output_parity/compiler/fixtures/not_included_type_immediate.res`,
+  `tests/error_output_parity/compiler/fixtures/not_included_type_unboxed_representation.res`,
+  and
+  `tests/error_output_parity/compiler/fixtures/not_included_type_tag_name.res`)
+- record field mismatch sub-reasons for missing, type, mutability,
+  optionality, and names (covered by
+  `tests/error_output_parity/compiler/fixtures/not_included_record_field_missing.res`,
+  `tests/error_output_parity/compiler/fixtures/not_included_record_field_type.res`,
+  `tests/error_output_parity/compiler/fixtures/not_included_record_field_mutable.res`,
+  `tests/error_output_parity/compiler/fixtures/not_included_record_field_optional.res`,
+  and
+  `tests/error_output_parity/compiler/fixtures/not_included_record_field_names.res`)
 - record field runtime-name mismatch from
   `Record_attributes_check.check_bs_attributes_inclusion` / `Includecore.Field_names`
   (covered by
   `tests/error_output_parity/compiler/fixtures/not_included_record_field_runtime_name.res`)
+- variant constructor mismatch sub-reasons for missing, type, arity, names,
+  and runtime representation (covered by
+  `tests/error_output_parity/compiler/fixtures/not_included_variant_constructor_missing.res`,
+  `tests/error_output_parity/compiler/fixtures/not_included_variant_constructor_type.res`,
+  `tests/error_output_parity/compiler/fixtures/not_included_variant_constructor_arity.res`,
+  `tests/error_output_parity/compiler/fixtures/not_included_variant_constructor_names.res`,
+  and
+  `tests/error_output_parity/compiler/fixtures/not_included_variant_representation.res`)
 - GADT constructor result-type mismatch in `Includecore.compare_variants`
   (covered by
   `tests/error_output_parity/compiler/fixtures/not_included_gadt_constructor_result.res`
@@ -2247,7 +2284,9 @@ only the wrapper variant:
 - module type declaration permutation mismatch (covered by
   `tests/error_output_parity/compiler/fixtures/modtype_permutation.res`)
 - invalid module alias / functor-argument alias requirement (covered by
-  `tests/error_output_parity/compiler/fixtures/not_included_functor_arg_module_alias.res`)
+  `tests/error_output_parity/compiler/fixtures/not_included_functor_arg_module_alias.res`
+  and the alias mismatch branch in
+  `tests/error_output_parity/compiler/fixtures/not_included_functor_arg_module_alias_mismatch.res`)
 - lax module alias normalization through persistent components (covered by
   `tests/error_output_parity/compiler/cases/include_alias_lax_normalization.res`)
 - strict module alias normalization through flattened runtime units has a
