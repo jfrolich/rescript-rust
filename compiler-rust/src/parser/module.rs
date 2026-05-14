@@ -78,7 +78,7 @@ fn parse_newline_or_semicolon_signature(p: &mut Parser<'_>) {
                 p.prev_end_pos.clone(),
                 p.end_pos.clone(),
                 DiagnosticCategory::message(
-                    "consecutive statements on a line must be separated by ';' or a newline",
+                    "consecutive specifications on a line must be separated by ';' or a newline",
                 ),
             );
         }
@@ -657,42 +657,10 @@ pub fn parse_structure_item(p: &mut Parser<'_>) -> Option<StructureItem> {
             // Capture start position BEFORE consuming %% so extension location includes it
             let ext_start_idx = p.start_pos_idx();
             p.next();
-            // Parse extension name - can be dotted like %%item.extension
-            // id_start shares the same position as ext_start
-            let id_start_idx = ext_start_idx;
-            let mut parts = vec![];
-            loop {
-                match &p.token {
-                    Token::Lident(name) | Token::Uident(name) => {
-                        parts.push(name.to_string());
-                        p.next();
-                    }
-                    // Keywords can be used as extension names (e.g., %%private)
-                    token if token.is_keyword() => {
-                        parts.push(token.to_string());
-                        p.next();
-                    }
-                    _ if parts.is_empty() => {
-                        p.err(DiagnosticCategory::Message(
-                            "Expected extension identifier".to_string(),
-                        ));
-                        parts.push("error".to_string());
-                        break;
-                    }
-                    _ => break,
-                }
-                // Check for dot to continue dotted extension name
-                if p.token == Token::Dot {
-                    p.next();
-                } else {
-                    break;
-                }
-            }
-            let id_name = parts.join(".");
-            let str_idx = p.arena_mut().push_string(id_name.to_string());
-            let id = with_loc(str_idx, p.mk_loc_idx_to_prev_end(id_start_idx));
+            let id = parse_extension_id(p, ext_start_idx);
             // Parse optional payload
-            let payload = if p.token == Token::Lparen {
+            let is_adjacent = p.start_pos.cnum == p.prev_end_pos.cnum;
+            let payload = if p.token == Token::Lparen && is_adjacent {
                 p.next();
                 let payload = parse_payload(p);
                 p.expect(Token::Rparen);
@@ -1343,9 +1311,7 @@ fn parse_primary_module_expr(p: &mut Parser<'_>) -> ModuleExpr {
                     pmod_attributes: Attributes::new(),
                 }
             } else {
-                p.err(DiagnosticCategory::Message(
-                    "Expected module expression".to_string(),
-                ));
+                p.err_unexpected();
                 recover::default_module_expr()
             }
         }
@@ -1921,9 +1887,6 @@ fn parse_paren_functor_module_type(p: &mut Parser<'_>) -> ModuleType {
                     }
                 }
                 _ => {
-                    p.err(DiagnosticCategory::Message(
-                        "Expected module type parameter".to_string(),
-                    ));
                     break;
                 }
             }
@@ -1974,7 +1937,7 @@ fn parse_primary_module_type(p: &mut Parser<'_>) -> ModuleType {
     match &p.token {
         Token::Uident(_) | Token::Lident(_) => {
             // Module type path
-            let lid = parse_module_long_ident(p);
+            let lid = parse_module_type_long_ident(p);
             ModuleType {
                 pmty_desc: Box::new(ModuleTypeDesc::Pmty_ident(lid)),
                 pmty_loc: p.mk_loc_idx_to_prev_end(start_pos_idx),
@@ -2006,24 +1969,16 @@ fn parse_primary_module_type(p: &mut Parser<'_>) -> ModuleType {
         Token::Module => {
             // module type of M
             p.next();
-            if p.token == Token::Typ {
-                p.next();
-                if p.token == Token::Of {
-                    p.next();
-                    let mod_expr = parse_module_expr(p);
-                    let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
-                    let mod_expr_idx = p.arena_mut().push_mod_expr(mod_expr);
-                    return ModuleType {
-                        pmty_desc: Box::new(ModuleTypeDesc::Pmty_typeof(mod_expr_idx)),
-                        pmty_loc: loc,
-                        pmty_attributes: Attributes::new(),
-                    };
-                }
+            p.expect(Token::Typ);
+            p.expect(Token::Of);
+            let mod_expr = parse_module_expr(p);
+            let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
+            let mod_expr_idx = p.arena_mut().push_mod_expr(mod_expr);
+            ModuleType {
+                pmty_desc: Box::new(ModuleTypeDesc::Pmty_typeof(mod_expr_idx)),
+                pmty_loc: loc,
+                pmty_attributes: Attributes::new(),
             }
-            p.err(DiagnosticCategory::Message(
-                "Expected 'type of'".to_string(),
-            ));
-            recover::default_module_type()
         }
         Token::Percent => {
             // Module type extension
@@ -2036,9 +1991,7 @@ fn parse_primary_module_type(p: &mut Parser<'_>) -> ModuleType {
             }
         }
         _ => {
-            p.err(DiagnosticCategory::Message(
-                "Expected module type".to_string(),
-            ));
+            p.err_unexpected();
             recover::default_module_type()
         }
     }
@@ -2138,45 +2091,12 @@ fn parse_with_constraint(p: &mut Parser<'_>) -> Option<WithConstraint> {
             };
             let typ = typ::parse_typ_expr(p);
 
-            // Parse type constraints: constraint 'a = int constraint 'b = string
-            // Note: type variables can be uppercase ('X) or lowercase ('a)
-            let mut cstrs = vec![];
-            while p.token == Token::Constraint {
-                let cstr_start_idx = p.start_pos_idx();
-                p.next();
-                p.expect(Token::SingleQuote);
-                // Accept both Lident ('a) and Uident ('X) as type variable names
-                let var = match &p.token {
-                    Token::Lident(name) | Token::Uident(name) => {
-                        let name = extend_cow_lifetime(name.clone());
-                        // OCaml: ident_loc spans from 'constraint' keyword to end of identifier
-                        let loc = p.mk_loc_idx_to_end(cstr_start_idx);
-                        p.next();
-                        CoreType {
-                            ptyp_desc: Box::new(CoreTypeDesc::Ptyp_var(Box::new(name))),
-                            ptyp_loc: loc,
-                            ptyp_attributes: Attributes::new(),
-                        }
-                    }
-                    _ => break,
-                };
-                p.expect(Token::Equal);
-                let cstr_typ = typ::parse_typ_expr(p);
-                let var_idx = p.arena_mut().push_core_type(var);
-                let cstr_typ_idx = p.arena_mut().push_core_type(cstr_typ);
-                cstrs.push((
-                    var_idx,
-                    cstr_typ_idx,
-                    p.mk_loc_idx_to_prev_end(cstr_start_idx),
-                ));
-            }
-
             let typ_idx = p.arena_mut().push_core_type(typ);
             let decl = TypeDeclaration {
                 // OCaml uses the full longident location for the type name location
                 ptype_name: with_loc(type_name_idx, type_loc.clone()),
                 ptype_params: params,
-                ptype_cstrs: cstrs,
+                ptype_cstrs: vec![],
                 ptype_kind: TypeKind::Ptype_abstract,
                 ptype_private: private,
                 ptype_manifest: Some(typ_idx),
@@ -2256,6 +2176,14 @@ fn is_expr_start(token: &Token<'_>) -> bool {
 /// Handles both module paths (Foo.Bar.Baz) and module type paths (Foo.Bar.t).
 /// Module type names are typically lowercase (e.g., RGLEvents.t).
 fn parse_module_long_ident(p: &mut Parser<'_>) -> Loc<LidentIdx> {
+    parse_module_long_ident_with_lowercase(p, false)
+}
+
+fn parse_module_type_long_ident(p: &mut Parser<'_>) -> Loc<LidentIdx> {
+    parse_module_long_ident_with_lowercase(p, true)
+}
+
+fn parse_module_long_ident_with_lowercase(p: &mut Parser<'_>, lowercase: bool) -> Loc<LidentIdx> {
     let start_pos_idx = p.start_pos_idx();
     let mut path_parts = vec![];
 
@@ -2270,22 +2198,23 @@ fn parse_module_long_ident(p: &mut Parser<'_>) -> Loc<LidentIdx> {
                 }
                 break;
             }
-            Token::Lident(name) => {
-                // Allow lowercase as final component (for module type names like `t`)
-                // This handles paths like RGLEvents.t where `t` is a module type name
+            Token::Lident(name) if lowercase => {
                 path_parts.push(name.to_string());
                 p.next();
                 break;
             }
-            _ => break,
+            _ => {
+                p.err(DiagnosticCategory::Uident(p.token.clone().into_owned()));
+                if !path_parts.is_empty() {
+                    path_parts.push("_".to_string());
+                }
+                break;
+            }
         }
     }
 
     if path_parts.is_empty() {
-        p.err(DiagnosticCategory::Message(
-            "Expected module identifier".to_string(),
-        ));
-        path_parts.push("Error".to_string());
+        path_parts.push("_".to_string());
     }
 
     let lid_idx = super::core::build_longident_idx(p, &path_parts);
@@ -2371,31 +2300,46 @@ fn parse_type_long_ident(p: &mut Parser<'_>) -> Loc<LidentIdx> {
     let start_pos_idx = p.start_pos_idx();
     let mut path_parts = vec![];
 
-    loop {
-        match &p.token {
-            Token::Uident(name) => {
-                path_parts.push(name.to_string());
-                p.next();
-                if p.token == Token::Dot {
+    match &p.token {
+        Token::Lident(name) => {
+            path_parts.push(name.to_string());
+            p.next();
+        }
+        Token::Uident(_) => loop {
+            match &p.token {
+                Token::Uident(name) => {
+                    let name = name.to_string();
+                    let start = p.start_pos.clone();
+                    let end = p.end_pos.clone();
+                    path_parts.push(name.clone());
                     p.next();
-                } else {
+                    if p.token == Token::Dot {
+                        p.next();
+                    } else {
+                        p.err_at(
+                            start,
+                            end,
+                            DiagnosticCategory::Lident(Token::Uident(name.into())),
+                        );
+                        break;
+                    }
+                }
+                Token::Lident(name) => {
+                    path_parts.push(name.to_string());
+                    p.next();
+                    break;
+                }
+                _ => {
+                    p.err_unexpected();
+                    path_parts.push("_".to_string());
                     break;
                 }
             }
-            Token::Lident(name) => {
-                path_parts.push(name.to_string());
-                p.next();
-                break;
-            }
-            _ => break,
+        },
+        _ => {
+            p.err_unexpected();
+            path_parts.push("_".to_string());
         }
-    }
-
-    if path_parts.is_empty() {
-        p.err(DiagnosticCategory::Message(
-            "Expected type identifier".to_string(),
-        ));
-        path_parts.push("error".to_string());
     }
 
     let lid_idx = super::core::build_longident_idx(p, &path_parts);
@@ -2502,8 +2446,21 @@ fn parse_let_bindings(
 
                     // Substitute Ptyp_constr -> Ptyp_var for the Ptyp_poly body
                     let ct_clone = p.arena().get_core_type(ct_idx).clone();
-                    let substituted_inner =
-                        typ::substitute_type_vars(p.arena_mut(), ct_clone, &var_set);
+                    let substituted_inner = match typ::substitute_type_vars(
+                        p.arena_mut(),
+                        ct_clone.clone(),
+                        &var_set,
+                    ) {
+                        Ok(substituted_inner) => substituted_inner,
+                        Err(loc) => {
+                            p.err_at(
+                                p.loc_start(loc),
+                                p.loc_end(loc),
+                                DiagnosticCategory::FatalSyntaxerr,
+                            );
+                            ct_clone
+                        }
+                    };
 
                     // Rebuild the Ptyp_poly with the substituted body
                     let substituted_inner_idx = p.arena_mut().push_core_type(substituted_inner);
@@ -4013,10 +3970,15 @@ fn parse_constructor_impl(
             with_loc(n_idx, loc)
         }
         _ => {
-            p.err(DiagnosticCategory::Message(
-                "Expected constructor name".to_string(),
-            ));
-            return None;
+            p.err(DiagnosticCategory::Uident(p.token.clone().into_owned()));
+            let error_idx = p.arena_mut().intern("_");
+            return Some(ConstructorDeclaration {
+                pcd_name: mknoloc(error_idx),
+                pcd_args: ConstructorArguments::Pcstr_tuple(vec![]),
+                pcd_res: None,
+                pcd_loc: p.none_loc(),
+                pcd_attributes: Attributes::new(),
+            });
         }
     };
 
@@ -4177,7 +4139,12 @@ fn parse_constructor_impl(
                 let arg_idx = p.arena_mut().push_core_type(arg);
                 args.push(arg_idx);
                 is_first = false;
-                if !p.optional(&Token::Comma) {
+                if p.optional(&Token::Comma) {
+                    continue;
+                }
+                if super::grammar::is_typ_expr_start(&p.token) || p.token == Token::LessThan {
+                    continue;
+                } else {
                     break;
                 }
             }
@@ -4767,9 +4734,7 @@ fn parse_value_description(
             with_loc(n_idx, loc)
         }
         _ => {
-            p.err(DiagnosticCategory::Message(
-                "Expected value name".to_string(),
-            ));
+            p.err(DiagnosticCategory::Lident(p.token.clone().into_owned()));
             let err_idx = p.arena_mut().intern("error");
             mknoloc(err_idx)
         }
@@ -4791,7 +4756,8 @@ fn parse_value_description(
     let typ = p.arena_mut().push_core_type(typ_ct);
     p.in_external = was_in_external;
 
-    // Parse optional primitive
+    // Parse primitive. Externals require `= "..."`; signature `let`
+    // declarations share this helper and leave the primitive empty.
     let prim = if p.token == Token::Equal {
         let equal_start = p.start_pos.clone();
         let equal_end = p.end_pos.clone();
@@ -4815,6 +4781,9 @@ fn parse_value_description(
             }
         }
     } else {
+        if !use_poly_type {
+            p.expect(Token::Equal);
+        }
         vec![]
     };
 
@@ -4964,10 +4933,9 @@ fn parse_module_definition(
                 with_loc(n_idx, loc)
             }
             _ => {
-                p.err(DiagnosticCategory::Message(
-                    "Expected module name".to_string(),
-                ));
-                return None;
+                p.err(DiagnosticCategory::Uident(p.token.clone().into_owned()));
+                let error_idx = p.arena_mut().intern("_");
+                mknoloc(error_idx)
             }
         };
 
@@ -5102,10 +5070,8 @@ fn parse_module_declaration(
             with_loc(n_idx, loc)
         }
         _ => {
-            p.err(DiagnosticCategory::Message(
-                "Expected module name".to_string(),
-            ));
-            let error_idx = p.arena_mut().intern("Error");
+            p.err(DiagnosticCategory::Uident(p.token.clone().into_owned()));
+            let error_idx = p.arena_mut().intern("_");
             mknoloc(error_idx)
         }
     };
@@ -5227,15 +5193,22 @@ fn parse_module_type_declaration(
             with_loc(n_idx, loc)
         }
         _ => {
-            p.err(DiagnosticCategory::Message(
-                "Expected module type name".to_string(),
-            ));
-            let error_idx = p.arena_mut().intern("error");
+            p.err(DiagnosticCategory::Uident(p.token.clone().into_owned()));
+            let error_idx = p.arena_mut().intern("_");
             mknoloc(error_idx)
         }
     };
 
-    let typ = if p.token == Token::Equal {
+    let typ = if in_structure {
+        if p.token == Token::Equal {
+            p.next();
+            let mt = parse_module_type(p);
+            Some(p.arena_mut().push_mod_type(mt))
+        } else {
+            p.expect(Token::Equal);
+            Some(p.arena_mut().push_mod_type(recover::default_module_type()))
+        }
+    } else if p.token == Token::Equal {
         p.next();
         let mt = parse_module_type(p);
         Some(p.arena_mut().push_mod_type(mt))
@@ -5442,12 +5415,45 @@ pub fn parse_payload(p: &mut Parser<'_>) -> Payload {
         // (Expression items already consumed the semicolon above)
 
         // Stop if we hit the closing paren or EOF
-        if p.token == Token::Rparen || p.token == Token::Eof {
+        if matches!(p.token, Token::Rparen | Token::Comma | Token::Eof) {
             break;
         }
     }
 
     Payload::PStr(Box::new(items))
+}
+
+/// Parse an extension/attribute identifier, matching OCaml's `parse_attribute_id`.
+pub fn parse_extension_id(p: &mut Parser<'_>, start_pos_idx: PosIdx) -> Located<StrIdx> {
+    let mut id = String::new();
+
+    loop {
+        let name = match &p.token {
+            Token::Lident(name) | Token::Uident(name) => Some(name.to_string()),
+            token if token.is_keyword() => Some(token.to_string()),
+            _ => None,
+        };
+
+        match name {
+            Some(name) => {
+                id.push_str(&name);
+                p.next();
+                if p.token == Token::Dot {
+                    p.next();
+                    id.push('.');
+                    continue;
+                }
+                break;
+            }
+            None => {
+                p.err_unexpected();
+                break;
+            }
+        }
+    }
+
+    let id_idx = p.arena_mut().push_string(id);
+    with_loc(id_idx, p.mk_loc_idx_to_prev_end(start_pos_idx))
 }
 
 /// Parse an extension.
@@ -5461,39 +5467,7 @@ fn parse_extension(p: &mut Parser<'_>) -> Extension {
     } else {
         p.expect(Token::Percent);
     }
-    let mut parts: Vec<String> = vec![];
-
-    loop {
-        match &p.token {
-            Token::Lident(name) | Token::Uident(name) => {
-                parts.push(name.to_string());
-                p.next();
-            }
-            _ if p.token.is_keyword() => {
-                parts.push(p.token.to_string());
-                p.next();
-            }
-            _ => break,
-        }
-
-        if p.token == Token::Dot {
-            p.next();
-            continue;
-        }
-        break;
-    }
-
-    let id = if parts.is_empty() {
-        p.err(DiagnosticCategory::Message(
-            "Expected extension identifier".to_string(),
-        ));
-        let error_idx = p.arena_mut().intern("error");
-        mknoloc(error_idx)
-    } else {
-        let id_str = parts.join(".");
-        let id_idx = p.arena_mut().push_string(id_str.to_string());
-        with_loc(id_idx, p.mk_loc_idx_to_prev_end(id_start_idx))
-    };
+    let id = parse_extension_id(p, id_start_idx);
 
     // Parse optional payload only if it's immediately adjacent.
     let is_adjacent = p.start_pos.cnum == p.prev_end_pos.cnum;

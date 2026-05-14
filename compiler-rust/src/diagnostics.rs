@@ -52,6 +52,8 @@ pub enum Warning {
     MethodOverride { methods: Vec<String> },
     /// Warning 8: Partial match (missing cases).
     PartialMatch { example: String },
+    /// Warning 8: Partial match because every clause has a guard.
+    AllClausesGuarded,
     /// Warning 9: Missing fields in record pattern.
     NonClosedRecordPattern { fields: String },
     /// Warning 10: Statement has non-unit type.
@@ -120,6 +122,10 @@ pub enum Warning {
     },
     /// Warning 43: Nonoptional label.
     NonoptionalLabel { name: String },
+    /// Warning 44: Open shadows an identifier.
+    OpenShadowIdentifier { kind: String, name: String },
+    /// Warning 45: Open shadows a label or constructor.
+    OpenShadowLabelConstructor { kind: String, name: String },
     /// Warning 47: Illegal attribute payload.
     AttributePayload { attr: String, message: String },
     /// Warning 48: Eliminated optional arguments.
@@ -141,6 +147,8 @@ pub enum Warning {
     AmbiguousPattern { vars: Vec<String> },
     /// Warning 60: Unused module.
     UnusedModule { name: String },
+    /// Warning 62: Type constraint on GADT type declaration.
+    ConstraintOnGadt,
     /// Warning 101: Unused ReScript attribute.
     BsUnusedAttribute { name: String },
     /// Warning 102: Polymorphic comparison.
@@ -177,6 +185,7 @@ impl Warning {
             Warning::PartialApplication => 5,
             Warning::MethodOverride { .. } => 7,
             Warning::PartialMatch { .. } => 8,
+            Warning::AllClausesGuarded => 8,
             Warning::NonClosedRecordPattern { .. } => 9,
             Warning::StatementType => 10,
             Warning::UnusedMatch => 11,
@@ -202,6 +211,8 @@ impl Warning {
             Warning::UnusedRecFlag => 39,
             Warning::AmbiguousName { .. } => 41,
             Warning::NonoptionalLabel { .. } => 43,
+            Warning::OpenShadowIdentifier { .. } => 44,
+            Warning::OpenShadowLabelConstructor { .. } => 45,
             Warning::AttributePayload { .. } => 47,
             Warning::EliminatedOptionalArguments { .. } => 48,
             Warning::NoCmiFile { .. } => 49,
@@ -211,6 +222,7 @@ impl Warning {
             Warning::UnreachableCase => 56,
             Warning::AmbiguousPattern { .. } => 57,
             Warning::UnusedModule { .. } => 60,
+            Warning::ConstraintOnGadt => 62,
             Warning::BsUnusedAttribute { .. } => 101,
             Warning::BsPolymorphicComparison => 102,
             Warning::BsFfiWarning { .. } => 103,
@@ -237,7 +249,7 @@ impl Warning {
                 let mut msg = format!("deprecated: {message}");
                 if *can_be_automigrated {
                     msg.push_str(
-                        "\n\n  This can be automatically migrated by the ReScript migration tool.",
+                        "\n\nThis can be automatically migrated by the ReScript migration tool. Run `rescript-tools migrate-all <project-root>` to run all automatic migrations available in your project, or `rescript-tools migrate <file>` to migrate a single file.",
                     );
                 }
                 msg
@@ -272,9 +284,14 @@ impl Warning {
             }
             Warning::PartialMatch { example } => {
                 format!(
-                    "You forgot to handle a possible case here, for example: \n  {}",
+                    "You forgot to handle a possible case here, for example: \n{}",
                     example
                 )
+            }
+            Warning::AllClausesGuarded => {
+                "this pattern-matching is not exhaustive.\n\
+                 All clauses in this pattern-matching are guarded."
+                    .to_string()
             }
             Warning::NonClosedRecordPattern { fields } => {
                 format!(
@@ -300,7 +317,8 @@ impl Warning {
                 "this argument will not be used by the function.".to_string()
             }
             Warning::NonreturningStatement => {
-                "this statement never returns (or has an unsound type.)".to_string()
+                "This statement does not continue execution; following code is unreachable."
+                    .to_string()
             }
             Warning::Preprocessor { message } => message.clone(),
             Warning::UselessRecordWith => {
@@ -316,11 +334,12 @@ impl Warning {
                 )
             }
             Warning::UnusedVariable { name } | Warning::UnusedVariableStrict { name } => {
+                // Match compiler/ext/warnings.ml:393-400.
                 format!(
                     "unused variable {}.\n\n\
                      Fix this by:\n\
                      - Deleting the variable if it's not used anymore.\n\
-                     - Prepending the variable name with `_` (like `_{}`) to ignore it.\n\
+                     - Prepending the variable name with `_` (like `_{}`) to ignore that the variable is unused.\n\
                      - Using the variable somewhere.",
                     name, name
                 )
@@ -403,13 +422,13 @@ impl Warning {
                 if *is_label {
                     format!(
                         "these field labels belong to several types: {}\n\
-                         The first one was selected. Disambiguate if this is wrong.",
+The first one was selected. Disambiguate if this is wrong.",
                         types.join(" ")
                     )
                 } else if names.len() == 1 {
                     format!(
                         "{} belongs to several types: {}\n\
-                         The first one was selected. Disambiguate if this is wrong.",
+The first one was selected. Disambiguate if this is wrong.",
                         names[0],
                         types.join(" ")
                     )
@@ -418,6 +437,18 @@ impl Warning {
                 }
             }
             Warning::NonoptionalLabel { name } => format!("the label {} is not optional.", name),
+            Warning::OpenShadowIdentifier { kind, name } => {
+                format!(
+                    "this open statement shadows the {} identifier {} (which is later used)",
+                    kind, name
+                )
+            }
+            Warning::OpenShadowLabelConstructor { kind, name } => {
+                format!(
+                    "this open statement shadows the {} {} (which is later used)",
+                    kind, name
+                )
+            }
             Warning::AttributePayload { attr, message } => {
                 format!("illegal payload for attribute '{}'.\n{}", attr, message)
             }
@@ -437,7 +468,9 @@ impl Warning {
                 None => format!("no cmi file was found in path for module {}", name),
             },
             Warning::FragileLiteralPattern => {
-                "Code should not depend on the actual values of this constructor's arguments."
+                "Code should not depend on the actual values of\n\
+this constructor's arguments. They are only for information\n\
+and may change in future versions. (See manual section 8.5)"
                     .to_string()
             }
             Warning::MisplacedAttribute { name } => {
@@ -449,9 +482,10 @@ impl Warning {
                     name
                 )
             }
-            Warning::UnreachableCase => "this match case is unreachable.\n\
-                 Consider replacing it with a refutation case '<pat> -> .'"
-                .to_string(),
+            Warning::UnreachableCase => {
+                "this match case is unreachable.\nConsider replacing it with a refutation case '<pat> -> .'"
+                    .to_string()
+            }
             Warning::AmbiguousPattern { vars } => {
                 let msg = if vars.len() == 1 {
                     format!("variable {}", vars[0])
@@ -460,15 +494,19 @@ impl Warning {
                 };
                 format!(
                     "Ambiguous or-pattern variables under guard;\n\
-                     {} may match different arguments.",
+                     {} may match different arguments. (See manual section 8.5)",
                     msg
                 )
             }
             Warning::UnusedModule { name } => format!("unused module {}.", name),
+            Warning::ConstraintOnGadt => {
+                "Type constraints do not apply to GADT cases of variant types.".to_string()
+            }
             Warning::BsUnusedAttribute { name } => {
                 format!(
                     "Unused attribute: @{}\n\
-                     This attribute has no effect here.",
+                     This attribute has no effect here.\n\
+                     For example, some attributes are only meaningful in externals.\n",
                     name
                 )
             }
@@ -498,24 +536,49 @@ impl Warning {
                 return_type,
                 is_function_call,
             } => {
-                let what = if *is_function_call {
-                    "function call"
+                // Match compiler/ext/warnings.ml:507-533.
+                let subject = if *is_function_call {
+                    " function call "
                 } else {
-                    "expression"
+                    " "
                 };
                 let ret = return_type
-                    .as_deref()
-                    .unwrap_or("something that is not `unit`");
-                format!(
-                    "This {} is at the top level and is expected to return `unit`. \
-                     But it's returning {}.",
-                    what, ret
-                )
+                    .as_ref()
+                    .map(|ret| format!("`{ret}`"))
+                    .unwrap_or_else(|| "something that is not `unit`".to_string());
+                let mut message = format!(
+                    "This{}is at the top level and is expected to return `unit`. \
+                     But it's returning {}.\n\n\
+                     In ReScript, anything at the top level must evaluate to `unit`. You \
+                     can fix this by assigning the expression to a value, or piping it into \
+                     the `ignore` function.",
+                    subject, ret
+                );
+                if return_type.is_some() {
+                    let help_text = if *is_function_call {
+                        "yourFunctionCall()"
+                    } else {
+                        "yourExpression"
+                    };
+                    message.push_str(&format!(
+                        "\n\nPossible solutions:\n\
+                         - Assigning to a value that is then ignored: `let _ = {help_text}`\n\
+                         - Piping into the built-in ignore function to ignore the result: `{help_text}->ignore`"
+                    ));
+                }
+                message
             }
-            Warning::BsTodo { message } => match message {
-                Some(text) => format!("Todo found: {}", text),
-                None => "Todo found.".to_string(),
-            },
+            Warning::BsTodo { message } => {
+                // Match compiler/ext/warnings.ml:535-541.
+                let mut text = match message {
+                    Some(text) => format!("Todo found: {}", text),
+                    None => "Todo found.".to_string(),
+                };
+                text.push_str(
+                    "\n\nThis code is not implemented yet and will crash at runtime. Make sure you implement this before running the code.",
+                );
+                text
+            }
         }
     }
 }
@@ -555,8 +618,12 @@ impl WarningConfig {
             errors: vec![false; MAX_WARNING_NUMBER],
             disabled: false,
         };
-        // Apply default warning configuration
-        config.parse("-40-42-44-45-48-60-6-52-9").ok();
+        // Match OCaml compiler/ext/bsc_warnings.ml:46-48. ReScript starts
+        // from `+a-4-9-20-41-50-102` and warning-as-error
+        // `-a+5+6+101+109`; later -w/-warn-error flags are layered on top
+        // by Warnings.parse_options in compiler/ext/warnings.ml:286-290.
+        config.parse("+a-4-9-20-41-50-102").ok();
+        config.parse_as_error("-a+5+6+101+109").ok();
         config
     }
 
@@ -614,6 +681,44 @@ impl WarningConfig {
                     for n in letter_warnings(c) {
                         if n < self.active.len() {
                             self.active[n] = false;
+                        }
+                    }
+                }
+                ' ' | '\t' | '\n' => {}
+                _ => return Err(format!("invalid warning specification: {}", c)),
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Parse a warning-as-error specification.
+    ///
+    /// This mirrors OCaml's `Warnings.parse_options true`: `+n` and uppercase
+    /// letters set the error flag, `-n` and lowercase letters clear it, and
+    /// `@n` both enables the warning and marks it as an error.
+    pub fn parse_as_error(&mut self, spec: &str) -> Result<(), String> {
+        let mut chars = spec.chars().peekable();
+
+        while let Some(c) = chars.next() {
+            match c {
+                '+' => self.apply_modifier(&mut chars, |_, error| *error = true)?,
+                '-' => self.apply_modifier(&mut chars, |_, error| *error = false)?,
+                '@' => self.apply_modifier(&mut chars, |active, error| {
+                    *active = true;
+                    *error = true;
+                })?,
+                'A'..='Z' => {
+                    for n in letter_warnings(c.to_ascii_lowercase()) {
+                        if n < self.errors.len() {
+                            self.errors[n] = true;
+                        }
+                    }
+                }
+                'a'..='z' => {
+                    for n in letter_warnings(c) {
+                        if n < self.errors.len() {
+                            self.errors[n] = false;
                         }
                     }
                 }
@@ -904,6 +1009,26 @@ mod tests {
         assert!(!config.active[2]);
         assert!(config.active[3]);
         assert!(config.errors[3]);
+    }
+
+    #[test]
+    fn test_warning_config_parse_as_error() {
+        let mut config = WarningConfig::new();
+        config.parse("-26").unwrap();
+        config.parse_as_error("+26").unwrap();
+
+        assert!(!config.active[26]);
+        assert!(config.errors[26]);
+
+        config.parse_as_error("-26").unwrap();
+
+        assert!(!config.active[26]);
+        assert!(!config.errors[26]);
+
+        config.parse_as_error("@26").unwrap();
+
+        assert!(config.active[26]);
+        assert!(config.errors[26]);
     }
 
     #[test]

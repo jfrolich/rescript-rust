@@ -1705,7 +1705,10 @@ impl LambdaCompiler {
                 delim: Delim::StarJ,
                 txt: value.clone(),
             }),
-            SwitchCaseTag::Int(value) => Expression::number(Number::int(*value)),
+            SwitchCaseTag::Int(value) => match i32::try_from(*value) {
+                Ok(value) => Expression::number(Number::int(value)),
+                Err(_) => Expression::number(Number::float(value.to_string())),
+            },
             SwitchCaseTag::Float(value) => Expression::number(Number::float(value.clone())),
             SwitchCaseTag::BigInt(value) => {
                 let positive = !value.starts_with('-');

@@ -434,6 +434,11 @@ impl CommutableRef {
     pub(crate) fn from_usize(idx: usize) -> Self {
         Self(u32::try_from(idx).expect("commutable arena index exceeds u32::MAX"))
     }
+
+    #[inline]
+    pub(crate) fn index(self) -> usize {
+        self.0 as usize
+    }
 }
 
 /// Abbreviation memo for type expansion caching.

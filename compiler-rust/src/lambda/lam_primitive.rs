@@ -194,6 +194,7 @@ pub struct ExternalFfiSpec {
 pub enum ExternalFfiKind {
     Default,
     ObjCreate,
+    Normal,
 }
 
 /// Result wrapping preserved for external calls.

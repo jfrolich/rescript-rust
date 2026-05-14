@@ -5,6 +5,7 @@
 //! OCaml implementation in `compiler/ml/code_frame.ml`.
 
 use crate::location::Position;
+use std::borrow::Cow;
 use std::io::IsTerminal;
 
 /// Count the number of digits in a number.
@@ -129,6 +130,29 @@ fn emphasis_ansi(emphasis: Emphasis) -> &'static str {
     }
 }
 
+fn source_for_display(src: &str) -> Cow<'_, str> {
+    if src.is_ascii() {
+        return Cow::Borrowed(src);
+    }
+
+    let mut bytes = Vec::with_capacity(src.len());
+    for ch in src.chars() {
+        let value = ch as u32;
+        if value > u8::MAX as u32 {
+            return Cow::Borrowed(src);
+        }
+        bytes.push(value as u8);
+    }
+
+    // OCaml compiler/ml/code_frame.ml:120-143 slices the source byte string
+    // and writes those bytes back to the terminal. Rust keeps parser input in a
+    // Latin-1 byte-preserving string, so recover valid UTF-8 for display only.
+    match String::from_utf8(bytes) {
+        Ok(display) => Cow::Owned(display),
+        Err(_) => Cow::Borrowed(src),
+    }
+}
+
 fn char_to_byte_idx(s: &str, char_idx: usize) -> usize {
     if char_idx == 0 {
         return 0;
@@ -181,6 +205,8 @@ pub fn print_warning(src: &str, start_pos: &Position, end_pos: &Position) -> Str
 }
 
 fn print_impl(src: &str, start_pos: &Position, end_pos: &Position, emphasis: Emphasis) -> String {
+    let display_src = source_for_display(src);
+    let src = display_src.as_ref();
     let indent = 2;
     let highlight_line_start = start_pos.line;
     let highlight_line_end = end_pos.line;

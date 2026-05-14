@@ -516,7 +516,7 @@ pub fn is_mod_expr_start(token: &Token<'_>) -> bool {
 
 /// Check if a token can start a dict row.
 pub fn is_dict_row_start(token: &Token<'_>) -> bool {
-    matches!(token, Token::String(_))
+    matches!(token, Token::DotDotDot | Token::String(_))
 }
 
 /// Check if a token can start a record row.

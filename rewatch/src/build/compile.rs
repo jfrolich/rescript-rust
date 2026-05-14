@@ -1488,12 +1488,15 @@ struct InProcessCompilerFlags {
     check_div_by_zero: bool,
     cross_module_inline: bool,
     no_assert_false: bool,
+    no_builtin_ppx: bool,
     make_runtime: bool,
     debug: bool,
     jsx_preserve: bool,
     jsx_version: Option<i32>,
     experimental_let_unwrap: bool,
     open_modules: Vec<String>,
+    warning_specs: Vec<String>,
+    warning_error_specs: Vec<String>,
 }
 
 impl Default for InProcessCompilerFlags {
@@ -1504,12 +1507,15 @@ impl Default for InProcessCompilerFlags {
             check_div_by_zero: true,
             cross_module_inline: false,
             no_assert_false: false,
+            no_builtin_ppx: false,
             make_runtime: false,
             debug: false,
             jsx_preserve: false,
             jsx_version: None,
             experimental_let_unwrap: false,
             open_modules: Vec::new(),
+            warning_specs: Vec::new(),
+            warning_error_specs: Vec::new(),
         }
     }
 }
@@ -1524,6 +1530,7 @@ fn parse_in_process_compiler_flags(flags: &[String]) -> InProcessCompilerFlags {
             "-bs-no-check-div-by-zero" => parsed.check_div_by_zero = false,
             "-bs-cross-module-opt" => parsed.cross_module_inline = true,
             "-bs-noassertfalse" => parsed.no_assert_false = true,
+            "-bs-no-builtin-ppx" => parsed.no_builtin_ppx = true,
             "-make-runtime" => parsed.make_runtime = true,
             "-bs-g" => parsed.debug = true,
             "-bs-jsx-preserve" => parsed.jsx_preserve = true,
@@ -1542,6 +1549,16 @@ fn parse_in_process_compiler_flags(flags: &[String]) -> InProcessCompilerFlags {
             "-open" => {
                 if let Some(mod_name) = iter.next() {
                     parsed.open_modules.push(mod_name.clone());
+                }
+            }
+            "-w" => {
+                if let Some(spec) = iter.next() {
+                    parsed.warning_specs.push(spec.clone());
+                }
+            }
+            "-warn-error" => {
+                if let Some(spec) = iter.next() {
+                    parsed.warning_error_specs.push(spec.clone());
                 }
             }
             _ => {}
@@ -1563,7 +1580,8 @@ fn build_compiler_options(
     // Parse package compiler-flags for flags the in-process compiler needs to honor.
     // In the subprocess path, these are passed as raw CLI args to bsc.
     let bsc_flags = config::flatten_flags(&package.config.compiler_flags);
-    let parsed_flags = parse_in_process_compiler_flags(&bsc_flags);
+    let warning_args = package.config.get_warning_args(package.is_local_dep, None);
+    let parsed_flags = parse_in_process_compiler_flags(&[bsc_flags, warning_args].concat());
 
     // Collect -I paths from all dependencies (same logic as get_dependency_paths)
     let mut include_paths: Vec<PathBuf> = Vec::new();
@@ -1638,6 +1656,8 @@ fn build_compiler_options(
         include_paths,
         runtime_path,
         open_modules,
+        warning_specs: parsed_flags.warning_specs,
+        warning_error_specs: parsed_flags.warning_error_specs,
         source_filename,
         output_path,
         output_module_format,
@@ -1649,6 +1669,7 @@ fn build_compiler_options(
         check_div_by_zero: parsed_flags.check_div_by_zero,
         cross_module_inline: parsed_flags.cross_module_inline,
         no_assert_false: parsed_flags.no_assert_false,
+        no_builtin_ppx: parsed_flags.no_builtin_ppx,
         nopervasives: parsed_flags.nopervasives,
         no_version_header: parsed_flags.no_version_header,
         module_name: Some(module_name.to_string()),
@@ -2601,6 +2622,7 @@ fn runtime_compiler_options(
         check_div_by_zero: parsed_flags.check_div_by_zero,
         cross_module_inline: parsed_flags.cross_module_inline,
         no_assert_false: parsed_flags.no_assert_false,
+        no_builtin_ppx: parsed_flags.no_builtin_ppx,
         nopervasives: parsed_flags.nopervasives,
         module_name: Some(module_name.to_string()),
         package_name: Some(runtime_config.name.clone()),

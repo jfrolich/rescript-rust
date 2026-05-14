@@ -1,0 +1,29 @@
+
+  Syntax error!
+  syntax_tests/data/parsing/errors/typeDef/variantConstructorName.res:1:14-18
+
+  1 │ type t = A | value
+  2 │ 
+  3 │ type u = A | false
+
+  Did you mean `Value` instead of `value`?
+
+
+  Syntax error!
+  syntax_tests/data/parsing/errors/typeDef/variantConstructorName.res:3:14-18
+
+  1 │ type t = A | value
+  2 │ 
+  3 │ type u = A | false
+  4 │ 
+
+  `false` is a reserved keyword.
+
+type nonrec t =
+  | A 
+  | _ 
+;;value
+type nonrec u =
+  | A 
+  | _ 
+;;false

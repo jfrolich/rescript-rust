@@ -1,0 +1,12 @@
+
+  Syntax error!
+  syntax_tests/data/parsing/errors/expressions/arrayMutationMissingRhs.res:2:8-3:0
+
+  1 │ let xs = [1]
+  2 │ xs[0] =
+  3 │ 
+
+  Seems that an expression is missing, with what do I mutate the array?
+
+let xs = [|1|]
+;;xs.(0) <- ([%rescript.exprhole ])

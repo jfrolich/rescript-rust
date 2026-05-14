@@ -548,6 +548,12 @@ pub struct PersistentEnv {
     cache: Arc<Mutex<HashMap<String, Option<Arc<PersStruct>>>>>,
     /// Load path: list of directories to search for .cmi files
     load_path: Arc<Vec<PathBuf>>,
+    /// Display spelling for each load-path entry.
+    /// OCaml stores `ps.ps_filename` through `Consistbl.check` at
+    /// compiler/ml/env.ml:630-638 and prints it at compiler/ml/env.ml:2110-2119.
+    /// Keep lookup paths normalized while preserving the load-path spelling
+    /// that should appear in diagnostics.
+    load_path_display: Arc<Vec<PathBuf>>,
     /// Alias prefix rewrites: flattened_name -> qualified_path.
     /// Populated when loading a CMI that has MtyAlias submodules
     /// (e.g., Stdlib.cmi has module JSON = Stdlib_JSON, so we record
@@ -598,6 +604,33 @@ pub struct PersistentEnv {
     /// env still has to rebuild its local flattened-alias table when it first
     /// observes a cached signature.
     prepared_cached_alias_rewrites: HashSet<String>,
+    /// First persistent-loader error observed through any clone of this env.
+    last_error: Arc<Mutex<Option<PersistentEnvError>>>,
+    /// Consistency table for imported CMI digests, matching OCaml `Consistbl`.
+    crc_units: Arc<Mutex<HashMap<String, (Vec<u8>, String)>>>,
+}
+
+/// Errors reported by OCaml's `Env` persistent interface loader.
+#[derive(Debug, Clone)]
+pub enum PersistentEnvError {
+    /// The file found for one module contains a different compiled unit.
+    IllegalRenaming {
+        /// Module name requested by the lookup.
+        expected: String,
+        /// Unit name stored inside the loaded `.cmi`.
+        actual: String,
+        /// Path to the mismatched `.cmi`.
+        filename: String,
+    },
+    /// Two loaded CMIs disagree on the digest for an imported interface.
+    InconsistentImport {
+        /// Interface whose digest assumptions differ.
+        name: String,
+        /// File that made the first assumption.
+        source1: String,
+        /// File that made the conflicting assumption.
+        source2: String,
+    },
 }
 
 fn should_register_lazy_raw_sig(name: &str, alias_rewrites: &AliasPrefixRewrites) -> bool {
@@ -615,6 +648,7 @@ impl PersistentEnv {
         PersistentEnv {
             cache: Arc::new(Mutex::new(HashMap::new())),
             load_path: Arc::new(Vec::new()),
+            load_path_display: Arc::new(Vec::new()),
             alias_prefix_rewrites: AliasPrefixRewrites::new(),
             open_modules: Arc::new(Vec::new()),
             jsx_version: None,
@@ -631,6 +665,8 @@ impl PersistentEnv {
             portable_cache_overrides: HashMap::new(),
             hidden_modules: HashSet::new(),
             prepared_cached_alias_rewrites: HashSet::new(),
+            last_error: Arc::new(Mutex::new(None)),
+            crc_units: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -640,6 +676,7 @@ impl PersistentEnv {
         PersistentEnv {
             cache: Arc::new(Mutex::new(HashMap::new())),
             load_path: Arc::new(Vec::new()),
+            load_path_display: Arc::new(Vec::new()),
             alias_prefix_rewrites: AliasPrefixRewrites::from_base(
                 registry.alias_rewrites.clone(),
                 registry.local_alias_rewrites.clone(),
@@ -659,7 +696,65 @@ impl PersistentEnv {
             portable_cache_overrides: registry.local_cached_modules.clone(),
             hidden_modules: HashSet::new(),
             prepared_cached_alias_rewrites: HashSet::new(),
+            last_error: Arc::new(Mutex::new(None)),
+            crc_units: Arc::new(Mutex::new(HashMap::new())),
         }
+    }
+
+    fn record_error(&self, error: PersistentEnvError) {
+        let mut last_error = self.last_error.lock().unwrap();
+        if last_error.is_none() {
+            *last_error = Some(error);
+        }
+    }
+
+    pub fn last_error(&self) -> Option<PersistentEnvError> {
+        self.last_error.lock().unwrap().clone()
+    }
+
+    fn validate_cmi_name(&self, expected: &str, actual: &str, filename: &str) -> bool {
+        if actual == expected {
+            true
+        } else {
+            self.record_error(PersistentEnvError::IllegalRenaming {
+                expected: expected.to_string(),
+                actual: actual.to_string(),
+                filename: filename.to_string(),
+            });
+            false
+        }
+    }
+
+    fn check_cmi_consistency(
+        &self,
+        crcs: &[(String, Option<Vec<u8>>)],
+        unit_name: &str,
+        filename: &str,
+    ) -> bool {
+        let mut crc_units = self.crc_units.lock().unwrap();
+        for (name, crc) in crcs {
+            if name == unit_name {
+                continue;
+            }
+            let Some(crc) = crc else {
+                continue;
+            };
+            match crc_units.get(name) {
+                Some((old_crc, old_source)) if old_crc != crc => {
+                    self.record_error(PersistentEnvError::InconsistentImport {
+                        name: name.clone(),
+                        source1: old_source.clone(),
+                        source2: filename.to_string(),
+                    });
+                    return false;
+                }
+                Some(_) => {}
+                None => {
+                    crc_units.insert(name.clone(), (crc.clone(), filename.to_string()));
+                }
+            }
+        }
+        true
     }
 
     fn cache_lookup(&self, name: &str) -> Option<Option<Arc<PersStruct>>> {
@@ -776,7 +871,13 @@ impl PersistentEnv {
 
     /// Set the load path (list of directories to search for .cmi files).
     pub fn set_load_path(&mut self, paths: Vec<PathBuf>) {
+        self.set_load_path_with_display(paths.clone(), paths);
+    }
+
+    pub fn set_load_path_with_display(&mut self, paths: Vec<PathBuf>, display_paths: Vec<PathBuf>) {
+        debug_assert_eq!(paths.len(), display_paths.len());
         self.load_path = Arc::new(paths);
+        self.load_path_display = Arc::new(display_paths);
     }
 
     pub fn set_open_modules(&mut self, open_modules: Vec<String>) {
@@ -795,10 +896,18 @@ impl PersistentEnv {
         self.compiling_module = module_name;
     }
 
+    pub fn is_compiling_module(&self, module_name: &str) -> bool {
+        self.compiling_module
+            .as_deref()
+            .is_some_and(|compiling| compiling == module_name)
+    }
+
     /// Add a directory to the load path.
     pub fn add_load_path(&mut self, path: PathBuf) {
         if !self.load_path.contains(&path) {
             Arc::make_mut(&mut self.load_path).push(path);
+            Arc::make_mut(&mut self.load_path_display)
+                .push(self.load_path.last().cloned().unwrap_or_default());
         }
     }
 
@@ -1214,6 +1323,7 @@ impl PersistentEnv {
         let mut fallback_pers = PersistentEnv {
             cache: Arc::new(Mutex::new(placeholders)),
             load_path: self.load_path.clone(),
+            load_path_display: self.load_path_display.clone(),
             alias_prefix_rewrites: self.alias_prefix_rewrites.clone(),
             open_modules: self.open_modules.clone(),
             jsx_version: self.jsx_version,
@@ -1230,6 +1340,8 @@ impl PersistentEnv {
             portable_cache_overrides: self.portable_cache_overrides.clone(),
             hidden_modules: self.hidden_modules.clone(),
             prepared_cached_alias_rewrites: HashSet::new(),
+            last_error: self.last_error.clone(),
+            crc_units: self.crc_units.clone(),
         };
         let mut env = initial_env(ctx);
         let open_modules = fallback_pers.open_modules.clone();
@@ -1295,7 +1407,7 @@ impl PersistentEnv {
             experimental_let_unwrap_for_structure(&structure, &options, parser.arena());
         let jsx_version = jsx_version_for_structure(&structure, &options, parser.arena());
         let structure = if let Some(jsx_version) = jsx_version {
-            jsx_ppx::transform_structure(structure, jsx_version, parser.arena_mut())
+            jsx_ppx::transform_structure_result(structure, jsx_version, parser.arena_mut()).ok()?
         } else {
             structure
         };
@@ -1399,7 +1511,7 @@ impl PersistentEnv {
         }
 
         let cmi_filename = format!("{}.cmi", name);
-        if let Some(full_path) = self.find_in_path_uncap(&cmi_filename) {
+        if let Some((full_path, display_path)) = self.find_in_path_uncap_entry(&cmi_filename) {
             let cmi = match cmi_format::read_cmi(&full_path) {
                 Ok(cmi) => cmi,
                 Err(e) => {
@@ -1408,13 +1520,20 @@ impl PersistentEnv {
                 }
             };
 
+            if !self.validate_cmi_name(name, &cmi.cmi_name, &display_path) {
+                return None;
+            }
+            if !self.check_cmi_consistency(&cmi.cmi_crcs, &cmi.cmi_name, &display_path) {
+                return None;
+            }
+
             let mut sig_ctx = SigReadContext::new(ctx);
             let signature = sig_ctx.read_signature(&cmi.cmi_sign);
             return Some(self.finalize_loaded_signature(
                 name,
-                cmi.cmi_name,
+                name.to_string(),
                 signature,
-                full_path,
+                display_path,
                 ctx,
             ));
         }
@@ -1484,8 +1603,14 @@ impl PersistentEnv {
         }
 
         let cmi_filename = format!("{}.cmi", name);
-        let full_path = self.find_in_path_uncap(&cmi_filename)?;
+        let (full_path, display_path) = self.find_in_path_uncap_entry(&cmi_filename)?;
         let cmi = cmi_format::read_cmi(&full_path).ok()?;
+        if !self.validate_cmi_name(name, &cmi.cmi_name, &display_path) {
+            return None;
+        }
+        if !self.check_cmi_consistency(&cmi.cmi_crcs, &cmi.cmi_name, &display_path) {
+            return None;
+        }
         let mut sig_ctx = SigReadContext::new(ctx);
         Some(Arc::new(sig_ctx.read_signature(&cmi.cmi_sign)))
     }
@@ -1503,22 +1628,32 @@ impl PersistentEnv {
     /// Search the load path for a file (case-insensitive on first char).
     /// Returns the full path if found.
     fn find_in_path_uncap(&self, filename: &str) -> Option<String> {
-        for dir in self.load_path.iter() {
-            // Try exact case first
-            let exact = dir.join(filename);
-            if exact.exists() {
-                return Some(exact.to_string_lossy().into_owned());
-            }
+        self.find_in_path_uncap_entry(filename)
+            .map(|(lookup_path, _)| lookup_path)
+    }
 
-            // Try uncapitalized
+    fn find_in_path_uncap_entry(&self, filename: &str) -> Option<(String, String)> {
+        for (index, dir) in self.load_path.iter().enumerate() {
+            let display_dir = self.load_path_display.get(index).unwrap_or(dir);
             if let Some(first_char) = filename.chars().next() {
                 if first_char.is_ascii_uppercase() {
                     let uncap = format!("{}{}", first_char.to_ascii_lowercase(), &filename[1..]);
                     let uncap_path = dir.join(&uncap);
                     if uncap_path.exists() {
-                        return Some(uncap_path.to_string_lossy().into_owned());
+                        return Some((
+                            uncap_path.to_string_lossy().into_owned(),
+                            display_dir.join(uncap).to_string_lossy().into_owned(),
+                        ));
                     }
                 }
+            }
+
+            let exact = dir.join(filename);
+            if exact.exists() {
+                return Some((
+                    exact.to_string_lossy().into_owned(),
+                    display_dir.join(filename).to_string_lossy().into_owned(),
+                ));
             }
         }
         None
@@ -2697,12 +2832,30 @@ fn freshen_module_type_bound_idents_with_maps(
     ctx: &TypeContext,
 ) {
     match module_type {
-        ModuleType::MtyIdent(path) | ModuleType::MtyAlias(_, path) => {
+        ModuleType::MtyIdent(path) => {
             if !maps.is_empty() {
+                // OCaml compiler/ml/subst.ml:345-348 handles `Mty_ident`
+                // through the modtype substitution table; Rust shares the
+                // type/modtype id map here, with dotted prefixes still going
+                // through `module_path` like compiler/ml/subst.ml:78-84.
                 *path = substitute_type_path(
                     path,
                     &maps.type_stamp_map,
                     &maps.type_name_map,
+                    &maps.module_stamp_map,
+                    &maps.module_name_map,
+                    maps.protected_module_head.as_ref(),
+                );
+            }
+        }
+        ModuleType::MtyAlias(_, path) => {
+            if !maps.is_empty() {
+                // OCaml compiler/ml/subst.ml:358-364 applies
+                // `module_path` to `Mty_alias` targets. Using the type path
+                // map here leaves freshly included sibling aliases pointing at
+                // stale module identifiers instead of the renamed module id.
+                *path = substitute_module_path(
+                    path,
                     &maps.module_stamp_map,
                     &maps.module_name_map,
                     maps.protected_module_head.as_ref(),
@@ -2863,6 +3016,29 @@ pub(crate) fn substitute_functor_result_module_path(
     copied
 }
 
+pub(crate) fn substitute_module_type_with_module_path_subst(
+    module_type: &ModuleType,
+    module_paths: &[(Ident, Path)],
+    ctx: &TypeContext,
+) -> ModuleType {
+    // Mirrors the `Subst.modtype (Subst.add_module ...)` shape used by
+    // compiler/ml/typemod.ml:1056-1120 for recursive-module inclusion. The
+    // module type is copied first, then bound signature/functor ids are
+    // freshened while module paths are rewritten through the same substitution.
+    let mut copied = crate::types::typecore::copy_lookup_module_type_for_subst(module_type, ctx);
+    let mut maps = SubstMaps::default();
+    for (id, path) in module_paths {
+        if id.stamp() != 0 {
+            insert_module_stamp_subst(&mut maps.module_stamp_map, id, path.clone());
+        } else {
+            maps.module_name_map
+                .insert(id.name().to_string(), path.clone());
+        }
+    }
+    freshen_module_type_bound_idents_with_maps(&mut copied, &maps, ctx);
+    copied
+}
+
 pub(crate) fn freshen_functor_component_module_type(
     module_type: &ModuleType,
     parent_context: Option<(&Path, &[SignatureItem])>,
@@ -2937,11 +3113,19 @@ pub fn substitute_sig_path(path: &Path, sig_items: &[SignatureItem], module_path
 
 fn substitute_module_type_paths_with_maps(module_type: &mut ModuleType, maps: &SubstMaps) {
     match module_type {
-        ModuleType::MtyIdent(path) | ModuleType::MtyAlias(_, path) => {
+        ModuleType::MtyIdent(path) => {
             *path = substitute_type_path(
                 path,
                 &maps.type_stamp_map,
                 &maps.type_name_map,
+                &maps.module_stamp_map,
+                &maps.module_name_map,
+                maps.protected_module_head.as_ref(),
+            );
+        }
+        ModuleType::MtyAlias(_, path) => {
+            *path = substitute_module_path(
+                path,
                 &maps.module_stamp_map,
                 &maps.module_name_map,
                 maps.protected_module_head.as_ref(),

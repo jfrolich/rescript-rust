@@ -3,41 +3,93 @@
 //! This module wires together parsing, type-checking, Lambda conversion, and
 //! JS IR codegen to produce JavaScript output.
 
+use std::borrow::Cow;
 use std::ffi::OsString;
+use std::fmt;
 use std::path::{Component, Path as FsPath, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use ahash::AHashSet;
 use anyhow::{Context, Result, anyhow};
 use tracing::info_span;
 
-use crate::binary_ast::ppx;
+use crate::binary_ast::{
+    ppx, write_external_ppx_signature_input, write_external_ppx_structure_input,
+};
 use crate::cmi::persistent_env::{
-    CmjExportArity, CmjExportConstant, ModuleRegistry, PersistentEnv,
+    CmjExportArity, CmjExportConstant, ModuleRegistry, PersistentEnv, PersistentEnvError,
 };
 use crate::cmi::portable_types::PortablePersStruct;
 use crate::context::IdGenerator;
+use crate::diagnostics::WarningConfig;
+use crate::ident::Ident;
 use crate::js_ir::{
     DepsProgram, Kind, ModuleFormat, ModuleId, ModulePathResolver,
     print_deps_program_with_directives_and_options,
 };
 use crate::lambda::lam_compile::LambdaCompiler;
+use crate::location::Location;
+use crate::parse_arena::{ExprIdx, LocIdx, ModExprIdx, ParseArena, StrIdx};
 use crate::parser::ast::{
-    Attribute, Constant, Expression, ModuleExpr, ModuleExprDesc, Payload, Signature,
-    SignatureItemDesc, Structure, StructureItemDesc,
+    ArgLabel as ParserArgLabel, Attribute, Constant, Expression, ExpressionDesc, ModuleExpr,
+    ModuleExprDesc, PatternDesc, Payload, Signature, SignatureItemDesc, Structure,
+    StructureItemDesc,
 };
-use crate::parser::{Parser, jsx_ppx, module};
+use crate::parser::{Longident, Parser, code_frame, jsx_ppx, module};
 use crate::types::sexp_typedtree::{
     print_typed_signature, print_typed_signature_with_locs, print_typed_structure,
     print_typed_structure_with_locs,
 };
-use crate::types::{TypeCheckContext, TypeContext, initial_env, transl_signature, type_structure};
+use crate::types::typecore::{BuiltinExtensionError, JsxPropKind, TypeCoreError, TypeCoreWarning};
+use crate::types::typemod::{TypeExtensionMismatch, TypeModError};
+use crate::types::{
+    ArgLabel as TypeArgLabel, FieldKind, TypeCheckContext, TypeClashContext, TypeContext, TypeDesc,
+    TypeExprRef, initial_env, transl_signature, type_structure,
+};
 
 // OCaml's Predef sets `Ident.set_current_time 999`. OCaml's Parmatch.extra_pat
 // then eagerly creates Ident.create "+" consuming stamp 1000.
 // We match this by starting at 999 and consuming one stamp.
 const OCAML_NON_PREDEF_STAMP_START: i32 = 999;
+const LET_UNWRAP_FEATURE_NOT_ENABLED_MSG: &str = "Experimental feature not enabled: LetUnwrap. Enable it by setting \"LetUnwrap\" to true under \"experimental-features\" in rescript.json.";
+const LET_UNWRAP_TOPLEVEL_MSG: &str = "`let?` is not allowed for top-level bindings.";
+const LET_UNWRAP_UNSUPPORTED_TYPE_MSG: &str =
+    "`let?` is only supported in let bindings targeting the `result` or `option` type.";
+const POLYVARIANT_INT_TOO_LARGE_MSG: &str =
+    "Integer literal exceeds int32 range. Use float or BigInt if larger values are required.";
+const REACT_COMPONENT_DESTRUCTURE_MSG: &str = "JSX component calls cannot be destructured.";
 static SKIP_CLI_CLEANUP: AtomicBool = AtomicBool::new(false);
+static EXTERNAL_PPX_TEMP_COUNTER: AtomicUsize = AtomicUsize::new(0);
+const AST_IMPL_MAGIC_NUMBER: &[u8] = b"Caml1999M022";
+const AST_INTF_MAGIC_NUMBER: &[u8] = b"Caml1999N022";
+
+#[derive(Debug)]
+pub struct UserDiagnostic {
+    output: String,
+    exit_code: i32,
+}
+
+impl UserDiagnostic {
+    pub fn new(output: String, exit_code: i32) -> Self {
+        Self { output, exit_code }
+    }
+
+    pub fn output(&self) -> &str {
+        &self.output
+    }
+
+    pub fn exit_code(&self) -> i32 {
+        self.exit_code
+    }
+}
+
+impl fmt::Display for UserDiagnostic {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.output)
+    }
+}
+
+impl std::error::Error for UserDiagnostic {}
 
 /// WASM-safe timing: native returns `Instant::now()`, WASM returns `None`
 /// (Instant::now panics on WASM since time isn't implemented there).
@@ -1134,6 +1186,7 @@ fn structure_needs_jsx_rewrite(
         // External @react.component declarations need JSX PPX lowering.
         StructureItemDesc::Pstr_primitive(vd) => {
             has_react_component_attr(&vd.pval_attributes, arena)
+                || has_react_component_with_props_attr(&vd.pval_attributes, arena)
         }
         StructureItemDesc::Pstr_value(inner) => {
             let (_, bindings) = &**inner;
@@ -1153,6 +1206,109 @@ fn structure_needs_jsx_rewrite(
         }
         _ => false,
     })
+}
+
+fn reject_invalid_react_component_destructure_in_structure(
+    structure: &Structure,
+    arena: &ParseArena,
+    filename: &str,
+) -> Result<()> {
+    if react_component_destructure_in_structure(structure, arena) {
+        return Err(
+            UserDiagnostic::new(format_react_component_destructure_report(filename), 2).into(),
+        );
+    }
+    Ok(())
+}
+
+fn react_component_destructure_in_structure(structure: &Structure, arena: &ParseArena) -> bool {
+    for item in structure {
+        match &*item.pstr_desc {
+            StructureItemDesc::Pstr_value(value) => {
+                for binding in &value.1 {
+                    if (has_react_component_attr(&binding.pvb_attributes, arena)
+                        || has_react_component_with_props_attr(&binding.pvb_attributes, arena))
+                        && !react_component_pattern_is_plain_name(binding.pvb_pat, arena)
+                    {
+                        return true;
+                    }
+                }
+            }
+            StructureItemDesc::Pstr_module(module_binding) => {
+                if react_component_destructure_in_module_expr(
+                    arena.get_mod_expr(module_binding.pmb_expr),
+                    arena,
+                ) {
+                    return true;
+                }
+            }
+            StructureItemDesc::Pstr_recmodule(module_bindings) => {
+                for module_binding in module_bindings.iter() {
+                    if react_component_destructure_in_module_expr(
+                        arena.get_mod_expr(module_binding.pmb_expr),
+                        arena,
+                    ) {
+                        return true;
+                    }
+                }
+            }
+            StructureItemDesc::Pstr_include(include_decl) => {
+                if react_component_destructure_in_module_expr(
+                    arena.get_mod_expr(include_decl.pincl_mod),
+                    arena,
+                ) {
+                    return true;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    false
+}
+
+fn react_component_destructure_in_module_expr(
+    module_expr: &ModuleExpr,
+    arena: &ParseArena,
+) -> bool {
+    match &*module_expr.pmod_desc {
+        ModuleExprDesc::Pmod_structure(structure) => {
+            react_component_destructure_in_structure(structure, arena)
+        }
+        ModuleExprDesc::Pmod_functor(functor) => {
+            react_component_destructure_in_module_expr(arena.get_mod_expr(functor.2), arena)
+        }
+        ModuleExprDesc::Pmod_apply(lhs, rhs) => {
+            react_component_destructure_in_module_expr(arena.get_mod_expr(*lhs), arena)
+                || react_component_destructure_in_module_expr(arena.get_mod_expr(*rhs), arena)
+        }
+        ModuleExprDesc::Pmod_constraint(inner, _) => {
+            react_component_destructure_in_module_expr(arena.get_mod_expr(*inner), arena)
+        }
+        _ => false,
+    }
+}
+
+fn react_component_pattern_is_plain_name(
+    pat_idx: crate::parse_arena::PatIdx,
+    arena: &ParseArena,
+) -> bool {
+    let pat = arena.get_pat(pat_idx);
+    match &*pat.ppat_desc {
+        PatternDesc::Ppat_var(_) => true,
+        PatternDesc::Ppat_constraint(inner) => {
+            let (inner_pat, _) = &**inner;
+            react_component_pattern_is_plain_name(*inner_pat, arena)
+        }
+        _ => false,
+    }
+}
+
+fn format_react_component_destructure_report(filename: &str) -> String {
+    format!(
+        "\n  We've found a bug for you!\n  {}\n\n  {REACT_COMPONENT_DESTRUCTURE_MSG}\n\n",
+        module_name_from_source_filename(filename)
+    )
 }
 
 /// A concrete JavaScript output target for one compile.
@@ -1188,6 +1344,10 @@ pub struct CompilerOptions {
     pub runtime_path: Option<PathBuf>,
     /// Additional modules opened implicitly from `-open` flags.
     pub open_modules: Vec<String>,
+    /// Warning enable/disable specs from `-w` flags.
+    pub warning_specs: Vec<String>,
+    /// Warning-as-error specs from `-warn-error` flags.
+    pub warning_error_specs: Vec<String>,
     /// Source filename for interface constraint propagation.
     /// When set, after type_structure, checks for a matching .cmi and
     /// unifies implementation value types with interface types.
@@ -1216,6 +1376,12 @@ pub struct CompilerOptions {
     pub cross_module_inline: bool,
     /// Mirror `Clflags.no_assert_false` / `-bs-noassertfalse`.
     pub no_assert_false: bool,
+    /// Mirror `Clflags.transparent_modules` / `-no-alias-deps`.
+    pub transparent_modules: bool,
+    /// Mirror `Js_config.no_builtin_ppx` / `-bs-no-builtin-ppx`.
+    pub no_builtin_ppx: bool,
+    /// External `-ppx` rewriters, in command-line order.
+    pub external_ppxs: Vec<String>,
     /// When true, do not implicitly open Pervasives and Stdlib.
     pub nopervasives: bool,
     /// The module name being compiled. Used to filter self-opens.
@@ -1224,6 +1390,8 @@ pub struct CompilerOptions {
     pub package_name: Option<String>,
     /// Compile the runtime package (`-make-runtime`).
     pub make_runtime: bool,
+    /// Mirror `Clflags.assume_no_mli := Mli_exists` from `-bs-read-cmi`.
+    pub assume_compiled_interface: bool,
     /// When true, `compile_source_in_process` captures the typed tree,
     /// raw lambda, and lambda sexps for display (used by the playground).
     pub capture_intermediates: bool,
@@ -1251,6 +1419,8 @@ impl Default for CompilerOptions {
             include_paths: Vec::new(),
             runtime_path: None,
             open_modules: Vec::new(),
+            warning_specs: Vec::new(),
+            warning_error_specs: Vec::new(),
             source_filename: None,
             output_path: None,
             output_module_format: None,
@@ -1263,15 +1433,284 @@ impl Default for CompilerOptions {
             check_div_by_zero: true,
             cross_module_inline: false,
             no_assert_false: false,
+            transparent_modules: false,
+            no_builtin_ppx: false,
+            external_ppxs: Vec::new(),
             nopervasives: false,
             module_name: None,
             package_name: None,
             make_runtime: false,
+            assume_compiled_interface: false,
             capture_intermediates: false,
             skip_js_render: false,
             publish_in_process_signature: true,
         }
     }
+}
+
+impl CompilerOptions {
+    fn current_unit_name(&self) -> Option<String> {
+        self.module_name.clone().or_else(|| {
+            self.source_filename
+                .as_deref()
+                .map(module_name_from_source_filename)
+                .filter(|name| !name.is_empty())
+        })
+    }
+}
+
+fn apply_warning_options(tctx: &mut TypeCheckContext<'_>, options: &CompilerOptions) {
+    for spec in &options.warning_specs {
+        tctx.apply_warning_spec(spec);
+    }
+    for spec in &options.warning_error_specs {
+        tctx.apply_warning_error_spec(spec);
+    }
+}
+
+fn apply_warning_specs_to_config(
+    config: &mut WarningConfig,
+    warning_specs: &[String],
+    warning_error_specs: &[String],
+) {
+    for spec in warning_specs {
+        let _ = config.parse(spec);
+    }
+    for spec in warning_error_specs {
+        let _ = config.parse_as_error(spec);
+    }
+}
+
+fn apply_file_config_warning_options(
+    tctx: &mut TypeCheckContext<'_>,
+    config: &FileConfigOverrides,
+) {
+    for spec in &config.warning_specs {
+        tctx.apply_warning_spec(spec);
+    }
+    for spec in &config.warning_error_specs {
+        tctx.apply_warning_error_spec(spec);
+    }
+}
+
+fn apply_leading_warning_attribute_options(
+    tctx: &mut TypeCheckContext<'_>,
+    specs: &[ppx::WarningAttributeSpec],
+) {
+    for spec in specs {
+        if spec.as_error {
+            tctx.apply_warning_error_spec(&spec.spec);
+        } else {
+            tctx.apply_warning_spec(&spec.spec);
+        }
+    }
+}
+
+fn warning_config_for_options(options: &CompilerOptions) -> WarningConfig {
+    let mut config = WarningConfig::new();
+    apply_warning_specs_to_config(
+        &mut config,
+        &options.warning_specs,
+        &options.warning_error_specs,
+    );
+    config
+}
+
+fn warning_config_for_options_and_file_config(
+    options: &CompilerOptions,
+    file_config: &FileConfigOverrides,
+) -> WarningConfig {
+    let mut config = warning_config_for_options(options);
+    apply_warning_specs_to_config(
+        &mut config,
+        &file_config.warning_specs,
+        &file_config.warning_error_specs,
+    );
+    config
+}
+
+fn warning_config_for_options_file_config_and_leading_attrs(
+    options: &CompilerOptions,
+    file_config: &FileConfigOverrides,
+    leading_specs: &[ppx::WarningAttributeSpec],
+) -> WarningConfig {
+    let mut config = warning_config_for_options(options);
+    // OCaml compiler/frontend/ppx_entry.ml:28-47 calls
+    // Bs_ast_invariant.iter_warnings_on_stru/sigi before builtin PPX
+    // rewriting; those leading attributes mutate Warnings.current before
+    // @deriving and external warnings are emitted.
+    for spec in leading_specs {
+        if spec.as_error {
+            let _ = config.parse_as_error(&spec.spec);
+        } else {
+            let _ = config.parse(&spec.spec);
+        }
+    }
+    apply_warning_specs_to_config(
+        &mut config,
+        &file_config.warning_specs,
+        &file_config.warning_error_specs,
+    );
+    config
+}
+
+fn shell_quote_path(path: &std::path::Path) -> String {
+    let value = path.to_string_lossy();
+    let mut quoted = String::with_capacity(value.len() + 2);
+    quoted.push('\'');
+    for ch in value.chars() {
+        if ch == '\'' {
+            quoted.push_str("'\\''");
+        } else {
+            quoted.push(ch);
+        }
+    }
+    quoted.push('\'');
+    quoted
+}
+
+fn temp_ppx_file(input_name: &str) -> Result<PathBuf> {
+    let basename = FsPath::new(input_name)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .filter(|name| !name.is_empty())
+        .unwrap_or("input");
+    let pid = std::process::id();
+    for _ in 0..1000 {
+        let counter = EXTERNAL_PPX_TEMP_COUNTER.fetch_add(1, Ordering::SeqCst);
+        let path = std::env::temp_dir().join(format!("ppx{pid:x}{counter:x}{basename}"));
+        match std::fs::OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(&path)
+        {
+            Ok(_) => return Ok(path),
+            Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(err) => {
+                return Err(err).with_context(|| format!("Failed to create {}", path.display()));
+            }
+        }
+    }
+    Err(anyhow!(
+        "Failed to create external preprocessor temporary file"
+    ))
+}
+
+fn format_external_ppx_cannot_run_report(filename: &str, command: &str) -> String {
+    format!(
+        "\n  We've found a bug for you!\n  {filename}\n\n  Error while running external preprocessor\nCommand line: {command}\n\n\n"
+    )
+}
+
+fn format_external_ppx_wrong_magic_report(filename: &str, magic: &str) -> String {
+    format!(
+        "\n  We've found a bug for you!\n  {filename}\n\n  External preprocessor does not produce a valid file\nCommand line: {magic}\n\n\n"
+    )
+}
+
+fn external_ppx_cannot_run(filename: &str, command: &str) -> anyhow::Error {
+    UserDiagnostic::new(format_external_ppx_cannot_run_report(filename, command), 2).into()
+}
+
+fn external_ppx_wrong_magic(filename: &str, magic: &str) -> anyhow::Error {
+    UserDiagnostic::new(format_external_ppx_wrong_magic_report(filename, magic), 2).into()
+}
+
+fn check_external_ppx_output_magic(
+    output_path: &std::path::Path,
+    magic: &[u8],
+    filename: &str,
+) -> Result<()> {
+    let bytes = std::fs::read(output_path).unwrap_or_default();
+    let buffer = if bytes.len() < magic.len() {
+        String::new()
+    } else {
+        String::from_utf8_lossy(&bytes[..magic.len()]).into_owned()
+    };
+    if buffer.as_bytes() != magic {
+        return Err(external_ppx_wrong_magic(filename, &buffer));
+    }
+    Ok(())
+}
+
+fn run_external_ppxs(
+    ppxs: &[String],
+    filename: &str,
+    arena: &mut ParseArena,
+    write_input: impl Fn(&std::path::Path, &str, &mut ParseArena) -> std::io::Result<()>,
+    magic: &[u8],
+) -> Result<()> {
+    if ppxs.is_empty() {
+        return Ok(());
+    }
+
+    let mut input_path = temp_ppx_file(filename)?;
+    write_input(&input_path, filename, arena)
+        .with_context(|| format!("Failed to write {}", input_path.display()))?;
+    let mut temp_files = vec![input_path.clone()];
+
+    for ppx in ppxs {
+        let output_path = temp_ppx_file(filename)?;
+        let command = format!(
+            "{} {} {}",
+            ppx,
+            shell_quote_path(&input_path),
+            shell_quote_path(&output_path)
+        );
+        let status = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(&command)
+            .status();
+        let ok = status.as_ref().is_ok_and(|status| status.success());
+        if !ok {
+            return Err(external_ppx_cannot_run(filename, &command));
+        }
+        if !output_path.exists() {
+            return Err(external_ppx_cannot_run(filename, &command));
+        }
+        check_external_ppx_output_magic(&output_path, magic, filename)?;
+        temp_files.push(output_path.clone());
+        input_path = output_path;
+    }
+
+    for path in temp_files {
+        let _ = std::fs::remove_file(path);
+    }
+    Ok(())
+}
+
+pub fn apply_external_structure_ppxs(
+    ppxs: &[String],
+    filename: &str,
+    arena: &mut ParseArena,
+    structure: &Structure,
+) -> Result<()> {
+    run_external_ppxs(
+        ppxs,
+        filename,
+        arena,
+        |path, filename, arena| {
+            write_external_ppx_structure_input(path, filename, arena, structure)
+        },
+        AST_IMPL_MAGIC_NUMBER,
+    )
+}
+
+pub fn apply_external_signature_ppxs(
+    ppxs: &[String],
+    filename: &str,
+    arena: &mut ParseArena,
+    signature: &Signature,
+) -> Result<()> {
+    run_external_ppxs(
+        ppxs,
+        filename,
+        arena,
+        |path, filename, arena| {
+            write_external_ppx_signature_input(path, filename, arena, signature)
+        },
+        AST_INTF_MAGIC_NUMBER,
+    )
 }
 
 pub fn jsx_version_for_structure(
@@ -1323,13 +1762,9175 @@ fn preprocess_signature_for_typecheck(
     options: &CompilerOptions,
     arena: &mut crate::parse_arena::ParseArena,
 ) -> Result<Signature> {
+    preprocess_signature_for_typecheck_inner(signature, options, arena)
+        .map_err(|e| anyhow!("PPX rewrite failed: {e}"))
+}
+
+fn preprocess_signature_for_typecheck_with_source(
+    signature: Signature,
+    options: &CompilerOptions,
+    arena: &mut crate::parse_arena::ParseArena,
+    source: &str,
+    filename: &str,
+) -> Result<Signature> {
+    let signature = if let Some(jsx_version) = options.jsx_version {
+        jsx_ppx::transform_signature_result(signature, jsx_version, arena)
+            .map_err(|e| jsx_ppx_error_to_anyhow(e, arena, source, filename))?
+    } else {
+        signature
+    };
+
+    if options.no_builtin_ppx {
+        Ok(signature)
+    } else {
+        ppx::rewrite_signature(&signature, arena)
+            .map_err(|e| ppx_error_to_anyhow(e, arena, source, filename))
+    }
+}
+
+fn preprocess_signature_for_typecheck_inner(
+    signature: Signature,
+    options: &CompilerOptions,
+    arena: &mut crate::parse_arena::ParseArena,
+) -> std::result::Result<Signature, ppx::PpxError> {
     let signature = if let Some(jsx_version) = options.jsx_version {
         jsx_ppx::transform_signature(signature, jsx_version, arena)
     } else {
         signature
     };
 
-    ppx::rewrite_signature(&signature, arena).map_err(|e| anyhow!("PPX rewrite failed: {e}"))
+    if options.no_builtin_ppx {
+        Ok(signature)
+    } else {
+        ppx::rewrite_signature(&signature, arena)
+    }
+}
+
+fn ppx_error_to_anyhow(
+    err: ppx::PpxError,
+    arena: &ParseArena,
+    source: &str,
+    filename: &str,
+) -> anyhow::Error {
+    let mut prefix = String::new();
+    for warning in err.warnings() {
+        prefix.push_str(&format_compiler_warning_report(
+            arena,
+            source,
+            filename,
+            &TypeCoreWarning {
+                loc: warning.loc,
+                warning: warning.warning.clone(),
+                is_error: false,
+            },
+        ));
+    }
+    if err.loc().is_none() && err.message_text().starts_with("Fatal error: exception ") {
+        return UserDiagnostic::new(format!("{prefix}{}", err.message_text()), 2).into();
+    }
+    if let Some(loc) = err.loc() {
+        let message = err.message_text();
+        let mut report = if message.contains('\n') {
+            let mut raw_message = String::with_capacity(message.len() + 2);
+            raw_message.push_str("  ");
+            raw_message.push_str(message);
+            format_compiler_error_report_raw_message(arena, source, filename, loc, &raw_message)
+        } else {
+            format_compiler_error_report(arena, source, filename, loc, message)
+        };
+        if !prefix.is_empty() {
+            report.insert_str(0, &prefix);
+        }
+        UserDiagnostic::new(report, 2).into()
+    } else {
+        let mut report = format_compiler_error_report_for_file(filename, err.message_text());
+        if !prefix.is_empty() {
+            report.insert_str(0, &prefix);
+        }
+        UserDiagnostic::new(report, 2).into()
+    }
+}
+
+fn jsx_ppx_error_to_anyhow(
+    err: jsx_ppx::JsxPreprocessorError,
+    arena: &ParseArena,
+    source: &str,
+    filename: &str,
+) -> anyhow::Error {
+    let loc = arena.to_location(err.loc);
+    let output = match err.message_style {
+        jsx_ppx::JsxPreprocessorMessageStyle::PrefixedLines => {
+            format_compiler_error_report_from_location(source, filename, &loc, &err.message)
+        }
+        jsx_ppx::JsxPreprocessorMessageStyle::FirstLineOnlyPrefix => {
+            let mut output = String::new();
+            push_compiler_error_report_header_from_location(&mut output, source, filename, &loc);
+            for (idx, line) in err.message.lines().enumerate() {
+                if idx == 0 {
+                    output.push_str("  ");
+                }
+                output.push_str(line);
+                output.push('\n');
+            }
+            output.push('\n');
+            output
+        }
+    };
+    UserDiagnostic::new(output, 2).into()
+}
+
+fn emit_ppx_warnings(
+    arena: &ParseArena,
+    source: &str,
+    filename: &str,
+    options: &CompilerOptions,
+    warnings: &[ppx::PpxWarning],
+) -> bool {
+    let warning_config = warning_config_for_options(options);
+    emit_ppx_warnings_with_config(arena, source, filename, &warning_config, warnings)
+}
+
+fn emit_ppx_warnings_with_config(
+    arena: &ParseArena,
+    source: &str,
+    filename: &str,
+    warning_config: &WarningConfig,
+    warnings: &[ppx::PpxWarning],
+) -> bool {
+    if warnings.is_empty() {
+        return false;
+    }
+
+    let mut has_error = false;
+    let mut stderr = std::io::stderr();
+    for warning in warnings {
+        if !warning_config.is_active(&warning.warning) {
+            continue;
+        }
+        let is_error = warning_config.is_error(&warning.warning);
+        has_error |= is_error;
+        let output = format_compiler_warning_report(
+            arena,
+            source,
+            filename,
+            &TypeCoreWarning {
+                loc: warning.loc,
+                warning: warning.warning.clone(),
+                is_error,
+            },
+        );
+        let _ = std::io::Write::write_all(&mut stderr, output.as_bytes());
+    }
+    let _ = std::io::Write::flush(&mut stderr);
+    has_error
+}
+
+fn reject_invalid_polyvariant_int_literals_in_structure(
+    structure: &Structure,
+    arena: &ParseArena,
+    source: &str,
+    filename: &str,
+) -> Result<()> {
+    if let Some(loc) = polyvariant_int_literal_outside_i32_loc_in_structure(structure, arena) {
+        return Err(UserDiagnostic::new(
+            format_compiler_error_report(
+                arena,
+                source,
+                filename,
+                loc,
+                POLYVARIANT_INT_TOO_LARGE_MSG,
+            ),
+            2,
+        )
+        .into());
+    }
+    Ok(())
+}
+
+fn polyvariant_int_literal_outside_i32_loc_in_structure(
+    structure: &Structure,
+    arena: &ParseArena,
+) -> Option<LocIdx> {
+    for item in structure {
+        match &*item.pstr_desc {
+            StructureItemDesc::Pstr_eval(eval) => {
+                if let Some(loc) = polyvariant_int_literal_outside_i32_loc_in_expr(eval.0, arena) {
+                    return Some(loc);
+                }
+            }
+            StructureItemDesc::Pstr_value(value) => {
+                for binding in &value.1 {
+                    if let Some(loc) =
+                        polyvariant_int_literal_outside_i32_loc_in_expr(binding.pvb_expr, arena)
+                    {
+                        return Some(loc);
+                    }
+                }
+            }
+            StructureItemDesc::Pstr_module(module_binding) => {
+                if let Some(loc) = polyvariant_int_literal_outside_i32_loc_in_mod_expr(
+                    module_binding.pmb_expr,
+                    arena,
+                ) {
+                    return Some(loc);
+                }
+            }
+            StructureItemDesc::Pstr_recmodule(module_bindings) => {
+                for module_binding in module_bindings.iter() {
+                    if let Some(loc) = polyvariant_int_literal_outside_i32_loc_in_mod_expr(
+                        module_binding.pmb_expr,
+                        arena,
+                    ) {
+                        return Some(loc);
+                    }
+                }
+            }
+            StructureItemDesc::Pstr_include(include_decl) => {
+                if let Some(loc) = polyvariant_int_literal_outside_i32_loc_in_mod_expr(
+                    include_decl.pincl_mod,
+                    arena,
+                ) {
+                    return Some(loc);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+fn polyvariant_int_literal_outside_i32_loc_in_mod_expr(
+    mod_expr: ModExprIdx,
+    arena: &ParseArena,
+) -> Option<LocIdx> {
+    let mod_expr = arena.get_mod_expr(mod_expr);
+    match &*mod_expr.pmod_desc {
+        ModuleExprDesc::Pmod_structure(items) => {
+            polyvariant_int_literal_outside_i32_loc_in_structure(items, arena)
+        }
+        ModuleExprDesc::Pmod_functor(functor) => {
+            polyvariant_int_literal_outside_i32_loc_in_mod_expr(functor.2, arena)
+        }
+        ModuleExprDesc::Pmod_apply(lhs, rhs) => {
+            polyvariant_int_literal_outside_i32_loc_in_mod_expr(*lhs, arena)
+                .or_else(|| polyvariant_int_literal_outside_i32_loc_in_mod_expr(*rhs, arena))
+        }
+        ModuleExprDesc::Pmod_constraint(inner, _) => {
+            polyvariant_int_literal_outside_i32_loc_in_mod_expr(*inner, arena)
+        }
+        ModuleExprDesc::Pmod_unpack(expr) => {
+            polyvariant_int_literal_outside_i32_loc_in_expr(*expr, arena)
+        }
+        _ => None,
+    }
+}
+
+fn polyvariant_int_literal_outside_i32_loc_in_expr(
+    expr: ExprIdx,
+    arena: &ParseArena,
+) -> Option<LocIdx> {
+    let expr = arena.get_expr(expr);
+    if let ExpressionDesc::Pexp_variant(inner) = &*expr.pexp_desc
+        && inner.1.is_none()
+        && is_valid_hash_number_label(&inner.0)
+        && inner.0.parse::<i32>().is_err()
+    {
+        return Some(expr.pexp_loc);
+    }
+
+    match &*expr.pexp_desc {
+        ExpressionDesc::Pexp_let(inner) => inner
+            .1
+            .iter()
+            .find_map(|binding| {
+                polyvariant_int_literal_outside_i32_loc_in_expr(binding.pvb_expr, arena)
+            })
+            .or_else(|| polyvariant_int_literal_outside_i32_loc_in_expr(inner.2, arena)),
+        ExpressionDesc::Pexp_fun(fun) => fun
+            .default
+            .and_then(|expr| polyvariant_int_literal_outside_i32_loc_in_expr(expr, arena))
+            .or_else(|| polyvariant_int_literal_outside_i32_loc_in_expr(fun.rhs, arena)),
+        ExpressionDesc::Pexp_apply(apply) => {
+            polyvariant_int_literal_outside_i32_loc_in_expr(apply.funct, arena).or_else(|| {
+                apply.args.iter().find_map(|(_, arg)| {
+                    polyvariant_int_literal_outside_i32_loc_in_expr(*arg, arena)
+                })
+            })
+        }
+        ExpressionDesc::Pexp_match(inner) | ExpressionDesc::Pexp_try(inner) => {
+            polyvariant_int_literal_outside_i32_loc_in_expr(inner.0, arena).or_else(|| {
+                inner.1.iter().find_map(|case| {
+                    case.pc_guard
+                        .and_then(|guard| {
+                            polyvariant_int_literal_outside_i32_loc_in_expr(guard, arena)
+                        })
+                        .or_else(|| {
+                            polyvariant_int_literal_outside_i32_loc_in_expr(case.pc_rhs, arena)
+                        })
+                })
+            })
+        }
+        ExpressionDesc::Pexp_tuple(items) | ExpressionDesc::Pexp_array(items) => items
+            .iter()
+            .find_map(|item| polyvariant_int_literal_outside_i32_loc_in_expr(*item, arena)),
+        ExpressionDesc::Pexp_construct(_, payload) => {
+            payload.and_then(|expr| polyvariant_int_literal_outside_i32_loc_in_expr(expr, arena))
+        }
+        ExpressionDesc::Pexp_variant(inner) => inner
+            .1
+            .and_then(|expr| polyvariant_int_literal_outside_i32_loc_in_expr(expr, arena)),
+        ExpressionDesc::Pexp_record(record) => record
+            .0
+            .iter()
+            .find_map(|field| polyvariant_int_literal_outside_i32_loc_in_expr(field.expr, arena))
+            .or_else(|| {
+                record
+                    .1
+                    .and_then(|base| polyvariant_int_literal_outside_i32_loc_in_expr(base, arena))
+            }),
+        ExpressionDesc::Pexp_field(owner, _)
+        | ExpressionDesc::Pexp_assert(owner)
+        | ExpressionDesc::Pexp_await(owner)
+        | ExpressionDesc::Pexp_comptime_compile_error(owner)
+        | ExpressionDesc::Pexp_comptime_build_variant(owner)
+        | ExpressionDesc::Pexp_comptime_variant_case(owner)
+        | ExpressionDesc::Pexp_comptime_build_record(owner)
+        | ExpressionDesc::Pexp_comptime_record_field(owner) => {
+            polyvariant_int_literal_outside_i32_loc_in_expr(*owner, arena)
+        }
+        ExpressionDesc::Pexp_send(inner) => {
+            polyvariant_int_literal_outside_i32_loc_in_expr(inner.0, arena)
+        }
+        ExpressionDesc::Pexp_setfield(inner) => {
+            polyvariant_int_literal_outside_i32_loc_in_expr(inner.0, arena)
+                .or_else(|| polyvariant_int_literal_outside_i32_loc_in_expr(inner.2, arena))
+        }
+        ExpressionDesc::Pexp_ifthenelse(inner) => {
+            polyvariant_int_literal_outside_i32_loc_in_expr(inner.0, arena)
+                .or_else(|| polyvariant_int_literal_outside_i32_loc_in_expr(inner.1, arena))
+                .or_else(|| {
+                    inner.2.and_then(|else_expr| {
+                        polyvariant_int_literal_outside_i32_loc_in_expr(else_expr, arena)
+                    })
+                })
+        }
+        ExpressionDesc::Pexp_sequence(lhs, rhs) => {
+            polyvariant_int_literal_outside_i32_loc_in_expr(*lhs, arena)
+                .or_else(|| polyvariant_int_literal_outside_i32_loc_in_expr(*rhs, arena))
+        }
+        ExpressionDesc::Pexp_while(cond, body) => {
+            polyvariant_int_literal_outside_i32_loc_in_expr(*cond, arena)
+                .or_else(|| polyvariant_int_literal_outside_i32_loc_in_expr(*body, arena))
+        }
+        ExpressionDesc::Pexp_for(inner) => {
+            polyvariant_int_literal_outside_i32_loc_in_expr(inner.1, arena)
+                .or_else(|| polyvariant_int_literal_outside_i32_loc_in_expr(inner.2, arena))
+                .or_else(|| polyvariant_int_literal_outside_i32_loc_in_expr(inner.4, arena))
+        }
+        ExpressionDesc::Pexp_for_of(inner)
+        | ExpressionDesc::Pexp_for_await_of(inner)
+        | ExpressionDesc::Pexp_inline_for(inner) => {
+            polyvariant_int_literal_outside_i32_loc_in_expr(inner.1, arena)
+                .or_else(|| polyvariant_int_literal_outside_i32_loc_in_expr(inner.2, arena))
+        }
+        ExpressionDesc::Pexp_constraint(inner) => {
+            polyvariant_int_literal_outside_i32_loc_in_expr(inner.0, arena)
+        }
+        ExpressionDesc::Pexp_coerce(inner) => {
+            polyvariant_int_literal_outside_i32_loc_in_expr(inner.0, arena)
+        }
+        ExpressionDesc::Pexp_letmodule(inner) => {
+            polyvariant_int_literal_outside_i32_loc_in_mod_expr(inner.1, arena)
+                .or_else(|| polyvariant_int_literal_outside_i32_loc_in_expr(inner.2, arena))
+        }
+        ExpressionDesc::Pexp_letexception(inner) => {
+            polyvariant_int_literal_outside_i32_loc_in_expr(inner.1, arena)
+        }
+        ExpressionDesc::Pexp_newtype(inner) => {
+            polyvariant_int_literal_outside_i32_loc_in_expr(inner.1, arena)
+        }
+        ExpressionDesc::Pexp_pack(mod_expr) => {
+            polyvariant_int_literal_outside_i32_loc_in_mod_expr(*mod_expr, arena)
+        }
+        ExpressionDesc::Pexp_open(inner) => {
+            polyvariant_int_literal_outside_i32_loc_in_expr(inner.2, arena)
+        }
+        ExpressionDesc::Pexp_comptime_field(inner) => {
+            polyvariant_int_literal_outside_i32_loc_in_expr(inner.0, arena)
+                .or_else(|| polyvariant_int_literal_outside_i32_loc_in_expr(inner.1, arena))
+        }
+        ExpressionDesc::Pexp_comptime_record(inner) => {
+            polyvariant_int_literal_outside_i32_loc_in_expr(inner.1, arena)
+        }
+        ExpressionDesc::Pexp_comptime_variant(inner) => {
+            polyvariant_int_literal_outside_i32_loc_in_expr(inner.1, arena).or_else(|| {
+                inner.2.and_then(|payload| {
+                    polyvariant_int_literal_outside_i32_loc_in_expr(payload, arena)
+                })
+            })
+        }
+        _ => None,
+    }
+}
+
+fn is_valid_hash_number_label(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    match bytes {
+        [] => false,
+        [b'0'..=b'9'] => true,
+        [b'1'..=b'9', rest @ ..] => rest.iter().all(u8::is_ascii_digit),
+        _ => false,
+    }
+}
+
+pub fn parser_error_to_anyhow(parser: &Parser<'_>, source: &str, filename: &str) -> anyhow::Error {
+    if parser.diagnostics().iter().any(|diagnostic| {
+        matches!(
+            diagnostic.category,
+            crate::parser::diagnostics::DiagnosticCategory::FatalSyntaxerr
+        )
+    }) {
+        return UserDiagnostic::new("Fatal error: exception Syntaxerr.Error(_)\n".to_string(), 2)
+            .into();
+    }
+
+    let mut output = String::new();
+    for diagnostic in parser.diagnostics() {
+        output.push_str(&code_frame::format_error(
+            filename,
+            source,
+            &diagnostic.start_pos,
+            &diagnostic.end_pos,
+            &diagnostic.explain_with_source(Some(source)),
+        ));
+    }
+    UserDiagnostic::new(output, 1).into()
+}
+
+fn directive_payload_error_to_anyhow(
+    err: DirectivePayloadError,
+    arena: &ParseArena,
+    source: &str,
+    filename: &str,
+) -> anyhow::Error {
+    UserDiagnostic::new(
+        format_compiler_error_report(arena, source, filename, err.loc, "expect string literal "),
+        2,
+    )
+    .into()
+}
+
+fn let_unwrap_feature_error_to_anyhow(
+    loc: LocIdx,
+    arena: &ParseArena,
+    source: &str,
+    filename: &str,
+) -> anyhow::Error {
+    UserDiagnostic::new(
+        format_compiler_error_report(
+            arena,
+            source,
+            filename,
+            loc,
+            LET_UNWRAP_FEATURE_NOT_ENABLED_MSG,
+        ),
+        2,
+    )
+    .into()
+}
+
+fn let_unwrap_position_error_to_anyhow(
+    loc: LocIdx,
+    arena: &ParseArena,
+    source: &str,
+    filename: &str,
+    message: &str,
+) -> anyhow::Error {
+    UserDiagnostic::new(
+        format_compiler_error_report(arena, source, filename, loc, message),
+        2,
+    )
+    .into()
+}
+
+fn attr_is_let_unwrap(attr: &Attribute, arena: &ParseArena) -> bool {
+    arena.get_string(attr.0.txt) == "let.unwrap"
+}
+
+fn attrs_have_let_unwrap(attrs: &crate::parser::ast::Attributes, arena: &ParseArena) -> bool {
+    attrs.iter().any(|attr| attr_is_let_unwrap(attr, arena))
+}
+
+fn reject_disabled_let_unwrap_in_structure(
+    enabled: bool,
+    structure: &Structure,
+    arena: &ParseArena,
+    source: &str,
+    filename: &str,
+) -> Result<()> {
+    if !enabled {
+        if let Some(loc) = disabled_let_unwrap_loc_in_structure(structure, arena) {
+            return Err(let_unwrap_feature_error_to_anyhow(
+                loc, arena, source, filename,
+            ));
+        }
+    }
+    Ok(())
+}
+
+#[derive(Clone, Copy)]
+enum LetUnwrapPositionError {
+    Toplevel(LocIdx),
+    UnsupportedType(LocIdx),
+}
+
+fn reject_enabled_invalid_let_unwrap_in_structure(
+    enabled: bool,
+    structure: &Structure,
+    arena: &ParseArena,
+    source: &str,
+    filename: &str,
+) -> Result<()> {
+    if !enabled {
+        return Ok(());
+    }
+    if let Some(error) = invalid_enabled_let_unwrap_in_structure(structure, arena) {
+        let (loc, message) = match error {
+            LetUnwrapPositionError::Toplevel(loc) => (loc, LET_UNWRAP_TOPLEVEL_MSG),
+            LetUnwrapPositionError::UnsupportedType(loc) => (loc, LET_UNWRAP_UNSUPPORTED_TYPE_MSG),
+        };
+        return Err(let_unwrap_position_error_to_anyhow(
+            loc, arena, source, filename, message,
+        ));
+    }
+    Ok(())
+}
+
+fn let_unwrap_binding_loc(
+    bindings: &[crate::parser::ast::ValueBinding],
+    arena: &ParseArena,
+) -> Option<LocIdx> {
+    bindings
+        .iter()
+        .find(|binding| attrs_have_let_unwrap(&binding.pvb_attributes, arena))
+        .map(|binding| arena.get_pat(binding.pvb_pat).ppat_loc)
+}
+
+fn is_supported_let_unwrap_pattern(pat: &crate::parser::ast::Pattern, arena: &ParseArena) -> bool {
+    let PatternDesc::Ppat_construct(ctor_lid, payload) = &*pat.ppat_desc else {
+        return false;
+    };
+    let Longident::Lident(ctor_name_idx) = arena.get_longident(ctor_lid.txt) else {
+        return false;
+    };
+    match (arena.get_string(*ctor_name_idx), payload.is_some()) {
+        ("Ok", true) | ("Error", true) | ("Some", true) | ("None", false) => true,
+        _ => false,
+    }
+}
+
+fn invalid_enabled_let_unwrap_in_bindings(
+    bindings: &[crate::parser::ast::ValueBinding],
+    arena: &ParseArena,
+) -> Option<LetUnwrapPositionError> {
+    for binding in bindings {
+        if let Some(error) = invalid_enabled_let_unwrap_in_expr(binding.pvb_expr, arena) {
+            return Some(error);
+        }
+    }
+    None
+}
+
+fn invalid_enabled_let_unwrap_in_structure(
+    structure: &Structure,
+    arena: &ParseArena,
+) -> Option<LetUnwrapPositionError> {
+    for item in structure {
+        match &*item.pstr_desc {
+            StructureItemDesc::Pstr_eval(eval) => {
+                if let Some(error) = invalid_enabled_let_unwrap_in_expr(eval.0, arena) {
+                    return Some(error);
+                }
+            }
+            StructureItemDesc::Pstr_value(value) => {
+                if let Some(loc) = let_unwrap_binding_loc(&value.1, arena) {
+                    return Some(LetUnwrapPositionError::Toplevel(loc));
+                }
+                if let Some(error) = invalid_enabled_let_unwrap_in_bindings(&value.1, arena) {
+                    return Some(error);
+                }
+            }
+            StructureItemDesc::Pstr_module(module_binding) => {
+                if let Some(error) =
+                    invalid_enabled_let_unwrap_in_mod_expr(module_binding.pmb_expr, arena)
+                {
+                    return Some(error);
+                }
+            }
+            StructureItemDesc::Pstr_recmodule(module_bindings) => {
+                for module_binding in module_bindings.iter() {
+                    if let Some(error) =
+                        invalid_enabled_let_unwrap_in_mod_expr(module_binding.pmb_expr, arena)
+                    {
+                        return Some(error);
+                    }
+                }
+            }
+            StructureItemDesc::Pstr_include(include_decl) => {
+                if let Some(error) =
+                    invalid_enabled_let_unwrap_in_mod_expr(include_decl.pincl_mod, arena)
+                {
+                    return Some(error);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+fn invalid_enabled_let_unwrap_in_mod_expr(
+    mod_expr: ModExprIdx,
+    arena: &ParseArena,
+) -> Option<LetUnwrapPositionError> {
+    let mod_expr = arena.get_mod_expr(mod_expr);
+    match &*mod_expr.pmod_desc {
+        ModuleExprDesc::Pmod_structure(items) => {
+            invalid_enabled_let_unwrap_in_structure(items, arena)
+        }
+        ModuleExprDesc::Pmod_functor(functor) => {
+            invalid_enabled_let_unwrap_in_mod_expr(functor.2, arena)
+        }
+        ModuleExprDesc::Pmod_apply(lhs, rhs) => invalid_enabled_let_unwrap_in_mod_expr(*lhs, arena)
+            .or_else(|| invalid_enabled_let_unwrap_in_mod_expr(*rhs, arena)),
+        ModuleExprDesc::Pmod_constraint(inner, _) => {
+            invalid_enabled_let_unwrap_in_mod_expr(*inner, arena)
+        }
+        ModuleExprDesc::Pmod_unpack(expr) => invalid_enabled_let_unwrap_in_expr(*expr, arena),
+        _ => None,
+    }
+}
+
+fn invalid_enabled_let_unwrap_in_expr(
+    expr: ExprIdx,
+    arena: &ParseArena,
+) -> Option<LetUnwrapPositionError> {
+    let expr = arena.get_expr(expr);
+    match &*expr.pexp_desc {
+        ExpressionDesc::Pexp_let(inner) => {
+            let (_rec_flag, bindings, body) = &**inner;
+            if let [binding] = bindings.as_slice()
+                && attrs_have_let_unwrap(&binding.pvb_attributes, arena)
+                && !is_supported_let_unwrap_pattern(arena.get_pat(binding.pvb_pat), arena)
+            {
+                return Some(LetUnwrapPositionError::UnsupportedType(
+                    arena.get_pat(binding.pvb_pat).ppat_loc,
+                ));
+            }
+            invalid_enabled_let_unwrap_in_bindings(bindings, arena)
+                .or_else(|| invalid_enabled_let_unwrap_in_expr(*body, arena))
+        }
+        ExpressionDesc::Pexp_fun(fun) => fun
+            .default
+            .and_then(|expr| invalid_enabled_let_unwrap_in_expr(expr, arena))
+            .or_else(|| invalid_enabled_let_unwrap_in_expr(fun.rhs, arena)),
+        ExpressionDesc::Pexp_apply(apply) => invalid_enabled_let_unwrap_in_expr(apply.funct, arena)
+            .or_else(|| {
+                apply
+                    .args
+                    .iter()
+                    .find_map(|(_, arg)| invalid_enabled_let_unwrap_in_expr(*arg, arena))
+            }),
+        ExpressionDesc::Pexp_match(inner) | ExpressionDesc::Pexp_try(inner) => {
+            invalid_enabled_let_unwrap_in_expr(inner.0, arena).or_else(|| {
+                inner.1.iter().find_map(|case| {
+                    case.pc_guard
+                        .and_then(|guard| invalid_enabled_let_unwrap_in_expr(guard, arena))
+                        .or_else(|| invalid_enabled_let_unwrap_in_expr(case.pc_rhs, arena))
+                })
+            })
+        }
+        ExpressionDesc::Pexp_tuple(items) | ExpressionDesc::Pexp_array(items) => items
+            .iter()
+            .find_map(|item| invalid_enabled_let_unwrap_in_expr(*item, arena)),
+        ExpressionDesc::Pexp_construct(_, payload) => {
+            payload.and_then(|expr| invalid_enabled_let_unwrap_in_expr(expr, arena))
+        }
+        ExpressionDesc::Pexp_variant(inner) => inner
+            .1
+            .and_then(|expr| invalid_enabled_let_unwrap_in_expr(expr, arena)),
+        ExpressionDesc::Pexp_record(record) => record
+            .0
+            .iter()
+            .find_map(|field| invalid_enabled_let_unwrap_in_expr(field.expr, arena))
+            .or_else(|| {
+                record
+                    .1
+                    .and_then(|base| invalid_enabled_let_unwrap_in_expr(base, arena))
+            }),
+        ExpressionDesc::Pexp_field(owner, _)
+        | ExpressionDesc::Pexp_assert(owner)
+        | ExpressionDesc::Pexp_await(owner)
+        | ExpressionDesc::Pexp_comptime_compile_error(owner)
+        | ExpressionDesc::Pexp_comptime_build_variant(owner)
+        | ExpressionDesc::Pexp_comptime_variant_case(owner)
+        | ExpressionDesc::Pexp_comptime_build_record(owner)
+        | ExpressionDesc::Pexp_comptime_record_field(owner) => {
+            invalid_enabled_let_unwrap_in_expr(*owner, arena)
+        }
+        ExpressionDesc::Pexp_send(inner) => invalid_enabled_let_unwrap_in_expr(inner.0, arena),
+        ExpressionDesc::Pexp_setfield(inner) => invalid_enabled_let_unwrap_in_expr(inner.0, arena)
+            .or_else(|| invalid_enabled_let_unwrap_in_expr(inner.2, arena)),
+        ExpressionDesc::Pexp_ifthenelse(inner) => {
+            invalid_enabled_let_unwrap_in_expr(inner.0, arena)
+                .or_else(|| invalid_enabled_let_unwrap_in_expr(inner.1, arena))
+                .or_else(|| {
+                    inner
+                        .2
+                        .and_then(|else_expr| invalid_enabled_let_unwrap_in_expr(else_expr, arena))
+                })
+        }
+        ExpressionDesc::Pexp_sequence(lhs, rhs) => invalid_enabled_let_unwrap_in_expr(*lhs, arena)
+            .or_else(|| invalid_enabled_let_unwrap_in_expr(*rhs, arena)),
+        ExpressionDesc::Pexp_while(cond, body) => invalid_enabled_let_unwrap_in_expr(*cond, arena)
+            .or_else(|| invalid_enabled_let_unwrap_in_expr(*body, arena)),
+        ExpressionDesc::Pexp_for(inner) => invalid_enabled_let_unwrap_in_expr(inner.1, arena)
+            .or_else(|| invalid_enabled_let_unwrap_in_expr(inner.2, arena))
+            .or_else(|| invalid_enabled_let_unwrap_in_expr(inner.4, arena)),
+        ExpressionDesc::Pexp_for_of(inner)
+        | ExpressionDesc::Pexp_for_await_of(inner)
+        | ExpressionDesc::Pexp_inline_for(inner) => {
+            invalid_enabled_let_unwrap_in_expr(inner.1, arena)
+                .or_else(|| invalid_enabled_let_unwrap_in_expr(inner.2, arena))
+        }
+        ExpressionDesc::Pexp_constraint(inner) => {
+            invalid_enabled_let_unwrap_in_expr(inner.0, arena)
+        }
+        ExpressionDesc::Pexp_coerce(inner) => invalid_enabled_let_unwrap_in_expr(inner.0, arena),
+        ExpressionDesc::Pexp_letmodule(inner) => {
+            invalid_enabled_let_unwrap_in_mod_expr(inner.1, arena)
+                .or_else(|| invalid_enabled_let_unwrap_in_expr(inner.2, arena))
+        }
+        ExpressionDesc::Pexp_letexception(inner) => {
+            invalid_enabled_let_unwrap_in_expr(inner.1, arena)
+        }
+        ExpressionDesc::Pexp_newtype(inner) => invalid_enabled_let_unwrap_in_expr(inner.1, arena),
+        ExpressionDesc::Pexp_pack(mod_expr) => {
+            invalid_enabled_let_unwrap_in_mod_expr(*mod_expr, arena)
+        }
+        ExpressionDesc::Pexp_open(inner) => invalid_enabled_let_unwrap_in_expr(inner.2, arena),
+        ExpressionDesc::Pexp_comptime_field(inner) => {
+            invalid_enabled_let_unwrap_in_expr(inner.0, arena)
+                .or_else(|| invalid_enabled_let_unwrap_in_expr(inner.1, arena))
+        }
+        ExpressionDesc::Pexp_comptime_record(inner) => {
+            invalid_enabled_let_unwrap_in_expr(inner.1, arena)
+        }
+        ExpressionDesc::Pexp_comptime_variant(inner) => {
+            invalid_enabled_let_unwrap_in_expr(inner.1, arena).or_else(|| {
+                inner
+                    .2
+                    .and_then(|payload| invalid_enabled_let_unwrap_in_expr(payload, arena))
+            })
+        }
+        _ => None,
+    }
+}
+
+fn disabled_let_unwrap_loc_in_bindings(
+    bindings: &[crate::parser::ast::ValueBinding],
+    arena: &ParseArena,
+) -> Option<LocIdx> {
+    for binding in bindings {
+        if attrs_have_let_unwrap(&binding.pvb_attributes, arena) {
+            return Some(arena.get_pat(binding.pvb_pat).ppat_loc);
+        }
+    }
+    for binding in bindings {
+        if let Some(loc) = disabled_let_unwrap_loc_in_expr(binding.pvb_expr, arena) {
+            return Some(loc);
+        }
+    }
+    None
+}
+
+fn disabled_let_unwrap_loc_in_structure(
+    structure: &Structure,
+    arena: &ParseArena,
+) -> Option<LocIdx> {
+    for item in structure {
+        match &*item.pstr_desc {
+            StructureItemDesc::Pstr_eval(eval) => {
+                if let Some(loc) = disabled_let_unwrap_loc_in_expr(eval.0, arena) {
+                    return Some(loc);
+                }
+            }
+            StructureItemDesc::Pstr_value(value) => {
+                if let Some(loc) = disabled_let_unwrap_loc_in_bindings(&value.1, arena) {
+                    return Some(loc);
+                }
+            }
+            StructureItemDesc::Pstr_module(module_binding) => {
+                if let Some(loc) =
+                    disabled_let_unwrap_loc_in_mod_expr(module_binding.pmb_expr, arena)
+                {
+                    return Some(loc);
+                }
+            }
+            StructureItemDesc::Pstr_recmodule(module_bindings) => {
+                for module_binding in module_bindings.iter() {
+                    if let Some(loc) =
+                        disabled_let_unwrap_loc_in_mod_expr(module_binding.pmb_expr, arena)
+                    {
+                        return Some(loc);
+                    }
+                }
+            }
+            StructureItemDesc::Pstr_include(include_decl) => {
+                if let Some(loc) =
+                    disabled_let_unwrap_loc_in_mod_expr(include_decl.pincl_mod, arena)
+                {
+                    return Some(loc);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+fn disabled_let_unwrap_loc_in_mod_expr(mod_expr: ModExprIdx, arena: &ParseArena) -> Option<LocIdx> {
+    let mod_expr = arena.get_mod_expr(mod_expr);
+    match &*mod_expr.pmod_desc {
+        ModuleExprDesc::Pmod_structure(items) => disabled_let_unwrap_loc_in_structure(items, arena),
+        ModuleExprDesc::Pmod_functor(functor) => {
+            disabled_let_unwrap_loc_in_mod_expr(functor.2, arena)
+        }
+        ModuleExprDesc::Pmod_apply(lhs, rhs) => disabled_let_unwrap_loc_in_mod_expr(*lhs, arena)
+            .or_else(|| disabled_let_unwrap_loc_in_mod_expr(*rhs, arena)),
+        ModuleExprDesc::Pmod_constraint(inner, _) => {
+            disabled_let_unwrap_loc_in_mod_expr(*inner, arena)
+        }
+        ModuleExprDesc::Pmod_unpack(expr) => disabled_let_unwrap_loc_in_expr(*expr, arena),
+        _ => None,
+    }
+}
+
+fn disabled_let_unwrap_loc_in_expr(expr: ExprIdx, arena: &ParseArena) -> Option<LocIdx> {
+    let expr = arena.get_expr(expr);
+    match &*expr.pexp_desc {
+        ExpressionDesc::Pexp_let(inner) => disabled_let_unwrap_loc_in_bindings(&inner.1, arena)
+            .or_else(|| disabled_let_unwrap_loc_in_expr(inner.2, arena)),
+        ExpressionDesc::Pexp_fun(fun) => fun
+            .default
+            .and_then(|expr| disabled_let_unwrap_loc_in_expr(expr, arena))
+            .or_else(|| disabled_let_unwrap_loc_in_expr(fun.rhs, arena)),
+        ExpressionDesc::Pexp_apply(apply) => disabled_let_unwrap_loc_in_expr(apply.funct, arena)
+            .or_else(|| {
+                apply
+                    .args
+                    .iter()
+                    .find_map(|(_, arg)| disabled_let_unwrap_loc_in_expr(*arg, arena))
+            }),
+        ExpressionDesc::Pexp_match(inner) | ExpressionDesc::Pexp_try(inner) => {
+            disabled_let_unwrap_loc_in_expr(inner.0, arena).or_else(|| {
+                inner.1.iter().find_map(|case| {
+                    case.pc_guard
+                        .and_then(|guard| disabled_let_unwrap_loc_in_expr(guard, arena))
+                        .or_else(|| disabled_let_unwrap_loc_in_expr(case.pc_rhs, arena))
+                })
+            })
+        }
+        ExpressionDesc::Pexp_tuple(items) | ExpressionDesc::Pexp_array(items) => items
+            .iter()
+            .find_map(|item| disabled_let_unwrap_loc_in_expr(*item, arena)),
+        ExpressionDesc::Pexp_construct(_, payload) => {
+            payload.and_then(|expr| disabled_let_unwrap_loc_in_expr(expr, arena))
+        }
+        ExpressionDesc::Pexp_variant(inner) => inner
+            .1
+            .and_then(|expr| disabled_let_unwrap_loc_in_expr(expr, arena)),
+        ExpressionDesc::Pexp_record(record) => record
+            .0
+            .iter()
+            .find_map(|field| disabled_let_unwrap_loc_in_expr(field.expr, arena))
+            .or_else(|| {
+                record
+                    .1
+                    .and_then(|base| disabled_let_unwrap_loc_in_expr(base, arena))
+            }),
+        ExpressionDesc::Pexp_field(owner, _)
+        | ExpressionDesc::Pexp_assert(owner)
+        | ExpressionDesc::Pexp_await(owner)
+        | ExpressionDesc::Pexp_comptime_compile_error(owner)
+        | ExpressionDesc::Pexp_comptime_build_variant(owner)
+        | ExpressionDesc::Pexp_comptime_variant_case(owner)
+        | ExpressionDesc::Pexp_comptime_build_record(owner)
+        | ExpressionDesc::Pexp_comptime_record_field(owner) => {
+            disabled_let_unwrap_loc_in_expr(*owner, arena)
+        }
+        ExpressionDesc::Pexp_send(inner) => disabled_let_unwrap_loc_in_expr(inner.0, arena),
+        ExpressionDesc::Pexp_setfield(inner) => disabled_let_unwrap_loc_in_expr(inner.0, arena)
+            .or_else(|| disabled_let_unwrap_loc_in_expr(inner.2, arena)),
+        ExpressionDesc::Pexp_ifthenelse(inner) => disabled_let_unwrap_loc_in_expr(inner.0, arena)
+            .or_else(|| disabled_let_unwrap_loc_in_expr(inner.1, arena))
+            .or_else(|| {
+                inner
+                    .2
+                    .and_then(|else_expr| disabled_let_unwrap_loc_in_expr(else_expr, arena))
+            }),
+        ExpressionDesc::Pexp_sequence(lhs, rhs) => disabled_let_unwrap_loc_in_expr(*lhs, arena)
+            .or_else(|| disabled_let_unwrap_loc_in_expr(*rhs, arena)),
+        ExpressionDesc::Pexp_while(cond, body) => disabled_let_unwrap_loc_in_expr(*cond, arena)
+            .or_else(|| disabled_let_unwrap_loc_in_expr(*body, arena)),
+        ExpressionDesc::Pexp_for(inner) => disabled_let_unwrap_loc_in_expr(inner.1, arena)
+            .or_else(|| disabled_let_unwrap_loc_in_expr(inner.2, arena))
+            .or_else(|| disabled_let_unwrap_loc_in_expr(inner.4, arena)),
+        ExpressionDesc::Pexp_for_of(inner)
+        | ExpressionDesc::Pexp_for_await_of(inner)
+        | ExpressionDesc::Pexp_inline_for(inner) => disabled_let_unwrap_loc_in_expr(inner.1, arena)
+            .or_else(|| disabled_let_unwrap_loc_in_expr(inner.2, arena)),
+        ExpressionDesc::Pexp_constraint(inner) => disabled_let_unwrap_loc_in_expr(inner.0, arena),
+        ExpressionDesc::Pexp_coerce(inner) => disabled_let_unwrap_loc_in_expr(inner.0, arena),
+        ExpressionDesc::Pexp_letmodule(inner) => {
+            disabled_let_unwrap_loc_in_mod_expr(inner.1, arena)
+                .or_else(|| disabled_let_unwrap_loc_in_expr(inner.2, arena))
+        }
+        ExpressionDesc::Pexp_letexception(inner) => disabled_let_unwrap_loc_in_expr(inner.1, arena),
+        ExpressionDesc::Pexp_newtype(inner) => disabled_let_unwrap_loc_in_expr(inner.1, arena),
+        ExpressionDesc::Pexp_pack(mod_expr) => {
+            disabled_let_unwrap_loc_in_mod_expr(*mod_expr, arena)
+        }
+        ExpressionDesc::Pexp_open(inner) => disabled_let_unwrap_loc_in_expr(inner.2, arena),
+        ExpressionDesc::Pexp_comptime_field(inner) => {
+            disabled_let_unwrap_loc_in_expr(inner.0, arena)
+                .or_else(|| disabled_let_unwrap_loc_in_expr(inner.1, arena))
+        }
+        ExpressionDesc::Pexp_comptime_record(inner) => {
+            disabled_let_unwrap_loc_in_expr(inner.1, arena)
+        }
+        ExpressionDesc::Pexp_comptime_variant(inner) => {
+            disabled_let_unwrap_loc_in_expr(inner.1, arena).or_else(|| {
+                inner
+                    .2
+                    .and_then(|payload| disabled_let_unwrap_loc_in_expr(payload, arena))
+            })
+        }
+        _ => None,
+    }
+}
+
+fn type_mod_error_to_anyhow(
+    err: TypeModError,
+    type_ctx: &TypeContext,
+    arena: &ParseArena,
+    source: &str,
+    filename: &str,
+    suppress_info_style: bool,
+) -> anyhow::Error {
+    match &err {
+        TypeModError::CoreError(TypeCoreError::ModuleError(module_error)) => {
+            type_mod_error_to_anyhow(
+                (**module_error).clone(),
+                type_ctx,
+                arena,
+                source,
+                filename,
+                suppress_info_style,
+            )
+        }
+        TypeModError::CoreError(TypeCoreError::UncurriedArityMismatch {
+            loc,
+            function_type,
+            expected_arity,
+            provided_arity,
+            provided_args,
+            arity_suggestion,
+            ..
+        }) => UserDiagnostic::new(
+            format_uncurried_arity_mismatch_report(
+                type_ctx,
+                arena,
+                source,
+                filename,
+                *loc,
+                *function_type,
+                *expected_arity,
+                *provided_arity,
+                provided_args,
+                arity_suggestion.as_deref(),
+            ),
+            2,
+        )
+        .into(),
+        TypeModError::CoreError(TypeCoreError::ConstructorArityMismatch {
+            loc,
+            name,
+            is_inline_record,
+            expected,
+            provided,
+        }) => UserDiagnostic::new(
+            format_constructor_arity_mismatch_report(
+                arena,
+                source,
+                filename,
+                *loc,
+                name,
+                *is_inline_record,
+                *expected,
+                *provided,
+            ),
+            2,
+        )
+        .into(),
+        TypeModError::CoreError(TypeCoreError::MultiplyBoundVariable { loc, name }) => {
+            UserDiagnostic::new(
+                format_compiler_error_report(
+                    arena,
+                    source,
+                    filename,
+                    *loc,
+                    &format!("Variable {name} is bound several times in this matching"),
+                ),
+                2,
+            )
+            .into()
+        }
+        TypeModError::CoreError(TypeCoreError::OrpatVars {
+            loc,
+            id,
+            valid_idents,
+        }) => UserDiagnostic::new(
+            format_orpat_vars_report(arena, source, filename, *loc, id, valid_idents),
+            2,
+        )
+        .into(),
+        TypeModError::CoreError(TypeCoreError::OrPatternTypeClash { loc, id, trace }) => {
+            UserDiagnostic::new(
+                format_or_pattern_type_clash_report(
+                    type_ctx,
+                    arena,
+                    source,
+                    filename,
+                    *loc,
+                    id,
+                    trace,
+                ),
+                2,
+            )
+            .into()
+        }
+        TypeModError::CoreError(TypeCoreError::BreakOutsideLoop { loc }) => UserDiagnostic::new(
+            format_compiler_error_report(
+                arena,
+                source,
+                filename,
+                *loc,
+                "`break` can only be used directly inside a loop body.",
+            ),
+            2,
+        )
+        .into(),
+        TypeModError::CoreError(TypeCoreError::ContinueOutsideLoop { loc }) => {
+            UserDiagnostic::new(
+                format_compiler_error_report(
+                    arena,
+                    source,
+                    filename,
+                    *loc,
+                    "`continue` can only be used inside a loop body.",
+                ),
+                2,
+            )
+            .into()
+        },
+        TypeModError::CoreError(TypeCoreError::JsxNotEnabled { loc }) => UserDiagnostic::new(
+            format_compiler_error_report(
+                arena,
+                source,
+                filename,
+                *loc,
+                "Cannot compile JSX expression because JSX support is not enabled. Add \"jsx\" settings to rescript.json to enable JSX support.",
+            ),
+            2,
+        )
+        .into(),
+        TypeModError::CoreError(TypeCoreError::ExtensionError(error)) => {
+            UserDiagnostic::new(
+                format_builtin_extension_error_report(arena, source, filename, error),
+                2,
+            )
+            .into()
+        }
+        TypeModError::CoreError(TypeCoreError::ExtensionAlreadyDisplayed) => {
+            UserDiagnostic::new(String::new(), 2).into()
+        }
+        TypeModError::CoreError(TypeCoreError::InvalidForLoopIndex { loc }) => {
+            UserDiagnostic::new(
+                format_compiler_error_report(
+                    arena,
+                    source,
+                    filename,
+                    *loc,
+                    "Invalid for-loop index: only variables and _ are allowed.",
+                ),
+                2,
+            )
+            .into()
+        }
+        TypeModError::CoreError(TypeCoreError::InvalidForOfPattern { loc }) => {
+            UserDiagnostic::new(
+                format_compiler_error_report(
+                    arena,
+                    source,
+                    filename,
+                    *loc,
+                    "Invalid for...of binding: only variables and _ are allowed.",
+                ),
+                2,
+            )
+            .into()
+        }
+        TypeModError::CoreError(TypeCoreError::IllegalLetrecPat { loc }) => {
+            UserDiagnostic::new(
+                format_compiler_error_report(
+                    arena,
+                    source,
+                    filename,
+                    *loc,
+                    "Only variables are allowed as left-hand side of `let rec'",
+                ),
+                2,
+            )
+            .into()
+        }
+        TypeModError::CoreError(TypeCoreError::IllegalLetrecExpr { loc }) => {
+            UserDiagnostic::new(
+                format_compiler_error_report(
+                    arena,
+                    source,
+                    filename,
+                    *loc,
+                    "This kind of expression is not allowed as right-hand side of `let rec'",
+                ),
+                2,
+            )
+            .into()
+        }
+        TypeModError::CoreError(TypeCoreError::EmptyRecordLiteral { loc }) => {
+            UserDiagnostic::new(
+                format_compiler_error_report(
+                    arena,
+                    source,
+                    filename,
+                    *loc,
+                    "Empty record literal {} should be type annotated or used in a record context.",
+                ),
+                2,
+            )
+            .into()
+        }
+        TypeModError::CoreError(TypeCoreError::InvalidInterval { loc }) => {
+            UserDiagnostic::new(
+                format_compiler_error_report(
+                    arena,
+                    source,
+                    filename,
+                    *loc,
+                    "Only character intervals are supported in patterns.",
+                ),
+                2,
+            )
+            .into()
+        }
+        TypeModError::CoreError(TypeCoreError::NoValueClauses { loc }) => {
+            UserDiagnostic::new(
+                format_compiler_error_report(
+                    arena,
+                    source,
+                    filename,
+                    *loc,
+                    "None of the patterns in this 'match' expression match values.",
+                ),
+                2,
+            )
+            .into()
+        }
+        TypeModError::CoreError(TypeCoreError::ExceptionPatternBelowToplevel { loc }) => {
+            UserDiagnostic::new(
+                format_compiler_error_report(
+                    arena,
+                    source,
+                    filename,
+                    *loc,
+                    "Exception patterns must be at the top level of a match case.",
+                ),
+                2,
+            )
+            .into()
+        }
+        TypeModError::CoreError(TypeCoreError::ModulesNotAllowed { loc }) => {
+            UserDiagnostic::new(
+                format_compiler_error_report(
+                    arena,
+                    source,
+                    filename,
+                    *loc,
+                    "Modules are not allowed in this pattern.",
+                ),
+                2,
+            )
+            .into()
+        }
+        TypeModError::CoreError(TypeCoreError::CannotInferSignature { loc }) => {
+            UserDiagnostic::new(
+                format_compiler_error_report(
+                    arena,
+                    source,
+                    filename,
+                    *loc,
+                    "The signature for this packaged module couldn't be inferred.",
+                ),
+                2,
+            )
+            .into()
+        }
+        TypeModError::CoreError(TypeCoreError::NotAPackedModule { loc, ty }) => {
+            UserDiagnostic::new(
+                format_compiler_error_report_with_unindented_break(
+                    arena,
+                    source,
+                    filename,
+                    *loc,
+                    "This expression is packed module, but the expected type is",
+                    &format_type_expr(type_ctx, *ty),
+                ),
+                2,
+            )
+            .into()
+        }
+        TypeModError::CoreError(TypeCoreError::InlinedRecordExpected { loc }) => {
+            UserDiagnostic::new(
+                format_compiler_error_report(
+                    arena,
+                    source,
+                    filename,
+                    *loc,
+                    "This constructor expects an inlined record argument.",
+                ),
+                2,
+            )
+            .into()
+        }
+        TypeModError::CoreError(TypeCoreError::InvalidExtensionConstructorPayload { loc }) => {
+            UserDiagnostic::new(
+                format_compiler_error_report(
+                    arena,
+                    source,
+                    filename,
+                    *loc,
+                    "Invalid [%extension_constructor] payload, a constructor is expected.",
+                ),
+                2,
+            )
+            .into()
+        }
+        TypeModError::CoreError(TypeCoreError::NotAnExtensionConstructor { loc }) => {
+            UserDiagnostic::new(
+                format_compiler_error_report(
+                    arena,
+                    source,
+                    filename,
+                    *loc,
+                    "This constructor is not an extension constructor.",
+                ),
+                2,
+            )
+            .into()
+        }
+        TypeModError::CoreError(TypeCoreError::CannotApplyModule { loc, mty }) => {
+            UserDiagnostic::new(
+                format_cannot_apply_module_report(type_ctx, arena, source, filename, *loc, mty),
+                2,
+            )
+            .into()
+        }
+        TypeModError::NotAPackedModule { loc, ty } => {
+            UserDiagnostic::new(
+                format_compiler_error_report_with_unindented_break(
+                    arena,
+                    source,
+                    filename,
+                    *loc,
+                    "This expression is not a packed module. It has type",
+                    &format_type_expr(type_ctx, *ty),
+                ),
+                2,
+            )
+            .into()
+        }
+        TypeModError::CannotApply { loc, mty } => UserDiagnostic::new(
+            format_cannot_apply_module_report(type_ctx, arena, source, filename, *loc, mty),
+            2,
+        )
+        .into(),
+        TypeModError::MissingModule {
+            loc,
+            path,
+            expanded,
+        } => UserDiagnostic::new(
+            format_compiler_error_report(
+                arena,
+                source,
+                filename,
+                *loc,
+                &format_missing_module_message(path, expanded),
+            ),
+            2,
+        )
+        .into(),
+        TypeModError::CannotScrapeAlias { loc, path } => UserDiagnostic::new(
+            format_compiler_error_report(
+                arena,
+                source,
+                filename,
+                *loc,
+                &format!("This is an alias for module {}, which is missing", path.name()),
+            ),
+            2,
+        )
+        .into(),
+        TypeModError::IllegalValueName { loc, name } => UserDiagnostic::new(
+            format_compiler_error_report_from_external_location(
+                type_ctx,
+                filename,
+                loc,
+                &format!("'{name}' is not a valid value identifier."),
+            ),
+            2,
+        )
+        .into(),
+        TypeModError::CannotEliminateDependency { loc, mty } => UserDiagnostic::new(
+            format_cannot_eliminate_dependency_report(
+                type_ctx, arena, source, filename, *loc, mty,
+            ),
+            2,
+        )
+        .into(),
+        TypeModError::RecursiveModuleRequiresExplicitType { loc } => UserDiagnostic::new(
+            format_compiler_error_report(
+                arena,
+                source,
+                filename,
+                *loc,
+                "Recursive modules require an explicit module type.",
+            ),
+            2,
+        )
+        .into(),
+        TypeModError::ApplyGenerative { loc } => UserDiagnostic::new(
+            format_compiler_error_report(
+                arena,
+                source,
+                filename,
+                *loc,
+                "This is a generative functor. It can only be applied to ()",
+            ),
+            2,
+        )
+        .into(),
+        TypeModError::NotAllowedInFunctorBody { loc } => UserDiagnostic::new(
+            format_compiler_error_report(
+                arena,
+                source,
+                filename,
+                *loc,
+                "This expression creates fresh types.\nIt is not allowed inside applicative functors.",
+            ),
+            2,
+        )
+        .into(),
+        TypeModError::IncompletePackedModule { loc, ty } => UserDiagnostic::new(
+            format_compiler_error_report_with_unindented_break(
+                arena,
+                source,
+                filename,
+                *loc,
+                "The type of this packed module contains variables:",
+                &format_package_type_expr_for_error(type_ctx, arena, *ty),
+            ),
+            2,
+        )
+        .into(),
+        TypeModError::ScopingPack { loc, lid, ty } => UserDiagnostic::new(
+            format_compiler_error_report_with_unindented_break(
+                arena,
+                source,
+                filename,
+                *loc,
+                &format!(
+                    "The type {} in this module cannot be exported.",
+                    format_longident_for_report(arena, lid)
+                ),
+                &format!(
+                    "Its type contains local dependencies:\n{}",
+                    format_type_expr(type_ctx, *ty)
+                ),
+            ),
+            2,
+        )
+        .into(),
+        TypeModError::StructureExpected { loc, mty } => UserDiagnostic::new(
+            format_structure_expected_report(type_ctx, arena, source, filename, *loc, mty),
+            2,
+        )
+        .into(),
+        TypeModError::WithNoComponent { loc, lid } => UserDiagnostic::new(
+            format_compiler_error_report(
+                arena,
+                source,
+                filename,
+                *loc,
+                &format!(
+                    "The signature constrained by `with' has no component named {}",
+                    format_longident_for_report(arena, lid)
+                ),
+            ),
+            2,
+        )
+        .into(),
+        TypeModError::WithMismatch { loc, lid, error } => UserDiagnostic::new(
+            format_with_mismatch_report(type_ctx, arena, source, filename, *loc, lid, error),
+            2,
+        )
+        .into(),
+        TypeModError::WithChangesModuleAlias { loc, lid, id, path } => UserDiagnostic::new(
+            format_compiler_error_report(
+                arena,
+                source,
+                filename,
+                *loc,
+                &format!(
+                    "This `with' constraint on {} changes {}, which is aliased \nin the constrained signature (as {}).",
+                    format_longident_for_report(arena, lid),
+                    path.name(),
+                    id.name()
+                ),
+            ),
+            2,
+        )
+        .into(),
+        TypeModError::WithMakesApplicativeFunctorIllTyped {
+            loc,
+            lid,
+            path,
+            error,
+        } => UserDiagnostic::new(
+            format_with_makes_applicative_functor_ill_typed_report(
+                type_ctx, arena, source, filename, *loc, lid, path, error,
+            ),
+            2,
+        )
+        .into(),
+        TypeModError::WithCannotRemoveConstrainedType { loc } => UserDiagnostic::new(
+            format_compiler_error_report(
+                arena,
+                source,
+                filename,
+                *loc,
+                "Destructive substitutions are not supported for constrained \ntypes (other than when replacing a type constructor with \na type constructor with the same arguments).",
+            ),
+            2,
+        )
+        .into(),
+        TypeModError::CoreError(TypeCoreError::LiteralOverflow { loc, ty }) => {
+            UserDiagnostic::new(
+                format_compiler_error_report(
+                    arena,
+                    source,
+                    filename,
+                    *loc,
+                    &format!(
+                        "Integer literal exceeds the range of representable integers of type {ty}"
+                    ),
+                ),
+                2,
+            )
+            .into()
+        }
+        TypeModError::CoreError(TypeCoreError::UnknownLiteral {
+            loc,
+            literal,
+            modifier,
+        }) => {
+            UserDiagnostic::new(
+                format_compiler_error_report(
+                    arena,
+                    source,
+                    filename,
+                    *loc,
+                    &format!("Unknown modifier '{modifier}' for literal {literal}{modifier}"),
+                ),
+                2,
+            )
+            .into()
+        }
+        TypeModError::CoreError(TypeCoreError::ExprTypeClash {
+            loc,
+            trace,
+            context,
+        }) => UserDiagnostic::new(
+            format_expr_type_clash_report(type_ctx, arena, source, filename, *loc, trace, context),
+            2,
+        )
+        .into(),
+        TypeModError::CoreError(TypeCoreError::PatternTypeClash {
+            loc: Some(loc),
+            trace,
+        }) => UserDiagnostic::new(
+            format_pattern_type_clash_report(type_ctx, arena, source, filename, *loc, trace),
+            2,
+        )
+        .into(),
+        TypeModError::CoreError(TypeCoreError::RecursiveLocalConstraint { loc, trace }) => {
+            UserDiagnostic::new(
+                format_recursive_local_constraint_report(
+                    type_ctx, arena, source, filename, *loc, trace,
+                ),
+                2,
+            )
+            .into()
+        }
+        TypeModError::CoreError(TypeCoreError::PolymorphicLabel { loc, lid }) => {
+            UserDiagnostic::new(
+                format_polymorphic_label_report(arena, source, filename, *loc, lid),
+                2,
+            )
+            .into()
+        }
+        TypeModError::CoreError(TypeCoreError::LabelMismatch { loc, lid, trace }) => {
+            UserDiagnostic::new(
+                format_label_mismatch_report(type_ctx, arena, source, filename, *loc, lid, trace),
+                2,
+            )
+            .into()
+        }
+        TypeModError::CoreError(TypeCoreError::NotSubtype {
+            loc,
+            trace,
+            context,
+        }) => {
+            UserDiagnostic::new(
+                format_not_subtype_report(type_ctx, arena, source, filename, *loc, trace, context),
+                2,
+            )
+            .into()
+        }
+        TypeModError::CoreError(TypeCoreError::LessGeneral { loc, kind, trace }) => {
+            UserDiagnostic::new(
+                format_less_general_report(type_ctx, arena, source, filename, *loc, kind, trace),
+                2,
+            )
+            .into()
+        }
+        TypeModError::CoreError(TypeCoreError::UnqualifiedGadtPattern { loc, tpath, name }) => {
+            UserDiagnostic::new(
+                format_compiler_error_report(
+                    arena,
+                    source,
+                    filename,
+                    *loc,
+                    &format!(
+                        "The GADT constructor {} of type {} must be qualified in this pattern.",
+                        name,
+                        format_type_path_for_report(tpath)
+                    ),
+                ),
+                2,
+            )
+            .into()
+        }
+        TypeModError::CoreError(TypeCoreError::UnexpectedExistential { loc }) => {
+            UserDiagnostic::new(
+                format_compiler_error_report(
+                    arena,
+                    source,
+                    filename,
+                    *loc,
+                    "Unexpected existential",
+                ),
+                2,
+            )
+            .into()
+        }
+        TypeModError::CoreError(TypeCoreError::NotAVariantType { loc, lid }) => {
+            UserDiagnostic::new(
+                format_not_a_variant_type_report(arena, source, filename, *loc, lid),
+                2,
+            )
+            .into()
+        }
+        TypeModError::CoreError(TypeCoreError::TypeParamsNotSupported { loc, lid }) => {
+            UserDiagnostic::new(
+                format_type_params_not_supported_report(arena, source, filename, *loc, lid),
+                2,
+            )
+            .into()
+        }
+        TypeModError::CoreError(TypeCoreError::ApplyNonFunction { loc, typ }) => {
+            UserDiagnostic::new(
+                format_apply_non_function_report(type_ctx, arena, source, filename, *loc, *typ),
+                2,
+            )
+            .into()
+        }
+        TypeModError::CoreError(TypeCoreError::TooManyArguments {
+            loc,
+            in_function,
+            ty,
+        }) => UserDiagnostic::new(
+            format_too_many_arguments_report(
+                type_ctx,
+                arena,
+                source,
+                filename,
+                *loc,
+                *in_function,
+                *ty,
+            ),
+            2,
+        )
+        .into(),
+        TypeModError::CoreError(TypeCoreError::AbstractWrongLabel { loc, label, ty }) => {
+            UserDiagnostic::new(
+                format_abstract_wrong_label_report(
+                    type_ctx, arena, source, filename, *loc, label, *ty,
+                ),
+                2,
+            )
+            .into()
+        }
+        TypeModError::CoreError(TypeCoreError::ApplyWrongLabel { loc, label, ty }) => {
+            UserDiagnostic::new(
+                format_apply_wrong_label_report(
+                    type_ctx,
+                    arena,
+                    source,
+                    filename,
+                    *loc,
+                    label,
+                    *ty,
+                    suppress_info_style,
+                ),
+                2,
+            )
+            .into()
+        }
+        TypeModError::CoreError(TypeCoreError::IncoherentLabelOrder { loc }) => {
+            UserDiagnostic::new(
+                format_compiler_error_report_with_unindented_break(
+                    arena,
+                    source,
+                    filename,
+                    *loc,
+                    "This labeled function is applied to arguments",
+                    "in an order different from other calls.\nThis is only allowed when the real type is known.",
+                ),
+                2,
+            )
+            .into()
+        }
+        TypeModError::CoreError(TypeCoreError::WrongName {
+            loc,
+            kind,
+            ty,
+            expected,
+            path,
+            name,
+            alternatives,
+            jsx_component_info,
+        }) => UserDiagnostic::new(
+            format_wrong_name_report(
+                type_ctx,
+                arena,
+                source,
+                filename,
+                *loc,
+                kind,
+                *ty,
+                expected,
+                path,
+                name,
+                alternatives,
+                jsx_component_info.as_ref(),
+            ),
+            2,
+        )
+        .into(),
+        TypeModError::CoreError(TypeCoreError::NameTypeMismatch {
+            loc,
+            kind,
+            lid,
+            expected,
+            alternatives,
+        }) => UserDiagnostic::new(
+            format_name_type_mismatch_report(
+                arena,
+                source,
+                filename,
+                *loc,
+                kind,
+                lid,
+                expected,
+                alternatives,
+            ),
+            2,
+        )
+        .into(),
+        TypeModError::CoreError(TypeCoreError::UndefinedMethod {
+            loc: Some(loc),
+            ty,
+            method,
+            alternatives,
+        }) => UserDiagnostic::new(
+            format_undefined_method_report(
+                type_ctx,
+                arena,
+                source,
+                filename,
+                *loc,
+                *ty,
+                method,
+                alternatives.as_deref(),
+            ),
+            2,
+        )
+        .into(),
+        TypeModError::CoreError(TypeCoreError::UnboundValue {
+            loc,
+            name,
+            qualifier,
+            alternatives,
+            module_suggestion,
+        }) => UserDiagnostic::new(
+            format_unbound_value_report(
+                arena,
+                source,
+                filename,
+                *loc,
+                name,
+                qualifier.as_deref(),
+                alternatives,
+                module_suggestion.as_deref(),
+            ),
+            2,
+        )
+        .into(),
+        TypeModError::CoreError(TypeCoreError::UnboundModule {
+            loc,
+            name,
+            alternatives,
+        }) => UserDiagnostic::new(
+            format_unbound_module_report(arena, source, filename, *loc, name, alternatives),
+            2,
+        )
+        .into(),
+        TypeModError::CoreError(TypeCoreError::AccessFunctorAsStructure { loc, lid }) => {
+            UserDiagnostic::new(
+                format_access_functor_as_structure_report(arena, source, filename, *loc, lid),
+                2,
+            )
+            .into()
+        }
+        TypeModError::CoreError(TypeCoreError::CannotScrapeAlias { loc, lid, path }) => {
+            UserDiagnostic::new(
+                format_cannot_scrape_alias_report(arena, source, filename, *loc, lid, path),
+                2,
+            )
+            .into()
+        }
+        TypeModError::CoreError(TypeCoreError::IllegalReferenceToRecursiveModule { loc }) => {
+            UserDiagnostic::new(
+                format_compiler_error_report(
+                    arena,
+                    source,
+                    filename,
+                    *loc,
+                    "Illegal recursive module reference",
+                ),
+                2,
+            )
+            .into()
+        }
+        TypeModError::CoreError(TypeCoreError::UnboundConstructor {
+            loc,
+            lid,
+            alternatives,
+        }) => {
+            UserDiagnostic::new(
+                format_unbound_constructor_report(
+                    arena,
+                    source,
+                    filename,
+                    *loc,
+                    lid,
+                    alternatives,
+                ),
+                2,
+            )
+            .into()
+        }
+        TypeModError::CoreError(TypeCoreError::UnboundTypeConstructor {
+            loc,
+            lid,
+            alternatives,
+        }) => {
+            UserDiagnostic::new(
+                format_unbound_type_constructor_report(
+                    arena,
+                    source,
+                    filename,
+                    *loc,
+                    lid,
+                    alternatives,
+                ),
+                2,
+            )
+            .into()
+        }
+        TypeModError::CoreError(TypeCoreError::UnboundTypeConstructorIncomplete {
+            loc,
+            path,
+        }) => UserDiagnostic::new(
+            format_unbound_type_constructor_incomplete_report(
+                arena, source, filename, *loc, path,
+            ),
+            2,
+        )
+        .into(),
+        TypeModError::CoreError(TypeCoreError::UnboundTypeVariable { loc, name }) => {
+            UserDiagnostic::new(
+                format_unbound_type_variable_report(arena, source, filename, *loc, name),
+                2,
+            )
+            .into()
+        }
+        TypeModError::CoreError(TypeCoreError::InvalidVariableName { loc, name }) => {
+            UserDiagnostic::new(
+                format_invalid_variable_name_report(arena, source, filename, *loc, name),
+                2,
+            )
+            .into()
+        }
+        TypeModError::CoreError(TypeCoreError::CannotQuantify { loc, name, ty }) => {
+            UserDiagnostic::new(
+                format_cannot_quantify_report(
+                    type_ctx, arena, source, filename, *loc, name, *ty,
+                ),
+                2,
+            )
+            .into()
+        }
+        TypeModError::CoreError(TypeCoreError::MultipleConstraintsOnType { loc, lid }) => {
+            UserDiagnostic::new(
+                format_multiple_constraints_on_type_report(arena, source, filename, *loc, lid),
+                2,
+            )
+            .into()
+        }
+        TypeModError::CoreError(TypeCoreError::SignatureExpected { loc }) => UserDiagnostic::new(
+            format_compiler_error_report(
+                arena,
+                source,
+                filename,
+                *loc,
+                "This module type is not a signature",
+            ),
+            2,
+        )
+        .into(),
+        TypeModError::CoreError(TypeCoreError::PresentHasConjunction { loc, label }) => {
+            UserDiagnostic::new(
+                format_present_has_conjunction_report(arena, source, filename, *loc, label),
+                2,
+            )
+            .into()
+        }
+        TypeModError::CoreError(TypeCoreError::PresentHasNoType { loc, label }) => {
+            UserDiagnostic::new(
+                format_present_has_no_type_report(arena, source, filename, *loc, label),
+                2,
+            )
+            .into()
+        }
+        TypeModError::CoreError(TypeCoreError::ConstructorMismatch {
+            loc,
+            actual,
+            expected,
+        }) => UserDiagnostic::new(
+            format_constructor_mismatch_report(
+                type_ctx, arena, source, filename, *loc, *actual, *expected,
+            ),
+            2,
+        )
+        .into(),
+        TypeModError::CoreError(TypeCoreError::NotAVariant { loc, ty }) => UserDiagnostic::new(
+            format_not_a_variant_report(type_ctx, arena, source, filename, *loc, *ty),
+            2,
+        )
+        .into(),
+        TypeModError::CoreError(TypeCoreError::MethodMismatch {
+            loc,
+            label,
+            actual,
+            expected,
+        }) => UserDiagnostic::new(
+            format_method_mismatch_report(
+                type_ctx, arena, source, filename, *loc, label, *actual, *expected,
+            ),
+            2,
+        )
+        .into(),
+        TypeModError::CoreError(TypeCoreError::TypeMismatch { loc, trace }) => {
+            UserDiagnostic::new(
+                format_type_mismatch_report(type_ctx, arena, source, filename, *loc, trace),
+                2,
+            )
+            .into()
+        }
+        TypeModError::CoreError(TypeCoreError::AliasTypeMismatch { loc, trace }) => {
+            UserDiagnostic::new(
+                format_alias_type_mismatch_report(
+                    type_ctx, arena, source, filename, *loc, trace,
+                ),
+                2,
+            )
+            .into()
+        }
+        TypeModError::CoreError(TypeCoreError::TypeArityMismatch {
+            loc,
+            lid,
+            expected,
+            provided,
+        }) => UserDiagnostic::new(
+            format_type_arity_mismatch_report(
+                arena, source, filename, *loc, lid, *expected, *provided,
+            ),
+            2,
+        )
+        .into(),
+        TypeModError::CoreError(TypeCoreError::LabelMultiplyDefined {
+            loc,
+            label,
+            jsx_component_info,
+        }) => UserDiagnostic::new(
+            format_label_multiply_defined_report(
+                arena,
+                source,
+                filename,
+                *loc,
+                label,
+                jsx_component_info.as_ref(),
+            ),
+            2,
+        )
+        .into(),
+        TypeModError::CoreError(TypeCoreError::LabelsMissing {
+            loc,
+            labels,
+            jsx_component_info,
+        }) => UserDiagnostic::new(
+            format_labels_missing_report(
+                arena,
+                source,
+                filename,
+                *loc,
+                labels,
+                jsx_component_info.as_ref(),
+            ),
+            2,
+        )
+        .into(),
+        TypeModError::CoreError(TypeCoreError::PrivateType { loc, ty }) => {
+            UserDiagnostic::new(
+                format_compiler_error_report(
+                    arena,
+                    source,
+                    filename,
+                    *loc,
+                    &format!(
+                        "Cannot create values of the private type {}",
+                        format_type_expr(type_ctx, *ty)
+                    ),
+                ),
+                2,
+            )
+            .into()
+        }
+        TypeModError::CoreError(TypeCoreError::PrivateLabel { loc, lid, ty }) => {
+            UserDiagnostic::new(
+                format_compiler_error_report(
+                    arena,
+                    source,
+                    filename,
+                    *loc,
+                    &format!(
+                        "Cannot assign field {} of the private type {}",
+                        format_longident_for_report(arena, lid),
+                        format_type_expr(type_ctx, *ty)
+                    ),
+                ),
+                2,
+            )
+            .into()
+        }
+        TypeModError::CoreError(TypeCoreError::LabelNotMutable { loc, lid }) => {
+            UserDiagnostic::new(
+                format_compiler_error_report(
+                    arena,
+                    source,
+                    filename,
+                    *loc,
+                    &format!(
+                        "The record field {} is not mutable",
+                        format_longident_for_report(arena, lid)
+                    ),
+                ),
+                2,
+            )
+            .into()
+        }
+        TypeModError::CoreError(TypeCoreError::UnboundRecordField {
+            loc,
+            field_name,
+            from_type,
+            alternatives,
+        }) => UserDiagnostic::new(
+            format_unbound_record_field_report(
+                type_ctx,
+                arena,
+                source,
+                filename,
+                *loc,
+                field_name,
+                *from_type,
+                alternatives,
+            ),
+            2,
+        )
+        .into(),
+        TypeModError::CoreError(TypeCoreError::FieldNotOptional { loc, name, typ }) => {
+            UserDiagnostic::new(
+                format_field_not_optional_report(
+                    type_ctx, arena, source, filename, *loc, name, *typ,
+                ),
+                2,
+            )
+            .into()
+        }
+        TypeModError::CoreError(TypeCoreError::FieldAccessOnDictType { loc }) => {
+            UserDiagnostic::new(
+                format_compiler_error_report(
+                    arena,
+                    source,
+                    filename,
+                    *loc,
+                    "Direct field access on a dict is not supported. Use Dict.get instead.",
+                ),
+                2,
+            )
+            .into()
+        }
+        TypeModError::CoreError(TypeCoreError::NotAnObjectType { loc, ty }) => UserDiagnostic::new(
+            format_compiler_error_report(
+                arena,
+                source,
+                filename,
+                *loc,
+                &format!("The type {} is not an object type", format_type_expr(type_ctx, *ty)),
+            ),
+            2,
+        )
+        .into(),
+        TypeModError::CoreError(TypeCoreError::OpenedObject { loc, path }) => {
+            let message = match path {
+                Some(path) => format!("Illegal open object type {}", path.name()),
+                None => "Illegal open object type".to_string(),
+            };
+            UserDiagnostic::new(
+                format_compiler_error_report(arena, source, filename, *loc, &message),
+                2,
+            )
+            .into()
+        }
+        TypeModError::SignatureMismatch { loc, error } => UserDiagnostic::new(
+            format_compiler_error_report_raw_message(
+                arena,
+                source,
+                filename,
+                *loc,
+                &crate::types::includemod::format_error(type_ctx, filename, error),
+            ),
+            2,
+        )
+        .into(),
+        TypeModError::UnboundModtype {
+            loc,
+            lid,
+            alternatives,
+        } => UserDiagnostic::new(
+            format_unbound_modtype_report(arena, source, filename, *loc, lid, alternatives),
+            2,
+        )
+        .into(),
+        TypeModError::InconsistentConstraint { loc, trace } => UserDiagnostic::new(
+            format_inconsistent_constraint_report(type_ctx, arena, source, filename, *loc, trace),
+            2,
+        )
+        .into(),
+        TypeModError::FatalError { message } => UserDiagnostic::new(message.clone(), 2).into(),
+        TypeModError::ConstraintFailed {
+            loc,
+            actual,
+            expected,
+        } => UserDiagnostic::new(
+            format_compiler_error_report(
+                arena,
+                source,
+                filename,
+                *loc,
+                &format!(
+                    "Constraints are not satisfied in this type.\nType {} should be an instance of {}",
+                    format_type_expr(type_ctx, *actual),
+                    format_type_expr(type_ctx, *expected)
+                ),
+            ),
+            2,
+        )
+        .into(),
+        TypeModError::DefinitionMismatch { loc, ty, detail } => UserDiagnostic::new(
+            format_definition_mismatch_report(
+                type_ctx,
+                arena,
+                source,
+                filename,
+                *loc,
+                *ty,
+                detail.as_deref(),
+            ),
+            2,
+        )
+        .into(),
+        TypeModError::BadFixedType { loc, reason } => UserDiagnostic::new(
+            format_compiler_error_report(
+                arena,
+                source,
+                filename,
+                *loc,
+                &format!("This fixed type {reason}"),
+            ),
+            2,
+        )
+        .into(),
+        TypeModError::BadVariance {
+            loc,
+            param_index,
+            actual,
+            expected,
+        } => UserDiagnostic::new(
+            format_bad_variance_report(
+                arena,
+                source,
+                filename,
+                *loc,
+                *param_index,
+                *actual,
+                *expected,
+            ),
+            2,
+        )
+        .into(),
+        TypeModError::InvalidUntaggedVariantDefinition { loc, reason } => UserDiagnostic::new(
+            format_compiler_error_report_from_location(
+                source,
+                filename,
+                loc,
+                &format!("This untagged variant definition is invalid: {reason}"),
+            ),
+            2,
+        )
+        .into(),
+        TypeModError::VariantSpreadCouldNotFindType { loc } => UserDiagnostic::new(
+            format_compiler_error_report(
+                arena,
+                source,
+                filename,
+                *loc,
+                "This type could not be found. It's only possible to spread variants that are known as the spread happens. This means for example that you can't spread variants in recursive definitions.",
+            ),
+            2,
+        )
+        .into(),
+        TypeModError::VariantSpreadInvalidType { loc } => UserDiagnostic::new(
+            format_compiler_error_report(
+                arena,
+                source,
+                filename,
+                *loc,
+                "This type is not a valid type to spread. It's only possible to spread other variants.",
+            ),
+            2,
+        )
+        .into(),
+        TypeModError::VariantSpreadHasTypeParams { loc } => UserDiagnostic::new(
+            format_compiler_error_report(
+                arena,
+                source,
+                filename,
+                *loc,
+                "Type parameters are not supported in variant type spreads.",
+            ),
+            2,
+        )
+        .into(),
+        TypeModError::VariantSpreadDuplicateConstructor {
+            loc,
+            variant_name,
+            constructor_name,
+        } => UserDiagnostic::new(
+            format_compiler_error_report(
+                arena,
+                source,
+                filename,
+                *loc,
+                &format!(
+                    "Variant {variant_name} has a constructor named {constructor_name}, but a constructor named {constructor_name} already exists in the variant it's spread into.\nYou cannot spread variants with overlapping constructors.",
+                ),
+            ),
+            2,
+        )
+        .into(),
+        TypeModError::VariantSpreadUnboxedMismatch {
+            loc,
+            source_unboxed,
+        } => UserDiagnostic::new(
+            format_compiler_error_report(
+                arena,
+                source,
+                filename,
+                *loc,
+                &format!(
+                    "This variant is {}, but the variant where this is spread is not. Both variants unboxed configuration must match.",
+                    if *source_unboxed {
+                        "unboxed"
+                    } else {
+                        "not unboxed"
+                    },
+                ),
+            ),
+            2,
+        )
+        .into(),
+        TypeModError::VariantSpreadTagMismatch { loc } => UserDiagnostic::new(
+            format_compiler_error_report(
+                arena,
+                source,
+                filename,
+                *loc,
+                "The @tag attribute does not match for this variant and the variant where this is spread. Both variants must have the same @tag attribute configuration, or no @tag attribute at all.",
+            ),
+            2,
+        )
+        .into(),
+        TypeModError::RepeatedParameter { loc } => UserDiagnostic::new(
+            format_compiler_error_report(
+                arena,
+                source,
+                filename,
+                *loc,
+                "A type parameter occurs several times",
+            ),
+            2,
+        )
+        .into(),
+        TypeModError::DuplicateConstructor { loc, name } => UserDiagnostic::new(
+            format_compiler_error_report(
+                arena,
+                source,
+                filename,
+                *loc,
+                &format!("Two constructors are named {name}"),
+            ),
+            2,
+        )
+        .into(),
+        TypeModError::DuplicateLabel {
+            loc,
+            label,
+            record_name,
+        } => UserDiagnostic::new(
+            format_duplicate_type_label_report(arena, source, filename, *loc, label, record_name),
+            2,
+        )
+        .into(),
+        TypeModError::RepeatedName {
+            loc,
+            kind,
+            name,
+            repeated_loc,
+        } => UserDiagnostic::new(
+            format_repeated_name_report(
+                arena,
+                source,
+                filename,
+                *loc,
+                kind,
+                name,
+                *repeated_loc,
+            ),
+            2,
+        )
+        .into(),
+        TypeModError::ObjectSpreadWithRecordField { loc, field_name } => UserDiagnostic::new(
+            format_compiler_error_report(
+                arena,
+                source,
+                filename,
+                *loc,
+                &format!(
+                    "You cannot mix a record field with an object type spread.\nRemove the record field or change it to an object field (e.g. \"{field_name}\": ...)."
+                ),
+            ),
+            2,
+        )
+        .into(),
+        TypeModError::RecursiveAbbrev { loc, name } => UserDiagnostic::new(
+            format_compiler_error_report(
+                arena,
+                source,
+                filename,
+                *loc,
+                &format!("The type abbreviation {name} is cyclic"),
+            ),
+            2,
+        )
+        .into(),
+        TypeModError::CycleInDef { loc, name, ty } => UserDiagnostic::new(
+            format_compiler_error_report(
+                arena,
+                source,
+                filename,
+                *loc,
+                &format!(
+                    "The definition of {name} contains a cycle:\n{}",
+                    format_type_expr(type_ctx, *ty)
+                ),
+            ),
+            2,
+        )
+        .into(),
+        TypeModError::ParametersDiffer {
+            loc,
+            path,
+            actual,
+            expected,
+        } => UserDiagnostic::new(
+            format_compiler_error_report(
+                arena,
+                source,
+                filename,
+                *loc,
+                &format!(
+                    "In the definition of {}, type {} should be {}",
+                    path.name(),
+                    format_type_expr(type_ctx, *actual),
+                    format_type_expr(type_ctx, *expected)
+                ),
+            ),
+            2,
+        )
+        .into(),
+        TypeModError::InvalidAttribute { loc, message } => UserDiagnostic::new(
+            format_compiler_error_report(arena, source, filename, *loc, message),
+            2,
+        )
+        .into(),
+        TypeModError::BadUnboxedAttribute { loc, message } => {
+            let report = if message == "extensible variant types cannot be unboxed" {
+                "This type cannot be unboxed because\nextensible variant types cannot be unboxed."
+                    .to_string()
+            } else {
+                format!("This type cannot be unboxed because {message}.")
+            };
+            UserDiagnostic::new(
+                format_compiler_error_report(arena, source, filename, *loc, &report),
+                2,
+            )
+            .into()
+        }
+        TypeModError::BoxedAndUnboxed { loc } => UserDiagnostic::new(
+            format_compiler_error_report(
+                arena,
+                source,
+                filename,
+                *loc,
+                "A type cannot be boxed and unboxed at the same time.",
+            ),
+            2,
+        )
+        .into(),
+        TypeModError::BadImmediateAttribute { loc } => UserDiagnostic::new(
+            format_compiler_error_report(
+                arena,
+                source,
+                filename,
+                *loc,
+                "Types marked with the immediate attribute must be\nnon-pointer types like int or bool",
+            ),
+            2,
+        )
+        .into(),
+        TypeModError::CannotExtendPrivateType { loc, path } => UserDiagnostic::new(
+            format_compiler_error_report(
+                arena,
+                source,
+                filename,
+                *loc,
+                &format!("Cannot extend private type definition {}", path.name()),
+            ),
+            2,
+        )
+        .into(),
+        TypeModError::NotExtensibleType { loc, path } => UserDiagnostic::new(
+            format_compiler_error_report(
+                arena,
+                source,
+                filename,
+                *loc,
+                &format!("Type definition {} is not extensible", path.name()),
+            ),
+            2,
+        )
+        .into(),
+        TypeModError::ExtensionMismatch {
+            loc,
+            path,
+            mismatch,
+        } => {
+            let mismatch_message = match mismatch {
+                TypeExtensionMismatch::Arity => "They have different arities.",
+                TypeExtensionMismatch::Variance => "Their variances do not agree.",
+            };
+            UserDiagnostic::new(
+                format_compiler_error_report(
+                    arena,
+                    source,
+                    filename,
+                    *loc,
+                    &format!(
+                        "This extension does not match the definition of type {}\n{}",
+                        path.name(),
+                        mismatch_message
+                    ),
+                ),
+                2,
+            )
+            .into()
+        }
+        TypeModError::RebindWrongType {
+            loc,
+            lid,
+            actual,
+            expected,
+        } => UserDiagnostic::new(
+            format_compiler_error_report(
+                arena,
+                source,
+                filename,
+                *loc,
+                &format!(
+                    "The constructor {} has type {} but was expected to be of type {}",
+                    format_longident_for_report(arena, lid),
+                    format_type_expr(type_ctx, *actual),
+                    format_type_expr(type_ctx, *expected)
+                ),
+            ),
+            2,
+        )
+        .into(),
+        TypeModError::RebindPrivate { loc, lid } => UserDiagnostic::new(
+            format_compiler_error_report(
+                arena,
+                source,
+                filename,
+                *loc,
+                &format!(
+                    "The constructor {} is private",
+                    format_longident_for_report(arena, lid)
+                ),
+            ),
+            2,
+        )
+        .into(),
+        TypeModError::UnboundTypeVar { loc, name } => UserDiagnostic::new(
+            format_unbound_type_variable_report(arena, source, filename, *loc, name),
+            2,
+        )
+        .into(),
+        TypeModError::UnboundTypeVarExt { loc, name } => UserDiagnostic::new(
+            format_unbound_type_variable_report(arena, source, filename, *loc, name),
+            2,
+        )
+        .into(),
+        TypeModError::AstUntaggedVariantError { loc, error } => {
+            let message = error.message_text();
+            UserDiagnostic::new(
+                format_compiler_error_report_from_location(source, filename, loc, &message),
+                2,
+            )
+            .into()
+        }
+        TypeModError::NonrecursiveGadt { loc } => UserDiagnostic::new(
+            format_compiler_error_report_raw_message(
+                arena,
+                source,
+                filename,
+                *loc,
+                "  GADTs require recursive type syntax.\nDefine your type using `type rec` instead of `type`.\nExample: type rec t = ...",
+            ),
+            2,
+        )
+        .into(),
+        TypeModError::NonGeneralizable { loc, typ } => UserDiagnostic::new(
+            format_non_generalizable_report(source, filename, loc, type_ctx, *typ),
+            2,
+        )
+        .into(),
+        TypeModError::NonGeneralizableModule { loc, mty } => UserDiagnostic::new(
+            format_non_generalizable_module_report(source, filename, loc, type_ctx, mty),
+            2,
+        )
+        .into(),
+        TypeModError::CoreError(TypeCoreError::InlinedRecordEscape { loc }) => {
+            UserDiagnostic::new(
+                format_compiler_error_report(
+                    arena,
+                    source,
+                    filename,
+                    *loc,
+                    "This use of an inlined record is not allowed: its anonymous type would escape its constructor scope.\nPossible solutions: \n- Destructure the fields you're interested in from the inline record\n- Change the underlying type to use a defined record as payload instead of an inline record. That will let you use the payload without destructuring it first",
+                ),
+                2,
+            )
+            .into()
+        }
+        _ => anyhow!("Type checking failed: {err:?}"),
+    }
+}
+
+fn persistent_env_error_to_anyhow(error: PersistentEnvError, filename: &str) -> anyhow::Error {
+    let message = match error {
+        PersistentEnvError::IllegalRenaming {
+            expected, actual, ..
+        } => format!(
+            "You referred to the module {expected}, but we've found one called {actual} instead.\nIs the name's casing right?"
+        ),
+        PersistentEnvError::InconsistentImport {
+            name,
+            source1,
+            source2,
+        } => {
+            let source1 = format_persistent_env_path(&source1);
+            let source2 = format_persistent_env_path(&source2);
+            format!(
+                "\x1b[1;33mIt's possible that your build is stale.\x1b[0m\nTry to clean the artifacts and build again?\n\n\x1b[1;33mHere's the original error message\x1b[0m\nThe files {source1}\nand {source2}\nmake inconsistent assumptions over interface {name}"
+            )
+        }
+    };
+    UserDiagnostic::new(format_compiler_error_report_for_file(filename, &message), 2).into()
+}
+
+fn format_persistent_env_path(path: &str) -> String {
+    // OCaml reports the stored persistent-structure filename directly through
+    // `Location.print_filename` in compiler/ml/env.ml:2110-2119.
+    path.to_string()
+}
+
+fn format_compiler_error_report_for_file(filename: &str, message: &str) -> String {
+    let mut output = String::new();
+    output.push_str("\n  We've found a bug for you!\n");
+    output.push_str("  ");
+    output.push_str(filename);
+    output.push_str("\n\n");
+    for line in message.lines() {
+        output.push_str("  ");
+        output.push_str(line);
+        output.push('\n');
+    }
+    output.push('\n');
+    output
+}
+
+fn format_duplicate_type_label_report(
+    arena: &ParseArena,
+    source: &str,
+    filename: &str,
+    loc: LocIdx,
+    label: &str,
+    record_name: &Option<String>,
+) -> String {
+    const INFO: &str = "\x1b[1;33m";
+    const RESET: &str = "\x1b[0m";
+
+    let message = if let Some(record_name) = record_name {
+        format!(
+            "The field {INFO}{label}{RESET} is defined several times in the record {INFO}{record_name}{RESET}. Fields can only be added once to a record."
+        )
+    } else {
+        format!(
+            "The field {INFO}{label}{RESET} is defined several times in this record. Fields can only be added once to a record."
+        )
+    };
+    format_compiler_error_report(arena, source, filename, loc, &message)
+}
+
+fn format_repeated_name_report(
+    arena: &ParseArena,
+    source: &str,
+    filename: &str,
+    loc: LocIdx,
+    kind: &str,
+    name: &str,
+    repeated_loc: LocIdx,
+) -> String {
+    let repeated = code_frame::format_location(
+        filename,
+        arena.loc_start(repeated_loc),
+        arena.loc_end(repeated_loc),
+    );
+    let message = if "at ".len() + repeated.len() + 1 < 76 {
+        format!(
+            "Multiple definition of the {kind} name {name} \nat {repeated} \nNames must be unique in a given structure or signature."
+        )
+    } else {
+        format!(
+            "Multiple definition of the {kind} name {name} \nat {repeated}\n Names must be unique in a given structure or signature."
+        )
+    };
+    format_compiler_error_report(arena, source, filename, loc, &message)
+}
+
+fn non_generalizable_help_message(intro: &str, rendered_type: &str) -> String {
+    const ERROR: &str = "\x1b[1;31m";
+    const INFO: &str = "\x1b[1;33m";
+    const RESET: &str = "\x1b[0m";
+
+    format!(
+        "{intro}\n{ERROR}{rendered_type}{RESET}\n\nThis happens when the type system senses there's a mutation/side-effect,\nin combination with a polymorphic value.\n{INFO}Using or annotating that value usually solves it.{RESET}"
+    )
+}
+
+fn format_non_generalizable_report(
+    source: &str,
+    filename: &str,
+    loc: &Location,
+    type_ctx: &TypeContext,
+    typ: TypeExprRef,
+) -> String {
+    let rendered_type = format_non_generalizable_type_expr(type_ctx, typ);
+    let message = non_generalizable_help_message(
+        "This expression's type contains type variables that cannot be generalized:",
+        &rendered_type,
+    );
+    format_compiler_error_report_from_location(source, filename, loc, &message)
+}
+
+fn format_non_generalizable_module_report(
+    source: &str,
+    filename: &str,
+    loc: &Location,
+    type_ctx: &TypeContext,
+    mty: &crate::types::decl::ModuleType,
+) -> String {
+    const ERROR: &str = "\x1b[1;31m";
+    const INFO: &str = "\x1b[1;33m";
+    const RESET: &str = "\x1b[0m";
+
+    let rendered_type = crate::types::includemod::format_module_type_show_weak(type_ctx, mty);
+    let mut output = String::new();
+
+    push_compiler_error_report_header_from_location(&mut output, source, filename, loc);
+    output.push_str(
+        "  The type of this module contains type variables that cannot be generalized:\n",
+    );
+    output.push_str("  ");
+    output.push_str(ERROR);
+    output.push_str(&rendered_type);
+    output.push_str(RESET);
+    output.push('\n');
+    output.push_str("  \n");
+    output.push_str("  This happens when the type system senses there's a mutation/side-effect,\n");
+    output.push_str("  in combination with a polymorphic value.\n");
+    output.push_str("  ");
+    output.push_str(INFO);
+    output.push_str("Using or annotating that value usually solves it.");
+    output.push_str(RESET);
+    output.push_str("\n\n");
+    output
+}
+
+fn format_interface_not_compiled_report(
+    source: &str,
+    filename: &str,
+    file_name_idx: StrIdx,
+    interface_name: &str,
+) -> String {
+    let loc = Location::in_file(file_name_idx);
+    let message = format!("Could not find the .cmi file for interface\n{interface_name}.");
+    format_compiler_error_report_from_location(source, filename, &loc, &message)
+}
+
+fn interface_source_name(source_file: &str) -> String {
+    let mut intf = std::path::PathBuf::from(source_file);
+    intf.set_extension("resi");
+    intf.to_string_lossy().into_owned()
+}
+
+fn source_has_interface(options: &CompilerOptions, source_file: &str) -> bool {
+    options.assume_compiled_interface || std::path::Path::new(&format!("{source_file}i")).exists()
+}
+
+fn compiled_interface_file_exists(options: &CompilerOptions, source_file: &str) -> bool {
+    let module_name = module_name_from_source_filename(source_file);
+    let filename = format!("{module_name}.cmi");
+    let uncapitalized = filename
+        .chars()
+        .next()
+        .map(|ch| ch.to_lowercase().collect::<String>() + &filename[ch.len_utf8()..])
+        .unwrap_or_else(|| filename.clone());
+
+    build_load_path(options)
+        .iter()
+        .any(|dir| dir.join(&uncapitalized).exists() || dir.join(&filename).exists())
+}
+
+fn push_compiler_error_report_header_from_location(
+    output: &mut String,
+    source: &str,
+    filename: &str,
+    loc: &Location,
+) {
+    output.push_str("\n  We've found a bug for you!\n");
+    output.push_str("  ");
+    if loc.loc_ghost && loc.loc_start.cnum < 0 && loc.loc_end.cnum < 0 {
+        output.push_str(filename);
+        output.push_str("\n\n");
+    } else {
+        output.push_str(&code_frame::format_location(
+            filename,
+            &loc.loc_start,
+            &loc.loc_end,
+        ));
+        output.push_str("\n\n");
+        output.push_str(&code_frame::print(source, &loc.loc_start, &loc.loc_end));
+        output.push('\n');
+    }
+}
+
+fn push_compiler_error_report_header(
+    output: &mut String,
+    arena: &ParseArena,
+    source: &str,
+    filename: &str,
+    loc: LocIdx,
+) {
+    output.push_str("\n  We've found a bug for you!\n");
+    output.push_str("  ");
+    let start_pos = arena.loc_start(loc);
+    let end_pos = arena.loc_end(loc);
+    if arena.loc_ghost(loc) && start_pos.cnum < 0 && end_pos.cnum < 0 {
+        output.push_str(filename);
+        output.push_str("\n\n");
+    } else {
+        output.push_str(&code_frame::format_location(filename, start_pos, end_pos));
+        output.push_str("\n\n");
+        output.push_str(&code_frame::print(source, start_pos, end_pos));
+        output.push('\n');
+    }
+}
+
+fn format_compiler_error_report_from_location(
+    source: &str,
+    filename: &str,
+    loc: &Location,
+    message: &str,
+) -> String {
+    let mut output = String::new();
+
+    push_compiler_error_report_header_from_location(&mut output, source, filename, loc);
+
+    for line in message.lines() {
+        output.push_str("  ");
+        output.push_str(line);
+        output.push('\n');
+    }
+    output.push('\n');
+    output
+}
+
+fn push_compiler_error_report_header_from_external_location(
+    output: &mut String,
+    source: Option<&str>,
+    filename: &str,
+    loc: &Location,
+) {
+    output.push_str("\n  We've found a bug for you!\n");
+    output.push_str("  ");
+    if loc.loc_ghost && loc.loc_start.cnum < 0 && loc.loc_end.cnum < 0 {
+        output.push_str(filename);
+        output.push_str("\n\n");
+    } else {
+        output.push_str(&code_frame::format_location(
+            filename,
+            &loc.loc_start,
+            &loc.loc_end,
+        ));
+        output.push_str("\n\n");
+        if let Some(source) = source {
+            output.push_str(&code_frame::print(source, &loc.loc_start, &loc.loc_end));
+            output.push('\n');
+        }
+    }
+}
+
+fn format_compiler_error_report_from_external_location(
+    type_ctx: &TypeContext,
+    current_filename: &str,
+    loc: &Location,
+    message: &str,
+) -> String {
+    let loc_filename = type_ctx
+        .resolve_cmi_longident_component(loc.loc_start.file_name)
+        .filter(|name| !name.is_empty() && name != "_none_")
+        .unwrap_or_else(|| current_filename.to_string());
+    let loc_source = std::fs::read_to_string(&loc_filename).ok();
+    let mut output = String::new();
+
+    push_compiler_error_report_header_from_external_location(
+        &mut output,
+        loc_source.as_deref(),
+        &loc_filename,
+        loc,
+    );
+
+    for line in message.lines() {
+        output.push_str("  ");
+        output.push_str(line);
+        output.push('\n');
+    }
+    output.push('\n');
+    output
+}
+
+fn format_compiler_error_report(
+    arena: &ParseArena,
+    source: &str,
+    filename: &str,
+    loc: LocIdx,
+    message: &str,
+) -> String {
+    let mut output = String::new();
+
+    push_compiler_error_report_header(&mut output, arena, source, filename, loc);
+
+    for line in message.lines() {
+        output.push_str("  ");
+        output.push_str(line);
+        output.push('\n');
+    }
+    output.push('\n');
+    output
+}
+
+fn format_builtin_extension_error_report(
+    arena: &ParseArena,
+    source: &str,
+    filename: &str,
+    error: &BuiltinExtensionError,
+) -> String {
+    let mut output =
+        format_compiler_error_report(arena, source, filename, error.loc, &error.message);
+    for sub in &error.sub {
+        output.push_str(&format_builtin_extension_error_report(
+            arena, source, filename, sub,
+        ));
+    }
+    output
+}
+
+fn format_compiler_error_report_with_unindented_break(
+    arena: &ParseArena,
+    source: &str,
+    filename: &str,
+    loc: LocIdx,
+    first_line: &str,
+    second_line: &str,
+) -> String {
+    let mut output = String::new();
+
+    push_compiler_error_report_header(&mut output, arena, source, filename, loc);
+    output.push_str("  ");
+    output.push_str(first_line);
+    output.push('\n');
+    output.push_str(second_line);
+    output.push_str("\n\n");
+    output
+}
+
+fn format_cannot_apply_module_report(
+    type_ctx: &TypeContext,
+    arena: &ParseArena,
+    source: &str,
+    filename: &str,
+    loc: LocIdx,
+    mty: &crate::types::decl::ModuleType,
+) -> String {
+    let mut output = String::new();
+    push_compiler_error_report_header(&mut output, arena, source, filename, loc);
+
+    let rendered_module_type = format_typemod_module_type(type_ctx, mty);
+    output.push_str("  This module is not a functor; it has type ");
+    output.push_str(&rendered_module_type);
+    output.push_str("\n\n");
+    output
+}
+
+fn format_missing_module_message(
+    path: &crate::types::path::Path,
+    expanded: &crate::types::path::Path,
+) -> String {
+    let head = expanded.head().name().to_string();
+    if path.same(expanded) {
+        format!(
+            "Internal path {} is dangling.\nThe compiled interface for module {head} was not found.",
+            path.name()
+        )
+    } else {
+        format!(
+            "Internal path {} expands to {} which is dangling.\nThe compiled interface for module {head} was not found.",
+            path.name(),
+            expanded.name()
+        )
+    }
+}
+
+fn format_cannot_eliminate_dependency_report(
+    type_ctx: &TypeContext,
+    arena: &ParseArena,
+    source: &str,
+    filename: &str,
+    loc: LocIdx,
+    mty: &crate::types::decl::ModuleType,
+) -> String {
+    let mut output = String::new();
+    push_compiler_error_report_header(&mut output, arena, source, filename, loc);
+
+    let rendered_module_type =
+        crate::types::includemod::format_module_type_full_paths(type_ctx, mty);
+    output.push_str("  This functor has type ");
+    output.push_str(&rendered_module_type);
+    output.push('\n');
+    output.push_str("  The parameter cannot be eliminated in the result type.\n");
+    output.push_str("   Bind the argument to a module identifier.\n\n");
+    output
+}
+
+fn format_structure_expected_report(
+    type_ctx: &TypeContext,
+    arena: &ParseArena,
+    source: &str,
+    filename: &str,
+    loc: LocIdx,
+    mty: &crate::types::decl::ModuleType,
+) -> String {
+    let mut output = String::new();
+    push_compiler_error_report_header(&mut output, arena, source, filename, loc);
+
+    let rendered_module_type = format_typemod_module_type(type_ctx, mty);
+    output.push_str("  This module is not a structure; it has type ");
+    output.push_str(&rendered_module_type);
+    output.push_str("\n\n");
+    output
+}
+
+fn format_typemod_module_type(
+    type_ctx: &TypeContext,
+    mty: &crate::types::decl::ModuleType,
+) -> String {
+    match mty {
+        crate::types::decl::ModuleType::MtySignature(sig) if sig.is_empty() => String::new(),
+        crate::types::decl::ModuleType::MtyFunctor {
+            param,
+            param_type,
+            result,
+        } => {
+            let param_type = param_type
+                .as_ref()
+                .map(|mty| format_typemod_module_type(type_ctx, mty))
+                .unwrap_or_else(|| "_".to_string());
+            let result = format_typemod_module_type(type_ctx, result);
+            format!("({}: {}) => {}", param.name(), param_type, result)
+        }
+        _ => crate::types::includemod::format_module_type(type_ctx, mty),
+    }
+}
+
+fn format_with_mismatch_report(
+    type_ctx: &TypeContext,
+    arena: &ParseArena,
+    source: &str,
+    filename: &str,
+    loc: LocIdx,
+    lid: &Longident,
+    error: &crate::types::includemod::IncludeModError,
+) -> String {
+    let mut message = String::new();
+    message.push_str("  In this `with' constraint, the new definition of ");
+    message.push_str(&format_longident_for_report(arena, lid));
+    message.push('\n');
+    message.push_str("  does not match its original definition in the constrained signature:\n");
+    message.push_str(
+        &crate::types::includemod::format_error_without_signature_header(type_ctx, filename, error),
+    );
+    format_compiler_error_report_raw_message(arena, source, filename, loc, &message)
+}
+
+fn format_with_makes_applicative_functor_ill_typed_report(
+    type_ctx: &TypeContext,
+    arena: &ParseArena,
+    source: &str,
+    filename: &str,
+    loc: LocIdx,
+    lid: &Longident,
+    path: &crate::types::Path,
+    error: &crate::types::includemod::IncludeModError,
+) -> String {
+    let mut message = String::new();
+    let lid_text = format_longident_for_report(arena, lid);
+    message.push_str("  This `with' constraint on ");
+    message.push_str(&lid_text);
+    message.push_str(" makes the applicative functor \n");
+    message.push_str("  type ");
+    message.push_str(&path.name());
+    message.push_str(" ill-typed in the constrained signature:\n");
+    let mut include_error =
+        crate::types::includemod::format_error_without_signature_header(type_ctx, filename, error);
+    include_error = include_error.replacen(
+        "  Modules do not match:\n    \n  is not included in\n    ",
+        "  Modules do not match:  is not included in ",
+        1,
+    );
+    if let Some(last_component) = lid_text.rsplit('.').next() {
+        include_error = include_error.replacen(
+            &format!("type {last_component} = {last_component}\n"),
+            &format!("type {last_component} = {lid_text}\n"),
+            1,
+        );
+    }
+    message.push_str(&include_error);
+    format_compiler_error_report_raw_message(arena, source, filename, loc, &message)
+}
+
+fn format_not_a_variant_type_report(
+    arena: &ParseArena,
+    source: &str,
+    filename: &str,
+    loc: LocIdx,
+    lid: &Longident,
+) -> String {
+    format_compiler_error_report_with_unindented_break(
+        arena,
+        source,
+        filename,
+        loc,
+        &format!("The type {}", format_longident_for_report(arena, lid)),
+        "is not a variant type",
+    )
+}
+
+fn format_type_params_not_supported_report(
+    arena: &ParseArena,
+    source: &str,
+    filename: &str,
+    loc: LocIdx,
+    lid: &Longident,
+) -> String {
+    format_compiler_error_report_with_unindented_break(
+        arena,
+        source,
+        filename,
+        loc,
+        &format!("The type {}", format_longident_for_report(arena, lid)),
+        "has type parameters, but type parameters is not supported here.",
+    )
+}
+
+fn format_unbound_type_constructor_report(
+    arena: &ParseArena,
+    source: &str,
+    filename: &str,
+    loc: LocIdx,
+    lid: &Longident,
+    alternatives: &[String],
+) -> String {
+    const INFO: &str = "\x1b[1;33m";
+    const RESET: &str = "\x1b[0m";
+
+    let name = format_longident_for_report(arena, lid);
+    let spellcheck_name = arena.get_string(lid.last_idx());
+    if let Some(hint) = spellcheck_hint(spellcheck_name, alternatives) {
+        return format_compiler_error_report(
+            arena,
+            source,
+            filename,
+            loc,
+            &format!(
+                "This type constructor, `{name}`, can't be found.\n\n\n{INFO}Hint: Did you mean {hint}?{RESET}"
+            ),
+        );
+    }
+
+    format_compiler_error_report(
+        arena,
+        source,
+        filename,
+        loc,
+        &format!(
+            "This type constructor, `{name}`, can't be found.\nIf you wanted to write a recursive type, don't forget the `rec` in `type rec`"
+        ),
+    )
+}
+
+fn format_unbound_type_constructor_incomplete_report(
+    arena: &ParseArena,
+    source: &str,
+    filename: &str,
+    loc: LocIdx,
+    path: &crate::types::Path,
+) -> String {
+    let name = format_type_path_for_report(path);
+    format_compiler_error_report_with_unindented_break(
+        arena,
+        source,
+        filename,
+        loc,
+        &format!("The type constructor {name}"),
+        "is not yet completely defined",
+    )
+}
+
+fn format_unbound_type_variable_report(
+    arena: &ParseArena,
+    source: &str,
+    filename: &str,
+    loc: LocIdx,
+    name: &str,
+) -> String {
+    let mut report = format_compiler_error_report(
+        arena,
+        source,
+        filename,
+        loc,
+        &format!("Unbound type parameter {name}"),
+    );
+    report.push('\n');
+    report
+}
+
+fn format_unbound_modtype_report(
+    arena: &ParseArena,
+    source: &str,
+    filename: &str,
+    loc: LocIdx,
+    lid: &Longident,
+    alternatives: &[String],
+) -> String {
+    let name = format_longident_for_report(arena, lid);
+    if let Some(hint) = spellcheck_hint(&name, alternatives) {
+        let mut raw_message = String::new();
+        raw_message.push_str("  Unbound module type ");
+        raw_message.push_str(&name);
+        raw_message.push('\n');
+        raw_message.push_str("Hint: Did you mean ");
+        raw_message.push_str(hint);
+        raw_message.push('?');
+        format_compiler_error_report_raw_message(arena, source, filename, loc, &raw_message)
+    } else {
+        format_compiler_error_report(
+            arena,
+            source,
+            filename,
+            loc,
+            &format!("Unbound module type {name}"),
+        )
+    }
+}
+
+fn format_invalid_variable_name_report(
+    arena: &ParseArena,
+    source: &str,
+    filename: &str,
+    loc: LocIdx,
+    name: &str,
+) -> String {
+    format_compiler_error_report(
+        arena,
+        source,
+        filename,
+        loc,
+        &format!("The type variable name {name} is not allowed in programs"),
+    )
+}
+
+fn format_cannot_quantify_report(
+    type_ctx: &TypeContext,
+    arena: &ParseArena,
+    source: &str,
+    filename: &str,
+    loc: LocIdx,
+    name: &str,
+    ty: TypeExprRef,
+) -> String {
+    let reason = if crate::types::btype::is_tvar(type_ctx, ty) {
+        "it escapes its scope"
+    } else if crate::types::btype::is_tunivar(type_ctx, ty) {
+        "it is already bound to another variable"
+    } else {
+        "it is not a variable"
+    };
+    let message = format_cannot_quantify_message(name, reason);
+    format_compiler_error_report(arena, source, filename, loc, &message)
+}
+
+fn format_cannot_quantify_message(name: &str, reason: &str) -> String {
+    let mut buf = Vec::new();
+    {
+        let mut ppf = crate::parser::formatter::Formatter::new(&mut buf);
+        ppf.set_margin(76);
+        ppf.open_hovbox(0);
+        ppf.print(format_args!(
+            "The universal type variable '{name} cannot be generalized:"
+        ));
+        ppf.space();
+        ppf.print(format_args!("{reason}."));
+        ppf.close_box();
+        ppf.flush();
+    }
+    String::from_utf8(buf).unwrap_or_default()
+}
+
+fn format_multiple_constraints_on_type_report(
+    arena: &ParseArena,
+    source: &str,
+    filename: &str,
+    loc: LocIdx,
+    lid: &Longident,
+) -> String {
+    format_compiler_error_report(
+        arena,
+        source,
+        filename,
+        loc,
+        &format!(
+            "Multiple constraints for type {}",
+            format_longident_for_report(arena, lid)
+        ),
+    )
+}
+
+fn format_present_has_conjunction_report(
+    arena: &ParseArena,
+    source: &str,
+    filename: &str,
+    loc: LocIdx,
+    label: &str,
+) -> String {
+    format_compiler_error_report(
+        arena,
+        source,
+        filename,
+        loc,
+        &format!("The present constructor {label} has a conjunctive type"),
+    )
+}
+
+fn format_present_has_no_type_report(
+    arena: &ParseArena,
+    source: &str,
+    filename: &str,
+    loc: LocIdx,
+    label: &str,
+) -> String {
+    format_compiler_error_report(
+        arena,
+        source,
+        filename,
+        loc,
+        &format!("The present constructor {label} has no type"),
+    )
+}
+
+fn format_constructor_mismatch_report(
+    type_ctx: &TypeContext,
+    arena: &ParseArena,
+    source: &str,
+    filename: &str,
+    loc: LocIdx,
+    actual: TypeExprRef,
+    expected: TypeExprRef,
+) -> String {
+    let mut printer = TypeExprPrinter::new(type_ctx);
+    let actual = printer.format(actual);
+    let expected = printer.format(expected);
+    format_compiler_error_report(
+        arena,
+        source,
+        filename,
+        loc,
+        &format!(
+            "This variant type contains a constructor {} which should be\n{}",
+            actual, expected
+        ),
+    )
+}
+
+fn format_not_a_variant_report(
+    type_ctx: &TypeContext,
+    arena: &ParseArena,
+    source: &str,
+    filename: &str,
+    loc: LocIdx,
+    ty: TypeExprRef,
+) -> String {
+    let message = format!(
+        "The type {} does not expand to a polymorphic variant type",
+        format_type_expr(type_ctx, ty)
+    );
+    if let TypeDesc::Tvar(Some(name)) = &*type_ctx.get_desc(type_ctx.repr(ty)) {
+        return format_compiler_error_report_with_unindented_break(
+            arena,
+            source,
+            filename,
+            loc,
+            &message,
+            &format!("Hint: Did you mean `{name}?"),
+        );
+    }
+    format_compiler_error_report(arena, source, filename, loc, &message)
+}
+
+fn format_method_mismatch_report(
+    type_ctx: &TypeContext,
+    arena: &ParseArena,
+    source: &str,
+    filename: &str,
+    loc: LocIdx,
+    label: &str,
+    actual: TypeExprRef,
+    expected: TypeExprRef,
+) -> String {
+    let mut printer = TypeExprPrinter::new(type_ctx);
+    let actual = printer.format(actual);
+    let expected = printer.format(expected);
+    format_compiler_error_report(
+        arena,
+        source,
+        filename,
+        loc,
+        &format!("Method '{label}' has type {actual}, which should be {expected}"),
+    )
+}
+
+fn format_type_mismatch_report(
+    type_ctx: &TypeContext,
+    arena: &ParseArena,
+    source: &str,
+    filename: &str,
+    loc: LocIdx,
+    trace: &[(TypeExprRef, TypeExprRef)],
+) -> String {
+    let Some((actual, expected)) = trace.first().copied() else {
+        return format_compiler_error_report(arena, source, filename, loc, "Type error.");
+    };
+    format_compiler_error_report(
+        arena,
+        source,
+        filename,
+        loc,
+        &format!(
+            "This type {} should be an instance of type {}",
+            format_type_expr(type_ctx, actual),
+            format_type_expr(type_ctx, expected)
+        ),
+    )
+}
+
+fn format_alias_type_mismatch_report(
+    type_ctx: &TypeContext,
+    arena: &ParseArena,
+    source: &str,
+    filename: &str,
+    loc: LocIdx,
+    trace: &[(TypeExprRef, TypeExprRef)],
+) -> String {
+    let Some((actual, expected)) = trace.first().copied() else {
+        return format_compiler_error_report(arena, source, filename, loc, "Type error.");
+    };
+    format_compiler_error_report(
+        arena,
+        source,
+        filename,
+        loc,
+        &format!(
+            "This alias is bound to type {} but is used as an instance of type {}",
+            format_type_expr(type_ctx, actual),
+            format_type_expr(type_ctx, expected)
+        ),
+    )
+}
+
+fn format_type_arity_mismatch_report(
+    arena: &ParseArena,
+    source: &str,
+    filename: &str,
+    loc: LocIdx,
+    lid: &Longident,
+    expected: usize,
+    provided: usize,
+) -> String {
+    let name = format_longident_for_report(arena, lid);
+    let message = if expected == 0 {
+        format!(
+            "The type {name} is not generic so expects no arguments,\nbut is here applied to {provided} argument(s).\nHave you tried removing the angular brackets `<` and `>` and the\narguments within them and just writing `{name}` instead? "
+        )
+    } else {
+        format!(
+            "The type constructor {name} expects {expected} argument(s),\nbut is here applied to {provided} argument(s)"
+        )
+    };
+    format_compiler_error_report(arena, source, filename, loc, &message)
+}
+
+fn format_inconsistent_constraint_report(
+    type_ctx: &TypeContext,
+    arena: &ParseArena,
+    source: &str,
+    filename: &str,
+    loc: LocIdx,
+    trace: &[(TypeExprRef, TypeExprRef)],
+) -> String {
+    if let Some((actual, expected)) = trace.first().copied() {
+        format_compiler_error_report_with_unindented_break(
+            arena,
+            source,
+            filename,
+            loc,
+            "The type constraints are not consistent.",
+            &format!(
+                "Type {} is not compatible with type {}",
+                format_type_expr(type_ctx, actual),
+                format_type_expr(type_ctx, expected)
+            ),
+        )
+    } else {
+        format_compiler_error_report(
+            arena,
+            source,
+            filename,
+            loc,
+            "The type constraints are not consistent.",
+        )
+    }
+}
+
+fn format_definition_mismatch_report(
+    type_ctx: &TypeContext,
+    arena: &ParseArena,
+    source: &str,
+    filename: &str,
+    loc: LocIdx,
+    ty: TypeExprRef,
+    detail: Option<&str>,
+) -> String {
+    let mut message = format!(
+        "This variant or record definition does not match that of type {}",
+        format_type_expr(type_ctx, ty)
+    );
+    if let Some(detail) = detail {
+        if !detail.is_empty() {
+            message.push('\n');
+            message.push_str(detail);
+        }
+    }
+    format_compiler_error_report(arena, source, filename, loc, &message)
+}
+
+fn variance_suffix(n: usize) -> &'static str {
+    let is_teen = (n % 100) / 10 == 1;
+    match n % 10 {
+        1 if !is_teen => "st",
+        2 if !is_teen => "nd",
+        3 if !is_teen => "rd",
+        _ => "th",
+    }
+}
+
+fn format_variance((co, cn, inj): (bool, bool, bool)) -> String {
+    let mut output = String::new();
+    if inj {
+        output.push_str("injective ");
+    }
+    match (co, cn) {
+        (true, true) => output.push_str("invariant"),
+        (true, false) => output.push_str("covariant"),
+        (false, true) => output.push_str("contravariant"),
+        (false, false) if inj => {}
+        (false, false) => output.push_str("unrestricted"),
+    }
+    output
+}
+
+fn format_bad_variance_report(
+    arena: &ParseArena,
+    source: &str,
+    filename: &str,
+    loc: LocIdx,
+    param_index: i32,
+    actual: (bool, bool, bool),
+    expected: (bool, bool, bool),
+) -> String {
+    let message = match param_index {
+        -1 => format!(
+            "In this definition, a type variable has a variance that\nis not reflected by its occurrence in type parameters.\nIt was expected to be {}, but it is {}.",
+            format_variance(expected),
+            format_variance(actual),
+        ),
+        -2 => "In this definition, a type variable cannot be deduced\nfrom the type parameters."
+            .to_string(),
+        -3 => format!(
+            "In this definition, a type variable has a variance that\ncannot be deduced from the type parameters.\nIt was expected to be {}, but it is {}.",
+            format_variance(expected),
+            format_variance(actual),
+        ),
+        _ => {
+            let param_index = param_index as usize;
+            format!(
+                "In this definition, expected parameter variances are not satisfied.\nThe {}{} type parameter was expected to be {},\nbut it is {}.",
+                param_index,
+                variance_suffix(param_index),
+                format_variance(expected),
+                format_variance(actual),
+            )
+        }
+    };
+    format_compiler_error_report(arena, source, filename, loc, &message)
+}
+
+fn format_compiler_error_report_with_bare_reset_lines(
+    arena: &ParseArena,
+    source: &str,
+    filename: &str,
+    loc: LocIdx,
+    message: &str,
+) -> String {
+    const RESET: &str = "\x1b[0m";
+
+    let mut output = String::new();
+
+    push_compiler_error_report_header(&mut output, arena, source, filename, loc);
+
+    for line in message.lines() {
+        if line == RESET {
+            output.push_str(line);
+        } else {
+            output.push_str("  ");
+            output.push_str(line);
+        }
+        output.push('\n');
+    }
+    output.push('\n');
+    output
+}
+
+fn format_compiler_warning_report(
+    arena: &ParseArena,
+    source: &str,
+    filename: &str,
+    warning: &TypeCoreWarning,
+) -> String {
+    let start_pos = arena.loc_start(warning.loc);
+    let end_pos = arena.loc_end(warning.loc);
+    let mut output = String::new();
+
+    output.push_str("\n  Warning number ");
+    output.push_str(&warning.warning.number().to_string());
+    if warning.is_error {
+        output.push_str(" (configured as error) ");
+    }
+    output.push('\n');
+    output.push_str("  ");
+    if arena.loc_ghost(warning.loc) && start_pos.cnum < 0 && end_pos.cnum < 0 {
+        output.push_str(filename);
+        output.push_str("\n\n");
+    } else {
+        output.push_str(&code_frame::format_location(filename, start_pos, end_pos));
+        output.push_str("\n\n");
+        output.push_str(&code_frame::print_warning(source, start_pos, end_pos));
+        output.push('\n');
+    }
+
+    let indent_after_blank = !matches!(
+        warning.warning,
+        crate::diagnostics::Warning::UnusedVariable { .. }
+            | crate::diagnostics::Warning::UnusedVariableStrict { .. }
+    );
+    let mut after_blank = false;
+    let message = warning.warning.message();
+    for (idx, line) in message.lines().enumerate() {
+        let indent_line = match warning.warning {
+            crate::diagnostics::Warning::NonClosedRecordPattern { .. } => idx == 0,
+            crate::diagnostics::Warning::AttributePayload { .. } => idx == 0,
+            crate::diagnostics::Warning::BsUnusedAttribute { .. } => idx == 0,
+            crate::diagnostics::Warning::AllClausesGuarded => idx == 0,
+            crate::diagnostics::Warning::AmbiguousPattern { .. } => idx == 0,
+            crate::diagnostics::Warning::AmbiguousName { .. } => idx == 0,
+            crate::diagnostics::Warning::FragileMatch { .. } => idx == 0,
+            crate::diagnostics::Warning::FragileLiteralPattern => idx == 0,
+            crate::diagnostics::Warning::UnreachableCase => idx == 0,
+            crate::diagnostics::Warning::PartialMatch { .. } => {
+                idx < 2 || line.starts_with("Hint:")
+            }
+            _ => indent_after_blank || !after_blank,
+        };
+        if !line.is_empty() && indent_line {
+            output.push_str("  ");
+            output.push_str(line);
+        } else if !line.is_empty() {
+            output.push_str(line);
+        }
+        if line.is_empty() {
+            after_blank = true;
+        }
+        output.push('\n');
+    }
+    if message.ends_with('\n') {
+        output.push('\n');
+    }
+    output.push('\n');
+    output
+}
+
+fn emit_type_warnings(
+    arena: &ParseArena,
+    source: &str,
+    filename: &str,
+    warnings: &[TypeCoreWarning],
+) {
+    if warnings.is_empty() {
+        return;
+    }
+
+    let mut stderr = std::io::stderr();
+    for warning in warnings {
+        let output = format_compiler_warning_report(arena, source, filename, warning);
+        let _ = std::io::Write::write_all(&mut stderr, output.as_bytes());
+    }
+    let _ = std::io::Write::flush(&mut stderr);
+}
+
+fn type_warnings_have_errors(warnings: &[TypeCoreWarning]) -> bool {
+    warnings.iter().any(|warning| warning.is_error)
+}
+
+fn format_compiler_error_report_raw_message(
+    arena: &ParseArena,
+    source: &str,
+    filename: &str,
+    loc: LocIdx,
+    message: &str,
+) -> String {
+    let mut output = String::new();
+
+    push_compiler_error_report_header(&mut output, arena, source, filename, loc);
+    output.push_str(message);
+    if !message.ends_with('\n') {
+        output.push('\n');
+    }
+    output.push('\n');
+    output
+}
+
+fn format_wrong_name_report(
+    type_ctx: &TypeContext,
+    arena: &ParseArena,
+    source: &str,
+    filename: &str,
+    loc: LocIdx,
+    kind: &str,
+    ty: TypeExprRef,
+    expected: &str,
+    path: &crate::types::Path,
+    name: &str,
+    alternatives: &[String],
+    jsx_component_info: Option<&crate::types::typecore::JsxPropErrorInfo>,
+) -> String {
+    const INFO: &str = "\x1b[1;33m";
+    const ERROR: &str = "\x1b[1;31m";
+    const RESET: &str = "\x1b[0m";
+
+    if let Some(jsx_component_info) = jsx_component_info {
+        let mut message = String::new();
+        if name == "children" {
+            message.push_str("This JSX component does not accept child elements. It has no ");
+            message.push_str(ERROR);
+            message.push_str("children");
+            message.push_str(RESET);
+            message.push_str(" prop ");
+        } else {
+            message.push_str("The prop ");
+            message.push_str(ERROR);
+            message.push_str(name);
+            message.push_str(RESET);
+            message.push_str(" does not belong to the JSX component ");
+        }
+        if let Some(component_name) = &jsx_component_info.component_name {
+            message.push_str(INFO);
+            message.push('<');
+            message.push_str(component_name);
+            message.push_str(" />");
+            message.push_str(RESET);
+            message.push(' ');
+        }
+        message.push_str("\n\n\n");
+        if let Some(hint) = spellcheck_hint(name, alternatives) {
+            let mut raw_message = format_message_with_compiler_indentation(&message);
+            raw_message.push_str("Hint: Did you mean ");
+            raw_message.push_str(hint);
+            raw_message.push_str("?\n");
+            return format_compiler_error_report_raw_message(
+                arena,
+                source,
+                filename,
+                loc,
+                &raw_message,
+            );
+        }
+        return format_compiler_error_report(arena, source, filename, loc, &message);
+    }
+
+    if path.is_constructor_typath() {
+        return format_compiler_error_report(
+            arena,
+            source,
+            filename,
+            loc,
+            &format!(
+                "The field {name} is not part of the record argument for the {} constructor",
+                path
+            ),
+        );
+    }
+
+    let label = if kind == "record" { "field" } else { kind };
+    let type_text = format_type_expr(type_ctx, ty);
+    if let Some(multiline_type) = format_type_application_multiline(&type_text) {
+        let mut raw_message = String::new();
+        raw_message.push_str("  The ");
+        raw_message.push_str(label);
+        raw_message.push(' ');
+        raw_message.push_str(ERROR);
+        raw_message.push_str(name);
+        raw_message.push_str(RESET);
+        raw_message.push_str(" does not belong to type ");
+        raw_message.push_str(INFO);
+        raw_message.push_str(&path.to_string());
+        raw_message.push_str(RESET);
+        raw_message.push_str("\n  \n  ");
+        raw_message.push_str(expected);
+        raw_message.push_str(" type\n");
+        push_ocaml_multiline_type_application(&mut raw_message, INFO, RESET, &multiline_type);
+        if let Some(hint) = spellcheck_hint(name, alternatives) {
+            raw_message.push_str("Hint: Did you mean ");
+            raw_message.push_str(hint);
+            raw_message.push_str("?\n");
+        }
+        return format_compiler_error_report_raw_message(
+            arena,
+            source,
+            filename,
+            loc,
+            &raw_message,
+        );
+    }
+    let mut message = String::new();
+    message.push_str("The ");
+    message.push_str(label);
+    message.push(' ');
+    message.push_str(ERROR);
+    message.push_str(name);
+    message.push_str(RESET);
+    message.push_str(" does not belong to type ");
+    message.push_str(INFO);
+    message.push_str(&path.to_string());
+    message.push_str(RESET);
+    message.push_str("\n\n");
+    message.push_str(expected);
+    message.push_str(" type ");
+    message.push_str(INFO);
+    message.push_str(&type_text);
+    message.push_str(RESET);
+    if let Some(hint) = spellcheck_hint(name, alternatives) {
+        let mut raw_message = format_message_with_compiler_indentation(&message);
+        raw_message.push_str("Hint: Did you mean ");
+        raw_message.push_str(hint);
+        raw_message.push_str("?\n");
+        return format_compiler_error_report_raw_message(
+            arena,
+            source,
+            filename,
+            loc,
+            &raw_message,
+        );
+    }
+    format_compiler_error_report(arena, source, filename, loc, &message)
+}
+
+fn format_name_type_mismatch_report(
+    arena: &ParseArena,
+    source: &str,
+    filename: &str,
+    loc: LocIdx,
+    kind: &str,
+    lid: &Longident,
+    expected: &(crate::types::Path, crate::types::Path),
+    alternatives: &[(crate::types::Path, crate::types::Path)],
+) -> String {
+    let label = if kind == "record" { "field" } else { kind };
+    let expected_type = format_type_path_for_report(&expected.1);
+    let lid = format_longident_for_report(arena, lid);
+    let message = match alternatives {
+        [(actual, _)] => format!(
+            "The {label} {lid} belongs to the {kind} type {}\nbut a {label} was expected belonging to the {kind} type {expected_type}",
+            format_type_path_for_report(actual)
+        ),
+        _ => {
+            let types = alternatives
+                .iter()
+                .map(|(path, _)| format_type_path_for_report(path))
+                .collect::<Vec<_>>()
+                .join("\n  ");
+            format!(
+                "The {label} {lid} belongs to one of the following {kind} types:\n  {types}\nbut a {label} was expected belonging to the {kind} type {expected_type}"
+            )
+        }
+    };
+    format_compiler_error_report(arena, source, filename, loc, &message)
+}
+
+fn format_undefined_method_report(
+    type_ctx: &TypeContext,
+    arena: &ParseArena,
+    source: &str,
+    filename: &str,
+    loc: LocIdx,
+    ty: TypeExprRef,
+    method: &str,
+    alternatives: Option<&[String]>,
+) -> String {
+    let type_text = format_type_expr(type_ctx, ty);
+    if let Some(hint) = alternatives.and_then(|alts| spellcheck_hint(method, alts)) {
+        let mut raw_message = String::new();
+        raw_message.push_str("  This expression has type ");
+        raw_message.push_str(&type_text);
+        raw_message.push('\n');
+        raw_message.push_str("  It has no field ");
+        raw_message.push_str(method);
+        raw_message.push('\n');
+        raw_message.push_str("Hint: Did you mean ");
+        raw_message.push_str(hint);
+        raw_message.push('?');
+        return format_compiler_error_report_raw_message(
+            arena,
+            source,
+            filename,
+            loc,
+            &raw_message,
+        );
+    }
+
+    format_compiler_error_report(
+        arena,
+        source,
+        filename,
+        loc,
+        &format!("This expression has type {type_text}\nIt has no field {method}"),
+    )
+}
+
+fn format_type_path_for_report(path: &crate::types::Path) -> String {
+    let name = path.name();
+    name.strip_prefix("Stdlib.")
+        .or_else(|| name.strip_prefix("Stdlib_"))
+        .unwrap_or(&name)
+        .to_string()
+}
+
+fn format_type_application_multiline(type_text: &str) -> Option<(String, Vec<String>)> {
+    let (head, rest) = type_text.split_once('<')?;
+    let args = rest.strip_suffix('>')?;
+    let args = args.split(", ").map(str::to_string).collect::<Vec<_>>();
+    if args.len() < 4
+        || args
+            .iter()
+            .any(|arg| arg.contains('<') || arg.contains('>'))
+    {
+        return None;
+    }
+    Some((head.to_string(), args))
+}
+
+fn push_ocaml_multiline_type_application(
+    output: &mut String,
+    info: &str,
+    reset: &str,
+    (head, args): &(String, Vec<String>),
+) {
+    output.push_str("    ");
+    output.push_str(info);
+    output.push_str(head);
+    output.push_str("<\n");
+    for arg in args {
+        output.push_str("  ");
+        output.push_str(arg);
+        output.push_str(",\n");
+    }
+    output.push('>');
+    output.push_str(reset);
+    output.push('\n');
+}
+
+fn format_unbound_value_report(
+    arena: &ParseArena,
+    source: &str,
+    filename: &str,
+    loc: LocIdx,
+    name: &str,
+    qualifier: Option<&str>,
+    alternatives: &[String],
+    module_suggestion: Option<&str>,
+) -> String {
+    const INFO: &str = "\x1b[1;33m";
+    const RESET: &str = "\x1b[0m";
+
+    let mut message = String::new();
+    if let Some(qualifier) = qualifier {
+        message.push_str("The value ");
+        message.push_str(name);
+        message.push_str(" can't be found in ");
+        message.push_str(qualifier);
+    } else {
+        message.push_str("The value ");
+        message.push_str(name);
+        message.push_str(" can't be found");
+    }
+
+    let spellcheck = spellcheck_hint(name, alternatives);
+    if let Some(module_suggestion) = module_suggestion {
+        let mut raw_message = String::new();
+        raw_message.push_str("  ");
+        raw_message.push_str(&message);
+        raw_message.push('\n');
+
+        if let Some(hint) = spellcheck {
+            raw_message.push_str("  \n  ");
+            raw_message.push_str(INFO);
+            raw_message.push_str("Hint: Did you mean ");
+            raw_message.push_str(hint);
+            raw_message.push('?');
+            raw_message.push_str(RESET);
+            raw_message.push_str("\n\n  Or did you mean");
+        } else {
+            raw_message.push_str("\n  Maybe you meant");
+        }
+        raw_message.push_str(" to use the module ");
+        raw_message.push_str(INFO);
+        raw_message.push_str(module_suggestion);
+        raw_message.push_str(RESET);
+        raw_message.push_str("?\n");
+
+        return format_compiler_error_report_raw_message(
+            arena,
+            source,
+            filename,
+            loc,
+            &raw_message,
+        );
+    }
+
+    if let Some(hint) = spellcheck {
+        message.push_str("\n\n");
+        message.push_str(INFO);
+        message.push_str("Hint: Did you mean ");
+        message.push_str(hint);
+        message.push('?');
+        message.push_str(RESET);
+    }
+
+    format_compiler_error_report(arena, source, filename, loc, &message)
+}
+
+fn format_unbound_module_report(
+    arena: &ParseArena,
+    source: &str,
+    filename: &str,
+    loc: LocIdx,
+    name: &str,
+    alternatives: &[String],
+) -> String {
+    const INFO: &str = "\x1b[1;33m";
+    const RESET: &str = "\x1b[0m";
+
+    let mut message = if name == "Str" {
+        format!(
+            "{INFO}The module or file Str can't be found.{RESET}\nAre you trying to use the standard library's Str?\nIf you're compiling to JavaScript, use {INFO}Js.Re{RESET} instead.\nOtherwise, add str.cma to your ocamlc/ocamlopt command."
+        )
+    } else {
+        format!(
+            "{INFO}The module or file {name} can't be found.{RESET}\n- If it's a third-party dependency:\n  - Did you add it to the \"dependencies\" or \"dev-dependencies\" in rescript.json?\n- Did you include the file's directory to the \"sources\" in rescript.json?"
+        )
+    };
+    if name != "Str"
+        && let Some(hint) = spellcheck_hint(name, alternatives)
+    {
+        message.push_str("\n\n\n");
+        message.push_str(INFO);
+        message.push_str("Hint: Did you mean ");
+        message.push_str(hint);
+        message.push('?');
+        message.push_str(RESET);
+    } else if name != "Str" {
+        message.push_str("\n\n");
+    }
+    format_compiler_error_report(arena, source, filename, loc, &message)
+}
+
+fn format_access_functor_as_structure_report(
+    arena: &ParseArena,
+    source: &str,
+    filename: &str,
+    loc: LocIdx,
+    lid: &Longident,
+) -> String {
+    let name = format_longident_for_report(arena, lid);
+    format_compiler_error_report(
+        arena,
+        source,
+        filename,
+        loc,
+        &format!("The module {name} is a functor, not a structure"),
+    )
+}
+
+fn format_cannot_scrape_alias_report(
+    arena: &ParseArena,
+    source: &str,
+    filename: &str,
+    loc: LocIdx,
+    lid: &Longident,
+    path: &crate::types::Path,
+) -> String {
+    let name = format_longident_for_report(arena, lid);
+    let alias = format_type_path_for_report(path);
+    format_compiler_error_report(
+        arena,
+        source,
+        filename,
+        loc,
+        &format!("The module {name} is an alias for module {alias}, which is missing"),
+    )
+}
+
+fn format_unbound_constructor_report(
+    arena: &ParseArena,
+    source: &str,
+    filename: &str,
+    loc: LocIdx,
+    lid: &Longident,
+    alternatives: &[String],
+) -> String {
+    const INFO: &str = "\x1b[1;33m";
+    const DIM: &str = "\x1b[2m";
+    const RESET: &str = "\x1b[0m";
+
+    let name = format_longident_for_report(arena, lid);
+    let mut message = format!(
+        "{INFO}The variant constructor {name} can't be found.{RESET}\n\n- If it's defined in another module or file, bring it into scope by:\n  - Prefixing it with said module name: {INFO}TheModule.{name}{RESET}\n  - Or specifying its type: {INFO}let theValue: TheModule.theType = {name}{RESET}\n- Constructors and modules are both capitalized. Did you want the latter?\n  Then instead of {DIM}let foo = Bar{RESET}, try {INFO}module Foo = Bar{RESET}."
+    );
+    if let Some(hint) = spellcheck_hint(&name, alternatives) {
+        message = format_message_with_compiler_indentation(&message);
+        message.push_str("Hint: Did you mean ");
+        message.push_str(hint);
+        message.push('?');
+        format_compiler_error_report_raw_message(arena, source, filename, loc, &message)
+    } else {
+        format_compiler_error_report(arena, source, filename, loc, &message)
+    }
+}
+
+fn format_message_with_compiler_indentation(message: &str) -> String {
+    let mut output = String::new();
+    for line in message.lines() {
+        output.push_str("  ");
+        output.push_str(line);
+        output.push('\n');
+    }
+    output
+}
+
+fn spellcheck_hint<'a>(name: &str, alternatives: &'a [String]) -> Option<&'a str> {
+    let cutoff = match name.len() {
+        1 | 2 => 0,
+        3 | 4 => 1,
+        5 | 6 => 2,
+        _ => 3,
+    };
+    alternatives
+        .iter()
+        .filter_map(|candidate| {
+            let distance = edit_distance_at_most(name, candidate, cutoff)?;
+            Some((distance, candidate.as_str()))
+        })
+        .min_by_key(|(distance, candidate)| (*distance, candidate.len()))
+        .map(|(_, candidate)| candidate)
+}
+
+fn edit_distance_at_most(left: &str, right: &str, cutoff: usize) -> Option<usize> {
+    let left = left.as_bytes();
+    let right = right.as_bytes();
+    if left.len().abs_diff(right.len()) > cutoff {
+        return None;
+    }
+
+    let mut prev: Vec<usize> = (0..=right.len()).collect();
+    let mut curr = vec![0; right.len() + 1];
+
+    for (i, left_byte) in left.iter().enumerate() {
+        curr[0] = i + 1;
+        let mut row_min = curr[0];
+        for (j, right_byte) in right.iter().enumerate() {
+            let cost = usize::from(left_byte != right_byte);
+            curr[j + 1] = (prev[j + 1] + 1).min(curr[j] + 1).min(prev[j] + cost);
+            row_min = row_min.min(curr[j + 1]);
+        }
+        if row_min > cutoff {
+            return None;
+        }
+        std::mem::swap(&mut prev, &mut curr);
+    }
+
+    (prev[right.len()] <= cutoff).then_some(prev[right.len()])
+}
+
+fn format_label_multiply_defined_report(
+    arena: &ParseArena,
+    source: &str,
+    filename: &str,
+    loc: LocIdx,
+    label: &str,
+    jsx_component_info: Option<&crate::types::typecore::JsxPropErrorInfo>,
+) -> String {
+    const INFO: &str = "\x1b[1;33m";
+    const RESET: &str = "\x1b[0m";
+
+    if let Some(jsx_component_info) = jsx_component_info {
+        let mut message = String::new();
+        message.push_str("The prop ");
+        message.push_str(INFO);
+        message.push_str(label);
+        message.push_str(RESET);
+        message.push_str(" has already been passed to the component ");
+        if let Some(component_name) = &jsx_component_info.component_name {
+            message.push_str(INFO);
+            message.push('<');
+            message.push_str(component_name);
+            message.push_str(" />");
+            message.push_str(RESET);
+            message.push(' ');
+        }
+
+        let mut raw_message = format_message_with_compiler_indentation(&message);
+        raw_message.push_str("You can't pass the same prop more than once.\n");
+        return format_compiler_error_report_raw_message(
+            arena,
+            source,
+            filename,
+            loc,
+            &raw_message,
+        );
+    }
+
+    format_compiler_error_report(
+        arena,
+        source,
+        filename,
+        loc,
+        &format!("The record field label {label} is defined several times"),
+    )
+}
+
+fn format_labels_missing_report(
+    arena: &ParseArena,
+    source: &str,
+    filename: &str,
+    loc: LocIdx,
+    labels: &[String],
+    jsx_component_info: Option<&crate::types::typecore::JsxPropErrorInfo>,
+) -> String {
+    const INFO: &str = "\x1b[1;33m";
+    const RESET: &str = "\x1b[0m";
+
+    let mut message = String::new();
+    if let Some(jsx_component_info) = jsx_component_info {
+        message.push_str("The component ");
+        if let Some(component_name) = &jsx_component_info.component_name {
+            message.push_str(INFO);
+            message.push('<');
+            message.push_str(component_name);
+            message.push_str(" />");
+            message.push_str(RESET);
+            message.push(' ');
+        }
+        message.push_str("is missing these required props:\n ");
+        message.push_str(&labels.join(" "));
+    } else {
+        message.push_str("Some required record fields are missing:");
+        for label in labels {
+            message.push(' ');
+            message.push_str(label);
+        }
+        message.push('.');
+    }
+
+    format_compiler_error_report(arena, source, filename, loc, &message)
+}
+
+fn format_expr_type_clash_report(
+    type_ctx: &TypeContext,
+    arena: &ParseArena,
+    source: &str,
+    filename: &str,
+    loc: LocIdx,
+    trace: &[(TypeExprRef, TypeExprRef)],
+    context: &Option<TypeClashContext>,
+) -> String {
+    const INFO: &str = "\x1b[1;33m";
+    const ERROR: &str = "\x1b[1;31m";
+    const RESET: &str = "\x1b[0m";
+
+    if let Some((actual_arity, expected_arity)) =
+        expr_type_clash_uncurried_arity_mismatch(type_ctx, trace)
+    {
+        return format_function_arity_mismatch_report(
+            arena,
+            source,
+            filename,
+            loc,
+            actual_arity,
+            expected_arity,
+        );
+    }
+
+    let Some((actual, expected)) = trace.first().copied() else {
+        return format_compiler_error_report(arena, source, filename, loc, "Type error.");
+    };
+
+    let actual_is_function = matches!(
+        &*type_ctx.get_desc(type_ctx.repr(actual)),
+        TypeDesc::Tarrow { .. }
+    );
+    let missing_parameters = if actual_is_function {
+        Vec::new()
+    } else {
+        collect_expected_function_arguments(type_ctx, expected)
+    };
+    let mut message = String::new();
+
+    if !missing_parameters.is_empty() {
+        if missing_parameters.len() == 1 {
+            message.push_str("This value might need to be ");
+            message.push_str(INFO);
+            message.push_str("wrapped in a function that takes an extra\nparameter");
+            message.push_str(RESET);
+            message.push_str(" of type ");
+            message.push_str(&format_type_clash_arguments(type_ctx, &missing_parameters));
+            message.push_str("\n\n");
+        } else {
+            message.push_str("This value seems to ");
+            message.push_str(INFO);
+            message.push_str("need to be wrapped in a function that takes extra arguments");
+            message.push_str(RESET);
+            message.push_str(" of type: ");
+            message.push_str(&format_type_clash_arguments(type_ctx, &missing_parameters));
+            message.push_str("\n\n");
+        }
+        message.push_str(INFO);
+        message.push_str("Here's the original error message");
+        message.push_str(RESET);
+        message.push('\n');
+    }
+
+    if matches!(context, Some(TypeClashContext::Await)) {
+        message.push_str("This has type: ");
+        message.push_str(ERROR);
+        message.push_str(&format_type_expr(type_ctx, actual));
+        message.push_str(RESET);
+        message.push('\n');
+        message.push_str("But you're using ");
+        message.push_str(INFO);
+        message.push_str("await");
+        message.push_str(RESET);
+        message.push_str(" on this expression, so it is expected to be of type:\n  ");
+        message.push_str(INFO);
+        message.push_str(&format_type_expr(type_ctx, expected));
+        message.push_str(RESET);
+        append_extra_type_clash_help(type_ctx, arena, source, loc, context, trace, &mut message);
+        let message = format_await_type_clash_message(&message);
+        return format_compiler_error_report_raw_message(arena, source, filename, loc, &message);
+    }
+
+    let (error_text, expected_text): (Cow<'static, str>, Cow<'static, str>) = match context {
+        Some(TypeClashContext::ArrayLiteral) => (
+            Cow::Borrowed("This array item has type: "),
+            Cow::Borrowed("But this array is expected to have items of type: "),
+        ),
+        Some(TypeClashContext::FunctionCall) => (
+            Cow::Borrowed("This has type: "),
+            Cow::Borrowed("But this function argument is expecting: "),
+        ),
+        Some(TypeClashContext::FunctionArgument { .. }) => (
+            Cow::Borrowed("This has type: "),
+            Cow::Borrowed("But this function argument is expecting: "),
+        ),
+        Some(TypeClashContext::StatementFunctionCall) => (
+            Cow::Borrowed("This function call returns: "),
+            Cow::Borrowed("But it's expected to return: "),
+        ),
+        Some(TypeClashContext::ComparisonOperator) => (
+            Cow::Borrowed("This has type: "),
+            Cow::Borrowed("But it's being compared to something of type: "),
+        ),
+        Some(TypeClashContext::StringConcat) => (
+            Cow::Borrowed("This has type: "),
+            Cow::Borrowed("But string concatenation is expecting: "),
+        ),
+        Some(TypeClashContext::MathOperator {
+            operator,
+            is_constant,
+            ..
+        }) => (
+            Cow::Borrowed(if is_constant.is_some() {
+                "This value has type: "
+            } else {
+                "This has type: "
+            }),
+            Cow::Owned(format!(
+                "But it's being used with the {INFO}{operator}{RESET} operator, which works on: "
+            )),
+        ),
+        Some(TypeClashContext::RecordField { .. }) => (
+            Cow::Borrowed("This has type: "),
+            Cow::Borrowed("But the record field "),
+        ),
+        Some(TypeClashContext::SetRecordField { .. }) => (
+            Cow::Borrowed("You're assigning something to this field that has type: "),
+            Cow::Borrowed("But the record field is of type: "),
+        ),
+        Some(TypeClashContext::IfCondition) => (
+            Cow::Borrowed("This has type: "),
+            Cow::Borrowed("But \x1b[1;33mif\x1b[0m conditions must always be of type: "),
+        ),
+        Some(TypeClashContext::IfReturn) => (
+            Cow::Borrowed("This has type: "),
+            Cow::Borrowed("But this \x1b[1;33mif\x1b[0m statement is expected to return: "),
+        ),
+        Some(TypeClashContext::TernaryReturn) => (
+            Cow::Borrowed("This has type: "),
+            Cow::Borrowed("But this ternary is expected to return: "),
+        ),
+        Some(TypeClashContext::SwitchExpression) => (
+            Cow::Borrowed("This has type: "),
+            Cow::Borrowed("But this switch is expected to return: "),
+        ),
+        Some(TypeClashContext::TryReturn) => (
+            Cow::Borrowed("This has type: "),
+            Cow::Borrowed("But this try/catch is expected to return: "),
+        ),
+        Some(TypeClashContext::WhileCondition) => (
+            Cow::Borrowed("This has type: "),
+            Cow::Borrowed("But a \x1b[1;33mwhile\x1b[0m loop condition must always be of type: "),
+        ),
+        Some(TypeClashContext::ForLoopCondition) => (
+            Cow::Borrowed("This has type: "),
+            Cow::Borrowed("But a \x1b[1;33mfor\x1b[0m loop bounds must always be of type: "),
+        ),
+        Some(TypeClashContext::AssertCondition) => (
+            Cow::Borrowed("This has type: "),
+            Cow::Borrowed("But assertions must always be of type: "),
+        ),
+        Some(TypeClashContext::LetUnwrapReturn) => (
+            Cow::Borrowed("This has type: "),
+            Cow::Borrowed("But this \x1b[1;33mlet?\x1b[0m is used where this type is expected: "),
+        ),
+        _ => (
+            Cow::Borrowed("This has type: "),
+            Cow::Borrowed("But it's expected to have type: "),
+        ),
+    };
+    let suppress_alias_expansion = matches!(
+        context,
+        Some(TypeClashContext::IfCondition)
+            | Some(TypeClashContext::WhileCondition)
+            | Some(TypeClashContext::ForLoopCondition)
+            | Some(TypeClashContext::AssertCondition)
+    );
+
+    message.push_str(&error_text);
+    if suppress_alias_expansion {
+        append_type_clash_type_without_alias_expansion(
+            type_ctx,
+            trace,
+            true,
+            ERROR,
+            actual,
+            &mut message,
+        );
+    } else {
+        append_type_clash_type(type_ctx, trace, true, ERROR, actual, &mut message);
+    }
+    message.push('\n');
+    if let Some(TypeClashContext::RecordField {
+        field_name, jsx, ..
+    }) = context
+    {
+        match (field_name.as_str(), jsx) {
+            ("children", Some(JsxPropKind::Fragment)) => {
+                message.push_str("But children of JSX fragments must be of type:\n  ");
+            }
+            ("children", Some(JsxPropKind::CustomComponent)) => {
+                message.push_str("But children passed to this component must be of type:\n  ");
+            }
+            (_, Some(_)) => {
+                message.push_str("But the component prop ");
+                message.push_str(INFO);
+                message.push_str(field_name);
+                message.push_str(RESET);
+                message.push_str(" is expected to have type: ");
+            }
+            _ => {
+                message.push_str(&expected_text);
+                message.push_str(INFO);
+                message.push_str(field_name);
+                message.push_str(RESET);
+                message.push_str(" is expected to have type: ");
+            }
+        }
+        if suppress_alias_expansion {
+            append_type_clash_type_without_alias_expansion(
+                type_ctx,
+                trace,
+                false,
+                INFO,
+                expected,
+                &mut message,
+            );
+        } else {
+            append_type_clash_type(type_ctx, trace, false, INFO, expected, &mut message);
+        }
+    } else if let Some(TypeClashContext::FunctionArgument { optional, name }) = context {
+        message.push_str("But this");
+        if *optional {
+            message.push_str(" optional");
+        }
+        message.push_str(" function argument");
+        if let Some(name) = name {
+            message.push(' ');
+            message.push_str(INFO);
+            message.push('~');
+            message.push_str(name);
+            message.push_str(RESET);
+        }
+        message.push_str(" is expecting:");
+        if type_is_object(type_ctx, expected) {
+            message.push_str("\n  ");
+            if let Some((field_name, expected_field_ty)) =
+                object_field_expected_line(type_ctx, trace)
+            {
+                message.push_str(INFO);
+                message.push_str("{..");
+                message.push('"');
+                message.push_str(&field_name);
+                message.push('"');
+                message.push_str(": ");
+                message.push_str(&format_type_expr(type_ctx, expected_field_ty));
+                message.push('}');
+                message.push_str(RESET);
+                append_extra_type_clash_help(
+                    type_ctx,
+                    arena,
+                    source,
+                    loc,
+                    context,
+                    trace,
+                    &mut message,
+                );
+
+                if type_clash_array_to_tuple(type_ctx, trace)
+                    || type_clash_expected_unit_actual(type_ctx, trace).is_some()
+                {
+                    let message = format_type_clash_message_with_empty_blank_lines(&message);
+                    return format_compiler_error_report_raw_message(
+                        arena, source, filename, loc, &message,
+                    );
+                }
+
+                return format_compiler_error_report(arena, source, filename, loc, &message);
+            }
+        } else {
+            message.push(' ');
+        }
+        append_type_clash_type(type_ctx, trace, false, INFO, expected, &mut message);
+    } else {
+        message.push_str(&expected_text);
+        append_type_clash_type(type_ctx, trace, false, INFO, expected, &mut message);
+    }
+    append_extra_type_clash_help(type_ctx, arena, source, loc, context, trace, &mut message);
+
+    if matches!(
+        context,
+        Some(TypeClashContext::ArrayLiteral) | Some(TypeClashContext::MathOperator { .. })
+    ) {
+        let message = format_array_type_clash_message(&message);
+        format_compiler_error_report_raw_message(arena, source, filename, loc, &message)
+    } else if matches!(
+        context,
+        Some(TypeClashContext::IfReturn)
+            | Some(TypeClashContext::TernaryReturn)
+            | Some(TypeClashContext::TryReturn)
+    ) {
+        let message = format_type_clash_return_message(&message);
+        format_compiler_error_report_raw_message(arena, source, filename, loc, &message)
+    } else if matches!(
+        context,
+        Some(TypeClashContext::ComparisonOperator)
+            | Some(TypeClashContext::IfCondition)
+            | Some(TypeClashContext::StatementFunctionCall)
+    ) {
+        let message = format_type_clash_message_with_empty_blank_lines(&message);
+        format_compiler_error_report_raw_message(arena, source, filename, loc, &message)
+    } else if matches!(
+        context,
+        Some(TypeClashContext::LetUnwrapReturn) | Some(TypeClashContext::SwitchExpression)
+    ) {
+        let message = format_type_clash_message_with_empty_blank_lines(&message);
+        format_compiler_error_report_raw_message(arena, source, filename, loc, &message)
+    } else if type_clash_string_to_polyvariant(type_ctx, trace)
+        || type_clash_string_to_variant(type_ctx, trace)
+    {
+        let message = format_type_clash_message_with_empty_blank_lines(&message);
+        format_compiler_error_report_raw_message(arena, source, filename, loc, &message)
+    } else if type_clash_array_to_tuple(type_ctx, trace)
+        || type_clash_expected_unit_actual(type_ctx, trace).is_some()
+        || type_clash_actual_promise(type_ctx, trace)
+    {
+        let message = format_type_clash_message_with_empty_blank_lines(&message);
+        format_compiler_error_report_raw_message(arena, source, filename, loc, &message)
+    } else if message.contains("These types are compatible at runtime") {
+        format_compiler_error_report_with_bare_reset_lines(arena, source, filename, loc, &message)
+    } else {
+        format_compiler_error_report(arena, source, filename, loc, &message)
+    }
+}
+
+fn format_pattern_type_clash_report(
+    type_ctx: &TypeContext,
+    arena: &ParseArena,
+    source: &str,
+    filename: &str,
+    loc: LocIdx,
+    trace: &[(TypeExprRef, TypeExprRef)],
+) -> String {
+    const INFO: &str = "\x1b[1;33m";
+    const ERROR: &str = "\x1b[1;31m";
+    const RESET: &str = "\x1b[0m";
+
+    let Some((actual, expected)) = trace.first().copied() else {
+        return format_compiler_error_report(arena, source, filename, loc, "Type error.");
+    };
+
+    let mut message = String::new();
+    message.push_str("This pattern matches values of type ");
+    message.push_str(ERROR);
+    message.push_str(&format_type_expr(
+        type_ctx,
+        type_clash_display_type(type_ctx, trace, true, actual),
+    ));
+    message.push_str(RESET);
+    message.push('\n');
+    message.push_str("but a pattern was expected which matches values of type ");
+    message.push_str(INFO);
+    message.push_str(&format_type_expr(
+        type_ctx,
+        type_clash_display_type(type_ctx, trace, false, expected),
+    ));
+    message.push_str(RESET);
+    if let Some(path) = type_clash_escape_constructor_path(type_ctx, trace) {
+        message.push('\n');
+        message.push_str("The type constructor ");
+        message.push_str(&path);
+        message.push_str(" would escape its scope");
+        return format_compiler_error_report(arena, source, filename, loc, &message);
+    }
+    append_pattern_option_type_clash_help(type_ctx, actual, expected, &mut message);
+    let is_polyvariant_explanation =
+        append_polyvariant_type_clash_help(type_ctx, trace, &mut message);
+    if !is_polyvariant_explanation {
+        append_incompatible_type_parts(type_ctx, trace, &mut message);
+    }
+
+    format_compiler_error_report(arena, source, filename, loc, &message)
+}
+
+fn format_recursive_local_constraint_report(
+    type_ctx: &TypeContext,
+    arena: &ParseArena,
+    source: &str,
+    filename: &str,
+    loc: LocIdx,
+    trace: &[(TypeExprRef, TypeExprRef)],
+) -> String {
+    const INFO: &str = "\x1b[1;33m";
+    const ERROR: &str = "\x1b[1;31m";
+    const RESET: &str = "\x1b[0m";
+
+    let Some((actual, expected)) = trace.first().copied() else {
+        return format_compiler_error_report(arena, source, filename, loc, "Type error.");
+    };
+
+    let mut message = String::new();
+    message.push_str("Recursive local constraint when unifying ");
+    message.push_str(ERROR);
+    message.push_str(&format_type_expr(
+        type_ctx,
+        type_clash_display_type(type_ctx, trace, true, actual),
+    ));
+    message.push_str(RESET);
+    message.push('\n');
+    message.push_str("with ");
+    message.push_str(INFO);
+    message.push_str(&format_type_expr(
+        type_ctx,
+        type_clash_display_type(type_ctx, trace, false, expected),
+    ));
+    message.push_str(RESET);
+    append_incompatible_type_parts(type_ctx, trace, &mut message);
+
+    format_compiler_error_report(arena, source, filename, loc, &message)
+}
+
+fn format_or_pattern_type_clash_report(
+    type_ctx: &TypeContext,
+    arena: &ParseArena,
+    source: &str,
+    filename: &str,
+    loc: LocIdx,
+    id: &Ident,
+    trace: &[(TypeExprRef, TypeExprRef)],
+) -> String {
+    const INFO: &str = "\x1b[1;33m";
+    const ERROR: &str = "\x1b[1;31m";
+    const RESET: &str = "\x1b[0m";
+
+    let Some((left, right)) = trace.first().copied() else {
+        return format_compiler_error_report(arena, source, filename, loc, "Type error.");
+    };
+
+    let mut message = String::new();
+    message.push_str("The variable ");
+    message.push_str(id.name());
+    message.push_str(" on the left-hand side of this or-pattern has type ");
+    message.push_str(ERROR);
+    message.push_str(&format_type_expr(
+        type_ctx,
+        type_clash_display_type(type_ctx, trace, true, left),
+    ));
+    message.push_str(RESET);
+    message.push('\n');
+    message.push_str("but on the right-hand side it has type ");
+    message.push_str(INFO);
+    message.push_str(&format_type_expr(
+        type_ctx,
+        type_clash_display_type(type_ctx, trace, false, right),
+    ));
+    message.push_str(RESET);
+
+    format_compiler_error_report(arena, source, filename, loc, &message)
+}
+
+fn format_orpat_vars_report(
+    arena: &ParseArena,
+    source: &str,
+    filename: &str,
+    loc: LocIdx,
+    id: &Ident,
+    valid_idents: &[Ident],
+) -> String {
+    let message = format!(
+        "Variable {} must occur on both sides of this | pattern",
+        id.name()
+    );
+    let alternatives: Vec<String> = valid_idents
+        .iter()
+        .map(|valid| valid.name().to_string())
+        .collect();
+
+    if let Some(hint) = spellcheck_hint(id.name(), &alternatives) {
+        let mut raw_message = format_message_with_compiler_indentation(&message);
+        raw_message.push_str("Hint: Did you mean ");
+        raw_message.push_str(hint);
+        raw_message.push('?');
+        return format_compiler_error_report_raw_message(
+            arena,
+            source,
+            filename,
+            loc,
+            &raw_message,
+        );
+    }
+
+    format_compiler_error_report(arena, source, filename, loc, &message)
+}
+
+fn format_label_mismatch_report(
+    type_ctx: &TypeContext,
+    arena: &ParseArena,
+    source: &str,
+    filename: &str,
+    loc: LocIdx,
+    lid: &Longident,
+    trace: &[(TypeExprRef, TypeExprRef)],
+) -> String {
+    let Some((actual, expected)) = trace.first().copied() else {
+        return format_compiler_error_report(arena, source, filename, loc, "Type error.");
+    };
+
+    let message = format!(
+        "The field {} belongs to the record type {}\nbut a field was expected belonging to the record type {}",
+        format_longident_for_report(arena, lid),
+        format_type_expr(type_ctx, actual),
+        format_type_expr(type_ctx, expected)
+    );
+    format_compiler_error_report(arena, source, filename, loc, &message)
+}
+
+fn format_polymorphic_label_report(
+    arena: &ParseArena,
+    source: &str,
+    filename: &str,
+    loc: LocIdx,
+    lid: &Longident,
+) -> String {
+    let message = format!(
+        "The record field {} is polymorphic. You cannot instantiate it in a pattern.",
+        format_longident_for_report(arena, lid)
+    );
+    format_compiler_error_report(arena, source, filename, loc, &message)
+}
+
+fn append_pattern_option_type_clash_help(
+    type_ctx: &TypeContext,
+    actual: TypeExprRef,
+    expected: TypeExprRef,
+    message: &mut String,
+) {
+    const INFO: &str = "\x1b[1;33m";
+    const ERROR: &str = "\x1b[1;31m";
+    const RESET: &str = "\x1b[0m";
+
+    let actual_is_option =
+        type_is_predef_path(type_ctx, actual, &crate::types::predef::path_option());
+    let expected_is_option =
+        type_is_predef_path(type_ctx, expected, &crate::types::predef::path_option());
+
+    if actual_is_option && !expected_is_option {
+        message.push_str("\n\nYou're expecting the value you're pattern matching on to be an ");
+        message.push_str(INFO);
+        message.push_str("option");
+        message.push_str(RESET);
+        message.push_str(", but the value is actually not an option.\n");
+        message.push_str("Change your pattern match to work on the concrete value (remove ");
+        message.push_str(ERROR);
+        message.push_str("Some(_)");
+        message.push_str(RESET);
+        message.push_str(" or ");
+        message.push_str(ERROR);
+        message.push_str("None");
+        message.push_str(RESET);
+        message.push_str(" from the pattern) to make it work.");
+    } else if expected_is_option && !actual_is_option {
+        message.push_str("\n\nThe value you're pattern matching on here is wrapped in an ");
+        message.push_str(INFO);
+        message.push_str("option");
+        message.push_str(RESET);
+        message.push_str(", but you're trying to match on the actual value.\n");
+        message.push_str("Wrap the highlighted pattern in ");
+        message.push_str(INFO);
+        message.push_str("Some()");
+        message.push_str(RESET);
+        message.push_str(" to make it work.");
+    }
+}
+
+fn append_type_clash_type(
+    type_ctx: &TypeContext,
+    trace: &[(TypeExprRef, TypeExprRef)],
+    actual_side: bool,
+    color: &str,
+    ty: TypeExprRef,
+    message: &mut String,
+) {
+    const DIM: &str = "\x1b[2m";
+    const RESET: &str = "\x1b[0m";
+
+    let original_ty = ty;
+    let ty = type_clash_display_type(type_ctx, trace, actual_side, ty);
+    let ty_text = format_type_expr(type_ctx, ty);
+    message.push_str(color);
+    message.push_str(&ty_text);
+    message.push_str(RESET);
+
+    if ty == original_ty
+        && let Some(expansion) = rendered_alias_expansion(type_ctx, ty, trace, actual_side)
+        && {
+            let expansion_text = format_type_expr(type_ctx, expansion);
+            expansion_text != ty_text || !type_is_polyvariant(type_ctx, expansion)
+        }
+    {
+        message.push(' ');
+        message.push_str(DIM);
+        message.push_str("(defined as");
+        message.push_str(RESET);
+        message.push(' ');
+        message.push_str(color);
+        message.push_str(&format_type_expr(type_ctx, expansion));
+        message.push_str(RESET);
+        message.push_str(DIM);
+        message.push(')');
+        message.push_str(RESET);
+    }
+}
+
+fn append_type_clash_type_without_alias_expansion(
+    type_ctx: &TypeContext,
+    trace: &[(TypeExprRef, TypeExprRef)],
+    actual_side: bool,
+    color: &str,
+    ty: TypeExprRef,
+    message: &mut String,
+) {
+    const RESET: &str = "\x1b[0m";
+
+    let ty = type_clash_display_type(type_ctx, trace, actual_side, ty);
+    message.push_str(color);
+    message.push_str(&format_type_expr(type_ctx, ty));
+    message.push_str(RESET);
+}
+
+fn type_clash_display_type(
+    type_ctx: &TypeContext,
+    trace: &[(TypeExprRef, TypeExprRef)],
+    actual_side: bool,
+    ty: TypeExprRef,
+) -> TypeExprRef {
+    if type_is_polyvariant(type_ctx, ty)
+        && let Some((actual, expected)) = polyvariant_diagnostic_type_pair(type_ctx, trace)
+    {
+        if actual_side { actual } else { expected }
+    } else {
+        ty
+    }
+}
+
+fn rendered_alias_expansion(
+    type_ctx: &TypeContext,
+    ty: TypeExprRef,
+    trace: &[(TypeExprRef, TypeExprRef)],
+    actual_side: bool,
+) -> Option<TypeExprRef> {
+    if let Some(expansion) = type_alias_expansion(type_ctx, ty)
+        && !type_expansion_same(type_ctx, ty, expansion)
+        && !type_is_polyvariant(type_ctx, expansion)
+    {
+        return Some(expand_promise_compat_alias(type_ctx, expansion));
+    }
+
+    let first = trace.first()?;
+    let (top_actual, top_expected) = *first;
+    let top = if actual_side {
+        top_actual
+    } else {
+        top_expected
+    };
+    let top_repr = type_ctx.repr(top);
+    let top_desc = type_ctx.get_desc(top_repr);
+    let top_is_package = matches!(&*top_desc, TypeDesc::Tpackage { .. });
+    drop(top_desc);
+    if top_is_package {
+        return None;
+    }
+
+    let top_text = format_type_expr(type_ctx, top);
+    if let Some(expansion) = trace.iter().skip(1).find_map(|pair| {
+        let ty = if actual_side { pair.0 } else { pair.1 };
+        (!type_is_object(type_ctx, ty)
+            && type_ctx.repr(ty) != type_ctx.repr(top)
+            && format_type_expr(type_ctx, ty) == top_text)
+            .then_some(ty)
+    }) {
+        return Some(expansion);
+    }
+
+    let counterpart_text = format_type_expr(
+        type_ctx,
+        if actual_side {
+            top_expected
+        } else {
+            top_actual
+        },
+    );
+    trace.iter().skip(1).find_map(|pair| {
+        let left_text = format_type_expr(type_ctx, pair.0);
+        let right_text = format_type_expr(type_ctx, pair.1);
+        if actual_side {
+            if right_text == counterpart_text && left_text != top_text {
+                Some(pair.0)
+            } else if left_text == counterpart_text && right_text != top_text {
+                Some(pair.1)
+            } else {
+                None
+            }
+        } else if left_text == counterpart_text && right_text != top_text {
+            Some(pair.1)
+        } else if right_text == counterpart_text && left_text != top_text {
+            Some(pair.0)
+        } else {
+            None
+        }
+    })
+}
+
+fn expand_promise_compat_alias(type_ctx: &TypeContext, ty: TypeExprRef) -> TypeExprRef {
+    let repr = type_ctx.repr(ty);
+    let desc = type_ctx.get_desc(repr);
+    let TypeDesc::Tconstr { path, .. } = &*desc else {
+        return repr;
+    };
+    let is_promise_alias = path.name() == "Promise.t" || path.name() == "Stdlib.Promise.t";
+    drop(desc);
+    if is_promise_alias
+        && let Some(expansion) = type_alias_expansion(type_ctx, repr)
+        && !type_expansion_same(type_ctx, repr, expansion)
+    {
+        expand_promise_compat_alias(type_ctx, expansion)
+    } else {
+        repr
+    }
+}
+
+fn format_not_subtype_report(
+    type_ctx: &TypeContext,
+    arena: &ParseArena,
+    source: &str,
+    filename: &str,
+    loc: LocIdx,
+    trace: &[(TypeExprRef, TypeExprRef)],
+    context: &Option<crate::types::SubtypeContext>,
+) -> String {
+    let Some((left, right)) = trace.first().copied() else {
+        return format_compiler_error_report(arena, source, filename, loc, "Type error.");
+    };
+
+    let mut message = format!(
+        "Type {} is not a subtype of {} ",
+        format_not_subtype_head_type(type_ctx, left),
+        format_not_subtype_head_type(type_ctx, right)
+    );
+    if let Some(extra) = format_subtype_context(context) {
+        message.push_str("\n\n");
+        message.push_str(&extra);
+        if extra.is_empty() {
+            message.push('\n');
+        }
+        return format_compiler_error_report_for_subtype_context(
+            arena, source, filename, loc, &message,
+        );
+    }
+
+    format_compiler_error_report(arena, source, filename, loc, &message)
+}
+
+fn format_less_general_report(
+    type_ctx: &TypeContext,
+    arena: &ParseArena,
+    source: &str,
+    filename: &str,
+    loc: LocIdx,
+    kind: &str,
+    trace: &[(TypeExprRef, TypeExprRef)],
+) -> String {
+    const ERROR: &str = "\x1b[1;31m";
+    const INFO: &str = "\x1b[1;33m";
+    const RESET: &str = "\x1b[0m";
+
+    let (actual, expected) = match trace {
+        [(actual, _), (expected, _), ..] => (*actual, *expected),
+        [(actual, expected)] => (*actual, *expected),
+        _ => return format_compiler_error_report(arena, source, filename, loc, "Type error."),
+    };
+
+    let message = format!(
+        "This {kind} has type {ERROR}{}{RESET}\nwhich is less general than {INFO}{}{RESET}",
+        format_less_general_type_expr(type_ctx, actual),
+        format_less_general_type_expr(type_ctx, expected)
+    );
+    format_compiler_error_report(arena, source, filename, loc, &message)
+}
+
+fn format_less_general_type_expr(type_ctx: &TypeContext, ty: TypeExprRef) -> String {
+    let ty = type_ctx.repr(ty);
+    let desc = type_ctx.get_desc(ty);
+    let TypeDesc::Tpoly { body, vars } = &*desc else {
+        return format_type_expr(type_ctx, ty);
+    };
+    if vars.is_empty() {
+        return format_type_expr(type_ctx, *body);
+    }
+
+    let body = *body;
+    let vars = vars.clone();
+    drop(desc);
+
+    let mut printer = TypeExprPrinter::new(type_ctx);
+    let vars_text = vars
+        .iter()
+        .map(|var| printer.format(*var))
+        .collect::<Vec<_>>()
+        .join(" ");
+    let body_text = printer.format(body);
+    format!("{vars_text}. {body_text}")
+}
+
+fn format_not_subtype_head_type(type_ctx: &TypeContext, ty: TypeExprRef) -> String {
+    let ty_text = format_type_expr(type_ctx, ty);
+    if let Some(expansion) = type_alias_full_expansion(type_ctx, ty)
+        && type_is_polyvariant(type_ctx, expansion)
+        && !type_expansion_same(type_ctx, ty, expansion)
+    {
+        format!("{ty_text} = {}", format_type_expr(type_ctx, expansion))
+    } else {
+        ty_text
+    }
+}
+
+fn format_subtype_context(context: &Option<crate::types::SubtypeContext>) -> Option<String> {
+    use crate::types::SubtypeContext;
+    use crate::types::ctype::{
+        RecordFieldSubtypeViolation, SubtypeTypeKind, VariantConfigurationIssue,
+        VariantConstructorAsPayload, VariantRuntimeRepresentationIssue,
+    };
+
+    const ERROR: &str = "\x1b[1;31m";
+    const INFO: &str = "\x1b[1;33m";
+    const RESET: &str = "\x1b[0m";
+
+    fn variant_as_payload_name(payload: VariantConstructorAsPayload) -> &'static str {
+        match payload {
+            VariantConstructorAsPayload::String => "string",
+            VariantConstructorAsPayload::Int => "int",
+            VariantConstructorAsPayload::Float => "float",
+            VariantConstructorAsPayload::BigInt => "bigint",
+            VariantConstructorAsPayload::Bool => "bool",
+            VariantConstructorAsPayload::Null => "null",
+            VariantConstructorAsPayload::Undefined => "undefined",
+        }
+    }
+
+    fn subtype_type_kind_name(kind: SubtypeTypeKind) -> &'static str {
+        match kind {
+            SubtypeTypeKind::Abstract => "an abstract type",
+            SubtypeTypeKind::Record => "a record",
+            SubtypeTypeKind::Variant => "a variant",
+            SubtypeTypeKind::Open => "an open type",
+        }
+    }
+
+    match context {
+        Some(SubtypeContext::CoercionTargetVariantNotUnboxed {
+            variant_name,
+            primitive,
+        }) => Some(format!(
+            "The variant {INFO}{}{RESET} is not unboxed, so it cannot be coerced to a {INFO}{}{RESET}. \nFix this by adding the {INFO}@unboxed{RESET} attribute to the variant {INFO}{}{RESET}.",
+            variant_name.last(),
+            primitive.last(),
+            variant_name.last()
+        )),
+        Some(SubtypeContext::CoercionTargetVariantDoesNotCoverType {
+            variant_name,
+            primitive,
+        }) => {
+            let primitive_name = primitive.last();
+            let mut chars = primitive_name.chars();
+            let capitalized = match chars.next() {
+                Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
+                None => String::new(),
+            };
+            Some(format!(
+                "The variant {INFO}{}{RESET} is unboxed, but has no catch-all case for the primitive {INFO}{primitive_name}{RESET}, and therefore does not cover all values of type {INFO}{primitive_name}{RESET}. \nFix this by adding a catch-all for {INFO}{}{RESET} to {INFO}{primitive_name}{RESET}, like {INFO}{capitalized}({primitive_name}){RESET}.",
+                variant_name.last(),
+                variant_name.last()
+            ))
+        }
+        Some(SubtypeContext::VariantConstructorRuntimeRepresentationMismatch {
+            variant_name,
+            issues,
+        }) => {
+            let mut output = String::new();
+            for issue in issues {
+                let mut item = String::new();
+                match issue {
+                    VariantRuntimeRepresentationIssue::CannotCoerceNonUnboxedWithPayload {
+                        constructor_name,
+                        expected_typename,
+                    } => {
+                        item.push_str(&format!(
+                            "The constructor {INFO}{constructor_name}{RESET} of variant {INFO}{}{RESET} has a payload, but the variant itself is not unboxed. \nThis means that the constructor {INFO}{constructor_name}{RESET} will be encoded as an object at runtime, which is not compatible with {INFO}{}{RESET}.",
+                            variant_name.last(),
+                            expected_typename.last()
+                        ));
+                    }
+                    VariantRuntimeRepresentationIssue::InlineRecordCannotBeCoerced {
+                        constructor_name,
+                    } => {
+                        item.push_str(&format!(
+                            "The constructor {INFO}{constructor_name}{RESET} of variant {INFO}{}{RESET} has an inline record as payload. Currently, inline records cannot be coerced.",
+                            variant_name.last()
+                        ));
+                    }
+                    VariantRuntimeRepresentationIssue::AsPayloadNotEligibleForCoercion {
+                        constructor_name,
+                        expected_typename,
+                        as_payload,
+                    } => {
+                        item.push_str(&format!(
+                            "The constructor {INFO}{constructor_name}{RESET} of variant {INFO}{}{RESET} has an {INFO}@as{RESET} payload that has a runtime representation of {INFO}{}{RESET}, which is not compatible with the expected {INFO}{}{RESET}.",
+                            variant_name.last(),
+                            variant_as_payload_name(*as_payload),
+                            expected_typename.last()
+                        ));
+                    }
+                    VariantRuntimeRepresentationIssue::MismatchedUnboxedPayload { .. } => {}
+                    VariantRuntimeRepresentationIssue::MismatchedAsPayload {
+                        constructor_name,
+                        expected_typename,
+                        as_payload,
+                    } => {
+                        item.push_str(&format!(
+                            "The constructor {INFO}{constructor_name}{RESET} of variant {INFO}{}{RESET} has ",
+                            variant_name.last()
+                        ));
+                        if let Some(payload) = as_payload {
+                            item.push_str(&format!(
+                                "an {INFO}@as{RESET} payload that gives it the runtime type of {INFO}{}{RESET}.",
+                                variant_as_payload_name(*payload)
+                            ));
+                        } else {
+                            item.push_str(&format!(
+                                "no {INFO}@as{RESET} payload, which makes it a {INFO}string{RESET} at runtime."
+                            ));
+                        }
+                        item.push_str(&format!(
+                            "\nThat runtime representation is not compatible with the expected runtime representation of {INFO}{}{RESET}.",
+                            expected_typename.last()
+                        ));
+                        item.push_str(&format!(
+                            "\n\nFix this by making sure all constructors in variant {INFO}{}{RESET} has a runtime representation of {INFO}{}{RESET}.",
+                            variant_name.last(),
+                            expected_typename.last()
+                        ));
+                    }
+                }
+                if item.is_empty() {
+                    continue;
+                }
+                if !output.is_empty() {
+                    output.push('\n');
+                }
+                output.push_str(&item);
+            }
+            (!issues.is_empty()).then_some(output)
+        }
+        Some(SubtypeContext::VariantConfigurationsMismatch {
+            left_variant_name,
+            right_variant_name,
+            issue,
+        }) => match issue {
+            VariantConfigurationIssue::UnboxedConfigNotMatching {
+                left_unboxed,
+                right_unboxed,
+            } => {
+                fn unboxed_status(unboxed: bool) -> String {
+                    if unboxed {
+                        format!("{ERROR}not {RESET}unboxed")
+                    } else {
+                        format!("{ERROR}{RESET}unboxed")
+                    }
+                }
+
+                Some(format!(
+                    "The variants have different {INFO}@unboxed{RESET} configurations.\n- Variant {INFO}{}{RESET} is {}.\n- Variant {INFO}{}{RESET} is {}.\n\nFix this by making sure the variants either both have, or don't have, the {INFO}@unboxed{RESET} attribute.",
+                    left_variant_name.last(),
+                    unboxed_status(*left_unboxed),
+                    right_variant_name.last(),
+                    unboxed_status(*right_unboxed),
+                ))
+            }
+            VariantConfigurationIssue::TagNameNotMatching {
+                left_tag,
+                right_tag,
+            } => {
+                fn tag_status(tag: &Option<String>, variant_name: &crate::types::Path) -> String {
+                    match tag {
+                        Some(tag) => format!(
+                            "{INFO}{}{RESET} has tag {INFO}{tag}{RESET}.",
+                            variant_name.last()
+                        ),
+                        None => {
+                            format!("{INFO}{}{RESET} has no explicit tag.", variant_name.last())
+                        }
+                    }
+                }
+
+                Some(format!(
+                    "The variants have different {INFO}@tag{RESET} configurations.\n- {}\n- {}\n\nFix this by making sure the variants either have the exact same {INFO}@tag{RESET} configuration, or no {INFO}@tag{RESET} at all.",
+                    tag_status(left_tag, left_variant_name),
+                    tag_status(right_tag, right_variant_name),
+                ))
+            }
+            VariantConfigurationIssue::IncompatibleConstructorCount { constructor_names } => {
+                let total_constructor_count = constructor_names.len();
+                let names_to_print = constructor_names.iter().take(3).collect::<Vec<_>>();
+                let not_printed_constructor_count =
+                    total_constructor_count.saturating_sub(names_to_print.len());
+                let mut names = names_to_print
+                    .iter()
+                    .map(|name| format!("{INFO}{name}{RESET}"))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                if not_printed_constructor_count > 0 {
+                    names.push_str(&format!(" (+{not_printed_constructor_count} more)"));
+                }
+                Some(format!(
+                    "{INFO}{}{RESET} has {total_constructor_count} constructor{} that {INFO}{}{RESET} does not have: {names}\nTherefore, it is not possible for {INFO}{}{RESET} to represent {INFO}{}{RESET}.",
+                    left_variant_name.last(),
+                    if total_constructor_count == 1 {
+                        ""
+                    } else {
+                        "s"
+                    },
+                    right_variant_name.last(),
+                    right_variant_name.last(),
+                    left_variant_name.last(),
+                ))
+            }
+        },
+        Some(SubtypeContext::DifferentTypeKinds {
+            left_typename,
+            right_typename,
+            left_type_kind,
+            right_type_kind,
+        }) => Some(format!(
+            "The types of {INFO}{}{RESET} and {INFO}{}{RESET} are different:\n- {INFO}{}{RESET} is {}\n- {INFO}{}{RESET} is {}",
+            left_typename.last(),
+            right_typename.last(),
+            left_typename.last(),
+            subtype_type_kind_name(*left_type_kind),
+            right_typename.last(),
+            subtype_type_kind_name(*right_type_kind)
+        )),
+        Some(SubtypeContext::RecordFieldsMismatch {
+            left_record_name,
+            right_record_name,
+            issues,
+        }) => {
+            let mut output = format!(
+                "The record {INFO}{}{RESET} cannot be coerced to the record {INFO}{}{RESET} because:",
+                left_record_name.last(),
+                right_record_name.last()
+            );
+            for issue in issues {
+                output.push_str("\n- ");
+                match issue {
+                    RecordFieldSubtypeViolation::OptionalMismatch {
+                        label,
+                        left_optional,
+                        right_optional,
+                    } => {
+                        output.push_str(&format!("The field {INFO}{label}{RESET} "));
+                        match (*left_optional, *right_optional) {
+                            (true, false) => output.push_str(&format!(
+                                "is optional in record {INFO}{}{RESET}, but is not optional in record {INFO}{}{RESET}",
+                                left_record_name.last(),
+                                right_record_name.last()
+                            )),
+                            (false, true) => output.push_str(&format!(
+                                "is not optional in record {INFO}{}{RESET}, but is optional in record {INFO}{}{RESET}",
+                                left_record_name.last(),
+                                right_record_name.last()
+                            )),
+                            _ => {}
+                        }
+                    }
+                    RecordFieldSubtypeViolation::FieldRuntimeNameMismatch {
+                        label,
+                        left_as,
+                        right_as,
+                    } => {
+                        output.push_str(&format!(
+                            "Field {INFO}{label}{RESET} runtime representation"
+                        ));
+                        if let Some(as_name) = left_as {
+                            output.push_str(&format!(
+                                " is configured to be {INFO}\"{as_name}\"{RESET} (via the @as attribute)"
+                            ));
+                        } else {
+                            output.push_str(&format!(" is {INFO}\"{label}\"{RESET}"));
+                        }
+                        output.push_str(&format!(
+                            " in record {INFO}{}{RESET}, but in record {INFO}{}{RESET}",
+                            right_record_name.last(),
+                            left_record_name.last()
+                        ));
+                        if let Some(as_name) = right_as {
+                            output.push_str(&format!(
+                                " it is configured to be {INFO}\"{as_name}\"{RESET} (via the @as attribute)."
+                            ));
+                        } else {
+                            output.push_str(&format!(" it is {INFO}\"{label}\"{RESET}."));
+                        }
+                        output.push_str(" Runtime representations must match.");
+                    }
+                    RecordFieldSubtypeViolation::FieldMissing { label } => {
+                        output.push_str(&format!(
+                            "The field {INFO}{label}{RESET} is missing in record {INFO}{}{RESET}, but present in record {INFO}{}{RESET}",
+                            right_record_name.last(),
+                            left_record_name.last()
+                        ));
+                    }
+                }
+            }
+            Some(output)
+        }
+        _ => None,
+    }
+}
+
+fn format_compiler_error_report_with_empty_blank_lines(
+    arena: &ParseArena,
+    source: &str,
+    filename: &str,
+    loc: LocIdx,
+    message: &str,
+) -> String {
+    let mut output = String::new();
+
+    push_compiler_error_report_header(&mut output, arena, source, filename, loc);
+
+    for line in message.lines() {
+        if !line.is_empty() {
+            output.push_str("  ");
+            output.push_str(line);
+        }
+        output.push('\n');
+    }
+    output.push('\n');
+    output
+}
+
+fn format_compiler_error_report_for_subtype_context(
+    arena: &ParseArena,
+    source: &str,
+    filename: &str,
+    loc: LocIdx,
+    message: &str,
+) -> String {
+    let mut output = String::new();
+
+    push_compiler_error_report_header(&mut output, arena, source, filename, loc);
+
+    let mut blank_lines = 0;
+    for line in message.lines() {
+        if line.is_empty() {
+            if blank_lines == 0 {
+                output.push('\n');
+            } else {
+                output.push_str("  \n");
+            }
+            blank_lines += 1;
+        } else {
+            output.push_str("  ");
+            output.push_str(line);
+            output.push('\n');
+        }
+    }
+    output.push('\n');
+    output
+}
+
+fn format_array_type_clash_message(message: &str) -> String {
+    let mut output = String::new();
+    let mut blank_lines = 0;
+
+    for line in message.lines() {
+        if line.is_empty() {
+            blank_lines += 1;
+            if blank_lines <= 2 {
+                output.push('\n');
+            } else {
+                output.push_str("  \n");
+            }
+        } else {
+            output.push_str("  ");
+            output.push_str(line);
+            output.push('\n');
+        }
+    }
+
+    output
+}
+
+fn format_await_type_clash_message(message: &str) -> String {
+    let mut output = String::new();
+
+    for line in message.lines() {
+        if line.is_empty() {
+            output.push('\n');
+        } else if line == "Possible solutions:" {
+            output.push_str(line);
+            output.push('\n');
+        } else {
+            output.push_str("  ");
+            output.push_str(line);
+            output.push('\n');
+        }
+    }
+
+    output
+}
+
+fn format_type_clash_message_with_empty_blank_lines(message: &str) -> String {
+    let mut output = String::new();
+
+    for line in message.lines() {
+        if line.is_empty() {
+            output.push('\n');
+        } else {
+            output.push_str("  ");
+            output.push_str(line);
+            output.push('\n');
+        }
+    }
+
+    output
+}
+
+fn format_type_clash_return_message(message: &str) -> String {
+    let lines: Vec<&str> = message.lines().collect();
+    let mut output = String::new();
+
+    for (idx, line) in lines.iter().enumerate() {
+        if line.is_empty() {
+            if lines
+                .get(idx + 1)
+                .is_some_and(|next| next.starts_with("You can convert "))
+            {
+                output.push_str("  \n");
+            } else {
+                output.push('\n');
+            }
+        } else {
+            output.push_str("  ");
+            output.push_str(line);
+            output.push('\n');
+        }
+    }
+
+    output
+}
+
+fn append_extra_type_clash_help(
+    type_ctx: &TypeContext,
+    arena: &ParseArena,
+    source: &str,
+    loc: LocIdx,
+    context: &Option<TypeClashContext>,
+    trace: &[(TypeExprRef, TypeExprRef)],
+    message: &mut String,
+) {
+    const INFO: &str = "\x1b[1;33m";
+    const RESET: &str = "\x1b[0m";
+
+    if let Some(path) = type_clash_escape_constructor_path(type_ctx, trace) {
+        message.push('\n');
+        message.push_str("The type constructor ");
+        message.push_str(&path);
+        message.push_str(" would escape its scope");
+        if !type_clash_top_actual_is_package(type_ctx, trace) {
+            return;
+        }
+    }
+
+    if matches!(context, Some(TypeClashContext::ArrayLiteral)) {
+        message.push_str("\n\n");
+        message.push_str("Arrays can only contain items of the same type.\n\n");
+        message.push_str("Possible solutions:\n");
+        message.push_str("- Convert all values in the array to the same type.\n");
+        message.push_str("- Use a tuple, if your array is of fixed length. Tuples can mix types freely, and compiles to a JavaScript array. Example of a tuple: `let myTuple = (10, \"hello\", 15.5, true)");
+    }
+
+    if type_clash_array_to_tuple(type_ctx, trace) {
+        message.push_str("\n\n- Fix this by passing a tuple instead of an array");
+        if let Some(rewrite) = suggested_array_to_tuple_rewrite(arena, source, loc) {
+            message.push_str(", like: ");
+            message.push_str(INFO);
+            message.push_str(&rewrite);
+            message.push_str(RESET);
+        } else {
+            message.push_str(INFO);
+            message.push_str(RESET);
+        }
+        message.push_str("\n\n");
+    }
+
+    if matches!(context, Some(TypeClashContext::Await)) {
+        message.push_str("\n\n");
+        message.push_str("You're trying to await something that is not a promise.\n\n");
+        message.push_str("Possible solutions:\n");
+        message.push_str("- Remove the ");
+        message.push_str(INFO);
+        message.push_str("await");
+        message.push_str(RESET);
+        message.push_str(" if this is not expected to be a promise\n");
+        message.push_str("- Wrap the expression in ");
+        message.push_str(INFO);
+        message.push_str("Promise.resolve");
+        message.push_str(RESET);
+        message.push_str(" to convert the expression to a promise");
+        return;
+    }
+
+    if matches!(context, Some(TypeClashContext::ComparisonOperator)) {
+        message.push_str("\n\n");
+        message.push_str("You can only compare things of the same type.");
+    }
+
+    if matches!(context, Some(TypeClashContext::IfCondition)) {
+        message.push_str("\n\n");
+        message.push_str("To fix this, change the highlighted code so it evaluates to a ");
+        message.push_str(INFO);
+        message.push_str("bool");
+        message.push_str(RESET);
+        message.push('.');
+    }
+
+    if matches!(context, Some(TypeClashContext::IfReturn)) {
+        message.push_str("\n\n");
+        message.push_str(INFO);
+        message.push_str("if");
+        message.push_str(RESET);
+        message.push_str(" expressions must return the same type in all branches (");
+        message.push_str(INFO);
+        message.push_str("if");
+        message.push_str(RESET);
+        message.push_str(", ");
+        message.push_str(INFO);
+        message.push_str("else if");
+        message.push_str(RESET);
+        message.push_str(", ");
+        message.push_str(INFO);
+        message.push_str("else");
+        message.push_str(RESET);
+        message.push_str(").");
+    }
+
+    if matches!(context, Some(TypeClashContext::TernaryReturn)) {
+        message.push_str("\n\n");
+        message.push_str("Ternaries (");
+        message.push_str(INFO);
+        message.push('?');
+        message.push_str(RESET);
+        message.push_str(" and ");
+        message.push_str(INFO);
+        message.push(':');
+        message.push_str(RESET);
+        message.push_str(") must return the same type in both branches.");
+    }
+
+    if matches!(context, Some(TypeClashContext::SwitchExpression)) {
+        message.push_str("\n\n");
+        message.push_str("All branches in a ");
+        message.push_str(INFO);
+        message.push_str("switch");
+        message.push_str(RESET);
+        message.push_str(" must return the same type.\n");
+        message.push_str("To fix this, change your branch to return the expected type.");
+    }
+
+    if matches!(context, Some(TypeClashContext::TryReturn)) {
+        message.push_str("\n\n");
+        message.push_str("The ");
+        message.push_str(INFO);
+        message.push_str("try");
+        message.push_str(RESET);
+        message.push_str(" body and the ");
+        message.push_str(INFO);
+        message.push_str("catch");
+        message.push_str(RESET);
+        message.push_str(" block must return the same type.\n");
+        message.push_str("To fix this, change your try/catch blocks to return the expected type.");
+    }
+
+    if matches!(context, Some(TypeClashContext::StatementFunctionCall)) {
+        message.push_str("\n\n");
+        message.push_str("- Did you mean to assign this to a variable?\n");
+        message.push_str(
+            "- If you don't care about the result of this expression, you can assign it to ",
+        );
+        message.push_str(INFO);
+        message.push('_');
+        message.push_str(RESET);
+        message.push_str(" via ");
+        message.push_str(INFO);
+        message.push_str("let _ = ...");
+        message.push_str(RESET);
+        message.push_str(" or pipe it to ");
+        message.push_str(INFO);
+        message.push_str("ignore");
+        message.push_str(RESET);
+        message.push_str(" via ");
+        message.push_str(INFO);
+        message.push_str("expression->ignore");
+        message.push_str(RESET);
+        message.push_str("\n\n\n");
+    }
+
+    if append_let_unwrap_return_help(type_ctx, trace, context, message) {
+        return;
+    }
+
+    if append_optional_function_argument_help(type_ctx, arena, source, loc, context, trace, message)
+    {
+        return;
+    }
+
+    if !matches!(
+        context,
+        Some(TypeClashContext::StatementFunctionCall)
+            | Some(TypeClashContext::SwitchExpression)
+            | Some(TypeClashContext::TryReturn)
+    ) && let Some(actual) = type_clash_expected_unit_actual(type_ctx, trace)
+    {
+        message.push_str("\n\n");
+        if type_is_jsx_element_like(type_ctx, trace, actual) {
+            message.push_str("- Did you forget to wrap this + adjacent JSX in a JSX fragment (");
+            message.push_str(INFO);
+            message.push_str("<></>");
+            message.push_str(RESET);
+            message.push_str(")?\n");
+            message.push_str("- Did you mean to assign this to a variable?\n\n\n");
+        } else {
+            message.push_str("- Did you mean to assign this to a variable?\n");
+            message.push_str(
+                "- If you don't care about the result of this expression, you can assign it to ",
+            );
+            message.push_str(INFO);
+            message.push('_');
+            message.push_str(RESET);
+            message.push_str(" via ");
+            message.push_str(INFO);
+            message.push_str("let _ = ...");
+            message.push_str(RESET);
+            message.push_str(" or pipe it to ");
+            message.push_str(INFO);
+            message.push_str("ignore");
+            message.push_str(RESET);
+            message.push_str(" via ");
+            message.push_str(INFO);
+            message.push_str("expression->ignore");
+            message.push_str(RESET);
+            message.push_str("\n\n\n");
+        }
+        return;
+    }
+
+    if append_optional_record_field_help(type_ctx, arena, source, loc, context, trace, message) {
+        return;
+    }
+
+    if append_string_to_polyvariant_help(type_ctx, arena, source, loc, trace, message) {
+        return;
+    }
+
+    if append_string_to_variant_help(type_ctx, arena, source, loc, trace, message) {
+        return;
+    }
+
+    if type_clash_actual_promise(type_ctx, trace) {
+        message.push_str("\n\n");
+        message.push_str("- Did you mean to await this promise before using it?");
+        message.push_str("\n\n");
+        return;
+    }
+
+    if append_jsx_element_type_clash_help(type_ctx, trace, message) {
+        return;
+    }
+
+    if append_braced_ident_record_help(type_ctx, arena, source, loc, context, trace, message) {
+        return;
+    }
+
+    if append_object_literal_record_help(type_ctx, arena, source, loc, trace, message) {
+        return;
+    }
+
+    let is_math_operator = append_math_operator_help(type_ctx, trace, context, message);
+    let is_object_field_mismatch = append_object_field_mismatch_help(type_ctx, trace, message);
+    let is_object_field_missing = append_object_field_missing_help(type_ctx, trace, message);
+    let is_polyvariant_explanation = append_polyvariant_type_clash_help(type_ctx, trace, message);
+    if !is_math_operator
+        && !is_object_field_mismatch
+        && !is_object_field_missing
+        && !is_polyvariant_explanation
+    {
+        if append_runtime_coercion_help(type_ctx, arena, source, loc, trace, message) {
+            return;
+        }
+        append_incompatible_type_parts(type_ctx, trace, message);
+        append_dict_literal_help(type_ctx, trace, message);
+    }
+    append_simple_conversion_help(type_ctx, arena, source, loc, trace, message);
+}
+
+fn type_clash_escape_constructor_path(
+    type_ctx: &TypeContext,
+    trace: &[(TypeExprRef, TypeExprRef)],
+) -> Option<String> {
+    for (actual, expected) in trace.iter().rev() {
+        if let Some(path) = escaped_constructor_path(type_ctx, *actual, *expected) {
+            return Some(path);
+        }
+        if let Some(path) = escaped_constructor_path(type_ctx, *expected, *actual) {
+            return Some(path);
+        }
+    }
+    None
+}
+
+fn type_clash_top_actual_is_package(
+    type_ctx: &TypeContext,
+    trace: &[(TypeExprRef, TypeExprRef)],
+) -> bool {
+    trace.first().is_some_and(|(actual, _)| {
+        let actual = type_ctx.repr(*actual);
+        let desc = type_ctx.get_desc(actual);
+        matches!(&*desc, TypeDesc::Tpackage { .. })
+    })
+}
+
+fn escaped_constructor_path(
+    type_ctx: &TypeContext,
+    constr_ty: TypeExprRef,
+    var_ty: TypeExprRef,
+) -> Option<String> {
+    let var_ty = type_ctx.repr(var_ty);
+    if !matches!(&*type_ctx.get_desc(var_ty), TypeDesc::Tvar(_)) {
+        return None;
+    }
+
+    let var_level = type_ctx.get_level(var_ty);
+    escaped_constructor_path_in_type(type_ctx, constr_ty, var_level, &mut AHashSet::new())
+}
+
+fn escaped_constructor_path_in_type(
+    type_ctx: &TypeContext,
+    ty: TypeExprRef,
+    var_level: i32,
+    seen: &mut AHashSet<TypeExprRef>,
+) -> Option<String> {
+    let ty = type_ctx.repr(ty);
+    if !seen.insert(ty) {
+        return None;
+    }
+
+    let desc = type_ctx.get_desc(ty);
+    match &*desc {
+        TypeDesc::Tconstr { path, args, .. } => {
+            if var_level < path.binding_time() {
+                return Some(path.name());
+            }
+            for arg in args {
+                if let Some(path) =
+                    escaped_constructor_path_in_type(type_ctx, *arg, var_level, seen)
+                {
+                    return Some(path);
+                }
+            }
+            None
+        }
+        TypeDesc::Tpackage { args, .. } | TypeDesc::Ttuple(args) => {
+            for arg in args {
+                if let Some(path) =
+                    escaped_constructor_path_in_type(type_ctx, *arg, var_level, seen)
+                {
+                    return Some(path);
+                }
+            }
+            None
+        }
+        TypeDesc::Tarrow { arg, ret, .. } => {
+            escaped_constructor_path_in_type(type_ctx, arg.typ, var_level, seen)
+                .or_else(|| escaped_constructor_path_in_type(type_ctx, *ret, var_level, seen))
+        }
+        TypeDesc::Tlink(next) | TypeDesc::Tsubst(next) | TypeDesc::Tpoly { body: next, .. } => {
+            escaped_constructor_path_in_type(type_ctx, *next, var_level, seen)
+        }
+        TypeDesc::Tobject { fields, .. } | TypeDesc::Tfield { rest: fields, .. } => {
+            escaped_constructor_path_in_type(type_ctx, *fields, var_level, seen)
+        }
+        TypeDesc::Tvariant(row) => {
+            for (_, field) in &row.row_fields {
+                match field {
+                    crate::types::type_expr::RowField::Rpresent(Some(arg)) => {
+                        if let Some(path) =
+                            escaped_constructor_path_in_type(type_ctx, *arg, var_level, seen)
+                        {
+                            return Some(path);
+                        }
+                    }
+                    crate::types::type_expr::RowField::Reither { types, .. } => {
+                        for arg in types {
+                            if let Some(path) =
+                                escaped_constructor_path_in_type(type_ctx, *arg, var_level, seen)
+                            {
+                                return Some(path);
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            escaped_constructor_path_in_type(type_ctx, row.row_more, var_level, seen)
+        }
+        _ => None,
+    }
+}
+
+fn append_math_operator_help(
+    type_ctx: &TypeContext,
+    trace: &[(TypeExprRef, TypeExprRef)],
+    context: &Option<TypeClashContext>,
+    message: &mut String,
+) -> bool {
+    const INFO: &str = "\x1b[1;33m";
+    const RESET: &str = "\x1b[0m";
+
+    let Some(TypeClashContext::MathOperator {
+        for_float,
+        operator,
+        is_constant,
+    }) = context
+    else {
+        return false;
+    };
+
+    let bottom_aliases = bottom_type_clash_aliases(trace);
+    if operator == "+"
+        && bottom_aliases.is_some_and(|(actual, expected)| {
+            type_is_predef_path(type_ctx, actual, &crate::types::predef::path_string())
+                || type_is_predef_path(type_ctx, expected, &crate::types::predef::path_string())
+        })
+    {
+        message.push_str("\n\nAre you looking to concatenate strings? Use the operator ");
+        message.push_str(INFO);
+        message.push_str("++");
+        message.push_str(RESET);
+        message.push_str(", which concatenates strings.\n\nPossible solutions:\n- Change the ");
+        message.push_str(INFO);
+        message.push('+');
+        message.push_str(RESET);
+        message.push_str(" operator to ");
+        message.push_str(INFO);
+        message.push_str("++");
+        message.push_str(RESET);
+        message.push_str(" to concatenate strings instead.");
+        return true;
+    }
+
+    let operator_for_other_type = match operator.as_str() {
+        "+" => "+.",
+        "+." => "+",
+        "/" => "/.",
+        "/." => "/",
+        "-" => "-.",
+        "*" => "*.",
+        "*." => "*",
+        other => other,
+    };
+    let operator_text = match operator.as_bytes().first().copied() {
+        Some(b'+') => "add",
+        Some(b'-') => "subtract",
+        Some(b'/') => "divide",
+        Some(b'*') => "multiply",
+        _ => "compute",
+    };
+    let target_type = if *for_float { "float" } else { "int" };
+
+    message.push_str(
+        "\n\nFloats and ints have their own mathematical operators. This means you cannot ",
+    );
+    message.push_str(operator_text);
+    message.push_str(" a float and an int without converting between the two.\n\nPossible solutions:\n- Ensure all values in this calculation have the type ");
+    message.push_str(INFO);
+    message.push_str(target_type);
+    message.push_str(RESET);
+    message.push_str(". You can convert between floats and ints via ");
+    message.push_str(INFO);
+    message.push_str("Float.toInt");
+    message.push_str(RESET);
+    message.push_str(" and ");
+    message.push_str(INFO);
+    message.push_str("Int.fromFloat");
+    message.push_str(RESET);
+    message.push('.');
+
+    if let Some(constant) = is_constant {
+        message.push_str("\n- Make ");
+        message.push_str(INFO);
+        message.push_str(constant);
+        message.push_str(RESET);
+        message.push_str(if *for_float { " a " } else { " an " });
+        message.push_str(INFO);
+        message.push_str(target_type);
+        message.push_str(RESET);
+        if *for_float {
+            message.push_str(" by adding a trailing dot: ");
+            message.push_str(INFO);
+            message.push_str(constant);
+            message.push('.');
+            message.push_str(RESET);
+        } else {
+            message.push_str(" by removing the dot or explicitly converting to int");
+        }
+    } else if [
+        bottom_aliases,
+        nested_type_clash_pair(type_ctx, trace),
+        trace.first().copied(),
+    ]
+    .into_iter()
+    .flatten()
+    .any(|(actual, expected)| {
+        type_pair_has_names(type_ctx, actual, expected, "float", "int")
+            || type_pair_has_names(type_ctx, actual, expected, "int", "float")
+    }) {
+        message.push_str("\n- Change the operator to ");
+        message.push_str(INFO);
+        message.push_str(operator_for_other_type);
+        message.push_str(RESET);
+        message.push_str(", which works on ");
+        message.push_str(INFO);
+        message.push_str(if *for_float { "int" } else { "float" });
+        message.push_str(RESET);
+    }
+
+    true
+}
+
+fn type_pair_has_names(
+    type_ctx: &TypeContext,
+    actual: TypeExprRef,
+    expected: TypeExprRef,
+    actual_name: &str,
+    expected_name: &str,
+) -> bool {
+    simple_type_constr_name(type_ctx, actual).as_deref() == Some(actual_name)
+        && simple_type_constr_name(type_ctx, expected).as_deref() == Some(expected_name)
+}
+
+fn append_let_unwrap_return_help(
+    type_ctx: &TypeContext,
+    trace: &[(TypeExprRef, TypeExprRef)],
+    context: &Option<TypeClashContext>,
+    message: &mut String,
+) -> bool {
+    const INFO: &str = "\x1b[1;33m";
+    const RESET: &str = "\x1b[0m";
+
+    if !matches!(context, Some(TypeClashContext::LetUnwrapReturn)) {
+        return false;
+    }
+
+    enum LetUnwrapKind {
+        Option,
+        Result,
+        Unknown,
+    }
+
+    let kind = [
+        trace.first().copied(),
+        bottom_type_clash_aliases(trace),
+        nested_type_clash_pair(type_ctx, trace),
+    ]
+    .into_iter()
+    .flatten()
+    .find_map(|(actual, expected)| {
+        if type_is_predef_path(type_ctx, actual, &crate::types::predef::path_option())
+            || type_is_predef_path(type_ctx, expected, &crate::types::predef::path_option())
+        {
+            Some(LetUnwrapKind::Option)
+        } else if type_is_predef_path(type_ctx, actual, &crate::types::predef::path_result())
+            || type_is_predef_path(type_ctx, expected, &crate::types::predef::path_result())
+        {
+            Some(LetUnwrapKind::Result)
+        } else {
+            None
+        }
+    })
+    .unwrap_or(LetUnwrapKind::Unknown);
+
+    match kind {
+        LetUnwrapKind::Option => {
+            message.push_str("\n\nThis ");
+            message.push_str(INFO);
+            message.push_str("let?");
+            message.push_str(RESET);
+            message.push_str(" unwraps an ");
+            message.push_str(INFO);
+            message.push_str("option");
+            message.push_str(RESET);
+            message.push_str("; use it where the enclosing function or let binding returns an ");
+            message.push_str(INFO);
+            message.push_str("option");
+            message.push_str(RESET);
+            message.push_str(" so ");
+            message.push_str(INFO);
+            message.push_str("None");
+            message.push_str(RESET);
+            message.push_str(" can propagate.\n\nPossible solutions:\n- Change the enclosing function or let binding to return ");
+            message.push_str(INFO);
+            message.push_str("option<'t>");
+            message.push_str(RESET);
+            message.push_str(" and use ");
+            message.push_str(INFO);
+            message.push_str("Some");
+            message.push_str(RESET);
+            message.push_str(" for success; ");
+            message.push_str(INFO);
+            message.push_str("let?");
+            message.push_str(RESET);
+            message.push_str(" will propagate ");
+            message.push_str(INFO);
+            message.push_str("None");
+            message.push_str(RESET);
+            message.push_str(".\n- Replace ");
+            message.push_str(INFO);
+            message.push_str("let?");
+            message.push_str(RESET);
+            message.push_str(" with a ");
+            message.push_str(INFO);
+            message.push_str("switch");
+            message.push_str(RESET);
+            message.push_str(" and handle the ");
+            message.push_str(INFO);
+            message.push_str("None");
+            message.push_str(RESET);
+            message.push_str(" case explicitly.\n- If you want a default value instead of early return, unwrap using ");
+            message.push_str(INFO);
+            message.push_str("Option.getOr(default)");
+            message.push_str(RESET);
+            message.push('.');
+        }
+        LetUnwrapKind::Result => {
+            message.push_str("\n\nThis ");
+            message.push_str(INFO);
+            message.push_str("let?");
+            message.push_str(RESET);
+            message.push_str(" unwraps a ");
+            message.push_str(INFO);
+            message.push_str("result");
+            message.push_str(RESET);
+            message.push_str("; use it where the enclosing function or let binding returns a ");
+            message.push_str(INFO);
+            message.push_str("result");
+            message.push_str(RESET);
+            message.push_str(" so ");
+            message.push_str(INFO);
+            message.push_str("Error");
+            message.push_str(RESET);
+            message.push_str(" can propagate.\n\nPossible solutions:\n- Change the enclosing function or let binding to return ");
+            message.push_str(INFO);
+            message.push_str("result<'ok, 'error>");
+            message.push_str(RESET);
+            message.push_str("; use ");
+            message.push_str(INFO);
+            message.push_str("Ok");
+            message.push_str(RESET);
+            message.push_str(" for success, and ");
+            message.push_str(INFO);
+            message.push_str("let?");
+            message.push_str(RESET);
+            message.push_str(" will propagate ");
+            message.push_str(INFO);
+            message.push_str("Error");
+            message.push_str(RESET);
+            message.push_str(".\n- Replace ");
+            message.push_str(INFO);
+            message.push_str("let?");
+            message.push_str(RESET);
+            message.push_str(" with a ");
+            message.push_str(INFO);
+            message.push_str("switch");
+            message.push_str(RESET);
+            message.push_str(" and handle the ");
+            message.push_str(INFO);
+            message.push_str("Error");
+            message.push_str(RESET);
+            message.push_str(" case explicitly.\n- If you want a default value instead of early return, unwrap using ");
+            message.push_str(INFO);
+            message.push_str("Result.getOr(default)");
+            message.push_str(RESET);
+            message.push('.');
+        }
+        LetUnwrapKind::Unknown => {
+            message.push_str("\n\n");
+            message.push_str(INFO);
+            message.push_str("let?");
+            message.push_str(RESET);
+            message.push_str(" can only be used in a context that expects ");
+            message.push_str(INFO);
+            message.push_str("option");
+            message.push_str(RESET);
+            message.push_str(" or ");
+            message.push_str(INFO);
+            message.push_str("result");
+            message.push_str(RESET);
+            message.push_str(".\n\nPossible solutions:\n- Change the enclosing function or let binding to return an ");
+            message.push_str(INFO);
+            message.push_str("option<'t>");
+            message.push_str(RESET);
+            message.push_str(" or ");
+            message.push_str(INFO);
+            message.push_str("result<'ok, 'error>");
+            message.push_str(RESET);
+            message.push_str(" and propagate with ");
+            message.push_str(INFO);
+            message.push_str("Some/Ok");
+            message.push_str(RESET);
+            message.push_str(".\n- Replace ");
+            message.push_str(INFO);
+            message.push_str("let?");
+            message.push_str(RESET);
+            message.push_str(" with a ");
+            message.push_str(INFO);
+            message.push_str("switch");
+            message.push_str(RESET);
+            message.push_str(" and handle the ");
+            message.push_str(INFO);
+            message.push_str("None/Error");
+            message.push_str(RESET);
+            message.push_str(" case explicitly.\n- If you want a default value instead of early return, unwrap using ");
+            message.push_str(INFO);
+            message.push_str("Option.getOr(default)");
+            message.push_str(RESET);
+            message.push_str(" or ");
+            message.push_str(INFO);
+            message.push_str("Result.getOr(default)");
+            message.push_str(RESET);
+            message.push('.');
+        }
+    }
+
+    true
+}
+
+fn type_is_predef_path(
+    type_ctx: &TypeContext,
+    ty: TypeExprRef,
+    expected_path: &crate::types::path::Path,
+) -> bool {
+    let repr = type_ctx.repr(ty);
+    match &*type_ctx.get_desc(repr) {
+        TypeDesc::Tconstr { path, .. } => path.same(expected_path),
+        TypeDesc::Tlink(next) | TypeDesc::Tsubst(next) => {
+            type_is_predef_path(type_ctx, *next, expected_path)
+        }
+        _ => false,
+    }
+}
+
+fn type_expands_to_predef_path(
+    type_ctx: &TypeContext,
+    ty: TypeExprRef,
+    expected_path: &crate::types::path::Path,
+) -> bool {
+    let mut current = type_ctx.repr(ty);
+    let mut seen = AHashSet::new();
+    loop {
+        if !seen.insert(current) {
+            return false;
+        }
+        if type_is_predef_path(type_ctx, current, expected_path) {
+            return true;
+        }
+        let Some(expansion) = type_alias_expansion(type_ctx, current) else {
+            return false;
+        };
+        let expansion = type_ctx.repr(expansion);
+        if type_expansion_same(type_ctx, current, expansion) {
+            return false;
+        }
+        current = expansion;
+    }
+}
+
+fn type_clash_actual_promise(type_ctx: &TypeContext, trace: &[(TypeExprRef, TypeExprRef)]) -> bool {
+    let is_promise_like =
+        |ty| type_expands_to_predef_path(type_ctx, ty, &crate::types::predef::path_promise());
+    trace
+        .first()
+        .copied()
+        .into_iter()
+        .chain(bottom_type_clash_aliases(trace))
+        .any(|(actual, expected)| is_promise_like(actual) && !is_promise_like(expected))
+}
+
+fn append_optional_record_field_help(
+    type_ctx: &TypeContext,
+    arena: &ParseArena,
+    source: &str,
+    loc: LocIdx,
+    context: &Option<TypeClashContext>,
+    trace: &[(TypeExprRef, TypeExprRef)],
+    message: &mut String,
+) -> bool {
+    const INFO: &str = "\x1b[1;33m";
+    const RESET: &str = "\x1b[0m";
+
+    let Some(TypeClashContext::RecordField {
+        field_name,
+        optional: true,
+        jsx,
+    }) = context
+    else {
+        return false;
+    };
+    let Some((actual, _expected)) = trace.first().copied() else {
+        return false;
+    };
+    let TypeDesc::Tconstr { path, .. } = &*type_ctx.get_desc(type_ctx.repr(actual)) else {
+        return false;
+    };
+    if !path.same(&crate::types::predef::path_option()) {
+        return false;
+    }
+
+    let passed_text = source_text_at_loc(arena, source, loc).unwrap_or_default();
+    message.push_str("\n\n");
+    message.push_str(INFO);
+    message.push_str(field_name);
+    message.push_str(RESET);
+    if jsx.is_some() {
+        message.push_str(
+            " is an optional component prop, and you're passing an optional value to it.\n",
+        );
+        message.push_str("Values passed to an optional component prop don't need to be wrapped in an option. You might need to adjust the type of the value supplied.\n");
+    } else {
+        message.push_str(
+            " is an optional record field, and you're passing an optional value to it.\n",
+        );
+        message.push_str("Values passed to an optional record field don't need to be wrapped in an option. You might need to adjust the type of the value supplied.\n");
+    }
+    message.push_str("     \n");
+    message.push_str("Possible solutions: \n");
+    message.push_str("- Unwrap the option from the value you're passing in\n");
+    message.push_str("- If you really do want to pass the optional value, prepend the value with ");
+    message.push_str(INFO);
+    message.push('?');
+    message.push_str(RESET);
+    message.push_str(" to show you want to pass the option, like: ");
+    message.push_str(INFO);
+    if jsx.is_some() {
+        message.push_str(field_name);
+        message.push_str("=?");
+        message.push_str(&passed_text);
+    } else {
+        message.push('{');
+        message.push_str(field_name);
+        message.push_str(": ?");
+        message.push_str(&passed_text);
+    }
+    message.push_str(RESET);
+    if jsx.is_none() {
+        message.push('}');
+    }
+    true
+}
+
+fn append_optional_function_argument_help(
+    type_ctx: &TypeContext,
+    arena: &ParseArena,
+    source: &str,
+    loc: LocIdx,
+    context: &Option<TypeClashContext>,
+    trace: &[(TypeExprRef, TypeExprRef)],
+    message: &mut String,
+) -> bool {
+    const INFO: &str = "\x1b[1;33m";
+    const RESET: &str = "\x1b[0m";
+
+    let Some(TypeClashContext::FunctionArgument { optional: true, .. }) = context else {
+        return false;
+    };
+    let Some((actual, _expected)) = trace.first().copied() else {
+        return false;
+    };
+    if !type_is_predef_path(type_ctx, actual, &crate::types::predef::path_option()) {
+        return false;
+    }
+
+    let passed_text = source_text_at_loc(arena, source, loc).unwrap_or_default();
+    message.push_str("\n\n");
+    message.push_str("You're passing an optional value into an optional function argument.\n");
+    message.push_str("Values passed to an optional function argument don't need to be wrapped in an option. You might need to adjust the type of the value supplied.\n");
+    message.push_str("     \n");
+    message.push_str("Possible solutions: \n");
+    message.push_str("- Unwrap the option from the value you're passing in\n");
+    message.push_str("- If you really do want to pass the optional value, prepend the value with ");
+    message.push_str(INFO);
+    message.push('?');
+    message.push_str(RESET);
+    message.push_str(" to show you want to pass the option, like: ");
+    message.push_str(INFO);
+    message.push('?');
+    message.push_str(&passed_text);
+    message.push_str(RESET);
+
+    true
+}
+
+fn source_text_at_loc(arena: &ParseArena, source: &str, loc: LocIdx) -> Option<String> {
+    let start = arena.loc_start(loc).cnum as usize;
+    let end = arena.loc_end(loc).cnum as usize;
+    source.get(start..end).map(str::trim).map(str::to_string)
+}
+
+fn append_runtime_coercion_help(
+    type_ctx: &TypeContext,
+    arena: &ParseArena,
+    source: &str,
+    loc: LocIdx,
+    trace: &[(TypeExprRef, TypeExprRef)],
+    message: &mut String,
+) -> bool {
+    const INFO: &str = "\x1b[1;33m";
+    const RESET: &str = "\x1b[0m";
+
+    let Some(rewrite) = runtime_coercion_suggestion(type_ctx, arena, source, loc, trace) else {
+        return false;
+    };
+
+    message.push_str("\n\nPossible solutions: \n");
+    message.push_str("- These types are compatible at runtime. You can use the coercion operator to convert to the expected type: ");
+    message.push_str(INFO);
+    message.push_str(&rewrite);
+    message.push_str(RESET);
+    message.push_str("\n\n");
+    true
+}
+
+fn runtime_coercion_suggestion(
+    type_ctx: &TypeContext,
+    arena: &ParseArena,
+    source: &str,
+    loc: LocIdx,
+    trace: &[(TypeExprRef, TypeExprRef)],
+) -> Option<String> {
+    let (actual, expected) = trace.first().copied()?;
+    if type_is_polyvariant(type_ctx, actual) && type_is_polyvariant(type_ctx, expected) {
+        return None;
+    }
+
+    let target_ty = bottom_type_clash_aliases(trace)
+        .map(|(_, target)| target)
+        .unwrap_or(expected);
+    let target_type_string = format_type_expr(type_ctx, target_ty);
+
+    if !runtime_coercion_compatible(type_ctx, actual, expected) {
+        return None;
+    }
+
+    let target_expr_text = source_text_at_loc(arena, source, loc)?;
+    if source_text_is_constant(&target_expr_text) {
+        return None;
+    }
+
+    Some(format!("({target_expr_text} :> {target_type_string})\n"))
+}
+
+fn runtime_coercion_compatible(
+    type_ctx: &TypeContext,
+    actual: TypeExprRef,
+    expected: TypeExprRef,
+) -> bool {
+    let env = crate::types::Env::empty();
+    crate::types::ctype::subtype(type_ctx, &env, actual, expected).is_ok()
+        || runtime_record_coercion_compatible(type_ctx, actual, expected)
+        || runtime_variant_to_primitive_coercion_compatible(type_ctx, actual, expected)
+}
+
+fn runtime_record_coercion_compatible(
+    type_ctx: &TypeContext,
+    actual: TypeExprRef,
+    expected: TypeExprRef,
+) -> bool {
+    let Some((actual_repr, actual_fields)) = record_fields_for_type(type_ctx, actual) else {
+        return false;
+    };
+    let Some((expected_repr, expected_fields)) = record_fields_for_type(type_ctx, expected) else {
+        return false;
+    };
+    if actual_repr != expected_repr {
+        return false;
+    }
+
+    expected_fields.iter().all(|expected_field| {
+        let Some(actual_field) = actual_fields
+            .iter()
+            .find(|actual_field| actual_field.ld_id.name() == expected_field.ld_id.name())
+        else {
+            return false;
+        };
+        actual_field.ld_optional == expected_field.ld_optional
+            && label_declaration_runtime_name(actual_field)
+                == label_declaration_runtime_name(expected_field)
+            && runtime_field_type_compatible(type_ctx, actual_field.ld_type, expected_field.ld_type)
+    })
+}
+
+fn record_fields_for_type(
+    type_ctx: &TypeContext,
+    ty: TypeExprRef,
+) -> Option<(
+    crate::types::decl::RecordRepresentation,
+    Vec<crate::types::decl::LabelDeclaration>,
+)> {
+    let repr = type_ctx.repr(ty);
+    let desc = type_ctx.get_desc(repr);
+    let TypeDesc::Tconstr { path, .. } = &*desc else {
+        return None;
+    };
+    let decl = type_decl_for_path(type_ctx, path)?;
+    match decl.type_kind {
+        crate::types::decl::TypeKind::TypeRecord(fields, record_repr) => {
+            Some((record_repr, fields))
+        }
+        _ => None,
+    }
+}
+
+fn runtime_field_type_compatible(
+    type_ctx: &TypeContext,
+    actual: TypeExprRef,
+    expected: TypeExprRef,
+) -> bool {
+    type_ctx.repr(actual) == type_ctx.repr(expected)
+        || format_type_expr(type_ctx, actual) == format_type_expr(type_ctx, expected)
+        || {
+            let env = crate::types::Env::empty();
+            crate::types::ctype::subtype(type_ctx, &env, actual, expected).is_ok()
+        }
+}
+
+fn label_declaration_runtime_name(label: &crate::types::decl::LabelDeclaration) -> String {
+    label_declaration_as_name(label).unwrap_or_else(|| label.ld_id.name().to_string())
+}
+
+fn label_declaration_as_name(label: &crate::types::decl::LabelDeclaration) -> Option<String> {
+    label.ld_attributes.iter().find_map(|attr| {
+        if attr.attr_name.txt == "as"
+            && let crate::types::decl::AttributePayload::Str(value) = &attr.attr_payload
+        {
+            Some(value.clone())
+        } else {
+            None
+        }
+    })
+}
+
+fn runtime_variant_to_primitive_coercion_compatible(
+    type_ctx: &TypeContext,
+    actual: TypeExprRef,
+    expected: TypeExprRef,
+) -> bool {
+    let Some(expected_path) = primitive_coercion_target_path(type_ctx, expected) else {
+        return false;
+    };
+    let Some((actual_path, constructors, type_params, unboxed)) =
+        variant_constructors_for_type(type_ctx, actual)
+    else {
+        return false;
+    };
+    if actual_path.same(&crate::types::predef::path_bool()) || !type_params.is_empty() {
+        return false;
+    }
+
+    constructors.iter().all(|constructor| {
+        variant_constructor_runtime_matches_primitive(
+            type_ctx,
+            constructor,
+            unboxed,
+            &expected_path,
+        )
+    })
+}
+
+fn primitive_coercion_target_path(
+    type_ctx: &TypeContext,
+    ty: TypeExprRef,
+) -> Option<crate::types::Path> {
+    let repr = type_ctx.repr(ty);
+    let desc = type_ctx.get_desc(repr);
+    let TypeDesc::Tconstr { path, args, .. } = &*desc else {
+        return None;
+    };
+    if !args.is_empty() {
+        return None;
+    }
+    [
+        crate::types::predef::path_string(),
+        crate::types::predef::path_int(),
+        crate::types::predef::path_float(),
+        crate::types::predef::path_bigint(),
+    ]
+    .into_iter()
+    .find(|primitive_path| path.same(primitive_path))
+}
+
+fn variant_constructors_for_type(
+    type_ctx: &TypeContext,
+    ty: TypeExprRef,
+) -> Option<(
+    crate::types::Path,
+    Vec<crate::types::decl::ConstructorDeclaration>,
+    Vec<TypeExprRef>,
+    bool,
+)> {
+    let repr = type_ctx.repr(ty);
+    let desc = type_ctx.get_desc(repr);
+    let TypeDesc::Tconstr { path, .. } = &*desc else {
+        return None;
+    };
+    let decl = type_decl_for_path(type_ctx, path)?;
+    match decl.type_kind {
+        crate::types::decl::TypeKind::TypeVariant(constructors) => Some((
+            path.clone(),
+            constructors,
+            decl.type_params,
+            decl.type_unboxed.unboxed,
+        )),
+        _ => None,
+    }
+}
+
+fn variant_constructor_runtime_matches_primitive(
+    type_ctx: &TypeContext,
+    constructor: &crate::types::decl::ConstructorDeclaration,
+    unboxed: bool,
+    target_path: &crate::types::Path,
+) -> bool {
+    match &constructor.cd_args {
+        crate::types::decl::ConstructorArguments::CstrTuple(args) if args.is_empty() => {
+            match variant_constructor_as_payload(&constructor.cd_attributes) {
+                None | Some(VariantConstructorAsPayload::String) => {
+                    target_path.same(&crate::types::predef::path_string())
+                }
+                Some(VariantConstructorAsPayload::Int) => {
+                    target_path.same(&crate::types::predef::path_int())
+                }
+                Some(VariantConstructorAsPayload::Float) => {
+                    target_path.same(&crate::types::predef::path_float())
+                }
+                Some(VariantConstructorAsPayload::BigInt) => {
+                    target_path.same(&crate::types::predef::path_bigint())
+                }
+                Some(
+                    VariantConstructorAsPayload::Bool
+                    | VariantConstructorAsPayload::Null
+                    | VariantConstructorAsPayload::Undefined,
+                ) => false,
+            }
+        }
+        crate::types::decl::ConstructorArguments::CstrTuple(args) if args.len() == 1 && unboxed => {
+            !target_path.same(&crate::types::predef::path_int())
+                && type_expr_path_same(type_ctx, args[0], target_path)
+        }
+        _ => false,
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum VariantConstructorAsPayload {
+    String,
+    Int,
+    Float,
+    BigInt,
+    Bool,
+    Null,
+    Undefined,
+}
+
+fn variant_constructor_as_payload(
+    attrs: &[crate::types::decl::Attribute],
+) -> Option<VariantConstructorAsPayload> {
+    attrs.iter().find_map(|attr| {
+        if attr.attr_name.txt != "as" {
+            return None;
+        }
+        match &attr.attr_payload {
+            crate::types::decl::AttributePayload::Str(_) => {
+                Some(VariantConstructorAsPayload::String)
+            }
+            crate::types::decl::AttributePayload::Int(_)
+            | crate::types::decl::AttributePayload::IntLiteral(_) => {
+                Some(VariantConstructorAsPayload::Int)
+            }
+            crate::types::decl::AttributePayload::Float(_) => {
+                Some(VariantConstructorAsPayload::Float)
+            }
+            crate::types::decl::AttributePayload::BigInt(_) => {
+                Some(VariantConstructorAsPayload::BigInt)
+            }
+            crate::types::decl::AttributePayload::Bool(_) => {
+                Some(VariantConstructorAsPayload::Bool)
+            }
+            crate::types::decl::AttributePayload::Ident(value) if value == "null" => {
+                Some(VariantConstructorAsPayload::Null)
+            }
+            crate::types::decl::AttributePayload::Ident(value) if value == "undefined" => {
+                Some(VariantConstructorAsPayload::Undefined)
+            }
+            _ => None,
+        }
+    })
+}
+
+fn type_expr_path_same(
+    type_ctx: &TypeContext,
+    ty: TypeExprRef,
+    target_path: &crate::types::Path,
+) -> bool {
+    matches!(
+        &*type_ctx.get_desc(type_ctx.repr(ty)),
+        TypeDesc::Tconstr { path, args, .. } if args.is_empty() && path.same(target_path)
+    )
+}
+
+fn source_text_is_constant(source_text: &str) -> bool {
+    let text = source_text.trim();
+    simple_string_literal_value(text).is_some()
+        || (text.starts_with('\'') && text.ends_with('\''))
+        || text
+            .as_bytes()
+            .first()
+            .is_some_and(|byte| byte.is_ascii_digit())
+}
+
+fn append_string_to_polyvariant_help(
+    type_ctx: &TypeContext,
+    arena: &ParseArena,
+    source: &str,
+    loc: LocIdx,
+    trace: &[(TypeExprRef, TypeExprRef)],
+    message: &mut String,
+) -> bool {
+    const INFO: &str = "\x1b[1;33m";
+    const RESET: &str = "\x1b[0m";
+
+    let Some(row) = trace.iter().copied().find_map(|(actual, expected)| {
+        (simple_type_constr_name(type_ctx, actual).as_deref() == Some("string"))
+            .then(|| polyvariant_row(type_ctx, expected))
+            .flatten()
+    }) else {
+        return false;
+    };
+    let Some(source_literal) = source_text_at_loc(arena, source, loc) else {
+        return false;
+    };
+    let Some(string_value) = simple_string_literal_value(&source_literal) else {
+        return false;
+    };
+    let fields = visible_polyvariant_fields(type_ctx, &row);
+    if !fields
+        .iter()
+        .any(|(label, _)| label.as_str() == string_value)
+    {
+        return false;
+    }
+
+    message.push_str("\n\nPossible solutions:\n");
+    message.push_str("- The constant passed matches one of the expected polymorphic variant constructors. Did you mean to pass this as a polymorphic variant? If so, rewrite ");
+    message.push_str(INFO);
+    message.push_str(&source_literal);
+    message.push_str(RESET);
+    message.push_str(" to ");
+    message.push_str(INFO);
+    message.push('#');
+    message.push_str(&string_value);
+    message.push_str(RESET);
+    true
+}
+
+fn append_string_to_variant_help(
+    type_ctx: &TypeContext,
+    arena: &ParseArena,
+    source: &str,
+    loc: LocIdx,
+    trace: &[(TypeExprRef, TypeExprRef)],
+    message: &mut String,
+) -> bool {
+    const INFO: &str = "\x1b[1;33m";
+    const RESET: &str = "\x1b[0m";
+
+    let Some(constructors) = trace.iter().copied().find_map(|(actual, expected)| {
+        (simple_type_constr_name(type_ctx, actual).as_deref() == Some("string"))
+            .then(|| concrete_variant_constructors(type_ctx, expected))
+            .flatten()
+    }) else {
+        return false;
+    };
+    let Some(source_literal) = source_text_at_loc(arena, source, loc) else {
+        return false;
+    };
+    let Some(string_value) = simple_string_literal_value(&source_literal) else {
+        return false;
+    };
+    let Some(constructor_name) = constructors.iter().find_map(|constructor| {
+        let runtime_repr = variant_constructor_string_runtime_repr(constructor)?;
+        (runtime_repr == string_value).then(|| constructor.cd_id.name().to_string())
+    }) else {
+        return false;
+    };
+
+    message.push_str("\n\nPossible solutions:\n");
+    message.push_str("- The constant passed matches the runtime representation of one of the expected variant constructors. Did you mean to pass this as a variant constructor? If so, rewrite ");
+    message.push_str(INFO);
+    message.push_str(&source_literal);
+    message.push_str(RESET);
+    message.push_str(" to ");
+    message.push_str(INFO);
+    message.push_str(&constructor_name);
+    message.push_str(RESET);
+    true
+}
+
+fn concrete_variant_constructors(
+    type_ctx: &TypeContext,
+    ty: TypeExprRef,
+) -> Option<Vec<crate::types::decl::ConstructorDeclaration>> {
+    let mut current = type_ctx.repr(ty);
+    let mut seen = Vec::new();
+
+    loop {
+        if seen.contains(&current) {
+            return None;
+        }
+        seen.push(current);
+
+        let desc = type_ctx.get_desc(current);
+        match &*desc {
+            TypeDesc::Tconstr { path, .. } => {
+                let decl = type_decl_for_path(type_ctx, path)?;
+                match decl.type_kind {
+                    crate::types::decl::TypeKind::TypeVariant(constructors) => {
+                        return Some(constructors);
+                    }
+                    crate::types::decl::TypeKind::TypeAbstract => {
+                        current = type_ctx.repr(decl.type_manifest?);
+                    }
+                    _ => return None,
+                }
+            }
+            TypeDesc::Tlink(next) | TypeDesc::Tsubst(next) => {
+                current = type_ctx.repr(*next);
+            }
+            _ => return None,
+        }
+    }
+}
+
+fn type_decl_for_path(
+    type_ctx: &TypeContext,
+    path: &crate::types::Path,
+) -> Option<crate::types::TypeDeclaration> {
+    if let crate::types::Path::Pident(id) = path
+        && id.stamp() != 0
+        && let Some(decl) = type_ctx.find_type_decl_by_stamp(id.stamp())
+    {
+        return Some(decl.clone());
+    }
+
+    if let Some(decl) = type_ctx.find_type_decl_by_path(&path.name()) {
+        return Some(decl.clone());
+    }
+
+    type_ctx
+        .find_type_decl(path.head_name())
+        .map(|decl| decl.clone())
+}
+
+fn variant_constructor_string_runtime_repr(
+    constructor: &crate::types::decl::ConstructorDeclaration,
+) -> Option<String> {
+    for attr in &constructor.cd_attributes {
+        if attr.attr_name.txt != "as" {
+            continue;
+        }
+        return match &attr.attr_payload {
+            crate::types::decl::AttributePayload::Str(value) => Some(value.clone()),
+            _ => None,
+        };
+    }
+
+    Some(constructor.cd_id.name().to_string())
+}
+
+fn type_clash_string_to_polyvariant(
+    type_ctx: &TypeContext,
+    trace: &[(TypeExprRef, TypeExprRef)],
+) -> bool {
+    trace.iter().copied().any(|(actual, expected)| {
+        simple_type_constr_name(type_ctx, actual).as_deref() == Some("string")
+            && polyvariant_row(type_ctx, expected).is_some()
+    })
+}
+
+fn type_clash_string_to_variant(
+    type_ctx: &TypeContext,
+    trace: &[(TypeExprRef, TypeExprRef)],
+) -> bool {
+    trace.iter().copied().any(|(actual, expected)| {
+        simple_type_constr_name(type_ctx, actual).as_deref() == Some("string")
+            && concrete_variant_constructors(type_ctx, expected).is_some()
+    })
+}
+
+fn simple_string_literal_value(source_literal: &str) -> Option<String> {
+    let quoted = source_literal.strip_prefix('"')?.strip_suffix('"')?;
+    if quoted.contains('\\') {
+        return None;
+    }
+    Some(quoted.to_string())
+}
+
+fn append_object_literal_record_help(
+    type_ctx: &TypeContext,
+    arena: &ParseArena,
+    source: &str,
+    loc: LocIdx,
+    trace: &[(TypeExprRef, TypeExprRef)],
+    message: &mut String,
+) -> bool {
+    const INFO: &str = "\x1b[1;33m";
+    const ERROR: &str = "\x1b[1;31m";
+    const RESET: &str = "\x1b[0m";
+
+    let has_object_record_mismatch = [
+        bottom_type_clash_aliases(trace),
+        nested_type_clash_pair(type_ctx, trace),
+        trace.first().copied(),
+    ]
+    .into_iter()
+    .flatten()
+    .any(|(actual, expected)| {
+        type_is_object(type_ctx, actual) && type_is_record(type_ctx, expected)
+    });
+    if !has_object_record_mismatch {
+        return false;
+    }
+
+    message.push_str("\n\nYou're passing a ");
+    message.push_str(ERROR);
+    message.push_str("ReScript object");
+    message.push_str(RESET);
+    message.push_str(" where a ");
+    message.push_str(INFO);
+    message.push_str("record");
+    message.push_str(RESET);
+    message.push_str(
+        " is expected. Objects are written with quoted keys, and records with unquoted keys.",
+    );
+    message.push_str("\n\nPossible solutions: \n- Rewrite the object to a record");
+    if let Some(rewrite) = source_text_at_loc(arena, source, loc)
+        .and_then(|text| object_literal_to_record_rewrite(&text))
+    {
+        message.push_str(", like: ");
+        message.push_str(INFO);
+        message.push_str(&rewrite);
+        message.push_str(RESET);
+    }
+    message.push('\n');
+    message.push('\n');
+
+    true
+}
+
+fn append_braced_ident_record_help(
+    type_ctx: &TypeContext,
+    arena: &ParseArena,
+    source: &str,
+    loc: LocIdx,
+    context: &Option<TypeClashContext>,
+    trace: &[(TypeExprRef, TypeExprRef)],
+    message: &mut String,
+) -> bool {
+    const INFO: &str = "\x1b[1;33m";
+    const RESET: &str = "\x1b[0m";
+
+    if !matches!(context, Some(TypeClashContext::BracedIdent)) {
+        return false;
+    }
+    let Some((_, expected)) = trace.first().copied() else {
+        return false;
+    };
+    if !type_is_record(type_ctx, expected) {
+        return false;
+    }
+
+    let rewrite = source_text_at_loc(arena, source, loc)
+        .map(|text| braced_ident_record_rewrite(&text))
+        .unwrap_or_default();
+
+    message
+        .push_str("\n\nYou might have meant to pass this as a record, but wrote it as a block.\n");
+    message.push_str(
+        "Braces with a single identifier counts as a block, not a record with a single (punned) field.\n\n",
+    );
+    message.push_str("Possible solutions: \n");
+    message.push_str("- Write out the full record with field and value, like: ");
+    message.push_str(INFO);
+    message.push_str(&rewrite);
+    message.push_str(RESET);
+    message.push_str("\n- Return the expected record from the block");
+
+    true
+}
+
+fn braced_ident_record_rewrite(text: &str) -> String {
+    let ident = text
+        .trim()
+        .trim_start_matches('{')
+        .trim_end_matches('}')
+        .trim();
+    format!("{{{ident}: {ident}}}")
+}
+
+fn object_literal_to_record_rewrite(text: &str) -> Option<String> {
+    let mut output = String::with_capacity(text.len());
+    let chars: Vec<char> = text.chars().collect();
+    let mut index = 0;
+    let mut changed = false;
+
+    while index < chars.len() {
+        if chars[index] != '"' {
+            output.push(chars[index]);
+            index += 1;
+            continue;
+        }
+
+        let start = index + 1;
+        let mut end = start;
+        let mut escaped = false;
+        while end < chars.len() {
+            let ch = chars[end];
+            if escaped {
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else if ch == '"' {
+                break;
+            }
+            end += 1;
+        }
+        if end >= chars.len() {
+            return None;
+        }
+
+        let key: String = chars[start..end].iter().collect();
+        let mut after = end + 1;
+        while after < chars.len() && chars[after].is_whitespace() {
+            after += 1;
+        }
+        if after < chars.len() && chars[after] == ':' && is_record_field_rewrite_key(&key) {
+            output.push_str(&key);
+            changed = true;
+        } else {
+            output.push('"');
+            output.push_str(&key);
+            output.push('"');
+        }
+        index = end + 1;
+    }
+
+    changed.then_some(output)
+}
+
+fn is_record_field_rewrite_key(key: &str) -> bool {
+    let mut chars = key.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    (first == '_' || first.is_ascii_alphabetic())
+        && chars.all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
+}
+
+fn append_jsx_element_type_clash_help(
+    type_ctx: &TypeContext,
+    trace: &[(TypeExprRef, TypeExprRef)],
+    message: &mut String,
+) -> bool {
+    const INFO: &str = "\x1b[1;33m";
+    const RESET: &str = "\x1b[0m";
+
+    let Some((actual, _expected)) = jsx_element_type_clash_pair(type_ctx, trace) else {
+        return false;
+    };
+
+    let repr = type_ctx.repr(actual);
+    match &*type_ctx.get_desc(repr) {
+        TypeDesc::Tconstr { path, args: _, .. } if path.same(&crate::types::predef::path_int()) => {
+            message.push_str("\n\nIn JSX, all content must be JSX elements. You can convert int to a JSX element with ");
+            message.push_str(INFO);
+            message.push_str("React.int");
+            message.push_str(RESET);
+            message.push_str(".\n\n");
+            true
+        }
+        TypeDesc::Tconstr { path, args: _, .. }
+            if path.same(&crate::types::predef::path_string()) =>
+        {
+            message.push_str("\n\nIn JSX, all content must be JSX elements. You can convert string to a JSX element with ");
+            message.push_str(INFO);
+            message.push_str("React.string");
+            message.push_str(RESET);
+            message.push_str(".\n\n");
+            true
+        }
+        TypeDesc::Tconstr { path, args: _, .. }
+            if path.same(&crate::types::predef::path_float()) =>
+        {
+            message.push_str("\n\nIn JSX, all content must be JSX elements. You can convert float to a JSX element with ");
+            message.push_str(INFO);
+            message.push_str("React.float");
+            message.push_str(RESET);
+            message.push_str(".\n\n");
+            true
+        }
+        TypeDesc::Tconstr { path, args, .. }
+            if args.len() == 1 && path.same(&crate::types::predef::path_option()) =>
+        {
+            message.push_str("\n\nYou need to unwrap this option to its underlying value first, then turn that value into a JSX element.\nFor ");
+            message.push_str(INFO);
+            message.push_str("None");
+            message.push_str(RESET);
+            message.push_str(", you can use ");
+            message.push_str(INFO);
+            message.push_str("React.null");
+            message.push_str(RESET);
+            message.push_str(" to output nothing into JSX.\n\n");
+            true
+        }
+        TypeDesc::Tconstr { path, args, .. }
+            if args.len() == 1 && path.same(&crate::types::predef::path_array()) =>
+        {
+            if type_is_jsx_element_named(type_ctx, args[0]) {
+                message.push_str("\n\nIn JSX, all content must be JSX elements. You can convert array to a JSX element with ");
+                message.push_str(INFO);
+                message.push_str("React.array");
+                message.push_str(RESET);
+                message.push_str(" (for example by using a pipe: ->React.array.).\n\n");
+            } else {
+                message.push_str("\n\nYou need to convert each item in this array to a JSX element first, then use ");
+                message.push_str(INFO);
+                message.push_str("React.array");
+                message.push_str(RESET);
+                message.push_str(
+                    " to convert the array of JSX elements into a single JSX element.\n\n",
+                );
+            }
+            true
+        }
+        _ => false,
+    }
+}
+
+fn jsx_element_type_clash_pair(
+    type_ctx: &TypeContext,
+    trace: &[(TypeExprRef, TypeExprRef)],
+) -> Option<(TypeExprRef, TypeExprRef)> {
+    [
+        trace.first().copied(),
+        bottom_type_clash_aliases(trace),
+        nested_type_clash_pair(type_ctx, trace),
+    ]
+    .into_iter()
+    .flatten()
+    .find(|(_, expected)| type_is_expected_jsx_element(type_ctx, trace, *expected))
+}
+
+fn type_is_expected_jsx_element(
+    type_ctx: &TypeContext,
+    trace: &[(TypeExprRef, TypeExprRef)],
+    ty: TypeExprRef,
+) -> bool {
+    type_is_jsx_element(type_ctx, ty)
+        || rendered_alias_expansion(type_ctx, ty, trace, false)
+            .is_some_and(|expansion| type_is_jsx_element(type_ctx, expansion))
+}
+
+fn type_is_jsx_element_named(type_ctx: &TypeContext, ty: TypeExprRef) -> bool {
+    type_is_jsx_element(type_ctx, ty) || format_type_expr(type_ctx, ty).ends_with(".element")
+}
+
+fn type_clash_expected_unit_actual(
+    type_ctx: &TypeContext,
+    trace: &[(TypeExprRef, TypeExprRef)],
+) -> Option<TypeExprRef> {
+    [trace.first().copied(), bottom_type_clash_aliases(trace)]
+        .into_iter()
+        .flatten()
+        .find_map(|(actual, expected)| type_is_unit(type_ctx, expected).then_some(actual))
+}
+
+fn type_is_unit(type_ctx: &TypeContext, ty: TypeExprRef) -> bool {
+    let repr = type_ctx.repr(ty);
+    match &*type_ctx.get_desc(repr) {
+        TypeDesc::Tconstr { path, .. } => path.same(&crate::types::predef::path_unit()),
+        TypeDesc::Tlink(next) | TypeDesc::Tsubst(next) => type_is_unit(type_ctx, *next),
+        _ => false,
+    }
+}
+
+fn type_is_jsx_element_like(
+    type_ctx: &TypeContext,
+    trace: &[(TypeExprRef, TypeExprRef)],
+    ty: TypeExprRef,
+) -> bool {
+    type_is_jsx_element(type_ctx, ty)
+        || rendered_alias_expansion(type_ctx, ty, trace, true)
+            .is_some_and(|expansion| type_is_jsx_element(type_ctx, expansion))
+}
+
+fn type_is_jsx_element(type_ctx: &TypeContext, ty: TypeExprRef) -> bool {
+    let repr = type_ctx.repr(ty);
+    match &*type_ctx.get_desc(repr) {
+        TypeDesc::Tconstr { path, .. } => path.name() == "Jsx.element",
+        TypeDesc::Tlink(next) | TypeDesc::Tsubst(next) => type_is_jsx_element(type_ctx, *next),
+        _ => false,
+    }
+}
+
+fn append_incompatible_type_parts(
+    type_ctx: &TypeContext,
+    trace: &[(TypeExprRef, TypeExprRef)],
+    message: &mut String,
+) {
+    const INFO: &str = "\x1b[1;33m";
+    const ERROR: &str = "\x1b[1;31m";
+
+    let reports = super_trace_reports(type_ctx, trace);
+    if reports.is_empty() {
+        return;
+    };
+
+    for (idx, report) in reports.iter().enumerate() {
+        if idx == 0 {
+            message.push_str("\n\nThe incompatible parts:\n  ");
+        } else {
+            message.push_str("\n  \n  Further expanded:\n    ");
+        }
+        append_type_expansion_report(
+            type_ctx,
+            report.actual,
+            report.actual_expansion,
+            ERROR,
+            message,
+        );
+        message.push_str(" vs ");
+        append_type_expansion_report(
+            type_ctx,
+            report.expected,
+            report.expected_expansion,
+            INFO,
+            message,
+        );
+    }
+}
+
+#[derive(Clone, Copy)]
+struct TypeExpansionReport {
+    actual: TypeExprRef,
+    actual_expansion: TypeExprRef,
+    expected: TypeExprRef,
+    expected_expansion: TypeExprRef,
+}
+
+fn append_type_expansion_report(
+    type_ctx: &TypeContext,
+    ty: TypeExprRef,
+    expansion: TypeExprRef,
+    color: &str,
+    message: &mut String,
+) {
+    const DIM: &str = "\x1b[2m";
+    const RESET: &str = "\x1b[0m";
+
+    message.push_str(color);
+    message.push_str(&format_type_expr(type_ctx, ty));
+    message.push_str(RESET);
+    if !type_expansion_same(type_ctx, ty, expansion) {
+        message.push(' ');
+        message.push_str(DIM);
+        message.push_str("(defined as");
+        message.push_str(RESET);
+        message.push(' ');
+        message.push_str(color);
+        message.push_str(&format_type_expr(type_ctx, expansion));
+        message.push_str(RESET);
+        message.push_str(DIM);
+        message.push(')');
+        message.push_str(RESET);
+    }
+}
+
+fn super_trace_reports(
+    type_ctx: &TypeContext,
+    trace: &[(TypeExprRef, TypeExprRef)],
+) -> Vec<TypeExpansionReport> {
+    let expanded = expanded_type_clash_trace(type_ctx, trace);
+    if expanded.len() < 4 {
+        return Vec::new();
+    }
+    let top_actual_text = format_type_expr(type_ctx, expanded[0].0);
+    let top_expected_text = format_type_expr(type_ctx, expanded[1].0);
+
+    let groups = expanded[2..]
+        .chunks_exact(2)
+        .map(|chunk| TypeExpansionReport {
+            actual: chunk[0].0,
+            actual_expansion: chunk[0].1,
+            expected: chunk[1].0,
+            expected_expansion: chunk[1].1,
+        })
+        .collect::<Vec<_>>();
+
+    let mut reports: Vec<TypeExpansionReport> = Vec::new();
+    for (idx, group) in groups.iter().copied().enumerate() {
+        let actual_text = format_type_expr(type_ctx, group.actual);
+        let expected_text = format_type_expr(type_ctx, group.expected);
+        let is_top_pair_expansion = (actual_text == top_actual_text
+            && expected_text == top_expected_text)
+            || (actual_text == top_expected_text && expected_text == top_actual_text)
+            || (actual_text == top_actual_text && expected_text != top_expected_text)
+            || (expected_text == top_expected_text && actual_text != top_actual_text)
+            || (actual_text == top_expected_text && expected_text != top_actual_text)
+            || (expected_text == top_actual_text && actual_text != top_expected_text);
+        if is_top_pair_expansion {
+            continue;
+        }
+
+        let is_same_expansion = type_expansion_same(type_ctx, group.actual, group.actual_expansion)
+            && type_expansion_same(type_ctx, group.expected, group.expected_expansion);
+        let duplicates_previous_expansion = reports.iter().any(|previous| {
+            let previous_actual_expansion = format_type_expr(type_ctx, previous.actual_expansion);
+            let previous_expected = format_type_expr(type_ctx, previous.expected);
+            let previous_actual = format_type_expr(type_ctx, previous.actual);
+            let previous_expected_expansion =
+                format_type_expr(type_ctx, previous.expected_expansion);
+            (actual_text == previous_actual_expansion && expected_text == previous_expected)
+                || (actual_text == previous_expected && expected_text == previous_actual_expansion)
+                || (actual_text == previous_actual && expected_text == previous_expected_expansion)
+                || (actual_text == previous_expected_expansion && expected_text == previous_actual)
+        });
+        if is_same_expansion && duplicates_previous_expansion {
+            continue;
+        }
+        if is_same_expansion && idx + 1 != groups.len() {
+            continue;
+        }
+        reports.push(group);
+    }
+    reports
+}
+
+fn expanded_type_clash_trace(
+    type_ctx: &TypeContext,
+    trace: &[(TypeExprRef, TypeExprRef)],
+) -> Vec<(TypeExprRef, TypeExprRef)> {
+    let mut expanded = Vec::with_capacity(trace.len() * 2);
+    for (actual, expected) in trace {
+        expanded.push(expanded_type_clash_entry(type_ctx, *actual));
+        expanded.push(expanded_type_clash_entry(type_ctx, *expected));
+    }
+    expanded
+}
+
+fn expanded_type_clash_entry(
+    type_ctx: &TypeContext,
+    ty: TypeExprRef,
+) -> (TypeExprRef, TypeExprRef) {
+    let repr = type_ctx.repr(ty);
+    let expansion = type_alias_expansion(type_ctx, repr).unwrap_or(repr);
+    (repr, expansion)
+}
+
+fn type_alias_expansion(type_ctx: &TypeContext, ty: TypeExprRef) -> Option<TypeExprRef> {
+    let repr = type_ctx.repr(ty);
+    let desc = type_ctx.get_desc(repr);
+    let TypeDesc::Tconstr { path, args, .. } = &*desc else {
+        return None;
+    };
+    let path = path.clone();
+    let args = args.clone();
+    drop(desc);
+
+    let manifest = type_decl_manifest_for_path(type_ctx, &path)?;
+    let (params, manifest) = manifest;
+    let expansion = if params.len() == args.len() {
+        crate::types::ctype::subst_type_params(type_ctx, &params, &args, manifest)
+    } else {
+        manifest
+    };
+    Some(type_ctx.repr(expansion))
+}
+
+fn type_alias_full_expansion(type_ctx: &TypeContext, ty: TypeExprRef) -> Option<TypeExprRef> {
+    let original = type_ctx.repr(ty);
+    let mut current = original;
+    let mut seen = AHashSet::new();
+    let mut changed = false;
+
+    while seen.insert(current) {
+        let Some(next) = type_alias_expansion(type_ctx, current) else {
+            break;
+        };
+        let next = type_ctx.repr(next);
+        if next == current {
+            break;
+        }
+        current = next;
+        changed = true;
+    }
+
+    changed.then_some(current)
+}
+
+fn type_decl_manifest_for_path(
+    type_ctx: &TypeContext,
+    path: &crate::types::Path,
+) -> Option<(Vec<TypeExprRef>, TypeExprRef)> {
+    let from_decl = |decl: std::cell::Ref<'_, crate::types::TypeDeclaration>| {
+        decl.type_manifest
+            .map(|manifest| (decl.type_params.clone(), manifest))
+    };
+
+    if let crate::types::Path::Pident(id) = path
+        && id.stamp() != 0
+        && let Some(decl) = type_ctx.find_type_decl_by_stamp(id.stamp())
+        && let Some(result) = from_decl(decl)
+    {
+        return Some(result);
+    }
+
+    if let Some(decl) = type_ctx.find_type_decl_by_path(&path.name())
+        && let Some(result) = from_decl(decl)
+    {
+        return Some(result);
+    }
+
+    if let Some(decl) = type_ctx.find_type_decl(path.head_name())
+        && let Some(result) = from_decl(decl)
+    {
+        return Some(result);
+    }
+
+    None
+}
+
+fn type_expansion_same(type_ctx: &TypeContext, ty: TypeExprRef, expansion: TypeExprRef) -> bool {
+    type_ctx.repr(ty) == type_ctx.repr(expansion)
+        || format_type_expr(type_ctx, ty) == format_type_expr(type_ctx, expansion)
+}
+
+fn append_polyvariant_type_clash_help(
+    type_ctx: &TypeContext,
+    trace: &[(TypeExprRef, TypeExprRef)],
+    message: &mut String,
+) -> bool {
+    const INFO: &str = "\x1b[1;33m";
+    const ERROR: &str = "\x1b[1;31m";
+    const RESET: &str = "\x1b[0m";
+
+    let Some((actual_ty, expected_ty)) = polyvariant_diagnostic_type_pair(type_ctx, trace) else {
+        return false;
+    };
+    let Some((actual_row, expected_row)) = polyvariant_row_pair(type_ctx, actual_ty, expected_ty)
+    else {
+        return false;
+    };
+
+    let actual_fields = visible_polyvariant_fields(type_ctx, &actual_row);
+    let expected_fields = visible_polyvariant_fields(type_ctx, &expected_row);
+    let common_labels = actual_fields
+        .iter()
+        .filter(|(actual_label, _)| {
+            expected_fields
+                .iter()
+                .any(|(expected_label, _)| expected_label == actual_label)
+        })
+        .count();
+
+    if actual_row.row_closed
+        && expected_row.row_closed
+        && common_labels == 0
+        && !actual_fields.is_empty()
+        && !expected_fields.is_empty()
+    {
+        message.push_str(
+            "\n\nThese polymorphic variants are incompatible - they share no common constructors.",
+        );
+        return true;
+    }
+
+    let missing_from_actual = expected_fields
+        .iter()
+        .filter(|(expected_label, _)| {
+            !actual_fields
+                .iter()
+                .any(|(actual_label, _)| actual_label == expected_label)
+        })
+        .map(|(label, _)| label.as_str())
+        .collect::<Vec<_>>();
+    if actual_row.row_closed && !missing_from_actual.is_empty() {
+        let constructors_txt = if missing_from_actual.len() == 1 {
+            "constructor"
+        } else {
+            "constructors"
+        };
+        message.push_str("\n\nThe first polymorphic variant is ");
+        message.push_str(INFO);
+        message.push_str("closed");
+        message.push_str(RESET);
+        message.push_str(" and doesn't include the ");
+        message.push_str(constructors_txt);
+        message.push_str(": ");
+        message.push_str(ERROR);
+        message.push_str(&format_polyvariant_tags(&missing_from_actual));
+        message.push_str(RESET);
+        message.push_str(".\n\nPossible solutions:\n- Either make the first variant ");
+        message.push_str(INFO);
+        message.push_str("open");
+        message.push_str(RESET);
+        message.push_str(" so it can accept additional constructors. To do this, make sure the type starts with ");
+        message.push_str(INFO);
+        message.push_str("[>");
+        message.push_str(RESET);
+        message.push_str(" instead of ");
+        message.push_str(INFO);
+        message.push('[');
+        message.push_str(RESET);
+        message.push_str("\n- Or add the missing ");
+        message.push_str(constructors_txt);
+        message.push_str(" to it.");
+        return true;
+    }
+
+    let missing_from_expected = actual_fields
+        .iter()
+        .filter(|(actual_label, _)| {
+            !expected_fields
+                .iter()
+                .any(|(expected_label, _)| expected_label == actual_label)
+        })
+        .map(|(label, _)| label.as_str())
+        .collect::<Vec<_>>();
+    if expected_row.row_closed && !missing_from_expected.is_empty() {
+        let constructors_txt = if missing_from_expected.len() == 1 {
+            "constructor"
+        } else {
+            "constructors"
+        };
+        message.push_str("\n\nThe second polymorphic variant is ");
+        message.push_str(INFO);
+        message.push_str("closed");
+        message.push_str(RESET);
+        message.push_str(" and doesn't include the ");
+        message.push_str(constructors_txt);
+        message.push_str(": ");
+        message.push_str(ERROR);
+        message.push_str(&format_polyvariant_tags(&missing_from_expected));
+        message.push_str(RESET);
+        message.push_str(".\n\nPossible solutions:\n- Either make the second variant ");
+        message.push_str(INFO);
+        message.push_str("open");
+        message.push_str(RESET);
+        message.push_str(" so it can accept additional constructors. To do this, make sure the type starts with ");
+        message.push_str(INFO);
+        message.push_str("[>");
+        message.push_str(RESET);
+        message.push_str(" instead of ");
+        message.push_str(INFO);
+        message.push('[');
+        message.push_str(RESET);
+        message.push_str("\n- Or add the missing ");
+        message.push_str(constructors_txt);
+        message.push_str(" to it.");
+        return true;
+    }
+
+    if actual_row.row_closed
+        && expected_row.row_closed
+        && actual_fields.len() == 1
+        && expected_fields.len() == 1
+        && actual_fields[0].0 == expected_fields[0].0
+    {
+        let constructor = format_polyvariant_tag(actual_fields[0].0.as_str());
+        message.push_str("\n\nBoth polymorphic variants have the constructor ");
+        message.push_str(INFO);
+        message.push_str(&constructor);
+        message.push_str(RESET);
+        message.push_str(
+            ", but their payload types are incompatible.\nMake sure the payload types for ",
+        );
+        message.push_str(INFO);
+        message.push_str(&constructor);
+        message.push_str(RESET);
+        message.push_str(" match exactly in both polymorphic variants.");
+        return true;
+    }
+
+    false
+}
+
+fn polyvariant_row_pair(
+    type_ctx: &TypeContext,
+    actual: TypeExprRef,
+    expected: TypeExprRef,
+) -> Option<(
+    crate::types::type_expr::RowDesc,
+    crate::types::type_expr::RowDesc,
+)> {
+    Some((
+        polyvariant_row(type_ctx, actual)?,
+        polyvariant_row(type_ctx, expected)?,
+    ))
+}
+
+fn polyvariant_diagnostic_type_pair(
+    type_ctx: &TypeContext,
+    trace: &[(TypeExprRef, TypeExprRef)],
+) -> Option<(TypeExprRef, TypeExprRef)> {
+    let mut fallback = None;
+    for (actual, expected) in trace.iter().copied() {
+        if polyvariant_row_pair(type_ctx, actual, expected).is_none() {
+            continue;
+        }
+        if fallback.is_none() {
+            fallback = Some((actual, expected));
+        }
+        if format_type_expr(type_ctx, actual) != format_type_expr(type_ctx, expected) {
+            return Some((actual, expected));
+        }
+    }
+    fallback
+}
+
+fn polyvariant_row(
+    type_ctx: &TypeContext,
+    ty: TypeExprRef,
+) -> Option<crate::types::type_expr::RowDesc> {
+    let repr = type_ctx.repr(ty);
+    let desc = type_ctx.get_desc(repr);
+    let row = match &*desc {
+        TypeDesc::Tvariant(row) => crate::types::btype::row_repr(type_ctx, row),
+        _ => return None,
+    };
+    Some(row)
+}
+
+fn type_is_polyvariant(type_ctx: &TypeContext, ty: TypeExprRef) -> bool {
+    matches!(
+        &*type_ctx.get_desc(type_ctx.repr(ty)),
+        TypeDesc::Tvariant(_)
+    )
+}
+
+fn visible_polyvariant_fields(
+    type_ctx: &TypeContext,
+    row: &crate::types::type_expr::RowDesc,
+) -> Vec<(
+    crate::types::asttypes::Label,
+    crate::types::type_expr::RowField,
+)> {
+    let mut fields = row
+        .row_fields
+        .iter()
+        .filter_map(|(label, field)| {
+            let field = crate::types::btype::row_field_repr(type_ctx, field);
+            (!matches!(field, crate::types::type_expr::RowField::Rabsent))
+                .then(|| (label.clone(), field))
+        })
+        .collect::<Vec<_>>();
+    fields.sort_by(|(left, _), (right, _)| left.as_str().cmp(right.as_str()));
+    fields
+}
+
+fn format_polyvariant_tags(labels: &[&str]) -> String {
+    labels
+        .iter()
+        .map(|label| format_polyvariant_tag(label))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn format_polyvariant_tag(label: &str) -> String {
+    format!("#{label}")
+}
+
+fn append_object_field_mismatch_help(
+    type_ctx: &TypeContext,
+    trace: &[(TypeExprRef, TypeExprRef)],
+    message: &mut String,
+) -> bool {
+    const INFO: &str = "\x1b[1;33m";
+    const ERROR: &str = "\x1b[1;31m";
+    const RESET: &str = "\x1b[0m";
+
+    let Some((field_name, actual_ty, expected_ty)) = trace
+        .iter()
+        .find_map(|(actual, expected)| object_field_mismatch_pair(type_ctx, *actual, *expected))
+    else {
+        return false;
+    };
+
+    message.push_str("\n\nTypes for field ");
+    message.push_str(INFO);
+    message.push('"');
+    message.push_str(&field_name);
+    message.push('"');
+    message.push_str(RESET);
+    message.push_str(" are incompatible:\n");
+    message.push_str("Field ");
+    message.push_str(INFO);
+    message.push('"');
+    message.push_str(&field_name);
+    message.push('"');
+    message.push_str(RESET);
+    message.push_str(" in the passed object has type ");
+    message.push_str(ERROR);
+    message.push_str(&format_type_expr(type_ctx, actual_ty));
+    message.push_str(RESET);
+    message.push_str(", but is expected to have type ");
+    message.push_str(INFO);
+    message.push_str(&format_type_expr(type_ctx, expected_ty));
+    message.push_str(RESET);
+    message.push('.');
+
+    true
+}
+
+fn append_object_field_missing_help(
+    type_ctx: &TypeContext,
+    trace: &[(TypeExprRef, TypeExprRef)],
+    message: &mut String,
+) -> bool {
+    const INFO: &str = "\x1b[1;33m";
+    const RESET: &str = "\x1b[0m";
+
+    let Some((first_object, field_name, field_ty)) = trace
+        .iter()
+        .find_map(|(actual, expected)| object_field_missing_pair(type_ctx, *actual, *expected))
+    else {
+        return false;
+    };
+
+    message.push_str("\n\nThe ");
+    message.push_str(if first_object { "first" } else { "second" });
+    message.push_str(" object is expected to have a field ");
+    message.push_str(INFO);
+    message.push('"');
+    message.push_str(&field_name);
+    message.push('"');
+    message.push_str(RESET);
+    message.push_str(" of type ");
+    message.push_str(INFO);
+    message.push_str(&format_type_expr(type_ctx, field_ty));
+    message.push_str(RESET);
+    message.push_str(", but it does not.");
+
+    true
+}
+
+fn object_field_expected_line(
+    type_ctx: &TypeContext,
+    trace: &[(TypeExprRef, TypeExprRef)],
+) -> Option<(String, TypeExprRef)> {
+    trace
+        .iter()
+        .find_map(|(actual, expected)| object_field_mismatch_pair(type_ctx, *actual, *expected))
+        .map(|(field_name, _, expected_field_ty)| (field_name, expected_field_ty))
+        .or_else(|| {
+            trace
+                .iter()
+                .find_map(|(actual, expected)| {
+                    object_field_missing_pair(type_ctx, *actual, *expected)
+                })
+                .map(|(_, field_name, field_ty)| (field_name, field_ty))
+        })
+}
+
+fn object_field_mismatch_pair(
+    type_ctx: &TypeContext,
+    actual: TypeExprRef,
+    expected: TypeExprRef,
+) -> Option<(String, TypeExprRef, TypeExprRef)> {
+    let actual_repr = type_ctx.repr(actual);
+    let expected_repr = type_ctx.repr(expected);
+    let actual_desc = type_ctx.get_desc(actual_repr);
+    let expected_desc = type_ctx.get_desc(expected_repr);
+    let result = match (&*actual_desc, &*expected_desc) {
+        (
+            TypeDesc::Tfield {
+                name: actual_name,
+                typ: actual_ty,
+                rest: actual_rest,
+                ..
+            },
+            TypeDesc::Tfield {
+                name: expected_name,
+                typ: expected_ty,
+                rest: expected_rest,
+                ..
+            },
+        ) if actual_name == expected_name
+            && type_is_nil(type_ctx, *actual_rest)
+            && type_is_nil(type_ctx, *expected_rest) =>
+        {
+            Some((actual_name.clone(), *actual_ty, *expected_ty))
+        }
+        _ => None,
+    };
+    drop(actual_desc);
+    drop(expected_desc);
+    result
+}
+
+fn object_field_missing_pair(
+    type_ctx: &TypeContext,
+    actual: TypeExprRef,
+    expected: TypeExprRef,
+) -> Option<(bool, String, TypeExprRef)> {
+    let actual_repr = type_ctx.repr(actual);
+    let expected_repr = type_ctx.repr(expected);
+    let actual_desc = type_ctx.get_desc(actual_repr);
+    let expected_desc = type_ctx.get_desc(expected_repr);
+    let result = match (&*actual_desc, &*expected_desc) {
+        (TypeDesc::Tnil | TypeDesc::Tconstr { .. }, TypeDesc::Tfield { name, typ, .. }) => {
+            Some((true, name.clone(), *typ))
+        }
+        (TypeDesc::Tfield { name, typ, .. }, TypeDesc::Tnil | TypeDesc::Tconstr { .. }) => {
+            Some((false, name.clone(), *typ))
+        }
+        _ => None,
+    };
+    drop(actual_desc);
+    drop(expected_desc);
+    result
+}
+
+fn type_is_nil(type_ctx: &TypeContext, ty: TypeExprRef) -> bool {
+    matches!(&*type_ctx.get_desc(type_ctx.repr(ty)), TypeDesc::Tnil)
+}
+
+fn append_dict_literal_help(
+    type_ctx: &TypeContext,
+    trace: &[(TypeExprRef, TypeExprRef)],
+    message: &mut String,
+) {
+    const INFO: &str = "\x1b[1;33m";
+    const RESET: &str = "\x1b[0m";
+
+    let has_dict_literal_mismatch = [
+        bottom_type_clash_aliases(trace),
+        nested_type_clash_pair(type_ctx, trace),
+        trace.first().copied(),
+    ]
+    .into_iter()
+    .flatten()
+    .any(|(actual, expected)| type_is_object(type_ctx, actual) && type_is_dict(type_ctx, expected));
+    if !has_dict_literal_mismatch {
+        return;
+    }
+
+    message.push_str("\n\nDicts are written like: ");
+    message.push_str(INFO);
+    message.push_str("dict{\"a\": 1, \"b\": 2}");
+    message.push_str(RESET);
+    message.push_str("\n\n");
+}
+
+fn type_is_object(type_ctx: &TypeContext, ty: TypeExprRef) -> bool {
+    let repr = type_ctx.repr(ty);
+    matches!(
+        &*type_ctx.get_desc(repr),
+        TypeDesc::Tobject { .. } | TypeDesc::Tfield { .. }
+    )
+}
+
+fn type_is_record(type_ctx: &TypeContext, ty: TypeExprRef) -> bool {
+    let repr = type_ctx.repr(ty);
+    match &*type_ctx.get_desc(repr) {
+        TypeDesc::Tconstr { path, .. } => type_path_is_record(type_ctx, path),
+        TypeDesc::Tlink(next) | TypeDesc::Tsubst(next) => type_is_record(type_ctx, *next),
+        _ => false,
+    }
+}
+
+fn type_path_is_record(type_ctx: &TypeContext, path: &crate::types::Path) -> bool {
+    if let crate::types::Path::Pident(id) = path
+        && id.stamp() != 0
+        && let Some(decl) = type_ctx.find_type_decl_by_stamp(id.stamp())
+    {
+        return matches!(
+            &decl.type_kind,
+            crate::types::decl::TypeKind::TypeRecord(_, _)
+        );
+    }
+
+    if let Some(decl) = type_ctx.find_type_decl_by_path(&path.name()) {
+        return matches!(
+            &decl.type_kind,
+            crate::types::decl::TypeKind::TypeRecord(_, _)
+        );
+    }
+
+    type_ctx
+        .find_type_decl(path.head_name())
+        .is_some_and(|decl| {
+            matches!(
+                &decl.type_kind,
+                crate::types::decl::TypeKind::TypeRecord(_, _)
+            )
+        })
+}
+
+fn type_is_dict(type_ctx: &TypeContext, ty: TypeExprRef) -> bool {
+    let repr = type_ctx.repr(ty);
+    match &*type_ctx.get_desc(repr) {
+        TypeDesc::Tconstr { path, .. } => {
+            path.same(&crate::types::predef::path_dict()) || path.last() == "dict"
+        }
+        TypeDesc::Tlink(next) | TypeDesc::Tsubst(next) => type_is_dict(type_ctx, *next),
+        _ => false,
+    }
+}
+
+fn type_clash_array_to_tuple(type_ctx: &TypeContext, trace: &[(TypeExprRef, TypeExprRef)]) -> bool {
+    [
+        bottom_type_clash_aliases(trace),
+        nested_type_clash_pair(type_ctx, trace),
+        trace.first().copied(),
+    ]
+    .into_iter()
+    .flatten()
+    .any(|(actual, expected)| {
+        let actual_is_array = match &*type_ctx.get_desc(type_ctx.repr(actual)) {
+            TypeDesc::Tconstr { path, .. } => path.head_name() == "array",
+            _ => false,
+        };
+        let expected_is_tuple = matches!(
+            &*type_ctx.get_desc(type_ctx.repr(expected)),
+            TypeDesc::Ttuple(_)
+        );
+
+        actual_is_array && expected_is_tuple
+    })
+}
+
+fn suggested_array_to_tuple_rewrite(
+    arena: &ParseArena,
+    source: &str,
+    loc: LocIdx,
+) -> Option<String> {
+    let start = arena.loc_start(loc).cnum as usize;
+    let end = arena.loc_end(loc).cnum as usize;
+    let text = source.get(start..end)?.trim();
+    let inner = text.strip_prefix('[')?.strip_suffix(']')?;
+    Some(format!("({inner})"))
+}
+
+fn append_simple_conversion_help(
+    type_ctx: &TypeContext,
+    arena: &ParseArena,
+    source: &str,
+    loc: LocIdx,
+    trace: &[(TypeExprRef, TypeExprRef)],
+    message: &mut String,
+) {
+    const INFO: &str = "\x1b[1;33m";
+    const RESET: &str = "\x1b[0m";
+
+    let Some((actual_name, expected_name, converter)) =
+        simple_conversion_candidate(type_ctx, trace)
+    else {
+        return;
+    };
+
+    message.push_str("\n\nYou can convert ");
+    message.push_str(INFO);
+    message.push_str(&actual_name);
+    message.push_str(RESET);
+    message.push_str(" to ");
+    message.push_str(INFO);
+    message.push_str(&expected_name);
+    message.push_str(RESET);
+    message.push_str(" with ");
+    message.push_str(INFO);
+    message.push_str(converter);
+    message.push_str(RESET);
+    message.push('.');
+    if actual_name == "float"
+        && expected_name == "int"
+        && source_loc_is_float_literal_with_trailing_dot(arena, source, loc)
+    {
+        message.push('\n');
+        message.push_str("If this is a literal, try a number without a trailing dot (e.g. ");
+        message.push_str(INFO);
+        message.push_str("20");
+        message.push_str(RESET);
+        message.push_str(").");
+    }
+    if actual_name == "int" && expected_name == "float" {
+        message.push('\n');
+        message.push_str("If this is a literal, try a number with a trailing dot (e.g. ");
+        message.push_str(INFO);
+        message.push_str("20.");
+        message.push_str(RESET);
+        message.push_str(").");
+    }
+}
+
+fn source_loc_is_float_literal_with_trailing_dot(
+    arena: &ParseArena,
+    source: &str,
+    loc: LocIdx,
+) -> bool {
+    let start = arena.loc_start(loc).cnum as usize;
+    let end = arena.loc_end(loc).cnum as usize;
+    let Some(text) = source.get(start..end).map(str::trim) else {
+        return false;
+    };
+    let (text, loc_has_dot) = if let Some(text) = text.strip_suffix('.') {
+        (text, true)
+    } else {
+        (text, false)
+    };
+    !text.is_empty()
+        && text.chars().all(|ch| ch.is_ascii_digit() || ch == '_')
+        && (loc_has_dot || source.as_bytes().get(end).is_some_and(|byte| *byte == b'.'))
+}
+
+fn simple_conversion_candidate(
+    type_ctx: &TypeContext,
+    trace: &[(TypeExprRef, TypeExprRef)],
+) -> Option<(String, String, &'static str)> {
+    let candidates = [
+        bottom_type_clash_aliases(trace),
+        nested_type_clash_pair(type_ctx, trace),
+        trace.first().copied(),
+    ];
+
+    for candidate in candidates.into_iter().flatten() {
+        let Some(actual_name) = simple_type_constr_name(type_ctx, candidate.0) else {
+            continue;
+        };
+        let Some(expected_name) = simple_type_constr_name(type_ctx, candidate.1) else {
+            continue;
+        };
+        if let Some(converter) = simple_conversion(&actual_name, &expected_name) {
+            return Some((actual_name, expected_name, converter));
+        }
+    }
+    None
+}
+
+fn nested_type_clash_pair(
+    type_ctx: &TypeContext,
+    trace: &[(TypeExprRef, TypeExprRef)],
+) -> Option<(TypeExprRef, TypeExprRef)> {
+    let (top_actual, top_expected) = trace.first().copied()?;
+    let top_actual_text = format_type_expr(type_ctx, top_actual);
+    let top_expected_text = format_type_expr(type_ctx, top_expected);
+    trace
+        .iter()
+        .skip(1)
+        .rev()
+        .copied()
+        .find(|(actual, expected)| {
+            let actual_text = format_type_expr(type_ctx, *actual);
+            let expected_text = format_type_expr(type_ctx, *expected);
+            let is_top_alias_expansion = (actual_text == top_actual_text
+                && expected_text != top_expected_text)
+                || (expected_text == top_expected_text && actual_text != top_actual_text)
+                || (actual_text == top_expected_text && expected_text != top_actual_text)
+                || (expected_text == top_actual_text && actual_text != top_expected_text);
+            !is_top_alias_expansion
+                && (actual_text != top_actual_text || expected_text != top_expected_text)
+        })
+}
+
+fn bottom_type_clash_aliases(
+    trace: &[(TypeExprRef, TypeExprRef)],
+) -> Option<(TypeExprRef, TypeExprRef)> {
+    let mut result = None;
+    for window in trace.windows(2) {
+        result = Some((window[0].1, window[1].1));
+    }
+    result
+}
+
+fn simple_type_constr_name(type_ctx: &TypeContext, ty: TypeExprRef) -> Option<String> {
+    match &*type_ctx.get_desc(type_ctx.repr(ty)) {
+        TypeDesc::Tconstr { path, args, .. } if args.is_empty() => {
+            Some(path.head_name().to_string())
+        }
+        _ => None,
+    }
+}
+
+fn simple_conversion(actual: &str, expected: &str) -> Option<&'static str> {
+    match (actual, expected) {
+        ("float", "int") => Some("Float.toInt"),
+        ("float", "string") => Some("Float.toString"),
+        ("int", "float") => Some("Int.toFloat"),
+        ("int", "string") => Some("Int.toString"),
+        ("string", "float") => Some("Float.fromString"),
+        ("string", "int") => Some("Int.fromString"),
+        _ => None,
+    }
+}
+
+fn expr_type_clash_uncurried_arity_mismatch(
+    type_ctx: &TypeContext,
+    trace: &[(TypeExprRef, TypeExprRef)],
+) -> Option<(i32, i32)> {
+    let (actual, expected) = trace.first().copied()?;
+    let actual_arity = uncurried_arrow_arity(type_ctx, actual)?;
+    let expected_arity = uncurried_arrow_arity(type_ctx, expected)?;
+    (actual_arity != expected_arity).then_some((actual_arity, expected_arity))
+}
+
+fn uncurried_arrow_arity(type_ctx: &TypeContext, ty: TypeExprRef) -> Option<i32> {
+    match &*type_ctx.get_desc(type_ctx.repr(ty)) {
+        TypeDesc::Tarrow {
+            arity: Some(arity), ..
+        } => Some(*arity),
+        _ => None,
+    }
+}
+
+fn format_function_arity_mismatch_report(
+    arena: &ParseArena,
+    source: &str,
+    filename: &str,
+    loc: LocIdx,
+    actual_arity: i32,
+    expected_arity: i32,
+) -> String {
+    const INFO: &str = "\x1b[1;33m";
+    const ERROR: &str = "\x1b[1;31m";
+    const RESET: &str = "\x1b[0m";
+
+    let mut message = String::new();
+    message.push_str("This function is expected to have ");
+    message.push_str(INFO);
+    message.push_str(&expected_arity.to_string());
+    message.push_str(RESET);
+    message.push(' ');
+    message.push_str(if expected_arity == 1 {
+        "argument"
+    } else {
+        "arguments"
+    });
+    message.push_str(", but");
+    if actual_arity < expected_arity {
+        message.push_str(" only");
+    }
+    message.push_str(" has ");
+    message.push_str(ERROR);
+    message.push_str(&actual_arity.to_string());
+    message.push_str(RESET);
+
+    format_compiler_error_report(arena, source, filename, loc, &message)
+}
+
+fn count_arrow_args(type_ctx: &TypeContext, ty: TypeExprRef, mut count: usize) -> usize {
+    let mut current = ty;
+    let mut seen = AHashSet::new();
+
+    loop {
+        let repr = type_ctx.repr(current);
+        if !seen.insert(repr) {
+            return count;
+        }
+
+        match &*type_ctx.get_desc(repr) {
+            TypeDesc::Tarrow { ret, .. } => {
+                count += 1;
+                current = *ret;
+            }
+            TypeDesc::Tlink(next) | TypeDesc::Tsubst(next) => {
+                current = *next;
+            }
+            _ => return count,
+        }
+    }
+}
+
+fn format_apply_non_function_report(
+    type_ctx: &TypeContext,
+    arena: &ParseArena,
+    source: &str,
+    filename: &str,
+    loc: LocIdx,
+    typ: TypeExprRef,
+) -> String {
+    const INFO: &str = "\x1b[1;33m";
+    const RESET: &str = "\x1b[0m";
+
+    let repr = type_ctx.repr(typ);
+    let mut message = String::new();
+    match &*type_ctx.get_desc(repr) {
+        TypeDesc::Tarrow { ret, .. } => {
+            let count = count_arrow_args(type_ctx, *ret, 1);
+            message.push_str("This function has type ");
+            message.push_str(INFO);
+            message.push_str(&format_type_expr(type_ctx, typ));
+            message.push_str(RESET);
+            message.push('\n');
+            message.push_str("It only accepts ");
+            message.push_str(&count.to_string());
+            message.push(' ');
+            message.push_str(if count == 1 { "argument" } else { "arguments" });
+            message.push_str("; here, it's called with more.");
+        }
+        _ => {
+            message.push_str("This can't be called, it's not a function.\n");
+            message.push_str("The function has type: ");
+            message.push_str(&format_type_expr(type_ctx, typ));
+        }
+    }
+
+    format_compiler_error_report(arena, source, filename, loc, &message)
+}
+
+fn format_too_many_arguments_report(
+    type_ctx: &TypeContext,
+    arena: &ParseArena,
+    source: &str,
+    filename: &str,
+    loc: LocIdx,
+    in_function: bool,
+    ty: TypeExprRef,
+) -> String {
+    let message = if in_function {
+        format!(
+            "This function expects too many arguments,\nit should have type {}",
+            format_type_expr(type_ctx, ty)
+        )
+    } else {
+        format!(
+            "This expression should not be a function,\nthe expected type is {}",
+            format_type_expr(type_ctx, ty)
+        )
+    };
+    format_compiler_error_report(arena, source, filename, loc, &message)
+}
+
+fn format_abstract_wrong_label_report(
+    type_ctx: &TypeContext,
+    arena: &ParseArena,
+    source: &str,
+    filename: &str,
+    loc: LocIdx,
+    label: &TypeArgLabel,
+    ty: TypeExprRef,
+) -> String {
+    let label_mark = match label {
+        TypeArgLabel::Nolabel => "but its first argument is not labelled".to_string(),
+        TypeArgLabel::Labelled(label) => {
+            format!("but its first argument is labelled ~{}", label.txt)
+        }
+        TypeArgLabel::Optional(label) => {
+            format!("but its first argument is labelled ?{}", label.txt)
+        }
+    };
+    let message = format!(
+        "This function should have type {}\n{}",
+        format_type_expr(type_ctx, ty),
+        label_mark
+    );
+    format_compiler_error_report(arena, source, filename, loc, &message)
+}
+
+fn format_apply_wrong_label_report(
+    type_ctx: &TypeContext,
+    arena: &ParseArena,
+    source: &str,
+    filename: &str,
+    loc: LocIdx,
+    label: &ParserArgLabel,
+    ty: TypeExprRef,
+    suppress_info_style: bool,
+) -> String {
+    const INFO: &str = "\x1b[1;33m";
+    const RESET: &str = "\x1b[0m";
+
+    let mut message = String::new();
+    match label {
+        ParserArgLabel::Nolabel => {
+            message.push_str("The argument at this position should be labelled.");
+        }
+        ParserArgLabel::Labelled(loc) => {
+            message.push_str("This function does not take the argument ");
+            if !suppress_info_style {
+                message.push_str(INFO);
+            }
+            message.push('~');
+            message.push_str(arena.get_string(loc.txt));
+            if !suppress_info_style {
+                message.push_str(RESET);
+            }
+            message.push('.');
+        }
+        ParserArgLabel::Optional(loc) => {
+            message.push_str("This function does not take the argument ");
+            if !suppress_info_style {
+                message.push_str(INFO);
+            }
+            message.push('?');
+            message.push_str(arena.get_string(loc.txt));
+            if !suppress_info_style {
+                message.push_str(RESET);
+            }
+            message.push('.');
+        }
+    }
+    message.push('\n');
+    message.push_str("This function has type: ");
+    message.push_str(&format_type_expr(type_ctx, ty));
+
+    format_compiler_error_report(arena, source, filename, loc, &message)
+}
+
+fn format_field_not_optional_report(
+    type_ctx: &TypeContext,
+    arena: &ParseArena,
+    source: &str,
+    filename: &str,
+    loc: LocIdx,
+    name: &str,
+    typ: TypeExprRef,
+) -> String {
+    const INFO: &str = "\x1b[1;33m";
+    const RESET: &str = "\x1b[0m";
+
+    let message = format!(
+        "Field {INFO}{name}{RESET} is not optional in type {}. Use without ?",
+        format_type_expr(type_ctx, typ)
+    );
+    format_compiler_error_report(arena, source, filename, loc, &message)
+}
+
+fn format_unbound_record_field_report(
+    type_ctx: &TypeContext,
+    arena: &ParseArena,
+    source: &str,
+    filename: &str,
+    loc: LocIdx,
+    field_name: &str,
+    from_type: Option<TypeExprRef>,
+    alternatives: &[String],
+) -> String {
+    const INFO: &str = "\x1b[1;33m";
+    const RESET: &str = "\x1b[0m";
+
+    let mut message = String::new();
+    let from_type_desc = from_type.map(|ty| {
+        let repr = type_ctx.repr(ty);
+        (repr, type_ctx.get_desc(repr).clone())
+    });
+
+    match from_type_desc {
+        Some((_, TypeDesc::Tconstr { path, .. })) if path.head_name() == "option" => {
+            message.push_str("You're trying to access the record field ");
+            message.push_str(INFO);
+            message.push_str(field_name);
+            message.push_str(RESET);
+            message.push_str(", but the value you're trying to access it on is an ");
+            message.push_str(INFO);
+            message.push_str("option");
+            message.push_str(RESET);
+            message.push_str(".\n");
+            message.push_str(
+                "You need to unwrap the option first before accessing the record field.\n",
+            );
+            message.push('\n');
+            message.push_str("Possible solutions:\n");
+            message.push_str("- Use ");
+            message.push_str(INFO);
+            message.push_str("Option.map");
+            message.push_str(RESET);
+            message.push_str(" to transform the option: ");
+            message.push_str(INFO);
+            message.push_str("xx->Option.map(field => field.");
+            message.push_str(field_name);
+            message.push(')');
+            message.push_str(RESET);
+            message.push('\n');
+            message.push_str("- Or use ");
+            message.push_str(INFO);
+            message.push_str("Option.getOr");
+            message.push_str(RESET);
+            message.push_str(" with a default: ");
+            message.push_str(INFO);
+            message.push_str("xx->Option.getOr(defaultRecord).");
+            message.push_str(field_name);
+            message.push_str(RESET);
+        }
+        Some((_, TypeDesc::Tconstr { path, .. })) if path.head_name() == "array" => {
+            message.push_str("You're trying to access the record field ");
+            message.push_str(INFO);
+            message.push_str(field_name);
+            message.push_str(RESET);
+            message.push_str(", but the value you're trying to access it on is an ");
+            message.push_str(INFO);
+            message.push_str("array");
+            message.push_str(RESET);
+            message.push_str(".\n");
+            message.push_str("You need to access an individual element of the array if you want to access an individual record field.");
+        }
+        Some((ty, TypeDesc::Tconstr { .. })) => {
+            let mut raw_message = String::new();
+            raw_message.push_str("  You're trying to access the record field ");
+            raw_message.push_str(INFO);
+            raw_message.push_str(field_name);
+            raw_message.push_str(RESET);
+            raw_message
+                .push_str(", but the thing you're trying to access it on is not a record. \n");
+            raw_message.push_str("  \n");
+            raw_message.push_str("The type of the thing you're trying to access it on is:\n");
+            raw_message.push_str("  \n");
+            raw_message.push_str(&format_type_expr(type_ctx, ty));
+            raw_message.push_str("\n  \n\n");
+            raw_message
+                .push_str("  Only records have fields that can be accessed with dot notation.");
+            if let Some(hint) = spellcheck_hint(
+                field_name.rsplit('.').next().unwrap_or(field_name),
+                alternatives,
+            ) {
+                raw_message.push('\n');
+                raw_message.push_str("Hint: Did you mean ");
+                raw_message.push_str(hint);
+                raw_message.push('?');
+            }
+            return format_compiler_error_report_raw_message(
+                arena,
+                source,
+                filename,
+                loc,
+                &raw_message,
+            );
+        }
+        _ => {
+            message.push_str(INFO);
+            message.push_str(field_name);
+            message.push_str(RESET);
+            message.push_str(
+                " refers to a record field, but no corresponding record type is in scope.",
+            );
+            message.push_str("\n\n");
+            message
+                .push_str("If it's defined in another module or file, bring it into scope by:\n");
+            message.push_str("- Prefixing the field name with the module name: ");
+            message.push_str(INFO);
+            message.push_str("TheModule.");
+            message.push_str(field_name);
+            message.push_str(RESET);
+            message.push('\n');
+            message.push_str("- Or specifying the record type explicitly:\n");
+            message.push_str(INFO);
+            message.push_str("let theValue: TheModule.theType = {");
+            message.push_str(field_name);
+            message.push_str(": VALUE}");
+            message.push_str(RESET);
+        }
+    }
+
+    if let Some(hint) = spellcheck_hint(
+        field_name.rsplit('.').next().unwrap_or(field_name),
+        alternatives,
+    ) {
+        let mut raw_message = format_message_with_compiler_indentation(&message);
+        raw_message.push_str("Hint: Did you mean ");
+        raw_message.push_str(hint);
+        raw_message.push('?');
+        return format_compiler_error_report_raw_message(
+            arena,
+            source,
+            filename,
+            loc,
+            &raw_message,
+        );
+    }
+
+    format_compiler_error_report(arena, source, filename, loc, &message)
+}
+
+fn collect_expected_function_arguments(
+    type_ctx: &TypeContext,
+    expected: TypeExprRef,
+) -> Vec<(TypeArgLabel, TypeExprRef)> {
+    let mut args = Vec::new();
+    let mut current = expected;
+    let mut seen = AHashSet::new();
+
+    loop {
+        let repr = type_ctx.repr(current);
+        if !seen.insert(repr) {
+            break;
+        }
+
+        match &*type_ctx.get_desc(repr) {
+            TypeDesc::Tarrow { arg, ret, .. } => {
+                args.push((arg.lbl.clone(), arg.typ));
+                current = *ret;
+            }
+            TypeDesc::Tlink(next) | TypeDesc::Tsubst(next) => current = *next,
+            _ => break,
+        }
+    }
+
+    args
+}
+
+fn format_type_clash_arguments(
+    type_ctx: &TypeContext,
+    args: &[(TypeArgLabel, TypeExprRef)],
+) -> String {
+    args.iter()
+        .map(|(label, ty)| {
+            let ty = format_type_expr(type_ctx, *ty);
+            match label {
+                TypeArgLabel::Nolabel => ty,
+                TypeArgLabel::Labelled(label) => format!("(~{}: {ty})", label.txt),
+                TypeArgLabel::Optional(label) => format!("(?{}: {ty})", label.txt),
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn format_uncurried_arity_mismatch_report(
+    type_ctx: &TypeContext,
+    arena: &ParseArena,
+    source: &str,
+    filename: &str,
+    loc: LocIdx,
+    function_type: TypeExprRef,
+    expected_arity: usize,
+    provided_arity: usize,
+    provided_args: &[crate::parser::ast::ArgLabel],
+    arity_suggestion: Option<&str>,
+) -> String {
+    const INFO: &str = "\x1b[1;33m";
+    const ERROR: &str = "\x1b[1;31m";
+    const RESET: &str = "\x1b[0m";
+
+    let args_from_type = collect_function_arg_labels(type_ctx, function_type);
+    let args_from_type_unlabelled = args_from_type
+        .iter()
+        .filter(|arg| matches!(arg, TypeArgLabel::Nolabel))
+        .count();
+    let provided_unlabelled = provided_args
+        .iter()
+        .filter(|arg| matches!(arg, crate::parser::ast::ArgLabel::Nolabel))
+        .count();
+    let mismatch_in_unlabelled_args = args_from_type_unlabelled != provided_unlabelled;
+
+    let required_args = args_from_type
+        .iter()
+        .filter_map(|arg| match arg {
+            TypeArgLabel::Labelled(label) => Some(label.txt.clone()),
+            TypeArgLabel::Nolabel | TypeArgLabel::Optional(_) => None,
+        })
+        .collect::<Vec<_>>();
+    let passed_named_args = provided_args
+        .iter()
+        .filter_map(|arg| parser_arg_label_name(arg, arena).map(str::to_string))
+        .collect::<Vec<_>>();
+    let missing_required_args = required_args
+        .iter()
+        .filter(|arg| !passed_named_args.contains(arg))
+        .cloned()
+        .collect::<Vec<_>>();
+
+    let named_args_of_fn_type = args_from_type
+        .iter()
+        .filter_map(|arg| match arg {
+            TypeArgLabel::Labelled(label) | TypeArgLabel::Optional(label) => {
+                Some(label.txt.clone())
+            }
+            TypeArgLabel::Nolabel => None,
+        })
+        .collect::<Vec<_>>();
+    let superfluous_args = passed_named_args
+        .iter()
+        .filter(|arg| !named_args_of_fn_type.contains(arg))
+        .cloned()
+        .collect::<Vec<_>>();
+
+    let is_fallback = missing_required_args.is_empty()
+        && superfluous_args.is_empty()
+        && !mismatch_in_unlabelled_args;
+
+    let mut message = String::new();
+    message.push_str("This function call is incorrect.\n");
+    message.push_str("The function has type:\n");
+    message.push_str(&format_type_expr(type_ctx, function_type));
+    message.push_str("\n\n");
+
+    if !missing_required_args.is_empty() {
+        message.push_str("- Missing arguments that must be provided: ");
+        message.push_str(
+            &missing_required_args
+                .iter()
+                .map(|arg| format!("~{arg}"))
+                .collect::<Vec<_>>()
+                .join(", "),
+        );
+        message.push('\n');
+        message.push_str("- Hint: Did you want to partially apply the function? You can do that by putting `...` just before the closing parens of the function call. Example: ");
+        message.push_str(INFO);
+        message.push_str("yourFn(~arg1=someVar, ...)");
+        message.push_str(RESET);
+        message.push('\n');
+    }
+
+    if !superfluous_args.is_empty() {
+        message.push_str("- Called with arguments it does not take: ");
+        message.push_str(&superfluous_args.join(", "));
+        message.push('\n');
+    }
+
+    if mismatch_in_unlabelled_args {
+        message.push_str("- The function takes ");
+        message.push_str(INFO);
+        message.push_str(&unlabelled_arg_count_message(
+            args_from_type_unlabelled,
+            provided_unlabelled,
+            CountPosition::Left,
+        ));
+        message.push_str(RESET);
+        message.push_str(" unlabelled argument");
+        if args_from_type_unlabelled != 1 {
+            message.push('s');
+        }
+        message.push_str(", but is called with ");
+        message.push_str(ERROR);
+        message.push_str(&unlabelled_arg_count_message(
+            provided_unlabelled,
+            args_from_type_unlabelled,
+            CountPosition::Right,
+        ));
+        message.push_str(RESET);
+    }
+
+    if is_fallback {
+        message.push_str("It is called with ");
+        message.push_str(ERROR);
+        message.push_str(&provided_arity.to_string());
+        message.push_str(RESET);
+        message.push_str(" argument");
+        if provided_arity != 1 {
+            message.push('s');
+        }
+        message.push_str(" but");
+        if provided_arity > expected_arity {
+            message.push_str(" just");
+        }
+        message.push_str(" requires ");
+        message.push_str(INFO);
+        message.push_str(&expected_arity.to_string());
+        message.push_str(RESET);
+        message.push('.');
+    }
+
+    if let Some(suggestion) = arity_suggestion {
+        message.push_str("\n\nHint: Try ");
+        message.push_str(INFO);
+        message.push_str(suggestion);
+        message.push_str(RESET);
+        message.push_str(" instead (takes ");
+        message.push_str(INFO);
+        message.push_str(&provided_arity.to_string());
+        message.push_str(RESET);
+        message.push_str(" argument");
+        if provided_arity != 1 {
+            message.push('s');
+        }
+        message.push_str(").");
+    }
+
+    format_compiler_error_report(arena, source, filename, loc, &message)
+}
+
+fn format_constructor_arity_mismatch_report(
+    arena: &ParseArena,
+    source: &str,
+    filename: &str,
+    loc: LocIdx,
+    name: &Longident,
+    is_inline_record: bool,
+    expected: usize,
+    provided: usize,
+) -> String {
+    const INFO: &str = "\x1b[1;33m";
+    const RESET: &str = "\x1b[0m";
+
+    let name = format_longident_for_report(arena, name);
+    let message = if is_inline_record && expected == 1 {
+        let suffix = if provided == 0 {
+            ", but it's not being passed any arguments"
+        } else {
+            ""
+        };
+        format!(
+            "This variant constructor {INFO}{name}{RESET} expects an inline record as payload{suffix}."
+        )
+    } else {
+        let argument = if expected == 1 {
+            "argument"
+        } else {
+            "arguments"
+        };
+        let only = if provided < expected { " only" } else { "" };
+        format!(
+            "This variant constructor {INFO}{name}{RESET} expects {expected} {argument}, but it's{only} being passed {provided}."
+        )
+    };
+
+    format_compiler_error_report(arena, source, filename, loc, &message)
+}
+
+fn format_longident_for_report(arena: &ParseArena, lid: &Longident) -> String {
+    match lid {
+        Longident::Lident(name) => arena.get_string(*name).to_string(),
+        Longident::Ldot(prefix, name) => {
+            format!(
+                "{}.{}",
+                format_longident_for_report(arena, prefix),
+                arena.get_string(*name)
+            )
+        }
+        Longident::Lapply(func, arg) => {
+            format!(
+                "{}({})",
+                format_longident_for_report(arena, func),
+                format_longident_for_report(arena, arg)
+            )
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum CountPosition {
+    Left,
+    Right,
+}
+
+fn unlabelled_arg_count_message(
+    count: usize,
+    other_count: usize,
+    position: CountPosition,
+) -> String {
+    match (count, position) {
+        (0, CountPosition::Left) => "no".to_string(),
+        (0, CountPosition::Right) => "none".to_string(),
+        _ if count > other_count => count.to_string(),
+        _ => format!("just {count}"),
+    }
+}
+
+fn parser_arg_label_name<'a>(
+    label: &crate::parser::ast::ArgLabel,
+    arena: &'a ParseArena,
+) -> Option<&'a str> {
+    match label {
+        crate::parser::ast::ArgLabel::Nolabel => None,
+        crate::parser::ast::ArgLabel::Labelled(loc)
+        | crate::parser::ast::ArgLabel::Optional(loc) => Some(arena.get_string(loc.txt)),
+    }
+}
+
+fn collect_function_arg_labels(
+    type_ctx: &TypeContext,
+    function_type: TypeExprRef,
+) -> Vec<TypeArgLabel> {
+    let mut labels = Vec::new();
+    let mut current = function_type;
+    let mut seen = AHashSet::new();
+
+    loop {
+        if !seen.insert(current) {
+            break;
+        }
+
+        match &*type_ctx.get_desc(current) {
+            TypeDesc::Tarrow { arg, ret, .. } => {
+                labels.push(arg.lbl.clone());
+                current = *ret;
+            }
+            _ => break,
+        }
+    }
+
+    labels.reverse();
+    labels
+}
+
+fn format_type_expr(type_ctx: &TypeContext, ty: TypeExprRef) -> String {
+    TypeExprPrinter::new(type_ctx).format(ty)
+}
+
+fn format_package_type_expr_for_error(
+    type_ctx: &TypeContext,
+    arena: &ParseArena,
+    ty: TypeExprRef,
+) -> String {
+    let repr = type_ctx.repr(ty);
+    let desc = (*type_ctx.get_desc(repr)).clone();
+    let TypeDesc::Tpackage { path, lids, args } = desc else {
+        return format_type_expr(type_ctx, ty);
+    };
+    if lids.is_empty() {
+        return format_type_expr(type_ctx, ty);
+    }
+
+    let constraints = lids
+        .iter()
+        .zip(args.iter())
+        .map(|(lid, arg)| {
+            format!(
+                "type {} = {}",
+                format_longident_for_report(arena, lid),
+                format_type_expr(type_ctx, *arg)
+            )
+        })
+        .collect::<Vec<_>>();
+    format!("module({} with {})", path.name(), constraints.join(" and "))
+}
+
+fn format_non_generalizable_type_expr(type_ctx: &TypeContext, ty: TypeExprRef) -> String {
+    TypeExprPrinter::new_with_weak_names(type_ctx).format(ty)
+}
+
+struct TypeExprPrinter<'a> {
+    type_ctx: &'a TypeContext,
+    vars: ahash::AHashMap<TypeExprRef, String>,
+    weak_vars: ahash::AHashMap<TypeExprRef, String>,
+    recursive_aliases: ahash::AHashMap<TypeExprRef, String>,
+    active: AHashSet<TypeExprRef>,
+    rendered_aliases: AHashSet<TypeExprRef>,
+    next_var: usize,
+    next_weak_var: usize,
+    weak_names: bool,
+}
+
+impl<'a> TypeExprPrinter<'a> {
+    fn new(type_ctx: &'a TypeContext) -> Self {
+        Self {
+            type_ctx,
+            vars: ahash::AHashMap::new(),
+            weak_vars: ahash::AHashMap::new(),
+            recursive_aliases: ahash::AHashMap::new(),
+            active: AHashSet::new(),
+            rendered_aliases: AHashSet::new(),
+            next_var: 0,
+            next_weak_var: 1,
+            weak_names: false,
+        }
+    }
+
+    fn new_with_weak_names(type_ctx: &'a TypeContext) -> Self {
+        Self {
+            weak_names: true,
+            ..Self::new(type_ctx)
+        }
+    }
+
+    fn format(&mut self, ty: TypeExprRef) -> String {
+        let repr = self.type_ctx.repr(ty);
+        if self.active.contains(&repr) {
+            return self.recursive_alias_for(repr);
+        }
+        if self.rendered_aliases.contains(&repr)
+            && let Some(alias) = self.recursive_aliases.get(&repr)
+        {
+            return alias.clone();
+        }
+
+        self.active.insert(repr);
+        let desc = (*self.type_ctx.get_desc(repr)).clone();
+        let rendered = match &desc {
+            TypeDesc::Tvar(name) | TypeDesc::Tunivar(name) => self.format_type_var(repr, name),
+            TypeDesc::Tarrow { .. } => self.format_arrow(repr),
+            TypeDesc::Ttuple(types) => {
+                let parts = types.iter().map(|ty| self.format(*ty)).collect::<Vec<_>>();
+                format!("({})", parts.join(", "))
+            }
+            TypeDesc::Tconstr { path, args, .. } => {
+                let name = self.format_path_name(path);
+                if args.is_empty() {
+                    name
+                } else {
+                    let args = args.iter().map(|ty| self.format(*ty)).collect::<Vec<_>>();
+                    format!("{name}<{}>", args.join(", "))
+                }
+            }
+            TypeDesc::Tlink(next) | TypeDesc::Tsubst(next) => self.format(*next),
+            TypeDesc::Tpoly { body, .. } => self.format(*body),
+            TypeDesc::Tobject { fields, .. } => self.format_object(*fields),
+            TypeDesc::Tfield { .. } => self.format_object(repr),
+            TypeDesc::Tnil => "{}".to_string(),
+            TypeDesc::Tvariant(row) => self.format_variant(row),
+            TypeDesc::Tpackage { path, lids, args } => self.format_package(path, lids, args),
+        };
+        self.active.remove(&repr);
+
+        if let Some(alias) = self.recursive_aliases.get(&repr) {
+            self.rendered_aliases.insert(repr);
+            format!("({rendered} as {alias})")
+        } else {
+            rendered
+        }
+    }
+
+    fn recursive_alias_for(&mut self, ty: TypeExprRef) -> String {
+        if let Some(alias) = self.recursive_aliases.get(&ty) {
+            return alias.clone();
+        }
+
+        let alias = generated_type_var_name(self.next_var);
+        self.next_var += 1;
+        self.recursive_aliases.insert(ty, alias.clone());
+        alias
+    }
+
+    fn format_package(
+        &mut self,
+        path: &crate::types::Path,
+        lids: &[Longident],
+        args: &[TypeExprRef],
+    ) -> String {
+        if lids.is_empty() {
+            return format!("module({})", path.name());
+        }
+
+        let constraints = lids
+            .iter()
+            .zip(args.iter())
+            .map(|(lid, arg)| {
+                format!(
+                    "type {} = {}",
+                    self.format_longident(lid),
+                    self.format(*arg)
+                )
+            })
+            .collect::<Vec<_>>();
+        format!("module({} with {})", path.name(), constraints.join(" and "))
+    }
+
+    fn format_longident(&self, lid: &Longident) -> String {
+        match lid {
+            Longident::Lident(name) => self
+                .type_ctx
+                .resolve_any_longident_component(*name)
+                .unwrap_or_else(|| format!("#{}", name.raw())),
+            Longident::Ldot(prefix, name) => {
+                let name = self
+                    .type_ctx
+                    .resolve_any_longident_component(*name)
+                    .unwrap_or_else(|| format!("#{}", name.raw()));
+                format!("{}.{}", self.format_longident(prefix), name)
+            }
+            Longident::Lapply(func, arg) => {
+                format!(
+                    "{}({})",
+                    self.format_longident(func),
+                    self.format_longident(arg)
+                )
+            }
+        }
+    }
+
+    fn format_path_name(&self, path: &crate::types::Path) -> String {
+        let name = self.format_path_name_raw(path);
+        let name = name
+            .strip_prefix("Pervasives.")
+            .or_else(|| name.strip_prefix("Stdlib."))
+            .or_else(|| name.strip_prefix("Pervasives_"))
+            .or_else(|| name.strip_prefix("Stdlib_"))
+            .unwrap_or(&name)
+            .to_string();
+        name
+    }
+
+    fn format_path_name_raw(&self, path: &crate::types::Path) -> String {
+        match path {
+            crate::types::Path::Pident(id) => self.format_path_component(id.name()),
+            crate::types::Path::Pdot(parent, name, _) => {
+                format!(
+                    "{}.{}",
+                    self.format_path_name_raw(parent),
+                    self.format_path_component(name)
+                )
+            }
+            crate::types::Path::Papply(functor, arg) => {
+                format!(
+                    "{}({})",
+                    self.format_path_name_raw(functor),
+                    self.format_path_name_raw(arg)
+                )
+            }
+        }
+    }
+
+    fn format_path_component(&self, name: &str) -> String {
+        if name.starts_with('$') || name.starts_with('%') {
+            format!("\\\"{name}\"")
+        } else {
+            name.to_string()
+        }
+    }
+
+    fn format_object(&mut self, fields: TypeExprRef) -> String {
+        let mut items = Vec::new();
+        let mut current = fields;
+        let mut seen = AHashSet::new();
+
+        loop {
+            let repr = self.type_ctx.repr(current);
+            if !seen.insert(repr) {
+                break;
+            }
+
+            match &*self.type_ctx.get_desc(repr) {
+                TypeDesc::Tfield {
+                    name,
+                    kind,
+                    typ,
+                    rest,
+                } => {
+                    if !matches!(kind, FieldKind::Fabsent) {
+                        items.push(format!("\"{}\": {}", name, self.format(*typ)));
+                    }
+                    current = *rest;
+                }
+                TypeDesc::Tobject { fields, .. } => current = *fields,
+                TypeDesc::Tlink(next) | TypeDesc::Tsubst(next) => current = *next,
+                TypeDesc::Tnil => break,
+                _ => break,
+            }
+        }
+
+        format!("{{{}}}", items.join(", "))
+    }
+
+    fn format_variant(&mut self, row: &crate::types::type_expr::RowDesc) -> String {
+        let row = crate::types::btype::row_repr(self.type_ctx, row);
+        let visible_fields = visible_polyvariant_fields(self.type_ctx, &row);
+        let all_present = visible_fields
+            .iter()
+            .all(|(_, field)| matches!(field, crate::types::type_expr::RowField::Rpresent(_)));
+        let fields = visible_fields
+            .iter()
+            .map(|(label, field)| self.format_variant_field(label.as_str(), field))
+            .collect::<Vec<_>>();
+        let prefix = if row.row_closed {
+            ""
+        } else if all_present {
+            "> "
+        } else {
+            "? "
+        };
+
+        if fields.is_empty() {
+            format!("[{}]", prefix.trim_end())
+        } else {
+            format!("[{}{}]", prefix, fields.join(" | "))
+        }
+    }
+
+    fn format_variant_field(
+        &mut self,
+        label: &str,
+        field: &crate::types::type_expr::RowField,
+    ) -> String {
+        use crate::types::type_expr::RowField;
+
+        let tag = format_polyvariant_tag(label);
+        match field {
+            RowField::Rpresent(Some(ty)) => format!("{tag}({})", self.format(*ty)),
+            RowField::Reither {
+                constant: false,
+                types,
+                ..
+            } if !types.is_empty() => {
+                let types = types.iter().map(|ty| self.format(*ty)).collect::<Vec<_>>();
+                format!("{tag}({})", types.join(" & "))
+            }
+            RowField::Rpresent(None) | RowField::Reither { .. } | RowField::Rabsent => tag,
+        }
+    }
+
+    fn format_arrow(&mut self, ty: TypeExprRef) -> String {
+        let mut args = Vec::new();
+        let mut current = ty;
+        let mut seen = AHashSet::new();
+
+        loop {
+            let repr = self.type_ctx.repr(current);
+            if !seen.insert(repr) {
+                break;
+            }
+
+            match &*self.type_ctx.get_desc(repr) {
+                TypeDesc::Tarrow {
+                    arg, ret, arity, ..
+                } if arity.is_none() || args.is_empty() => {
+                    args.push((
+                        self.format_arrow_arg(&arg.lbl, arg.typ),
+                        !matches!(arg.lbl, TypeArgLabel::Nolabel),
+                    ));
+                    current = *ret;
+                }
+                TypeDesc::Tlink(next) | TypeDesc::Tsubst(next) => current = *next,
+                _ => break,
+            }
+        }
+
+        let ret = self.format(current);
+        if let [(arg, true)] = args.as_slice() {
+            format!("({arg}) => {ret}")
+        } else if let [(arg, false)] = args.as_slice() {
+            format!("{arg} => {ret}")
+        } else {
+            let args = args
+                .into_iter()
+                .map(|(arg, _)| arg)
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("({args}) => {ret}")
+        }
+    }
+
+    fn format_arrow_arg(&mut self, label: &TypeArgLabel, ty: TypeExprRef) -> String {
+        match label {
+            TypeArgLabel::Nolabel => self.format(ty),
+            TypeArgLabel::Labelled(label) => format!("~{}: {}", label.txt, self.format(ty)),
+            TypeArgLabel::Optional(label) => {
+                let inner_ty = crate::types::ctype::extract_option_type(self.type_ctx, ty);
+                let ty = inner_ty
+                    .map(|inner_ty| self.format(inner_ty))
+                    .unwrap_or_else(|| "<hidden>".to_string());
+                format!("~{}: {}=?", label.txt, ty)
+            }
+        }
+    }
+
+    fn format_type_var(&mut self, ty: TypeExprRef, name: &Option<String>) -> String {
+        if self.weak_names && self.type_ctx.get_level(ty) != crate::types::GENERIC_LEVEL {
+            if let Some(existing) = self.weak_vars.get(&ty) {
+                return existing.clone();
+            }
+            let name = format!("'_weak{}", self.next_weak_var);
+            self.next_weak_var += 1;
+            self.weak_vars.insert(ty, name.clone());
+            return name;
+        }
+
+        if let Some(name) = name {
+            if !name.is_empty() && name != "_" {
+                return format!("'{name}");
+            }
+        }
+
+        if let Some(existing) = self.vars.get(&ty) {
+            return existing.clone();
+        }
+
+        let name = generated_type_var_name(self.next_var);
+        self.next_var += 1;
+        self.vars.insert(ty, name.clone());
+        name
+    }
+}
+
+fn generated_type_var_name(idx: usize) -> String {
+    let letter = (b'a' + (idx % 26) as u8) as char;
+    if idx < 26 {
+        format!("'{letter}")
+    } else {
+        format!("'{letter}{}", idx / 26)
+    }
 }
 
 /// Compile ReScript source to JavaScript.
@@ -1347,32 +10948,101 @@ pub fn compile_source_to_js_with_options(
     let mut parser = Parser::new(filename, source);
     let structure = module::parse_structure(&mut parser);
     if parser.has_errors() {
-        return Err(anyhow!(
-            "Parse failed with {} error(s)",
-            parser.diagnostics().len()
-        ));
+        return Err(parser_error_to_anyhow(&parser, source, filename));
     }
-    let file_directives = extract_file_directives_from_structure(&structure, parser.arena())?;
+    apply_external_structure_ppxs(
+        &options.external_ppxs,
+        filename,
+        parser.arena_mut(),
+        &structure,
+    )?;
+    reject_invalid_polyvariant_int_literals_in_structure(
+        &structure,
+        parser.arena(),
+        source,
+        filename,
+    )?;
+    let frontend_warnings =
+        ppx::collect_leading_builtin_warning_attributes(&structure, parser.arena());
+    let frontend_warning_specs =
+        ppx::collect_leading_builtin_warning_attribute_specs(&structure, parser.arena());
+    let mut ppx_warnings_have_errors = emit_ppx_warnings(
+        parser.arena(),
+        source,
+        filename,
+        options,
+        &frontend_warnings,
+    );
+    let config_warnings = validate_file_config_from_structure(&structure, parser.arena())
+        .map_err(|err| config_payload_error_to_anyhow(err, parser.arena(), source, filename))?;
+    let file_config = extract_file_config_from_structure(&structure, parser.arena());
+    let file_warning_config = warning_config_for_options_file_config_and_leading_attrs(
+        options,
+        &file_config,
+        &frontend_warning_specs,
+    );
+    ppx_warnings_have_errors |= emit_ppx_warnings_with_config(
+        parser.arena(),
+        source,
+        filename,
+        &file_warning_config,
+        &config_warnings,
+    );
+    let file_directives = extract_file_directives_from_structure(&structure, parser.arena())
+        .map_err(|err| directive_payload_error_to_anyhow(err, parser.arena(), source, filename))?;
     let debug = debug_for_structure(&structure, options, parser.arena());
     let jsx_preserve = jsx_preserve_for_structure(&structure, options, parser.arena());
-    let experimental_let_unwrap =
-        experimental_let_unwrap_for_structure(&structure, options, parser.arena());
+    let experimental_let_unwrap = options.experimental_let_unwrap || file_config.let_unwrap;
+    reject_disabled_let_unwrap_in_structure(
+        experimental_let_unwrap,
+        &structure,
+        parser.arena(),
+        source,
+        filename,
+    )?;
+    reject_enabled_invalid_let_unwrap_in_structure(
+        experimental_let_unwrap,
+        &structure,
+        parser.arena(),
+        source,
+        filename,
+    )?;
     // Source fallback path: only run JSX rewrite when the file enables `-bs-jsx`.
-    let jsx_version = jsx_version_for_structure(&structure, options, parser.arena());
+    let jsx_version = options.jsx_version.or(file_config.jsx_version);
     let structure = if let Some(jsx_version) = jsx_version {
-        jsx_ppx::transform_structure(structure, jsx_version, parser.arena_mut())
+        reject_invalid_react_component_destructure_in_structure(
+            &structure,
+            parser.arena(),
+            filename,
+        )?;
+        jsx_ppx::transform_structure_result(structure, jsx_version, parser.arena_mut())
+            .map_err(|e| jsx_ppx_error_to_anyhow(e, parser.arena(), source, filename))?
     } else {
         structure
     };
 
-    // Expand extension points (%%raw, %raw, %re, %%private) without touching externals
-    let structure = ppx::expand_extensions(&structure, parser.arena_mut());
+    let structure = if options.no_builtin_ppx {
+        structure
+    } else {
+        let ppx_warnings = ppx::collect_raw_js_warnings(&structure, parser.arena_mut());
+        ppx_warnings_have_errors |= emit_ppx_warnings_with_config(
+            parser.arena(),
+            source,
+            filename,
+            &file_warning_config,
+            &ppx_warnings,
+        );
 
-    // Rewrite expressions: desugar pipe (->), setter (#=), property access (##),
-    // await, tagged templates, encode externals, and apply spice mapper rewrites.
-    // spice is handled here, so avoid running a second top-level spice expansion pass.
-    let structure = ppx::rewrite_structure(&structure, parser.arena_mut())
-        .map_err(|e| anyhow!("PPX rewrite failed: {e}"))?;
+        // Expand extension points (%%raw, %raw, %re, %%private) without touching externals
+        let structure = ppx::expand_extensions(&structure, parser.arena_mut())
+            .map_err(|e| ppx_error_to_anyhow(e, parser.arena(), source, filename))?;
+
+        // Rewrite expressions: desugar pipe (->), setter (#=), property access (##),
+        // await, tagged templates, encode externals, and apply spice mapper rewrites.
+        // spice is handled here, so avoid running a second top-level spice expansion pass.
+        ppx::rewrite_structure(&structure, parser.arena_mut())
+            .map_err(|e| ppx_error_to_anyhow(e, parser.arena(), source, filename))?
+    };
 
     // Type check
     crate::ident::Ident::set_current_time(OCAML_NON_PREDEF_STAMP_START);
@@ -1383,44 +11053,124 @@ pub fn compile_source_to_js_with_options(
     let type_ctx = TypeContext::new(std::sync::Arc::new(id_gen));
     let mut tctx = TypeCheckContext::new(&type_ctx, parser.arena());
     tctx.experimental_let_unwrap = experimental_let_unwrap;
+    tctx.transparent_modules = options.transparent_modules;
+    apply_warning_options(&mut tctx, options);
+    apply_leading_warning_attribute_options(&mut tctx, &frontend_warning_specs);
+    apply_file_config_warning_options(&mut tctx, &file_config);
     let mut env = initial_env(&type_ctx);
 
     // Load Pervasives and extend the initial environment
     let mut pers_env = PersistentEnv::new();
-    let load_path = build_load_path(options);
+    let (load_path, load_path_display) = build_load_path_with_display(options);
     type_ctx.set_load_paths(load_path.clone());
-    pers_env.set_load_path(load_path.clone());
+    pers_env.set_load_path_with_display(load_path.clone(), load_path_display);
     pers_env.set_open_modules(options.open_modules.clone());
     pers_env.set_jsx_version(options.jsx_version);
+    let current_unit_name = options.current_unit_name();
+    pers_env.set_compiling_module(current_unit_name.clone());
     load_pervasives(
         &mut pers_env,
         &mut env,
         &type_ctx,
         &options.open_modules,
         options.nopervasives,
-        options.module_name.as_deref(),
+        current_unit_name.as_deref(),
     );
 
     // Store persistent env in the type check context for module resolution
     tctx.set_persistent_env(pers_env);
 
-    let (typed_structure, final_env) = type_structure(&mut tctx, &env, parser.arena(), &structure)
-        .map_err(|e| anyhow!("Type checking failed: {e:?}"))?;
+    let (typed_structure, final_env) =
+        match type_structure(&mut tctx, &env, parser.arena(), &structure) {
+            Ok(result) => result,
+            Err(e) => {
+                let suppress_info_style = !tctx.warnings.is_empty();
+                emit_type_warnings(parser.arena(), source, filename, &tctx.warnings);
+                if let Some(error) = tctx
+                    .persistent_env
+                    .as_ref()
+                    .and_then(|persistent_env| persistent_env.last_error())
+                {
+                    return Err(persistent_env_error_to_anyhow(error, filename));
+                }
+                return Err(type_mod_error_to_anyhow(
+                    e,
+                    &type_ctx,
+                    parser.arena(),
+                    source,
+                    filename,
+                    suppress_info_style,
+                ));
+            }
+        };
+    if let Some(error) = tctx
+        .persistent_env
+        .as_ref()
+        .and_then(|persistent_env| persistent_env.last_error())
+    {
+        return Err(persistent_env_error_to_anyhow(error, filename));
+    }
+    emit_type_warnings(parser.arena(), source, filename, &tctx.warnings);
+    if ppx_warnings_have_errors || type_warnings_have_errors(&tctx.warnings) {
+        return Err(UserDiagnostic::new(String::new(), 2).into());
+    }
+    let delayed_type_warning_start = tctx.warnings.len();
+
+    let source_file_for_interface = options.source_filename.as_deref().unwrap_or(filename);
+    let has_resi = source_file_for_interface.ends_with(".res")
+        && source_has_interface(options, source_file_for_interface);
+    if options.assume_compiled_interface
+        && source_file_for_interface.ends_with(".res")
+        && !compiled_interface_file_exists(options, source_file_for_interface)
+    {
+        let intf_name = interface_source_name(source_file_for_interface);
+        return Err(UserDiagnostic::new(
+            format_interface_not_compiled_report(source, filename, parser.filename(), &intf_name),
+            2,
+        )
+        .into());
+    }
 
     // Apply interface constraints: moregen linking for non-generic Tvars.
     // OCaml's Includemod.compunit -> moregeneral -> moregen links weak (non-generic)
     // type variables from value-restricted expressions to the corresponding types
     // from the .resi interface. This happens BEFORE sexp serialization.
-    apply_moregen_constraints(&mut tctx, &type_ctx, &typed_structure, options, None);
+    apply_moregen_constraints(
+        &mut tctx,
+        &type_ctx,
+        &typed_structure,
+        options,
+        Some(has_resi),
+    );
+    // OCaml compiler/ml/typemod.ml:1755-1758 reads the compiled interface
+    // through Env.read_signature; persistent Env errors raised there abort
+    // implementation typing before warnings are reported as success.
+    if let Some(error) = tctx
+        .persistent_env
+        .as_ref()
+        .and_then(|persistent_env| persistent_env.last_error())
+    {
+        return Err(persistent_env_error_to_anyhow(error, filename));
+    }
 
     // OCaml's type_implementation_more calls normalize_signature ONLY when there
     // is no .resi file (Mli_exists branch skips it). Match this behavior:
     // normalize sorts Tvariant row fields and Tobject field chains alphabetically.
-    let has_resi = options
-        .source_filename
-        .as_ref()
-        .is_some_and(|f| f.ends_with(".res") && std::path::Path::new(&format!("{}i", f)).exists());
     if !has_resi {
+        let simple_signature =
+            crate::types::includemod::simplify_signature(&typed_structure.str_type);
+        if let Err(e) =
+            crate::types::typemod::check_nongen_schemes(&type_ctx, &final_env, &simple_signature)
+        {
+            return Err(type_mod_error_to_anyhow(
+                e,
+                &type_ctx,
+                parser.arena(),
+                source,
+                filename,
+                false,
+            ));
+        }
         normalize_signature_types(&type_ctx, &typed_structure, &final_env);
     }
 
@@ -1472,7 +11222,7 @@ pub fn compile_source_to_js_with_options(
         &env,
         &typed_structure,
         options,
-        None,
+        Some(has_resi),
     );
     let mut raw_converter =
         crate::raw_lambda::convert::RawLambdaConverter::with_start_stamp_and_unit_name(
@@ -1483,6 +11233,7 @@ pub fn compile_source_to_js_with_options(
             unit_name,
         );
     raw_converter.set_no_assert_false(options.no_assert_false);
+    raw_converter.set_warning_config(tctx.warning_config.clone());
     if let Some(persistent_env) = tctx.persistent_env.clone() {
         raw_converter.set_persistent_env(persistent_env);
     }
@@ -1491,6 +11242,33 @@ pub fn compile_source_to_js_with_options(
     }
     let raw_lambda =
         raw_converter.convert_structure_with_coercion(&typed_structure, &implementation_coercion);
+    let raw_warnings = raw_converter.take_warnings();
+    if let Some(diagnostic) = raw_converter.take_diagnostic() {
+        emit_type_warnings(parser.arena(), source, filename, &raw_warnings);
+        if type_warnings_have_errors(&raw_warnings) {
+            return Err(UserDiagnostic::new(String::new(), 2).into());
+        }
+        return Err(UserDiagnostic::new(
+            format_compiler_error_report_from_location(
+                source,
+                filename,
+                &diagnostic.loc,
+                &diagnostic.message,
+            ),
+            2,
+        )
+        .into());
+    }
+    tctx.flush_value_usage_checks();
+    let delayed_warnings = &tctx.warnings[delayed_type_warning_start..];
+    emit_type_warnings(parser.arena(), source, filename, delayed_warnings);
+    if type_warnings_have_errors(delayed_warnings) {
+        return Err(UserDiagnostic::new(String::new(), 2).into());
+    }
+    emit_type_warnings(parser.arena(), source, filename, &raw_warnings);
+    if type_warnings_have_errors(&raw_warnings) {
+        return Err(UserDiagnostic::new(String::new(), 2).into());
+    }
     let possible_required_modules = raw_converter.take_possible_required_modules();
     let raw_lambda_current_stamp = raw_converter.current_stamp();
     if options.dump_lambda {
@@ -1573,6 +11351,18 @@ pub fn compile_source_to_js_with_options(
         &lowered_lambda,
         &possible_required_modules,
     );
+    if let Some(diagnostic) = compiler.take_diagnostic() {
+        return Err(UserDiagnostic::new(
+            format_compiler_error_report_from_location(
+                source,
+                filename,
+                &diagnostic.loc,
+                &diagnostic.message,
+            ),
+            2,
+        )
+        .into());
+    }
 
     // JS IR -> JS source
     let js = print_deps_program_with_directives_and_options(
@@ -1864,6 +11654,16 @@ fn build_inferred_signature_coercion(
     }
 }
 
+fn report_compunit_inclusion_warnings(
+    tctx: &mut TypeCheckContext<'_>,
+    warnings: Vec<crate::diagnostics::Warning>,
+) {
+    let loc = tctx.arena.none_loc();
+    for warning in warnings {
+        tctx.report_warning(loc, warning);
+    }
+}
+
 fn compute_raw_implementation_coercion(
     tctx: &mut TypeCheckContext<'_>,
     type_ctx: &TypeContext,
@@ -1886,13 +11686,10 @@ fn compute_raw_implementation_coercion(
         return build_inferred_signature_coercion(impl_sig);
     }
 
-    let Some(module_name) = std::path::Path::new(source_file)
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .map(|s| s.to_string())
-    else {
+    let module_name = module_name_from_source_filename(source_file);
+    if module_name.is_empty() {
         return crate::types::typedtree::ModuleCoercion::Tcoerce_none;
-    };
+    }
     let Some(pers) = &mut tctx.persistent_env else {
         return crate::types::typedtree::ModuleCoercion::Tcoerce_none;
     };
@@ -1909,14 +11706,19 @@ fn compute_raw_implementation_coercion(
         None => return crate::types::typedtree::ModuleCoercion::Tcoerce_none,
     };
 
-    match crate::types::includemod::compunit(
+    let mut inclusion_warnings = Vec::new();
+    let inclusion_result = crate::types::includemod::compunit_with_warnings(
         type_ctx,
         env,
         source_file,
         impl_sig,
         "(inferred signature)",
         target_sig.as_ref(),
-    ) {
+        &mut inclusion_warnings,
+    );
+    report_compunit_inclusion_warnings(tctx, inclusion_warnings);
+
+    match inclusion_result {
         Ok(cc) => cc,
         Err(_) if has_resi => {
             // compunit can fail when the OCaml-built CMI has different type stamps
@@ -1942,14 +11744,58 @@ pub fn typecheck_interface_source(
     let mut parser = Parser::new(filename, source);
     let signature = module::parse_signature(&mut parser);
     if parser.has_errors() {
-        return Err(anyhow!(
-            "Parse failed with {} error(s)",
-            parser.diagnostics().len()
-        ));
+        return Err(parser_error_to_anyhow(&parser, source, filename));
     }
-    let experimental_let_unwrap =
-        experimental_let_unwrap_for_signature(&signature, options, parser.arena());
-    let signature = preprocess_signature_for_typecheck(signature, options, parser.arena_mut())?;
+    apply_external_signature_ppxs(
+        &options.external_ppxs,
+        filename,
+        parser.arena_mut(),
+        &signature,
+    )?;
+    let frontend_warnings =
+        ppx::collect_leading_builtin_warning_signature_attributes(&signature, parser.arena());
+    let frontend_warning_specs =
+        ppx::collect_leading_builtin_warning_signature_attribute_specs(&signature, parser.arena());
+    let mut ppx_warnings_have_errors = emit_ppx_warnings(
+        parser.arena(),
+        source,
+        filename,
+        options,
+        &frontend_warnings,
+    );
+    let config_warnings = validate_file_config_from_signature(&signature, parser.arena())
+        .map_err(|err| config_payload_error_to_anyhow(err, parser.arena(), source, filename))?;
+    let file_config = extract_file_config_from_signature(&signature, parser.arena());
+    let file_warning_config = warning_config_for_options_file_config_and_leading_attrs(
+        options,
+        &file_config,
+        &frontend_warning_specs,
+    );
+    ppx_warnings_have_errors |= emit_ppx_warnings_with_config(
+        parser.arena(),
+        source,
+        filename,
+        &file_warning_config,
+        &config_warnings,
+    );
+    let experimental_let_unwrap = options.experimental_let_unwrap || file_config.let_unwrap;
+    let signature = preprocess_signature_for_typecheck_with_source(
+        signature,
+        options,
+        parser.arena_mut(),
+        source,
+        filename,
+    )?;
+    if !options.no_builtin_ppx {
+        let ppx_warnings = ppx::collect_signature_warnings(&signature, parser.arena());
+        ppx_warnings_have_errors |= emit_ppx_warnings_with_config(
+            parser.arena(),
+            source,
+            filename,
+            &file_warning_config,
+            &ppx_warnings,
+        );
+    }
 
     // Type check
     crate::ident::Ident::set_current_time(OCAML_NON_PREDEF_STAMP_START);
@@ -1960,28 +11806,65 @@ pub fn typecheck_interface_source(
     let type_ctx = TypeContext::new(std::sync::Arc::new(id_gen));
     let mut tctx = TypeCheckContext::new(&type_ctx, parser.arena());
     tctx.experimental_let_unwrap = experimental_let_unwrap;
+    tctx.transparent_modules = options.transparent_modules;
+    apply_warning_options(&mut tctx, options);
+    apply_leading_warning_attribute_options(&mut tctx, &frontend_warning_specs);
+    apply_file_config_warning_options(&mut tctx, &file_config);
     let mut env = initial_env(&type_ctx);
 
     // Load Pervasives and extend the initial environment
     let mut pers_env = PersistentEnv::new();
-    let load_path = build_load_path(options);
+    let (load_path, load_path_display) = build_load_path_with_display(options);
     type_ctx.set_load_paths(load_path.clone());
-    pers_env.set_load_path(load_path.clone());
+    pers_env.set_load_path_with_display(load_path.clone(), load_path_display);
     pers_env.set_open_modules(options.open_modules.clone());
     pers_env.set_jsx_version(options.jsx_version);
+    let current_unit_name = options.current_unit_name();
+    pers_env.set_compiling_module(current_unit_name.clone());
     load_pervasives(
         &mut pers_env,
         &mut env,
         &type_ctx,
         &options.open_modules,
         options.nopervasives,
-        options.module_name.as_deref(),
+        current_unit_name.as_deref(),
     );
 
     tctx.set_persistent_env(pers_env);
 
-    let typed_signature = transl_signature(&mut tctx, &env, parser.arena(), &signature)
-        .map_err(|e| anyhow!("Type checking failed: {e:?}"))?;
+    let typed_signature = match transl_signature(&mut tctx, &env, parser.arena(), &signature) {
+        Ok(typed_signature) => typed_signature,
+        Err(e) => {
+            let suppress_info_style = !tctx.warnings.is_empty();
+            emit_type_warnings(parser.arena(), source, filename, &tctx.warnings);
+            if let Some(error) = tctx
+                .persistent_env
+                .as_ref()
+                .and_then(|persistent_env| persistent_env.last_error())
+            {
+                return Err(persistent_env_error_to_anyhow(error, filename));
+            }
+            return Err(type_mod_error_to_anyhow(
+                e,
+                &type_ctx,
+                parser.arena(),
+                source,
+                filename,
+                suppress_info_style,
+            ));
+        }
+    };
+    if let Some(error) = tctx
+        .persistent_env
+        .as_ref()
+        .and_then(|persistent_env| persistent_env.last_error())
+    {
+        return Err(persistent_env_error_to_anyhow(error, filename));
+    }
+    emit_type_warnings(parser.arena(), source, filename, &tctx.warnings);
+    if ppx_warnings_have_errors || type_warnings_have_errors(&tctx.warnings) {
+        return Err(UserDiagnostic::new(String::new(), 2).into());
+    }
 
     // Print typed tree if requested
     if options.dump_typed_sexp {
@@ -2037,23 +11920,52 @@ pub fn compile_file_to_js_with_options(
 /// - Expands `-I` directories
 /// - Appends `{runtime_path}/lib/ocaml` as the stdlib directory (unless no_stdlib)
 fn build_load_path(options: &CompilerOptions) -> Vec<PathBuf> {
+    build_load_path_with_display(options).0
+}
+
+fn build_load_path_with_display(options: &CompilerOptions) -> (Vec<PathBuf>, Vec<PathBuf>) {
     let stdlib_dir = options
         .runtime_path
         .as_ref()
         .map(|runtime_path| runtime_path.join("lib").join("ocaml"));
     let cwd = std::env::current_dir().ok();
 
-    let mut paths = options
-        .include_paths
-        .iter()
-        .map(|path| normalize_load_path_entry(path, stdlib_dir.as_deref(), cwd.as_deref()))
-        .collect::<Vec<_>>();
+    let mut paths = Vec::new();
+    let mut display_paths = Vec::new();
 
-    if let Some(stdlib_dir) = stdlib_dir {
-        paths.push(stdlib_dir);
+    for path in &options.include_paths {
+        paths.push(normalize_load_path_entry(
+            path,
+            stdlib_dir.as_deref(),
+            cwd.as_deref(),
+        ));
+        display_paths.push(display_load_path_entry(
+            path,
+            stdlib_dir.as_deref(),
+            cwd.as_deref(),
+        ));
     }
 
-    paths
+    if let Some(stdlib_dir) = stdlib_dir {
+        paths.push(normalize_load_path_entry(&stdlib_dir, None, cwd.as_deref()));
+        display_paths.push(stdlib_dir);
+    }
+
+    (paths, display_paths)
+}
+
+fn display_load_path_entry(
+    path: &FsPath,
+    stdlib_dir: Option<&FsPath>,
+    cwd: Option<&FsPath>,
+) -> PathBuf {
+    if let Some(raw) = path.to_str()
+        && raw.starts_with('+')
+    {
+        return normalize_load_path_entry(path, stdlib_dir, cwd);
+    }
+
+    path.to_path_buf()
 }
 
 fn normalize_load_path_entry(
@@ -2223,9 +12135,42 @@ pub fn typecheck_and_dump_sexp<W: std::io::Write>(
                 parser.diagnostics().len()
             ));
         }
-        let experimental_let_unwrap =
-            experimental_let_unwrap_for_signature(&signature, options, parser.arena());
-        let signature = preprocess_signature_for_typecheck(signature, options, parser.arena_mut())?;
+        let frontend_warnings =
+            ppx::collect_leading_builtin_warning_signature_attributes(&signature, parser.arena());
+        let frontend_warning_specs = ppx::collect_leading_builtin_warning_signature_attribute_specs(
+            &signature,
+            parser.arena(),
+        );
+        let _ = emit_ppx_warnings(
+            parser.arena(),
+            source,
+            filename,
+            options,
+            &frontend_warnings,
+        );
+        let config_warnings = validate_file_config_from_signature(&signature, parser.arena())
+            .map_err(|err| config_payload_error_to_anyhow(err, parser.arena(), source, filename))?;
+        let file_config = extract_file_config_from_signature(&signature, parser.arena());
+        let file_warning_config = warning_config_for_options_file_config_and_leading_attrs(
+            options,
+            &file_config,
+            &frontend_warning_specs,
+        );
+        let _ = emit_ppx_warnings_with_config(
+            parser.arena(),
+            source,
+            filename,
+            &file_warning_config,
+            &config_warnings,
+        );
+        let experimental_let_unwrap = options.experimental_let_unwrap || file_config.let_unwrap;
+        let signature = preprocess_signature_for_typecheck_with_source(
+            signature,
+            options,
+            parser.arena_mut(),
+            source,
+            filename,
+        )?;
 
         // Type check
         crate::ident::Ident::set_current_time(OCAML_NON_PREDEF_STAMP_START);
@@ -2236,21 +12181,27 @@ pub fn typecheck_and_dump_sexp<W: std::io::Write>(
         let type_ctx = TypeContext::new(std::sync::Arc::new(id_gen));
         let mut tctx = TypeCheckContext::new(&type_ctx, parser.arena());
         tctx.experimental_let_unwrap = experimental_let_unwrap;
+        tctx.transparent_modules = options.transparent_modules;
+        apply_warning_options(&mut tctx, options);
+        apply_leading_warning_attribute_options(&mut tctx, &frontend_warning_specs);
+        apply_file_config_warning_options(&mut tctx, &file_config);
         let mut env = initial_env(&type_ctx);
 
         let mut pers_env = PersistentEnv::new();
-        let load_path = build_load_path(options);
+        let (load_path, load_path_display) = build_load_path_with_display(options);
         type_ctx.set_load_paths(load_path.clone());
-        pers_env.set_load_path(load_path);
+        pers_env.set_load_path_with_display(load_path, load_path_display);
         pers_env.set_open_modules(options.open_modules.clone());
         pers_env.set_jsx_version(options.jsx_version);
+        let current_unit_name = options.current_unit_name();
+        pers_env.set_compiling_module(current_unit_name.clone());
         load_pervasives(
             &mut pers_env,
             &mut env,
             &type_ctx,
             &options.open_modules,
             options.nopervasives,
-            options.module_name.as_deref(),
+            current_unit_name.as_deref(),
         );
         tctx.set_persistent_env(pers_env);
 
@@ -2269,19 +12220,60 @@ pub fn typecheck_and_dump_sexp<W: std::io::Write>(
                 parser.diagnostics().len()
             ));
         }
-        let experimental_let_unwrap =
-            experimental_let_unwrap_for_structure(&structure, options, parser.arena());
+        let frontend_warning_specs =
+            ppx::collect_leading_builtin_warning_attribute_specs(&structure, parser.arena());
+        let file_config = extract_file_config_from_structure(&structure, parser.arena());
+        let file_warning_config = warning_config_for_options_file_config_and_leading_attrs(
+            options,
+            &file_config,
+            &frontend_warning_specs,
+        );
+        let experimental_let_unwrap = options.experimental_let_unwrap || file_config.let_unwrap;
+        reject_disabled_let_unwrap_in_structure(
+            experimental_let_unwrap,
+            &structure,
+            parser.arena(),
+            source,
+            filename,
+        )?;
+        reject_enabled_invalid_let_unwrap_in_structure(
+            experimental_let_unwrap,
+            &structure,
+            parser.arena(),
+            source,
+            filename,
+        )?;
 
-        let jsx_version = jsx_version_for_structure(&structure, options, parser.arena());
+        let jsx_version = options.jsx_version.or(file_config.jsx_version);
         let structure = if let Some(jsx_version) = jsx_version {
-            jsx_ppx::transform_structure(structure, jsx_version, parser.arena_mut())
+            reject_invalid_react_component_destructure_in_structure(
+                &structure,
+                parser.arena(),
+                filename,
+            )?;
+            jsx_ppx::transform_structure_result(structure, jsx_version, parser.arena_mut())
+                .map_err(|e| jsx_ppx_error_to_anyhow(e, parser.arena(), source, filename))?
         } else {
             structure
         };
 
-        let structure = ppx::expand_extensions(&structure, parser.arena_mut());
-        let structure = ppx::rewrite_structure(&structure, parser.arena_mut())
-            .map_err(|e| anyhow!("PPX rewrite failed: {e}"))?;
+        let structure = if options.no_builtin_ppx {
+            structure
+        } else {
+            let ppx_warnings = ppx::collect_raw_js_warnings(&structure, parser.arena_mut());
+            let _ = emit_ppx_warnings_with_config(
+                parser.arena(),
+                source,
+                filename,
+                &file_warning_config,
+                &ppx_warnings,
+            );
+
+            let structure = ppx::expand_extensions(&structure, parser.arena_mut())
+                .map_err(|e| ppx_error_to_anyhow(e, parser.arena(), source, filename))?;
+            ppx::rewrite_structure(&structure, parser.arena_mut())
+                .map_err(|e| ppx_error_to_anyhow(e, parser.arena(), source, filename))?
+        };
 
         // Type check
         crate::ident::Ident::set_current_time(OCAML_NON_PREDEF_STAMP_START);
@@ -2289,21 +12281,27 @@ pub fn typecheck_and_dump_sexp<W: std::io::Write>(
         let type_ctx = TypeContext::new(std::sync::Arc::new(id_gen));
         let mut tctx = TypeCheckContext::new(&type_ctx, parser.arena());
         tctx.experimental_let_unwrap = experimental_let_unwrap;
+        tctx.transparent_modules = options.transparent_modules;
+        apply_warning_options(&mut tctx, options);
+        apply_leading_warning_attribute_options(&mut tctx, &frontend_warning_specs);
+        apply_file_config_warning_options(&mut tctx, &file_config);
         let mut env = initial_env(&type_ctx);
 
         let mut pers_env = PersistentEnv::new();
-        let load_path = build_load_path(options);
+        let (load_path, load_path_display) = build_load_path_with_display(options);
         type_ctx.set_load_paths(load_path.clone());
-        pers_env.set_load_path(load_path);
+        pers_env.set_load_path_with_display(load_path, load_path_display);
         pers_env.set_open_modules(options.open_modules.clone());
         pers_env.set_jsx_version(options.jsx_version);
+        let current_unit_name = options.current_unit_name();
+        pers_env.set_compiling_module(current_unit_name.clone());
         load_pervasives(
             &mut pers_env,
             &mut env,
             &type_ctx,
             &options.open_modules,
             options.nopervasives,
-            options.module_name.as_deref(),
+            current_unit_name.as_deref(),
         );
         tctx.set_persistent_env(pers_env);
 
@@ -2356,14 +12354,10 @@ fn apply_moregen_constraints(
     }
 
     // Extract module name from source filename
-    let module_name = std::path::Path::new(source_file)
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .map(|s| s.to_string());
-    let module_name = match module_name {
-        Some(n) => n,
-        None => return,
-    };
+    let module_name = module_name_from_source_filename(source_file);
+    if module_name.is_empty() {
+        return;
+    }
 
     // Load the RAW interface signature from CMI (without path substitution).
     // OCaml's ps_sig retains raw Pident paths; path substitution happens lazily
@@ -2863,6 +12857,8 @@ fn moregen_link_impl(
 pub struct FileConfigOverrides {
     pub let_unwrap: bool,
     pub jsx_version: Option<i32>,
+    pub warning_specs: Vec<String>,
+    pub warning_error_specs: Vec<String>,
 }
 
 fn parse_config_flags(flags: &[String]) -> FileConfigOverrides {
@@ -2882,6 +12878,20 @@ fn parse_config_flags(flags: &[String]) -> FileConfigOverrides {
                     if let Ok(v) = flags[i + 1].parse::<i32>() {
                         overrides.jsx_version = Some(v);
                     }
+                    i += 2;
+                    continue;
+                }
+            }
+            "-w" => {
+                if i + 1 < flags.len() {
+                    overrides.warning_specs.push(flags[i + 1].clone());
+                    i += 2;
+                    continue;
+                }
+            }
+            "-warn-error" => {
+                if i + 1 < flags.len() {
+                    overrides.warning_error_specs.push(flags[i + 1].clone());
                     i += 2;
                     continue;
                 }
@@ -2963,7 +12973,7 @@ fn extract_single_string_payload(
 fn extract_file_directives_from_structure(
     structure: &Structure,
     arena: &crate::parse_arena::ParseArena,
-) -> Result<Vec<String>> {
+) -> std::result::Result<Vec<String>, DirectivePayloadError> {
     let mut directives = Vec::new();
 
     for item in structure {
@@ -2973,12 +12983,403 @@ fn extract_file_directives_from_structure(
         if arena.get_string(attr.0.txt) != "directive" {
             continue;
         }
-        let directive = extract_single_string_payload(&attr.1, arena)
-            .ok_or_else(|| anyhow!("Expected string literal payload in @@directive"))?;
+        let Some(directive) = extract_single_string_payload(&attr.1, arena) else {
+            return Err(DirectivePayloadError { loc: item.pstr_loc });
+        };
         directives.push(directive);
     }
 
     Ok(directives)
+}
+
+#[derive(Debug, Clone, Copy)]
+struct DirectivePayloadError {
+    loc: LocIdx,
+}
+
+#[derive(Debug, Clone)]
+struct ConfigPayloadError {
+    loc: LocIdx,
+    message: String,
+}
+
+impl std::fmt::Display for DirectivePayloadError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("expect string literal ")
+    }
+}
+
+impl std::error::Error for DirectivePayloadError {}
+
+impl std::fmt::Display for ConfigPayloadError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for ConfigPayloadError {}
+
+fn config_payload_error_to_anyhow(
+    err: ConfigPayloadError,
+    arena: &ParseArena,
+    source: &str,
+    filename: &str,
+) -> anyhow::Error {
+    UserDiagnostic::new(
+        format_compiler_error_report(arena, source, filename, err.loc, &err.message),
+        2,
+    )
+    .into()
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ConfigAction {
+    name: StrIdx,
+    loc: LocIdx,
+    expr: Option<ExprIdx>,
+}
+
+fn push_config_warning(
+    warnings: &mut Vec<ppx::PpxWarning>,
+    loc: LocIdx,
+    warning: crate::diagnostics::Warning,
+) {
+    // OCaml runs Ast_config processing twice on the direct bsc path
+    // (frontend rewrite and js_implementation), so warning-only config
+    // diagnostics are printed twice before compilation continues.
+    for _ in 0..2 {
+        warnings.push(ppx::PpxWarning {
+            loc,
+            warning: warning.clone(),
+        });
+    }
+}
+
+fn push_invalid_config_record_warning(warnings: &mut Vec<ppx::PpxWarning>, loc: LocIdx) {
+    push_config_warning(
+        warnings,
+        loc,
+        crate::diagnostics::Warning::BsDeriveWarning {
+            message: "invalid attribute config-record, ignoring".to_string(),
+        },
+    );
+}
+
+fn config_payload_actions(
+    payload: &Payload,
+    default_loc: LocIdx,
+    arena: &ParseArena,
+    warnings: &mut Vec<ppx::PpxWarning>,
+) -> Result<Vec<ConfigAction>, ConfigPayloadError> {
+    let Payload::PStr(items) = payload else {
+        push_invalid_config_record_warning(warnings, default_loc);
+        return Ok(Vec::new());
+    };
+    if items.is_empty() {
+        return Ok(Vec::new());
+    }
+    if items.len() != 1 {
+        push_invalid_config_record_warning(warnings, default_loc);
+        return Ok(Vec::new());
+    }
+    let StructureItemDesc::Pstr_eval(inner) = &*items[0].pstr_desc else {
+        push_invalid_config_record_warning(warnings, default_loc);
+        return Ok(Vec::new());
+    };
+    let (expr_idx, _) = &**inner;
+    let expr = arena.get_expr(*expr_idx);
+    match &*expr.pexp_desc {
+        ExpressionDesc::Pexp_record(inner) => {
+            let (fields, with_obj) = &**inner;
+            if with_obj.is_some() {
+                push_config_warning(
+                    warnings,
+                    expr.pexp_loc,
+                    crate::diagnostics::Warning::BsDeriveWarning {
+                        message: "`with` is not supported, discarding".to_string(),
+                    },
+                );
+                return Ok(Vec::new());
+            }
+            let mut actions = Vec::with_capacity(fields.len());
+            for field in fields {
+                let Longident::Lident(name_idx) = arena.get_longident(field.lid.txt) else {
+                    return Err(ConfigPayloadError {
+                        loc: default_loc,
+                        message: "Qualified label is not allowed".to_string(),
+                    });
+                };
+                let field_expr = arena.get_expr(field.expr);
+                let punned = match &*field_expr.pexp_desc {
+                    // OCaml compiler/ml/ast_payload.ml:206-214 compares the
+                    // label and identifier names, so separately interned Rust
+                    // StrIdx values for `no_export: no_export` must still
+                    // count as the punned `None` payload.
+                    ExpressionDesc::Pexp_ident(lid) => matches!(
+                        arena.get_longident(lid.txt),
+                        Longident::Lident(value_idx) if value_idx == name_idx
+                            || arena.get_string(*value_idx) == arena.get_string(*name_idx)
+                    ),
+                    _ => false,
+                };
+                actions.push(ConfigAction {
+                    name: *name_idx,
+                    loc: field.lid.loc,
+                    expr: if punned { None } else { Some(field.expr) },
+                });
+            }
+            Ok(actions)
+        }
+        ExpressionDesc::Pexp_ident(lid) => {
+            let Longident::Lident(name_idx) = arena.get_longident(lid.txt) else {
+                push_invalid_config_record_warning(warnings, default_loc);
+                return Ok(Vec::new());
+            };
+            Ok(vec![ConfigAction {
+                name: *name_idx,
+                loc: lid.loc,
+                expr: None,
+            }])
+        }
+        _ => {
+            push_invalid_config_record_warning(warnings, default_loc);
+            Ok(Vec::new())
+        }
+    }
+}
+
+fn validate_config_bool_literal(
+    expr_idx: ExprIdx,
+    arena: &ParseArena,
+) -> Result<(), ConfigPayloadError> {
+    let expr = arena.get_expr(expr_idx);
+    let is_bool_literal = match &*expr.pexp_desc {
+        ExpressionDesc::Pexp_construct(lid, None) => matches!(
+            arena.get_longident(lid.txt),
+            Longident::Lident(name_idx)
+                if matches!(arena.get_string(*name_idx), "true" | "false")
+        ),
+        _ => false,
+    };
+    if is_bool_literal {
+        Ok(())
+    } else {
+        Err(ConfigPayloadError {
+            loc: expr.pexp_loc,
+            message: "expect `true` or `false` in this field".to_string(),
+        })
+    }
+}
+
+fn config_bsc_flags_parse_ok(flags: &[String]) -> bool {
+    let mut i = 0;
+    while i < flags.len() {
+        let flag = flags[i].as_str();
+        match flag {
+            "-bs-jsx" => {
+                if i + 1 >= flags.len() || flags[i + 1] != "4" {
+                    return false;
+                }
+                i += 2;
+            }
+            "-enable-experimental" => {
+                if i + 1 >= flags.len() || flags[i + 1] != "LetUnwrap" {
+                    return false;
+                }
+                i += 2;
+            }
+            "-w"
+            | "-o"
+            | "-output"
+            | "-ppx"
+            | "-open"
+            | "-bs-jsx-module"
+            | "-bs-jsx-mode"
+            | "-bs-package-output"
+            | "-bs-project-root"
+            | "-bs-package-name"
+            | "-bs-ns"
+            | "-bs-gentype-module"
+            | "-bs-gentype-module-resolution"
+            | "-bs-gentype-generated-extension"
+            | "-bs-gentype-suffix"
+            | "-bs-gentype-shim"
+            | "-bs-gentype-debug"
+            | "-bs-gentype-dep"
+            | "-bs-gentype-source-dir"
+            | "-bs-gentype-dep-path"
+            | "-bs-gentype-bsb-project-root"
+            | "-color"
+            | "-e"
+            | "-reprint-source"
+            | "-format"
+            | "-pp"
+            | "-runtime-path"
+            | "-warn-error" => {
+                if i + 1 >= flags.len() {
+                    return false;
+                }
+                i += 2;
+            }
+            "-bs-read-cmi"
+            | "-bs-jsx-preserve"
+            | "-bs-ast"
+            | "-bs-test-ast-conversion"
+            | "-bs-syntax-only"
+            | "-bs-g"
+            | "-as-pp"
+            | "-no-alias-deps"
+            | "-bs-gentype"
+            | "-bs-gentype-export-interfaces"
+            | "-unboxed-types"
+            | "-nostdlib"
+            | "-bs-cmi-only"
+            | "-bs-cmi"
+            | "-bs-cmj"
+            | "-bs-no-version-header"
+            | "-bs-no-builtin-ppx"
+            | "-bs-cross-module-opt"
+            | "-bs-no-cross-module-opt"
+            | "-bs-diagnose"
+            | "-bs-no-check-div-by-zero"
+            | "-bs-noassertfalse"
+            | "-noassert"
+            | "-bs-loc"
+            | "-dtypedtree"
+            | "-dtyped-sexp"
+            | "-dtyped-sexp-locs"
+            | "-dparsetree"
+            | "-dparsetree-sexp-locs"
+            | "-drawlambda"
+            | "-dlambda-sexp"
+            | "-dlambda-sexp-locs"
+            | "-dsource"
+            | "-only-parse"
+            | "-editor-mode"
+            | "-ignore-parse-errors"
+            | "-verbose"
+            | "-keep-locs"
+            | "-no-keep-locs"
+            | "-nopervasives"
+            | "-v"
+            | "-version"
+            | "-absname"
+            | "-bs-no-bin-annot"
+            | "-short-paths"
+            | "-unsafe"
+            | "-warn-help"
+            | "-make-runtime" => i += 1,
+            _ => return false,
+        }
+    }
+    true
+}
+
+fn validate_config_flags(
+    expr_idx: Option<ExprIdx>,
+    arena: &ParseArena,
+    warnings: &mut Vec<ppx::PpxWarning>,
+) -> Result<(), ConfigPayloadError> {
+    let Some(expr_idx) = expr_idx else {
+        return Ok(());
+    };
+    let expr = arena.get_expr(expr_idx);
+    let ExpressionDesc::Pexp_array(elements) = &*expr.pexp_desc else {
+        return Err(ConfigPayloadError {
+            loc: expr.pexp_loc,
+            message: "string array expected".to_string(),
+        });
+    };
+    let mut flags = Vec::with_capacity(elements.len());
+    for elem_idx in elements.iter() {
+        let elem = arena.get_expr(*elem_idx);
+        let ExpressionDesc::Pexp_constant(constant) = &*elem.pexp_desc else {
+            return Err(ConfigPayloadError {
+                loc: elem.pexp_loc,
+                message: "string literal expected".to_string(),
+            });
+        };
+        let Constant::String(value, _) = &**constant else {
+            return Err(ConfigPayloadError {
+                loc: elem.pexp_loc,
+                message: "string literal expected".to_string(),
+            });
+        };
+        flags.push(value.to_string());
+    }
+    if !config_bsc_flags_parse_ok(&flags) {
+        push_config_warning(
+            warnings,
+            expr.pexp_loc,
+            crate::diagnostics::Warning::Preprocessor {
+                message: "invalid flags for bsc".to_string(),
+            },
+        );
+    }
+    Ok(())
+}
+
+fn validate_config_payload(
+    payload: &Payload,
+    default_loc: LocIdx,
+    allow_no_export: bool,
+    arena: &ParseArena,
+    warnings: &mut Vec<ppx::PpxWarning>,
+) -> Result<(), ConfigPayloadError> {
+    let actions = config_payload_actions(payload, default_loc, arena, warnings)?;
+    for action in actions {
+        match arena.get_string(action.name) {
+            "no_export" if allow_no_export => {
+                if let Some(expr_idx) = action.expr {
+                    validate_config_bool_literal(expr_idx, arena)?;
+                }
+            }
+            "flags" => validate_config_flags(action.expr, arena, warnings)?,
+            name => {
+                return Err(ConfigPayloadError {
+                    loc: action.loc,
+                    message: format!("{name} is not supported"),
+                });
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_file_config_from_structure(
+    structure: &Structure,
+    arena: &ParseArena,
+) -> Result<Vec<ppx::PpxWarning>, ConfigPayloadError> {
+    let mut warnings = Vec::new();
+    for item in structure {
+        match &*item.pstr_desc {
+            StructureItemDesc::Pstr_attribute(attr) => {
+                if arena.get_string(attr.0.txt) == "config" {
+                    validate_config_payload(&attr.1, attr.0.loc, true, arena, &mut warnings)?;
+                }
+            }
+            _ => break,
+        }
+    }
+    Ok(warnings)
+}
+
+fn validate_file_config_from_signature(
+    signature: &Signature,
+    arena: &ParseArena,
+) -> Result<Vec<ppx::PpxWarning>, ConfigPayloadError> {
+    let mut warnings = Vec::new();
+    for item in signature {
+        match &*item.psig_desc {
+            SignatureItemDesc::Psig_attribute(attr) => {
+                if arena.get_string(attr.0.txt) == "config" {
+                    validate_config_payload(&attr.1, attr.0.loc, false, arena, &mut warnings)?;
+                }
+            }
+            _ => break,
+        }
+    }
+    Ok(warnings)
 }
 
 /// Extract `@@config({flags: [...]})` overrides from a parsed structure.
@@ -3033,19 +13434,27 @@ pub fn typecheck_stored_structure_and_dump_sexp<W: std::io::Write>(
     // OCaml starts fresh for each bsc invocation, so we reset to match.
     arena.reset_local_module_counter();
 
-    let experimental_let_unwrap =
-        experimental_let_unwrap_for_structure(&structure, options, &arena);
+    let file_config = extract_file_config_from_structure(&structure, &arena);
+    let frontend_warning_specs =
+        ppx::collect_leading_builtin_warning_attribute_specs(&structure, &arena);
+    let experimental_let_unwrap = options.experimental_let_unwrap || file_config.let_unwrap;
 
-    let jsx_version = jsx_version_for_structure(&structure, options, &arena);
+    let jsx_version = options.jsx_version.or(file_config.jsx_version);
     let structure = if let Some(jsx_version) = jsx_version {
-        jsx_ppx::transform_structure(structure, jsx_version, &mut arena)
+        jsx_ppx::transform_structure_result(structure, jsx_version, &mut arena)
+            .map_err(|e| anyhow!("PPX rewrite failed: {e}"))?
     } else {
         structure
     };
 
-    let structure = ppx::expand_extensions(&structure, &mut arena);
-    let structure = ppx::rewrite_structure(&structure, &mut arena)
-        .map_err(|e| anyhow!("PPX rewrite failed: {e}"))?;
+    let structure = if options.no_builtin_ppx {
+        structure
+    } else {
+        let structure = ppx::expand_extensions(&structure, &mut arena)
+            .map_err(|e| anyhow!("PPX rewrite failed: {e}"))?;
+        ppx::rewrite_structure(&structure, &mut arena)
+            .map_err(|e| anyhow!("PPX rewrite failed: {e}"))?
+    };
 
     crate::ident::Ident::set_current_time(OCAML_NON_PREDEF_STAMP_START);
     let id_gen = IdGenerator::with_start_stamp(OCAML_NON_PREDEF_STAMP_START);
@@ -3055,21 +13464,27 @@ pub fn typecheck_stored_structure_and_dump_sexp<W: std::io::Write>(
     let type_ctx = TypeContext::new(std::sync::Arc::new(id_gen));
     let mut tctx = TypeCheckContext::new(&type_ctx, &arena);
     tctx.experimental_let_unwrap = experimental_let_unwrap;
+    tctx.transparent_modules = options.transparent_modules;
+    apply_warning_options(&mut tctx, options);
+    apply_leading_warning_attribute_options(&mut tctx, &frontend_warning_specs);
+    apply_file_config_warning_options(&mut tctx, &file_config);
     let mut env = initial_env(&type_ctx);
 
     let mut pers_env = PersistentEnv::new();
-    let load_path = build_load_path(options);
+    let (load_path, load_path_display) = build_load_path_with_display(options);
     type_ctx.set_load_paths(load_path.clone());
-    pers_env.set_load_path(load_path);
+    pers_env.set_load_path_with_display(load_path, load_path_display);
     pers_env.set_open_modules(options.open_modules.clone());
     pers_env.set_jsx_version(options.jsx_version);
+    let current_unit_name = options.current_unit_name();
+    pers_env.set_compiling_module(current_unit_name.clone());
     load_pervasives(
         &mut pers_env,
         &mut env,
         &type_ctx,
         &options.open_modules,
         options.nopervasives,
-        options.module_name.as_deref(),
+        current_unit_name.as_deref(),
     );
     tctx.set_persistent_env(pers_env);
 
@@ -3089,8 +13504,10 @@ pub fn typecheck_stored_signature_and_dump_sexp<W: std::io::Write>(
     options: &CompilerOptions,
     writer: &mut W,
 ) -> Result<()> {
-    let experimental_let_unwrap =
-        experimental_let_unwrap_for_signature(&signature, options, &arena);
+    let file_config = extract_file_config_from_signature(&signature, &arena);
+    let frontend_warning_specs =
+        ppx::collect_leading_builtin_warning_signature_attribute_specs(&signature, &arena);
+    let experimental_let_unwrap = options.experimental_let_unwrap || file_config.let_unwrap;
 
     crate::ident::Ident::set_current_time(OCAML_NON_PREDEF_STAMP_START);
     let id_gen = IdGenerator::with_start_stamp(OCAML_NON_PREDEF_STAMP_START);
@@ -3100,21 +13517,27 @@ pub fn typecheck_stored_signature_and_dump_sexp<W: std::io::Write>(
     let type_ctx = TypeContext::new(std::sync::Arc::new(id_gen));
     let mut tctx = TypeCheckContext::new(&type_ctx, &arena);
     tctx.experimental_let_unwrap = experimental_let_unwrap;
+    tctx.transparent_modules = options.transparent_modules;
+    apply_warning_options(&mut tctx, options);
+    apply_leading_warning_attribute_options(&mut tctx, &frontend_warning_specs);
+    apply_file_config_warning_options(&mut tctx, &file_config);
     let mut env = initial_env(&type_ctx);
 
     let mut pers_env = PersistentEnv::new();
-    let load_path = build_load_path(options);
+    let (load_path, load_path_display) = build_load_path_with_display(options);
     type_ctx.set_load_paths(load_path.clone());
-    pers_env.set_load_path(load_path);
+    pers_env.set_load_path_with_display(load_path, load_path_display);
     pers_env.set_open_modules(options.open_modules.clone());
     pers_env.set_jsx_version(options.jsx_version);
+    let current_unit_name = options.current_unit_name();
+    pers_env.set_compiling_module(current_unit_name.clone());
     load_pervasives(
         &mut pers_env,
         &mut env,
         &type_ctx,
         &options.open_modules,
         options.nopervasives,
-        options.module_name.as_deref(),
+        current_unit_name.as_deref(),
     );
     tctx.set_persistent_env(pers_env);
 
@@ -3431,16 +13854,66 @@ pub fn compile_source_in_process(
             parser.diagnostics().len()
         ));
     }
+    let frontend_warnings =
+        ppx::collect_leading_builtin_warning_attributes(&structure, parser.arena());
+    let frontend_warning_specs =
+        ppx::collect_leading_builtin_warning_attribute_specs(&structure, parser.arena());
+    let _ = emit_ppx_warnings(
+        parser.arena(),
+        source,
+        filename,
+        options,
+        &frontend_warnings,
+    );
+    let config_warnings = validate_file_config_from_structure(&structure, parser.arena())
+        .map_err(|err| config_payload_error_to_anyhow(err, parser.arena(), source, filename))?;
+    let file_config = extract_file_config_from_structure(&structure, parser.arena());
+    let file_warning_config = warning_config_for_options_file_config_and_leading_attrs(
+        options,
+        &file_config,
+        &frontend_warning_specs,
+    );
+    let _ = emit_ppx_warnings_with_config(
+        parser.arena(),
+        source,
+        filename,
+        &file_warning_config,
+        &config_warnings,
+    );
     let experimental_let_unwrap =
         experimental_let_unwrap_for_structure(&structure, options, parser.arena());
+    reject_disabled_let_unwrap_in_structure(
+        experimental_let_unwrap,
+        &structure,
+        parser.arena(),
+        source,
+        filename,
+    )?;
+    reject_enabled_invalid_let_unwrap_in_structure(
+        experimental_let_unwrap,
+        &structure,
+        parser.arena(),
+        source,
+        filename,
+    )?;
     let jsx_version = jsx_version_for_structure(&structure, options, parser.arena());
     let structure = if let Some(jsx_version) = jsx_version {
-        jsx_ppx::transform_structure(structure, jsx_version, parser.arena_mut())
+        reject_invalid_react_component_destructure_in_structure(
+            &structure,
+            parser.arena(),
+            filename,
+        )?;
+        jsx_ppx::transform_structure_result(structure, jsx_version, parser.arena_mut())
+            .map_err(|e| jsx_ppx_error_to_anyhow(e, parser.arena(), source, filename))?
     } else {
         structure
     };
-    let structure = ppx::rewrite_structure(&structure, parser.arena_mut())
-        .map_err(|e| anyhow!("PPX rewrite failed: {e}"))?;
+    let structure = if options.no_builtin_ppx {
+        structure
+    } else {
+        ppx::rewrite_structure(&structure, parser.arena_mut())
+            .map_err(|e| ppx_error_to_anyhow(e, parser.arena(), source, filename))?
+    };
     let structure =
         crate::binary_ast::writer::apply_no_export_config(parser.arena_mut(), structure);
 
@@ -3684,6 +14157,9 @@ pub fn compile_preprocessed_structure_in_process_until_js(
             jsx_preserve_for_structure(structure, options, arena),
         )
     };
+    let file_config = extract_file_config_from_structure(structure, arena);
+    let frontend_warning_specs =
+        ppx::collect_leading_builtin_warning_attribute_specs(structure, arena);
 
     log::debug!(
         "[compile_source_in_process] {} type-check start",
@@ -3695,24 +14171,28 @@ pub fn compile_preprocessed_structure_in_process_until_js(
     let _ = id_gen.next_stamp();
     let type_ctx = TypeContext::new(std::sync::Arc::new(id_gen));
     let mut tctx = TypeCheckContext::new(&type_ctx, arena);
-    tctx.experimental_let_unwrap = options.experimental_let_unwrap;
+    tctx.experimental_let_unwrap = options.experimental_let_unwrap || file_config.let_unwrap;
+    tctx.transparent_modules = options.transparent_modules;
+    apply_warning_options(&mut tctx, options);
+    apply_leading_warning_attribute_options(&mut tctx, &frontend_warning_specs);
+    apply_file_config_warning_options(&mut tctx, &file_config);
     let mut env = initial_env(&type_ctx);
 
     let mut pers_env = PersistentEnv::from_registry(registry);
-    let load_path = build_load_path(options);
+    let (load_path, load_path_display) = build_load_path_with_display(options);
     type_ctx.set_load_paths(load_path.clone());
-    pers_env.set_load_path(load_path.clone());
+    pers_env.set_load_path_with_display(load_path.clone(), load_path_display);
     pers_env.set_open_modules(options.open_modules.clone());
     pers_env.set_jsx_version(options.jsx_version);
     pers_env.set_nopervasives(options.nopervasives);
-    pers_env.set_compiling_module(options.module_name.clone());
+    pers_env.set_compiling_module(Some(module_name.to_string()));
     load_pervasives(
         &mut pers_env,
         &mut env,
         &type_ctx,
         &options.open_modules,
         options.nopervasives,
-        options.module_name.as_deref(),
+        Some(module_name),
     );
 
     tctx.set_persistent_env(pers_env);
@@ -3737,7 +14217,16 @@ pub fn compile_preprocessed_structure_in_process_until_js(
             );
         }
 
+        let simple_signature =
+            crate::types::includemod::simplify_signature(&typed_structure.str_type);
         if !has_interface {
+            if let Err(e) = crate::types::typemod::check_nongen_schemes(
+                &type_ctx,
+                &final_env,
+                &simple_signature,
+            ) {
+                return Err(anyhow!("Type checking failed: {e:?}"));
+            }
             normalize_signature_types(&type_ctx, &typed_structure, &final_env);
         }
 
@@ -3748,7 +14237,7 @@ pub fn compile_preprocessed_structure_in_process_until_js(
             has_interface,
         );
 
-        crate::types::includemod::simplify_signature(&typed_structure.str_type)
+        simple_signature
     };
 
     // OCaml saves the inferred `.cmi` only in the no-interface branch before
@@ -3841,7 +14330,7 @@ pub fn compile_preprocessed_structure_in_process_until_js(
         .as_deref()
         .map(module_name_from_source_filename)
         .unwrap_or_default();
-    let (raw_lambda, possible_required_modules, raw_lambda_current_stamp) =
+    let (raw_lambda, raw_diagnostic, possible_required_modules, raw_lambda_current_stamp) =
         crate::timing::measure(crate::timing::Phase::Lambda, || {
             let _phase = info_span!("compiler.raw_lambda").entered();
             let implementation_coercion = compute_raw_implementation_coercion(
@@ -3861,19 +14350,25 @@ pub fn compile_preprocessed_structure_in_process_until_js(
                     unit_name,
                 );
             raw_converter.set_no_assert_false(options.no_assert_false);
+            raw_converter.set_warning_config(tctx.warning_config.clone());
             if let Some(persistent_env) = tctx.persistent_env.clone() {
                 raw_converter.set_persistent_env(persistent_env);
             }
             let raw_lambda = raw_converter
                 .convert_structure_with_coercion(&typed_structure, &implementation_coercion);
+            let raw_diagnostic = raw_converter.take_diagnostic();
             let possible_required_modules = raw_converter.take_possible_required_modules();
             let raw_lambda_current_stamp = raw_converter.current_stamp();
             (
                 raw_lambda,
+                raw_diagnostic,
                 possible_required_modules,
                 raw_lambda_current_stamp,
             )
         });
+    if let Some(diagnostic) = raw_diagnostic {
+        return Err(anyhow!(diagnostic.message));
+    }
     // Capture raw lambda sexp for the playground (only if requested).
     let raw_lambda_sexp = if options.capture_intermediates {
         let mut buf = Vec::new();
@@ -3936,8 +14431,8 @@ pub fn finish_preprocessed_structure_in_process_from_js_boundary(
     )
     .entered();
     let mut persistent_env_for_js = PersistentEnv::from_registry(registry);
-    let load_path = build_load_path(options);
-    persistent_env_for_js.set_load_path(load_path);
+    let (load_path, load_path_display) = build_load_path_with_display(options);
+    persistent_env_for_js.set_load_path_with_display(load_path, load_path_display);
     persistent_env_for_js.set_open_modules(options.open_modules.clone());
     persistent_env_for_js.set_jsx_version(options.jsx_version);
     persistent_env_for_js.set_nopervasives(options.nopervasives);
@@ -4096,7 +14591,39 @@ pub fn typecheck_interface_in_process(
             parser.diagnostics().len()
         ));
     }
-    let signature = preprocess_signature_for_typecheck(signature, options, parser.arena_mut())?;
+    let frontend_warnings =
+        ppx::collect_leading_builtin_warning_signature_attributes(&signature, parser.arena());
+    let frontend_warning_specs =
+        ppx::collect_leading_builtin_warning_signature_attribute_specs(&signature, parser.arena());
+    let _ = emit_ppx_warnings(
+        parser.arena(),
+        source,
+        filename,
+        options,
+        &frontend_warnings,
+    );
+    let config_warnings = validate_file_config_from_signature(&signature, parser.arena())
+        .map_err(|err| config_payload_error_to_anyhow(err, parser.arena(), source, filename))?;
+    let file_config = extract_file_config_from_signature(&signature, parser.arena());
+    let file_warning_config = warning_config_for_options_file_config_and_leading_attrs(
+        options,
+        &file_config,
+        &frontend_warning_specs,
+    );
+    let _ = emit_ppx_warnings_with_config(
+        parser.arena(),
+        source,
+        filename,
+        &file_warning_config,
+        &config_warnings,
+    );
+    let signature = preprocess_signature_for_typecheck_with_source(
+        signature,
+        options,
+        parser.arena_mut(),
+        source,
+        filename,
+    )?;
 
     typecheck_preprocessed_signature_in_process(
         parser.arena(),
@@ -4123,30 +14650,37 @@ pub fn typecheck_preprocessed_signature_in_process(
     )
     .entered();
     let original_alias_count = registry.alias_rewrite_len();
+    let file_config = extract_file_config_from_signature(signature, arena);
+    let frontend_warning_specs =
+        ppx::collect_leading_builtin_warning_signature_attribute_specs(signature, arena);
 
     crate::ident::Ident::set_current_time(OCAML_NON_PREDEF_STAMP_START);
     let id_gen = IdGenerator::with_start_stamp(OCAML_NON_PREDEF_STAMP_START);
     let _ = id_gen.next_stamp();
     let type_ctx = TypeContext::new(std::sync::Arc::new(id_gen));
     let mut tctx = TypeCheckContext::new(&type_ctx, arena);
-    tctx.experimental_let_unwrap = options.experimental_let_unwrap;
+    tctx.experimental_let_unwrap = options.experimental_let_unwrap || file_config.let_unwrap;
+    tctx.transparent_modules = options.transparent_modules;
+    apply_warning_options(&mut tctx, options);
+    apply_leading_warning_attribute_options(&mut tctx, &frontend_warning_specs);
+    apply_file_config_warning_options(&mut tctx, &file_config);
     let mut env = initial_env(&type_ctx);
 
     let mut pers_env = PersistentEnv::from_registry(registry);
-    let load_path = build_load_path(options);
+    let (load_path, load_path_display) = build_load_path_with_display(options);
     type_ctx.set_load_paths(load_path.clone());
-    pers_env.set_load_path(load_path);
+    pers_env.set_load_path_with_display(load_path, load_path_display);
     pers_env.set_open_modules(options.open_modules.clone());
     pers_env.set_jsx_version(options.jsx_version);
     pers_env.set_nopervasives(options.nopervasives);
-    pers_env.set_compiling_module(options.module_name.clone());
+    pers_env.set_compiling_module(Some(module_name.to_string()));
     load_pervasives(
         &mut pers_env,
         &mut env,
         &type_ctx,
         &options.open_modules,
         options.nopervasives,
-        options.module_name.as_deref(),
+        Some(module_name),
     );
 
     tctx.set_persistent_env(pers_env);
@@ -4225,30 +14759,37 @@ pub fn typecheck_implementation_in_process(
             parser.diagnostics().len()
         ));
     }
+    let file_config = extract_file_config_from_structure(&structure, parser.arena());
+    let frontend_warning_specs =
+        ppx::collect_leading_builtin_warning_attribute_specs(&structure, parser.arena());
 
     crate::ident::Ident::set_current_time(OCAML_NON_PREDEF_STAMP_START);
     let id_gen = IdGenerator::with_start_stamp(OCAML_NON_PREDEF_STAMP_START);
     let _ = id_gen.next_stamp();
     let type_ctx = TypeContext::new(std::sync::Arc::new(id_gen));
     let mut tctx = TypeCheckContext::new(&type_ctx, parser.arena());
-    tctx.experimental_let_unwrap = options.experimental_let_unwrap;
+    tctx.experimental_let_unwrap = options.experimental_let_unwrap || file_config.let_unwrap;
+    tctx.transparent_modules = options.transparent_modules;
+    apply_warning_options(&mut tctx, options);
+    apply_leading_warning_attribute_options(&mut tctx, &frontend_warning_specs);
+    apply_file_config_warning_options(&mut tctx, &file_config);
     let mut env = initial_env(&type_ctx);
 
     let mut pers_env = PersistentEnv::from_registry(registry);
-    let load_path = build_load_path(options);
+    let (load_path, load_path_display) = build_load_path_with_display(options);
     type_ctx.set_load_paths(load_path.clone());
-    pers_env.set_load_path(load_path);
+    pers_env.set_load_path_with_display(load_path, load_path_display);
     pers_env.set_open_modules(options.open_modules.clone());
     pers_env.set_jsx_version(options.jsx_version);
     pers_env.set_nopervasives(options.nopervasives);
-    pers_env.set_compiling_module(options.module_name.clone());
+    pers_env.set_compiling_module(Some(module_name.to_string()));
     load_pervasives(
         &mut pers_env,
         &mut env,
         &type_ctx,
         &options.open_modules,
         options.nopervasives,
-        options.module_name.as_deref(),
+        Some(module_name),
     );
 
     tctx.set_persistent_env(pers_env);

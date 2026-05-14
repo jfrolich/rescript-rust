@@ -9131,6 +9131,9 @@ fn names_from_construct_pattern(ctx_ref: &TypeContext, pat: &Pattern) -> Option<
                 crate::types::decl::AttributePayload::Int(value) => {
                     Some(SwitchCaseTag::Int(*value))
                 }
+                crate::types::decl::AttributePayload::IntLiteral(value) => {
+                    crate::types::decl::parse_ocaml_int_literal(value).map(SwitchCaseTag::Int)
+                }
                 crate::types::decl::AttributePayload::Float(value) => {
                     Some(SwitchCaseTag::Float(value.clone()))
                 }

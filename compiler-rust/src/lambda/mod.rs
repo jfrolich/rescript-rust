@@ -155,7 +155,7 @@ pub struct LambdaSwitch {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SwitchCaseTag {
     String(String),
-    Int(i32),
+    Int(i64),
     Float(String),
     BigInt(String),
     Bool(bool),

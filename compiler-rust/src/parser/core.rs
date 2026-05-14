@@ -33,6 +33,22 @@ pub fn mknoloc<T>(txt: T) -> Loc<T> {
     }
 }
 
+const VARIANT_IDENT_MESSAGE: &str = "A polymorphic variant (e.g. #id) must start with an alphabetical letter or be a number (e.g. #742)";
+
+/// Report an invalid polymorphic variant tag like OCaml's parse_hash_ident.
+pub fn err_invalid_variant_ident(p: &mut Parser<'_>, hash_start_pos: Position) {
+    if p.token == Token::Eof {
+        p.err_unexpected_at(hash_start_pos);
+    } else {
+        p.err_at(
+            hash_start_pos,
+            p.end_pos,
+            DiagnosticCategory::Message(VARIANT_IDENT_MESSAGE.to_string()),
+        );
+        p.next();
+    }
+}
+
 // ============================================================================
 // Error Recovery
 // ============================================================================
@@ -211,6 +227,10 @@ pub mod error_messages {
          ...b}` wouldn't make sense, as `b` would override every field of `a` \
          anyway.";
 
+    /// Error message for record expression spread without any updated fields.
+    pub const RECORD_SPREAD_WITHOUT_UPDATE: &str =
+        "Record spread needs at least one field that's updated";
+
     /// Error message for dict expression spread.
     pub const DICT_EXPR_SPREAD: &str = "Dict literals do not support spread (`...`) yet.";
 
@@ -283,6 +303,14 @@ pub mod error_messages {
             "Cannot use keyword `{}` as a record field name. Suggestion: rename it (e.g. `{}_`)\n  \
              If you need the field to be \"{}\" at runtime, annotate the field: `@as(\"{}\") {}_ : ...`",
             keyword_txt, keyword_txt, keyword_txt, keyword_txt, keyword_txt
+        )
+    }
+
+    /// Generate error message for unquoted object type field names.
+    pub fn object_quoted_field_name(name: &str) -> String {
+        format!(
+            "An object type declaration needs quoted field names. Did you mean \"{}\"?",
+            name
         )
     }
 }
@@ -982,9 +1010,19 @@ pub fn is_es6_arrow_expression(p: &mut Parser<'_>, in_ternary: bool) -> bool {
                         match &state.token {
                             Token::Colon if !in_ternary => {
                                 state.next();
-                                // Check for `() :typ =>`
-                                super::typ::parse_typ_expr_no_arrow(state);
-                                matches!(state.token, Token::EqualGreater)
+                                match &state.token {
+                                    Token::Lident(_) => {
+                                        state.next();
+                                        if state.token == Token::LessThan {
+                                            state.set_diamond_mode();
+                                            state.next();
+                                            go_to_closing(&Token::GreaterThan, state);
+                                            state.pop_diamond_mode();
+                                        }
+                                        matches!(state.token, Token::EqualGreater)
+                                    }
+                                    _ => true,
+                                }
                             }
                             Token::EqualGreater => true,
                             _ => false,
@@ -996,11 +1034,7 @@ pub fn is_es6_arrow_expression(p: &mut Parser<'_>, in_ternary: bool) -> bool {
                         go_to_closing(&Token::Rparen, state);
                         match &state.token {
                             Token::EqualGreater => true,
-                            Token::Colon if !in_ternary => {
-                                state.next();
-                                super::typ::parse_typ_expr_no_arrow(state);
-                                matches!(state.token, Token::EqualGreater)
-                            }
+                            Token::Colon if !in_ternary => true,
                             Token::Rparen => false,
                             _ => {
                                 state.next_unsafe();

@@ -10,10 +10,13 @@
 
 use anyhow::{Context, Result, anyhow};
 use rescript_compiler::binary_ast::{
-    ppx, write_signature_ast_current, write_structure_ast_current,
+    ppx, write_signature_ast_current_with_extra_deps_and_builtin_ppx,
+    write_structure_ast_current_with_extra_deps_and_builtin_ppx,
 };
+use rescript_compiler::cmi::cmi_format;
 use rescript_compiler::driver::{
-    CompilerOptions, compile_file_to_js_with_options, enable_cli_cleanup_skip,
+    CompilerOptions, UserDiagnostic, apply_external_signature_ppxs, apply_external_structure_ppxs,
+    compile_file_to_js_with_options, enable_cli_cleanup_skip, parser_error_to_anyhow,
     typecheck_interface_file,
 };
 use rescript_compiler::js_ir::ModuleFormat;
@@ -21,7 +24,7 @@ use rescript_compiler::parser::{Parser, module, sexp_locs};
 use rescript_compiler::source_text::latin1_bytes_to_string;
 use std::env;
 use std::fs;
-use std::io::Write;
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
 /// Auto-detect the runtime path based on the executable's location.
@@ -54,7 +57,7 @@ fn default_runtime_path() -> Option<PathBuf> {
     // Case 2: local development — walk up from exe dir looking for packages/@rescript/runtime.
     // This handles various layouts:
     //   OCaml: _build/install/default/bin/bsc (4 levels)
-    //   Rust:  compiler-rust/target/release/bsc (3 levels)
+    //   Rust:  compiler-rust/target/debug/bsc (3 levels)
     let mut search_dir = dir.to_path_buf();
     for _ in 0..6 {
         let runtime = search_dir
@@ -91,6 +94,8 @@ struct Options {
     runtime_path: Option<PathBuf>,
     package_name: Option<String>,
     open_modules: Vec<String>,
+    warning_specs: Vec<String>,
+    warning_error_specs: Vec<String>,
     jsx_version: Option<i32>,
     experimental_let_unwrap: bool,
     jsx_preserve: bool,
@@ -99,7 +104,12 @@ struct Options {
     no_check_div_by_zero: bool,
     cross_module_inline: bool,
     no_assert_false: bool,
+    transparent_modules: bool,
+    no_builtin_ppx: bool,
+    external_ppxs: Vec<String>,
+    gentype: bool,
     make_runtime: bool,
+    read_cmi: bool,
 }
 
 impl Options {
@@ -129,6 +139,11 @@ fn main() {
                     std::process::exit(0);
                 }
                 Err(err) => {
+                    if let Some(diagnostic) = err.downcast_ref::<UserDiagnostic>() {
+                        eprint!("{}", diagnostic.output());
+                        let _ = std::io::stderr().flush();
+                        std::process::exit(diagnostic.exit_code());
+                    }
                     eprintln!("{err}");
                     let _ = std::io::stderr().flush();
                     std::process::exit(1);
@@ -217,13 +232,30 @@ fn run() -> Result<()> {
                 "-bs-no-check-div-by-zero" => opts.no_check_div_by_zero = true,
                 "-bs-cross-module-opt" => opts.cross_module_inline = true,
                 "-bs-noassertfalse" => opts.no_assert_false = true,
-                "-w" | "-warn-error" | "-color" | "-bs-jsx-mode" | "-pp" | "-ppx" | "-ppxopt" => {
+                "-bs-no-builtin-ppx" => opts.no_builtin_ppx = true,
+                "-bs-gentype" => opts.gentype = true,
+                "-w" => {
+                    if let Some(val) = args.next() {
+                        opts.warning_specs.push(val);
+                    }
+                }
+                "-warn-error" => {
+                    if let Some(val) = args.next() {
+                        opts.warning_error_specs.push(val);
+                    }
+                }
+                "-ppx" => {
+                    if let Some(val) = args.next() {
+                        opts.external_ppxs.push(val);
+                    }
+                }
+                "-color" | "-bs-jsx-mode" | "-pp" | "-ppxopt" => {
                     // Consume the next argument if present (value flags).
                     let _ = args.next();
                 }
+                "-bs-read-cmi" => opts.read_cmi = true,
+                "-no-alias-deps" => opts.transparent_modules = true,
                 "-absname"
-                | "-bs-read-cmi"
-                | "-no-alias-deps"
                 | "-bs-no-implicit-stdlib"
                 | "-unsafe"
                 | "-bs-super-errors"
@@ -248,10 +280,20 @@ fn run() -> Result<()> {
         .ok_or_else(|| anyhow!("Missing input file"))?;
 
     if opts.bs_ast {
-        return generate_ast(&input, opts.output, opts.dump_parsetree_sexp_locs);
+        return generate_ast(
+            &input,
+            opts.output,
+            opts.dump_parsetree_sexp_locs,
+            opts.no_builtin_ppx,
+            &opts.external_ppxs,
+        );
     }
 
     let ext = input.extension().and_then(|s| s.to_str()).unwrap_or("");
+    if ext == "cmi" {
+        return read_cmi_input(&input);
+    }
+
     let source_path = if ext == "ast" || ext == "iast" {
         read_ast_source_path(&input)?
     } else {
@@ -279,6 +321,8 @@ fn run() -> Result<()> {
         include_paths: opts.include_paths.clone(),
         runtime_path,
         open_modules: opts.open_modules.clone(),
+        warning_specs: opts.warning_specs.clone(),
+        warning_error_specs: opts.warning_error_specs.clone(),
         source_filename: Some(source_path.to_string_lossy().into_owned()),
         output_path: opts.output.clone(),
         output_module_format: package_output
@@ -293,10 +337,14 @@ fn run() -> Result<()> {
         check_div_by_zero: !opts.no_check_div_by_zero,
         cross_module_inline: opts.cross_module_inline,
         no_assert_false: opts.no_assert_false,
+        transparent_modules: opts.transparent_modules,
+        no_builtin_ppx: opts.no_builtin_ppx,
+        external_ppxs: opts.external_ppxs.clone(),
         nopervasives: opts.nopervasives,
         module_name: opts.module_name.clone(),
         package_name: opts.package_name.clone(),
         make_runtime: opts.make_runtime,
+        assume_compiled_interface: opts.read_cmi,
         capture_intermediates: false,
         skip_js_render: false,
         publish_in_process_signature: true,
@@ -311,10 +359,25 @@ fn run() -> Result<()> {
     }
 }
 
+fn read_cmi_input(input: &Path) -> Result<()> {
+    let filename = input.to_string_lossy();
+    match cmi_format::read_cmi(&filename) {
+        Ok(_cmi) => Ok(()),
+        Err(cmi_format::CmiError::Io(err)) => Err(err).with_context(|| filename.to_string()),
+        Err(err) => Err(UserDiagnostic::new(format_cmi_error_report(&err), 2).into()),
+    }
+}
+
+fn format_cmi_error_report(err: &cmi_format::CmiError) -> String {
+    format!("\n  We've found a bug for you!\n  _none_\n\n  {err}\n\n")
+}
+
 fn generate_ast(
     input: &Path,
     output: Option<PathBuf>,
     dump_parsetree_sexp_locs: bool,
+    no_builtin_ppx: bool,
+    external_ppxs: &[String],
 ) -> Result<()> {
     // Read file as raw bytes, converting each byte to a char (Latin-1 encoding).
     // This matches OCaml's byte-level string handling where each byte is a character.
@@ -359,48 +422,66 @@ fn generate_ast(
         fs::create_dir_all(parent)?;
     }
 
-    let mut parser = Parser::new(filename, &source);
+    let mut parser = Parser::new(&filename, &source);
 
     if is_interface {
         // Parse signature (interface file)
         let signature = module::parse_signature(&mut parser);
         if parser.has_errors() {
-            return Err(anyhow!(
-                "Parse failed with {} error(s)",
-                parser.diagnostics().len()
-            ));
+            return Err(parser_error_to_anyhow(&parser, &source, &filename));
         }
+        apply_external_signature_ppxs(external_ppxs, &filename, parser.arena_mut(), &signature)?;
 
         if dump_parsetree_sexp_locs {
-            let rewritten = ppx::rewrite_signature(&signature, parser.arena_mut())
-                .map_err(|e| anyhow!("PPX rewrite failed: {e}"))?;
+            let rewritten = if no_builtin_ppx {
+                signature.clone()
+            } else {
+                ppx::rewrite_signature(&signature, parser.arena_mut())
+                    .map_err(|e| anyhow!("PPX rewrite failed: {e}"))?
+            };
             let mut stderr = std::io::stderr();
             sexp_locs::print_signature(&rewritten, parser.arena(), &mut stderr);
             let _ = stderr.write_all(b"\n");
         }
 
-        write_signature_ast_current(&out_path, &source_path, parser.arena_mut(), &signature)
-            .with_context(|| format!("Failed to write {}", out_path.display()))?;
+        write_signature_ast_current_with_extra_deps_and_builtin_ppx(
+            &out_path,
+            &source_path,
+            parser.arena_mut(),
+            &signature,
+            &[],
+            !no_builtin_ppx,
+        )
+        .with_context(|| format!("Failed to write {}", out_path.display()))?;
     } else {
         // Parse structure (implementation file)
         let structure = module::parse_structure(&mut parser);
         if parser.has_errors() {
-            return Err(anyhow!(
-                "Parse failed with {} error(s)",
-                parser.diagnostics().len()
-            ));
+            return Err(parser_error_to_anyhow(&parser, &source, &filename));
         }
+        apply_external_structure_ppxs(external_ppxs, &filename, parser.arena_mut(), &structure)?;
 
         if dump_parsetree_sexp_locs {
-            let rewritten = ppx::rewrite_structure(&structure, parser.arena_mut())
-                .map_err(|e| anyhow!("PPX rewrite failed: {e}"))?;
+            let rewritten = if no_builtin_ppx {
+                structure.clone()
+            } else {
+                ppx::rewrite_structure(&structure, parser.arena_mut())
+                    .map_err(|e| anyhow!("PPX rewrite failed: {e}"))?
+            };
             let mut stderr = std::io::stderr();
             sexp_locs::print_structure(&rewritten, parser.arena(), &mut stderr);
             let _ = stderr.write_all(b"\n");
         }
 
-        write_structure_ast_current(&out_path, &source_path, parser.arena_mut(), &structure)
-            .with_context(|| format!("Failed to write {}", out_path.display()))?;
+        write_structure_ast_current_with_extra_deps_and_builtin_ppx(
+            &out_path,
+            &source_path,
+            parser.arena_mut(),
+            &structure,
+            &[],
+            !no_builtin_ppx,
+        )
+        .with_context(|| format!("Failed to write {}", out_path.display()))?;
     }
 
     Ok(())
@@ -447,7 +528,8 @@ fn write_outputs(
 ) -> Result<()> {
     if opts.has_dump_output() {
         let js = compile_file_to_js_with_options(source_path, compiler_opts)?;
-        return write_precompiled_outputs(source_path, &js, opts);
+        write_precompiled_outputs(source_path, &js, opts)?;
+        return maybe_process_gentype(source_path, opts);
     }
 
     if let Some(out) = &opts.output {
@@ -458,7 +540,7 @@ fn write_outputs(
             fs::create_dir_all(parent)?;
         }
         fs::write(out, js)?;
-        return Ok(());
+        return maybe_process_gentype(source_path, opts);
     }
 
     if !opts.package_outputs.is_empty() {
@@ -480,19 +562,123 @@ fn write_outputs(
                 fs::write(out_path, js)?;
             }
         }
+        return maybe_process_gentype(source_path, opts);
+    }
+
+    let mut output_opts = compiler_opts.clone();
+    output_opts.output_path = None;
+    output_opts.output_module_format = None;
+    let js = compile_file_to_js_with_options(source_path, &output_opts)?;
+    print!("{js}");
+    maybe_process_gentype(source_path, opts)
+}
+
+fn path_without_extension(path: &Path) -> PathBuf {
+    let mut path = path.to_path_buf();
+    path.set_extension("");
+    path
+}
+
+fn gentype_output_prefix(source_path: &Path, opts: &Options) -> PathBuf {
+    match &opts.output {
+        Some(output) => path_without_extension(output),
+        None => path_without_extension(source_path),
+    }
+}
+
+fn uncapitalize_ascii_filename(path: &Path) -> Option<PathBuf> {
+    let file_name = path.file_name()?.to_str()?;
+    let mut chars = file_name.chars();
+    let first = chars.next()?;
+    let lowered = first.to_ascii_lowercase().to_string() + chars.as_str();
+    Some(path.with_file_name(lowered))
+}
+
+fn gentype_cmt_file_for_output_prefix(output_prefix: &Path) -> Option<PathBuf> {
+    // Mirrors compiler/gentype/Paths.ml:get_cmt_file for the output.cmt path
+    // passed by compiler/core/js_implementation.ml after code generation.
+    let path_cmt = output_prefix.with_extension("cmt");
+    if path_cmt.extension().and_then(|ext| ext.to_str()) != Some("cmt") {
+        return None;
+    }
+
+    let path_cmt_lower_case = uncapitalize_ascii_filename(&path_cmt)?;
+    let path_cmti = output_prefix.with_extension("cmti");
+    let path_cmti_lower_case = path_cmt_lower_case.with_extension("cmti");
+
+    for candidate in [
+        path_cmti_lower_case,
+        path_cmti,
+        path_cmt_lower_case,
+        path_cmt,
+    ] {
+        if candidate.exists() {
+            return Some(candidate);
+        }
+    }
+
+    None
+}
+
+fn maybe_process_gentype(source_path: &Path, opts: &Options) -> Result<()> {
+    if !opts.gentype {
         return Ok(());
     }
 
-    let out = source_path.with_extension("js");
-    let mut output_opts = compiler_opts.clone();
-    output_opts.output_path = Some(out.clone());
-    output_opts.output_module_format = None;
-    let js = compile_file_to_js_with_options(source_path, &output_opts)?;
-    if let Some(parent) = out.parent() {
-        fs::create_dir_all(parent)?;
+    let output_prefix = gentype_output_prefix(source_path, opts);
+    let Some(cmt_file) = gentype_cmt_file_for_output_prefix(&output_prefix) else {
+        return Ok(());
+    };
+
+    check_gentype_cmt_file(&cmt_file)
+}
+
+fn check_gentype_cmt_file(cmt_file: &Path) -> Result<()> {
+    // Cmt_format.read_cmt raises Cmt_format.Error(Not_a_typedtree _) when the
+    // selected file contains a compiled interface without typedtree data.
+    const CMT_MAGIC: &[u8; 12] = b"Caml1999T022";
+    const CMI_MAGIC: &[u8; 12] = b"Caml1999I022";
+
+    let data = fs::read(cmt_file).with_context(|| cmt_file.display().to_string())?;
+    if data.len() < CMT_MAGIC.len() {
+        return Ok(());
     }
-    fs::write(out, js)?;
-    Ok(())
+
+    let magic = &data[..CMT_MAGIC.len()];
+    if magic == CMT_MAGIC {
+        return Ok(());
+    }
+
+    if magic == CMI_MAGIC {
+        let _ = io::stdout().flush();
+        return Err(UserDiagnostic::new(
+            "Fatal error: exception Cmt_format.Error(_)\n".to_string(),
+            2,
+        )
+        .into());
+    }
+
+    print!(
+        "  Error loading {}\n\n  It looks like you might have stale compilation artifacts.\n  Try to clean and rebuild.\n\n",
+        gentype_display_path(cmt_file).display()
+    );
+    let _ = io::stdout().flush();
+    Err(UserDiagnostic::new(
+        "Fatal error: exception File \"compiler/gentype/GenTypeMain.ml\", line 91, characters 4-10: Assertion failed\n".to_string(),
+        2,
+    )
+    .into())
+}
+
+fn gentype_display_path(path: &Path) -> PathBuf {
+    if path.is_absolute() {
+        return path.to_path_buf();
+    }
+
+    match env::current_dir() {
+        Ok(cwd) => cwd.join(path),
+        Err(_) => path.to_path_buf(),
+    }
 }
 
 fn write_precompiled_outputs(source_path: &Path, js: &str, opts: &Options) -> Result<()> {

@@ -140,6 +140,23 @@ pub enum EnvError {
 /// Result type for environment operations.
 pub type EnvResult<T> = Result<T, EnvError>;
 
+/// Check that a value identifier is accepted by the environment.
+///
+/// Mirrors OCaml `Env.check_value_name`: most lexical validity is enforced
+/// before this point, but forged AST/CMI values named `->` or multi-`#`
+/// method identifiers must be rejected when values enter the environment.
+pub fn check_value_name(name: &str, loc: Location) -> EnvResult<()> {
+    if name == "->" {
+        return Err(EnvError::IllegalValueName(loc, name.to_string()));
+    }
+    if let Some(rest) = name.strip_prefix('#') {
+        if rest.as_bytes().contains(&b'#') {
+            return Err(EnvError::IllegalValueName(loc, name.to_string()));
+        }
+    }
+    Ok(())
+}
+
 // ============================================================================
 // Environment Summary
 // ============================================================================
@@ -393,6 +410,11 @@ pub struct Env {
     /// module-components cache key logic consults it frequently in
     /// module-heavy files. This cache must stay derived from bindings only; it
     /// must not become a path-spelling alias-equivalence shortcut.
+
+    /// Module identifiers that are functor parameters.
+    /// Mirrors OCaml `Env.functor_args` and drives aliasability checks.
+    functor_args: HashSet<Ident>,
+
     local_module_aliases_cache: RefCell<Option<Vec<(Ident, Path)>>>,
 
     /// Intentional Rust performance cache for env-scoped component cache keys.
@@ -445,6 +467,7 @@ impl Clone for Env {
             modules: self.modules.clone(),
             module_components: self.module_components.clone(),
             modtypes: self.modtypes.clone(),
+            functor_args: self.functor_args.clone(),
             // These are Rust-only memo tables derived from the binding tables.
             // Do not duplicate them when snapshotting environments for unifier
             // state; OCaml Env snapshots carry semantic bindings, not copied
@@ -481,6 +504,7 @@ impl Env {
             modules: BindingTable::new(),
             module_components: BindingTable::new(),
             modtypes: BindingTable::new(),
+            functor_args: HashSet::new(),
             local_module_aliases_cache: RefCell::new(None),
             module_path_requires_env_scoped_cache_cache: RefCell::new(HashMap::new()),
             implicit_open_roots: im_rc::HashSet::new(),
@@ -509,6 +533,7 @@ impl Env {
             modules: self.modules.clone(),
             module_components: self.module_components.clone(),
             modtypes: self.modtypes.clone(),
+            functor_args: self.functor_args.clone(),
             // These are Rust-only memo tables derived from the binding tables.
             // Do not duplicate them when snapshotting environments for unifier
             // state; OCaml Env snapshots carry semantic bindings, not copied
@@ -669,6 +694,17 @@ impl Env {
             .ok_or_else(|| EnvError::ValueNotFound(name.to_string()))
     }
 
+    /// Find a value by name with its local/opened origin flag.
+    pub fn find_value_with_origin(
+        &self,
+        name: &str,
+    ) -> EnvResult<(&Ident, &ValueDescription, bool)> {
+        self.values
+            .find_by_name_with_origin(name)
+            .map(|(id, v, is_local)| (id, v.as_ref(), is_local))
+            .ok_or_else(|| EnvError::ValueNotFound(name.to_string()))
+    }
+
     /// Iterate over visible value bindings.
     pub fn iter_values(&self) -> impl Iterator<Item = (&Ident, &ValueDescription)> {
         self.values.iter().map(|(id, v)| (id, v.as_ref()))
@@ -766,6 +802,11 @@ impl Env {
             .find_by_name_with_origin(name)
             .map(|(id, decl, is_local)| (id, decl.as_ref(), is_local))
             .ok_or_else(|| EnvError::TypeNotFound(name.to_string()))
+    }
+
+    /// Iterate over visible type bindings.
+    pub fn iter_types(&self) -> impl Iterator<Item = (&Ident, &TypeDeclaration)> {
+        self.types.iter().map(|(id, decl)| (id, decl.as_ref()))
     }
 
     pub(crate) fn find_type_by_ident(&self, id: &Ident) -> EnvResult<&TypeDeclaration> {
@@ -883,6 +924,17 @@ impl Env {
             .ok_or_else(|| EnvError::ConstructorNotFound(name.to_string()))
     }
 
+    /// Find a constructor by name with its local/opened origin flag.
+    pub fn find_constructor_with_origin(
+        &self,
+        name: &str,
+    ) -> EnvResult<(&Ident, &ConstructorDescription, bool)> {
+        self.constrs
+            .find_by_name_with_origin(name)
+            .map(|(id, c, is_local)| (id, c.as_ref(), is_local))
+            .ok_or_else(|| EnvError::ConstructorNotFound(name.to_string()))
+    }
+
     /// Find all constructors with a given name.
     pub fn find_all_constructors(&self, name: &str) -> Vec<&ConstructorDescription> {
         self.constrs
@@ -890,6 +942,11 @@ impl Env {
             .into_iter()
             .map(|c| c.as_ref())
             .collect()
+    }
+
+    /// Iterate over visible constructor bindings.
+    pub fn iter_constructors(&self) -> impl Iterator<Item = (&Ident, &ConstructorDescription)> {
+        self.constrs.iter().map(|(id, c)| (id, c.as_ref()))
     }
 
     // ========================================================================
@@ -918,6 +975,17 @@ impl Env {
             .ok_or_else(|| EnvError::LabelNotFound(name.to_string()))
     }
 
+    /// Find a label by name with its local/opened origin flag.
+    pub fn find_label_with_origin(
+        &self,
+        name: &str,
+    ) -> EnvResult<(&Ident, &LabelDescription, bool)> {
+        self.labels
+            .find_by_name_with_origin(name)
+            .map(|(id, l, is_local)| (id, l.as_ref(), is_local))
+            .ok_or_else(|| EnvError::LabelNotFound(name.to_string()))
+    }
+
     /// Find all labels with a given name.
     pub fn find_all_labels(&self, name: &str) -> Vec<&LabelDescription> {
         self.labels
@@ -925,6 +993,11 @@ impl Env {
             .into_iter()
             .map(|l| l.as_ref())
             .collect()
+    }
+
+    /// Iterate over visible label bindings.
+    pub fn iter_labels(&self) -> impl Iterator<Item = (&Ident, &LabelDescription)> {
+        self.labels.iter().map(|(id, l)| (id, l.as_ref()))
     }
 
     // ========================================================================
@@ -967,6 +1040,21 @@ impl Env {
     /// Add a module binding.
     pub fn add_module(&mut self, id: Ident, decl: ModuleDeclaration) {
         self.add_module_with_component_path(id.clone(), decl, Path::pident(id));
+    }
+
+    /// Add a functor-parameter module binding.
+    pub fn add_module_arg(&mut self, id: Ident, decl: ModuleDeclaration) {
+        self.add_module(id.clone(), decl);
+        self.functor_args.insert(id);
+    }
+
+    /// Check whether a module path is rooted in a functor parameter.
+    pub fn is_functor_arg_path(&self, path: &Path) -> bool {
+        match path {
+            Path::Pident(id) => self.functor_args.iter().any(|arg| arg.same(id)),
+            Path::Pdot(parent, _, _) => self.is_functor_arg_path(parent),
+            Path::Papply(_, _) => true,
+        }
     }
 
     /// Add a module binding from an opened module (lower priority than local bindings).
@@ -1065,6 +1153,11 @@ impl Env {
         self.implicit_open_roots
             .contains(component_path.head().name())
             && self.path_starts_with_opened_component(path)
+    }
+
+    /// Iterate over visible module bindings.
+    pub fn iter_modules(&self) -> impl Iterator<Item = (&Ident, &ModuleDeclaration)> {
+        self.modules.iter().map(|(id, m)| (id, m.as_ref()))
     }
 
     pub(crate) fn has_module_ident(&self, id: &Ident) -> bool {
@@ -1262,6 +1355,23 @@ impl Env {
             .find_by_name_with_id(name)
             .map(|(id, decl)| (id, decl.as_ref()))
             .ok_or_else(|| EnvError::ModuleNotFound(name.to_string()))
+    }
+
+    /// Find a module type by name, returning the identifier, declaration, and
+    /// whether the binding is local (from `add_modtype`) vs opened.
+    pub fn find_modtype_with_origin(
+        &self,
+        name: &str,
+    ) -> EnvResult<(&Ident, &ModtypeDeclaration, bool)> {
+        self.modtypes
+            .find_by_name_with_origin(name)
+            .map(|(id, decl, is_local)| (id, decl.as_ref(), is_local))
+            .ok_or_else(|| EnvError::ModuleNotFound(name.to_string()))
+    }
+
+    /// Iterate over visible module type bindings.
+    pub fn iter_modtypes(&self) -> impl Iterator<Item = (&Ident, &ModtypeDeclaration)> {
+        self.modtypes.iter().map(|(id, mtd)| (id, mtd.as_ref()))
     }
 
     /// Find a module type by path.
@@ -2018,6 +2128,13 @@ pub fn initial_env(ctx: &TypeContext) -> Env {
         let add_exception =
             |env: &mut Env, id: Ident, args: Vec<TypeExprRef>, exn_ty: TypeExprRef| {
                 let path = Path::pident(id.clone());
+                let warn_on_literal_pattern_attr = crate::types::decl::Attribute {
+                    attr_name: crate::types::asttypes::Located::noloc(
+                        "ocaml.warn_on_literal_pattern".to_string(),
+                    ),
+                    attr_payload: crate::types::decl::AttributePayload::Structure(vec![]),
+                    attr_loc: Location::none(),
+                };
                 let cstr_desc = ConstructorDescription {
                     cstr_name: id.name().to_string(),
                     cstr_res: exn_ty,
@@ -2030,7 +2147,7 @@ pub fn initial_env(ctx: &TypeContext) -> Env {
                     cstr_generalized: false,
                     cstr_private: PrivateFlag::Public,
                     cstr_loc: Location::none(),
-                    cstr_attributes: vec![],
+                    cstr_attributes: vec![warn_on_literal_pattern_attr],
                     cstr_inlined: None,
                 };
                 env.add_constructor(id, cstr_desc);

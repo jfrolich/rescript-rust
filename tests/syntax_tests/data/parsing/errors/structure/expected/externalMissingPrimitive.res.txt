@@ -1,0 +1,10 @@
+
+  Syntax error!
+  syntax_tests/data/parsing/errors/structure/externalMissingPrimitive.res:1:16-2:0
+
+  1 │ external x: int
+  2 │ 
+
+  Did you forget a `=` here?
+
+external x : int

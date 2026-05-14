@@ -45,6 +45,53 @@ pub enum DiagnosticCategory {
     UnclosedComment,
     /// Unknown character.
     UnknownUchar(char),
+    /// OCaml `Syntaxerr.Error(_)` escaping from parser helpers.
+    FatalSyntaxerr,
+}
+
+/// A category of parser warning.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum ParserWarningKind {
+    /// Legacy `(. ...)` uncurried syntax.
+    DeprecatedUncurriedDotSyntax,
+}
+
+/// A parser warning with location information.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ParserWarning {
+    /// Start position of the warning.
+    pub start_pos: Position,
+    /// End position of the warning.
+    pub end_pos: Position,
+    /// The warning kind.
+    pub kind: ParserWarningKind,
+}
+
+impl ParserWarning {
+    /// Create a new parser warning.
+    pub fn new(start_pos: Position, end_pos: Position, kind: ParserWarningKind) -> Self {
+        Self {
+            start_pos,
+            end_pos,
+            kind,
+        }
+    }
+
+    /// Warning number as reported by OCaml's `Warnings.Deprecated`.
+    pub fn number(&self) -> i32 {
+        match self.kind {
+            ParserWarningKind::DeprecatedUncurriedDotSyntax => 3,
+        }
+    }
+
+    /// Explain the warning as a human-readable message.
+    pub fn message(&self) -> &'static str {
+        match self.kind {
+            ParserWarningKind::DeprecatedUncurriedDotSyntax => {
+                "deprecated: The `(. ...)` uncurried syntax is deprecated. Uncurried is now the default in ReScript — remove the leading dot."
+            }
+        }
+    }
 }
 
 /// A parser diagnostic with location information.
@@ -171,6 +218,9 @@ impl ParserDiagnostic {
             }
             DiagnosticCategory::UnknownUchar(ch) => {
                 format!("Not sure what to do with this character: \"{}\".", ch)
+            }
+            DiagnosticCategory::FatalSyntaxerr => {
+                "Fatal error: exception Syntaxerr.Error(_)".to_string()
             }
         }
     }

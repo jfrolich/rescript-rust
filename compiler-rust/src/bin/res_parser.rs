@@ -22,8 +22,8 @@ use clap::Parser as ClapParser;
 use rescript_compiler::binary_ast::{Marshal, MarshalWriter, mapper_from0, mapper_to0, ppx};
 use rescript_compiler::parse_arena::ParseArena;
 use rescript_compiler::parser::{
-    Comment, Parser, ParserMode, Scanner, SignatureItem, Structure, code_frame, jsx_ppx,
-    ml_printer, module, printer, sexp, sexp_locs, sexp_locs0,
+    Comment, Parser, ParserMode, ParserWarning, Scanner, SignatureItem, Structure, code_frame,
+    jsx_ppx, ml_printer, module, printer, sexp, sexp_locs, sexp_locs0,
 };
 use rescript_compiler::source_text::latin1_bytes_to_string;
 use std::fs;
@@ -172,28 +172,41 @@ fn main() {
     if is_interface {
         let signature = module::parse_signature(&mut parser);
 
+        print_parser_warnings(&parser, &source, &filename, &mut io::stdout());
+
         // Print diagnostics if any
-        if parser.has_errors() {
+        let has_parse_errors = parser.has_errors();
+        if has_parse_errors {
             print_diagnostics(&parser, &source, &filename, &mut io::stdout());
             if !args.recover {
                 process::exit(1);
             }
         }
 
-        // Apply JSX PPX transformation and emit JSX preprocessor warnings.
-        let (signature, jsx_warnings) = jsx_ppx::transform_signature_with_warnings(
-            signature,
-            args.jsx_version,
-            parser.arena_mut(),
-        );
-        print_jsx_preprocessor_warnings(&source, &filename, &jsx_warnings, &mut io::stderr());
-
-        // Apply AST conversion round-trip if requested (for testing)
-        let signature = if args.test_ast_conversion {
-            let sig0 = mapper_to0::map_signature(parser.arena_mut(), &signature);
-            mapper_from0::map_signature(parser.arena_mut(), &sig0)
-        } else {
+        let signature = if has_parse_errors {
             signature
+        } else {
+            // Apply JSX PPX transformation and emit JSX preprocessor warnings.
+            let (signature, jsx_warnings) = match jsx_ppx::transform_signature_with_warnings_result(
+                signature,
+                args.jsx_version,
+                parser.arena_mut(),
+            ) {
+                Ok(result) => result,
+                Err(err) => {
+                    eprintln!("{err}");
+                    process::exit(1);
+                }
+            };
+            print_jsx_preprocessor_warnings(&source, &filename, &jsx_warnings, &mut io::stderr());
+
+            // Apply AST conversion round-trip if requested (for testing)
+            if args.test_ast_conversion {
+                let sig0 = mapper_to0::map_signature(parser.arena_mut(), &signature);
+                mapper_from0::map_signature(parser.arena_mut(), &sig0)
+            } else {
+                signature
+            }
         };
 
         // Print in requested format
@@ -218,14 +231,18 @@ fn main() {
                 sexp_locs::print_signature(&signature, parser.arena(), &mut io::stdout())
             }
             "sexp-locs-ppx" => {
-                let rewritten = match ppx::rewrite_signature(&signature, parser.arena_mut()) {
-                    Ok(rewritten) => rewritten,
-                    Err(e) => {
-                        eprintln!("PPX rewrite failed: {e}");
-                        process::exit(1);
-                    }
-                };
-                sexp_locs::print_signature(&rewritten, parser.arena(), &mut io::stdout());
+                if has_parse_errors {
+                    sexp_locs::print_signature(&signature, parser.arena(), &mut io::stdout());
+                } else {
+                    let rewritten = match ppx::rewrite_signature(&signature, parser.arena_mut()) {
+                        Ok(rewritten) => rewritten,
+                        Err(e) => {
+                            eprintln!("PPX rewrite failed: {e}");
+                            process::exit(1);
+                        }
+                    };
+                    sexp_locs::print_signature(&rewritten, parser.arena(), &mut io::stdout());
+                }
             }
             "sexp0-locs" => {
                 let sig0 = mapper_to0::map_signature(parser.arena_mut(), &signature);
@@ -283,28 +300,41 @@ fn main() {
     } else {
         let structure = module::parse_structure(&mut parser);
 
+        print_parser_warnings(&parser, &source, &filename, &mut io::stdout());
+
         // Print diagnostics if any
-        if parser.has_errors() {
+        let has_parse_errors = parser.has_errors();
+        if has_parse_errors {
             print_diagnostics(&parser, &source, &filename, &mut io::stdout());
             if !args.recover {
                 process::exit(1);
             }
         }
 
-        // Apply JSX PPX transformation and emit JSX preprocessor warnings.
-        let (structure, jsx_warnings) = jsx_ppx::transform_structure_with_warnings(
-            structure,
-            args.jsx_version,
-            parser.arena_mut(),
-        );
-        print_jsx_preprocessor_warnings(&source, &filename, &jsx_warnings, &mut io::stderr());
-
-        // Apply AST conversion round-trip if requested (for testing)
-        let structure = if args.test_ast_conversion {
-            let str0 = mapper_to0::map_structure(parser.arena_mut(), &structure);
-            mapper_from0::map_structure(parser.arena_mut(), &str0)
-        } else {
+        let structure = if has_parse_errors {
             structure
+        } else {
+            // Apply JSX PPX transformation and emit JSX preprocessor warnings.
+            let (structure, jsx_warnings) = match jsx_ppx::transform_structure_with_warnings_result(
+                structure,
+                args.jsx_version,
+                parser.arena_mut(),
+            ) {
+                Ok(result) => result,
+                Err(err) => {
+                    eprintln!("{err}");
+                    process::exit(1);
+                }
+            };
+            print_jsx_preprocessor_warnings(&source, &filename, &jsx_warnings, &mut io::stderr());
+
+            // Apply AST conversion round-trip if requested (for testing)
+            if args.test_ast_conversion {
+                let str0 = mapper_to0::map_structure(parser.arena_mut(), &structure);
+                mapper_from0::map_structure(parser.arena_mut(), &str0)
+            } else {
+                structure
+            }
         };
 
         // Print in requested format
@@ -335,14 +365,18 @@ fn main() {
                 sexp_locs::print_structure(&structure, parser.arena(), &mut io::stdout())
             }
             "sexp-locs-ppx" => {
-                let rewritten = match ppx::rewrite_structure(&structure, parser.arena_mut()) {
-                    Ok(rewritten) => rewritten,
-                    Err(e) => {
-                        eprintln!("PPX rewrite failed: {e}");
-                        process::exit(1);
-                    }
-                };
-                sexp_locs::print_structure(&rewritten, parser.arena(), &mut io::stdout());
+                if has_parse_errors {
+                    sexp_locs::print_structure(&structure, parser.arena(), &mut io::stdout());
+                } else {
+                    let rewritten = match ppx::rewrite_structure(&structure, parser.arena_mut()) {
+                        Ok(rewritten) => rewritten,
+                        Err(e) => {
+                            eprintln!("PPX rewrite failed: {e}");
+                            process::exit(1);
+                        }
+                    };
+                    sexp_locs::print_structure(&rewritten, parser.arena(), &mut io::stdout());
+                }
             }
             "sexp0-locs" => {
                 let str0 = mapper_to0::map_structure(parser.arena_mut(), &structure);
@@ -413,6 +447,46 @@ fn print_diagnostics(parser: &Parser, source: &str, filename: &str, out: &mut im
         );
         let _ = out.write_all(error_msg.as_bytes());
     }
+}
+
+fn print_parser_warnings(parser: &Parser, source: &str, filename: &str, out: &mut impl Write) {
+    for warning in parser.warnings() {
+        print_parser_warning(source, filename, warning, out);
+    }
+}
+
+fn print_parser_warning(
+    source: &str,
+    filename: &str,
+    warning: &ParserWarning,
+    out: &mut impl Write,
+) {
+    let use_color = should_enable_color();
+    let _ = writeln!(out);
+    if use_color {
+        let _ = writeln!(
+            out,
+            "  \x1b[1;33mWarning number {}\x1b[0m",
+            warning.number()
+        );
+    } else {
+        let _ = writeln!(out, "  Warning number {}", warning.number());
+    }
+    let location = code_frame::format_location(filename, &warning.start_pos, &warning.end_pos);
+    let location = if use_color {
+        colorize_location(&location)
+    } else {
+        location
+    };
+    let _ = writeln!(out, "  {}", location);
+    let _ = writeln!(out);
+    let _ = writeln!(
+        out,
+        "{}",
+        code_frame::print_warning(source, &warning.start_pos, &warning.end_pos)
+    );
+    let _ = writeln!(out, "  {}", warning.message());
+    let _ = writeln!(out);
 }
 
 fn print_jsx_preprocessor_warnings(

@@ -25,8 +25,8 @@ use crate::lambda::lam_compat::{FieldDbgInfo, LetKind};
 use crate::lambda::lam_constant::Constant;
 use crate::lambda::lam_primitive::{
     ExternalArgAttr, ExternalArgConst, ExternalArgDelim, ExternalArgLabel, ExternalArgSpec,
-    ExternalModuleBindName, ExternalModuleName, ExternalObjLabel, ExternalObjSpec, ExternalSpec,
-    Mutable, Primitive,
+    ExternalFfiKind, ExternalModuleBindName, ExternalModuleName, ExternalObjLabel, ExternalObjSpec,
+    ExternalSpec, Mutable, Primitive,
 };
 use crate::lambda::{ApplyStatus, Lambda, TagInfo};
 use crate::location::Location;
@@ -950,6 +950,7 @@ impl LambdaCompiler {
 
     pub(crate) fn compile_js_call(
         &mut self,
+        loc: &Location,
         prim_name: &str,
         arg_types: &[ExternalArgSpec],
         ffi: &crate::lambda::lam_primitive::ExternalFfiSpec,
@@ -962,6 +963,16 @@ impl LambdaCompiler {
             call_transformed_jsx: transformed_jsx,
             ..CallInfo::default()
         };
+
+        if ffi.kind == ExternalFfiKind::Normal {
+            self.report_diagnostic(
+                loc,
+                &format!(
+                    "\x1b[1;31mError:\x1b[0m internal error, using unrecognized primitive {prim_name}"
+                ),
+            );
+            return Expression::undefined(false);
+        }
 
         match ffi.spec.as_ref() {
             Some(ExternalSpec::JsVar {
@@ -1176,7 +1187,7 @@ impl LambdaCompiler {
         )
     }
 
-    pub(crate) fn compile_import(&self, args: Vec<Expression>) -> Expression {
+    pub(crate) fn compile_import(&mut self, loc: &Location, args: Vec<Expression>) -> Expression {
         let arg = match args.as_slice() {
             [arg] => arg,
             [
@@ -1187,20 +1198,20 @@ impl LambdaCompiler {
                 },
             ] => arg,
             _ => {
-                return Expression::call(
-                    Expression::var(Ident::create_persistent("import")),
-                    args,
-                    CallInfo::default(),
+                self.report_diagnostic(
+                    loc,
+                    "Invalid argument: Dynamic import must take a single module or module value as its argument.",
                 );
+                return Expression::undefined(false);
             }
         };
 
         let Some((module, member)) = self.module_of_expression(arg) else {
-            return Expression::call(
-                Expression::var(Ident::create_persistent("import")),
-                args,
-                CallInfo::default(),
+            self.report_diagnostic(
+                loc,
+                "Invalid argument: Dynamic import requires a module or module value that is a file as argument. Passing a value or local module is not allowed.",
             );
+            return Expression::undefined(false);
         };
 
         let path = match &module.kind {
@@ -1212,11 +1223,11 @@ impl LambdaCompiler {
         };
 
         let Some(path) = path else {
-            return Expression::call(
-                Expression::var(Ident::create_persistent("import")),
-                args,
-                CallInfo::default(),
+            self.report_diagnostic(
+                loc,
+                "Invalid argument: Dynamic import requires a module or module value that is a file as argument. Passing a value or local module is not allowed.",
             );
+            return Expression::undefined(false);
         };
 
         let import_expr = Expression::call(

@@ -262,6 +262,9 @@ pub struct TypeContext {
     /// persistent signatures. Keyed by the original source node identity for
     /// the lifetime of this typing context.
     generic_dotted_constr_copies: RefCell<ahash::AHashMap<TypeExprRef, TypeExprRef>>,
+    /// Counters for OCaml `Ctype.get_new_abstract_name` when reifying local
+    /// GADT constraint variables.
+    reified_var_counters: RefCell<ahash::AHashMap<String, usize>>,
     /// Previous env ID for check_abbrev_env (OCaml ctype.ml:1272)
     previous_env_id: Cell<u64>,
 
@@ -387,6 +390,10 @@ pub struct TypeContext {
     /// StrIdx values here and resolve them later when needed.
     cmi_longident_names: RefCell<ahash::AHashMap<u32, String>>,
 
+    /// String table for ParseArena Longident components whose StrIdx values are
+    /// intentionally unique per source occurrence for marshal identity.
+    arena_longident_names: RefCell<ahash::AHashMap<u32, String>>,
+
     /// Next synthetic StrIdx raw value for CMI longident strings.
     next_cmi_longident_idx: Cell<u32>,
 
@@ -485,6 +492,7 @@ impl TypeContext {
             trace_gadt_instances: Cell::new(false),
             simple_abbrevs: Cell::new(AbbrevMemoRef(1)),
             generic_dotted_constr_copies: RefCell::new(ahash::AHashMap::new()),
+            reified_var_counters: RefCell::new(ahash::AHashMap::new()),
             previous_env_id: Cell::new(0),
             current_abbreviations: Cell::new(AbbrevMemoRef::nil()),
             types: TypeArena::new(),
@@ -518,6 +526,7 @@ impl TypeContext {
             renamed_module_sigs: RefCell::new(ahash::AHashMap::new()),
             raw_module_sigs: RefCell::new(ahash::AHashMap::new()),
             cmi_longident_names: RefCell::new(ahash::AHashMap::new()),
+            arena_longident_names: RefCell::new(ahash::AHashMap::new()),
             next_cmi_longident_idx: Cell::new(0xF000_0000),
             predef_int: Cell::new(None),
             predef_char: Cell::new(None),
@@ -599,6 +608,24 @@ impl TypeContext {
         self.cmi_longident_names.borrow().get(&idx.raw()).cloned()
     }
 
+    pub(crate) fn register_arena_longident_names(&self, arena: &crate::parse_arena::ParseArena) {
+        let mut names = self.arena_longident_names.borrow_mut();
+        for raw in 0..arena.string_count() {
+            let idx = StrIdx::from_raw(raw as u32);
+            names
+                .entry(raw as u32)
+                .or_insert_with(|| arena.get_string(idx).to_string());
+        }
+    }
+
+    pub(crate) fn resolve_any_longident_component(&self, idx: StrIdx) -> Option<String> {
+        self.cmi_longident_names
+            .borrow()
+            .get(&idx.raw())
+            .cloned()
+            .or_else(|| self.arena_longident_names.borrow().get(&idx.raw()).cloned())
+    }
+
     /// Snapshot synthetic CMI longident component names so portable signatures
     /// can move across TypeContexts without losing the side table.
     pub fn snapshot_cmi_longident_names(&self) -> Vec<(u32, String)> {
@@ -633,6 +660,18 @@ impl TypeContext {
     /// Register a type declaration by ident stamp for alias expansion.
     pub fn register_type_decl_by_stamp(&self, stamp: i32, decl: super::decl::TypeDeclaration) {
         self.type_decl_by_stamp.borrow_mut().insert(stamp, decl);
+    }
+
+    /// Match OCaml `Ctype.get_new_abstract_name`.
+    pub(crate) fn next_reified_abstract_name(&self, prefix: &str) -> String {
+        let mut counters = self.reified_var_counters.borrow_mut();
+        let index = counters.get(prefix).map_or(0, |previous| previous + 1);
+        counters.insert(prefix.to_string(), index);
+        if index == 0 && !prefix.is_empty() && !prefix.ends_with('$') {
+            prefix.to_string()
+        } else {
+            format!("{prefix}{index}")
+        }
     }
 
     /// Look up a type declaration by name from the global store.
@@ -1077,10 +1116,27 @@ impl TypeContext {
         arity: Option<i32>,
     ) -> TypeExprRef {
         let commutable = self.alloc_commutable(Commutable::Cok);
+        self.new_arrow_with_commutable(
+            arg_label,
+            arg_type,
+            ret_type,
+            Commutable::Clink(commutable),
+            arity,
+        )
+    }
+
+    pub(crate) fn new_arrow_with_commutable(
+        &self,
+        arg_label: ArgLabel,
+        arg_type: TypeExprRef,
+        ret_type: TypeExprRef,
+        commutable: Commutable,
+        arity: Option<i32>,
+    ) -> TypeExprRef {
         self.new_type(TypeDesc::Tarrow {
             arg: TypeArg::new(arg_label, arg_type),
             ret: ret_type,
-            commutable: Commutable::Clink(commutable),
+            commutable,
             arity,
         })
     }
@@ -1824,6 +1880,34 @@ impl TypeContext {
         let idx = commutables.len();
         commutables.push(RefCell::new(c));
         CommutableRef::from_usize(idx)
+    }
+
+    pub(crate) fn get_commutable(&self, c: CommutableRef) -> Commutable {
+        let commutables = self.commutables.borrow();
+        commutables
+            .get(c.index())
+            .map(|cell| cell.borrow().clone())
+            .unwrap_or(Commutable::Cunknown)
+    }
+
+    pub(crate) fn set_commutable(&self, c: CommutableRef, value: Commutable) {
+        let commutables = self.commutables.borrow();
+        if let Some(cell) = commutables.get(c.index()) {
+            *cell.borrow_mut() = value;
+        }
+    }
+
+    pub(crate) fn commutable_repr(&self, c: &Commutable) -> Commutable {
+        match c {
+            Commutable::Clink(link) => {
+                let linked = self.get_commutable(*link);
+                match linked {
+                    Commutable::Cunknown => c.clone(),
+                    _ => self.commutable_repr(&linked),
+                }
+            }
+            _ => c.clone(),
+        }
     }
 
     // ========================================================================

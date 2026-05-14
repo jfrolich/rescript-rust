@@ -21,7 +21,12 @@ if [[ "$CHECK_RUNTIME" == "1" && ! -x "$RES_PARSER" ]]; then
 fi
 
 tmp_dir=$(mktemp -d)
-trap 'rm -rf "$tmp_dir"' EXIT
+cleanup_tmp_dir() {
+  find "$tmp_dir" -type f -delete 2>/dev/null || true
+  find "$tmp_dir" -mindepth 1 -type d -empty -delete 2>/dev/null || true
+  rmdir "$tmp_dir" 2>/dev/null || true
+}
+trap cleanup_tmp_dir EXIT
 
 error_numbers_file="$tmp_dir/error_numbers.txt"
 warning_numbers_file="$tmp_dir/warning_numbers.txt"

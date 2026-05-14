@@ -53,6 +53,11 @@ Category-based scanner diagnostics:
 4. `Diagnostics.unknown_uchar` (`:1031`)
 5. dynamic `Diagnostics.message msg` for escape-sequence problems (`:361`, `:371`, `:415`)
 
+The escape-sequence dynamic messages are covered by
+`tests/syntax_tests/data/parsing/errors/scanner/invalidEscapeSequence.res`,
+which triggers both `unknown escape sequence` and
+`escape sequence is invalid unicode code point`.
+
 ## 3. Parser Grammar Diagnostics (`res_core.ml`)
 
 Main parser diagnostic emission uses `Parser.err` + `Diagnostics.*`.
@@ -106,6 +111,25 @@ Examples of direct literal parser messages in `res_core.ml`:
 4. `Did you forget a \`</\` here?` (`compiler/syntax/src/res_core.ml:2821`)
 5. `JSX prop names must be lowercase` (`compiler/syntax/src/res_core.ml:2991`)
 6. `Pattern matching needs at least one case` (`compiler/syntax/src/res_core.ml:3875`)
+7. `A jsx name must be a lowercase or uppercase name...`
+   (`compiler/syntax/src/res_core.ml:2852`)
+
+The lower-case JSX closing-name mismatch recovery path is covered by
+`tests/syntax_tests/data/parsing/errors/expressions/jsxClosingMismatch.res`.
+This complements the existing uppercase/qualified mismatch cases in
+`tests/syntax_tests/data/parsing/errors/expressions/jsx.res`.
+
+The `Closing jsx name should be the same as the opening name...` fallback is
+covered by
+`tests/syntax_tests/data/parsing/errors/expressions/jsxClosingEmptyName.res`,
+which reaches the `</` with no following identifier branch.
+
+The invalid JSX tag-name fallback is covered through the direct compiler
+fixture `tests/error_output_parity/compiler/fixtures/parser_jsx_bad_name_number.res`.
+It is not a numbered parser-matrix case because OCaml's
+`res_parser -recover -print ml` emits the diagnostics and then crashes while
+printing the recovered raw tree for `<1 />`; the `bsc` path compares the
+user-facing parser diagnostics without that recovered-printer crash.
 
 Dynamic parser messages also exist (`"Missing " ^ closing`, keyword escapes, etc.).
 

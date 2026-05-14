@@ -65,7 +65,9 @@ pub use marshal::MarshalWriter;
 pub use parsetree0::*;
 pub use serialize::Marshal;
 pub use writer::{
-    write_signature_ast, write_signature_ast_current, write_signature_ast_current_with_extra_deps,
-    write_signature_ast_to_vec, write_structure_ast, write_structure_ast_current,
-    write_structure_ast_current_with_extra_deps, write_structure_ast_to_vec,
+    write_external_ppx_signature_input, write_external_ppx_structure_input, write_signature_ast,
+    write_signature_ast_current, write_signature_ast_current_with_extra_deps,
+    write_signature_ast_current_with_extra_deps_and_builtin_ppx, write_signature_ast_to_vec,
+    write_structure_ast, write_structure_ast_current, write_structure_ast_current_with_extra_deps,
+    write_structure_ast_current_with_extra_deps_and_builtin_ppx, write_structure_ast_to_vec,
 };

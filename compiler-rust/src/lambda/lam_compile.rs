@@ -78,6 +78,12 @@ pub(crate) struct StaticHandler {
     pub(crate) handler: Lambda,
 }
 
+#[derive(Debug, Clone)]
+pub(crate) struct LambdaDiagnostic {
+    pub(crate) loc: Location,
+    pub(crate) message: String,
+}
+
 /// Direct port of the `handler` record in `Lam_compile_context`
 /// (lam_compile_context.ml:78). Used by `flatten_nested_caches` to collect
 /// multiple adjacent `Lstaticcatch` handlers into a single dispatch group.
@@ -318,6 +324,7 @@ pub struct LambdaCompiler {
     /// unique JS labels (`loop_0`, `loop_1`, ...) on demand. Mirrors
     /// OCaml's `loop_label_counter`.
     pub(crate) loop_label_counter: std::rc::Rc<std::cell::Cell<i32>>,
+    diagnostic: Option<LambdaDiagnostic>,
 }
 
 impl Default for LambdaCompiler {
@@ -397,6 +404,7 @@ impl LambdaCompiler {
             switch_depth: 0,
             loop_stack: Vec::new(),
             loop_label_counter: std::rc::Rc::new(std::cell::Cell::new(0)),
+            diagnostic: None,
         }
     }
 
@@ -440,6 +448,7 @@ impl LambdaCompiler {
             switch_depth: 0,
             loop_stack: Vec::new(),
             loop_label_counter: std::rc::Rc::new(std::cell::Cell::new(0)),
+            diagnostic: None,
         }
     }
 
@@ -641,6 +650,19 @@ impl LambdaCompiler {
 
     pub(crate) fn take_cmj_export_arities(&mut self) -> AHashMap<String, CmjExportArity> {
         std::mem::take(&mut self.cmj_export_arities)
+    }
+
+    pub(crate) fn take_diagnostic(&mut self) -> Option<LambdaDiagnostic> {
+        self.diagnostic.take()
+    }
+
+    pub(crate) fn report_diagnostic(&mut self, loc: &Location, message: &str) {
+        if self.diagnostic.is_none() {
+            self.diagnostic = Some(LambdaDiagnostic {
+                loc: loc.clone(),
+                message: message.to_string(),
+            });
+        }
     }
 
     fn coerce_toplevel_exports(
@@ -1209,7 +1231,7 @@ impl LambdaCompiler {
                 if let Some((op, lhs, rhs)) = short_circuit_primitive(&info.primitive, &info.args) {
                     return self.compile_short_circuit_expr(op, lhs, rhs);
                 }
-                self.compile_primitive(&info.primitive, &info.args)
+                self.compile_primitive(&info.primitive, &info.args, &info.loc)
             }
             Lambda::Lswitch(scrut, switch) => self.compile_switch(scrut, switch),
             Lambda::LstringSwitch(scrut, cases, default) => {
@@ -4979,27 +5001,49 @@ impl LambdaCompiler {
         }
     }
 
-    pub(crate) fn compile_import_primitive(&mut self, args: &[Lambda]) -> Compiled {
+    fn dynamic_import_supported_argument(lam: &Lambda) -> bool {
+        match lam {
+            Lambda::LglobalModule(_, _) | Lambda::Lvar(_) => true,
+            Lambda::Lprim(PrimInfo { primitive, .. }) => {
+                matches!(
+                    primitive,
+                    Primitive::Pfield(_, _) | Primitive::PjsCall { .. }
+                )
+            }
+            Lambda::Lfunction(_) => false,
+            _ => false,
+        }
+    }
+
+    pub(crate) fn compile_import_primitive(&mut self, loc: &Location, args: &[Lambda]) -> Compiled {
         let target = match args {
             [arg] => self.dynamic_import_body(arg).unwrap_or_else(|| arg.clone()),
             _ => {
-                let mut prelude = vec![];
-                let mut compiled_args = Vec::new();
-                for arg in args {
-                    let compiled = self.compile_expr(arg);
-                    prelude.extend(compiled.prelude);
-                    compiled_args.push(compiled.expr);
-                }
+                self.report_diagnostic(
+                    loc,
+                    "Missing argument: Dynamic import requires a module or module value that is a file as argument.",
+                );
                 return Compiled {
-                    prelude,
-                    expr: self.compile_import(compiled_args),
+                    prelude: vec![],
+                    expr: Expression::undefined(false),
                 };
             }
         };
 
+        if !Self::dynamic_import_supported_argument(&target) {
+            self.report_diagnostic(
+                loc,
+                "Invalid argument: unsupported argument to dynamic import. If you believe this should be supported, please open an issue.",
+            );
+            return Compiled {
+                prelude: vec![],
+                expr: Expression::undefined(false),
+            };
+        }
+
         let compiled = self.compile_expr(&target);
         let prelude = compiled.prelude;
-        let expr = self.compile_import(vec![compiled.expr]);
+        let expr = self.compile_import(loc, vec![compiled.expr]);
         Compiled { prelude, expr }
     }
 

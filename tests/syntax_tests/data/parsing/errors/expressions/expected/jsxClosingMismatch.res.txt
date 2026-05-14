@@ -1,0 +1,10 @@
+
+  Syntax error!
+  syntax_tests/data/parsing/errors/expressions/jsxClosingMismatch.res:1:9-19
+
+  1 │ let x = <div></span>
+  2 │ 
+
+  Missing </div>
+
+let x = <div></span>

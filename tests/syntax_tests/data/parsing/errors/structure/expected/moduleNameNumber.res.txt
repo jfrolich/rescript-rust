@@ -1,0 +1,20 @@
+
+  Syntax error!
+  syntax_tests/data/parsing/errors/structure/moduleNameNumber.res:1:8
+
+  1 │ module 1 = {}
+  2 │ 
+
+  At this point, I'm looking for an uppercased name like `Belt` or `Array`
+
+
+  Syntax error!
+  syntax_tests/data/parsing/errors/structure/moduleNameNumber.res:1:10
+
+  1 │ module 1 = {}
+  2 │ 
+
+  Did you mean `==` here?
+
+module _ = struct  end
+;;1 = {  }

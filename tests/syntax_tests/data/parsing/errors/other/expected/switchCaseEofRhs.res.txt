@@ -1,0 +1,21 @@
+
+  Syntax error!
+  syntax_tests/data/parsing/errors/other/switchCaseEofRhs.res:2:7-3:0
+
+  1 │ let x = switch a {
+  2 │ | A =>
+  3 │ 
+
+  Missing expression
+
+
+  Syntax error!
+  syntax_tests/data/parsing/errors/other/switchCaseEofRhs.res:2:7-3:0
+
+  1 │ let x = switch a {
+  2 │ | A =>
+  3 │ 
+
+  Did you forget a `}` here?
+
+let x = match a with | A -> [%rescript.exprhole ]

@@ -55,6 +55,13 @@ impl LambdaCompiler {
         }
     }
 
+    fn compile_runtime_int(value: i64) -> Expression {
+        match i32::try_from(value) {
+            Ok(value) => Expression::number(Number::int(value)),
+            Err(_) => Expression::number(Number::float(value.to_string())),
+        }
+    }
+
     pub(crate) fn compile_constant(cst: &Constant) -> Expression {
         match cst {
             Constant::JsNull => Expression::null(),
@@ -65,7 +72,7 @@ impl LambdaCompiler {
                 i,
                 comment: Some(PointerInfo::Constructor(tag)),
             } => match &tag.runtime_tag {
-                Some(ConstructorRuntimeTag::Int(value)) => Expression::number(Number::int(*value)),
+                Some(ConstructorRuntimeTag::Int(value)) => Self::compile_runtime_int(*value),
                 Some(ConstructorRuntimeTag::String(value)) => Expression::string(value.clone()),
                 Some(ConstructorRuntimeTag::Float(value)) => {
                     Expression::number(Number::float(value.clone()))

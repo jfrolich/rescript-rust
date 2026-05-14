@@ -9,7 +9,8 @@ use crate::parse_arena::{ExprIdx, LidentIdx, LocIdx, Located, ParseArena, PosIdx
 
 use super::ast::*;
 use super::core::{
-    ExprContext, ast_helper, if_let_attr, make_braces_attr, mknoloc, recover, with_loc,
+    ExprContext, ast_helper, err_invalid_variant_ident, if_let_attr, make_braces_attr, mknoloc,
+    recover, with_loc,
 };
 use super::diagnostics::DiagnosticCategory;
 use super::grammar;
@@ -39,6 +40,12 @@ pub fn parse_constant(p: &mut Parser<'_>) -> Constant {
         Token::Int { i, suffix } => {
             let value = extend_cow_lifetime(i.clone());
             let s = *suffix;
+            if s == Some('n') && !is_valid_bigint_literal(&value) {
+                p.err(DiagnosticCategory::Message(
+                    "Invalid bigint literal. Only decimal literal is allowed for bigint."
+                        .to_string(),
+                ));
+            }
             p.next();
             Constant::Integer(value, s)
         }
@@ -71,6 +78,20 @@ pub fn parse_constant(p: &mut Parser<'_>) -> Constant {
             Constant::Integer(Cow::Borrowed("0"), None)
         }
     }
+}
+
+fn is_valid_bigint_literal(s: &str) -> bool {
+    if s.is_empty() {
+        return false;
+    }
+
+    let mut chars = s.chars();
+    let first = chars.next().unwrap();
+    if first != '-' && first != '+' && !first.is_ascii_digit() && first != '_' {
+        return false;
+    }
+
+    chars.all(|c| c.is_ascii_digit() || c == '_')
 }
 
 // ============================================================================
@@ -632,9 +653,11 @@ pub fn parse_operand_expr(p: &mut Parser<'_>, context: ExprContext) -> Expressio
         | Token::Bnot
         | Token::Question => {
             let token = p.token.clone();
+            p.leave_breadcrumb(Grammar::ExprUnary);
             p.next();
             let token_end_idx = p.prev_end_pos_idx();
             let operand = parse_unary_expr(p);
+            p.eat_breadcrumb();
             (
                 super::core::make_unary_expr(p, start_pos_idx, token_end_idx, token, operand),
                 false,
@@ -731,9 +754,11 @@ pub fn parse_unary_expr(p: &mut Parser<'_>) -> Expression {
         | Token::Bnot
         | Token::Question => {
             let token = p.token.clone();
+            p.leave_breadcrumb(Grammar::ExprUnary);
             p.next();
             let token_end_idx = p.prev_end_pos_idx();
             let operand = parse_unary_expr(p);
+            p.eat_breadcrumb();
             super::core::make_unary_expr(p, start_pos_idx, token_end_idx, token, operand)
         }
         _ => {
@@ -1145,8 +1170,14 @@ fn parse_parameters(p: &mut Parser<'_>) -> Vec<super::core::FundefParameter> {
             let lparen_pos_idx = p.start_pos_idx();
             p.next();
 
-            // Skip optional dot (uncurried marker)
-            let had_dot = p.optional(&Token::Dot);
+            // Skip deprecated uncurried marker.
+            let had_dot = if p.token == Token::Dot {
+                p.warn_uncurried_dot_syntax();
+                p.next();
+                true
+            } else {
+                false
+            };
 
             if p.token == Token::Rparen {
                 // Unit parameter: () or (.)
@@ -1285,8 +1316,11 @@ fn set_first_type_param_paren_pos_idx(
 fn parse_parameter(p: &mut Parser<'_>) -> Option<super::core::FundefParameter> {
     let start_pos_idx = p.start_pos_idx();
 
-    // Skip optional dot (uncurried marker, ignored now)
-    p.optional(&Token::Dot);
+    // Skip deprecated uncurried marker.
+    if p.token == Token::Dot {
+        p.warn_uncurried_dot_syntax();
+        p.next();
+    }
 
     // Parse attributes
     let attrs = parse_attributes(p);
@@ -1719,19 +1753,21 @@ fn parse_payload(p: &mut Parser<'_>) -> Payload {
         }]));
     }
 
-    // For other payloads, skip them for now while preserving nesting
-    let mut depth = 1;
-    while depth > 0 && p.token != Token::Eof {
-        match &p.token {
-            Token::Lparen | Token::Lbrace | Token::Lbracket => depth += 1,
-            Token::Rparen | Token::Rbrace | Token::Rbracket => depth -= 1,
-            _ => {}
-        }
-        if depth > 0 {
-            p.next();
-        }
+    if p.token == Token::Rparen {
+        return Payload::PStr(Box::new(vec![]));
     }
-    Payload::PStr(Box::new(vec![]))
+
+    let start_pos_idx = p.start_pos_idx();
+    let expr = parse_expr(p);
+    let expr_idx = p.arena_mut().push_expr(expr);
+    let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
+    Payload::PStr(Box::new(vec![StructureItem {
+        pstr_desc: Box::new(StructureItemDesc::Pstr_eval(Box::new((
+            expr_idx,
+            Attributes::new(),
+        )))),
+        pstr_loc: loc,
+    }]))
 }
 
 // ============================================================================
@@ -1791,6 +1827,7 @@ pub fn parse_binary_expr(
             _ => break,
         };
 
+        p.leave_breadcrumb(Grammar::ExprBinaryAfterOp(token.clone()));
         let op_start_idx = p.start_pos_idx();
         p.next();
         let op_end_idx = p.prev_end_pos_idx();
@@ -1798,6 +1835,7 @@ pub fn parse_binary_expr(
         // Handle special case for assignment
         if token == Token::ColonEqual {
             let right = parse_expr_with_context(p, context);
+            p.eat_breadcrumb();
             let loc = p.mk_loc_spanning(left.pexp_loc, right.pexp_loc);
             let op =
                 super::core::make_infix_operator(p, Token::ColonEqual, op_start_idx, op_end_idx);
@@ -1819,6 +1857,7 @@ pub fn parse_binary_expr(
             prec + 1
         };
         let right = parse_binary_expr(p, right, next_prec, context);
+        p.eat_breadcrumb();
 
         let loc = p.mk_loc_spanning(left.pexp_loc, right.pexp_loc);
 
@@ -2134,40 +2173,7 @@ pub fn parse_atomic_expr(p: &mut Parser<'_>) -> Expression {
             // OCaml includes the % in the extension name location
             let id_start_idx = p.start_pos_idx();
             p.next();
-            let mut parts: Vec<String> = vec![];
-
-            loop {
-                match &p.token {
-                    Token::Lident(name) | Token::Uident(name) => {
-                        parts.push(name.to_string());
-                        p.next();
-                    }
-                    _ if p.token.is_keyword() => {
-                        parts.push(p.token.to_string());
-                        p.next();
-                    }
-                    _ => break,
-                }
-
-                if p.token == Token::Dot {
-                    p.next();
-                    continue;
-                }
-                break;
-            }
-
-            let name = if parts.is_empty() {
-                p.err(DiagnosticCategory::Message(
-                    "Expected extension name after %".to_string(),
-                ));
-                let error_idx = p.arena_mut().intern("error");
-                with_loc(error_idx, LocIdx::none())
-            } else {
-                let id = parts.join(".");
-                let loc = p.mk_loc_idx_to_prev_end(id_start_idx);
-                let str_idx = p.arena_mut().push_string(id);
-                with_loc(str_idx, loc)
-            };
+            let name = super::module::parse_extension_id(p, id_start_idx);
 
             let payload = if p.token == Token::Lparen {
                 p.next();
@@ -2195,6 +2201,7 @@ pub fn parse_atomic_expr(p: &mut Parser<'_>) -> Expression {
         }
         Token::Hash => {
             // Polyvariant: #tag or #tag(arg)
+            let hash_start_pos = p.start_pos;
             p.next();
             let tag: Label = match &p.token {
                 Token::Lident(name) | Token::Uident(name) => {
@@ -2222,10 +2229,8 @@ pub fn parse_atomic_expr(p: &mut Parser<'_>) -> Expression {
                     tag
                 }
                 _ => {
-                    p.err(DiagnosticCategory::Message(
-                        "Expected variant tag after #".to_string(),
-                    ));
-                    Cow::Borrowed("error")
+                    err_invalid_variant_ident(p, hash_start_pos);
+                    Cow::Borrowed("")
                 }
             };
 
@@ -2355,9 +2360,14 @@ pub fn parse_atomic_expr(p: &mut Parser<'_>) -> Expression {
             recover::default_expr(p.arena_mut())
         }
         Token::Eof => {
-            p.err(DiagnosticCategory::Message(
-                "Unexpected end of file".to_string(),
-            ));
+            p.err_at(
+                p.prev_end_pos.clone(),
+                p.end_pos.clone(),
+                DiagnosticCategory::unexpected(
+                    p.token.clone().into_owned(),
+                    p.breadcrumbs().to_vec(),
+                ),
+            );
             recover::default_expr(p.arena_mut())
         }
         _ => {
@@ -2892,18 +2902,23 @@ pub fn parse_primary_expr(p: &mut Parser<'_>, operand: Expression, no_call: bool
                 let bracket_loc = p.mk_loc_idx(lbracket_start_idx, rbracket_end_idx);
 
                 if p.token == Token::Equal {
-                    let equal_start_idx = p.start_pos_idx();
-                    p.next();
-                    let equal_end_idx = p.prev_end_pos_idx();
-                    let value = parse_expr(p);
-
-                    // Check if index is a string constant for object property assignment
                     let is_string_index =
                         if let ExpressionDesc::Pexp_constant(c) = &*index.pexp_desc {
                             matches!(&**c, Constant::String(..))
                         } else {
                             false
                         };
+                    if !is_string_index {
+                        p.leave_breadcrumb(Grammar::ExprArrayMutation);
+                    }
+                    let equal_start_idx = p.start_pos_idx();
+                    p.next();
+                    let equal_end_idx = p.prev_end_pos_idx();
+                    let value = parse_expr(p);
+                    if !is_string_index {
+                        p.eat_breadcrumb();
+                    }
+
                     if is_string_index {
                         let (s, _) = if let ExpressionDesc::Pexp_constant(c) = &*index.pexp_desc {
                             if let Constant::String(s, tag) = &**c {
@@ -3152,6 +3167,7 @@ fn parse_argument(p: &mut Parser<'_>) -> (ArgLabel, Expression) {
     // Handle uncurried dot marker before argument
     // In f(. a, b, . c), each dot is consumed before the argument
     if p.token == Token::Dot {
+        p.warn_uncurried_dot_syntax();
         p.next();
         // Check for apply(.) - uncurried unit call
         if p.token == Token::Rparen {
@@ -3733,14 +3749,16 @@ enum DictPart {
 
 fn parse_dict_expr(p: &mut Parser<'_>, start_pos_idx: PosIdx) -> Expression {
     // Token::Dict already consumed the opening '{'
-    // Upstream #8369: dict literals now support `...spread_expr` entries.
+    // OCaml: parse_comma_delimited_region ~grammar:DictRows ~closing:Rbrace
+    //        ~f:parse_dict_expr_part.
 
     let mut parts: Vec<DictPart> = vec![];
+    p.leave_breadcrumb(Grammar::DictRows);
     while p.token != Token::Rbrace && p.token != Token::Eof {
-        if p.token == Token::DotDotDot {
+        let part = if p.token == Token::DotDotDot {
             p.next();
             let spread_expr = parse_constrained_or_coerced_expr(p);
-            parts.push(DictPart::Spread(spread_expr));
+            Some(DictPart::Spread(spread_expr))
         } else {
             match &p.token {
                 Token::String(s) => {
@@ -3748,8 +3766,33 @@ fn parse_dict_expr(p: &mut Parser<'_>, start_pos_idx: PosIdx) -> Expression {
                     let key_start_idx = p.start_pos_idx();
                     p.next();
                     let key_loc = p.mk_loc_idx_to_prev_end(key_start_idx);
-                    p.expect(Token::Colon);
-                    let value = parse_expr(p);
+                    let value = match p.token {
+                        Token::Colon => {
+                            p.next();
+                            parse_expr(p)
+                        }
+                        Token::Equal => {
+                            p.err_at(
+                                p.start_pos,
+                                p.end_pos,
+                                DiagnosticCategory::message(
+                                    "Dict entries use `:` to separate keys from values. Example: `{\"k\": v}`",
+                                ),
+                            );
+                            p.next();
+                            parse_expr(p)
+                        }
+                        _ => {
+                            let lid_idx = p.push_lident(key.as_ref());
+                            Expression {
+                                pexp_desc: Box::new(ExpressionDesc::Pexp_ident(with_loc(
+                                    lid_idx, key_loc,
+                                ))),
+                                pexp_loc: key_loc,
+                                pexp_attributes: Attributes::new(),
+                            }
+                        }
+                    };
                     let value_end_idx = p.loc_end_idx(value.pexp_loc);
                     let key_expr = Expression {
                         pexp_desc: Box::new(ExpressionDesc::Pexp_constant(Box::new(
@@ -3769,20 +3812,34 @@ fn parse_dict_expr(p: &mut Parser<'_>, start_pos_idx: PosIdx) -> Expression {
                         pexp_loc: tuple_loc,
                         pexp_attributes: Attributes::new(),
                     };
-                    parts.push(DictPart::Row(tuple));
+                    Some(DictPart::Row(tuple))
                 }
-                _ => {
-                    p.err(DiagnosticCategory::Message(
-                        "Dict keys must be strings".to_string(),
-                    ));
+                _ => None,
+            }
+        };
+
+        match part {
+            Some(part) => {
+                parts.push(part);
+                if p.token == Token::Comma {
+                    p.next();
+                } else if p.token == Token::Rbrace || p.token == Token::Eof {
+                    break;
+                } else if grammar::is_list_element(&Grammar::DictRows, &p.token) {
+                    p.expect(Token::Comma);
+                } else if !recover::should_abort_list_parse(p) {
+                    p.expect(Token::Comma);
+                    if p.token == Token::Semicolon {
+                        p.next();
+                    }
+                } else {
                     break;
                 }
             }
-        }
-        if !p.optional(&Token::Comma) {
-            break;
-        }
+            None => break,
+        };
     }
+    p.eat_breadcrumb();
 
     p.expect(Token::Rbrace);
     let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
@@ -3971,6 +4028,11 @@ fn parse_braced_or_record_expr(p: &mut Parser<'_>) -> Expression {
         }
         p.optional(&Token::Comma);
         let fields = parse_record_fields(p);
+        if fields.is_empty() {
+            p.err(DiagnosticCategory::Message(
+                super::core::error_messages::RECORD_SPREAD_WITHOUT_UPDATE.to_string(),
+            ));
+        }
         p.expect(Token::Rbrace);
         let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
         let spread_idx = p.arena_mut().push_expr(spread);
@@ -4100,7 +4162,7 @@ fn parse_braced_or_record_expr(p: &mut Parser<'_>) -> Expression {
     let is_js_object = p.lookahead(|state| {
         if let Token::String(_) = &state.token {
             state.next();
-            matches!(state.token, Token::Colon)
+            matches!(state.token, Token::Colon | Token::Equal)
         } else {
             false
         }
@@ -4842,8 +4904,21 @@ fn parse_let_in_block_with_continuation_and_attrs(
 
                 // Substitute Ptyp_constr -> Ptyp_var for the Ptyp_poly body
                 let inner_ct = p.arena().get_core_type(*inner_idx).clone();
-                let substituted_inner =
-                    super::typ::substitute_type_vars(p.arena_mut(), inner_ct, &var_set);
+                let substituted_inner = match super::typ::substitute_type_vars(
+                    p.arena_mut(),
+                    inner_ct.clone(),
+                    &var_set,
+                ) {
+                    Ok(substituted_inner) => substituted_inner,
+                    Err(loc) => {
+                        p.err_at(
+                            p.loc_start(loc),
+                            p.loc_end(loc),
+                            DiagnosticCategory::FatalSyntaxerr,
+                        );
+                        inner_ct
+                    }
+                };
 
                 // Rebuild the Ptyp_poly with the substituted body
                 let substituted_inner_idx = p.arena_mut().push_core_type(substituted_inner);
@@ -5053,10 +5128,8 @@ fn parse_module_name(p: &mut Parser<'_>) -> Located<StrIdx> {
             with_loc(str_idx, loc)
         }
         _ => {
-            p.err(DiagnosticCategory::Message(
-                "Expected module name".to_string(),
-            ));
-            let str_idx = p.arena_mut().intern("Error");
+            p.err(DiagnosticCategory::Uident(p.token.clone().into_owned()));
+            let str_idx = p.arena_mut().intern("_");
             mknoloc(str_idx)
         }
     }
@@ -5078,20 +5151,18 @@ fn parse_module_longident(p: &mut Parser<'_>) -> Located<LidentIdx> {
                     break;
                 }
             }
-            Token::Lident(name) => {
-                parts.push(name.to_string());
-                p.next();
+            _ => {
+                p.err(DiagnosticCategory::Uident(p.token.clone().into_owned()));
+                if !parts.is_empty() {
+                    parts.push("_".to_string());
+                }
                 break;
             }
-            _ => break,
         }
     }
 
     if parts.is_empty() {
-        p.err(DiagnosticCategory::Message(
-            "Expected module path".to_string(),
-        ));
-        parts.push("Error".to_string());
+        parts.push("_".to_string());
     }
 
     let lid = super::core::build_longident(p.arena_mut(), &parts);
@@ -5339,7 +5410,12 @@ fn parse_js_object_expr(p: &mut Parser<'_>, start_pos_idx: PosIdx) -> Expression
             let key_loc = p.mk_loc_idx_to_prev_end(field_start_idx);
             let lid_idx = p.push_lident(&*key);
 
-            if p.token == Token::Colon {
+            if p.token == Token::Colon || p.token == Token::Equal {
+                if p.token == Token::Equal {
+                    p.err(DiagnosticCategory::message(
+                        super::core::error_messages::RECORD_FIELD_MISSING_COLON,
+                    ));
+                }
                 p.next();
                 let expr = parse_expr(p);
                 let expr_idx = p.arena_mut().push_expr(expr);
@@ -6045,28 +6121,31 @@ fn parse_switch_case_block(p: &mut Parser<'_>) -> Expression {
     // This is critical for error messages: ExprBlock + Bar → "Looks like there might be
     // an expression missing here" (for empty switch case bodies like | Empty => | Next => ...)
     p.leave_breadcrumb(Grammar::ExprBlock);
-    // Use the recursive parser that properly nests let/module/open/exception
-    let result = parse_switch_case_body(p).unwrap_or_else(|| {
-        // OCaml: parse_expr_block -> parse_expr_block_item -> parse_expr ->
-        // parse_atomic_expr encounters | or } and emits an error through the
-        // breadcrumb-aware diagnostic system before returning exprhole.
-        // Match OCaml's error position: prev_end_pos..end_pos (like parse_atomic_expr default)
-        // Push ExprOperand so breadcrumb-aware diagnostics see [.., ExprBlock, ExprOperand]
-        // which triggers "Looks like there might be an expression missing here" for Bar.
-        if p.token != Token::Rbrace && p.token != Token::Eof {
-            p.leave_breadcrumb(Grammar::ExprOperand);
-            p.err_at(
-                p.prev_end_pos.clone(),
-                p.end_pos.clone(),
-                DiagnosticCategory::unexpected(
-                    p.token.clone().into_owned(),
-                    p.breadcrumbs().to_vec(),
-                ),
-            );
-            p.eat_breadcrumb();
+    // Use the recursive parser that properly nests let/module/open/exception.
+    // OCaml calls parse_expr_block_item unconditionally for the first RHS item;
+    // if the token is not a block-expression start, parse_expr/parse_atomic_expr
+    // emits the unexpected-token diagnostic and performs generic recovery.
+    let result = match parse_switch_case_body(p) {
+        Some(expr) => expr,
+        None => {
+            let expr = parse_expr_with_context(p, ExprContext::SwitchCaseRhs);
+            parse_newline_or_semicolon_expr_block(p);
+            if let Some(rest) = parse_switch_case_body(p) {
+                let loc = p.mk_loc_spanning(expr.pexp_loc, rest.pexp_loc);
+                Expression {
+                    pexp_desc: {
+                        let e1_idx = p.arena_mut().push_expr(expr);
+                        let e2_idx = p.arena_mut().push_expr(rest);
+                        Box::new(ExpressionDesc::Pexp_sequence(e1_idx, e2_idx))
+                    },
+                    pexp_loc: loc,
+                    pexp_attributes: Attributes::new(),
+                }
+            } else {
+                expr
+            }
         }
-        recover::default_expr(p.arena_mut())
-    });
+    };
     p.eat_breadcrumb();
     result
 }
@@ -6080,6 +6159,7 @@ fn parse_switch_expr(p: &mut Parser<'_>) -> Expression {
     p.expect(Token::Lbrace);
 
     let mut cases = vec![];
+    p.leave_breadcrumb(Grammar::PatternMatching);
     while p.token != Token::Rbrace && p.token != Token::Eof {
         // OCaml uses begin_region/end_region around each case
         // This allows errors from different cases to all be reported
@@ -6122,6 +6202,7 @@ fn parse_switch_expr(p: &mut Parser<'_>) -> Expression {
             break;
         }
     }
+    p.eat_breadcrumb();
 
     // OCaml: emit error if switch has no cases
     // OCaml uses end_pos (end of current token) as the error end, not start_pos
@@ -6269,9 +6350,14 @@ fn parse_for_rest(
         }
         Token::In => {
             if await_kw {
-                p.err(DiagnosticCategory::Message(
-                    "A `for await` loop must use `of`, like `for await item of items`.".to_string(),
-                ));
+                p.err_at(
+                    p.arena().get_position(start_pos_idx).clone(),
+                    p.end_pos,
+                    DiagnosticCategory::Message(
+                        "A `for await` loop must use `of`, like `for await item of items`."
+                            .to_string(),
+                    ),
+                );
             }
             p.next();
             let start_expr = parse_expr(p);
@@ -6340,11 +6426,15 @@ fn normalize_for_of_pattern(
     match &*pattern.ppat_desc {
         super::ast::PatternDesc::Ppat_any | super::ast::PatternDesc::Ppat_var(_) => pattern,
         _ => {
-            p.err(DiagnosticCategory::Message(
-                "A `for...of` or `for await...of` loop only supports a variable or `_` on the \
-                 left side. Destructuring patterns are not supported here."
-                    .to_string(),
-            ));
+            p.err_at(
+                p.loc_start(pattern.ppat_loc),
+                p.loc_end(pattern.ppat_loc),
+                DiagnosticCategory::Message(
+                    "A `for...of` or `for await...of` loop only supports a variable or `_` on the \
+                     left side. Destructuring patterns are not supported here."
+                        .to_string(),
+                ),
+            );
             super::ast::Pattern {
                 ppat_desc: Box::new(super::ast::PatternDesc::Ppat_any),
                 ppat_loc: pattern.ppat_loc,
@@ -6948,50 +7038,73 @@ fn parse_jsx(p: &mut Parser<'_>) -> Expression {
             false
         };
 
-        let closing_tag_end_idx;
-        let closing_tag_name_loc;
-        let closing_tag_name;
-        if has_closing_tag {
-            let closing_name_start_idx = p.start_pos_idx();
-            closing_tag_name = parse_jsx_tag_name(p);
-            closing_tag_name_loc = p.mk_loc_idx_to_prev_end(closing_name_start_idx);
-            // Check for tag name mismatch (OCaml: "Missing </Foo.Bar>")
-            if !jsx_tag_names_match(&tag_name, &closing_tag_name, p) {
-                let opening_name = jsx_tag_name_to_string_for_error(&tag_name, p);
-                // OCaml checks: if structure_item_start -> "Missing </Tag>"
-                //               else -> "Closing jsx name should be the same..."
-                if super::grammar::is_structure_item_start(&p.token) {
-                    p.err_at(
-                        start_pos.clone(),
-                        p.prev_end_pos.clone(),
-                        DiagnosticCategory::Message(format!("Missing </{}>", opening_name)),
-                    );
-                    // OCaml: expect GreaterThan in this branch
-                    p.expect(Token::GreaterThan);
-                } else {
-                    p.err_at(
-                        start_pos.clone(),
-                        p.prev_end_pos.clone(),
-                        DiagnosticCategory::Message(format!("Missing </{}>", opening_name)),
-                    );
+        let closing_tag = if has_closing_tag {
+            let token0 = p.token.clone().into_owned();
+            match token0 {
+                Token::Lident(_) | Token::Uident(_) => {
+                    let closing_name_start_idx = p.start_pos_idx();
+                    let closing_tag_name = parse_jsx_tag_name(p);
+                    let closing_tag_name_loc = p.mk_loc_idx_to_prev_end(closing_name_start_idx);
+                    // Check for tag name mismatch (OCaml: "Missing </Foo.Bar>")
+                    let closing_tag_end_idx = if !jsx_tag_names_match(
+                        &tag_name,
+                        &closing_tag_name,
+                        p,
+                    ) {
+                        let opening_name = jsx_tag_name_to_string_for_error(&tag_name, p);
+                        if super::grammar::is_structure_item_start(&token0) {
+                            p.err_at(
+                                start_pos.clone(),
+                                p.prev_end_pos.clone(),
+                                DiagnosticCategory::Message(format!("Missing </{}>", opening_name)),
+                            );
+                            // OCaml consumes '>' in this mismatch branch to keep AST shape stable.
+                            p.expect(Token::GreaterThan);
+                            p.prev_end_pos_idx()
+                        } else {
+                            p.err_at(
+                                    start_pos.clone(),
+                                    p.prev_end_pos.clone(),
+                                    DiagnosticCategory::Message(format!(
+                                        "Closing jsx name should be the same as the opening name. Did you mean </{}> ?",
+                                        opening_name
+                                    )),
+                                );
+                            p.expect(Token::GreaterThan);
+                            p.prev_end_pos_idx()
+                        }
+                    } else {
+                        let closing_tag_end_idx = p.start_pos_idx();
+                        p.expect(Token::GreaterThan);
+                        closing_tag_end_idx
+                    };
+                    Some(JsxClosingTag {
+                        start: closing_tag_start_idx,
+                        name: with_loc(closing_tag_name, closing_tag_name_loc),
+                        end: closing_tag_end_idx,
+                    })
+                }
+                token => {
+                    let opening_name = jsx_tag_name_to_string_for_error(&tag_name, p);
+                    if super::grammar::is_structure_item_start(&token) {
+                        p.err_at(
+                            start_pos.clone(),
+                            p.prev_end_pos.clone(),
+                            DiagnosticCategory::Message(format!("Missing </{}>", opening_name)),
+                        );
+                    } else {
+                        p.err_at(
+                            start_pos.clone(),
+                            p.prev_end_pos.clone(),
+                            DiagnosticCategory::Message(format!(
+                                "Closing jsx name should be the same as the opening name. Did you mean </{}> ?",
+                                opening_name
+                            )),
+                        );
+                    }
+                    None
                 }
             }
-            // OCaml: closing_tag_end = p.start_pos (position of '>')
-            closing_tag_end_idx = p.start_pos_idx();
-            p.expect(Token::GreaterThan);
-        } else {
-            // No closing tag - create a synthetic one
-            closing_tag_name = JsxTagName::Invalid("error".to_string());
-            closing_tag_name_loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
-            closing_tag_end_idx = p.prev_end_pos_idx();
-        }
-
-        let closing_tag = if has_closing_tag {
-            Some(JsxClosingTag {
-                start: closing_tag_start_idx,
-                name: with_loc(closing_tag_name, closing_tag_name_loc),
-                end: closing_tag_end_idx,
-            })
         } else {
             // OCaml: closing_tag_start is None when no proper closing tag was found
             None
@@ -7137,7 +7250,7 @@ fn parse_jsx_tag_name(p: &mut Parser<'_>) -> JsxTagName {
         }
         _ => {
             p.err(DiagnosticCategory::Message(
-                "Expected JSX tag name".to_string(),
+                "A jsx name must be a lowercase or uppercase name, like: div in <div /> or Navbar in <Navbar />".to_string(),
             ));
             JsxTagName::Invalid("error".to_string())
         }
@@ -7175,8 +7288,10 @@ fn parse_jsx_props(p: &mut Parser<'_>) -> Vec<JsxProp> {
             }
             Token::Lident(name) => {
                 let name = name.clone();
-                let name_loc = p.mk_loc_current();
+                let name_start_idx = p.start_pos_idx();
                 p.next();
+                let name = read_hyphen_chain(p, name);
+                let name_loc = p.mk_loc_idx_to_prev_end(name_start_idx);
 
                 if p.token == Token::Equal {
                     p.next();
@@ -7210,15 +7325,28 @@ fn parse_jsx_props(p: &mut Parser<'_>) -> Vec<JsxProp> {
             }
             Token::Question => {
                 p.next();
-                if let Token::Lident(name) = &p.token {
-                    let name = name.clone();
-                    let name_loc = p.mk_loc_current();
-                    p.next();
-                    let name_idx = p.arena_mut().push_interned_string(&name);
-                    props.push(JsxProp::Punning {
-                        optional: true,
-                        name: with_loc(name_idx, name_loc),
-                    });
+                match &p.token {
+                    Token::Lident(name) => {
+                        let name = name.clone();
+                        let name_start_idx = p.start_pos_idx();
+                        p.next();
+                        let name = read_hyphen_chain(p, name);
+                        let name_loc = p.mk_loc_idx_to_prev_end(name_start_idx);
+                        let name_idx = p.arena_mut().push_interned_string(&name);
+                        props.push(JsxProp::Punning {
+                            optional: true,
+                            name: with_loc(name_idx, name_loc),
+                        });
+                    }
+                    Token::Uident(name) => {
+                        let name = name.clone();
+                        p.next();
+                        drop(read_hyphen_chain(p, name));
+                        p.err(DiagnosticCategory::Message(
+                            "JSX prop names must be lowercase".to_string(),
+                        ));
+                    }
+                    _ => {}
                 }
             }
             token if token.is_keyword() => {

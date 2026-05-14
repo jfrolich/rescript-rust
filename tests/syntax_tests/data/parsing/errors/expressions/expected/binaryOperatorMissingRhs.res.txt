@@ -1,0 +1,10 @@
+
+  Syntax error!
+  syntax_tests/data/parsing/errors/expressions/binaryOperatorMissingRhs.res:1:12-2:0
+
+  1 │ let x = 1 +
+  2 │ 
+
+  Did you forget to write an expression here?
+
+let x = 1 + ([%rescript.exprhole ])

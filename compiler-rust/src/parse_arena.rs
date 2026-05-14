@@ -1832,6 +1832,11 @@ impl ParseArena {
         self.strings.get(idx)
     }
 
+    /// Number of strings currently stored in the arena string table.
+    pub fn string_count(&self) -> usize {
+        self.strings.len()
+    }
+
     /// Find the most recently inserted string index for the given content.
     ///
     /// This scans from the end to prefer the latest identity when the same string

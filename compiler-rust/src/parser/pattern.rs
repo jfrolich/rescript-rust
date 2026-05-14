@@ -6,7 +6,9 @@
 use std::borrow::Cow;
 
 use super::ast::*;
-use super::core::{ast_helper, mknoloc, recover, template_literal_attr, with_loc};
+use super::core::{
+    ast_helper, err_invalid_variant_ident, mknoloc, recover, template_literal_attr, with_loc,
+};
 use super::diagnostics::DiagnosticCategory;
 use super::grammar::{self, Grammar};
 use super::longident::Longident;
@@ -609,7 +611,7 @@ fn parse_atomic_pattern(p: &mut Parser<'_>) -> Pattern {
             p.expect(Token::Lparen);
 
             let name_loc = match &p.token {
-                Token::Uident(name) | Token::Lident(name) => {
+                Token::Uident(name) => {
                     let name = name.to_string();
                     let loc = p.mk_loc_current();
                     p.next();
@@ -617,11 +619,8 @@ fn parse_atomic_pattern(p: &mut Parser<'_>) -> Pattern {
                     with_loc(str_idx, loc)
                 }
                 _ => {
-                    p.err(DiagnosticCategory::Message(
-                        "Expected module name".to_string(),
-                    ));
-                    let str_idx = p.arena_mut().intern("Error");
-                    with_loc(str_idx, p.mk_loc_current())
+                    let str_idx = p.arena_mut().intern("_");
+                    mknoloc(str_idx)
                 }
             };
 
@@ -1468,12 +1467,7 @@ fn parse_dict_pattern(p: &mut Parser<'_>, start_pos_idx: PosIdx) -> Pattern {
                     opt,
                 });
             }
-            _ => {
-                p.err(DiagnosticCategory::Message(
-                    "Dict keys must be strings".to_string(),
-                ));
-                break;
-            }
+            _ => break,
         }
 
         if !p.optional(&Token::Comma) {
@@ -1505,39 +1499,7 @@ fn parse_extension_pattern(p: &mut Parser<'_>, start_pos_idx: PosIdx) -> Pattern
     // OCaml includes the % in the extension name location
     // start_pos_idx already points to the start (before %)
     p.expect(Token::Percent);
-    let mut parts: Vec<String> = vec![];
-
-    loop {
-        match &p.token {
-            Token::Lident(name) | Token::Uident(name) => {
-                parts.push(name.to_string());
-                p.next();
-            }
-            _ if p.token.is_keyword() => {
-                parts.push(p.token.to_string());
-                p.next();
-            }
-            _ => break,
-        }
-
-        if p.token == Token::Dot {
-            p.next();
-            continue;
-        }
-        break;
-    }
-
-    let id = if parts.is_empty() {
-        p.err(DiagnosticCategory::Message(
-            "Expected extension identifier".to_string(),
-        ));
-        let str_idx = p.arena_mut().intern("error");
-        mknoloc(str_idx)
-    } else {
-        let joined = parts.join(".");
-        let str_idx = p.arena_mut().push_string(joined);
-        with_loc(str_idx, p.mk_loc_idx_to_prev_end(start_pos_idx))
-    };
+    let id = super::module::parse_extension_id(p, start_pos_idx);
 
     let payload = if p.token == Token::Lparen {
         p.next();
@@ -1615,6 +1577,7 @@ fn parse_template_literal_pattern(p: &mut Parser<'_>, start_pos_idx: PosIdx) -> 
 /// Parse a polymorphic variant pattern (#Tag or #Tag(pat) or #...type).
 fn parse_poly_variant_pattern(p: &mut Parser<'_>) -> Pattern {
     let start_pos_idx = p.start_pos_idx();
+    let hash_start_pos = p.start_pos;
     p.expect(Token::Hash);
 
     // Handle #...type - type constraint pattern
@@ -1659,10 +1622,8 @@ fn parse_poly_variant_pattern(p: &mut Parser<'_>) -> Pattern {
             tag
         }
         _ => {
-            p.err(DiagnosticCategory::Message(
-                "Expected variant tag after #".to_string(),
-            ));
-            Cow::Borrowed("error")
+            err_invalid_variant_ident(p, hash_start_pos);
+            Cow::Borrowed("")
         }
     };
 

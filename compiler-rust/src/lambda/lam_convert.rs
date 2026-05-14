@@ -1389,7 +1389,9 @@ fn to_parser_mutable(flag: TypeMutableFlag) -> ParserMutableFlag {
 fn decoded_external_ffi_spec(encoded: &str) -> ExternalFfiSpec {
     let ffi_marshaled = decode_marshaled_ffi_type(encoded);
     ExternalFfiSpec {
-        kind: if ffi_marshaled
+        kind: if !is_bs_primitive(encoded) {
+            ExternalFfiKind::Normal
+        } else if ffi_marshaled
             .as_ref()
             .is_some_and(ffi_marshaled_is_obj_create)
         {
@@ -1421,6 +1423,13 @@ fn decode_marshaled_ffi_type(encoded: &str) -> Option<OcamlValue> {
     let bytes = encoded.chars().map(|c| c as u32 as u8).collect::<Vec<_>>();
     let mut reader = MarshalReader::new();
     reader.read_from_bytes(&bytes).ok()
+}
+
+fn is_bs_primitive(encoded: &str) -> bool {
+    let mut chars = encoded.chars();
+    let first = chars.next().map(|c| c as u32 as u8);
+    let second = chars.next().map(|c| c as u32 as u8);
+    first == Some(0x84) && second == Some(0x95) && 2 + chars.count() >= 20
 }
 
 fn ffi_marshaled_is_obj_create(value: &OcamlValue) -> bool {

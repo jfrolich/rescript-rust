@@ -508,7 +508,9 @@ pub enum AttributePayload {
     /// String payload
     Str(String),
     /// Integer payload
-    Int(i32),
+    Int(i64),
+    /// Unparsed integer payload from source attributes.
+    IntLiteral(String),
     /// Float payload
     Float(String),
     /// BigInt payload
@@ -517,6 +519,11 @@ pub enum AttributePayload {
     Bool(bool),
     /// Identifier payload
     Ident(String),
+    /// Deprecated payload with optional migration metadata.
+    Deprecated {
+        reason: String,
+        can_be_automigrated: bool,
+    },
     /// Structure payload (list of string pairs)
     Structure(Vec<(String, String)>),
 }
@@ -568,6 +575,48 @@ pub fn constructor_description_attrs_for_variant(
         attrs.insert(0, internal_optional_attr());
     }
     attrs
+}
+
+/// Parse like OCaml's `int_of_string` on a 64-bit runtime.
+pub(crate) fn parse_ocaml_int_literal(s: &str) -> Option<i64> {
+    let stripped: String = s.chars().filter(|c| *c != '_').collect();
+    let (negative, digits) = if let Some(rest) = stripped.strip_prefix('-') {
+        (true, rest)
+    } else if let Some(rest) = stripped.strip_prefix('+') {
+        (false, rest)
+    } else {
+        (false, stripped.as_str())
+    };
+    let (base, digits) = if let Some(rest) = digits
+        .strip_prefix("0x")
+        .or_else(|| digits.strip_prefix("0X"))
+    {
+        (16, rest)
+    } else if let Some(rest) = digits
+        .strip_prefix("0o")
+        .or_else(|| digits.strip_prefix("0O"))
+    {
+        (8, rest)
+    } else if let Some(rest) = digits
+        .strip_prefix("0b")
+        .or_else(|| digits.strip_prefix("0B"))
+    {
+        (2, rest)
+    } else {
+        (10, digits)
+    };
+    if digits.is_empty() {
+        return None;
+    }
+    let magnitude = i128::from_str_radix(digits, base).ok()?;
+    let value = if negative { -magnitude } else { magnitude };
+    let min = -(1i128 << 62);
+    let max = (1i128 << 62) - 1;
+    if value < min || value > max {
+        None
+    } else {
+        Some(value as i64)
+    }
 }
 
 #[cfg(test)]

@@ -1,0 +1,10 @@
+
+  Syntax error!
+  syntax_tests/data/parsing/errors/expressions/unaryOperatorMissingOperand.res:1:10-2:0
+
+  1 │ let x = !
+  2 │ 
+
+  Did you forget to write an expression here?
+
+let x = not ([%rescript.exprhole ])

@@ -1,0 +1,12 @@
+
+  Syntax error!
+  syntax_tests/data/parsing/errors/other/switchCaseEmptyBeforeBrace.res:2:7-3:1
+
+  1 │ let x = switch a {
+  2 │ | A =>
+  3 │ }
+  4 │ 
+
+  It seems that this expression block is empty
+
+let x = match a with | A -> [%rescript.exprhole ]

@@ -7,7 +7,7 @@ use std::borrow::Cow;
 use std::collections::HashSet;
 
 use super::ast::*;
-use super::core::{ast_helper, mknoloc, recover, with_loc};
+use super::core::{ast_helper, err_invalid_variant_ident, mknoloc, recover, with_loc};
 use super::diagnostics::DiagnosticCategory;
 use super::grammar;
 use super::grammar::Grammar;
@@ -38,8 +38,14 @@ pub fn substitute_type_vars(
     arena: &mut crate::parse_arena::ParseArena,
     typ: CoreType,
     vars: &HashSet<String>,
-) -> CoreType {
+) -> Result<CoreType, LocIdx> {
     let new_desc = match *typ.ptyp_desc {
+        CoreTypeDesc::Ptyp_var(name) => {
+            if vars.contains(name.as_ref().as_ref()) {
+                return Err(typ.ptyp_loc);
+            }
+            CoreTypeDesc::Ptyp_var(name)
+        }
         CoreTypeDesc::Ptyp_constr(inner) => {
             let (lid, args) = *inner;
             // Check if this is a simple Lident that matches a type variable
@@ -51,11 +57,11 @@ pub fn substitute_type_vars(
                         let name = Cow::Owned(name.to_string());
                         arena.record_tyvar_source(typ.ptyp_loc, source_idx);
                         // Convert to Ptyp_var
-                        return CoreType {
+                        return Ok(CoreType {
                             ptyp_desc: Box::new(CoreTypeDesc::Ptyp_var(Box::new(name))),
                             ptyp_loc: typ.ptyp_loc,
                             ptyp_attributes: typ.ptyp_attributes,
-                        };
+                        });
                     }
                 }
             }
@@ -64,19 +70,19 @@ pub fn substitute_type_vars(
                 .into_iter()
                 .map(|arg_idx| {
                     let arg_type = arena.get_core_type(arg_idx).clone();
-                    let substituted = substitute_type_vars(arena, arg_type, vars);
-                    arena.push_core_type(substituted)
+                    substitute_type_vars(arena, arg_type, vars)
+                        .map(|substituted| arena.push_core_type(substituted))
                 })
-                .collect();
+                .collect::<Result<_, _>>()?;
             CoreTypeDesc::Ptyp_constr(Box::new((lid, new_args)))
         }
         CoreTypeDesc::Ptyp_arrow(inner) => {
             let (arg, ret, arity) = *inner;
             let ret_type = arena.get_core_type(ret).clone();
-            let substituted_ret = substitute_type_vars(arena, ret_type, vars);
+            let substituted_ret = substitute_type_vars(arena, ret_type, vars)?;
             let new_ret = arena.push_core_type(substituted_ret);
             let arg_type = arena.get_core_type(arg.typ).clone();
-            let substituted_arg = substitute_type_vars(arena, arg_type, vars);
+            let substituted_arg = substitute_type_vars(arena, arg_type, vars)?;
             let new_arg_typ = arena.push_core_type(substituted_arg);
             CoreTypeDesc::Ptyp_arrow(Box::new((
                 Box::new(TypeArg {
@@ -93,13 +99,33 @@ pub fn substitute_type_vars(
                 .into_iter()
                 .map(|e_idx| {
                     let e_type = arena.get_core_type(e_idx).clone();
-                    let substituted = substitute_type_vars(arena, e_type, vars);
-                    arena.push_core_type(substituted)
+                    substitute_type_vars(arena, e_type, vars)
+                        .map(|substituted| arena.push_core_type(substituted))
                 })
-                .collect(),
+                .collect::<Result<_, _>>()?,
         )),
-        CoreTypeDesc::Ptyp_poly(inner) => CoreTypeDesc::Ptyp_poly(inner),
-        CoreTypeDesc::Ptyp_alias(inner) => CoreTypeDesc::Ptyp_alias(inner),
+        CoreTypeDesc::Ptyp_poly(inner) => {
+            let (poly_vars, body_idx) = *inner;
+            if poly_vars
+                .iter()
+                .any(|var| vars.contains(arena.get_string(var.txt)))
+            {
+                return Err(typ.ptyp_loc);
+            }
+            let body_type = arena.get_core_type(body_idx).clone();
+            let substituted_body = substitute_type_vars(arena, body_type, vars)?;
+            let new_body_idx = arena.push_core_type(substituted_body);
+            CoreTypeDesc::Ptyp_poly(Box::new((poly_vars, new_body_idx)))
+        }
+        CoreTypeDesc::Ptyp_alias(inner) => {
+            let (inner_idx, name) = *inner;
+            if vars.contains(name.as_ref()) {
+                return Err(typ.ptyp_loc);
+            }
+            let inner_type = arena.get_core_type(inner_idx).clone();
+            let substituted_inner = substitute_type_vars(arena, inner_type, vars)?;
+            CoreTypeDesc::Ptyp_alias(Box::new((arena.push_core_type(substituted_inner), name)))
+        }
         CoreTypeDesc::Ptyp_object(inner) => {
             let (fields, closed) = *inner;
             let new_fields: Vec<ObjectField> = fields
@@ -107,16 +133,18 @@ pub fn substitute_type_vars(
                 .map(|field| match field {
                     ObjectField::Otag(name, attrs, inner_typ_idx) => {
                         let inner_type = arena.get_core_type(inner_typ_idx).clone();
-                        let substituted = substitute_type_vars(arena, inner_type, vars);
-                        ObjectField::Otag(name, attrs, arena.push_core_type(substituted))
+                        substitute_type_vars(arena, inner_type, vars).map(|substituted| {
+                            ObjectField::Otag(name, attrs, arena.push_core_type(substituted))
+                        })
                     }
                     ObjectField::Oinherit(inner_typ_idx) => {
                         let inner_type = arena.get_core_type(inner_typ_idx).clone();
-                        let substituted = substitute_type_vars(arena, inner_type, vars);
-                        ObjectField::Oinherit(arena.push_core_type(substituted))
+                        substitute_type_vars(arena, inner_type, vars).map(|substituted| {
+                            ObjectField::Oinherit(arena.push_core_type(substituted))
+                        })
                     }
                 })
-                .collect();
+                .collect::<Result<_, _>>()?;
             CoreTypeDesc::Ptyp_object(Box::new((new_fields, closed)))
         }
         CoreTypeDesc::Ptyp_variant(inner) => {
@@ -129,19 +157,20 @@ pub fn substitute_type_vars(
                             .into_iter()
                             .map(|t_idx| {
                                 let t_type = arena.get_core_type(t_idx).clone();
-                                let substituted = substitute_type_vars(arena, t_type, vars);
-                                arena.push_core_type(substituted)
+                                substitute_type_vars(arena, t_type, vars)
+                                    .map(|substituted| arena.push_core_type(substituted))
                             })
-                            .collect();
-                        RowField::Rtag(name, attrs, empty, new_types)
+                            .collect::<Result<_, _>>()?;
+                        Ok(RowField::Rtag(name, attrs, empty, new_types))
                     }
                     RowField::Rinherit(inner_typ_idx) => {
                         let inner_type = arena.get_core_type(inner_typ_idx).clone();
-                        let substituted = substitute_type_vars(arena, inner_type, vars);
-                        RowField::Rinherit(arena.push_core_type(substituted))
+                        substitute_type_vars(arena, inner_type, vars).map(|substituted| {
+                            RowField::Rinherit(arena.push_core_type(substituted))
+                        })
                     }
                 })
-                .collect();
+                .collect::<Result<_, _>>()?;
             CoreTypeDesc::Ptyp_variant(Box::new((new_rows, closed, labels)))
         }
         CoreTypeDesc::Ptyp_package(pkg_inner) => {
@@ -150,20 +179,20 @@ pub fn substitute_type_vars(
                 .into_iter()
                 .map(|(c_lid, c_typ_idx)| {
                     let c_type = arena.get_core_type(c_typ_idx).clone();
-                    let substituted = substitute_type_vars(arena, c_type, vars);
-                    (c_lid, arena.push_core_type(substituted))
+                    substitute_type_vars(arena, c_type, vars)
+                        .map(|substituted| (c_lid, arena.push_core_type(substituted)))
                 })
-                .collect();
+                .collect::<Result<_, _>>()?;
             CoreTypeDesc::Ptyp_package(Box::new((lid, new_constraints)))
         }
         // These don't contain nested types, return as-is
         other => other,
     };
-    CoreType {
+    Ok(CoreType {
         ptyp_desc: Box::new(new_desc),
         ptyp_loc: typ.ptyp_loc,
         ptyp_attributes: typ.ptyp_attributes,
-    }
+    })
 }
 
 // ============================================================================
@@ -195,69 +224,102 @@ pub fn parse_typ_expr(p: &mut Parser<'_>) -> CoreType {
 /// This is used for record field types where `'a => T` should NOT include
 /// the `'` in the arrow type's location.
 pub fn parse_poly_type_expr(p: &mut Parser<'_>) -> CoreType {
-    // Special case: single type var followed by =>
     if p.token == Token::SingleQuote {
-        // Try to parse as single type var
-        let result = p.lookahead(|state| {
-            state.next(); // consume '
-            match &state.token {
-                Token::Lident(_) | Token::Uident(_) => {
-                    state.next(); // consume name
-                    // Check if followed by => (not another type var or .)
-                    state.token == Token::EqualGreater
-                }
-                _ => false,
+        let start_pos_idx = p.start_pos_idx();
+        let vars = parse_type_var_list(p);
+        match vars.as_slice() {
+            [_, _, ..] => {
+                p.expect(Token::Dot);
+                let body = parse_typ_expr(p);
+                let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
+                let body_idx = p.arena_mut().push_core_type(body);
+                return CoreType {
+                    ptyp_desc: Box::new(CoreTypeDesc::Ptyp_poly(Box::new((vars, body_idx)))),
+                    ptyp_loc: loc,
+                    ptyp_attributes: Attributes::new(),
+                };
             }
-        });
-
-        if result {
-            // It's a single type var followed by =>
-            p.next(); // consume '
-            let var_start_idx = p.start_pos_idx();
-            let name = match &p.token {
-                Token::Lident(n) | Token::Uident(n) => {
-                    let n = extend_cow_lifetime(n.clone());
+            [var] => match p.token {
+                Token::Dot => {
                     p.next();
-                    n
+                    let body = parse_typ_expr(p);
+                    let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
+                    let body_idx = p.arena_mut().push_core_type(body);
+                    return CoreType {
+                        ptyp_desc: Box::new(CoreTypeDesc::Ptyp_poly(Box::new((vars, body_idx)))),
+                        ptyp_loc: loc,
+                        ptyp_attributes: Attributes::new(),
+                    };
                 }
-                _ => Cow::Borrowed("a"),
-            };
-            let var_loc = p.mk_loc_idx_to_prev_end(var_start_idx);
-            let typ = CoreType {
-                ptyp_desc: Box::new(CoreTypeDesc::Ptyp_var(Box::new(name))),
-                ptyp_loc: var_loc.clone(),
-                ptyp_attributes: Attributes::new(),
-            };
-            p.next(); // consume =>
-            let return_type = parse_typ_expr_inner(p, true);
-            // Use typ.ptyp_loc.loc_start (the var's location, excluding ')
-            let typ_start_idx = p.loc_start_idx(typ.ptyp_loc);
-            let end_pos_idx = p.prev_end_pos_idx();
-            let loc = p.mk_loc_idx(typ_start_idx, end_pos_idx);
-            let typ_idx = p.arena_mut().push_core_type(typ);
-            let arg = TypeArg {
-                attrs: Attributes::new(),
-                lbl: ArgLabel::Nolabel,
-                typ: typ_idx,
-            };
-            // LITERAL path: OCaml line 4367 `Typ.arrow ~arity:(Some 1)`
-            // Use static arity to match OCaml's CSE sharing behavior
-            let ret_idx = p.arena_mut().push_core_type(return_type);
-            return CoreType {
-                ptyp_desc: Box::new(CoreTypeDesc::Ptyp_arrow(Box::new((
-                    Box::new(arg),
-                    ret_idx,
-                    p.static_arity_1(),
-                )))),
-                ptyp_loc: loc,
-                ptyp_attributes: Attributes::new(),
-            };
+                Token::EqualGreater => {
+                    p.next();
+                    let name = p.arena().get_string(var.txt).to_string();
+                    let typ = CoreType {
+                        ptyp_desc: Box::new(CoreTypeDesc::Ptyp_var(Box::new(Cow::Owned(name)))),
+                        ptyp_loc: var.loc,
+                        ptyp_attributes: Attributes::new(),
+                    };
+                    let return_type = parse_typ_expr_inner(p, true);
+                    let typ_start_idx = p.loc_start_idx(typ.ptyp_loc);
+                    let end_pos_idx = p.prev_end_pos_idx();
+                    let loc = p.mk_loc_idx(typ_start_idx, end_pos_idx);
+                    let typ_idx = p.arena_mut().push_core_type(typ);
+                    let arg = TypeArg {
+                        attrs: Attributes::new(),
+                        lbl: ArgLabel::Nolabel,
+                        typ: typ_idx,
+                    };
+                    let ret_idx = p.arena_mut().push_core_type(return_type);
+                    return CoreType {
+                        ptyp_desc: Box::new(CoreTypeDesc::Ptyp_arrow(Box::new((
+                            Box::new(arg),
+                            ret_idx,
+                            p.static_arity_1(),
+                        )))),
+                        ptyp_loc: loc,
+                        ptyp_attributes: Attributes::new(),
+                    };
+                }
+                _ => {
+                    let name = p.arena().get_string(var.txt).to_string();
+                    return CoreType {
+                        ptyp_desc: Box::new(CoreTypeDesc::Ptyp_var(Box::new(Cow::Owned(name)))),
+                        ptyp_loc: var.loc,
+                        ptyp_attributes: Attributes::new(),
+                    };
+                }
+            },
+            [] => unreachable!("parse_type_var_list always consumes at least one quote here"),
         }
     }
 
     // Fall through to regular type expression parsing
     let typ = parse_typ_expr_inner(p, true);
     parse_type_alias(p, typ)
+}
+
+fn parse_type_var_list(p: &mut Parser<'_>) -> Vec<StringLoc> {
+    let mut vars = Vec::new();
+    while p.token == Token::SingleQuote {
+        p.next();
+        let var_start_idx = p.start_pos_idx();
+        let (name, loc) = if p.token == Token::Eof {
+            p.err_at(
+                p.start_pos,
+                p.prev_end_pos,
+                DiagnosticCategory::Unexpected {
+                    token: p.token.clone().into_owned(),
+                    context: vec![],
+                },
+            );
+            (String::new(), p.mk_loc_idx_to_prev_end(var_start_idx))
+        } else {
+            super::core::parse_ident(p, super::core::error_messages::TYPE_PARAM, var_start_idx)
+        };
+        let name_idx = p.arena_mut().push_interned_string(&name);
+        vars.push(with_loc(name_idx, loc));
+    }
+    vars
 }
 
 /// Parse a locally abstract type: `type a b c. SomeType`
@@ -564,54 +626,21 @@ fn parse_atomic_typ_expr_with_start(
     let mut typ = match &p.token {
         Token::SingleQuote => {
             // Type variable: 'a
-            // Polytype: 'a 'b. T
-            let mut vars: Vec<Located<StrIdx>> = vec![];
-
-            while p.token == Token::SingleQuote {
-                p.next(); // consume the single quote first
-                let var_start_idx = p.start_pos_idx(); // capture start position AFTER the quote
-                // OCaml: special case for EOF - emit unexpected token error
-                let (name, var_loc) = if p.token == Token::Eof {
-                    p.err(DiagnosticCategory::Unexpected {
-                        token: p.token.clone().into_owned(),
-                        context: vec![],
-                    });
-                    (String::new(), p.mk_loc_idx_to_prev_end(var_start_idx))
-                } else {
-                    // OCaml: parse_ident checks for keywords first
-                    super::core::parse_ident(
-                        p,
-                        super::core::error_messages::TYPE_VAR,
-                        var_start_idx,
-                    )
-                };
-                let name_idx = p.arena_mut().push_interned_string(&name);
-                vars.push(with_loc(name_idx, var_loc));
-            }
-
-            if p.token == Token::Dot && !vars.is_empty() {
-                p.next();
-                let body = parse_typ_expr(p);
-                let loc = p.mk_loc_idx_to_end_of(start_pos_idx, body.ptyp_loc);
-                let body_idx = p.arena_mut().push_core_type(body);
-                CoreType {
-                    ptyp_desc: Box::new(CoreTypeDesc::Ptyp_poly(Box::new((vars, body_idx)))),
-                    ptyp_loc: loc,
-                    ptyp_attributes: Attributes::new(),
-                }
-            } else if let Some(first) = vars.first() {
-                CoreType {
-                    ptyp_desc: Box::new(CoreTypeDesc::Ptyp_var(Box::new(Cow::Owned(
-                        p.arena().get_string(first.txt).to_string(),
-                    )))),
-                    ptyp_loc: first.loc.clone(), // Use the variable's location (excludes the ')
-                    ptyp_attributes: Attributes::new(),
-                }
+            p.next();
+            let var_start_idx = p.start_pos_idx();
+            let (name, var_loc) = if p.token == Token::Eof {
+                p.err(DiagnosticCategory::Unexpected {
+                    token: p.token.clone().into_owned(),
+                    context: vec![],
+                });
+                (String::new(), p.mk_loc_idx_to_prev_end(var_start_idx))
             } else {
-                p.err(DiagnosticCategory::Message(
-                    super::core::error_messages::TYPE_VAR.to_string(),
-                ));
-                recover::default_type(p.arena_mut())
+                super::core::parse_ident(p, super::core::error_messages::TYPE_VAR, var_start_idx)
+            };
+            CoreType {
+                ptyp_desc: Box::new(CoreTypeDesc::Ptyp_var(Box::new(Cow::Owned(name)))),
+                ptyp_loc: var_loc,
+                ptyp_attributes: Attributes::new(),
             }
         }
         Token::Underscore => {
@@ -770,9 +799,30 @@ fn parse_type_constr_with_start(
     let mut path_parts: Vec<String> = vec![];
     loop {
         match &p.token {
-            Token::Lident(name) | Token::Uident(name) => {
+            Token::Lident(name) => {
                 path_parts.push(name.to_string());
                 p.next();
+            }
+            Token::Uident(name) => {
+                let token_start = p.start_pos.clone();
+                let token_end = p.end_pos.clone();
+                let token = Token::Uident(Cow::Owned(name.to_string()));
+                path_parts.push(name.to_string());
+                p.next();
+                let token_after_ident = p.token.clone();
+                if p.token == Token::Dot {
+                    p.next();
+                    continue;
+                }
+                p.err_at(token_start, token_end, DiagnosticCategory::Lident(token));
+                p.next();
+                if token_after_ident == Token::Rparen && p.token == Token::Dot {
+                    p.next();
+                    if matches!(p.token, Token::Lident(_)) {
+                        p.next();
+                    }
+                }
+                break;
             }
             _ => break,
         }
@@ -956,8 +1006,14 @@ fn parse_function_type(p: &mut Parser<'_>, start_pos_idx: PosIdx) -> CoreType {
     // Use identity-based position (push_start_pos) to match OCaml's behavior where
     // nested function captures create different heap objects even at the same coordinate.
     let first_uncurried_start_idx = p.start_pos_idx();
-    // Skip uncurried marker
-    let first_has_dot = p.optional(&Token::Dot);
+    // Skip deprecated uncurried marker.
+    let first_has_dot = if p.token == Token::Dot {
+        p.warn_uncurried_dot_syntax();
+        p.next();
+        true
+    } else {
+        false
+    };
 
     // Track both the TypeArg and its start position as PosIdx (for arrow location sharing)
     let mut params: Vec<(TypeArg, crate::parse_arena::PosIdx)> = vec![];
@@ -975,8 +1031,12 @@ fn parse_function_type(p: &mut Parser<'_>, start_pos_idx: PosIdx) -> CoreType {
         let has_dot = if is_first_param {
             is_first_param = false;
             first_has_dot
+        } else if p.token == Token::Dot {
+            p.warn_uncurried_dot_syntax();
+            p.next();
+            true
         } else {
-            p.optional(&Token::Dot)
+            false
         };
         // OCaml handles doc comments separately from regular attributes for location purposes.
         // In OCaml parse_type_parameter:
@@ -1589,7 +1649,7 @@ fn parse_record_or_object_type(p: &mut Parser<'_>) -> CoreType {
     p.expect(Token::Lbrace);
 
     // Check for object type: {. ... } or {.. ... }
-    let _is_object = p.token == Token::Dot || p.token == Token::DotDot;
+    let is_object = p.token == Token::Dot || p.token == Token::DotDot;
     let closed = if p.token == Token::DotDot {
         p.next();
         ClosedFlag::Open
@@ -1642,15 +1702,16 @@ fn parse_record_or_object_type(p: &mut Parser<'_>) -> CoreType {
             ptyp_attributes: Attributes::new(),
         }
     } else {
-        // Check for inline record syntax in wrong position: { name: ... } where object type expected
-        // OCaml: when inline_types_context is None and token is Lident, emit error
-        if !has_inline_context && matches!(p.token, Token::Lident(_)) {
+        // Check for inline record syntax in wrong position: { name: ... } where object type expected.
+        // Object markers (`{. ...}` / `{.. ...}`) go through OCaml's object-field parser instead.
+        if !has_inline_context && !is_object && matches!(p.token, Token::Lident(_)) {
             p.err(DiagnosticCategory::Message(
                 "An inline record type declaration is only allowed in a variant constructor's declaration or nested inside of a record type declaration".to_string(),
             ));
         }
 
-        let fields = parse_object_fields(p);
+        let allow_record_lidents_after_spread = !is_object && p.token == Token::DotDotDot;
+        let fields = parse_object_fields(p, allow_record_lidents_after_spread);
         p.expect(Token::Rbrace);
         let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
         let typ = CoreType {
@@ -1673,6 +1734,7 @@ pub fn parse_object_type_body(p: &mut Parser<'_>, start_pos_idx: PosIdx) -> Core
     // The caller provides the PosIdx directly for identity-based position sharing.
 
     // Check for open/closed markers: {. ... } or {.. ... }
+    let starts_with_object_marker = matches!(p.token, Token::Dot | Token::DotDot);
     let closed = if p.token == Token::DotDot {
         p.next();
         ClosedFlag::Open
@@ -1683,7 +1745,9 @@ pub fn parse_object_type_body(p: &mut Parser<'_>, start_pos_idx: PosIdx) -> Core
         ClosedFlag::Closed
     };
 
-    let fields = parse_object_fields(p);
+    let allow_record_lidents_after_spread =
+        !starts_with_object_marker && p.token == Token::DotDotDot;
+    let fields = parse_object_fields(p, allow_record_lidents_after_spread);
     p.expect(Token::Rbrace);
     let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
     let typ = CoreType {
@@ -1703,10 +1767,14 @@ pub fn parse_object_type_body(p: &mut Parser<'_>, start_pos_idx: PosIdx) -> Core
 }
 
 /// Parse object fields.
-fn parse_object_fields(p: &mut Parser<'_>) -> Vec<ObjectField> {
+fn parse_object_fields(
+    p: &mut Parser<'_>,
+    allow_record_lidents_after_spread: bool,
+) -> Vec<ObjectField> {
     // Leave breadcrumb matching OCaml's parse_comma_delimited_region ~grammar:StringFieldDeclarations
     p.leave_breadcrumb(Grammar::StringFieldDeclarations);
     let mut fields = vec![];
+    let mut in_spread_tail = false;
 
     while p.token != Token::Rbrace && p.token != Token::Eof {
         // Optional attributes on the field.
@@ -1718,6 +1786,9 @@ fn parse_object_fields(p: &mut Parser<'_>) -> Vec<ObjectField> {
             let typ = parse_typ_expr(p);
             let typ_idx = p.arena_mut().push_core_type(typ);
             fields.push(ObjectField::Oinherit(typ_idx));
+            if allow_record_lidents_after_spread {
+                in_spread_tail = true;
+            }
             if !p.optional(&Token::Comma) {
                 break;
             }
@@ -1726,7 +1797,15 @@ fn parse_object_fields(p: &mut Parser<'_>) -> Vec<ObjectField> {
 
         // Handle optional field: name?: typ
         let name = match &p.token {
-            Token::Lident(n) => Some(n.to_string()),
+            Token::Lident(n) => {
+                let name = n.to_string();
+                if !in_spread_tail {
+                    p.err(DiagnosticCategory::Message(
+                        super::core::error_messages::object_quoted_field_name(&name),
+                    ));
+                }
+                Some(name)
+            }
             Token::String(s) => Some(s.to_string()),
             _ => None,
         };
@@ -1904,6 +1983,7 @@ fn parse_poly_variant_type(p: &mut Parser<'_>) -> CoreType {
 /// Parse a simple polymorphic variant type starting with #.
 fn parse_poly_variant_type_simple(p: &mut Parser<'_>) -> CoreType {
     let start_pos_idx = p.start_pos_idx();
+    let hash_start_pos = p.start_pos;
     p.expect(Token::Hash);
 
     let tag: Label = match &p.token {
@@ -1932,10 +2012,8 @@ fn parse_poly_variant_type_simple(p: &mut Parser<'_>) -> CoreType {
             tag
         }
         _ => {
-            p.err(DiagnosticCategory::Message(
-                "Expected variant tag after #".to_string(),
-            ));
-            Cow::Borrowed("error")
+            err_invalid_variant_ident(p, hash_start_pos);
+            Cow::Borrowed("")
         }
     };
 
@@ -2207,6 +2285,7 @@ fn parse_single_row_field_with_attrs(p: &mut Parser<'_>, attrs: Attributes) -> O
     if p.token == Token::Hash {
         // Tagged row field: #tag or #tag(args)
         let hash_start_idx = p.start_pos_idx();
+        let hash_start_pos = p.start_pos;
         p.next();
         let tag: Loc<Label> = match &p.token {
             Token::Lident(name) | Token::Uident(name) => {
@@ -2247,10 +2326,8 @@ fn parse_single_row_field_with_attrs(p: &mut Parser<'_>, attrs: Attributes) -> O
                 with_loc(Cow::Borrowed("false"), loc)
             }
             _ => {
-                p.err(DiagnosticCategory::Message(
-                    "Expected variant tag after #".to_string(),
-                ));
-                mknoloc(Cow::Borrowed("error"))
+                err_invalid_variant_ident(p, hash_start_pos);
+                mknoloc(Cow::Borrowed(""))
             }
         };
 
@@ -2347,6 +2424,7 @@ fn parse_row_fields(p: &mut Parser<'_>) -> Vec<RowField> {
             // Tagged row field: #tag or #tag(args)
             // Capture the # position for location - OCaml includes # in the tag location
             let hash_start_idx = p.start_pos_idx();
+            let hash_start_pos = p.start_pos;
             p.next();
             let tag: Loc<Label> = match &p.token {
                 Token::Lident(name) | Token::Uident(name) => {
@@ -2387,10 +2465,8 @@ fn parse_row_fields(p: &mut Parser<'_>) -> Vec<RowField> {
                     with_loc(Cow::Borrowed("false"), loc)
                 }
                 _ => {
-                    p.err(DiagnosticCategory::Message(
-                        "Expected variant tag after #".to_string(),
-                    ));
-                    mknoloc(Cow::Borrowed("error"))
+                    err_invalid_variant_ident(p, hash_start_pos);
+                    mknoloc(Cow::Borrowed(""))
                 }
             };
 
@@ -2550,26 +2626,27 @@ fn parse_module_long_ident(p: &mut Parser<'_>) -> super::ast::Loc<crate::parse_a
     let start_pos_idx = p.start_pos_idx();
     let mut path_parts: Vec<String> = vec![];
 
-    while let Token::Uident(name) = &p.token {
-        path_parts.push(name.to_string());
-        p.next();
-        if p.token == Token::Dot {
-            p.next();
-        } else {
-            break;
-        }
-    }
-
-    if path_parts.is_empty() {
-        // Allow lowercase module identifiers in some contexts (e.g. module type names).
-        if let Token::Lident(name) = &p.token {
-            path_parts.push(name.to_string());
-            p.next();
-        } else {
-            p.err(DiagnosticCategory::Message(
-                "Expected module identifier".to_string(),
-            ));
-            path_parts.push("Error".to_string());
+    loop {
+        match &p.token {
+            Token::Uident(name) => {
+                path_parts.push(name.to_string());
+                p.next();
+                if p.token == Token::Dot {
+                    p.next();
+                    continue;
+                }
+                break;
+            }
+            Token::Lident(name) => {
+                path_parts.push(name.to_string());
+                p.next();
+                break;
+            }
+            _ => {
+                p.err(DiagnosticCategory::Uident(p.token.clone().into_owned()));
+                path_parts.push("_".to_string());
+                break;
+            }
         }
     }
 
@@ -2649,40 +2726,7 @@ fn parse_extension(p: &mut Parser<'_>) -> Extension {
     // OCaml includes the % in the extension name location
     let id_start_idx = p.start_pos_idx();
     p.expect(Token::Percent);
-    let mut parts: Vec<String> = vec![];
-
-    loop {
-        match &p.token {
-            Token::Lident(name) | Token::Uident(name) => {
-                parts.push(name.to_string());
-                p.next();
-            }
-            _ if p.token.is_keyword() => {
-                parts.push(p.token.to_string());
-                p.next();
-            }
-            _ => break,
-        }
-
-        if p.token == Token::Dot {
-            p.next();
-            continue;
-        }
-        break;
-    }
-
-    let id = if parts.is_empty() {
-        p.err(DiagnosticCategory::Message(
-            "Expected extension identifier".to_string(),
-        ));
-        let idx = p.arena_mut().intern("error");
-        mknoloc(idx)
-    } else {
-        let id = parts.join(".");
-        let loc = p.mk_loc_idx_to_prev_end(id_start_idx);
-        let idx = p.arena_mut().push_string(id.to_string());
-        with_loc(idx, loc)
-    };
+    let id = super::module::parse_extension_id(p, id_start_idx);
 
     // Parse optional payload: %ext(payload)
     let payload = if p.token == Token::Lparen {
