@@ -102,3 +102,4 @@ error,99,tests/syntax_tests/data/parsing/errors/expressions/unaryOperatorMissing
 error,100,tests/syntax_tests/data/parsing/errors/expressions/arrowReturnPolytype.res,tests/syntax_tests/data/parsing/errors/expressions/expected/arrowReturnPolytype.res.txt
 error,101,tests/syntax_tests/data/parsing/errors/expressions/jsxUpperOptionalProp.res,tests/syntax_tests/data/parsing/errors/expressions/expected/jsxUpperOptionalProp.res.txt
 error,102,tests/syntax_tests/data/parsing/errors/expressions/jsxClosingMismatch.res,tests/syntax_tests/data/parsing/errors/expressions/expected/jsxClosingMismatch.res.txt
+error,103,tests/syntax_tests/data/parsing/errors/expressions/jsxClosingEmptyName.res,tests/syntax_tests/data/parsing/errors/expressions/expected/jsxClosingEmptyName.res.txt

@@ -1,0 +1,10 @@
+
+  Syntax error!
+  syntax_tests/data/parsing/errors/expressions/jsxClosingEmptyName.res:1:9-15
+
+  1 │ let x = <div></>
+  2 │ 
+
+  Closing jsx name should be the same as the opening name. Did you mean </div> ?
+
+let x = <div> > ([%rescript.exprhole ])

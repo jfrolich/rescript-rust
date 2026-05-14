@@ -114,6 +114,11 @@ The lower-case JSX closing-name mismatch recovery path is covered by
 This complements the existing uppercase/qualified mismatch cases in
 `tests/syntax_tests/data/parsing/errors/expressions/jsx.res`.
 
+The `Closing jsx name should be the same as the opening name...` fallback is
+covered by
+`tests/syntax_tests/data/parsing/errors/expressions/jsxClosingEmptyName.res`,
+which reaches the `</` with no following identifier branch.
+
 The invalid JSX tag-name fallback is covered through the direct compiler
 fixture `tests/error_output_parity/compiler/fixtures/parser_jsx_bad_name_number.res`.
 It is not a numbered parser-matrix case because OCaml's

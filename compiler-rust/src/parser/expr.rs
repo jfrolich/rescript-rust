@@ -7039,50 +7039,70 @@ fn parse_jsx(p: &mut Parser<'_>) -> Expression {
             false
         };
 
-        let closing_tag_end_idx;
-        let closing_tag_name_loc;
-        let closing_tag_name;
-        if has_closing_tag {
-            let closing_name_start_idx = p.start_pos_idx();
-            closing_tag_name = parse_jsx_tag_name(p);
-            closing_tag_name_loc = p.mk_loc_idx_to_prev_end(closing_name_start_idx);
-            // Check for tag name mismatch (OCaml: "Missing </Foo.Bar>")
-            if !jsx_tag_names_match(&tag_name, &closing_tag_name, p) {
-                let opening_name = jsx_tag_name_to_string_for_error(&tag_name, p);
-                // OCaml checks: if structure_item_start -> "Missing </Tag>"
-                //               else -> "Closing jsx name should be the same..."
-                if super::grammar::is_structure_item_start(&p.token) {
-                    p.err_at(
-                        start_pos.clone(),
-                        p.prev_end_pos.clone(),
-                        DiagnosticCategory::Message(format!("Missing </{}>", opening_name)),
-                    );
-                    // OCaml: expect GreaterThan in this branch
-                    p.expect(Token::GreaterThan);
-                } else {
-                    p.err_at(
-                        start_pos.clone(),
-                        p.prev_end_pos.clone(),
-                        DiagnosticCategory::Message(format!("Missing </{}>", opening_name)),
-                    );
+        let closing_tag = if has_closing_tag {
+            let token0 = p.token.clone().into_owned();
+            match token0 {
+                Token::Lident(_) | Token::Uident(_) => {
+                    let closing_name_start_idx = p.start_pos_idx();
+                    let closing_tag_name = parse_jsx_tag_name(p);
+                    let closing_tag_name_loc = p.mk_loc_idx_to_prev_end(closing_name_start_idx);
+                    // Check for tag name mismatch (OCaml: "Missing </Foo.Bar>")
+                    let closing_tag_end_idx =
+                        if !jsx_tag_names_match(&tag_name, &closing_tag_name, p) {
+                            let opening_name = jsx_tag_name_to_string_for_error(&tag_name, p);
+                            if super::grammar::is_structure_item_start(&token0) {
+                                p.err_at(
+                                    start_pos.clone(),
+                                    p.prev_end_pos.clone(),
+                                    DiagnosticCategory::Message(format!("Missing </{}>", opening_name)),
+                                );
+                                // OCaml consumes '>' in this mismatch branch to keep AST shape stable.
+                                p.expect(Token::GreaterThan);
+                                p.prev_end_pos_idx()
+                            } else {
+                                p.err_at(
+                                    start_pos.clone(),
+                                    p.prev_end_pos.clone(),
+                                    DiagnosticCategory::Message(format!(
+                                        "Closing jsx name should be the same as the opening name. Did you mean </{}> ?",
+                                        opening_name
+                                    )),
+                                );
+                                p.expect(Token::GreaterThan);
+                                p.prev_end_pos_idx()
+                            }
+                        } else {
+                            let closing_tag_end_idx = p.start_pos_idx();
+                            p.expect(Token::GreaterThan);
+                            closing_tag_end_idx
+                        };
+                    Some(JsxClosingTag {
+                        start: closing_tag_start_idx,
+                        name: with_loc(closing_tag_name, closing_tag_name_loc),
+                        end: closing_tag_end_idx,
+                    })
+                }
+                token => {
+                    let opening_name = jsx_tag_name_to_string_for_error(&tag_name, p);
+                    if super::grammar::is_structure_item_start(&token) {
+                        p.err_at(
+                            start_pos.clone(),
+                            p.prev_end_pos.clone(),
+                            DiagnosticCategory::Message(format!("Missing </{}>", opening_name)),
+                        );
+                    } else {
+                        p.err_at(
+                            start_pos.clone(),
+                            p.prev_end_pos.clone(),
+                            DiagnosticCategory::Message(format!(
+                                "Closing jsx name should be the same as the opening name. Did you mean </{}> ?",
+                                opening_name
+                            )),
+                        );
+                    }
+                    None
                 }
             }
-            // OCaml: closing_tag_end = p.start_pos (position of '>')
-            closing_tag_end_idx = p.start_pos_idx();
-            p.expect(Token::GreaterThan);
-        } else {
-            // No closing tag - create a synthetic one
-            closing_tag_name = JsxTagName::Invalid("error".to_string());
-            closing_tag_name_loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
-            closing_tag_end_idx = p.prev_end_pos_idx();
-        }
-
-        let closing_tag = if has_closing_tag {
-            Some(JsxClosingTag {
-                start: closing_tag_start_idx,
-                name: with_loc(closing_tag_name, closing_tag_name_loc),
-                end: closing_tag_end_idx,
-            })
         } else {
             // OCaml: closing_tag_start is None when no proper closing tag was found
             None
