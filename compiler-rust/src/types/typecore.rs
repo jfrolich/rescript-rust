@@ -9984,9 +9984,20 @@ fn check_partial_simple<'a>(
         return Partial::Total;
     }
 
-    // Check poly variant exhaustiveness: if all cases are Tpat_variant and the
-    // scrutinee type is a closed variant, check if all tags are covered.
-    if let Some(first_case) = cases.first() {
+    // OCaml compiler/ml/parmatch.ml:844-875 only calls row_of_pat
+    // (compiler/ml/parmatch.ml:834-837, which expands the pattern type) from
+    // the Tpat_variant branch. Keep regular constructor matrices on the
+    // constructor path above so normal variant exhaustiveness does not force
+    // unrelated persistent module signatures while checking for polyvariants.
+    let mut case_tags: HashSet<String> = HashSet::new();
+    let mut all_variant_pats = true;
+    for case in cases {
+        collect_variant_tags(&case.c_lhs, &mut case_tags, &mut all_variant_pats);
+    }
+    if all_variant_pats
+        && !case_tags.is_empty()
+        && let Some(first_case) = cases.first()
+    {
         let pat_ty = crate::types::ctype::expand_head(ctx, env, first_case.c_lhs.pat_type);
         let pat_ty = ctx.repr(pat_ty);
         let desc = ctx.get_desc(pat_ty);
@@ -10006,14 +10017,7 @@ fn check_partial_simple<'a>(
                     .map(|(l, _)| l.as_str())
                     .collect();
 
-                // Collect all tags from the case patterns
-                let mut case_tags: HashSet<String> = HashSet::new();
-                let mut all_variant_pats = true;
-                for case in cases {
-                    collect_variant_tags(&case.c_lhs, &mut case_tags, &mut all_variant_pats);
-                }
-
-                if all_variant_pats && !type_tags.is_empty() {
+                if !type_tags.is_empty() {
                     if type_tags.iter().all(|tag| case_tags.contains(*tag)) {
                         return Partial::Total;
                     }
