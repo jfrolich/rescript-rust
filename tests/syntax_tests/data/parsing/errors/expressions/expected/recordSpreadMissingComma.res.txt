@@ -1,0 +1,10 @@
+
+  Syntax error!
+  syntax_tests/data/parsing/errors/expressions/recordSpreadMissingComma.res:1:16
+
+  1 │ let x = {...foo}
+  2 │ 
+
+  Did you forget a `,` here?
+
+let x = { foo with  }

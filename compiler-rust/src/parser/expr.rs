@@ -4027,7 +4027,7 @@ fn parse_braced_or_record_expr(p: &mut Parser<'_>) -> Expression {
                 pexp_attributes: Attributes::new(),
             };
         }
-        p.optional(&Token::Comma);
+        p.expect(Token::Comma);
         let fields = parse_record_fields(p);
         if fields.is_empty() {
             p.err(DiagnosticCategory::Message(

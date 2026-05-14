@@ -138,6 +138,12 @@ user-facing parser diagnostics without that recovered-printer crash.
 
 Dynamic parser messages also exist (`"Missing " ^ closing`, keyword escapes, etc.).
 
+Record spread recovery has two distinct branches:
+`tests/syntax_tests/data/parsing/errors/expressions/recordSpreadMissingComma.res`
+covers the missing comma after a spread (`{...record}`), while
+`tests/error_output_parity/compiler/fixtures/parser_record_spread_no_update.res`
+covers the explicit trailing comma no-update message (`{...record,}`).
+
 ## 4. JSX Warning/Error Surface
 
 ### 4.1 Warning emission
