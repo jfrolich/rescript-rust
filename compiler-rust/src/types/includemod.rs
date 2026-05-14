@@ -2878,6 +2878,8 @@ fn compare_record_declarations(
     warnings: &mut Vec<Warning>,
 ) -> Option<String> {
     let param_map = build_type_param_map(type_ctx, impl_params, sig_params);
+    // OCaml compiler/ml/includecore.ml:396 starts record comparison at 1,
+    // so diagnostics report declaration field positions as 1-based.
     let mut index = 0usize;
     let len = impl_labels.len().min(sig_labels.len());
 
@@ -2887,7 +2889,7 @@ fn compare_record_declarations(
         if impl_label.ld_id.name() != sig_label.ld_id.name() {
             return Some(format!(
                 "Fields number {} have different names, {} and {}.",
-                index,
+                index + 1,
                 impl_label.ld_id.name(),
                 sig_label.ld_id.name()
             ));
@@ -2954,6 +2956,8 @@ fn compare_variant_declarations(
     warnings: &mut Vec<Warning>,
 ) -> Option<String> {
     let param_map = build_type_param_map(type_ctx, impl_params, sig_params);
+    // OCaml compiler/ml/includecore.ml:392 starts variant comparison at 1,
+    // so diagnostics report constructor positions as 1-based.
     let mut index = 0usize;
     let len = impl_constructors.len().min(sig_constructors.len());
 
@@ -2963,7 +2967,7 @@ fn compare_variant_declarations(
         if impl_constructor.cd_id.name() != sig_constructor.cd_id.name() {
             return Some(format!(
                 "Fields number {} have different names, {} and {}.",
-                index,
+                index + 1,
                 impl_constructor.cd_id.name(),
                 sig_constructor.cd_id.name()
             ));

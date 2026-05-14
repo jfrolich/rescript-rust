@@ -5487,12 +5487,19 @@ fn type_pattern_interval(
 
     let make_const = |val: i32| -> Constant { Constant::Char(val) };
 
+    // OCaml compiler/ml/typecore.ml:1425-1437 expands character intervals
+    // through Ast_helper with ghost locations for the generated constants and
+    // `or` nodes, then restores the source location only on the outer pattern.
+    // This keeps Parmatch warning 12 from reporting partially overlapped
+    // generated interval arms as source subpatterns.
+    let ghost_loc = tctx.arena.none_loc();
+
     // Build all constant patterns for the range
     let mut patterns: Vec<Pattern> = (start_val..=end_val)
         .map(|val| {
             Pattern::new(
                 PatternDesc::Tpat_constant(make_const(val)),
-                loc.clone(),
+                ghost_loc.clone(),
                 expected_ty,
                 EnvRef(0),
                 Attributes::new(),
@@ -5505,13 +5512,14 @@ fn type_pattern_interval(
     while let Some(pat_left) = patterns.pop() {
         result = Pattern::new(
             PatternDesc::Tpat_or(Box::new(pat_left), Box::new(result), None),
-            loc.clone(),
+            ghost_loc.clone(),
             expected_ty,
             EnvRef(0),
             Attributes::new(),
         );
     }
 
+    result.pat_loc = loc;
     result.pat_attributes = pat.ppat_attributes.clone();
 
     Ok(result)
@@ -10483,6 +10491,7 @@ struct SimplePatternKey {
     key: String,
     loc: LocIdx,
     from_variant_spread: bool,
+    from_generated_or: bool,
 }
 
 fn pattern_from_variant_spread_attr(arena: &ParseArena, pat: &Pattern) -> bool {
@@ -10496,16 +10505,19 @@ fn simple_pattern_keys(arena: &ParseArena, pat: &Pattern) -> Option<Vec<SimplePa
         arena: &ParseArena,
         pat: &Pattern,
         inherited_variant_spread: bool,
+        inherited_generated_or: bool,
         keys: &mut Vec<SimplePatternKey>,
     ) -> bool {
         let from_variant_spread =
             inherited_variant_spread || pattern_from_variant_spread_attr(arena, pat);
+        let from_generated_or = inherited_generated_or;
         match &pat.pat_desc {
             PatternDesc::Tpat_constant(constant) => {
                 keys.push(SimplePatternKey {
                     key: format!("const:{constant:?}"),
                     loc: pat.pat_loc,
                     from_variant_spread,
+                    from_generated_or,
                 });
                 true
             }
@@ -10514,6 +10526,7 @@ fn simple_pattern_keys(arena: &ParseArena, pat: &Pattern) -> Option<Vec<SimplePa
                     key: format!("ctor:{}", cstr.cstr_name),
                     loc: pat.pat_loc,
                     from_variant_spread,
+                    from_generated_or,
                 });
                 true
             }
@@ -10522,22 +10535,47 @@ fn simple_pattern_keys(arena: &ParseArena, pat: &Pattern) -> Option<Vec<SimplePa
                     key: format!("variant:{label}"),
                     loc: pat.pat_loc,
                     from_variant_spread,
+                    from_generated_or,
                 });
                 true
             }
             PatternDesc::Tpat_alias(inner, _, _) => {
-                collect(arena, inner, from_variant_spread, keys)
+                collect(
+                    arena,
+                    inner,
+                    from_variant_spread,
+                    from_generated_or,
+                    keys,
+                )
             }
             PatternDesc::Tpat_or(left, right, _) => {
-                collect(arena, left, from_variant_spread, keys)
-                    && collect(arena, right, from_variant_spread, keys)
+                // OCaml compiler/ml/parmatch.ml:1722-1728 does not expand
+                // syntactically generated or-patterns whose branches are both
+                // ghost locations. Keep the keys for whole-case coverage, but
+                // mark them so the Rust fast path does not emit Warning 12 for
+                // individual generated interval arms.
+                let generated_or = from_generated_or
+                    || (arena.loc_ghost(left.pat_loc) && arena.loc_ghost(right.pat_loc));
+                collect(
+                    arena,
+                    left,
+                    from_variant_spread,
+                    generated_or,
+                    keys,
+                ) && collect(
+                    arena,
+                    right,
+                    from_variant_spread,
+                    generated_or,
+                    keys,
+                )
             }
             _ => false,
         }
     }
 
     let mut keys = Vec::new();
-    if collect(arena, pat, false, &mut keys) && !keys.is_empty() {
+    if collect(arena, pat, false, false, &mut keys) && !keys.is_empty() {
         Some(keys)
     } else {
         None
@@ -10832,7 +10870,8 @@ fn report_unused_match_cases(
                     || covered_keys.contains(&key.key)
                     || !keys_in_case.insert(key.key.clone())
                 {
-                    unused_subpatterns.push((key.loc, key.from_variant_spread));
+                    unused_subpatterns
+                        .push((key.loc, key.from_variant_spread || key.from_generated_or));
                 }
             }
         }

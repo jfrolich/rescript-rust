@@ -4083,6 +4083,7 @@ fn check_type_declaration_coherence(
     ctx: &crate::types::context::TypeContext,
     env: &Env,
     loc: LocIdx,
+    id: &Ident,
     decl: &crate::types::decl::TypeDeclaration,
 ) -> TypeModResult<()> {
     if !type_kind_needs_coherence_check(&decl.type_kind) {
@@ -4103,19 +4104,43 @@ fn check_type_declaration_coherence(
         });
     };
 
-    let Ok(expected_decl) = env.lookup_type(path) else {
+    let Some(expected_decl) = crate::types::ctype::lookup_type_decl_for_path_pub(ctx, env, path)
+    else {
         return Ok(());
     };
-    let detail = definition_mismatch_detail(ctx, expected_decl, decl);
-    if detail.is_some()
-        || std::mem::discriminant(&expected_decl.type_kind)
-            != std::mem::discriminant(&decl.type_kind)
-    {
-        return Err(TypeModError::DefinitionMismatch {
-            loc,
-            ty: manifest,
-            detail,
+
+    // OCaml compiler/ml/typedecl.ml:863-884 checks manifest/kind coherence
+    // with `Includecore.type_declarations ~equality:true` after resolving the
+    // manifest constructor through Env. Reuse the Rust inclusion checker here
+    // instead of comparing declaration kind discriminants locally, so manifest
+    // aliases with abstract exported declarations (for example Js_null.t) keep
+    // the same expansion behavior as OCaml's Ctype/Includecore path.
+    let mut warnings = Vec::new();
+    if let Err(error) = crate::types::includemod::type_declarations(
+        ctx,
+        env,
+        id.clone(),
+        decl,
+        &expected_decl,
+        &mut warnings,
+    ) {
+        // OCaml compiler/ml/typedecl.ml:878-882 reports coherence details in
+        // manifest-target then current-declaration order, even though the Rust
+        // inclusion checker still receives the current declaration first for
+        // manifest expansion compatibility.
+        let detail = definition_mismatch_detail(ctx, &expected_decl, decl).or_else(|| match error {
+            crate::types::includemod::IncludeModError::TypeDeclarationMismatch {
+                detail,
+                ..
+            } if !detail.is_empty() => Some(detail),
+            crate::types::includemod::IncludeModError::TypeMismatch { reason, .. }
+                if !reason.is_empty() =>
+            {
+                Some(reason)
+            }
+            _ => None,
         });
+        return Err(TypeModError::DefinitionMismatch { loc, ty: manifest, detail });
     }
 
     Ok(())
@@ -21085,6 +21110,7 @@ fn type_structure_item<'a>(
                     ctx,
                     &new_env,
                     decls[idx].ptype_loc,
+                    &declared_type_ids[idx],
                     internal_decl,
                 )?;
             }
@@ -23289,7 +23315,13 @@ fn transl_sig_type_declarations_with_ids_and_originals<'a>(
     }
 
     for (idx, internal_decl) in internal_decls_for_generalize.iter().enumerate() {
-        check_type_declaration_coherence(ctx, &variance_env, decls[idx].ptype_loc, internal_decl)?;
+        check_type_declaration_coherence(
+            ctx,
+            &variance_env,
+            decls[idx].ptype_loc,
+            &declared_type_ids[idx],
+            internal_decl,
+        )?;
     }
 
     Ok(typed_tree_decls)
