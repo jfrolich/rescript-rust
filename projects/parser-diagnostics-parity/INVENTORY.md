@@ -206,6 +206,19 @@ messages and locations:
 Rust must preserve both checks. Broadening the frontend invariant would produce
 the wrong reference output for later constructors and signatures.
 
+`Typedecl.Unavailable_type_constructor` reachability note:
+
+- OCaml can raise this only from defensive `Not_found` branches in
+  `compiler/ml/typedecl.ml:767-785` (`check_constraints_rec`) and
+  `compiler/ml/typedecl.ml:862-886` (`check_coherence`).
+- Both branches run after type translation has already resolved the
+  constructor path in the same environment, so ordinary ReScript source should
+  report the earlier unbound-type diagnostic instead of this constructor.
+- A recursive equation probe (`type rec t = u = A and u = A`) reaches the
+  duplicate-constructor warning path, not `Unavailable_type_constructor`.
+- No direct ReScript source fixture is currently known that reaches this
+  diagnostic without constructing an inconsistent or stale typed environment.
+
 ### 5.1 Module Inclusion Type Mismatch Diagnostics
 
 `compiler/ml/includecore.ml:159-177` defines the type-declaration mismatch
