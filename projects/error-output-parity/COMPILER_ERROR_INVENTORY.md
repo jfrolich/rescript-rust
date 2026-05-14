@@ -303,6 +303,13 @@ with a reason after checking raise sites.
   `tests/error_output_parity/compiler/fixtures/typecore_error_statement_type_clash.res`.
 - Typecore warning 5 (`Partial_application`) is covered by
   `tests/error_output_parity/compiler/fixtures/typecore_warning_partial_application.res`.
+- Warning 3 (`Deprecated`) is covered for source-level deprecated type use by
+  `tests/error_output_parity/compiler/fixtures/typecore_warning_deprecated_type.res`
+  and by the existing super-errors fixture
+  `tests/build_tests/super_errors/fixtures/highlighting4.res`.
+- Typecore warning 16 (`Unerasable_optional_argument`) is not observable from
+  normal ReScript function syntax: `type_function` disables warning 16 before
+  the optional-argument check for the uncurried function path ReScript uses.
 - Typecore warning 9 (`Non_closed_record_pattern`) is covered by
   `tests/error_output_parity/compiler/fixtures/typecore_warning_non_closed_record_pattern.res`.
 - Typecore warning 20 (`Unused_argument`) is covered by
@@ -338,6 +345,11 @@ with a reason after checking raise sites.
   `tests/error_output_parity/compiler/fixtures/typecore_warning_nonoptional_label.res`.
 - Typecore warning 52 (`Fragile_literal_pattern`) is covered by
   `tests/error_output_parity/compiler/fixtures/typecore_warning_fragile_literal_pattern.res`.
+- Typecore warning 109 (`Bs_toplevel_expression_unit`) is covered for both
+  ordinary expressions and function calls by
+  `tests/error_output_parity/compiler/fixtures/typecore_warning_toplevel_expression.res`
+  and
+  `tests/error_output_parity/compiler/fixtures/typecore_warning_toplevel_function_call.res`.
 
 ## Typetexp Coverage Notes
 
