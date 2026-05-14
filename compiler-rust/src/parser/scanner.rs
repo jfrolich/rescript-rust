@@ -1322,15 +1322,8 @@ impl<'src> Scanner<'src> {
             },
 
             '\\' => {
-                // Exotic identifier
-                // Capture position of backslash for error reporting
-                let backslash_pos = self.position();
-                self.next();
-                if self.ch == '"' {
-                    self.scan_exotic_identifier(backslash_pos)
-                } else {
-                    Token::Backslash
-                }
+                let start_pos = self.position();
+                self.scan_exotic_identifier(start_pos)
             }
 
             c if c == EOF_CHAR => {
@@ -1662,50 +1655,16 @@ impl<'src> Scanner<'src> {
         }
     }
 
-    /// Scan an exotic identifier (e.g., \"foo").
-    /// Returns the identifier without surrounding quotes.
-    /// `backslash_pos` is the position of the backslash for error reporting.
-    fn scan_exotic_identifier(&mut self, backslash_pos: Position) -> Token<'src> {
-        let start_pos = backslash_pos;
-
-        self.next(); // consume opening quote
-        let content_start = self.offset; // start of identifier content (after opening quote)
+    /// Scan an exotic identifier or its recovery form, matching OCaml's scanner.
+    fn scan_exotic_identifier(&mut self, start_pos: Position) -> Token<'src> {
+        let start_offset = self.offset;
+        self.next2();
 
         loop {
             match self.ch {
                 '"' => {
-                    let content_end = self.offset; // end of content (before closing quote)
-                    self.next(); // consume closing quote
-                    // Return identifier without quotes
-                    let ident = self.substring(content_start, content_end);
-
-                    // Check for empty identifier - OCaml preserves the full exotic form (\"")
-                    // when the content is empty, for error recovery purposes
-                    if ident.is_empty() {
-                        let end_pos = self.position();
-                        self.error(
-                            start_pos.clone(),
-                            end_pos,
-                            DiagnosticCategory::message(
-                                "A quoted identifier can't be empty string.",
-                            ),
-                        );
-                        // Return the full exotic form like OCaml does: \""
-                        // (backslash was consumed by caller, so we prepend it)
-                        return Token::Lident(Cow::Owned("\\\"\"".to_string()));
-                    }
-
-                    // OCaml preserves exotic form for uppercase identifiers
-                    // (to avoid confusion in OCaml parsetree where uppercase = module)
-                    if ident
-                        .as_bytes()
-                        .first()
-                        .map_or(false, |b| b.is_ascii_uppercase())
-                    {
-                        return Token::Lident(Cow::Owned(format!("\\\"{}\"", ident)));
-                    }
-
-                    return Token::Lident(Cow::Borrowed(ident));
+                    self.next();
+                    break;
                 }
                 '\n' | '\r' => {
                     let end_pos = self.position();
@@ -1716,13 +1675,8 @@ impl<'src> Scanner<'src> {
                             "A quoted identifier can't contain line breaks.",
                         ),
                     );
-                    // OCaml includes the \" prefix plus the linebreak in the identifier
-                    // e.g. \"a followed by newline becomes \"a\n in the AST
-                    let content = self.substring(content_start, self.offset);
-                    self.next(); // consume the linebreak
-                    // Build full exotic form: \" + content + actual newline
-                    let ident = format!("\\\"{}\n", content);
-                    return Token::Lident(Cow::Owned(ident));
+                    self.next();
+                    break;
                 }
                 c if c == EOF_CHAR => {
                     let end_pos = self.position();
@@ -1731,13 +1685,40 @@ impl<'src> Scanner<'src> {
                         end_pos,
                         DiagnosticCategory::message("Did you forget a \" here?"),
                     );
-                    // OCaml includes the scanned \" prefix without inventing a closing quote.
-                    let content = self.substring(content_start, self.offset);
-                    let ident = format!("\\\"{}", content);
-                    return Token::Lident(Cow::Owned(ident));
+                    break;
                 }
                 _ => self.next(),
             }
+        }
+
+        let ident = self.substring(start_offset, self.offset);
+        let name = Self::unwrap_uppercase_exotic(ident);
+        if name.is_empty() {
+            let end_pos = self.position();
+            self.error(
+                start_pos,
+                end_pos,
+                DiagnosticCategory::message("A quoted identifier can't be empty string."),
+            );
+            Token::Lident(Cow::Borrowed(ident))
+        } else if Self::is_uident(name) {
+            Token::Lident(Cow::Borrowed(ident))
+        } else {
+            Token::Lident(Cow::Borrowed(name))
+        }
+    }
+
+    fn is_uident(name: &str) -> bool {
+        name.as_bytes()
+            .first()
+            .is_some_and(|byte| byte.is_ascii_uppercase())
+    }
+
+    fn unwrap_uppercase_exotic(name: &str) -> &str {
+        if name.len() >= 3 && name.starts_with("\\\"") && name.ends_with('"') {
+            &name[2..name.len() - 1]
+        } else {
+            name
         }
     }
 

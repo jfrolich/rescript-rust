@@ -65,6 +65,11 @@ The escape-sequence dynamic messages are covered by
 which triggers both `unknown escape sequence` and
 `escape sequence is invalid unicode code point`.
 
+The OCaml scanner treats any standalone backslash as the start of exotic
+identifier recovery (`scan_exotic_identifier`), not only `\"`. The recovered
+JS-string escape path is covered by
+`tests/error_output_parity/compiler/fixtures/parser_js_string_invalid_escape_recovery.res`.
+
 ## 3. Parser Grammar Diagnostics (`res_core.ml`)
 
 Main parser diagnostic emission uses `Parser.err` + `Diagnostics.*`.
