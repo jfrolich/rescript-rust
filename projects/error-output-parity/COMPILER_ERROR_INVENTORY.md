@@ -1004,6 +1004,11 @@ with a reason after checking raise sites.
       `tests/syntax_tests/data/parsing/errors/expressions/arrowReturnPolytype.res`
       and through `bsc` by
       `tests/error_output_parity/compiler/fixtures/arrow_return_polytype_recovery.res`.
+  - Ambiguous unparenthesized `x: t => body` expressions emit the same
+    parameter-vs-return annotation suggestion produced by
+    `over_parse_constrained_or_coerced_or_arrow_expression`
+    - Covered through `bsc` by
+      `tests/error_output_parity/compiler/fixtures/parser_ambiguous_arrow_type_annotation.res`.
   - `parse_jsx_prop` rejects uppercase JSX prop names before JSX PPX/type
     checking
     - Covered through `bsc` by
@@ -1111,11 +1116,13 @@ with a reason after checking raise sites.
       and
       `tests/error_output_parity/compiler/fixtures/parser_old_array_syntax.res`.
   - Record/dict field recovery rejects `=` where `:` is required in expression,
-    pattern, type, and dict contexts
+    pattern, type, string-key object, and dict contexts
     - Covered through `bsc` by
       `tests/error_output_parity/compiler/fixtures/parser_record_expr_field_equal.res`,
       `tests/error_output_parity/compiler/fixtures/parser_record_pattern_field_equal.res`,
       `tests/error_output_parity/compiler/fixtures/parser_record_type_field_equal.res`,
+      `tests/error_output_parity/compiler/fixtures/parser_string_key_record_field_equal.res`,
+      `tests/error_output_parity/compiler/fixtures/parser_string_key_record_later_field_equal.res`,
       and
       `tests/error_output_parity/compiler/fixtures/parser_dict_field_missing_colon.res`.
   - Keyword field recovery is covered for expression, pattern, and type record
@@ -1132,6 +1139,10 @@ with a reason after checking raise sites.
       `tests/error_output_parity/compiler/fixtures/parser_consecutive_structure_items.res`,
       and
       `tests/error_output_parity/compiler/fixtures/parser_consecutive_signature_items.resi`.
+  - Infix `=` expressions use `make_infix_operator` and emit the reference
+    parser's equality suggestion before type checking
+    - Covered through `bsc` by
+      `tests/error_output_parity/compiler/fixtures/parser_infix_equal_suggestion.res`.
   - Pattern tuples reject singleton tuple syntax, and malformed module names
     keep the follow-on infix equality suggestion
     - Covered through `bsc` by

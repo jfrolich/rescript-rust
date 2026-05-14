@@ -4196,7 +4196,7 @@ fn parse_braced_or_record_expr(p: &mut Parser<'_>) -> Expression {
     let is_js_object = p.lookahead(|state| {
         if let Token::String(_) = &state.token {
             state.next();
-            matches!(state.token, Token::Colon)
+            matches!(state.token, Token::Colon | Token::Equal)
         } else {
             false
         }
@@ -5448,7 +5448,12 @@ fn parse_js_object_expr(p: &mut Parser<'_>, start_pos_idx: PosIdx) -> Expression
             let key_loc = p.mk_loc_idx_to_prev_end(field_start_idx);
             let lid_idx = p.push_lident(&*key);
 
-            if p.token == Token::Colon {
+            if p.token == Token::Colon || p.token == Token::Equal {
+                if p.token == Token::Equal {
+                    p.err(DiagnosticCategory::message(
+                        super::core::error_messages::RECORD_FIELD_MISSING_COLON,
+                    ));
+                }
                 p.next();
                 let expr = parse_expr(p);
                 let expr_idx = p.arena_mut().push_expr(expr);
