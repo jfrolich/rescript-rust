@@ -331,6 +331,8 @@ with a reason after checking raise sites.
   the optional-argument check for the uncurried function path ReScript uses.
 - Typecore warning 9 (`Non_closed_record_pattern`) is covered by
   `tests/error_output_parity/compiler/fixtures/typecore_warning_non_closed_record_pattern.res`.
+- Typecore warning 10 (`Statement_type`) is covered by
+  `tests/error_output_parity/compiler/fixtures/typecore_warning_statement_type.res`.
 - Typecore warning 20 (`Unused_argument`) is covered by
   `tests/error_output_parity/compiler/fixtures/typecore_warning_unused_argument.res`.
 - Typecore warning 21 (`Nonreturning_statement`) is covered by
@@ -979,6 +981,17 @@ with a reason after checking raise sites.
       `tests/error_output_parity/compiler/fixtures/unused_type_hidden_by_module_constraint.res`,
       and
       `tests/error_output_parity/compiler/fixtures/unused_module_hidden_by_module_constraint.res`.
+  - `Warnings.Unused_constructor` and `Warnings.Unused_extension` for
+    constructors/extensions registered by `Env.store_type` and
+    `Env.store_extension`, including the pattern-only wording variants
+    - Covered by
+      `tests/error_output_parity/compiler/fixtures/env_warning_unused_constructor.res`,
+      `tests/error_output_parity/compiler/fixtures/env_warning_unused_constructor_pattern.res`,
+      `tests/error_output_parity/compiler/fixtures/env_warning_unused_constructor_private.res`,
+      `tests/error_output_parity/compiler/fixtures/env_warning_unused_extension.res`,
+      `tests/error_output_parity/compiler/fixtures/env_warning_unused_extension_pattern.res`,
+      and
+      `tests/error_output_parity/compiler/fixtures/env_warning_unused_extension_private.res`.
   - `Warnings.Unused_open` for fresh `open` declarations when no later lookup
     selects a binding from the opened signature
     - Covered by

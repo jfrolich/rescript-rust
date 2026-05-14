@@ -6417,6 +6417,27 @@ struct TopLevelTypeUseCheck {
     rec_flag: RecFlag,
 }
 
+#[derive(Debug, Clone)]
+struct TopLevelConstructorUseCheck {
+    type_id: Ident,
+    type_name: String,
+    name: String,
+    loc: LocIdx,
+    item_index: usize,
+    order: usize,
+}
+
+#[derive(Debug, Clone)]
+struct TopLevelExtensionUseCheck {
+    id: Ident,
+    type_name: String,
+    name: String,
+    loc: LocIdx,
+    item_index: usize,
+    order: usize,
+    is_exception: bool,
+}
+
 struct OpenShadowIdentifierUseCheck {
     kind: &'static str,
     name: String,
@@ -6668,6 +6689,77 @@ fn collect_top_level_type_use_checks(
         item_index,
         rec_flag: *rec_flag,
     }));
+}
+
+fn collect_top_level_constructor_use_checks(
+    arena: &ParseArena,
+    item: &StructureItem,
+    item_index: usize,
+    out: &mut Vec<TopLevelConstructorUseCheck>,
+) {
+    let StructureItemDesc::Tstr_type(_, decls) = &item.str_desc else {
+        return;
+    };
+
+    for decl in decls {
+        let type_name = decl.typ_id.name().to_string();
+        if !should_warn_unused_name(&type_name) || arena.to_location(decl.typ_loc).loc_ghost {
+            continue;
+        }
+        let crate::types::TypeKind::TypeVariant(constructors) = &decl.typ_type.type_kind else {
+            continue;
+        };
+        for constructor in constructors {
+            out.push(TopLevelConstructorUseCheck {
+                type_id: decl.typ_id.clone(),
+                type_name: type_name.clone(),
+                name: constructor.cd_id.name().to_string(),
+                loc: decl.typ_loc,
+                item_index,
+                order: out.len(),
+            });
+        }
+    }
+}
+
+fn collect_top_level_extension_use_checks(
+    arena: &ParseArena,
+    item: &StructureItem,
+    item_index: usize,
+    out: &mut Vec<TopLevelExtensionUseCheck>,
+) {
+    fn push_check(
+        arena: &ParseArena,
+        ext: &crate::types::typedtree::ExtensionConstructor,
+        item_index: usize,
+        out: &mut Vec<TopLevelExtensionUseCheck>,
+    ) {
+        if ext.ext_type.ext_loc.loc_ghost {
+            return;
+        }
+        let loc = find_existing_loc_idx(arena, &ext.ext_type.ext_loc).unwrap_or(ext.ext_loc);
+        out.push(TopLevelExtensionUseCheck {
+            id: ext.ext_id.clone(),
+            type_name: ext.ext_type.ext_type_path.last().to_string(),
+            name: ext.ext_id.name().to_string(),
+            loc,
+            item_index,
+            order: out.len(),
+            is_exception: ext.ext_type.ext_is_exception,
+        });
+    }
+
+    match &item.str_desc {
+        StructureItemDesc::Tstr_typext(ext) => {
+            for constructor in &ext.tyext_constructors {
+                push_check(arena, constructor, item_index, out);
+            }
+        }
+        StructureItemDesc::Tstr_exception(ext) => {
+            push_check(arena, ext, item_index, out);
+        }
+        _ => {}
+    }
 }
 
 fn collect_open_shadow_identifier_use_checks(
@@ -9675,6 +9767,8 @@ struct ModuleTypeExportedNames {
     values: HashSet<String>,
     modules: HashSet<String>,
     types: HashSet<String>,
+    constructors: HashMap<(String, String), crate::types::PrivateFlag>,
+    extensions: HashMap<(String, String), crate::types::PrivateFlag>,
 }
 
 fn module_type_exported_names(
@@ -9723,11 +9817,25 @@ fn module_type_exported_names(
                 crate::types::decl::SignatureItem::SigModule(id, _, _) => {
                     names.modules.insert(id.name().to_string());
                 }
-                crate::types::decl::SignatureItem::SigType(id, _, _) => {
+                crate::types::decl::SignatureItem::SigType(id, decl, _) => {
                     names.types.insert(id.name().to_string());
+                    if let crate::types::decl::TypeKind::TypeVariant(constructors) = &decl.type_kind
+                    {
+                        for constructor in constructors {
+                            names.constructors.insert(
+                                (id.name().to_string(), constructor.cd_id.name().to_string()),
+                                decl.type_private,
+                            );
+                        }
+                    }
                 }
-                crate::types::decl::SignatureItem::SigTypext(_, _, _)
-                | crate::types::decl::SignatureItem::SigModtype(_, _)
+                crate::types::decl::SignatureItem::SigTypext(id, ext, _) => {
+                    names.extensions.insert(
+                        (ext.ext_type_path.last().to_string(), id.name().to_string()),
+                        ext.ext_private,
+                    );
+                }
+                crate::types::decl::SignatureItem::SigModtype(_, _)
                 | crate::types::decl::SignatureItem::SigClass
                 | crate::types::decl::SignatureItem::SigClassType => {}
             }
@@ -9736,6 +9844,394 @@ fn module_type_exported_names(
     }
 
     loop_(env, mty, &mut HashSet::default())
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct ConstructorUseFlags {
+    positive: bool,
+    pattern: bool,
+    privatize: bool,
+}
+
+impl ConstructorUseFlags {
+    fn merge(&mut self, other: ConstructorUseFlags) {
+        self.positive |= other.positive;
+        self.pattern |= other.pattern;
+        self.privatize |= other.privatize;
+    }
+}
+
+fn constructor_result_is_type_ident(
+    ctx: &crate::types::TypeContext,
+    desc: &crate::types::decl::ConstructorDescription,
+    type_id: &Ident,
+) -> bool {
+    let res = ctx.repr(desc.cstr_res);
+    let desc = ctx.get_desc(res);
+    matches!(
+        &*desc,
+        TypeDesc::Tconstr { path, .. } if matches!(path, Path::Pident(id) if id.same(type_id))
+    )
+}
+
+fn constructor_matches_type_check(
+    ctx: &crate::types::TypeContext,
+    desc: &crate::types::decl::ConstructorDescription,
+    check: &TopLevelConstructorUseCheck,
+) -> bool {
+    desc.cstr_name == check.name && constructor_result_is_type_ident(ctx, desc, &check.type_id)
+}
+
+fn constructor_matches_extension_check(
+    desc: &crate::types::decl::ConstructorDescription,
+    check: &TopLevelExtensionUseCheck,
+) -> bool {
+    desc.cstr_name == check.name
+        && matches!(
+            &desc.cstr_tag,
+            crate::types::decl::ConstructorTag::CstrExtension(Path::Pident(id))
+                if id.same(&check.id)
+        )
+}
+
+fn pattern_constructor_usage(
+    ctx: &crate::types::TypeContext,
+    pat: &crate::types::typedtree::Pattern,
+    matches_constructor: &dyn Fn(&crate::types::TypeContext, &crate::types::decl::ConstructorDescription) -> bool,
+) -> ConstructorUseFlags {
+    use crate::types::typedtree::PatternDesc;
+
+    let mut usage = ConstructorUseFlags::default();
+    match &pat.pat_desc {
+        PatternDesc::Tpat_construct(_, desc, args) => {
+            if matches_constructor(ctx, desc) {
+                usage.pattern = true;
+            }
+            for arg in args {
+                usage.merge(pattern_constructor_usage(ctx, arg, matches_constructor));
+            }
+        }
+        PatternDesc::Tpat_alias(inner, _, _) => {
+            usage.merge(pattern_constructor_usage(ctx, inner, matches_constructor));
+        }
+        PatternDesc::Tpat_tuple(pats) | PatternDesc::Tpat_array(pats) => {
+            for pat in pats {
+                usage.merge(pattern_constructor_usage(ctx, pat, matches_constructor));
+            }
+        }
+        PatternDesc::Tpat_variant(_, Some(inner), _) => {
+            usage.merge(pattern_constructor_usage(ctx, inner, matches_constructor));
+        }
+        PatternDesc::Tpat_record(fields, _) => {
+            for (_, _, pat, _) in fields {
+                usage.merge(pattern_constructor_usage(ctx, pat, matches_constructor));
+            }
+        }
+        PatternDesc::Tpat_or(left, right, _) => {
+            usage.merge(pattern_constructor_usage(ctx, left, matches_constructor));
+            usage.merge(pattern_constructor_usage(ctx, right, matches_constructor));
+        }
+        PatternDesc::Tpat_any
+        | PatternDesc::Tpat_var(_, _)
+        | PatternDesc::Tpat_constant(_)
+        | PatternDesc::Tpat_variant(_, None, _) => {}
+    }
+    usage
+}
+
+fn function_param_pattern_constructor_usage(
+    ctx: &crate::types::TypeContext,
+    pat: &crate::types::typedtree::FunctionParamPattern,
+    matches_constructor: &dyn Fn(&crate::types::TypeContext, &crate::types::decl::ConstructorDescription) -> bool,
+) -> ConstructorUseFlags {
+    let mut usage = ConstructorUseFlags::default();
+    match pat {
+        crate::types::typedtree::FunctionParamPattern::Simple(pat) => {
+            usage.merge(pattern_constructor_usage(ctx, pat, matches_constructor));
+        }
+        crate::types::typedtree::FunctionParamPattern::Nested(params) => {
+            for param in params {
+                if let Some(default) = &param.default {
+                    usage.merge(expression_constructor_usage(ctx, default, matches_constructor));
+                }
+                usage.merge(function_param_pattern_constructor_usage(
+                    ctx,
+                    &param.pat,
+                    matches_constructor,
+                ));
+            }
+        }
+    }
+    usage
+}
+
+fn case_constructor_usage(
+    ctx: &crate::types::TypeContext,
+    case: &crate::types::typedtree::Case,
+    matches_constructor: &dyn Fn(&crate::types::TypeContext, &crate::types::decl::ConstructorDescription) -> bool,
+) -> ConstructorUseFlags {
+    let mut usage = pattern_constructor_usage(ctx, &case.c_lhs, matches_constructor);
+    if let Some(guard) = &case.c_guard {
+        usage.merge(expression_constructor_usage(ctx, guard, matches_constructor));
+    }
+    usage.merge(expression_constructor_usage(
+        ctx,
+        &case.c_rhs,
+        matches_constructor,
+    ));
+    usage
+}
+
+fn expression_constructor_usage(
+    ctx: &crate::types::TypeContext,
+    expr: &Expression,
+    matches_constructor: &dyn Fn(&crate::types::TypeContext, &crate::types::decl::ConstructorDescription) -> bool,
+) -> ConstructorUseFlags {
+    use crate::types::typedtree::{ExpressionDesc, RecordLabelDefinition};
+
+    let mut usage = ConstructorUseFlags::default();
+    match &expr.exp_desc {
+        ExpressionDesc::Texp_let(_, bindings, body) => {
+            for binding in bindings {
+                usage.merge(pattern_constructor_usage(
+                    ctx,
+                    &binding.vb_pat,
+                    matches_constructor,
+                ));
+                usage.merge(expression_constructor_usage(
+                    ctx,
+                    &binding.vb_expr,
+                    matches_constructor,
+                ));
+            }
+            usage.merge(expression_constructor_usage(ctx, body, matches_constructor));
+        }
+        ExpressionDesc::Texp_function { params, body, .. } => {
+            for param in params {
+                if let Some(default) = &param.default {
+                    usage.merge(expression_constructor_usage(ctx, default, matches_constructor));
+                }
+                usage.merge(function_param_pattern_constructor_usage(
+                    ctx,
+                    &param.pat,
+                    matches_constructor,
+                ));
+            }
+            for case in body {
+                usage.merge(case_constructor_usage(ctx, case, matches_constructor));
+            }
+        }
+        ExpressionDesc::Texp_apply { funct, args, .. } => {
+            usage.merge(expression_constructor_usage(ctx, funct, matches_constructor));
+            for arg in args {
+                if let Some(expr) = &arg.expression {
+                    usage.merge(expression_constructor_usage(ctx, expr, matches_constructor));
+                }
+            }
+        }
+        ExpressionDesc::Texp_match(scrutinee, value_cases, exn_cases, _) => {
+            usage.merge(expression_constructor_usage(
+                ctx,
+                scrutinee,
+                matches_constructor,
+            ));
+            for case in value_cases {
+                usage.merge(case_constructor_usage(ctx, case, matches_constructor));
+            }
+            for case in exn_cases {
+                usage.merge(case_constructor_usage(ctx, case, matches_constructor));
+            }
+        }
+        ExpressionDesc::Texp_try(body, cases) => {
+            usage.merge(expression_constructor_usage(ctx, body, matches_constructor));
+            for case in cases {
+                usage.merge(case_constructor_usage(ctx, case, matches_constructor));
+            }
+        }
+        ExpressionDesc::Texp_tuple(items) | ExpressionDesc::Texp_array(items) => {
+            for item in items {
+                usage.merge(expression_constructor_usage(ctx, item, matches_constructor));
+            }
+        }
+        ExpressionDesc::Texp_construct(_, desc, args) => {
+            if matches_constructor(ctx, desc) {
+                usage.positive = true;
+            }
+            for arg in args {
+                usage.merge(expression_constructor_usage(ctx, arg, matches_constructor));
+            }
+        }
+        ExpressionDesc::Texp_variant(_, payload) => {
+            if let Some(payload) = payload {
+                usage.merge(expression_constructor_usage(ctx, payload, matches_constructor));
+            }
+        }
+        ExpressionDesc::Texp_record {
+            fields,
+            extended_expression,
+        }
+        | ExpressionDesc::Texp_record_sparse {
+            fields,
+            extended_expression,
+            ..
+        } => {
+            for (_, _, definition, _) in fields {
+                if let RecordLabelDefinition::Overridden(_, expr) = definition {
+                    usage.merge(expression_constructor_usage(ctx, expr, matches_constructor));
+                }
+            }
+            if let Some(expr) = extended_expression {
+                usage.merge(expression_constructor_usage(ctx, expr, matches_constructor));
+            }
+        }
+        ExpressionDesc::Texp_field(expr, _, _) | ExpressionDesc::Texp_assert(expr) => {
+            usage.merge(expression_constructor_usage(ctx, expr, matches_constructor));
+        }
+        ExpressionDesc::Texp_setfield(record, _, _, value)
+        | ExpressionDesc::Texp_sequence(record, value)
+        | ExpressionDesc::Texp_while(record, value) => {
+            usage.merge(expression_constructor_usage(ctx, record, matches_constructor));
+            usage.merge(expression_constructor_usage(ctx, value, matches_constructor));
+        }
+        ExpressionDesc::Texp_ifthenelse(cond, then_expr, else_expr) => {
+            usage.merge(expression_constructor_usage(ctx, cond, matches_constructor));
+            usage.merge(expression_constructor_usage(ctx, then_expr, matches_constructor));
+            if let Some(else_expr) = else_expr {
+                usage.merge(expression_constructor_usage(ctx, else_expr, matches_constructor));
+            }
+        }
+        ExpressionDesc::Texp_for(_, pat, start, stop, _, body) => {
+            usage.merge(pattern_constructor_usage(ctx, pat, matches_constructor));
+            usage.merge(expression_constructor_usage(ctx, start, matches_constructor));
+            usage.merge(expression_constructor_usage(ctx, stop, matches_constructor));
+            usage.merge(expression_constructor_usage(ctx, body, matches_constructor));
+        }
+        ExpressionDesc::Texp_for_of(_, _, iterable, body)
+        | ExpressionDesc::Texp_for_await_of(_, _, iterable, body) => {
+            usage.merge(expression_constructor_usage(ctx, iterable, matches_constructor));
+            usage.merge(expression_constructor_usage(ctx, body, matches_constructor));
+        }
+        ExpressionDesc::Texp_send(receiver, _, arg) => {
+            usage.merge(expression_constructor_usage(ctx, receiver, matches_constructor));
+            if let Some(arg) = arg {
+                usage.merge(expression_constructor_usage(ctx, arg, matches_constructor));
+            }
+        }
+        ExpressionDesc::Texp_letmodule(_, _, module_expr, body) => {
+            usage.merge(module_expr_constructor_usage(
+                ctx,
+                module_expr,
+                matches_constructor,
+            ));
+            usage.merge(expression_constructor_usage(ctx, body, matches_constructor));
+        }
+        ExpressionDesc::Texp_letexception(_, body) => {
+            usage.merge(expression_constructor_usage(ctx, body, matches_constructor));
+        }
+        ExpressionDesc::Texp_pack(module_expr) => {
+            usage.merge(module_expr_constructor_usage(
+                ctx,
+                module_expr,
+                matches_constructor,
+            ));
+        }
+        ExpressionDesc::Texp_ident(_, _, _)
+        | ExpressionDesc::Texp_constant(_)
+        | ExpressionDesc::Texp_break
+        | ExpressionDesc::Texp_continue
+        | ExpressionDesc::Texp_extension_constructor(_, _) => {}
+    }
+    usage
+}
+
+fn module_expr_constructor_usage(
+    ctx: &crate::types::TypeContext,
+    module_expr: &ModuleExpr,
+    matches_constructor: &dyn Fn(&crate::types::TypeContext, &crate::types::decl::ConstructorDescription) -> bool,
+) -> ConstructorUseFlags {
+    let mut usage = ConstructorUseFlags::default();
+    match &module_expr.mod_desc {
+        ModuleExprDesc::Tmod_structure(structure) => {
+            for item in &structure.str_items {
+                usage.merge(structure_item_constructor_usage(
+                    ctx,
+                    item,
+                    matches_constructor,
+                ));
+            }
+        }
+        ModuleExprDesc::Tmod_apply(functor, arg, _) => {
+            usage.merge(module_expr_constructor_usage(ctx, functor, matches_constructor));
+            usage.merge(module_expr_constructor_usage(ctx, arg, matches_constructor));
+        }
+        ModuleExprDesc::Tmod_functor(_, _, _, body)
+        | ModuleExprDesc::Tmod_constraint(body, _, _, _) => {
+            usage.merge(module_expr_constructor_usage(ctx, body, matches_constructor));
+        }
+        ModuleExprDesc::Tmod_unpack(expr, _) => {
+            usage.merge(expression_constructor_usage(ctx, expr, matches_constructor));
+        }
+        ModuleExprDesc::Tmod_ident(_, _) => {}
+    }
+    usage
+}
+
+fn structure_item_constructor_usage(
+    ctx: &crate::types::TypeContext,
+    item: &StructureItem,
+    matches_constructor: &dyn Fn(&crate::types::TypeContext, &crate::types::decl::ConstructorDescription) -> bool,
+) -> ConstructorUseFlags {
+    let mut usage = ConstructorUseFlags::default();
+    match &item.str_desc {
+        StructureItemDesc::Tstr_eval(expr, _) => {
+            usage.merge(expression_constructor_usage(ctx, expr, matches_constructor));
+        }
+        StructureItemDesc::Tstr_value(_, bindings) => {
+            for binding in bindings {
+                usage.merge(pattern_constructor_usage(
+                    ctx,
+                    &binding.vb_pat,
+                    matches_constructor,
+                ));
+                usage.merge(expression_constructor_usage(
+                    ctx,
+                    &binding.vb_expr,
+                    matches_constructor,
+                ));
+            }
+        }
+        StructureItemDesc::Tstr_module(binding) => {
+            usage.merge(module_expr_constructor_usage(
+                ctx,
+                &binding.mb_expr,
+                matches_constructor,
+            ));
+        }
+        StructureItemDesc::Tstr_recmodule(bindings) => {
+            for binding in bindings {
+                usage.merge(module_expr_constructor_usage(
+                    ctx,
+                    &binding.mb_expr,
+                    matches_constructor,
+                ));
+            }
+        }
+        StructureItemDesc::Tstr_include(include) => {
+            usage.merge(module_expr_constructor_usage(
+                ctx,
+                &include.incl_mod,
+                matches_constructor,
+            ));
+        }
+        StructureItemDesc::Tstr_primitive(_)
+        | StructureItemDesc::Tstr_type(_, _)
+        | StructureItemDesc::Tstr_typext(_)
+        | StructureItemDesc::Tstr_exception(_)
+        | StructureItemDesc::Tstr_modtype(_)
+        | StructureItemDesc::Tstr_open(_)
+        | StructureItemDesc::Tstr_attribute(_) => {}
+    }
+    usage
 }
 
 fn report_unused_items_hidden_by_module_constraint(
@@ -9758,16 +10254,22 @@ fn report_unused_items_hidden_by_module_constraint(
     let mut value_checks = Vec::new();
     let mut module_checks = Vec::new();
     let mut type_checks = Vec::new();
+    let mut constructor_checks = Vec::new();
+    let mut extension_checks = Vec::new();
     for (item_index, item) in structure.str_items.iter().enumerate() {
         collect_top_level_value_use_checks(item, item_index, &mut value_checks);
         collect_top_level_module_use_checks(item, item_index, &mut module_checks);
         collect_top_level_type_use_checks(item, item_index, &mut type_checks);
+        collect_top_level_constructor_use_checks(arena, item, item_index, &mut constructor_checks);
+        collect_top_level_extension_use_checks(arena, item, item_index, &mut extension_checks);
     }
 
     let mut final_visible_values = HashMap::new();
     for (index, check) in value_checks.iter().enumerate() {
         final_visible_values.insert(check.name.clone(), index);
     }
+
+    let mut hidden_warnings = Vec::new();
 
     for (check_index, check) in value_checks.iter().enumerate() {
         if !should_warn_unused_name(&check.name)
@@ -9789,12 +10291,14 @@ fn report_unused_items_hidden_by_module_constraint(
             .skip(start_index)
             .any(|item| structure_item_uses_ident(item, &check.id));
         if !used {
-            tctx.report_warning(
-                check.loc,
-                Warning::UnusedValueDeclaration {
+            hidden_warnings.push(DelayedWarning {
+                item_index: check.item_index,
+                order: 0,
+                loc: check.loc,
+                warning: Warning::UnusedValueDeclaration {
                     name: check.name.clone(),
                 },
-            );
+            });
         }
     }
 
@@ -9825,12 +10329,14 @@ fn report_unused_items_hidden_by_module_constraint(
             .skip(start_index)
             .any(|item| structure_item_uses_module_ident(ctx, item, &check.id));
         if !used {
-            tctx.report_warning(
-                check.loc,
-                Warning::UnusedModule {
+            hidden_warnings.push(DelayedWarning {
+                item_index: check.item_index,
+                order: 0,
+                loc: check.loc,
+                warning: Warning::UnusedModule {
                     name: check.name.clone(),
                 },
-            );
+            });
         }
     }
 
@@ -9859,14 +10365,90 @@ fn report_unused_items_hidden_by_module_constraint(
             .skip(start_index)
             .any(|item| structure_item_uses_type_ident(ctx, item, &check.id));
         if !used {
-            tctx.report_warning(
-                check.loc,
-                Warning::UnusedTypeDeclaration {
+            hidden_warnings.push(DelayedWarning {
+                item_index: check.item_index,
+                order: 0,
+                loc: check.loc,
+                warning: Warning::UnusedTypeDeclaration {
                     name: check.name.clone(),
                 },
-            );
+            });
         }
     }
+
+    for check in &constructor_checks {
+        let exported_private = exported_names
+            .constructors
+            .get(&(check.type_name.clone(), check.name.clone()))
+            .copied();
+        if matches!(exported_private, Some(crate::types::PrivateFlag::Public)) {
+            continue;
+        }
+
+        let start_index = check.item_index + 1;
+        let mut usage = ConstructorUseFlags::default();
+        usage.privatize = matches!(exported_private, Some(crate::types::PrivateFlag::Private));
+        for item in structure.str_items.iter().skip(start_index) {
+            usage.merge(structure_item_constructor_usage(
+                ctx,
+                item,
+                &|ctx, desc| constructor_matches_type_check(ctx, desc, check),
+            ));
+            if usage.positive {
+                break;
+            }
+        }
+        if !usage.positive {
+            hidden_warnings.push(DelayedWarning {
+                item_index: check.item_index,
+                order: check.order + 1,
+                loc: check.loc,
+                warning: Warning::UnusedConstructor {
+                    name: check.name.clone(),
+                    used_in_pattern: usage.pattern,
+                    is_private: usage.privatize,
+                },
+            });
+        }
+    }
+
+    for check in &extension_checks {
+        let exported_private = exported_names
+            .extensions
+            .get(&(check.type_name.clone(), check.name.clone()))
+            .copied();
+        if matches!(exported_private, Some(crate::types::PrivateFlag::Public)) {
+            continue;
+        }
+
+        let start_index = check.item_index + 1;
+        let mut usage = ConstructorUseFlags::default();
+        usage.privatize = matches!(exported_private, Some(crate::types::PrivateFlag::Private));
+        for item in structure.str_items.iter().skip(start_index) {
+            usage.merge(structure_item_constructor_usage(
+                ctx,
+                item,
+                &|_, desc| constructor_matches_extension_check(desc, check),
+            ));
+            if usage.positive {
+                break;
+            }
+        }
+        if !usage.positive {
+            hidden_warnings.push(DelayedWarning {
+                item_index: check.item_index,
+                order: check.order,
+                loc: check.loc,
+                warning: Warning::UnusedExtension {
+                    name: check.name.clone(),
+                    is_exception: check.is_exception,
+                    used_in_pattern: usage.pattern,
+                    is_private: usage.privatize,
+                },
+            });
+        }
+    }
+    report_delayed_warnings(tctx, hidden_warnings);
 }
 
 fn push_sig_values_from_env_pattern(
@@ -17817,21 +18399,26 @@ fn type_module_expr_with_alias<'a>(
             // `wrap_constraint`; it does not re-run module-type translation.
             let decl_mty = decl_module_type_from_typed(&typed_mty)
                 .unwrap_or(crate::types::decl::ModuleType::MtySignature(vec![]));
-            report_unused_items_hidden_by_module_constraint(
-                tctx, env, arena, &typed_mod, &decl_mty,
-            );
+            let typed_mod_for_unused_check = typed_mod.clone();
             let constrained = wrap_constraint_with_decl_mty(
                 tctx,
                 env,
                 typed_mod,
                 typed_mty.clone(),
-                decl_mty,
+                decl_mty.clone(),
                 crate::types::typedtree::ModuleTypeConstraint::Tmodtype_explicit(Box::new(
                     typed_mty,
                 )),
                 loc,
                 mod_expr.pmod_attributes.clone(),
             )?;
+            report_unused_items_hidden_by_module_constraint(
+                tctx,
+                env,
+                arena,
+                &typed_mod_for_unused_check,
+                &decl_mty,
+            );
             Ok(constrained)
         }
 

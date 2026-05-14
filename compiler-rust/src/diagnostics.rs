@@ -371,14 +371,12 @@ impl Warning {
             } => {
                 if *used_in_pattern {
                     format!(
-                        "constructor {} is never used to build values.\n\
-                         (However, this constructor appears in patterns.)",
+                        "constructor {} is never used to build values.\n(However, this constructor appears in patterns.)",
                         name
                     )
                 } else if *is_private {
                     format!(
-                        "constructor {} is never used to build values.\n\
-                         Its type is exported as a private type.",
+                        "constructor {} is never used to build values.\nIts type is exported as a private type.",
                         name
                     )
                 } else {
@@ -398,14 +396,12 @@ impl Warning {
                 };
                 if *used_in_pattern {
                     format!(
-                        "{} {} is never used to build values.\n\
-                         (However, this constructor appears in patterns.)",
+                        "{} {} is never used to build values.\n(However, this constructor appears in patterns.)",
                         kind, name
                     )
                 } else if *is_private {
                     format!(
-                        "{} {} is never used to build values.\n\
-                         It is exported or rebound as a private extension.",
+                        "{} {} is never used to build values.\nIt is exported or rebound as a private extension.",
                         kind, name
                     )
                 } else {
@@ -535,18 +531,28 @@ and may change in future versions. (See manual section 8.5)"
                 return_type,
                 is_function_call,
             } => {
-                let what = if *is_function_call {
-                    "function call"
+                let subject = if *is_function_call {
+                    "This function call"
                 } else {
-                    "expression"
+                    "This"
                 };
-                let ret = return_type
-                    .as_deref()
-                    .unwrap_or("something that is not `unit`");
+                let ret = match return_type {
+                    Some(return_type) => format!("`{}`", return_type),
+                    None => "something that is not `unit`".to_string(),
+                };
+                let help_text = if *is_function_call {
+                    "yourFunctionCall()"
+                } else {
+                    "yourExpression"
+                };
                 format!(
-                    "This {} is at the top level and is expected to return `unit`. \
-                     But it's returning {}.",
-                    what, ret
+                    "{} is at the top level and is expected to return `unit`. But it's returning \
+                     {}.\n\nIn ReScript, anything at the top level must evaluate to `unit`. You \
+                     can fix this by assigning the expression to a value, or piping it into the \
+                     `ignore` function.\n\nPossible solutions:\n- Assigning to a value that is then \
+                     ignored: `let _ = {}`\n- Piping into the built-in ignore function to ignore \
+                     the result: `{}->ignore`",
+                    subject, ret, help_text, help_text
                 )
             }
             Warning::BsTodo { message } => match message {
