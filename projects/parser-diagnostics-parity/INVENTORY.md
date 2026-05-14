@@ -372,6 +372,27 @@ instead of typed `type error` constructors. Coverage includes:
      `tests/error_output_parity/compiler/fixtures/dynamic_import_value_argument.res`
      and the raw external primitive path by
      `tests/error_output_parity/compiler/fixtures/dynamic_import_value_external.res`
+3. `compiler/frontend/ast_utf8_string.ml:25-30` and
+   `compiler/frontend/ast_utf8_string.ml:190-197`
+   - JS-delimited string transformation reports `Offset: ...` diagnostics for
+     invalid escape payloads after parsing has produced `Pconst_string (_, Some "js")`
+   - invalid `\x` payload is covered by
+     `tests/error_output_parity/compiler/fixtures/template_pattern_invalid_hex_escape.res`
+   - invalid fixed-width `\u` payload is covered by
+     `tests/error_output_parity/compiler/fixtures/template_pattern_invalid_unicode_escape.res`
+   - invalid `\u{...}` codepoint payload is covered by
+     `tests/error_output_parity/compiler/fixtures/template_pattern_utf8_codepoint_escape.res`
+     and
+     `tests/error_output_parity/compiler/fixtures/string_escape_codepoint_overflow.res`
+   - ordinary quoted-string malformed escapes such as `"\x"` and `"\u12"`
+     are rejected by the scanner before the frontend transform; those earlier
+     scanner diagnostics are covered by the `string_escape_*` fixtures
+   - the trailing-backslash transform branch is parser-masked for direct
+     ReScript source: a template-pattern probe with `` `\` `` reaches
+     `Diagnostics.unclosed_template` before `Ast_utf8_string.transform`
+   - no direct ReScript source fixture is currently known that reaches
+     `Invalid_code_point` in this frontend transform; raw source invalid
+     codepoints are owned by scanner diagnostics before the PPX transform
 
 ### 5.4 Recursive Value Diagnostics
 
