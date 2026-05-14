@@ -2105,10 +2105,14 @@ with a reason after checking raise sites.
       and
       `tests/error_output_parity/compiler/fixtures/bs_external_scope_tuple_non_string.res`.
   - `@module({from, with})` import-attributes payload validation
-    - Covered for missing `from`, missing `with`, non-string import
-      attribute values, and non-regular import attribute keys by
+    - Covered for missing `from`, missing `with`, wrong-shaped top-level
+      `from`/`with` fields that OCaml ignores before reporting the
+      corresponding missing-field diagnostic, non-string import attribute
+      values, and non-regular import attribute keys by
       `tests/error_output_parity/compiler/fixtures/bs_external_module_import_missing_from.res`,
       `tests/error_output_parity/compiler/fixtures/bs_external_module_import_missing_with.res`,
+      `tests/error_output_parity/compiler/fixtures/bs_external_module_import_from_non_string.res`,
+      `tests/error_output_parity/compiler/fixtures/bs_external_module_import_with_non_record.res`,
       `tests/error_output_parity/compiler/fixtures/bs_external_module_import_non_string_value.res`,
       and
       `tests/error_output_parity/compiler/fixtures/bs_external_module_import_qualified_key.res`.
@@ -2182,16 +2186,17 @@ with a reason after checking raise sites.
       `tests/error_output_parity/compiler/fixtures/bs_external_module_val_as_var.res`.
   - Non-object optional argument validation in `handle_attributes`
     - Covered for underscore optional arguments, payload `@string` optionals,
-      and all `@variadic` last-argument validations (optional, underscore,
-      FFI-attributed, and non-array) by
+      all `@variadic` last-argument validations (optional, underscore,
+      FFI-attributed, and non-array), and the `@taggedTemplate` route through
+      the same `splice` validation state by
       `tests/error_output_parity/compiler/fixtures/bs_optional_underscore_external.res`,
-      `tests/error_output_parity/compiler/fixtures/bs_optional_string_payload.res`
-      and
+      `tests/error_output_parity/compiler/fixtures/bs_optional_string_payload.res`,
       `tests/error_output_parity/compiler/fixtures/bs_variadic_optional_last_arg.res`,
       `tests/error_output_parity/compiler/fixtures/bs_variadic_underscore_last_arg.res`,
       `tests/error_output_parity/compiler/fixtures/bs_variadic_attr_last_arg.res`,
+      `tests/error_output_parity/compiler/fixtures/bs_variadic_non_array_last_arg.res`,
       and
-      `tests/error_output_parity/compiler/fixtures/bs_variadic_non_array_last_arg.res`.
+      `tests/error_output_parity/compiler/fixtures/bs_tagged_template_non_array_last_arg.res`.
 - `compiler/frontend/external_ffi_types.ml`
   - `valid_global_name` rejects invalid global/call/constructor names
     - Covered by
