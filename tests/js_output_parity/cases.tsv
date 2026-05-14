@@ -4,5 +4,6 @@ tests/js_output_parity/fixtures/ffi_patterns.res
 tests/js_output_parity/fixtures/advanced_output_patterns.res	
 tests/js_output_parity/fixtures/control_module_patterns.res	
 tests/js_output_parity/fixtures/external_edge_patterns.res	
+tests/js_output_parity/fixtures/variant_representation_patterns.res	
 tests/js_output_parity/fixtures/tella_sparse_record.res	
 tests/js_output_parity/fixtures/jsx_preserve_minimal.res	-bs-jsx 4 -bs-jsx-preserve
