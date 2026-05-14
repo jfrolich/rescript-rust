@@ -1429,10 +1429,12 @@ with a reason after checking raise sites.
       and
       `tests/error_output_parity/compiler/fixtures/scanner_unclosed_template.res`.
 - `compiler/frontend/ast_utf8_string.ml`
-  - JavaScript string `\u{...}` codepoint escape validation after parsing
+  - `Invalid_unicode_codepoint_escape` for JavaScript string `\u{...}`
+    codepoint escape validation after parsing
     - Covered by
       `tests/error_output_parity/compiler/fixtures/string_escape_codepoint_overflow.res`.
-  - JavaScript string fixed-width escape validation reached through template
+  - `Invalid_hex_escape`, `Invalid_unicode_escape`, and `Invalid_code_point`
+    for JavaScript string fixed-width escape validation reached through template
     literal patterns, which bypass the normal string scanner and call
     `Ast_utf8_string.transform` from `Ast_utf8_string_interp.transform_pat`
     - Covered for invalid `\x`, invalid `\u`, and UTF-8 codepoint-offset
@@ -1447,13 +1449,15 @@ with a reason after checking raise sites.
     so the parser emits the unclosed-template diagnostic before
     `Ast_utf8_string.transform` can see a string ending in `\`.
 - `compiler/frontend/ast_utf8_string_interp.ml`
-  - Internal interpolation segment errors such as `Unterminated_variable`,
-    `Unmatched_paren`, and `Invalid_syntax_of_var` are source-unreachable from
-    normal `.res`/`.resi` compilation. The compiler entry points are
-    `transform_exp` and `transform_pat`; for recognized user delimiters they
-    either preserve backquoted template text or delegate validation to
-    `Ast_utf8_string.transform`. The segment-splitting `transform_test` path is
-    only exercised by `tests/ounit_tests/ounit_unicode_tests.ml`.
+  - Internal interpolation segment errors such as `Invalid_code_point`,
+    `Invalid_escape_code`, `Invalid_hex_escape`, `Invalid_unicode_escape`,
+    `Unterminated_variable`, `Unmatched_paren`, and `Invalid_syntax_of_var` are
+    source-unreachable from normal `.res`/`.resi` compilation. The compiler
+    entry points are `transform_exp` and `transform_pat`; for recognized user
+    delimiters they either preserve backquoted template text or delegate
+    validation to `Ast_utf8_string.transform`. The segment-splitting
+    `transform_test` path is only exercised by
+    `tests/ounit_tests/ounit_unicode_tests.ml`.
 - `compiler/ml/builtin_attributes.ml`
   - `error_of_extension` rejects uninterpreted expression, type, pattern,
     module expression, structure, and signature extension points
