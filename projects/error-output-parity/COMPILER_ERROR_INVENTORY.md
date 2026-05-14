@@ -630,7 +630,7 @@ with a reason after checking raise sites.
     polymorphic-variant row bound in
     `tests/error_output_parity/compiler/fixtures/unbound_type_var_private_polyvariant.res`.
   - Checked: ordinary alias, record, and constructor unbound type-parameter
-    positions found so far are rejected earlier by
+    positions are rejected earlier while translating source core types by
     `Typetexp.Unbound_type_variable`. GADT constructor variables are locally
     quantified instead of unbound, guarded by
     `tests/error_output_parity/compiler/fixtures/gadt_existential_arg_success.res`
@@ -681,9 +681,9 @@ with a reason after checking raise sites.
     payloads by
     `tests/error_output_parity/compiler/fixtures/extension_bad_variance.res`.
 - `Unavailable_type_constructor`
-  - Not reachable from normal `.res`/`.resi` source found so far. The OCaml
-    raise sites are second-pass checks over already translated `Tconstr` nodes
-    in `check_constraints_rec` and `check_coherence`; missing source-level type
+  - Source-unreachable from normal `.res`/`.resi` source. The OCaml raise sites
+    are second-pass checks over already translated `Tconstr` nodes in
+    `check_constraints_rec` and `check_coherence`; missing source-level type
     constructors are rejected earlier by type expression translation, while
     recursive placeholders are all installed in the final declaration env before
     these checks run. The manifest-plus-representation guard
@@ -696,9 +696,9 @@ with a reason after checking raise sites.
     `tests/error_output_parity/compiler/fixtures/bad_fixed_type_no_row.res` and
     `tests/error_output_parity/compiler/fixtures/bad_fixed_type_not_object_or_variant.res`.
 - `Unbound_type_var_ext`
-  - Not directly reachable from normal `.res`/`.resi` source found so far.
-    Exception and non-GADT type-extension constructor payload variables are
-    rejected earlier by `Typetexp.Unbound_type_variable`, before
+  - Source-unreachable from normal `.res`/`.resi` source. Exception and
+    non-GADT type-extension constructor payload variables are rejected earlier
+    by `Typetexp.Unbound_type_variable`, before
     `Typedecl.closed_extension_constructor` can report this verbose internal
     variant. This includes ordinary payloads and private polymorphic-variant
     row payloads, guarded by
@@ -2358,7 +2358,7 @@ only the wrapper variant:
 - `Includemod.Unbound_module_path` for unbound module path (covered by
   `tests/error_output_parity/compiler/cases/include_unbound_module_path.res`)
 - `Includemod.Unbound_modtype_path` for unbound module type path is not
-  reachable from normal `.res`/`.resi` source found so far.
+  reachable from normal `.res`/`.resi` source.
   `compiler/ml/includemod.ml` only calls `expand_module_path` after
   `may_expand_module_path` has just succeeded against the same
   `Env.find_modtype_expansion` lookup, and normal source references to missing
