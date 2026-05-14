@@ -2983,7 +2983,7 @@ fn compare_variant_declarations(
         if impl_constructor.cd_id.name() != sig_constructor.cd_id.name() {
             return Some(format!(
                 "Fields number {} have different names, {} and {}.",
-                index,
+                index + 1,
                 impl_constructor.cd_id.name(),
                 sig_constructor.cd_id.name()
             ));

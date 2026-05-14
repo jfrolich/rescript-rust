@@ -223,6 +223,20 @@ paths. Record-field mismatch coverage now includes:
 4. `Includecore.Field_names`
    - covered by `tests/error_output_parity/compiler/fixtures/not_included_record_field_names.res`
    - this verifies OCaml's one-based field numbering in the diagnostic text.
+5. `Includecore.Field_type`
+   - covered by `tests/error_output_parity/compiler/fixtures/not_included_record_field_type.res`
+
+Variant-constructor mismatch coverage now includes:
+
+1. `Includecore.Field_names`
+   - covered by `tests/error_output_parity/compiler/fixtures/not_included_variant_constructor_names.res`
+   - this verifies OCaml's one-based constructor numbering in the diagnostic text.
+2. `Includecore.Field_missing`
+   - covered by `tests/error_output_parity/compiler/fixtures/not_included_variant_constructor_missing.res`
+3. `Includecore.Field_arity`
+   - covered by `tests/error_output_parity/compiler/fixtures/not_included_variant_constructor_arity.res`
+4. `Includecore.Field_type`
+   - covered by `tests/error_output_parity/compiler/fixtures/not_included_variant_constructor_type.res`
 
 ## 6. Formatting and Presentation Contract
 
