@@ -2194,7 +2194,11 @@ only the wrapper variant:
   and the GADT result-type branch by
   `tests/error_output_parity/compiler/fixtures/not_included_extension_gadt_result.res`
   and the result presence/absence branch by
-  `tests/error_output_parity/compiler/fixtures/not_included_extension_gadt_result_presence.res`)
+  `tests/error_output_parity/compiler/fixtures/not_included_extension_gadt_result_presence.res`,
+  plus rebound GADT constructor result branches by
+  `tests/error_output_parity/compiler/fixtures/not_included_extension_rebind_gadt_result.res`
+  and
+  `tests/error_output_parity/compiler/fixtures/not_included_extension_rebind_gadt_result_presence.res`)
 - module mismatch (covered by
   `tests/error_output_parity/compiler/fixtures/not_included_module_mismatch.res`)
 - module type mismatch (covered by

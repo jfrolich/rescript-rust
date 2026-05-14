@@ -22065,7 +22065,8 @@ fn type_structure_item<'a>(
 
             // OCaml typedecl.ml transl_type_extension rejects incompatible
             // targets before translating any extension constructors.
-            if let Ok(type_decl) = env.lookup_type(&path) {
+            let target_type_decl = env.lookup_type(&path).ok();
+            if let Some(type_decl) = &target_type_decl {
                 if !matches!(type_decl.type_kind, crate::types::TypeKind::TypeOpen) {
                     return Err(TypeModError::NotExtensibleType {
                         loc,
@@ -22287,11 +22288,24 @@ fn type_structure_item<'a>(
                             lookup_rebind_constructor(tctx, env, lid)?;
                         let (inst_args, cstr_res) =
                             crate::types::instance_constructor(ctx, &rebind_desc);
+                        let (res, ret_type) = if rebind_desc.cstr_generalized {
+                            let type_params = target_type_decl
+                                .as_ref()
+                                .map(|decl| {
+                                    crate::types::ctype::instance_list(ctx, &decl.type_params)
+                                })
+                                .unwrap_or_default();
+                            let res = ctx.new_constr(path.clone(), type_params.clone());
+                            let ret_type = Some(ctx.new_constr(path.clone(), type_params));
+                            (res, ret_type)
+                        } else {
+                            (ext_res_ty, None)
+                        };
                         if crate::types::ctype::unify(
                             ctx,
                             &mut tctx.unify_state,
                             cstr_res,
-                            ext_res_ty,
+                            res,
                         )
                         .is_err()
                         {
@@ -22299,7 +22313,7 @@ fn type_structure_item<'a>(
                                 loc: lid.loc,
                                 lid: tctx.resolve_lid(lid.txt).clone(),
                                 actual: cstr_res,
-                                expected: ext_res_ty,
+                                expected: res,
                             });
                         }
                         if matches!(rebind_desc.cstr_private, crate::types::PrivateFlag::Private)
@@ -22323,7 +22337,7 @@ fn type_structure_item<'a>(
                             ext_args,
                             inst_args,
                             rebind_desc.cstr_inlined.clone(),
-                            None,
+                            ret_type,
                         )
                     }
                 };
