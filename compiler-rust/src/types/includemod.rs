@@ -2332,6 +2332,123 @@ fn substitute_type_inlined_paths<'a>(
     }
 }
 
+fn collect_constructor_argument_types(args: &ConstructorArguments, types: &mut Vec<TypeExprRef>) {
+    match args {
+        ConstructorArguments::CstrTuple(items) => types.extend(items.iter().copied()),
+        ConstructorArguments::CstrRecord(labels) => {
+            types.extend(labels.iter().map(|label| label.ld_type));
+        }
+    }
+}
+
+fn collect_type_kind_types(kind: &TypeKind, types: &mut Vec<TypeExprRef>) {
+    match kind {
+        TypeKind::TypeAbstract | TypeKind::TypeOpen => {}
+        TypeKind::TypeRecord(labels, _) => {
+            types.extend(labels.iter().map(|label| label.ld_type));
+        }
+        TypeKind::TypeVariant(constructors) => {
+            for constructor in constructors {
+                collect_constructor_argument_types(&constructor.cd_args, types);
+                if let Some(ty) = constructor.cd_res {
+                    types.push(ty);
+                }
+            }
+        }
+    }
+}
+
+fn collect_type_inlined_types(inlined: &TypeInlinedType, types: &mut Vec<TypeExprRef>) {
+    match inlined {
+        TypeInlinedType::Record { labels, .. } => {
+            types.extend(labels.iter().map(|label| label.ld_type));
+        }
+    }
+}
+
+fn next_copied_type(types: &mut std::vec::IntoIter<TypeExprRef>) -> TypeExprRef {
+    types
+        .next()
+        .expect("type declaration substitution slot mismatch")
+}
+
+fn substitute_label_declaration_with_copied_type(
+    label: &LabelDeclaration,
+    types: &mut std::vec::IntoIter<TypeExprRef>,
+) -> LabelDeclaration {
+    let mut substituted = label.clone();
+    substituted.ld_type = next_copied_type(types);
+    substituted
+}
+
+fn substitute_constructor_arguments_with_copied_types(
+    args: &ConstructorArguments,
+    types: &mut std::vec::IntoIter<TypeExprRef>,
+) -> ConstructorArguments {
+    match args {
+        ConstructorArguments::CstrTuple(items) => ConstructorArguments::CstrTuple(
+            items.iter().map(|_| next_copied_type(types)).collect(),
+        ),
+        ConstructorArguments::CstrRecord(labels) => ConstructorArguments::CstrRecord(
+            labels
+                .iter()
+                .map(|label| substitute_label_declaration_with_copied_type(label, types))
+                .collect(),
+        ),
+    }
+}
+
+fn substitute_constructor_declaration_with_copied_types(
+    constructor: &ConstructorDeclaration,
+    types: &mut std::vec::IntoIter<TypeExprRef>,
+) -> ConstructorDeclaration {
+    let mut substituted = constructor.clone();
+    substituted.cd_args =
+        substitute_constructor_arguments_with_copied_types(&constructor.cd_args, types);
+    substituted.cd_res = constructor.cd_res.map(|_| next_copied_type(types));
+    substituted
+}
+
+fn substitute_type_kind_with_copied_types(
+    kind: &TypeKind,
+    types: &mut std::vec::IntoIter<TypeExprRef>,
+) -> TypeKind {
+    match kind {
+        TypeKind::TypeAbstract => TypeKind::TypeAbstract,
+        TypeKind::TypeOpen => TypeKind::TypeOpen,
+        TypeKind::TypeRecord(labels, repr) => TypeKind::TypeRecord(
+            labels
+                .iter()
+                .map(|label| substitute_label_declaration_with_copied_type(label, types))
+                .collect(),
+            repr.clone(),
+        ),
+        TypeKind::TypeVariant(constructors) => TypeKind::TypeVariant(
+            constructors
+                .iter()
+                .map(|constructor| {
+                    substitute_constructor_declaration_with_copied_types(constructor, types)
+                })
+                .collect(),
+        ),
+    }
+}
+
+fn substitute_type_inlined_with_copied_types(
+    inlined: &TypeInlinedType,
+    types: &mut std::vec::IntoIter<TypeExprRef>,
+) -> TypeInlinedType {
+    match inlined {
+        TypeInlinedType::Record { type_name, labels } => TypeInlinedType::Record {
+            type_name: type_name.clone(),
+            labels: labels
+                .iter()
+                .map(|label| substitute_label_declaration_with_copied_type(label, types))
+                .collect(),
+        },
+    }
+}
+
 fn substitute_type_declaration_paths<'a>(
     type_ctx: &'a TypeContext,
     decl: &TypeDeclaration,
@@ -2339,22 +2456,41 @@ fn substitute_type_declaration_paths<'a>(
 ) -> TypeDeclaration {
     // OCaml compiler/ml/includemod.ml:66-70 applies
     // `Subst.type_declaration` before comparing a signature declaration;
-    // compiler/ml/subst.ml:273-301 copies params, manifest, and kind.
+    // compiler/ml/subst.ml:273-301 copies params, kind, and manifest in one
+    // `typexp` window, with a single cleanup after the whole declaration.
     let mut substituted = decl.clone();
+    let mut slots = Vec::new();
+    slots.extend(decl.type_params.iter().copied());
+    collect_type_kind_types(&decl.type_kind, &mut slots);
+    if let Some(manifest) = decl.type_manifest {
+        slots.push(manifest);
+    }
+    for inlined in &decl.type_inlined_types {
+        collect_type_inlined_types(inlined, &mut slots);
+    }
+
+    let copied = ctype::subst_identity_copy_many(type_ctx, &slots);
+    if !subst.is_empty() {
+        let mut seen = HashSet::new();
+        for ty in &copied {
+            rewrite_substituted_type_paths(type_ctx, *ty, subst, &mut seen);
+        }
+    }
+
+    let mut copied = copied.into_iter();
     substituted.type_params = decl
         .type_params
         .iter()
-        .map(|ty| substitute_value_type_paths(type_ctx, *ty, subst))
+        .map(|_| next_copied_type(&mut copied))
         .collect();
-    substituted.type_manifest = decl
-        .type_manifest
-        .map(|ty| substitute_value_type_paths(type_ctx, ty, subst));
-    substituted.type_kind = substitute_type_kind_paths(type_ctx, &decl.type_kind, subst);
+    substituted.type_kind = substitute_type_kind_with_copied_types(&decl.type_kind, &mut copied);
+    substituted.type_manifest = decl.type_manifest.map(|_| next_copied_type(&mut copied));
     substituted.type_inlined_types = decl
         .type_inlined_types
         .iter()
-        .map(|inlined| substitute_type_inlined_paths(type_ctx, inlined, subst))
+        .map(|inlined| substitute_type_inlined_with_copied_types(inlined, &mut copied))
         .collect();
+    debug_assert!(copied.next().is_none());
     substituted
 }
 
@@ -2566,104 +2702,104 @@ fn substitute_modtype_declaration_paths_no_freshen(
     substituted
 }
 
+fn rewrite_substituted_type_paths<'a>(
+    type_ctx: &'a TypeContext,
+    ty: TypeExprRef,
+    subst: &InclusionSubst,
+    seen: &mut HashSet<TypeExprRef>,
+) {
+    let ty = type_ctx.repr(ty);
+    if !seen.insert(ty) {
+        return;
+    }
+
+    let desc = type_ctx.get_desc(ty);
+    match &*desc {
+        TypeDesc::Tconstr { path, args, abbrev } => {
+            for arg in args {
+                rewrite_substituted_type_paths(type_ctx, *arg, subst, seen);
+            }
+            let new_path = substitute_type_constructor_path(path, subst);
+            if new_path != *path {
+                type_ctx.set_desc(
+                    ty,
+                    TypeDesc::Tconstr {
+                        path: new_path,
+                        args: args.clone(),
+                        abbrev: *abbrev,
+                    },
+                );
+            }
+        }
+        TypeDesc::Tarrow { arg, ret, .. } => {
+            rewrite_substituted_type_paths(type_ctx, arg.typ, subst, seen);
+            rewrite_substituted_type_paths(type_ctx, *ret, subst, seen);
+        }
+        TypeDesc::Ttuple(items) => {
+            for item in items {
+                rewrite_substituted_type_paths(type_ctx, *item, subst, seen);
+            }
+        }
+        TypeDesc::Tobject { fields, .. } => {
+            rewrite_substituted_type_paths(type_ctx, *fields, subst, seen);
+        }
+        TypeDesc::Tfield { typ, rest, .. } => {
+            rewrite_substituted_type_paths(type_ctx, *typ, subst, seen);
+            rewrite_substituted_type_paths(type_ctx, *rest, subst, seen);
+        }
+        TypeDesc::Tvariant(row0) => {
+            let row = crate::types::btype::row_repr(type_ctx, &row0);
+            for (_, field) in &row.row_fields {
+                match field {
+                    RowField::Rpresent(Some(arg)) => {
+                        rewrite_substituted_type_paths(type_ctx, *arg, subst, seen)
+                    }
+                    RowField::Reither { types, .. } => {
+                        for ty in types {
+                            rewrite_substituted_type_paths(type_ctx, *ty, subst, seen);
+                        }
+                    }
+                    RowField::Rpresent(None) | RowField::Rabsent => {}
+                }
+            }
+            rewrite_substituted_type_paths(type_ctx, row.row_more, subst, seen);
+        }
+        TypeDesc::Tpoly { body, vars } => {
+            rewrite_substituted_type_paths(type_ctx, *body, subst, seen);
+            for var in vars {
+                rewrite_substituted_type_paths(type_ctx, *var, subst, seen);
+            }
+        }
+        TypeDesc::Tpackage { path, args, lids } => {
+            for arg in args {
+                rewrite_substituted_type_paths(type_ctx, *arg, subst, seen);
+            }
+            let new_path = substitute_modtype_path(path, subst);
+            if new_path != *path {
+                type_ctx.set_desc(
+                    ty,
+                    TypeDesc::Tpackage {
+                        path: new_path,
+                        lids: lids.clone(),
+                        args: args.clone(),
+                    },
+                );
+            }
+        }
+        TypeDesc::Tlink(target) | TypeDesc::Tsubst(target) => {
+            rewrite_substituted_type_paths(type_ctx, *target, subst, seen);
+        }
+        TypeDesc::Tvar(_) | TypeDesc::Tunivar(_) | TypeDesc::Tnil => {}
+    }
+}
+
 fn substitute_value_type_paths<'a>(
     type_ctx: &'a TypeContext,
     ty: TypeExprRef,
     subst: &InclusionSubst,
 ) -> TypeExprRef {
-    use crate::types::type_expr::{RowField, TypeDesc};
-
     if subst.is_empty() {
         return ty;
-    }
-
-    fn rewrite<'a>(
-        type_ctx: &'a TypeContext,
-        ty: TypeExprRef,
-        subst: &InclusionSubst,
-        seen: &mut HashSet<TypeExprRef>,
-    ) {
-        let ty = type_ctx.repr(ty);
-        if !seen.insert(ty) {
-            return;
-        }
-
-        let desc = type_ctx.get_desc(ty);
-        match &*desc {
-            TypeDesc::Tconstr { path, args, abbrev } => {
-                for arg in args {
-                    rewrite(type_ctx, *arg, subst, seen);
-                }
-                let new_path = substitute_type_constructor_path(path, subst);
-                if new_path != *path {
-                    type_ctx.set_desc(
-                        ty,
-                        TypeDesc::Tconstr {
-                            path: new_path,
-                            args: args.clone(),
-                            abbrev: *abbrev,
-                        },
-                    );
-                }
-            }
-            TypeDesc::Tarrow { arg, ret, .. } => {
-                rewrite(type_ctx, arg.typ, subst, seen);
-                rewrite(type_ctx, *ret, subst, seen);
-            }
-            TypeDesc::Ttuple(items) => {
-                for item in items {
-                    rewrite(type_ctx, *item, subst, seen);
-                }
-            }
-            TypeDesc::Tobject { fields, .. } => {
-                rewrite(type_ctx, *fields, subst, seen);
-            }
-            TypeDesc::Tfield { typ, rest, .. } => {
-                rewrite(type_ctx, *typ, subst, seen);
-                rewrite(type_ctx, *rest, subst, seen);
-            }
-            TypeDesc::Tvariant(row0) => {
-                let row = crate::types::btype::row_repr(type_ctx, &row0);
-                for (_, field) in &row.row_fields {
-                    match field {
-                        RowField::Rpresent(Some(arg)) => rewrite(type_ctx, *arg, subst, seen),
-                        RowField::Reither { types, .. } => {
-                            for ty in types {
-                                rewrite(type_ctx, *ty, subst, seen);
-                            }
-                        }
-                        RowField::Rpresent(None) | RowField::Rabsent => {}
-                    }
-                }
-                rewrite(type_ctx, row.row_more, subst, seen);
-            }
-            TypeDesc::Tpoly { body, vars } => {
-                rewrite(type_ctx, *body, subst, seen);
-                for var in vars {
-                    rewrite(type_ctx, *var, subst, seen);
-                }
-            }
-            TypeDesc::Tpackage { path, args, lids } => {
-                for arg in args {
-                    rewrite(type_ctx, *arg, subst, seen);
-                }
-                let new_path = substitute_modtype_path(path, subst);
-                if new_path != *path {
-                    type_ctx.set_desc(
-                        ty,
-                        TypeDesc::Tpackage {
-                            path: new_path,
-                            lids: lids.clone(),
-                            args: args.clone(),
-                        },
-                    );
-                }
-            }
-            TypeDesc::Tlink(target) | TypeDesc::Tsubst(target) => {
-                rewrite(type_ctx, *target, subst, seen);
-            }
-            TypeDesc::Tvar(_) | TypeDesc::Tunivar(_) | TypeDesc::Tnil => {}
-        }
     }
 
     // OCaml compiler/ml/includemod.ml:56-60 applies `Subst.value_description`
@@ -2671,7 +2807,7 @@ fn substitute_value_type_paths<'a>(
     // substitutes the value type rather than mutating the original scheme.
     let copied = ctype::subst_identity_copy(type_ctx, ty);
     let mut seen = HashSet::new();
-    rewrite(type_ctx, copied, subst, &mut seen);
+    rewrite_substituted_type_paths(type_ctx, copied, subst, &mut seen);
     copied
 }
 

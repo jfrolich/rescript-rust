@@ -9621,6 +9621,18 @@ pub fn subst_identity_copy(ctx: &TypeContext, ty: TypeExprRef) -> TypeExprRef {
     subst_identity_copy_with_partial(ctx, ty, false)
 }
 
+pub fn subst_identity_copy_many(ctx: &TypeContext, types: &[TypeExprRef]) -> Vec<TypeExprRef> {
+    let mut seen = HashMap::new();
+    // OCaml compiler/ml/subst.ml:273-301 calls `typexp` for every type slot
+    // in a declaration before the single `cleanup_types` call, so temporary
+    // Tsubst markers preserve sharing between params, kind fields, and manifest.
+    let mut row_more_markers = HashMap::new();
+    types
+        .iter()
+        .map(|ty| subst_identity_copy_rec(ctx, *ty, false, &mut seen, &mut row_more_markers))
+        .collect()
+}
+
 pub fn subst_identity_copy_with_partial(
     ctx: &TypeContext,
     ty: TypeExprRef,
