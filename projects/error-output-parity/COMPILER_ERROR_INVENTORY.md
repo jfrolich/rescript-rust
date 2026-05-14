@@ -1230,6 +1230,19 @@ with a reason after checking raise sites.
       `tests/error_output_parity/compiler/fixtures/string_escape_decimal_overflow.res`,
       and
       `tests/error_output_parity/compiler/fixtures/string_escape_unicode_surrogate.res`.
+  - Scanner diagnostics for unknown characters, quoted identifiers, exponent
+    notation, and unclosed comments, strings, and templates are covered through
+    `bsc`, not only `res_parser`
+    - Covered by
+      `tests/error_output_parity/compiler/fixtures/scanner_bad_character.res`,
+      `tests/error_output_parity/compiler/fixtures/scanner_exotic_empty_identifier.res`,
+      `tests/error_output_parity/compiler/fixtures/scanner_exotic_identifier_linebreak.res`,
+      `tests/error_output_parity/compiler/fixtures/scanner_exotic_identifier_unclosed.res`,
+      `tests/error_output_parity/compiler/fixtures/scanner_exponent_missing_digits.res`,
+      `tests/error_output_parity/compiler/fixtures/scanner_unclosed_comment.res`,
+      `tests/error_output_parity/compiler/fixtures/scanner_unclosed_string.res`,
+      and
+      `tests/error_output_parity/compiler/fixtures/scanner_unclosed_template.res`.
 - `compiler/frontend/ast_utf8_string.ml`
   - JavaScript string `\u{...}` codepoint escape validation after parsing
     - Covered by
