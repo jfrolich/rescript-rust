@@ -150,6 +150,9 @@ The `for await`/`in` parser diagnostic is covered by
 The signature-only consecutive-specification diagnostic is covered by
 `tests/syntax_tests/data/parsing/errors/signature/consecutive.resi`.
 
+The non-decimal bigint literal diagnostic from `parse_constant` is covered by
+`tests/syntax_tests/data/parsing/errors/scanner/invalidBigint.res`.
+
 ## 4. JSX Warning/Error Surface
 
 ### 4.1 Warning emission

@@ -1,0 +1,10 @@
+
+  Syntax error!
+  syntax_tests/data/parsing/errors/scanner/invalidBigint.res:1:13-16
+
+  1 │ let value = 0x1n
+  2 │ 
+
+  Invalid bigint literal. Only decimal literal is allowed for bigint.
+
+let value = 0x1n

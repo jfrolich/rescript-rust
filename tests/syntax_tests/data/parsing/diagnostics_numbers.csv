@@ -108,3 +108,4 @@ error,105,tests/syntax_tests/data/parsing/errors/scanner/unclosedExoticIdentifie
 error,106,tests/syntax_tests/data/parsing/errors/expressions/recordSpreadMissingComma.res,tests/syntax_tests/data/parsing/errors/expressions/expected/recordSpreadMissingComma.res.txt
 error,107,tests/syntax_tests/data/parsing/errors/expressions/forAwaitIn.res,tests/syntax_tests/data/parsing/errors/expressions/expected/forAwaitIn.res.txt
 error,108,tests/syntax_tests/data/parsing/errors/signature/consecutive.resi,tests/syntax_tests/data/parsing/errors/signature/expected/consecutive.resi.txt
+error,109,tests/syntax_tests/data/parsing/errors/scanner/invalidBigint.res,tests/syntax_tests/data/parsing/errors/scanner/expected/invalidBigint.res.txt
