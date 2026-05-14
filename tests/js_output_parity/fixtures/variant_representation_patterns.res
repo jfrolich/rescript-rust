@@ -109,6 +109,22 @@ type sourceLarge =
 
 let widenSmall = (value: sourceSmall): sourceLarge => (value :> sourceLarge)
 
+module TellaPositionWidening = {
+  type portraitPosition = [#Top | #Bottom]
+  type layoutPosition = [#TopRight | #BottomRight | #TopLeft | #BottomLeft | #Top | #Bottom]
+
+  let className = (position: layoutPosition) =>
+    switch position {
+    | #TopLeft | #Top => "top-left"
+    | #TopRight => "top-right"
+    | #BottomLeft => "bottom-left"
+    | #BottomRight | #Bottom => "bottom-right"
+    }
+
+  let fromPortrait = (position: portraitPosition) =>
+    className((position :> layoutPosition))
+}
+
 let allValues = (
   coercedValues,
   classifyJsonish(JsonFalse),
@@ -119,4 +135,6 @@ let allValues = (
   convertPoly(#polyHi),
   describeTagged(TaggedPoint({x: 2, y: 3})),
   widenSmall(SmallFixed),
+  TellaPositionWidening.fromPortrait(#Top),
+  TellaPositionWidening.fromPortrait(#Bottom),
 )

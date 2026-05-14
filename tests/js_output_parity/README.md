@@ -28,6 +28,7 @@ Each source listed in `cases.tsv` is compiled in these fixture modes:
 - unsafe output (`-unsafe -bs-no-check-div-by-zero`)
 - no-version-header output (`-bs-no-version-header`)
 - cross-module optimization output (`-bs-cross-module-opt`)
+- no cross-module optimization output (`-bs-no-cross-module-opt`)
 
 Current focused coverage:
 
@@ -60,7 +61,8 @@ Current focused coverage:
   args, property get/set, dynamic import, and module-await lowering.
 - `variant_representation_patterns.res`: string/int/float/bigint constructor
   coercions, unboxed nullish variants, variant spreads, `jsConverter`,
-  tagged inline records, and unboxed widening.
+  tagged inline records, unboxed widening, and Tella-derived named
+  polymorphic-variant widening.
 - `tella_sparse_record.res`: a minimized Tella-derived large sparse record
   shape without depending on the external Tella repository.
 - `jsx_transform_patterns.res`: JSX v4 transform output for DOM elements,

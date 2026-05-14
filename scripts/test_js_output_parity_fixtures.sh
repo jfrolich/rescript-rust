@@ -254,6 +254,7 @@ run_fixture() {
     compare_case "$source" "$case_flags" "unsafe" "esmodule" ".mjs" "-unsafe -bs-no-check-div-by-zero" || return 1
     compare_case "$source" "$case_flags" "noheader" "esmodule" ".mjs" "-bs-no-version-header" || return 1
     compare_case "$source" "$case_flags" "cross-module-opt" "esmodule" ".mjs" "-bs-cross-module-opt" || return 1
+    compare_case "$source" "$case_flags" "no-cross-module-opt" "esmodule" ".mjs" "-bs-no-cross-module-opt" || return 1
 }
 
 echo -e "${BOLD}JS output fixture parity${RESET}"
