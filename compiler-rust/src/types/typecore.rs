@@ -10958,6 +10958,247 @@ fn pattern_variable_paths(pat: &Pattern) -> HashMap<String, Vec<Vec<usize>>> {
     vars
 }
 
+fn collect_pattern_bound_idents(pat: &Pattern, vars: &mut Vec<Ident>) {
+    match &pat.pat_desc {
+        PatternDesc::Tpat_var(id, _) => vars.push(id.clone()),
+        PatternDesc::Tpat_alias(inner, id, _) => {
+            collect_pattern_bound_idents(inner, vars);
+            vars.push(id.clone());
+        }
+        PatternDesc::Tpat_tuple(items) | PatternDesc::Tpat_array(items) => {
+            for item in items {
+                collect_pattern_bound_idents(item, vars);
+            }
+        }
+        PatternDesc::Tpat_construct(_, _, args) => {
+            for arg in args {
+                collect_pattern_bound_idents(arg, vars);
+            }
+        }
+        PatternDesc::Tpat_variant(_, Some(arg), _) => {
+            collect_pattern_bound_idents(arg, vars);
+        }
+        PatternDesc::Tpat_record(fields, _) => {
+            for (_, _, field_pat, _) in fields {
+                collect_pattern_bound_idents(field_pat, vars);
+            }
+        }
+        PatternDesc::Tpat_or(left, right, _) => {
+            collect_pattern_bound_idents(left, vars);
+            collect_pattern_bound_idents(right, vars);
+        }
+        PatternDesc::Tpat_any
+        | PatternDesc::Tpat_constant(_)
+        | PatternDesc::Tpat_variant(_, None, _) => {}
+    }
+}
+
+fn collect_expression_ident_heads(exp: &Expression, ids: &mut Vec<Ident>) {
+    match &exp.exp_desc {
+        ExpressionDesc::Texp_ident(path, _, _) => {
+            ids.extend(path.heads().into_iter().cloned());
+        }
+        ExpressionDesc::Texp_let(_, bindings, body) => {
+            for binding in bindings {
+                collect_expression_ident_heads(&binding.vb_expr, ids);
+            }
+            collect_expression_ident_heads(body, ids);
+        }
+        ExpressionDesc::Texp_function { params, body, .. } => {
+            for param in params {
+                if let Some(default) = &param.default {
+                    collect_expression_ident_heads(default, ids);
+                }
+            }
+            collect_case_expression_ident_heads(body, ids);
+        }
+        ExpressionDesc::Texp_apply { funct, args, .. } => {
+            collect_expression_ident_heads(funct, ids);
+            for arg in args {
+                if let Some(expr) = &arg.expression {
+                    collect_expression_ident_heads(expr, ids);
+                }
+            }
+        }
+        ExpressionDesc::Texp_match(scrutinee, cases, exn_cases, _) => {
+            collect_expression_ident_heads(scrutinee, ids);
+            collect_case_expression_ident_heads(cases, ids);
+            collect_case_expression_ident_heads(exn_cases, ids);
+        }
+        ExpressionDesc::Texp_try(scrutinee, cases) => {
+            collect_expression_ident_heads(scrutinee, ids);
+            collect_case_expression_ident_heads(cases, ids);
+        }
+        ExpressionDesc::Texp_tuple(items) | ExpressionDesc::Texp_array(items) => {
+            for item in items {
+                collect_expression_ident_heads(item, ids);
+            }
+        }
+        ExpressionDesc::Texp_construct(_, _, args) => {
+            for arg in args {
+                collect_expression_ident_heads(arg, ids);
+            }
+        }
+        ExpressionDesc::Texp_variant(_, Some(arg)) => {
+            collect_expression_ident_heads(arg, ids);
+        }
+        ExpressionDesc::Texp_record {
+            fields,
+            extended_expression,
+        }
+        | ExpressionDesc::Texp_record_sparse {
+            fields,
+            extended_expression,
+            ..
+        } => {
+            for (_, _, definition, _) in fields {
+                if let crate::types::typedtree::RecordLabelDefinition::Overridden(_, expr) =
+                    definition
+                {
+                    collect_expression_ident_heads(expr, ids);
+                }
+            }
+            if let Some(expr) = extended_expression {
+                collect_expression_ident_heads(expr, ids);
+            }
+        }
+        ExpressionDesc::Texp_field(expr, _, _) | ExpressionDesc::Texp_assert(expr) => {
+            collect_expression_ident_heads(expr, ids);
+        }
+        ExpressionDesc::Texp_setfield(expr1, _, _, expr2)
+        | ExpressionDesc::Texp_sequence(expr1, expr2)
+        | ExpressionDesc::Texp_while(expr1, expr2)
+        | ExpressionDesc::Texp_for_of(_, _, expr1, expr2)
+        | ExpressionDesc::Texp_for_await_of(_, _, expr1, expr2) => {
+            collect_expression_ident_heads(expr1, ids);
+            collect_expression_ident_heads(expr2, ids);
+        }
+        ExpressionDesc::Texp_ifthenelse(cond, then_, else_) => {
+            collect_expression_ident_heads(cond, ids);
+            collect_expression_ident_heads(then_, ids);
+            if let Some(else_) = else_ {
+                collect_expression_ident_heads(else_, ids);
+            }
+        }
+        ExpressionDesc::Texp_for(_, _, start, stop, _, body) => {
+            collect_expression_ident_heads(start, ids);
+            collect_expression_ident_heads(stop, ids);
+            collect_expression_ident_heads(body, ids);
+        }
+        ExpressionDesc::Texp_send(receiver, _, arg) => {
+            collect_expression_ident_heads(receiver, ids);
+            if let Some(arg) = arg {
+                collect_expression_ident_heads(arg, ids);
+            }
+        }
+        ExpressionDesc::Texp_letmodule(_, _, module_expr, body) => {
+            collect_module_expr_ident_heads(module_expr, ids);
+            collect_expression_ident_heads(body, ids);
+        }
+        ExpressionDesc::Texp_letexception(_, body) => {
+            collect_expression_ident_heads(body, ids);
+        }
+        ExpressionDesc::Texp_pack(module_expr) => {
+            collect_module_expr_ident_heads(module_expr, ids);
+        }
+        ExpressionDesc::Texp_constant(_)
+        | ExpressionDesc::Texp_variant(_, None)
+        | ExpressionDesc::Texp_break
+        | ExpressionDesc::Texp_continue
+        | ExpressionDesc::Texp_extension_constructor(_, _) => {}
+    }
+}
+
+fn collect_case_expression_ident_heads(
+    cases: &[crate::types::typedtree::Case],
+    ids: &mut Vec<Ident>,
+) {
+    for case in cases {
+        if let Some(guard) = &case.c_guard {
+            collect_expression_ident_heads(guard, ids);
+        }
+        collect_expression_ident_heads(&case.c_rhs, ids);
+    }
+}
+
+fn collect_module_expr_ident_heads(module_expr: &ModuleExpr, ids: &mut Vec<Ident>) {
+    match &module_expr.mod_desc {
+        ModuleExprDesc::Tmod_ident(_, _) => {}
+        ModuleExprDesc::Tmod_structure(structure) => {
+            for item in &structure.str_items {
+                match &item.str_desc {
+                    StructureItemDesc::Tstr_eval(expr, _) => {
+                        collect_expression_ident_heads(expr, ids);
+                    }
+                    StructureItemDesc::Tstr_value(_, bindings) => {
+                        for binding in bindings {
+                            collect_expression_ident_heads(&binding.vb_expr, ids);
+                        }
+                    }
+                    StructureItemDesc::Tstr_module(binding) => {
+                        collect_module_expr_ident_heads(&binding.mb_expr, ids);
+                    }
+                    StructureItemDesc::Tstr_recmodule(bindings) => {
+                        for binding in bindings {
+                            collect_module_expr_ident_heads(&binding.mb_expr, ids);
+                        }
+                    }
+                    StructureItemDesc::Tstr_include(include) => {
+                        collect_module_expr_ident_heads(&include.incl_mod, ids);
+                    }
+                    StructureItemDesc::Tstr_primitive(_)
+                    | StructureItemDesc::Tstr_type(_, _)
+                    | StructureItemDesc::Tstr_typext(_)
+                    | StructureItemDesc::Tstr_exception(_)
+                    | StructureItemDesc::Tstr_modtype(_)
+                    | StructureItemDesc::Tstr_open(_)
+                    | StructureItemDesc::Tstr_attribute(_) => {}
+                }
+            }
+        }
+        ModuleExprDesc::Tmod_apply(functor, arg, _) => {
+            collect_module_expr_ident_heads(functor, ids);
+            collect_module_expr_ident_heads(arg, ids);
+        }
+        ModuleExprDesc::Tmod_functor(_, _, mty, body) => {
+            if let Some(mty) = mty {
+                collect_module_type_ident_heads(mty, ids);
+            }
+            collect_module_expr_ident_heads(body, ids);
+        }
+        ModuleExprDesc::Tmod_constraint(module_expr, _, constraint, _) => {
+            collect_module_expr_ident_heads(module_expr, ids);
+            if let ModuleTypeConstraint::Tmodtype_explicit(mty) = constraint {
+                collect_module_type_ident_heads(mty, ids);
+            }
+        }
+        ModuleExprDesc::Tmod_unpack(expr, _) => {
+            collect_expression_ident_heads(expr, ids);
+        }
+    }
+}
+
+fn collect_module_type_ident_heads(module_type: &ModuleType, ids: &mut Vec<Ident>) {
+    match &module_type.mty_desc {
+        ModuleTypeDesc::Tmty_typeof(module_expr) => {
+            collect_module_expr_ident_heads(module_expr, ids);
+        }
+        ModuleTypeDesc::Tmty_functor(_, _, param, body) => {
+            if let Some(param) = param {
+                collect_module_type_ident_heads(param, ids);
+            }
+            collect_module_type_ident_heads(body, ids);
+        }
+        ModuleTypeDesc::Tmty_with(module_type, _) => {
+            collect_module_type_ident_heads(module_type, ids);
+        }
+        ModuleTypeDesc::Tmty_ident(_, _)
+        | ModuleTypeDesc::Tmty_signature(_)
+        | ModuleTypeDesc::Tmty_alias(_, _)
+        | ModuleTypeDesc::Tmty_placeholder => {}
+    }
+}
+
 fn collect_ambiguous_or_pattern_vars(pat: &Pattern, vars: &mut HashSet<String>) {
     match &pat.pat_desc {
         PatternDesc::Tpat_or(left, right, _) => {
@@ -11017,8 +11258,27 @@ fn report_ambiguous_guarded_or_patterns(
             continue;
         }
 
-        let mut vars: Vec<String> = vars.into_iter().collect();
+        let mut pattern_ids = Vec::new();
+        collect_pattern_bound_idents(&case.c_lhs, &mut pattern_ids);
+        let mut guard_ids = Vec::new();
+        if let Some(guard) = &case.c_guard {
+            collect_expression_ident_heads(guard, &mut guard_ids);
+        }
+
+        // OCaml compiler/ml/parmatch.ml:2538-2554 intersects ambiguous
+        // pattern binders with `all_rhs_idents` from the guard before warning.
+        let mut vars: Vec<String> = vars
+            .into_iter()
+            .filter(|name| {
+                pattern_ids.iter().any(|pat_id| {
+                    pat_id.name() == name && guard_ids.iter().any(|guard_id| guard_id.same(pat_id))
+                })
+            })
+            .collect();
         vars.sort();
+        if vars.is_empty() {
+            continue;
+        }
         tctx.report_warning(case.c_lhs.pat_loc, Warning::AmbiguousPattern { vars });
     }
 }
