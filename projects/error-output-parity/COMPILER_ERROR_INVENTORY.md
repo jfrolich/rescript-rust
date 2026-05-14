@@ -1880,10 +1880,14 @@ with a reason after checking raise sites.
       `tests/error_output_parity/compiler/fixtures/obj_extension_qualified_label.res`.
 - `compiler/frontend/ast_external.ml`
   - Empty and multiple primitive string rejection
-    - Source-unreachable from normal `.res`/`.resi`. Probes for
-      `external x: int` and `external x: int = "a" "b"` are rejected by parser
-      diagnostics before `Ast_external.handle_external_in_stru` or
-      `Ast_external.handle_external_in_sig` can inspect `pval_prim`.
+    - Source-unreachable from normal `.res`/`.resi`. `external x: int` and
+      `external x: int = "a" "b"` are rejected by parser diagnostics before
+      `Ast_external.handle_external_in_stru` or `Ast_external.handle_external_in_sig`
+      can inspect `pval_prim`.
+    - The parser-level guards are covered by
+      `tests/error_output_parity/compiler/fixtures/external_missing_primitive.res`
+      and
+      `tests/error_output_parity/compiler/fixtures/external_multiple_primitive_strings.res`.
 - `compiler/frontend/ast_exp_apply.ml`
   - `property name (...) can not contain speical character #`
     - Covered by
