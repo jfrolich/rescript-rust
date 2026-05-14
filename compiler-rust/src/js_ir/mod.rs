@@ -22,7 +22,10 @@ use std::ffi::OsString;
 use std::fs;
 use std::path::{Component, Path as FsPath, PathBuf};
 
-use crate::cmi::persistent_env::{CmjExportArity, CmjExportConstant, PersistentEnv};
+use crate::cmi::persistent_env::{
+    CmjExportArity, CmjExportConstant, CmjPackageModuleSystem, CmjPackageName, CmjPackageSpec,
+    PersistentEnv,
+};
 use crate::ident::Ident;
 use crate::lambda::Lambda;
 use crate::lambda::SwitchCaseTag;
@@ -61,10 +64,24 @@ pub struct ModulePathResolver {
     output_suffix: String,
     current_source_path: Option<PathBuf>,
     current_package_name: Option<String>,
+    current_package_has_output: bool,
     runtime_path: Option<PathBuf>,
     persistent_env: Option<PersistentEnv>,
     current_package_is_runtime: bool,
     path_overrides: HashMap<String, String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ModulePathResolutionError {
+    MissingMlDependency { module_name: String },
+    DependencyScriptModuleDependentNot { module_name: String },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum PackageInfoQuery {
+    Script,
+    NotFound,
+    Found,
 }
 
 impl ModulePathResolver {
@@ -85,6 +102,7 @@ impl ModulePathResolver {
             current_source_path: source_filename
                 .map(|path| normalize_absolute_path(FsPath::new(path))),
             current_package_name: package_name.map(ToOwned::to_owned),
+            current_package_has_output: package_name.is_some() && output_module_format.is_some(),
             runtime_path: runtime_path.map(normalize_absolute_path),
             persistent_env,
             current_package_is_runtime,
@@ -144,6 +162,41 @@ impl ModulePathResolver {
                     self.relative_output_path(&target_source)
                 }
             }
+        }
+    }
+
+    /// Return the package-mode dependency error that OCaml raises while turning
+    /// an ML module id into a JS import path.
+    pub fn module_path_resolution_error(
+        &self,
+        module: &ModuleId,
+    ) -> Option<ModulePathResolutionError> {
+        if module.dynamic_import
+            || self.path_overrides.contains_key(module.id.name())
+            || !matches!(module.kind, Kind::Ml)
+            || self.is_runtime_module(module.id.name())
+        {
+            return None;
+        }
+
+        let import_info = self
+            .persistent_env
+            .as_ref()?
+            .module_cmj_import_info(module.id.name())?;
+        let dep_query = self.query_package_spec(&import_info.package_spec);
+        let current_query = self.current_package_query();
+        match (&dep_query, &current_query) {
+            (PackageInfoQuery::NotFound, _) => {
+                Some(ModulePathResolutionError::MissingMlDependency {
+                    module_name: module.id.name().to_string(),
+                })
+            }
+            (PackageInfoQuery::Script, PackageInfoQuery::Found) => Some(
+                ModulePathResolutionError::DependencyScriptModuleDependentNot {
+                    module_name: module.id.name().to_string(),
+                },
+            ),
+            _ => None,
         }
     }
 
@@ -280,6 +333,38 @@ impl ModulePathResolver {
         ))
     }
 
+    fn current_package_query(&self) -> PackageInfoQuery {
+        if self.current_package_is_runtime {
+            return PackageInfoQuery::NotFound;
+        }
+        let Some(_current_package_name) = &self.current_package_name else {
+            return PackageInfoQuery::Script;
+        };
+        if !self.current_package_has_output {
+            return PackageInfoQuery::NotFound;
+        }
+
+        PackageInfoQuery::Found
+    }
+
+    fn query_package_spec(&self, package_spec: &CmjPackageSpec) -> PackageInfoQuery {
+        match &package_spec.name {
+            CmjPackageName::Empty => return PackageInfoQuery::Script,
+            CmjPackageName::Runtime | CmjPackageName::Normal(_) => {}
+        };
+
+        if package_spec
+            .module_systems
+            .iter()
+            .find(|info| module_system_compatible(info.module_system, self.format))
+            .is_some()
+        {
+            PackageInfoQuery::Found
+        } else {
+            PackageInfoQuery::NotFound
+        }
+    }
+
     fn fallback_local_module_source(&self, module_name: &str) -> Option<PathBuf> {
         let current_source = self.current_source_path.as_ref()?;
         let current_dir = current_source.parent()?;
@@ -324,6 +409,14 @@ fn module_format_from_output_path(output_path: Option<&FsPath>) -> ModuleFormat 
         Some(name) if name.ends_with(".mjs") => ModuleFormat::EsModule,
         _ => ModuleFormat::CommonJs,
     }
+}
+
+fn module_system_compatible(dep: CmjPackageModuleSystem, query: ModuleFormat) -> bool {
+    matches!(
+        (dep, query),
+        (CmjPackageModuleSystem::CommonJs, ModuleFormat::CommonJs)
+            | (CmjPackageModuleSystem::EsModule, ModuleFormat::EsModule)
+    )
 }
 
 fn output_suffix_from_path(output_path: Option<&FsPath>) -> String {

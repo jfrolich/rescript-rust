@@ -24,7 +24,7 @@ use crate::context::IdGenerator;
 use crate::diagnostics::WarningConfig;
 use crate::ident::Ident;
 use crate::js_ir::{
-    DepsProgram, Kind, ModuleFormat, ModuleId, ModulePathResolver,
+    DepsProgram, Kind, ModuleFormat, ModuleId, ModulePathResolutionError, ModulePathResolver,
     print_deps_program_with_directives_and_options,
 };
 use crate::lambda::lam_compile::LambdaCompiler;
@@ -4324,6 +4324,34 @@ fn persistent_env_error_to_anyhow(error: PersistentEnvError, filename: &str) -> 
         }
     };
     UserDiagnostic::new(format_compiler_error_report_for_file(filename, &message), 2).into()
+}
+
+fn module_path_resolution_error_to_anyhow(
+    error: ModulePathResolutionError,
+    filename: &str,
+) -> anyhow::Error {
+    let message = match error {
+        ModulePathResolutionError::MissingMlDependency { module_name } => {
+            format!("Missing dependency {module_name} in search path")
+        }
+        ModulePathResolutionError::DependencyScriptModuleDependentNot { module_name } => {
+            format!("{module_name} is compiled in script mode while its dependent is not")
+        }
+    };
+    UserDiagnostic::new(format_compiler_error_report_for_file(filename, &message), 2).into()
+}
+
+fn check_module_path_resolution_errors(
+    program: &DepsProgram,
+    resolver: &ModulePathResolver,
+    filename: &str,
+) -> Result<()> {
+    for module in &program.modules {
+        if let Some(error) = resolver.module_path_resolution_error(module) {
+            return Err(module_path_resolution_error_to_anyhow(error, filename));
+        }
+    }
+    Ok(())
 }
 
 fn format_persistent_env_path(path: &str) -> String {
@@ -11331,6 +11359,7 @@ pub fn compile_source_to_js_with_options(
         )
         .into());
     }
+    check_module_path_resolution_errors(&program, &module_path_resolver, filename)?;
 
     // JS IR -> JS source
     let js = print_deps_program_with_directives_and_options(
@@ -14480,6 +14509,13 @@ pub fn finish_preprocessed_structure_in_process_from_js_boundary(
             )
         }
     };
+    if !options.skip_js_render {
+        check_module_path_resolution_errors(
+            &program,
+            &module_path_resolver,
+            options.source_filename.as_deref().unwrap_or("_none_"),
+        )?;
+    }
     let is_pure = program.side_effect.is_none();
     let mut rendered_programs = if options.skip_js_render {
         crate::js_ir::dispose_deps_program_nonrecursive(program);
@@ -14502,6 +14538,11 @@ pub fn finish_preprocessed_structure_in_process_from_js_boundary(
                 persistent_env_for_js.clone(),
                 pre_js.jsx_preserve,
             );
+            check_module_path_resolution_errors(
+                &program,
+                &module_path_resolver,
+                options.source_filename.as_deref().unwrap_or("_none_"),
+            )?;
             rendered_programs.push((Some(target.path.clone()), program, module_path_resolver));
         }
         rendered_programs

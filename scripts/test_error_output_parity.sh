@@ -212,6 +212,20 @@ compare_outputs() {
     return 0
 }
 
+prebuild_ocaml_dependency() {
+    local source_file="$1"
+    shift
+    local safe prep_out
+    safe=$(safe_name "prebuild_${source_file}")
+    prep_out="$CACHE_DIR/compiler/${safe}.out"
+
+    if ! timeout "$TIMEOUT_SECONDS" "$OCAML_BSC" "$@" "$source_file" > "$prep_out.stdout" 2> "$prep_out"; then
+        echo -e "${RED}Failed to prepare OCaml dependency:${RESET} $source_file"
+        cat "$prep_out"
+        return 1
+    fi
+}
+
 run_parser_cases() {
     echo -e "${BOLD}Parser diagnostics parity${RESET}"
     while IFS=, read -r kind number source_file _expected_file; do
@@ -251,6 +265,21 @@ run_compiler_case() {
     if [[ "$source_file" == "tests/error_output_parity/compiler/cases/gentype_stale_cmti.res" ]]; then
         cp "$PROJECT_ROOT/tests/error_output_parity/compiler/cases/Bar.cmi" \
             "$CACHE_DIR/compiler/gentype_stale_cmti.cmti"
+    fi
+
+    if [[ "$source_file" == "tests/error_output_parity/compiler/cases/package_script_dependency.res" ]]; then
+        prebuild_ocaml_dependency \
+            "tests/error_output_parity/compiler/cases/package_script_dependency_dep.res" \
+            -w -A -bs-jsx 4 -color never || return 1
+    fi
+
+    if [[ "$source_file" == "tests/error_output_parity/compiler/cases/package_missing_ml_dependency.res" ]]; then
+        prebuild_ocaml_dependency \
+            "tests/error_output_parity/compiler/cases/package_missing_ml_dependency_dep.res" \
+            -w -A -bs-jsx 4 -color never \
+            -bs-project-root . \
+            -bs-package-name dep_pkg \
+            -bs-package-output commonjs:.parity-cache/error-output/compiler:.js || return 1
     fi
 
     if [[ "$source_file" == ".parity-cache/error-output/compiler/gentype_bad_magic.res" ]]; then

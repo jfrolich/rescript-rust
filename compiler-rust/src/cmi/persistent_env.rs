@@ -202,6 +202,47 @@ pub enum CmjExportArity {
 pub struct CmjModuleMetadata {
     pub is_pure: bool,
     pub export_constants: HashMap<String, CmjExportConstant>,
+    pub package_spec: CmjPackageSpec,
+    pub file_case: CmjFileCase,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CmjPackageName {
+    Empty,
+    Runtime,
+    Normal(String),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CmjPackageModuleSystem {
+    CommonJs,
+    EsModule,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CmjPackageInfo {
+    pub module_system: CmjPackageModuleSystem,
+    pub path: String,
+    pub suffix: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CmjPackageSpec {
+    pub name: CmjPackageName,
+    pub module_systems: Vec<CmjPackageInfo>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CmjFileCase {
+    Upper,
+    Little,
+}
+
+#[derive(Debug, Clone)]
+pub struct CmjModuleImportInfo {
+    pub package_path: PathBuf,
+    pub package_spec: CmjPackageSpec,
+    pub file_case: CmjFileCase,
 }
 
 /// In-memory module metadata for the `--in-process` build mode.
@@ -1270,6 +1311,33 @@ impl PersistentEnv {
         ))
     }
 
+    /// Return package metadata recorded in a dependency `.cmj`, matching
+    /// `Lam_compile_env.get_package_path_from_cmj`.
+    pub fn module_cmj_import_info(&self, name: &str) -> Option<CmjModuleImportInfo> {
+        if let Some(info) = self.in_memory_info(name) {
+            if info.package_name.is_some() {
+                return None;
+            }
+            return Some(CmjModuleImportInfo {
+                package_path: PathBuf::new(),
+                package_spec: CmjPackageSpec {
+                    name: CmjPackageName::Empty,
+                    module_systems: Vec::new(),
+                },
+                file_case: CmjFileCase::Upper,
+            });
+        }
+
+        let path = self.resolve_module_cmj_path(name)?;
+        let metadata = read_cmj_module_metadata(&path)?;
+        let package_path = path.parent()?.parent()?.parent()?.to_path_buf();
+        Some(CmjModuleImportInfo {
+            package_path,
+            package_spec: metadata.package_spec,
+            file_case: metadata.file_case,
+        })
+    }
+
     /// Resolve a module name to its companion `.cmj` path when present.
     pub fn resolve_module_cmj_path(&self, name: &str) -> Option<PathBuf> {
         let cmj_filename = format!("{name}.cmj");
@@ -2114,6 +2182,8 @@ pub fn read_cmj_module_metadata(path: &FsPath) -> Option<CmjModuleMetadata> {
     Some(CmjModuleMetadata {
         is_pure: decode_cmj_pure(&value)?,
         export_constants: decode_cmj_export_constants(&value)?,
+        package_spec: decode_cmj_package_spec(&value)?,
+        file_case: decode_cmj_file_case(&value)?,
     })
 }
 
@@ -2278,6 +2348,66 @@ fn decode_cmj_export_lambdas(value: &OcamlValue) -> Option<HashMap<String, Lambd
 fn decode_cmj_persistent_closed_lambda(value: &OcamlValue) -> Option<Lambda> {
     let lam = value.as_option()?;
     decode_cmj_lambda(lam)
+}
+
+fn decode_cmj_package_spec(value: &OcamlValue) -> Option<CmjPackageSpec> {
+    let (_, fields) = value.as_block_opt()?;
+    let package_field = fields.get(2)?;
+    let (_, package_fields) = package_field.as_block_opt()?;
+    if package_fields.len() != 2 {
+        return None;
+    }
+
+    Some(CmjPackageSpec {
+        name: decode_cmj_package_name(&package_fields[0])?,
+        module_systems: decode_cmj_list(&package_fields[1], decode_cmj_package_info)?,
+    })
+}
+
+fn decode_cmj_package_name(value: &OcamlValue) -> Option<CmjPackageName> {
+    match value {
+        // compiler/core/js_packages_info.ml:39: Pkg_empty.
+        OcamlValue::Int(0) => Some(CmjPackageName::Empty),
+        // compiler/core/js_packages_info.ml:39: Pkg_runtime.
+        OcamlValue::Int(1) => Some(CmjPackageName::Runtime),
+        // compiler/core/js_packages_info.ml:39: Pkg_normal of string.
+        OcamlValue::Block(0, fields) if fields.len() == 1 => {
+            Some(CmjPackageName::Normal(fields[0].as_string().to_string()))
+        }
+        _ => None,
+    }
+}
+
+fn decode_cmj_package_info(value: &OcamlValue) -> Option<CmjPackageInfo> {
+    let (_, fields) = value.as_block_opt()?;
+    if fields.len() != 3 {
+        return None;
+    }
+
+    Some(CmjPackageInfo {
+        module_system: decode_cmj_package_module_system(&fields[0])?,
+        path: fields[1].as_string().to_string(),
+        suffix: fields[2].as_string().to_string(),
+    })
+}
+
+fn decode_cmj_package_module_system(value: &OcamlValue) -> Option<CmjPackageModuleSystem> {
+    match value.as_int() {
+        // compiler/ext/ext_module_system.ml:1: Commonjs | Esmodule.
+        0 => Some(CmjPackageModuleSystem::CommonJs),
+        1 => Some(CmjPackageModuleSystem::EsModule),
+        _ => None,
+    }
+}
+
+fn decode_cmj_file_case(value: &OcamlValue) -> Option<CmjFileCase> {
+    let (_, fields) = value.as_block_opt()?;
+    match fields.get(3)?.as_int() {
+        // compiler/ext/ext_js_file_kind.ml:24: Upper | Little.
+        0 => Some(CmjFileCase::Upper),
+        1 => Some(CmjFileCase::Little),
+        _ => None,
+    }
 }
 
 fn decode_cmj_lambda(value: &OcamlValue) -> Option<Lambda> {

@@ -1041,6 +1041,16 @@ with a reason after checking raise sites.
     activating warnings
     - Covered by
       `tests/error_output_parity/compiler/cases/warn_error_unused_variable.res`.
+- `compiler/depends/bs_exception.ml` via
+  `compiler/core/js_name_of_module_id.ml`
+  - `Dependency_script_module_dependent_not` from package-mode JS path
+    resolution when a current package output depends on a script-mode `.cmj`
+    - Covered by
+      `tests/error_output_parity/compiler/cases/package_script_dependency.res`.
+  - `Missing_ml_dependency` from `Js_packages_info.query_package_infos` when a
+    dependency package has no output for the current module system
+    - Covered by
+      `tests/error_output_parity/compiler/cases/package_missing_ml_dependency.res`.
 - `compiler/syntax/src/res_core.ml`
   - `parse_external_def` requires the `=` before an external primitive name
     - Covered through `res_parser` by
