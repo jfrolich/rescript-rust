@@ -909,9 +909,6 @@ with a reason after checking raise sites.
   `tests/error_output_parity/compiler/fixtures/untagged_duplicate_nonstring_literal.res`,
   `tests/error_output_parity/compiler/fixtures/untagged_only_one_unknown.res`,
   `tests/error_output_parity/compiler/fixtures/untagged_at_most_one_object.res`,
-  `tests/error_output_parity/compiler/fixtures/untagged_at_most_one_array.res`,
-  `tests/error_output_parity/compiler/fixtures/untagged_at_most_one_promise.res`,
-  `tests/error_output_parity/compiler/fixtures/untagged_at_most_one_date.res`,
   `tests/error_output_parity/compiler/fixtures/untagged_recursive_promise_alias_collision.res`,
   `tests/error_output_parity/compiler/fixtures/untagged_recursive_promise_alias_collision.resi`,
   `tests/error_output_parity/compiler/fixtures/untagged_at_most_one_function.res`,
@@ -920,6 +917,31 @@ with a reason after checking raise sites.
   `tests/error_output_parity/compiler/fixtures/untagged_at_most_one_bigint.res`,
   and
   `tests/error_output_parity/compiler/fixtures/untagged_at_most_one_boolean.res`.
+- Every `AtMostOneInstance` display name from
+  `compiler/ml/ast_untagged_variants.ml:1-50` now has a dedicated fixture:
+  `untagged_at_most_one_array.res`,
+  `untagged_at_most_one_arraybuffer.res`,
+  `untagged_at_most_one_bigint64array.res`,
+  `untagged_at_most_one_biguint64array.res`,
+  `untagged_at_most_one_blob.res`,
+  `untagged_at_most_one_dataview.res`,
+  `untagged_at_most_one_date.res`,
+  `untagged_at_most_one_file.res`,
+  `untagged_at_most_one_float32array.res`,
+  `untagged_at_most_one_float64array.res`,
+  `untagged_at_most_one_int16array.res`,
+  `untagged_at_most_one_int32array.res`,
+  `untagged_at_most_one_int8array.res`,
+  `untagged_at_most_one_map.res`,
+  `untagged_at_most_one_promise.res`,
+  `untagged_at_most_one_regexp.res`,
+  `untagged_at_most_one_set.res`,
+  `untagged_at_most_one_uint16array.res`,
+  `untagged_at_most_one_uint32array.res`,
+  `untagged_at_most_one_uint8array.res`,
+  `untagged_at_most_one_uint8clampedarray.res`,
+  `untagged_at_most_one_weakmap.res`, and
+  `untagged_at_most_one_weakset.res`.
 
 ## Other Compiler Error Surfaces
 
