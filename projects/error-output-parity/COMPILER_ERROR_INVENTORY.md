@@ -1974,7 +1974,11 @@ with a reason after checking raise sites.
     source-unreachable from normal ReScript. `parse_type_constructor_declaration`
     only creates ordinary constructor declarations from `Uident` tokens;
     `false`/`true` are rejected earlier as invalid constructor names, while
-    `()` parses as a unit type payload rather than a constructor declaration.
+    `()` does not create a built-in constructor declaration. Covered by
+    `tests/error_output_parity/compiler/fixtures/variant_constructor_reserved_keyword.res`,
+    `tests/error_output_parity/compiler/fixtures/variant_constructor_true_keyword.res`,
+    and
+    `tests/error_output_parity/compiler/fixtures/variant_constructor_unit_payload.res`.
 - `compiler/ml/parmatch.ml`
   - `Warnings.Partial_match` for ordinary exhaustiveness
     - Covered by `tests/build_tests/super_errors/fixtures/warnings5.res`.
