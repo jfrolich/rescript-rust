@@ -15,6 +15,7 @@ Scope scanned:
 - `compiler/ml/typedecl.ml`
 - `compiler/ml/typetexp.ml`
 - `compiler/ml/typemod.ml`
+- `compiler/ml/typecore.ml`
 
 ## 1. Core Diagnostic Model
 
@@ -416,7 +417,169 @@ The latest focused and broad evidence for this family is:
 - `TIMEOUT_SECONDS=10 ./scripts/test_error_output_parity.sh --compiler-only`
   passes 1013/1013
 
-### 5.3 Module Inclusion Type Mismatch Diagnostics
+### 5.3 Expression and Pattern Typing Diagnostics
+
+`compiler/ml/typecore.ml:27-100` defines the finite expression/pattern typing
+error constructor set. Coverage now includes:
+
+1. `Typecore.Polymorphic_label`
+   - covered by `tests/error_output_parity/compiler/fixtures/polymorphic_label.res`
+2. `Typecore.Constructor_arity_mismatch`
+   - covered by
+     `tests/error_output_parity/compiler/fixtures/constructor_arity_mismatch.res`
+   - inline-record branches are covered by
+     `constructor_arity_inline_record_missing.res` and
+     `constructor_arity_inline_record_extra.res`
+3. `Typecore.Label_mismatch`
+   - covered by `tests/error_output_parity/compiler/fixtures/label_mismatch.res`
+4. `Typecore.Pattern_type_clash`
+   - covered by `tests/error_output_parity/compiler/fixtures/pattern_type_clash.res`
+5. `Typecore.Or_pattern_type_clash`
+   - covered by `tests/error_output_parity/compiler/fixtures/or_pattern_type_clash.res`
+6. `Typecore.Multiply_bound_variable`
+   - covered by `tests/error_output_parity/compiler/fixtures/multiply_bound_variable.res`
+7. `Typecore.Orpat_vars`
+   - covered by `tests/error_output_parity/compiler/fixtures/orpat_vars.res`
+     and the spellcheck branch in `orpat_vars_spellcheck.res`
+8. `Typecore.Expr_type_clash`
+   - covered by `tests/error_output_parity/compiler/fixtures/expr_type_clash.res`
+   - function-kind branches are covered by
+     `expr_type_clash_curried_expected_uncurried.res`,
+     `expr_type_clash_uncurried_expected_curried.res`, and
+     `expr_type_clash_curried_value_expected_uncurried.res`
+   - local-module escape contexts are covered by the `let_module_escape_*`
+     fixtures and `package_local_type_escape.res`
+9. `Typecore.Apply_non_function`
+   - covered by `tests/error_output_parity/compiler/fixtures/apply_non_function.res`
+     and the arrow/too-many-curried-args branch in
+     `apply_non_function_too_many_curried_args.res`
+10. `Typecore.Apply_wrong_label`
+    - covered by `apply_wrong_label.res`, `apply_wrong_label_optional.res`,
+      and `apply_wrong_label_unlabeled.res`
+11. `Typecore.Label_multiply_defined`
+    - covered by `label_multiply_defined.res` and the JSX component branch in
+      `jsx_duplicate_prop_call.res`
+12. `Typecore.Labels_missing`
+    - covered by `labels_missing.res` and the JSX component branch in
+      `jsx_missing_required_prop_call.res`
+13. `Typecore.Label_not_mutable`
+    - covered by `tests/error_output_parity/compiler/fixtures/label_not_mutable.res`
+14. `Typecore.Wrong_name`
+    - covered by `wrong_name.res`, `wrong_name_spellcheck.res`,
+      `wrong_name_inline_record_constructor.res`, `jsx_unknown_prop_call.res`,
+      and `jsx_children_not_allowed.res`
+15. `Typecore.Name_type_mismatch`
+    - covered by `name_type_mismatch.res` and
+      `name_type_mismatch_multiple.res`
+16. `Typecore.Undefined_method`
+    - covered by `undefined_method.res`, `undefined_method_spellcheck.res`,
+      and `undefined_method_no_alternatives.res`
+17. `Typecore.Private_type`
+    - covered by `tests/error_output_parity/compiler/fixtures/private_type.res`
+18. `Typecore.Private_label`
+    - covered by `tests/error_output_parity/compiler/fixtures/private_label.res`
+19. `Typecore.Not_subtype`
+    - covered by
+      `tests/error_output_parity/compiler/fixtures/not_subtype_variant_spread.res`
+20. `Typecore.Too_many_arguments`
+    - covered by `too_many_arguments.res` and
+      `too_many_function_parameters.res`
+21. `Typecore.Abstract_wrong_label`
+    - covered by `abstract_wrong_label.res`, `abstract_wrong_label_optional.res`,
+      and `abstract_wrong_label_unlabeled.res`
+22. `Typecore.Scoping_let_module`
+    - covered by `tests/error_output_parity/compiler/fixtures/let_module_escape_result.res`
+23. `Typecore.Not_a_variant_type`
+    - covered by
+      `tests/error_output_parity/compiler/fixtures/not_a_variant_type_spread.res`
+24. `Typecore.Incoherent_label_order`
+    - covered by `tests/error_output_parity/compiler/fixtures/incoherent_label_order.res`
+25. `Typecore.Less_general`
+    - covered by `less_general_field_value.res` and
+      `less_general_definition.res`
+26. `Typecore.Modules_not_allowed`
+    - covered by
+      `tests/error_output_parity/compiler/fixtures/modules_not_allowed_toplevel_unpack.res`
+27. `Typecore.Cannot_infer_signature`
+    - covered by
+      `tests/error_output_parity/compiler/fixtures/cannot_infer_pack_signature.res`
+28. `Typecore.Not_a_packed_module`
+    - covered by `tests/error_output_parity/compiler/fixtures/not_a_packed_module.res`
+29. `Typecore.Recursive_local_constraint`
+    - covered by
+      `tests/error_output_parity/compiler/fixtures/recursive_local_constraint.res`
+30. `Typecore.Unexpected_existential`
+    - covered by `tests/error_output_parity/compiler/fixtures/unexpected_existential.res`
+31. `Typecore.Unqualified_gadt_pattern`
+    - covered by
+      `tests/error_output_parity/compiler/fixtures/unqualified_gadt_pattern.res`
+32. `Typecore.Invalid_interval`
+    - covered by
+      `tests/error_output_parity/compiler/fixtures/invalid_interval_pattern.res`
+33. `Typecore.Invalid_for_loop_index`
+    - covered by
+      `tests/error_output_parity/compiler/fixtures/invalid_for_loop_index.res`
+34. `Typecore.Invalid_for_of_pattern`
+    - covered by
+      `tests/error_output_parity/compiler/fixtures/invalid_for_of_pattern.res`
+35. `Typecore.No_value_clauses`
+    - covered by `tests/error_output_parity/compiler/fixtures/no_value_clauses.res`
+36. `Typecore.Exception_pattern_below_toplevel`
+    - covered by
+      `tests/error_output_parity/compiler/fixtures/exception_pattern_below_toplevel.res`
+37. `Typecore.Inlined_record_escape`
+    - covered by
+      `tests/error_output_parity/compiler/fixtures/inlined_record_escape.res`
+38. `Typecore.Inlined_record_expected`
+    - covered by
+      `tests/error_output_parity/compiler/fixtures/inlined_record_expected.res`
+39. `Typecore.Invalid_extension_constructor_payload`
+    - covered by
+      `tests/error_output_parity/compiler/fixtures/invalid_extension_constructor_payload.res`
+40. `Typecore.Not_an_extension_constructor`
+    - covered by
+      `tests/error_output_parity/compiler/fixtures/not_an_extension_constructor.res`
+41. `Typecore.Break_outside_loop`
+    - covered by `tests/error_output_parity/compiler/fixtures/break_outside_loop.res`
+42. `Typecore.Continue_outside_loop`
+    - covered by
+      `tests/error_output_parity/compiler/fixtures/continue_outside_loop.res`
+43. `Typecore.Literal_overflow`
+    - covered by `tests/error_output_parity/compiler/fixtures/literal_overflow.res`
+44. `Typecore.Unknown_literal`
+    - covered by `unknown_integer_literal_modifier.res` and
+      `unknown_float_literal_modifier.res`
+45. `Typecore.Illegal_letrec_pat`
+    - covered by
+      `tests/error_output_parity/compiler/fixtures/illegal_letrec_pattern.res`
+46. `Typecore.Empty_record_literal`
+    - covered by `tests/error_output_parity/compiler/fixtures/empty_record_literal.res`
+47. `Typecore.Uncurried_arity_mismatch`
+    - covered by `unlabelled_arity_mismatch.res`,
+      `uncurried_arity_missing_required_label.res`,
+      `uncurried_arity_superfluous_label.res`,
+      `uncurried_arity_suggestion.res`, and
+      `uncurried_arity_method_annotated.res`
+48. `Typecore.Field_not_optional`
+    - covered by `field_not_optional_pattern.res` and
+      `field_not_optional_inline_record.res`
+49. `Typecore.Type_params_not_supported`
+    - covered by
+      `tests/error_output_parity/compiler/fixtures/type_params_not_supported_variant_spread.res`
+50. `Typecore.Field_access_on_dict_type`
+    - covered by
+      `tests/error_output_parity/compiler/fixtures/field_access_on_dict_type.res`
+51. `Typecore.Jsx_not_enabled`
+    - covered by `tests/error_output_parity/compiler/cases/jsx_not_enabled.res`
+      through the no-`-bs-jsx` case in
+      `tests/error_output_parity/compiler/cases.tsv`
+
+Broad evidence for this family:
+
+- `TIMEOUT_SECONDS=10 ./scripts/test_error_output_parity.sh --compiler-only`
+  passes 1013/1013 with the debug Rust compiler
+
+### 5.4 Module Inclusion Type Mismatch Diagnostics
 
 `compiler/ml/includecore.ml:159-177` defines the type-declaration mismatch
 details printed through `Typemod.Not_included` and related signature-mismatch
@@ -525,7 +688,7 @@ reachability notes:
   ReScript source fixture is currently known that prints
   `Module <path> cannot be aliased`.
 
-### 5.4 Compiled Interface Format Diagnostics
+### 5.5 Compiled Interface Format Diagnostics
 
 `compiler/ml/cmi_format.ml:18-21` defines compiled-interface reader errors.
 These are covered through direct `.cmi` cases in
@@ -543,7 +706,7 @@ It is covered by `tests/error_output_parity/compiler/cases/gentype_stale_cmti.re
 where `-bs-gentype` selects a stale `.cmti` containing only CMI data and both
 compilers print `Fatal error: exception Cmt_format.Error(_)`.
 
-### 5.5 Frontend Direct `raise_errorf` Diagnostics
+### 5.6 Frontend Direct `raise_errorf` Diagnostics
 
 Several frontend rewrites raise plain `Location.raise_errorf` diagnostics
 instead of typed `type error` constructors. Coverage includes:
@@ -602,7 +765,7 @@ instead of typed `type error` constructors. Coverage includes:
    - a config-record field with an explicit payload is covered by
      `tests/error_output_parity/compiler/fixtures/bs_return_record_value_payload.res`
 
-### 5.6 Recursive Value Diagnostics
+### 5.7 Recursive Value Diagnostics
 
 `compiler/ml/rec_check.ml:453-475` defines the backend recursive-value
 right-hand-side check:
