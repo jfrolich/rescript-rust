@@ -21,6 +21,13 @@ Scope scanned:
 - `compiler/ml/variant_coercion.ml`
 - `compiler/ml/record_coercion.ml`
 - `compiler/ml/ast_untagged_variants.ml`
+- `compiler/frontend/bs_syntaxerr.ml`
+- `compiler/frontend/ast_attributes.ml`
+- `compiler/ml/ast_payload.ml`
+- `compiler/frontend/bs_builtin_ppx.ml`
+- `compiler/frontend/ast_exp_handle_external.ml`
+- `compiler/frontend/ast_exp_extension.ml`
+- `compiler/frontend/typemod_hide.ml`
 
 ## 1. Core Diagnostic Model
 
@@ -898,6 +905,24 @@ instead of typed `type error` constructors. Coverage includes:
      `tests/error_output_parity/compiler/fixtures/bs_return_unknown_directive.res`
    - a config-record field with an explicit payload is covered by
      `tests/error_output_parity/compiler/fixtures/bs_return_record_value_payload.res`
+6. `compiler/frontend/ast_exp_handle_external.ml:69-172`
+   - `%debugger` payload rejection is covered by
+     `tests/error_output_parity/compiler/fixtures/raw_debugger_payload.res`
+   - `%raw`, `%re`, and `%%raw` non-string payloads are covered by
+     `raw_expr_non_string.res`, `raw_re_non_string.res`, and
+     `raw_structure_non_string.res`
+   - `%ffi` non-string and non-function payloads are covered by
+     `ffi_non_string.res` and `ffi_non_function_string.res`
+   - Flow warning/error variants for raw and ffi payload parsing are covered by
+     the `raw_expr_*`, `raw_structure_*`, and `ffi_*_warning` fixtures
+7. `compiler/frontend/ast_exp_extension.ml:79`
+   - `%obj` accepts only record-expression payloads
+   - covered by
+     `tests/error_output_parity/compiler/fixtures/obj_extension_non_record.res`
+8. `compiler/frontend/typemod_hide.ml:54-58`
+   - `%%private(...)` local extensions reject structures that define types
+   - covered by
+     `tests/error_output_parity/compiler/fixtures/private_type_in_local_extension.res`
 
 ### 5.9 Recursive Value Diagnostics
 
@@ -907,7 +932,117 @@ right-hand-side check:
 1. `Rec_check.Illegal_letrec_expr`
    - covered by `tests/error_output_parity/compiler/fixtures/illegal_letrec_expr.res`
 
-### 5.5 Frontend Reachability Notes
+### 5.10 Frontend Helper Diagnostics
+
+`compiler/frontend/bs_syntaxerr.ml:27-51` defines the finite frontend syntax
+error constructor set. Coverage now includes:
+
+1. `Unsupported_predicates`
+   - covered by `bs_get_unsupported_predicate.res` and
+     `bs_set_unsupported_predicate.res`
+2. `Duplicated_bs_deriving`
+   - covered by `bs_duplicate_deriving.res`
+3. `Conflict_attributes`
+   - covered by `bs_conflict_type_ffi_attrs.res`
+4. `Expect_int_literal`
+   - covered by `bs_int_as_expect_int_literal.res`
+5. `Expect_string_literal`
+   - covered by `bs_string_as_expect_string_literal.res` and the config
+     action path in `config_flags_non_array.res`
+6. `Expect_int_or_string_or_json_literal`
+   - covered by `bs_as_expect_int_string_json_literal.res`
+7. `Unhandled_poly_type`
+   - covered by `bs_external_unhandled_poly_type.res`
+8. `Invalid_underscore_type_in_external`
+   - covered by `bs_invalid_underscore_external.res`
+9. `Invalid_bs_string_type`
+   - covered by `bs_invalid_string_external_arg.res`
+10. `Invalid_bs_int_type`
+    - covered by `bs_invalid_int_external_arg.res`
+11. `Invalid_bs_unwrap_type`
+    - covered by `bs_invalid_unwrap_external_arg.res`
+12. `Conflict_ffi_attribute`
+    - covered by `bs_conflict_get_index_module.res`,
+      `bs_conflict_set_index_module.res`, `bs_conflict_module_val.res`,
+      `bs_conflict_module_send.res`, `bs_conflict_module_value_new.res`,
+      `bs_conflict_val_call_send.res`, `bs_conflict_val_value_new.res`, and
+      `bs_conflict_new_get.res`
+13. `Illegal_attribute`
+    - covered by `bs_external_illegal_module_many_strings.res` and
+      `bs_external_illegal_scope_empty.res`
+14. `Not_supported_directive_in_bs_return`
+    - covered by `bs_return_unknown_directive.res`
+15. `Expect_opt_in_bs_return_to_opt`
+    - covered by `bs_return_to_opt_non_option.res`
+16. `Misplaced_label_syntax`
+    - covered by `bs_misplaced_label_syntax.res`
+17. `Optional_in_uncurried_bs_attribute`
+    - covered by `bs_this_optional_arg.res`
+18. `Bs_this_simple_pattern`
+    - covered by `bs_this_simple_pattern.res`
+19. `Experimental_feature_not_enabled LetUnwrap`
+    - covered through included super-error fixtures
+      `tests/build_tests/super_errors/fixtures/feature_letunwrap_not_enabled.res`
+      and `let_unwrap_on_top_level_not_enabled.res`
+20. `LetUnwrap_not_supported_in_position`
+    - `Toplevel` is covered by
+      `tests/build_tests/super_errors/fixtures/let_unwrap_on_top_level.res`
+    - `Unsupported_type` is covered by
+      `tests/build_tests/super_errors/fixtures/let_unwrap_on_not_supported_variant.res`
+
+`Conflict_bs_bs_this_bs_meth` is still a dead constructor in the current OCaml
+source: `rg Conflict_bs_bs_this_bs_meth compiler` finds only the type
+definition and formatter branches.
+
+`compiler/frontend/ast_attributes.ml` and `compiler/ml/ast_payload.ml` provide
+the helper checks used by many of the frontend diagnostics above. Source-level
+coverage includes:
+
+1. `Ast_payload.raw_as_string_exp_exn`
+   - `%re` non-regex payload is covered by `raw_re_non_regex.res`
+   - Flow parser warning/error branches are covered by the `raw_expr_*`,
+     `raw_structure_*`, `ffi_invalid_js_warning.res`, and
+     `raw_re_invalid_regex_warning.res` fixtures
+2. `Ast_payload.ident_or_record_as_config`
+   - qualified config labels are covered by `bs_get_predicate_qualified_label.res`,
+     `bs_return_qualified_label.res`, and `bs_return_qualified_ident.res`
+   - unsupported `with` records and invalid payload warnings are covered by
+     `config_invalid_payload_warning.res` and `bs_return_record_with_payload.res`
+3. `Ast_payload.assert_strings`
+   - string, tuple, and non-string tuple branches are covered by
+     `bs_external_scope_ident_payload.res`,
+     `bs_external_module_ident_payload.res`,
+     `bs_external_scope_tuple_non_string.res`, and
+     `bs_external_module_tuple_non_string.res`
+4. `Ast_payload.assert_bool_lit`
+   - covered by `bs_get_predicate_non_bool.res`,
+     `bs_set_predicate_non_bool.res`, and `config_no_export_non_bool.res`
+5. `Ast_payload.table_dispatch`
+   - covered by `deriving_unsupported.res` and `config_unknown.res`
+6. `Ast_attributes.iter_process_bs_string_as`,
+   `iter_process_bs_int_as`, and `iter_process_bs_string_or_int_as`
+   - wrong-payload, duplicate, overflow, and JSON-object branches are covered by
+     the `bs_string_as_*`, `bs_int_as_*`, `bs_as_*`, and `untagged_as_*`
+     fixtures
+
+`Ast_payload.as_core_type` is currently not reachable from ordinary source:
+`rg "Ast_payload\\.as_core_type|as_core_type\\b" compiler` finds only the
+definition and `.mli` declaration.
+
+`compiler/frontend/bs_builtin_ppx.ml` owns the OCaml reference placement for
+`let?` feature, top-level, and unsupported-pattern checks. Rust currently
+matches the user-facing output but the check placement is not 1:1: the normal
+compiler path still preflights these cases in `compiler-rust/src/driver.rs`,
+while `compiler-rust/src/binary_ast/ppx.rs` performs the rewrite. This is a
+source-alignment note, not a byte-output gap; the full error-output harness
+includes the `super_errors` fixtures listed above.
+
+Latest broad evidence after the untagged-instance expansion:
+
+- `TIMEOUT_SECONDS=10 ./scripts/test_error_output_parity.sh`
+  passes 1144/1144 with the debug Rust compiler
+
+### 5.11 Frontend Reachability Notes
 
 `compiler/frontend/ast_exp_apply.ml` has defensive diagnostics for malformed
 rewritten pipe/property applications:
