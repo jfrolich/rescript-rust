@@ -146,6 +146,8 @@ covers the explicit trailing comma no-update message (`{...record,}`).
 
 The `for await`/`in` parser diagnostic is covered by
 `tests/syntax_tests/data/parsing/errors/expressions/forAwaitIn.res`.
+The `for...of` destructuring-pattern diagnostic is covered by
+`tests/syntax_tests/data/parsing/errors/expressions/for_of_pattern.res`.
 
 The signature-only consecutive-specification diagnostic is covered by
 `tests/syntax_tests/data/parsing/errors/signature/consecutive.resi`.
