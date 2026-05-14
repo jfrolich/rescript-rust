@@ -2078,7 +2078,8 @@ with a reason after checking raise sites.
     ReScript parser/PPX path does not leave an unescaped `Some "js"` delimiter
     for `emit_external_warnings`: ordinary strings/templates are rewritten by
     `Bs_builtin_ppx`, while `-bs-no-builtin-ppx` returns before the invariant
-    walker runs.
+    walker runs. The no-builtin entry-point guard is covered by
+    `tests/error_output_parity/compiler/cases/no_builtin_js_delimiter_success.res`.
   - `compiler/syntax/src/jsx_common.ml` only wraps JSX helper diagnostics used
     by `jsx_v4.ml`; the observable messages are covered under the
     `compiler/syntax/src/jsx_v4.ml` fixtures.
