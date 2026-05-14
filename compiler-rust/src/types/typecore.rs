@@ -2534,11 +2534,11 @@ fn transl_type_inner(
                     }
                 }
             }
-            ty_list.reverse();
-
             // OCaml compiler/ml/typetexp.ml:538-539 builds this node with
             // `Btype.newgenty` and immediately checks it through
-            // `unify_var env (newvar ()) ty'`.
+            // `unify_var env (newvar ()) ty'`. The `List.rev ty_list` there
+            // only restores source order after the preceding fold conses each
+            // occurring variable; this Rust loop already pushes in source order.
             let poly_ty = ctx.new_generic_type(TypeDesc::Tpoly {
                 body: body_ty,
                 vars: ty_list,
