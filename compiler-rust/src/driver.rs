@@ -3915,6 +3915,17 @@ fn type_mod_error_to_anyhow(
             2,
         )
         .into(),
+        TypeModError::VaryingAnonymous { loc } => UserDiagnostic::new(
+            format_compiler_error_report(
+                arena,
+                source,
+                filename,
+                *loc,
+                "In this GADT definition, the variance of some parameter cannot be checked",
+            ),
+            2,
+        )
+        .into(),
         TypeModError::InvalidUntaggedVariantDefinition { loc, reason } => UserDiagnostic::new(
             format_compiler_error_report_from_location(
                 source,

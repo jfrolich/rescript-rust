@@ -3160,6 +3160,10 @@ pub enum TypeModError {
         actual: (bool, bool, bool),
         expected: (bool, bool, bool),
     },
+    /// A GADT result type constrains a parameter whose variance cannot be checked.
+    VaryingAnonymous {
+        loc: LocIdx,
+    },
     /// Invalid untagged variant definition.
     InvalidUntaggedVariantDefinition { loc: Location, reason: String },
     /// A variant type spread could not resolve its source type.
@@ -3714,6 +3718,114 @@ fn type_decl_variance_fields(
     }
 
     fields
+}
+
+fn constructor_arguments_variance_fields(
+    args: &crate::types::ConstructorArguments,
+) -> Vec<(bool, TypeExprRef)> {
+    match args {
+        crate::types::ConstructorArguments::CstrTuple(args) => {
+            args.iter().copied().map(|arg| (false, arg)).collect()
+        }
+        crate::types::ConstructorArguments::CstrRecord(labels) => labels
+            .iter()
+            .map(|label| {
+                (
+                    label.ld_mutable == crate::types::asttypes::MutableFlag::Mutable,
+                    label.ld_type,
+                )
+            })
+            .collect(),
+    }
+}
+
+fn extension_required_variance(variance: TypesVariance) -> (bool, bool, bool) {
+    let (co, cn) = variance.get_upper();
+    (!cn, !co, false)
+}
+
+fn check_extension_constructor_variance_requirements(
+    ctx: &crate::types::context::TypeContext,
+    env: &Env,
+    loc: LocIdx,
+    type_decl: &crate::types::decl::TypeDeclaration,
+    ext: &crate::types::ExtensionConstructor,
+) -> TypeModResult<()> {
+    let params = match ext.ext_ret_type {
+        Some(ret_type) => {
+            let ret_repr = ctx.repr(ret_type);
+            match &*ctx.get_desc(ret_repr) {
+                crate::types::type_expr::TypeDesc::Tconstr { args, .. } => args.clone(),
+                _ => ext.ext_type_params.clone(),
+            }
+        }
+        None => ext.ext_type_params.clone(),
+    };
+    if params.is_empty() {
+        return Ok(());
+    }
+
+    let required: Vec<_> = type_decl
+        .type_variance
+        .iter()
+        .copied()
+        .map(extension_required_variance)
+        .collect();
+    if ext.ext_ret_type.is_some() {
+        let free_vars_by_param: Vec<HashSet<TypeExprRef>> = params
+            .iter()
+            .map(|param| {
+                let mut free_vars = HashSet::default();
+                let mut visited = HashSet::default();
+                collect_free_type_variables(ctx, *param, &mut free_vars, &mut visited);
+                free_vars
+            })
+            .collect();
+        for (idx, param) in params.iter().copied().enumerate() {
+            let expected = required.get(idx).copied().unwrap_or((true, true, false));
+            if !expected.0 && !expected.1 {
+                continue;
+            }
+            let constrained = if type_is_tvar_without_repr(ctx, param) {
+                free_vars_by_param
+                    .iter()
+                    .enumerate()
+                    .any(|(other_idx, free_vars)| {
+                        other_idx != idx && free_vars.contains(&ctx.repr(param))
+                    })
+            } else {
+                true
+            };
+            if constrained {
+                return Err(TypeModError::VaryingAnonymous { loc });
+            }
+        }
+    }
+
+    let fields = constructor_arguments_variance_fields(&ext.ext_args);
+    let variance_map = crate::types::ctype::compute_variance_map_for_fields(ctx, env, &fields);
+    for (idx, param) in params.iter().copied().enumerate() {
+        if !type_is_tvar_without_repr(ctx, param) {
+            continue;
+        }
+        let actual_variance = variance_map
+            .get(&ctx.repr(param))
+            .copied()
+            .unwrap_or_else(TypesVariance::null);
+        let expected = required.get(idx).copied().unwrap_or((true, true, false));
+        let (actual_co, actual_cn) = actual_variance.get_upper();
+        let actual = (actual_co, actual_cn, actual_variance.is_injective());
+        if (actual_co && !expected.0) || (actual_cn && !expected.1) || (!actual.2 && expected.2) {
+            return Err(TypeModError::BadVariance {
+                loc,
+                param_index: (idx + 1) as i32,
+                actual,
+                expected,
+            });
+        }
+    }
+
+    Ok(())
 }
 
 fn variance_from_requirement(requirement: (bool, bool, bool)) -> TypesVariance {
@@ -22215,10 +22327,11 @@ fn type_structure_item<'a>(
             // parameter nodes rather than the original declaration parameters.
             let ext_res_ty = ctx.new_generic_constr(path.clone(), typed_param_type_refs.clone());
 
-            // Translate constructors and register them in the environment
+            // Translate constructors; OCaml adds them to the environment only
+            // after generalization, closedness checks, and variance checks pass.
             let mut typed_constructors = Vec::new();
+            let mut constructor_descriptions = Vec::new();
             let mut ext_types_to_generalize: Vec<TypeExprRef> = Vec::new();
-            let mut new_env = env.clone();
             let ext_private = parser_private_to_type_private(ext.ptyext_private);
             for ec in &ext.ptyext_constructors {
                 let name_str = arena.get_string(ec.pext_name.txt).to_string();
@@ -22462,11 +22575,7 @@ fn type_structure_item<'a>(
                     cstr_attributes: vec![],
                     cstr_inlined: cstr_inlined.clone(),
                 };
-                // OCaml compiler/ml/env.ml:1693-1716 registers extension
-                // constructors through `Datarepr.extension_descr` only; inline
-                // record labels produced at compiler/ml/datarepr.ml:190-214 are
-                // not added to `env.labels`.
-                new_env.add_constructor(id.clone(), cstr_desc);
+                constructor_descriptions.push((id.clone(), cstr_desc));
 
                 typed_constructors.push(crate::types::typedtree::ExtensionConstructor {
                     ext_id: id,
@@ -22531,6 +22640,24 @@ fn type_structure_item<'a>(
                         });
                     }
                 }
+                if let Some(type_decl) = &target_type_decl {
+                    check_extension_constructor_variance_requirements(
+                        ctx,
+                        env,
+                        loc,
+                        type_decl,
+                        &ext_cstr.ext_type,
+                    )?;
+                }
+            }
+
+            let mut new_env = env.clone();
+            for (id, cstr_desc) in constructor_descriptions {
+                // OCaml compiler/ml/env.ml:1693-1716 registers extension
+                // constructors through `Datarepr.extension_descr` only; inline
+                // record labels produced at compiler/ml/datarepr.ml:190-214 are
+                // not added to `env.labels`.
+                new_env.add_constructor(id, cstr_desc);
             }
 
             let item_sig = typed_constructors

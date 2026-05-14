@@ -670,6 +670,9 @@ with a reason after checking raise sites.
     `tests/error_output_parity/compiler/fixtures/bad_variance_constrained_parameter_nondeducible.res`
     and
     `tests/error_output_parity/compiler/fixtures/bad_variance_constrained_parameter_undeduced_variance.res`.
+  - Covered for `compute_variance_extension` checks over extension constructor
+    payloads by
+    `tests/error_output_parity/compiler/fixtures/extension_bad_variance.res`.
 - `Unavailable_type_constructor`
   - Not reachable from normal `.res`/`.resi` source found so far. The OCaml
     raise sites are second-pass checks over already translated `Tconstr` nodes
@@ -696,8 +699,11 @@ with a reason after checking raise sites.
     Exception GADT local quantification is guarded by
     `tests/error_output_parity/compiler/fixtures/exception_gadt_existential_success.res`.
 - `Varying_anonymous`
-  - Covered by
+  - Covered for direct GADT result parameters by
     `tests/error_output_parity/compiler/fixtures/varying_anonymous.res`.
+  - Covered for `compute_variance_extension` checks over extension GADT result
+    parameters by
+    `tests/error_output_parity/compiler/fixtures/extension_varying_anonymous.res`.
 - `Val_in_structure`
   - Covered by
     `tests/error_output_parity/compiler/fixtures/val_in_structure.res`.
