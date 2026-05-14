@@ -7266,8 +7266,10 @@ fn parse_jsx_props(p: &mut Parser<'_>) -> Vec<JsxProp> {
             }
             Token::Lident(name) => {
                 let name = name.clone();
-                let name_loc = p.mk_loc_current();
+                let name_start_idx = p.start_pos_idx();
                 p.next();
+                let name = read_hyphen_chain(p, name);
+                let name_loc = p.mk_loc_idx_to_prev_end(name_start_idx);
 
                 if p.token == Token::Equal {
                     p.next();
@@ -7301,15 +7303,28 @@ fn parse_jsx_props(p: &mut Parser<'_>) -> Vec<JsxProp> {
             }
             Token::Question => {
                 p.next();
-                if let Token::Lident(name) = &p.token {
-                    let name = name.clone();
-                    let name_loc = p.mk_loc_current();
-                    p.next();
-                    let name_idx = p.arena_mut().push_interned_string(&name);
-                    props.push(JsxProp::Punning {
-                        optional: true,
-                        name: with_loc(name_idx, name_loc),
-                    });
+                match &p.token {
+                    Token::Lident(name) => {
+                        let name = name.clone();
+                        let name_start_idx = p.start_pos_idx();
+                        p.next();
+                        let name = read_hyphen_chain(p, name);
+                        let name_loc = p.mk_loc_idx_to_prev_end(name_start_idx);
+                        let name_idx = p.arena_mut().push_interned_string(&name);
+                        props.push(JsxProp::Punning {
+                            optional: true,
+                            name: with_loc(name_idx, name_loc),
+                        });
+                    }
+                    Token::Uident(name) => {
+                        let name = name.clone();
+                        p.next();
+                        drop(read_hyphen_chain(p, name));
+                        p.err(DiagnosticCategory::Message(
+                            "JSX prop names must be lowercase".to_string(),
+                        ));
+                    }
+                    _ => {}
                 }
             }
             token if token.is_keyword() => {

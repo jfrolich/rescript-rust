@@ -1,0 +1,10 @@
+
+  Syntax error!
+  syntax_tests/data/parsing/errors/expressions/jsxUpperOptionalProp.res:1:20
+
+  1 │ let view = <div ?A />
+  2 │ 
+
+  JSX prop names must be lowercase
+
+let view = <div />
