@@ -289,6 +289,19 @@ Variant-constructor mismatch coverage now includes:
   `Record_representation`; the other `Includecore.type_mismatch` constructors
   above are covered by byte-for-byte OCaml/Rust fixtures.
 
+### 5.2 Compiled Interface Format Diagnostics
+
+`compiler/ml/cmi_format.ml:18-21` defines compiled-interface reader errors.
+These are covered through direct `.cmi` cases in
+`tests/error_output_parity/compiler/cases.tsv`:
+
+1. `Cmi_format.Not_an_interface`
+   - covered by `tests/error_output_parity/compiler/cases/cmi_not_an_interface.cmi`
+2. `Cmi_format.Wrong_version_interface`
+   - covered by `tests/error_output_parity/compiler/cases/cmi_wrong_version.cmi`
+3. `Cmi_format.Corrupted_interface`
+   - covered by `tests/error_output_parity/compiler/cases/cmi_corrupted.cmi`
+
 ## 6. Formatting and Presentation Contract
 
 `compiler/ml/location.ml` defines the warning/error output contract consumed by parser diagnostics:
