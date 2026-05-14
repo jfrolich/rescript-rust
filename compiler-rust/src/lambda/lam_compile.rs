@@ -3700,18 +3700,14 @@ impl LambdaCompiler {
                         expr: Expression::undefined(false),
                     };
                 }
-                if !bindings.is_empty()
-                    || self.staticcatch_requires_explicit_jump(bindings, handler)
-                {
-                    Compiled {
-                        prelude: self
-                            .compile_staticcatch_effect_block(*label, bindings, body, handler),
-                        expr: Expression::undefined(false),
-                    }
-                } else {
-                    self.with_static_handler(*label, bindings, handler, |this| {
-                        this.compile_effect_output(body)
-                    })
+                // OCaml's `Lsequence` compiles its head with
+                // `EffectCall Not_tail`; in `compile_staticcatch`
+                // (lam_compile.ml:984-1059), that continuation always falls
+                // through to the explicit-jump arm. Keep the same shape here
+                // instead of inlining the handler at every raise site.
+                Compiled {
+                    prelude: self.compile_staticcatch_effect_block(*label, bindings, body, handler),
+                    expr: Expression::undefined(false),
                 }
             }
             Lambda::Lswitch(scrut, switch) => Compiled {

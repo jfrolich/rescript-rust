@@ -228,15 +228,6 @@ pub fn parse_structure(p: &mut Parser<'_>) -> Structure {
     let mut items = vec![];
 
     while p.token != Token::Eof {
-        // Skip leading semicolons
-        while p.token == Token::Semicolon {
-            p.next();
-        }
-
-        if p.token == Token::Eof {
-            break;
-        }
-
         if let Some(item) = parse_structure_item(p) {
             items.push(item);
         }
@@ -714,15 +705,6 @@ pub fn parse_structure_item(p: &mut Parser<'_>) -> Option<StructureItem> {
             }
         }
     };
-
-    // Consume trailing semicolon if present (OCaml includes this in the structure item location)
-    // If a semicolon is consumed, we can't share the LocIdx with value_binding because
-    // the structure_item location now extends past the binding's end
-    if p.token == Token::Semicolon {
-        p.next();
-        // Clear any shared LocIdx - the semicolon extends the structure_item location
-        item_loc_idx = None;
-    }
 
     desc.map(|d| StructureItem {
         pstr_desc: Box::new(d),
@@ -2446,19 +2428,21 @@ fn parse_let_bindings(
 
                     // Substitute Ptyp_constr -> Ptyp_var for the Ptyp_poly body
                     let ct_clone = p.arena().get_core_type(ct_idx).clone();
-                    let substituted_inner =
-                        match typ::substitute_type_vars(p.arena_mut(), ct_clone.clone(), &var_set)
-                        {
-                            Ok(substituted_inner) => substituted_inner,
-                            Err(loc) => {
-                                p.err_at(
-                                    p.loc_start(loc),
-                                    p.loc_end(loc),
-                                    DiagnosticCategory::FatalSyntaxerr,
-                                );
-                                ct_clone
-                            }
-                        };
+                    let substituted_inner = match typ::substitute_type_vars(
+                        p.arena_mut(),
+                        ct_clone.clone(),
+                        &var_set,
+                    ) {
+                        Ok(substituted_inner) => substituted_inner,
+                        Err(loc) => {
+                            p.err_at(
+                                p.loc_start(loc),
+                                p.loc_end(loc),
+                                DiagnosticCategory::FatalSyntaxerr,
+                            );
+                            ct_clone
+                        }
+                    };
 
                     // Rebuild the Ptyp_poly with the substituted body
                     let substituted_inner_idx = p.arena_mut().push_core_type(substituted_inner);
@@ -3660,12 +3644,10 @@ fn parse_type_params_angle(p: &mut Parser<'_>) -> Vec<(CoreTypeIdx, Variance)> {
         } else if let Token::Lident(name) | Token::Uident(name) = &p.token {
             // Missing singlequote: foo instead of 'foo
             let name = name.to_string();
-            p.err(
-                DiagnosticCategory::Message(format!(
-                    "Type params start with a singlequote: '{}",
-                    name
-                )),
-            );
+            p.err(DiagnosticCategory::Message(format!(
+                "Type params start with a singlequote: '{}",
+                name
+            )));
             let loc = p.mk_loc_current();
             p.next();
             // Add for recovery

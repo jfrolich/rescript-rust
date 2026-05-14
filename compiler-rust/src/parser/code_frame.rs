@@ -66,6 +66,16 @@ fn leading_space_count(s: &str) -> usize {
     s.chars().take_while(|&c| c == ' ').count()
 }
 
+fn char_len(s: &str) -> usize {
+    s.chars().count()
+}
+
+fn char_slice(s: &str, start: usize, end: usize) -> &str {
+    let start_byte = char_to_byte_idx(s, start);
+    let end_byte = char_to_byte_idx(s, end);
+    &s[start_byte..end_byte]
+}
+
 /// Break a long line into chunks of max_width characters.
 /// Matches OCaml's `break_long_line` in code_frame.ml.
 fn break_long_line(max_width: usize, line: &str) -> Vec<&str> {
@@ -74,10 +84,10 @@ fn break_long_line(max_width: usize, line: &str) -> Vec<&str> {
     }
     let mut result = Vec::new();
     let mut pos = 0;
-    let len = line.len();
+    let len = char_len(line);
     while pos < len {
         let chunk_length = max_width.min(len - pos);
-        result.push(&line[pos..pos + chunk_length]);
+        result.push(char_slice(line, pos, pos + chunk_length));
         pos += chunk_length;
     }
     if result.is_empty() {
@@ -129,6 +139,19 @@ fn emphasis_ansi(emphasis: Emphasis) -> &'static str {
     }
 }
 
+fn push_decoded_source(buf: &mut String, s: &str) {
+    let mut bytes = Vec::with_capacity(s.chars().count());
+    for ch in s.chars() {
+        let codepoint = ch as u32;
+        if codepoint > u8::MAX as u32 {
+            buf.push_str(s);
+            return;
+        }
+        bytes.push(codepoint as u8);
+    }
+    buf.push_str(&String::from_utf8_lossy(&bytes));
+}
+
 fn char_to_byte_idx(s: &str, char_idx: usize) -> usize {
     if char_idx == 0 {
         return 0;
@@ -150,18 +173,18 @@ fn append_highlighted_segment(
     let end_char = segment.end.min(segment_len);
 
     if !use_color || end_char <= start_char {
-        buf.push_str(&segment.s);
+        push_decoded_source(buf, &segment.s);
         return;
     }
 
     let start_byte = char_to_byte_idx(&segment.s, start_char);
     let end_byte = char_to_byte_idx(&segment.s, end_char);
 
-    buf.push_str(&segment.s[..start_byte]);
+    push_decoded_source(buf, &segment.s[..start_byte]);
     buf.push_str(emphasis_ansi(emphasis));
-    buf.push_str(&segment.s[start_byte..end_byte]);
+    push_decoded_source(buf, &segment.s[start_byte..end_byte]);
     buf.push_str(ANSI_RESET);
-    buf.push_str(&segment.s[end_byte..]);
+    push_decoded_source(buf, &segment.s[end_byte..]);
 }
 
 /// Print a code frame with source context around an error.
@@ -227,7 +250,7 @@ fn print_impl(src: &str, start_pos: &Position, end_pos: &Position, emphasis: Emp
         .iter()
         .filter_map(|(_, line)| {
             let spaces = leading_space_count(line);
-            if line.len() == spaces {
+            if char_len(line) == spaces {
                 None // Line is all spaces, don't count
             } else {
                 Some(spaces)
@@ -246,8 +269,8 @@ fn print_impl(src: &str, start_pos: &Position, end_pos: &Position, emphasis: Emp
     let processed_lines: Vec<Line> = lines
         .iter()
         .map(|(gutter, line)| {
-            let stripped = if line.len() > leading_space_to_cut {
-                &line[leading_space_to_cut..]
+            let stripped = if char_len(line) > leading_space_to_cut {
+                char_slice(line, leading_space_to_cut, char_len(line))
             } else {
                 ""
             };

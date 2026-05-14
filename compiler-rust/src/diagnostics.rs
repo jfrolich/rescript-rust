@@ -288,11 +288,9 @@ impl Warning {
                     example
                 )
             }
-            Warning::AllClausesGuarded => {
-                "this pattern-matching is not exhaustive.\n\
+            Warning::AllClausesGuarded => "this pattern-matching is not exhaustive.\n\
                  All clauses in this pattern-matching are guarded."
-                    .to_string()
-            }
+                .to_string(),
             Warning::NonClosedRecordPattern { fields } => {
                 format!(
                     "the following labels are not bound in this record pattern: {}\n\
@@ -338,7 +336,8 @@ impl Warning {
                     "unused variable {}.\n\n\
                      Fix this by:\n\
                      - Deleting the variable if it's not used anymore.\n\
-                     - Prepending the variable name with `_` (like `_{}`) to ignore it.\n\
+                     - Prepending the variable name with `_` (like `_{}`) to ignore that the \
+                     variable is unused.\n\
                      - Using the variable somewhere.",
                     name, name
                 )
@@ -462,12 +461,10 @@ The first one was selected. Disambiguate if this is wrong.",
                 ),
                 None => format!("no cmi file was found in path for module {}", name),
             },
-            Warning::FragileLiteralPattern => {
-                "Code should not depend on the actual values of\n\
+            Warning::FragileLiteralPattern => "Code should not depend on the actual values of\n\
 this constructor's arguments. They are only for information\n\
 and may change in future versions. (See manual section 8.5)"
-                    .to_string()
-            }
+                .to_string(),
             Warning::MisplacedAttribute { name } => {
                 format!("the \"{}\" attribute cannot appear in this context", name)
             }
@@ -555,10 +552,17 @@ and may change in future versions. (See manual section 8.5)"
                     subject, ret, help_text, help_text
                 )
             }
-            Warning::BsTodo { message } => match message {
-                Some(text) => format!("Todo found: {}", text),
-                None => "Todo found.".to_string(),
-            },
+            Warning::BsTodo { message } => {
+                let prefix = match message {
+                    Some(text) => format!("Todo found: {}", text),
+                    None => "Todo found.".to_string(),
+                };
+                format!(
+                    "{}\n\nThis code is not implemented yet and will crash at runtime. Make sure \
+                     you implement this before running the code.",
+                    prefix
+                )
+            }
         }
     }
 }

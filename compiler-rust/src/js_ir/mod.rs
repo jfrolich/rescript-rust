@@ -151,7 +151,7 @@ impl ModulePathResolver {
             Kind::Runtime => Some(self.runtime_module_path(module.id.name())),
             Kind::Ml => {
                 if self.is_runtime_module(module.id.name()) {
-                    Some(self.runtime_module_path(module.id.name()))
+                    Some(self.runtime_ml_module_path(module.id.name()))
                 } else {
                     let target_source = self
                         .persistent_env
@@ -208,9 +208,8 @@ impl ModulePathResolver {
             ),
             (PackageInfoQuery::Script, PackageInfoQuery::Script) => {
                 let js_file = js_name_of_module_name(module_name, import_info.file_case, ".js");
-                (!env.file_exists_in_load_path_uncap(&js_file)).then_some(
-                    ModulePathResolutionError::JsNotFound { js_file },
-                )
+                (!env.file_exists_in_load_path_uncap(&js_file))
+                    .then_some(ModulePathResolutionError::JsNotFound { js_file })
             }
             _ => None,
         }
@@ -274,6 +273,17 @@ impl ModulePathResolver {
             ModuleFormat::CommonJs => ("js", "cjs"),
         };
         format!("@rescript/runtime/lib/{dir}/{module_name}.{ext}")
+    }
+
+    fn runtime_ml_module_path(&self, module_name: &str) -> String {
+        // OCaml routes Ml modules whose cmj belongs to the runtime package
+        // through get_runtime_module_path with a "./Stdlib_*" JS file name,
+        // while primitive Runtime modules keep names like "Primitive_int".
+        if module_name.starts_with("./") || module_name.starts_with("../") {
+            self.runtime_module_path(module_name)
+        } else {
+            self.runtime_module_path(&format!("./{module_name}"))
+        }
     }
 
     fn is_runtime_module(&self, module_name: &str) -> bool {
