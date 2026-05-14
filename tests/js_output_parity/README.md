@@ -42,6 +42,9 @@ Current focused coverage:
 - `function_call_patterns.res`: uncurried direct calls, partial application,
   labelled/default calls, pipes, callback arity wrappers, `@ignore`, and
   constant `@as` arguments.
+- `match_lowering_patterns.res`: list/array/record destructuring, nested
+  constructor patterns, literal payload patterns, guards, tuple or-patterns,
+  aliases, and exception payload matching.
 - `advanced_output_patterns.res`: variadic constructors, imported modules with
   attributes, unwrap externals, escaped record fields, unboxed constructors,
   exceptions, async/await, includes, functors, and assertions.
