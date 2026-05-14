@@ -22337,16 +22337,17 @@ fn type_structure_item<'a>(
 
                 // Register the extension constructor in the environment
                 let ext_path = Path::pident(id.clone());
+                let cstr_res = ext_ret_ty.unwrap_or(ext_res_ty);
                 let cstr_desc = crate::types::decl::ConstructorDescription {
                     cstr_name: name_str.clone(),
-                    cstr_res: ext_res_ty,
+                    cstr_res,
                     cstr_existentials: vec![],
                     cstr_args: cstr_args.clone(),
                     cstr_arity: cstr_args.len() as i32,
                     cstr_tag: crate::types::decl::ConstructorTag::CstrExtension(ext_path),
                     cstr_consts: -1,
                     cstr_nonconsts: -1,
-                    cstr_generalized: false,
+                    cstr_generalized: ext_ret_ty.is_some(),
                     cstr_private: ext_private,
                     cstr_loc: crate::location::Location::none(),
                     cstr_attributes: vec![],
@@ -22368,7 +22369,7 @@ fn type_structure_item<'a>(
                         ext_type_path: path.clone(),
                         ext_type_params: vec![],
                         ext_args,
-                        ext_ret_type: None,
+                        ext_ret_type: ext_ret_ty,
                         ext_private,
                         ext_loc: arena.to_location(ec.pext_loc),
                         ext_attributes: vec![],

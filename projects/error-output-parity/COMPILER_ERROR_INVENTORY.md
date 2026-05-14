@@ -2190,7 +2190,11 @@ only the wrapper variant:
   and the result presence/absence branch by
   `tests/error_output_parity/compiler/fixtures/not_included_gadt_constructor_result_presence.res`)
 - extension constructor mismatch (covered by
-  `tests/error_output_parity/compiler/fixtures/not_included_extension_mismatch.res`)
+  `tests/error_output_parity/compiler/fixtures/not_included_extension_mismatch.res`
+  and the GADT result-type branch by
+  `tests/error_output_parity/compiler/fixtures/not_included_extension_gadt_result.res`
+  and the result presence/absence branch by
+  `tests/error_output_parity/compiler/fixtures/not_included_extension_gadt_result_presence.res`)
 - module mismatch (covered by
   `tests/error_output_parity/compiler/fixtures/not_included_module_mismatch.res`)
 - module type mismatch (covered by

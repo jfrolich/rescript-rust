@@ -826,7 +826,7 @@ fn format_type_extension(
     full_paths: bool,
 ) -> String {
     let mut printer = TypeExprErrorPrinter::new_with_options(type_ctx, false, full_paths);
-    let constructor = match &ext.ext_args {
+    let rendered_constructor = match &ext.ext_args {
         ConstructorArguments::CstrTuple(args) if args.is_empty() => id.name().to_string(),
         ConstructorArguments::CstrTuple(args) => {
             let args = args
@@ -845,7 +845,18 @@ fn format_type_extension(
             format!("{}({{{fields}}})", id.name())
         }
     };
-    format!("type {} +={spacing}{constructor}", ext.ext_type_path.last())
+    let constructor = match ext.ext_ret_type {
+        Some(ret) => format!("{rendered_constructor}: {}", printer.format(ret)),
+        None => rendered_constructor,
+    };
+    let params = format_type_params(&mut printer, &ext.ext_type_params, &[], false);
+    let type_name = ext.ext_type_path.last();
+    let type_head = if params.is_empty() {
+        format!("type {type_name}")
+    } else {
+        format!("type {type_name}<{params}>")
+    };
+    format!("{type_head} +={spacing}{constructor}")
 }
 
 fn format_constructor_declaration(
