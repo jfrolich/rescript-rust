@@ -276,6 +276,10 @@ with a reason after checking raise sites.
   `tests/error_output_parity/compiler/fixtures/coerce_record_missing_field.res`,
   and
   `tests/error_output_parity/compiler/fixtures/coerce_different_type_kinds.res`.
+  The `compiler/ml/variant_coercion.ml` `variant_configuration_issue`
+  constructors are covered here as `Unboxed_config_not_matching`,
+  `Tag_name_not_matching`, and `Incompatible_constructor_count` by the three
+  `coerce_variant_*_mismatch.res` fixtures listed above.
   `Ctype.Generic {errorCode = "VCPMMVD"}` is marked unreachable: the only
   OCaml construction site is inside the primitive-to-variant coercion branch
   guarded by `can_try_coerce_variant_to_primitive_opt (...) |> Option.is_some`,
@@ -749,7 +753,9 @@ with a reason after checking raise sites.
     and
     `tests/error_output_parity/compiler/fixtures/nonrec_gadt_signature.resi`.
 - `Variant_runtime_representation_mismatch`
-  - Covered for spread-time unboxed and `@tag` mismatches by
+  - Covered for spread-time unboxed and `@tag` mismatches, corresponding to
+    `compiler/ml/variant_coercion.ml` `VariantError` with `Untagged` and
+    `TagName`, by
     `tests/error_output_parity/compiler/fixtures/variant_spread_unboxed_mismatch.res`
     and
     `tests/error_output_parity/compiler/fixtures/variant_spread_tag_mismatch.res`.
@@ -961,7 +967,10 @@ with a reason after checking raise sites.
   `tests/error_output_parity/compiler/fixtures/untagged_invalid_tag_annotation.res`.
 - `TagFieldNameConflict`: covered by
   `tests/error_output_parity/compiler/fixtures/untagged_tag_field_conflict.res`.
-- `InvalidUntaggedVariantDefinition`: covered across the reachable subcases by
+- `InvalidUntaggedVariantDefinition`: covered across the reachable subcases
+  `ConstructorMoreThanOneArg`, `DuplicateLiteral`, `OnlyOneUnknown`,
+  `AtMostOneObject`, `AtMostOneFunction`, `AtMostOneString`,
+  `AtMostOneNumber`, `AtMostOneBigint`, and `AtMostOneBoolean` by
   `tests/error_output_parity/compiler/fixtures/untagged_constructor_more_than_one_arg.res`,
   `tests/error_output_parity/compiler/fixtures/untagged_duplicate_string_literal.res`,
   `tests/error_output_parity/compiler/fixtures/untagged_duplicate_nonstring_literal.res`,
