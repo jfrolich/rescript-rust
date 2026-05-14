@@ -14,6 +14,7 @@ Scope scanned:
 - `compiler/frontend/bs_ast_invariant.ml`
 - `compiler/ml/typedecl.ml`
 - `compiler/ml/typetexp.ml`
+- `compiler/ml/typemod.ml`
 
 ## 1. Core Diagnostic Model
 
@@ -333,7 +334,89 @@ The `Cannot_scrape_alias` coverage uses `tests/error_output_parity/compiler/case
 because the fixture requires an intentionally missing compiled module alias
 environment under `tests/error_output_parity/compiler/cases/missing_module_cmis`.
 
-### 5.2 Module Inclusion Type Mismatch Diagnostics
+### 5.2 Module Typing Diagnostics
+
+`compiler/ml/typemod.ml:24-47` defines the finite module-typing error
+constructor set. Coverage now includes:
+
+1. `Typemod.Cannot_apply`
+   - covered by `tests/error_output_parity/compiler/fixtures/cannot_apply_module.res`
+2. `Typemod.Not_included`
+   - covered by `tests/error_output_parity/compiler/fixtures/not_included_value_mismatch.res`
+   - functor-argument mismatch coverage is
+     `tests/error_output_parity/compiler/fixtures/functor_argument_mismatch.res`
+   - the nested `Includemod` and `Includecore` detail variants are mapped in
+     section 5.3 below
+3. `Typemod.Cannot_eliminate_dependency`
+   - covered by
+     `tests/error_output_parity/compiler/fixtures/cannot_eliminate_dependency.res`
+4. `Typemod.Signature_expected`
+   - covered by
+     `tests/error_output_parity/compiler/fixtures/signature_expected_package_constraint.res`
+     and
+     `tests/error_output_parity/compiler/fixtures/signature_expected_include_functor.res`
+5. `Typemod.Structure_expected`
+   - covered by
+     `tests/error_output_parity/compiler/fixtures/structure_expected_open_functor.res`
+     and
+     `tests/error_output_parity/compiler/fixtures/structure_expected_include_functor.res`
+6. `Typemod.With_no_component`
+   - covered by `tests/error_output_parity/compiler/fixtures/with_no_component_type.res`
+7. `Typemod.With_mismatch`
+   - covered by `tests/error_output_parity/compiler/fixtures/with_mismatch_type.res`
+8. `Typemod.With_makes_applicative_functor_ill_typed`
+   - covered by
+     `tests/error_output_parity/compiler/fixtures/with_makes_applicative_functor_ill_typed.res`
+9. `Typemod.With_changes_module_alias`
+   - covered by
+     `tests/error_output_parity/compiler/fixtures/with_changes_module_alias.res`
+10. `Typemod.With_cannot_remove_constrained_type`
+    - covered by
+      `tests/error_output_parity/compiler/fixtures/with_cannot_remove_constrained_type.res`
+11. `Typemod.Repeated_name`
+    - covered by `tests/error_output_parity/compiler/fixtures/repeated_module_name.res`
+12. `Typemod.Non_generalizable`
+    - covered by
+      `tests/error_output_parity/compiler/fixtures/non_generalizable_ref_none.res`
+13. `Typemod.Non_generalizable_module`
+    - covered by `tests/error_output_parity/compiler/fixtures/non_generalizable_module.res`
+      and the `module type of` path in
+      `tests/error_output_parity/compiler/fixtures/module_type_of_non_generalizable.res`
+14. `Typemod.Interface_not_compiled`
+    - covered by `tests/error_output_parity/compiler/cases/interface_not_compiled.res`
+      through the `-bs-read-cmi` case in
+      `tests/error_output_parity/compiler/cases.tsv`
+15. `Typemod.Not_allowed_in_functor_body`
+    - covered by
+      `tests/error_output_parity/compiler/fixtures/not_allowed_in_functor_body.res`
+16. `Typemod.Not_a_packed_module`
+    - covered by
+      `tests/error_output_parity/compiler/fixtures/unpack_not_a_packed_module.res`
+17. `Typemod.Incomplete_packed_module`
+    - covered by
+      `tests/error_output_parity/compiler/fixtures/incomplete_packed_module.res`
+18. `Typemod.Scoping_pack`
+    - covered by
+      `tests/error_output_parity/compiler/fixtures/package_scoping_pack_local_type.res`
+19. `Typemod.Recursive_module_require_explicit_type`
+    - covered by
+      `tests/error_output_parity/compiler/fixtures/recursive_module_requires_explicit_type.res`
+20. `Typemod.Apply_generative`
+    - covered by `tests/error_output_parity/compiler/fixtures/apply_generative_functor.res`
+21. `Typemod.Cannot_scrape_alias`
+    - covered by
+      `tests/error_output_parity/compiler/cases/cannot_scrape_alias_module_type_with.res`
+    - this case requires the missing-alias environment from
+      `tests/error_output_parity/compiler/cases/missing_module_cmis`
+
+The latest focused and broad evidence for this family is:
+
+- `TIMEOUT_SECONDS=10 ./scripts/test_error_output_parity.sh --compiler-only cannot_scrape_alias`
+  passes 2/2
+- `TIMEOUT_SECONDS=10 ./scripts/test_error_output_parity.sh --compiler-only`
+  passes 1013/1013
+
+### 5.3 Module Inclusion Type Mismatch Diagnostics
 
 `compiler/ml/includecore.ml:159-177` defines the type-declaration mismatch
 details printed through `Typemod.Not_included` and related signature-mismatch
@@ -442,7 +525,7 @@ reachability notes:
   ReScript source fixture is currently known that prints
   `Module <path> cannot be aliased`.
 
-### 5.3 Compiled Interface Format Diagnostics
+### 5.4 Compiled Interface Format Diagnostics
 
 `compiler/ml/cmi_format.ml:18-21` defines compiled-interface reader errors.
 These are covered through direct `.cmi` cases in
@@ -460,7 +543,7 @@ It is covered by `tests/error_output_parity/compiler/cases/gentype_stale_cmti.re
 where `-bs-gentype` selects a stale `.cmti` containing only CMI data and both
 compilers print `Fatal error: exception Cmt_format.Error(_)`.
 
-### 5.4 Frontend Direct `raise_errorf` Diagnostics
+### 5.5 Frontend Direct `raise_errorf` Diagnostics
 
 Several frontend rewrites raise plain `Location.raise_errorf` diagnostics
 instead of typed `type error` constructors. Coverage includes:
@@ -519,7 +602,7 @@ instead of typed `type error` constructors. Coverage includes:
    - a config-record field with an explicit payload is covered by
      `tests/error_output_parity/compiler/fixtures/bs_return_record_value_payload.res`
 
-### 5.5 Recursive Value Diagnostics
+### 5.6 Recursive Value Diagnostics
 
 `compiler/ml/rec_check.ml:453-475` defines the backend recursive-value
 right-hand-side check:
