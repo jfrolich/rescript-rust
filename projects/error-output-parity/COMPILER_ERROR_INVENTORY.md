@@ -685,7 +685,10 @@ with a reason after checking raise sites.
     in `check_constraints_rec` and `check_coherence`; missing source-level type
     constructors are rejected earlier by type expression translation, while
     recursive placeholders are all installed in the final declaration env before
-    these checks run.
+    these checks run. The manifest-plus-representation guard
+    `tests/error_output_parity/compiler/fixtures/definition_mismatch_unbound_type_equation.res`
+    confirms a missing manifest type in the `check_coherence` source shape is
+    rejected before `Typedecl.Unavailable_type_constructor`.
 - `Bad_fixed_type`
   - Covered for fixed polymorphic variant rows without a row variable and
     private manifests that are not object or variant types by
