@@ -8,7 +8,8 @@ not be checked in. A fixture can include a sibling `.resi`; the runner compiles
 that interface before the implementation for each compiler. A fixture entry can
 also be a directory; the runner builds the copied directory as a tiny project
 with the OCaml compiler and debug rewatch `--in-process`, then compares every
-generated JS output.
+generated JS output. Directory fixtures can include `rescript.extra.json` for
+extra project-level config such as namespace settings.
 
 Run the focused fixture gate with the debug Rust compiler and debug rewatch:
 
@@ -75,6 +76,8 @@ Current focused coverage:
 - `module_boundary_patterns/`: a multi-source fixture covering local module
   artifacts, `.resi` plus `.res` provider compilation, consumer imports, module
   aliases, abstract exported values, and cross-module optimization reads.
+- `namespace_project_patterns/`: a multi-source namespaced project covering
+  project-level namespace module aliases across output modes.
 - `jsx_transform_patterns.res`: JSX v4 transform output for DOM elements,
   components, fragments, keys, spread props, escaped prop names, optional
   children, and memoed components.

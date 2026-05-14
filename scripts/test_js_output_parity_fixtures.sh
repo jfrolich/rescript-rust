@@ -135,12 +135,14 @@ write_directory_project_config() {
     local suffix="$3"
     local case_flags_raw="$4"
     local mode_flags_raw="$5"
+    local extra_config_path="$6"
 
-    python3 - "$project_dir/rescript.json" "$module_system" "$suffix" "$case_flags_raw" "$mode_flags_raw" <<'PY'
+    python3 - "$project_dir/rescript.json" "$module_system" "$suffix" "$case_flags_raw" "$mode_flags_raw" "$extra_config_path" <<'PY'
 import json
+import os
 import sys
 
-path, module_system, suffix, case_flags, mode_flags = sys.argv[1:6]
+path, module_system, suffix, case_flags, mode_flags, extra_config_path = sys.argv[1:7]
 compiler_flags = ["-w -a", "-warn-error -a"]
 if mode_flags:
     compiler_flags.append(mode_flags)
@@ -157,6 +159,11 @@ config = {
     },
     "compiler-flags": compiler_flags,
 }
+
+if extra_config_path and os.path.exists(extra_config_path):
+    with open(extra_config_path, encoding="utf-8") as handle:
+        extra_config = json.load(handle)
+    config.update(extra_config)
 
 with open(path, "w", encoding="utf-8") as handle:
     json.dump(config, handle, indent=2)
@@ -195,6 +202,7 @@ compare_directory_case() {
     fi
 
     local safe source_copy_root ocaml_project_dir rust_project_dir ocaml_source_dir rust_source_dir ocaml_log rust_log diff_out
+    local extra_config_path
     safe=$(safe_name "${mode_name}_${source}")
     source_copy_root="$CACHE_DIR/sources/$safe"
     ocaml_project_dir="$source_copy_root/ocaml"
@@ -204,6 +212,7 @@ compare_directory_case() {
     ocaml_log="$CACHE_DIR/logs/ocaml_${safe}.log"
     rust_log="$CACHE_DIR/logs/rust_${safe}.log"
     diff_out="$CACHE_DIR/diffs/${safe}.diff"
+    extra_config_path="$source_path/rescript.extra.json"
 
     mkdir -p "$ocaml_source_dir" "$rust_source_dir"
 
@@ -228,8 +237,8 @@ compare_directory_case() {
         return 0
     fi
 
-    write_directory_project_config "$ocaml_project_dir" "$module_system" "$suffix" "$case_flags_raw" "$mode_flags_raw"
-    write_directory_project_config "$rust_project_dir" "$module_system" "$suffix" "$case_flags_raw" "$mode_flags_raw"
+    write_directory_project_config "$ocaml_project_dir" "$module_system" "$suffix" "$case_flags_raw" "$mode_flags_raw" "$extra_config_path"
+    write_directory_project_config "$rust_project_dir" "$module_system" "$suffix" "$case_flags_raw" "$mode_flags_raw" "$extra_config_path"
 
     run_capture "$ocaml_log" env RESCRIPT_BSC_EXE="$OCAML_BSC" "$RESCRIPT_CLI" build --no-timing true "$ocaml_project_dir"
     run_capture "$rust_log" env RESCRIPT_BSC_EXE="$RUST_BSC" "$REWATCH_BIN" build --in-process --no-timing true "$rust_project_dir"
