@@ -1,0 +1,10 @@
+
+  Warning number 3
+  syntax_tests/data/parsing/warnings/uncurriedDot.res:1:10
+
+  1 │ let f = (. x) => x
+  2 │ 
+
+  deprecated: The `(. ...)` uncurried syntax is deprecated. Uncurried is now the default in ReScript — remove the leading dot.
+
+let f = x => x

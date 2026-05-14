@@ -1146,6 +1146,10 @@ with a reason after checking raise sites.
     `Bs_package_not_found`, `Bs_main_not_exist`, `Bs_invalid_path`) have no call
     sites in this branch.
 - `compiler/syntax/src/res_core.ml`
+  - `warn_uncurried_dot_syntax` emits `Warnings.Deprecated` for the legacy
+    `(. ...)` uncurried marker in parser output
+    - Covered through `res_parser` by
+      `tests/syntax_tests/data/parsing/warnings/uncurriedDot.res`.
   - `parse_external_def` requires the `=` before an external primitive name
     - Covered through `res_parser` by
       `tests/syntax_tests/data/parsing/errors/structure/externalMissingPrimitive.res`
