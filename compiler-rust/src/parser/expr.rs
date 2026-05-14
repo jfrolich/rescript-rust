@@ -3782,14 +3782,16 @@ enum DictPart {
 
 fn parse_dict_expr(p: &mut Parser<'_>, start_pos_idx: PosIdx) -> Expression {
     // Token::Dict already consumed the opening '{'
-    // Upstream #8369: dict literals now support `...spread_expr` entries.
+    // OCaml: parse_comma_delimited_region ~grammar:DictRows ~closing:Rbrace
+    //        ~f:parse_dict_expr_part.
 
     let mut parts: Vec<DictPart> = vec![];
+    p.leave_breadcrumb(Grammar::DictRows);
     while p.token != Token::Rbrace && p.token != Token::Eof {
-        if p.token == Token::DotDotDot {
+        let part = if p.token == Token::DotDotDot {
             p.next();
             let spread_expr = parse_constrained_or_coerced_expr(p);
-            parts.push(DictPart::Spread(spread_expr));
+            Some(DictPart::Spread(spread_expr))
         } else {
             match &p.token {
                 Token::String(s) => {
@@ -3797,8 +3799,11 @@ fn parse_dict_expr(p: &mut Parser<'_>, start_pos_idx: PosIdx) -> Expression {
                     let key_start_idx = p.start_pos_idx();
                     p.next();
                     let key_loc = p.mk_loc_idx_to_prev_end(key_start_idx);
-                    match p.token {
-                        Token::Colon => p.next(),
+                    let value = match p.token {
+                        Token::Colon => {
+                            p.next();
+                            parse_expr(p)
+                        }
                         Token::Equal => {
                             p.err_at(
                                 p.start_pos,
@@ -3808,10 +3813,20 @@ fn parse_dict_expr(p: &mut Parser<'_>, start_pos_idx: PosIdx) -> Expression {
                                 ),
                             );
                             p.next();
+                            parse_expr(p)
                         }
-                        _ => p.expect(Token::Colon),
-                    }
-                    let value = parse_expr(p);
+                        _ => {
+                            let lid_idx = p.push_lident(key.as_ref());
+                            Expression {
+                                pexp_desc: Box::new(ExpressionDesc::Pexp_ident(with_loc(
+                                    lid_idx,
+                                    key_loc,
+                                ))),
+                                pexp_loc: key_loc,
+                                pexp_attributes: Attributes::new(),
+                            }
+                        }
+                    };
                     let value_end_idx = p.loc_end_idx(value.pexp_loc);
                     let key_expr = Expression {
                         pexp_desc: Box::new(ExpressionDesc::Pexp_constant(Box::new(
@@ -3831,20 +3846,34 @@ fn parse_dict_expr(p: &mut Parser<'_>, start_pos_idx: PosIdx) -> Expression {
                         pexp_loc: tuple_loc,
                         pexp_attributes: Attributes::new(),
                     };
-                    parts.push(DictPart::Row(tuple));
+                    Some(DictPart::Row(tuple))
                 }
-                _ => {
-                    p.err(DiagnosticCategory::Message(
-                        "Dict keys must be strings".to_string(),
-                    ));
+                _ => None,
+            }
+        };
+
+        match part {
+            Some(part) => {
+                parts.push(part);
+                if p.token == Token::Comma {
+                    p.next();
+                } else if p.token == Token::Rbrace || p.token == Token::Eof {
+                    break;
+                } else if grammar::is_list_element(&Grammar::DictRows, &p.token) {
+                    p.expect(Token::Comma);
+                } else if !recover::should_abort_list_parse(p) {
+                    p.expect(Token::Comma);
+                    if p.token == Token::Semicolon {
+                        p.next();
+                    }
+                } else {
                     break;
                 }
             }
-        }
-        if !p.optional(&Token::Comma) {
-            break;
-        }
+            None => break,
+        };
     }
+    p.eat_breadcrumb();
 
     p.expect(Token::Rbrace);
     let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);

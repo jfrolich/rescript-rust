@@ -1078,6 +1078,16 @@ with a reason after checking raise sites.
       `tests/error_output_parity/compiler/fixtures/parser_dict_pattern_key_not_string.res`
       and
       `tests/error_output_parity/compiler/fixtures/parser_dict_pattern_field_equal.res`.
+  - Dict expression rows follow the shared delimited-region recovery for
+    non-string keys, missing commas between string rows and spread rows, and the
+    OCaml row-punning fallback when a string key is not followed by `:` or `=`
+    - Covered through `bsc` by
+      `tests/error_output_parity/compiler/fixtures/parser_dict_key_not_string.res`,
+      `tests/error_output_parity/compiler/fixtures/parser_dict_missing_comma.res`,
+      `tests/error_output_parity/compiler/fixtures/parser_dict_missing_comma_before_spread.res`,
+      `tests/error_output_parity/compiler/fixtures/parser_dict_spread_missing_comma_before_row.res`,
+      and
+      `tests/error_output_parity/compiler/fixtures/parser_dict_missing_colon_before_value.res`.
   - First-class module patterns accept uppercase module names only, leaving
     lowercase names to the same `Rparen` recovery path as OCaml
     - Covered through `bsc` by
