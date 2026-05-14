@@ -38,7 +38,9 @@ use crate::parser::longident::Longident;
 use crate::types::type_expr::TypeExprRefSet;
 use crate::types::typedtree::{
     ApplyArg, ArrowArg, Constant, EnvRef, ExpExtra, Expression, ExpressionDesc, FunctionParam,
-    FunctionParamPattern, PatExtra, Pattern, PatternDesc, ValueBinding,
+    FunctionParamPattern, ModuleExpr, ModuleExprDesc, ModuleType, ModuleTypeConstraint,
+    ModuleTypeDesc, PatExtra, Pattern, PatternDesc, StructureItem, StructureItemDesc,
+    TypedSignatureItem, TypedSignatureItemDesc, ValueBinding,
 };
 use crate::types::{
     Commutable, Env, Path, RowField, TypeArg, TypeContext, TypeDesc, TypeError, TypeExprRef,
@@ -20691,13 +20693,124 @@ pub(crate) fn typed_expression_uses_ident(expr: &Expression, target: &Ident) -> 
                     .as_deref()
                     .is_some_and(|expr| typed_expression_uses_ident(expr, target))
         }
-        ExpressionDesc::Texp_letmodule(_, _, _, body)
-        | ExpressionDesc::Texp_letexception(_, body) => typed_expression_uses_ident(body, target),
+        ExpressionDesc::Texp_letmodule(_, _, module_expr, body) => {
+            // OCaml compiler/ml/typecore.ml:4610-4655 records value-use
+            // callbacks while typing the RHS, and typecore.ml:3399-3425 /
+            // typemod.ml:1358-1377 type the let-module RHS before the body.
+            typed_module_expr_uses_ident(module_expr, target)
+                || typed_expression_uses_ident(body, target)
+        }
+        ExpressionDesc::Texp_letexception(_, body) => typed_expression_uses_ident(body, target),
+        ExpressionDesc::Texp_pack(module_expr) => {
+            // OCaml compiler/ml/typecore.ml:3518-3528 and
+            // typemod.ml:1358-1377 type packed module expressions by typing
+            // the underlying module expression, so local value uses inside
+            // `Pmod_unpack` count for warning 26/27.
+            typed_module_expr_uses_ident(module_expr, target)
+        }
         ExpressionDesc::Texp_constant(_)
         | ExpressionDesc::Texp_break
         | ExpressionDesc::Texp_continue
-        | ExpressionDesc::Texp_pack(_)
         | ExpressionDesc::Texp_extension_constructor(_, _) => false,
+    }
+}
+
+fn typed_module_expr_uses_ident(module_expr: &ModuleExpr, target: &Ident) -> bool {
+    match &module_expr.mod_desc {
+        ModuleExprDesc::Tmod_structure(structure) => structure
+            .str_items
+            .iter()
+            .any(|item| typed_structure_item_uses_ident(item, target)),
+        ModuleExprDesc::Tmod_apply(func, arg, _) => {
+            typed_module_expr_uses_ident(func, target) || typed_module_expr_uses_ident(arg, target)
+        }
+        ModuleExprDesc::Tmod_functor(_, _, arg, body) => {
+            arg.as_deref()
+                .is_some_and(|arg| typed_module_type_uses_ident(arg, target))
+                || typed_module_expr_uses_ident(body, target)
+        }
+        ModuleExprDesc::Tmod_constraint(inner, _, constraint, _) => {
+            typed_module_expr_uses_ident(inner, target)
+                || match constraint {
+                    ModuleTypeConstraint::Tmodtype_explicit(module_type) => {
+                        typed_module_type_uses_ident(module_type, target)
+                    }
+                    ModuleTypeConstraint::Tmodtype_implicit => false,
+                }
+        }
+        ModuleExprDesc::Tmod_unpack(expr, _) => typed_expression_uses_ident(expr, target),
+        ModuleExprDesc::Tmod_ident(_, _) => false,
+    }
+}
+
+fn typed_module_type_uses_ident(module_type: &ModuleType, target: &Ident) -> bool {
+    match &module_type.mty_desc {
+        ModuleTypeDesc::Tmty_typeof(module_expr) => typed_module_expr_uses_ident(module_expr, target),
+        ModuleTypeDesc::Tmty_functor(_, _, arg, body) => {
+            arg.as_deref()
+                .is_some_and(|arg| typed_module_type_uses_ident(arg, target))
+                || typed_module_type_uses_ident(body, target)
+        }
+        ModuleTypeDesc::Tmty_with(inner, _) => typed_module_type_uses_ident(inner, target),
+        ModuleTypeDesc::Tmty_signature(signature) => signature
+            .sig_items
+            .iter()
+            .any(|item| typed_signature_item_uses_ident(item, target)),
+        ModuleTypeDesc::Tmty_ident(_, _)
+        | ModuleTypeDesc::Tmty_alias(_, _)
+        | ModuleTypeDesc::Tmty_placeholder => false,
+    }
+}
+
+fn typed_signature_item_uses_ident(item: &TypedSignatureItem, target: &Ident) -> bool {
+    match &item.sig_desc {
+        TypedSignatureItemDesc::Tsig_module(decl) => {
+            typed_module_type_uses_ident(&decl.md_type, target)
+        }
+        TypedSignatureItemDesc::Tsig_recmodule(decls) => decls
+            .iter()
+            .any(|decl| typed_module_type_uses_ident(&decl.md_type, target)),
+        TypedSignatureItemDesc::Tsig_modtype(decl) => decl
+            .mtd_type
+            .as_ref()
+            .is_some_and(|module_type| typed_module_type_uses_ident(module_type, target)),
+        TypedSignatureItemDesc::Tsig_include(include) => {
+            typed_module_type_uses_ident(&include.incl_mod, target)
+        }
+        TypedSignatureItemDesc::Tsig_value(_)
+        | TypedSignatureItemDesc::Tsig_type(_, _)
+        | TypedSignatureItemDesc::Tsig_typext(_)
+        | TypedSignatureItemDesc::Tsig_exception(_)
+        | TypedSignatureItemDesc::Tsig_open(_)
+        | TypedSignatureItemDesc::Tsig_attribute(_) => false,
+    }
+}
+
+fn typed_structure_item_uses_ident(item: &StructureItem, target: &Ident) -> bool {
+    match &item.str_desc {
+        StructureItemDesc::Tstr_eval(expr, _) => typed_expression_uses_ident(expr, target),
+        StructureItemDesc::Tstr_value(_, bindings) => bindings
+            .iter()
+            .any(|binding| typed_expression_uses_ident(&binding.vb_expr, target)),
+        StructureItemDesc::Tstr_module(binding) => {
+            typed_module_expr_uses_ident(&binding.mb_expr, target)
+        }
+        StructureItemDesc::Tstr_recmodule(bindings) => bindings
+            .iter()
+            .any(|binding| typed_module_expr_uses_ident(&binding.mb_expr, target)),
+        StructureItemDesc::Tstr_modtype(decl) => decl
+            .mtd_type
+            .as_ref()
+            .is_some_and(|module_type| typed_module_type_uses_ident(module_type, target)),
+        StructureItemDesc::Tstr_include(include) => {
+            typed_module_expr_uses_ident(&include.incl_mod, target)
+        }
+        StructureItemDesc::Tstr_primitive(_)
+        | StructureItemDesc::Tstr_type(_, _)
+        | StructureItemDesc::Tstr_typext(_)
+        | StructureItemDesc::Tstr_exception(_)
+        | StructureItemDesc::Tstr_open(_)
+        | StructureItemDesc::Tstr_attribute(_) => false,
     }
 }
 
