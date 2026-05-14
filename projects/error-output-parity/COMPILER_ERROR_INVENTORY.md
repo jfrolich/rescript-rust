@@ -1476,6 +1476,11 @@ with a reason after checking raise sites.
       `tests/error_output_parity/compiler/fixtures/jsx_component_key_prop.res`
       and the included-structure traversal case in
       `tests/error_output_parity/compiler/fixtures/jsx_component_key_prop_include.res`.
+  - `recursively_transform_named_args_for_make` emits
+    `Warnings.Preprocessor` when optional prop annotations omit the explicit
+    `option<...>` wrapper
+    - Covered by
+      `tests/error_output_parity/compiler/fixtures/jsx_component_optional_annotation_warning.res`.
   - `make_label_decls` rejects duplicate `@react.component` prop names before
     the generated props type can mask the PPX error
     - Covered by

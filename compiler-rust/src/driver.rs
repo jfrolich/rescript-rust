@@ -1844,6 +1844,21 @@ fn jsx_ppx_error_to_anyhow(
     UserDiagnostic::new(output, 2).into()
 }
 
+fn jsx_preprocessor_warnings_to_ppx(
+    arena: &mut ParseArena,
+    warnings: Vec<jsx_ppx::JsxPreprocessorWarning>,
+) -> Vec<ppx::PpxWarning> {
+    warnings
+        .into_iter()
+        .map(|warning| ppx::PpxWarning {
+            loc: arena.mk_loc_from_positions(&warning.start_pos, &warning.end_pos),
+            warning: crate::diagnostics::Warning::Preprocessor {
+                message: warning.message,
+            },
+        })
+        .collect()
+}
+
 fn emit_ppx_warnings(
     arena: &ParseArena,
     source: &str,
@@ -11087,8 +11102,21 @@ pub fn compile_source_to_js_with_options(
             parser.arena(),
             filename,
         )?;
-        jsx_ppx::transform_structure_result(structure, jsx_version, parser.arena_mut())
-            .map_err(|e| jsx_ppx_error_to_anyhow(e, parser.arena(), source, filename))?
+        let (structure, jsx_warnings) = jsx_ppx::transform_structure_with_warnings_result(
+            structure,
+            jsx_version,
+            parser.arena_mut(),
+        )
+        .map_err(|e| jsx_ppx_error_to_anyhow(e, parser.arena(), source, filename))?;
+        let jsx_warnings = jsx_preprocessor_warnings_to_ppx(parser.arena_mut(), jsx_warnings);
+        ppx_warnings_have_errors |= emit_ppx_warnings_with_config(
+            parser.arena(),
+            source,
+            filename,
+            &file_warning_config,
+            &jsx_warnings,
+        );
+        structure
     } else {
         structure
     };
@@ -12389,8 +12417,21 @@ pub fn typecheck_and_dump_sexp<W: std::io::Write>(
                 parser.arena(),
                 filename,
             )?;
-            jsx_ppx::transform_structure_result(structure, jsx_version, parser.arena_mut())
-                .map_err(|e| jsx_ppx_error_to_anyhow(e, parser.arena(), source, filename))?
+            let (structure, jsx_warnings) = jsx_ppx::transform_structure_with_warnings_result(
+                structure,
+                jsx_version,
+                parser.arena_mut(),
+            )
+            .map_err(|e| jsx_ppx_error_to_anyhow(e, parser.arena(), source, filename))?;
+            let jsx_warnings = jsx_preprocessor_warnings_to_ppx(parser.arena_mut(), jsx_warnings);
+            let _ = emit_ppx_warnings_with_config(
+                parser.arena(),
+                source,
+                filename,
+                &file_warning_config,
+                &jsx_warnings,
+            );
+            structure
         } else {
             structure
         };
@@ -13993,9 +14034,16 @@ pub fn compile_source_in_process(
     );
     let config_warnings = validate_file_config_from_structure(&structure, parser.arena())
         .map_err(|err| config_payload_error_to_anyhow(err, parser.arena(), source, filename))?;
-    let _ = emit_ppx_warnings(parser.arena(), source, filename, options, &config_warnings);
-    let experimental_let_unwrap =
-        experimental_let_unwrap_for_structure(&structure, options, parser.arena());
+    let file_config = extract_file_config_from_structure(&structure, parser.arena());
+    let file_warning_config = warning_config_for_options_and_file_config(options, &file_config);
+    let _ = emit_ppx_warnings_with_config(
+        parser.arena(),
+        source,
+        filename,
+        &file_warning_config,
+        &config_warnings,
+    );
+    let experimental_let_unwrap = options.experimental_let_unwrap || file_config.let_unwrap;
     if !options.no_builtin_ppx {
         reject_disabled_let_unwrap_in_structure(
             experimental_let_unwrap,
@@ -14012,15 +14060,28 @@ pub fn compile_source_in_process(
             filename,
         )?;
     }
-    let jsx_version = jsx_version_for_structure(&structure, options, parser.arena());
+    let jsx_version = options.jsx_version.or(file_config.jsx_version);
     let structure = if let Some(jsx_version) = jsx_version {
         reject_invalid_react_component_destructure_in_structure(
             &structure,
             parser.arena(),
             filename,
         )?;
-        jsx_ppx::transform_structure_result(structure, jsx_version, parser.arena_mut())
-            .map_err(|e| jsx_ppx_error_to_anyhow(e, parser.arena(), source, filename))?
+        let (structure, jsx_warnings) = jsx_ppx::transform_structure_with_warnings_result(
+            structure,
+            jsx_version,
+            parser.arena_mut(),
+        )
+        .map_err(|e| jsx_ppx_error_to_anyhow(e, parser.arena(), source, filename))?;
+        let jsx_warnings = jsx_preprocessor_warnings_to_ppx(parser.arena_mut(), jsx_warnings);
+        let _ = emit_ppx_warnings_with_config(
+            parser.arena(),
+            source,
+            filename,
+            &file_warning_config,
+            &jsx_warnings,
+        );
+        structure
     } else {
         structure
     };
