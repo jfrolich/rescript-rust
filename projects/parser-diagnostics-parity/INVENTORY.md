@@ -16,6 +16,10 @@ Scope scanned:
 - `compiler/ml/typetexp.ml`
 - `compiler/ml/typemod.ml`
 - `compiler/ml/typecore.ml`
+- `compiler/ml/ctype.ml`
+- `compiler/ml/printtyp.ml`
+- `compiler/ml/variant_coercion.ml`
+- `compiler/ml/record_coercion.ml`
 
 ## 1. Core Diagnostic Model
 
@@ -579,7 +583,69 @@ Broad evidence for this family:
 - `TIMEOUT_SECONDS=10 ./scripts/test_error_output_parity.sh --compiler-only`
   passes 1013/1013 with the debug Rust compiler
 
-### 5.4 Module Inclusion Type Mismatch Diagnostics
+### 5.4 Coercion Subtype Context Diagnostics
+
+`compiler/ml/ctype.ml:73-103` defines `subtype_context`, which is printed by
+`compiler/ml/printtyp.ml:1748-1812` through `Typecore.Not_subtype`. Coverage
+now includes:
+
+1. `Ctype.Coercion_target_variant_not_unboxed`
+   - covered by
+     `tests/error_output_parity/compiler/fixtures/coerce_primitive_to_variant_not_unboxed.res`
+2. `Ctype.Coercion_target_variant_does_not_cover_type`
+   - covered by
+     `tests/error_output_parity/compiler/fixtures/coerce_primitive_to_variant_no_catchall.res`
+3. `Ctype.Variant_constructor_runtime_representation_mismatch`
+   - nested issue variants from `compiler/ml/variant_coercion.ml:1-20` are
+     covered by:
+     `coerce_variant_to_primitive_unboxed_payload_mismatch.res`
+     (`Mismatched_unboxed_payload`),
+     `coerce_variant_to_primitive_missing_as.res`
+     (`Mismatched_as_payload None`),
+     `coerce_variant_to_primitive_mismatched_as.res`
+     (`Mismatched_as_payload Some`),
+     `coerce_variant_to_primitive_null_as.res`
+     (`As_payload_not_elgible_for_coercion`),
+     `coerce_variant_to_primitive_inline_record.res`
+     (`Inline_record_cannot_be_coerced`), and
+     `coerce_variant_to_primitive_payload_not_unboxed.res`
+     (`Cannot_coerce_non_unboxed_with_payload`)
+4. `Ctype.Variant_configurations_mismatch`
+   - nested issue variants from `compiler/ml/variant_coercion.ml:176-179`
+     are covered by:
+     `coerce_variant_unboxed_configuration_mismatch.res`
+     (`Unboxed_config_not_matching`),
+     `coerce_variant_tag_configuration_mismatch.res`
+     (`Tag_name_not_matching`), and
+     `coerce_variant_constructor_count_mismatch.res`
+     (`Incompatible_constructor_count`)
+5. `Ctype.Different_type_kinds`
+   - covered by
+     `tests/error_output_parity/compiler/fixtures/coerce_different_type_kinds.res`
+6. `Ctype.Record_fields_mismatch`
+   - nested issue variants from `compiler/ml/record_coercion.ml:1-12` are
+     covered by:
+     `coerce_record_optional_to_required.res`,
+     `coerce_record_required_to_optional.res`,
+     `coerce_record_left_as_runtime_mismatch.res`,
+     `coerce_record_right_as_runtime_mismatch.res`, and
+     `coerce_record_missing_field.res`
+
+`Ctype.Generic {errorCode = "VCPMMVD"}` reachability note:
+
+- The only construction site is `compiler/ml/ctype.ml:3754-3757`.
+- That arm is inside a branch guarded by
+  `extract_concrete_typedecl_opt env t2 |> Variant_coercion.can_try_coerce_variant_to_primitive_opt |> Option.is_some`,
+  then immediately re-runs the same pure query and matches on `None`.
+- No direct ReScript source fixture is currently known that can reach this
+  defensive fallback without an inconsistent typed environment.
+
+Focused evidence:
+
+- `TIMEOUT_SECONDS=10 ./scripts/test_error_output_parity.sh --compiler-only coerce_`
+  passes 17/17
+
+### 5.5 Module Inclusion Type Mismatch Diagnostics
 
 `compiler/ml/includecore.ml:159-177` defines the type-declaration mismatch
 details printed through `Typemod.Not_included` and related signature-mismatch
@@ -688,7 +754,7 @@ reachability notes:
   ReScript source fixture is currently known that prints
   `Module <path> cannot be aliased`.
 
-### 5.5 Compiled Interface Format Diagnostics
+### 5.6 Compiled Interface Format Diagnostics
 
 `compiler/ml/cmi_format.ml:18-21` defines compiled-interface reader errors.
 These are covered through direct `.cmi` cases in
@@ -706,7 +772,7 @@ It is covered by `tests/error_output_parity/compiler/cases/gentype_stale_cmti.re
 where `-bs-gentype` selects a stale `.cmti` containing only CMI data and both
 compilers print `Fatal error: exception Cmt_format.Error(_)`.
 
-### 5.6 Frontend Direct `raise_errorf` Diagnostics
+### 5.7 Frontend Direct `raise_errorf` Diagnostics
 
 Several frontend rewrites raise plain `Location.raise_errorf` diagnostics
 instead of typed `type error` constructors. Coverage includes:
@@ -765,7 +831,7 @@ instead of typed `type error` constructors. Coverage includes:
    - a config-record field with an explicit payload is covered by
      `tests/error_output_parity/compiler/fixtures/bs_return_record_value_payload.res`
 
-### 5.7 Recursive Value Diagnostics
+### 5.8 Recursive Value Diagnostics
 
 `compiler/ml/rec_check.ml:453-475` defines the backend recursive-value
 right-hand-side check:
