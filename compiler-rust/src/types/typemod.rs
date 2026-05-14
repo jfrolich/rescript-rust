@@ -6124,7 +6124,8 @@ impl OpenShadowLabelConstructorKind {
 struct OpenShadowLabelConstructorUseCheck {
     kind: OpenShadowLabelConstructorKind,
     name: String,
-    res: TypeExprRef,
+    previous_res: TypeExprRef,
+    opened_res: TypeExprRef,
     loc: LocIdx,
     item_index: usize,
     emitted: bool,
@@ -6203,27 +6204,20 @@ fn opened_names_from_signature(sig_items: &[crate::types::decl::SignatureItem]) 
     names
 }
 
-fn opened_names_for_open(
-    tctx: &mut TypeCheckContext<'_>,
-    env: &Env,
-    arena: &ParseArena,
-    open: &OpenDeclaration,
-) -> OpenedNames {
-    let open_lid = arena.get_longident(open.open_txt.txt);
-    // OCaml compiler/ml/env.ml:781-793 resolves open components through
-    // `find_module_descr`, then compiler/ml/env.ml:1874-1877 uses that
-    // component table in `open_signature`. Warning bookkeeping should inspect
-    // the same component signature instead of forcing a persistent `ps_sig`
-    // copy through `Env.find_module`.
-    crate::types::typecore::with_resolved_module_components_for_lid(
-        open_lid,
-        arena,
-        env,
-        &mut tctx.persistent_env,
-        tctx.type_ctx,
-        |components| opened_names_from_signature(components.signature()),
-    )
-    .unwrap_or_default()
+fn opened_names_for_open(env_before_open: &Env, env_after_open: &Env) -> OpenedNames {
+    // OCaml compiler/ml/env.ml:1874-1911 computes open warning state as part
+    // of the same `open_signature` component insertion used by
+    // compiler/ml/typemod.ml:1566-1568 for `Pstr_open`; it does not perform a
+    // second module lookup after typing the open declaration.
+    let opened = env_after_open.opened_binding_names_added_since(env_before_open);
+    OpenedNames {
+        values: opened.values,
+        types: opened.types,
+        modules: opened.modules,
+        modtypes: opened.modtypes,
+        constructors: opened.constructors,
+        labels: opened.labels,
+    }
 }
 
 fn collect_open_use_check(
@@ -6514,7 +6508,6 @@ fn same_constructor_result(
 }
 
 fn collect_open_shadow_label_constructor_use_checks(
-    ctx: &crate::types::TypeContext,
     env_before_open: &Env,
     env_after_open: &Env,
     opened_names: &OpenedNames,
@@ -6538,20 +6531,18 @@ fn collect_open_shadow_label_constructor_use_checks(
         else {
             continue;
         };
-        if is_local
-            || same_constructor_result(
-                ctx,
-                env_before_open,
-                previous_desc.cstr_res,
-                opened_desc.cstr_res,
-            )
-        {
+        if is_local {
             continue;
         }
         out.push(OpenShadowLabelConstructorUseCheck {
             kind: OpenShadowLabelConstructorKind::Constructor,
             name: name.to_string(),
-            res: opened_desc.cstr_res,
+            // OCaml compiler/ml/env.ml:181-187, 277-283, and 1895-1908 keep
+            // this comparison inside the opened-component use callback. Store
+            // the two result types here, but do not call `same_constr` until a
+            // later typed item actually uses the opened constructor.
+            previous_res: previous_desc.cstr_res,
+            opened_res: opened_desc.cstr_res,
             loc,
             item_index,
             emitted: false,
@@ -6573,20 +6564,17 @@ fn collect_open_shadow_label_constructor_use_checks(
         let Ok((_, opened_desc, is_local)) = env_after_open.find_label_with_origin(name) else {
             continue;
         };
-        if is_local
-            || same_constructor_result(
-                ctx,
-                env_before_open,
-                previous_desc.lbl_res,
-                opened_desc.lbl_res,
-            )
-        {
+        if is_local {
             continue;
         }
         out.push(OpenShadowLabelConstructorUseCheck {
             kind: OpenShadowLabelConstructorKind::Label,
             name: name.to_string(),
-            res: opened_desc.lbl_res,
+            // See the constructor case above: OCaml runs
+            // compiler/ml/env.ml:457-462 `check_shadowing` from the open-table
+            // use callback, not while building the open declaration.
+            previous_res: previous_desc.lbl_res,
+            opened_res: opened_desc.lbl_res,
             loc,
             item_index,
             emitted: false,
@@ -6737,7 +6725,8 @@ fn constructor_matches_open_shadow_label_constructor(
 ) -> bool {
     check.kind == OpenShadowLabelConstructorKind::Constructor
         && desc.cstr_name == check.name
-        && same_constructor_result(ctx, env, desc.cstr_res, check.res)
+        && same_constructor_result(ctx, env, desc.cstr_res, check.opened_res)
+        && !same_constructor_result(ctx, env, check.previous_res, check.opened_res)
 }
 
 fn label_matches_open_shadow_label_constructor(
@@ -6748,7 +6737,8 @@ fn label_matches_open_shadow_label_constructor(
 ) -> bool {
     check.kind == OpenShadowLabelConstructorKind::Label
         && desc.lbl_name == check.name
-        && same_constructor_result(ctx, env, desc.lbl_res, check.res)
+        && same_constructor_result(ctx, env, desc.lbl_res, check.opened_res)
+        && !same_constructor_result(ctx, env, check.previous_res, check.opened_res)
 }
 
 fn pattern_uses_open_shadow_label_constructor(
@@ -18263,7 +18253,7 @@ pub fn transl_signature<'a>(
         if let TSigDesc::Tsig_open(open) = &typed_item.sig_desc
             && is_fresh_open(open)
         {
-            let opened_names = opened_names_for_open(tctx, &env_before_item, arena, open);
+            let opened_names = opened_names_for_open(&env_before_item, &sig_env);
             collect_open_shadow_identifier_use_checks(
                 &env_before_item,
                 &sig_env,
@@ -18427,7 +18417,7 @@ pub fn type_structure<'a>(
         if let StructureItemDesc::Tstr_open(open) = &typed_item.str_desc
             && is_fresh_open(open)
         {
-            let opened_names = opened_names_for_open(tctx, &current_env, arena, open);
+            let opened_names = opened_names_for_open(&current_env, &new_env);
             collect_open_shadow_identifier_use_checks(
                 &current_env,
                 &new_env,
@@ -18437,7 +18427,6 @@ pub fn type_structure<'a>(
                 &mut open_shadow_identifier_checks,
             );
             collect_open_shadow_label_constructor_use_checks(
-                tctx.type_ctx,
                 &current_env,
                 &new_env,
                 &opened_names,
@@ -22189,15 +22178,6 @@ fn type_structure_item<'a>(
         ParsedStructureItemDesc::Pstr_open(open_desc) => {
             // Open declaration: open M
             let longident = tctx.resolve_lid(open_desc.popen_lid.txt).clone();
-            if let Some(err) = structure_expected_error_for_open(
-                tctx,
-                env,
-                arena,
-                &longident,
-                open_desc.popen_lid.loc,
-            ) {
-                return Err(err);
-            }
             let fallback_path = lookup_module_path_by_lid(
                 &longident,
                 arena,
@@ -22234,6 +22214,21 @@ fn type_structure_item<'a>(
                 );
                 resolved_path
             } else {
+                // OCaml compiler/ml/typemod.ml:88-95 first calls
+                // `Env.open_signature`; only when that fails does it call
+                // `Env.find_module`/`extract_sig_open` to raise
+                // `Structure_expected`. Keep this scrape on the failure path so
+                // successful opens do not force module aliases before the
+                // opened component table is installed.
+                if let Some(err) = structure_expected_error_for_open(
+                    tctx,
+                    env,
+                    arena,
+                    &longident,
+                    open_desc.popen_lid.loc,
+                ) {
+                    return Err(err);
+                }
                 fallback_path
             };
 

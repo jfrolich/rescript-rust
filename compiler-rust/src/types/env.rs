@@ -244,6 +244,21 @@ impl<T: Clone> BindingTable<T> {
         }
     }
 
+    fn opened_names_added_since(&self, previous: &Self) -> HashSet<String> {
+        let mut names = HashSet::new();
+        for (name, entries) in self.by_name.iter() {
+            let previous_len = previous.by_name.get(name).map_or(0, Vec::len);
+            if entries
+                .iter()
+                .skip(previous_len)
+                .any(|(_, _, is_local)| !*is_local)
+            {
+                names.insert(name.clone());
+            }
+        }
+        names
+    }
+
     /// Find a binding by name.
     pub fn find_by_name(&self, name: &str) -> Option<&T> {
         self.by_name
@@ -355,6 +370,16 @@ impl<T: Clone> BindingTable<T> {
             .values()
             .flat_map(|entries| entries.iter().map(|(id, v, _)| (id, v)))
     }
+}
+
+#[derive(Debug, Clone, Default)]
+pub(crate) struct OpenedBindingNames {
+    pub(crate) values: HashSet<String>,
+    pub(crate) types: HashSet<String>,
+    pub(crate) modules: HashSet<String>,
+    pub(crate) modtypes: HashSet<String>,
+    pub(crate) constructors: HashSet<String>,
+    pub(crate) labels: HashSet<String>,
 }
 
 impl<T: Clone> Default for BindingTable<T> {
@@ -998,6 +1023,21 @@ impl Env {
     /// Iterate over visible label bindings.
     pub fn iter_labels(&self) -> impl Iterator<Item = (&Ident, &LabelDescription)> {
         self.labels.iter().map(|(id, l)| (id, l.as_ref()))
+    }
+
+    pub(crate) fn opened_binding_names_added_since(&self, previous: &Env) -> OpenedBindingNames {
+        // OCaml compiler/ml/env.ml:1874-1911 attaches the open warning slot
+        // while `open_signature` installs the opened component tables through
+        // env.ml:181-187 and env.ml:277-283. Derive Rust warning names from the
+        // same just-added opened bindings instead of resolving the module again.
+        OpenedBindingNames {
+            values: self.values.opened_names_added_since(&previous.values),
+            types: self.types.opened_names_added_since(&previous.types),
+            modules: self.modules.opened_names_added_since(&previous.modules),
+            modtypes: self.modtypes.opened_names_added_since(&previous.modtypes),
+            constructors: self.constrs.opened_names_added_since(&previous.constrs),
+            labels: self.labels.opened_names_added_since(&previous.labels),
+        }
     }
 
     // ========================================================================
