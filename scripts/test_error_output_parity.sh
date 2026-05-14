@@ -260,6 +260,15 @@ run_compiler_case() {
             "$CACHE_DIR/compiler/gentype_bad_magic.cmti"
         run_capture "$ocaml_out" "$OCAML_BSC" "${flags[@]}" "$source_file"
         run_capture "$rust_out" "$RUST_BSC" "${flags[@]}" "$source_file"
+    elif [[ "$source_file" == ".parity-cache/error-output/compiler/compunit_deprecated_inclusion.res" ]]; then
+        cp "$PROJECT_ROOT/tests/error_output_parity/compiler/cases/compunit_deprecated_inclusion.res" \
+            "$CACHE_DIR/compiler/compunit_deprecated_inclusion.res"
+        cp "$PROJECT_ROOT/tests/error_output_parity/compiler/cases/compunit_deprecated_inclusion.reference.cmi" \
+            "$CACHE_DIR/compiler/compunit_deprecated_inclusion.cmi"
+        run_capture_stderr "$ocaml_out" "$OCAML_BSC" "${flags[@]}" "$source_file"
+        cp "$PROJECT_ROOT/tests/error_output_parity/compiler/cases/compunit_deprecated_inclusion.reference.cmi" \
+            "$CACHE_DIR/compiler/compunit_deprecated_inclusion.cmi"
+        run_capture_stderr "$rust_out" "$RUST_BSC" "${flags[@]}" "$source_file"
     else
         run_capture_stderr "$ocaml_out" "$OCAML_BSC" "${flags[@]}" "$source_file"
         run_capture_stderr "$rust_out" "$RUST_BSC" "${flags[@]}" "$source_file"

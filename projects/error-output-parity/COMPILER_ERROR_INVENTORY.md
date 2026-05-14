@@ -320,6 +320,12 @@ with a reason after checking raise sites.
   `tests/error_output_parity/compiler/fixtures/includemod_warning_deprecated_module.res`,
   and
   `tests/error_output_parity/compiler/fixtures/includemod_warning_deprecated_modtype.res`.
+- Warning 3 (`Deprecated`) from compilation-unit `.resi` inclusion is covered by
+  the explicit cached-CMI case
+  `.parity-cache/error-output/compiler/compunit_deprecated_inclusion.res` in
+  `tests/error_output_parity/compiler/cases.tsv`, with source/reference inputs
+  in `tests/error_output_parity/compiler/cases/compunit_deprecated_inclusion.res`
+  and `tests/error_output_parity/compiler/cases/compunit_deprecated_inclusion.resi`.
 - Typecore warning 16 (`Unerasable_optional_argument`) is not observable from
   normal ReScript function syntax: `type_function` disables warning 16 before
   the optional-argument check for the uncurried function path ReScript uses.

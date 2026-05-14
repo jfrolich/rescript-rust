@@ -5337,10 +5337,15 @@ fn format_compiler_warning_report(
     }
     output.push('\n');
     output.push_str("  ");
-    output.push_str(&code_frame::format_location(filename, start_pos, end_pos));
-    output.push_str("\n\n");
-    output.push_str(&code_frame::print_warning(source, start_pos, end_pos));
-    output.push('\n');
+    if arena.loc_ghost(warning.loc) && start_pos.cnum < 0 && end_pos.cnum < 0 {
+        output.push_str(filename);
+        output.push_str("\n\n");
+    } else {
+        output.push_str(&code_frame::format_location(filename, start_pos, end_pos));
+        output.push_str("\n\n");
+        output.push_str(&code_frame::print_warning(source, start_pos, end_pos));
+        output.push('\n');
+    }
 
     let indent_after_blank = !matches!(
         warning.warning,
@@ -11575,6 +11580,16 @@ fn build_inferred_signature_coercion(
     }
 }
 
+fn report_compunit_inclusion_warnings(
+    tctx: &mut TypeCheckContext<'_>,
+    warnings: Vec<crate::diagnostics::Warning>,
+) {
+    let loc = tctx.arena.none_loc();
+    for warning in warnings {
+        tctx.report_warning(loc, warning);
+    }
+}
+
 fn compute_raw_implementation_coercion(
     tctx: &mut TypeCheckContext<'_>,
     type_ctx: &TypeContext,
@@ -11597,13 +11612,10 @@ fn compute_raw_implementation_coercion(
         return build_inferred_signature_coercion(impl_sig);
     }
 
-    let Some(module_name) = std::path::Path::new(source_file)
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .map(|s| s.to_string())
-    else {
+    let module_name = module_name_from_source_filename(source_file);
+    if module_name.is_empty() {
         return crate::types::typedtree::ModuleCoercion::Tcoerce_none;
-    };
+    }
     let Some(pers) = &mut tctx.persistent_env else {
         return crate::types::typedtree::ModuleCoercion::Tcoerce_none;
     };
@@ -11620,14 +11632,19 @@ fn compute_raw_implementation_coercion(
         None => return crate::types::typedtree::ModuleCoercion::Tcoerce_none,
     };
 
-    match crate::types::includemod::compunit(
+    let mut inclusion_warnings = Vec::new();
+    let inclusion_result = crate::types::includemod::compunit_with_warnings(
         type_ctx,
         env,
         source_file,
         impl_sig,
         "(inferred signature)",
         target_sig.as_ref(),
-    ) {
+        &mut inclusion_warnings,
+    );
+    report_compunit_inclusion_warnings(tctx, inclusion_warnings);
+
+    match inclusion_result {
         Ok(cc) => cc,
         Err(_) if has_resi => {
             // compunit can fail when the OCaml-built CMI has different type stamps
@@ -12201,14 +12218,10 @@ fn apply_moregen_constraints(
     }
 
     // Extract module name from source filename
-    let module_name = std::path::Path::new(source_file)
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .map(|s| s.to_string());
-    let module_name = match module_name {
-        Some(n) => n,
-        None => return,
-    };
+    let module_name = module_name_from_source_filename(source_file);
+    if module_name.is_empty() {
+        return;
+    }
 
     // Load the RAW interface signature from CMI (without path substitution).
     // OCaml's ps_sig retains raw Pident paths; path substitution happens lazily
