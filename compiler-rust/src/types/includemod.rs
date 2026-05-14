@@ -811,6 +811,11 @@ fn format_label_declaration(
     printer: &mut TypeExprErrorPrinter<'_>,
     label: &LabelDeclaration,
 ) -> String {
+    let mutable_prefix = if label.ld_mutable == crate::types::MutableFlag::Mutable {
+        "mutable "
+    } else {
+        ""
+    };
     let optional = if label.ld_optional { "?" } else { "" };
     let field_type = if label.ld_optional {
         optional_field_payload_type(printer.type_ctx, label.ld_type)
@@ -818,7 +823,8 @@ fn format_label_declaration(
         label.ld_type
     };
     format!(
-        "{}{}: {}",
+        "{}{}{}: {}",
+        mutable_prefix,
         label.ld_id.name(),
         optional,
         printer.format(field_type)
@@ -2901,7 +2907,7 @@ fn compare_record_declarations(
         if impl_label.ld_id.name() != sig_label.ld_id.name() {
             return Some(format!(
                 "Fields number {} have different names, {} and {}.",
-                index,
+                index + 1,
                 impl_label.ld_id.name(),
                 sig_label.ld_id.name()
             ));

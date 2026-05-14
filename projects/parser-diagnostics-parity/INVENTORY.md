@@ -206,6 +206,24 @@ messages and locations:
 Rust must preserve both checks. Broadening the frontend invariant would produce
 the wrong reference output for later constructors and signatures.
 
+### 5.1 Module Inclusion Type Mismatch Diagnostics
+
+`compiler/ml/includecore.ml:159-177` defines the type-declaration mismatch
+details printed through `Typemod.Not_included` and related signature-mismatch
+paths. Record-field mismatch coverage now includes:
+
+1. `Includecore.Field_optional`
+   - covered by `tests/error_output_parity/compiler/fixtures/not_included_record_field_optional.res`
+2. `Includecore.Field_mutable`
+   - covered by `tests/error_output_parity/compiler/fixtures/not_included_record_field_mutable.res`
+   - this verifies the signature/type-declaration pretty-printer preserves the
+     `mutable` field prefix.
+3. `Includecore.Field_missing`
+   - covered by `tests/error_output_parity/compiler/fixtures/not_included_record_field_missing.res`
+4. `Includecore.Field_names`
+   - covered by `tests/error_output_parity/compiler/fixtures/not_included_record_field_names.res`
+   - this verifies OCaml's one-based field numbering in the diagnostic text.
+
 ## 6. Formatting and Presentation Contract
 
 `compiler/ml/location.ml` defines the warning/error output contract consumed by parser diagnostics:
