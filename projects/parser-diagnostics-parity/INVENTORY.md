@@ -1,6 +1,6 @@
 # OCaml Parser Diagnostics Inventory
 
-Inventory date: **February 10, 2026**
+Inventory date: **May 14, 2026**
 
 Scope scanned:
 
@@ -13,6 +13,7 @@ Scope scanned:
 - `compiler/ml/location.ml`
 - `compiler/frontend/bs_ast_invariant.ml`
 - `compiler/ml/typedecl.ml`
+- `compiler/ml/typetexp.ml`
 
 ## 1. Core Diagnostic Model
 
@@ -224,7 +225,115 @@ the wrong reference output for later constructors and signatures.
 - No direct ReScript source fixture is currently known that reaches this
   diagnostic without constructing an inconsistent or stale typed environment.
 
-### 5.1 Module Inclusion Type Mismatch Diagnostics
+### 5.1 Type Expression Diagnostics
+
+`compiler/ml/typetexp.ml:28-55` defines the finite type-expression error
+constructor set used by type paths, package types, polymorphic variants,
+object types, and narrowed unbound identifier reporting. Coverage now includes:
+
+1. `Typetexp.Unbound_type_variable`
+   - covered by `tests/error_output_parity/compiler/fixtures/unbound_type_variable.res`
+   - fixed/wildcard and nested manifest paths are covered by
+     `unbound_type_variable_wildcard.res`, `unbound_type_var_alias.res`, and
+     `unbound_type_var_record.res`
+2. `Typetexp.Unbound_type_constructor`
+   - covered by `tests/error_output_parity/compiler/fixtures/unbound_type_constructor.res`
+   - spellcheck and qualified-prefix narrowing are covered by
+     `unbound_type_constructor_spellcheck.res` and
+     `unbound_type_constructor_parent_module.res`
+3. `Typetexp.Unbound_type_constructor_2`
+   - covered by
+     `tests/error_output_parity/compiler/fixtures/unbound_type_constructor_incomplete.res`
+4. `Typetexp.Type_arity_mismatch`
+   - covered by `tests/error_output_parity/compiler/fixtures/type_arity_mismatch.res`
+     and the non-generic zero-arity branch in
+     `type_arity_mismatch_nongeneric.res`
+5. `Typetexp.Type_mismatch`
+   - covered by `tests/error_output_parity/compiler/fixtures/typetexp_type_mismatch.res`
+6. `Typetexp.Alias_type_mismatch`
+   - covered by
+     `tests/error_output_parity/compiler/fixtures/typetexp_alias_type_mismatch.res`
+7. `Typetexp.Present_has_conjunction`
+   - covered by
+     `tests/error_output_parity/compiler/fixtures/present_variant_has_conjunction.res`
+8. `Typetexp.Present_has_no_type`
+   - covered by
+     `tests/error_output_parity/compiler/fixtures/present_variant_has_no_type.res`
+9. `Typetexp.Constructor_mismatch`
+   - covered by
+     `tests/error_output_parity/compiler/fixtures/polyvariant_constructor_mismatch.res`
+10. `Typetexp.Not_a_variant`
+    - covered by `tests/error_output_parity/compiler/fixtures/typetexp_not_a_variant.res`
+      and the type-variable hint branch in
+      `typetexp_not_a_variant_type_var_hint.res`
+11. `Typetexp.Variant_tags`
+    - covered by `tests/error_output_parity/compiler/fixtures/variant_tags_collision.res`
+12. `Typetexp.Invalid_variable_name`
+    - covered by
+      `tests/error_output_parity/compiler/fixtures/invalid_type_variable_name.res`
+      and the type-parameter path in `invalid_type_parameter_name.res`
+13. `Typetexp.Cannot_quantify`
+    - covered by `cannot_quantify_alias.res`, `cannot_quantify_already_bound.res`,
+      and `cannot_quantify_escapes_scope.res`
+14. `Typetexp.Multiple_constraints_on_type`
+    - covered by
+      `tests/error_output_parity/compiler/fixtures/multiple_constraints_on_package_type.res`
+15. `Typetexp.Method_mismatch`
+    - covered by `tests/error_output_parity/compiler/fixtures/typetexp_method_mismatch.res`
+16. `Typetexp.Unbound_value`
+    - covered by `unbound_value.res`, with spellcheck/module-name suggestion
+      branches covered by `unbound_value_spellcheck.res`,
+      `unbound_value_module_suggestion.res`, and
+      `unbound_value_spellcheck_and_module_suggestion.res`
+17. `Typetexp.Unbound_constructor`
+    - covered by `unbound_constructor.res`, `unbound_constructor_qualified.res`,
+      `unbound_constructor_spellcheck.res`, and the payload-location branch in
+      `unbound_constructor_payload_loc.res`
+18. `Typetexp.Unbound_label`
+    - covered by `unbound_label.res`, plus receiver-specific branches in
+      `unbound_label_option_receiver.res`, `unbound_label_array_receiver.res`,
+      and `unbound_label_non_record_receiver.res`
+19. `Typetexp.Unbound_module`
+    - covered by `unbound_module.res`, `unbound_module_spellcheck.res`,
+      `unbound_module_str.res`, `module_alias_unbound_module.res`,
+      `module_type_of_unbound_module.res`, `module_type_alias_unbound_module.res`,
+      `with_module_unbound_module.res`, and
+      `with_module_equation_unbound_module.res`
+20. `Typetexp.Unbound_modtype`
+    - covered by `unbound_modtype.res`, `unbound_modtype_qualified.res`,
+      `unbound_modtype_spellcheck.res`, and `signature_unbound_modtype.res`
+21. `Typetexp.Ill_typed_functor_application`
+    - covered by
+      `tests/error_output_parity/compiler/fixtures/ill_typed_functor_application_type_path.res`
+22. `Typetexp.Illegal_reference_to_recursive_module`
+    - covered by
+      `tests/error_output_parity/compiler/fixtures/illegal_reference_to_recursive_module.res`
+23. `Typetexp.Access_functor_as_structure`
+    - covered by
+      `tests/error_output_parity/compiler/fixtures/access_functor_as_structure.res`
+24. `Typetexp.Apply_structure_as_functor`
+    - covered by
+      `tests/error_output_parity/compiler/fixtures/apply_structure_as_functor_type_path.res`
+25. `Typetexp.Cannot_scrape_alias`
+    - covered by
+      `tests/error_output_parity/compiler/cases/cannot_scrape_alias_type_path.res`
+    - this comes from `typetexp.ml:68-103`, where narrowed unbound identifier
+      reporting checks a module prefix and finds an alias whose target `.cmi` is
+      missing; the paired `Typemod.Cannot_scrape_alias` case is
+      `cannot_scrape_alias_module_type_with.res`
+    - focused parity check:
+      `TIMEOUT_SECONDS=10 ./scripts/test_error_output_parity.sh --compiler-only cannot_scrape_alias`
+      passes 2/2
+26. `Typetexp.Opened_object`
+    - covered by `tests/error_output_parity/compiler/fixtures/typetexp_opened_object.res`
+27. `Typetexp.Not_an_object`
+    - covered by `tests/error_output_parity/compiler/fixtures/typetexp_not_an_object.res`
+
+The `Cannot_scrape_alias` coverage uses `tests/error_output_parity/compiler/cases.tsv`
+because the fixture requires an intentionally missing compiled module alias
+environment under `tests/error_output_parity/compiler/cases/missing_module_cmis`.
+
+### 5.2 Module Inclusion Type Mismatch Diagnostics
 
 `compiler/ml/includecore.ml:159-177` defines the type-declaration mismatch
 details printed through `Typemod.Not_included` and related signature-mismatch
@@ -333,7 +442,7 @@ reachability notes:
   ReScript source fixture is currently known that prints
   `Module <path> cannot be aliased`.
 
-### 5.2 Compiled Interface Format Diagnostics
+### 5.3 Compiled Interface Format Diagnostics
 
 `compiler/ml/cmi_format.ml:18-21` defines compiled-interface reader errors.
 These are covered through direct `.cmi` cases in
@@ -351,7 +460,7 @@ It is covered by `tests/error_output_parity/compiler/cases/gentype_stale_cmti.re
 where `-bs-gentype` selects a stale `.cmti` containing only CMI data and both
 compilers print `Fatal error: exception Cmt_format.Error(_)`.
 
-### 5.3 Frontend Direct `raise_errorf` Diagnostics
+### 5.4 Frontend Direct `raise_errorf` Diagnostics
 
 Several frontend rewrites raise plain `Location.raise_errorf` diagnostics
 instead of typed `type error` constructors. Coverage includes:
@@ -410,7 +519,7 @@ instead of typed `type error` constructors. Coverage includes:
    - a config-record field with an explicit payload is covered by
      `tests/error_output_parity/compiler/fixtures/bs_return_record_value_payload.res`
 
-### 5.4 Recursive Value Diagnostics
+### 5.5 Recursive Value Diagnostics
 
 `compiler/ml/rec_check.ml:453-475` defines the backend recursive-value
 right-hand-side check:
