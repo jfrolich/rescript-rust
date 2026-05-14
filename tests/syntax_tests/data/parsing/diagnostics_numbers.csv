@@ -106,3 +106,4 @@ error,103,tests/syntax_tests/data/parsing/errors/expressions/jsxClosingEmptyName
 error,104,tests/syntax_tests/data/parsing/errors/scanner/invalidEscapeSequence.res,tests/syntax_tests/data/parsing/errors/scanner/expected/invalidEscapeSequence.res.txt
 error,105,tests/syntax_tests/data/parsing/errors/scanner/unclosedExoticIdentifier.res,tests/syntax_tests/data/parsing/errors/scanner/expected/unclosedExoticIdentifier.res.txt
 error,106,tests/syntax_tests/data/parsing/errors/expressions/recordSpreadMissingComma.res,tests/syntax_tests/data/parsing/errors/expressions/expected/recordSpreadMissingComma.res.txt
+error,107,tests/syntax_tests/data/parsing/errors/expressions/forAwaitIn.res,tests/syntax_tests/data/parsing/errors/expressions/expected/forAwaitIn.res.txt
