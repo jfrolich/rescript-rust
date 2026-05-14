@@ -1952,6 +1952,18 @@ with a reason after checking raise sites.
     The shared formatter branches are covered by the `builtin_extension_*`
     fixtures; normal `bsc` compilation reaches those through the frontend and
     typechecker paths rather than through `Depend`.
+  - `compiler/bsc/rescript_compiler_main.ml` wires the
+    `Ast_config.add_structure/add_signature "flags"` handler. Its
+    `string array expected`, `string literal expected`, and invalid-flag warning
+    branches are covered through the `@@config({flags: ...})` fixtures listed
+    under `compiler/frontend/ast_config.ml`.
+  - `compiler/ext/warnings.ml` and `compiler/ext/warnings.mli` define warning
+    constructors and shared warning text. They do not independently raise
+    diagnostics; coverage is tracked at the warning emitters such as `Env`,
+    `Parmatch`, `Typecore`, `Lam_compile_primitive`, and frontend PPX modules.
+  - `compiler/syntax/src/jsx_common.ml` only wraps JSX helper diagnostics used
+    by `jsx_v4.ml`; the observable messages are covered under the
+    `compiler/syntax/src/jsx_v4.ml` fixtures.
   - `compiler/ml/ast_helper.ml` raises `Syntaxerr.Variable_in_scope` from
     `Typ.varify_constructors`; covered by `variable_in_scope.res`.
     `compiler/ml/ast_helper0.ml` has the same v0 AST compatibility helper for
@@ -1974,7 +1986,8 @@ with a reason after checking raise sites.
     diagnostic types or printers:
     `compiler/frontend/ast_utf8_string.mli`,
     `compiler/frontend/ast_utf8_string_interp.mli`,
-    `compiler/frontend/bs_syntaxerr.mli`, `compiler/ml/cmi_format.mli`,
+    `compiler/frontend/bs_syntaxerr.mli`,
+    `compiler/depends/bs_exception.mli`, `compiler/ml/cmi_format.mli`,
     `compiler/ml/cmt_format.mli`, `compiler/ml/env.mli`,
     `compiler/ml/includemod.mli`, `compiler/ml/location.mli`,
     `compiler/ml/syntaxerr.mli`, `compiler/ml/translmod.mli`,
