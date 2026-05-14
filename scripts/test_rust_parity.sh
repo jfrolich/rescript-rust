@@ -12,7 +12,7 @@ PROJECT_ROOT=$(cd "$scriptDir/.."; pwd -P)
 # Directories
 DUNE_BIN_DIR="$PROJECT_ROOT/_build/install/default/bin"
 RUST_DIR="$PROJECT_ROOT/compiler-rust"
-RUST_TARGET="${RUST_TARGET:-release}"
+RUST_TARGET="${RUST_TARGET:-debug}"
 RUST_BSC="$RUST_DIR/target/$RUST_TARGET/bsc"
 RUST_PARSER="$RUST_DIR/target/$RUST_TARGET/res_parser_rust"
 OCAML_BSC="$PROJECT_ROOT/packages/@rescript/$(./scripts/platform.sh)/bin/bsc.exe"
@@ -120,13 +120,15 @@ check_prerequisites() {
 
     if [[ ! -x "$RUST_BSC" ]]; then
         echo -e "${RED}Error: Rust bsc not found at $RUST_BSC${RESET}"
-        echo "Run 'cargo build --manifest-path compiler-rust/Cargo.toml --release' first."
+        echo "Run 'cargo build --manifest-path compiler-rust/Cargo.toml' first."
+        echo "This parity script expects debug artifacts for iteration."
         missing=true
     fi
 
     if [[ ! -x "$RUST_PARSER" ]]; then
         echo -e "${RED}Error: Rust parser not found at $RUST_PARSER${RESET}"
-        echo "Run 'cargo build --manifest-path compiler-rust/Cargo.toml --release' first."
+        echo "Run 'cargo build --manifest-path compiler-rust/Cargo.toml' first."
+        echo "This parity script expects debug artifacts for iteration."
         missing=true
     fi
 
@@ -844,6 +846,7 @@ echo ""
 echo "OCaml bsc:    $OCAML_BSC"
 echo "Rust bsc:     $RUST_BSC"
 echo "Rust parser:  $RUST_PARSER"
+echo "Rust target:  $RUST_TARGET"
 echo "OCaml parser: $OCAML_PARSER"
 echo "Timeout:      ${TIMEOUT_SECONDS}s per file"
 echo ""

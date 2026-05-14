@@ -27,9 +27,9 @@ use crate::parser::ast::{
     ExpressionRecordField, ExtensionConstructor, ExtensionConstructorKind, IncludeDeclaration,
     JsxContainerElement, JsxElement, JsxFragment, JsxProp, JsxUnaryElement, LabelDeclaration,
     ModuleExpr, ModuleExprDesc, ModuleType, ModuleTypeDesc, ObjectField, Pattern, PatternDesc,
-    PatternRecordField, Payload, PexpApply, PexpFun, PrivateFlag, RecFlag, RowField,
-    SignatureItem, SignatureItemDesc, StructureItem, StructureItemDesc, TypeArg, TypeDeclaration,
-    TypeExtension, TypeKind, ValueBinding, ValueDescription, WithConstraint,
+    PatternRecordField, Payload, PexpApply, PexpFun, PrivateFlag, RecFlag, RowField, SignatureItem,
+    SignatureItemDesc, StructureItem, StructureItemDesc, TypeArg, TypeDeclaration, TypeExtension,
+    TypeKind, ValueBinding, ValueDescription, WithConstraint,
 };
 use crate::parser::longident::Longident;
 
@@ -64,6 +64,12 @@ pub const AWAIT_NOT_ASYNC_CONTEXT_ERROR: &str = "Await on expression not in an a
 pub struct PpxWarning {
     pub loc: LocIdx,
     pub warning: Warning,
+}
+
+#[derive(Debug, Clone)]
+pub struct WarningAttributeSpec {
+    pub spec: String,
+    pub as_error: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -463,12 +469,28 @@ fn classify_recovered_arrow_function_arity(code: &str) -> Option<usize> {
     }
 }
 
+fn js_expression_parse_fails(s: &str) -> bool {
+    use oxc_allocator::Allocator;
+    use oxc_parser::Parser;
+    use oxc_span::SourceType;
+
+    let allocator = Allocator::default();
+    let source_type = SourceType::default();
+    Parser::new(&allocator, s, source_type)
+        .parse_expression()
+        .is_err()
+}
+
 /// Detect if a JavaScript string contains a function expression.
-/// This mirrors `Ast_payload.raw_as_string_exp_exn`, which classifies the Flow
-/// AST even when parsing produced warnings.
+/// This mirrors `Ast_payload.raw_as_string_exp_exn` at
+/// compiler/ml/ast_payload.ml:140-158: classify the parsed Flow expression,
+/// then set `is_function` only when Classify_function.classify_exp sees a
+/// function root at compiler/ml/classify_function.ml:45-66. The keyword
+/// fallback is only for Flow/OXC recovery cases like `function`, not valid call
+/// expressions such as `function () {} ()`.
 fn is_js_function(s: &str) -> bool {
     classify_js_function_arity(s).is_some()
-        || starts_with_keyword(s, "function")
+        || (js_expression_parse_fails(s) && starts_with_keyword(s, "function"))
         || classify_recovered_arrow_function_arity(s).is_some()
 }
 
@@ -534,11 +556,7 @@ fn raw_js_warning_loc(
     arena.push_loc(start_idx, end_idx, loc_ghost)
 }
 
-fn flow_like_raw_js_parse_message(
-    code: &str,
-    oxc_message: &str,
-    start_offset: usize,
-) -> String {
+fn flow_like_raw_js_parse_message(code: &str, oxc_message: &str, start_offset: usize) -> String {
     if oxc_message == "Unexpected token" && start_offset >= code.trim_end().len() {
         "Unexpected end of input".to_string()
     } else {
@@ -574,9 +592,7 @@ fn js_identifier_end(code: &str, start: usize) -> usize {
     end
 }
 
-fn flow_like_function_expression_parse_warning(
-    code: &str,
-) -> Option<(String, usize, usize)> {
+fn flow_like_function_expression_parse_warning(code: &str) -> Option<(String, usize, usize)> {
     let trimmed = code.trim_start();
     let leading = code.len() - trimmed.len();
     let after_function = trimmed.strip_prefix("function")?;
@@ -605,7 +621,9 @@ fn flow_like_function_expression_parse_warning(
             token_offset,
         )),
         Some('(') => {
-            let close_offset = code[token_offset..].find(')').map(|idx| token_offset + idx)?;
+            let close_offset = code[token_offset..]
+                .find(')')
+                .map(|idx| token_offset + idx)?;
             let after_close = code.get(close_offset + 1..)?;
             if after_close.trim().is_empty() {
                 Some((
@@ -817,7 +835,10 @@ fn raw_js_expression_parse_warning(
         Err(errors) => errors.into_iter(),
     };
     let first_error = errors.next()?;
-    let first_label = first_error.labels.as_ref().and_then(|labels| labels.first());
+    let first_label = first_error
+        .labels
+        .as_ref()
+        .and_then(|labels| labels.first());
     let start_offset = first_label.map_or_else(|| code.len(), |label| label.offset());
     let end_offset = first_label.map_or(start_offset, |label| label.offset() + label.len());
     let (message, start_offset, end_offset) = flow_like_raw_js_expression_parse_warning(
@@ -851,7 +872,10 @@ fn raw_js_program_parse_warning(
     let allocator = Allocator::default();
     let parser_return = Parser::new(&allocator, code, SourceType::default()).parse();
     let first_error = parser_return.errors.into_iter().next()?;
-    let first_label = first_error.labels.as_ref().and_then(|labels| labels.first());
+    let first_label = first_error
+        .labels
+        .as_ref()
+        .and_then(|labels| labels.first());
     let start_offset = first_label.map_or_else(|| code.len(), |label| label.offset());
     let end_offset = first_label.map_or(start_offset, |label| label.offset() + label.len());
     let (message, start_offset, end_offset) = flow_like_raw_js_program_parse_warning(
@@ -1096,6 +1120,24 @@ fn collect_builtin_warning_attribute(
     }
 }
 
+fn builtin_warning_attribute_spec(
+    attr: &Attribute,
+    arena: &ParseArena,
+) -> Option<WarningAttributeSpec> {
+    let (name, payload) = attr;
+    let attr_name = arena.get_string(name.txt);
+    match attr_name {
+        "warning" | "ocaml.warning" | "warnerror" | "ocaml.warnerror" => {
+            let spec = payload_single_string_literal(payload, arena)?;
+            Some(WarningAttributeSpec {
+                spec: spec.to_string(),
+                as_error: matches!(attr_name, "warnerror" | "ocaml.warnerror"),
+            })
+        }
+        _ => None,
+    }
+}
+
 /// Mirrors `Bs_ast_invariant.iter_warnings_on_stru`: only leading floating
 /// structure attributes are checked before frontend rewriting.
 pub fn collect_leading_builtin_warning_attributes(
@@ -1114,7 +1156,29 @@ pub fn collect_leading_builtin_warning_attributes(
     warnings
 }
 
-/// Mirrors `Bs_ast_invariant.iter_warnings_on_sigi` for interface files.
+/// Mirrors `Bs_ast_invariant.iter_warnings_on_stru` at
+/// compiler/frontend/bs_ast_invariant.ml:151-158: leading `@@warning` and
+/// `@@warnerror` attributes update the warning state before frontend rewriting.
+pub fn collect_leading_builtin_warning_attribute_specs(
+    structure: &[StructureItem],
+    arena: &ParseArena,
+) -> Vec<WarningAttributeSpec> {
+    let mut specs = Vec::new();
+    for item in structure {
+        match &*item.pstr_desc {
+            StructureItemDesc::Pstr_attribute(attr) => {
+                if let Some(spec) = builtin_warning_attribute_spec(attr, arena) {
+                    specs.push(spec);
+                }
+            }
+            _ => break,
+        }
+    }
+    specs
+}
+
+/// Mirrors `Bs_ast_invariant.iter_warnings_on_sigi` at
+/// compiler/frontend/bs_ast_invariant.ml:160-167 for interface files.
 pub fn collect_leading_builtin_warning_signature_attributes(
     signature: &[SignatureItem],
     arena: &ParseArena,
@@ -1129,6 +1193,25 @@ pub fn collect_leading_builtin_warning_signature_attributes(
         }
     }
     warnings
+}
+
+/// Mirrors `Bs_ast_invariant.iter_warnings_on_sigi` for interface files.
+pub fn collect_leading_builtin_warning_signature_attribute_specs(
+    signature: &[SignatureItem],
+    arena: &ParseArena,
+) -> Vec<WarningAttributeSpec> {
+    let mut specs = Vec::new();
+    for item in signature {
+        match &*item.psig_desc {
+            SignatureItemDesc::Psig_attribute(attr) => {
+                if let Some(spec) = builtin_warning_attribute_spec(attr, arena) {
+                    specs.push(spec);
+                }
+            }
+            _ => break,
+        }
+    }
+    specs
 }
 
 fn attr_named(attrs: &[Attribute], name: &str, arena: &ParseArena) -> bool {
@@ -1383,9 +1466,7 @@ fn collect_string_redundant_warning_from_type(
     arena: &ParseArena,
     warnings: &mut Vec<PpxWarning>,
 ) {
-    if check_type_ffi_attrs(typ, arena) != Some("string")
-        || type_ffi_attr_count(typ, arena) != 1
-    {
+    if check_type_ffi_attrs(typ, arena) != Some("string") || type_ffi_attr_count(typ, arena) != 1 {
         return;
     }
 
@@ -1393,8 +1474,7 @@ fn collect_string_redundant_warning_from_type(
         return;
     };
     let (row_fields, closed, labels) = &**variant_inner;
-    if !matches!(closed, current::ClosedFlag::Closed) || labels.is_some() || row_fields.is_empty()
-    {
+    if !matches!(closed, current::ClosedFlag::Closed) || labels.is_some() || row_fields.is_empty() {
         return;
     }
 
@@ -2030,6 +2110,15 @@ fn validate_plain_obj_arg_type_errors(
                 if matches!(&*typ.ptyp_desc, CoreTypeDesc::Ptyp_any)
                     && get_as_string_attr(&arg.attrs, arena).is_none()
                     && get_as_int_attr(&arg.attrs, arena).is_none()
+                    // OCaml compiler/syntax/src/res_core.ml:5018-5026 keeps
+                    // labelled `@as(json`...`) _` external arguments as
+                    // arity-changing constants. The `@as` payload was already
+                    // validated by `validate_external_arg_type_errors`, so only
+                    // reject a truly bare `_` here.
+                    && !typ
+                        .ptyp_attributes
+                        .iter()
+                        .any(|(attr_name, _)| arena.get_string(attr_name.txt) == "as")
                 {
                     return Err(PpxError::at_loc(
                         typ.ptyp_loc,
@@ -2103,31 +2192,25 @@ fn validate_external_attribute_payload_errors(
                 if validate_module_import_attributes_payload(payload, arena)? {
                     continue;
                 }
-                let strings = match payload_string_literals_or_error_loc(
-                    payload,
-                    arena,
-                    attr_name.loc,
-                ) {
-                    Ok(strings) => strings,
-                    Err(loc) => {
-                        return Err(PpxError::at_loc(loc, "expect string tuple list"));
-                    }
-                };
+                let strings =
+                    match payload_string_literals_or_error_loc(payload, arena, attr_name.loc) {
+                        Ok(strings) => strings,
+                        Err(loc) => {
+                            return Err(PpxError::at_loc(loc, "expect string tuple list"));
+                        }
+                    };
                 if strings.len() > 2 {
                     return Err(PpxError::at_loc(attr_name.loc, "Illegal attributes"));
                 }
             }
             "scope" => {
-                let scopes = match payload_string_literals_or_error_loc(
-                    payload,
-                    arena,
-                    attr_name.loc,
-                ) {
-                    Ok(scopes) => scopes,
-                    Err(loc) => {
-                        return Err(PpxError::at_loc(loc, "expect string tuple list"));
-                    }
-                };
+                let scopes =
+                    match payload_string_literals_or_error_loc(payload, arena, attr_name.loc) {
+                        Ok(scopes) => scopes,
+                        Err(loc) => {
+                            return Err(PpxError::at_loc(loc, "expect string tuple list"));
+                        }
+                    };
                 if scopes.is_empty() {
                     return Err(PpxError::at_loc(attr_name.loc, "Illegal attributes"));
                 }
@@ -2150,13 +2233,10 @@ fn validate_external_attribute_payload_errors(
             }
             "return" => {
                 validate_return_wrapper_config_shape(payload, arena)?;
-                let config_warning =
-                    return_wrapper_config_warning(payload, arena, attr_name.loc);
+                let config_warning = return_wrapper_config_warning(payload, arena, attr_name.loc);
                 let Some(wrapper) = get_return_wrapper_config(payload, arena) else {
-                    let mut error = PpxError::at_loc(
-                        attr_name.loc,
-                        "Not supported return directive",
-                    );
+                    let mut error =
+                        PpxError::at_loc(attr_name.loc, "Not supported return directive");
                     if let Some((loc, message)) = config_warning {
                         error = error.with_warning(
                             loc,
@@ -2280,10 +2360,7 @@ fn validate_external_arg_type_errors(args: &[TypeArg], arena: &mut ParseArena) -
     Ok(())
 }
 
-fn validate_external_core_type_arg_errors(
-    typ: &CoreType,
-    arena: &mut ParseArena,
-) -> PpxResult<()> {
+fn validate_external_core_type_arg_errors(typ: &CoreType, arena: &mut ParseArena) -> PpxResult<()> {
     if matches!(&*typ.ptyp_desc, CoreTypeDesc::Ptyp_any) {
         validate_string_or_int_as_attrs(&typ.ptyp_attributes, arena)?;
     }
@@ -2631,8 +2708,7 @@ fn payload_string_literals(payload: &Payload, arena: &ParseArena) -> Option<Vec<
                 ExpressionDesc::Pexp_tuple(exprs) => {
                     let mut result = Vec::with_capacity(exprs.len());
                     for expr in exprs.iter() {
-                        let ExpressionDesc::Pexp_constant(c) =
-                            &*arena.get_expr(*expr).pexp_desc
+                        let ExpressionDesc::Pexp_constant(c) = &*arena.get_expr(*expr).pexp_desc
                         else {
                             return None;
                         };
@@ -2670,8 +2746,7 @@ fn payload_string_literals_or_error_loc(
                 ExpressionDesc::Pexp_tuple(exprs) => {
                     let mut result = Vec::with_capacity(exprs.len());
                     for expr in exprs.iter() {
-                        let ExpressionDesc::Pexp_constant(c) =
-                            &*arena.get_expr(*expr).pexp_desc
+                        let ExpressionDesc::Pexp_constant(c) = &*arena.get_expr(*expr).pexp_desc
                         else {
                             return Err(items[0].pstr_loc);
                         };
@@ -2799,7 +2874,10 @@ fn validate_string_or_int_as_attrs(attrs: &[Attribute], arena: &mut ParseArena) 
             ));
         };
         if matches!(delim, Delim::DNoQuotes)
-            && !matches!(classify_js_exp(&payload), JsExpClassification::JsLiteral { .. })
+            && !matches!(
+                classify_js_exp(&payload),
+                JsExpClassification::JsLiteral { .. }
+            )
         {
             let err = PpxError::at_loc(loc, "an object literal expected");
             return if let Some(warning) =
@@ -2822,12 +2900,17 @@ fn validate_string_or_int_as_attrs(attrs: &[Attribute], arena: &mut ParseArena) 
 
 fn validate_bs_string_type(typ: &CoreType, arena: &ParseArena) -> PpxResult<()> {
     let CoreTypeDesc::Ptyp_variant(variant_inner) = &*typ.ptyp_desc else {
-        return Err(PpxError::at_loc(typ.ptyp_loc, "Not a valid type for %@string"));
+        return Err(PpxError::at_loc(
+            typ.ptyp_loc,
+            "Not a valid type for %@string",
+        ));
     };
     let (row_fields, closed, labels) = &**variant_inner;
-    if !matches!(closed, current::ClosedFlag::Closed) || labels.is_some() || row_fields.is_empty()
-    {
-        return Err(PpxError::at_loc(typ.ptyp_loc, "Not a valid type for %@string"));
+    if !matches!(closed, current::ClosedFlag::Closed) || labels.is_some() || row_fields.is_empty() {
+        return Err(PpxError::at_loc(
+            typ.ptyp_loc,
+            "Not a valid type for %@string",
+        ));
     }
 
     enum StringRows {
@@ -2852,7 +2935,10 @@ fn validate_bs_string_type(typ: &CoreType, arena: &ParseArena) -> PpxResult<()> 
                 rows = StringRows::NonNull;
             }
             _ => {
-                return Err(PpxError::at_loc(typ.ptyp_loc, "Not a valid type for %@string"));
+                return Err(PpxError::at_loc(
+                    typ.ptyp_loc,
+                    "Not a valid type for %@string",
+                ));
             }
         }
     }
@@ -2865,8 +2951,7 @@ fn validate_bs_int_type(typ: &CoreType, arena: &ParseArena) -> PpxResult<()> {
         return Err(PpxError::at_loc(typ.ptyp_loc, "Not a valid type for %@int"));
     };
     let (row_fields, closed, labels) = &**variant_inner;
-    if !matches!(closed, current::ClosedFlag::Closed) || labels.is_some() || row_fields.is_empty()
-    {
+    if !matches!(closed, current::ClosedFlag::Closed) || labels.is_some() || row_fields.is_empty() {
         return Err(PpxError::at_loc(typ.ptyp_loc, "Not a valid type for %@int"));
     }
 
@@ -3097,7 +3182,8 @@ fn is_user_option_type(typ: &CoreType, arena: &ParseArena) -> bool {
                     let Longident::Lident(parent_name) = parent.as_ref() else {
                         return false;
                     };
-                    arena.get_string(*parent_name) == "*predef*" && arena.get_string(*name) == "option"
+                    arena.get_string(*parent_name) == "*predef*"
+                        && arena.get_string(*name) == "option"
                 }
                 _ => false,
             }
@@ -3556,9 +3642,9 @@ fn get_opt_arg_type_unchecked(_nolabel: bool, typ: &CoreType, arena: &ParseArena
                 let (row_fields, closed_flag, labels_opt) = &**variant_inner;
                 if matches!(closed_flag, current::ClosedFlag::Closed) && labels_opt.is_none() {
                     let (has_as, descr) = map_row_fields_into_strings(row_fields, arena);
-                    let has_payload = row_fields.iter().any(|rf| {
-                        matches!(rf, RowField::Rtag(_, _, false, types) if !types.is_empty())
-                    });
+                    let has_payload = row_fields.iter().any(
+                        |rf| matches!(rf, RowField::Rtag(_, _, false, types) if !types.is_empty()),
+                    );
 
                     if has_payload {
                         return Attr::PolyVar {
@@ -9318,7 +9404,10 @@ fn record_field_action_config(
     arena: &ParseArena,
 ) -> PpxResult<DeriveActionConfig> {
     let Longident::Lident(name_idx) = arena.get_longident(field.lid.txt) else {
-        return Err(PpxError::at_loc(field.lid.loc, "Qualified label is not allowed"));
+        return Err(PpxError::at_loc(
+            field.lid.loc,
+            "Qualified label is not allowed",
+        ));
     };
     let name = arena.get_string(*name_idx).to_string();
     let config = if expr_lident_name(field.expr, arena).as_deref() == Some(name.as_str()) {
@@ -9484,11 +9573,7 @@ fn validate_deriving_attr_payload(payload: &Payload, arena: &ParseArena) -> PpxR
         }
     }
 
-    if actions
-        .iter()
-        .any(|action| action.name == "abstract")
-        && actions.len() > 1
-    {
+    if actions.iter().any(|action| action.name == "abstract") && actions.len() > 1 {
         if let Some(action) = actions.iter().find(|action| action.name == "abstract") {
             return Err(PpxError::at_loc(
                 action.name_loc,
@@ -12206,11 +12291,7 @@ fn validate_type_declaration_builtin_type_redefinition_error(
     Ok(())
 }
 
-fn core_type_get_uncurry_arity_aux(
-    typ_idx: CoreTypeIdx,
-    acc: i32,
-    arena: &ParseArena,
-) -> i32 {
+fn core_type_get_uncurry_arity_aux(typ_idx: CoreTypeIdx, acc: i32, arena: &ParseArena) -> i32 {
     let typ = arena.get_core_type(typ_idx);
     match &*typ.ptyp_desc {
         CoreTypeDesc::Ptyp_arrow(inner) => {
@@ -13256,8 +13337,7 @@ fn validate_module_type_method_attribute_errors(
                     | WithConstraint::Pwith_typesubst(_, tdcl) => {
                         validate_type_declaration_method_attribute_errors(tdcl, arena)?;
                     }
-                    WithConstraint::Pwith_module(_, _)
-                    | WithConstraint::Pwith_modsubst(_, _) => {}
+                    WithConstraint::Pwith_module(_, _) | WithConstraint::Pwith_modsubst(_, _) => {}
                 }
             }
             Ok(())
@@ -13347,10 +13427,7 @@ fn validate_expression_idx_method_attribute_errors(
     validate_expression_method_attribute_errors(&expr, arena)
 }
 
-fn validate_cases_method_attribute_errors(
-    cases: &[Case],
-    arena: &mut ParseArena,
-) -> PpxResult<()> {
+fn validate_cases_method_attribute_errors(cases: &[Case], arena: &mut ParseArena) -> PpxResult<()> {
     for case in cases {
         validate_pattern_idx_method_attribute_errors(case.pc_lhs, arena)?;
         if let Some(guard) = case.pc_guard {
@@ -14002,10 +14079,7 @@ fn validate_jsx_element_js_string_errors(
     Ok(())
 }
 
-fn validate_jsx_props_js_string_errors(
-    props: &[JsxProp],
-    arena: &mut ParseArena,
-) -> PpxResult<()> {
+fn validate_jsx_props_js_string_errors(props: &[JsxProp], arena: &mut ParseArena) -> PpxResult<()> {
     for prop in props {
         match prop {
             JsxProp::Value { value, .. } => {
@@ -14272,8 +14346,7 @@ fn validate_module_type_js_string_errors(
                     WithConstraint::Pwith_typesubst(_, tdcl) => {
                         validate_type_declaration_js_string_errors(tdcl, arena)?;
                     }
-                    WithConstraint::Pwith_module(_, _)
-                    | WithConstraint::Pwith_modsubst(_, _) => {}
+                    WithConstraint::Pwith_module(_, _) | WithConstraint::Pwith_modsubst(_, _) => {}
                 }
             }
             Ok(())
@@ -15226,7 +15299,13 @@ fn validate_method_callback_this_errors(
 fn validate_expression_this_errors(expr: &Expression, arena: &mut ParseArena) -> PpxResult<()> {
     match &*expr.pexp_desc {
         ExpressionDesc::Pexp_fun(inner) if has_this_attr(&expr.pexp_attributes, arena) => {
-            validate_method_callback_this_errors(expr, &inner.arg_label, inner.lhs, inner.rhs, arena)
+            validate_method_callback_this_errors(
+                expr,
+                &inner.arg_label,
+                inner.lhs,
+                inner.rhs,
+                arena,
+            )
         }
         ExpressionDesc::Pexp_fun(inner) => {
             if let Some(default) = inner.default {
@@ -16754,17 +16833,15 @@ fn expand_extensions_expr(expr: &Expression, arena: &mut ParseArena) -> Expressi
                     let raw_prim = prim_str(arena, "#raw_expr");
                     handle_raw(expr, payload, arena, raw_prim, ext_name.loc)
                 }
-                "re" => {
-                    match payload_single_string_literal_with_loc(payload, arena) {
-                        Some((code, _loc))
-                            if is_js_regex_literal(code) || is_js_regex_like_literal(code) =>
-                        {
-                            handle_re(expr, payload, arena, ext_name.loc)
-                        }
-                        Some(_) => expr.clone(),
-                        None => handle_re(expr, payload, arena, ext_name.loc),
+                "re" => match payload_single_string_literal_with_loc(payload, arena) {
+                    Some((code, _loc))
+                        if is_js_regex_literal(code) || is_js_regex_like_literal(code) =>
+                    {
+                        handle_re(expr, payload, arena, ext_name.loc)
                     }
-                }
+                    Some(_) => expr.clone(),
+                    None => handle_re(expr, payload, arena, ext_name.loc),
+                },
                 _ => expr.clone(),
             }
         }

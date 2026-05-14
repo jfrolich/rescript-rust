@@ -589,6 +589,12 @@ pub struct PersistentEnv {
     cache: Arc<Mutex<HashMap<String, Option<Arc<PersStruct>>>>>,
     /// Load path: list of directories to search for .cmi files
     load_path: Arc<Vec<PathBuf>>,
+    /// Display spelling for each load-path entry.
+    /// OCaml stores `ps.ps_filename` through `Consistbl.check` at
+    /// compiler/ml/env.ml:630-638 and prints it at compiler/ml/env.ml:2110-2119.
+    /// Keep lookup paths normalized while preserving the load-path spelling
+    /// that should appear in diagnostics.
+    load_path_display: Arc<Vec<PathBuf>>,
     /// Alias prefix rewrites: flattened_name -> qualified_path.
     /// Populated when loading a CMI that has MtyAlias submodules
     /// (e.g., Stdlib.cmi has module JSON = Stdlib_JSON, so we record
@@ -668,8 +674,13 @@ pub enum PersistentEnvError {
     },
 }
 
-fn should_register_lazy_raw_sig(name: &str) -> bool {
-    name.contains('_')
+fn should_register_lazy_raw_sig(name: &str, alias_rewrites: &AliasPrefixRewrites) -> bool {
+    // OCaml compiler/ml/env.ml:1516-1518 reaches alias backing signatures only
+    // through `scrape_alias` and the component tables built by env.ml:1530-1578.
+    // Rust keeps raw signatures for the same known backing heads; use the
+    // alias table populated by `collect_alias_rewrites` instead of guessing from
+    // flattened name spelling.
+    alias_rewrites.get(name).is_some()
 }
 
 impl PersistentEnv {
@@ -678,6 +689,7 @@ impl PersistentEnv {
         PersistentEnv {
             cache: Arc::new(Mutex::new(HashMap::new())),
             load_path: Arc::new(Vec::new()),
+            load_path_display: Arc::new(Vec::new()),
             alias_prefix_rewrites: AliasPrefixRewrites::new(),
             open_modules: Arc::new(Vec::new()),
             jsx_version: None,
@@ -705,6 +717,7 @@ impl PersistentEnv {
         PersistentEnv {
             cache: Arc::new(Mutex::new(HashMap::new())),
             load_path: Arc::new(Vec::new()),
+            load_path_display: Arc::new(Vec::new()),
             alias_prefix_rewrites: AliasPrefixRewrites::from_base(
                 registry.alias_rewrites.clone(),
                 registry.local_alias_rewrites.clone(),
@@ -899,7 +912,13 @@ impl PersistentEnv {
 
     /// Set the load path (list of directories to search for .cmi files).
     pub fn set_load_path(&mut self, paths: Vec<PathBuf>) {
+        self.set_load_path_with_display(paths.clone(), paths);
+    }
+
+    pub fn set_load_path_with_display(&mut self, paths: Vec<PathBuf>, display_paths: Vec<PathBuf>) {
+        debug_assert_eq!(paths.len(), display_paths.len());
         self.load_path = Arc::new(paths);
+        self.load_path_display = Arc::new(display_paths);
     }
 
     pub fn set_open_modules(&mut self, open_modules: Vec<String>) {
@@ -928,6 +947,8 @@ impl PersistentEnv {
     pub fn add_load_path(&mut self, path: PathBuf) {
         if !self.load_path.contains(&path) {
             Arc::make_mut(&mut self.load_path).push(path);
+            Arc::make_mut(&mut self.load_path_display)
+                .push(self.load_path.last().cloned().unwrap_or_default());
         }
     }
 
@@ -946,105 +967,6 @@ impl PersistentEnv {
 
     pub fn qualified_alias_path_for_flattened_head(&self, flat_head: &str) -> Option<Path> {
         self.alias_prefix_rewrites.get(flat_head)
-    }
-
-    pub fn path_head_is_namespace_alias(&self, path: &Path) -> bool {
-        fn signature_is_namespace_alias(head: &str, sig: &[SignatureItem]) -> bool {
-            let namespace_suffix = format!("-{head}");
-            !sig.is_empty()
-                && sig.iter().all(|item| {
-                    matches!(
-                        item,
-                        SignatureItem::SigModule(
-                            _,
-                            ModuleDeclaration {
-                                md_type:
-                                    ModuleType::MtyAlias(
-                                        _,
-                                        Path::Pident(target)
-                                    ),
-                                ..
-                            },
-                            _
-                        ) if target.is_persistent()
-                            && target.name().ends_with(&namespace_suffix)
-                    )
-                })
-        }
-
-        let head = path.head().name();
-        // OCaml compiler/ml/env.ml:711-746 goes through the persistent-table
-        // lookup path for loaded units; use the same case/override-aware cache
-        // helpers as `find_pers_struct` so in-process `.mlmap` namespace
-        // entries are visible here too. Namespace `.cmi` files also arrive as
-        // alias-only signatures whose components point at `Component-Head`
-        // backing units; compiler/ml/mtype.ml:41-49 leaves those value
-        // descriptions unchanged while strengthening the selected alias.
-        if let Some((_, Some(ps))) = self.cache_lookup_entry(head) {
-            return ps.ps_filename.ends_with(".mlmap")
-                || signature_is_namespace_alias(head, ps.ps_sig.as_ref());
-        }
-        self.portable_cache_entry(head).is_some_and(|(_, ps)| {
-            ps.ps_filename.ends_with(".mlmap") || signature_is_namespace_alias(head, &ps.ps_sig)
-        })
-    }
-
-    pub fn module_is_namespace_backing_head(&self, name: &str) -> bool {
-        let Some((module_name, namespace_name)) = name.rsplit_once('-') else {
-            return false;
-        };
-
-        fn signature_has_namespace_backing_alias(
-            namespace_name: &str,
-            module_name: &str,
-            backing_name: &str,
-            sig: &[SignatureItem],
-        ) -> bool {
-            let namespace_suffix = format!("-{namespace_name}");
-            sig.iter().any(|item| {
-                matches!(
-                    item,
-                    SignatureItem::SigModule(
-                        id,
-                        ModuleDeclaration {
-                            md_type: ModuleType::MtyAlias(_, Path::Pident(target)),
-                            ..
-                        },
-                        _
-                    ) if id.name() == module_name
-                        && target.is_persistent()
-                        && target.name() == backing_name
-                        && target.name().ends_with(&namespace_suffix)
-                )
-            })
-        }
-
-        // OCaml compiler/ml/env.ml:1513-1519 runs `scrape_alias` before
-        // building component tables, so a ReScript namespace module such as
-        // `NodeJs` can select the backing persistent unit `Fs-NodeJs` through
-        // its alias-only `.mlmap` signature without forcing unrelated modules.
-        if let Some((_, Some(ps))) = self.cache_lookup_entry(namespace_name) {
-            return (ps.ps_filename.ends_with(".mlmap")
-                || self.path_head_is_namespace_alias(&Path::pident(Ident::create_persistent(
-                    namespace_name,
-                ))))
-                && signature_has_namespace_backing_alias(
-                    namespace_name,
-                    module_name,
-                    name,
-                    ps.ps_sig.as_ref(),
-                );
-        }
-        self.portable_cache_entry(namespace_name)
-            .is_some_and(|(_, ps)| {
-                ps.ps_filename.ends_with(".mlmap")
-                    && signature_has_namespace_backing_alias(
-                        namespace_name,
-                        module_name,
-                        name,
-                        &ps.ps_sig,
-                    )
-            })
     }
 
     pub fn has_known_module_without_loading(&self, name: &str) -> bool {
@@ -1117,8 +1039,10 @@ impl PersistentEnv {
                 register_sig_types_recursive(&ps.ps_sig, &module_path, ctx, &self.load_path);
             }
             register_types_by_stamp_in_signature_recursive(&ps.ps_sig, ctx);
-            if should_register_lazy_raw_sig(name) && !ctx.has_raw_module_sig(name) {
-                ctx.register_raw_module_sig(name, ps.ps_sig.clone());
+            if should_register_lazy_raw_sig(&portable_key, &self.alias_prefix_rewrites)
+                && !ctx.has_raw_module_sig(&portable_key)
+            {
+                ctx.register_raw_module_sig(&portable_key, ps.ps_sig.clone());
             }
             self.prepared_cached_alias_rewrites
                 .insert(portable_key.clone());
@@ -1154,7 +1078,9 @@ impl PersistentEnv {
         if let Some(ps) = result.as_ref() {
             self.prepared_cached_alias_rewrites
                 .insert(load_name.clone());
-            if should_register_lazy_raw_sig(&load_name) && !ctx.has_raw_module_sig(&load_name) {
+            if should_register_lazy_raw_sig(&load_name, &self.alias_prefix_rewrites)
+                && !ctx.has_raw_module_sig(&load_name)
+            {
                 ctx.register_raw_module_sig(&load_name, ps.ps_sig.clone());
             }
         }
@@ -1190,7 +1116,9 @@ impl PersistentEnv {
             register_types_by_stamp_in_signature_recursive(&ps.ps_sig, ctx);
         }
 
-        if should_register_lazy_raw_sig(cache_key) && !ctx.has_raw_module_sig(cache_key) {
+        if should_register_lazy_raw_sig(cache_key, &self.alias_prefix_rewrites)
+            && !ctx.has_raw_module_sig(cache_key)
+        {
             ctx.register_raw_module_sig(cache_key, ps.ps_sig.clone());
         }
     }
@@ -1229,7 +1157,7 @@ impl PersistentEnv {
         );
         register_sig_types_recursive(&signature, &effective_module_path, ctx, &self.load_path);
         let signature = Arc::new(signature);
-        if should_register_lazy_raw_sig(name) {
+        if should_register_lazy_raw_sig(name, &self.alias_prefix_rewrites) {
             ctx.register_raw_module_sig(name, signature.clone());
         }
 
@@ -1471,6 +1399,7 @@ impl PersistentEnv {
         let mut fallback_pers = PersistentEnv {
             cache: Arc::new(Mutex::new(placeholders)),
             load_path: self.load_path.clone(),
+            load_path_display: self.load_path_display.clone(),
             alias_prefix_rewrites: self.alias_prefix_rewrites.clone(),
             open_modules: self.open_modules.clone(),
             jsx_version: self.jsx_version,
@@ -1658,7 +1587,7 @@ impl PersistentEnv {
         }
 
         let cmi_filename = format!("{}.cmi", name);
-        if let Some(full_path) = self.find_in_path_uncap(&cmi_filename) {
+        if let Some((full_path, display_path)) = self.find_in_path_uncap_entry(&cmi_filename) {
             let cmi = match cmi_format::read_cmi(&full_path) {
                 Ok(cmi) => cmi,
                 Err(e) => {
@@ -1667,10 +1596,10 @@ impl PersistentEnv {
                 }
             };
 
-            if !self.validate_cmi_name(name, &cmi.cmi_name, &full_path) {
+            if !self.validate_cmi_name(name, &cmi.cmi_name, &display_path) {
                 return None;
             }
-            if !self.check_cmi_consistency(&cmi.cmi_crcs, &cmi.cmi_name, &full_path) {
+            if !self.check_cmi_consistency(&cmi.cmi_crcs, &cmi.cmi_name, &display_path) {
                 return None;
             }
 
@@ -1680,7 +1609,7 @@ impl PersistentEnv {
                 name,
                 name.to_string(),
                 signature,
-                full_path,
+                display_path,
                 ctx,
             ));
         }
@@ -1750,12 +1679,12 @@ impl PersistentEnv {
         }
 
         let cmi_filename = format!("{}.cmi", name);
-        let full_path = self.find_in_path_uncap(&cmi_filename)?;
+        let (full_path, display_path) = self.find_in_path_uncap_entry(&cmi_filename)?;
         let cmi = cmi_format::read_cmi(&full_path).ok()?;
-        if !self.validate_cmi_name(name, &cmi.cmi_name, &full_path) {
+        if !self.validate_cmi_name(name, &cmi.cmi_name, &display_path) {
             return None;
         }
-        if !self.check_cmi_consistency(&cmi.cmi_crcs, &cmi.cmi_name, &full_path) {
+        if !self.check_cmi_consistency(&cmi.cmi_crcs, &cmi.cmi_name, &display_path) {
             return None;
         }
         let mut sig_ctx = SigReadContext::new(ctx);
@@ -1775,20 +1704,32 @@ impl PersistentEnv {
     /// Search the load path for a file (case-insensitive on first char).
     /// Returns the full path if found.
     fn find_in_path_uncap(&self, filename: &str) -> Option<String> {
-        for dir in self.load_path.iter() {
+        self.find_in_path_uncap_entry(filename)
+            .map(|(lookup_path, _)| lookup_path)
+    }
+
+    fn find_in_path_uncap_entry(&self, filename: &str) -> Option<(String, String)> {
+        for (index, dir) in self.load_path.iter().enumerate() {
+            let display_dir = self.load_path_display.get(index).unwrap_or(dir);
             if let Some(first_char) = filename.chars().next() {
                 if first_char.is_ascii_uppercase() {
                     let uncap = format!("{}{}", first_char.to_ascii_lowercase(), &filename[1..]);
                     let uncap_path = dir.join(&uncap);
                     if uncap_path.exists() {
-                        return Some(uncap_path.to_string_lossy().into_owned());
+                        return Some((
+                            uncap_path.to_string_lossy().into_owned(),
+                            display_dir.join(uncap).to_string_lossy().into_owned(),
+                        ));
                     }
                 }
             }
 
             let exact = dir.join(filename);
             if exact.exists() {
-                return Some(exact.to_string_lossy().into_owned());
+                return Some((
+                    exact.to_string_lossy().into_owned(),
+                    display_dir.join(filename).to_string_lossy().into_owned(),
+                ));
             }
         }
         None
@@ -3029,12 +2970,30 @@ fn freshen_module_type_bound_idents_with_maps(
     ctx: &TypeContext,
 ) {
     match module_type {
-        ModuleType::MtyIdent(path) | ModuleType::MtyAlias(_, path) => {
+        ModuleType::MtyIdent(path) => {
             if !maps.is_empty() {
+                // OCaml compiler/ml/subst.ml:345-348 handles `Mty_ident`
+                // through the modtype substitution table; Rust shares the
+                // type/modtype id map here, with dotted prefixes still going
+                // through `module_path` like compiler/ml/subst.ml:78-84.
                 *path = substitute_type_path(
                     path,
                     &maps.type_stamp_map,
                     &maps.type_name_map,
+                    &maps.module_stamp_map,
+                    &maps.module_name_map,
+                    maps.protected_module_head.as_ref(),
+                );
+            }
+        }
+        ModuleType::MtyAlias(_, path) => {
+            if !maps.is_empty() {
+                // OCaml compiler/ml/subst.ml:358-364 applies
+                // `module_path` to `Mty_alias` targets. Using the type path
+                // map here leaves freshly included sibling aliases pointing at
+                // stale module identifiers instead of the renamed module id.
+                *path = substitute_module_path(
+                    path,
                     &maps.module_stamp_map,
                     &maps.module_name_map,
                     maps.protected_module_head.as_ref(),
@@ -3292,11 +3251,19 @@ pub fn substitute_sig_path(path: &Path, sig_items: &[SignatureItem], module_path
 
 fn substitute_module_type_paths_with_maps(module_type: &mut ModuleType, maps: &SubstMaps) {
     match module_type {
-        ModuleType::MtyIdent(path) | ModuleType::MtyAlias(_, path) => {
+        ModuleType::MtyIdent(path) => {
             *path = substitute_type_path(
                 path,
                 &maps.type_stamp_map,
                 &maps.type_name_map,
+                &maps.module_stamp_map,
+                &maps.module_name_map,
+                maps.protected_module_head.as_ref(),
+            );
+        }
+        ModuleType::MtyAlias(_, path) => {
+            *path = substitute_module_path(
+                path,
                 &maps.module_stamp_map,
                 &maps.module_name_map,
                 maps.protected_module_head.as_ref(),
@@ -3580,6 +3547,13 @@ pub fn substitute_type_paths_in_child_sig(
 ) {
     let parent_maps = build_subst_maps(parent_sig, parent_module_path);
     substitute_type_paths_in_sig_with_maps(child_sig, &parent_maps, ctx);
+    // OCaml compiler/ml/env.ml:1454-1486 builds `prefix_idents` from the real
+    // signature binders, and compiler/ml/subst.ml:69-95 rewrites module paths
+    // only through those explicit bindings. Do not synthesize extra flattened
+    // backing-head substitutions here: a scraped alias value type such as
+    // `Crypto-NodeJs.KeyObject.t` is not a path to the parent `KeyObject`
+    // binder, so OCaml leaves it unchanged while building child components at
+    // compiler/ml/env.ml:1516-1578.
     restore_child_self_manifests_from_parent_scope(child_sig, parent_sig, parent_module_path, ctx);
 }
 
@@ -4172,6 +4146,29 @@ pub fn substitute_type_paths_in_value_from_sig(
         ctx,
         &mut visited,
     );
+
+    for flat_head in ctx.flattened_alias_heads_for_component_path(module_path) {
+        let flat_parent = Path::pident(Ident::create_persistent(&flat_head));
+        for item in sig_items {
+            let SignatureItem::SigType(id, _, _) = item else {
+                continue;
+            };
+            let old_path = Path::pdot(flat_parent.clone(), id.name());
+            let new_path = Path::pdot(module_path.clone(), id.name());
+            if old_path.same(&new_path) {
+                continue;
+            }
+            // OCaml compiler/ml/env.ml:1454-1481 `prefix_idents`
+            // creates a selected component type path for each `Sig_type`,
+            // and env.ml:1530-1538 applies compiler/ml/subst.ml:303-309
+            // `Subst.value_description` before typecore.ml:2421-2457
+            // instances the selected value. Rust CMI type graphs can still
+            // contain the flattened persistent backing path for that same
+            // component type, so rewrite only the current component's direct
+            // type binders at the Env substitution boundary.
+            rewrite_type_expr_by_path_prefix_pub(desc.val_type, &old_path, &new_path, ctx);
+        }
+    }
 }
 
 fn direct_manifest_substitution_would_self_alias(
@@ -4216,18 +4213,12 @@ fn substitute_type_path(
     match path {
         Path::Pident(ident) => {
             if ident.stamp() != 0 {
+                // OCaml compiler/ml/subst.ml:87-100 `type_path` rewrites
+                // non-persistent ids through Ident.find_same only. It does not
+                // fall back to declaration names or flattened path spelling.
                 type_stamp_map
                     .get(&ident.stamp())
                     .cloned()
-                    .or_else(|| {
-                        // Flattened CMI heads like Stdlib_JSON often carry
-                        // non-zero stamps but still need name-based rewriting.
-                        ident
-                            .name()
-                            .contains('_')
-                            .then(|| type_name_map.get(ident.name()).cloned())
-                            .flatten()
-                    })
                     .unwrap_or_else(|| path.clone())
             } else {
                 type_name_map
@@ -4273,19 +4264,12 @@ fn substitute_module_path(
             if ident.stamp() != 0 {
                 let protected = protected_module_head
                     .is_some_and(|(stamp, name)| *stamp == ident.stamp() && name == ident.name());
+                // OCaml compiler/ml/subst.ml:69-76 `module_path` rewrites
+                // non-persistent ids through Ident.find_same only. It does not
+                // fall back to declaration names or flattened path spelling.
                 module_stamp_map
                     .get(&ident.stamp())
                     .and_then(|(_, path)| (!protected).then(|| path.clone()))
-                    .or_else(|| {
-                        // Flattened module names (Stdlib_JSON, Stdlib_Intl_*)
-                        // may appear with non-zero stamps; allow a targeted
-                        // name fallback for those heads only.
-                        ident
-                            .name()
-                            .contains('_')
-                            .then(|| module_name_map.get(ident.name()).cloned())
-                            .flatten()
-                    })
                     .unwrap_or_else(|| path.clone())
             } else {
                 module_name_map
@@ -5544,25 +5528,19 @@ fn rewrite_inner_prefix(path: &Path, old_name: &str, new_prefix: &Path) -> Optio
 /// lower lookup priority than local bindings (e.g., Predef types like `int`
 /// are not shadowed when Pervasives.cmi is opened).
 ///
-/// When `as_opened` is true, items are added with lower priority (opened).
-/// When `as_opened` is false, items are added with normal priority (for `include`).
-pub fn add_signature_to_env(
+/// Add an already-built module component signature with opened-binding priority.
+pub fn open_signature_components_into_env(
     sig_items: &[SignatureItem],
     module_path: &Path,
     env: &mut Env,
     ctx: &TypeContext,
-    as_opened: bool,
 ) {
-    add_signature_to_env_with_options(
-        sig_items,
-        module_path,
-        env,
-        ctx,
-        as_opened,
-        true,
-        true,
-        None,
-    );
+    // OCaml compiler/ml/env.ml:1874-1877 implements `open_signature` by
+    // forcing `find_module_descr root` and passing the already-built component
+    // table to `add_components`. The component table was built by
+    // env.ml:1513-1588, including the env.ml:1530 `prefix_idents` substitution,
+    // so an `open` must not apply a second signature-wide substitution here.
+    add_signature_to_env_with_options(sig_items, module_path, env, ctx, true, false, true, None);
 }
 
 fn add_signature_to_env_with_options(
@@ -6027,7 +6005,18 @@ fn add_signature_to_env_with_options(
                     other => other,
                 };
                 if as_opened {
-                    env.add_opened_module(id.clone(), md.clone());
+                    if let Some((_, stored)) = precomputed_components
+                        .and_then(|components| components.lookup_child_components(id.name()))
+                    {
+                        // OCaml compiler/ml/env.ml:1841-1877 opens the
+                        // already-built `comp_components` table alongside
+                        // `comp_modules`. Reuse that child component thunk so
+                        // opened-module source lookup follows env.ml:1000-1013
+                        // without forcing the parent module declaration.
+                        env.add_opened_module_with_components(id.clone(), md.clone(), stored);
+                    } else {
+                        env.add_opened_module(id.clone(), md.clone());
+                    }
                 } else {
                     env.add_module(id.clone(), md.clone());
                 }

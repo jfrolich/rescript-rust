@@ -25,8 +25,8 @@ use crate::lambda::lam_compat::{FieldDbgInfo, LetKind};
 use crate::lambda::lam_constant::Constant;
 use crate::lambda::lam_primitive::{
     ExternalArgAttr, ExternalArgConst, ExternalArgDelim, ExternalArgLabel, ExternalArgSpec,
-    ExternalFfiKind, ExternalModuleBindName, ExternalModuleName, ExternalObjLabel,
-    ExternalObjSpec, ExternalSpec, Mutable, Primitive,
+    ExternalFfiKind, ExternalModuleBindName, ExternalModuleName, ExternalObjLabel, ExternalObjSpec,
+    ExternalSpec, Mutable, Primitive,
 };
 use crate::lambda::{ApplyStatus, Lambda, TagInfo};
 use crate::location::Location;

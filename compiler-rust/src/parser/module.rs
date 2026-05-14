@@ -230,6 +230,19 @@ pub fn parse_structure(p: &mut Parser<'_>) -> Structure {
     while p.token != Token::Eof {
         if let Some(item) = parse_structure_item(p) {
             items.push(item);
+        } else {
+            use super::core::recover::should_abort_list_parse;
+
+            if p.token == Token::Eof || should_abort_list_parse(p) {
+                break;
+            }
+
+            // OCaml compiler/syntax/src/res_core.ml:1213-1227 and
+            // compiler/syntax/src/res_core.ml:7748-7752 implement top-level
+            // structures with parse_region, which reports unexpected tokens
+            // instead of pre-skipping extra semicolons.
+            p.err_unexpected();
+            p.next();
         }
     }
 
@@ -694,13 +707,11 @@ pub fn parse_structure_item(p: &mut Parser<'_>) -> Option<StructureItem> {
                     expr_idx,
                     attrs.clone(),
                 ))))
-            } else if p.token != Token::Eof {
-                // Use err_unexpected which creates a proper Unexpected diagnostic
-                // with breadcrumbs, matching OCaml's parse_region behavior
-                p.err_unexpected();
-                p.next();
-                None
             } else {
+                // OCaml compiler/syntax/src/res_core.ml:6789-6798 returns
+                // None for an unrecognized structure-item token; the
+                // surrounding parse_region/parse_delimited_region reports the
+                // unexpected token and advances.
                 None
             }
         }
@@ -1602,6 +1613,8 @@ fn parse_functor_module_expr(p: &mut Parser<'_>) -> ModuleExpr {
 
 /// Parse structure items within braces.
 fn parse_structure_in_braces(p: &mut Parser<'_>) -> Vec<StructureItem> {
+    use super::core::recover::should_abort_list_parse;
+
     // OCaml uses parse_delimited_region ~grammar:Grammar.Structure ~closing:Rbrace
     // The Structure breadcrumb is needed so that error recovery (skip_tokens_and_maybe_retry)
     // knows that Rbrace is a list terminator and shouldn't be consumed
@@ -1609,17 +1622,16 @@ fn parse_structure_in_braces(p: &mut Parser<'_>) -> Vec<StructureItem> {
     let mut items = vec![];
 
     while p.token != Token::Rbrace && p.token != Token::Eof {
-        // Skip semicolons
-        while p.token == Token::Semicolon {
-            p.next();
-        }
-
-        if p.token == Token::Rbrace || p.token == Token::Eof {
-            break;
-        }
-
         if let Some(item) = parse_structure_item(p) {
             items.push(item);
+        } else if p.token == Token::Rbrace || p.token == Token::Eof || should_abort_list_parse(p) {
+            break;
+        } else {
+            // OCaml compiler/syntax/src/res_core.ml:1194-1211 reports the
+            // unexpected token from parse_delimited_region, then advances
+            // exactly once before retrying.
+            p.err_unexpected();
+            p.next();
         }
     }
 

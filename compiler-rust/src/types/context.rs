@@ -91,6 +91,20 @@ impl Deref for TypeDescSnapshot {
     }
 }
 
+/// Snapshot of mutable type-checker state for OCaml-style failed-unify
+/// backtracking.
+pub(crate) struct TypeMutationSnapshot {
+    type_states: Vec<(TypeDesc, i32)>,
+    row_field_states: Vec<Option<RowField>>,
+    abbrev_states: Vec<AbbrevMemo>,
+    memoized_abbrev_refs: Vec<AbbrevMemoRef>,
+    current_abbreviations: AbbrevMemoRef,
+    current_level: i32,
+    nongen_level: i32,
+    global_level: i32,
+    saved_levels: Vec<(i32, i32)>,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub(crate) struct QualifiedModuleComponentsCacheKey {
     path: Path,
@@ -262,12 +276,6 @@ pub struct TypeContext {
     /// Type expression storage. Uses UnsafeCell-based arena for zero-copy access.
     types: TypeArena,
 
-    /// Preserve canonical typedtree side effects for debug/parity output.
-    ///
-    /// Normal JS compilation can skip eager signature-renaming work that exists
-    /// only to keep typedtree identity and traversal order stable for dumps.
-    preserve_canonical_typedtree: Cell<bool>,
-
     /// Cached value of `RESCRIPT_COMPILER_COUNTERS` for hot-path probes.
     compiler_counters_enabled: bool,
 
@@ -328,18 +336,6 @@ pub struct TypeContext {
     /// OCaml keeps this relationship in `comp_components`; Rust needs an
     /// explicit side table for paths that later appear without `PersistentEnv`.
     flattened_alias_component_paths: RefCell<ahash::AHashMap<String, Path>>,
-
-    /// Scoped guard for package inclusion. OCaml's `Typemod.type_package`
-    /// reaches `wrap_constraint` after package path construction
-    /// (compiler/ml/typemod.ml:1710-1719); the Rust-only implicit-open alias
-    /// force in env_lazy.rs must not run while that inclusion walk is using
-    /// component tables that OCaml keeps lazy through compiler/ml/env.ml:800-813.
-    component_alias_sig_force_suppression: Cell<u32>,
-    /// Narrower guard for Rust-only typedecl constraint probes. OCaml
-    /// compiler/ml/typedecl.ml:767-779 can inspect alias manifests without
-    /// publishing that raw lookup through env.ml:800-813 component lazies; use
-    /// this to keep those probe views out of normal Rust lookup caches.
-    component_alias_probe_cache_suppression: Cell<u32>,
 
     /// Cached dotted value lookups keyed by resolved module access path.
     resolved_module_value_cache: RefCell<
@@ -500,7 +496,6 @@ impl TypeContext {
             previous_env_id: Cell::new(0),
             current_abbreviations: Cell::new(AbbrevMemoRef::nil()),
             types: TypeArena::new(),
-            preserve_canonical_typedtree: Cell::new(false),
             compiler_counters_enabled: crate::perf_counters::enabled(),
             // Index 0 is reserved as canonical Mnil; index 1 is the dedicated
             // simple_abbrevs memo ref.
@@ -521,8 +516,6 @@ impl TypeContext {
             resolved_module_sig_cache: RefCell::new(ahash::AHashMap::new()),
             qualified_module_components_cache: RefCell::new(ahash::AHashMap::new()),
             flattened_alias_component_paths: RefCell::new(ahash::AHashMap::new()),
-            component_alias_sig_force_suppression: Cell::new(0),
-            component_alias_probe_cache_suppression: Cell::new(0),
             resolved_module_value_cache: RefCell::new(ahash::AHashMap::new()),
             resolved_module_type_cache: RefCell::new(ahash::AHashMap::new()),
             resolved_child_module_path_cache: RefCell::new(ahash::AHashMap::new()),
@@ -578,14 +571,6 @@ impl TypeContext {
         self.typed_envs.borrow().get(env_ref.index()).cloned()
     }
 
-    pub(crate) fn set_preserve_canonical_typedtree(&self, preserve: bool) {
-        self.preserve_canonical_typedtree.set(preserve);
-    }
-
-    pub(crate) fn preserve_canonical_typedtree(&self) -> bool {
-        self.preserve_canonical_typedtree.get()
-    }
-
     #[inline]
     pub(crate) fn compiler_counters_enabled(&self) -> bool {
         self.compiler_counters_enabled
@@ -623,10 +608,7 @@ impl TypeContext {
         self.cmi_longident_names.borrow().get(&idx.raw()).cloned()
     }
 
-    pub(crate) fn register_arena_longident_names(
-        &self,
-        arena: &crate::parse_arena::ParseArena,
-    ) {
+    pub(crate) fn register_arena_longident_names(&self, arena: &crate::parse_arena::ParseArena) {
         let mut names = self.arena_longident_names.borrow_mut();
         for raw in 0..arena.string_count() {
             let idx = StrIdx::from_raw(raw as u32);
@@ -1072,35 +1054,6 @@ impl TypeContext {
             .is_some_and(crate::cmi::persistent_env::PersistentEnv::is_in_process_mode)
     }
 
-    pub(crate) fn suppresses_component_alias_sig_force(&self) -> bool {
-        self.component_alias_sig_force_suppression.get() > 0
-    }
-
-    pub(crate) fn suppresses_component_alias_probe_caches(&self) -> bool {
-        self.component_alias_probe_cache_suppression.get() > 0
-    }
-
-    pub(crate) fn with_component_alias_sig_force_suppressed<R>(&self, f: impl FnOnce() -> R) -> R {
-        let previous = self.component_alias_sig_force_suppression.get();
-        self.component_alias_sig_force_suppression
-            .set(previous.saturating_add(1));
-        let result = f();
-        self.component_alias_sig_force_suppression.set(previous);
-        result
-    }
-
-    pub(crate) fn with_component_alias_probe_caches_suppressed<R>(
-        &self,
-        f: impl FnOnce() -> R,
-    ) -> R {
-        let previous = self.component_alias_probe_cache_suppression.get();
-        self.component_alias_probe_cache_suppression
-            .set(previous.saturating_add(1));
-        let result = self.with_component_alias_sig_force_suppressed(f);
-        self.component_alias_probe_cache_suppression.set(previous);
-        result
-    }
-
     /// Look up a type declaration by full qualified path string.
     pub fn find_type_decl_by_path(
         &self,
@@ -1351,6 +1304,83 @@ impl TypeContext {
     #[inline]
     pub fn set_desc(&self, r: TypeExprRef, desc: TypeDesc) {
         self.types.get(r).set_desc(desc);
+    }
+
+    /// Save mutable type state before a speculative unification.
+    ///
+    /// OCaml compiler/ml/typecore.ml:3187-3211 and 3321-3329 use
+    /// `Btype.snapshot`/`Btype.backtrack` (with saved Ctype levels) around
+    /// unifications that may fail. Rust keeps type nodes in append-only
+    /// arenas, so this snapshots mutable contents of pre-existing nodes and
+    /// cells, while intentionally leaving newly allocated nodes and lazy
+    /// environment caches alive after restore.
+    pub(crate) fn snapshot_type_state(&self) -> TypeMutationSnapshot {
+        let type_len = self.types.len();
+        let mut type_states = Vec::with_capacity(type_len);
+        for idx in 0..type_len {
+            let ty = TypeExprRef::from_usize(idx);
+            type_states.push((self.get_desc(ty).0, self.get_level(ty)));
+        }
+
+        let row_field_states = self
+            .row_fields
+            .borrow()
+            .iter()
+            .map(|cell| cell.borrow().clone())
+            .collect();
+        let abbrev_states = self
+            .abbrevs
+            .borrow()
+            .iter()
+            .map(|cell| cell.borrow().clone())
+            .collect();
+
+        TypeMutationSnapshot {
+            type_states,
+            row_field_states,
+            abbrev_states,
+            memoized_abbrev_refs: self.memoized_abbrev_refs.borrow().clone(),
+            current_abbreviations: self.current_abbreviations.get(),
+            current_level: self.current_level.get(),
+            nongen_level: self.nongen_level.get(),
+            global_level: self.global_level.get(),
+            saved_levels: self.saved_levels.borrow().clone(),
+        }
+    }
+
+    /// Restore a snapshot created by `snapshot_type_state`.
+    pub(crate) fn restore_type_state(&self, snapshot: TypeMutationSnapshot) {
+        for (idx, (desc, level)) in snapshot.type_states.into_iter().enumerate() {
+            let ty = TypeExprRef::from_usize(idx);
+            self.set_desc(ty, desc);
+            self.set_level(ty, level);
+        }
+
+        {
+            let row_fields = self.row_fields.borrow();
+            for (idx, field) in snapshot.row_field_states.into_iter().enumerate() {
+                if let Some(cell) = row_fields.get(idx) {
+                    *cell.borrow_mut() = field;
+                }
+            }
+        }
+
+        {
+            let abbrevs = self.abbrevs.borrow();
+            for (idx, memo) in snapshot.abbrev_states.into_iter().enumerate() {
+                if let Some(cell) = abbrevs.get(idx) {
+                    *cell.borrow_mut() = memo;
+                }
+            }
+        }
+
+        *self.memoized_abbrev_refs.borrow_mut() = snapshot.memoized_abbrev_refs;
+        self.current_abbreviations
+            .set(snapshot.current_abbreviations);
+        self.current_level.set(snapshot.current_level);
+        self.nongen_level.set(snapshot.nongen_level);
+        self.global_level.set(snapshot.global_level);
+        *self.saved_levels.borrow_mut() = snapshot.saved_levels;
     }
 
     // ========================================================================
@@ -1996,6 +2026,24 @@ impl TypeContext {
     ) -> Option<T> {
         let raw = self.raw_module_sigs.borrow();
         raw.get(name).map(|sig| f(sig.as_ref()))
+    }
+
+    pub(crate) fn get_or_load_raw_module_sig(
+        &self,
+        module_name: &str,
+    ) -> Option<Arc<super::decl::Signature>> {
+        if let Some(sig) = self.raw_module_sigs.borrow().get(module_name).cloned() {
+            return Some(sig);
+        }
+        // OCaml compiler/ml/env.ml:669-678 creates persistent `ps_comps` from
+        // the CMI signature separately from `ps_sig`, and env.ml:781-788 returns
+        // those components for exact persistent `Pident` descriptor lookup. Load
+        // the component signature here without forcing the renamed `ps_sig` lazy.
+        let sig = self.load_lazy_raw_module_sig_for_rename(module_name)?;
+        self.raw_module_sigs
+            .borrow_mut()
+            .insert(module_name.to_string(), sig.clone());
+        Some(sig)
     }
 
     /// Trigger module signature renaming for a persistent module.

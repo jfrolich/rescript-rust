@@ -33,12 +33,13 @@ use std::ops::Deref;
 /// A located value (convenience alias).
 pub type Loc<T> = Located<T>;
 
-/// Sparse storage for typedtree extras.
+/// Intentional Rust performance representation for sparse typedtree extras.
 ///
 /// Most typed expressions and patterns have no extras. Store that common case
 /// as `None` instead of carrying an inline empty Vec on every node; callers
 /// still see slice/iterator semantics so the external typedtree shape is
-/// unchanged.
+/// unchanged. Do not remove this during parity cleanup unless the replacement
+/// keeps the same OCaml-facing behavior and comparable memory profile.
 #[derive(Debug, Clone)]
 pub struct SparseExtras<T> {
     items: Option<Box<[T]>>,
@@ -331,12 +332,19 @@ pub enum ExpressionDesc {
         extended_expression: Option<Box<Expression>>,
     },
 
-    /// Large regular record with many omitted optional fields.
+    /// Intentional Rust performance representation for large regular records
+    /// with many omitted optional fields.
     ///
     /// OCaml compiler/ml/typecore.ml:2833-2842 stores one entry per label from
     /// the shared `lbl_all` array. Keep the same external typedtree shape by
     /// expanding in serializers, but avoid copying hundreds of label
-    /// descriptions into every sparse JSX record internally.
+    /// descriptions into every sparse JSX record internally. The shared
+    /// `all_labels` table is part of that optimization; consumers are expected
+    /// to expand it at typedtree/lambda/raw-lambda boundaries.
+    ///
+    /// Do not remove this during parity cleanup unless the replacement keeps
+    /// the same external typedtree/lambda/JS behavior and comparable
+    /// large-record performance.
     Texp_record_sparse {
         fields: Vec<RecordField>,
         all_labels: std::sync::Arc<Vec<LabelDescription>>,
@@ -439,7 +447,8 @@ pub enum RecordLabelDefinition {
     Kept(TypeExprRef),
     /// Label is overridden with new expression.
     Overridden(Loc<LidentIdx>, Expression),
-    /// Omitted optional label synthesized as `None`.
+    /// Intentional Rust performance representation for an omitted optional label
+    /// synthesized as `None`.
     ///
     /// OCaml compiler/ml/typecore.ml:2833-2842 materializes this as
     /// `Overridden ({loc; txt = Lident lbl.lbl_name}, option_none lbl.lbl_arg loc)`.

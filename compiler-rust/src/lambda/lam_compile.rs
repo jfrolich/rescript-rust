@@ -285,8 +285,22 @@ pub struct LambdaCompiler {
     pub(crate) jsx_preserve: bool,
     pub(crate) check_div_by_zero: bool,
     pub(crate) cross_module_inline: bool,
+    /// Intentional Rust performance cache for repeated `.cmj` resolver reads.
+    ///
+    /// OCaml keeps this metadata in Lam_compile_env and queries it through
+    /// `query_external_id_info` during lowering
+    /// (compiler/core/lam_compile.ml:234-244, 274-279). Rust's resolver can hit
+    /// the filesystem, so cache the whole module export table, including
+    /// misses, while keeping the same cross-module-inline gate from
+    /// compiler/core/lam_stats_export.ml:53-63 and
+    /// compiler/core/js_cmj_format.ml:120-128.
     pub(crate) cmj_constant_cache: HashMap<String, Option<HashMap<String, CmjExportConstant>>>,
     pub(crate) cmj_arity_cache: HashMap<String, Option<HashMap<String, CmjExportArity>>>,
+    /// Same intentional cache family as above, but for exported lambda bodies.
+    /// Keep this paired with the constant/arity caches so repeated cross-module
+    /// inline probes do not re-read the same `.cmj` metadata
+    /// (`query_external_id_info` in compiler/core/lam_compile.ml:234-244,
+    /// 274-279).
     pub(crate) cmj_lambda_cache: HashMap<String, Option<HashMap<String, Lambda>>>,
     pub(crate) cmj_export_constants: AHashMap<String, CmjExportConstant>,
     pub(crate) cmj_export_arities: AHashMap<String, CmjExportArity>,

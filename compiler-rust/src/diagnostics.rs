@@ -332,12 +332,12 @@ impl Warning {
                 )
             }
             Warning::UnusedVariable { name } | Warning::UnusedVariableStrict { name } => {
+                // Match compiler/ext/warnings.ml:393-400.
                 format!(
                     "unused variable {}.\n\n\
                      Fix this by:\n\
                      - Deleting the variable if it's not used anymore.\n\
-                     - Prepending the variable name with `_` (like `_{}`) to ignore that the \
-                     variable is unused.\n\
+                     - Prepending the variable name with `_` (like `_{}`) to ignore that the variable is unused.\n\
                      - Using the variable somewhere.",
                     name, name
                 )
@@ -528,40 +528,48 @@ and may change in future versions. (See manual section 8.5)"
                 return_type,
                 is_function_call,
             } => {
+                // Match compiler/ext/warnings.ml:507-533.
                 let subject = if *is_function_call {
-                    "This function call"
+                    " function call "
                 } else {
-                    "This"
+                    " "
                 };
-                let ret = match return_type {
-                    Some(return_type) => format!("`{}`", return_type),
-                    None => "something that is not `unit`".to_string(),
-                };
-                let help_text = if *is_function_call {
-                    "yourFunctionCall()"
-                } else {
-                    "yourExpression"
-                };
-                format!(
-                    "{} is at the top level and is expected to return `unit`. But it's returning \
-                     {}.\n\nIn ReScript, anything at the top level must evaluate to `unit`. You \
-                     can fix this by assigning the expression to a value, or piping it into the \
-                     `ignore` function.\n\nPossible solutions:\n- Assigning to a value that is then \
-                     ignored: `let _ = {}`\n- Piping into the built-in ignore function to ignore \
-                     the result: `{}->ignore`",
-                    subject, ret, help_text, help_text
-                )
+                let ret = return_type
+                    .as_ref()
+                    .map(|ret| format!("`{ret}`"))
+                    .unwrap_or_else(|| "something that is not `unit`".to_string());
+                let mut message = format!(
+                    "This{}is at the top level and is expected to return `unit`. \
+                     But it's returning {}.\n\n\
+                     In ReScript, anything at the top level must evaluate to `unit`. You \
+                     can fix this by assigning the expression to a value, or piping it into \
+                     the `ignore` function.",
+                    subject, ret
+                );
+                if return_type.is_some() {
+                    let help_text = if *is_function_call {
+                        "yourFunctionCall()"
+                    } else {
+                        "yourExpression"
+                    };
+                    message.push_str(&format!(
+                        "\n\nPossible solutions:\n\
+                         - Assigning to a value that is then ignored: `let _ = {help_text}`\n\
+                         - Piping into the built-in ignore function to ignore the result: `{help_text}->ignore`"
+                    ));
+                }
+                message
             }
             Warning::BsTodo { message } => {
-                let prefix = match message {
+                // Match compiler/ext/warnings.ml:535-541.
+                let mut text = match message {
                     Some(text) => format!("Todo found: {}", text),
                     None => "Todo found.".to_string(),
                 };
-                format!(
-                    "{}\n\nThis code is not implemented yet and will crash at runtime. Make sure \
-                     you implement this before running the code.",
-                    prefix
-                )
+                text.push_str(
+                    "\n\nThis code is not implemented yet and will crash at runtime. Make sure you implement this before running the code.",
+                );
+                text
             }
         }
     }
@@ -602,9 +610,12 @@ impl WarningConfig {
             errors: vec![false; MAX_WARNING_NUMBER],
             disabled: false,
         };
-        // Apply default warning configuration
-        config.parse("-40-42-44-45-48-60-6-52-9").ok();
-        config.parse("@5@6@101@109").ok();
+        // Match OCaml compiler/ext/bsc_warnings.ml:46-48. ReScript starts
+        // from `+a-4-9-20-41-50-102` and warning-as-error
+        // `-a+5+6+101+109`; later -w/-warn-error flags are layered on top
+        // by Warnings.parse_options in compiler/ext/warnings.ml:286-290.
+        config.parse("+a-4-9-20-41-50-102").ok();
+        config.parse_as_error("-a+5+6+101+109").ok();
         config
     }
 

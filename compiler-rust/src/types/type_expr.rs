@@ -242,6 +242,13 @@ pub enum TypeDesc {
 
 /// A reference to a type expression.
 ///
+/// Intentional Rust performance representation for OCaml type-node identity.
+///
+/// OCaml stores a type node as `{mutable desc; mutable level; id}`
+/// (compiler/ml/types.ml:22) and relies on physical identity plus the `id`.
+/// Rust keeps that identity as an arena index instead of a pointer-shaped
+/// object handle.
+///
 /// In the arena-based design, this is an index or pointer.
 /// Type arenas are dense and far below `u32::MAX`; keeping the handle compact
 /// reduces typedtree and type descriptor memory traffic.
@@ -265,11 +272,13 @@ impl TypeExprRef {
     }
 }
 
-/// Scratch map keyed by dense `TypeExprRef` arena indices.
+/// Intentional Rust performance representation for short-lived type-node maps.
 ///
 /// This preserves physical-identity semantics: the key is still the exact
 /// `TypeExprRef`, matching the OCaml compiler's type-node identity model. The
-/// storage avoids hashing for short-lived copy/substitution caches.
+/// reference node shape is compiler/ml/types.ml:22 and allocation path is
+/// compiler/ml/btype.ml:46-48. The storage avoids hashing for short-lived
+/// copy/substitution caches.
 #[derive(Debug, Clone)]
 pub(crate) struct TypeExprRefMap<T> {
     offset: u32,
@@ -321,11 +330,12 @@ impl<T> Default for TypeExprRefMap<T> {
     }
 }
 
-/// Scratch set keyed by dense `TypeExprRef` arena indices.
+/// Intentional Rust performance representation for short-lived type-node sets.
 ///
 /// Like [`TypeExprRefMap`], this is still keyed by exact type-node identity.
 /// It replaces short-lived `HashSet<TypeExprRef>` visited tables in hot
-/// type traversals without changing OCaml physical-sharing semantics.
+/// type traversals without changing OCaml physical-sharing semantics from
+/// compiler/ml/types.ml:22.
 #[derive(Debug, Clone)]
 pub(crate) struct TypeExprRefSet {
     offset: u32,

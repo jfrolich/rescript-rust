@@ -461,51 +461,6 @@ fn lookup_type_decl_for_path(
     None
 }
 
-fn type_decl_would_get_strengthened_manifest(decl: &super::decl::TypeDeclaration) -> bool {
-    // OCaml compiler/ml/mtype.ml:55-70 keeps public manifests and private
-    // record/variant manifests as-is; all other signature types receive a
-    // self-manifest rooted at the visible module access path.
-    !matches!(
-        (&decl.type_manifest, decl.type_private, &decl.type_kind),
-        (Some(_), PrivateFlag::Public, _)
-            | (
-                Some(_),
-                PrivateFlag::Private,
-                super::decl::TypeKind::TypeRecord(..) | super::decl::TypeKind::TypeVariant(..),
-            )
-    )
-}
-
-fn type_decl_has_manifest_path(
-    ctx: &TypeContext,
-    decl: &super::decl::TypeDeclaration,
-    path: &Path,
-) -> bool {
-    decl.type_manifest.is_some_and(|manifest| {
-        let manifest = ctx.repr(manifest);
-        matches!(
-            &*ctx.get_desc(manifest),
-            TypeDesc::Tconstr {
-                path: manifest_path,
-                ..
-            } if manifest_path.same(path)
-        )
-    })
-}
-
-fn type_decl_preserves_strengthened_alias_path(
-    ctx: &TypeContext,
-    decl: &super::decl::TypeDeclaration,
-    flat_path: &Path,
-) -> bool {
-    // OCaml compiler/ml/mtype.ml:55-70 creates self-manifests for abstract
-    // signature types during strengthening. Rust can later see the already
-    // strengthened flat component, so treat an existing self-manifest the same
-    // as a declaration that would still receive one.
-    type_decl_would_get_strengthened_manifest(decl)
-        || type_decl_has_manifest_path(ctx, decl, flat_path)
-}
-
 pub(crate) fn lookup_type_decl_for_path_pub(
     ctx: &TypeContext,
     env: &Env,
@@ -604,128 +559,6 @@ fn path_root_is_local_module_alias(env: &Env, path: &Path) -> bool {
             .find_module_same(root)
             .ok()
             .is_some_and(|md| matches!(md.md_type, super::decl::ModuleType::MtyAlias(..)))
-}
-
-pub(crate) fn decl_manifest_aliases_path(
-    ctx: &TypeContext,
-    decl: &super::decl::TypeDeclaration,
-    target: &Path,
-    arity: usize,
-) -> bool {
-    decl.type_manifest.is_some_and(|manifest| {
-        let manifest = ctx.repr(manifest);
-        let manifest_desc = ctx.get_desc(manifest);
-        match &*manifest_desc {
-            TypeDesc::Tconstr { path, args, .. } => {
-                args.len() == arity && (path.same(target) || path.name() == target.name())
-            }
-            _ => false,
-        }
-    })
-}
-
-pub(crate) fn registered_flattened_alias_rewrite(ctx: &TypeContext, path: &Path) -> Option<Path> {
-    let root = path_root_ident(path)?;
-    if !root.is_persistent() {
-        return None;
-    }
-
-    let root_path = Path::pident(root.clone());
-    let alias_path = in_process_module_resolution_env(ctx)
-        .as_ref()
-        .and_then(|pers| pers.qualified_alias_path_for_flattened_head(root.name()))
-        .or_else(|| ctx.find_flattened_alias_component_path(root.name()))?;
-    if alias_path.same(&root_path) {
-        return None;
-    }
-
-    rewrite_path_prefix(path, &root_path, &alias_path)
-}
-
-fn flattened_alias_rewrites_connect(ctx: &TypeContext, path1: &Path, path2: &Path) -> bool {
-    let rewrite1 = registered_flattened_alias_rewrite(ctx, path1);
-    let rewrite2 = registered_flattened_alias_rewrite(ctx, path2);
-    rewrite1
-        .as_ref()
-        .is_some_and(|rewritten| rewritten.same(path2))
-        || rewrite2
-            .as_ref()
-            .is_some_and(|rewritten| rewritten.same(path1))
-        || rewrite1
-            .as_ref()
-            .zip(rewrite2.as_ref())
-            .is_some_and(|(rewritten1, rewritten2)| rewritten1.same(rewritten2))
-}
-
-pub(crate) fn flattened_alias_paths_equivalent(
-    ctx: &TypeContext,
-    env: &Env,
-    path1: &Path,
-    path2: &Path,
-    arity: usize,
-) -> bool {
-    // OCaml derives alias identity from declarations reached through
-    // compiler/ml/env.ml:800-813 `find_type`, compiler/ml/subst.ml:87-100
-    // `type_path`, and manifest expansion in compiler/ml/ctype.ml:1346-1372.
-    // The flattened-vs-qualified path relation itself must come from
-    // compiler/ml/env.ml:1517 alias scraping and env.ml:1530-1538 component
-    // prefixing, captured by Rust's registered component alias table. Do not infer
-    // it from `A_B`/`A.B` spelling, and do not treat arbitrary manifest aliases
-    // such as `Js.null = Js_null.t` as a flattened-module representative match.
-    if !flattened_alias_rewrites_connect(ctx, path1, path2) {
-        return false;
-    };
-
-    let (Some(decl1), Some(decl2)) = (
-        lookup_type_decl_for_path(ctx, env, path1),
-        lookup_type_decl_for_path(ctx, env, path2),
-    ) else {
-        return false;
-    };
-
-    decl_manifest_aliases_path(ctx, &decl1, path2, arity)
-        || decl_manifest_aliases_path(ctx, &decl2, path1, arity)
-        || decl1
-            .type_path
-            .as_ref()
-            .zip(decl2.type_path.as_ref())
-            .is_some_and(|(lp, sp)| lp.same(sp) || lp.name() == sp.name())
-}
-
-pub(crate) fn nullary_constr_paths_equivalent(
-    ctx: &TypeContext,
-    env: &Env,
-    path1: &Path,
-    path2: &Path,
-) -> bool {
-    if path1.same(path2) || path1.name() == path2.name() {
-        return true;
-    }
-
-    let decl1 =
-        lookup_type_decl_for_path(ctx, env, path1).or_else(|| env.lookup_type(path1).ok().cloned());
-    let decl2 =
-        lookup_type_decl_for_path(ctx, env, path2).or_else(|| env.lookup_type(path2).ok().cloned());
-    let (Some(decl1), Some(decl2)) = (decl1, decl2) else {
-        return false;
-    };
-
-    let same_type_path = decl1
-        .type_path
-        .as_ref()
-        .zip(decl2.type_path.as_ref())
-        .is_some_and(|(p1, p2)| p1.same(p2) || p1.name() == p2.name());
-    if same_type_path {
-        return true;
-    }
-
-    if decl_manifest_aliases_path(ctx, &decl1, path2, 0)
-        || decl_manifest_aliases_path(ctx, &decl2, path1, 0)
-    {
-        return true;
-    }
-
-    flattened_alias_paths_equivalent(ctx, env, path1, path2, 0)
 }
 
 fn is_contractive(ctx: &TypeContext, env: &Env, path: &Path) -> bool {
@@ -908,12 +741,7 @@ fn create_reified_constr(
 
 /// Match OCaml `Ctype.reify`: replace free RHS variables in a local GADT
 /// equation with fresh local abstract types before installing the constraint.
-fn reify(
-    ctx: &TypeContext,
-    env: &mut Env,
-    newtype_level: i32,
-    ty: TypeExprRef,
-) -> TypeResult<()> {
+fn reify(ctx: &TypeContext, env: &mut Env, newtype_level: i32, ty: TypeExprRef) -> TypeResult<()> {
     fn iterator(
         ctx: &TypeContext,
         env: &mut Env,
@@ -1001,15 +829,6 @@ pub fn occurs(ctx: &TypeContext, needle: TypeExprRef, haystack: TypeExprRef) -> 
     let needle = ctx.repr(needle);
     let mut visited = TypeExprRefSet::new();
     occurs_rec(ctx, needle, haystack, &mut visited)
-}
-
-fn occurs_with_expanded_head(
-    ctx: &TypeContext,
-    env: &Env,
-    needle: TypeExprRef,
-    haystack: TypeExprRef,
-) -> bool {
-    occurs(ctx, needle, haystack) || occurs(ctx, needle, expand_head_unif(ctx, env, haystack))
 }
 
 /// Match OCaml's `occur_univar` pass before linking a type variable.
@@ -1252,14 +1071,16 @@ fn update_level_expand_with_lookup_capture<'a>(
                 // numeric result falls back to `Path.binding_time`.
                 let path_level =
                     get_level_with_lookup_capture(ctx, env, &path, pending_type_lookup_paths);
-                let should_try_expand = current != GENERIC_LEVEL && level < path_level;
+                // OCaml compiler/ml/ctype.ml:742-768 only requires
+                // `level < get_level env p` after the outer `ty.level > level`
+                // check. Generic-level constructor nodes are still eligible
+                // for abbreviation expansion during `moregeneral`.
+                let should_try_expand = level < path_level;
                 drop(desc);
-                // Guard: skip expansion for all local Pident types (not predef).
-                // OCaml's update_level tries expansion but often fails for local types
-                // (Env.find_type raises Not_found). In Rust, try_expand_head succeeds
-                // more often, causing unwanted alias expansion that changes type identity.
-                // Preserving local Pident aliases matches OCaml's effective behavior.
-                let is_local_pident = matches!(&path, Path::Pident(id) if id.stamp() != 0 && !is_predef_type_name(id.name()));
+                // OCaml compiler/ml/ctype.ml:742-768 does not special-case
+                // local Pident constructors here. It attempts abbreviation
+                // expansion whenever `level < get_level env p`, and preserves
+                // the original constructor only when expansion fails.
                 // Match OCaml: skip expansion in update_level for Pdot paths
                 // through first-class module parameters whose manifest is a
                 // locally-abstract type (non-generic, non-predef Pident).
@@ -1280,7 +1101,7 @@ fn update_level_expand_with_lookup_capture<'a>(
                                         if id.stamp() != 0 && !is_predef_type_name(id.name())))
                         })
                     });
-                if should_try_expand && !is_local_pident && !is_firstclass_module_pdot {
+                if should_try_expand && !is_firstclass_module_pdot {
                     if let Some(paths) = pending_type_expansion_paths.as_deref_mut() {
                         paths.push(path.clone());
                     }
@@ -1978,11 +1799,8 @@ fn resolve_module_type_through_env_path<'a>(
         }
         Path::Pdot(parent, name, _) => {
             let mut persistent_env = in_process_module_resolution_env(ctx);
-            let parent_root_name = path_root_ident(parent).map(|id| id.name());
-            let parent_is_implicit_stdlib_component =
-                matches!(parent_root_name, Some("Pervasives") | Some("Stdlib"))
-                    && matches!(parent.as_ref(), Path::Pdot(_, _, _));
-            if parent_is_implicit_stdlib_component {
+            let parent_is_opened_component = env.path_starts_with_opened_component(parent);
+            if parent_is_opened_component {
                 let selected_child_path = Path::pdot(parent.as_ref().clone(), name.to_string());
                 if let Some((_, sig)) = crate::types::typecore::resolve_module_signature_for_path(
                     &selected_child_path,
@@ -1993,9 +1811,9 @@ fn resolve_module_type_through_env_path<'a>(
                     // OCaml compiler/ml/env.ml:1094-1100 value lookup uses
                     // `lookup_module_descr`, which descends through
                     // env.ml:781-793's `comp_components`; that does not force
-                    // env.ml:1568's child `comp_modules` thunk. When Rust only
-                    // needs the signature for an implicit Stdlib component,
-                    // reuse the selected component signature and leave the
+                    // env.ml:1568's child `comp_modules` thunk. For any path
+                    // whose first dotted component came from an open, reuse
+                    // the selected component signature and leave the
                     // module-declaration force to env.ml:865-882-equivalent
                     // callers that actually ask for `find_module`.
                     return Some(super::decl::ModuleType::MtySignature(sig));
@@ -2019,11 +1837,9 @@ fn resolve_module_type_through_env_path<'a>(
             {
                 match &md.md_type {
                     super::decl::ModuleType::MtySignature(_) => {
-                        let parent_root_name = path_root_ident(parent).map(|id| id.name());
-                        let parent_is_implicit_stdlib_component =
-                            matches!(parent_root_name, Some("Pervasives") | Some("Stdlib"))
-                                && matches!(parent.as_ref(), Path::Pdot(_, _, _));
-                        let preferred_child_path = (!parent_is_implicit_stdlib_component)
+                        let parent_is_opened_component =
+                            env.path_starts_with_opened_component(parent);
+                        let preferred_child_path = (!parent_is_opened_component)
                             .then(|| parent_alias_target.as_ref())
                             .flatten()
                             .map(|target_parent_path| {
@@ -2031,12 +1847,11 @@ fn resolve_module_type_through_env_path<'a>(
                             });
                         // OCaml compiler/ml/env.ml:1094-1100 resolves value
                         // prefixes through `lookup_module_descr`; for dotted
-                        // implicit-Stdlib components that path reads
-                        // env.ml:781-793's selected `comp_components` table.
-                        // Do not immediately rebuild the flattened alias
-                        // target (`Stdlib_JSON.Classify`) after selecting
-                        // `Stdlib.JSON.Classify`; OCaml only forces the
-                        // selected component module declaration at
+                        // opened components that path reads env.ml:781-793's
+                        // selected `comp_components` table. Do not
+                        // immediately rebuild the flattened alias target after
+                        // selecting an opened component path; OCaml only
+                        // forces the selected component module declaration at
                         // env.ml:865-882 when normalization explicitly asks
                         // for it.
                         crate::types::typecore::resolve_module_signature_for_path(
@@ -2383,11 +2198,12 @@ fn lookup_component_module_sig_type<'a>(
         // thunk. Use the in-process persistent env so dotted persistent paths
         // such as `Layout__Types.Name.t` can be found through component tables
         // instead of falling back to module-declaration lookup.
-        return crate::types::typecore::with_resolved_module_components_for_path(
+        return crate::types::typecore::with_resolved_module_components_for_path_with_cache_mode(
             module_path,
             env,
             &mut persistent_env,
             ctx,
+            crate::types::typecore::ComponentLookupCacheMode::FindModule,
             |components| {
                 components
                     .lookup_type(type_name)
@@ -2594,116 +2410,6 @@ fn resolve_type_through_env<'a>(
     resolve_type_item_through_env(ctx, env, path, strengthen_alias_types).map(|(_, decl)| decl)
 }
 
-pub(crate) fn resolved_type_items_share_identity(
-    ctx: &TypeContext,
-    env: &Env,
-    path1: &Path,
-    path2: &Path,
-    arity: usize,
-) -> bool {
-    let canonicalize_local_direct_family = |path: &Path| -> Path {
-        match path {
-            Path::Pdot(parent, type_name, _) => match parent.as_ref() {
-                Path::Pident(module_id) => {
-                    let mut no_persistent_env = None;
-                    crate::types::typecore::resolve_letmodule_direct_type_family_root(
-                        ctx,
-                        env,
-                        &mut no_persistent_env,
-                        module_id,
-                        type_name,
-                        arity,
-                    )
-                    .map(|root| Path::pdot(root, type_name.clone()))
-                    .unwrap_or_else(|| path.clone())
-                }
-                _ => path.clone(),
-            },
-            _ => path.clone(),
-        }
-    };
-
-    let path1 = canonicalize_local_direct_family(path1);
-    let path2 = canonicalize_local_direct_family(path2);
-    let resolve_identity_type_item =
-        |path: &Path| -> Option<(crate::ident::Ident, super::decl::TypeDeclaration)> {
-            if let Path::Pdot(parent, name, _) = path
-                && let Some(found) =
-                    lookup_component_module_sig_type(ctx, env, parent.as_ref(), name.as_str())
-            {
-                // This helper is a Rust-only identity shortcut used while unifying
-                // constructors. OCaml compiler/ml/ctype.ml:2412-2426 asks
-                // compiler/ml/env.ml:800-813 `Env.find_type`, whose dotted parent
-                // lookup descends through env.ml:781-793 `find_module_descr` and
-                // `comp_components`; it does not force env.ml:865-882
-                // `find_module`/env.ml:1568 `comp_modules` just to compare two
-                // type items.
-                return Some(found);
-            }
-            resolve_type_item_through_env(ctx, env, path, false)
-        };
-    let Some((id1, decl1)) = resolve_identity_type_item(&path1) else {
-        return false;
-    };
-    let Some((id2, decl2)) = resolve_identity_type_item(&path2) else {
-        return false;
-    };
-
-    id1.stamp() != 0
-        && id1.stamp() == id2.stamp()
-        && decl1.type_params.len() == arity
-        && decl2.type_params.len() == arity
-        || match (path1, path2) {
-            (Path::Pdot(parent1, name1, _), Path::Pdot(parent2, name2, _)) if name1 == name2 => {
-                let raw_parent1 = {
-                    let mut no_persistent_env = None;
-                    crate::types::typecore::module_alias_target_for_path(
-                        parent1.as_ref(),
-                        env,
-                        &mut no_persistent_env,
-                        ctx,
-                    )
-                    .unwrap_or_else(|| parent1.as_ref().clone())
-                };
-                let raw_parent2 = {
-                    let mut no_persistent_env = None;
-                    crate::types::typecore::module_alias_target_for_path(
-                        parent2.as_ref(),
-                        env,
-                        &mut no_persistent_env,
-                        ctx,
-                    )
-                    .unwrap_or_else(|| parent2.as_ref().clone())
-                };
-                let raw_path1 = Path::pdot(raw_parent1.clone(), name1.to_string());
-                let raw_path2 = Path::pdot(raw_parent2.clone(), name2.to_string());
-                // OCaml compiler/ml/env.ml:781-793 follows module aliases in
-                // `lookup_module_descr`, then compiler/ml/env.ml:800-813
-                // returns the selected `Sig_type` item before
-                // compiler/ml/ctype.ml:2412-2414 unifies constructor
-                // arguments. Use the resolved target paths here too; otherwise
-                // Rust expands phantom-parameter manifests such as
-                // Webapi__Iterator.next before the alias-path arguments have
-                // been unified.
-                let raw1 = lookup_component_module_sig_type(ctx, env, &raw_parent1, name1.as_str())
-                    .or_else(|| resolve_type_item_through_env(ctx, env, &raw_path1, false));
-                let raw2 = lookup_component_module_sig_type(ctx, env, &raw_parent2, name2.as_str())
-                    .or_else(|| resolve_type_item_through_env(ctx, env, &raw_path2, false));
-                matches!(
-                    (raw1, raw2),
-                    (
-                        Some((raw_id1, raw_decl1)),
-                        Some((raw_id2, raw_decl2))
-                    ) if raw_id1.stamp() != 0
-                        && raw_id1.stamp() == raw_id2.stamp()
-                        && raw_decl1.type_params.len() == arity
-                        && raw_decl2.type_params.len() == arity
-                )
-            }
-            _ => false,
-        }
-}
-
 /// Normalize a path by following module aliases, using both the local env
 /// and persistent environment (CMI files) for module lookup.
 ///
@@ -2717,7 +2423,7 @@ pub(crate) fn normalize_path_full<'a>(ctx: &'a TypeContext, env: &Env, path: &Pa
     if let Some(cached) = ctx.find_normalized_path_full(env_id, path) {
         return cached;
     }
-    let normalized = normalize_path_full_inner(ctx, env, path, 0, &mut HashSet::new(), true, None);
+    let normalized = normalize_path_full_inner(ctx, env, path, 0, &mut HashSet::new(), true);
     ctx.register_normalized_path_full(env_id, path, normalized.clone());
     normalized
 }
@@ -2780,13 +2486,8 @@ fn module_path_exists_for_strict_normalize<'a>(
     }
 
     let mut persistent_env = in_process_module_resolution_env(ctx);
-    crate::types::typecore::resolve_module_signature_for_path(
-        path,
-        env,
-        &mut persistent_env,
-        ctx,
-    )
-    .is_some()
+    crate::types::typecore::resolve_module_signature_for_path(path, env, &mut persistent_env, ctx)
+        .is_some()
 }
 
 pub(crate) fn force_normalize_path_full_side_effects<'a>(
@@ -2802,50 +2503,11 @@ pub(crate) fn force_normalize_path_full_side_effects<'a>(
     // normalized-path cache for this side-effect-only call, because an earlier
     // component-table probe may have cached the same structural answer before
     // the OCaml-equivalent module thunk was forced.
-    normalize_path_full_inner(ctx, env, path, 0, &mut HashSet::new(), true, None)
+    normalize_path_full_inner(ctx, env, path, 0, &mut HashSet::new(), true)
 }
 
 fn normalize_path_forward_only<'a>(ctx: &'a TypeContext, env: &Env, path: &Path) -> Path {
-    normalize_path_full_inner(ctx, env, path, 0, &mut HashSet::new(), false, None)
-}
-
-fn rewrite_path_prefix(path: &Path, old_prefix: &Path, new_prefix: &Path) -> Option<Path> {
-    if path.same(old_prefix) {
-        return Some(new_prefix.clone());
-    }
-
-    match path {
-        Path::Pdot(parent, name, pos) => {
-            let rewritten_parent = rewrite_path_prefix(parent, old_prefix, new_prefix)?;
-            Some(Path::Pdot(
-                std::sync::Arc::new(rewritten_parent),
-                name.clone(),
-                *pos,
-            ))
-        }
-        Path::Pident(_) | Path::Papply(_, _) => None,
-    }
-}
-
-fn normalize_path_through_local_aliases(env: &Env, path: &Path) -> Option<Path> {
-    env.with_current_local_module_aliases(|aliases| {
-        aliases.iter().find_map(|(alias_id, target_path)| {
-            let target_head = path_root_ident(target_path)?;
-            let target_is_local = env
-                .find_module_with_origin(target_head.name())
-                .ok()
-                .is_some_and(|(origin_id, _, is_local)| is_local && origin_id.same(target_head));
-            if !target_is_local {
-                return None;
-            }
-            let alias_path = Path::pident(alias_id.clone());
-            if alias_path.same(path) {
-                return None;
-            }
-            rewrite_path_prefix(path, &target_path, &alias_path)
-                .filter(|rewritten| !rewritten.same(path))
-        })
-    })
+    normalize_path_full_inner(ctx, env, path, 0, &mut HashSet::new(), false)
 }
 
 fn normalize_path_full_inner<'a>(
@@ -2855,54 +2517,27 @@ fn normalize_path_full_inner<'a>(
     depth: usize,
     visiting: &mut HashSet<Path>,
     allow_reverse_local_aliases: bool,
-    root_child: Option<&str>,
 ) -> Path {
     if depth > 20 {
         return path.clone();
     }
 
     if let Path::Pdot(parent, module_name, _) = path {
-        let parent_root_name = path_root_ident(parent).map(|id| id.name());
-        let parent_is_implicit_root =
-            matches!(parent_root_name, Some("Pervasives") | Some("Stdlib"));
-        if parent_is_implicit_root
-            && let Ok((_, md, false)) = env.find_module_with_origin(module_name)
-            && md
-                .md_path
-                .as_ref()
-                .is_some_and(|md_path| md_path.same(path))
-            && let super::decl::ModuleType::MtyAlias(_, alias_path)
-            | super::decl::ModuleType::MtyIdent(alias_path) = &md.md_type
-            && resolved_module_signature_has_submodules(ctx, alias_path)
-            && !alias_path.same(path)
-        {
-            // OCaml compiler/ml/env.ml:781-793 descends through opened
-            // `comp_components`, and env.ml:800-811 reads opened module
-            // aliases before `normalize_path` would recurse into the synthetic
-            // implicit Stdlib/Pervasives root from compiler/core/res_compmisc.ml:61-62.
-            return normalize_path_full_inner(
-                ctx,
-                env,
-                alias_path,
-                depth + 1,
-                visiting,
-                allow_reverse_local_aliases,
-                None,
-            );
-        }
-        if !parent_is_implicit_root
+        let path_starts_with_implicit_opened_component =
+            env.path_starts_with_implicit_opened_component(path);
+        if !path_starts_with_implicit_opened_component
             && let Some(alias_path) = ctx.find_module_alias_in_components(parent, module_name)
             && !alias_path.same(path)
         {
             // OCaml compiler/ml/env.ml:781-793 lets `find_module_descr`
             // navigate persistent components through `ps_comps`, and
             // env.ml:876-880 reads a dotted module from those components before
-            // alias normalization continues. Preserve that component-level
-            // alias for roots such as `Js.Json`, while leaving
-            // `Pervasives`/`Stdlib` to the recursive path below because Rust's
-            // qualified-lookup root bindings are not present in OCaml's
-            // implicit opens at compiler/core/res_compmisc.ml:61-62 and
-            // compiler/ml/env.ml:1874-1877.
+            // alias normalization continues. `open_signature` at
+            // env.ml:1841-1877 installs opened child component tables too.
+            // Initial-env opens from compiler/core/res_compmisc.ml:48-63 keep
+            // their root force behavior; source-level opens follow the opened
+            // component descriptor path instead of forcing the opened root
+            // through env.ml:865-875.
             return normalize_path_full_inner(
                 ctx,
                 env,
@@ -2910,7 +2545,6 @@ fn normalize_path_full_inner<'a>(
                 depth + 1,
                 visiting,
                 allow_reverse_local_aliases,
-                None,
             );
         }
     }
@@ -2923,10 +2557,8 @@ fn normalize_path_full_inner<'a>(
         Path::Pdot(p, s, pos) => {
             // OCaml compiler/ml/env.ml:903-914 normalizes a dotted path's
             // prefix before `find_module ~alias:true` inspects the path at
-            // env.ml:865-882. For implicit `Pervasives`/`Stdlib` roots, keep
-            // component-alias shortcuts below this point so persistent roots
-            // still force `ps_sig` at env.ml:872-874 when `expand_abbrev_gen`
-            // reaches `Env.normalize_path`.
+            // env.ml:865-882. Component aliases already handled above model the
+            // descriptor-table path from env.ml:781-793.
             let p_norm = normalize_path_full_inner(
                 ctx,
                 env,
@@ -2934,7 +2566,6 @@ fn normalize_path_full_inner<'a>(
                 depth + 1,
                 visiting,
                 allow_reverse_local_aliases,
-                Some(s.as_str()),
             );
             if p_norm == **p {
                 path.clone()
@@ -2950,7 +2581,6 @@ fn normalize_path_full_inner<'a>(
                 depth + 1,
                 visiting,
                 allow_reverse_local_aliases,
-                None,
             );
             let p2_norm = normalize_path_full_inner(
                 ctx,
@@ -2959,7 +2589,6 @@ fn normalize_path_full_inner<'a>(
                 depth + 1,
                 visiting,
                 allow_reverse_local_aliases,
-                None,
             );
             if p1_norm == **p1 && p2_norm == **p2 {
                 path.clone()
@@ -2974,70 +2603,15 @@ fn normalize_path_full_inner<'a>(
     // compiler/ml/env.ml:865-875/env.ml:903-914: `normalize_path` calls
     // `find_module ~alias:true`, which forces a persistent structure's
     // `ps_sig` unless the exact module id is already present in `env.modules`.
-    // Rust keeps implicit `Pervasives`/`Stdlib` root bindings for qualified
-    // lookup even though OCaml's implicit open in
-    // compiler/core/res_compmisc.ml:61-62 and compiler/ml/env.ml:1874-1877
-    // exposes components, not root module bindings. Keep the compensation so
-    // paths like `Pervasives.ref` and `Stdlib.Iterator.result` consume
-    // compiler/ml/env.ml:865-875 `ps_sig` stamps at the same point.
+    // Implicit opens in compiler/core/res_compmisc.ml:61-62 go through
+    // compiler/ml/env.ml:1874-1877 `open_signature`, which exposes opened
+    // components but not root module bindings, so implicit `Pervasives` and
+    // `Stdlib` roots naturally take the persistent force path here.
     if let Path::Pident(id) = &path {
         let has_local_module = env.find_module_same(id).is_ok();
-        let has_component_cache = {
-            let key = crate::types::context::QualifiedModuleComponentsCacheKey::new(
-                path.clone(),
-                env.module_path_requires_env_scoped_cache(&path)
-                    .then_some(env.id()),
-            );
-            ctx.has_qualified_module_components(&key)
-        };
-        // OCaml compiler/ml/env.ml:1000-1007 and 1064-1073 can navigate
-        // `Belt`'s persistent `ps_comps` without forcing `ps_sig`. If Rust has
-        // already cached that component view, do not turn recursive
-        // normalize-path prefix handling for Belt collection aliases into an
-        // earlier full-signature force than OCaml observes.
-        let stdlib_array_buffer_component_lookup =
-            id.name() == "Stdlib" && matches!(root_child, Some("ArrayBuffer"));
-        // OCaml compiler/ml/env.ml:1000-1007 can reach the implicit
-        // `Stdlib.ArrayBuffer` component through `ps_comps` while typing
-        // `Stdlib_TypedArray` signatures; compiler/ml/env.ml:865-875 is not
-        // entered for the root `Stdlib` until a later normalize-path call.
-        // Rust recursively normalizes the synthetic `Stdlib.ArrayBuffer.t`
-        // path, so skip only that root force to preserve OCaml's lazy
-        // `Subst.signature` stamp order without weakening `Stdlib.Iterator.*`
-        // normalize-path forcing.
-        let should_force_persistent_sig = id.is_persistent()
-            && !(id.name() == "Belt" && has_component_cache)
-            && (!has_local_module
-                || id.name() == "Pervasives"
-                || (id.name() == "Stdlib" && !stdlib_array_buffer_component_lookup));
+        let should_force_persistent_sig = id.is_persistent() && !has_local_module;
         if should_force_persistent_sig {
             ctx.trigger_module_sig_rename(id.name());
-        }
-        if env
-            .find_module_with_origin(id.name())
-            .ok()
-            .is_some_and(|(origin_id, md, is_local)| {
-                let target_is_local = match &md.md_type {
-                    super::decl::ModuleType::MtyAlias(_, target)
-                    | super::decl::ModuleType::MtyIdent(target) => path_root_ident(target)
-                        .is_some_and(|head| {
-                            env.find_module_with_origin(head.name()).ok().is_some_and(
-                                |(target_id, _, target_local)| target_local && target_id.same(head),
-                            )
-                        }),
-                    _ => false,
-                };
-                is_local
-                    && origin_id.same(id)
-                    && target_is_local
-                    && matches!(
-                        md.md_type,
-                        super::decl::ModuleType::MtyAlias(..)
-                            | super::decl::ModuleType::MtyIdent(..)
-                    )
-            })
-        {
-            return path;
         }
     }
 
@@ -3058,7 +2632,6 @@ fn normalize_path_full_inner<'a>(
             depth + 1,
             visiting,
             allow_reverse_local_aliases,
-            None,
         );
     }
 
@@ -3084,7 +2657,6 @@ fn normalize_path_full_inner<'a>(
                     depth + 1,
                     visiting,
                     allow_reverse_local_aliases,
-                    None,
                 );
             }
         }
@@ -3108,34 +2680,11 @@ fn normalize_path_full_inner<'a>(
                 depth + 1,
                 visiting,
                 allow_reverse_local_aliases,
-                None,
             );
         }
     }
 
-    if allow_reverse_local_aliases
-        && let Some(rewritten) = normalize_path_through_local_aliases(env, &path)
-    {
-        return normalize_path_full_inner(
-            ctx,
-            env,
-            &rewritten,
-            depth + 1,
-            visiting,
-            allow_reverse_local_aliases,
-            None,
-        );
-    }
-
     path
-}
-
-fn resolved_module_signature_has_submodules(ctx: &TypeContext, path: &Path) -> bool {
-    ctx.find_resolved_module_sig(&path.name())
-        .is_some_and(|(_, sig)| {
-            sig.iter()
-                .any(|item| matches!(item, super::decl::SignatureItem::SigModule(..)))
-        })
 }
 
 /// has a manifest (i.e., `type t = <body>`), expand it by substituting
@@ -3182,7 +2731,6 @@ fn try_expand_head_with_mode<'a>(
             let path = path.clone();
             let orig_abbrev = *abbrev;
             let lookup_abbrev = proper_abbrevs(ctx, &path, &args, *abbrev);
-            let path_name = path.name();
             // Try stamp-based lookup first (most precise, handles CMI-loaded types)
             let stamp = match &path {
                 Path::Pident(id) if id.stamp() != 0 => Some(id.stamp()),
@@ -3217,7 +2765,14 @@ fn try_expand_head_with_mode<'a>(
                 if !(cached_repr == ty || stale_same_path) {
                     let level = ctx.get_level(ty);
                     if level != GENERIC_LEVEL {
-                        update_level(ctx, level, cached);
+                        // OCaml compiler/ml/ctype.ml:1353-1359 lowers a
+                        // memoized abbreviation expansion with
+                        // `update_level env level ty'`. That is observable:
+                        // ctype.ml:666-673 `get_level` calls
+                        // Env.find_type, which can force component signatures
+                        // while expanding the head. Keep the env-aware path
+                        // here rather than the cheaper structural lowering.
+                        update_level_expand(ctx, env, level, cached);
                     }
                     return Some(cached_repr);
                 }
@@ -3298,7 +2853,11 @@ fn try_expand_head_with_mode<'a>(
                         // resolver below handles path lookup for declarations with
                         // no stored `type_path`.
                         env_decl.type_path.as_ref().is_some_and(|decl_path| {
-                            decl_path.same(&path) || decl_path.name() == path_name
+                            // OCaml compiler/ml/env.ml:800-813 `Env.find_type`
+                            // reaches a qualified declaration through the
+                            // parent component table; it does not accept an
+                            // unrelated declaration with the same printed path.
+                            decl_path.same(&path)
                         })
                     }
                     Path::Papply(_, _) => false,
@@ -3603,6 +3162,19 @@ pub fn expand_head_once<'a>(
     try_expand_head(ctx, env, ty).map(|expanded| ctx.repr(expanded))
 }
 
+pub(crate) fn expand_abbrev_opt_once<'a>(
+    ctx: &'a TypeContext,
+    env: &Env,
+    ty: TypeExprRef,
+) -> Option<TypeExprRef> {
+    let ty = ctx.repr(ty);
+    // OCaml compiler/ml/ctype.ml:4165 calls `expand_abbrev_opt` from
+    // `cyclic_abbrev`; ctype.ml:1464-1478 defines that as the Private
+    // expansion path through `Env.find_type_expansion_opt`.
+    try_expand_head_with_mode(ctx, env, ty, ExpandHeadMode::Optimize)
+        .map(|expanded| ctx.repr(expanded))
+}
+
 /// Fully expand a type through all aliases until it can't be expanded further.
 /// Like OCaml's expand_head_opt: repeatedly calls try_expand_head until stable.
 pub fn expand_head<'a>(ctx: &'a TypeContext, env: &Env, ty: TypeExprRef) -> TypeExprRef {
@@ -3719,6 +3291,16 @@ fn subtype_type_kind(kind: &crate::types::TypeKind) -> SubtypeTypeKind {
     }
 }
 
+fn generic_private_abbrev(ctx: &TypeContext, env: &Env, path: &Path) -> bool {
+    lookup_type_decl_for_path(ctx, env, path).is_some_and(|decl| {
+        matches!(decl.type_kind, crate::types::TypeKind::TypeAbstract)
+            && decl.type_private == PrivateFlag::Private
+            && decl
+                .type_manifest
+                .is_some_and(|manifest| ctx.get_level(ctx.repr(manifest)) == GENERIC_LEVEL)
+    })
+}
+
 fn type_expr_path_same(ctx: &TypeContext, ty: TypeExprRef, target_path: &Path) -> bool {
     matches!(
         &*ctx.get_desc(ctx.repr(ty)),
@@ -3761,6 +3343,18 @@ fn variant_constructor_as_payload(
     })
 }
 
+fn variant_constructor_as_string_payload(attrs: &[crate::types::decl::Attribute]) -> Option<&str> {
+    attrs.iter().find_map(|attr| {
+        if attr.attr_name.txt == "as"
+            && let crate::types::decl::AttributePayload::Str(value) = &attr.attr_payload
+        {
+            Some(value.as_str())
+        } else {
+            None
+        }
+    })
+}
+
 fn variant_constructor_covers_primitive(
     ctx: &TypeContext,
     constructor: &crate::types::decl::ConstructorDeclaration,
@@ -3771,6 +3365,104 @@ fn variant_constructor_covers_primitive(
             type_expr_path_same(ctx, args[0], primitive_path)
         }
         _ => false,
+    }
+}
+
+fn variant_representation_matches(
+    left_attrs: &[crate::types::decl::Attribute],
+    right_attrs: &[crate::types::decl::Attribute],
+) -> bool {
+    // OCaml compiler/ml/variant_coercion.ml:152-160 compares the processed
+    // constructor tag type, not the whole attribute list. Distinct source
+    // locations on otherwise equal `@as` attributes must not make variant
+    // subtyping fail.
+    variant_constructor_as_payload(left_attrs) == variant_constructor_as_payload(right_attrs)
+}
+
+fn variant_constructor_matches_polyvariant_label(
+    ctx: &TypeContext,
+    constructor: &crate::types::decl::ConstructorDeclaration,
+    label: &str,
+    unboxed: bool,
+) -> bool {
+    if let Some(as_string) = variant_constructor_as_string_payload(&constructor.cd_attributes) {
+        return as_string == label;
+    }
+    if variant_constructor_as_payload(&constructor.cd_attributes).is_some() {
+        return false;
+    }
+    if unboxed
+        && let crate::types::decl::ConstructorArguments::CstrTuple(args) = &constructor.cd_args
+        && args.len() == 1
+        && type_expr_path_same(ctx, args[0], &crate::types::predef::path_string())
+    {
+        return true;
+    }
+    constructor.cd_id.name() == label
+}
+
+fn can_coerce_polyvariant_to_variant(
+    ctx: &TypeContext,
+    row: &RowDesc,
+    constructors: &[crate::types::decl::ConstructorDeclaration],
+    type_attributes: &[crate::types::decl::Attribute],
+) -> bool {
+    // OCaml compiler/ml/variant_coercion.ml:246-286 accepts only closed
+    // payload-free polymorphic variant rows, then compares each row label with
+    // the target variant constructor runtime representation.
+    let unboxed = type_attributes
+        .iter()
+        .any(|attr| attr.attr_name.txt == "unboxed");
+    row.row_fields.iter().all(|(label, field)| {
+        matches!(btype::row_field_repr(ctx, field), RowField::Rpresent(None))
+            && constructors.iter().any(|constructor| {
+                variant_constructor_matches_polyvariant_label(ctx, constructor, label, unboxed)
+            })
+    })
+}
+
+fn is_valid_hash_number_label(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    match bytes {
+        [] => false,
+        [b'0'..=b'9'] => true,
+        [b'1'..=b'9', rest @ ..] => rest.iter().all(u8::is_ascii_digit),
+        _ => false,
+    }
+}
+
+fn variant_row_is_subtype_of_primitive(
+    ctx: &TypeContext,
+    row: &RowDesc,
+    target: TypeExprRef,
+) -> bool {
+    // OCaml compiler/core/matching_polyfill.ml:51-70 plugs
+    // Ctype.variant_is_subtype at compiler/core/bs_conditional_initial.ml:33:
+    // closed payload-free numeric rows coerce to int, and closed payload-free
+    // nonnumeric rows coerce to string.
+    let row = row_repr(ctx, row);
+    if !row.row_closed {
+        return false;
+    }
+    let mut numeric_row = None;
+    for (label, field) in &row.row_fields {
+        if !matches!(
+            btype::row_field_repr(ctx, field),
+            RowField::Rabsent | RowField::Rpresent(None)
+        ) {
+            return false;
+        }
+        let numeric = is_valid_hash_number_label(label);
+        match numeric_row {
+            Some(expected) if expected != numeric => return false,
+            Some(_) => {}
+            None => numeric_row = Some(numeric),
+        }
+    }
+    match numeric_row {
+        Some(true) => type_expr_path_same(ctx, target, &crate::types::predef::path_int()),
+        Some(false) => type_expr_path_same(ctx, target, &crate::types::predef::path_string()),
+        None => false,
     }
 }
 
@@ -3952,6 +3644,17 @@ fn subtype_rec(
                 ..
             },
         ) => {
+            if generic_private_abbrev(ctx, env, path1)
+                && let Some(expanded1) =
+                    try_expand_head_with_mode(ctx, env, ty1, ExpandHeadMode::Optimize)
+            {
+                // OCaml compiler/ml/ctype.ml:3712-3713 expands the left-hand
+                // private abbreviation with expand_abbrev_opt during subtype,
+                // allowing `private int :> int` while keeping construction
+                // restrictions elsewhere.
+                return subtype_rec(ctx, env, visited, trace, expanded1, ty2);
+            }
+
             if path1.same(&crate::types::predef::path_int())
                 && path2.same(&crate::types::predef::path_float())
                 && args1.is_empty()
@@ -4033,6 +3736,14 @@ fn subtype_rec(
             Err(subtype_error(trace))
         }
         (TypeDesc::Tconstr { .. }, _) => {
+            if let TypeDesc::Tconstr { path, .. } = &desc1
+                && generic_private_abbrev(ctx, env, path)
+                && let Some(expanded1) =
+                    try_expand_head_with_mode(ctx, env, ty1, ExpandHeadMode::Optimize)
+            {
+                // OCaml compiler/ml/ctype.ml:3712-3713.
+                return subtype_rec(ctx, env, visited, trace, expanded1, ty2);
+            }
             if let Some(expanded1) = try_expand_head(ctx, env, ty1) {
                 subtype_rec(ctx, env, visited, trace, expanded1, ty2)
             } else {
@@ -4040,11 +3751,42 @@ fn subtype_rec(
             }
         }
         (_, TypeDesc::Tconstr { .. }) => {
+            if let (TypeDesc::Tvariant(row), TypeDesc::Tconstr { path, args, .. }) =
+                (&desc1, &desc2)
+                && args.is_empty()
+            {
+                let row = row_repr(ctx, row);
+                if variant_row_is_subtype_of_primitive(ctx, &row, ty2) {
+                    // OCaml compiler/ml/ctype.ml:3986 runs the
+                    // Matching_polyfill.variant_is_subtype hook before
+                    // falling through to ordinary subtype failure.
+                    return Ok(());
+                }
+                if row.row_closed
+                    && let Some(decl2) = lookup_type_decl_for_path(ctx, env, path)
+                    && let crate::types::TypeKind::TypeVariant(constructors) = &decl2.type_kind
+                    && can_coerce_polyvariant_to_variant(
+                        ctx,
+                        &row,
+                        constructors,
+                        &decl2.type_attributes,
+                    )
+                {
+                    // OCaml compiler/ml/ctype.ml:3974-3988 handles closed
+                    // polymorphic variant rows before the generic
+                    // `variant_is_subtype` path when the target expands to a
+                    // concrete Type_variant declaration.
+                    return Ok(());
+                }
+            }
             if let Some(expanded2) = try_expand_head(ctx, env, ty2) {
                 subtype_rec(ctx, env, visited, trace, ty1, expanded2)
             } else {
                 Err(subtype_error(trace))
             }
+        }
+        (TypeDesc::Tvariant(row1), TypeDesc::Tvariant(row2)) => {
+            subtype_variant_rows(ctx, env, visited, trace, row1, row2)
         }
         (TypeDesc::Tpoly { body: body1, .. }, TypeDesc::Tpoly { body: body2, .. }) => {
             subtype_rec(ctx, env, visited, trace, *body1, *body2)
@@ -4054,6 +3796,129 @@ fn subtype_rec(
         }
         (_, TypeDesc::Tlink(next2) | TypeDesc::Tsubst(next2)) => {
             subtype_rec(ctx, env, visited, trace, ty1, *next2)
+        }
+        _ => Err(subtype_error(trace)),
+    }
+}
+
+fn subtype_variant_rows(
+    ctx: &TypeContext,
+    env: &Env,
+    visited: &mut HashSet<(u32, u32)>,
+    trace: &[(TypeExprRef, TypeExprRef)],
+    row1: &RowDesc,
+    row2: &RowDesc,
+) -> TypeResult<()> {
+    // OCaml compiler/ml/ctype.ml:3969-3971 dispatches variant rows to
+    // `subtype_row`; compiler/ml/ctype.ml:4064-4099 allows a closed source row
+    // with no extra labels to subtype a wider target row.
+    let row1 = row_repr(ctx, row1);
+    let row2 = row_repr(ctx, row2);
+    let (r1, r2, pairs) = merge_row_fields(&row1.row_fields, &row2.row_fields);
+    let more1 = ctx.repr(row_more(ctx, &row1));
+    let more2 = ctx.repr(row_more(ctx, &row2));
+    let more1_desc = (*ctx.get_desc(more1)).clone();
+    let more2_desc = (*ctx.get_desc(more2)).clone();
+
+    match (&more1_desc, &more2_desc) {
+        (TypeDesc::Tconstr { path: path1, .. }, TypeDesc::Tconstr { path: path2, .. })
+            if path1.same(path2) =>
+        {
+            let mut more_trace = trace.to_vec();
+            more_trace.push((more1, more2));
+            subtype_rec(ctx, env, visited, &more_trace, more1, more2)
+        }
+        (
+            TypeDesc::Tvar(_) | TypeDesc::Tconstr { .. } | TypeDesc::Tnil,
+            TypeDesc::Tvar(_) | TypeDesc::Tconstr { .. } | TypeDesc::Tnil,
+        ) if row1.row_closed && r1.is_empty() => {
+            for (_label, field1, field2) in pairs {
+                let field1 = btype::row_field_repr(ctx, field1);
+                let field2 = btype::row_field_repr(ctx, field2);
+                match (&field1, &field2) {
+                    (
+                        RowField::Rpresent(None)
+                        | RowField::Reither {
+                            constant: true, ..
+                        },
+                        RowField::Rpresent(None),
+                    )
+                    | (RowField::Rabsent, _) => {}
+                    (RowField::Rpresent(Some(ty1)), RowField::Rpresent(Some(ty2))) => {
+                        let mut field_trace = trace.to_vec();
+                        field_trace.push((*ty1, *ty2));
+                        subtype_rec(ctx, env, visited, &field_trace, *ty1, *ty2)?;
+                    }
+                    (
+                        RowField::Reither {
+                            constant: false,
+                            types,
+                            ..
+                        },
+                        RowField::Rpresent(Some(ty2)),
+                    ) if !types.is_empty() => {
+                        let ty1 = types[0];
+                        let mut field_trace = trace.to_vec();
+                        field_trace.push((ty1, *ty2));
+                        subtype_rec(ctx, env, visited, &field_trace, ty1, *ty2)?;
+                    }
+                    _ => return Err(subtype_error(trace)),
+                }
+            }
+            Ok(())
+        }
+        (TypeDesc::Tunivar(_), TypeDesc::Tunivar(_))
+            if row1.row_closed == row2.row_closed && r1.is_empty() && r2.is_empty() =>
+        {
+            let mut more_trace = trace.to_vec();
+            more_trace.push((more1, more2));
+            subtype_rec(ctx, env, visited, &more_trace, more1, more2)?;
+
+            for (_label, field1, field2) in pairs {
+                let field1 = btype::row_field_repr(ctx, field1);
+                let field2 = btype::row_field_repr(ctx, field2);
+                match (&field1, &field2) {
+                    (RowField::Rpresent(None), RowField::Rpresent(None))
+                    | (RowField::Rabsent, RowField::Rabsent) => {}
+                    (
+                        RowField::Reither {
+                            constant: true,
+                            types: types1,
+                            ..
+                        },
+                        RowField::Reither {
+                            constant: true,
+                            types: types2,
+                            ..
+                        },
+                    ) if types1.is_empty() && types2.is_empty() => {}
+                    (RowField::Rpresent(Some(ty1)), RowField::Rpresent(Some(ty2))) => {
+                        let mut field_trace = trace.to_vec();
+                        field_trace.push((*ty1, *ty2));
+                        subtype_rec(ctx, env, visited, &field_trace, *ty1, *ty2)?;
+                    }
+                    (
+                        RowField::Reither {
+                            constant: false,
+                            types: types1,
+                            ..
+                        },
+                        RowField::Reither {
+                            constant: false,
+                            types: types2,
+                            ..
+                        },
+                    ) if types1.len() == 1 && types2.len() == 1 => {
+                        let ty1 = types1[0];
+                        let ty2 = types2[0];
+                        let mut field_trace = trace.to_vec();
+                        field_trace.push((ty1, ty2));
+                        subtype_rec(ctx, env, visited, &field_trace, ty1, ty2)?;
+                    }
+                    _ => return Err(subtype_error(trace)),
+                }
+            }
+            Ok(())
         }
         _ => Err(subtype_error(trace)),
     }
@@ -4097,6 +3962,100 @@ fn subtype_same_constr_args(
     Ok(())
 }
 
+fn subtype_constructor_arguments(
+    ctx: &TypeContext,
+    env: &Env,
+    visited: &mut HashSet<(u32, u32)>,
+    trace: &[(TypeExprRef, TypeExprRef)],
+    left: &crate::types::decl::ConstructorDeclaration,
+    right: &crate::types::decl::ConstructorDeclaration,
+) -> TypeResult<()> {
+    if !variant_representation_matches(&left.cd_attributes, &right.cd_attributes) {
+        return Err(subtype_error(trace));
+    }
+    match (&left.cd_args, &right.cd_args) {
+        (
+            crate::types::decl::ConstructorArguments::CstrTuple(left_args),
+            crate::types::decl::ConstructorArguments::CstrTuple(right_args),
+        ) if left_args.len() == right_args.len() => {
+            for (left_arg, right_arg) in left_args.iter().zip(right_args.iter()) {
+                let mut arg_trace = trace.to_vec();
+                arg_trace.push((*left_arg, *right_arg));
+                subtype_rec(ctx, env, visited, &arg_trace, *left_arg, *right_arg)?;
+            }
+            Ok(())
+        }
+        (
+            crate::types::decl::ConstructorArguments::CstrRecord(left_fields),
+            crate::types::decl::ConstructorArguments::CstrRecord(right_fields),
+        ) => subtype_record_fields(
+            ctx,
+            env,
+            visited,
+            trace,
+            &Path::Pident(left.cd_id.clone()),
+            &Path::Pident(right.cd_id.clone()),
+            left_fields,
+            right_fields,
+        ),
+        _ => Err(subtype_error(trace)),
+    }
+}
+
+fn subtype_variant_constructors(
+    ctx: &TypeContext,
+    env: &Env,
+    visited: &mut HashSet<(u32, u32)>,
+    trace: &[(TypeExprRef, TypeExprRef)],
+    path1: &Path,
+    path2: &Path,
+    cstrs1: &[crate::types::decl::ConstructorDeclaration],
+    cstrs2: &[crate::types::decl::ConstructorDeclaration],
+) -> TypeResult<()> {
+    let cstrs2_by_name = cstrs2
+        .iter()
+        .map(|cstr| (cstr.cd_id.name().to_string(), cstr))
+        .collect::<HashMap<_, _>>();
+    // OCaml compiler/ml/ctype.ml:3805-3827 only attaches
+    // Incompatible_constructor_count when the source variant has more
+    // constructors than the target. Equal-size variants with different
+    // constructor names fall through to the generic subtype failure below.
+    if cstrs1.len() > cstrs2.len() {
+        let missing = cstrs1
+            .iter()
+            .filter(|cstr| !cstrs2_by_name.contains_key(cstr.cd_id.name()))
+            .map(|cstr| cstr.cd_id.name().to_string())
+            .collect::<Vec<_>>();
+        return Err(subtype_error_with_context(
+            trace,
+            SubtypeContext::VariantConfigurationsMismatch {
+                left_variant_name: path1.clone(),
+                right_variant_name: path2.clone(),
+                issue: VariantConfigurationIssue::IncompatibleConstructorCount {
+                    constructor_names: missing,
+                },
+            },
+        ));
+    }
+
+    // OCaml compiler/ml/ctype.ml:3828-3904 builds a constructor map from the
+    // target variant, then checks each source constructor's representation and
+    // payload fields with subtype_list/Record_coercion.check_record_fields.
+    for left in cstrs1 {
+        let Some(right) = cstrs2_by_name.get(left.cd_id.name()) else {
+            return Err(subtype_error(trace));
+        };
+        if subtype_constructor_arguments(ctx, env, visited, trace, left, right).is_err() {
+            // OCaml compiler/ml/ctype.ml:3863-3905 treats constructor payload
+            // subtyping as a boolean while checking variant-to-variant
+            // coercion, then records the root variant subtype failure with no
+            // nested Different_type_kinds context.
+            return Err(subtype_error(trace));
+        }
+    }
+    Ok(())
+}
+
 fn subtype_concrete_type_declarations(
     ctx: &TypeContext,
     env: &Env,
@@ -4127,28 +4086,8 @@ fn subtype_concrete_type_declarations(
                         issue,
                     },
                 ))
-            } else if cstrs1.len() > cstrs2.len() {
-                let cstrs2_names: HashSet<_> =
-                    cstrs2.iter().map(|cstr| cstr.cd_id.name()).collect();
-                let constructor_names = cstrs1
-                    .iter()
-                    .filter_map(|cstr| {
-                        let name = cstr.cd_id.name();
-                        (!cstrs2_names.contains(name)).then(|| name.to_string())
-                    })
-                    .collect();
-                Err(subtype_error_with_context(
-                    trace,
-                    SubtypeContext::VariantConfigurationsMismatch {
-                        left_variant_name: path1.clone(),
-                        right_variant_name: path2.clone(),
-                        issue: VariantConfigurationIssue::IncompatibleConstructorCount {
-                            constructor_names,
-                        },
-                    },
-                ))
             } else {
-                Err(subtype_error(trace))
+                subtype_variant_constructors(ctx, env, visited, trace, path1, path2, cstrs1, cstrs2)
             },
         ),
         (super::TypeKind::TypeAbstract, super::TypeKind::TypeAbstract)
@@ -4839,12 +4778,11 @@ pub fn unify_var<'a>(
         (TypeDesc::Tvar(_), _) => {
             drop(desc1);
             drop(desc2);
-            let occurs = if let Some(env) = state.env() {
-                occurs_with_expanded_head(ctx, env, t1, t2)
-            } else {
-                occurs(ctx, t1, t2)
-            };
-            if occurs {
+            // OCaml compiler/ml/ctype.ml:2280-2286 `unify1_var`
+            // performs `occur` and links directly. Constructor-head
+            // expansion only happens in the earlier deep-occur route through
+            // compiler/ml/ctype.ml:2302 and :2338-2344.
+            if occurs(ctx, t1, t2) {
                 return Err(TypeError::Unify(vec![(t1, t2)]));
             }
             if let Some(env) = state.env() {
@@ -4917,7 +4855,10 @@ fn unify_after_expansion<'a>(
     let swap_trace = |result: TypeResult<()>| -> TypeResult<()> {
         match result {
             Err(TypeError::Unify(trace)) if swap => Err(TypeError::Unify(
-                trace.into_iter().map(|(left, right)| (right, left)).collect(),
+                trace
+                    .into_iter()
+                    .map(|(left, right)| (right, left))
+                    .collect(),
             )),
             other => other,
         }
@@ -4929,39 +4870,6 @@ fn unify_after_expansion<'a>(
         // OCaml ctype.ml:2348 returns immediately when the expanded heads are
         // physically equal; the unify3 relink at lines 2393-2397 is not run.
         return Ok(());
-    }
-
-    {
-        let lhs_desc = ctx.borrow_desc(lhs);
-        let rhs_desc = ctx.borrow_desc(rhs);
-        if let (
-            TypeDesc::Tconstr {
-                path: path1,
-                args: args1,
-                ..
-            },
-            TypeDesc::Tconstr {
-                path: path2,
-                args: args2,
-                ..
-            },
-        ) = (&*lhs_desc, &*rhs_desc)
-        {
-            if args1.is_empty() && args2.is_empty() && path1.name() == path2.name() {
-                drop(lhs_desc);
-                drop(rhs_desc);
-                link_type(ctx, lhs, rhs);
-                if state.mode != crate::types::UnifyMode::Pattern {
-                    let to_ty = ctx.repr(relink_target);
-                    if rhs != to_ty && !deep_occur(ctx, rhs, to_ty) {
-                        ctx.set_desc(rhs, TypeDesc::Tlink(to_ty));
-                    }
-                }
-                return Ok(());
-            }
-        }
-        drop(lhs_desc);
-        drop(rhs_desc);
     }
 
     {
@@ -5176,12 +5084,10 @@ fn unify_types<'a>(
             drop(desc1);
             drop(desc2);
 
-            let occurs = if let Some(env) = state.env() {
-                occurs_with_expanded_head(ctx, env, t1, t2)
-            } else {
-                occurs(ctx, t1, t2)
-            };
-            if occurs {
+            // OCaml compiler/ml/ctype.ml:2280-2286 `unify1_var`
+            // does not expand constructor heads after the
+            // compiler/ml/ctype.ml:2302 deep-occur special case has failed.
+            if occurs(ctx, t1, t2) {
                 return Err(TypeError::Unify(vec![(t1, t2)]));
             }
             if let Some(env) = state.env() {
@@ -5199,12 +5105,8 @@ fn unify_types<'a>(
             drop(desc1);
             drop(desc2);
 
-            let occurs = if let Some(env) = state.env() {
-                occurs_with_expanded_head(ctx, env, t2, t1)
-            } else {
-                occurs(ctx, t2, t1)
-            };
-            if occurs {
+            // Symmetric `unify1_var` case from compiler/ml/ctype.ml:2304.
+            if occurs(ctx, t2, t1) {
                 return Err(TypeError::Unify(vec![(t1, t2)]));
             }
             if let Some(env) = state.env() {
@@ -5363,11 +5265,7 @@ fn unify_types<'a>(
                 if let Some(env) = state.env() {
                     // OCaml compiler/ml/ctype.ml:2338-2344 (`unify2`) expands
                     // both constructor heads before the constructor-path cases
-                    // at ctype.ml:2412-2414 are considered. Keep Rust's
-                    // same-type-item fallback below this expansion so aliases
-                    // such as local module aliases and flattened persistent
-                    // units get the same `unify3` representative relinking
-                    // opportunity first.
+                    // at ctype.ml:2412-2414 are considered.
                     let exp1 = expand_head_unif(ctx, env, t1);
                     let exp2 = expand_head_unif(ctx, env, t2);
                     if exp1 != t1 || exp2 != t2 {
@@ -5376,148 +5274,10 @@ fn unify_types<'a>(
                         return unify_after_expansion(ctx, state, t1, exp1, t2, exp2);
                     }
                 }
-                if args1.len() == args2.len()
-                    && let Some(env) = state.env()
-                    && resolved_type_items_share_identity(ctx, env, path1, path2, args1.len())
-                {
-                    let pairs: Vec<_> = args1
-                        .iter()
-                        .zip(args2.iter())
-                        .map(|(&a, &b)| (a, b))
-                        .collect();
-                    let p1_persistent = path_root_is_persistent(path1);
-                    let p2_persistent = path_root_is_persistent(path2);
-                    let p1_local_alias = path_root_is_local_module_alias(env, path1);
-                    let p2_local_alias = path_root_is_local_module_alias(env, path2);
-                    let flat_persistent_parent = |path: &Path| {
-                        // OCaml compiler/ml/ctype.ml:2393-2414 can link an
-                        // expanded backing-unit representative after
-                        // env.ml:1530-1538 and subst.ml:87-95 have substituted
-                        // selected module components. Limit that compensation to
-                        // ReScript's flattened persistent backing units; ordinary
-                        // persistent source modules such as `ZoomGenerator.t`
-                        // keep their explicit annotation path.
-                        matches!(
-                            path,
-                            Path::Pdot(parent, _, _)
-                                if matches!(parent.as_ref(), Path::Pident(id)
-                                    if id.is_persistent() && id.name().contains('_'))
-                        )
-                    };
-                    let p1_flat_persistent = flat_persistent_parent(path1);
-                    let p2_flat_persistent = flat_persistent_parent(path2);
-                    let p1_selected_alias_candidate =
-                        p1_flat_persistent || (p1_persistent && p2_local_alias);
-                    let p2_selected_alias_candidate =
-                        p2_flat_persistent || (p2_persistent && p1_local_alias);
-                    let p1_flat_decl =
-                        if p1_selected_alias_candidate && !p2_selected_alias_candidate {
-                            lookup_type_decl_for_path(ctx, env, path1)
-                        } else {
-                            None
-                        };
-                    let p2_flat_decl =
-                        if p2_selected_alias_candidate && !p1_selected_alias_candidate {
-                            lookup_type_decl_for_path(ctx, env, path2)
-                        } else {
-                            None
-                        };
-                    let p1_selected_decl = if p1_selected_alias_candidate
-                        && !p2_selected_alias_candidate
-                    {
-                        resolve_type_item_through_env(ctx, env, path2, false).map(|(_, decl)| decl)
-                    } else {
-                        None
-                    };
-                    let p2_selected_decl = if p2_selected_alias_candidate
-                        && !p1_selected_alias_candidate
-                    {
-                        resolve_type_item_through_env(ctx, env, path1, false).map(|(_, decl)| decl)
-                    } else {
-                        None
-                    };
-                    let p1_alias_decl = p1_selected_decl.as_ref().or(p1_flat_decl.as_ref());
-                    let p2_alias_decl = p2_selected_decl.as_ref().or(p2_flat_decl.as_ref());
-                    let p1_should_link_flat_alias = p1_selected_alias_candidate
-                        && !p2_selected_alias_candidate
-                        && p1_alias_decl.is_none_or(|decl| {
-                            type_decl_preserves_strengthened_alias_path(ctx, decl, path1)
-                        });
-                    let p2_should_link_flat_alias = p2_selected_alias_candidate
-                        && !p1_selected_alias_candidate
-                        && p2_alias_decl.is_none_or(|decl| {
-                            type_decl_preserves_strengthened_alias_path(ctx, decl, path2)
-                        });
-                    drop(desc1);
-                    drop(desc2);
-                    // OCaml compiler/ml/ctype.ml:2341-2344 expands
-                    // abbreviations before ctype.ml:2412-2414 handles
-                    // `Path.same` constructors by unifying only arguments.
-                    // When Rust still has two access paths that resolve to the
-                    // same signature type item, take the same argument-only
-                    // path without forcing Env.normalize_path from
-                    // compiler/ml/env.ml:903-914.
-                    //
-                    // OCaml compiler/ml/ctype.ml:2367-2379 links the
-                    // representative in expression mode before constructor
-                    // arguments are unified. Rust can still expose flattened
-                    // persistent runtime paths here, while OCaml
-                    // compiler/ml/env.ml:1530-1538 plus
-                    // compiler/ml/subst.ml:87-95 have already substituted
-                    // selected module components. Only move a flattened
-                    // persistent module identifier, or a nested persistent
-                    // backing path paired with a source-selected local alias,
-                    // onto that visible alias. Nested selected paths such as
-                    // `Js.Dict.t` or `Belt.Id.cmp` are already in OCaml's spelling.
-                    //
-                    // OCaml compiler/ml/ctype.ml:2393-2397 links the expanded
-                    // constructor representative to the original other side in
-                    // expression mode before ctype.ml:2412-2414 unifies
-                    // constructor arguments. For local aliases such as
-                    // `Types = Layout__Types`, that shared ref makes
-                    // `Types.Component.t` win over `Layout__Types.Component.t`.
-                    //
-                    // OCaml compiler/ml/mtype.ml:55-70 controls which alias
-                    // components get a strengthened self-manifest. If the flat
-                    // persistent declaration would be strengthened, or already
-                    // carries that self-manifest from an earlier component
-                    // view, unification observes the visible alias path; public
-                    // manifests to other targets such as Stdlib_Error.t keep
-                    // the original target path.
-                    if p1_should_link_flat_alias {
-                        link_type(ctx, t1, t2);
-                    } else if p2_should_link_flat_alias {
-                        link_type(ctx, t2, t1);
-                    } else if p1_persistent != p2_persistent {
-                        if p1_flat_persistent {
-                            link_type(ctx, t1, t2);
-                        } else if p2_flat_persistent {
-                            link_type(ctx, t2, t1);
-                        }
-                    }
-                    for (a, b) in pairs {
-                        unify(ctx, state, a, b)?;
-                    }
-                    return Ok(());
-                }
-                let p1 = path1.name();
-                let p2 = path2.name();
-                if p1 == p2 && args1.len() == args2.len() {
-                    let pairs: Vec<_> = args1
-                        .iter()
-                        .zip(args2.iter())
-                        .map(|(&a, &b)| (a, b))
-                        .collect();
-                    drop(desc1);
-                    drop(desc2);
-                    // Equivalent named paths with divergent stamps should still
-                    // unify structurally through their arguments.
-                    link_type(ctx, t1, t2);
-                    for (a, b) in pairs {
-                        unify(ctx, state, a, b)?;
-                    }
-                    return Ok(());
-                }
+                // OCaml compiler/ml/ctype.ml:2413-2433 only takes the
+                // constructor argument-only path for `Path.same`; divergent
+                // stamps with the same printed path fall through to normal
+                // expansion, equation generation, or failure.
                 if let Some(env) = state.env() {
                     let norm1 = normalize_path_full(ctx, env, path1);
                     let norm2 = normalize_path_full(ctx, env, path2);
@@ -5582,123 +5342,9 @@ fn unify_types<'a>(
                     }
                 }
 
-                // Narrow fallback for local submodule-path aliases where one side
-                // is exactly one segment longer than the other:
-                // `Plain.ComponentInput.t` vs `ComponentInput.t`.
-                // Only accept when the short path is explicitly manifest-aliased
-                // to the long path in the current environment.
-                let seg1: Vec<&str> = p1.split('.').collect();
-                let seg2: Vec<&str> = p2.split('.').collect();
-                let alias_candidate = if seg1.len() == seg2.len() + 1 {
-                    Some((t1, t2, path1, path2, seg1.as_slice(), seg2.as_slice()))
-                } else if seg2.len() == seg1.len() + 1 {
-                    Some((t2, t1, path2, path1, seg2.as_slice(), seg1.as_slice()))
-                } else {
-                    None
-                };
-                if let Some((long_ty, short_ty, long_path, short_path, long_segs, short_segs)) =
-                    alias_candidate
-                {
-                    if short_segs.len() >= 2
-                        && long_segs[1..] == *short_segs
-                        && !path_root_is_persistent(short_path)
-                        && args1.len() == args2.len()
-                    {
-                        let alias_matches = if let Some(env) = state.env() {
-                            let long_decl = lookup_type_decl_for_path(ctx, env, long_path);
-                            let short_decl = lookup_type_decl_for_path(ctx, env, short_path);
-                            if short_decl.is_none() {
-                                long_decl.is_some()
-                            } else {
-                                short_decl.and_then(|decl| decl.type_manifest).is_some_and(
-                                    |manifest| {
-                                        let manifest = ctx.repr(manifest);
-                                        let manifest_desc = ctx.get_desc(manifest);
-                                        match &*manifest_desc {
-                                            TypeDesc::Tconstr { path, args, .. } => {
-                                                args.len() == args1.len()
-                                                    && (path.same(long_path)
-                                                        || path.name() == long_path.name())
-                                            }
-                                            _ => false,
-                                        }
-                                    },
-                                )
-                            }
-                        } else {
-                            false
-                        };
-                        if alias_matches {
-                            let pairs: Vec<_> = args1
-                                .iter()
-                                .zip(args2.iter())
-                                .map(|(&a, &b)| (a, b))
-                                .collect();
-                            drop(desc1);
-                            drop(desc2);
-                            // Keep the longer qualified path as the representative.
-                            link_type(ctx, short_ty, long_ty);
-                            for (a, b) in pairs {
-                                unify(ctx, state, a, b)?;
-                            }
-                            return Ok(());
-                        }
-                    }
-                }
-
-                // Narrow fallback for flattened nested-module aliases. OCaml
-                // compiler/ml/env.ml:1517 scrapes module aliases before
-                // env.ml:1530-1538 prefixes component identifiers, so require
-                // Rust's registered component-alias rewrite to identify the flat
-                // backing path and selected qualified path before linking.
-                let flatten_alias_candidate = if registered_flattened_alias_rewrite(ctx, path1)
-                    .as_ref()
-                    .is_some_and(|rewritten| rewritten.same(path2))
-                {
-                    Some((t2, t1, path2, path1))
-                } else if registered_flattened_alias_rewrite(ctx, path2)
-                    .as_ref()
-                    .is_some_and(|rewritten| rewritten.same(path1))
-                {
-                    Some((t1, t2, path1, path2))
-                } else {
-                    None
-                };
-                if let Some((qualified_ty, flat_ty, qualified_path, flat_path)) =
-                    flatten_alias_candidate
-                {
-                    if args1.len() == args2.len() {
-                        let alias_matches = if let Some(env) = state.env() {
-                            flattened_alias_paths_equivalent(
-                                ctx,
-                                env,
-                                qualified_path,
-                                flat_path,
-                                args1.len(),
-                            )
-                        } else {
-                            false
-                        };
-                        if alias_matches {
-                            let pairs: Vec<_> = args1
-                                .iter()
-                                .zip(args2.iter())
-                                .map(|(&a, &b)| (a, b))
-                                .collect();
-                            drop(desc1);
-                            drop(desc2);
-                            // Keep the qualified component path as the representative.
-                            link_type(ctx, flat_ty, qualified_ty);
-                            for (a, b) in pairs {
-                                unify(ctx, state, a, b)?;
-                            }
-                            return Ok(());
-                        }
-                    }
-                }
-
-                // Paths differ. Match OCaml flow by attempting alias expansion
-                // before any equation generation.
+                // Paths differ after `expand_head_unif`; match OCaml
+                // compiler/ml/ctype.ml:2413-2433 by leaving the constructor
+                // argument path unless the expanded paths are `Path.same`.
                 // Extract paths for potential GADT equation handling (nullary Tconstr only)
                 let gadt_path1 = if args1.is_empty() {
                     Some(path1.clone())
@@ -6033,7 +5679,16 @@ fn unify_types<'a>(
                 return Err(TypeError::Unify(vec![(t1, t2)]));
             }
 
-            if !path1.same(&path2) && path1.name() != path2.name() {
+            let package_paths_equivalent = path1.same(&path2)
+                || unify_env.as_ref().is_some_and(|env| {
+                    // OCaml compiler/ml/ctype.ml:2173-2175 `eq_package_path`
+                    // compares the original paths or their normalized paths
+                    // with `Path.same`; it does not compare printed names.
+                    let norm1 = normalize_path_full(ctx, env, &path1);
+                    let norm2 = normalize_path_full(ctx, env, &path2);
+                    norm1.same(&norm2)
+                });
+            if !package_paths_equivalent {
                 return Err(TypeError::Unify(vec![(t1, t2)]));
             }
 
@@ -6207,8 +5862,8 @@ fn unify_types<'a>(
 // ============================================================================
 
 /// Sort row fields alphabetically by label, matching OCaml's `sort_row_fields`.
-type RowFieldEntryRef<'a> = (&'a Label, &'a RowField);
-type RowPairRef<'a, 'b> = (&'a str, &'a RowField, &'b RowField);
+pub(crate) type RowFieldEntryRef<'a> = (&'a Label, &'a RowField);
+pub(crate) type RowPairRef<'a, 'b> = (&'a str, &'a RowField, &'b RowField);
 
 fn sort_row_fields<'a>(fields: &'a [(Label, RowField)]) -> Vec<RowFieldEntryRef<'a>> {
     let mut sorted: Vec<_> = fields.iter().map(|(label, field)| (label, field)).collect();
@@ -6322,7 +5977,7 @@ fn merge_strictly_sorted_row_fields<'a, 'b>(
 /// Merge row fields matching OCaml's `merge_row_fields`.
 /// Sorts both inputs, then uses sorted merge to partition into
 /// (r1_only, r2_only, pairs).
-fn merge_row_fields<'a, 'b>(
+pub(crate) fn merge_row_fields<'a, 'b>(
     fi1: &'a [(Label, RowField)],
     fi2: &'b [(Label, RowField)],
 ) -> (
@@ -8128,8 +7783,7 @@ pub fn compute_variance_decl(
         compute_variance_rec(ctx, env, &mut visited, initial_variance, *ty, 0);
     }
 
-    let is_type_var =
-        |ty: TypeExprRef| matches!(&*ctx.get_desc(ctx.repr(ty)), TypeDesc::Tvar(_));
+    let is_type_var = |ty: TypeExprRef| matches!(&*ctx.get_desc(ctx.repr(ty)), TypeDesc::Tvar(_));
     let is_concrete = !matches!(decl.type_kind, super::TypeKind::TypeAbstract);
 
     // Extract variance for each param. This mirrors OCaml typedecl.ml:1200-1224:
@@ -8661,18 +8315,6 @@ fn compute_variance_rec(
                 // same lazy persistent signature components that later stamps
                 // depend on. Use Rust's path-aware helper instead of the
                 // name fallback-only env lookup.
-                if matches!(
-                    &path,
-                    Path::Pdot(parent, _, _)
-                        if matches!(parent.as_ref(), Path::Pident(id) if id.name() == "Pervasives")
-                ) {
-                    // OCaml compiler/ml/env.ml:783-788 resolves the persistent
-                    // parent of `Pervasives.ref` while serving the
-                    // compiler/ml/typedecl.ml:1064-1066 variance lookup. Rust's
-                    // initial environment stores that root module eagerly, so
-                    // explicitly consume the corresponding lazy rename here.
-                    ctx.trigger_module_sig_rename("Pervasives");
-                }
                 let variances = lookup_type_decl_for_path(ctx, env, &path)
                     .map(|d| d.type_variance.clone())
                     .unwrap_or_else(|| vec![Variance::MAY_INV; args.len()]);
@@ -9498,7 +9140,8 @@ pub fn instance_constructor_in_pattern(
         // OCaml compiler/ml/ctype.ml:1111-1123 creates existential abstract
         // type names with `Ident.create`, so they consume the same stamp
         // stream as typedtree binders.
-        let path = super::path::Path::pident(ctx.create_ident(&ctx.next_reified_abstract_name(&name)));
+        let path =
+            super::path::Path::pident(ctx.create_ident(&ctx.next_reified_abstract_name(&name)));
         env.add_local_constraint(path.clone(), decl);
 
         // Create Tconstr pointing to the abstract type
@@ -10102,6 +9745,18 @@ pub fn copy_type(ctx: &TypeContext, ty: TypeExprRef) -> TypeExprRef {
 /// shared pattern types.
 pub fn subst_identity_copy(ctx: &TypeContext, ty: TypeExprRef) -> TypeExprRef {
     subst_identity_copy_with_partial(ctx, ty, false)
+}
+
+pub fn subst_identity_copy_many(ctx: &TypeContext, types: &[TypeExprRef]) -> Vec<TypeExprRef> {
+    let mut seen = HashMap::new();
+    // OCaml compiler/ml/subst.ml:273-301 calls `typexp` for every type slot
+    // in a declaration before the single `cleanup_types` call, so temporary
+    // Tsubst markers preserve sharing between params, kind fields, and manifest.
+    let mut row_more_markers = HashMap::new();
+    types
+        .iter()
+        .map(|ty| subst_identity_copy_rec(ctx, *ty, false, &mut seen, &mut row_more_markers))
+        .collect()
 }
 
 pub fn subst_identity_copy_with_partial(

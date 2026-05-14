@@ -144,13 +144,10 @@ const COMPONENT_WITH_PROPS_EXTERNAL_MSG: &str = "Components cannot be defined as
 const COMPONENT_WITH_PROPS_FORWARD_REF_MSG: &str = "Components using React.forwardRef cannot use @react.componentWithProps. Use @react.component instead.";
 const COMPONENT_KEY_PROP_MSG: &str = "Key cannot be accessed inside of a component. Don't worry - you can always key a component from its parent!";
 const COMPONENT_DUPLICATE_PROP_MSG_PREFIX: &str = "The prop `";
-const COMPONENT_DUPLICATE_PROP_MSG_SUFFIX: &str =
-    "` is defined several times in this component.";
+const COMPONENT_DUPLICATE_PROP_MSG_SUFFIX: &str = "` is defined several times in this component.";
 const COMPONENT_PROPS_NEED_LABELLED_MSG: &str = "React: props need to be labelled arguments.\nIf you are working with refs be sure to wrap with React.forwardRef.\nIf your component doesn't have any props use () or _ instead of a name.";
-const COMPONENT_CALL_NEEDS_FUNCTION_MSG: &str =
-    "JSX component calls can only be on function definitions or component wrappers (forwardRef, memo).";
-const STRING_INT_ATTR_UNSUPPORTED_MSG: &str =
-    "@string and @int attributes not supported. See https://github.com/rescript-lang/rescript-compiler/issues/5724";
+const COMPONENT_CALL_NEEDS_FUNCTION_MSG: &str = "JSX component calls can only be on function definitions or component wrappers (forwardRef, memo).";
+const STRING_INT_ATTR_UNSUPPORTED_MSG: &str = "@string and @int attributes not supported. See https://github.com/rescript-lang/rescript-compiler/issues/5724";
 const COMPONENT_REF_PLAIN_ARGS_MSG: &str =
     "React: react.component refs only support plain arguments and type annotations.";
 const JSX_SPREAD_AFTER_PROP_MSG: &str =
@@ -166,8 +163,7 @@ pub fn transform_structure(
     initial_version: i32,
     arena: &mut ParseArena,
 ) -> Structure {
-    transform_structure_result(structure, initial_version, arena)
-        .expect("JSX PPX transform failed")
+    transform_structure_result(structure, initial_version, arena).expect("JSX PPX transform failed")
 }
 
 /// Transform a structure, applying JSX PPX transformations.
@@ -227,8 +223,7 @@ pub fn transform_signature(
     initial_version: i32,
     arena: &mut ParseArena,
 ) -> Signature {
-    transform_signature_result(signature, initial_version, arena)
-        .expect("JSX PPX transform failed")
+    transform_signature_result(signature, initial_version, arena).expect("JSX PPX transform failed")
 }
 
 /// Transform a signature, applying JSX PPX transformations.
@@ -345,11 +340,7 @@ fn transform_structure_item_multi(
                 );
             }
             _ => {
-                set_fatal_error(
-                    config,
-                    item.pstr_loc,
-                    DUPLICATE_REACT_COMPONENT_ATTR_MSG,
-                );
+                set_fatal_error(config, item.pstr_loc, DUPLICATE_REACT_COMPONENT_ATTR_MSG);
                 return vec![item];
             }
         }
@@ -1976,14 +1967,15 @@ fn transform_signature_item_multi(
         match count_react_component_attrs(arena, &vd.pval_attributes) {
             0 => {}
             1 => {
-                return transform_react_component_sig((**vd).clone(), &item.psig_loc, config, arena);
+                return transform_react_component_sig(
+                    (**vd).clone(),
+                    &item.psig_loc,
+                    config,
+                    arena,
+                );
             }
             _ => {
-                set_fatal_error(
-                    config,
-                    item.psig_loc,
-                    DUPLICATE_REACT_COMPONENT_ATTR_MSG,
-                );
+                set_fatal_error(config, item.psig_loc, DUPLICATE_REACT_COMPONENT_ATTR_MSG);
                 return vec![item];
             }
         }
@@ -3711,14 +3703,9 @@ fn transform_structure_item_desc(
             let transformed = transform_expression(expr, config, arena);
             StructureItemDesc::Pstr_eval(Box::new((arena.push_expr(transformed), attrs)))
         }
-        StructureItemDesc::Pstr_module(mb) => {
-            StructureItemDesc::Pstr_module(Box::new(transform_module_binding(
-                *mb,
-                config,
-                arena,
-                warnings,
-            )))
-        }
+        StructureItemDesc::Pstr_module(mb) => StructureItemDesc::Pstr_module(Box::new(
+            transform_module_binding(*mb, config, arena, warnings),
+        )),
         StructureItemDesc::Pstr_recmodule(mbs) => {
             let mut result = vec![];
             for mb in *mbs {
@@ -3726,11 +3713,9 @@ fn transform_structure_item_desc(
             }
             StructureItemDesc::Pstr_recmodule(Box::new(result))
         }
-        StructureItemDesc::Pstr_modtype(mt) => {
-            StructureItemDesc::Pstr_modtype(Box::new(transform_module_type_declaration(
-                *mt, config, arena,
-            )))
-        }
+        StructureItemDesc::Pstr_modtype(mt) => StructureItemDesc::Pstr_modtype(Box::new(
+            transform_module_type_declaration(*mt, config, arena),
+        )),
         StructureItemDesc::Pstr_include(incl) => {
             let mod_expr = arena.get_mod_expr(incl.pincl_mod).clone();
             let transformed = transform_module_expr(mod_expr, config, arena, warnings);
@@ -4601,7 +4586,8 @@ fn mk_record_from_props(
     };
 
     // Build record fields
-    let record_fields: Vec<ExpressionRecordField> = regular_props.into_iter()
+    let record_fields: Vec<ExpressionRecordField> = regular_props
+        .into_iter()
         .filter_map(|prop| {
             match prop {
                 JsxProp::Punning { optional, name } => {
@@ -4624,7 +4610,11 @@ fn mk_record_from_props(
                         opt: *optional,
                     })
                 }
-                JsxProp::Value { name, optional, value } => {
+                JsxProp::Value {
+                    name,
+                    optional,
+                    value,
+                } => {
                     // name.txt is already a StrIdx, use it directly
                     let name_str_idx = name.txt;
                     Some(ExpressionRecordField {

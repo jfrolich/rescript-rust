@@ -167,6 +167,12 @@ impl JsPrinter {
                     self.write(" = require(");
                     self.print_string(&path);
                     self.write_char(')');
+                    // OCaml compiler/core/js_dump_import_export.ml:111-120:
+                    // CommonJS requires append `.default` from the external's
+                    // default flag independently of import attributes.
+                    if matches!(&module.kind, Kind::External { default: true, .. }) {
+                        self.write(".default");
+                    }
                 }
             }
 

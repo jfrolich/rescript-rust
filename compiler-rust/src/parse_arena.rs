@@ -462,6 +462,15 @@ pub struct ParseArena {
     /// Arena of expressions (returns ExprIdx).
     /// Replaces `Box<Expression>` for recursive AST references.
     expressions: Arena<Expression, ExprIdx>,
+    /// Intentional Rust performance representation for expression fields that
+    /// are usually absent.
+    ///
+    /// OCaml compiler/ml/parsetree.ml:210-214 stores one expression record,
+    /// and parsetree.ml:226-298 stores these payloads directly inside
+    /// `expression_desc` variants. The arena parser keeps them in side tables
+    /// keyed by stable `ExprIdx` so common expression nodes stay compact. Do
+    /// not move these back inline during parity cleanup unless the replacement
+    /// keeps the same AST behavior and comparable parser memory profile.
     /// Sparse side table for function default expressions, keyed by function ExprIdx.
     expr_fun_defaults: Vec<Option<ExprIdx>>,
     /// Sparse side table for case guards, keyed by owning match/try ExprIdx.

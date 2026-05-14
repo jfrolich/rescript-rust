@@ -156,16 +156,80 @@ These are known high-risk areas from the seven-day parity review. Treat them as 
 
 Hard rule for this goal: never improve parity by adding a Rust-only compatibility layer. Any change that suppresses a force, rewrites a representative, matches path strings, scans signature contents to guess forcing, or branches lazy behavior on output mode must be treated as debt unless it directly mirrors the reference OCaml implementation at a cited source location.
 
-- **Canonical typedtree mode altering semantics:** `preserve_canonical_typedtree` branches in `context.rs`, `env_lazy.rs`, `persistent_env.rs`, and `typecore.rs` currently make canonical output and normal compilation use different lazy behavior. OCaml has one lazy environment algorithm; output mode must not decide force order, thunk sharing, or signature copy depth.
-- **Global force suppression guards:** `component_alias_sig_force_suppression` and `component_alias_probe_cache_suppression` compensate after the fact. OCaml separates lookup APIs such as `find_module_descr`, `find_module`, `find_type`, and `components_of_module_maker`; Rust should move side effects into the corresponding lazy thunk and call paths rather than using global suppress flags.
-- **Path-spelling alias equivalence:** `flattened_alias_paths_equivalent` and call sites in `ctype.rs`, `typecore.rs`, and `typemod.rs` use spelling such as `__`, `_`, `.mlmap`, and flattened/unflattened paths to infer alias identity, including fallback success when declaration lookup fails. Alias identity should come from declarations, substitution, and component lookup.
-- **Signature-content child forcing:** `typecore.rs` currently forces implicit child components based on signature properties such as “only values” or “has manifest type.” OCaml forcing should be driven by the actual lookup/normalization path, not by scanning a signature and deciding it should force.
-- **Primitive_js_extern probe compensation:** `typemod.rs` contains an explicitly temporary `Primitive_js_extern` force until Rust match/backtracking is equivalent. Keep it tracked as debt; do not treat it as OCaml-aligned.
-- **Alias representative selection:** `preferred_alias_equiv_representative` and call sites in `typecore.rs` still pick a representative after recognizing alias-equivalent constructors. OCaml representative choice should fall out of `type_argument` -> `type_expect` -> `unify_exp` and `ctype.ml` expansion/linking order, not a typecore-side preference helper.
-- **Implicit Stdlib/Pervasives root special cases:** `ctype.rs`, `env_lazy.rs`, and `typecore.rs` still contain explicit `Stdlib`/`Pervasives` force-order branches. If these are needed, they must be justified by the OCaml implicit-open path (`compiler/core/res_compmisc.ml` plus `compiler/ml/env.ml`) rather than hard-coded parity observations.
+### Intentional Rust Performance Representations
+
+Do not remove these while cleaning parity debt. They are explicit Rust storage/layout optimizations that must preserve OCaml-equivalent external typedtree, lambda, and JavaScript behavior, but they do not have to use OCaml's exact in-memory representation.
+
+- **Sparse typedtree extras:** `typedtree::SparseExtras<T>` stores the common empty extras case without an inline empty `Vec`. This preserves the same slice/iterator behavior as OCaml's `exp_extra = []` / `pat_extra = []`, while reducing per-node memory.
+- **Parser expression side tables:** `ParseArena` keeps rarely-present expression payloads such as function defaults, case guards, record spreads, and coercion sources in sparse `ExprIdx` side tables. This is a storage optimization over OCaml Parsetree records from `compiler/ml/parsetree.ml:210-214` and `compiler/ml/parsetree.ml:226-298`; it must preserve the same AST accessors and marshalling behavior.
+- **Sparse large regular records:** `ExpressionDesc::Texp_record_sparse` and `RecordLabelDefinition::OmittedOptionalNone` avoid allocating hundreds of cloned label descriptions and full `Texp_construct None` nodes for large JSX prop records. The boundary must remain equivalent to OCaml `compiler/ml/typecore.ml:297-300`, `compiler/ml/typecore.ml:2833-2842`, and `compiler/ml/translcore.ml:1139-1191`: serializers and lambda lowering expand over the complete `lbl_all` order and produce the same external shape.
+- **Compact type-node handles:** `TypeExprRef(u32)` and `TypeExprRefMap<T>` are arena-index storage optimizations for OCaml `type_expr` physical identity from `compiler/ml/types.ml:22` and the allocation path in `compiler/ml/btype.ml:46-48`. Keep identity-based behavior; do not replace this with structural keys.
+- **Derived Env alias-scope caches:** `Env::local_module_aliases_cache` and `module_path_requires_env_scoped_cache_cache` are Rust-side memo tables derived from visible bindings, preserving OCaml lookup boundaries in `compiler/ml/env.ml:781-813` and `compiler/ml/env.ml:1516-1538`. They are performance caches only, not path-spelling alias equivalence.
+- **CMJ export lookup caches:** `LambdaCompiler` caches `.cmj` constant/arity/lambda export tables per module because Rust's resolver can cross an I/O boundary. This must preserve OCaml's query/export gates in `compiler/core/lam_compile.ml:234-244`, `compiler/core/lam_compile.ml:274-279`, `compiler/core/lam_stats_export.ml:53-63`, and `compiler/core/js_cmj_format.ml:120-128`.
 
 Completed for this goal:
 - **Alias representative patching removed:** `preserve_alias_unify_representative` and its call sites were deleted. Do not reintroduce a typecore-side representative rewrite; representative choice must continue to emerge from the OCaml-aligned `type_argument` -> `type_expect` -> `unify_exp` flow plus `ctype.ml` unification/expansion.
+- **Canonical typedtree mode altering semantics removed:** `preserve_canonical_typedtree` and its driver/typecore branches were deleted. Normal compilation and typedtree dumping now use one lazy component-resolution path; output mode must stay out of force order, thunk sharing, and signature copy depth.
+- **Alias representative selection removed:** `preferred_alias_equiv_representative` and its call sites were deleted. Alias-equivalent constructor recovery now links through the existing unification order instead of a typecore-side representative preference.
+- **Path-spelling alias fallbacks reduced:** `env_lazy::parent_matches_component_context` no longer formats `A__B`/`A_B`; local alias unification no longer succeeds when the short declaration is missing; `lookup_type_decl_for_path` no longer synthesizes `Stdlib.X.t`/`Stdlib_X.t`; flattened constructor, signature-prefix, nested self-path, include-localization, and raw lazy signature registration now require registered alias-table evidence.
+- **CMI substitution spelling fallback removed:** `persistent_env.rs` no longer rewrites non-persistent type or module idents by checking for `_` in the name. Non-persistent substitution now follows OCaml `compiler/ml/subst.ml:69-76` and `compiler/ml/subst.ml:87-100`: rewrite by identifier identity only, with name lookup reserved for persistent stamp-0 ids.
+- **Qualified type expansion name fallback removed:** `ctype.rs` no longer treats a declaration with the same printed qualified path as an exact type lookup. Qualified type expansion now follows OCaml `compiler/ml/env.ml:800-813` and `compiler/ml/ctype.ml:1395-1439`: resolve through the parent component table and fall through when that lookup fails.
+- **Flattened alias declaration-name fallback removed:** `ctype.rs` no longer treats two registered flattened-alias declarations as equivalent just because their `type_path` values print the same name. The final declaration-identity comparison now follows OCaml `compiler/ml/ctype.ml:1941` and `compiler/ml/ctype.ml:2077-2088`: use `Path.same`, with alias equivalence coming from manifests or registered component-alias evidence.
+- **Manifest/nullary constructor name fallbacks removed:** `ctype.rs` no longer treats manifest aliases or nullary constructor paths as equivalent just because their printed path names match. These checks now follow OCaml `compiler/ml/ctype.ml:1941` and `compiler/ml/ctype.ml:2077-2088`: compare paths with `Path.same`; let real manifest expansion and registered alias evidence account for legitimate aliases.
+- **Name-based nullary unify shortcut removed:** `ctype.rs` no longer links two expanded nullary constructors just because their printed paths match. `unify_after_expansion` now falls through to the normal OCaml-shaped constructor branch, matching `compiler/ml/ctype.ml:2338-2363` and the `Tconstr`/`Path.same` branch at `compiler/ml/ctype.ml:2413-2433`.
+- **Failed-unify snapshot/backtrack added:** `TypeContext::snapshot_type_state` / `restore_type_state` now give Rust an OCaml-style mutation rollback for speculative unification. `for...of` follows the two-snapshot iterable-then-array order from `compiler/ml/typecore.ml:3187-3211`, and non-generalizable coercions use the snapshot/backtrack fast path from `compiler/ml/typecore.ml:3317-3330` instead of copied-node compensation. Local type declarations also preserve `ptype_private` in the environment declaration per `compiler/ml/typedecl.ml:700-706`, so private aliases do not become public equality-unification aliases.
+  Debug verification: `cargo build --manifest-path compiler-rust/Cargo.toml`, `cargo build --manifest-path rewatch/Cargo.toml`, `./scripts/test_typedtree_parity.sh type_coercion_free_vars` = 1/1, `./scripts/test_typedtree_parity.sh --quick` = 660/660, `./scripts/test_lambda_parity.sh --quick` = 660/660.
+- **Name-based constructor unify shortcut removed:** `ctype.rs` no longer links parameterized constructors solely because their printed paths match. Constructor unification now continues through the OCaml-shaped `Path.same` branch from `compiler/ml/ctype.ml:2413-2433`, with alias equivalence coming from expansion, normalization, or registered component-alias evidence.
+- **Local submodule segment fallback removed:** `ctype.rs` no longer splits printed paths to equate aliases such as `A.B.t` and `B.t`. Legitimate local module alias identity must come from OCaml-shaped component prefixing/substitution (`compiler/ml/env.ml:1516-1559`, `compiler/ml/subst.ml:69-100`) and normal `Path.same` unification (`compiler/ml/ctype.ml:2413-2433`), not segment-count heuristics.
+- **Package path printed-name fallback removed:** `ctype.rs` package unification no longer accepts equal printed package paths. It now follows OCaml `compiler/ml/ctype.ml:2173-2175` and `compiler/ml/ctype.ml:2236-2244`: compare the original package paths with `Path.same`, then compare normalized package paths with `Path.same`.
+- **Probe cache suppression removed:** `component_alias_probe_cache_suppression` and its global guard were deleted. Probe-style type/component lookups now use explicit no-publish cache mode at the lookup API boundary, matching OCaml's separate `find_module_descr`/`find_type` descriptor reads instead of changing global context state.
+- **Global force suppression guard removed:** `component_alias_sig_force_suppression` and its scoped wrappers were deleted. Probe-style component/type lookups now carry explicit `ComponentLookupCacheMode::Probe`, matching OCaml `compiler/ml/env.ml:781-813` descriptor/type lookups separately from `find_module`/`components_of_module_maker` forcing at `compiler/ml/env.ml:865-882` and `compiler/ml/env.ml:1516-1588`.
+- **Label root rewrite name fallback removed:** `typecore.rs` no longer rewrites label argument/result type paths by matching equal printed parent names. Direct record-label root rewriting now follows OCaml `compiler/ml/subst.ml:87-95` and `compiler/ml/env.ml:1542-1559`: apply explicit component substitution with `Path.same`, not path spelling.
+- **Value-only signature qualification shortcut removed:** `typecore.rs` no longer skips component-signature copying/substitution when a signature contains only values. Component signatures now follow OCaml `compiler/ml/env.ml:1530-1538` and `compiler/ml/subst.ml:303-309`: run `prefix_idents`/`Subst.value_description` shape consistently instead of deciding laziness from signature contents.
+- **Primitive_js_extern probe compensation removed:** `typemod.rs` no longer scans type manifests for a `Primitive_js_extern` root to decide whether to force constraint-match expansion. Type-declaration constraint side effects now stay on the OCaml-shaped path at `compiler/ml/typedecl.ml:767-781` and `compiler/ml/ctype.ml:2338-2344`: expand copied heads for the parameterized constructor currently being checked.
+- **Implicit-root signature-content shortcut removed:** `ctype.rs` no longer follows synthetic `Stdlib`/`Pervasives` component aliases before recursive path normalization, and no longer checks whether an alias target signature contains submodules before deciding to normalize through it. `normalize_path_full_inner` now follows OCaml `compiler/ml/env.ml:903-914`: normalize the dotted prefix first, then let `find_module ~alias:true` at `compiler/ml/env.ml:865-882` force and follow aliases in Env order.
+- **Selected-value Primitive_js_extern manifest scan removed:** `typecore.rs` no longer walks copied selected-value type manifests looking for a `Primitive_js_extern` root to trigger head expansion. Qualified value typing now stays on the OCaml path from `compiler/ml/typecore.ml:2421-2457` and `compiler/ml/typecore.ml:4171-4192`: instance the selected value description, type source arguments, and let `compiler/ml/ctype.ml:2338-2344` expansion occur through unification rather than a content-based manifest scan.
+- **Selected-value force suppression flag removed:** `typecore.rs` no longer carries a dead `suppress_selected_value_forces` branch through selected-value type traversal. All selected-value traversal now follows the single OCaml-shaped path: `compiler/ml/typecore.ml:2421-2457` instances the `Env.find_value` result, `compiler/ml/typecore.ml:4171-4192` types source arguments, and component value paths come from `compiler/ml/env.ml:1530-1538` plus `compiler/ml/subst.ml:303-309`.
+- **Constructor same-type-item unification fallback removed:** `ctype.rs` no longer bypasses constructor expansion/failure by comparing resolved `Sig_type` item identities for different paths, and selected-value persistent rewrites no longer depend on that identity helper. Constructor unification now follows OCaml `compiler/ml/ctype.ml:2338-2344` and `compiler/ml/ctype.ml:2413-2433`: expand both heads first, then take the argument-only path only when the resulting constructor paths are `Path.same`.
+- **Packed-module placeholder fallback removed:** `typecore.rs` no longer synthesizes a placeholder `Texp_pack` when the expected type does not expand to `Tpackage`. `Pexp_pack` now follows OCaml `compiler/ml/typecore.ml:3518-3525`: raise `CannotInferSignature` for an unconstrained type variable and `NotAPackedModule` otherwise. Debug verification at the time of this change: `cargo build --manifest-path compiler-rust/Cargo.toml`, `cargo build --manifest-path rewatch/Cargo.toml`, `./scripts/test_typedtree_parity.sh --quick` = `660/660`, `./scripts/test_lambda_parity.sh --quick` = `660/660`.
+- **Typecore post-unify alias retry removed:** `typecore.rs` no longer catches `Ctype.Unify` to retry flattened-alias or nullary-constructor linking from expression typing. `unify_expression_types` now mirrors OCaml `compiler/ml/typecore.ml:345-348`: report the `Ctype.unify` result directly, with alias expansion and representative choice handled inside the Ctype/Env flow.
+- **Ctype flattened-alias constructor link removed:** `ctype.rs` no longer links flattened and qualified constructors after expansion failed to make their paths equal. Constructor unification now follows OCaml `compiler/ml/ctype.ml:2338-2344` and `compiler/ml/ctype.ml:2413-2433`: run `expand_head_unif`, then unify constructor arguments only when the expanded paths are `Path.same`.
+- **Selected-value alias post-unify skip removed:** `typecore.rs` no longer skips the second argument unification for selected flattened aliases. Function application arguments now follow OCaml `compiler/ml/typecore.ml:3771-3773`: `type_expect` first, then `unify_exp`; alias success/failure must come from Ctype/Env, not a selected-value guard.
+- **Flattened alias equivalence helper removed:** `ctype.rs` no longer exposes `flattened_alias_paths_equivalent`, `registered_flattened_alias_rewrite`, or `nullary_constr_paths_equivalent`. Type-path equivalence now stays on the OCaml-shaped routes: component lookup through `compiler/ml/env.ml:800-813`, substitution through `compiler/ml/subst.ml:87-100`/`303-309`, expansion through `compiler/ml/ctype.ml:1346-1372`, and constructor unification only under `Path.same` at `compiler/ml/ctype.ml:2413-2433`.
+- **Initial-env `ref` duplicate removed:** `env.rs` no longer installs a local predef `ref` record into `initial_env`. OCaml `compiler/ml/predef.ml:239-419` does not define `ref` in `initial_safe_string`; `ref` enters the environment from `packages/@rescript/runtime/Pervasives.res:302` through the implicit open in `compiler/core/res_compmisc.ml:58-62` and `compiler/ml/env.ml:1874-1877`. With the duplicate local label gone, `typecore.rs` no longer needs the Rust-only `Pervasives.ref`/`ref` duplicate path shortcut in label ambiguity handling.
+- **Initial-env Pervasives value preload removed:** `env.rs` no longer installs Pervasives operators, utilities, and `ref` primitives directly into `initial_env`. OCaml `compiler/ml/predef.ml:419-424` only adds the remaining predef `char` type after the common predef types/exceptions; normal values come from `Pervasives.res` through the implicit-open path in `compiler/core/res_compmisc.ml:56-62` and `compiler/ml/env.ml:1874-1877`.
+- **Implicit Stdlib/Pervasives root bindings removed:** `driver.rs` no longer adds standalone-only root module bindings after opening implicit `Pervasives` and `Stdlib`; it only keeps raw signatures available for descriptor lookup. This matches OCaml `compiler/core/res_compmisc.ml:56-62` and `compiler/ml/env.ml:1874-1877`, where `open_signature` adds opened components but not root module bindings. `ctype.rs` normalize-path root forcing now follows the ordinary `compiler/ml/env.ml:865-882` persistent path without explicit `Stdlib`/`Pervasives` name overrides.
+- **Pervasives variance force removed:** `ctype.rs` no longer forces a `Pervasives` signature rename during variance lookup for `Pervasives.ref`. OCaml `compiler/ml/typedecl.ml:1064-1066` asks `Env.find_type`, whose dotted lookup goes through `compiler/ml/env.ml:800-813` and `find_module_descr` at `compiler/ml/env.ml:781-788`; that reads persistent `ps_comps` without entering `find_module`'s `ps_sig` force at `compiler/ml/env.ml:865-875`.
+- **Stdlib ArrayBuffer normalize-path exception removed:** `ctype.rs` no longer skips the implicit-root `Stdlib` force only for `Stdlib.ArrayBuffer`. Normalize-path root forcing now follows OCaml `compiler/ml/ctype.ml:1367-1372` and `compiler/ml/env.ml:903-914`: normalize the prefix first, then `find_module ~alias:true` at `compiler/ml/env.ml:865-882` decides whether the persistent root signature is forced.
+- **Flattened alias spelling synthesis removed:** `typecore.rs` no longer constructs double-underscore flattened names inside `rewrite_flattened_alias_head_prefixes`. Source prefixes now come only from the persistent alias table or the component relation registered while building selected components, matching OCaml `compiler/ml/env.ml:1516-1538` alias scraping/prefixing and `compiler/ml/env.ml:1567-1578` child component storage.
+- **Nested alias self-path spelling fallback removed:** `typecore.rs` no longer treats `flat_head_...` string prefixes as proof that a resolved module belongs under a selected alias component. `should_rewrite_nested_alias_self_path` now keeps a backing unit only when `TypeContext` has registered the parent or child component relation, matching OCaml `compiler/ml/env.ml:1516-1538` alias scraping/prefixing and `compiler/ml/env.ml:1567-1578` child component storage.
+- **Selected-value implicit Stdlib inference removed:** `typecore.rs` no longer carries a non-Stdlib selected-value flag that infers `Stdlib.*` rewrites from flattened parent paths. Selected value traversal now rewrites persistent nested `t` paths only through the selected component's registered alias relation, matching OCaml `compiler/ml/typecore.ml:2421-2457`, `compiler/ml/typecore.ml:4171-4192`, `compiler/ml/typecore.ml:4219-4224`, `compiler/ml/env.ml:1530-1538`, and `compiler/ml/subst.ml:303-309`.
+- **Signature item-shape substitution gate removed:** `typecore.rs` no longer decides whether to copy/substitute a resolved module signature by scanning for type/module/modtype declarations. Module signature qualification now follows OCaml `compiler/ml/env.ml:1530-1538` and `compiler/ml/subst.ml:303-309`: build/apply the component substitution path independently of whether the signature contains only values.
+- **Selected-value implicit Stdlib alias-target gate removed:** `typecore.rs` no longer has a separate `Stdlib`-root predicate for deciding whether to collect selected alias targets. Exact selected roots and dotted selected component paths already cover the OCaml `compiler/ml/env.ml:781-813` and `compiler/ml/env.ml:1530-1538` lookup/substitution cases, including implicit opens from `compiler/core/res_compmisc.ml:56-62`.
+- **Selected-value opened-component root exclusion removed:** `typecore.rs` no longer excludes `Stdlib`/`Pervasives` by name when checking whether a selected module is an opened component. Alias-target collection now uses the same generic opened-component predicate, with exact roots and dotted component paths covering the implicit-open cases from `compiler/core/res_compmisc.ml:56-62` and `compiler/ml/env.ml:1874-1877`.
+- **Implicit Stdlib component helper removed:** `typecore.rs` no longer has a separate `is_implicit_stdlib_component_path` helper for local type-path qualification. The existing persistent/global-root predicate covers the OCaml `compiler/ml/env.ml:781-813` descriptor/component path, so alias-target lookup no longer needs a root-name shortcut.
+- **Selected-value implicit Stdlib force skip removed:** `typecore.rs` no longer skips nested type forcing for a non-Stdlib selected value solely because the nested type parent is rooted at `Stdlib` or `Pervasives`. Selected value traversal now skips only the selected component's own nested module and selected alias siblings, matching OCaml `compiler/ml/typecore.ml:2421-2457` value instancing, `compiler/ml/typecore.ml:4171-4192` source argument typing, `compiler/ml/env.ml:1091-1100` qualified value lookup, and `compiler/ml/ctype.ml:666-695` later argument lowering.
+- **Qualified value leaf fallback removed:** `typecore.rs` no longer resolves `Module.value` by falling back to an unqualified `value` lookup when the module prefix is unavailable. Qualified value lookup now follows OCaml `compiler/ml/env.ml:1091-1100`: resolve the module prefix through `lookup_module_descr`, read the selected component value table, or fail.
+- **Qualified value raw-signature fallback removed:** `typecore.rs` no longer scans a resolved raw signature when the component-value cache misses during qualified value lookup. Qualified value lookup now stays on the OCaml `compiler/ml/env.ml:1091-1100` route: `lookup_module_descr` at `compiler/ml/env.ml:1000-1034`, component values built by `compiler/ml/env.ml:1516-1538`, and `Subst.value_description` at `compiler/ml/subst.ml:303-309`.
+- **Selected-value implicit Stdlib nested-force gate removed:** `typecore.rs` no longer forces nested selected-value type paths just because the selected module is rooted at `Stdlib`. The nested selected-component skip is now generic for all selected modules, matching OCaml `compiler/ml/typecore.ml:2421-2457` value instancing, `compiler/ml/typecore.ml:4171-4192` argument typing, `compiler/ml/env.ml:1091-1100` qualified value lookup, and the separate child-module thunk force boundary in `compiler/ml/env.ml:1567-1578`.
+- **Selected-value Stdlib alias-root exception removed:** `typecore.rs` no longer excludes `Stdlib` by name when deciding whether the selected module and a candidate type parent share a registered alias root. The rewrite decision now uses the same registered alias-root relation for every module family, matching OCaml `compiler/ml/env.ml:1516-1538` alias scraping/component prefixing, `compiler/ml/mtype.ml:41-49` alias strengthening, and `compiler/ml/subst.ml:303-309` value-description substitution.
+- **Opened-component path detection generalized:** `ctype.rs` no longer decides selected child signature reuse and component-alias normalization by hard-coded `Stdlib`/`Pervasives` root names. It now detects whether the first dotted component came from an opened Env binding, matching OCaml implicit opens in `compiler/core/res_compmisc.ml:56-62`, `compiler/ml/env.ml:1874-1877`, descriptor/component lookup in `compiler/ml/env.ml:781-793`, module forcing in `compiler/ml/env.ml:865-882`, and child component construction in `compiler/ml/env.ml:1567-1578`.
+- **Direct opened-component alias forcing generalized:** `env_lazy.rs` no longer hard-codes direct `Stdlib`/`Pervasives` children when deciding whether a persistent alias target should trigger signature renaming without a `PersistentEnv`. The predicate now checks opened Env binding origin, matching OCaml implicit opens in `compiler/core/res_compmisc.ml:56-62`, `compiler/ml/env.ml:1874-1877`, alias scraping in `compiler/ml/env.ml:1440-1446`, module forcing in `compiler/ml/env.ml:865-882`, and probe-style descriptor/type lookup laziness in `compiler/ml/env.ml:800-813`.
+- **Belt normalize-path force exception removed:** `ctype.rs` no longer skips persistent signature forcing for `Belt` when a component cache already exists. Normalize-path `Pident` handling now follows OCaml `compiler/ml/ctype.ml:1367-1372` and `compiler/ml/env.ml:903-914`: call `find_module ~alias:true`, whose persistent branch in `compiler/ml/env.ml:865-875` forces `ps_sig` unless the module is present in `env.modules`.
+- **Signature-content child forcing removed:** `typecore.rs` no longer scans raw signatures to decide that a manifest parent has a persistent alias child. Lowered-argument manifest forcing is now limited to captured `Ctype.lower_args` lookup/expansion paths plus registered alias-component facts, matching the OCaml force route through `compiler/ml/typecore.ml:2335-2342`, `compiler/ml/ctype.ml:666-673`, `compiler/ml/env.ml:800-813`, and child component thunk storage at `compiler/ml/env.ml:1567-1578`.
+- **Fabricated flattened alias head removed:** `typecore.rs` no longer derives a persistent backing unit by joining a qualified alias path with underscores during local module type-path qualification. Rewrites now use only flattened heads recorded from the persistent alias table or component relations, matching OCaml alias evidence from `compiler/ml/env.ml:1517`, `compiler/ml/env.ml:1530-1538`, and `compiler/ml/env.ml:1567-1578` rather than path spelling.
+- **Namespace suffix force heuristic removed:** `persistent_env.rs`/`typecore.rs` no longer decide lowered-argument manifest forcing from `.mlmap` filenames, `Module-Namespace` suffix spelling, or alias-only signature shape. Namespace-backed aliases now rely on alias-prefix rewrites collected from actual module alias declarations/components, matching OCaml alias evidence from `compiler/ml/env.ml:1517`, `compiler/ml/env.ml:1530-1538`, and `compiler/ml/env.ml:1567-1578`.
+- **Selected-value Promise path spelling removed:** `typecore.rs` no longer treats printed `Stdlib.Promise.t` as a Promise constructor when deciding whether async selected-value final results stay lazy. The async final-result skip now recognizes only the predef Promise path, matching `compiler/ml/predef.ml:66`, `compiler/ml/predef.ml:113`, and the lowered async application flow at `compiler/ml/typecore.ml:2568-2588`.
+- **Selected-value Promise-aware final-result branch removed:** `typecore.rs` no longer scans final application result types for a qualified component path plus Promise constructor before deciding whether to force them. Selected-value final-result laziness now uniformly follows OCaml `compiler/ml/typecore.ml:2335-2343` (`lower_args` stops at the first non-arrow result) and `compiler/ml/typecore.ml:4219-4224` (the final application result is left to caller unification/expansion).
+- **Path-spelling alias equivalence helper removed:** `flattened_alias_paths_equivalent` and its call sites are gone from `ctype.rs`, `typecore.rs`, and `typemod.rs`. Remaining flattened-name uses must stay tied to persistent alias-table or registered component evidence from `compiler/ml/env.ml:1516-1538` and `compiler/ml/subst.ml:87-100`, not fallback path spelling.
+- **Implicit Stdlib/Pervasives force-order special cases audited/removed:** Current explicit `Pervasives.*` entries in `typecore.rs` mirror unified operators from `compiler/ml/unified_ops.ml:56-262` and `compiler/ml/typecore.ml:3814-3819`; current explicit `Stdlib_*`/`Stdlib.Child.t` entries in `typemod.rs` mirror untagged-variant builtin object matching in `compiler/ml/ast_untagged_variants.ml:243-271`. Implicit opens are handled through `compiler/core/res_compmisc.ml:56-62` and `compiler/ml/env.ml:1874-1877`, not Rust-only force-order branches.
+- **Value component substitution scan removed:** `env_lazy.rs::lookup_value_for_access` no longer runs `value_mentions_local_component_type` before selected value substitution. Qualified component value lookup now always deep-copies the selected value and applies the component substitution, matching `compiler/ml/env.ml:1530-1538` and `compiler/ml/subst.ml:303-309`, with the copied result memoized in the component table.
+- **Direct flattened component type rewrite moved to Env substitution:** `persistent_env.rs::substitute_type_paths_in_value_from_sig` now rewrites direct flattened backing type paths for the selected component's own `Sig_type` binders, and the matching `typecore.rs` post-instance fallback was deleted. This follows OCaml `compiler/ml/env.ml:1454-1481` (`prefix_idents` creates selected component paths), `compiler/ml/env.ml:1530-1538` (component values are stored after substitution), `compiler/ml/subst.ml:303-309` (`Subst.value_description`), and `compiler/ml/typecore.ml:2421-2457` (typecore only instances the returned value description).
+- **Opened-component selected-value rewrite removed:** `typecore.rs` no longer has a post-instance `selected_opened_alias_type_path` branch. Opened component value paths now rely on the existing qualified component lookup/substitution flow from OCaml `compiler/ml/env.ml:1841-1860`/`compiler/ml/env.ml:1874-1877` (open component tables), `compiler/ml/env.ml:1091-1100` (qualified value lookup), `compiler/ml/env.ml:1530-1538` (component values), `compiler/ml/subst.ml:303-309` (`Subst.value_description`), and `compiler/ml/typecore.ml:2421-2457` (instance the returned value description).
+- **Flattened persistent selected-value rewrite removed:** `typecore.rs` no longer has a post-instance `flattened_persistent_alias_type_path` branch. Flattened alias value path shape now comes from component signature qualification and value-description substitution instead of a typecore-side path rewrite, matching OCaml `compiler/ml/env.ml:1435-1446` (alias scraping), `compiler/ml/env.ml:1516-1538` (component construction), `compiler/ml/mtype.ml:41-49` (alias strengthening leaves value descriptions unchanged), `compiler/ml/subst.ml:303-309`, and `compiler/ml/typecore.ml:2421-2457`.
+- **Local-alias selected-value rewrite removed:** `typecore.rs` no longer rewrites selected-value type paths through `visible_local_alias_type_path` or collects alias targets after `instance`. Local alias value path shape now comes from component construction/substitution before expression typing, matching OCaml `compiler/ml/env.ml:1718-1734` (local `store_module` builds components rooted at `Pident id`), `compiler/ml/env.ml:1435-1446` (alias scraping), `compiler/ml/env.ml:1516-1538` (component values), `compiler/ml/subst.ml:303-309`, and `compiler/ml/typecore.ml:2421-2457`.
+- **Selected-value force helper removed:** `typecore.rs` no longer has `force_qualified_value_type_paths`, no longer walks selected-value schemes after `instance`, and no longer forces constructor-result alias paths through `constructor_alias_rewrite_value_path`. Identifier typing now mirrors OCaml `compiler/ml/typecore.ml:2421-2457`: `Typetexp.find_value`, `instance env desc.val_type`, then `rue`. Constructor typing now leaves argument/result forcing to the normal constructor flow from `compiler/ml/typecore.ml:4282-4347`, with later expansion through `compiler/ml/ctype.ml:1367-1372` and Env lookup `compiler/ml/env.ml:896-914`.
+- **Stale include substitution helper removed:** `includemod.rs` no longer keeps the unused `substitute_module_declaration_paths` helper that claimed Rust could not thread substitution lazily. The active module-declaration check already follows OCaml `compiler/ml/includemod.ml:396-413`: strengthen the implementation module type, then recurse through `modtypes` with the current substitution instead of pre-substituting the module declaration.
 
 ### Running Typedtree Sexp Parity Tests
 
@@ -191,8 +255,8 @@ Completed for this goal:
 
 **CRITICAL: Build BOTH compiler and rewatch before parity tests:**
 ```bash
-cargo build --release --manifest-path compiler-rust/Cargo.toml
-cargo build --release --manifest-path rewatch/Cargo.toml
+cargo build --manifest-path compiler-rust/Cargo.toml
+cargo build --manifest-path rewatch/Cargo.toml
 ```
 The parity script uses the rewatch binary, NOT bsc directly. A stale rewatch binary gives WRONG results!
 
@@ -275,8 +339,8 @@ Use this workflow for every parity session so results are reproducible and analy
 
 ```bash
 # 1) Build compiler binaries used by parity
-cargo build --release --manifest-path compiler-rust/Cargo.toml
-cargo build --release --manifest-path rewatch/Cargo.toml
+cargo build --manifest-path compiler-rust/Cargo.toml
+cargo build --manifest-path rewatch/Cargo.toml
 
 # 2) Clear cached parity artifacts (files only)
 find .parity-cache/tests/diffs -type f -delete
@@ -343,7 +407,7 @@ cd tests/tests
 
 # 2) Run Rust bsc with those args from tests/tests/lib/bs
 cd lib/bs
-timeout 10 /absolute/path/to/compiler-rust/target/release/bsc -dtyped-sexp <compiler-args...> 2> /tmp/rust.sexp 1>/dev/null
+timeout 10 /absolute/path/to/compiler-rust/target/debug/bsc -dtyped-sexp <compiler-args...> 2> /tmp/rust.sexp 1>/dev/null
 
 # 3) Optional: run OCaml bsc with same args for side-by-side diffs
 timeout 10 /absolute/path/to/_build/install/default/bin/bsc -dtyped-sexp <compiler-args...> 2> /tmp/ocaml.sexp 1>/dev/null
@@ -352,7 +416,7 @@ diff -u /tmp/ocaml.sexp /tmp/rust.sexp | sed -n '1,200p'
 
 Use env-gated debug tracing with direct bsc repro (example):
 ```bash
-RUST_DEBUG_FINALIZE_VARIANT=1 timeout 10 /absolute/path/to/compiler-rust/target/release/bsc -dtyped-sexp <compiler-args...> 2> /tmp/rust-debug.sexp 1>/dev/null
+RUST_DEBUG_FINALIZE_VARIANT=1 timeout 10 /absolute/path/to/compiler-rust/target/debug/bsc -dtyped-sexp <compiler-args...> 2> /tmp/rust-debug.sexp 1>/dev/null
 rg "\[finalize-" /tmp/rust-debug.sexp
 ```
 
@@ -739,7 +803,7 @@ cargo clippy --manifest-path rewatch/Cargo.toml --all-targets --all-features
 cargo fmt --check --manifest-path rewatch/Cargo.toml
 
 # Build rewatch
-cargo build --manifest-path rewatch/Cargo.toml --release
+cargo build --manifest-path rewatch/Cargo.toml
 
 # Or use the Makefile shortcuts
 make rewatch          # Build rewatch
@@ -960,7 +1024,7 @@ The expected files in `tests/syntax_tests/data/*/expected/` contain the OCaml re
 
 ```bash
 # Build the Rust parser first
-cargo build --manifest-path compiler-rust/Cargo.toml --release
+cargo build --manifest-path compiler-rust/Cargo.toml
 
 # Run all syntax tests with the Rust parser
 PARSER=rust ./scripts/test_syntax.sh
@@ -1012,10 +1076,10 @@ cat tests/temp/syntax_tests/data/printer/expr/expected/apply.res.txt
 
 ```bash
 # For printer tests (default ReScript output)
-./compiler-rust/target/release/res_parser_rust tests/syntax_tests/data/printer/expr/apply.res
+./compiler-rust/target/debug/res_parser_rust tests/syntax_tests/data/printer/expr/apply.res
 
 # For parsing tests (ML format output)
-./compiler-rust/target/release/res_parser_rust -print ml tests/syntax_tests/data/parsing/grammar/expressions/binary.res
+./compiler-rust/target/debug/res_parser_rust -print ml tests/syntax_tests/data/parsing/grammar/expressions/binary.res
 
 # Compare with OCaml parser output
 ./_build/install/default/bin/res_parser tests/syntax_tests/data/printer/expr/apply.res
@@ -1130,7 +1194,7 @@ The following files have known location parity differences that require more com
 
 ```bash
 # 1. Build the Rust compiler
-cargo build --release --manifest-path compiler-rust/Cargo.toml
+cargo build --manifest-path compiler-rust/Cargo.toml
 
 # 2. Run the triage script to see what's broken and WHY
 ./scripts/triage_js_failures.sh
@@ -1139,7 +1203,7 @@ cargo build --release --manifest-path compiler-rust/Cargo.toml
 #    Fix the root cause in Rust code
 
 # 4. Rebuild
-cargo build --release --manifest-path compiler-rust/Cargo.toml
+cargo build --manifest-path compiler-rust/Cargo.toml
 
 # 5. Use single-file test for rapid iteration while developing a fix
 ./scripts/test_js_single.sh adt_optimize_test --diff
@@ -1280,7 +1344,7 @@ These indices are updated in `next()` when tokens are consumed. The key methods 
    ```bash
    FILE=tests/syntax_tests/data/parsing/grammar/expressions/binary.res
    ./_build/install/default/bin/res_parser -print binary $FILE > /tmp/ocaml.bin
-   ./compiler-rust/target/release/res_parser_rust -print binary $FILE > /tmp/rust.bin
+   ./compiler-rust/target/debug/res_parser_rust -print binary $FILE > /tmp/rust.bin
    diff <(xxd /tmp/ocaml.bin) <(xxd /tmp/rust.bin) | head -50
    ```
 
@@ -1301,7 +1365,7 @@ These indices are updated in `next()` when tokens are consumed. The key methods 
 
 6. **Test and commit:**
    ```bash
-   cargo build --manifest-path compiler-rust/Cargo.toml --release
+   cargo build --manifest-path compiler-rust/Cargo.toml
    ./scripts/test_parser_ast_parity.sh 2>&1 | grep "FAILED\|passing"
    # If improved, commit immediately!
    ```
@@ -1390,7 +1454,7 @@ fn parse_inner(p: &mut Parser) {
 
 # Compare binary output directly
 ./_build/install/default/bin/res_parser -print binary FILE > /tmp/ocaml.bin
-./compiler-rust/target/release/res_parser_rust -print binary FILE > /tmp/rust.bin
+./compiler-rust/target/debug/res_parser_rust -print binary FILE > /tmp/rust.bin
 diff <(xxd /tmp/ocaml.bin) <(xxd /tmp/rust.bin)
 ```
 

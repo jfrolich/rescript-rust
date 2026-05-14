@@ -177,11 +177,12 @@ PROJECT_ROOT=$(cd "$scriptDir/.."; pwd -P)
 DUNE_BIN_DIR="$PROJECT_ROOT/_build/install/default/bin"
 
 # Parser executables (for sexp output - readable diffs)
-RUST_PARSER="$PROJECT_ROOT/compiler-rust/target/release/res_parser_rust"
+RUST_TARGET="${RUST_TARGET:-debug}"
+RUST_PARSER="$PROJECT_ROOT/compiler-rust/target/$RUST_TARGET/res_parser_rust"
 OCAML_PARSER="$DUNE_BIN_DIR/res_parser"
 
 # Compiler executables (for bsc -bs-ast output - production format)
-RUST_BSC="$PROJECT_ROOT/compiler-rust/target/release/bsc"
+RUST_BSC="$PROJECT_ROOT/compiler-rust/target/$RUST_TARGET/bsc"
 OCAML_BSC="$PROJECT_ROOT/packages/@rescript/$($PROJECT_ROOT/scripts/platform.sh)/bin/bsc.exe"
 
 # Spice PPX parity configuration
@@ -217,7 +218,8 @@ fi
 
 if [[ ! -x "$RUST_PARSER" ]]; then
     echo -e "${RED}Error: Rust parser not found at $RUST_PARSER${RESET}"
-    echo "Run 'cargo build --manifest-path compiler-rust/Cargo.toml --release' first."
+    echo "Run 'cargo build --manifest-path compiler-rust/Cargo.toml' first."
+    echo "This parity script expects debug artifacts for iteration."
     exit 1
 fi
 
@@ -229,7 +231,8 @@ fi
 
 if [[ ! -x "$RUST_BSC" ]]; then
     echo -e "${RED}Error: Rust bsc not found at $RUST_BSC${RESET}"
-    echo "Run 'cargo build --manifest-path compiler-rust/Cargo.toml --release' first."
+    echo "Run 'cargo build --manifest-path compiler-rust/Cargo.toml' first."
+    echo "This parity script expects debug artifacts for iteration."
     exit 1
 fi
 
@@ -243,6 +246,7 @@ echo "OCaml parser: $OCAML_PARSER"
 echo "Rust parser:  $RUST_PARSER"
 echo "OCaml bsc:    $OCAML_BSC"
 echo "Rust bsc:     $RUST_BSC"
+echo "Rust target:  $RUST_TARGET"
 echo "Spice ppx:    $SPICE_PPX"
 echo "Spice tests:  $SPICE_TEST_DIR"
 echo "Timeout: ${TIMEOUT_SECONDS}s"

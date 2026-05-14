@@ -3786,8 +3786,7 @@ fn parse_dict_expr(p: &mut Parser<'_>, start_pos_idx: PosIdx) -> Expression {
                             let lid_idx = p.push_lident(key.as_ref());
                             Expression {
                                 pexp_desc: Box::new(ExpressionDesc::Pexp_ident(with_loc(
-                                    lid_idx,
-                                    key_loc,
+                                    lid_idx, key_loc,
                                 ))),
                                 pexp_loc: key_loc,
                                 pexp_attributes: Attributes::new(),
@@ -7047,20 +7046,23 @@ fn parse_jsx(p: &mut Parser<'_>) -> Expression {
                     let closing_tag_name = parse_jsx_tag_name(p);
                     let closing_tag_name_loc = p.mk_loc_idx_to_prev_end(closing_name_start_idx);
                     // Check for tag name mismatch (OCaml: "Missing </Foo.Bar>")
-                    let closing_tag_end_idx =
-                        if !jsx_tag_names_match(&tag_name, &closing_tag_name, p) {
-                            let opening_name = jsx_tag_name_to_string_for_error(&tag_name, p);
-                            if super::grammar::is_structure_item_start(&token0) {
-                                p.err_at(
-                                    start_pos.clone(),
-                                    p.prev_end_pos.clone(),
-                                    DiagnosticCategory::Message(format!("Missing </{}>", opening_name)),
-                                );
-                                // OCaml consumes '>' in this mismatch branch to keep AST shape stable.
-                                p.expect(Token::GreaterThan);
-                                p.prev_end_pos_idx()
-                            } else {
-                                p.err_at(
+                    let closing_tag_end_idx = if !jsx_tag_names_match(
+                        &tag_name,
+                        &closing_tag_name,
+                        p,
+                    ) {
+                        let opening_name = jsx_tag_name_to_string_for_error(&tag_name, p);
+                        if super::grammar::is_structure_item_start(&token0) {
+                            p.err_at(
+                                start_pos.clone(),
+                                p.prev_end_pos.clone(),
+                                DiagnosticCategory::Message(format!("Missing </{}>", opening_name)),
+                            );
+                            // OCaml consumes '>' in this mismatch branch to keep AST shape stable.
+                            p.expect(Token::GreaterThan);
+                            p.prev_end_pos_idx()
+                        } else {
+                            p.err_at(
                                     start_pos.clone(),
                                     p.prev_end_pos.clone(),
                                     DiagnosticCategory::Message(format!(
@@ -7068,14 +7070,14 @@ fn parse_jsx(p: &mut Parser<'_>) -> Expression {
                                         opening_name
                                     )),
                                 );
-                                p.expect(Token::GreaterThan);
-                                p.prev_end_pos_idx()
-                            }
-                        } else {
-                            let closing_tag_end_idx = p.start_pos_idx();
                             p.expect(Token::GreaterThan);
-                            closing_tag_end_idx
-                        };
+                            p.prev_end_pos_idx()
+                        }
+                    } else {
+                        let closing_tag_end_idx = p.start_pos_idx();
+                        p.expect(Token::GreaterThan);
+                        closing_tag_end_idx
+                    };
                     Some(JsxClosingTag {
                         start: closing_tag_start_idx,
                         name: with_loc(closing_tag_name, closing_tag_name_loc),

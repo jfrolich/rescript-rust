@@ -124,10 +124,7 @@ pub fn substitute_type_vars(
             }
             let inner_type = arena.get_core_type(inner_idx).clone();
             let substituted_inner = substitute_type_vars(arena, inner_type, vars)?;
-            CoreTypeDesc::Ptyp_alias(Box::new((
-                arena.push_core_type(substituted_inner),
-                name,
-            )))
+            CoreTypeDesc::Ptyp_alias(Box::new((arena.push_core_type(substituted_inner), name)))
         }
         CoreTypeDesc::Ptyp_object(inner) => {
             let (fields, closed) = *inner;
@@ -1748,7 +1745,8 @@ pub fn parse_object_type_body(p: &mut Parser<'_>, start_pos_idx: PosIdx) -> Core
         ClosedFlag::Closed
     };
 
-    let allow_record_lidents_after_spread = !starts_with_object_marker && p.token == Token::DotDotDot;
+    let allow_record_lidents_after_spread =
+        !starts_with_object_marker && p.token == Token::DotDotDot;
     let fields = parse_object_fields(p, allow_record_lidents_after_spread);
     p.expect(Token::Rbrace);
     let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);

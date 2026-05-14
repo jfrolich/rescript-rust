@@ -219,8 +219,9 @@ impl ParserDiagnostic {
             DiagnosticCategory::UnknownUchar(ch) => {
                 format!("Not sure what to do with this character: \"{}\".", ch)
             }
-            DiagnosticCategory::FatalSyntaxerr => "Fatal error: exception Syntaxerr.Error(_)"
-                .to_string(),
+            DiagnosticCategory::FatalSyntaxerr => {
+                "Fatal error: exception Syntaxerr.Error(_)".to_string()
+            }
         }
     }
 }

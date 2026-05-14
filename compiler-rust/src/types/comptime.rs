@@ -1172,6 +1172,11 @@ pub fn specialize_expression(
             omitted_loc,
             extended_expression,
         } => {
+            // Intentional Rust performance representation: preserve the sparse
+            // record wrapper while specializing only explicit field
+            // expressions. Later typedtree/lambda boundaries expand the
+            // carried `all_labels` table to the full field list from OCaml
+            // compiler/ml/typecore.ml:2833-2842.
             let spec_fields: Vec<_> = fields
                 .iter()
                 .map(|(lid, desc, def, opt)| {

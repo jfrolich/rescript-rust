@@ -866,6 +866,7 @@ pub struct RawLambdaConverter<'a> {
     lowered: LambdaConverter<'a>,
     unit_name: String,
     no_assert_false: bool,
+    noassert: bool,
     diagnostic: Option<RawLambdaDiagnostic>,
     warnings: Vec<TypeCoreWarning>,
     warning_config: WarningConfig,
@@ -891,6 +892,7 @@ impl<'a> RawLambdaConverter<'a> {
             lowered: LambdaConverter::new(arena),
             unit_name: String::new(),
             no_assert_false: false,
+            noassert: false,
             diagnostic: None,
             warnings: Vec::new(),
             warning_config: WarningConfig::new(),
@@ -917,6 +919,7 @@ impl<'a> RawLambdaConverter<'a> {
             lowered: LambdaConverter::with_start_stamp(arena, start_stamp),
             unit_name: String::new(),
             no_assert_false: false,
+            noassert: false,
             diagnostic: None,
             warnings: Vec::new(),
             warning_config: WarningConfig::new(),
@@ -944,6 +947,7 @@ impl<'a> RawLambdaConverter<'a> {
             lowered: LambdaConverter::with_start_stamp(arena, start_stamp),
             unit_name,
             no_assert_false: false,
+            noassert: false,
             diagnostic: None,
             warnings: Vec::new(),
             warning_config: WarningConfig::new(),
@@ -960,6 +964,10 @@ impl<'a> RawLambdaConverter<'a> {
 
     pub fn set_no_assert_false(&mut self, no_assert_false: bool) {
         self.no_assert_false = no_assert_false;
+    }
+
+    pub fn set_noassert(&mut self, noassert: bool) {
+        self.noassert = noassert;
     }
 
     pub fn set_warning_config(&mut self, warning_config: WarningConfig) {
@@ -2166,7 +2174,10 @@ impl<'a> RawLambdaConverter<'a> {
                     Primitive::PjsFnMake(_) | Primitive::PjsFnMakeUnit
                 ) && prim.args.len() == 1 =>
             {
-                let inner = prim.args.pop().expect("checked single Pjs_fn_make argument");
+                let inner = prim
+                    .args
+                    .pop()
+                    .expect("checked single Pjs_fn_make argument");
                 prim.args
                     .push(self.apply_inline_attribute_raw(inner, loc, inline));
                 RawLambda::Lprim(prim)
@@ -2512,6 +2523,19 @@ impl<'a> RawLambdaConverter<'a> {
             0,
             crate::lambda::lam_constant::PointerInfo::AssertFalse,
         ))
+    }
+
+    fn assert_failed_lambda(&self, loc: Location) -> Lambda {
+        self.raise_predef_exception("Assert_failure", PREDEF_ASSERT_FAILURE_STAMP, loc)
+    }
+
+    fn assert_false_lambda(&self, loc: Location) -> Lambda {
+        // Same branch as compiler/ml/translcore.ml:926-928.
+        if self.no_assert_false {
+            Lambda::const_(Constant::int_with_comment(0, PointerInfo::AssertFalse))
+        } else {
+            self.assert_failed_lambda(loc)
+        }
     }
 
     fn has_only_expr_attr(&self, expr: &Expression, name: &str) -> bool {
@@ -3443,6 +3467,10 @@ impl<'a> RawLambdaConverter<'a> {
                         omitted_loc,
                         ..
                     } => {
+                        // Intentional Rust performance representation:
+                        // expand sparse records before raw-lambda conversion
+                        // so inlined records see the same shape as OCaml
+                        // compiler/ml/translcore.ml:1139-1191.
                         let expanded_fields =
                             self.expand_sparse_record_fields(all_labels, fields, *omitted_loc);
                         self.convert_record_raw(
@@ -3750,6 +3778,10 @@ impl<'a> RawLambdaConverter<'a> {
             if let Some(field) = explicit_by_pos.get(&pos) {
                 expanded.push((*field).clone());
             } else if label.lbl_optional {
+                // Intentional Rust performance representation: reconstruct
+                // the omitted optional `None` node that OCaml
+                // compiler/ml/typecore.ml:2833-2842 stores eagerly in the
+                // typedtree field list.
                 let label_lid = Located {
                     txt: placeholder_lid.txt,
                     loc: omitted_loc,
@@ -4104,6 +4136,22 @@ impl<'a> RawLambdaConverter<'a> {
             crate::types::Path::Pident(_) => path.clone(),
         };
 
+        if matches!(&path, crate::types::Path::Pdot(..))
+            && let Some(alias_target) = crate::types::typecore::module_alias_target_for_path(
+                &path,
+                env,
+                &mut self.persistent_env,
+                self.type_ctx,
+            )
+            && !alias_target.same(&path)
+        {
+            // OCaml compiler/ml/env.ml:876-880 resolves dotted modules through
+            // `find_module_descr` component tables before following the alias
+            // at compiler/ml/env.ml:903-914. A direct Rust env lookup can still
+            // see the un-prefixed local alias stored in the source signature.
+            return self.normalize_module_path_in_env(env, &alias_target);
+        }
+
         if let Ok(md) = env.lookup_module(&path) {
             match &md.md_type {
                 crate::types::decl::ModuleType::MtyAlias(_, alias_path) => {
@@ -4173,6 +4221,22 @@ impl<'a> RawLambdaConverter<'a> {
             ),
             crate::types::Path::Pident(_) => path.clone(),
         };
+
+        if matches!(&path, crate::types::Path::Pdot(..))
+            && let Some(alias_target) = crate::types::typecore::module_alias_target_for_path(
+                &path,
+                env,
+                &mut self.persistent_env,
+                self.type_ctx,
+            )
+            && !alias_target.same(&path)
+        {
+            // OCaml compiler/ml/lambda.ml:651-652 calls
+            // `Env.normalize_path_prefix`; for a dotted prefix that reaches
+            // compiler/ml/env.ml:876-880's component lookup before alias
+            // following at compiler/ml/env.ml:903-914.
+            return self.normalize_value_prefix_path_in_env(env, &alias_target);
+        }
 
         if let Ok(md) = env.lookup_module(&path) {
             match &md.md_type {
@@ -6067,6 +6131,11 @@ impl<'a> RawLambdaConverter<'a> {
                         if cstr.cstr_name == "false" && args.is_empty()
                 ) {
                     self.raw_assert_false(self.loc(expr.exp_loc))
+                } else if self.noassert {
+                    // OCaml translcore.ml:926-931 handles `assert false`
+                    // first, then lowers ordinary assertions to unit under
+                    // Clflags.noassert.
+                    RawLambda::unit()
                 } else {
                     let failure = self.raw_assert_failed(self.loc(expr.exp_loc));
                     RawLambda::LifThenElse(
@@ -6242,9 +6311,20 @@ impl<'a> RawLambdaConverter<'a> {
             ExpressionDesc::Texp_letmodule(_, _, _, body) => self.convert_expr(body),
             ExpressionDesc::Texp_letexception(_, body) => self.convert_expr(body),
             ExpressionDesc::Texp_assert(inner_expr) => {
-                let cond = self.convert_expr(inner_expr);
-                let failure = self.match_failure(self.loc(inner_expr.exp_loc));
-                Lambda::if_(cond, Lambda::unit(), failure)
+                if matches!(
+                    inner_expr.exp_desc,
+                    ExpressionDesc::Texp_construct(_, ref cstr, ref args)
+                        if cstr.cstr_name == "false" && args.is_empty()
+                ) {
+                    self.assert_false_lambda(self.loc(expr.exp_loc))
+                } else if self.noassert {
+                    // Same branch order as compiler/ml/translcore.ml:926-931.
+                    Lambda::unit()
+                } else {
+                    let cond = self.convert_expr(inner_expr);
+                    let failure = self.assert_failed_lambda(self.loc(expr.exp_loc));
+                    Lambda::if_(cond, Lambda::unit(), failure)
+                }
             }
             _ => {
                 trace_raw_fallback(Self::expr_desc_name(&expr.exp_desc));
@@ -9172,15 +9252,10 @@ impl<'a> RawLambdaConverter<'a> {
                 if matches!(cstr.cstr_tag, ConstructorTag::CstrUnboxed) =>
             {
                 if let Some(arg) = args.first() {
-                    // For unboxed constructors with inline records, the value IS the
-                    // single field directly. Unwrap single-field inline records to
-                    // bind the inner pattern to the scrutinee as an alias.
-                    if let PatternDesc::Tpat_record(fields, _) = &arg.pat_desc {
-                        if fields.len() == 1 {
-                            let (_, _, inner_pat, _) = &fields[0];
-                            return self.bind_irrefutable_pattern_raw(inner_pat, scrut, body);
-                        }
-                    }
+                    // OCaml compiler/ml/matching.ml:1249-1271 passes
+                    // Cstr_unboxed payloads through as `(arg, Alias)`;
+                    // record payload patterns are then decomposed by normal
+                    // record matching at compiler/ml/matching.ml:1439-1454.
                     self.bind_irrefutable_pattern_raw(arg, scrut, body)
                 } else {
                     body

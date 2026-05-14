@@ -382,6 +382,9 @@ pub fn max_lambda_input_stamp(typed_structure: &crate::types::typedtree::Structu
                 extended_expression,
                 ..
             } => {
+                // Intentional Rust performance representation: omitted
+                // optional fields are synthetic, so traversal only visits
+                // explicit overridden expressions and the optional base.
                 for (_, _, field, _) in fields {
                     if let crate::types::typedtree::RecordLabelDefinition::Overridden(_, expr) =
                         field
@@ -1375,6 +1378,8 @@ pub struct CompilerOptions {
     pub cross_module_inline: bool,
     /// Mirror `Clflags.no_assert_false` / `-bs-noassertfalse`.
     pub no_assert_false: bool,
+    /// Mirror `Clflags.noassert` / `-noassert`.
+    pub noassert: bool,
     /// Mirror `Clflags.transparent_modules` / `-no-alias-deps`.
     pub transparent_modules: bool,
     /// Mirror `Js_config.no_builtin_ppx` / `-bs-no-builtin-ppx`.
@@ -1432,6 +1437,7 @@ impl Default for CompilerOptions {
             check_div_by_zero: true,
             cross_module_inline: false,
             no_assert_false: false,
+            noassert: false,
             transparent_modules: false,
             no_builtin_ppx: false,
             external_ppxs: Vec::new(),
@@ -1448,10 +1454,6 @@ impl Default for CompilerOptions {
 }
 
 impl CompilerOptions {
-    fn preserve_canonical_typedtree(&self) -> bool {
-        self.dump_typed_sexp || self.dump_typed_sexp_locs || self.capture_intermediates
-    }
-
     fn current_unit_name(&self) -> Option<String> {
         self.module_name.clone().or_else(|| {
             self.source_filename
@@ -1496,6 +1498,19 @@ fn apply_file_config_warning_options(
     }
 }
 
+fn apply_leading_warning_attribute_options(
+    tctx: &mut TypeCheckContext<'_>,
+    specs: &[ppx::WarningAttributeSpec],
+) {
+    for spec in specs {
+        if spec.as_error {
+            tctx.apply_warning_error_spec(&spec.spec);
+        } else {
+            tctx.apply_warning_spec(&spec.spec);
+        }
+    }
+}
+
 fn warning_config_for_options(options: &CompilerOptions) -> WarningConfig {
     let mut config = WarningConfig::new();
     apply_warning_specs_to_config(
@@ -1506,11 +1521,23 @@ fn warning_config_for_options(options: &CompilerOptions) -> WarningConfig {
     config
 }
 
-fn warning_config_for_options_and_file_config(
+fn warning_config_for_options_file_config_and_leading_attrs(
     options: &CompilerOptions,
     file_config: &FileConfigOverrides,
+    leading_specs: &[ppx::WarningAttributeSpec],
 ) -> WarningConfig {
     let mut config = warning_config_for_options(options);
+    // OCaml compiler/frontend/ppx_entry.ml:28-47 calls
+    // Bs_ast_invariant.iter_warnings_on_stru/sigi before builtin PPX
+    // rewriting; those leading attributes mutate Warnings.current before
+    // @deriving and external warnings are emitted.
+    for spec in leading_specs {
+        if spec.as_error {
+            let _ = config.parse_as_error(&spec.spec);
+        } else {
+            let _ = config.parse(&spec.spec);
+        }
+    }
     apply_warning_specs_to_config(
         &mut config,
         &file_config.warning_specs,
@@ -4408,13 +4435,8 @@ fn check_module_path_resolution_errors(
 }
 
 fn format_persistent_env_path(path: &str) -> String {
-    let path_buf = PathBuf::from(path);
-    if path_buf.is_absolute()
-        && let Ok(cwd) = std::env::current_dir()
-        && let Ok(relative) = path_buf.strip_prefix(cwd)
-    {
-        return relative.to_string_lossy().into_owned();
-    }
+    // OCaml reports the stored persistent-structure filename directly through
+    // `Location.print_filename` in compiler/ml/env.ml:2110-2119.
     path.to_string()
 }
 
@@ -5937,7 +5959,9 @@ fn format_unbound_module_report(
             "{INFO}The module or file {name} can't be found.{RESET}\n- If it's a third-party dependency:\n  - Did you add it to the \"dependencies\" or \"dev-dependencies\" in rescript.json?\n- Did you include the file's directory to the \"sources\" in rescript.json?"
         )
     };
-    if name != "Str" && let Some(hint) = spellcheck_hint(name, alternatives) {
+    if name != "Str"
+        && let Some(hint) = spellcheck_hint(name, alternatives)
+    {
         message.push_str("\n\n\n");
         message.push_str(INFO);
         message.push_str("Hint: Did you mean ");
@@ -6604,7 +6628,13 @@ fn format_orpat_vars_report(
         raw_message.push_str("Hint: Did you mean ");
         raw_message.push_str(hint);
         raw_message.push('?');
-        return format_compiler_error_report_raw_message(arena, source, filename, loc, &raw_message);
+        return format_compiler_error_report_raw_message(
+            arena,
+            source,
+            filename,
+            loc,
+            &raw_message,
+        );
     }
 
     format_compiler_error_report(arena, source, filename, loc, &message)
@@ -10266,9 +10296,8 @@ fn format_unbound_record_field_report(
             raw_message.push_str("  \n");
             raw_message.push_str(&format_type_expr(type_ctx, ty));
             raw_message.push_str("\n  \n\n");
-            raw_message.push_str(
-                "  Only records have fields that can be accessed with dot notation.",
-            );
+            raw_message
+                .push_str("  Only records have fields that can be accessed with dot notation.");
             if let Some(hint) = spellcheck_hint(
                 field_name.rsplit('.').next().unwrap_or(field_name),
                 alternatives,
@@ -10319,7 +10348,13 @@ fn format_unbound_record_field_report(
         raw_message.push_str("Hint: Did you mean ");
         raw_message.push_str(hint);
         raw_message.push('?');
-        return format_compiler_error_report_raw_message(arena, source, filename, loc, &raw_message);
+        return format_compiler_error_report_raw_message(
+            arena,
+            source,
+            filename,
+            loc,
+            &raw_message,
+        );
     }
 
     format_compiler_error_report(arena, source, filename, loc, &message)
@@ -11055,6 +11090,8 @@ pub fn compile_source_to_js_with_options(
     )?;
     let frontend_warnings =
         ppx::collect_leading_builtin_warning_attributes(&structure, parser.arena());
+    let frontend_warning_specs =
+        ppx::collect_leading_builtin_warning_attribute_specs(&structure, parser.arena());
     let mut ppx_warnings_have_errors = emit_ppx_warnings(
         parser.arena(),
         source,
@@ -11065,7 +11102,11 @@ pub fn compile_source_to_js_with_options(
     let config_warnings = validate_file_config_from_structure(&structure, parser.arena())
         .map_err(|err| config_payload_error_to_anyhow(err, parser.arena(), source, filename))?;
     let file_config = extract_file_config_from_structure(&structure, parser.arena());
-    let file_warning_config = warning_config_for_options_and_file_config(options, &file_config);
+    let file_warning_config = warning_config_for_options_file_config_and_leading_attrs(
+        options,
+        &file_config,
+        &frontend_warning_specs,
+    );
     ppx_warnings_have_errors |= emit_ppx_warnings_with_config(
         parser.arena(),
         source,
@@ -11151,19 +11192,19 @@ pub fn compile_source_to_js_with_options(
     // at module initialization, consuming stamp 1000 before any compilation.
     let _ = id_gen.next_stamp();
     let type_ctx = TypeContext::new(std::sync::Arc::new(id_gen));
-    type_ctx.set_preserve_canonical_typedtree(options.preserve_canonical_typedtree());
     let mut tctx = TypeCheckContext::new(&type_ctx, parser.arena());
     tctx.experimental_let_unwrap = experimental_let_unwrap;
     tctx.transparent_modules = options.transparent_modules;
     apply_warning_options(&mut tctx, options);
+    apply_leading_warning_attribute_options(&mut tctx, &frontend_warning_specs);
     apply_file_config_warning_options(&mut tctx, &file_config);
     let mut env = initial_env(&type_ctx);
 
     // Load Pervasives and extend the initial environment
     let mut pers_env = PersistentEnv::new();
-    let load_path = build_load_path(options);
+    let (load_path, load_path_display) = build_load_path_with_display(options);
     type_ctx.set_load_paths(load_path.clone());
-    pers_env.set_load_path(load_path.clone());
+    pers_env.set_load_path_with_display(load_path.clone(), load_path_display);
     pers_env.set_open_modules(options.open_modules.clone());
     pers_env.set_jsx_version(options.jsx_version);
     let current_unit_name = options.current_unit_name();
@@ -11253,6 +11294,17 @@ pub fn compile_source_to_js_with_options(
         has_resi,
     )?;
 
+    // OCaml compiler/ml/typemod.ml:1755-1758 reads the compiled interface
+    // through Env.read_signature; persistent Env errors raised there abort
+    // implementation typing before warnings are reported as success.
+    if let Some(error) = tctx
+        .persistent_env
+        .as_ref()
+        .and_then(|persistent_env| persistent_env.last_error())
+    {
+        return Err(persistent_env_error_to_anyhow(error, filename));
+    }
+
     // OCaml's type_implementation_more calls normalize_signature ONLY when there
     // is no .resi file (Mli_exists branch skips it). Match this behavior:
     // normalize sorts Tvariant row fields and Tobject field chains alphabetically.
@@ -11333,6 +11385,7 @@ pub fn compile_source_to_js_with_options(
             unit_name,
         );
     raw_converter.set_no_assert_false(options.no_assert_false);
+    raw_converter.set_noassert(options.noassert);
     raw_converter.set_warning_config(tctx.warning_config.clone());
     if let Some(persistent_env) = tctx.persistent_env.clone() {
         raw_converter.set_persistent_env(persistent_env);
@@ -11971,6 +12024,8 @@ pub fn typecheck_interface_source(
     )?;
     let frontend_warnings =
         ppx::collect_leading_builtin_warning_signature_attributes(&signature, parser.arena());
+    let frontend_warning_specs =
+        ppx::collect_leading_builtin_warning_signature_attribute_specs(&signature, parser.arena());
     let mut ppx_warnings_have_errors = emit_ppx_warnings(
         parser.arena(),
         source,
@@ -11981,7 +12036,11 @@ pub fn typecheck_interface_source(
     let config_warnings = validate_file_config_from_signature(&signature, parser.arena())
         .map_err(|err| config_payload_error_to_anyhow(err, parser.arena(), source, filename))?;
     let file_config = extract_file_config_from_signature(&signature, parser.arena());
-    let file_warning_config = warning_config_for_options_and_file_config(options, &file_config);
+    let file_warning_config = warning_config_for_options_file_config_and_leading_attrs(
+        options,
+        &file_config,
+        &frontend_warning_specs,
+    );
     ppx_warnings_have_errors |= emit_ppx_warnings_with_config(
         parser.arena(),
         source,
@@ -12015,19 +12074,19 @@ pub fn typecheck_interface_source(
     // at module initialization, consuming stamp 1000 before any compilation.
     let _ = id_gen.next_stamp();
     let type_ctx = TypeContext::new(std::sync::Arc::new(id_gen));
-    type_ctx.set_preserve_canonical_typedtree(options.preserve_canonical_typedtree());
     let mut tctx = TypeCheckContext::new(&type_ctx, parser.arena());
     tctx.experimental_let_unwrap = experimental_let_unwrap;
     tctx.transparent_modules = options.transparent_modules;
     apply_warning_options(&mut tctx, options);
+    apply_leading_warning_attribute_options(&mut tctx, &frontend_warning_specs);
     apply_file_config_warning_options(&mut tctx, &file_config);
     let mut env = initial_env(&type_ctx);
 
     // Load Pervasives and extend the initial environment
     let mut pers_env = PersistentEnv::new();
-    let load_path = build_load_path(options);
+    let (load_path, load_path_display) = build_load_path_with_display(options);
     type_ctx.set_load_paths(load_path.clone());
-    pers_env.set_load_path(load_path.clone());
+    pers_env.set_load_path_with_display(load_path.clone(), load_path_display);
     pers_env.set_open_modules(options.open_modules.clone());
     pers_env.set_jsx_version(options.jsx_version);
     let current_unit_name = options.current_unit_name();
@@ -12131,23 +12190,52 @@ pub fn compile_file_to_js_with_options(
 /// - Expands `-I` directories
 /// - Appends `{runtime_path}/lib/ocaml` as the stdlib directory (unless no_stdlib)
 fn build_load_path(options: &CompilerOptions) -> Vec<PathBuf> {
+    build_load_path_with_display(options).0
+}
+
+fn build_load_path_with_display(options: &CompilerOptions) -> (Vec<PathBuf>, Vec<PathBuf>) {
     let stdlib_dir = options
         .runtime_path
         .as_ref()
         .map(|runtime_path| runtime_path.join("lib").join("ocaml"));
     let cwd = std::env::current_dir().ok();
 
-    let mut paths = options
-        .include_paths
-        .iter()
-        .map(|path| normalize_load_path_entry(path, stdlib_dir.as_deref(), cwd.as_deref()))
-        .collect::<Vec<_>>();
+    let mut paths = Vec::new();
+    let mut display_paths = Vec::new();
 
-    if let Some(stdlib_dir) = stdlib_dir {
-        paths.push(stdlib_dir);
+    for path in &options.include_paths {
+        paths.push(normalize_load_path_entry(
+            path,
+            stdlib_dir.as_deref(),
+            cwd.as_deref(),
+        ));
+        display_paths.push(display_load_path_entry(
+            path,
+            stdlib_dir.as_deref(),
+            cwd.as_deref(),
+        ));
     }
 
-    paths
+    if let Some(stdlib_dir) = stdlib_dir {
+        paths.push(normalize_load_path_entry(&stdlib_dir, None, cwd.as_deref()));
+        display_paths.push(stdlib_dir);
+    }
+
+    (paths, display_paths)
+}
+
+fn display_load_path_entry(
+    path: &FsPath,
+    stdlib_dir: Option<&FsPath>,
+    cwd: Option<&FsPath>,
+) -> PathBuf {
+    if let Some(raw) = path.to_str()
+        && raw.starts_with('+')
+    {
+        return normalize_load_path_entry(path, stdlib_dir, cwd);
+    }
+
+    path.to_path_buf()
 }
 
 fn normalize_load_path_entry(
@@ -12233,36 +12321,36 @@ pub fn load_pervasives<'a>(
     nopervasives: bool,
     compiling_module: Option<&str>,
 ) {
-    use crate::ident::Ident;
-
     if !nopervasives {
         // Try to load and open Pervasives
         if pers_env.open_module("Pervasives", env, ctx) {
+            env.mark_implicit_open_root("Pervasives");
             // OCaml `Res_compmisc.initial_env` opens implicit modules through
             // `type_open` (compiler/core/res_compmisc.ml:48-63). In in-process
-            // builds, the persistent registry remains available for explicit
-            // `Pervasives.X` lookup, so avoid cloning the whole raw signature a
-            // second time just to add a top-level module binding.
+            // and standalone builds alike, that reaches Env.open_signature at
+            // compiler/ml/env.ml:1874-1877, which adds opened components but
+            // not a root `Pervasives` module binding. Keep the raw signature
+            // registered for ps_comps-style descriptor lookup without changing
+            // source module lookup shape.
             if !pers_env.is_in_process_mode() {
                 if let Some(md) = pers_env.get_module_declaration("Pervasives", ctx) {
                     if let crate::types::decl::ModuleType::MtySignature(ref sig) = md.md_type {
                         ctx.register_raw_module_sig("Pervasives", std::sync::Arc::new(sig.clone()));
                     }
-                    env.add_module(Ident::create_persistent("Pervasives"), md);
                 }
             }
         }
 
         // Try to load and open Stdlib
         if pers_env.open_module("Stdlib", env, ctx) {
+            env.mark_implicit_open_root("Stdlib");
             // Same implicit-open behavior as above; keep the opened bindings,
-            // but let explicit module lookup use the in-process registry.
+            // but let explicit module lookup use the persistent registry.
             if !pers_env.is_in_process_mode() {
                 if let Some(md) = pers_env.get_module_declaration("Stdlib", ctx) {
                     if let crate::types::decl::ModuleType::MtySignature(ref sig) = md.md_type {
                         ctx.register_raw_module_sig("Stdlib", std::sync::Arc::new(sig.clone()));
                     }
-                    env.add_module(Ident::create_persistent("Stdlib"), md);
                 }
             }
         }
@@ -12276,13 +12364,17 @@ pub fn load_pervasives<'a>(
             }
         }
         if pers_env.open_module(module_name, env, ctx) {
-            // Keep bsc's standalone path unchanged, but in-process builds can
-            // resolve explicit `Module.X` lookups through the persistent
-            // registry. Creating this binding would clone the full raw
-            // signature after `open_module` already added the opened contents.
+            // OCaml compiler/core/res_compmisc.ml:42-66 applies command-line
+            // `-open` modules through Typemod.type_open_ (typemod.ml:83-96),
+            // which calls Env.open_signature (env.ml:1874-1877). That exposes
+            // opened components but does not install a root module binding, so
+            // later Env.normalize_path can still reach the persistent-root
+            // force path through env.ml:903-914.
             if !pers_env.is_in_process_mode() {
                 if let Some(md) = pers_env.get_module_declaration(module_name, ctx) {
-                    env.add_module(Ident::create_persistent(module_name), md);
+                    if let crate::types::decl::ModuleType::MtySignature(ref sig) = md.md_type {
+                        ctx.register_raw_module_sig(module_name, std::sync::Arc::new(sig.clone()));
+                    }
                 }
             }
         }
@@ -12315,6 +12407,10 @@ pub fn typecheck_and_dump_sexp<W: std::io::Write>(
         }
         let frontend_warnings =
             ppx::collect_leading_builtin_warning_signature_attributes(&signature, parser.arena());
+        let frontend_warning_specs = ppx::collect_leading_builtin_warning_signature_attribute_specs(
+            &signature,
+            parser.arena(),
+        );
         let _ = emit_ppx_warnings(
             parser.arena(),
             source,
@@ -12325,7 +12421,11 @@ pub fn typecheck_and_dump_sexp<W: std::io::Write>(
         let config_warnings = validate_file_config_from_signature(&signature, parser.arena())
             .map_err(|err| config_payload_error_to_anyhow(err, parser.arena(), source, filename))?;
         let file_config = extract_file_config_from_signature(&signature, parser.arena());
-        let file_warning_config = warning_config_for_options_and_file_config(options, &file_config);
+        let file_warning_config = warning_config_for_options_file_config_and_leading_attrs(
+            options,
+            &file_config,
+            &frontend_warning_specs,
+        );
         let _ = emit_ppx_warnings_with_config(
             parser.arena(),
             source,
@@ -12349,18 +12449,18 @@ pub fn typecheck_and_dump_sexp<W: std::io::Write>(
         // at module initialization, consuming stamp 1000 before any compilation.
         let _ = id_gen.next_stamp();
         let type_ctx = TypeContext::new(std::sync::Arc::new(id_gen));
-        type_ctx.set_preserve_canonical_typedtree(true);
         let mut tctx = TypeCheckContext::new(&type_ctx, parser.arena());
         tctx.experimental_let_unwrap = experimental_let_unwrap;
         tctx.transparent_modules = options.transparent_modules;
         apply_warning_options(&mut tctx, options);
+        apply_leading_warning_attribute_options(&mut tctx, &frontend_warning_specs);
         apply_file_config_warning_options(&mut tctx, &file_config);
         let mut env = initial_env(&type_ctx);
 
         let mut pers_env = PersistentEnv::new();
-        let load_path = build_load_path(options);
+        let (load_path, load_path_display) = build_load_path_with_display(options);
         type_ctx.set_load_paths(load_path.clone());
-        pers_env.set_load_path(load_path);
+        pers_env.set_load_path_with_display(load_path, load_path_display);
         pers_env.set_open_modules(options.open_modules.clone());
         pers_env.set_jsx_version(options.jsx_version);
         let current_unit_name = options.current_unit_name();
@@ -12390,8 +12490,14 @@ pub fn typecheck_and_dump_sexp<W: std::io::Write>(
                 parser.diagnostics().len()
             ));
         }
+        let frontend_warning_specs =
+            ppx::collect_leading_builtin_warning_attribute_specs(&structure, parser.arena());
         let file_config = extract_file_config_from_structure(&structure, parser.arena());
-        let file_warning_config = warning_config_for_options_and_file_config(options, &file_config);
+        let file_warning_config = warning_config_for_options_file_config_and_leading_attrs(
+            options,
+            &file_config,
+            &frontend_warning_specs,
+        );
         let experimental_let_unwrap = options.experimental_let_unwrap || file_config.let_unwrap;
         if !options.no_builtin_ppx {
             reject_disabled_let_unwrap_in_structure(
@@ -12458,18 +12564,18 @@ pub fn typecheck_and_dump_sexp<W: std::io::Write>(
         crate::ident::Ident::set_current_time(OCAML_NON_PREDEF_STAMP_START);
         let id_gen = IdGenerator::with_start_stamp(OCAML_NON_PREDEF_STAMP_START);
         let type_ctx = TypeContext::new(std::sync::Arc::new(id_gen));
-        type_ctx.set_preserve_canonical_typedtree(true);
         let mut tctx = TypeCheckContext::new(&type_ctx, parser.arena());
         tctx.experimental_let_unwrap = experimental_let_unwrap;
         tctx.transparent_modules = options.transparent_modules;
         apply_warning_options(&mut tctx, options);
+        apply_leading_warning_attribute_options(&mut tctx, &frontend_warning_specs);
         apply_file_config_warning_options(&mut tctx, &file_config);
         let mut env = initial_env(&type_ctx);
 
         let mut pers_env = PersistentEnv::new();
-        let load_path = build_load_path(options);
+        let (load_path, load_path_display) = build_load_path_with_display(options);
         type_ctx.set_load_paths(load_path.clone());
-        pers_env.set_load_path(load_path);
+        pers_env.set_load_path_with_display(load_path, load_path_display);
         pers_env.set_open_modules(options.open_modules.clone());
         pers_env.set_jsx_version(options.jsx_version);
         let current_unit_name = options.current_unit_name();
@@ -13290,9 +13396,14 @@ fn config_payload_actions(
                 };
                 let field_expr = arena.get_expr(field.expr);
                 let punned = match &*field_expr.pexp_desc {
+                    // OCaml compiler/ml/ast_payload.ml:206-214 compares the
+                    // label and identifier names, so separately interned Rust
+                    // StrIdx values for `no_export: no_export` must still
+                    // count as the punned `None` payload.
                     ExpressionDesc::Pexp_ident(lid) => matches!(
                         arena.get_longident(lid.txt),
                         Longident::Lident(value_idx) if value_idx == name_idx
+                            || arena.get_string(*value_idx) == arena.get_string(*name_idx)
                     ),
                     _ => false,
                 };
@@ -13609,6 +13720,8 @@ pub fn typecheck_stored_structure_and_dump_sexp<W: std::io::Write>(
     arena.reset_local_module_counter();
 
     let file_config = extract_file_config_from_structure(&structure, &arena);
+    let frontend_warning_specs =
+        ppx::collect_leading_builtin_warning_attribute_specs(&structure, &arena);
     let experimental_let_unwrap = options.experimental_let_unwrap || file_config.let_unwrap;
 
     let jsx_version = options.jsx_version.or(file_config.jsx_version);
@@ -13634,18 +13747,18 @@ pub fn typecheck_stored_structure_and_dump_sexp<W: std::io::Write>(
     // at module initialization, consuming stamp 1000 before any compilation.
     let _ = id_gen.next_stamp();
     let type_ctx = TypeContext::new(std::sync::Arc::new(id_gen));
-    type_ctx.set_preserve_canonical_typedtree(true);
     let mut tctx = TypeCheckContext::new(&type_ctx, &arena);
     tctx.experimental_let_unwrap = experimental_let_unwrap;
     tctx.transparent_modules = options.transparent_modules;
     apply_warning_options(&mut tctx, options);
+    apply_leading_warning_attribute_options(&mut tctx, &frontend_warning_specs);
     apply_file_config_warning_options(&mut tctx, &file_config);
     let mut env = initial_env(&type_ctx);
 
     let mut pers_env = PersistentEnv::new();
-    let load_path = build_load_path(options);
+    let (load_path, load_path_display) = build_load_path_with_display(options);
     type_ctx.set_load_paths(load_path.clone());
-    pers_env.set_load_path(load_path);
+    pers_env.set_load_path_with_display(load_path, load_path_display);
     pers_env.set_open_modules(options.open_modules.clone());
     pers_env.set_jsx_version(options.jsx_version);
     let current_unit_name = options.current_unit_name();
@@ -13677,6 +13790,8 @@ pub fn typecheck_stored_signature_and_dump_sexp<W: std::io::Write>(
     writer: &mut W,
 ) -> Result<()> {
     let file_config = extract_file_config_from_signature(&signature, &arena);
+    let frontend_warning_specs =
+        ppx::collect_leading_builtin_warning_signature_attribute_specs(&signature, &arena);
     let experimental_let_unwrap = options.experimental_let_unwrap || file_config.let_unwrap;
 
     crate::ident::Ident::set_current_time(OCAML_NON_PREDEF_STAMP_START);
@@ -13685,18 +13800,18 @@ pub fn typecheck_stored_signature_and_dump_sexp<W: std::io::Write>(
     // at module initialization, consuming stamp 1000 before any compilation.
     let _ = id_gen.next_stamp();
     let type_ctx = TypeContext::new(std::sync::Arc::new(id_gen));
-    type_ctx.set_preserve_canonical_typedtree(true);
     let mut tctx = TypeCheckContext::new(&type_ctx, &arena);
     tctx.experimental_let_unwrap = experimental_let_unwrap;
     tctx.transparent_modules = options.transparent_modules;
     apply_warning_options(&mut tctx, options);
+    apply_leading_warning_attribute_options(&mut tctx, &frontend_warning_specs);
     apply_file_config_warning_options(&mut tctx, &file_config);
     let mut env = initial_env(&type_ctx);
 
     let mut pers_env = PersistentEnv::new();
-    let load_path = build_load_path(options);
+    let (load_path, load_path_display) = build_load_path_with_display(options);
     type_ctx.set_load_paths(load_path.clone());
-    pers_env.set_load_path(load_path);
+    pers_env.set_load_path_with_display(load_path, load_path_display);
     pers_env.set_open_modules(options.open_modules.clone());
     pers_env.set_jsx_version(options.jsx_version);
     let current_unit_name = options.current_unit_name();
@@ -13971,6 +14086,7 @@ pub struct InProcessCompileResult {
 pub struct InProcessPreJsCompileResult {
     pub lowered_lambda: crate::lambda::Lambda,
     pub possible_required_modules: AHashSet<ModuleId>,
+    pub ident_stamp_at_js_boundary: i32,
     pub file_directives: Vec<String>,
     pub debug: bool,
     pub jsx_preserve: bool,
@@ -14025,6 +14141,8 @@ pub fn compile_source_in_process(
     }
     let frontend_warnings =
         ppx::collect_leading_builtin_warning_attributes(&structure, parser.arena());
+    let frontend_warning_specs =
+        ppx::collect_leading_builtin_warning_attribute_specs(&structure, parser.arena());
     let _ = emit_ppx_warnings(
         parser.arena(),
         source,
@@ -14035,7 +14153,11 @@ pub fn compile_source_in_process(
     let config_warnings = validate_file_config_from_structure(&structure, parser.arena())
         .map_err(|err| config_payload_error_to_anyhow(err, parser.arena(), source, filename))?;
     let file_config = extract_file_config_from_structure(&structure, parser.arena());
-    let file_warning_config = warning_config_for_options_and_file_config(options, &file_config);
+    let file_warning_config = warning_config_for_options_file_config_and_leading_attrs(
+        options,
+        &file_config,
+        &frontend_warning_specs,
+    );
     let _ = emit_ppx_warnings_with_config(
         parser.arena(),
         source,
@@ -14335,6 +14457,8 @@ pub fn compile_preprocessed_structure_in_process_until_js(
         )
     };
     let file_config = extract_file_config_from_structure(structure, arena);
+    let frontend_warning_specs =
+        ppx::collect_leading_builtin_warning_attribute_specs(structure, arena);
 
     log::debug!(
         "[compile_source_in_process] {} type-check start",
@@ -14345,18 +14469,18 @@ pub fn compile_preprocessed_structure_in_process_until_js(
     let id_gen = IdGenerator::with_start_stamp(OCAML_NON_PREDEF_STAMP_START);
     let _ = id_gen.next_stamp();
     let type_ctx = TypeContext::new(std::sync::Arc::new(id_gen));
-    type_ctx.set_preserve_canonical_typedtree(options.preserve_canonical_typedtree());
     let mut tctx = TypeCheckContext::new(&type_ctx, arena);
     tctx.experimental_let_unwrap = options.experimental_let_unwrap || file_config.let_unwrap;
     tctx.transparent_modules = options.transparent_modules;
     apply_warning_options(&mut tctx, options);
+    apply_leading_warning_attribute_options(&mut tctx, &frontend_warning_specs);
     apply_file_config_warning_options(&mut tctx, &file_config);
     let mut env = initial_env(&type_ctx);
 
     let mut pers_env = PersistentEnv::from_registry(registry);
-    let load_path = build_load_path(options);
+    let (load_path, load_path_display) = build_load_path_with_display(options);
     type_ctx.set_load_paths(load_path.clone());
-    pers_env.set_load_path(load_path.clone());
+    pers_env.set_load_path_with_display(load_path.clone(), load_path_display);
     pers_env.set_open_modules(options.open_modules.clone());
     pers_env.set_jsx_version(options.jsx_version);
     pers_env.set_nopervasives(options.nopervasives);
@@ -14525,6 +14649,7 @@ pub fn compile_preprocessed_structure_in_process_until_js(
                     unit_name,
                 );
             raw_converter.set_no_assert_false(options.no_assert_false);
+            raw_converter.set_noassert(options.noassert);
             raw_converter.set_warning_config(tctx.warning_config.clone());
             if let Some(persistent_env) = tctx.persistent_env.clone() {
                 raw_converter.set_persistent_env(persistent_env);
@@ -14560,6 +14685,13 @@ pub fn compile_preprocessed_structure_in_process_until_js(
             raw_lambda_current_stamp,
         )
     });
+    // OCaml has one mutable `Ident.currentstamp` through typechecking,
+    // `Translmod.transl_implementation`, and `Lam_compile_main.compile`
+    // (compiler/ext/ident.ml:26-58; compiler/core/js_implementation.ml:161-167).
+    // Rewatch can split Rust in-process compilation before JS and resume it on a
+    // different worker thread, so carry the module-local legacy stamp explicitly
+    // instead of reading that worker's unrelated thread-local counter.
+    let ident_stamp_at_js_boundary = crate::ident::Ident::current_local_stamp();
 
     // Capture lambda sexp for the playground (only if requested).
     let lambda_sexp = if options.capture_intermediates {
@@ -14573,6 +14705,7 @@ pub fn compile_preprocessed_structure_in_process_until_js(
     Ok(InProcessPreJsCompileResult {
         lowered_lambda,
         possible_required_modules,
+        ident_stamp_at_js_boundary,
         file_directives,
         debug,
         jsx_preserve,
@@ -14598,8 +14731,8 @@ pub fn finish_preprocessed_structure_in_process_from_js_boundary(
     )
     .entered();
     let mut persistent_env_for_js = PersistentEnv::from_registry(registry);
-    let load_path = build_load_path(options);
-    persistent_env_for_js.set_load_path(load_path);
+    let (load_path, load_path_display) = build_load_path_with_display(options);
+    persistent_env_for_js.set_load_path_with_display(load_path, load_path_display);
     persistent_env_for_js.set_open_modules(options.open_modules.clone());
     persistent_env_for_js.set_jsx_version(options.jsx_version);
     persistent_env_for_js.set_nopervasives(options.nopervasives);
@@ -14608,6 +14741,7 @@ pub fn finish_preprocessed_structure_in_process_from_js_boundary(
         persistent_env_for_js.unregister_in_memory_signature(module_name);
     }
     let persistent_env_for_js = Some(persistent_env_for_js);
+    crate::ident::Ident::set_current_time(pre_js.ident_stamp_at_js_boundary);
     let js_targets = effective_js_output_targets(options);
     let primary_target = js_targets.first();
     let primary_output_path = primary_target
@@ -14771,6 +14905,8 @@ pub fn typecheck_interface_in_process(
     }
     let frontend_warnings =
         ppx::collect_leading_builtin_warning_signature_attributes(&signature, parser.arena());
+    let frontend_warning_specs =
+        ppx::collect_leading_builtin_warning_signature_attribute_specs(&signature, parser.arena());
     let _ = emit_ppx_warnings(
         parser.arena(),
         source,
@@ -14781,7 +14917,11 @@ pub fn typecheck_interface_in_process(
     let config_warnings = validate_file_config_from_signature(&signature, parser.arena())
         .map_err(|err| config_payload_error_to_anyhow(err, parser.arena(), source, filename))?;
     let file_config = extract_file_config_from_signature(&signature, parser.arena());
-    let file_warning_config = warning_config_for_options_and_file_config(options, &file_config);
+    let file_warning_config = warning_config_for_options_file_config_and_leading_attrs(
+        options,
+        &file_config,
+        &frontend_warning_specs,
+    );
     let _ = emit_ppx_warnings_with_config(
         parser.arena(),
         source,
@@ -14823,23 +14963,25 @@ pub fn typecheck_preprocessed_signature_in_process(
     .entered();
     let original_alias_count = registry.alias_rewrite_len();
     let file_config = extract_file_config_from_signature(signature, arena);
+    let frontend_warning_specs =
+        ppx::collect_leading_builtin_warning_signature_attribute_specs(signature, arena);
 
     crate::ident::Ident::set_current_time(OCAML_NON_PREDEF_STAMP_START);
     let id_gen = IdGenerator::with_start_stamp(OCAML_NON_PREDEF_STAMP_START);
     let _ = id_gen.next_stamp();
     let type_ctx = TypeContext::new(std::sync::Arc::new(id_gen));
-    type_ctx.set_preserve_canonical_typedtree(options.preserve_canonical_typedtree());
     let mut tctx = TypeCheckContext::new(&type_ctx, arena);
     tctx.experimental_let_unwrap = options.experimental_let_unwrap || file_config.let_unwrap;
     tctx.transparent_modules = options.transparent_modules;
     apply_warning_options(&mut tctx, options);
+    apply_leading_warning_attribute_options(&mut tctx, &frontend_warning_specs);
     apply_file_config_warning_options(&mut tctx, &file_config);
     let mut env = initial_env(&type_ctx);
 
     let mut pers_env = PersistentEnv::from_registry(registry);
-    let load_path = build_load_path(options);
+    let (load_path, load_path_display) = build_load_path_with_display(options);
     type_ctx.set_load_paths(load_path.clone());
-    pers_env.set_load_path(load_path);
+    pers_env.set_load_path_with_display(load_path, load_path_display);
     pers_env.set_open_modules(options.open_modules.clone());
     pers_env.set_jsx_version(options.jsx_version);
     pers_env.set_nopervasives(options.nopervasives);
@@ -14930,23 +15072,25 @@ pub fn typecheck_implementation_in_process(
         ));
     }
     let file_config = extract_file_config_from_structure(&structure, parser.arena());
+    let frontend_warning_specs =
+        ppx::collect_leading_builtin_warning_attribute_specs(&structure, parser.arena());
 
     crate::ident::Ident::set_current_time(OCAML_NON_PREDEF_STAMP_START);
     let id_gen = IdGenerator::with_start_stamp(OCAML_NON_PREDEF_STAMP_START);
     let _ = id_gen.next_stamp();
     let type_ctx = TypeContext::new(std::sync::Arc::new(id_gen));
-    type_ctx.set_preserve_canonical_typedtree(options.preserve_canonical_typedtree());
     let mut tctx = TypeCheckContext::new(&type_ctx, parser.arena());
     tctx.experimental_let_unwrap = options.experimental_let_unwrap || file_config.let_unwrap;
     tctx.transparent_modules = options.transparent_modules;
     apply_warning_options(&mut tctx, options);
+    apply_leading_warning_attribute_options(&mut tctx, &frontend_warning_specs);
     apply_file_config_warning_options(&mut tctx, &file_config);
     let mut env = initial_env(&type_ctx);
 
     let mut pers_env = PersistentEnv::from_registry(registry);
-    let load_path = build_load_path(options);
+    let (load_path, load_path_display) = build_load_path_with_display(options);
     type_ctx.set_load_paths(load_path.clone());
-    pers_env.set_load_path(load_path);
+    pers_env.set_load_path_with_display(load_path, load_path_display);
     pers_env.set_open_modules(options.open_modules.clone());
     pers_env.set_jsx_version(options.jsx_version);
     pers_env.set_nopervasives(options.nopervasives);

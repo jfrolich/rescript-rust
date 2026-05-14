@@ -745,11 +745,16 @@ impl JsPrinter {
         }
         let needs_paren = self.expr_needs_paren(expr);
         if needs_paren {
-            self.write_char('(');
-        }
-        self.print_expression(expr, 0);
-        if needs_paren {
-            self.write_char(')');
+            // OCaml js_dump.ml:1351-1353 wraps expression statements with
+            // P.paren_group f 1, so multiline object/function bodies inherit
+            // one extra indentation level while the surrounding parens print.
+            self.with_indent(1, |this| {
+                this.write_char('(');
+                this.print_expression(expr, 0);
+                this.write_char(')');
+            });
+        } else {
+            self.print_expression(expr, 0);
         }
         self.semi();
     }
@@ -5263,6 +5268,32 @@ mod tests {
         assert_eq!(
             print_block(&block),
             "(((_)=> console.log('should works'))());"
+        );
+    }
+
+    #[test]
+    fn test_print_parenthesized_object_statement_uses_ocaml_group_indent() {
+        let stmt = Statement::exp(Expression::new(ExpressionDesc::Object(
+            None,
+            vec![
+                (
+                    PropertyName::lit("high"),
+                    Expression::call(
+                        Expression::var(Ident::create_local("add")),
+                        vec![
+                            Expression::number(Number::int(1)),
+                            Expression::number(Number::int(2)),
+                        ],
+                        CallInfo::default(),
+                    ),
+                ),
+                (PropertyName::lit("low"), Expression::number(Number::int(3))),
+            ],
+        )));
+
+        assert_eq!(
+            print_block(&vec![stmt]),
+            "({\n    high: add(1, 2),\n    low: 3\n  });"
         );
     }
 

@@ -8,19 +8,19 @@
 //!
 //! All other flags are accepted and ignored.
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 use rescript_compiler::binary_ast::{
     ppx, write_signature_ast_current_with_extra_deps_and_builtin_ppx,
     write_structure_ast_current_with_extra_deps_and_builtin_ppx,
 };
 use rescript_compiler::cmi::cmi_format;
 use rescript_compiler::driver::{
-    apply_external_signature_ppxs, apply_external_structure_ppxs, compile_file_to_js_with_options,
-    enable_cli_cleanup_skip, parser_error_to_anyhow, typecheck_interface_file, CompilerOptions,
-    UserDiagnostic,
+    CompilerOptions, UserDiagnostic, apply_external_signature_ppxs, apply_external_structure_ppxs,
+    compile_file_to_js_with_options, enable_cli_cleanup_skip, parser_error_to_anyhow,
+    typecheck_interface_file,
 };
 use rescript_compiler::js_ir::ModuleFormat;
-use rescript_compiler::parser::{module, sexp_locs, Parser};
+use rescript_compiler::parser::{Parser, module, sexp_locs};
 use rescript_compiler::source_text::latin1_bytes_to_string;
 use std::env;
 use std::fs;
@@ -104,6 +104,7 @@ struct Options {
     no_check_div_by_zero: bool,
     cross_module_inline: bool,
     no_assert_false: bool,
+    noassert: bool,
     transparent_modules: bool,
     no_builtin_ppx: bool,
     external_ppxs: Vec<String>,
@@ -232,6 +233,9 @@ fn run() -> Result<()> {
                 "-bs-no-check-div-by-zero" => opts.no_check_div_by_zero = true,
                 "-bs-cross-module-opt" => opts.cross_module_inline = true,
                 "-bs-noassertfalse" => opts.no_assert_false = true,
+                // OCaml compiler/bsc/rescript_compiler_main.ml:391-392
+                // parses -noassert into Clflags.noassert.
+                "-noassert" => opts.noassert = true,
                 "-bs-no-builtin-ppx" => opts.no_builtin_ppx = true,
                 "-bs-gentype" => opts.gentype = true,
                 "-w" => {
@@ -337,6 +341,7 @@ fn run() -> Result<()> {
         check_div_by_zero: !opts.no_check_div_by_zero,
         cross_module_inline: opts.cross_module_inline,
         no_assert_false: opts.no_assert_false,
+        noassert: opts.noassert,
         transparent_modules: opts.transparent_modules,
         no_builtin_ppx: opts.no_builtin_ppx,
         external_ppxs: opts.external_ppxs.clone(),

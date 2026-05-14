@@ -21,8 +21,7 @@ use super::context::TypeContext;
 use super::decl::{
     ConstructorArguments, ConstructorDeclaration, ConstructorDescription, ConstructorTag,
     LabelDeclaration, LabelDescription, ModtypeDeclaration, ModuleDeclaration, ModuleType,
-    PrimitiveDescription, RecordRepresentation, Signature, SignatureItem, TypeDeclaration,
-    TypeKind, ValueDescription, ValueKind,
+    RecordRepresentation, Signature, SignatureItem, TypeDeclaration, TypeKind, ValueDescription,
 };
 use super::path::Path;
 use super::type_expr::{TypeDesc, TypeExprRef};
@@ -245,6 +244,21 @@ impl<T: Clone> BindingTable<T> {
         }
     }
 
+    fn opened_names_added_since(&self, previous: &Self) -> HashSet<String> {
+        let mut names = HashSet::new();
+        for (name, entries) in self.by_name.iter() {
+            let previous_len = previous.by_name.get(name).map_or(0, Vec::len);
+            if entries
+                .iter()
+                .skip(previous_len)
+                .any(|(_, _, is_local)| !*is_local)
+            {
+                names.insert(name.clone());
+            }
+        }
+        names
+    }
+
     /// Find a binding by name.
     pub fn find_by_name(&self, name: &str) -> Option<&T> {
         self.by_name
@@ -358,6 +372,16 @@ impl<T: Clone> BindingTable<T> {
     }
 }
 
+#[derive(Debug, Clone, Default)]
+pub(crate) struct OpenedBindingNames {
+    pub(crate) values: HashSet<String>,
+    pub(crate) types: HashSet<String>,
+    pub(crate) modules: HashSet<String>,
+    pub(crate) modtypes: HashSet<String>,
+    pub(crate) constructors: HashSet<String>,
+    pub(crate) labels: HashSet<String>,
+}
+
 impl<T: Clone> Default for BindingTable<T> {
     fn default() -> Self {
         Self::new()
@@ -403,17 +427,37 @@ pub struct Env {
     /// Module type bindings.
     modtypes: BindingTable<Arc<ModtypeDeclaration>>,
 
+    /// Intentional Rust performance cache for active local module aliases.
+    ///
+    /// OCaml walks the current Env tables when resolving module components
+    /// (compiler/ml/env.ml:781-813, 1516-1538). Rust memoizes that derived
+    /// view per immutable Env instance because the env_lazy-backed
+    /// module-components cache key logic consults it frequently in
+    /// module-heavy files. This cache must stay derived from bindings only; it
+    /// must not become a path-spelling alias-equivalence shortcut.
+
     /// Module identifiers that are functor parameters.
     /// Mirrors OCaml `Env.functor_args` and drives aliasability checks.
     functor_args: HashSet<Ident>,
 
-    /// Active local module aliases keyed by the current visible binding set.
-    /// This is computed lazily because the env_lazy-backed module-components
-    /// cache key logic consults it frequently in module-heavy files.
     local_module_aliases_cache: RefCell<Option<Vec<(Ident, Path)>>>,
 
-    /// Memoized env-scope decisions for qualified module-component cache keys.
+    /// Intentional Rust performance cache for env-scoped component cache keys.
+    ///
+    /// This preserves OCaml's lookup boundary from find_module_descr/find_type
+    /// into components_of_module_maker (compiler/ml/env.ml:781-813,
+    /// 1516-1538) but avoids recomputing the same alias-scope predicate for
+    /// every qualified component lookup.
     module_path_requires_env_scoped_cache_cache: RefCell<HashMap<String, bool>>,
+
+    /// Persistent roots opened by the initial environment.
+    ///
+    /// OCaml compiler/core/res_compmisc.ml:48-63 installs implicit opens before
+    /// typechecking source items. `Env.normalize_path` can still force those
+    /// roots through compiler/ml/env.ml:865-875 because no source open selected
+    /// them. Source-level opens use the same component tables but should not be
+    /// classified as initial-env roots.
+    implicit_open_roots: im_rc::HashSet<String>,
 
     /// Summary of bindings.
     ///
@@ -455,6 +499,7 @@ impl Clone for Env {
             // memoized lookup results.
             local_module_aliases_cache: RefCell::new(None),
             module_path_requires_env_scoped_cache_cache: RefCell::new(HashMap::new()),
+            implicit_open_roots: self.implicit_open_roots.clone(),
             summary: self.summary.clone(),
             local_constraints: self.local_constraints.clone(),
             gadt_instances: self.gadt_instances.clone(),
@@ -487,6 +532,7 @@ impl Env {
             functor_args: HashSet::new(),
             local_module_aliases_cache: RefCell::new(None),
             module_path_requires_env_scoped_cache_cache: RefCell::new(HashMap::new()),
+            implicit_open_roots: im_rc::HashSet::new(),
             summary: EnvSummary::Empty,
             local_constraints: im_rc::HashMap::new(),
             gadt_instances: Vec::new(),
@@ -519,6 +565,7 @@ impl Env {
             // memoized lookup results.
             local_module_aliases_cache: RefCell::new(None),
             module_path_requires_env_scoped_cache_cache: RefCell::new(HashMap::new()),
+            implicit_open_roots: self.implicit_open_roots.clone(),
             summary: self.summary.clone(),
             local_constraints: self.local_constraints.clone(),
             gadt_instances: self.gadt_instances.clone(),
@@ -537,6 +584,9 @@ impl Env {
     }
 
     fn invalidate_module_alias_caches(&self) {
+        // These caches are purely derived from visible bindings. Every Env
+        // mutation that can change OCaml component lookup visibility must drop
+        // them before later lookups rebuild the same derived view.
         self.local_module_aliases_cache.borrow_mut().take();
         self.module_path_requires_env_scoped_cache_cache
             .borrow_mut()
@@ -975,6 +1025,21 @@ impl Env {
         self.labels.iter().map(|(id, l)| (id, l.as_ref()))
     }
 
+    pub(crate) fn opened_binding_names_added_since(&self, previous: &Env) -> OpenedBindingNames {
+        // OCaml compiler/ml/env.ml:1874-1911 attaches the open warning slot
+        // while `open_signature` installs the opened component tables through
+        // env.ml:181-187 and env.ml:277-283. Derive Rust warning names from the
+        // same just-added opened bindings instead of resolving the module again.
+        OpenedBindingNames {
+            values: self.values.opened_names_added_since(&previous.values),
+            types: self.types.opened_names_added_since(&previous.types),
+            modules: self.modules.opened_names_added_since(&previous.modules),
+            modtypes: self.modtypes.opened_names_added_since(&previous.modtypes),
+            constructors: self.constrs.opened_names_added_since(&previous.constrs),
+            labels: self.labels.opened_names_added_since(&previous.labels),
+        }
+    }
+
     // ========================================================================
     // Module Bindings
     // ========================================================================
@@ -1040,6 +1105,23 @@ impl Env {
         self.modules.add_opened(id, decl);
     }
 
+    pub(crate) fn add_opened_module_with_components(
+        &mut self,
+        id: Ident,
+        decl: ModuleDeclaration,
+        components: Arc<super::env_lazy::StoredModuleComponents>,
+    ) {
+        // OCaml compiler/ml/env.ml:1841-1877 `open_signature` adds both
+        // `comp_modules` and `comp_components` to the opened environment. Keep
+        // the opened component thunk with the opened module declaration so a
+        // source `Lident` lookup can reuse env.ml:1874-1877's component table
+        // instead of rebuilding through the parent module path.
+        self.bump_id();
+        self.invalidate_module_alias_caches();
+        self.modules.add_opened(id.clone(), Arc::new(decl));
+        self.module_components.add_opened(id, components);
+    }
+
     /// Find a module by name.
     pub fn find_module(&self, name: &str) -> EnvResult<&ModuleDeclaration> {
         self.modules
@@ -1066,6 +1148,51 @@ impl Env {
             .find_by_name_with_origin(name)
             .map(|(id, decl, is_local)| (id, decl.as_ref(), is_local))
             .ok_or_else(|| EnvError::ModuleNotFound(name.to_string()))
+    }
+
+    fn first_dotted_component_path(path: &Path) -> Option<Path> {
+        match path {
+            Path::Pdot(parent, name, pos) => match parent.as_ref() {
+                Path::Pident(_) => {
+                    Some(Path::pdot_pos(parent.as_ref().clone(), name.clone(), *pos))
+                }
+                _ => Self::first_dotted_component_path(parent),
+            },
+            Path::Pident(_) | Path::Papply(_, _) => None,
+        }
+    }
+
+    pub(crate) fn path_starts_with_opened_component(&self, path: &Path) -> bool {
+        // OCaml compiler/core/res_compmisc.ml:56-62 installs implicit opens
+        // through Env.open_signature; compiler/ml/env.ml:1874-1877 adds the
+        // opened components without a root module binding. Detect those
+        // component-origin paths from the Env binding itself, not by spelling
+        // roots such as `Stdlib` or `Pervasives`.
+        let Some(component_path) = Self::first_dotted_component_path(path) else {
+            return false;
+        };
+        self.find_module_with_origin(component_path.last())
+            .ok()
+            .is_some_and(|(_, md, is_local)| {
+                !is_local
+                    && md
+                        .md_path
+                        .as_ref()
+                        .is_some_and(|opened_path| opened_path.same(&component_path))
+            })
+    }
+
+    pub(crate) fn mark_implicit_open_root(&mut self, name: &str) {
+        self.implicit_open_roots.insert(name.to_string());
+    }
+
+    pub(crate) fn path_starts_with_implicit_opened_component(&self, path: &Path) -> bool {
+        let Some(component_path) = Self::first_dotted_component_path(path) else {
+            return false;
+        };
+        self.implicit_open_roots
+            .contains(component_path.head().name())
+            && self.path_starts_with_opened_component(path)
     }
 
     /// Iterate over visible module bindings.
@@ -2139,34 +2266,6 @@ pub fn initial_env(ctx: &TypeContext) -> Env {
         );
     }
 
-    // ref('a) = { mutable contents: 'a }
-    {
-        let tvar = ctx.new_generic_var(None);
-        let contents_label = crate::types::decl::LabelDeclaration {
-            ld_id: Ident::create_persistent("contents"),
-            ld_mutable: MutableFlag::Mutable,
-            ld_optional: false,
-            ld_type: tvar,
-            ld_loc: Location::none(),
-            ld_attributes: vec![],
-        };
-        add_type_with_constrs(
-            &mut env,
-            Ident::create_persistent("ref"),
-            TypeDeclaration {
-                type_params: vec![tvar],
-                type_arity: 1,
-                type_kind: TypeKind::TypeRecord(
-                    vec![contents_label],
-                    crate::types::decl::RecordRepresentation::RecordRegular,
-                ),
-                type_variance: vec![crate::types::variance::Variance::invariant()],
-                ..decl_abstr(1, false)
-            },
-            ctx,
-        );
-    }
-
     // char = int (private manifest)
     add_type_with_constrs(
         &mut env,
@@ -2179,281 +2278,11 @@ pub fn initial_env(ctx: &TypeContext) -> Env {
         ctx,
     );
 
-    // Create type references for primitives at generic level.
-    let int_ty = ctx.new_generic_constr(predef::path_int(), vec![]);
-    let float_ty = ctx.new_generic_constr(predef::path_float(), vec![]);
-    let bool_ty = ctx.new_generic_constr(predef::path_bool(), vec![]);
-    let _string_ty = ctx.new_generic_constr(predef::path_string(), vec![]);
-    let unit_ty = ctx.new_generic_constr(predef::path_unit(), vec![]);
-
-    // Add polymorphic arithmetic operators matching Pervasives.res:
-    //   external "+": ('a, 'a) => 'a = "%add"
-    // Each operator gets its own fresh 'a Tvar shared across all positions
-    add_poly_binary_primitive(&mut env, ctx, "+", "%add");
-    add_poly_binary_primitive(&mut env, ctx, "-", "%sub");
-    add_poly_binary_primitive(&mut env, ctx, "*", "%mul");
-    add_poly_binary_primitive(&mut env, ctx, "/", "%div");
-    add_poly_binary_primitive(&mut env, ctx, "mod", "%mod");
-    add_poly_binary_primitive(&mut env, ctx, "**", "%pow");
-    add_poly_binary_primitive(&mut env, ctx, "%", "%mod");
-
-    // Add monomorphic float operators matching Pervasives.res:
-    //   external "+.": (float, float) => float = "%addfloat"
-    // Each call creates fresh type nodes per position to match OCaml's CMI behavior
-    // where each occurrence is a separate physical node.
-    let float_path = predef::path_float();
-    add_mono_binary_primitive(&mut env, ctx, "+.", "%addfloat", &float_path);
-    add_mono_binary_primitive(&mut env, ctx, "-.", "%subfloat", &float_path);
-    add_mono_binary_primitive(&mut env, ctx, "*.", "%mulfloat", &float_path);
-    add_mono_binary_primitive(&mut env, ctx, "/.", "%divfloat", &float_path);
-
-    // Add polymorphic comparison operators matching Pervasives.res:
-    //   external "==": ('a, 'a) => bool = "%equal"
-    add_poly_cmp_primitive(&mut env, ctx, "==", "%equal", bool_ty);
-    add_poly_cmp_primitive(&mut env, ctx, "!=", "%notequal", bool_ty);
-    add_poly_cmp_primitive(&mut env, ctx, "<", "%lessthan", bool_ty);
-    add_poly_cmp_primitive(&mut env, ctx, ">", "%greaterthan", bool_ty);
-    add_poly_cmp_primitive(&mut env, ctx, "<=", "%lessequal", bool_ty);
-    add_poly_cmp_primitive(&mut env, ctx, ">=", "%greaterequal", bool_ty);
-    add_poly_cmp_primitive(&mut env, ctx, "===", "%eq", bool_ty);
-    add_poly_cmp_primitive(&mut env, ctx, "!==", "%noteq", bool_ty);
-
-    // Add boolean operators (monomorphic)
-    let bool_path = predef::path_bool();
-    add_mono_binary_primitive(&mut env, ctx, "&&", "%sequand", &bool_path);
-    add_mono_binary_primitive(&mut env, ctx, "||", "%sequor", &bool_path);
-    add_mono_unary_primitive(&mut env, ctx, "not", "%boolnot", &bool_path);
-
-    // Add polymorphic unary operators matching Pervasives.res:
-    //   external "~-": 'a => 'a = "%neg"
-    add_poly_unary_primitive(&mut env, ctx, "~-", "%neg");
-    add_poly_unary_primitive(&mut env, ctx, "~+", "%plus");
-    add_mono_unary_primitive(&mut env, ctx, "~-.", "%negfloat", &float_path);
-
-    // Add string concatenation (monomorphic)
-    let string_path = predef::path_string();
-    add_mono_binary_primitive(&mut env, ctx, "++", "%string_concat", &string_path);
-
-    // Add polymorphic bitwise operators matching Pervasives.res
-    add_poly_binary_primitive(&mut env, ctx, "&&&", "%bitand");
-    add_poly_binary_primitive(&mut env, ctx, "|||", "%bitor");
-    add_poly_binary_primitive(&mut env, ctx, "^^^", "%bitxor");
-    add_poly_binary_primitive(&mut env, ctx, "<<", "%lsl");
-    add_poly_binary_primitive(&mut env, ctx, ">>", "%asr");
-    add_poly_binary_primitive(&mut env, ctx, ">>>", "%lsr");
-    add_poly_unary_primitive(&mut env, ctx, "~~~", "%bitnot");
-
-    // Add polymorphic comparison/utility from Pervasives.res
-    add_poly_cmp_primitive(&mut env, ctx, "compare", "%compare", int_ty);
-    add_poly_binary_primitive(&mut env, ctx, "min", "%min");
-    add_poly_binary_primitive(&mut env, ctx, "max", "%max");
-
-    // Add ignore function (polymorphic)
-    let alpha = ctx.new_generic_var(None);
-    add_unary_primitive(&mut env, ctx, "ignore", "%ignore", alpha, unit_ty);
-
-    // Add pair projections matching Pervasives.res
-    //   external fst: (('a, 'b)) => 'a = "%field0"
-    //   external snd: (('a, 'b)) => 'b = "%field1"
-    {
-        let alpha = ctx.new_generic_var(None);
-        let beta = ctx.new_generic_var(None);
-        let tuple_ty =
-            ctx.new_generic_type(crate::types::type_expr::TypeDesc::Ttuple(vec![alpha, beta]));
-        add_unary_primitive(&mut env, ctx, "fst", "%field0", tuple_ty, alpha);
-    }
-    {
-        let alpha = ctx.new_generic_var(None);
-        let beta = ctx.new_generic_var(None);
-        let tuple_ty =
-            ctx.new_generic_type(crate::types::type_expr::TypeDesc::Ttuple(vec![alpha, beta]));
-        add_unary_primitive(&mut env, ctx, "snd", "%field1", tuple_ty, beta);
-    }
-
-    // Add common numeric conversion helpers used from Pervasives.res
-    add_unary_primitive(
-        &mut env,
-        ctx,
-        "float_of_int",
-        "%floatofint",
-        int_ty,
-        float_ty,
-    );
-    add_unary_primitive(
-        &mut env,
-        ctx,
-        "int_of_float",
-        "%intoffloat",
-        float_ty,
-        int_ty,
-    );
-    add_mono_unary_primitive(&mut env, ctx, "abs_float", "abs", &float_path);
-    add_constant_value(&mut env, "min_int", int_ty);
-    add_constant_value(&mut env, "max_int", int_ty);
-
-    // Add ref primitives matching Pervasives.res
-    //   external ref: 'a => ref<'a> = "%makeref"
-    //   external "!" : ref<'a> => 'a = "%refget"
-    //   external ":=": (ref<'a>, 'a) => unit = "%refset"
-    {
-        let alpha = ctx.new_generic_var(None);
-        let ref_ty =
-            ctx.new_generic_constr(Path::pident(Ident::create_persistent("ref")), vec![alpha]);
-        add_unary_primitive(&mut env, ctx, "ref", "%makeref", alpha, ref_ty);
-    }
-    {
-        let alpha = ctx.new_generic_var(None);
-        let ref_ty =
-            ctx.new_generic_constr(Path::pident(Ident::create_persistent("ref")), vec![alpha]);
-        add_unary_primitive(&mut env, ctx, "!", "%refget", ref_ty, alpha);
-    }
-    {
-        let alpha = ctx.new_generic_var(None);
-        let ref_ty =
-            ctx.new_generic_constr(Path::pident(Ident::create_persistent("ref")), vec![alpha]);
-        add_binary_primitive(&mut env, ctx, ":=", "%refset", ref_ty, alpha, unit_ty);
-    }
-
+    // OCaml's initial environment stops at predef types/exceptions
+    // (compiler/ml/predef.ml:419-424). Pervasives values enter through
+    // implicit opens (compiler/core/res_compmisc.ml:56-62,
+    // compiler/ml/env.ml:1874-1877).
     env
-}
-
-/// Helper to add a binary primitive operator.
-fn add_binary_primitive(
-    env: &mut Env,
-    ctx: &TypeContext,
-    name: &str,
-    prim_name: &str,
-    arg1_ty: TypeExprRef,
-    arg2_ty: TypeExprRef,
-    ret_ty: TypeExprRef,
-) {
-    // Build at generic level so instance() creates fresh copies per use site
-    let inner_ty = ctx.new_generic_arrow(crate::types::ArgLabel::Nolabel, arg2_ty, ret_ty, None);
-    let func_ty =
-        ctx.new_generic_arrow(crate::types::ArgLabel::Nolabel, arg1_ty, inner_ty, Some(2));
-    let id = Ident::create_persistent(name);
-    // Primitives come from Pervasives module
-    let pervasives_id = Ident::create_persistent("Pervasives");
-    let path = Path::pdot(Path::pident(pervasives_id), name.to_string());
-    let desc = ValueDescription {
-        val_type: func_ty,
-        val_kind: ValueKind::ValPrim(PrimitiveDescription {
-            prim_name: prim_name.to_string(),
-            prim_arity: 2,
-            prim_native_name: String::new(),
-            prim_native_float: false,
-            prim_from_constructor: false,
-        }),
-        val_loc: Location::none(),
-        val_attributes: vec![],
-        val_path: Some(path),
-    };
-    env.add_value(id, desc);
-}
-
-/// Helper to add a unary primitive operator
-fn add_unary_primitive(
-    env: &mut Env,
-    ctx: &TypeContext,
-    name: &str,
-    prim_name: &str,
-    arg_ty: TypeExprRef,
-    ret_ty: TypeExprRef,
-) {
-    // Build at generic level so instance() creates fresh copies per use site
-    let func_ty = ctx.new_generic_arrow(crate::types::ArgLabel::Nolabel, arg_ty, ret_ty, Some(1));
-    let id = Ident::create_persistent(name);
-    // Primitives come from Pervasives module
-    let pervasives_id = Ident::create_persistent("Pervasives");
-    let path = Path::pdot(Path::pident(pervasives_id), name.to_string());
-    let desc = ValueDescription {
-        val_type: func_ty,
-        val_kind: ValueKind::ValPrim(PrimitiveDescription {
-            prim_name: prim_name.to_string(),
-            prim_arity: 1,
-            prim_native_name: String::new(),
-            prim_native_float: false,
-            prim_from_constructor: false,
-        }),
-        val_loc: Location::none(),
-        val_attributes: vec![],
-        val_path: Some(path),
-    };
-    env.add_value(id, desc);
-}
-
-/// Helper to add a constant value from Pervasives with a known type.
-fn add_constant_value(env: &mut Env, name: &str, ty: TypeExprRef) {
-    let id = Ident::create_persistent(name);
-    let pervasives_id = Ident::create_persistent("Pervasives");
-    let path = Path::pdot(Path::pident(pervasives_id), name.to_string());
-    let desc = ValueDescription {
-        val_type: ty,
-        val_kind: ValueKind::ValReg,
-        val_loc: Location::none(),
-        val_attributes: vec![],
-        val_path: Some(path),
-    };
-    env.add_value(id, desc);
-}
-
-/// Helper to add a monomorphic binary operator where all positions use the same
-/// nullary type constructor (e.g. float → float → float). Creates distinct type
-/// nodes for each position to match OCaml's CMI behavior where each type
-/// occurrence is a separate physical node.
-fn add_mono_binary_primitive(
-    env: &mut Env,
-    ctx: &TypeContext,
-    name: &str,
-    prim_name: &str,
-    ty_path: &Path,
-) {
-    let arg1 = ctx.new_generic_constr(ty_path.clone(), vec![]);
-    let arg2 = ctx.new_generic_constr(ty_path.clone(), vec![]);
-    let ret = ctx.new_generic_constr(ty_path.clone(), vec![]);
-    add_binary_primitive(env, ctx, name, prim_name, arg1, arg2, ret);
-}
-
-/// Helper to add a monomorphic unary operator where both positions use the same
-/// nullary type constructor. Creates distinct type nodes for each position.
-fn add_mono_unary_primitive(
-    env: &mut Env,
-    ctx: &TypeContext,
-    name: &str,
-    prim_name: &str,
-    ty_path: &Path,
-) {
-    let arg = ctx.new_generic_constr(ty_path.clone(), vec![]);
-    let ret = ctx.new_generic_constr(ty_path.clone(), vec![]);
-    add_unary_primitive(env, ctx, name, prim_name, arg, ret);
-}
-
-/// Helper to add a polymorphic binary operator: ('a, 'a) => 'a
-/// Creates a single shared Tvar for all three positions, matching OCaml behavior
-/// where Pervasives declares e.g. `external "+": ('a, 'a) => 'a = "%add"`
-fn add_poly_binary_primitive(env: &mut Env, ctx: &TypeContext, name: &str, prim_name: &str) {
-    // Create a SINGLE Tvar shared across all three positions
-    let alpha = ctx.new_generic_var(None);
-    add_binary_primitive(env, ctx, name, prim_name, alpha, alpha, alpha);
-}
-
-/// Helper to add a polymorphic comparison operator: ('a, 'a) => ret_ty
-/// Creates a single shared Tvar for the two arg positions
-fn add_poly_cmp_primitive(
-    env: &mut Env,
-    ctx: &TypeContext,
-    name: &str,
-    prim_name: &str,
-    ret_ty: TypeExprRef,
-) {
-    let alpha = ctx.new_generic_var(None);
-    add_binary_primitive(env, ctx, name, prim_name, alpha, alpha, ret_ty);
-}
-
-/// Helper to add a polymorphic unary operator: 'a => 'a
-fn add_poly_unary_primitive(env: &mut Env, ctx: &TypeContext, name: &str, prim_name: &str) {
-    let alpha = ctx.new_generic_var(None);
-    add_unary_primitive(env, ctx, name, prim_name, alpha, alpha);
 }
 
 #[cfg(test)]

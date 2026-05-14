@@ -14,13 +14,16 @@ DUNE_BIN_DIR="$PROJECT_ROOT/_build/install/default/bin"
 # Allow switching between OCaml and Rust parsers via PARSER environment variable
 # Usage: PARSER=rust ./scripts/test_syntax.sh
 if [[ "$PARSER" == "rust" ]]; then
-  RES_PARSER="$PROJECT_ROOT/compiler-rust/target/release/res_parser_rust"
+  RUST_TARGET="${RUST_TARGET:-debug}"
+  RES_PARSER="$PROJECT_ROOT/compiler-rust/target/$RUST_TARGET/res_parser_rust"
   if [[ ! -x "$RES_PARSER" ]]; then
     echo "Error: Rust parser not found at $RES_PARSER"
-    echo "Run 'cargo build --manifest-path compiler-rust/Cargo.toml --release' first."
+    echo "Run 'cargo build --manifest-path compiler-rust/Cargo.toml' first."
+    echo "This syntax script expects debug artifacts for iteration."
     exit 1
   fi
   echo "Using Rust parser: $RES_PARSER"
+  echo "Rust target: $RUST_TARGET"
 else
   RES_PARSER="$DUNE_BIN_DIR/res_parser"
   if [[ ! -x "$RES_PARSER" ]]; then
