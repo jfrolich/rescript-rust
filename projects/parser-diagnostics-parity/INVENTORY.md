@@ -45,6 +45,11 @@ Literal scanner messages:
 4. `A quoted identifier can't be empty string.` (`:343`)
 5. `unterminated regex` (`:607`)
 
+The unclosed quoted identifier EOF path is covered by
+`tests/syntax_tests/data/parsing/errors/scanner/unclosedExoticIdentifier.res`.
+That fixture has no final newline because the OCaml branch only fires when the
+scanner reaches EOF before a line break.
+
 Category-based scanner diagnostics:
 
 1. `Diagnostics.unclosed_string` (`:463`)

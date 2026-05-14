@@ -1,0 +1,17 @@
+
+  Syntax error!
+  syntax_tests/data/parsing/errors/scanner/unclosedExoticIdentifier.res:1:5-9
+
+  1 │ let \"abc
+
+  Did you forget a " here?
+
+
+  Syntax error!
+  syntax_tests/data/parsing/errors/scanner/unclosedExoticIdentifier.res:1:10
+
+  1 │ let \"abc
+
+  Did you forget a `=` here?
+
+let \"abc = [%rescript.exprhole ]

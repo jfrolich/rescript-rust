@@ -1731,9 +1731,9 @@ impl<'src> Scanner<'src> {
                         end_pos,
                         DiagnosticCategory::message("Did you forget a \" here?"),
                     );
-                    // OCaml includes the \" prefix in the identifier for error recovery
+                    // OCaml includes the scanned \" prefix without inventing a closing quote.
                     let content = self.substring(content_start, self.offset);
-                    let ident = format!("\\\"{}\"", content);
+                    let ident = format!("\\\"{}", content);
                     return Token::Lident(Cow::Owned(ident));
                 }
                 _ => self.next(),
