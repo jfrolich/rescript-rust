@@ -92,6 +92,12 @@ fn check_type_variable_name(loc: LocIdx, name: &str) -> TypeModResult<()> {
     }
 }
 
+fn report_inclusion_warnings(tctx: &mut TypeCheckContext<'_>, loc: LocIdx, warnings: Vec<Warning>) {
+    for warning in warnings {
+        tctx.report_warning(loc, warning);
+    }
+}
+
 // ============================================================================
 // Helper Functions for Path Conversion
 // ============================================================================
@@ -12066,14 +12072,17 @@ fn collect_pmty_with_type_constraints<'a>(
                         Some(std::slice::from_ref(&original_decl)),
                     )?;
                     if let Some(typed_decl) = typed_decls.pop() {
-                        crate::types::includemod::type_declarations(
+                        let mut inclusion_warnings = Vec::new();
+                        let inclusion_result = crate::types::includemod::type_declarations(
                             tctx.type_ctx,
                             env,
                             id,
                             &typed_decl.typ_type,
                             &original_decl,
-                        )
-                        .map_err(|error| TypeModError::WithMismatch {
+                            &mut inclusion_warnings,
+                        );
+                        report_inclusion_warnings(tctx, loc, inclusion_warnings);
+                        inclusion_result.map_err(|error| TypeModError::WithMismatch {
                             loc,
                             lid: longident.clone(),
                             error,
@@ -12792,14 +12801,17 @@ fn transl_with_constraints<'a>(
                         Some(std::slice::from_ref(&original_decl)),
                     )?;
                     if let Some(typed_decl) = typed_decls.pop() {
-                        crate::types::includemod::type_declarations(
+                        let mut inclusion_warnings = Vec::new();
+                        let inclusion_result = crate::types::includemod::type_declarations(
                             tctx.type_ctx,
                             env,
                             id.clone(),
                             &typed_decl.typ_type,
                             &original_decl,
-                        )
-                        .map_err(|error| TypeModError::WithMismatch {
+                            &mut inclusion_warnings,
+                        );
+                        report_inclusion_warnings(tctx, loc, inclusion_warnings);
+                        inclusion_result.map_err(|error| TypeModError::WithMismatch {
                             loc,
                             lid: longident.clone(),
                             error,
@@ -12847,14 +12859,17 @@ fn transl_with_constraints<'a>(
                         Some(std::slice::from_ref(&original_decl)),
                     )?;
                     if let Some(typed_decl) = typed_decls.pop() {
-                        crate::types::includemod::type_declarations(
+                        let mut inclusion_warnings = Vec::new();
+                        let inclusion_result = crate::types::includemod::type_declarations(
                             tctx.type_ctx,
                             env,
                             id.clone(),
                             &typed_decl.typ_type,
                             &original_decl,
-                        )
-                        .map_err(|error| TypeModError::WithMismatch {
+                            &mut inclusion_warnings,
+                        );
+                        report_inclusion_warnings(tctx, loc, inclusion_warnings);
+                        inclusion_result.map_err(|error| TypeModError::WithMismatch {
                             loc,
                             lid: longident.clone(),
                             error,
@@ -15671,8 +15686,8 @@ pub(crate) fn decl_signature_from_typed_signature(
                     ModuleDeclaration {
                         md_type: decl_module_type_from_typed(&md.md_type)
                             .unwrap_or(crate::types::decl::ModuleType::MtySignature(vec![])),
-                        md_attributes: vec![],
-                        md_loc: crate::location::Location::none(),
+                        md_attributes: parser_attrs_to_decl_attrs(arena, &md.md_attributes),
+                        md_loc: arena.to_location(md.md_loc),
                         md_path: None,
                     },
                     crate::types::decl::RecStatus::TrecNot,
@@ -15685,8 +15700,8 @@ pub(crate) fn decl_signature_from_typed_signature(
                         ModuleDeclaration {
                             md_type: decl_module_type_from_typed(&md.md_type)
                                 .unwrap_or(crate::types::decl::ModuleType::MtySignature(vec![])),
-                            md_attributes: vec![],
-                            md_loc: crate::location::Location::none(),
+                            md_attributes: parser_attrs_to_decl_attrs(arena, &md.md_attributes),
+                            md_loc: arena.to_location(md.md_loc),
                             md_path: None,
                         },
                         if i == 0 {
@@ -15702,8 +15717,8 @@ pub(crate) fn decl_signature_from_typed_signature(
                     mtd.mtd_id.clone(),
                     ModtypeDeclaration {
                         mtd_type: mtd.mtd_type.as_ref().and_then(decl_module_type_from_typed),
-                        mtd_attributes: vec![],
-                        mtd_loc: crate::location::Location::none(),
+                        mtd_attributes: parser_attrs_to_decl_attrs(arena, &mtd.mtd_attributes),
+                        mtd_loc: arena.to_location(mtd.mtd_loc),
                     },
                 ));
             }
@@ -17483,13 +17498,17 @@ fn type_module_expr_with_alias<'a>(
             if let Some(simplified_structure_sig) = simplified_structure_sig {
                 let simplified =
                     crate::types::decl::ModuleType::MtySignature(simplified_structure_sig);
-                let coercion = crate::types::includemod::modtypes(
+                let mut inclusion_warnings = Vec::new();
+                let coercion_result = crate::types::includemod::modtypes_with_warnings(
                     tctx.type_ctx,
                     env,
                     &md.mod_type,
                     &simplified,
-                )
-                .map_err(|err| TypeModError::SignatureMismatch { loc, error: err })?;
+                    &mut inclusion_warnings,
+                );
+                report_inclusion_warnings(tctx, loc, inclusion_warnings);
+                let coercion = coercion_result
+                    .map_err(|err| TypeModError::SignatureMismatch { loc, error: err })?;
                 Ok(ModuleExpr {
                     mod_desc: ModuleExprDesc::Tmod_constraint(
                         Box::new(md),
@@ -17634,13 +17653,19 @@ fn type_module_expr_with_alias<'a>(
                         .as_ref()
                         .map(|inner| (**inner).clone())
                         .unwrap_or_else(|| crate::types::decl::ModuleType::MtySignature(vec![]));
-                    crate::types::includemod::modtypes(tctx.type_ctx, env, &arg_mty, &param_mty)
-                        .map_err(|err| {
-                            TypeModError::SignatureMismatch {
-                                loc: arg.pmod_loc,
-                                error: err,
-                            }
-                        })?
+                    let mut inclusion_warnings = Vec::new();
+                    let coercion_result = crate::types::includemod::modtypes_with_warnings(
+                        tctx.type_ctx,
+                        env,
+                        &arg_mty,
+                        &param_mty,
+                        &mut inclusion_warnings,
+                    );
+                    report_inclusion_warnings(tctx, arg.pmod_loc, inclusion_warnings);
+                    coercion_result.map_err(|err| TypeModError::SignatureMismatch {
+                        loc: arg.pmod_loc,
+                        error: err,
+                    })?
                 }
                 _ => {
                     return Err(TypeModError::CannotApply {
@@ -17870,11 +17895,19 @@ fn wrap_constraint_with_decl_and_arg_mty<'a>(
     mod_attributes: Attributes,
 ) -> TypeModResult<ModuleExpr> {
     let error_loc = arg.mod_loc;
-    let coercion = crate::types::includemod::modtypes(tctx.type_ctx, env, &arg_mty, &decl_mty)
-        .map_err(|err| TypeModError::SignatureMismatch {
-            loc: error_loc,
-            error: err,
-        })?;
+    let mut inclusion_warnings = Vec::new();
+    let coercion_result = crate::types::includemod::modtypes_with_warnings(
+        tctx.type_ctx,
+        env,
+        &arg_mty,
+        &decl_mty,
+        &mut inclusion_warnings,
+    );
+    report_inclusion_warnings(tctx, error_loc, inclusion_warnings);
+    let coercion = coercion_result.map_err(|err| TypeModError::SignatureMismatch {
+        loc: error_loc,
+        error: err,
+    })?;
     let env_ref = tctx.type_ctx.store_typed_env(env);
 
     Ok(ModuleExpr {
@@ -17949,12 +17982,19 @@ fn wrap_recmodule_constraint_with_inclusion_mtys<'a>(
     mod_attributes: Attributes,
 ) -> TypeModResult<ModuleExpr> {
     let error_loc = arg.mod_loc;
-    let coercion =
-        crate::types::includemod::modtypes(tctx.type_ctx, env, &include_arg_mty, &include_decl_mty)
-            .map_err(|err| TypeModError::SignatureMismatch {
-                loc: error_loc,
-                error: err,
-            })?;
+    let mut inclusion_warnings = Vec::new();
+    let coercion_result = crate::types::includemod::modtypes_with_warnings(
+        tctx.type_ctx,
+        env,
+        &include_arg_mty,
+        &include_decl_mty,
+        &mut inclusion_warnings,
+    );
+    report_inclusion_warnings(tctx, error_loc, inclusion_warnings);
+    let coercion = coercion_result.map_err(|err| TypeModError::SignatureMismatch {
+        loc: error_loc,
+        error: err,
+    })?;
     let env_ref = tctx.type_ctx.store_typed_env(env);
 
     Ok(ModuleExpr {
@@ -19742,11 +19782,12 @@ fn type_structure_item<'a>(
 
             // Add the external value to the environment
             let mut new_env = env.clone();
+            let val_attributes = parser_attrs_to_decl_attrs(arena, &vd.pval_attributes);
             let val_desc_for_env = crate::types::ValueDescription {
                 val_type: val_ty,
                 val_kind: crate::types::ValueKind::ValPrim(prim_desc),
                 val_loc: arena.to_location(loc),
-                val_attributes: vec![],
+                val_attributes,
                 val_path: None,
             };
             let sig_item =
@@ -22101,11 +22142,12 @@ fn type_structure_item<'a>(
                 _ => decl_mod_type.clone(),
             };
             let item_sig_mod_type = localized_decl_mod_type.clone();
+            let module_attributes = parser_attrs_to_decl_attrs(arena, &mb.pmb_attributes);
             new_env.add_module(
                 mod_id.clone(),
                 crate::types::decl::ModuleDeclaration {
                     md_type: localized_decl_mod_type,
-                    md_attributes: vec![],
+                    md_attributes: module_attributes.clone(),
                     md_loc: arena.to_location(mb.pmb_loc),
                     md_path: None,
                 },
@@ -22114,7 +22156,7 @@ fn type_structure_item<'a>(
                 mod_id.clone(),
                 crate::types::decl::ModuleDeclaration {
                     md_type: item_sig_mod_type,
-                    md_attributes: vec![],
+                    md_attributes: module_attributes,
                     md_loc: arena.to_location(mb.pmb_loc),
                     md_path: None,
                 },
@@ -22423,10 +22465,11 @@ fn type_structure_item<'a>(
 
             // Add the module type to the environment
             let mut new_env = env.clone();
+            let mtd_attributes = parser_attrs_to_decl_attrs(arena, &mtd.pmtd_attributes);
             let decl_mtd = crate::types::decl::ModtypeDeclaration {
                 mtd_type: decl_mtd_type,
-                mtd_attributes: vec![],
-                mtd_loc: crate::location::Location::none(),
+                mtd_attributes,
+                mtd_loc: arena.to_location(mtd.pmtd_loc),
             };
             new_env.add_modtype(mtd_id.clone(), decl_mtd.clone());
 

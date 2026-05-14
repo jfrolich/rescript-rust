@@ -10,7 +10,9 @@
 #![allow(unused_variables)]
 #![allow(dead_code)]
 
+use crate::diagnostics::Warning;
 use crate::ident::Ident;
+use crate::location::Location;
 use crate::types::Path;
 use crate::types::ctype;
 use crate::types::decl::{
@@ -32,6 +34,85 @@ use ahash::{AHashMap as HashMap, AHashSet as HashSet};
 
 /// Result type for inclusion checking.
 pub type IncludeModResult<T> = Result<T, IncludeModError>;
+
+fn deprecated_payload_from_attrs<'a>(
+    attrs: &'a [Attribute],
+    names: &[&str],
+) -> Option<&'a AttributePayload> {
+    attrs
+        .iter()
+        .find(|attr| names.iter().any(|name| attr.attr_name.txt == *name))
+        .map(|attr| &attr.attr_payload)
+}
+
+fn deprecated_payload_reason(payload: &AttributePayload) -> &str {
+    match payload {
+        AttributePayload::Deprecated { reason, .. } | AttributePayload::Str(reason) => {
+            reason.as_str()
+        }
+        AttributePayload::Empty => "",
+        _ => "",
+    }
+}
+
+fn deprecated_inclusion_warning(
+    name: &str,
+    impl_attrs: &[Attribute],
+    sig_attrs: &[Attribute],
+    def_loc: &Location,
+    use_loc: &Location,
+) -> Option<Warning> {
+    let impl_payload =
+        deprecated_payload_from_attrs(impl_attrs, &["deprecated", "ocaml.deprecated"])?;
+    if deprecated_payload_from_attrs(sig_attrs, &["deprecated", "ocaml.deprecated"]).is_some() {
+        return None;
+    }
+    let reason = deprecated_payload_reason(impl_payload);
+    let message = if reason.is_empty() {
+        name.to_string()
+    } else {
+        format!("{name}\n{reason}")
+    };
+    Some(Warning::Deprecated {
+        message,
+        def_loc: def_loc.clone(),
+        use_loc: use_loc.clone(),
+        can_be_automigrated: false,
+    })
+}
+
+fn deprecated_mutable_inclusion_warning(
+    name: &str,
+    impl_attrs: &[Attribute],
+    sig_attrs: &[Attribute],
+    def_loc: &Location,
+    use_loc: &Location,
+) -> Option<Warning> {
+    let impl_payload = deprecated_payload_from_attrs(
+        impl_attrs,
+        &["deprecated_mutable", "ocaml.deprecated_mutable"],
+    )?;
+    if deprecated_payload_from_attrs(
+        sig_attrs,
+        &["deprecated_mutable", "ocaml.deprecated_mutable"],
+    )
+    .is_some()
+    {
+        return None;
+    }
+    let reason = deprecated_payload_reason(impl_payload);
+    let message = if reason.is_empty() {
+        format!("mutating field {name}")
+    } else {
+        format!("mutating field {name}\n{reason}")
+    };
+    Some(Warning::Deprecated {
+        message,
+        def_loc: def_loc.clone(),
+        use_loc: use_loc.clone(),
+        can_be_automigrated: false,
+    })
+}
 
 /// Errors that can occur during module inclusion checking.
 #[derive(Debug, Clone)]
@@ -1002,8 +1083,22 @@ pub fn modtypes<'a>(
     mty_impl: &ModuleType,
     mty_sig: &ModuleType,
 ) -> IncludeModResult<ModuleCoercion> {
+    let mut warnings = Vec::new();
+    modtypes_with_warnings(type_ctx, env, mty_impl, mty_sig, &mut warnings)
+}
+
+pub fn modtypes_with_warnings<'a>(
+    type_ctx: &'a TypeContext,
+    env: &Env,
+    mty_impl: &ModuleType,
+    mty_sig: &ModuleType,
+    warnings: &mut Vec<Warning>,
+) -> IncludeModResult<ModuleCoercion> {
     let subst = InclusionSubst::default();
-    modtypes_inner(type_ctx, env, &subst, mty_impl, mty_sig, None, false).map_err(|error| {
+    modtypes_inner(
+        type_ctx, env, &subst, mty_impl, mty_sig, None, false, warnings,
+    )
+    .map_err(|error| {
         if module_type_error_is_alias_unbound_module(mty_impl, mty_sig, &error) {
             error
         } else {
@@ -1035,6 +1130,7 @@ fn modtypes_inner<'a>(
     mty_sig: &ModuleType,
     sig_access_path: Option<&Path>,
     aliasable: bool,
+    warnings: &mut Vec<Warning>,
 ) -> IncludeModResult<ModuleCoercion> {
     // Guard against infinite recursion in module type expansion
     let depth = MODTYPES_DEPTH.with(|d| {
@@ -1209,6 +1305,7 @@ fn modtypes_inner<'a>(
                         mty_sig,
                         sig_access_path,
                         aliasable,
+                        warnings,
                     )
                 }) {
                 coercion?
@@ -1228,6 +1325,7 @@ fn modtypes_inner<'a>(
                     mty_sig,
                     sig_access_path,
                     aliasable,
+                    warnings,
                 )?
             };
             match pres_impl {
@@ -1242,7 +1340,15 @@ fn modtypes_inner<'a>(
 
         // Signature matching
         (ModuleType::MtySignature(sig_impl), ModuleType::MtySignature(sig_sig)) => {
-            signatures_with_subst(type_ctx, env, subst, sig_access_path, sig_impl, sig_sig)
+            signatures_with_subst(
+                type_ctx,
+                env,
+                subst,
+                sig_access_path,
+                sig_impl,
+                sig_sig,
+                warnings,
+            )
         }
 
         // Functor matching
@@ -1270,7 +1376,16 @@ fn modtypes_inner<'a>(
             let param_coercion = match (param_type_impl, expected_param_type.as_ref()) {
                 (Some(pt_impl), Some(pt_sig)) => {
                     // Note: parameters are contravariant, so we swap impl/sig
-                    modtypes_inner(type_ctx, env, &empty_subst, pt_sig, pt_impl, None, true)?
+                    modtypes_inner(
+                        type_ctx,
+                        env,
+                        &empty_subst,
+                        pt_sig,
+                        pt_impl,
+                        None,
+                        true,
+                        warnings,
+                    )?
                 }
                 (None, None) => ModuleCoercion::Tcoerce_none,
                 _ => {
@@ -1310,6 +1425,7 @@ fn modtypes_inner<'a>(
                 result_sig,
                 sig_access_path,
                 false,
+                warnings,
             )
             .map_err(|error| IncludeModError::InFunctorBody {
                 param: param_impl.clone(),
@@ -1343,6 +1459,7 @@ fn modtypes_inner<'a>(
                     expanded,
                     sig_access_path,
                     aliasable,
+                    warnings,
                 )
             }) {
                 return result;
@@ -1356,6 +1473,7 @@ fn modtypes_inner<'a>(
                     &expanded,
                     sig_access_path,
                     aliasable,
+                    warnings,
                 )
             } else {
                 Ok(ModuleCoercion::Tcoerce_none)
@@ -1373,6 +1491,7 @@ fn modtypes_inner<'a>(
                     mty_sig,
                     sig_access_path,
                     aliasable,
+                    warnings,
                 )
             }) {
                 return result;
@@ -1386,6 +1505,7 @@ fn modtypes_inner<'a>(
                     mty_sig,
                     sig_access_path,
                     aliasable,
+                    warnings,
                 )
             } else {
                 Ok(ModuleCoercion::Tcoerce_none)
@@ -1405,6 +1525,7 @@ fn modtypes_inner<'a>(
                     mty_sig,
                     sig_access_path,
                     aliasable,
+                    warnings,
                 )
             }) {
                 return result;
@@ -1418,6 +1539,7 @@ fn modtypes_inner<'a>(
                     mty_sig,
                     sig_access_path,
                     aliasable,
+                    warnings,
                 )
             } else {
                 Ok(ModuleCoercion::Tcoerce_none)
@@ -1434,6 +1556,7 @@ fn modtypes_inner<'a>(
                     expanded,
                     sig_access_path,
                     aliasable,
+                    warnings,
                 )
             }) {
                 return result;
@@ -1447,6 +1570,7 @@ fn modtypes_inner<'a>(
                     &expanded,
                     sig_access_path,
                     aliasable,
+                    warnings,
                 )
             } else {
                 Ok(ModuleCoercion::Tcoerce_none)
@@ -1713,6 +1837,7 @@ fn check_paired_signature_items<'a>(
     paired: &[PairedSignatureItem<'_>],
     sig_access_path: Option<&Path>,
     subst: &InclusionSubst,
+    warnings: &mut Vec<Warning>,
 ) -> IncludeModResult<Vec<(usize, ModuleCoercion)>> {
     let mut coercions = Vec::new();
 
@@ -1729,6 +1854,7 @@ fn check_paired_signature_items<'a>(
                     impl_val_desc,
                     sig_val_desc,
                     subst,
+                    warnings,
                 )?;
                 if !matches!(sig_val_desc.val_kind, ValueKind::ValPrim(_)) {
                     coercions.push((pair.runtime_pos, coercion));
@@ -1751,6 +1877,7 @@ fn check_paired_signature_items<'a>(
                     impl_id.clone(),
                     impl_type_decl,
                     &expected_type_decl,
+                    warnings,
                 )?;
             }
             (
@@ -1764,6 +1891,7 @@ fn check_paired_signature_items<'a>(
                     impl_ext_constr,
                     sig_ext_constr,
                     subst,
+                    warnings,
                 )?;
                 coercions.push((pair.runtime_pos, ModuleCoercion::Tcoerce_none));
             }
@@ -1771,6 +1899,15 @@ fn check_paired_signature_items<'a>(
                 SignatureItem::SigModule(impl_id, impl_mod_decl, _),
                 SignatureItem::SigModule(sig_id, sig_mod_decl, _),
             ) => {
+                if let Some(warning) = deprecated_inclusion_warning(
+                    impl_id.name(),
+                    &impl_mod_decl.md_attributes,
+                    &sig_mod_decl.md_attributes,
+                    &impl_mod_decl.md_loc,
+                    &sig_mod_decl.md_loc,
+                ) {
+                    warnings.push(warning);
+                }
                 // Match compiler/ml/includemod.ml:396-413:
                 // `module_declarations` always strengthens the implementation
                 // module type and recurses through `modtypes` with the current
@@ -1791,6 +1928,7 @@ fn check_paired_signature_items<'a>(
                     &sig_mod_decl.md_type,
                     nested_sig_access_path.as_ref(),
                     false,
+                    warnings,
                 )
                 .map_err(|error| {
                     let name = impl_id.clone();
@@ -1831,6 +1969,7 @@ fn check_paired_signature_items<'a>(
                     impl_id.clone(),
                     impl_modtype_decl,
                     &expected_modtype_decl,
+                    warnings,
                 )?;
             }
             (SignatureItem::SigClass, SignatureItem::SigClass)
@@ -1867,6 +2006,27 @@ pub fn compunit<'a>(
     _intf_name: &str,
     intf_sig: &Signature,
 ) -> IncludeModResult<ModuleCoercion> {
+    let mut warnings = Vec::new();
+    compunit_with_warnings(
+        type_ctx,
+        env,
+        impl_name,
+        impl_sig,
+        _intf_name,
+        intf_sig,
+        &mut warnings,
+    )
+}
+
+pub fn compunit_with_warnings<'a>(
+    type_ctx: &'a TypeContext,
+    env: &Env,
+    impl_name: &str,
+    impl_sig: &Signature,
+    _intf_name: &str,
+    intf_sig: &Signature,
+    warnings: &mut Vec<Warning>,
+) -> IncludeModResult<ModuleCoercion> {
     fn module_name_from_source_filename(path: &str) -> String {
         let basename = std::path::Path::new(path)
             .file_name()
@@ -1895,6 +2055,7 @@ pub fn compunit<'a>(
         Some(&access_path),
         impl_sig,
         intf_sig,
+        warnings,
     )
 }
 
@@ -1906,7 +2067,16 @@ pub fn signatures<'a>(
     sig_sig: &Signature,
 ) -> IncludeModResult<ModuleCoercion> {
     let subst = InclusionSubst::default();
-    signatures_with_subst(type_ctx, env, &subst, None, sig_impl, sig_sig)
+    let mut warnings = Vec::new();
+    signatures_with_subst(
+        type_ctx,
+        env,
+        &subst,
+        None,
+        sig_impl,
+        sig_sig,
+        &mut warnings,
+    )
 }
 
 fn signatures_with_subst<'a>(
@@ -1916,6 +2086,7 @@ fn signatures_with_subst<'a>(
     sig_access_path: Option<&Path>,
     sig_impl: &Signature,
     sig_sig: &Signature,
+    warnings: &mut Vec<Warning>,
 ) -> IncludeModResult<ModuleCoercion> {
     let mut include_env = env.clone();
     // OCaml compiler/ml/includemod.ml:284-337 threads the current `Subst.t`
@@ -1958,8 +2129,14 @@ fn signatures_with_subst<'a>(
         return Err(IncludeModError::SignatureMismatch(errors));
     }
 
-    let coercions =
-        check_paired_signature_items(type_ctx, &include_env, &paired, sig_access_path, &subst)?;
+    let coercions = check_paired_signature_items(
+        type_ctx,
+        &include_env,
+        &paired,
+        sig_access_path,
+        &subst,
+        warnings,
+    )?;
 
     if len_impl == len_sig {
         Ok(simplify_structure_coercion(
@@ -1988,7 +2165,18 @@ fn value_descriptions<'a>(
     impl_desc: &ValueDescription,
     sig_desc: &ValueDescription,
     subst: &InclusionSubst,
+    warnings: &mut Vec<Warning>,
 ) -> IncludeModResult<ModuleCoercion> {
+    if let Some(warning) = deprecated_inclusion_warning(
+        id.name(),
+        &impl_desc.val_attributes,
+        &sig_desc.val_attributes,
+        &impl_desc.val_loc,
+        &sig_desc.val_loc,
+    ) {
+        warnings.push(warning);
+    }
+
     // Check that the value types are compatible
     // The implementation type should be more general than (or equal to) the signature type
     let expected_ty = substitute_value_type_paths(type_ctx, sig_desc.val_type, subst);
@@ -2508,7 +2696,18 @@ pub(crate) fn type_declarations<'a>(
     id: Ident,
     impl_decl: &TypeDeclaration,
     sig_decl: &TypeDeclaration,
+    warnings: &mut Vec<Warning>,
 ) -> IncludeModResult<()> {
+    if let Some(warning) = deprecated_inclusion_warning(
+        id.name(),
+        &impl_decl.type_attributes,
+        &sig_decl.type_attributes,
+        &impl_decl.type_loc,
+        &sig_decl.type_loc,
+    ) {
+        warnings.push(warning);
+    }
+
     // Check arity (number of type parameters)
     if impl_decl.type_params.len() != sig_decl.type_params.len() {
         return Err(IncludeModError::TypeMismatch {
@@ -2633,6 +2832,7 @@ pub(crate) fn type_declarations<'a>(
                 &sig_decl.type_params,
                 impl_labels,
                 sig_labels,
+                warnings,
             ) {
                 Err(IncludeModError::TypeDeclarationMismatch {
                     name: id,
@@ -2656,6 +2856,7 @@ pub(crate) fn type_declarations<'a>(
                 &sig_decl.type_params,
                 impl_constructors,
                 sig_constructors,
+                warnings,
             ) {
                 Err(IncludeModError::TypeDeclarationMismatch {
                     name: id,
@@ -2688,6 +2889,7 @@ fn compare_record_declarations(
     sig_params: &[TypeExprRef],
     impl_labels: &[LabelDeclaration],
     sig_labels: &[LabelDeclaration],
+    warnings: &mut Vec<Warning>,
 ) -> Option<String> {
     let param_map = build_type_param_map(type_ctx, impl_params, sig_params);
     let mut index = 0usize;
@@ -2715,6 +2917,15 @@ fn compare_record_declarations(
                 "The optional attribute of field {} is different.",
                 impl_label.ld_id.name()
             ));
+        }
+        if let Some(warning) = deprecated_mutable_inclusion_warning(
+            impl_label.ld_id.name(),
+            &impl_label.ld_attributes,
+            &sig_label.ld_attributes,
+            &impl_label.ld_loc,
+            &sig_label.ld_loc,
+        ) {
+            warnings.push(warning);
         }
         if !type_exprs_equal_for_inclusion(
             type_ctx,
@@ -2754,6 +2965,7 @@ fn compare_variant_declarations(
     sig_params: &[TypeExprRef],
     impl_constructors: &[ConstructorDeclaration],
     sig_constructors: &[ConstructorDeclaration],
+    warnings: &mut Vec<Warning>,
 ) -> Option<String> {
     let param_map = build_type_param_map(type_ctx, impl_params, sig_params);
     let mut index = 0usize;
@@ -2770,6 +2982,15 @@ fn compare_variant_declarations(
                 sig_constructor.cd_id.name()
             ));
         }
+        if let Some(warning) = deprecated_inclusion_warning(
+            impl_constructor.cd_id.name(),
+            &impl_constructor.cd_attributes,
+            &sig_constructor.cd_attributes,
+            &impl_constructor.cd_loc,
+            &sig_constructor.cd_loc,
+        ) {
+            warnings.push(warning);
+        }
 
         match (&impl_constructor.cd_args, &sig_constructor.cd_args) {
             (
@@ -2783,6 +3004,7 @@ fn compare_variant_declarations(
                     sig_params,
                     impl_labels,
                     sig_labels,
+                    warnings,
                 ) {
                     return Some(detail);
                 }
@@ -3096,6 +3318,7 @@ fn extension_constructors<'a>(
     impl_ext: &ExtensionConstructor,
     sig_ext: &ExtensionConstructor,
     subst: &InclusionSubst,
+    warnings: &mut Vec<Warning>,
 ) -> IncludeModResult<()> {
     let sig_ext = substitute_extension_constructor_paths(type_ctx, sig_ext, subst);
     let mismatch = || IncludeModError::ExtensionConstructorMismatch {
@@ -3137,6 +3360,7 @@ fn extension_constructors<'a>(
         &param_map,
         &impl_ext.ext_args,
         &sig_ext.ext_args,
+        warnings,
     ) {
         return Err(mismatch());
     }
@@ -3172,6 +3396,7 @@ fn constructor_arguments_equal_for_inclusion(
     param_map: &HashMap<TypeExprRef, TypeExprRef>,
     impl_args: &ConstructorArguments,
     sig_args: &ConstructorArguments,
+    warnings: &mut Vec<Warning>,
 ) -> bool {
     match (impl_args, sig_args) {
         (
@@ -3196,7 +3421,8 @@ fn constructor_arguments_equal_for_inclusion(
             ConstructorArguments::CstrRecord(impl_labels),
             ConstructorArguments::CstrRecord(sig_labels),
         ) => {
-            compare_record_declarations(type_ctx, env, &[], &[], impl_labels, sig_labels).is_none()
+            compare_record_declarations(type_ctx, env, &[], &[], impl_labels, sig_labels, warnings)
+                .is_none()
         }
         _ => false,
     }
@@ -3209,7 +3435,18 @@ fn modtype_declarations<'a>(
     id: Ident,
     impl_decl: &ModtypeDeclaration,
     sig_decl: &ModtypeDeclaration,
+    warnings: &mut Vec<Warning>,
 ) -> IncludeModResult<()> {
+    if let Some(warning) = deprecated_inclusion_warning(
+        id.name(),
+        &impl_decl.mtd_attributes,
+        &sig_decl.mtd_attributes,
+        &impl_decl.mtd_loc,
+        &sig_decl.mtd_loc,
+    ) {
+        warnings.push(warning);
+    }
+
     if impl_decl == sig_decl {
         return Ok(());
     }
@@ -3242,8 +3479,10 @@ fn modtype_declarations<'a>(
             // Module types must be equivalent (both directions), and OCaml
             // rejects equivalent declarations when either direction needs a
             // structure-field permutation.
-            let impl_to_sig = modtypes(type_ctx, env, impl_mty, sig_mty).map_err(&mismatch)?;
-            let sig_to_impl = modtypes(type_ctx, env, sig_mty, impl_mty).map_err(&mismatch)?;
+            let impl_to_sig = modtypes_with_warnings(type_ctx, env, impl_mty, sig_mty, warnings)
+                .map_err(&mismatch)?;
+            let sig_to_impl = modtypes_with_warnings(type_ctx, env, sig_mty, impl_mty, warnings)
+                .map_err(&mismatch)?;
             if !matches!(impl_to_sig, ModuleCoercion::Tcoerce_none)
                 || !matches!(sig_to_impl, ModuleCoercion::Tcoerce_none)
             {
