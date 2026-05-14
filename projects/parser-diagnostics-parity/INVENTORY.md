@@ -393,6 +393,22 @@ instead of typed `type error` constructors. Coverage includes:
    - no direct ReScript source fixture is currently known that reaches
      `Invalid_code_point` in this frontend transform; raw source invalid
      codepoints are owned by scanner diagnostics before the PPX transform
+4. `compiler/frontend/ast_external_process.ml:207-215`
+   - payload-bearing external attributes `@val`, `@send`, `@set`, `@get`,
+     and `@new` accept either no payload or a single string payload
+   - invalid payload coverage now mirrors that attribute list:
+     `tests/error_output_parity/compiler/fixtures/bs_external_val_invalid_payload.res`,
+     `tests/error_output_parity/compiler/fixtures/bs_external_send_invalid_payload.res`,
+     `tests/error_output_parity/compiler/fixtures/bs_external_set_invalid_payload.res`,
+     `tests/error_output_parity/compiler/fixtures/bs_external_get_invalid_payload.res`,
+     and
+     `tests/error_output_parity/compiler/fixtures/bs_external_new_invalid_payload.res`
+5. `compiler/frontend/ast_external_process.ml:379-384`
+   - `@return` accepts only a single punned directive action
+   - unsupported return directives are covered by
+     `tests/error_output_parity/compiler/fixtures/bs_return_unknown_directive.res`
+   - a config-record field with an explicit payload is covered by
+     `tests/error_output_parity/compiler/fixtures/bs_return_record_value_payload.res`
 
 ### 5.4 Recursive Value Diagnostics
 
