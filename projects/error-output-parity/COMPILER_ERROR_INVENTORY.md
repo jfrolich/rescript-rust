@@ -710,6 +710,9 @@ with a reason after checking raise sites.
     `tests/error_output_parity/compiler/fixtures/variant_spread_has_type_params.res`,
     and
     `tests/error_output_parity/compiler/fixtures/variant_spread_duplicate_constructor.res`.
+  - The concrete helper constructors are defined in
+    `compiler/ml/variant_type_spread.ml`; `compiler/ml/typedecl.ml` reports
+    them through `Typedecl.Variant_spread_fail`.
 
 ## `compiler/ml/typemod.ml`
 
@@ -1629,7 +1632,9 @@ with a reason after checking raise sites.
     `@as`
     - Covered by
       `tests/error_output_parity/compiler/fixtures/bs_string_redundant_warning.res`.
-- `compiler/frontend/ast_derive*.ml`
+- `compiler/frontend/ast_derive_abstract.ml`,
+  `compiler/frontend/ast_derive_projector.ml`, and
+  `compiler/frontend/ast_derive_util.ml`
   - `Ast_payload.table_dispatch` unsupported `@deriving` action
     - Covered by
       `tests/error_output_parity/compiler/fixtures/deriving_unsupported.res`.
@@ -1897,6 +1902,56 @@ with a reason after checking raise sites.
       assertion.
     - Virtual fixture prepared under
       `.parity-cache/error-output/compiler/gentype_bad_magic.res`.
+- Helper/internal source audit
+  - `compiler/core/cmd_ast_exception.ml` only defines the external-PPX
+    exception constructors used by `compiler/core/cmd_ppx_apply.ml`.
+    `WrongMagic` is covered by `external_ppx_wrong_magic.res`; `CannotRun`
+    remains source-reachable but intentionally outside the byte-for-byte
+    harness because OCaml prints nondeterministic `Filename.temp_file` paths in
+    the command line.
+  - `compiler/core/js_implementation.ml` and
+    `compiler/core/lam_compile_main.ml` call `Warnings.check_fatal` and inspect
+    `Warnings.has_warnings`; they do not introduce their own message text.
+    Fatal warning promotion is covered at the warning source by
+    `warn_error_unused_variable.res`, `parmatch_all_guarded.res`,
+    `config_warn_error_unused_variable.res`, and
+    `config_warn_error_raw_warning.res`.
+  - `compiler/ml/delayed_checks.ml` saves/restores warning state around delayed
+    checks. It has no independent diagnostic message; delayed warning payloads
+    are covered at their emitters.
+  - `compiler/ml/depend.ml` handles `%error`/`%ocaml.error` extensions in
+    dependency extraction by reusing `Builtin_attributes.error_of_extension`.
+    The shared formatter branches are covered by the `builtin_extension_*`
+    fixtures; normal `bsc` compilation reaches those through the frontend and
+    typechecker paths rather than through `Depend`.
+  - `compiler/ml/ast_helper.ml` raises `Syntaxerr.Variable_in_scope` from
+    `Typ.varify_constructors`; covered by `variable_in_scope.res`.
+    `compiler/ml/ast_helper0.ml` has the same v0 AST compatibility helper for
+    PPX mapping and does not add a distinct user-facing diagnostic.
+  - `compiler/ml/error_message_utils.ml` formats type-error explanations; it
+    does not raise independent diagnostics. Its message branches are exercised
+    through the `Typecore` fixtures above.
+  - `compiler/ml/longident.ml`, `compiler/ml/primitive.ml`,
+    `compiler/ml/subst.ml`, and `compiler/ml/matching.ml` only add
+    `fatal_error` guards for internal invariants in the diagnostic grep. These
+    are not intended user diagnostics from ordinary ReScript source; reachable
+    match warnings from `matching`/`parmatch` are covered separately.
+  - `compiler/frontend/ast_pat.ml` has no active diagnostic; the `raise_errorf`
+    found by source grep is in a commented-out branch.
+  - `compiler/frontend/ast_core_type.ml` and
+    `compiler/frontend/ast_uncurry_gen.ml` route through `Bs_syntaxerr`
+    constructors already covered by `bs_external_unhandled_poly_type.res`,
+    `bs_this_simple_pattern.res`, and `bs_this_optional_arg.res`.
+  - Interface files that appear in source greps only mirror implementation
+    diagnostic types or printers:
+    `compiler/frontend/ast_utf8_string.mli`,
+    `compiler/frontend/ast_utf8_string_interp.mli`,
+    `compiler/frontend/bs_syntaxerr.mli`, `compiler/ml/cmi_format.mli`,
+    `compiler/ml/cmt_format.mli`, `compiler/ml/env.mli`,
+    `compiler/ml/includemod.mli`, `compiler/ml/location.mli`,
+    `compiler/ml/syntaxerr.mli`, `compiler/ml/translmod.mli`,
+    `compiler/ml/typecore.mli`, `compiler/ml/typedecl.mli`,
+    `compiler/ml/typemod.mli`, and `compiler/ml/typetexp.mli`.
 - `compiler/frontend/ast_external_process.ml`
   - `Invalid payload` from `name_from_payload_or_prim`
     - Covered for the shared `@val`/`@send`/`@set`/`@get`/`@new`
