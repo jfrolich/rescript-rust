@@ -82,6 +82,9 @@ Current focused coverage:
   retained local bindings and side effects.
 - `deriving_output_patterns.res`: builtin deriving output for accessors,
   abstract records, optional fields, and light abstract records.
+- `attribute_codegen_patterns.res`: inline constants/functions/modules,
+  `%%private` extension output, tuple `@module` externals, legacy and direct
+  `null_to_opt` returns, and named/optional `@unwrap` arguments.
 - `jsx_transform_patterns.res`: JSX v4 transform output for DOM elements,
   components, fragments, keys, spread props, escaped prop names, optional
   children, and memoed components.

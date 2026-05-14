@@ -7178,6 +7178,12 @@ fn closed_schema_rec(
     enum Action {
         Tvar,
         Tconstr(Vec<TypeExprRef>),
+        Tfield {
+            kind: FieldKind,
+            typ: TypeExprRef,
+            rest: TypeExprRef,
+        },
+        Tvariant(RowDesc),
         Children(Vec<TypeExprRef>),
     }
 
@@ -7186,6 +7192,12 @@ fn closed_schema_rec(
         match &*desc {
             TypeDesc::Tvar(_) => Action::Tvar,
             TypeDesc::Tconstr { args, .. } => Action::Tconstr(args.clone()),
+            TypeDesc::Tfield { kind, typ, rest, .. } => Action::Tfield {
+                kind: kind.clone(),
+                typ: *typ,
+                rest: *rest,
+            },
+            TypeDesc::Tvariant(row) => Action::Tvariant(row.clone()),
             _ => {
                 let mut children = Vec::new();
                 iter_type_expr(ctx, ty, |child| children.push(child));
@@ -7209,6 +7221,24 @@ fn closed_schema_rec(
             } else {
                 false
             }
+        }
+        // OCaml compiler/ml/ctype.ml:4191-4198 handles object fields and
+        // variant rows separately from generic `iter_type_expr`: absent object
+        // fields do not close-check their payload, and static variant rows
+        // deliberately do not visit `row_more`.
+        Action::Tfield { kind, typ, rest } => {
+            (!matches!(kind, FieldKind::Fpresent) || closed_schema_rec(ctx, env, typ, visited))
+                && closed_schema_rec(ctx, env, rest, visited)
+        }
+        Action::Tvariant(row) => {
+            let row = crate::types::btype::row_repr(ctx, &row);
+            let mut row_children = Vec::new();
+            crate::types::btype::iter_row(ctx, &row, |child| row_children.push(child));
+            row_children
+                .into_iter()
+                .all(|child| closed_schema_rec(ctx, env, child, visited))
+                && (crate::types::btype::static_row(ctx, &row)
+                    || closed_schema_rec(ctx, env, row.row_more, visited))
         }
         Action::Children(children) => children
             .iter()
