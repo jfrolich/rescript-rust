@@ -4331,6 +4331,12 @@ fn module_path_resolution_error_to_anyhow(
     filename: &str,
 ) -> anyhow::Error {
     let message = match error {
+        ModulePathResolutionError::CmjNotFound { module_name } => format!(
+            "{module_name} not found, it means either the module does not exist or it is a namespace"
+        ),
+        ModulePathResolutionError::JsNotFound { js_file } => {
+            format!("{js_file} not found, needed in script mode ")
+        },
         ModulePathResolutionError::MissingMlDependency { module_name } => {
             format!("Missing dependency {module_name} in search path")
         }

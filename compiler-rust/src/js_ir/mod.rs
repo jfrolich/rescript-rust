@@ -23,8 +23,8 @@ use std::fs;
 use std::path::{Component, Path as FsPath, PathBuf};
 
 use crate::cmi::persistent_env::{
-    CmjExportArity, CmjExportConstant, CmjPackageModuleSystem, CmjPackageName, CmjPackageSpec,
-    PersistentEnv,
+    CmjExportArity, CmjExportConstant, CmjFileCase, CmjPackageModuleSystem, CmjPackageName,
+    CmjPackageSpec, PersistentEnv,
 };
 use crate::ident::Ident;
 use crate::lambda::Lambda;
@@ -73,6 +73,8 @@ pub struct ModulePathResolver {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ModulePathResolutionError {
+    CmjNotFound { module_name: String },
+    JsNotFound { js_file: String },
     MissingMlDependency { module_name: String },
     DependencyScriptModuleDependentNot { module_name: String },
 }
@@ -179,23 +181,37 @@ impl ModulePathResolver {
             return None;
         }
 
-        let import_info = self
-            .persistent_env
-            .as_ref()?
-            .module_cmj_import_info(module.id.name())?;
+        let env = self.persistent_env.as_ref()?;
+        let module_name = module.id.name();
+        let Some(import_info) = env.module_cmj_import_info(module_name) else {
+            if !env.module_has_in_memory_info(module_name)
+                && env.resolve_module_cmj_path(module_name).is_none()
+            {
+                return Some(ModulePathResolutionError::CmjNotFound {
+                    module_name: module_name.to_string(),
+                });
+            }
+            return None;
+        };
         let dep_query = self.query_package_spec(&import_info.package_spec);
         let current_query = self.current_package_query();
         match (&dep_query, &current_query) {
             (PackageInfoQuery::NotFound, _) => {
                 Some(ModulePathResolutionError::MissingMlDependency {
-                    module_name: module.id.name().to_string(),
+                    module_name: module_name.to_string(),
                 })
             }
             (PackageInfoQuery::Script, PackageInfoQuery::Found) => Some(
                 ModulePathResolutionError::DependencyScriptModuleDependentNot {
-                    module_name: module.id.name().to_string(),
+                    module_name: module_name.to_string(),
                 },
             ),
+            (PackageInfoQuery::Script, PackageInfoQuery::Script) => {
+                let js_file = js_name_of_module_name(module_name, import_info.file_case, ".js");
+                (!env.file_exists_in_load_path_uncap(&js_file)).then_some(
+                    ModulePathResolutionError::JsNotFound { js_file },
+                )
+            }
             _ => None,
         }
     }
@@ -417,6 +433,26 @@ fn module_system_compatible(dep: CmjPackageModuleSystem, query: ModuleFormat) ->
         (CmjPackageModuleSystem::CommonJs, ModuleFormat::CommonJs)
             | (CmjPackageModuleSystem::EsModule, ModuleFormat::EsModule)
     )
+}
+
+fn js_name_of_module_name(module_name: &str, file_case: CmjFileCase, suffix: &str) -> String {
+    let name = match file_case {
+        CmjFileCase::Upper => module_name.to_string(),
+        CmjFileCase::Little => uncapitalize_ascii(module_name),
+    };
+    if let Some(index) = name.rfind('-') {
+        format!("{}{}", &name[..index], suffix)
+    } else {
+        format!("{name}{suffix}")
+    }
+}
+
+fn uncapitalize_ascii(name: &str) -> String {
+    let mut chars = name.chars();
+    let Some(first) = chars.next() else {
+        return String::new();
+    };
+    format!("{}{}", first.to_ascii_lowercase(), chars.as_str())
 }
 
 fn output_suffix_from_path(output_path: Option<&FsPath>) -> String {

@@ -282,6 +282,21 @@ run_compiler_case() {
             -bs-package-output commonjs:.parity-cache/error-output/compiler:.js || return 1
     fi
 
+    if [[ "$source_file" == "tests/error_output_parity/compiler/cases/cmj_not_found.res" ]]; then
+        prebuild_ocaml_dependency \
+            "tests/error_output_parity/compiler/cases/cmj_not_found_dep.res" \
+            -w -A -bs-jsx 4 -color never || return 1
+        rm -f tests/error_output_parity/compiler/cases/cmj_not_found_dep.cmj
+    fi
+
+    if [[ "$source_file" == "tests/error_output_parity/compiler/cases/js_not_found.res" ]]; then
+        prebuild_ocaml_dependency \
+            "tests/error_output_parity/compiler/cases/js_not_found_dep.res" \
+            -w -A -bs-jsx 4 -color never || return 1
+        rm -f tests/error_output_parity/compiler/cases/js_not_found_dep.js
+        rm -f tests/error_output_parity/compiler/cases/Js_not_found_dep.js
+    fi
+
     if [[ "$source_file" == ".parity-cache/error-output/compiler/gentype_bad_magic.res" ]]; then
         cp "$PROJECT_ROOT/tests/error_output_parity/compiler/cases/gentype_stale_cmti.res" \
             "$CACHE_DIR/compiler/gentype_bad_magic.res"

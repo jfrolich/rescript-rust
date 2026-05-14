@@ -1338,6 +1338,14 @@ impl PersistentEnv {
         })
     }
 
+    pub fn module_has_in_memory_info(&self, name: &str) -> bool {
+        self.in_memory_info(name).is_some()
+    }
+
+    pub fn file_exists_in_load_path_uncap(&self, filename: &str) -> bool {
+        self.find_in_path_uncap(filename).is_some()
+    }
+
     /// Resolve a module name to its companion `.cmj` path when present.
     pub fn resolve_module_cmj_path(&self, name: &str) -> Option<PathBuf> {
         let cmj_filename = format!("{name}.cmj");

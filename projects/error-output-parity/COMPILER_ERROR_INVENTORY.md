@@ -1043,6 +1043,14 @@ with a reason after checking raise sites.
       `tests/error_output_parity/compiler/cases/warn_error_unused_variable.res`.
 - `compiler/depends/bs_exception.ml` via
   `compiler/core/js_name_of_module_id.ml`
+  - `Cmj_not_found` from `compiler/core/js_cmj_load.ml` when a dependency CMI
+    is present but its companion CMJ is missing
+    - Covered by
+      `tests/error_output_parity/compiler/cases/cmj_not_found.res`.
+  - `Js_not_found` from script-mode JS path resolution when a dependency CMJ is
+    present but no sibling JS output is on the load path
+    - Covered by
+      `tests/error_output_parity/compiler/cases/js_not_found.res`.
   - `Dependency_script_module_dependent_not` from package-mode JS path
     resolution when a current package output depends on a script-mode `.cmj`
     - Covered by
@@ -1051,6 +1059,16 @@ with a reason after checking raise sites.
     dependency package has no output for the current module system
     - Covered by
       `tests/error_output_parity/compiler/cases/package_missing_ml_dependency.res`.
+  - `Bs_duplicate_exports` is a defensive `lam_coercion.ml` export-list
+    invariant. Normal source probes with duplicate lets and duplicate includes
+    coalesce to the final exported binding before this check; no `.res` route has
+    been found.
+  - `Js_not_found`, `Cmj_not_found`, `Missing_ml_dependency`,
+    `Dependency_script_module_dependent_not`, and `Bs_duplicate_exports` are the
+    only `Bs_exception.error` call sites in the active compiler path. The
+    remaining constructors (`Bs_cyclic_depends`, `Bs_duplicated_module`,
+    `Bs_package_not_found`, `Bs_main_not_exist`, `Bs_invalid_path`) have no call
+    sites in this branch.
 - `compiler/syntax/src/res_core.ml`
   - `parse_external_def` requires the `=` before an external primitive name
     - Covered through `res_parser` by
