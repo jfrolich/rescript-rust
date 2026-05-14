@@ -103,3 +103,4 @@ error,100,tests/syntax_tests/data/parsing/errors/expressions/arrowReturnPolytype
 error,101,tests/syntax_tests/data/parsing/errors/expressions/jsxUpperOptionalProp.res,tests/syntax_tests/data/parsing/errors/expressions/expected/jsxUpperOptionalProp.res.txt
 error,102,tests/syntax_tests/data/parsing/errors/expressions/jsxClosingMismatch.res,tests/syntax_tests/data/parsing/errors/expressions/expected/jsxClosingMismatch.res.txt
 error,103,tests/syntax_tests/data/parsing/errors/expressions/jsxClosingEmptyName.res,tests/syntax_tests/data/parsing/errors/expressions/expected/jsxClosingEmptyName.res.txt
+error,104,tests/syntax_tests/data/parsing/errors/scanner/invalidEscapeSequence.res,tests/syntax_tests/data/parsing/errors/scanner/expected/invalidEscapeSequence.res.txt

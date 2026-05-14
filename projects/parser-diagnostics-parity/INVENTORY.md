@@ -53,6 +53,11 @@ Category-based scanner diagnostics:
 4. `Diagnostics.unknown_uchar` (`:1031`)
 5. dynamic `Diagnostics.message msg` for escape-sequence problems (`:361`, `:371`, `:415`)
 
+The escape-sequence dynamic messages are covered by
+`tests/syntax_tests/data/parsing/errors/scanner/invalidEscapeSequence.res`,
+which triggers both `unknown escape sequence` and
+`escape sequence is invalid unicode code point`.
+
 ## 3. Parser Grammar Diagnostics (`res_core.ml`)
 
 Main parser diagnostic emission uses `Parser.err` + `Diagnostics.*`.

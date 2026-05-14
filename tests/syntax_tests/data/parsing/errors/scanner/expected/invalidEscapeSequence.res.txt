@@ -1,0 +1,36 @@
+
+  Syntax error!
+  syntax_tests/data/parsing/errors/scanner/invalidEscapeSequence.res:1:10-11
+
+  1 │ let x = "\x"
+  2 │ 
+  3 │ let x = "\u12"
+
+  unknown escape sequence
+
+
+  Syntax error!
+  syntax_tests/data/parsing/errors/scanner/invalidEscapeSequence.res:3:10-13
+
+  1 │ let x = "\x"
+  2 │ 
+  3 │ let x = "\u12"
+  4 │ 
+  5 │ let x = "\uD800"
+
+  unknown escape sequence
+
+
+  Syntax error!
+  syntax_tests/data/parsing/errors/scanner/invalidEscapeSequence.res:5:10-15
+
+  3 │ let x = "\u12"
+  4 │ 
+  5 │ let x = "\uD800"
+  6 │ 
+
+  escape sequence is invalid unicode code point
+
+let x = {js|\x|js}
+let x = {js|\u12|js}
+let x = {js|\uD800|js}
