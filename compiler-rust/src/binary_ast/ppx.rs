@@ -1334,10 +1334,9 @@ fn collect_obj_optional_as_warnings(
     for arg in args {
         let arg_type = arena.get_core_type(arg.typ);
         let warn_type_as = match arg.lbl {
-            // OCaml `Ast_external_process.get_opt_arg_type` raises
-            // `Invalid_underscore_type_in_external` for optional `_` before
-            // unused `@as` warnings are collected.
-            ArgLabel::Optional(_) => !matches!(&*arg_type.ptyp_desc, CoreTypeDesc::Ptyp_any),
+            // Rust collects warnings in a pre-pass, but OCaml reaches the same
+            // optional-arg helper before unused `@as` warnings can be reported.
+            ArgLabel::Optional(_) => get_opt_arg_type(false, arg_type, arena).is_ok(),
             ArgLabel::Labelled(_) => !matches!(&*arg_type.ptyp_desc, CoreTypeDesc::Ptyp_any),
             ArgLabel::Nolabel => false,
         };
@@ -1769,7 +1768,7 @@ fn build_arg_type_specs(typ: &CoreType, arena: &mut ParseArena) -> (Params, usiz
         let (label_noname, arg_type, keeps_runtime_arg) = match &arg.lbl {
             ArgLabel::Optional(_) => {
                 let arg_typ = arena.get_core_type(arg.typ).clone();
-                let arg_type = get_opt_arg_type(false, &arg_typ, arena);
+                let arg_type = get_opt_arg_type_unchecked(false, &arg_typ, arena);
                 // Optional args are never Arg_cst and are kept in `args`.
                 (LabelNoname::ArgOptional, arg_type, true)
             }
@@ -2056,15 +2055,8 @@ fn validate_plain_obj_arg_type_errors(
                 }
             }
             ArgLabel::Optional(label_loc) => {
-                if matches!(&*typ.ptyp_desc, CoreTypeDesc::Ptyp_any) {
-                    return Err(PpxError::at_loc(
-                        typ.ptyp_loc,
-                        "_ is not allowed in combination with external optional type",
-                    ));
-                }
-
                 let label = arena.get_string(label_loc.txt).to_string();
-                match get_opt_arg_type(false, &typ, arena) {
+                match get_opt_arg_type(false, &typ, arena)? {
                     Attr::PolyVar { .. } => {
                         return Err(PpxError::at_loc(
                             external_loc,
@@ -2269,14 +2261,7 @@ fn validate_non_obj_optional_arg_type_errors(
         };
 
         let typ = arena.get_core_type(arg.typ);
-        if matches!(&*typ.ptyp_desc, CoreTypeDesc::Ptyp_any) {
-            return Err(PpxError::at_loc(
-                typ.ptyp_loc,
-                "_ is not allowed in combination with external optional type",
-            ));
-        }
-
-        if matches!(get_opt_arg_type(false, typ, arena), Attr::PolyVar { .. }) {
+        if matches!(get_opt_arg_type(false, typ, arena)?, Attr::PolyVar { .. }) {
             let label = arena.get_string(label_loc.txt);
             return Err(PpxError::at_loc(
                 external_loc,
@@ -2338,16 +2323,6 @@ fn validate_external_attribute_errors(
         arena,
     );
 
-    if !desc.mk_obj && desc.splice {
-        validate_variadic_arg_type_errors(&args, vd.pval_loc, arena)?;
-    }
-
-    if !desc.mk_obj {
-        validate_non_obj_optional_arg_type_errors(&args, vd.pval_loc, arena)?;
-    }
-
-    let (params, arity) = build_arg_type_specs(&vd_type, arena);
-
     if desc.mk_obj {
         if external_desc_is_plain_obj(&desc) {
             // OCaml Ast_external_process.process_obj rejects non-empty
@@ -2367,6 +2342,14 @@ fn validate_external_attribute_errors(
             "Attribute found that conflicts with @obj",
         ));
     }
+
+    if desc.splice {
+        validate_variadic_arg_type_errors(&args, vd.pval_loc, arena)?;
+    }
+
+    validate_non_obj_optional_arg_type_errors(&args, vd.pval_loc, arena)?;
+
+    let (params, arity) = build_arg_type_specs(&vd_type, arena);
 
     if desc.set_index && !external_desc_is_plain_set_index(&desc) {
         return Err(PpxError::at_loc(
@@ -3406,7 +3389,7 @@ fn process_obj_type(
                     get_as_string_attr(&arg.attrs, arena).unwrap_or_else(|| label_name.clone());
 
                 let arg_typ = arena.get_core_type(arg.typ).clone();
-                let arg_type = get_opt_arg_type(false, &arg_typ, arena);
+                let arg_type = get_opt_arg_type_unchecked(false, &arg_typ, arena);
 
                 match arg_type {
                     Attr::Ignore => {
@@ -3543,9 +3526,18 @@ fn process_obj_type(
 
 /// Get optional arg type (for Optional labels).
 /// Mirrors OCaml's get_opt_arg_type.
-/// OCaml rejects Ptyp_any before this path; Rust validates that separately so
-/// encoding can keep using a plain Attr return.
-fn get_opt_arg_type(_nolabel: bool, typ: &CoreType, arena: &ParseArena) -> Attr {
+fn get_opt_arg_type(nolabel: bool, typ: &CoreType, arena: &ParseArena) -> PpxResult<Attr> {
+    if matches!(&*typ.ptyp_desc, CoreTypeDesc::Ptyp_any) {
+        return Err(PpxError::at_loc(
+            typ.ptyp_loc,
+            "_ is not allowed in combination with external optional type",
+        ));
+    }
+    Ok(get_opt_arg_type_unchecked(nolabel, typ, arena))
+}
+
+/// Same classifier after the validation pass has already rejected Ptyp_any.
+fn get_opt_arg_type_unchecked(_nolabel: bool, typ: &CoreType, arena: &ParseArena) -> Attr {
     let attr_type = check_type_ffi_attrs(typ, arena);
     match attr_type {
         Some("ignore") => Attr::Ignore,
@@ -4652,7 +4644,7 @@ fn build_obj_ffi_type(typ: &CoreType, arena: &mut ParseArena) -> FfiType {
                     get_as_string_attr(&arg.attrs, arena).unwrap_or_else(|| label_name.clone());
 
                 let arg_typ = arena.get_core_type(arg.typ).clone();
-                let arg_type = get_opt_arg_type(false, &arg_typ, arena);
+                let arg_type = get_opt_arg_type_unchecked(false, &arg_typ, arena);
 
                 match arg_type {
                     Attr::Ignore => {
