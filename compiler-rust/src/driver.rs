@@ -4255,13 +4255,24 @@ fn type_mod_error_to_anyhow(
             )
             .into()
         }
-        TypeModError::NonrecursiveGadt { loc } => UserDiagnostic::new(
+        TypeModError::FrontendNonrecursiveGadt { loc } => UserDiagnostic::new(
             format_compiler_error_report_raw_message(
                 arena,
                 source,
                 filename,
                 *loc,
                 "  GADTs require recursive type syntax.\nDefine your type using `type rec` instead of `type`.\nExample: type rec t = ...",
+            ),
+            2,
+        )
+        .into(),
+        TypeModError::NonrecursiveGadt { loc } => UserDiagnostic::new(
+            format_compiler_error_report_raw_message(
+                arena,
+                source,
+                filename,
+                *loc,
+                "  GADT case syntax cannot be used in a 'nonrec' block.",
             ),
             2,
         )

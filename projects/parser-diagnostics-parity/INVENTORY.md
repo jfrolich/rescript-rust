@@ -11,6 +11,8 @@ Scope scanned:
 - `compiler/syntax/src/jsx_v4.ml`
 - `compiler/syntax/src/jsx_common.ml`
 - `compiler/ml/location.ml`
+- `compiler/frontend/bs_ast_invariant.ml`
+- `compiler/ml/typedecl.ml`
 
 ## 1. Core Diagnostic Model
 
@@ -185,7 +187,26 @@ Shared helper:
 
 - `compiler/syntax/src/jsx_common.ml:45` (`raise_error`)
 
-## 5. Formatting and Presentation Contract
+## 5. Compiler Type Declaration Diagnostics
+
+The nonrecursive GADT diagnostic has two reference checks with different
+messages and locations:
+
+1. `compiler/frontend/bs_ast_invariant.ml:81-90`
+   - structure-only frontend invariant
+   - matches `Pstr_type (Nonrecursive, [{ptype_kind = Ptype_variant ({pcd_res = Some _} :: _)}])`
+   - reports at the whole structure item with `GADTs require recursive type syntax...`
+   - covered by `tests/error_output_parity/compiler/fixtures/nonrec_gadt.res`
+2. `compiler/ml/typedecl.ml:80-89`
+   - `Typedecl.enter_type` check for all nonrecursive variant constructors
+   - raises `Typedecl.Nonrec_gadt` at the constructor declaration location
+   - covered by `tests/error_output_parity/compiler/fixtures/nonrec_gadt_later_constructor.res`
+   - signature path covered by `tests/error_output_parity/compiler/fixtures/nonrec_gadt_signature.resi`
+
+Rust must preserve both checks. Broadening the frontend invariant would produce
+the wrong reference output for later constructors and signatures.
+
+## 6. Formatting and Presentation Contract
 
 `compiler/ml/location.ml` defines the warning/error output contract consumed by parser diagnostics:
 
@@ -197,7 +218,7 @@ Shared helper:
 This file is part of diagnostics parity scope because output style differences
 are user-visible regressions even when semantic warning/error detection matches.
 
-## 6. Coverage Implications
+## 7. Coverage Implications
 
 To claim parser diagnostics parity, tests must cover:
 
@@ -209,7 +230,7 @@ To claim parser diagnostics parity, tests must cover:
 6. Location/code-frame formatting parity for warnings and syntax errors.
 7. Crash-hardening cases where malformed input stresses code-frame slicing.
 
-## 7. Fixture Completeness Target
+## 8. Fixture Completeness Target
 
 Required fixture policy for this project:
 

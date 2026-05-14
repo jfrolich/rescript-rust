@@ -3299,9 +3299,14 @@ pub enum TypeModError {
         /// Specific attribute validation error.
         error: AstUntaggedVariantError,
     },
-    /// GADT constructor result syntax requires `type rec`.
-    NonrecursiveGadt {
+    /// ReScript frontend invariant for a first-constructor GADT result on `type`.
+    FrontendNonrecursiveGadt {
         /// Whole type declaration location.
+        loc: LocIdx,
+    },
+    /// OCaml Typedecl.Nonrec_gadt.
+    NonrecursiveGadt {
+        /// Constructor declaration location.
         loc: LocIdx,
     },
     /// An exported value has a weak type variable in its inferred scheme.
@@ -3617,6 +3622,26 @@ fn check_type_declaration_constraint_on_gadt(
     if constructors.iter().any(|constructor| constructor.pcd_res.is_some()) {
         tctx.report_warning(*loc, Warning::ConstraintOnGadt);
     }
+}
+
+fn check_nonrecursive_gadt_enter_type(
+    rec_flag: RecFlag,
+    decl: &crate::parser::ast::TypeDeclaration,
+) -> TypeModResult<()> {
+    if !matches!(rec_flag, RecFlag::Nonrecursive) {
+        return Ok(());
+    }
+    let crate::parser::ast::TypeKind::Ptype_variant(constructors) = &decl.ptype_kind else {
+        return Ok(());
+    };
+    for constructor in constructors {
+        if constructor.pcd_res.is_some() {
+            return Err(TypeModError::NonrecursiveGadt {
+                loc: constructor.pcd_loc,
+            });
+        }
+    }
+    Ok(())
 }
 
 fn type_is_tvar_without_repr(ctx: &crate::types::context::TypeContext, ty: TypeExprRef) -> bool {
@@ -19875,7 +19900,7 @@ fn type_structure_item<'a>(
                         if cstrs.first().is_some_and(|cstr| cstr.pcd_res.is_some())
                 )
             {
-                return Err(TypeModError::NonrecursiveGadt { loc });
+                return Err(TypeModError::FrontendNonrecursiveGadt { loc });
             }
             // Type declaration: type t = ...
             let ctx = tctx.type_ctx;
@@ -19897,6 +19922,7 @@ fn type_structure_item<'a>(
             let mut declared_type_ids: Vec<Ident> = Vec::with_capacity(decls.len());
             let needs_placeholder = matches!(rec_flag, crate::parser::ast::RecFlag::Recursive);
             for decl in decls.iter() {
+                check_nonrecursive_gadt_enter_type(*rec_flag, decl)?;
                 let type_name = decl.ptype_name.txt;
                 let type_name_str = arena.get_string(type_name);
                 let type_id = ctx.create_ident(type_name_str);
@@ -22987,6 +23013,9 @@ fn transl_sig_type_declarations_with_ids_and_originals<'a>(
         }
     };
     let mut temp_env = env.clone();
+    for decl in decls {
+        check_nonrecursive_gadt_enter_type(rec_flag, decl)?;
+    }
     if matches!(rec_flag, RecFlag::Recursive) {
         for (type_id, decl) in declared_type_ids.iter().zip(decls.iter()) {
             let placeholder_decl = crate::types::TypeDeclaration {
