@@ -4,7 +4,8 @@ This corpus compares JavaScript emitted by the OCaml compiler and the Rust
 compiler byte for byte. The fixtures are intentionally small, compiling
 ReScript programs that isolate code-generation shapes. Generated `.js`, `.mjs`,
 `.cmi`, `.cmj`, and `.cmt` files are written under `.parity-cache/` and must
-not be checked in.
+not be checked in. A fixture can include a sibling `.resi`; the runner compiles
+that interface before the implementation for each compiler.
 
 Run the focused fixture gate with the debug Rust compiler:
 
@@ -65,6 +66,9 @@ Current focused coverage:
   polymorphic-variant widening.
 - `tella_sparse_record.res`: a minimized Tella-derived large sparse record
   shape without depending on the external Tella repository.
+- `interface_patterns.res`: a minimized interface-backed case covering `.resi`
+  CMI flow, abstract implementation types, nested module signatures, and named
+  polymorphic-variant widening.
 - `jsx_transform_patterns.res`: JSX v4 transform output for DOM elements,
   components, fragments, keys, spread props, escaped prop names, optional
   children, and memoed components.
