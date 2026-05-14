@@ -1,6 +1,6 @@
 
   Syntax error!
-  tests/syntax_tests/data/parsing/errors/typeDef/uppercaseTypeParamMissingQuote.res:1:8
+  syntax_tests/data/parsing/errors/typeDef/uppercaseTypeParamMissingQuote.res:1:8
 
   1 │ type t<A> = string
   2 │ 
