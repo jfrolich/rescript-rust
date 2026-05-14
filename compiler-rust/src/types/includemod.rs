@@ -3082,6 +3082,16 @@ fn compare_record_declarations(
         ) {
             warnings.push(warning);
         }
+        let impl_runtime_name = label_declaration_runtime_name(impl_label);
+        let sig_runtime_name = label_declaration_runtime_name(sig_label);
+        if impl_runtime_name != sig_runtime_name {
+            return Some(format!(
+                "Fields number {} have different names, {} and {}.",
+                index + 1,
+                impl_runtime_name,
+                sig_runtime_name
+            ));
+        }
         if !type_exprs_equal_for_inclusion(
             type_ctx,
             Some(env),
@@ -3291,6 +3301,22 @@ fn compare_variant_declarations(
     }
 
     None
+}
+
+fn label_declaration_runtime_name(label: &LabelDeclaration) -> String {
+    label_declaration_as_name(label).unwrap_or_else(|| label.ld_id.name().to_string())
+}
+
+fn label_declaration_as_name(label: &LabelDeclaration) -> Option<String> {
+    label.ld_attributes.iter().find_map(|attr| {
+        if attr.attr_name.txt == "as"
+            && let AttributePayload::Str(value) = &attr.attr_payload
+        {
+            Some(value.clone())
+        } else {
+            None
+        }
+    })
 }
 
 fn constructor_is_nullary(constructor: &ConstructorDeclaration) -> bool {

@@ -2180,6 +2180,10 @@ only the wrapper variant:
   `tests/error_output_parity/compiler/fixtures/not_included_value_mismatch.res`)
 - type declaration mismatch (covered by
   `tests/error_output_parity/compiler/fixtures/not_included_type_mismatch.res`)
+- record field runtime-name mismatch from
+  `Record_attributes_check.check_bs_attributes_inclusion` / `Includecore.Field_names`
+  (covered by
+  `tests/error_output_parity/compiler/fixtures/not_included_record_field_runtime_name.res`)
 - extension constructor mismatch (covered by
   `tests/error_output_parity/compiler/fixtures/not_included_extension_mismatch.res`)
 - module mismatch (covered by
