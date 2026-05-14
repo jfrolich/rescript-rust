@@ -226,6 +226,27 @@ paths. Record-field mismatch coverage now includes:
 5. `Includecore.Field_type`
    - covered by `tests/error_output_parity/compiler/fixtures/not_included_record_field_type.res`
 
+Top-level type-declaration mismatch coverage now includes:
+
+1. `Includecore.Arity`
+   - covered by `tests/error_output_parity/compiler/fixtures/not_included_type_arity.res`
+2. `Includecore.Privacy`
+   - covered by `tests/error_output_parity/compiler/fixtures/not_included_type_privacy.res`
+3. `Includecore.Kind`
+   - covered by `tests/error_output_parity/compiler/fixtures/not_included_type_kind.res`
+4. `Includecore.Constraint`
+   - covered by `tests/error_output_parity/compiler/fixtures/not_included_type_constraint_param.res`
+5. `Includecore.Manifest`
+   - covered by `tests/error_output_parity/compiler/fixtures/not_included_type_manifest.res`
+6. `Includecore.Variance`
+   - covered by `tests/error_output_parity/compiler/fixtures/not_included_type_variance.res`
+7. `Includecore.Unboxed_representation`
+   - covered by `tests/error_output_parity/compiler/fixtures/not_included_type_unboxed_representation.res`
+8. `Includecore.Immediate`
+   - covered by `tests/error_output_parity/compiler/fixtures/not_included_type_immediate.res`
+9. `Includecore.Tag_name`
+   - covered by `tests/error_output_parity/compiler/fixtures/not_included_type_tag_name.res`
+
 Variant-constructor mismatch coverage now includes:
 
 1. `Includecore.Field_names`
@@ -237,6 +258,12 @@ Variant-constructor mismatch coverage now includes:
    - covered by `tests/error_output_parity/compiler/fixtures/not_included_variant_constructor_arity.res`
 4. `Includecore.Field_type`
    - covered by `tests/error_output_parity/compiler/fixtures/not_included_variant_constructor_type.res`
+5. `Includecore.Variant_representation`
+   - covered by `tests/error_output_parity/compiler/fixtures/not_included_variant_representation.res`
+
+Known remaining `Includecore.type_mismatch` coverage gap:
+
+- `Includecore.Record_representation`
 
 ## 6. Formatting and Presentation Contract
 

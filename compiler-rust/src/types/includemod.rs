@@ -226,8 +226,16 @@ fn format_include_error(
         } => {
             let actual = format_module_type(type_ctx, actual);
             let expected = format_module_type(type_ctx, expected);
-            if should_elide_module_mismatch(&actual, &expected) {
+            if should_elide_module_mismatch(&actual, &expected)
+                || should_elide_type_declaration_module_mismatch(error, &actual, &expected)
+            {
                 output.push_str("  ...\n");
+            } else if is_compact_type_declaration_mismatch(error) {
+                output.push_str("  Modules do not match: ");
+                output.push_str(&actual);
+                output.push_str(" is not included in ");
+                output.push_str(&expected);
+                output.push('\n');
             } else if !expected.contains('\n') {
                 output.push_str("  Modules do not match: ");
                 output.push_str(&actual);
@@ -285,14 +293,22 @@ fn format_include_error(
             expected,
             detail,
         } => {
-            output.push_str("  Type declarations do not match:\n");
-            output.push_str("    ");
-            output.push_str(&format_type_declaration(type_ctx, name, actual));
-            output.push('\n');
-            output.push_str("  is not included in\n");
-            output.push_str("    ");
-            output.push_str(&format_type_declaration(type_ctx, name, expected));
-            output.push('\n');
+            if detail == "Their variances do not agree." {
+                output.push_str("  Type declarations do not match: ");
+                output.push_str(&format_type_declaration(type_ctx, name, actual));
+                output.push_str(" is not included in ");
+                output.push_str(&format_type_declaration(type_ctx, name, expected));
+                output.push('\n');
+            } else {
+                output.push_str("  Type declarations do not match:\n");
+                output.push_str("    ");
+                output.push_str(&format_type_declaration(type_ctx, name, actual));
+                output.push('\n');
+                output.push_str("  is not included in\n");
+                output.push_str("    ");
+                output.push_str(&format_type_declaration(type_ctx, name, expected));
+                output.push('\n');
+            }
             output.push_str("  ");
             output.push_str(&code_frame::format_location(
                 filename,
@@ -434,6 +450,14 @@ fn format_include_error(
     }
 }
 
+fn is_compact_type_declaration_mismatch(error: &IncludeModError) -> bool {
+    matches!(
+        error,
+        IncludeModError::TypeDeclarationMismatch { detail, .. }
+            if detail == "Their variances do not agree."
+    )
+}
+
 fn format_functor_body_error(
     type_ctx: &TypeContext,
     filename: &str,
@@ -472,6 +496,16 @@ fn format_module_type_for_context_leaf(type_ctx: &TypeContext, mty: &ModuleType)
 
 fn should_elide_module_mismatch(actual: &str, expected: &str) -> bool {
     actual.len() + expected.len() > 120
+}
+
+fn should_elide_type_declaration_module_mismatch(
+    error: &IncludeModError,
+    actual: &str,
+    expected: &str,
+) -> bool {
+    matches!(error, IncludeModError::TypeDeclarationMismatch { .. })
+        && !is_compact_type_declaration_mismatch(error)
+        && actual.len() + expected.len() > 80
 }
 
 pub(crate) fn format_module_type(type_ctx: &TypeContext, mty: &ModuleType) -> String {
@@ -647,9 +681,17 @@ fn format_type_declaration_with_options(
 ) -> String {
     let mut printer = TypeExprErrorPrinter::new_with_options(type_ctx, weak_names, full_paths);
     let name = id.name();
-    let params = format_type_params(&mut printer, &decl.type_params);
-    let prefix = if decl.type_unboxed.unboxed {
+    let params = format_type_params(
+        &mut printer,
+        &decl.type_params,
+        &decl.type_variance,
+        matches!(decl.type_kind, TypeKind::TypeAbstract),
+    );
+    let prefix = if decl.type_unboxed.unboxed || type_decl_has_attr(decl, "unboxed") {
         "@unboxed "
+    } else if type_decl_has_attr(decl, "immediate") || type_decl_has_attr(decl, "ocaml.immediate")
+    {
+        "@immediate "
     } else {
         ""
     };
@@ -799,10 +841,33 @@ fn format_constructor_attributes(attrs: &[Attribute]) -> String {
         .collect::<String>()
 }
 
-fn format_type_params(printer: &mut TypeExprErrorPrinter<'_>, params: &[TypeExprRef]) -> String {
+fn format_type_params(
+    printer: &mut TypeExprErrorPrinter<'_>,
+    params: &[TypeExprRef],
+    variances: &[crate::types::Variance],
+    show_variance: bool,
+) -> String {
     params
         .iter()
-        .map(|param| printer.format(*param))
+        .enumerate()
+        .map(|(index, param)| {
+            let variance = if show_variance {
+                variances.get(index).map(|variance| {
+                    let (may_pos, may_neg) = variance.get_upper();
+                    if may_pos && !may_neg {
+                        "+"
+                    } else if !may_pos && may_neg {
+                        "-"
+                    } else {
+                        ""
+                    }
+                })
+            } else {
+                None
+            }
+            .unwrap_or("");
+            format!("{variance}{}", printer.format(*param))
+        })
         .collect::<Vec<_>>()
         .join(", ")
 }
@@ -2716,64 +2781,201 @@ pub(crate) fn type_declarations<'a>(
 
     // Check arity (number of type parameters)
     if impl_decl.type_params.len() != sig_decl.type_params.len() {
-        return Err(IncludeModError::TypeMismatch {
-            name: id,
-            reason: format!(
-                "arity mismatch: expected {} type parameters, found {}",
-                sig_decl.type_params.len(),
-                impl_decl.type_params.len()
-            ),
-        });
+        return Err(type_decl_mismatch(
+            id,
+            impl_decl,
+            sig_decl,
+            "They have different arities.",
+        ));
+    }
+
+    if !private_flags(impl_decl, sig_decl) {
+        return Err(type_decl_mismatch(
+            id,
+            impl_decl,
+            sig_decl,
+            "A private type would be revealed.",
+        ));
     }
 
     force_package_manifest_inclusion_side_effects(type_ctx, env, impl_decl, sig_decl);
 
     let param_map = build_type_param_map(type_ctx, &impl_decl.type_params, &sig_decl.type_params);
-    if let Some(sig_manifest) = sig_decl.type_manifest {
-        let manifests_match = impl_decl.type_manifest.is_some_and(|impl_manifest| {
-            type_exprs_equal_for_inclusion(
+    match (impl_decl.type_manifest, sig_decl.type_manifest) {
+        (_, None) => {
+            if !type_param_lists_equal_for_inclusion(
+                type_ctx,
+                env,
+                &impl_decl.type_params,
+                &sig_decl.type_params,
+            ) {
+                return Err(type_decl_mismatch(
+                    id,
+                    impl_decl,
+                    sig_decl,
+                    "Their constraints differ.",
+                ));
+            }
+        }
+        (Some(impl_manifest), Some(sig_manifest)) => {
+            if !type_exprs_equal_for_inclusion(
                 type_ctx,
                 Some(env),
                 &param_map,
                 impl_manifest,
                 sig_manifest,
-            )
-        });
-        if !manifests_match {
-            return Err(IncludeModError::TypeDeclarationMismatch {
-                name: id,
-                actual: impl_decl.clone(),
-                expected: sig_decl.clone(),
-                detail: String::new(),
+            ) {
+                return Err(type_decl_mismatch(id, impl_decl, sig_decl, String::new()));
+            }
+        }
+        (None, Some(sig_manifest)) => {
+            let manifests_match = type_param_lists_equal_for_inclusion(
+                type_ctx,
+                env,
+                &impl_decl.type_params,
+                &sig_decl.type_params,
+            ) && impl_decl.type_path.as_ref().is_some_and(|path| {
+                let self_ty =
+                    type_ctx.new_generic_constr(path.clone(), sig_decl.type_params.clone());
+                type_exprs_equal_for_inclusion(
+                    type_ctx,
+                    Some(env),
+                    &param_map,
+                    self_ty,
+                    sig_manifest,
+                )
             });
+            if !manifests_match {
+                return Err(type_decl_mismatch(
+                    id,
+                    impl_decl,
+                    sig_decl,
+                    if type_param_lists_equal_for_inclusion(
+                        type_ctx,
+                        env,
+                        &impl_decl.type_params,
+                        &sig_decl.type_params,
+                    ) {
+                        String::new()
+                    } else {
+                        "Their constraints differ.".to_string()
+                    },
+                ));
+            }
         }
     }
 
+    if !matches!(sig_decl.type_kind, TypeKind::TypeAbstract)
+        && impl_decl.type_unboxed.unboxed != sig_decl.type_unboxed.unboxed
+    {
+        let unboxed_decl = if sig_decl.type_unboxed.unboxed {
+            "the second"
+        } else {
+            "the first"
+        };
+        return Err(type_decl_mismatch(
+            id,
+            impl_decl,
+            sig_decl,
+            format!(
+                "Their internal representations differ:\n{unboxed_decl} declaration uses unboxed representation."
+            ),
+        ));
+    }
+
+    if type_decl_tag_name(impl_decl) != type_decl_tag_name(sig_decl) {
+        return Err(type_decl_mismatch(
+            id,
+            impl_decl,
+            sig_decl,
+            "Their @tag annotations differ.",
+        ));
+    }
+
+    // Check that the type kinds are compatible
+    match (&impl_decl.type_kind, &sig_decl.type_kind) {
+        // Abstract in signature allows any implementation
+        (_, TypeKind::TypeAbstract) => {}
+
+        (TypeKind::TypeRecord(impl_labels, impl_rep), TypeKind::TypeRecord(sig_labels, sig_rep)) => {
+            if let Some(detail) = compare_record_declarations(
+                type_ctx,
+                env,
+                &impl_decl.type_params,
+                &sig_decl.type_params,
+                impl_labels,
+                sig_labels,
+                warnings,
+            ) {
+                return Err(type_decl_mismatch(id, impl_decl, sig_decl, detail));
+            }
+            if impl_rep != sig_rep {
+                return Err(type_decl_mismatch(
+                    id,
+                    impl_decl,
+                    sig_decl,
+                    "Their internal representations differ.",
+                ));
+            }
+        }
+
+        (TypeKind::TypeVariant(impl_constructors), TypeKind::TypeVariant(sig_constructors)) => {
+            if let Some(detail) = compare_variant_declarations(
+                type_ctx,
+                env,
+                &impl_decl.type_params,
+                &sig_decl.type_params,
+                impl_constructors,
+                sig_constructors,
+                warnings,
+            ) {
+                return Err(type_decl_mismatch(id, impl_decl, sig_decl, detail));
+            }
+        }
+
+        (TypeKind::TypeOpen, TypeKind::TypeOpen) => {}
+
+        _ => {
+            return Err(type_decl_mismatch(
+                id,
+                impl_decl,
+                sig_decl,
+                "Their kinds differ.",
+            ));
+        }
+    }
+
+    if matches!(sig_decl.type_kind, TypeKind::TypeAbstract)
+        && sig_decl.type_manifest.is_none()
+        && !impl_decl.type_immediate
+        && sig_decl.type_immediate
+    {
+        return Err(type_decl_mismatch(
+            id,
+            impl_decl,
+            sig_decl,
+            "the first is not an immediate type.",
+        ));
+    }
+
     // Match OCaml's Includecore.type_declarations variance check.
-    let sig_is_abstract = matches!(
-        sig_decl.type_kind,
-        crate::types::decl::TypeKind::TypeAbstract
-    ) && sig_decl.type_manifest.is_none();
+    let sig_is_abstract = matches!(sig_decl.type_kind, TypeKind::TypeAbstract)
+        && sig_decl.type_manifest.is_none();
     let need_variance = sig_is_abstract
         || matches!(impl_decl.type_private, crate::types::PrivateFlag::Private)
-        || matches!(impl_decl.type_kind, crate::types::decl::TypeKind::TypeOpen);
+        || matches!(impl_decl.type_kind, TypeKind::TypeOpen);
     if need_variance && impl_decl.type_variance.len() == sig_decl.type_variance.len() {
         let abstract_or_private =
             sig_is_abstract || matches!(sig_decl.type_private, crate::types::PrivateFlag::Private);
-        let open_sig = matches!(sig_decl.type_kind, crate::types::decl::TypeKind::TypeOpen)
-            && sig_decl.type_manifest.is_none();
+        let open_sig =
+            matches!(sig_decl.type_kind, TypeKind::TypeOpen) && sig_decl.type_manifest.is_none();
 
-        for (i, (sig_param, (impl_var, sig_var))) in sig_decl
-            .type_params
-            .iter()
-            .zip(
-                impl_decl
-                    .type_variance
-                    .iter()
-                    .zip(sig_decl.type_variance.iter()),
-            )
-            .enumerate()
-        {
+        for (sig_param, (impl_var, sig_var)) in sig_decl.type_params.iter().zip(
+            impl_decl
+                .type_variance
+                .iter()
+                .zip(sig_decl.type_variance.iter()),
+        ) {
             let implies = |lhs: bool, rhs: bool| !lhs || rhs;
             let constrained = !crate::types::btype::is_tvar(type_ctx, *sig_param);
 
@@ -2798,94 +3000,17 @@ pub(crate) fn type_declarations<'a>(
             );
 
             if !(upper_ok && lower_ok) {
-                return Err(IncludeModError::TypeMismatch {
-                    name: id,
-                    reason: format!("variance mismatch at parameter {}", i),
-                });
+                return Err(type_decl_mismatch(
+                    id,
+                    impl_decl,
+                    sig_decl,
+                    "Their variances do not agree.",
+                ));
             }
         }
     }
 
-    // Check that the type kinds are compatible
-    match (&impl_decl.type_kind, &sig_decl.type_kind) {
-        // Abstract in signature allows any implementation
-        (_, crate::types::decl::TypeKind::TypeAbstract) => Ok(()),
-
-        _ if impl_decl.type_unboxed.unboxed != sig_decl.type_unboxed.unboxed => {
-            let unboxed_decl = if sig_decl.type_unboxed.unboxed {
-                "the second"
-            } else {
-                "the first"
-            };
-            Err(IncludeModError::TypeDeclarationMismatch {
-                name: id,
-                actual: impl_decl.clone(),
-                expected: sig_decl.clone(),
-                detail: format!(
-                    "Their internal representations differ:\n{unboxed_decl} declaration uses unboxed representation."
-                ),
-            })
-        }
-
-        (
-            crate::types::decl::TypeKind::TypeRecord(impl_labels, _),
-            crate::types::decl::TypeKind::TypeRecord(sig_labels, _),
-        ) => {
-            if let Some(detail) = compare_record_declarations(
-                type_ctx,
-                env,
-                &impl_decl.type_params,
-                &sig_decl.type_params,
-                impl_labels,
-                sig_labels,
-                warnings,
-            ) {
-                Err(IncludeModError::TypeDeclarationMismatch {
-                    name: id,
-                    actual: impl_decl.clone(),
-                    expected: sig_decl.clone(),
-                    detail,
-                })
-            } else {
-                Ok(())
-            }
-        }
-
-        (
-            crate::types::decl::TypeKind::TypeVariant(impl_constructors),
-            crate::types::decl::TypeKind::TypeVariant(sig_constructors),
-        ) => {
-            if let Some(detail) = compare_variant_declarations(
-                type_ctx,
-                env,
-                &impl_decl.type_params,
-                &sig_decl.type_params,
-                impl_constructors,
-                sig_constructors,
-                warnings,
-            ) {
-                Err(IncludeModError::TypeDeclarationMismatch {
-                    name: id,
-                    actual: impl_decl.clone(),
-                    expected: sig_decl.clone(),
-                    detail,
-                })
-            } else {
-                Ok(())
-            }
-        }
-
-        // Same kind is fine
-        (k1, k2) if std::mem::discriminant(k1) == std::mem::discriminant(k2) => {
-            // Would need deeper checking for record/variant fields
-            Ok(())
-        }
-
-        _ => Err(IncludeModError::TypeMismatch {
-            name: id,
-            reason: "incompatible type kinds".to_string(),
-        }),
-    }
+    Ok(())
 }
 
 fn compare_record_declarations(
@@ -2962,6 +3087,70 @@ fn compare_record_declarations(
     }
 
     None
+}
+
+fn type_decl_mismatch(
+    name: Ident,
+    actual: &TypeDeclaration,
+    expected: &TypeDeclaration,
+    detail: impl Into<String>,
+) -> IncludeModError {
+    IncludeModError::TypeDeclarationMismatch {
+        name,
+        actual: actual.clone(),
+        expected: expected.clone(),
+        detail: detail.into(),
+    }
+}
+
+fn type_decl_has_attr(decl: &TypeDeclaration, name: &str) -> bool {
+    decl.type_attributes
+        .iter()
+        .any(|attr| attr.attr_name.txt == name)
+}
+
+fn type_decl_tag_name(decl: &TypeDeclaration) -> Option<&str> {
+    decl.type_attributes.iter().find_map(|attr| {
+        if attr.attr_name.txt == "tag"
+            && let AttributePayload::Str(value) = &attr.attr_payload
+        {
+            Some(value.as_str())
+        } else {
+            None
+        }
+    })
+}
+
+fn private_flags(impl_decl: &TypeDeclaration, sig_decl: &TypeDeclaration) -> bool {
+    match (impl_decl.type_private, sig_decl.type_private) {
+        (crate::types::PrivateFlag::Private, crate::types::PrivateFlag::Public) => {
+            matches!(sig_decl.type_kind, TypeKind::TypeAbstract)
+                && (sig_decl.type_manifest.is_none()
+                    || !matches!(impl_decl.type_kind, TypeKind::TypeAbstract))
+        }
+        _ => true,
+    }
+}
+
+fn type_param_lists_equal_for_inclusion(
+    type_ctx: &TypeContext,
+    env: &Env,
+    impl_params: &[TypeExprRef],
+    sig_params: &[TypeExprRef],
+) -> bool {
+    if impl_params.len() != sig_params.len() {
+        return false;
+    }
+    let empty_param_map = HashMap::default();
+    impl_params.iter().zip(sig_params.iter()).all(|(impl_ty, sig_ty)| {
+        type_exprs_equal_for_inclusion(
+            type_ctx,
+            Some(env),
+            &empty_param_map,
+            *impl_ty,
+            *sig_ty,
+        )
+    })
 }
 
 fn compare_variant_declarations(
@@ -3051,6 +3240,16 @@ fn compare_variant_declarations(
             }
         }
 
+        if constructor_is_nullary(impl_constructor)
+            && constructor_as_payload(&impl_constructor.cd_attributes)
+                != constructor_as_payload(&sig_constructor.cd_attributes)
+        {
+            return Some(format!(
+                "The internal representations for case {} are not equal.",
+                impl_constructor.cd_id.name()
+            ));
+        }
+
         index += 1;
     }
 
@@ -3068,6 +3267,20 @@ fn compare_variant_declarations(
     }
 
     None
+}
+
+fn constructor_is_nullary(constructor: &ConstructorDeclaration) -> bool {
+    matches!(
+        &constructor.cd_args,
+        ConstructorArguments::CstrTuple(args) if args.is_empty()
+    )
+}
+
+fn constructor_as_payload(attrs: &[Attribute]) -> Option<&AttributePayload> {
+    attrs
+        .iter()
+        .find(|attr| attr.attr_name.txt == "as")
+        .map(|attr| &attr.attr_payload)
 }
 
 fn build_type_param_map(
