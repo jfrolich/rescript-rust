@@ -78,6 +78,8 @@ Current focused coverage:
   aliases, abstract exported values, and cross-module optimization reads.
 - `namespace_project_patterns/`: a multi-source namespaced project covering
   project-level namespace module aliases across output modes.
+- `config_output_patterns.res`: file-level `@@config(no_export)` output with
+  retained local bindings and side effects.
 - `jsx_transform_patterns.res`: JSX v4 transform output for DOM elements,
   components, fragments, keys, spread props, escaped prop names, optional
   children, and memoed components.
