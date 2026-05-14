@@ -1980,6 +1980,20 @@ with a reason after checking raise sites.
     `fatal_error` guards for internal invariants in the diagnostic grep. These
     are not intended user diagnostics from ordinary ReScript source; reachable
     match warnings from `matching`/`parmatch` are covered separately.
+  - Broad `failwith`/`invalid_arg`/`fatal_error` greps also find internal guards
+    in `compiler/core/lam_check.ml`, `compiler/core/lam_dce.ml`,
+    `compiler/core/lam_compile_external_call.ml`, `compiler/ml/btype.ml`,
+    `compiler/ml/ctype.ml`, `compiler/ml/oprint.ml`,
+    `compiler/ml/predef.ml`, `compiler/ml/printtyp.ml`,
+    `compiler/ml/ast_mapper_from0.ml`, `compiler/syntax/src/res_comments_table.ml`,
+    and the `compiler/ext/` utility modules `ext_array.ml`, `ext_buffer.ml`,
+    `ext_fmt.ml`, `ext_list.ml`, `ext_path.ml`, `ext_pervasives.ml`,
+    `ext_string.ml`, `identifiable.ml`, `map_gen.ml`, `misc.ml`, `misc.mli`,
+    `set_gen.ml`, and `vec.cppo.ml`. These are container bounds checks,
+    impossible legacy-AST cases, lambda/backend invariant checks, or shared
+    utility exception constructors rather than user-facing ReScript diagnostics.
+    User-visible messages reached through these subsystems are covered at their
+    raise/report sites above.
   - `compiler/frontend/ast_pat.ml` has no active diagnostic; the `raise_errorf`
     found by source grep is in a commented-out branch.
   - `compiler/frontend/ast_core_type.ml` and
