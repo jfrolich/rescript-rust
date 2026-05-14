@@ -261,9 +261,20 @@ Variant-constructor mismatch coverage now includes:
 5. `Includecore.Variant_representation`
    - covered by `tests/error_output_parity/compiler/fixtures/not_included_variant_representation.res`
 
-Known remaining `Includecore.type_mismatch` coverage gap:
+`Includecore.Record_representation` reachability note:
 
-- `Includecore.Record_representation`
+- OCaml top-level record declarations are produced in `compiler/ml/typedecl.ml:647-656`
+  as either `Record_regular` or `Record_unboxed false`.
+- Inline record constructor payloads use `Record_inlined` or `Record_unboxed true`
+  in `compiler/ml/datarepr.ml:132-135`, but those are constructor payload
+  records, not top-level `Type_record` declarations compared by
+  `Includecore.type_declarations`.
+- Rust mirrors this split in `compiler-rust/src/types/typemod.rs:21141-21145`
+  for top-level records and `compiler-rust/src/types/typemod.rs:20833-20838`
+  for inline constructor records.
+- No direct ReScript source fixture is currently known that reaches
+  `Record_representation`; the other `Includecore.type_mismatch` constructors
+  above are covered by byte-for-byte OCaml/Rust fixtures.
 
 ## 6. Formatting and Presentation Contract
 
