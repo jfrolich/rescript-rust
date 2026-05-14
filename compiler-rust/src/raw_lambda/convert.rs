@@ -866,6 +866,7 @@ pub struct RawLambdaConverter<'a> {
     lowered: LambdaConverter<'a>,
     unit_name: String,
     no_assert_false: bool,
+    noassert: bool,
     diagnostic: Option<RawLambdaDiagnostic>,
     warnings: Vec<TypeCoreWarning>,
     warning_config: WarningConfig,
@@ -891,6 +892,7 @@ impl<'a> RawLambdaConverter<'a> {
             lowered: LambdaConverter::new(arena),
             unit_name: String::new(),
             no_assert_false: false,
+            noassert: false,
             diagnostic: None,
             warnings: Vec::new(),
             warning_config: WarningConfig::new(),
@@ -917,6 +919,7 @@ impl<'a> RawLambdaConverter<'a> {
             lowered: LambdaConverter::with_start_stamp(arena, start_stamp),
             unit_name: String::new(),
             no_assert_false: false,
+            noassert: false,
             diagnostic: None,
             warnings: Vec::new(),
             warning_config: WarningConfig::new(),
@@ -944,6 +947,7 @@ impl<'a> RawLambdaConverter<'a> {
             lowered: LambdaConverter::with_start_stamp(arena, start_stamp),
             unit_name,
             no_assert_false: false,
+            noassert: false,
             diagnostic: None,
             warnings: Vec::new(),
             warning_config: WarningConfig::new(),
@@ -960,6 +964,10 @@ impl<'a> RawLambdaConverter<'a> {
 
     pub fn set_no_assert_false(&mut self, no_assert_false: bool) {
         self.no_assert_false = no_assert_false;
+    }
+
+    pub fn set_noassert(&mut self, noassert: bool) {
+        self.noassert = noassert;
     }
 
     pub fn set_warning_config(&mut self, warning_config: WarningConfig) {
@@ -2515,6 +2523,19 @@ impl<'a> RawLambdaConverter<'a> {
             0,
             crate::lambda::lam_constant::PointerInfo::AssertFalse,
         ))
+    }
+
+    fn assert_failed_lambda(&self, loc: Location) -> Lambda {
+        self.raise_predef_exception("Assert_failure", PREDEF_ASSERT_FAILURE_STAMP, loc)
+    }
+
+    fn assert_false_lambda(&self, loc: Location) -> Lambda {
+        // Same branch as compiler/ml/translcore.ml:926-928.
+        if self.no_assert_false {
+            Lambda::const_(Constant::int_with_comment(0, PointerInfo::AssertFalse))
+        } else {
+            self.assert_failed_lambda(loc)
+        }
     }
 
     fn has_only_expr_attr(&self, expr: &Expression, name: &str) -> bool {
@@ -6110,6 +6131,11 @@ impl<'a> RawLambdaConverter<'a> {
                         if cstr.cstr_name == "false" && args.is_empty()
                 ) {
                     self.raw_assert_false(self.loc(expr.exp_loc))
+                } else if self.noassert {
+                    // OCaml translcore.ml:926-931 handles `assert false`
+                    // first, then lowers ordinary assertions to unit under
+                    // Clflags.noassert.
+                    RawLambda::unit()
                 } else {
                     let failure = self.raw_assert_failed(self.loc(expr.exp_loc));
                     RawLambda::LifThenElse(
@@ -6285,9 +6311,20 @@ impl<'a> RawLambdaConverter<'a> {
             ExpressionDesc::Texp_letmodule(_, _, _, body) => self.convert_expr(body),
             ExpressionDesc::Texp_letexception(_, body) => self.convert_expr(body),
             ExpressionDesc::Texp_assert(inner_expr) => {
-                let cond = self.convert_expr(inner_expr);
-                let failure = self.match_failure(self.loc(inner_expr.exp_loc));
-                Lambda::if_(cond, Lambda::unit(), failure)
+                if matches!(
+                    inner_expr.exp_desc,
+                    ExpressionDesc::Texp_construct(_, ref cstr, ref args)
+                        if cstr.cstr_name == "false" && args.is_empty()
+                ) {
+                    self.assert_false_lambda(self.loc(expr.exp_loc))
+                } else if self.noassert {
+                    // Same branch order as compiler/ml/translcore.ml:926-931.
+                    Lambda::unit()
+                } else {
+                    let cond = self.convert_expr(inner_expr);
+                    let failure = self.assert_failed_lambda(self.loc(expr.exp_loc));
+                    Lambda::if_(cond, Lambda::unit(), failure)
+                }
             }
             _ => {
                 trace_raw_fallback(Self::expr_desc_name(&expr.exp_desc));

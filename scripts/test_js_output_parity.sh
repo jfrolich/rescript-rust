@@ -39,6 +39,9 @@ fi
 
 if [[ "$include_external" == "true" ]]; then
     set +e
+    "$project_root/scripts/test_js_output_parity_fixtures.sh" "${forward_args[@]}"
+    fixture_status=$?
+
     TELLA_DIR="$project_root/.no_external_js_corpus" \
         "$project_root/scripts/test_rust_parity.sh" --skip-parser-ast --skip-syntax "${forward_args[@]}"
     local_status=$?
@@ -47,11 +50,25 @@ if [[ "$include_external" == "true" ]]; then
     tella_status=$?
     set -e
 
+    if [[ "$fixture_status" -ne 0 ]]; then
+        exit "$fixture_status"
+    fi
     if [[ "$local_status" -ne 0 ]]; then
         exit "$local_status"
     fi
     exit "$tella_status"
 fi
 
+set +e
+"$project_root/scripts/test_js_output_parity_fixtures.sh" "${forward_args[@]}"
+fixture_status=$?
+
 TELLA_DIR="$project_root/.no_external_js_corpus" \
-    exec "$project_root/scripts/test_rust_parity.sh" --skip-parser-ast --skip-syntax "${forward_args[@]}"
+    "$project_root/scripts/test_rust_parity.sh" --skip-parser-ast --skip-syntax "${forward_args[@]}"
+local_status=$?
+set -e
+
+if [[ "$fixture_status" -ne 0 ]]; then
+    exit "$fixture_status"
+fi
+exit "$local_status"

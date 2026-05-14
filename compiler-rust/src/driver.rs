@@ -1376,6 +1376,8 @@ pub struct CompilerOptions {
     pub cross_module_inline: bool,
     /// Mirror `Clflags.no_assert_false` / `-bs-noassertfalse`.
     pub no_assert_false: bool,
+    /// Mirror `Clflags.noassert` / `-noassert`.
+    pub noassert: bool,
     /// Mirror `Clflags.transparent_modules` / `-no-alias-deps`.
     pub transparent_modules: bool,
     /// Mirror `Js_config.no_builtin_ppx` / `-bs-no-builtin-ppx`.
@@ -1433,6 +1435,7 @@ impl Default for CompilerOptions {
             check_div_by_zero: true,
             cross_module_inline: false,
             no_assert_false: false,
+            noassert: false,
             transparent_modules: false,
             no_builtin_ppx: false,
             external_ppxs: Vec::new(),
@@ -11233,6 +11236,7 @@ pub fn compile_source_to_js_with_options(
             unit_name,
         );
     raw_converter.set_no_assert_false(options.no_assert_false);
+    raw_converter.set_noassert(options.noassert);
     raw_converter.set_warning_config(tctx.warning_config.clone());
     if let Some(persistent_env) = tctx.persistent_env.clone() {
         raw_converter.set_persistent_env(persistent_env);
@@ -14350,6 +14354,7 @@ pub fn compile_preprocessed_structure_in_process_until_js(
                     unit_name,
                 );
             raw_converter.set_no_assert_false(options.no_assert_false);
+            raw_converter.set_noassert(options.noassert);
             raw_converter.set_warning_config(tctx.warning_config.clone());
             if let Some(persistent_env) = tctx.persistent_env.clone() {
                 raw_converter.set_persistent_env(persistent_env);

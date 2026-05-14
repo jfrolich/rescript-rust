@@ -104,6 +104,7 @@ struct Options {
     no_check_div_by_zero: bool,
     cross_module_inline: bool,
     no_assert_false: bool,
+    noassert: bool,
     transparent_modules: bool,
     no_builtin_ppx: bool,
     external_ppxs: Vec<String>,
@@ -232,6 +233,9 @@ fn run() -> Result<()> {
                 "-bs-no-check-div-by-zero" => opts.no_check_div_by_zero = true,
                 "-bs-cross-module-opt" => opts.cross_module_inline = true,
                 "-bs-noassertfalse" => opts.no_assert_false = true,
+                // OCaml compiler/bsc/rescript_compiler_main.ml:391-392
+                // parses -noassert into Clflags.noassert.
+                "-noassert" => opts.noassert = true,
                 "-bs-no-builtin-ppx" => opts.no_builtin_ppx = true,
                 "-bs-gentype" => opts.gentype = true,
                 "-w" => {
@@ -337,6 +341,7 @@ fn run() -> Result<()> {
         check_div_by_zero: !opts.no_check_div_by_zero,
         cross_module_inline: opts.cross_module_inline,
         no_assert_false: opts.no_assert_false,
+        noassert: opts.noassert,
         transparent_modules: opts.transparent_modules,
         no_builtin_ppx: opts.no_builtin_ppx,
         external_ppxs: opts.external_ppxs.clone(),
