@@ -2186,7 +2186,9 @@ only the wrapper variant:
   `tests/error_output_parity/compiler/fixtures/not_included_record_field_runtime_name.res`)
 - GADT constructor result-type mismatch in `Includecore.compare_variants`
   (covered by
-  `tests/error_output_parity/compiler/fixtures/not_included_gadt_constructor_result.res`)
+  `tests/error_output_parity/compiler/fixtures/not_included_gadt_constructor_result.res`
+  and the result presence/absence branch by
+  `tests/error_output_parity/compiler/fixtures/not_included_gadt_constructor_result_presence.res`)
 - extension constructor mismatch (covered by
   `tests/error_output_parity/compiler/fixtures/not_included_extension_mismatch.res`)
 - module mismatch (covered by
