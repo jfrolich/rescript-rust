@@ -97,8 +97,8 @@ if [[ ! -d "$FIXTURE_DIR" ]]; then
     exit 0
 fi
 
-mkdir -p "$CACHE_DIR/diffs" "$CACHE_DIR/ocaml" "$CACHE_DIR/rust" "$CACHE_DIR/logs"
-find "$CACHE_DIR" -type f \( -name '*.js' -o -name '*.mjs' -o -name '*.log' -o -name '*.diff' -o -name '*.status' \) -delete 2>/dev/null || true
+mkdir -p "$CACHE_DIR/diffs" "$CACHE_DIR/ocaml" "$CACHE_DIR/rust" "$CACHE_DIR/logs" "$CACHE_DIR/sources"
+find "$CACHE_DIR" -type f \( -name '*.js' -o -name '*.mjs' -o -name '*.log' -o -name '*.diff' -o -name '*.status' -o -name '*.res' -o -name '*.cmi' -o -name '*.cmj' -o -name '*.cmt' \) -delete 2>/dev/null || true
 
 cd "$PROJECT_ROOT"
 
@@ -157,14 +157,19 @@ compare_case() {
         echo "[$mode_name] $source"
     fi
 
-    local safe stem ocaml_dir rust_dir ocaml_pkg_dir rust_pkg_dir ocaml_log rust_log ocaml_out rust_out diff_out
+    local safe stem source_base source_copy_dir source_copy_rel source_copy ocaml_dir rust_dir ocaml_pkg_dir rust_pkg_dir ocaml_log rust_log ocaml_out rust_out diff_out
     safe=$(safe_name "${mode_name}_${source}")
-    stem=$(basename "${source%.res}")
+    source_base=$(basename "$source")
+    stem="${source_base%.res}"
+    source_copy_dir="$CACHE_DIR/sources/$safe"
+    source_copy_rel="$CACHE_REL/sources/$safe/$source_base"
+    source_copy="$PROJECT_ROOT/$source_copy_rel"
     ocaml_pkg_dir="$CACHE_REL/ocaml/$safe"
     rust_pkg_dir="$CACHE_REL/rust/$safe"
     ocaml_dir="$PROJECT_ROOT/$ocaml_pkg_dir"
     rust_dir="$PROJECT_ROOT/$rust_pkg_dir"
-    mkdir -p "$ocaml_dir" "$rust_dir"
+    mkdir -p "$source_copy_dir" "$ocaml_dir" "$rust_dir"
+    cp "$source_path" "$source_copy"
     ocaml_log="$CACHE_DIR/logs/ocaml_${safe}.log"
     rust_log="$CACHE_DIR/logs/rust_${safe}.log"
     ocaml_out="$ocaml_dir/${stem}${suffix}"
@@ -188,7 +193,8 @@ compare_case() {
         read -r -a mode_flags <<< "$mode_flags_raw"
     fi
 
-    run_capture "$ocaml_log" "$OCAML_BSC" "${base_flags[@]}" "${mode_flags[@]+"${mode_flags[@]}"}" "${case_flags[@]+"${case_flags[@]}"}" "$source"
+    run_capture "$ocaml_log" "$OCAML_BSC" "${base_flags[@]}" "${mode_flags[@]+"${mode_flags[@]}"}" "${case_flags[@]+"${case_flags[@]}"}" "$source_copy_rel"
+    find "$source_copy_dir" -maxdepth 1 -type f \( -name '*.cmi' -o -name '*.cmj' -o -name '*.cmt' \) -delete 2>/dev/null || true
 
     base_flags=(
         -bs-project-root "$PROJECT_ROOT"
@@ -197,7 +203,7 @@ compare_case() {
         -warn-error -a
         -bs-package-output "${module_system}:${rust_pkg_dir}:${suffix}"
     )
-    run_capture "$rust_log" "$RUST_BSC" "${base_flags[@]}" "${mode_flags[@]+"${mode_flags[@]}"}" "${case_flags[@]+"${case_flags[@]}"}" "$source"
+    run_capture "$rust_log" "$RUST_BSC" "${base_flags[@]}" "${mode_flags[@]+"${mode_flags[@]}"}" "${case_flags[@]+"${case_flags[@]}"}" "$source_copy_rel"
 
     local ocaml_status rust_status
     ocaml_status=$(cat "$ocaml_log.status")

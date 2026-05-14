@@ -9252,15 +9252,10 @@ impl<'a> RawLambdaConverter<'a> {
                 if matches!(cstr.cstr_tag, ConstructorTag::CstrUnboxed) =>
             {
                 if let Some(arg) = args.first() {
-                    // For unboxed constructors with inline records, the value IS the
-                    // single field directly. Unwrap single-field inline records to
-                    // bind the inner pattern to the scrutinee as an alias.
-                    if let PatternDesc::Tpat_record(fields, _) = &arg.pat_desc {
-                        if fields.len() == 1 {
-                            let (_, _, inner_pat, _) = &fields[0];
-                            return self.bind_irrefutable_pattern_raw(inner_pat, scrut, body);
-                        }
-                    }
+                    // OCaml compiler/ml/matching.ml:1249-1271 passes
+                    // Cstr_unboxed payloads through as `(arg, Alias)`;
+                    // record payload patterns are then decomposed by normal
+                    // record matching at compiler/ml/matching.ml:1439-1454.
                     self.bind_irrefutable_pattern_raw(arg, scrut, body)
                 } else {
                     body
