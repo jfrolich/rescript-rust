@@ -4984,7 +4984,6 @@ fn type_pattern_record(
         field_name: String,
         source_pos: i32,
         label: Option<crate::types::LabelDescription>,
-        alternatives: Vec<String>,
     }
 
     let mut pending_fields = Vec::new();
@@ -5028,13 +5027,6 @@ fn type_pattern_record(
             field_name,
             source_pos: idx as i32,
             label,
-            alternatives: unbound_label_alternatives(
-                tctx.arena,
-                env,
-                &mut tctx.persistent_env,
-                ctx,
-                &resolved_lid,
-            ),
         });
     }
 
@@ -5132,7 +5124,19 @@ fn type_pattern_record(
                     loc: field.lid.loc,
                     field_name: field.field_name,
                     from_type: None,
-                    alternatives: field.alternatives,
+                    // OCaml compiler/ml/typecore.ml:1118-1119 raises the
+                    // unbound-label error from label disambiguation; spelling
+                    // suggestions are produced only while reporting
+                    // Typetexp.Unbound_label at compiler/ml/typetexp.ml:916-959.
+                    // Keep this module-signature scan on the error path so
+                    // successful record patterns do not force diagnostic data.
+                    alternatives: unbound_label_alternatives(
+                        tctx.arena,
+                        env,
+                        &mut tctx.persistent_env,
+                        ctx,
+                        &field_lid_for_error,
+                    ),
                 });
             }
             let field_ty = ctx.new_var(None);
@@ -15536,7 +15540,6 @@ fn type_record(
         field: &'a crate::parser::ast::ExpressionRecordField,
         field_name: &'a str,
         disambiguated: Option<crate::types::LabelDescription>,
-        alternatives: Vec<String>,
     }
 
     // Match OCaml typecore.ml type_record_elem_list:
@@ -15648,13 +15651,6 @@ fn type_record(
             field,
             field_name,
             disambiguated,
-            alternatives: unbound_label_alternatives(
-                tctx.arena,
-                env,
-                &mut tctx.persistent_env,
-                ctx,
-                resolved_lid,
-            ),
         });
     }
     if let Some((_, first_types, first_path)) = ambiguous_label_warnings.first().cloned() {
@@ -15706,7 +15702,6 @@ fn type_record(
 
     // Type check explicitly written fields in lbl_pos order.
     for explicit_field in explicit_fields.iter() {
-        let idx = explicit_field.original_index;
         let field = explicit_field.field;
         let field_name = explicit_field.field_name;
         let disambiguated = explicit_field.disambiguated.clone();
@@ -15855,11 +15850,24 @@ fn type_record(
                         poly_vars,
                     )
                 } else {
+                    let resolved_lid = tctx.arena.get_longident(field.lid.txt);
                     return Err(TypeCoreError::UnboundRecordField {
                         loc: field.lid.loc,
                         field_name: field_name.to_string(),
                         from_type: None,
-                        alternatives: explicit_field.alternatives.clone(),
+                        // OCaml compiler/ml/typecore.ml:1107-1125 performs
+                        // record-label disambiguation while typing, but
+                        // compiler/ml/typetexp.ml:916-959 computes spelling
+                        // alternatives only when reporting Typetexp.Unbound_label.
+                        // Do not resolve the whole qualifier signature for
+                        // diagnostics after a label has already been resolved.
+                        alternatives: unbound_label_alternatives(
+                            tctx.arena,
+                            env,
+                            &mut tctx.persistent_env,
+                            ctx,
+                            resolved_lid,
+                        ),
                     });
                 };
 
@@ -21354,17 +21362,11 @@ fn report_let_partial_match_warnings<'a>(
             binding.vb_pat.clone(),
             binding.vb_expr.clone(),
         )];
-        let partial = check_partial_simple(ctx, env, &cases);
-        if partial != crate::types::typedtree::Partial::Partial {
-            report_fragile_match_if_needed(tctx, ctx, env, binding.vb_pat.pat_loc, &cases, partial);
-            continue;
-        }
-
-        // OCaml compiler/ml/typecore.ml:4695-4707 computes the LetUnwrap
-        // partial-match warning hint with `repr (Ctype.expand_head env
-        // pat.pat_type)` before typecore.ml:4715 `end_def ()`. That
-        // expansion is observable because persistent type aliases may be
-        // forced while identifiers for later bindings have not been allocated.
+        // OCaml compiler/ml/typecore.ml:4695-4710 computes the LetUnwrap
+        // partial-match warning hint before calling `check_partial`, and before
+        // typecore.ml:4715 `end_def ()`. That `Ctype.expand_head` side effect
+        // is observable because persistent type aliases may be forced while
+        // identifiers for later bindings have not been allocated.
         let let_unwrap_example = if tctx.experimental_let_unwrap {
             let expanded = crate::types::ctype::expand_head(ctx, env, binding.vb_pat.pat_type);
             let desc = ctx.get_desc(ctx.repr(expanded));
@@ -21386,6 +21388,12 @@ fn report_let_partial_match_warnings<'a>(
         } else {
             None
         };
+
+        let partial = check_partial_simple(ctx, env, &cases);
+        if partial != crate::types::typedtree::Partial::Partial {
+            report_fragile_match_if_needed(tctx, ctx, env, binding.vb_pat.pat_loc, &cases, partial);
+            continue;
+        }
 
         let example = let_unwrap_example
             .or_else(|| optional_record_field_missing_example(&cases))
