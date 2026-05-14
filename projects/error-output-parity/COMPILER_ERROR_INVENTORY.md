@@ -427,12 +427,13 @@ with a reason after checking raise sites.
   inheritance before the type is fully defined by
   `tests/error_output_parity/compiler/fixtures/unbound_type_constructor_incomplete.res`.
 - `Unbound_type_variable`: covered through direct and nested type declaration
-  manifests, wildcard variables, variant constructor payloads, and record
-  fields by
+  manifests, wildcard variables, variant constructor payloads, extension
+  constructor payloads, and record fields by
   `tests/error_output_parity/compiler/fixtures/unbound_type_variable.res`,
   `tests/error_output_parity/compiler/fixtures/unbound_type_var_alias.res`,
   `tests/error_output_parity/compiler/fixtures/unbound_type_variable_wildcard.res`,
   `tests/error_output_parity/compiler/fixtures/unbound_type_var_decl.res`,
+  `tests/error_output_parity/compiler/fixtures/unbound_type_var_ext.res`,
   and
   `tests/error_output_parity/compiler/fixtures/unbound_type_var_record.res`.
 - `Type_arity_mismatch`: covered by
@@ -619,7 +620,12 @@ with a reason after checking raise sites.
   - Checked: normal `.res`/`.resi` unbound type-parameter positions found so
     far are rejected earlier by `Typetexp.Unbound_type_variable`, before the
     later `Typedecl.closed_type_decl` check can report this verbose internal
-    variant. The observable type-expression paths are covered in the
+    variant. GADT constructor variables are locally quantified instead of
+    unbound, guarded by
+    `tests/error_output_parity/compiler/fixtures/gadt_existential_arg_success.res`
+    and
+    `tests/error_output_parity/compiler/fixtures/gadt_result_variable_success.res`.
+    The observable type-expression error paths are covered in the
     `Typetexp.Unbound_type_variable` section.
 - `Cannot_extend_private_type`
   - Covered by
@@ -667,8 +673,14 @@ with a reason after checking raise sites.
     `tests/error_output_parity/compiler/fixtures/bad_fixed_type_no_row.res` and
     `tests/error_output_parity/compiler/fixtures/bad_fixed_type_not_object_or_variant.res`.
 - `Unbound_type_var_ext`
-  - Covered by
-    `tests/error_output_parity/compiler/fixtures/unbound_type_var_ext.res`.
+  - Checked: non-GADT extension constructor payload variables are rejected
+    earlier by `Typetexp.Unbound_type_variable`, before
+    `Typedecl.closed_extension_constructor` can report this verbose internal
+    variant. GADT extension constructor variables are locally quantified instead
+    of unbound, guarded by
+    `tests/error_output_parity/compiler/fixtures/extension_gadt_existential_arg_success.res`
+    and
+    `tests/error_output_parity/compiler/fixtures/extension_gadt_result_variable_success.res`.
 - `Varying_anonymous`
   - Covered by
     `tests/error_output_parity/compiler/fixtures/varying_anonymous.res`.

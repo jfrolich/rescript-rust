@@ -1,2 +1,2 @@
-// error-output-parity: Typedecl.Unbound_type_var variant
+// error-output-parity: Typetexp.Unbound_type_variable in a constructor payload
 type t = A('a)

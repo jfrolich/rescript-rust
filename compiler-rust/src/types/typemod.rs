@@ -17871,20 +17871,14 @@ fn find_unbound_type_var_in_typed_type_kind(
 ) -> Option<(String, LocIdx)> {
     match kind {
         TypedTypeKind::Ttype_variant(constructors) => constructors.iter().find_map(|cstr| {
-            cstr.cd_res
-                .as_ref()
-                .and_then(|ctyp| find_unbound_type_var_in_typed_core_type(ctx, ctyp, allowed))
-                .or_else(|| {
-                    if cstr.cd_res.is_some() {
-                        None
-                    } else {
-                        find_unbound_type_var_in_typed_type_constructor_args(
-                            ctx,
-                            &cstr.cd_args,
-                            allowed,
-                        )
-                    }
-                })
+            // OCaml Typedecl.make_constructor translates GADT constructor
+            // arguments/results with an extensible variable policy; those
+            // variables are constructor-local, not unbound declaration params.
+            if cstr.cd_res.is_some() {
+                None
+            } else {
+                find_unbound_type_var_in_typed_type_constructor_args(ctx, &cstr.cd_args, allowed)
+            }
         }),
         TypedTypeKind::Ttype_record(labels) => labels.iter().find_map(|label| {
             find_unbound_type_var_in_typed_core_type(ctx, &label.ld_type, allowed)
@@ -22352,10 +22346,12 @@ fn type_structure_item<'a>(
                 // Register the extension constructor in the environment
                 let ext_path = Path::pident(id.clone());
                 let cstr_res = ext_ret_ty.unwrap_or(ext_res_ty);
+                let cstr_existentials =
+                    crate::types::env::constructor_existentials(ctx, &cstr_args, ext_ret_ty);
                 let cstr_desc = crate::types::decl::ConstructorDescription {
                     cstr_name: name_str.clone(),
                     cstr_res,
-                    cstr_existentials: vec![],
+                    cstr_existentials,
                     cstr_args: cstr_args.clone(),
                     cstr_arity: cstr_args.len() as i32,
                     cstr_tag: crate::types::decl::ConstructorTag::CstrExtension(ext_path),
@@ -22428,38 +22424,25 @@ fn type_structure_item<'a>(
                     typed_ret,
                 ) = &ext_cstr.ext_kind
                 {
-                    if let Some((name, loc)) = find_unbound_type_var_in_typed_constructor_args(
+                    if typed_ret.is_none() {
+                        // Non-GADT extension constructors use the fixed policy
+                        // and reject stray variables. GADT extension variables
+                        // are constructor-local, as in OCaml typedecl.ml.
+                        if let Some((name, loc)) = find_unbound_type_var_in_typed_constructor_args(
+                            ctx,
+                            typed_args,
+                            &allowed_type_params,
+                        ) {
+                            return Err(TypeModError::UnboundTypeVarExt { loc, name });
+                        }
+                    }
+                }
+                if ext_cstr.ext_type.ext_ret_type.is_none() {
+                    if let Some(name) = find_unbound_type_var_name_in_constructor_args(
                         ctx,
-                        typed_args,
+                        &ext_cstr.ext_type.ext_args,
                         &allowed_type_params,
                     ) {
-                        return Err(TypeModError::UnboundTypeVarExt { loc, name });
-                    }
-                    if let Some(typed_ret) = typed_ret
-                        && let Some((name, loc)) = find_unbound_type_var_in_typed_core_type(
-                            ctx,
-                            typed_ret,
-                            &allowed_type_params,
-                        )
-                    {
-                        return Err(TypeModError::UnboundTypeVarExt { loc, name });
-                    }
-                }
-                if let Some(name) = find_unbound_type_var_name_in_constructor_args(
-                    ctx,
-                    &ext_cstr.ext_type.ext_args,
-                    &allowed_type_params,
-                ) {
-                    return Err(TypeModError::UnboundTypeVarExt {
-                        loc: ext_cstr.ext_loc,
-                        name,
-                    });
-                }
-                if let Some(ret_ty) = ext_cstr.ext_type.ext_ret_type {
-                    let mut visited = HashSet::new();
-                    if let Some(name) =
-                        find_unbound_type_var_name(ctx, ret_ty, &allowed_type_params, &mut visited)
-                    {
                         return Err(TypeModError::UnboundTypeVarExt {
                             loc: ext_cstr.ext_loc,
                             name,
