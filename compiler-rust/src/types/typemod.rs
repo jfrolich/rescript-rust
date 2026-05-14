@@ -3578,19 +3578,20 @@ fn check_type_declaration_duplicate_definitions(
         match &decl.ptype_kind {
             crate::parser::ast::TypeKind::Ptype_variant(constructors_in_decl) => {
                 for constructor in constructors_in_decl {
-                    let constructor_name = arena.get_string(constructor.pcd_name.txt);
-                    if let Some(previous_type_name) = constructors.get(constructor_name) {
+                    let constructor_name =
+                        duplicate_definition_constructor_name_after_variant_spread(arena, constructor);
+                    if let Some(previous_type_name) = constructors.get(&constructor_name) {
                         tctx.report_warning(
                             constructor.pcd_loc,
                             Warning::DuplicateDefinitions {
                                 kind: "constructor".to_string(),
-                                name: constructor_name.to_string(),
+                                name: constructor_name.clone(),
                                 type1: previous_type_name.clone(),
                                 type2: type_name.clone(),
                             },
                         );
                     } else {
-                        constructors.insert(constructor_name.to_string(), type_name.clone());
+                        constructors.insert(constructor_name, type_name.clone());
                     }
                 }
             }
@@ -3618,6 +3619,40 @@ fn check_type_declaration_duplicate_definitions(
             | crate::parser::ast::TypeKind::Ptype_open => {}
         }
     }
+}
+
+fn duplicate_definition_constructor_name_after_variant_spread(
+    arena: &ParseArena,
+    constructor: &crate::parser::ast::ConstructorDeclaration,
+) -> String {
+    let constructor_name = arena.get_string(constructor.pcd_name.txt);
+    if constructor_name != "..." {
+        return constructor_name.to_string();
+    }
+
+    let crate::parser::ast::ConstructorArguments::Pcstr_tuple(args) = &constructor.pcd_args else {
+        return constructor_name.to_string();
+    };
+    let Some(spread_type_idx) = args.first() else {
+        return constructor_name.to_string();
+    };
+    let spread_type = arena.get_core_type(*spread_type_idx);
+    let crate::parser::ast::CoreTypeDesc::Ptyp_constr(inner) = &*spread_type.ptyp_desc else {
+        return constructor_name.to_string();
+    };
+    let spread_lid = arena.get_longident(inner.0.txt);
+    let variant_name = spread_lid
+        .flatten_idx()
+        .into_iter()
+        .map(|idx| arena.get_string(idx))
+        .collect::<Vec<_>>()
+        .join(".");
+
+    // OCaml compiler/ml/typedecl.ml:1463 expands variant spreads before
+    // typedecl.ml:1399-1414 `check_duplicates`. The spread sentinel is renamed
+    // by compiler/ml/variant_type_spread.ml:55-63 to `...<flattened type path>`,
+    // so duplicate-definition warning 30 must not compare raw `...` markers.
+    format!("...{variant_name}")
 }
 
 fn check_type_declaration_constraint_on_gadt(
