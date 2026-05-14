@@ -80,6 +80,8 @@ Current focused coverage:
   project-level namespace module aliases across output modes.
 - `config_output_patterns.res`: file-level `@@config(no_export)` output with
   retained local bindings and side effects.
+- `deriving_output_patterns.res`: builtin deriving output for accessors,
+  abstract records, optional fields, and light abstract records.
 - `jsx_transform_patterns.res`: JSX v4 transform output for DOM elements,
   components, fragments, keys, spread props, escaped prop names, optional
   children, and memoed components.
