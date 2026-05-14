@@ -1032,8 +1032,9 @@ with a reason after checking raise sites.
     - The current-unit branch still reports `Unbound_module` without the CMI
       warning, covered by
       `tests/error_output_parity/compiler/cases/module_alias_current_unit_no_alias_deps.res`.
-  - Delayed unused value/type/module warnings for implementation bindings
-    hidden by an explicit module constraint
+  - Delayed `Warnings.Unused_value_declaration`,
+    `Warnings.Unused_type_declaration`, and `Warnings.Unused_module` warnings
+    for implementation bindings hidden by an explicit module constraint
     - Covered by
       `tests/error_output_parity/compiler/fixtures/unused_value_hidden_by_module_constraint.res`,
       `tests/error_output_parity/compiler/fixtures/unused_type_hidden_by_module_constraint.res`,
@@ -1580,9 +1581,9 @@ with a reason after checking raise sites.
     items as invalid sub-errors
     - Covered by
       `tests/error_output_parity/compiler/fixtures/builtin_extension_error_invalid_sub.res`.
-  - `warning_attribute` reports preprocessor warnings from `@@ppwarning`
-    and illegal `@@warning` payloads/lists, and applies OCaml
-    warning-as-error semantics for `@@warnerror`
+  - `warning_attribute` reports `Warnings.Preprocessor` from `@@ppwarning`,
+    `Warnings.Attribute_payload` for illegal `@@warning` payloads/lists, and
+    applies OCaml warning-as-error semantics for `@@warnerror`
     - Covered by
       `tests/error_output_parity/compiler/fixtures/builtin_ppwarning.res`,
       `tests/error_output_parity/compiler/fixtures/builtin_warning_non_string.res`,
@@ -1730,6 +1731,9 @@ with a reason after checking raise sites.
       `tests/error_output_parity/compiler/fixtures/bs_return_qualified_ident.res`
       and
       `tests/error_output_parity/compiler/fixtures/bs_return_record_with_payload.res`.
+  - `Warnings.Bs_derive_warning` for invalid config-record payloads
+    - Covered by
+      `tests/error_output_parity/compiler/fixtures/config_invalid_payload_warning.res`.
 - `compiler/frontend/ast_config.ml`
   - `Ast_payload.table_dispatch` unsupported `@@config` action
     - Covered by
@@ -1798,6 +1802,7 @@ with a reason after checking raise sites.
       `tests/error_output_parity/compiler/fixtures/deriving_accessors_not_applicable_abstract_signature.resi`,
       and
       `tests/error_output_parity/compiler/fixtures/deriving_accessors_not_applicable_open_signature.resi`.
+    - These emit `Warnings.Bs_derive_warning`.
   - `Ast_derive_util.not_applicable` warnings for `jsConverter`
     - Covered for regular variants, non-polyvariant abstract types, and open
       types by
@@ -1808,6 +1813,7 @@ with a reason after checking raise sites.
       `tests/error_output_parity/compiler/fixtures/deriving_jsconverter_not_applicable_abstract_signature.resi`,
       and
       `tests/error_output_parity/compiler/fixtures/deriving_jsconverter_not_applicable_open_signature.resi`.
+    - These emit `Warnings.Bs_derive_warning`.
 - `compiler/frontend/ast_exp_handle_external.ml`
   - `%debugger` payload rejection
     - Covered by
@@ -2078,7 +2084,8 @@ with a reason after checking raise sites.
     diagnostics; coverage is tracked at the warning emitters such as `Env`,
     `Parmatch`, `Typecore`, `Lam_compile_primitive`, and frontend PPX modules.
   - `compiler/common/bs_warnings.ml` is a warning helper module. Its
-    `warn_literal_overflow` path is covered through integer literal emitters,
+    `warn_literal_overflow` path emits `Warnings.Bs_integer_literal_overflow`
+    and is covered through integer literal emitters,
     and its `error_unescaped_delimiter` path is documented below as the
     `Warnings.Bs_uninterpreted_delimiters` source-unreachable case.
     A constructor audit against `compiler/ext/warnings.ml` found these legacy or
