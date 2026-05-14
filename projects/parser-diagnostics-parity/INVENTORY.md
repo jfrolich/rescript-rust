@@ -346,6 +346,17 @@ It is covered by `tests/error_output_parity/compiler/cases/gentype_stale_cmti.re
 where `-bs-gentype` selects a stale `.cmti` containing only CMI data and both
 compilers print `Fatal error: exception Cmt_format.Error(_)`.
 
+### 5.3 Frontend Direct `raise_errorf` Diagnostics
+
+Several frontend rewrites raise plain `Location.raise_errorf` diagnostics
+instead of typed `type error` constructors. Coverage includes:
+
+1. `compiler/frontend/ast_tuple_pattern_flatten.ml:67-81`
+   - qualified record labels while destructuring packed modules are rejected with
+     `Not supported pattern match on modules`
+   - covered by
+     `tests/error_output_parity/compiler/fixtures/module_pattern_match_qualified.res`
+
 ## 6. Formatting and Presentation Contract
 
 `compiler/ml/location.ml` defines the warning/error output contract consumed by parser diagnostics:
