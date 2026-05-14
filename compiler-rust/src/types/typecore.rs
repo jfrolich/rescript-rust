@@ -10569,6 +10569,35 @@ fn collect_top_constructor_names(pat: &Pattern, names: &mut HashSet<String>) {
     }
 }
 
+fn typed_pattern_contains_generalized_constructor(pat: &Pattern) -> bool {
+    match &pat.pat_desc {
+        PatternDesc::Tpat_construct(_, cstr, args) => {
+            cstr.cstr_generalized
+                || args
+                    .iter()
+                    .any(typed_pattern_contains_generalized_constructor)
+        }
+        PatternDesc::Tpat_tuple(items) | PatternDesc::Tpat_array(items) => {
+            items.iter().any(typed_pattern_contains_generalized_constructor)
+        }
+        PatternDesc::Tpat_record(fields, _) => fields
+            .iter()
+            .any(|(_, _, pat, _)| typed_pattern_contains_generalized_constructor(pat)),
+        PatternDesc::Tpat_variant(_, Some(arg), _) => {
+            typed_pattern_contains_generalized_constructor(arg)
+        }
+        PatternDesc::Tpat_alias(inner, _, _) => typed_pattern_contains_generalized_constructor(inner),
+        PatternDesc::Tpat_or(left, right, _) => {
+            typed_pattern_contains_generalized_constructor(left)
+                || typed_pattern_contains_generalized_constructor(right)
+        }
+        PatternDesc::Tpat_any
+        | PatternDesc::Tpat_var(_, _)
+        | PatternDesc::Tpat_constant(_)
+        | PatternDesc::Tpat_variant(_, None, _) => false,
+    }
+}
+
 fn type_exprs_may_unify_without_alloc(
     ctx: &TypeContext,
     env: &Env,
@@ -10688,6 +10717,18 @@ fn report_unreachable_gadt_catch_all_if_needed(
         || case.c_guard.is_some()
         || !pattern_is_simple_catch_all(&case.c_lhs)
     {
+        return false;
+    }
+    if !previous_unguarded_cases
+        .iter()
+        .any(|previous| typed_pattern_contains_generalized_constructor(&previous.c_lhs))
+    {
+        // OCaml compiler/ml/typecore.ml:4371-4378 computes `has_gadts`
+        // through compiler/ml/typecore.ml:2194-2203 `contains_gadt`, and
+        // compiler/ml/typecore.ml:1842-1846 reaches the expensive
+        // `partial_pred` refinement from Parmatch only for the generated
+        // witness pattern. Do not scan a regular variant's whole constructor
+        // table here; that forces persistent signatures earlier than OCaml.
         return false;
     }
 
