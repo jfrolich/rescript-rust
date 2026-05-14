@@ -230,8 +230,8 @@ run_parser_cases() {
             run_capture "$ocaml_out" "$OCAML_PARSER" -jsx-version 4 "$source_file"
             run_capture "$rust_out" "$RUST_PARSER" -jsx-version 4 "$source_file"
         else
-            run_capture "$ocaml_out" "$OCAML_PARSER" -recover -print ml "$source_file"
-            run_capture "$rust_out" "$RUST_PARSER" -recover -print ml "$source_file"
+            run_capture "$ocaml_out" "$OCAML_PARSER" -jsx-version 4 -recover -print ml "$source_file"
+            run_capture "$rust_out" "$RUST_PARSER" -jsx-version 4 -recover -print ml "$source_file"
         fi
 
         compare_outputs "parser" "$source_file" "$ocaml_out" "$rust_out" "$diff_out" || return 1

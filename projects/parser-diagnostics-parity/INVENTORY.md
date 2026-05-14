@@ -107,6 +107,11 @@ Examples of direct literal parser messages in `res_core.ml`:
 5. `JSX prop names must be lowercase` (`compiler/syntax/src/res_core.ml:2991`)
 6. `Pattern matching needs at least one case` (`compiler/syntax/src/res_core.ml:3875`)
 
+The lower-case JSX closing-name mismatch recovery path is covered by
+`tests/syntax_tests/data/parsing/errors/expressions/jsxClosingMismatch.res`.
+This complements the existing uppercase/qualified mismatch cases in
+`tests/syntax_tests/data/parsing/errors/expressions/jsx.res`.
+
 Dynamic parser messages also exist (`"Missing " ^ closing`, keyword escapes, etc.).
 
 ## 4. JSX Warning/Error Surface

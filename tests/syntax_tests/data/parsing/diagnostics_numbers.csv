@@ -101,3 +101,4 @@ error,98,tests/syntax_tests/data/parsing/errors/expressions/binaryOperatorMissin
 error,99,tests/syntax_tests/data/parsing/errors/expressions/unaryOperatorMissingOperand.res,tests/syntax_tests/data/parsing/errors/expressions/expected/unaryOperatorMissingOperand.res.txt
 error,100,tests/syntax_tests/data/parsing/errors/expressions/arrowReturnPolytype.res,tests/syntax_tests/data/parsing/errors/expressions/expected/arrowReturnPolytype.res.txt
 error,101,tests/syntax_tests/data/parsing/errors/expressions/jsxUpperOptionalProp.res,tests/syntax_tests/data/parsing/errors/expressions/expected/jsxUpperOptionalProp.res.txt
+error,102,tests/syntax_tests/data/parsing/errors/expressions/jsxClosingMismatch.res,tests/syntax_tests/data/parsing/errors/expressions/expected/jsxClosingMismatch.res.txt

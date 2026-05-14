@@ -57,7 +57,10 @@ What it does:
 
 1. Runs parser diagnostics fixtures from
    `tests/syntax_tests/data/parsing/diagnostics_numbers.csv` through
-   `res_parser` and `res_parser_rust`.
+   `res_parser` and `res_parser_rust`. Parser error rows use
+   `-jsx-version 4 -recover -print ml` so recovered invalid parse trees follow
+   the OCaml driver path that prints diagnostics without applying JSX PPX
+   rewrites.
 2. Runs compiler diagnostics fixtures through OCaml `bsc` and Rust `bsc`.
 3. Compares parser exit status and combined stdout/stderr byte-for-byte with no
    output normalization.
