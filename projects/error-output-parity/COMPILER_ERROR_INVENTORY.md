@@ -1522,7 +1522,8 @@ with a reason after checking raise sites.
     compilation. A trailing backslash before a closing template backtick escapes
     the backtick in `compiler/syntax/src/res_scanner.ml:scan_template_literal_token`,
     so the parser emits the unclosed-template diagnostic before
-    `Ast_utf8_string.transform` can see a string ending in `\`.
+    `Ast_utf8_string.transform` can see a string ending in `\`. Covered by
+    `tests/error_output_parity/compiler/fixtures/scanner_template_trailing_backslash.res`.
 - `compiler/frontend/ast_utf8_string_interp.ml`
   - Internal interpolation segment errors such as `Invalid_code_point`,
     `Invalid_escape_code`, `Invalid_hex_escape`, `Invalid_unicode_escape`,
