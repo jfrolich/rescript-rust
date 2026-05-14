@@ -2001,6 +2001,12 @@ with a reason after checking raise sites.
       `tests/error_output_parity/compiler/fixtures/identity_wrong_type_let_module.res`
       and the packed-module expression traversal case in
       `tests/error_output_parity/compiler/fixtures/identity_wrong_type_packed_module.res`.
+  - `Bs_ffi_warning` for unsafe primitive names that do not start with `%`,
+    `#`, or `?` is source-unreachable from normal `.res`/`.resi`
+    compilation. User primitive strings such as `external x: int = "foo"`
+    are encoded by the builtin PPX before the invariant walker sees them; with
+    `-bs-no-builtin-ppx`, `ppx_entry.ml` returns before
+    `emit_external_warnings_on_structure/signature` runs.
   - Built-in constructor redefinition (`false`, `true`, `()`) is
     source-unreachable from normal ReScript. `parse_type_constructor_declaration`
     only creates ordinary constructor declarations from `Uident` tokens;
