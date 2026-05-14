@@ -4251,6 +4251,167 @@ fn definition_mismatch_detail(
     }
 }
 
+fn type_expr_lists_equal_without_renaming(
+    ctx: &crate::types::context::TypeContext,
+    env: &Env,
+    left: &[TypeExprRef],
+    right: &[TypeExprRef],
+) -> bool {
+    left.len() == right.len()
+        && left.iter().zip(right.iter()).all(|(left_ty, right_ty)| {
+            crate::types::ctype::equal_type_exprs_without_renaming(ctx, env, *left_ty, *right_ty)
+        })
+}
+
+fn coherence_private_flags(
+    expected: &crate::types::decl::TypeDeclaration,
+    actual: &crate::types::decl::TypeDeclaration,
+) -> bool {
+    match (expected.type_private, actual.type_private) {
+        (crate::types::PrivateFlag::Private, crate::types::PrivateFlag::Public) => {
+            matches!(actual.type_kind, crate::types::decl::TypeKind::TypeAbstract)
+                && (actual.type_manifest.is_none()
+                    || !matches!(
+                        expected.type_kind,
+                        crate::types::decl::TypeKind::TypeAbstract
+                    ))
+        }
+        _ => true,
+    }
+}
+
+fn type_decl_tag_name(decl: &crate::types::decl::TypeDeclaration) -> Option<&str> {
+    decl.type_attributes.iter().find_map(|attr| {
+        if attr.attr_name.txt == "tag"
+            && let crate::types::decl::AttributePayload::Str(value) = &attr.attr_payload
+        {
+            Some(value.as_str())
+        } else {
+            None
+        }
+    })
+}
+
+fn coherence_variance_detail(
+    ctx: &crate::types::context::TypeContext,
+    expected: &crate::types::decl::TypeDeclaration,
+    actual: &crate::types::decl::TypeDeclaration,
+) -> Option<String> {
+    let actual_is_abstract = matches!(actual.type_kind, crate::types::decl::TypeKind::TypeAbstract)
+        && actual.type_manifest.is_none();
+    let need_variance = actual_is_abstract
+        || matches!(expected.type_private, crate::types::PrivateFlag::Private)
+        || matches!(expected.type_kind, crate::types::decl::TypeKind::TypeOpen);
+
+    if !need_variance || expected.type_variance.len() != actual.type_variance.len() {
+        return None;
+    }
+
+    let actual_is_private = matches!(actual.type_private, crate::types::PrivateFlag::Private);
+    let open_actual = matches!(actual.type_kind, crate::types::decl::TypeKind::TypeOpen)
+        && actual.type_manifest.is_none();
+
+    for (actual_param, (expected_var, actual_var)) in actual.type_params.iter().zip(
+        expected
+            .type_variance
+            .iter()
+            .zip(actual.type_variance.iter()),
+    ) {
+        let implies = |lhs: bool, rhs: bool| !lhs || rhs;
+        let constrained = !crate::types::btype::is_tvar(ctx, *actual_param);
+
+        let (expected_co, expected_cn) = expected_var.get_upper();
+        let (actual_co, actual_cn) = actual_var.get_upper();
+        let upper_ok = if actual_is_abstract || actual_is_private {
+            implies(expected_co, actual_co) && implies(expected_cn, actual_cn)
+        } else if open_actual || constrained {
+            expected_co == actual_co && expected_cn == actual_cn
+        } else {
+            true
+        };
+
+        let (expected_p, expected_n, expected_i, expected_j) = expected_var.get_lower();
+        let (actual_p, actual_n, actual_i, actual_j) = actual_var.get_lower();
+        let lower_ok = implies(
+            actual_is_abstract || actual_is_private,
+            implies(actual_p, expected_p)
+                && implies(actual_n, expected_n)
+                && implies(actual_i, expected_i)
+                && implies(actual_j, expected_j),
+        );
+
+        if !(upper_ok && lower_ok) {
+            return Some("Their variances do not agree.".to_string());
+        }
+    }
+
+    None
+}
+
+fn coherence_definition_mismatch_detail(
+    ctx: &crate::types::context::TypeContext,
+    expected: &crate::types::decl::TypeDeclaration,
+    actual: &crate::types::decl::TypeDeclaration,
+) -> Option<String> {
+    if expected.type_params.len() != actual.type_params.len() {
+        return Some("They have different arities.".to_string());
+    }
+
+    if !coherence_private_flags(expected, actual) {
+        return Some("A private type would be revealed.".to_string());
+    }
+
+    if !matches!(actual.type_kind, crate::types::decl::TypeKind::TypeAbstract)
+        && expected.type_unboxed.unboxed != actual.type_unboxed.unboxed
+    {
+        let unboxed_decl = if actual.type_unboxed.unboxed {
+            "the second"
+        } else {
+            "the first"
+        };
+        return Some(format!(
+            "Their internal representations differ:\n{unboxed_decl} declaration uses unboxed representation."
+        ));
+    }
+
+    if type_decl_tag_name(expected) != type_decl_tag_name(actual) {
+        return Some("Their @tag annotations differ.".to_string());
+    }
+
+    match (&expected.type_kind, &actual.type_kind) {
+        (_, crate::types::decl::TypeKind::TypeAbstract) => {}
+        (
+            crate::types::decl::TypeKind::TypeRecord(_, expected_rep),
+            crate::types::decl::TypeKind::TypeRecord(_, actual_rep),
+        ) => {
+            if let Some(detail) = definition_mismatch_detail(ctx, expected, actual) {
+                return Some(detail);
+            }
+            if expected_rep != actual_rep {
+                return Some("Their internal representations differ.".to_string());
+            }
+        }
+        (
+            crate::types::decl::TypeKind::TypeVariant(_),
+            crate::types::decl::TypeKind::TypeVariant(_),
+        ) => {
+            if let Some(detail) = definition_mismatch_detail(ctx, expected, actual) {
+                return Some(detail);
+            }
+        }
+        (crate::types::decl::TypeKind::TypeOpen, crate::types::decl::TypeKind::TypeOpen) => {}
+        _ => return Some("Their kinds differ.".to_string()),
+    }
+
+    let actual_is_abstract = matches!(actual.type_kind, crate::types::decl::TypeKind::TypeAbstract)
+        && actual.type_manifest.is_none();
+    if actual_is_abstract && !expected.type_immediate && actual.type_immediate {
+        return Some("the first is not an immediate type.".to_string());
+    }
+
+    coherence_variance_detail(ctx, expected, actual)
+}
+
 fn check_type_declaration_coherence(
     ctx: &crate::types::context::TypeContext,
     env: &Env,
@@ -4268,51 +4429,59 @@ fn check_type_declaration_coherence(
 
     let manifest_repr = ctx.repr(manifest);
     let manifest_desc = ctx.get_desc(manifest_repr);
-    let TypeDesc::Tconstr { path, .. } = &*manifest_desc else {
+    let (manifest_path, manifest_args) = match &*manifest_desc {
+        TypeDesc::Tconstr { path, args, .. } => (path.clone(), args.clone()),
+        _ => {
+            return Err(TypeModError::DefinitionMismatch {
+                loc,
+                ty: manifest,
+                detail: None,
+            });
+        }
+    };
+    drop(manifest_desc);
+
+    if manifest_args.len() != decl.type_params.len() {
         return Err(TypeModError::DefinitionMismatch {
             loc,
             ty: manifest,
-            detail: None,
+            detail: Some("They have different arities.".to_string()),
         });
-    };
+    }
 
-    let Some(expected_decl) = crate::types::ctype::lookup_type_decl_for_path_pub(ctx, env, path)
+    if !type_expr_lists_equal_without_renaming(ctx, env, &manifest_args, &decl.type_params) {
+        return Err(TypeModError::DefinitionMismatch {
+            loc,
+            ty: manifest,
+            detail: Some("Their constraints differ.".to_string()),
+        });
+    }
+
+    let Some(expected_decl) =
+        crate::types::ctype::lookup_type_decl_for_path_pub(ctx, env, &manifest_path)
     else {
         return Ok(());
     };
 
-    // OCaml compiler/ml/typedecl.ml:863-884 checks manifest/kind coherence
-    // with `Includecore.type_declarations ~equality:true` after resolving the
-    // manifest constructor through Env. Reuse the Rust inclusion checker here
-    // instead of comparing declaration kind discriminants locally, so manifest
-    // aliases with abstract exported declarations (for example Js_null.t) keep
-    // the same expansion behavior as OCaml's Ctype/Includecore path.
-    let mut warnings = Vec::new();
-    if let Err(error) = crate::types::includemod::type_declarations(
+    // OCaml compiler/ml/typedecl.ml:863-884 first checks that manifest
+    // arguments are exactly the current declaration parameters, then compares
+    // the resolved manifest declaration against the explicit representation
+    // after `Subst.add_type id path` has rewritten recursive self references.
+    let self_path = Path::pident(id.clone());
+    let substituted_decl = crate::types::includemod::substitute_type_declaration_self_path(
         ctx,
-        env,
-        id.clone(),
         decl,
-        &expected_decl,
-        &mut warnings,
-    ) {
-        // OCaml compiler/ml/typedecl.ml:878-882 reports coherence details in
-        // manifest-target then current-declaration order, even though the Rust
-        // inclusion checker still receives the current declaration first for
-        // manifest expansion compatibility.
-        let detail = definition_mismatch_detail(ctx, &expected_decl, decl).or_else(|| match error {
-            crate::types::includemod::IncludeModError::TypeDeclarationMismatch {
-                detail,
-                ..
-            } if !detail.is_empty() => Some(detail),
-            crate::types::includemod::IncludeModError::TypeMismatch { reason, .. }
-                if !reason.is_empty() =>
-            {
-                Some(reason)
-            }
-            _ => None,
+        &self_path,
+        &manifest_path,
+    );
+    if let Some(detail) =
+        coherence_definition_mismatch_detail(ctx, &expected_decl, &substituted_decl)
+    {
+        return Err(TypeModError::DefinitionMismatch {
+            loc,
+            ty: manifest,
+            detail: Some(detail),
         });
-        return Err(TypeModError::DefinitionMismatch { loc, ty: manifest, detail });
     }
 
     Ok(())

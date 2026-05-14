@@ -2641,6 +2641,17 @@ fn substitute_type_declaration_paths<'a>(
     substituted
 }
 
+pub(crate) fn substitute_type_declaration_self_path<'a>(
+    type_ctx: &'a TypeContext,
+    decl: &TypeDeclaration,
+    from: &Path,
+    to: &Path,
+) -> TypeDeclaration {
+    let mut subst = InclusionSubst::default();
+    subst.type_paths.insert(from.clone(), to.clone());
+    substitute_type_declaration_paths(type_ctx, decl, &subst)
+}
+
 fn substitute_extension_constructor_paths<'a>(
     type_ctx: &'a TypeContext,
     ext: &ExtensionConstructor,
