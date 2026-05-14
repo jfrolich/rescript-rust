@@ -2616,26 +2616,27 @@ fn parse_module_long_ident(p: &mut Parser<'_>) -> super::ast::Loc<crate::parse_a
     let start_pos_idx = p.start_pos_idx();
     let mut path_parts: Vec<String> = vec![];
 
-    while let Token::Uident(name) = &p.token {
-        path_parts.push(name.to_string());
-        p.next();
-        if p.token == Token::Dot {
-            p.next();
-        } else {
-            break;
-        }
-    }
-
-    if path_parts.is_empty() {
-        // Allow lowercase module identifiers in some contexts (e.g. module type names).
-        if let Token::Lident(name) = &p.token {
-            path_parts.push(name.to_string());
-            p.next();
-        } else {
-            p.err(DiagnosticCategory::Message(
-                "Expected module identifier".to_string(),
-            ));
-            path_parts.push("Error".to_string());
+    loop {
+        match &p.token {
+            Token::Uident(name) => {
+                path_parts.push(name.to_string());
+                p.next();
+                if p.token == Token::Dot {
+                    p.next();
+                    continue;
+                }
+                break;
+            }
+            Token::Lident(name) => {
+                path_parts.push(name.to_string());
+                p.next();
+                break;
+            }
+            _ => {
+                p.err(DiagnosticCategory::Uident(p.token.clone().into_owned()));
+                path_parts.push("_".to_string());
+                break;
+            }
         }
     }
 

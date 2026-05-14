@@ -1343,9 +1343,7 @@ fn parse_primary_module_expr(p: &mut Parser<'_>) -> ModuleExpr {
                     pmod_attributes: Attributes::new(),
                 }
             } else {
-                p.err(DiagnosticCategory::Message(
-                    "Expected module expression".to_string(),
-                ));
+                p.err_unexpected();
                 recover::default_module_expr()
             }
         }
@@ -1921,9 +1919,6 @@ fn parse_paren_functor_module_type(p: &mut Parser<'_>) -> ModuleType {
                     }
                 }
                 _ => {
-                    p.err(DiagnosticCategory::Message(
-                        "Expected module type parameter".to_string(),
-                    ));
                     break;
                 }
             }
@@ -1974,7 +1969,7 @@ fn parse_primary_module_type(p: &mut Parser<'_>) -> ModuleType {
     match &p.token {
         Token::Uident(_) | Token::Lident(_) => {
             // Module type path
-            let lid = parse_module_long_ident(p);
+            let lid = parse_module_type_long_ident(p);
             ModuleType {
                 pmty_desc: Box::new(ModuleTypeDesc::Pmty_ident(lid)),
                 pmty_loc: p.mk_loc_idx_to_prev_end(start_pos_idx),
@@ -2006,24 +2001,16 @@ fn parse_primary_module_type(p: &mut Parser<'_>) -> ModuleType {
         Token::Module => {
             // module type of M
             p.next();
-            if p.token == Token::Typ {
-                p.next();
-                if p.token == Token::Of {
-                    p.next();
-                    let mod_expr = parse_module_expr(p);
-                    let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
-                    let mod_expr_idx = p.arena_mut().push_mod_expr(mod_expr);
-                    return ModuleType {
-                        pmty_desc: Box::new(ModuleTypeDesc::Pmty_typeof(mod_expr_idx)),
-                        pmty_loc: loc,
-                        pmty_attributes: Attributes::new(),
-                    };
-                }
+            p.expect(Token::Typ);
+            p.expect(Token::Of);
+            let mod_expr = parse_module_expr(p);
+            let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
+            let mod_expr_idx = p.arena_mut().push_mod_expr(mod_expr);
+            ModuleType {
+                pmty_desc: Box::new(ModuleTypeDesc::Pmty_typeof(mod_expr_idx)),
+                pmty_loc: loc,
+                pmty_attributes: Attributes::new(),
             }
-            p.err(DiagnosticCategory::Message(
-                "Expected 'type of'".to_string(),
-            ));
-            recover::default_module_type()
         }
         Token::Percent => {
             // Module type extension
@@ -2036,9 +2023,7 @@ fn parse_primary_module_type(p: &mut Parser<'_>) -> ModuleType {
             }
         }
         _ => {
-            p.err(DiagnosticCategory::Message(
-                "Expected module type".to_string(),
-            ));
+            p.err_unexpected();
             recover::default_module_type()
         }
     }
@@ -2223,6 +2208,14 @@ fn is_expr_start(token: &Token<'_>) -> bool {
 /// Handles both module paths (Foo.Bar.Baz) and module type paths (Foo.Bar.t).
 /// Module type names are typically lowercase (e.g., RGLEvents.t).
 fn parse_module_long_ident(p: &mut Parser<'_>) -> Loc<LidentIdx> {
+    parse_module_long_ident_with_lowercase(p, false)
+}
+
+fn parse_module_type_long_ident(p: &mut Parser<'_>) -> Loc<LidentIdx> {
+    parse_module_long_ident_with_lowercase(p, true)
+}
+
+fn parse_module_long_ident_with_lowercase(p: &mut Parser<'_>, lowercase: bool) -> Loc<LidentIdx> {
     let start_pos_idx = p.start_pos_idx();
     let mut path_parts = vec![];
 
@@ -2237,22 +2230,23 @@ fn parse_module_long_ident(p: &mut Parser<'_>) -> Loc<LidentIdx> {
                 }
                 break;
             }
-            Token::Lident(name) => {
-                // Allow lowercase as final component (for module type names like `t`)
-                // This handles paths like RGLEvents.t where `t` is a module type name
+            Token::Lident(name) if lowercase => {
                 path_parts.push(name.to_string());
                 p.next();
                 break;
             }
-            _ => break,
+            _ => {
+                p.err(DiagnosticCategory::Uident(p.token.clone().into_owned()));
+                if !path_parts.is_empty() {
+                    path_parts.push("_".to_string());
+                }
+                break;
+            }
         }
     }
 
     if path_parts.is_empty() {
-        p.err(DiagnosticCategory::Message(
-            "Expected module identifier".to_string(),
-        ));
-        path_parts.push("Error".to_string());
+        path_parts.push("_".to_string());
     }
 
     let lid_idx = super::core::build_longident_idx(p, &path_parts);
@@ -2338,31 +2332,46 @@ fn parse_type_long_ident(p: &mut Parser<'_>) -> Loc<LidentIdx> {
     let start_pos_idx = p.start_pos_idx();
     let mut path_parts = vec![];
 
-    loop {
-        match &p.token {
-            Token::Uident(name) => {
-                path_parts.push(name.to_string());
-                p.next();
-                if p.token == Token::Dot {
+    match &p.token {
+        Token::Lident(name) => {
+            path_parts.push(name.to_string());
+            p.next();
+        }
+        Token::Uident(_) => loop {
+            match &p.token {
+                Token::Uident(name) => {
+                    let name = name.to_string();
+                    let start = p.start_pos.clone();
+                    let end = p.end_pos.clone();
+                    path_parts.push(name.clone());
                     p.next();
-                } else {
+                    if p.token == Token::Dot {
+                        p.next();
+                    } else {
+                        p.err_at(
+                            start,
+                            end,
+                            DiagnosticCategory::Lident(Token::Uident(name.into())),
+                        );
+                        break;
+                    }
+                }
+                Token::Lident(name) => {
+                    path_parts.push(name.to_string());
+                    p.next();
+                    break;
+                }
+                _ => {
+                    p.err_unexpected();
+                    path_parts.push("_".to_string());
                     break;
                 }
             }
-            Token::Lident(name) => {
-                path_parts.push(name.to_string());
-                p.next();
-                break;
-            }
-            _ => break,
+        },
+        _ => {
+            p.err_unexpected();
+            path_parts.push("_".to_string());
         }
-    }
-
-    if path_parts.is_empty() {
-        p.err(DiagnosticCategory::Message(
-            "Expected type identifier".to_string(),
-        ));
-        path_parts.push("error".to_string());
     }
 
     let lid_idx = super::core::build_longident_idx(p, &path_parts);
@@ -5214,10 +5223,8 @@ fn parse_module_type_declaration(
             with_loc(n_idx, loc)
         }
         _ => {
-            p.err(DiagnosticCategory::Message(
-                "Expected module type name".to_string(),
-            ));
-            let error_idx = p.arena_mut().intern("error");
+            p.err(DiagnosticCategory::Uident(p.token.clone().into_owned()));
+            let error_idx = p.arena_mut().intern("_");
             mknoloc(error_idx)
         }
     };

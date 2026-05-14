@@ -1062,11 +1062,12 @@ with a reason after checking raise sites.
       and
       `tests/error_output_parity/compiler/fixtures/parser_let_unwrap_signature.resi`.
   - Type declaration parsing rejects module-qualified declaration names,
-    misplaced record field doc comments, and multiple inline records at the
-    same generated field path
+    misplaced record field doc comments, misplaced `mutable`, and multiple
+    inline records at the same generated field path
     - Covered through `bsc` by
       `tests/error_output_parity/compiler/fixtures/parser_type_declaration_longident.res`,
       `tests/error_output_parity/compiler/fixtures/parser_record_doc_comment_field_position.res`,
+      `tests/error_output_parity/compiler/fixtures/parser_record_mutable_field_position.res`,
       and
       `tests/error_output_parity/compiler/fixtures/parser_multiple_inline_record_definitions.res`.
   - Pattern parsing rejects array/list/record spread forms and string
@@ -1149,6 +1150,35 @@ with a reason after checking raise sites.
       `tests/error_output_parity/compiler/fixtures/parser_tuple_single_pattern.res`
       and
       `tests/error_output_parity/compiler/fixtures/parser_module_name_number_equal.res`.
+  - Module expressions report the shared unexpected-token parser diagnostic
+    when the module expression starts with an invalid token
+    - Covered through `bsc` by
+      `tests/error_output_parity/compiler/fixtures/parser_module_expr_unexpected.res`.
+  - Module type declarations and module type expressions report the reference
+    uppercase-identifier, token expectation, and unexpected-token diagnostics
+    for malformed module-type syntax
+    - Covered through `bsc` by
+      `tests/error_output_parity/compiler/fixtures/parser_module_type_name_unexpected.res`,
+      `tests/error_output_parity/compiler/fixtures/parser_module_type_of_missing_type.res`,
+      and
+      `tests/error_output_parity/compiler/fixtures/parser_module_type_unexpected.res`.
+  - Module paths and module aliases preserve the reference parser's uppercase
+    module-identifier requirements, while `with type` constraints preserve the
+    lowercase type-name requirement
+    - Covered through `bsc` by
+      `tests/error_output_parity/compiler/fixtures/parser_open_module_unexpected.res`,
+      `tests/error_output_parity/compiler/fixtures/parser_signature_module_alias_unexpected.resi`,
+      `tests/error_output_parity/compiler/fixtures/parser_with_module_path_unexpected.res`,
+      and
+      `tests/error_output_parity/compiler/fixtures/parser_with_type_uppercase_name.res`.
+  - Package type module paths use the same module-identifier parser diagnostic
+    as `parse_package_type`
+    - Covered through `bsc` by
+      `tests/error_output_parity/compiler/fixtures/parser_package_type_module_unexpected.res`.
+  - Functor module-type parameters use the same delimited-region recovery as
+    the reference parser when a parameter starts with an invalid token
+    - Covered through `bsc` by
+      `tests/error_output_parity/compiler/fixtures/parser_functor_module_type_param_unexpected.res`.
   - Literal, JSX-name, and type-parameter parser branches reject invalid
     bigint syntax, JSX names/dots/hyphens/closing names, missing type-parameter
     singlequotes, old paren type parameters, and invalid type-variable names
