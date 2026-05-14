@@ -307,6 +307,9 @@ with a reason after checking raise sites.
   `tests/error_output_parity/compiler/fixtures/typecore_warning_deprecated_type.res`
   and by the existing super-errors fixture
   `tests/build_tests/super_errors/fixtures/highlighting4.res`.
+- Warning 3 (`Deprecated`) for mutating fields marked `@deprecated_mutable` is
+  covered by
+  `tests/error_output_parity/compiler/fixtures/typecore_warning_deprecated_mutable_field.res`.
 - Typecore warning 16 (`Unerasable_optional_argument`) is not observable from
   normal ReScript function syntax: `type_function` disables warning 16 before
   the optional-argument check for the uncurried function path ReScript uses.

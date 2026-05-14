@@ -7324,6 +7324,37 @@ fn deprecated_warning_for_type(
     deprecated_warning_from_attrs(&path.name(), &decl.type_attributes)
 }
 
+fn deprecated_mutable_warning_for_label(
+    name: &str,
+    label: &crate::types::LabelDescription,
+) -> Option<Warning> {
+    for attr in &label.lbl_attributes {
+        if attr.attr_name.txt != "deprecated_mutable"
+            && attr.attr_name.txt != "ocaml.deprecated_mutable"
+        {
+            continue;
+        }
+        let reason = match &attr.attr_payload {
+            crate::types::decl::AttributePayload::Deprecated { reason, .. }
+            | crate::types::decl::AttributePayload::Str(reason) => reason.as_str(),
+            crate::types::decl::AttributePayload::Empty => "",
+            _ => "",
+        };
+        let message = if reason.is_empty() {
+            format!("mutating field {name}")
+        } else {
+            format!("mutating field {name}\n{reason}")
+        };
+        return Some(Warning::Deprecated {
+            message,
+            def_loc: Location::none(),
+            use_loc: Location::none(),
+            can_be_automigrated: false,
+        });
+    }
+    None
+}
+
 /// Type check an expression against an expected type.
 pub fn type_expect<'a>(
     tctx: &mut TypeCheckContext<'a>,
@@ -18815,7 +18846,7 @@ fn type_setfield(
 
     // Type check the new value with the proper field type.
     let field_context = Some(TypeClashContext::SetRecordField {
-        field_name: field_context_name,
+        field_name: field_context_name.clone(),
     });
     let typed_value = type_expect(tctx, env, new_value, field_ty, field_context)?;
 
@@ -18824,6 +18855,9 @@ fn type_setfield(
             loc,
             lid: resolved_lid,
         });
+    }
+    if let Some(warning) = deprecated_mutable_warning_for_label(&field_context_name, &label_desc) {
+        tctx.report_warning(field_lid.loc, warning);
     }
 
     // OCaml: rue { ... exp_type = instance_def Predef.type_unit; ... }
