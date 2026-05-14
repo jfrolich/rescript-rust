@@ -1580,8 +1580,8 @@ with a reason after checking raise sites.
       and
       `tests/error_output_parity/compiler/fixtures/builtin_warnerror_attribute.res`.
 - `compiler/ml/translattribute.ml`
-  - `find_attribute` reports duplicate `inline` and `inlined` attributes
-    at the second attribute location
+  - `Warnings.Duplicated_attribute` from `find_attribute` for duplicate
+    `inline` and `inlined` attributes at the second attribute location
     - Covered by
       `tests/error_output_parity/compiler/fixtures/translattribute_inline_duplicate.res`
       and
@@ -1592,36 +1592,42 @@ with a reason after checking raise sites.
       `tests/error_output_parity/compiler/fixtures/translattribute_inline_invalid_payload.res`
       and
       `tests/error_output_parity/compiler/fixtures/translattribute_inlined_invalid_payload.res`.
-  - `check_attribute` reports misplaced expression attributes for non-function
-    `inline` and non-call-target `inlined`
+  - `Warnings.Misplaced_attribute` from `check_attribute` for misplaced
+    expression attributes on non-function `inline` and non-call-target
+    `inlined`
     - Covered by
       `tests/error_output_parity/compiler/fixtures/translattribute_inline_misplaced_expr.res`
       and
       `tests/error_output_parity/compiler/fixtures/translattribute_inlined_misplaced_expr.res`.
-  - `check_attribute_on_module` reports misplaced module attributes for
-    non-functor `inline` and non-apply-target `inlined`
+  - `Warnings.Misplaced_attribute` from `check_attribute_on_module` for
+    misplaced module attributes on non-functor `inline` and non-apply-target
+    `inlined`
     - Covered by
       `tests/error_output_parity/compiler/fixtures/translattribute_module_inline_misplaced_expr.res`
       and
       `tests/error_output_parity/compiler/fixtures/translattribute_module_inlined_misplaced_expr.res`.
-  - `get_and_remove_inlined_attribute_on_module` reports invalid and duplicate
-    `inlined` payloads on module apply targets
+  - `get_and_remove_inlined_attribute_on_module` reports invalid payloads and
+    `Warnings.Duplicated_attribute` for duplicate `inlined` attributes on
+    module apply targets
     - Covered by
       `tests/error_output_parity/compiler/fixtures/translattribute_module_inlined_invalid_payload.res`
       and
       `tests/error_output_parity/compiler/fixtures/translattribute_module_inlined_duplicate.res`.
   - `parse_inline_attribute` reports invalid module functor `inline` payloads,
-    and `find_attribute` reports duplicate module functor `inline` attributes
+    and `find_attribute` reports `Warnings.Duplicated_attribute` for duplicate
+    module functor `inline` attributes
     - Covered by
       `tests/error_output_parity/compiler/fixtures/translattribute_module_inline_invalid_payload.res`
       and
       `tests/error_output_parity/compiler/fixtures/translattribute_module_inline_duplicate.res`.
-  - `add_inline_attribute` reports duplicate `inline` when binding attributes
-    are applied to a function expression that already has an inline attribute
+  - `add_inline_attribute` reports `Warnings.Duplicated_attribute` for
+    duplicate `inline` when binding attributes are applied to a function
+    expression that already has an inline attribute
     - Covered by
       `tests/error_output_parity/compiler/fixtures/translattribute_inline_duplicate_function_expr.res`.
-  - `add_inline_attribute` reports `inline1`/`inline2` when binding attributes
-    cannot apply to the translated lambda
+  - `add_inline_attribute` reports `Warnings.Misplaced_attribute`
+    `inline1`/`inline2` when binding attributes cannot apply to the translated
+    lambda
     - Covered for value bindings whose translated lambda is a non-wrapper
       `Lprim` by
       `tests/error_output_parity/compiler/fixtures/translattribute_inline_binding_lprim_misplaced_always.res`
