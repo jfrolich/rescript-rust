@@ -910,6 +910,16 @@ with a reason after checking raise sites.
       `tests/error_output_parity/compiler/fixtures/unused_type_hidden_by_module_constraint.res`,
       and
       `tests/error_output_parity/compiler/fixtures/unused_module_hidden_by_module_constraint.res`.
+  - `Warnings.Unused_open` for fresh `open` declarations when no later lookup
+    selects a binding from the opened signature
+    - Covered by
+      `tests/error_output_parity/compiler/fixtures/env_warning_unused_open.res`,
+      `tests/error_output_parity/compiler/fixtures/env_warning_unused_open_signature.resi`,
+      `tests/error_output_parity/compiler/fixtures/env_warning_unused_open_expression.res`,
+      `tests/error_output_parity/compiler/fixtures/env_warning_unused_open_after_other_modtype_open.res`,
+      `tests/error_output_parity/compiler/fixtures/env_warning_open_shadow_direct_qualified_value.res`,
+      and
+      `tests/error_output_parity/compiler/fixtures/env_warning_open_shadow_direct_qualified_module.res`.
   - `Warnings.Open_shadow_identifier` value, type, module, and module-type
     shadowing from an `open`, reported only when the opened item is later used
     - Covered by
@@ -925,6 +935,12 @@ with a reason after checking raise sites.
       `tests/error_output_parity/compiler/fixtures/env_warning_open_shadow_signature_modtype.resi`,
       and
       `tests/error_output_parity/compiler/fixtures/env_warning_open_shadow_same_modtype_reopen.res`.
+    - Qualified direct references to the opened module path are covered by
+      `tests/error_output_parity/compiler/fixtures/env_warning_open_shadow_direct_qualified_value.res`
+      and
+      `tests/error_output_parity/compiler/fixtures/env_warning_open_shadow_direct_qualified_module.res`.
+    - `open!` suppression is covered by
+      `tests/error_output_parity/compiler/fixtures/env_warning_open_bang_suppresses_shadow.res`.
   - `Warnings.Open_shadow_label_constructor` constructor and label shadowing from
     an `open`, reported only when the opened constructor or label is later used
     - Covered by

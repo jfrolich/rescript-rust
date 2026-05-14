@@ -19140,6 +19140,21 @@ fn type_open(
 
     // Type check the body expression in the extended environment
     let typed_body = type_expect(tctx, &open_env, body, expected_ty, None)?;
+    if matches!(override_flag, crate::parser::ast::OverrideFlag::Fresh)
+        && !crate::types::typemod::expression_uses_opened_path(
+            tctx.type_ctx,
+            tctx.arena,
+            &typed_body,
+            &path,
+        )
+    {
+        tctx.report_warning(
+            loc,
+            Warning::UnusedOpen {
+                name: path.name(),
+            },
+        );
+    }
 
     // Return expression with Texp_open in exp_extra (matching OCaml)
     Ok(prepend_exp_extra(
