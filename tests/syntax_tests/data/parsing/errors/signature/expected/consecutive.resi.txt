@@ -1,0 +1,11 @@
+
+  Syntax error!
+  syntax_tests/data/parsing/errors/signature/consecutive.resi:1:11-14
+
+  1 │ let a: int let b: int
+  2 │ 
+
+  consecutive specifications on a line must be separated by ';' or a newline
+
+val a : int
+val b : int

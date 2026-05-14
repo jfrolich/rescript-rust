@@ -147,6 +147,9 @@ covers the explicit trailing comma no-update message (`{...record,}`).
 The `for await`/`in` parser diagnostic is covered by
 `tests/syntax_tests/data/parsing/errors/expressions/forAwaitIn.res`.
 
+The signature-only consecutive-specification diagnostic is covered by
+`tests/syntax_tests/data/parsing/errors/signature/consecutive.resi`.
+
 ## 4. JSX Warning/Error Surface
 
 ### 4.1 Warning emission
