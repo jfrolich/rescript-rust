@@ -362,6 +362,14 @@ instead of typed `type error` constructors. Coverage includes:
    - covered by
      `tests/error_output_parity/compiler/fixtures/module_pattern_match_qualified.res`
 
+### 5.4 Recursive Value Diagnostics
+
+`compiler/ml/rec_check.ml:453-475` defines the backend recursive-value
+right-hand-side check:
+
+1. `Rec_check.Illegal_letrec_expr`
+   - covered by `tests/error_output_parity/compiler/fixtures/illegal_letrec_expr.res`
+
 ## 6. Formatting and Presentation Contract
 
 `compiler/ml/location.ml` defines the warning/error output contract consumed by parser diagnostics:
