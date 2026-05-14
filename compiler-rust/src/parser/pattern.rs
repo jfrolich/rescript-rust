@@ -1499,39 +1499,7 @@ fn parse_extension_pattern(p: &mut Parser<'_>, start_pos_idx: PosIdx) -> Pattern
     // OCaml includes the % in the extension name location
     // start_pos_idx already points to the start (before %)
     p.expect(Token::Percent);
-    let mut parts: Vec<String> = vec![];
-
-    loop {
-        match &p.token {
-            Token::Lident(name) | Token::Uident(name) => {
-                parts.push(name.to_string());
-                p.next();
-            }
-            _ if p.token.is_keyword() => {
-                parts.push(p.token.to_string());
-                p.next();
-            }
-            _ => break,
-        }
-
-        if p.token == Token::Dot {
-            p.next();
-            continue;
-        }
-        break;
-    }
-
-    let id = if parts.is_empty() {
-        p.err(DiagnosticCategory::Message(
-            "Expected extension identifier".to_string(),
-        ));
-        let str_idx = p.arena_mut().intern("error");
-        mknoloc(str_idx)
-    } else {
-        let joined = parts.join(".");
-        let str_idx = p.arena_mut().push_string(joined);
-        with_loc(str_idx, p.mk_loc_idx_to_prev_end(start_pos_idx))
-    };
+    let id = super::module::parse_extension_id(p, start_pos_idx);
 
     let payload = if p.token == Token::Lparen {
         p.next();

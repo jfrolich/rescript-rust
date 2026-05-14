@@ -1035,6 +1035,11 @@ with a reason after checking raise sites.
       `tests/error_output_parity/compiler/fixtures/parser_object_unquoted_field_type.res`,
       and
       `tests/error_output_parity/compiler/fixtures/parser_type_definition_in_function.res`.
+  - Spread-first object type tails parse later lowercase fields through the
+    record-field recovery path before converting to object fields, avoiding the
+    ordinary unquoted-object-field diagnostic
+    - Covered through `res_parser` by
+      `tests/syntax_tests/data/parsing/errors/typexpr/objectSpread.res`.
   - Structure and signature item parsers reject single-`@` attributes with no
     attached node, preserving the standalone-attribute suggestion
     - Covered through `bsc` by
@@ -1171,6 +1176,12 @@ with a reason after checking raise sites.
       `tests/error_output_parity/compiler/fixtures/parser_with_module_path_unexpected.res`,
       and
       `tests/error_output_parity/compiler/fixtures/parser_with_type_uppercase_name.res`.
+  - Local module definitions and block-local `open` expressions use the same
+    uppercase module-name/path diagnostics as the reference parser
+    - Covered through `bsc` by
+      `tests/error_output_parity/compiler/fixtures/parser_local_module_lowercase_name.res`
+      and
+      `tests/error_output_parity/compiler/fixtures/parser_open_expression_lowercase_path.res`.
   - Package type module paths use the same module-identifier parser diagnostic
     as `parse_package_type`
     - Covered through `bsc` by
@@ -1192,6 +1203,16 @@ with a reason after checking raise sites.
       `tests/error_output_parity/compiler/fixtures/parser_type_params_old_parens.res`,
       and
       `tests/error_output_parity/compiler/fixtures/parser_type_var_invalid_name.res`.
+  - Extension identifiers in expression, pattern, type, and structure contexts
+    use the same `parse_attribute_id` unexpected-token recovery as the
+    reference parser, including trailing-dot recovery
+    - Covered through `bsc` by
+      `tests/error_output_parity/compiler/fixtures/parser_extension_expr_unexpected.res`,
+      `tests/error_output_parity/compiler/fixtures/parser_extension_expr_trailing_dot.res`,
+      `tests/error_output_parity/compiler/fixtures/parser_extension_pattern_unexpected.res`,
+      `tests/error_output_parity/compiler/fixtures/parser_extension_structure_unexpected.res`,
+      and
+      `tests/error_output_parity/compiler/fixtures/parser_extension_type_unexpected.res`.
 - `compiler/syntax/src/jsx_v4.ml`
   - `check_multiple_components` rejects more than one `@react.component`
     definition in the same module before generated React type lookups can mask

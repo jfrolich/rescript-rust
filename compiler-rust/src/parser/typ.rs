@@ -1713,7 +1713,8 @@ fn parse_record_or_object_type(p: &mut Parser<'_>) -> CoreType {
             ));
         }
 
-        let fields = parse_object_fields(p);
+        let allow_record_lidents_after_spread = !is_object && p.token == Token::DotDotDot;
+        let fields = parse_object_fields(p, allow_record_lidents_after_spread);
         p.expect(Token::Rbrace);
         let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
         let typ = CoreType {
@@ -1736,6 +1737,7 @@ pub fn parse_object_type_body(p: &mut Parser<'_>, start_pos_idx: PosIdx) -> Core
     // The caller provides the PosIdx directly for identity-based position sharing.
 
     // Check for open/closed markers: {. ... } or {.. ... }
+    let starts_with_object_marker = matches!(p.token, Token::Dot | Token::DotDot);
     let closed = if p.token == Token::DotDot {
         p.next();
         ClosedFlag::Open
@@ -1746,7 +1748,8 @@ pub fn parse_object_type_body(p: &mut Parser<'_>, start_pos_idx: PosIdx) -> Core
         ClosedFlag::Closed
     };
 
-    let fields = parse_object_fields(p);
+    let allow_record_lidents_after_spread = !starts_with_object_marker && p.token == Token::DotDotDot;
+    let fields = parse_object_fields(p, allow_record_lidents_after_spread);
     p.expect(Token::Rbrace);
     let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
     let typ = CoreType {
@@ -1766,10 +1769,14 @@ pub fn parse_object_type_body(p: &mut Parser<'_>, start_pos_idx: PosIdx) -> Core
 }
 
 /// Parse object fields.
-fn parse_object_fields(p: &mut Parser<'_>) -> Vec<ObjectField> {
+fn parse_object_fields(
+    p: &mut Parser<'_>,
+    allow_record_lidents_after_spread: bool,
+) -> Vec<ObjectField> {
     // Leave breadcrumb matching OCaml's parse_comma_delimited_region ~grammar:StringFieldDeclarations
     p.leave_breadcrumb(Grammar::StringFieldDeclarations);
     let mut fields = vec![];
+    let mut in_spread_tail = false;
 
     while p.token != Token::Rbrace && p.token != Token::Eof {
         // Optional attributes on the field.
@@ -1781,6 +1788,9 @@ fn parse_object_fields(p: &mut Parser<'_>) -> Vec<ObjectField> {
             let typ = parse_typ_expr(p);
             let typ_idx = p.arena_mut().push_core_type(typ);
             fields.push(ObjectField::Oinherit(typ_idx));
+            if allow_record_lidents_after_spread {
+                in_spread_tail = true;
+            }
             if !p.optional(&Token::Comma) {
                 break;
             }
@@ -1791,9 +1801,11 @@ fn parse_object_fields(p: &mut Parser<'_>) -> Vec<ObjectField> {
         let name = match &p.token {
             Token::Lident(n) => {
                 let name = n.to_string();
-                p.err(DiagnosticCategory::Message(
-                    super::core::error_messages::object_quoted_field_name(&name),
-                ));
+                if !in_spread_tail {
+                    p.err(DiagnosticCategory::Message(
+                        super::core::error_messages::object_quoted_field_name(&name),
+                    ));
+                }
                 Some(name)
             }
             Token::String(s) => Some(s.to_string()),
@@ -2716,40 +2728,7 @@ fn parse_extension(p: &mut Parser<'_>) -> Extension {
     // OCaml includes the % in the extension name location
     let id_start_idx = p.start_pos_idx();
     p.expect(Token::Percent);
-    let mut parts: Vec<String> = vec![];
-
-    loop {
-        match &p.token {
-            Token::Lident(name) | Token::Uident(name) => {
-                parts.push(name.to_string());
-                p.next();
-            }
-            _ if p.token.is_keyword() => {
-                parts.push(p.token.to_string());
-                p.next();
-            }
-            _ => break,
-        }
-
-        if p.token == Token::Dot {
-            p.next();
-            continue;
-        }
-        break;
-    }
-
-    let id = if parts.is_empty() {
-        p.err(DiagnosticCategory::Message(
-            "Expected extension identifier".to_string(),
-        ));
-        let idx = p.arena_mut().intern("error");
-        mknoloc(idx)
-    } else {
-        let id = parts.join(".");
-        let loc = p.mk_loc_idx_to_prev_end(id_start_idx);
-        let idx = p.arena_mut().push_string(id.to_string());
-        with_loc(idx, loc)
-    };
+    let id = super::module::parse_extension_id(p, id_start_idx);
 
     // Parse optional payload: %ext(payload)
     let payload = if p.token == Token::Lparen {

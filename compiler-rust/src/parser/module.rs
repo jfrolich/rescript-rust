@@ -657,42 +657,10 @@ pub fn parse_structure_item(p: &mut Parser<'_>) -> Option<StructureItem> {
             // Capture start position BEFORE consuming %% so extension location includes it
             let ext_start_idx = p.start_pos_idx();
             p.next();
-            // Parse extension name - can be dotted like %%item.extension
-            // id_start shares the same position as ext_start
-            let id_start_idx = ext_start_idx;
-            let mut parts = vec![];
-            loop {
-                match &p.token {
-                    Token::Lident(name) | Token::Uident(name) => {
-                        parts.push(name.to_string());
-                        p.next();
-                    }
-                    // Keywords can be used as extension names (e.g., %%private)
-                    token if token.is_keyword() => {
-                        parts.push(token.to_string());
-                        p.next();
-                    }
-                    _ if parts.is_empty() => {
-                        p.err(DiagnosticCategory::Message(
-                            "Expected extension identifier".to_string(),
-                        ));
-                        parts.push("error".to_string());
-                        break;
-                    }
-                    _ => break,
-                }
-                // Check for dot to continue dotted extension name
-                if p.token == Token::Dot {
-                    p.next();
-                } else {
-                    break;
-                }
-            }
-            let id_name = parts.join(".");
-            let str_idx = p.arena_mut().push_string(id_name.to_string());
-            let id = with_loc(str_idx, p.mk_loc_idx_to_prev_end(id_start_idx));
+            let id = parse_extension_id(p, ext_start_idx);
             // Parse optional payload
-            let payload = if p.token == Token::Lparen {
+            let is_adjacent = p.start_pos.cnum == p.prev_end_pos.cnum;
+            let payload = if p.token == Token::Lparen && is_adjacent {
                 p.next();
                 let payload = parse_payload(p);
                 p.expect(Token::Rparen);
@@ -5453,6 +5421,39 @@ pub fn parse_payload(p: &mut Parser<'_>) -> Payload {
     Payload::PStr(Box::new(items))
 }
 
+/// Parse an extension/attribute identifier, matching OCaml's `parse_attribute_id`.
+pub fn parse_extension_id(p: &mut Parser<'_>, start_pos_idx: PosIdx) -> Located<StrIdx> {
+    let mut id = String::new();
+
+    loop {
+        let name = match &p.token {
+            Token::Lident(name) | Token::Uident(name) => Some(name.to_string()),
+            token if token.is_keyword() => Some(token.to_string()),
+            _ => None,
+        };
+
+        match name {
+            Some(name) => {
+                id.push_str(&name);
+                p.next();
+                if p.token == Token::Dot {
+                    p.next();
+                    id.push('.');
+                    continue;
+                }
+                break;
+            }
+            None => {
+                p.err_unexpected();
+                break;
+            }
+        }
+    }
+
+    let id_idx = p.arena_mut().push_string(id);
+    with_loc(id_idx, p.mk_loc_idx_to_prev_end(start_pos_idx))
+}
+
 /// Parse an extension.
 fn parse_extension(p: &mut Parser<'_>) -> Extension {
     // Capture start position BEFORE consuming % or %% so extension location includes it
@@ -5464,39 +5465,7 @@ fn parse_extension(p: &mut Parser<'_>) -> Extension {
     } else {
         p.expect(Token::Percent);
     }
-    let mut parts: Vec<String> = vec![];
-
-    loop {
-        match &p.token {
-            Token::Lident(name) | Token::Uident(name) => {
-                parts.push(name.to_string());
-                p.next();
-            }
-            _ if p.token.is_keyword() => {
-                parts.push(p.token.to_string());
-                p.next();
-            }
-            _ => break,
-        }
-
-        if p.token == Token::Dot {
-            p.next();
-            continue;
-        }
-        break;
-    }
-
-    let id = if parts.is_empty() {
-        p.err(DiagnosticCategory::Message(
-            "Expected extension identifier".to_string(),
-        ));
-        let error_idx = p.arena_mut().intern("error");
-        mknoloc(error_idx)
-    } else {
-        let id_str = parts.join(".");
-        let id_idx = p.arena_mut().push_string(id_str.to_string());
-        with_loc(id_idx, p.mk_loc_idx_to_prev_end(id_start_idx))
-    };
+    let id = parse_extension_id(p, id_start_idx);
 
     // Parse optional payload only if it's immediately adjacent.
     let is_adjacent = p.start_pos.cnum == p.prev_end_pos.cnum;

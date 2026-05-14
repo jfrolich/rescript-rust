@@ -2173,40 +2173,7 @@ pub fn parse_atomic_expr(p: &mut Parser<'_>) -> Expression {
             // OCaml includes the % in the extension name location
             let id_start_idx = p.start_pos_idx();
             p.next();
-            let mut parts: Vec<String> = vec![];
-
-            loop {
-                match &p.token {
-                    Token::Lident(name) | Token::Uident(name) => {
-                        parts.push(name.to_string());
-                        p.next();
-                    }
-                    _ if p.token.is_keyword() => {
-                        parts.push(p.token.to_string());
-                        p.next();
-                    }
-                    _ => break,
-                }
-
-                if p.token == Token::Dot {
-                    p.next();
-                    continue;
-                }
-                break;
-            }
-
-            let name = if parts.is_empty() {
-                p.err(DiagnosticCategory::Message(
-                    "Expected extension name after %".to_string(),
-                ));
-                let error_idx = p.arena_mut().intern("error");
-                with_loc(error_idx, LocIdx::none())
-            } else {
-                let id = parts.join(".");
-                let loc = p.mk_loc_idx_to_prev_end(id_start_idx);
-                let str_idx = p.arena_mut().push_string(id);
-                with_loc(str_idx, loc)
-            };
+            let name = super::module::parse_extension_id(p, id_start_idx);
 
             let payload = if p.token == Token::Lparen {
                 p.next();
@@ -5162,10 +5129,8 @@ fn parse_module_name(p: &mut Parser<'_>) -> Located<StrIdx> {
             with_loc(str_idx, loc)
         }
         _ => {
-            p.err(DiagnosticCategory::Message(
-                "Expected module name".to_string(),
-            ));
-            let str_idx = p.arena_mut().intern("Error");
+            p.err(DiagnosticCategory::Uident(p.token.clone().into_owned()));
+            let str_idx = p.arena_mut().intern("_");
             mknoloc(str_idx)
         }
     }
@@ -5187,20 +5152,18 @@ fn parse_module_longident(p: &mut Parser<'_>) -> Located<LidentIdx> {
                     break;
                 }
             }
-            Token::Lident(name) => {
-                parts.push(name.to_string());
-                p.next();
+            _ => {
+                p.err(DiagnosticCategory::Uident(p.token.clone().into_owned()));
+                if !parts.is_empty() {
+                    parts.push("_".to_string());
+                }
                 break;
             }
-            _ => break,
         }
     }
 
     if parts.is_empty() {
-        p.err(DiagnosticCategory::Message(
-            "Expected module path".to_string(),
-        ));
-        parts.push("Error".to_string());
+        parts.push("_".to_string());
     }
 
     let lid = super::core::build_longident(p.arena_mut(), &parts);
