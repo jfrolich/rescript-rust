@@ -1678,6 +1678,11 @@ with a reason after checking raise sites.
   - `%re` JavaScript regex literal validation
     - Covered by
       `tests/error_output_parity/compiler/fixtures/raw_re_non_regex.res`.
+  - `compiler/ml/bs_flow_ast_utils.ml` is a reporting helper for Flow parser
+    diagnostics used by raw JavaScript payload processing. It reports the first
+    Flow parse error as `Warnings.Bs_ffi_warning`; coverage is tracked at the
+    user-facing callers in `Ast_payload.raw_as_string_exp_exn` and
+    `Ast_attributes.iter_process_bs_string_or_int_as`.
   - `assert_bool_lit` for method `@get`/`@set` predicate payloads
     - Covered by
       `tests/error_output_parity/compiler/fixtures/bs_get_predicate_non_bool.res`
@@ -2038,6 +2043,10 @@ with a reason after checking raise sites.
     constructors and shared warning text. They do not independently raise
     diagnostics; coverage is tracked at the warning emitters such as `Env`,
     `Parmatch`, `Typecore`, `Lam_compile_primitive`, and frontend PPX modules.
+  - `compiler/common/bs_warnings.ml` is a warning helper module. Its
+    `warn_literal_overflow` path is covered through integer literal emitters,
+    and its `error_unescaped_delimiter` path is documented below as the
+    `Warnings.Bs_uninterpreted_delimiters` source-unreachable case.
     A constructor audit against `compiler/ext/warnings.ml` found these legacy or
     inactive warning constructors without active emitters outside the warning
     definition/printer itself:
