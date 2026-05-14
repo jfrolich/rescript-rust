@@ -28,6 +28,9 @@ Scope scanned:
 - `compiler/frontend/ast_exp_handle_external.ml`
 - `compiler/frontend/ast_exp_extension.ml`
 - `compiler/frontend/typemod_hide.ml`
+- `compiler/ml/env.ml`
+- `compiler/ml/transl_recmodule.ml`
+- `compiler/core/lam_compile_primitive.ml`
 
 ## 1. Core Diagnostic Model
 
@@ -932,7 +935,53 @@ right-hand-side check:
 1. `Rec_check.Illegal_letrec_expr`
    - covered by `tests/error_output_parity/compiler/fixtures/illegal_letrec_expr.res`
 
-### 5.10 Frontend Helper Diagnostics
+### 5.10 Backend and Environment Diagnostics
+
+`compiler/ml/env.ml:57-62` defines environment-loading and value-name errors.
+Coverage now includes:
+
+1. `Env.Illegal_renaming`
+   - covered by `tests/error_output_parity/compiler/cases/illegal_renaming.res`
+2. `Env.Inconsistent_import`
+   - covered by
+     `tests/error_output_parity/compiler/cases/inconsistent_import.res`
+3. `Env.Missing_module`
+   - covered by `tests/error_output_parity/compiler/cases/missing_module.res`
+4. `Env.Illegal_value_name`
+   - covered by
+     `tests/error_output_parity/compiler/cases/illegal_value_name.res`
+5. `Warnings.No_cmi_file`
+   - covered by
+     `tests/error_output_parity/compiler/cases/no_cmi_file_warning.res`
+   - the current-unit `-no-alias-deps` branch is covered by
+     `tests/error_output_parity/compiler/cases/module_alias_current_unit_no_alias_deps.res`
+
+`compiler/ml/transl_recmodule.ml:5-7` defines the recursive-module translation
+error:
+
+1. `Transl_recmodule.Circular_dependency`
+   - covered by
+     `tests/error_output_parity/compiler/fixtures/circular_recursive_module.res`
+     and the `module type of` approximation path in
+     `tests/error_output_parity/compiler/fixtures/module_type_of_structure_recursive_module.res`
+
+`compiler/core/lam_compile_primitive.ml` has direct backend diagnostics for
+primitive lowering:
+
+1. `Pimport` module/file argument rejection
+   - covered by `dynamic_import_global_value.res`,
+     `dynamic_import_value_argument.res`,
+     `dynamic_import_local_value.res`, and
+     `dynamic_import_no_argument_external.res`
+2. `Pimport` primitive arity guard
+   - source-unreachable from ordinary ReScript because `Lam_compile` handles
+     `%import` arity before calling `Lam_compile_primitive.translate`; the
+     lower primitive helper keeps the same diagnostic for invalid lambda input
+3. `Pdict_has` invalid external signature
+   - covered by
+     `tests/error_output_parity/compiler/fixtures/dict_has_bad_arity.res`
+
+### 5.11 Frontend Helper Diagnostics
 
 `compiler/frontend/bs_syntaxerr.ml:27-51` defines the finite frontend syntax
 error constructor set. Coverage now includes:
@@ -1042,7 +1091,7 @@ Latest broad evidence after the untagged-instance expansion:
 - `TIMEOUT_SECONDS=10 ./scripts/test_error_output_parity.sh`
   passes 1144/1144 with the debug Rust compiler
 
-### 5.11 Frontend Reachability Notes
+### 5.12 Frontend Reachability Notes
 
 `compiler/frontend/ast_exp_apply.ml` has defensive diagnostics for malformed
 rewritten pipe/property applications:
