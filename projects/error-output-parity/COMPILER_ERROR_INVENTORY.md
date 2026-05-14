@@ -238,18 +238,19 @@ with a reason after checking raise sites.
   `tests/error_output_parity/compiler/fixtures/cannot_infer_pack_signature.res`.
 - `Not_a_packed_module`: covered by
   `tests/error_output_parity/compiler/fixtures/not_a_packed_module.res`.
-- `Recursive_local_constraint`: checked against the `unify_pat_types_gadt`
-  raise site in `compiler/ml/typecore.ml`. Local GADT constraint cycle probes
-  found so far, including
-  `tests/error_output_parity/compiler/fixtures/recursive_local_constraint.res`,
+- `Recursive_local_constraint`: source-unreachable in this branch. The
+  reporter is wired through `unify_pat_types_gadt` in
+  `compiler/ml/typecore.ml`, but the only producer would be
+  `Ctype.Unification_recursive_abbrev`, which is only constructed by the
+  `Ctype.unify` wrapper when `Ctype.Recursive_abbrev` escapes. A source grep of
+  `compiler/ml/ctype.ml` finds `Recursive_abbrev` only at the exception
+  declaration and that wrapper catch; there is no raise site. Local GADT
+  constraint cycle probes, including
+  `tests/error_output_parity/compiler/fixtures/recursive_local_constraint.res`
+  and
   `tests/error_output_parity/compiler/fixtures/recursive_local_constraint_alias.res`,
-  surface as `Pattern_type_clash`; an additional OCaml-only generated probe over
-  4,992 one- and two-parameter GADT result/payload/scrutinee shapes, plus
-  targeted transparent-alias payload/result feedback shapes, found no
-  `Recursive local constraint` reporter. Keep this variant listed until a
-  direct `Unification_recursive_abbrev` source-level repro is found or the raise
-  site is proven unreachable for ReScript syntax. Rust now mirrors the OCaml
-  check location: `unify_pattern_types_gadt` maps recursive abbreviation
+  therefore surface as `Pattern_type_clash` instead. Rust still mirrors the
+  OCaml check location: `unify_pattern_types_gadt` maps recursive abbreviation
   failures to `RecursiveLocalConstraint`, and `add_gadt_equation` uses a
   `local_non_recursive_abbrev` walk before installing a local constraint.
 - `Not_a_variant_type`: covered by
