@@ -15230,6 +15230,48 @@ fn ambiguous_record_label_warning_info<'a>(
     Some((types, Some(selected_path)))
 }
 
+fn reduce_record_label_scope_by_ids<'a>(
+    candidates: Vec<&'a crate::types::LabelDescription>,
+    field_names: &[&str],
+    closed_record: bool,
+    env: &Env,
+    pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
+    ctx: &'a TypeContext,
+) -> Option<Vec<&'a crate::types::LabelDescription>> {
+    // OCaml compiler/ml/typecore.ml:1071-1095 filters the visible label scope
+    // with every field name before Label.disambiguate can call
+    // compiler/ml/typecore.ml:975-1006 `ambiguous_types`. Use the same reduced
+    // scope for warnings; comparing the full scope forces unrelated component
+    // signatures before OCaml would.
+    let mut matching_ids = false;
+    let mut matching_closed = Vec::new();
+    for label in candidates {
+        let Some(info) = build_record_label_descriptions_info(label.lbl_res, env, pers_env, ctx)
+        else {
+            continue;
+        };
+        if !field_names
+            .iter()
+            .all(|name| info.summary.contains_label(name))
+        {
+            continue;
+        }
+        matching_ids = true;
+        if info.matches_field_names(field_names, closed_record) {
+            matching_closed.push(label);
+        }
+    }
+    if !matching_ids {
+        return None;
+    }
+
+    if matching_closed.is_empty() {
+        None
+    } else {
+        Some(matching_closed)
+    }
+}
+
 fn force_unqualified_record_label_disambiguate_by_type_compare<'a>(
     field_name: &str,
     record_opath_ty: Option<TypeExprRef>,
@@ -15682,6 +15724,14 @@ fn type_record(
         {
             let candidates = env.find_all_labels(field_name);
             if candidates.len() > 1
+                && let Some(candidates) = reduce_record_label_scope_by_ids(
+                    candidates,
+                    &field_names,
+                    closed_record,
+                    env,
+                    &mut tctx.persistent_env,
+                    ctx,
+                )
                 && let Some((types, selected_path)) = ambiguous_record_label_warning_info(
                     label,
                     &candidates,
