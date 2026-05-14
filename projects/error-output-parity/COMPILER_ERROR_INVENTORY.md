@@ -180,12 +180,10 @@ with a reason after checking raise sites.
   `tests/error_output_parity/compiler/fixtures/abstract_wrong_label_optional.res`,
   and
   `tests/error_output_parity/compiler/fixtures/abstract_wrong_label_unlabeled.res`.
-- `Scoping_let_module`: source-unreachable from normal ReScript. The
-  `Pexp_letmodule` raise site in `compiler/ml/typecore.ml` is after typing the
-  local module body with `type_expect`; source-level probes that make the local
-  module type escape are rejected during that body expectation as
-  `Expr_type_clash` or `Pattern_type_clash` before the later `unify_var` can
-  raise `Scoping_let_module`. The observable earlier reporters are covered by
+- `Scoping_let_module`: covered by the final `Pexp_letmodule` result escape in
+  `tests/error_output_parity/compiler/fixtures/let_module_escape_result.res`.
+  The nearby local-module escape probes that fail during body expectation are
+  covered separately by
   `tests/error_output_parity/compiler/fixtures/scoping_let_module.res`,
   `tests/error_output_parity/compiler/fixtures/scoping_let_module_value.res`,
   `tests/error_output_parity/compiler/fixtures/let_module_escape_value.res`,
@@ -240,15 +238,16 @@ with a reason after checking raise sites.
   `tests/error_output_parity/compiler/fixtures/not_a_packed_module.res`.
 - `Recursive_local_constraint`: checked against the `unify_pat_types_gadt`
   raise site in `compiler/ml/typecore.ml`. Local GADT constraint cycle probes
-  found so far surface as `Pattern_type_clash`; an additional OCaml-only
-  generated probe over 4,992 one- and two-parameter GADT result/payload/scrutinee
-  shapes found no `Recursive local constraint` reporter. Keep this variant
-  listed until a direct `Unification_recursive_abbrev` source-level repro is
-  found or the raise site is proven unreachable for ReScript syntax. Rust now
-  mirrors the OCaml check location: `unify_pattern_types_gadt` maps recursive
-  abbreviation failures to `RecursiveLocalConstraint`, and
-  `add_gadt_equation` uses a `local_non_recursive_abbrev` walk before
-  installing a local constraint.
+  found so far, including
+  `tests/error_output_parity/compiler/fixtures/recursive_local_constraint.res`,
+  surface as `Pattern_type_clash`; an additional OCaml-only generated probe over
+  4,992 one- and two-parameter GADT result/payload/scrutinee shapes found no
+  `Recursive local constraint` reporter. Keep this variant listed until a
+  direct `Unification_recursive_abbrev` source-level repro is found or the raise
+  site is proven unreachable for ReScript syntax. Rust now mirrors the OCaml
+  check location: `unify_pattern_types_gadt` maps recursive abbreviation
+  failures to `RecursiveLocalConstraint`, and `add_gadt_equation` uses a
+  `local_non_recursive_abbrev` walk before installing a local constraint.
 - `Not_a_variant_type`: covered by
   `tests/error_output_parity/compiler/fixtures/not_a_variant_type_spread.res`.
 - `Not_subtype`: covered by
