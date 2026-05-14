@@ -20,6 +20,7 @@ Scope scanned:
 - `compiler/ml/printtyp.ml`
 - `compiler/ml/variant_coercion.ml`
 - `compiler/ml/record_coercion.ml`
+- `compiler/ml/ast_untagged_variants.ml`
 
 ## 1. Core Diagnostic Model
 
@@ -645,7 +646,74 @@ Focused evidence:
 - `TIMEOUT_SECONDS=10 ./scripts/test_error_output_parity.sh --compiler-only coerce_`
   passes 17/17
 
-### 5.5 Module Inclusion Type Mismatch Diagnostics
+### 5.5 Untagged Variant Diagnostics
+
+`compiler/ml/ast_untagged_variants.ml:52-69` defines the finite untagged
+variant error set. Coverage now includes:
+
+1. `Ast_untagged_variants.InvalidVariantAsAnnotation`
+   - covered by
+     `tests/error_output_parity/compiler/fixtures/untagged_invalid_as_annotation.res`
+2. `Ast_untagged_variants.Duplicated_bs_as`
+   - covered by
+     `tests/error_output_parity/compiler/fixtures/untagged_duplicate_as.res`
+3. `Ast_untagged_variants.InvalidVariantTagAnnotation`
+   - covered by
+     `tests/error_output_parity/compiler/fixtures/untagged_invalid_tag_annotation.res`
+4. `Ast_untagged_variants.TagFieldNameConflict`
+   - covered by
+     `tests/error_output_parity/compiler/fixtures/untagged_tag_field_conflict.res`
+5. `Ast_untagged_variants.InvalidUntaggedVariantDefinition`
+   - `OnlyOneUnknown` is covered by `untagged_only_one_unknown.res`
+   - `AtMostOneObject` is covered by `untagged_at_most_one_object.res`
+   - `AtMostOneFunction` is covered by `untagged_at_most_one_function.res`
+   - `AtMostOneString` is covered by `untagged_at_most_one_string.res`
+   - `AtMostOneNumber` is covered by `untagged_at_most_one_number.res`
+   - `AtMostOneBigint` is covered by `untagged_at_most_one_bigint.res`
+   - `AtMostOneBoolean` is covered by `untagged_at_most_one_boolean.res`
+   - `DuplicateLiteral` string and non-string payloads are covered by
+     `untagged_duplicate_string_literal.res` and
+     `untagged_duplicate_nonstring_literal.res`
+   - `ConstructorMoreThanOneArg` is covered by
+     `untagged_constructor_more_than_one_arg.res`
+   - every `AtMostOneInstance` display name from
+     `ast_untagged_variants.ml:1-50` is now covered by a dedicated fixture:
+     `untagged_at_most_one_array.res`,
+     `untagged_at_most_one_arraybuffer.res`,
+     `untagged_at_most_one_bigint64array.res`,
+     `untagged_at_most_one_biguint64array.res`,
+     `untagged_at_most_one_blob.res`,
+     `untagged_at_most_one_dataview.res`,
+     `untagged_at_most_one_date.res`,
+     `untagged_at_most_one_file.res`,
+     `untagged_at_most_one_float32array.res`,
+     `untagged_at_most_one_float64array.res`,
+     `untagged_at_most_one_int16array.res`,
+     `untagged_at_most_one_int32array.res`,
+     `untagged_at_most_one_int8array.res`,
+     `untagged_at_most_one_map.res`,
+     `untagged_at_most_one_promise.res`,
+     `untagged_at_most_one_regexp.res`,
+     `untagged_at_most_one_set.res`,
+     `untagged_at_most_one_uint16array.res`,
+     `untagged_at_most_one_uint32array.res`,
+     `untagged_at_most_one_uint8array.res`,
+     `untagged_at_most_one_uint8clampedarray.res`,
+     `untagged_at_most_one_weakmap.res`, and
+     `untagged_at_most_one_weakset.res`
+
+The post-env recursive type group path is covered in both implementation and
+signature contexts by `untagged_recursive_promise_alias_collision.res` and
+`untagged_recursive_promise_alias_collision.resi`.
+
+Focused evidence:
+
+- `TIMEOUT_SECONDS=10 ./scripts/test_error_output_parity.sh --compiler-only untagged_at_most_one_`
+  passes 29/29
+- `TIMEOUT_SECONDS=10 ./scripts/test_error_output_parity.sh --compiler-only untagged_`
+  passes 40/40
+
+### 5.6 Module Inclusion Type Mismatch Diagnostics
 
 `compiler/ml/includecore.ml:159-177` defines the type-declaration mismatch
 details printed through `Typemod.Not_included` and related signature-mismatch
@@ -754,7 +822,7 @@ reachability notes:
   ReScript source fixture is currently known that prints
   `Module <path> cannot be aliased`.
 
-### 5.6 Compiled Interface Format Diagnostics
+### 5.7 Compiled Interface Format Diagnostics
 
 `compiler/ml/cmi_format.ml:18-21` defines compiled-interface reader errors.
 These are covered through direct `.cmi` cases in
@@ -772,7 +840,7 @@ It is covered by `tests/error_output_parity/compiler/cases/gentype_stale_cmti.re
 where `-bs-gentype` selects a stale `.cmti` containing only CMI data and both
 compilers print `Fatal error: exception Cmt_format.Error(_)`.
 
-### 5.7 Frontend Direct `raise_errorf` Diagnostics
+### 5.8 Frontend Direct `raise_errorf` Diagnostics
 
 Several frontend rewrites raise plain `Location.raise_errorf` diagnostics
 instead of typed `type error` constructors. Coverage includes:
@@ -831,7 +899,7 @@ instead of typed `type error` constructors. Coverage includes:
    - a config-record field with an explicit payload is covered by
      `tests/error_output_parity/compiler/fixtures/bs_return_record_value_payload.res`
 
-### 5.8 Recursive Value Diagnostics
+### 5.9 Recursive Value Diagnostics
 
 `compiler/ml/rec_check.ml:453-475` defines the backend recursive-value
 right-hand-side check:
