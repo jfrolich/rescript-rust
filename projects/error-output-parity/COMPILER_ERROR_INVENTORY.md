@@ -1982,6 +1982,20 @@ with a reason after checking raise sites.
     constructors and shared warning text. They do not independently raise
     diagnostics; coverage is tracked at the warning emitters such as `Env`,
     `Parmatch`, `Typecore`, `Lam_compile_primitive`, and frontend PPX modules.
+    A constructor audit against `compiler/ext/warnings.ml` found these legacy or
+    inactive warning constructors without active emitters outside the warning
+    definition/printer itself:
+    `Comment_start`, `Comment_not_end`, `Method_override`,
+    `Instance_variable_override`, `Illegal_backslash`,
+    `Implicit_public_methods`, `Bad_module_name`, `Eol_in_string`,
+    `Eliminated_optional_arguments`, `Bad_docstring`, `Bs_fragile_external`,
+    and `Bs_unimplemented_primitive`.
+    `Warnings.Bs_uninterpreted_delimiters` has one emitter in
+    `compiler/frontend/bs_ast_invariant.ml`, but source probes show the normal
+    ReScript parser/PPX path does not leave an unescaped `Some "js"` delimiter
+    for `emit_external_warnings`: ordinary strings/templates are rewritten by
+    `Bs_builtin_ppx`, while `-bs-no-builtin-ppx` returns before the invariant
+    walker runs.
   - `compiler/syntax/src/jsx_common.ml` only wraps JSX helper diagnostics used
     by `jsx_v4.ml`; the observable messages are covered under the
     `compiler/syntax/src/jsx_v4.ml` fixtures.
