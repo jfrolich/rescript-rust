@@ -2279,11 +2279,11 @@ through higher-level errors such as `Typemod.Not_included`,
 Coverage should include representative include mismatch symptoms rather than
 only the wrapper variant:
 
-- missing values (covered by
+- `Includemod.Missing_field` for missing values (covered by
   `tests/error_output_parity/compiler/fixtures/not_included_missing_value.res`)
-- value description mismatch (covered by
+- `Includemod.Value_descriptions` for value description mismatch (covered by
   `tests/error_output_parity/compiler/fixtures/not_included_value_mismatch.res`)
-- type declaration mismatch (covered by
+- `Includemod.Type_declarations` for type declaration mismatch (covered by
   `tests/error_output_parity/compiler/fixtures/not_included_type_mismatch.res`)
 - type declaration mismatch sub-reasons for arity, privacy, kind,
   constraints, manifest, variance, immediate, unboxed representation, and
@@ -2323,7 +2323,8 @@ only the wrapper variant:
   `tests/error_output_parity/compiler/fixtures/not_included_gadt_constructor_result.res`
   and the result presence/absence branch by
   `tests/error_output_parity/compiler/fixtures/not_included_gadt_constructor_result_presence.res`)
-- extension constructor mismatch (covered by
+- `Includemod.Extension_constructors` for extension constructor mismatch
+  (covered by
   `tests/error_output_parity/compiler/fixtures/not_included_extension_mismatch.res`
   and the GADT result-type branch by
   `tests/error_output_parity/compiler/fixtures/not_included_extension_gadt_result.res`
@@ -2333,26 +2334,32 @@ only the wrapper variant:
   `tests/error_output_parity/compiler/fixtures/not_included_extension_rebind_gadt_result.res`
   and
   `tests/error_output_parity/compiler/fixtures/not_included_extension_rebind_gadt_result_presence.res`)
-- module mismatch (covered by
+- `Includemod.Module_types` for module mismatch (covered by
   `tests/error_output_parity/compiler/fixtures/not_included_module_mismatch.res`)
-- module type mismatch (covered by
+- `Includemod.Modtype_infos` for module type mismatch (covered by
   `tests/error_output_parity/compiler/fixtures/not_included_modtype_mismatch.res`)
-- module type declaration permutation mismatch (covered by
+- `Includemod.Modtype_permutation` for module type declaration permutation
+  mismatch (covered by
   `tests/error_output_parity/compiler/fixtures/modtype_permutation.res`)
-- invalid module alias / functor-argument alias requirement (covered by
+- `Includemod.Invalid_module_alias` for invalid module alias /
+  functor-argument alias requirement (covered by
   `tests/error_output_parity/compiler/fixtures/not_included_functor_arg_module_alias.res`
   and the alias mismatch branch in
   `tests/error_output_parity/compiler/fixtures/not_included_functor_arg_module_alias_mismatch.res`)
+- `Includemod.Interface_mismatch` for implementation/interface compunit
+  mismatch wrapping the concrete include symptom (covered by
+  `tests/error_output_parity/compiler/cases/compunit_value_mismatch.res`)
 - lax module alias normalization through persistent components (covered by
   `tests/error_output_parity/compiler/cases/include_alias_lax_normalization.res`)
 - strict module alias normalization through flattened runtime units has a
   success guard in
   `tests/error_output_parity/compiler/fixtures/include_alias_strict_flattened_runtime_success.res`
-- unbound module path (covered by
+- `Includemod.Unbound_module_path` for unbound module path (covered by
   `tests/error_output_parity/compiler/cases/include_unbound_module_path.res`)
-- unbound module type path is not reachable from normal `.res`/`.resi` source
-  found so far. `compiler/ml/includemod.ml` only calls `expand_module_path`
-  after `may_expand_module_path` has just succeeded against the same
+- `Includemod.Unbound_modtype_path` for unbound module type path is not
+  reachable from normal `.res`/`.resi` source found so far.
+  `compiler/ml/includemod.ml` only calls `expand_module_path` after
+  `may_expand_module_path` has just succeeded against the same
   `Env.find_modtype_expansion` lookup, and normal source references to missing
   module types are rejected earlier as `Typetexp.Unbound_modtype`. Probes for
   abstract structure module-type declarations also hit parser diagnostics before
