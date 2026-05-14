@@ -2205,7 +2205,9 @@ with a reason after checking raise sites.
       `%@as is not supported with optional yet` is not reachable from normal
       `.res` syntax. Optional `_` arguments are rejected first by
       `get_opt_arg_type`, and non-underscore optional `@as` attributes fall
-      through `spec_of_ptyp` as unused attributes.
+      through `spec_of_ptyp` as unused attributes. The optional `_` + `@as`
+      source path is guarded by
+      `tests/error_output_parity/compiler/fixtures/bs_obj_optional_as_underscore.res`.
   - `@module` with payload-bearing `@new`
     - Covered by
       `tests/error_output_parity/compiler/fixtures/bs_module_new_payload.res`.

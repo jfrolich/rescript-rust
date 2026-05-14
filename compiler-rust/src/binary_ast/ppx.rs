@@ -1334,7 +1334,10 @@ fn collect_obj_optional_as_warnings(
     for arg in args {
         let arg_type = arena.get_core_type(arg.typ);
         let warn_type_as = match arg.lbl {
-            ArgLabel::Optional(_) => true,
+            // OCaml `Ast_external_process.get_opt_arg_type` raises
+            // `Invalid_underscore_type_in_external` for optional `_` before
+            // unused `@as` warnings are collected.
+            ArgLabel::Optional(_) => !matches!(&*arg_type.ptyp_desc, CoreTypeDesc::Ptyp_any),
             ArgLabel::Labelled(_) => !matches!(&*arg_type.ptyp_desc, CoreTypeDesc::Ptyp_any),
             ArgLabel::Nolabel => false,
         };
