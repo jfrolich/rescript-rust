@@ -361,6 +361,17 @@ instead of typed `type error` constructors. Coverage includes:
      `Not supported pattern match on modules`
    - covered by
      `tests/error_output_parity/compiler/fixtures/module_pattern_match_qualified.res`
+2. `compiler/core/lam_compile.ml:1765-1818`
+   - `%import` is rejected for missing arguments and for exactly one argument
+     that is not a module or module value
+   - missing/extra-argument arity is covered by
+     `tests/error_output_parity/compiler/fixtures/dynamic_import_no_argument_external.res`
+     and
+     `tests/error_output_parity/compiler/fixtures/dynamic_import_too_many_arguments_external.res`
+   - unsupported single value argument is covered by
+     `tests/error_output_parity/compiler/fixtures/dynamic_import_value_argument.res`
+     and the raw external primitive path by
+     `tests/error_output_parity/compiler/fixtures/dynamic_import_value_external.res`
 
 ### 5.4 Recursive Value Diagnostics
 
@@ -391,6 +402,12 @@ and `pval_prim` with more than one primitive string. Ordinary ReScript external
 syntax requires exactly one primitive string and parser probes such as
 `external x: int = ("a", "b")` report the earlier external-syntax diagnostic
 instead of reaching `Ast_external`.
+
+`compiler/frontend/bs_syntaxerr.ml` still defines and formats
+`Conflict_bs_bs_this_bs_meth`, but the current OCaml source has no raise site
+for that constructor. `rg Conflict_bs_bs_this_bs_meth compiler` only finds the
+type definition and formatter branches, so there is no direct ReScript fixture
+for this dead diagnostic.
 
 ## 6. Formatting and Presentation Contract
 
