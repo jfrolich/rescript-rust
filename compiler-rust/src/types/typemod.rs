@@ -3113,6 +3113,39 @@ pub enum TypeExtensionMismatch {
     Variance,
 }
 
+/// Context for `Typedecl.Unbound_type_var` detail lines.
+#[derive(Debug, Clone)]
+pub enum UnboundTypeVarDetail {
+    /// The variable appears in a type expression.
+    Type {
+        /// Type expression that contains the variable.
+        ty: TypeExprRef,
+    },
+    /// The variable appears in a variant case payload.
+    Case {
+        /// Constructor/tag name.
+        name: String,
+        /// Payload type that contains the variable.
+        ty: TypeExprRef,
+        /// Whether this is a polymorphic-variant tag.
+        polymorphic: bool,
+    },
+    /// The variable appears in a record field.
+    Field {
+        /// Field name.
+        name: String,
+        /// Field type that contains the variable.
+        ty: TypeExprRef,
+    },
+    /// The variable appears in an object method.
+    Method {
+        /// Method name.
+        name: String,
+        /// Method type that contains the variable.
+        ty: TypeExprRef,
+    },
+}
+
 /// Errors that can occur during module type checking.
 #[derive(Debug, Clone)]
 pub enum TypeModError {
@@ -3288,6 +3321,8 @@ pub enum TypeModError {
         loc: LocIdx,
         /// Unbound variable name as printed by OCaml, including the leading quote.
         name: String,
+        /// Extra detail matching `Typedecl.explain_unbound`.
+        detail: Option<UnboundTypeVarDetail>,
     },
     /// An extension constructor contains an unbound type variable.
     UnboundTypeVarExt {
@@ -17952,10 +17987,7 @@ fn find_unbound_type_var_name(
                 .or_else(|| find_unbound_type_var_name(ctx, *rest, allowed, visited))
         }
         TypeDesc::Tvariant(row) => {
-            if let Some(name) = find_unbound_type_var_name(ctx, row.row_more, allowed, visited) {
-                return Some(name);
-            }
-            row.row_fields.iter().find_map(|(_, field)| match field {
+            let field_name = row.row_fields.iter().find_map(|(_, field)| match field {
                 crate::types::RowField::Rpresent(Some(ty)) => {
                     find_unbound_type_var_name(ctx, *ty, allowed, visited)
                 }
@@ -17963,7 +17995,9 @@ fn find_unbound_type_var_name(
                     .iter()
                     .find_map(|ty| find_unbound_type_var_name(ctx, *ty, allowed, visited)),
                 _ => None,
-            })
+            });
+            field_name
+                .or_else(|| find_unbound_type_var_name(ctx, row.row_more, allowed, visited))
         }
         TypeDesc::Tnil => None,
     }
@@ -17982,6 +18016,311 @@ fn find_unbound_type_var_name_in_constructor_args(
         crate::types::ConstructorArguments::CstrRecord(labels) => labels.iter().find_map(|label| {
             find_unbound_type_var_name(ctx, label.ld_type, allowed, &mut visited)
         }),
+    }
+}
+
+// Mirrors OCaml `Ctype.closed_type_decl`/`closed_type` for declaration-level
+// unbound variables: declared params are marked as allowed, constructor payloads
+// and record fields are checked before the manifest, and each checked type
+// expression reports the last free variable seen by `free_vars_rec`.
+fn collect_unbound_type_vars_in_type_expr(
+    ctx: &crate::types::context::TypeContext,
+    ty: TypeExprRef,
+    allowed: &HashSet<TypeExprRef>,
+    visited: &mut HashSet<TypeExprRef>,
+    vars: &mut Vec<TypeExprRef>,
+) {
+    let ty = ctx.repr(ty);
+    if allowed.contains(&ty) || !visited.insert(ty) {
+        return;
+    }
+
+    match &*ctx.get_desc(ty) {
+        TypeDesc::Tvar(_) => vars.push(ty),
+        TypeDesc::Tobject { fields, .. } => {
+            collect_unbound_type_vars_in_type_expr(ctx, *fields, allowed, visited, vars);
+        }
+        TypeDesc::Tfield { typ, rest, .. } => {
+            collect_unbound_type_vars_in_type_expr(ctx, *typ, allowed, visited, vars);
+            collect_unbound_type_vars_in_type_expr(ctx, *rest, allowed, visited, vars);
+        }
+        TypeDesc::Tvariant(row) => {
+            let row = crate::types::btype::row_repr(ctx, row);
+            for (_, field) in &row.row_fields {
+                match crate::types::btype::row_field_repr(ctx, field) {
+                    crate::types::RowField::Rpresent(Some(ty)) => {
+                        collect_unbound_type_vars_in_type_expr(ctx, ty, allowed, visited, vars);
+                    }
+                    crate::types::RowField::Reither { types, .. } => {
+                        for ty in types {
+                            collect_unbound_type_vars_in_type_expr(
+                                ctx, ty, allowed, visited, vars,
+                            );
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            if !crate::types::btype::static_row(ctx, &row) {
+                collect_unbound_type_vars_in_type_expr(
+                    ctx,
+                    row.row_more,
+                    allowed,
+                    visited,
+                    vars,
+                );
+            }
+        }
+        _ => {
+            crate::types::btype::iter_type_expr(ctx, ty, |child| {
+                collect_unbound_type_vars_in_type_expr(ctx, child, allowed, visited, vars);
+            });
+        }
+    }
+}
+
+fn find_unbound_type_var_in_type_expr(
+    ctx: &crate::types::context::TypeContext,
+    ty: TypeExprRef,
+    allowed: &HashSet<TypeExprRef>,
+) -> Option<TypeExprRef> {
+    let mut vars = Vec::new();
+    let mut visited = HashSet::new();
+    collect_unbound_type_vars_in_type_expr(ctx, ty, allowed, &mut visited, &mut vars);
+    vars.last().copied()
+}
+
+fn find_unbound_type_var_in_constructor_args(
+    ctx: &crate::types::context::TypeContext,
+    args: &crate::types::ConstructorArguments,
+    allowed: &HashSet<TypeExprRef>,
+) -> Option<TypeExprRef> {
+    match args {
+        crate::types::ConstructorArguments::CstrTuple(types) => types
+            .iter()
+            .find_map(|ty| find_unbound_type_var_in_type_expr(ctx, *ty, allowed)),
+        crate::types::ConstructorArguments::CstrRecord(labels) => labels
+            .iter()
+            .find_map(|label| find_unbound_type_var_in_type_expr(ctx, label.ld_type, allowed)),
+    }
+}
+
+fn find_unbound_type_var_in_type_decl(
+    ctx: &crate::types::context::TypeContext,
+    decl: &crate::types::TypeDeclaration,
+) -> Option<TypeExprRef> {
+    let allowed: HashSet<TypeExprRef> = decl
+        .type_params
+        .iter()
+        .map(|ty_ref| ctx.repr(*ty_ref))
+        .collect();
+
+    match &decl.type_kind {
+        crate::types::TypeKind::TypeVariant(constructors) => {
+            for cstr in constructors {
+                if cstr.cd_res.is_none()
+                    && let Some(ty) =
+                        find_unbound_type_var_in_constructor_args(ctx, &cstr.cd_args, &allowed)
+                {
+                    return Some(ty);
+                }
+            }
+        }
+        crate::types::TypeKind::TypeRecord(labels, _) => {
+            for label in labels {
+                if let Some(ty) = find_unbound_type_var_in_type_expr(ctx, label.ld_type, &allowed)
+                {
+                    return Some(ty);
+                }
+            }
+        }
+        crate::types::TypeKind::TypeAbstract | crate::types::TypeKind::TypeOpen => {}
+    }
+
+    decl.type_manifest
+        .and_then(|manifest| find_unbound_type_var_in_type_expr(ctx, manifest, &allowed))
+}
+
+fn type_var_report_name_from_type_expr(
+    ctx: &crate::types::context::TypeContext,
+    ty: TypeExprRef,
+) -> String {
+    match &*ctx.get_desc(ctx.repr(ty)) {
+        TypeDesc::Tvar(name) | TypeDesc::Tunivar(name) => type_var_report_name(name),
+        _ => "_".to_string(),
+    }
+}
+
+fn constructor_args_display_type(
+    ctx: &crate::types::context::TypeContext,
+    args: &crate::types::ConstructorArguments,
+) -> Option<TypeExprRef> {
+    match args {
+        crate::types::ConstructorArguments::CstrTuple(types) => match types.as_slice() {
+            [] => None,
+            [ty] => Some(*ty),
+            _ => Some(ctx.new_tuple(types.clone())),
+        },
+        crate::types::ConstructorArguments::CstrRecord(labels) => {
+            let types = labels.iter().map(|label| label.ld_type).collect::<Vec<_>>();
+            match types.as_slice() {
+                [] => None,
+                [ty] => Some(*ty),
+                _ => Some(ctx.new_tuple(types)),
+            }
+        }
+    }
+}
+
+fn row_field_display_type(
+    ctx: &crate::types::context::TypeContext,
+    field: &crate::types::RowField,
+) -> Option<TypeExprRef> {
+    match crate::types::btype::row_field_repr(ctx, field) {
+        crate::types::RowField::Rpresent(Some(ty)) => Some(ty),
+        crate::types::RowField::Reither { types, .. } => match types.as_slice() {
+            [] => Some(ctx.new_tuple(Vec::new())),
+            [ty] => Some(*ty),
+            _ => Some(ctx.new_tuple(types)),
+        },
+        _ => None,
+    }
+}
+
+fn find_unbound_type_var_detail_in_single_type(
+    ctx: &crate::types::context::TypeContext,
+    unbound: TypeExprRef,
+    ty: TypeExprRef,
+) -> UnboundTypeVarDetail {
+    let ty = ctx.repr(ty);
+    match &*ctx.get_desc(ty) {
+        TypeDesc::Tobject { fields, .. } => {
+            let mut current = ctx.repr(*fields);
+            loop {
+                if current == unbound {
+                    return UnboundTypeVarDetail::Type { ty };
+                }
+                match &*ctx.get_desc(current) {
+                    TypeDesc::Tfield {
+                        name, typ, rest, ..
+                    } => {
+                        if crate::types::ctype::deep_occur(ctx, unbound, *typ) {
+                            return UnboundTypeVarDetail::Method {
+                                name: name.clone(),
+                                ty: *typ,
+                            };
+                        }
+                        current = ctx.repr(*rest);
+                    }
+                    TypeDesc::Tlink(next) | TypeDesc::Tsubst(next) => {
+                        current = ctx.repr(*next);
+                    }
+                    _ => return UnboundTypeVarDetail::Type { ty },
+                }
+            }
+        }
+        TypeDesc::Tvariant(row) => {
+            let row = crate::types::btype::row_repr(ctx, row);
+            if ctx.repr(row.row_more) == unbound {
+                return UnboundTypeVarDetail::Type { ty };
+            }
+            for (label, field) in &row.row_fields {
+                if let Some(field_ty) = row_field_display_type(ctx, field)
+                    && crate::types::ctype::deep_occur(ctx, unbound, field_ty)
+                {
+                    return UnboundTypeVarDetail::Case {
+                        name: label.to_string(),
+                        ty: field_ty,
+                        polymorphic: true,
+                    };
+                }
+            }
+            UnboundTypeVarDetail::Type { ty }
+        }
+        TypeDesc::Tlink(next) | TypeDesc::Tsubst(next) => {
+            find_unbound_type_var_detail_in_single_type(ctx, unbound, *next)
+        }
+        _ => UnboundTypeVarDetail::Type { ty },
+    }
+}
+
+fn find_unbound_type_var_detail_in_type_decl(
+    ctx: &crate::types::context::TypeContext,
+    decl: &crate::types::TypeDeclaration,
+    unbound: TypeExprRef,
+) -> Option<UnboundTypeVarDetail> {
+    match &decl.type_kind {
+        crate::types::TypeKind::TypeVariant(constructors) => {
+            for cstr in constructors {
+                if let Some(display_ty) = constructor_args_display_type(ctx, &cstr.cd_args)
+                    && crate::types::ctype::deep_occur(ctx, unbound, display_ty)
+                {
+                    return Some(UnboundTypeVarDetail::Case {
+                        name: cstr.cd_id.name().to_string(),
+                        ty: display_ty,
+                        polymorphic: false,
+                    });
+                }
+            }
+            None
+        }
+        crate::types::TypeKind::TypeRecord(labels, _) => {
+            for label in labels {
+                if crate::types::ctype::deep_occur(ctx, unbound, label.ld_type) {
+                    return Some(UnboundTypeVarDetail::Field {
+                        name: label.ld_id.name().to_string(),
+                        ty: label.ld_type,
+                    });
+                }
+            }
+            None
+        }
+        crate::types::TypeKind::TypeAbstract => decl
+            .type_manifest
+            .map(|manifest| find_unbound_type_var_detail_in_single_type(ctx, unbound, manifest)),
+        crate::types::TypeKind::TypeOpen => None,
+    }
+}
+
+fn find_unbound_type_var_in_typed_core_type_before_closed_decl(
+    ctx: &crate::types::context::TypeContext,
+    ctyp: &TypedCoreType,
+    allowed: &HashSet<TypeExprRef>,
+) -> Option<(String, LocIdx)> {
+    match &ctyp.ctyp_desc {
+        TypedCoreTypeDesc::Ttyp_var(name) => {
+            let ty = ctx.repr(ctyp.ctyp_type);
+            match &*ctx.get_desc(ty) {
+                TypeDesc::Tvar(_) | TypeDesc::Tunivar(_) => {
+                    (!allowed.contains(&ty)).then(|| (type_var_report_name(name), ctyp.ctyp_loc))
+                }
+                _ => None,
+            }
+        }
+        TypedCoreTypeDesc::Ttyp_arrow(arg, ret, _) => {
+            find_unbound_type_var_in_typed_core_type_before_closed_decl(ctx, &arg.typ, allowed)
+                .or_else(|| {
+                    find_unbound_type_var_in_typed_core_type_before_closed_decl(ctx, ret, allowed)
+                })
+        }
+        TypedCoreTypeDesc::Ttyp_tuple(types) | TypedCoreTypeDesc::Ttyp_constr(_, _, types) => {
+            types.iter().find_map(|ctyp| {
+                find_unbound_type_var_in_typed_core_type_before_closed_decl(ctx, ctyp, allowed)
+            })
+        }
+        TypedCoreTypeDesc::Ttyp_poly(_, body) => {
+            let mut allowed = allowed.clone();
+            if let TypeDesc::Tpoly { vars, .. } = &*ctx.get_desc(ctx.repr(ctyp.ctyp_type)) {
+                allowed.extend(vars.iter().map(|var| ctx.repr(*var)));
+            }
+            find_unbound_type_var_in_typed_core_type_before_closed_decl(ctx, body, &allowed)
+        }
+        TypedCoreTypeDesc::Ttyp_alias(body, _) => {
+            find_unbound_type_var_in_typed_core_type_before_closed_decl(ctx, body, allowed)
+        }
+        TypedCoreTypeDesc::Ttyp_object(_, _)
+        | TypedCoreTypeDesc::Ttyp_variant(_, _, _)
+        | TypedCoreTypeDesc::Ttyp_package(_) => None,
     }
 }
 
@@ -18017,7 +18356,88 @@ fn find_unbound_type_var_in_typed_core_type(
         TypedCoreTypeDesc::Ttyp_alias(body, _) => {
             find_unbound_type_var_in_typed_core_type(ctx, body, allowed)
         }
-        _ => None,
+        TypedCoreTypeDesc::Ttyp_object(fields, _) => fields.iter().find_map(|field| {
+            match &field.of_desc {
+                crate::types::typedtree::ObjectFieldDesc::OTtag(_, ty)
+                | crate::types::typedtree::ObjectFieldDesc::OTinherit(ty) => {
+                    find_unbound_type_var_in_typed_core_type(ctx, ty, allowed)
+                }
+            }
+        }),
+        TypedCoreTypeDesc::Ttyp_variant(rows, _, _) => rows.iter().find_map(|row| {
+            match &row.rf_desc {
+                crate::types::typedtree::RowFieldDesc::Rtag(_, _, types) => types
+                    .iter()
+                    .find_map(|ctyp| find_unbound_type_var_in_typed_core_type(ctx, ctyp, allowed)),
+                crate::types::typedtree::RowFieldDesc::Rinherit(ctyp) => {
+                    find_unbound_type_var_in_typed_core_type(ctx, ctyp, allowed)
+                }
+            }
+        }),
+        TypedCoreTypeDesc::Ttyp_package(package) => package
+            .pack_fields
+            .iter()
+            .find_map(|(_, ctyp)| find_unbound_type_var_in_typed_core_type(ctx, ctyp, allowed)),
+    }
+}
+
+fn find_unbound_type_var_in_typed_type_constructor_args_before_closed_decl(
+    ctx: &crate::types::context::TypeContext,
+    args: &TypedConstructorArguments,
+    allowed: &HashSet<TypeExprRef>,
+) -> Option<(String, LocIdx)> {
+    match args {
+        TypedConstructorArguments::Cstr_tuple(types) => types.iter().find_map(|ctyp| {
+            find_unbound_type_var_in_typed_core_type_before_closed_decl(ctx, ctyp, allowed)
+        }),
+        TypedConstructorArguments::Cstr_record(labels) => labels.iter().find_map(|label| {
+            find_unbound_type_var_in_typed_core_type_before_closed_decl(
+                ctx,
+                &label.ld_type,
+                allowed,
+            )
+        }),
+    }
+}
+
+fn find_unbound_type_var_in_typed_type_decl_before_closed_decl(
+    ctx: &crate::types::context::TypeContext,
+    decl: &TypedTypeDeclaration,
+) -> Option<(String, LocIdx)> {
+    let allowed: HashSet<TypeExprRef> = decl
+        .typ_type
+        .type_params
+        .iter()
+        .map(|ty_ref| ctx.repr(*ty_ref))
+        .collect();
+    match &decl.typ_kind {
+        TypedTypeKind::Ttype_variant(constructors) => constructors.iter().find_map(|cstr| {
+            // OCaml Typedecl.make_constructor locally quantifies GADT
+            // constructor arguments/results, so they do not become unbound
+            // declaration parameters at this earlier type-expression phase.
+            if cstr.cd_res.is_some() {
+                None
+            } else {
+                find_unbound_type_var_in_typed_type_constructor_args_before_closed_decl(
+                    ctx,
+                    &cstr.cd_args,
+                    &allowed,
+                )
+            }
+        }),
+        TypedTypeKind::Ttype_record(labels) => labels.iter().find_map(|label| {
+            find_unbound_type_var_in_typed_core_type_before_closed_decl(
+                ctx,
+                &label.ld_type,
+                &allowed,
+            )
+        }),
+        TypedTypeKind::Ttype_abstract | TypedTypeKind::Ttype_open => decl
+            .typ_manifest
+            .as_ref()
+            .and_then(|ctyp| {
+                find_unbound_type_var_in_typed_core_type_before_closed_decl(ctx, ctyp, &allowed)
+            }),
     }
 }
 
@@ -18038,59 +18458,26 @@ fn find_unbound_type_var_in_typed_constructor_args(
     }
 }
 
-fn find_unbound_type_var_in_typed_type_constructor_args(
-    ctx: &crate::types::context::TypeContext,
-    args: &TypedConstructorArguments,
-    allowed: &HashSet<TypeExprRef>,
-) -> Option<(String, LocIdx)> {
-    match args {
-        TypedConstructorArguments::Cstr_tuple(types) => types
-            .iter()
-            .find_map(|ctyp| find_unbound_type_var_in_typed_core_type(ctx, ctyp, allowed)),
-        TypedConstructorArguments::Cstr_record(labels) => labels.iter().find_map(|label| {
-            find_unbound_type_var_in_typed_core_type(ctx, &label.ld_type, allowed)
-        }),
-    }
-}
-
-fn find_unbound_type_var_in_typed_type_kind(
-    ctx: &crate::types::context::TypeContext,
-    kind: &TypedTypeKind,
-    allowed: &HashSet<TypeExprRef>,
-) -> Option<(String, LocIdx)> {
-    match kind {
-        TypedTypeKind::Ttype_variant(constructors) => constructors.iter().find_map(|cstr| {
-            // OCaml Typedecl.make_constructor translates GADT constructor
-            // arguments/results with an extensible variable policy; those
-            // variables are constructor-local, not unbound declaration params.
-            if cstr.cd_res.is_some() {
-                None
-            } else {
-                find_unbound_type_var_in_typed_type_constructor_args(ctx, &cstr.cd_args, allowed)
-            }
-        }),
-        TypedTypeKind::Ttype_record(labels) => labels.iter().find_map(|label| {
-            find_unbound_type_var_in_typed_core_type(ctx, &label.ld_type, allowed)
-        }),
-        TypedTypeKind::Ttype_abstract | TypedTypeKind::Ttype_open => None,
-    }
-}
-
 fn find_unbound_type_var_in_typed_type_decl(
     ctx: &crate::types::context::TypeContext,
     decl: &TypedTypeDeclaration,
-) -> Option<(String, LocIdx)> {
-    let allowed: HashSet<TypeExprRef> = decl
-        .typ_type
-        .type_params
-        .iter()
-        .map(|ty_ref| ctx.repr(*ty_ref))
-        .collect();
-    find_unbound_type_var_in_typed_type_kind(ctx, &decl.typ_kind, &allowed).or_else(|| {
-        decl.typ_manifest
-            .as_ref()
-            .and_then(|ctyp| find_unbound_type_var_in_typed_core_type(ctx, ctyp, &allowed))
-    })
+) -> Option<(String, LocIdx, Option<UnboundTypeVarDetail>)> {
+    if let Some((name, loc)) = find_unbound_type_var_in_typed_type_decl_before_closed_decl(ctx, decl)
+    {
+        return Some((name, loc, None));
+    }
+
+    if let Some(unbound) = find_unbound_type_var_in_type_decl(ctx, &decl.typ_type) {
+        let detail = find_unbound_type_var_detail_in_type_decl(ctx, &decl.typ_type, unbound)
+            .unwrap_or(UnboundTypeVarDetail::Type { ty: unbound });
+        return Some((
+            type_var_report_name_from_type_expr(ctx, unbound),
+            decl.typ_loc,
+            Some(detail),
+        ));
+    }
+
+    None
 }
 
 fn type_expr_has_free_variables(ctx: &crate::types::context::TypeContext, ty: TypeExprRef) -> bool {
@@ -22124,9 +22511,10 @@ fn type_structure_item<'a>(
             )?;
 
             for typed_decl in &typed_tree_decls {
-                if let Some((name, loc)) = find_unbound_type_var_in_typed_type_decl(ctx, typed_decl)
+                if let Some((name, loc, detail)) =
+                    find_unbound_type_var_in_typed_type_decl(ctx, typed_decl)
                 {
-                    return Err(TypeModError::UnboundTypeVar { loc, name });
+                    return Err(TypeModError::UnboundTypeVar { loc, name, detail });
                 }
             }
 

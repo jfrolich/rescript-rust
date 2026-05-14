@@ -625,11 +625,13 @@ with a reason after checking raise sites.
   - Covered by
     `tests/error_output_parity/compiler/fixtures/null_arity_external.res`.
 - `Unbound_type_var`
-  - Checked: normal `.res`/`.resi` unbound type-parameter positions found so
-    far are rejected earlier by `Typetexp.Unbound_type_variable`, before the
-    later `Typedecl.closed_type_decl` check can report this verbose internal
-    variant. GADT constructor variables are locally quantified instead of
-    unbound, guarded by
+  - Covered for the later `Typedecl.closed_type_decl` check by a private
+    polymorphic-variant row bound in
+    `tests/error_output_parity/compiler/fixtures/unbound_type_var_private_polyvariant.res`.
+  - Checked: ordinary alias, record, and constructor unbound type-parameter
+    positions found so far are rejected earlier by
+    `Typetexp.Unbound_type_variable`. GADT constructor variables are locally
+    quantified instead of unbound, guarded by
     `tests/error_output_parity/compiler/fixtures/gadt_existential_arg_success.res`
     and
     `tests/error_output_parity/compiler/fixtures/gadt_result_variable_success.res`.
@@ -690,13 +692,17 @@ with a reason after checking raise sites.
     `tests/error_output_parity/compiler/fixtures/bad_fixed_type_no_row.res` and
     `tests/error_output_parity/compiler/fixtures/bad_fixed_type_not_object_or_variant.res`.
 - `Unbound_type_var_ext`
-  - Covered for exception payload variables by
-    `tests/error_output_parity/compiler/fixtures/exception_unbound_type_var.res`.
-  - Checked: non-GADT type-extension constructor payload variables are rejected
-    earlier by `Typetexp.Unbound_type_variable`, before
+  - Not directly reachable from normal `.res`/`.resi` source found so far.
+    Exception and non-GADT type-extension constructor payload variables are
+    rejected earlier by `Typetexp.Unbound_type_variable`, before
     `Typedecl.closed_extension_constructor` can report this verbose internal
-    variant. GADT type-extension constructor variables are locally quantified
-    instead of unbound, guarded by
+    variant. This includes ordinary payloads and private polymorphic-variant
+    row payloads, guarded by
+    `tests/error_output_parity/compiler/fixtures/exception_unbound_type_var.res`,
+    `tests/error_output_parity/compiler/fixtures/exception_unbound_type_var_private_polyvariant.res`,
+    and `tests/error_output_parity/compiler/fixtures/unbound_type_var_ext.res`.
+    GADT type-extension constructor variables are locally quantified instead of
+    unbound, guarded by
     `tests/error_output_parity/compiler/fixtures/extension_gadt_existential_arg_success.res`
     and
     `tests/error_output_parity/compiler/fixtures/extension_gadt_result_variable_success.res`.

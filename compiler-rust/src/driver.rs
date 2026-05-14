@@ -43,7 +43,7 @@ use crate::types::sexp_typedtree::{
 use crate::types::typecore::{
     BuiltinExtensionError, JsxPropKind, TypeCoreError, TypeCoreWarning,
 };
-use crate::types::typemod::{TypeExtensionMismatch, TypeModError};
+use crate::types::typemod::{TypeExtensionMismatch, TypeModError, UnboundTypeVarDetail};
 use crate::types::{
     ArgLabel as TypeArgLabel, FieldKind, TypeCheckContext, TypeClashContext, TypeContext, TypeDesc,
     TypeExprRef, initial_env, transl_signature, type_structure,
@@ -4248,8 +4248,29 @@ fn type_mod_error_to_anyhow(
             2,
         )
         .into(),
-        TypeModError::UnboundTypeVar { loc, name } => UserDiagnostic::new(
+        TypeModError::UnboundTypeVar {
+            loc,
+            name,
+            detail: None,
+        } => UserDiagnostic::new(
             format_unbound_type_variable_report(arena, source, filename, *loc, name),
+            2,
+        )
+        .into(),
+        TypeModError::UnboundTypeVar {
+            loc,
+            name,
+            detail: Some(detail),
+        } => UserDiagnostic::new(
+            format_unbound_type_declaration_variable_report(
+                type_ctx,
+                arena,
+                source,
+                filename,
+                *loc,
+                name,
+                Some(detail),
+            ),
             2,
         )
         .into(),
@@ -4977,6 +4998,64 @@ fn format_unbound_type_variable_report(
     );
     report.push('\n');
     report
+}
+
+fn format_unbound_type_declaration_variable_report(
+    type_ctx: &TypeContext,
+    arena: &ParseArena,
+    source: &str,
+    filename: &str,
+    loc: LocIdx,
+    name: &str,
+    detail: Option<&UnboundTypeVarDetail>,
+) -> String {
+    let mut message = String::from("  A type variable is unbound in this type declaration.");
+    if let Some(detail) = detail {
+        match detail {
+            UnboundTypeVarDetail::Type { ty } => {
+                message.push_str("\nIn type ");
+                message.push_str(&format_type_expr(type_ctx, *ty));
+                message.push_str(" the variable ");
+                message.push_str(name);
+                message.push_str(" is unbound");
+            }
+            UnboundTypeVarDetail::Case {
+                name: case_name,
+                ty,
+                polymorphic,
+            } => {
+                message.push_str("\nIn case ");
+                if *polymorphic {
+                    message.push('`');
+                }
+                message.push_str(case_name);
+                message.push_str(" of ");
+                message.push_str(&format_type_expr(type_ctx, *ty));
+                message.push_str(" the variable ");
+                message.push_str(name);
+                message.push_str(" is unbound");
+            }
+            UnboundTypeVarDetail::Field { name: field_name, ty } => {
+                message.push_str("\nIn field ");
+                message.push_str(field_name);
+                message.push_str(": ");
+                message.push_str(&format_type_expr(type_ctx, *ty));
+                message.push_str(" the variable ");
+                message.push_str(name);
+                message.push_str(" is unbound");
+            }
+            UnboundTypeVarDetail::Method { name: method_name, ty } => {
+                message.push_str("\nIn method ");
+                message.push_str(method_name);
+                message.push_str(": ");
+                message.push_str(&format_type_expr(type_ctx, *ty));
+                message.push_str(" the variable ");
+                message.push_str(name);
+                message.push_str(" is unbound");
+            }
+        }
+    }
+    format_compiler_error_report_raw_message(arena, source, filename, loc, &message)
 }
 
 fn format_unbound_modtype_report(
