@@ -78,6 +78,8 @@ with a reason after checking raise sites.
   `tests/error_output_parity/compiler/fixtures/pattern_type_clash.res`
   and the local GADT constraint expansion subcase in
   `tests/error_output_parity/compiler/fixtures/recursive_local_constraint.res`,
+  plus an alias-mediated local GADT constraint subcase in
+  `tests/error_output_parity/compiler/fixtures/recursive_local_constraint_alias.res`,
   plus the local let-module function parameter escape subcase in
   `tests/error_output_parity/compiler/fixtures/let_module_escape_function_param.res`.
 - `Or_pattern_type_clash`: covered by
@@ -240,8 +242,10 @@ with a reason after checking raise sites.
   raise site in `compiler/ml/typecore.ml`. Local GADT constraint cycle probes
   found so far, including
   `tests/error_output_parity/compiler/fixtures/recursive_local_constraint.res`,
+  `tests/error_output_parity/compiler/fixtures/recursive_local_constraint_alias.res`,
   surface as `Pattern_type_clash`; an additional OCaml-only generated probe over
-  4,992 one- and two-parameter GADT result/payload/scrutinee shapes found no
+  4,992 one- and two-parameter GADT result/payload/scrutinee shapes, plus
+  targeted transparent-alias payload/result feedback shapes, found no
   `Recursive local constraint` reporter. Keep this variant listed until a
   direct `Unification_recursive_abbrev` source-level repro is found or the raise
   site is proven unreachable for ReScript syntax. Rust now mirrors the OCaml

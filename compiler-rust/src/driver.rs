@@ -6411,20 +6411,10 @@ fn format_pattern_type_clash_report(
 
     let mut message = String::new();
     message.push_str("This pattern matches values of type ");
-    message.push_str(ERROR);
-    message.push_str(&format_type_expr(
-        type_ctx,
-        type_clash_display_type(type_ctx, trace, true, actual),
-    ));
-    message.push_str(RESET);
+    append_type_clash_type(type_ctx, trace, true, ERROR, actual, &mut message);
     message.push('\n');
     message.push_str("but a pattern was expected which matches values of type ");
-    message.push_str(INFO);
-    message.push_str(&format_type_expr(
-        type_ctx,
-        type_clash_display_type(type_ctx, trace, false, expected),
-    ));
-    message.push_str(RESET);
+    append_type_clash_type(type_ctx, trace, false, INFO, expected, &mut message);
     if let Some(path) = type_clash_escape_constructor_path(type_ctx, trace) {
         message.push('\n');
         message.push_str("The type constructor ");
@@ -6460,20 +6450,10 @@ fn format_recursive_local_constraint_report(
 
     let mut message = String::new();
     message.push_str("Recursive local constraint when unifying ");
-    message.push_str(ERROR);
-    message.push_str(&format_type_expr(
-        type_ctx,
-        type_clash_display_type(type_ctx, trace, true, actual),
-    ));
-    message.push_str(RESET);
+    append_type_clash_type(type_ctx, trace, true, ERROR, actual, &mut message);
     message.push('\n');
     message.push_str("with ");
-    message.push_str(INFO);
-    message.push_str(&format_type_expr(
-        type_ctx,
-        type_clash_display_type(type_ctx, trace, false, expected),
-    ));
-    message.push_str(RESET);
+    append_type_clash_type(type_ctx, trace, false, INFO, expected, &mut message);
     append_incompatible_type_parts(type_ctx, trace, &mut message);
 
     format_compiler_error_report(arena, source, filename, loc, &message)
@@ -6500,20 +6480,10 @@ fn format_or_pattern_type_clash_report(
     message.push_str("The variable ");
     message.push_str(id.name());
     message.push_str(" on the left-hand side of this or-pattern has type ");
-    message.push_str(ERROR);
-    message.push_str(&format_type_expr(
-        type_ctx,
-        type_clash_display_type(type_ctx, trace, true, left),
-    ));
-    message.push_str(RESET);
+    append_type_clash_type(type_ctx, trace, true, ERROR, left, &mut message);
     message.push('\n');
     message.push_str("but on the right-hand side it has type ");
-    message.push_str(INFO);
-    message.push_str(&format_type_expr(
-        type_ctx,
-        type_clash_display_type(type_ctx, trace, false, right),
-    ));
-    message.push_str(RESET);
+    append_type_clash_type(type_ctx, trace, false, INFO, right, &mut message);
 
     format_compiler_error_report(arena, source, filename, loc, &message)
 }
@@ -6727,10 +6697,11 @@ fn rendered_alias_expansion(
     let top_text = format_type_expr(type_ctx, top);
     if let Some(expansion) = trace.iter().skip(1).find_map(|pair| {
         let ty = if actual_side { pair.0 } else { pair.1 };
-        (!type_is_object(type_ctx, ty)
+        let is_candidate = !type_is_object(type_ctx, ty)
+            && !type_is_polyvariant(type_ctx, ty)
             && type_ctx.repr(ty) != type_ctx.repr(top)
-            && format_type_expr(type_ctx, ty) == top_text)
-            .then_some(ty)
+            && format_type_expr(type_ctx, ty) == top_text;
+        is_candidate.then_some(ty)
     }) {
         return Some(expansion);
     }
@@ -6746,17 +6717,22 @@ fn rendered_alias_expansion(
     trace.iter().skip(1).find_map(|pair| {
         let left_text = format_type_expr(type_ctx, pair.0);
         let right_text = format_type_expr(type_ctx, pair.1);
+        let left_is_candidate = !type_is_polyvariant(type_ctx, pair.0);
+        let right_is_candidate = !type_is_polyvariant(type_ctx, pair.1);
         if actual_side {
-            if right_text == counterpart_text && left_text != top_text {
+            if left_is_candidate && right_text == counterpart_text && left_text != top_text {
                 Some(pair.0)
-            } else if left_text == counterpart_text && right_text != top_text {
+            } else if right_is_candidate
+                && left_text == counterpart_text
+                && right_text != top_text
+            {
                 Some(pair.1)
             } else {
                 None
             }
-        } else if left_text == counterpart_text && right_text != top_text {
+        } else if right_is_candidate && left_text == counterpart_text && right_text != top_text {
             Some(pair.1)
-        } else if right_text == counterpart_text && left_text != top_text {
+        } else if left_is_candidate && right_text == counterpart_text && left_text != top_text {
             Some(pair.0)
         } else {
             None
