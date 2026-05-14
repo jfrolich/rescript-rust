@@ -1626,8 +1626,9 @@ with a reason after checking raise sites.
     - Covered by
       `tests/error_output_parity/compiler/fixtures/dynamic_import_value_argument.res`,
       `tests/error_output_parity/compiler/fixtures/dynamic_import_local_value.res`,
+      `tests/error_output_parity/compiler/fixtures/dynamic_import_no_argument_external.res`,
       and
-      `tests/error_output_parity/compiler/fixtures/dynamic_import_no_argument_external.res`.
+      `tests/error_output_parity/compiler/fixtures/dynamic_import_value_external.res`.
 - `compiler/core/lam_compile_primitive.ml`
   - `Pimport` module/file argument rejection
     - Covered by
@@ -2078,7 +2079,12 @@ with a reason after checking raise sites.
   - `Invalid payload` from `name_from_payload_or_prim`
     - Covered for the shared `@val`/`@send`/`@set`/`@get`/`@new`
       payload path by
-      `tests/error_output_parity/compiler/fixtures/bs_external_val_invalid_payload.res`.
+      `tests/error_output_parity/compiler/fixtures/bs_external_val_invalid_payload.res`,
+      `tests/error_output_parity/compiler/fixtures/bs_external_send_invalid_payload.res`,
+      `tests/error_output_parity/compiler/fixtures/bs_external_set_invalid_payload.res`,
+      `tests/error_output_parity/compiler/fixtures/bs_external_get_invalid_payload.res`,
+      and
+      `tests/error_output_parity/compiler/fixtures/bs_external_new_invalid_payload.res`.
   - `Ast_payload.assert_strings` for `@module` and `@scope`
     - Covered by
       `tests/error_output_parity/compiler/fixtures/bs_external_module_ident_payload.res`,
@@ -2094,6 +2100,10 @@ with a reason after checking raise sites.
       `tests/error_output_parity/compiler/fixtures/bs_external_module_import_non_string_value.res`,
       and
       `tests/error_output_parity/compiler/fixtures/bs_external_module_import_qualified_key.res`.
+  - `@return` rejects record payload entries with explicit values before
+    return-wrapper type validation
+    - Covered by
+      `tests/error_output_parity/compiler/fixtures/bs_return_record_value_payload.res`.
   - `@get_index`/`@set_index` non-empty primitive-name validation
     - Covered by
       `tests/error_output_parity/compiler/fixtures/bs_external_get_index_named_primitive.res`
