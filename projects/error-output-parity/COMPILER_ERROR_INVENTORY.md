@@ -893,6 +893,10 @@ with a reason after checking raise sites.
     `tests/build_tests/super_errors/fixtures/let_unwrap_on_top_level.res`
     and
     `tests/build_tests/super_errors/fixtures/let_unwrap_on_not_supported_variant.res`.
+  - The `-bs-no-builtin-ppx` escape path is covered by
+    `tests/error_output_parity/compiler/cases/no_builtin_let_unwrap.res`; OCaml
+    skips the builtin PPX let-unwrap rejection there and reports the underlying
+    top-level fragile-pattern diagnostic instead.
 
 ## Ast_untagged_variants Coverage Notes
 

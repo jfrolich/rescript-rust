@@ -10995,20 +10995,22 @@ pub fn compile_source_to_js_with_options(
     let debug = debug_for_structure(&structure, options, parser.arena());
     let jsx_preserve = jsx_preserve_for_structure(&structure, options, parser.arena());
     let experimental_let_unwrap = options.experimental_let_unwrap || file_config.let_unwrap;
-    reject_disabled_let_unwrap_in_structure(
-        experimental_let_unwrap,
-        &structure,
-        parser.arena(),
-        source,
-        filename,
-    )?;
-    reject_enabled_invalid_let_unwrap_in_structure(
-        experimental_let_unwrap,
-        &structure,
-        parser.arena(),
-        source,
-        filename,
-    )?;
+    if !options.no_builtin_ppx {
+        reject_disabled_let_unwrap_in_structure(
+            experimental_let_unwrap,
+            &structure,
+            parser.arena(),
+            source,
+            filename,
+        )?;
+        reject_enabled_invalid_let_unwrap_in_structure(
+            experimental_let_unwrap,
+            &structure,
+            parser.arena(),
+            source,
+            filename,
+        )?;
+    }
     // Source fallback path: only run JSX rewrite when the file enables `-bs-jsx`.
     let jsx_version = options.jsx_version.or(file_config.jsx_version);
     let structure = if let Some(jsx_version) = jsx_version {
@@ -12295,20 +12297,22 @@ pub fn typecheck_and_dump_sexp<W: std::io::Write>(
         let file_config = extract_file_config_from_structure(&structure, parser.arena());
         let file_warning_config = warning_config_for_options_and_file_config(options, &file_config);
         let experimental_let_unwrap = options.experimental_let_unwrap || file_config.let_unwrap;
-        reject_disabled_let_unwrap_in_structure(
-            experimental_let_unwrap,
-            &structure,
-            parser.arena(),
-            source,
-            filename,
-        )?;
-        reject_enabled_invalid_let_unwrap_in_structure(
-            experimental_let_unwrap,
-            &structure,
-            parser.arena(),
-            source,
-            filename,
-        )?;
+        if !options.no_builtin_ppx {
+            reject_disabled_let_unwrap_in_structure(
+                experimental_let_unwrap,
+                &structure,
+                parser.arena(),
+                source,
+                filename,
+            )?;
+            reject_enabled_invalid_let_unwrap_in_structure(
+                experimental_let_unwrap,
+                &structure,
+                parser.arena(),
+                source,
+                filename,
+            )?;
+        }
 
         let jsx_version = options.jsx_version.or(file_config.jsx_version);
         let structure = if let Some(jsx_version) = jsx_version {
@@ -13924,20 +13928,22 @@ pub fn compile_source_in_process(
     let _ = emit_ppx_warnings(parser.arena(), source, filename, options, &config_warnings);
     let experimental_let_unwrap =
         experimental_let_unwrap_for_structure(&structure, options, parser.arena());
-    reject_disabled_let_unwrap_in_structure(
-        experimental_let_unwrap,
-        &structure,
-        parser.arena(),
-        source,
-        filename,
-    )?;
-    reject_enabled_invalid_let_unwrap_in_structure(
-        experimental_let_unwrap,
-        &structure,
-        parser.arena(),
-        source,
-        filename,
-    )?;
+    if !options.no_builtin_ppx {
+        reject_disabled_let_unwrap_in_structure(
+            experimental_let_unwrap,
+            &structure,
+            parser.arena(),
+            source,
+            filename,
+        )?;
+        reject_enabled_invalid_let_unwrap_in_structure(
+            experimental_let_unwrap,
+            &structure,
+            parser.arena(),
+            source,
+            filename,
+        )?;
+    }
     let jsx_version = jsx_version_for_structure(&structure, options, parser.arena());
     let structure = if let Some(jsx_version) = jsx_version {
         reject_invalid_react_component_destructure_in_structure(
