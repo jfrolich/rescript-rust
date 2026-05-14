@@ -599,9 +599,10 @@ with a reason after checking raise sites.
     `tests/error_output_parity/compiler/fixtures/definition_mismatch.res` and
     `tests/error_output_parity/compiler/fixtures/definition_mismatch_payload.res`.
 - `Constraint_failed`
-  - Covered for GADT constructor return-type validation and recursive
-    abbreviation expansion parameter validation by
-    `tests/error_output_parity/compiler/fixtures/constraint_failed_constructor_return.res`
+  - Covered for GADT constructor return-type validation, exception result-type
+    validation, and recursive abbreviation expansion parameter validation by
+    `tests/error_output_parity/compiler/fixtures/constraint_failed_constructor_return.res`,
+    `tests/error_output_parity/compiler/fixtures/exception_wrong_result.res`,
     and
     `tests/error_output_parity/compiler/fixtures/constraint_failed_recursion.res`.
 - `Inconsistent_constraint`
@@ -638,8 +639,14 @@ with a reason after checking raise sites.
     `tests/error_output_parity/compiler/fixtures/extension_mismatch_arity.res`,
     `tests/error_output_parity/compiler/fixtures/extension_mismatch_variance.res`.
 - `Rebind_wrong_type`
-  - Covered by
-    `tests/error_output_parity/compiler/fixtures/rebind_wrong_type.res`.
+  - Covered for type-extension rebinds of extension and ordinary constructors by
+    `tests/error_output_parity/compiler/fixtures/rebind_wrong_type.res` and
+    `tests/error_output_parity/compiler/fixtures/rebind_normal_constructor_wrong_type.res`.
+  - Covered for exception rebinds of ordinary constructors and non-exn
+    extension constructors by
+    `tests/error_output_parity/compiler/fixtures/exception_rebind_wrong_type.res`
+    and
+    `tests/error_output_parity/compiler/fixtures/exception_rebind_extension_wrong_type.res`.
 - `Rebind_mismatch`
   - Covered by
     `tests/error_output_parity/compiler/fixtures/rebind_mismatch.res`.
@@ -673,14 +680,18 @@ with a reason after checking raise sites.
     `tests/error_output_parity/compiler/fixtures/bad_fixed_type_no_row.res` and
     `tests/error_output_parity/compiler/fixtures/bad_fixed_type_not_object_or_variant.res`.
 - `Unbound_type_var_ext`
-  - Checked: non-GADT extension constructor payload variables are rejected
+  - Covered for exception payload variables by
+    `tests/error_output_parity/compiler/fixtures/exception_unbound_type_var.res`.
+  - Checked: non-GADT type-extension constructor payload variables are rejected
     earlier by `Typetexp.Unbound_type_variable`, before
     `Typedecl.closed_extension_constructor` can report this verbose internal
-    variant. GADT extension constructor variables are locally quantified instead
-    of unbound, guarded by
+    variant. GADT type-extension constructor variables are locally quantified
+    instead of unbound, guarded by
     `tests/error_output_parity/compiler/fixtures/extension_gadt_existential_arg_success.res`
     and
     `tests/error_output_parity/compiler/fixtures/extension_gadt_result_variable_success.res`.
+    Exception GADT local quantification is guarded by
+    `tests/error_output_parity/compiler/fixtures/exception_gadt_existential_success.res`.
 - `Varying_anonymous`
   - Covered by
     `tests/error_output_parity/compiler/fixtures/varying_anonymous.res`.
