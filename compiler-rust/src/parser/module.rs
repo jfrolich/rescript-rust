@@ -3657,12 +3657,10 @@ fn parse_type_params_angle(p: &mut Parser<'_>) -> Vec<(CoreTypeIdx, Variance)> {
             };
             let typ_idx = p.arena_mut().push_core_type(typ);
             params.push((typ_idx, variance));
-        } else if let Token::Lident(name) = &p.token {
+        } else if let Token::Lident(name) | Token::Uident(name) = &p.token {
             // Missing singlequote: foo instead of 'foo
             let name = name.to_string();
-            p.err_multiple(
-                p.start_pos.clone(),
-                p.end_pos.clone(),
+            p.err(
                 DiagnosticCategory::Message(format!(
                     "Type params start with a singlequote: '{}",
                     name

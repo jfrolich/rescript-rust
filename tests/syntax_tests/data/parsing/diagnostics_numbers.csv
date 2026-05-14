@@ -110,3 +110,4 @@ error,107,tests/syntax_tests/data/parsing/errors/expressions/forAwaitIn.res,test
 error,108,tests/syntax_tests/data/parsing/errors/signature/consecutive.resi,tests/syntax_tests/data/parsing/errors/signature/expected/consecutive.resi.txt
 error,109,tests/syntax_tests/data/parsing/errors/scanner/invalidBigint.res,tests/syntax_tests/data/parsing/errors/scanner/expected/invalidBigint.res.txt
 error,110,tests/syntax_tests/data/parsing/errors/expressions/for_of_pattern.res,tests/syntax_tests/data/parsing/errors/expressions/expected/for_of_pattern.res.txt
+error,111,tests/syntax_tests/data/parsing/errors/typeDef/uppercaseTypeParamMissingQuote.res,tests/syntax_tests/data/parsing/errors/typeDef/expected/uppercaseTypeParamMissingQuote.res.txt

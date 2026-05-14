@@ -1326,6 +1326,7 @@ with a reason after checking raise sites.
       `tests/error_output_parity/compiler/fixtures/parser_jsx_trailing_hyphen.res`,
       `tests/error_output_parity/compiler/fixtures/parser_jsx_closing_name_mismatch.res`,
       `tests/error_output_parity/compiler/fixtures/parser_type_param_missing_singlequote.res`,
+      `tests/syntax_tests/data/parsing/errors/typeDef/uppercaseTypeParamMissingQuote.res`,
       `tests/error_output_parity/compiler/fixtures/parser_type_params_old_parens.res`,
       and
       `tests/error_output_parity/compiler/fixtures/parser_type_var_invalid_name.res`.
