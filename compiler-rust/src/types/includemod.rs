@@ -18,8 +18,8 @@ use crate::types::ctype;
 use crate::types::decl::{
     Attribute, AttributePayload, ConstructorArguments, ConstructorDeclaration,
     ExtensionConstructor, LabelDeclaration, ModtypeDeclaration, ModuleDeclaration, ModuleType,
-    Signature, SignatureItem, TypeDeclaration, TypeInlinedType, TypeKind, ValueDescription,
-    ValueKind,
+    RecStatus, Signature, SignatureItem, TypeDeclaration, TypeInlinedType, TypeKind,
+    ValueDescription, ValueKind,
 };
 use crate::types::env::Env;
 use crate::types::type_expr::TypeDesc;
@@ -591,8 +591,15 @@ fn format_signature_item(
     full_paths: bool,
 ) -> String {
     match item {
-        SignatureItem::SigType(id, decl, _) => {
-            format_type_declaration_with_options(type_ctx, id, decl, weak_names, full_paths)
+        SignatureItem::SigType(id, decl, rec_status) => {
+            format_signature_type_declaration_with_options(
+                type_ctx,
+                id,
+                decl,
+                *rec_status,
+                weak_names,
+                full_paths,
+            )
         }
         SignatureItem::SigValue(id, desc) => {
             format_value_description_with_options(type_ctx, id, desc, weak_names, full_paths)
@@ -703,6 +710,35 @@ fn format_type_declaration_with_options(
     weak_names: bool,
     full_paths: bool,
 ) -> String {
+    format_type_declaration_with_options_and_rec(type_ctx, id, decl, weak_names, full_paths, false)
+}
+
+fn format_signature_type_declaration_with_options(
+    type_ctx: &TypeContext,
+    id: &Ident,
+    decl: &TypeDeclaration,
+    rec_status: RecStatus,
+    weak_names: bool,
+    full_paths: bool,
+) -> String {
+    format_type_declaration_with_options_and_rec(
+        type_ctx,
+        id,
+        decl,
+        weak_names,
+        full_paths,
+        rec_status == RecStatus::TrecFirst,
+    )
+}
+
+fn format_type_declaration_with_options_and_rec(
+    type_ctx: &TypeContext,
+    id: &Ident,
+    decl: &TypeDeclaration,
+    weak_names: bool,
+    full_paths: bool,
+    type_rec: bool,
+) -> String {
     let mut printer = TypeExprErrorPrinter::new_with_options(type_ctx, weak_names, full_paths);
     let name = id.name();
     let params = format_type_params(
@@ -719,10 +755,11 @@ fn format_type_declaration_with_options(
     } else {
         ""
     };
+    let type_keyword = if type_rec { "type rec" } else { "type" };
     let head = if params.is_empty() {
-        format!("{prefix}type {name}")
+        format!("{prefix}{type_keyword} {name}")
     } else {
-        format!("{prefix}type {name}<{params}>")
+        format!("{prefix}{type_keyword} {name}<{params}>")
     };
 
     match &decl.type_kind {
@@ -816,7 +853,7 @@ fn format_constructor_declaration(
     constructor: &ConstructorDeclaration,
 ) -> String {
     let constructor_prefix = format_constructor_attributes(&constructor.cd_attributes);
-    match &constructor.cd_args {
+    let rendered_constructor = match &constructor.cd_args {
         ConstructorArguments::CstrTuple(args) if args.is_empty() => {
             format!("{constructor_prefix}{}", constructor.cd_id.name())
         }
@@ -839,6 +876,10 @@ fn format_constructor_declaration(
                 constructor.cd_id.name()
             )
         }
+    };
+    match constructor.cd_res {
+        Some(res) => format!("{rendered_constructor}: {}", printer.format(res)),
+        None => rendered_constructor,
     }
 }
 
@@ -3047,6 +3088,24 @@ fn compare_record_declarations(
     warnings: &mut Vec<Warning>,
 ) -> Option<String> {
     let param_map = build_type_param_map(type_ctx, impl_params, sig_params);
+    compare_record_declarations_with_param_map(
+        type_ctx,
+        env,
+        &param_map,
+        impl_labels,
+        sig_labels,
+        warnings,
+    )
+}
+
+fn compare_record_declarations_with_param_map(
+    type_ctx: &TypeContext,
+    env: &Env,
+    param_map: &HashMap<TypeExprRef, TypeExprRef>,
+    impl_labels: &[LabelDeclaration],
+    sig_labels: &[LabelDeclaration],
+    warnings: &mut Vec<Warning>,
+) -> Option<String> {
     let mut index = 0usize;
     let len = impl_labels.len().min(sig_labels.len());
 
@@ -3221,16 +3280,40 @@ fn compare_variant_declarations(
             warnings.push(warning);
         }
 
+        let arg_param_map = match (impl_constructor.cd_res, sig_constructor.cd_res) {
+            (Some(impl_res), Some(sig_res)) => {
+                if !type_exprs_equal_for_inclusion(
+                    type_ctx,
+                    Some(env),
+                    &param_map,
+                    impl_res,
+                    sig_res,
+                ) {
+                    return Some(format!(
+                        "The types for field {} are not equal.",
+                        impl_constructor.cd_id.name()
+                    ));
+                }
+                build_type_param_map(type_ctx, &[impl_res], &[sig_res])
+            }
+            (Some(_), None) | (None, Some(_)) => {
+                return Some(format!(
+                    "The types for field {} are not equal.",
+                    impl_constructor.cd_id.name()
+                ));
+            }
+            (None, None) => param_map.clone(),
+        };
+
         match (&impl_constructor.cd_args, &sig_constructor.cd_args) {
             (
                 ConstructorArguments::CstrRecord(impl_labels),
                 ConstructorArguments::CstrRecord(sig_labels),
             ) => {
-                if let Some(detail) = compare_record_declarations(
+                if let Some(detail) = compare_record_declarations_with_param_map(
                     type_ctx,
                     env,
-                    impl_params,
-                    sig_params,
+                    &arg_param_map,
                     impl_labels,
                     sig_labels,
                     warnings,
@@ -3255,7 +3338,7 @@ fn compare_variant_declarations(
                     if !type_exprs_equal_for_inclusion(
                         type_ctx,
                         Some(env),
-                        &param_map,
+                        &arg_param_map,
                         *impl_arg,
                         *sig_arg,
                     ) {

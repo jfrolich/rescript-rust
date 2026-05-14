@@ -2184,6 +2184,9 @@ only the wrapper variant:
   `Record_attributes_check.check_bs_attributes_inclusion` / `Includecore.Field_names`
   (covered by
   `tests/error_output_parity/compiler/fixtures/not_included_record_field_runtime_name.res`)
+- GADT constructor result-type mismatch in `Includecore.compare_variants`
+  (covered by
+  `tests/error_output_parity/compiler/fixtures/not_included_gadt_constructor_result.res`)
 - extension constructor mismatch (covered by
   `tests/error_output_parity/compiler/fixtures/not_included_extension_mismatch.res`)
 - module mismatch (covered by
