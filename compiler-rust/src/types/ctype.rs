@@ -3785,6 +3785,9 @@ fn subtype_rec(
                 Err(subtype_error(trace))
             }
         }
+        (TypeDesc::Tvariant(row1), TypeDesc::Tvariant(row2)) => {
+            subtype_variant_rows(ctx, env, visited, trace, row1, row2)
+        }
         (TypeDesc::Tpoly { body: body1, .. }, TypeDesc::Tpoly { body: body2, .. }) => {
             subtype_rec(ctx, env, visited, trace, *body1, *body2)
         }
@@ -3793,6 +3796,129 @@ fn subtype_rec(
         }
         (_, TypeDesc::Tlink(next2) | TypeDesc::Tsubst(next2)) => {
             subtype_rec(ctx, env, visited, trace, ty1, *next2)
+        }
+        _ => Err(subtype_error(trace)),
+    }
+}
+
+fn subtype_variant_rows(
+    ctx: &TypeContext,
+    env: &Env,
+    visited: &mut HashSet<(u32, u32)>,
+    trace: &[(TypeExprRef, TypeExprRef)],
+    row1: &RowDesc,
+    row2: &RowDesc,
+) -> TypeResult<()> {
+    // OCaml compiler/ml/ctype.ml:3969-3971 dispatches variant rows to
+    // `subtype_row`; compiler/ml/ctype.ml:4064-4099 allows a closed source row
+    // with no extra labels to subtype a wider target row.
+    let row1 = row_repr(ctx, row1);
+    let row2 = row_repr(ctx, row2);
+    let (r1, r2, pairs) = merge_row_fields(&row1.row_fields, &row2.row_fields);
+    let more1 = ctx.repr(row_more(ctx, &row1));
+    let more2 = ctx.repr(row_more(ctx, &row2));
+    let more1_desc = (*ctx.get_desc(more1)).clone();
+    let more2_desc = (*ctx.get_desc(more2)).clone();
+
+    match (&more1_desc, &more2_desc) {
+        (TypeDesc::Tconstr { path: path1, .. }, TypeDesc::Tconstr { path: path2, .. })
+            if path1.same(path2) =>
+        {
+            let mut more_trace = trace.to_vec();
+            more_trace.push((more1, more2));
+            subtype_rec(ctx, env, visited, &more_trace, more1, more2)
+        }
+        (
+            TypeDesc::Tvar(_) | TypeDesc::Tconstr { .. } | TypeDesc::Tnil,
+            TypeDesc::Tvar(_) | TypeDesc::Tconstr { .. } | TypeDesc::Tnil,
+        ) if row1.row_closed && r1.is_empty() => {
+            for (_label, field1, field2) in pairs {
+                let field1 = btype::row_field_repr(ctx, field1);
+                let field2 = btype::row_field_repr(ctx, field2);
+                match (&field1, &field2) {
+                    (
+                        RowField::Rpresent(None)
+                        | RowField::Reither {
+                            constant: true, ..
+                        },
+                        RowField::Rpresent(None),
+                    )
+                    | (RowField::Rabsent, _) => {}
+                    (RowField::Rpresent(Some(ty1)), RowField::Rpresent(Some(ty2))) => {
+                        let mut field_trace = trace.to_vec();
+                        field_trace.push((*ty1, *ty2));
+                        subtype_rec(ctx, env, visited, &field_trace, *ty1, *ty2)?;
+                    }
+                    (
+                        RowField::Reither {
+                            constant: false,
+                            types,
+                            ..
+                        },
+                        RowField::Rpresent(Some(ty2)),
+                    ) if !types.is_empty() => {
+                        let ty1 = types[0];
+                        let mut field_trace = trace.to_vec();
+                        field_trace.push((ty1, *ty2));
+                        subtype_rec(ctx, env, visited, &field_trace, ty1, *ty2)?;
+                    }
+                    _ => return Err(subtype_error(trace)),
+                }
+            }
+            Ok(())
+        }
+        (TypeDesc::Tunivar(_), TypeDesc::Tunivar(_))
+            if row1.row_closed == row2.row_closed && r1.is_empty() && r2.is_empty() =>
+        {
+            let mut more_trace = trace.to_vec();
+            more_trace.push((more1, more2));
+            subtype_rec(ctx, env, visited, &more_trace, more1, more2)?;
+
+            for (_label, field1, field2) in pairs {
+                let field1 = btype::row_field_repr(ctx, field1);
+                let field2 = btype::row_field_repr(ctx, field2);
+                match (&field1, &field2) {
+                    (RowField::Rpresent(None), RowField::Rpresent(None))
+                    | (RowField::Rabsent, RowField::Rabsent) => {}
+                    (
+                        RowField::Reither {
+                            constant: true,
+                            types: types1,
+                            ..
+                        },
+                        RowField::Reither {
+                            constant: true,
+                            types: types2,
+                            ..
+                        },
+                    ) if types1.is_empty() && types2.is_empty() => {}
+                    (RowField::Rpresent(Some(ty1)), RowField::Rpresent(Some(ty2))) => {
+                        let mut field_trace = trace.to_vec();
+                        field_trace.push((*ty1, *ty2));
+                        subtype_rec(ctx, env, visited, &field_trace, *ty1, *ty2)?;
+                    }
+                    (
+                        RowField::Reither {
+                            constant: false,
+                            types: types1,
+                            ..
+                        },
+                        RowField::Reither {
+                            constant: false,
+                            types: types2,
+                            ..
+                        },
+                    ) if types1.len() == 1 && types2.len() == 1 => {
+                        let ty1 = types1[0];
+                        let ty2 = types2[0];
+                        let mut field_trace = trace.to_vec();
+                        field_trace.push((ty1, ty2));
+                        subtype_rec(ctx, env, visited, &field_trace, ty1, ty2)?;
+                    }
+                    _ => return Err(subtype_error(trace)),
+                }
+            }
+            Ok(())
         }
         _ => Err(subtype_error(trace)),
     }
