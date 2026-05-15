@@ -122,6 +122,9 @@ Current focused coverage:
 - `attribute_codegen_patterns.res`: inline constants/functions/modules,
   `%%private` extension output, tuple `@module` externals, legacy and direct
   `null_to_opt` returns, and named/optional `@unwrap` arguments.
+- `external_arity_patterns.res`: uncurried external arity inference from type
+  aliases and type constructors, optional external arity, and JSX v4 external
+  component arity through `@react.component @module`.
 - `jsx_transform_patterns.res`: JSX v4 transform output for DOM elements,
   components, fragments, keys, spread props, escaped prop names, optional
   children, and memoed components.
