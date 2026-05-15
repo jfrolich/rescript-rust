@@ -70,6 +70,9 @@ Current focused coverage:
   polymorphic-variant widening.
 - `tella_sparse_record.res`: a minimized Tella-derived large sparse record
   shape without depending on the external Tella repository.
+- `tella_scoped_send_patterns.res`: minimized Tella binding output for
+  Stripe/Notion-style `@send @scope` methods, nested send scopes, imported
+  constructors, escaped record fields, and optional nested payload records.
 - `interface_patterns.res`: a minimized interface-backed case covering `.resi`
   CMI flow, abstract implementation types, nested module signatures, and named
   polymorphic-variant widening.
@@ -88,5 +91,9 @@ Current focused coverage:
 - `jsx_transform_patterns.res`: JSX v4 transform output for DOM elements,
   components, fragments, keys, spread props, escaped prop names, optional
   children, and memoed components.
+- `jsx_external_component_patterns.res`: Tella-derived JSX v4 output for
+  scoped external React component bindings using `@module`, `@scope`,
+  escaped prop names, optional callback props, polymorphic event details,
+  array props, fragments, and default imports.
 - `jsx_preserve_minimal.res`: JSX v4 preserve output for DOM elements, nested
   children, and spread props.

@@ -10,6 +10,7 @@ tests/js_output_parity/fixtures/module_pack_patterns.res
 tests/js_output_parity/fixtures/external_edge_patterns.res	
 tests/js_output_parity/fixtures/variant_representation_patterns.res	
 tests/js_output_parity/fixtures/tella_sparse_record.res	
+tests/js_output_parity/fixtures/tella_scoped_send_patterns.res
 tests/js_output_parity/fixtures/interface_patterns.res
 tests/js_output_parity/fixtures/module_boundary_patterns
 tests/js_output_parity/fixtures/namespace_project_patterns
@@ -17,4 +18,5 @@ tests/js_output_parity/fixtures/config_output_patterns.res
 tests/js_output_parity/fixtures/deriving_output_patterns.res
 tests/js_output_parity/fixtures/attribute_codegen_patterns.res
 tests/js_output_parity/fixtures/jsx_transform_patterns.res	-bs-jsx 4
+tests/js_output_parity/fixtures/jsx_external_component_patterns.res	-bs-jsx 4
 tests/js_output_parity/fixtures/jsx_preserve_minimal.res	-bs-jsx 4 -bs-jsx-preserve
