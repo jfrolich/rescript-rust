@@ -33,7 +33,7 @@ if [[ "${fixture_args[0]:-}" == "--help" || "${fixture_args[0]:-}" == "-h" ]]; t
     echo "Usage: $0 [--with-external] [test_rust_parity.sh options]"
     echo ""
     echo "Runs the dedicated JS output parity mode using the existing Rust parity harness."
-    echo "By default it only checks the canonical 657 files under tests/tests/src."
+    echo "By default it only checks the canonical 660 files under tests/tests/src."
     echo "This keeps Spice PPX parity enabled and skips only parser AST and syntax sections."
     echo "With --with-external, local tests still use the per-file harness, while Tella"
     echo "is compared as an OCaml project build against a rewatch --in-process build."
