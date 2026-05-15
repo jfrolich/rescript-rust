@@ -117,6 +117,9 @@ Current focused coverage:
   binding output for scoped global event registries, `@get` option accessors,
   Promise wrappers around callback APIs, `@val @scope(("process", "env"))`
   nullable reads, and `@send @scope` webhook client methods.
+- `tella_json_decode_patterns.res`: minimized Tella JSON decoder output for
+  exception-wrapping array/dict loops, unsafe array allocation, recursive
+  field-path decoding, optional decoder fallback, and one-of error folding.
 - `interface_patterns.res`: a minimized interface-backed case covering `.resi`
   CMI flow, abstract implementation types, nested module signatures, and named
   polymorphic-variant widening.
