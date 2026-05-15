@@ -3,6 +3,7 @@ tests/js_output_parity/fixtures/core_patterns.res
 tests/js_output_parity/fixtures/ffi_patterns.res	
 tests/js_output_parity/fixtures/js_expression_patterns.res	
 tests/js_output_parity/fixtures/function_call_patterns.res	
+tests/js_output_parity/fixtures/mutable_uncurry_patterns.res
 tests/js_output_parity/fixtures/match_lowering_patterns.res
 tests/js_output_parity/fixtures/local_exception_scope_patterns.res
 tests/js_output_parity/fixtures/js_exception_rethrow_patterns.res

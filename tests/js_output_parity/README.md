@@ -48,6 +48,9 @@ Current focused coverage:
 - `function_call_patterns.res`: uncurried direct calls, partial application,
   labelled/default calls, pipes, callback arity wrappers, `@ignore`, and
   constant `@as` arguments.
+- `mutable_uncurry_patterns.res`: mutable-ref parameter destructuring,
+  generated parameter-name stability, multi-arity tuple functions, and nested
+  functions over ref payloads.
 - `match_lowering_patterns.res`: list/array/record destructuring, nested
   constructor patterns, literal payload patterns, guards, tuple or-patterns,
   aliases, and exception payload matching.
