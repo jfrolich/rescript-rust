@@ -75,6 +75,9 @@ Current focused coverage:
 - `external_edge_patterns.res`: nested scopes, nullable/null-undefined returns,
   `@string`/`@int` marshalling, tagged templates, `@this` callbacks, constant
   args, property get/set, dynamic import, and module-await lowering.
+- `import_binding_patterns.res`: same-source and same-member `@module`
+  imports, tuple module paths, `@val` plus `@module`, `@new` imports,
+  variadic module imports, node-style module names, and relative imports.
 - `variant_representation_patterns.res`: string/int/float/bigint constructor
   coercions, unboxed nullish variants, variant spreads, `jsConverter`,
   tagged inline records, unboxed widening, and Tella-derived named
