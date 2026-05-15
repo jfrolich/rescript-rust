@@ -15,6 +15,12 @@ while [[ $# -gt 0 ]]; do
             include_external=true
             shift
             ;;
+        --release)
+            fixture_args+=("$1")
+            local_args+=("$1")
+            tella_args+=("$1")
+            shift
+            ;;
         -q|--quick)
             fixture_args+=("$1")
             tella_args+=("$1")
@@ -30,7 +36,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 if [[ "${fixture_args[0]:-}" == "--help" || "${fixture_args[0]:-}" == "-h" ]]; then
-    echo "Usage: $0 [--with-external] [test_rust_parity.sh options]"
+    echo "Usage: $0 [--with-external] [--release] [test_rust_parity.sh options]"
     echo ""
     echo "Runs the dedicated JS output parity mode using the existing Rust parity harness."
     echo "By default it only checks the canonical 660 files under tests/tests/src."
@@ -40,6 +46,7 @@ if [[ "${fixture_args[0]:-}" == "--help" || "${fixture_args[0]:-}" == "-h" ]]; t
     echo ""
     echo "Options:"
     echo "  --with-external  Include the external corpus via TELLA_DIR as well."
+    echo "  --release        Use target/release Rust compiler and rewatch artifacts."
     echo "  -q, --quick      Stop early in focused fixtures and external Tella build."
     echo ""
     echo "Equivalent to:"

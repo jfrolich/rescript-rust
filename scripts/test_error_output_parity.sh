@@ -23,6 +23,7 @@ USAGE:
   ./scripts/test_error_output_parity.sh [OPTIONS] [FILE|PATTERN]
 
 OPTIONS:
+  --release          Use target/release Rust compiler and parser artifacts
   --parser-only       Run parser diagnostics only
   --compiler-only     Run compiler/typechecker diagnostics only
   --no-super-errors   Do not include tests/build_tests/super_errors/fixtures
@@ -38,6 +39,10 @@ EOF
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
+        --release)
+            RUST_TARGET=release
+            shift
+            ;;
         --parser-only)
             RUN_PARSER=true
             RUN_COMPILER=false
@@ -80,10 +85,11 @@ scriptDir=$(dirname "$0")
 PROJECT_ROOT=$(cd "$scriptDir/.."; pwd -P)
 DUNE_BIN_DIR="$PROJECT_ROOT/_build/install/default/bin"
 
+RUST_TARGET="${RUST_TARGET:-debug}"
 OCAML_BSC="${OCAML_BSC:-$DUNE_BIN_DIR/bsc}"
-RUST_BSC="${RUST_BSC:-$PROJECT_ROOT/compiler-rust/target/debug/bsc}"
+RUST_BSC="${RUST_BSC:-$PROJECT_ROOT/compiler-rust/target/$RUST_TARGET/bsc}"
 OCAML_PARSER="${OCAML_PARSER:-$DUNE_BIN_DIR/res_parser}"
-RUST_PARSER="${RUST_PARSER:-$PROJECT_ROOT/compiler-rust/target/debug/res_parser_rust}"
+RUST_PARSER="${RUST_PARSER:-$PROJECT_ROOT/compiler-rust/target/$RUST_TARGET/res_parser_rust}"
 
 PARSER_MATRIX="$PROJECT_ROOT/tests/syntax_tests/data/parsing/diagnostics_numbers.csv"
 COMPILER_CASES_FILE="$PROJECT_ROOT/tests/error_output_parity/compiler/cases.tsv"
@@ -120,7 +126,11 @@ fi
 if [[ "$missing" -ne 0 ]]; then
     echo "Build first:"
     echo "  eval \$(opam env --shell=sh) && make lib"
-    echo "  cargo build --manifest-path compiler-rust/Cargo.toml"
+    if [[ "$RUST_TARGET" == "release" ]]; then
+        echo "  cargo build --release --manifest-path compiler-rust/Cargo.toml"
+    else
+        echo "  cargo build --manifest-path compiler-rust/Cargo.toml"
+    fi
     exit 2
 fi
 

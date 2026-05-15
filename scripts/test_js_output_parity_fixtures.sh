@@ -19,6 +19,7 @@ USAGE:
   ./scripts/test_js_output_parity_fixtures.sh [OPTIONS] [FILE|PATTERN]
 
 OPTIONS:
+  --release        Use target/release Rust compiler and rewatch artifacts
   -q, --quick       Stop on first mismatch
   -v, --verbose     Print each fixture/mode
   -h, --help        Show this help
@@ -33,6 +34,11 @@ EOF
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
+        --release)
+            RUST_TARGET=release
+            REWATCH_TARGET=release
+            shift
+            ;;
         -q|--quick)
             QUICK_MODE=true
             shift
@@ -66,11 +72,21 @@ done
 
 script_dir=$(cd "$(dirname "$0")"; pwd -P)
 PROJECT_ROOT=$(cd "$script_dir/.."; pwd -P)
+RUST_TARGET="${RUST_TARGET:-debug}"
+REWATCH_TARGET="${REWATCH_TARGET:-$RUST_TARGET}"
 OCAML_BSC="${OCAML_BSC:-$PROJECT_ROOT/packages/@rescript/$("$PROJECT_ROOT/scripts/platform.sh")/bin/bsc.exe}"
-RUST_BSC="${RUST_BSC:-$PROJECT_ROOT/compiler-rust/target/debug/bsc}"
-REWATCH_BIN="${REWATCH_BIN:-$PROJECT_ROOT/rewatch/target/debug/rescript}"
+RUST_BSC="${RUST_BSC:-$PROJECT_ROOT/compiler-rust/target/$RUST_TARGET/bsc}"
+REWATCH_BIN="${REWATCH_BIN:-$PROJECT_ROOT/rewatch/target/$REWATCH_TARGET/rescript}"
 RESCRIPT_CLI="${RESCRIPT_CLI:-$PROJECT_ROOT/packages/@rescript/$("$PROJECT_ROOT/scripts/platform.sh")/bin/rescript.exe}"
 RESCRIPT_RUNTIME="${RESCRIPT_RUNTIME:-$PROJECT_ROOT/packages/@rescript/runtime}"
+RUST_BUILD_FLAG=""
+REWATCH_BUILD_FLAG=""
+if [[ "$RUST_TARGET" == "release" ]]; then
+    RUST_BUILD_FLAG=" --release"
+fi
+if [[ "$REWATCH_TARGET" == "release" ]]; then
+    REWATCH_BUILD_FLAG=" --release"
+fi
 CASES_FILE="$PROJECT_ROOT/tests/js_output_parity/cases.tsv"
 FIXTURE_DIR="$PROJECT_ROOT/tests/js_output_parity/fixtures"
 CACHE_REL=".parity-cache/js-output-fixtures"
@@ -92,8 +108,8 @@ done
 if [[ "$missing" -ne 0 ]]; then
     echo "Build first:"
     echo "  make"
-    echo "  cargo build --manifest-path compiler-rust/Cargo.toml"
-    echo "  cargo build --manifest-path rewatch/Cargo.toml"
+    echo "  cargo build$RUST_BUILD_FLAG --manifest-path compiler-rust/Cargo.toml"
+    echo "  cargo build$REWATCH_BUILD_FLAG --manifest-path rewatch/Cargo.toml"
     exit 2
 fi
 if [[ ! -d "$RESCRIPT_RUNTIME" ]]; then

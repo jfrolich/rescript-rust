@@ -50,6 +50,25 @@ make format
 make checkformat
 ```
 
+## Parity Gates for Performance Work
+
+- For performance work, build and test the release artifacts. Use `--release` on parity scripts instead of overriding paths by hand:
+  ```bash
+  cargo build --release --manifest-path compiler-rust/Cargo.toml
+  cargo build --release --manifest-path rewatch/Cargo.toml
+  ```
+- Keep full JavaScript output parity before retaining performance changes:
+  ```bash
+  ./scripts/test_js_output_parity.sh --release
+  ./scripts/test_js_output_parity.sh --release --with-external
+  ```
+  The first command covers the non-Tella corpus; `--with-external` also runs Tella output parity.
+- Keep error output parity green after diagnostic changes and before retaining performance changes:
+  ```bash
+  ./scripts/test_error_output_parity.sh --release
+  ```
+  Output parity and error parity are both required gates; do not treat Tella build success alone as sufficient.
+
 The Makefile’s targets build on each other in this order:
 
 1. `yarn-install` runs automatically for targets that need JavaScript tooling (lib, playground, tests, formatting, etc.).

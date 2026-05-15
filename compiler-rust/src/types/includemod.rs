@@ -22,7 +22,7 @@ use crate::types::decl::{
     ValueDescription, ValueKind,
 };
 use crate::types::env::Env;
-use crate::types::type_expr::{RowDesc, RowField, TypeDesc};
+use crate::types::type_expr::{FieldKind, RowDesc, RowField, TypeDesc};
 use crate::types::typedtree::ModuleCoercion;
 use crate::types::{TypeContext, TypeExprRef};
 use crate::{parser::code_frame, types::ArgLabel};
@@ -3745,6 +3745,27 @@ fn type_exprs_equal_for_inclusion_inner(
             // renaming map.
             rows_equal_for_inclusion(type_ctx, env, param_map, impl_row, sig_row, seen)
         }
+        // OCaml compiler/ml/ctype.ml:3293-3330 compares object
+        // manifests through `eqtype_fields`, not physical identity.
+        (
+            TypeDesc::Tobject {
+                fields: impl_fields,
+                ..
+            },
+            TypeDesc::Tobject {
+                fields: sig_fields, ..
+            },
+        ) => object_fields_equal_for_inclusion(
+            type_ctx,
+            env,
+            param_map,
+            *impl_fields,
+            *sig_fields,
+            seen,
+        ),
+        (TypeDesc::Tfield { .. }, TypeDesc::Tfield { .. }) => {
+            object_fields_equal_for_inclusion(type_ctx, env, param_map, impl_ty, sig_ty, seen)
+        }
         (TypeDesc::Tnil, TypeDesc::Tnil) => true,
         _ => impl_ty == sig_ty,
     }
@@ -3875,6 +3896,138 @@ fn row_fields_equal_for_inclusion(
         }
         _ => false,
     }
+}
+
+fn flatten_object_fields_for_inclusion(
+    type_ctx: &TypeContext,
+    fields: TypeExprRef,
+) -> (Vec<(String, FieldKind, TypeExprRef)>, TypeExprRef) {
+    let mut flattened = Vec::new();
+    let mut current = type_ctx.repr(fields);
+    loop {
+        let desc = type_ctx.get_desc(current);
+        match &*desc {
+            TypeDesc::Tfield {
+                name,
+                kind,
+                typ,
+                rest,
+            } => {
+                flattened.push((name.clone(), kind.clone(), *typ));
+                let next = type_ctx.repr(*rest);
+                drop(desc);
+                current = next;
+            }
+            _ => {
+                drop(desc);
+                break;
+            }
+        }
+    }
+    flattened.sort_by(|left, right| left.0.cmp(&right.0));
+    (flattened, current)
+}
+
+type ObjectFieldForInclusion = (String, FieldKind, TypeExprRef);
+
+fn associate_object_fields_for_inclusion(
+    impl_fields: Vec<ObjectFieldForInclusion>,
+    sig_fields: Vec<ObjectFieldForInclusion>,
+) -> (
+    Vec<(String, FieldKind, TypeExprRef, FieldKind, TypeExprRef)>,
+    Vec<ObjectFieldForInclusion>,
+    Vec<ObjectFieldForInclusion>,
+) {
+    let mut pairs = Vec::new();
+    let mut impl_only = Vec::new();
+    let mut sig_only = Vec::new();
+    let mut impl_index = 0;
+    let mut sig_index = 0;
+
+    while impl_index < impl_fields.len() && sig_index < sig_fields.len() {
+        let (impl_name, impl_kind, impl_ty) = &impl_fields[impl_index];
+        let (sig_name, sig_kind, sig_ty) = &sig_fields[sig_index];
+        match impl_name.cmp(sig_name) {
+            std::cmp::Ordering::Equal => {
+                pairs.push((
+                    impl_name.clone(),
+                    impl_kind.clone(),
+                    *impl_ty,
+                    sig_kind.clone(),
+                    *sig_ty,
+                ));
+                impl_index += 1;
+                sig_index += 1;
+            }
+            std::cmp::Ordering::Less => {
+                impl_only.push(impl_fields[impl_index].clone());
+                impl_index += 1;
+            }
+            std::cmp::Ordering::Greater => {
+                sig_only.push(sig_fields[sig_index].clone());
+                sig_index += 1;
+            }
+        }
+    }
+
+    impl_only.extend(impl_fields[impl_index..].iter().cloned());
+    sig_only.extend(sig_fields[sig_index..].iter().cloned());
+    (pairs, impl_only, sig_only)
+}
+
+fn object_field_kinds_equal_for_inclusion(left: &FieldKind, right: &FieldKind) -> bool {
+    matches!(
+        (left, right),
+        (FieldKind::Fvar(_), FieldKind::Fvar(_)) | (FieldKind::Fpresent, FieldKind::Fpresent)
+    )
+}
+
+fn object_fields_equal_for_inclusion(
+    type_ctx: &TypeContext,
+    env: Option<&Env>,
+    param_map: &HashMap<TypeExprRef, TypeExprRef>,
+    impl_fields: TypeExprRef,
+    sig_fields: TypeExprRef,
+    seen: &mut HashSet<(TypeExprRef, TypeExprRef)>,
+) -> bool {
+    let (impl_fields_flat, impl_rest) = flatten_object_fields_for_inclusion(type_ctx, impl_fields);
+    let (sig_fields_flat, sig_rest) = flatten_object_fields_for_inclusion(type_ctx, sig_fields);
+    let same_row = impl_rest == sig_rest || seen.contains(&(impl_rest, sig_rest));
+
+    if !same_row {
+        if let Some(env) = env {
+            let sig_rest_expanded =
+                type_ctx.repr(crate::types::ctype::expand_head(type_ctx, env, sig_rest));
+            if let TypeDesc::Tobject { fields, .. } = &*type_ctx.get_desc(sig_rest_expanded) {
+                return object_fields_equal_for_inclusion(
+                    type_ctx,
+                    Some(env),
+                    param_map,
+                    impl_fields,
+                    *fields,
+                    seen,
+                );
+            }
+        }
+    }
+
+    let (pairs, impl_only, sig_only) =
+        associate_object_fields_for_inclusion(impl_fields_flat, sig_fields_flat);
+    if !type_exprs_equal_for_inclusion_inner(type_ctx, env, param_map, impl_rest, sig_rest, seen)
+        || !impl_only.is_empty()
+        || !sig_only.is_empty()
+    {
+        return false;
+    }
+
+    pairs
+        .into_iter()
+        .all(|(_, impl_kind, impl_ty, sig_kind, sig_ty)| {
+            object_field_kinds_equal_for_inclusion(&impl_kind, &sig_kind)
+                && type_exprs_equal_for_inclusion_inner(
+                    type_ctx, env, param_map, impl_ty, sig_ty, seen,
+                )
+        })
 }
 
 fn arg_labels_equal(left: &ArgLabel, right: &ArgLabel) -> bool {

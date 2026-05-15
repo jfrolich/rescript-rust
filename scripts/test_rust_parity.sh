@@ -71,6 +71,12 @@ while [[ $# -gt 0 ]]; do
             SKIP_SPICE_PPX=true
             shift
             ;;
+        --release)
+            RUST_TARGET=release
+            RUST_BSC="$RUST_DIR/target/$RUST_TARGET/bsc"
+            RUST_PARSER="$RUST_DIR/target/$RUST_TARGET/res_parser_rust"
+            shift
+            ;;
         --verbose|-v)
             VERBOSE=true
             shift
@@ -83,6 +89,7 @@ while [[ $# -gt 0 ]]; do
             echo "  --skip-syntax      Skip syntax tests"
             echo "  --skip-js          Skip JS compilation snapshot tests"
             echo "  --skip-spice-ppx   Skip spice PPX parity tests"
+            echo "  --release          Use target/release Rust compiler/parser artifacts"
             echo "  --verbose, -v      Show more detailed output"
             echo "  --help, -h         Show this help message"
             exit 0
@@ -120,15 +127,21 @@ check_prerequisites() {
 
     if [[ ! -x "$RUST_BSC" ]]; then
         echo -e "${RED}Error: Rust bsc not found at $RUST_BSC${RESET}"
-        echo "Run 'cargo build --manifest-path compiler-rust/Cargo.toml' first."
-        echo "This parity script expects debug artifacts for iteration."
+        if [[ "$RUST_TARGET" == "release" ]]; then
+            echo "Run 'cargo build --release --manifest-path compiler-rust/Cargo.toml' first."
+        else
+            echo "Run 'cargo build --manifest-path compiler-rust/Cargo.toml' first."
+        fi
         missing=true
     fi
 
     if [[ ! -x "$RUST_PARSER" ]]; then
         echo -e "${RED}Error: Rust parser not found at $RUST_PARSER${RESET}"
-        echo "Run 'cargo build --manifest-path compiler-rust/Cargo.toml' first."
-        echo "This parity script expects debug artifacts for iteration."
+        if [[ "$RUST_TARGET" == "release" ]]; then
+            echo "Run 'cargo build --release --manifest-path compiler-rust/Cargo.toml' first."
+        else
+            echo "Run 'cargo build --manifest-path compiler-rust/Cargo.toml' first."
+        fi
         missing=true
     fi
 

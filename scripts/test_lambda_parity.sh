@@ -15,6 +15,7 @@
 #   -q, --quick       Stop on first failure (useful for quick iteration)
 #   -j, --parallel N  Run N tests in parallel (default: 8)
 #   -v, --verbose     Show progress for each file
+#   --release         Use target/release Rust compiler artifacts
 #   -l, --locs        Test with locations (-dlambda-sexp-locs)
 #   -r, --raw         Test unoptimized lambda printer output (-drawlambda)
 #   -u, --unoptimized Alias for --raw; compare pre-optimization lambda
@@ -55,6 +56,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         -v|--verbose)
             VERBOSE=true
+            shift
+            ;;
+        --release)
+            RUST_TARGET=release
             shift
             ;;
         -l|--locs)
@@ -116,8 +121,11 @@ fi
 
 if [[ ! -x "$RUST_BSC" ]]; then
     echo -e "${YELLOW}Warning: Rust bsc not found at $RUST_BSC${RESET}"
-    echo "Run 'cargo build --manifest-path compiler-rust/Cargo.toml' to build the debug Rust compiler."
-    echo "This parity script expects debug artifacts for iteration."
+    if [[ "$RUST_TARGET" == "release" ]]; then
+        echo "Run 'cargo build --release --manifest-path compiler-rust/Cargo.toml' to build the release Rust compiler."
+    else
+        echo "Run 'cargo build --manifest-path compiler-rust/Cargo.toml' to build the debug Rust compiler."
+    fi
     echo "For now, testing OCaml compiler only."
     RUST_AVAILABLE=false
 else

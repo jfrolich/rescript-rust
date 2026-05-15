@@ -8,6 +8,7 @@
 #   ./scripts/test_tella_output_parity.sh [OPTIONS] [FILE|PATTERN]
 #
 # Options:
+#   --release        Use target/release Rust compiler and rewatch artifacts
 #   -q, --quick       Stop on first output diff
 #   -v, --verbose     Show progress for each output file
 #   -h, --help        Show this help message
@@ -20,6 +21,11 @@ FILE_ARG=""
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
+        --release)
+            RUST_TARGET=release
+            REWATCH_TARGET=release
+            shift
+            ;;
         -q|--quick)
             QUICK_MODE=true
             shift
@@ -79,15 +85,21 @@ fi
 
 if [[ ! -x "$RUST_BSC" ]]; then
     echo -e "${RED}Error: Rust bsc not found at $RUST_BSC${RESET}" >&2
-    echo "Run 'cargo build --manifest-path compiler-rust/Cargo.toml' first." >&2
-    echo "This output parity script expects debug Rust artifacts for iteration." >&2
+    if [[ "$RUST_TARGET" == "release" ]]; then
+        echo "Run 'cargo build --release --manifest-path compiler-rust/Cargo.toml' first." >&2
+    else
+        echo "Run 'cargo build --manifest-path compiler-rust/Cargo.toml' first." >&2
+    fi
     exit 2
 fi
 
 if [[ ! -x "$REWATCH_BIN" ]]; then
     echo -e "${RED}Error: rewatch binary not found at $REWATCH_BIN${RESET}" >&2
-    echo "Run 'cargo build --manifest-path rewatch/Cargo.toml' first." >&2
-    echo "This output parity script expects debug rewatch artifacts for iteration." >&2
+    if [[ "$REWATCH_TARGET" == "release" ]]; then
+        echo "Run 'cargo build --release --manifest-path rewatch/Cargo.toml' first." >&2
+    else
+        echo "Run 'cargo build --manifest-path rewatch/Cargo.toml' first." >&2
+    fi
     exit 2
 fi
 
