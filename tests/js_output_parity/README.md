@@ -123,6 +123,9 @@ Current focused coverage:
 - `tella_json_encode_patterns.res`: minimized Tella JSON encoder output for
   `%identity` JSON externals, dict pair mapping, object construction from
   property lists, recursive list-to-array filling, and tuple encoders.
+- `tella_dexie_binding_patterns.res`: minimized Tella Dexie binding output for
+  indexed table access, fluent `@send` chains, raw store-schema helpers,
+  labelled promise-returning sends, and `%identity` primary-key encoders.
 - `interface_patterns.res`: a minimized interface-backed case covering `.resi`
   CMI flow, abstract implementation types, nested module signatures, and named
   polymorphic-variant widening.
