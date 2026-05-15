@@ -120,6 +120,9 @@ Current focused coverage:
 - `tella_json_decode_patterns.res`: minimized Tella JSON decoder output for
   exception-wrapping array/dict loops, unsafe array allocation, recursive
   field-path decoding, optional decoder fallback, and one-of error folding.
+- `tella_json_encode_patterns.res`: minimized Tella JSON encoder output for
+  `%identity` JSON externals, dict pair mapping, object construction from
+  property lists, recursive list-to-array filling, and tuple encoders.
 - `interface_patterns.res`: a minimized interface-backed case covering `.resi`
   CMI flow, abstract implementation types, nested module signatures, and named
   polymorphic-variant widening.
