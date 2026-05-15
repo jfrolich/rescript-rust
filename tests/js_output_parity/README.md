@@ -126,6 +126,9 @@ Current focused coverage:
 - `tella_dexie_binding_patterns.res`: minimized Tella Dexie binding output for
   indexed table access, fluent `@send` chains, raw store-schema helpers,
   labelled promise-returning sends, and `%identity` primary-key encoders.
+- `tella_directive_import_patterns.res`: minimized Tella/Next client-module
+  directive output for file-level and nested `@@directive` items combined with
+  emitted imports, hook-shaped externals, and `@send` navigation methods.
 - `interface_patterns.res`: a minimized interface-backed case covering `.resi`
   CMI flow, abstract implementation types, nested module signatures, and named
   polymorphic-variant widening.

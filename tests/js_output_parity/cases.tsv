@@ -28,6 +28,7 @@ tests/js_output_parity/fixtures/tella_chrome_svix_binding_patterns.res
 tests/js_output_parity/fixtures/tella_json_decode_patterns.res
 tests/js_output_parity/fixtures/tella_json_encode_patterns.res
 tests/js_output_parity/fixtures/tella_dexie_binding_patterns.res
+tests/js_output_parity/fixtures/tella_directive_import_patterns.res
 tests/js_output_parity/fixtures/interface_patterns.res
 tests/js_output_parity/fixtures/module_boundary_patterns
 tests/js_output_parity/fixtures/namespace_project_patterns
