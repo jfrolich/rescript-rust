@@ -17,10 +17,12 @@ pub mod op;
 pub mod printer;
 pub mod program_printer;
 
+use ahash::AHashMap;
 use std::collections::HashMap;
 use std::ffi::OsString;
 use std::fs;
 use std::path::{Component, Path as FsPath, PathBuf};
+use std::sync::Arc;
 
 use crate::cmi::persistent_env::{
     CmjExportArity, CmjExportConstant, CmjFileCase, CmjPackageModuleSystem, CmjPackageName,
@@ -232,30 +234,30 @@ impl ModulePathResolver {
     pub fn module_cmj_export_constants(
         &self,
         module_name: &str,
-    ) -> Option<HashMap<String, CmjExportConstant>> {
+    ) -> Option<Arc<AHashMap<String, CmjExportConstant>>> {
         self.persistent_env
             .as_ref()
             .and_then(|env| env.module_cmj_export_constants(module_name))
-            .map(|exports| exports.into_iter().collect())
     }
 
     /// Read arity metadata recorded in a module's companion `.cmj`.
     pub fn module_cmj_export_arities(
         &self,
         module_name: &str,
-    ) -> Option<HashMap<String, CmjExportArity>> {
+    ) -> Option<Arc<AHashMap<String, CmjExportArity>>> {
         self.persistent_env
             .as_ref()
             .and_then(|env| env.module_cmj_export_arities(module_name))
-            .map(|exports| exports.into_iter().collect())
     }
 
     /// Read closed lambda exports recorded in a module's companion `.cmj`.
-    pub fn module_cmj_export_lambdas(&self, module_name: &str) -> Option<HashMap<String, Lambda>> {
+    pub fn module_cmj_export_lambdas(
+        &self,
+        module_name: &str,
+    ) -> Option<Arc<AHashMap<String, Lambda>>> {
         self.persistent_env
             .as_ref()
             .and_then(|env| env.module_cmj_export_lambdas(module_name))
-            .map(|exports| exports.into_iter().collect())
     }
 
     fn runtime_module_path(&self, module_name: &str) -> String {

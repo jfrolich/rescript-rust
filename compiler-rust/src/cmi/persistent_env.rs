@@ -257,9 +257,9 @@ pub struct InMemoryModuleInfo {
     /// Whether the module is side-effect free (replaces `.cmj` purity lookup)
     pub is_pure: bool,
     /// Closed constant exports (replaces `.cmj` constant lookup)
-    pub cmj_export_constants: HashMap<String, CmjExportConstant>,
+    pub cmj_export_constants: Arc<HashMap<String, CmjExportConstant>>,
     /// Arity metadata for exports (replaces `.cmj` arity lookup)
-    pub cmj_export_arities: HashMap<String, CmjExportArity>,
+    pub cmj_export_arities: Arc<HashMap<String, CmjExportArity>>,
     /// Whether this module belongs to `@rescript/runtime`
     pub is_runtime: bool,
     /// Package name used by JS import rebasing in `--in-process` builds.
@@ -280,8 +280,8 @@ impl InMemoryModuleInfo {
         Self {
             source_path,
             is_pure,
-            cmj_export_constants,
-            cmj_export_arities: HashMap::new(),
+            cmj_export_constants: Arc::new(cmj_export_constants),
+            cmj_export_arities: Arc::new(HashMap::new()),
             is_runtime,
             package_name: None,
             package_root: None,
@@ -293,7 +293,7 @@ impl InMemoryModuleInfo {
         mut self,
         cmj_export_arities: HashMap<String, CmjExportArity>,
     ) -> Self {
-        self.cmj_export_arities = cmj_export_arities;
+        self.cmj_export_arities = Arc::new(cmj_export_arities);
         self
     }
 
@@ -1306,7 +1306,7 @@ impl PersistentEnv {
     pub fn module_cmj_export_constants(
         &self,
         name: &str,
-    ) -> Option<HashMap<String, CmjExportConstant>> {
+    ) -> Option<Arc<HashMap<String, CmjExportConstant>>> {
         // Check in-memory registry first (--in-process mode)
         if let Some(info) = self.in_memory_info(name) {
             return Some(info.cmj_export_constants.clone());
@@ -1318,7 +1318,7 @@ impl PersistentEnv {
         }
 
         let path = self.resolve_module_cmj_path(name)?;
-        read_cmj_export_constants(&path)
+        read_cmj_export_constants(&path).map(Arc::new)
     }
 
     /// Read arity metadata recorded in a module's companion `.cmj`.
@@ -1326,7 +1326,10 @@ impl PersistentEnv {
     /// OCaml keeps `arity` even when `compiler/core/js_cmj_format.ml:113-121`
     /// strips non-constant `persistent_closed_lambda` with cross-module
     /// inlining off.
-    pub fn module_cmj_export_arities(&self, name: &str) -> Option<HashMap<String, CmjExportArity>> {
+    pub fn module_cmj_export_arities(
+        &self,
+        name: &str,
+    ) -> Option<Arc<HashMap<String, CmjExportArity>>> {
         if let Some(info) = self.in_memory_info(name) {
             return Some(info.cmj_export_arities.clone());
         }
@@ -1337,7 +1340,7 @@ impl PersistentEnv {
         }
 
         let path = self.resolve_module_cmj_path(name)?;
-        read_cmj_export_arities(&path)
+        read_cmj_export_arities(&path).map(Arc::new)
     }
 
     /// Read closed lambda exports recorded in a module's `.cmj` metadata.
@@ -1345,7 +1348,7 @@ impl PersistentEnv {
     /// This mirrors the `cross_module_inline = true` arm of OCaml
     /// `js_cmj_format.ml:112-121`, where non-constant
     /// `persistent_closed_lambda` values are preserved for backend inlining.
-    pub fn module_cmj_export_lambdas(&self, name: &str) -> Option<HashMap<String, Lambda>> {
+    pub fn module_cmj_export_lambdas(&self, name: &str) -> Option<Arc<HashMap<String, Lambda>>> {
         // In in-process mode the registry is authoritative; do not fall back to
         // disk `.cmj` files behind the scheduler's back.
         if self.in_process_mode {
@@ -1353,7 +1356,7 @@ impl PersistentEnv {
         }
 
         let path = self.resolve_module_cmj_path(name)?;
-        read_cmj_export_lambdas(&path)
+        read_cmj_export_lambdas(&path).map(Arc::new)
     }
 
     fn read_source_latin1(path: &FsPath) -> Option<String> {
