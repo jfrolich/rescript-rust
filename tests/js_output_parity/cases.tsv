@@ -1,6 +1,7 @@
 # source	extra compiler flags
 tests/js_output_parity/fixtures/core_patterns.res	
 tests/js_output_parity/fixtures/numeric_primitive_patterns.res
+tests/js_output_parity/fixtures/runtime_primitive_alias_patterns.res
 tests/js_output_parity/fixtures/ffi_patterns.res	
 tests/js_output_parity/fixtures/js_expression_patterns.res	
 tests/js_output_parity/fixtures/function_call_patterns.res	

@@ -43,6 +43,9 @@ Current focused coverage:
 - `numeric_primitive_patterns.res`: integer division/modulo flag-sensitive
   lowering, bitwise operators, overflow coercions, float arithmetic,
   comparisons, assertions, and int/float conversions.
+- `runtime_primitive_alias_patterns.res`: aliases for runtime-backed
+  `compare`/`min`/`max` across primitive/object types plus checked
+  string/array access and update primitives.
 - `ffi_patterns.res`: `@obj`, `@send`, `@get`, `@set`, index get/set,
   ignored GADT arguments, raw JavaScript, and array/string FFI calls.
 - `js_expression_patterns.res`: reserved property names, scoped/default
