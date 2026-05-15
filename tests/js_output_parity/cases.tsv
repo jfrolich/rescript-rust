@@ -5,6 +5,7 @@ tests/js_output_parity/fixtures/runtime_primitive_alias_patterns.res
 tests/js_output_parity/fixtures/ffi_patterns.res	
 tests/js_output_parity/fixtures/js_expression_patterns.res	
 tests/js_output_parity/fixtures/uncurried_external_edge_patterns.res
+tests/js_output_parity/fixtures/uncurried_optional_external_patterns.res
 tests/js_output_parity/fixtures/function_call_patterns.res	
 tests/js_output_parity/fixtures/higher_order_eta_patterns.res
 tests/js_output_parity/fixtures/async_this_callback_patterns.res

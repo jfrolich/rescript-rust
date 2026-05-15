@@ -55,6 +55,9 @@ Current focused coverage:
   object builders with constant JSON args, scoped constant-arg calls, ignored
   GADT witness get/set/index accessors, unit-send forms, `@this` setters, and
   bare `@module` constructor imports.
+- `uncurried_optional_external_patterns.res`: uncurried external calls with
+  trailing optional arguments omitted, earlier optional slots preserved when a
+  later optional label is supplied, optional `@send`, and optional `@new`.
 - `function_call_patterns.res`: uncurried direct calls, partial application,
   labelled/default calls, pipes, callback arity wrappers, `@ignore`, and
   constant `@as` arguments.
