@@ -40,6 +40,9 @@ Current focused coverage:
 - `core_patterns.res`: literals, tuples, arrays, lists, records, objects,
   labelled/optional functions, pipe calls, loops, assertions, options,
   polymorphic variants, unboxed variants, and nested modules.
+- `numeric_primitive_patterns.res`: integer division/modulo flag-sensitive
+  lowering, bitwise operators, overflow coercions, float arithmetic,
+  comparisons, assertions, and int/float conversions.
 - `ffi_patterns.res`: `@obj`, `@send`, `@get`, `@set`, index get/set,
   ignored GADT arguments, raw JavaScript, and array/string FFI calls.
 - `js_expression_patterns.res`: reserved property names, scoped/default

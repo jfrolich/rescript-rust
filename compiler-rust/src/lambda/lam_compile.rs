@@ -5079,6 +5079,20 @@ impl LambdaCompiler {
         )
     }
 
+    pub(crate) fn builtin_runtime_call_info() -> CallInfo {
+        // OCaml `E.runtime_call` uses `Js_call_info.builtin_runtime_call`
+        // (`compiler/core/js_exp_make.ml:147-149`), defined as
+        // `{arity = Full; call_info = Call_builtin_runtime}`
+        // (`compiler/core/js_call_info.ml:40-42`). `js_dump.ml:299-344`
+        // relies on exactly that metadata when eta-reducing wrappers like
+        // `fun x y -> Primitive_int.div x y` to `Primitive_int.div`.
+        CallInfo {
+            kind: CallKind::BuiltinRuntime,
+            arity: CallArity::Full,
+            ..CallInfo::default()
+        }
+    }
+
     pub(crate) fn runtime_call_expr(
         &self,
         module_name: &str,
@@ -5088,7 +5102,7 @@ impl LambdaCompiler {
         Expression::call(
             self.runtime_member_expr(module_name, member),
             args,
-            CallInfo::default(),
+            Self::builtin_runtime_call_info(),
         )
     }
 
