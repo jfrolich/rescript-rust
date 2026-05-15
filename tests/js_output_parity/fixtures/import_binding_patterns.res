@@ -1,6 +1,8 @@
 type token
 type config
 type componentClass
+type data
+type bareClient
 
 @module("output-parity-sdk") external defaultToken: token = "default"
 @module("output-parity-sdk") external createToken: string => token = "createToken"
@@ -26,6 +28,11 @@ type componentClass
 @module("./relative-tool.js") external localDefault: int => int = "default"
 @module("./relative-tool.js") external localNamed: int => int = "named"
 
+@module external assetUrl: string = "./asset.png"
+@val @module external bareData: data = "emoji-mart/data/all.json"
+@module @new external makeBareClient: (~token: string, ~secret: string) => bareClient =
+  "@mux/mux-node"
+
 let makeConfig = name => %raw(`{ displayName: name }`)
 
 let renderValue = () => render(createClass(makeConfig("ImportBinding")), defaultToken)
@@ -48,6 +55,9 @@ let allValues = (
   joinPath(["root", "child", "file.res"]),
   localDefault(3),
   localNamed(4),
+  assetUrl,
+  bareData,
+  makeBareClient(~token="token", ~secret="secret"),
   renderValue(),
   assertionCalls(),
 )
