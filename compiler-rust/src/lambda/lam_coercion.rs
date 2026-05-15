@@ -1,15 +1,15 @@
 //! Export alias resolution and toplevel rewriting.
 //!
 //! Port of `lam_coercion.ml` — resolves export aliases, rewrites toplevel
-//! variable initializers, and reorders trailing export bindings.
+//! variable initializers, and handles toplevel export extraction.
 
 use std::collections::{HashMap, HashSet};
 
 use crate::ident::Ident;
-use crate::js_ir::op::{IdentInfo, Number, UsedStats};
+use crate::js_ir::op::IdentInfo;
 use crate::js_ir::{
-    BinOp, Block, Expression, ExpressionDesc, Statement, StatementDesc, VIdent,
-    VariableDeclaration, ocaml_eq_expression,
+    Block, Expression, ExpressionDesc, Statement, StatementDesc, VIdent, VariableDeclaration,
+    ocaml_eq_expression,
 };
 use crate::lambda::TagInfo;
 use crate::lambda::js_exp_make::js_expr_no_side_effects;
@@ -243,66 +243,6 @@ pub(crate) fn rewrite_toplevel_variable_initializers_through_rewriteable_aliases
     }
 
     *block = flattened;
-}
-
-pub(crate) fn reorder_trailing_export_bindings_by_export_order(
-    block: &mut Block,
-    exports: &[Ident],
-) {
-    if block.len() < 2 || exports.len() < 2 {
-        return;
-    }
-
-    let export_positions: HashMap<Ident, usize> = exports
-        .iter()
-        .cloned()
-        .enumerate()
-        .map(|(index, ident)| (ident, index))
-        .collect();
-    let Some(end) = block.iter().rposition(|stmt| {
-        reorderable_trailing_export_binding_ident(stmt, &export_positions).is_some()
-    }) else {
-        return;
-    };
-    let start = block[..=end]
-        .iter()
-        .rposition(|stmt| {
-            reorderable_trailing_export_binding_ident(stmt, &export_positions).is_none()
-        })
-        .map_or(0, |index| index + 1);
-    if end <= start {
-        return;
-    }
-
-    block[start..=end].sort_by_key(|stmt| {
-        reorderable_trailing_export_binding_ident(stmt, &export_positions)
-            .and_then(|ident| export_positions.get(ident).copied())
-            .unwrap_or(usize::MAX)
-    });
-}
-
-pub(crate) fn reorderable_trailing_export_binding_ident<'a>(
-    stmt: &'a Statement,
-    export_positions: &HashMap<Ident, usize>,
-) -> Option<&'a Ident> {
-    match &stmt.desc {
-        StatementDesc::Variable(VariableDeclaration {
-            ident,
-            value:
-                Some(Expression {
-                    desc:
-                        ExpressionDesc::Var(_)
-                        | ExpressionDesc::Undefined { .. }
-                        | ExpressionDesc::Null
-                        | ExpressionDesc::Bool(_)
-                        | ExpressionDesc::Str { .. }
-                        | ExpressionDesc::Number(_),
-                    ..
-                }),
-            ..
-        }) if export_positions.contains_key(ident) => Some(ident),
-        _ => None,
-    }
 }
 
 pub(crate) fn rewriteable_alias_root_has_other_toplevel_uses(

@@ -58,8 +58,8 @@ use super::lam_coercion::{
     insert_rebound_export_before_equivalent_later_binding,
     keeps_declared_same_name_function_export_alias, max_ident_stamp_in_block,
     max_ident_stamp_in_expression, push_effect_expression, push_s_exp,
-    reorder_trailing_export_bindings_by_export_order, resolve_declared_same_name_self_alias_target,
-    resolve_export_aliases, reusable_same_name_export_binding,
+    resolve_declared_same_name_self_alias_target, resolve_export_aliases,
+    reusable_same_name_export_binding,
     rewrite_toplevel_variable_initializers_through_rewriteable_aliases,
 };
 use super::lam_compile_variant::{empty_switch_case_clause, stable_group_switch_cases};
@@ -828,8 +828,11 @@ impl LambdaCompiler {
             }));
         }
 
+        // OCaml compiler/core/lam_coercion.ml:160-172 folds original flattened
+        // groups back in front of rebound export groups and preserves that
+        // order. Generated JS observes this, so these late bindings must not be
+        // sorted by export-list order.
         block.extend(rebound_exports);
-        reorder_trailing_export_bindings_by_export_order(block, &exports);
         (exports, name_reservations)
     }
 
@@ -2070,6 +2073,22 @@ impl LambdaCompiler {
                     }),
                     self.try_statement(body_block, exn, handler_block),
                 ]
+            }
+            Lambda::Lsequence(first, second) => {
+                // OCaml compiler/core/lam_compile.ml:1862-1869 compiles an
+                // `Llet` RHS with continuation `Declare(kind, id)`. Its
+                // Lsequence arm at compiler/core/lam_compile.ml:1899-1903
+                // emits the head as `EffectCall Not_tail`, then compiles the
+                // tail in the original continuation. That lets
+                // compiler/core/js_stmt_make.ml:62-67 turn a final unit
+                // `Undefined` into `let id;` instead of binding a
+                // `(effect, undefined)` expression.
+                let mut block = self.compile_effect_block(first);
+                if lambda_is_unconditional_exit(first) || block_finishes_output(&block) {
+                    return block;
+                }
+                block.extend(self.compile_let_binding(kind, id, second));
+                block
             }
             Lambda::Lswitch(scrut, switch) => {
                 self.compile_switch_binding_block(kind, id, scrut, switch)

@@ -102,6 +102,9 @@ Current focused coverage:
   coercions, unboxed nullish variants, variant spreads, `jsConverter`,
   tagged inline records, unboxed widening, and Tella-derived named
   polymorphic-variant widening.
+- `unboxed_recursive_output_patterns.res`: recursive unboxed unknown and
+  existential payload representations, polymorphic unboxed record fields, and
+  recursive unboxed record aliases inside polymorphic-variant rows.
 - `tella_sparse_record.res`: a minimized Tella-derived large sparse record
   shape without depending on the external Tella repository.
 - `tella_scoped_send_patterns.res`: minimized Tella binding output for
