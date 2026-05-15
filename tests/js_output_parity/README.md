@@ -11,6 +11,9 @@ with the OCaml compiler and debug rewatch `--in-process`, then compares every
 generated JS output. Directory fixtures can include `rescript.extra.json` for
 extra project-level config such as namespace settings.
 
+See `COVERAGE.md` for the compiler-output surface checklist that maps language
+features and Tella-minimized patterns to concrete fixtures.
+
 Run the focused fixture gate with the debug Rust compiler and debug rewatch:
 
 ```bash
