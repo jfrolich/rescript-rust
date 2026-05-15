@@ -1,6 +1,8 @@
 syntax_tests/data/api/reasonSyntax.res
 syntax_tests/data/api/reiSyntax.resi
 syntax_tests/data/api/resiSyntax.resi
+syntax_tests/data/ast-mapping/ForAwaitOfExpressions.res
+syntax_tests/data/ast-mapping/ForOfExpressions.res
 syntax_tests/data/ast-mapping/FunWithAttribute.res
 syntax_tests/data/ast-mapping/JSXElements.res
 syntax_tests/data/ast-mapping/JSXFragments.res
@@ -855,6 +857,8 @@ syntax_tests/data/parsing/grammar/expressions/extension.res
 syntax_tests/data/parsing/grammar/expressions/firstClassModule.res
 syntax_tests/data/parsing/grammar/expressions/float.res
 syntax_tests/data/parsing/grammar/expressions/for.res
+syntax_tests/data/parsing/grammar/expressions/for_await_of.res
+syntax_tests/data/parsing/grammar/expressions/for_of.res
 syntax_tests/data/parsing/grammar/expressions/ident.res
 syntax_tests/data/parsing/grammar/expressions/if.res
 syntax_tests/data/parsing/grammar/expressions/infix.res
@@ -862,6 +866,7 @@ syntax_tests/data/parsing/grammar/expressions/jsx.res
 syntax_tests/data/parsing/grammar/expressions/letUnwrap.res
 syntax_tests/data/parsing/grammar/expressions/list.res
 syntax_tests/data/parsing/grammar/expressions/locallyAbstractTypes.res
+syntax_tests/data/parsing/grammar/expressions/loopControl.res
 syntax_tests/data/parsing/grammar/expressions/parenthesized.res
 syntax_tests/data/parsing/grammar/expressions/polyvariant.res
 syntax_tests/data/parsing/grammar/expressions/primary.res
@@ -875,6 +880,7 @@ syntax_tests/data/parsing/grammar/expressions/tupleVsDivision.res
 syntax_tests/data/parsing/grammar/expressions/unary.res
 syntax_tests/data/parsing/grammar/expressions/unaryOrBinary.res
 syntax_tests/data/parsing/grammar/expressions/uncurried.res
+syntax_tests/data/parsing/grammar/expressions/uncurriedLegacyDot.res
 syntax_tests/data/parsing/grammar/expressions/underscoreApply.res
 syntax_tests/data/parsing/grammar/expressions/while.res
 syntax_tests/data/parsing/grammar/interface/interface.resi
@@ -925,7 +931,13 @@ syntax_tests/data/parsing/grammar/signature/typeDefinition.res
 syntax_tests/data/parsing/grammar/signature/typext.res
 syntax_tests/data/parsing/grammar/structure/exceptionDefinition.res
 syntax_tests/data/parsing/grammar/structure/externalDefinition.res
+syntax_tests/data/parsing/grammar/structure/externalInlineRecord.res
+syntax_tests/data/parsing/grammar/structure/externalInlineRecordAnonymous.res
+syntax_tests/data/parsing/grammar/structure/externalInlineRecordCollision.res
+syntax_tests/data/parsing/grammar/structure/externalInlineRecordNestedArrow.res
+syntax_tests/data/parsing/grammar/structure/externalInlineRecordNonArrow.res
 syntax_tests/data/parsing/grammar/structure/includeStatement.res
+syntax_tests/data/parsing/grammar/structure/inlineRecordCollision.res
 syntax_tests/data/parsing/grammar/structure/itemExtension.res
 syntax_tests/data/parsing/grammar/structure/letBinding.res
 syntax_tests/data/parsing/grammar/structure/modExprExtension.res
@@ -964,6 +976,7 @@ syntax_tests/data/parsing/grammar/typexpr/polyVariant.res
 syntax_tests/data/parsing/grammar/typexpr/tuple.res
 syntax_tests/data/parsing/grammar/typexpr/typeconstr.res
 syntax_tests/data/parsing/grammar/typexpr/uncurried.res
+syntax_tests/data/parsing/grammar/typexpr/uncurriedLegacyDot.res
 syntax_tests/data/parsing/grammar/typexpr/unit.res
 syntax_tests/data/parsing/grammar/typexpr/var.res
 syntax_tests/data/parsing/other/attributes.res
@@ -982,6 +995,7 @@ syntax_tests/data/parsing/other/stringLiterals.res
 syntax_tests/data/ppx/react/aliasProps.res
 syntax_tests/data/ppx/react/asyncAwait.res
 syntax_tests/data/ppx/react/commentAtTop.res
+syntax_tests/data/ppx/react/defaultPatternProp.res
 syntax_tests/data/ppx/react/defaultValueProp.res
 syntax_tests/data/ppx/react/externalWithCustomName.res
 syntax_tests/data/ppx/react/externalWithRef.res
@@ -1071,6 +1085,8 @@ syntax_tests/data/printer/expr/extension.res
 syntax_tests/data/printer/expr/field.res
 syntax_tests/data/printer/expr/firstClassModule.res
 syntax_tests/data/printer/expr/for.res
+syntax_tests/data/printer/expr/for_await_of.res
+syntax_tests/data/printer/expr/for_of.res
 syntax_tests/data/printer/expr/fun.res
 syntax_tests/data/printer/expr/ident.res
 syntax_tests/data/printer/expr/if.res
@@ -1082,6 +1098,7 @@ syntax_tests/data/printer/expr/letUnwrap.res
 syntax_tests/data/printer/expr/letexception.res
 syntax_tests/data/printer/expr/letmodule.res
 syntax_tests/data/printer/expr/list.res
+syntax_tests/data/printer/expr/loopControl.res
 syntax_tests/data/printer/expr/nestedCallbacks.res
 syntax_tests/data/printer/expr/newtype.res
 syntax_tests/data/printer/expr/open.res
@@ -1154,6 +1171,11 @@ syntax_tests/data/printer/pattern/variant.res
 syntax_tests/data/printer/signature/attributes.resi
 syntax_tests/data/printer/signature/exception.resi
 syntax_tests/data/printer/signature/extension.resi
+syntax_tests/data/printer/signature/externalInlineRecord.resi
+syntax_tests/data/printer/signature/externalInlineRecordAnonymous.resi
+syntax_tests/data/printer/signature/externalInlineRecordBareArrow.resi
+syntax_tests/data/printer/signature/externalInlineRecordNestedArrow.resi
+syntax_tests/data/printer/signature/externalObjectSpread.resi
 syntax_tests/data/printer/signature/include.resi
 syntax_tests/data/printer/signature/modtype.resi
 syntax_tests/data/printer/signature/module.resi
@@ -1167,6 +1189,14 @@ syntax_tests/data/printer/structure/exception.res
 syntax_tests/data/printer/structure/expr.res
 syntax_tests/data/printer/structure/extension.res
 syntax_tests/data/printer/structure/external.res
+syntax_tests/data/printer/structure/externalInlineRecord.res
+syntax_tests/data/printer/structure/externalInlineRecordAll.res
+syntax_tests/data/printer/structure/externalInlineRecordAnonymous.res
+syntax_tests/data/printer/structure/externalInlineRecordBareArrow.res
+syntax_tests/data/printer/structure/externalInlineRecordComments.res
+syntax_tests/data/printer/structure/externalInlineRecordNestedArrow.res
+syntax_tests/data/printer/structure/externalInlineRecordNonArrow.res
+syntax_tests/data/printer/structure/externalObjectSpread.res
 syntax_tests/data/printer/structure/include.res
 syntax_tests/data/printer/structure/moduleBinding.res
 syntax_tests/data/printer/structure/moduleTypeDeclaration.res
@@ -1179,6 +1209,7 @@ syntax_tests/data/printer/typeDef/abstract.res
 syntax_tests/data/printer/typeDef/attributes.res
 syntax_tests/data/printer/typeDef/constraint.res
 syntax_tests/data/printer/typeDef/exoticIdent.res
+syntax_tests/data/printer/typeDef/inlineRecordCollision.res
 syntax_tests/data/printer/typeDef/missingPipeBeforeConstructorAttribute.res
 syntax_tests/data/printer/typeDef/open.res
 syntax_tests/data/printer/typeDef/private.res
