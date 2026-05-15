@@ -51,6 +51,10 @@ Current focused coverage:
 - `js_expression_patterns.res`: reserved property names, scoped/default
   externals, variadic `@new`/`@send`, optional external args, object literals,
   dict-pattern lowering, and index mutation.
+- `uncurried_external_edge_patterns.res`: uncurried external edge output for
+  object builders with constant JSON args, scoped constant-arg calls, ignored
+  GADT witness get/set/index accessors, unit-send forms, `@this` setters, and
+  bare `@module` constructor imports.
 - `function_call_patterns.res`: uncurried direct calls, partial application,
   labelled/default calls, pipes, callback arity wrappers, `@ignore`, and
   constant `@as` arguments.
