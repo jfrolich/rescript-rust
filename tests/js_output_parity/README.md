@@ -51,6 +51,9 @@ Current focused coverage:
 - `function_call_patterns.res`: uncurried direct calls, partial application,
   labelled/default calls, pipes, callback arity wrappers, `@ignore`, and
   constant `@as` arguments.
+- `higher_order_eta_patterns.res`: higher-order unary/binary function wrapper
+  output, nested wrappers, and wrappers around record/object-selected
+  callbacks.
 - `mutable_uncurry_patterns.res`: mutable-ref parameter destructuring,
   generated parameter-name stability, multi-arity tuple functions, and nested
   functions over ref payloads.
