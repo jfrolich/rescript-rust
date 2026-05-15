@@ -27,6 +27,7 @@ tests/js_output_parity/fixtures/module_boundary_patterns
 tests/js_output_parity/fixtures/namespace_project_patterns
 tests/js_output_parity/fixtures/config_output_patterns.res
 tests/js_output_parity/fixtures/deriving_output_patterns.res
+tests/js_output_parity/fixtures/uncurried_deriving_output_patterns.res
 tests/js_output_parity/fixtures/attribute_codegen_patterns.res
 tests/js_output_parity/fixtures/external_arity_patterns.res	-bs-jsx 4
 tests/js_output_parity/fixtures/jsx_transform_patterns.res	-bs-jsx 4

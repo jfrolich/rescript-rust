@@ -119,6 +119,9 @@ Current focused coverage:
   retained local bindings and side effects.
 - `deriving_output_patterns.res`: builtin deriving output for accessors,
   abstract records, optional fields, and light abstract records.
+- `uncurried_deriving_output_patterns.res`: generated accessor and constructor
+  helper arity from `@deriving(accessors)` under `@@uncurried`, including
+  composed calls through derived helpers.
 - `attribute_codegen_patterns.res`: inline constants/functions/modules,
   `%%private` extension output, tuple `@module` externals, legacy and direct
   `null_to_opt` returns, and named/optional `@unwrap` arguments.
