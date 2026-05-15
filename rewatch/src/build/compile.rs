@@ -137,7 +137,6 @@ struct PreJsMsg {
 
 struct SignatureReadyMsg {
     module_name: String,
-    signature: rescript_compiler::types::Signature,
     fingerprint: u64,
     is_pure: bool,
     registry_updates: Vec<PendingRegistryUpdate>,
@@ -270,7 +269,6 @@ fn apply_signature_ready(build_command_state: &BuildCommandState, msg: Signature
     let generation_before = build_command_state.get_interface_generation(&msg.module_name);
     let generation_after = build_command_state.register_in_memory_interface(
         msg.module_name,
-        msg.signature,
         msg.fingerprint,
         msg.is_pure,
     );
@@ -2793,7 +2791,6 @@ fn compile_module_in_process_to_js_boundary(
                 .tx
                 .send(WorkerMsg::SignatureReady(SignatureReadyMsg {
                     module_name: module_name.to_string(),
-                    signature: intf_result.signature,
                     fingerprint: intf_fingerprint,
                     is_pure: provisional_is_pure,
                     registry_updates: interface_registry_update.iter().cloned().collect::<Vec<_>>(),
@@ -2803,7 +2800,6 @@ fn compile_module_in_process_to_js_boundary(
             // Register the interface signature in rewatch's in-memory registry.
             build_command_state.register_in_memory_interface(
                 module_name.to_string(),
-                intf_result.signature,
                 intf_fingerprint,
                 provisional_is_pure,
             );
@@ -2843,7 +2839,6 @@ fn compile_module_in_process_to_js_boundary(
                 .tx
                 .send(WorkerMsg::SignatureReady(SignatureReadyMsg {
                     module_name: signature_module_name.clone(),
-                    signature: ready.signature,
                     fingerprint,
                     is_pure: provisional_is_pure,
                     registry_updates,

@@ -2119,11 +2119,11 @@ impl TypeContext {
                     "in-process invariant violated: missing PersistentEnv while forcing raw signature for {module_name}"
                 )
             });
-            return Some(pers_env.read_raw_sig_shared(module_name, self).unwrap_or_else(|| {
-                panic!(
-                    "in-process invariant violated: raw signature for {module_name} was not in the module registry"
-                )
-            }));
+            // Source fallback can re-enter normalization while the same module
+            // has only a cache placeholder. The rename force is a side effect;
+            // skip the transient miss and let a later lookup force the
+            // published signature.
+            return pers_env.read_raw_sig_shared(module_name, self);
         }
 
         let cmi_path = {

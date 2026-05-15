@@ -1269,23 +1269,12 @@ fn build_local_module_components<'a>(
             // component-table construction; scrape_alias at env.ml:1435-1446
             // reaches `find_module`, whose persistent Pident branch at
             // env.ml:872-875 forces `ps_sig = Subst.signature identity sign`
-            // from env.ml:677. mtype.ml:30-80 then strengthens the alias target
-            // path, and mtype.ml:98-102 keeps child modules as aliases to that
-            // target before env.ml:1530-1578 builds the selected component
-            // table. Run the same qualification here instead of reusing the
-            // raw Rust component signature directly.
-            let qualified_sig = super::typecore::qualify_resolved_signature_for_local_components(
-                access_path,
-                &md.md_type,
-                renamed_sig.as_ref(),
-                Some(alias_id.name()),
-                pers_env,
-                ctx,
-            );
+            // from env.ml:677. Keep that force, then let the component view
+            // apply the selected access path lazily to forced items.
             return Some(
                 QualifiedModuleComponents::new_with_child_components_arc_and_value_source_prefix(
                     access_path.clone(),
-                    Arc::new(qualified_sig),
+                    renamed_sig,
                     HashMap::new(),
                     Some(source_prefix),
                     ctx,

@@ -8,7 +8,6 @@ use rescript_compiler::cmi::persistent_env::{CmjExportConstant, ModuleRegistry};
 use rescript_compiler::cmi::portable_types::PortablePersStruct;
 use rescript_compiler::parse_arena::ParseArena;
 use rescript_compiler::parser::ast::{Signature, Structure};
-use rescript_compiler::types::Signature as DeclSignature;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::{fmt::Display, ops::Deref, path::PathBuf, time::SystemTime};
@@ -42,15 +41,11 @@ impl BuildMode {
 
 /// Per-module in-memory compilation state for `--in-process` builds.
 ///
-/// Stores the published interface signature and a generation number that
-/// replaces timestamp-based invalidation (`last_compiled_cmi`/`last_compiled_cmt`).
+/// Stores a generation number that replaces timestamp-based invalidation
+/// (`last_compiled_cmi`/`last_compiled_cmt`).
 /// When a module is recompiled and its interface changes, the generation is
 /// bumped so downstream dependents know to recompile.
 pub struct InMemoryModuleState {
-    /// The module's published interface signature.
-    /// For modules with `.resi`, this comes from typechecking the `.resi`.
-    /// For modules without `.resi`, this is the inferred signature from `.res`.
-    pub signature: DeclSignature,
     /// Monotonically increasing generation number. Bumped only when the
     /// module's published interface actually changes (fingerprint differs).
     /// Downstream dependents compare their recorded dependency generation
@@ -69,7 +64,6 @@ impl std::fmt::Debug for InMemoryModuleState {
         f.debug_struct("InMemoryModuleState")
             .field("generation", &self.generation)
             .field("is_pure", &self.is_pure)
-            .field("signature", &format!("<{} items>", self.signature.len()))
             .finish()
     }
 }
@@ -232,7 +226,7 @@ pub struct BuildCommandState {
     // Stored ASTs from parse phase, keyed by "{module_name}:impl" or "{module_name}:intf"
     pub stored_asts: Mutex<AHashMap<String, StoredAst>>,
     // In-memory published interfaces, keyed by module name. Only used in --in-process mode.
-    // Maps module_name -> InMemoryModuleState (signature + generation).
+    // Maps module_name -> InMemoryModuleState.
     pub in_memory_interfaces: Mutex<AHashMap<String, InMemoryModuleState>>,
     // Monotonically increasing generation counter for in-memory interface invalidation.
     // Each compilation that produces a new interface bumps this counter.
@@ -377,7 +371,6 @@ impl BuildCommandState {
     pub fn register_in_memory_interface(
         &self,
         module_name: String,
-        signature: DeclSignature,
         fingerprint: u64,
         is_pure: bool,
     ) -> u64 {
@@ -392,7 +385,6 @@ impl BuildCommandState {
         // Interface changed (or first registration) — bump generation
         let generation = self.next_interface_generation();
         let state = InMemoryModuleState {
-            signature,
             generation,
             fingerprint,
             is_pure,
