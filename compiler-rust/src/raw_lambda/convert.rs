@@ -3877,11 +3877,18 @@ impl<'a> RawLambdaConverter<'a> {
         all_labels: &std::sync::Arc<Vec<LabelDescription>>,
         fields: &[RecordField],
     ) -> Vec<RecordField> {
-        // Normal JS compilation does not need to carry OCaml's omitted
-        // optional `None` placeholders through Lambda: the JS printer omits
-        // optional undefined record properties anyway. Keep the explicit
-        // fields in `lbl_all` order so output stays byte-for-byte aligned with
-        // the expanded OCaml-shaped path.
+        // If every selected label has a materialized slot, sorting by `lbl_pos`
+        // preserves OCaml `lbl_all` field order without walking omitted fields.
+        if fields.iter().all(|field| field.1.lbl_pos >= 0) {
+            let mut compact = fields
+                .iter()
+                .filter(|field| !record_field_is_static_optional_none(&field.1, &field.2))
+                .cloned()
+                .collect::<Vec<_>>();
+            compact.sort_by_key(|field| field.1.lbl_pos);
+            return compact;
+        }
+
         let mut compact = Vec::with_capacity(fields.len());
         for (idx, label) in all_labels.iter().enumerate() {
             let label_pos = if label.lbl_pos >= 0 {
