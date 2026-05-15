@@ -51,6 +51,11 @@ Current focused coverage:
 - `match_lowering_patterns.res`: list/array/record destructuring, nested
   constructor patterns, literal payload patterns, guards, tuple or-patterns,
   aliases, and exception payload matching.
+- `local_exception_scope_patterns.res`: local exception declarations, nested
+  exception shadowing, record-payload local exceptions, and `exception` switch
+  patterns.
+- `js_exception_rethrow_patterns.res`: JS exception packing/destructuring,
+  `JsExn` catch patterns, rethrow paths, and exception switch patterns.
 - `advanced_output_patterns.res`: variadic constructors, imported modules with
   attributes, unwrap externals, escaped record fields, unboxed constructors,
   exceptions, async/await, includes, functors, and assertions.

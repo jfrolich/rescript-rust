@@ -4,6 +4,8 @@ tests/js_output_parity/fixtures/ffi_patterns.res
 tests/js_output_parity/fixtures/js_expression_patterns.res	
 tests/js_output_parity/fixtures/function_call_patterns.res	
 tests/js_output_parity/fixtures/match_lowering_patterns.res
+tests/js_output_parity/fixtures/local_exception_scope_patterns.res
+tests/js_output_parity/fixtures/js_exception_rethrow_patterns.res
 tests/js_output_parity/fixtures/advanced_output_patterns.res	
 tests/js_output_parity/fixtures/control_module_patterns.res	
 tests/js_output_parity/fixtures/module_pack_patterns.res
