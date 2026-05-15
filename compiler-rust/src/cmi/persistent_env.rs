@@ -6005,7 +6005,26 @@ fn add_signature_to_env_with_options(
                     other => other,
                 };
                 if as_opened {
-                    if let Some((_, stored)) = precomputed_components
+                    let direct_persistent_alias = matches!(
+                        &md.md_type,
+                        ModuleType::MtyAlias(_, Path::Pident(alias_id))
+                            | ModuleType::MtyIdent(Path::Pident(alias_id))
+                            if alias_id.is_persistent()
+                    );
+                    if direct_persistent_alias && precomputed_components.is_some() {
+                        // OCaml compiler/ml/env.ml:1516-1518 scrapes a
+                        // direct persistent child alias through env.ml:865-875
+                        // `find_module`, so the child component table does not
+                        // need the parent component environment. Avoid forcing
+                        // the parent's `comp_components` just to open an
+                        // equivalent persistent-alias thunk.
+                        let stored = Arc::new(crate::types::env_lazy::StoredModuleComponents::new(
+                            Env::empty(),
+                            access_path.clone(),
+                            md.clone(),
+                        ));
+                        env.add_opened_module_with_components(id.clone(), md.clone(), stored);
+                    } else if let Some((_, stored)) = precomputed_components
                         .and_then(|components| components.lookup_child_components(id.name()))
                     {
                         // OCaml compiler/ml/env.ml:1841-1877 opens the
