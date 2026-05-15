@@ -57,6 +57,9 @@ Current focused coverage:
 - `higher_order_eta_patterns.res`: higher-order unary/binary function wrapper
   output, nested wrappers, and wrappers around record/object-selected
   callbacks.
+- `async_this_callback_patterns.res`: async lowering for `@this` methods,
+  async record callbacks, inline async callbacks, async closures captured inside
+  loops, nested async callbacks, and React-hook-shaped callback wrappers.
 - `mutable_uncurry_patterns.res`: mutable-ref parameter destructuring,
   generated parameter-name stability, multi-arity tuple functions, and nested
   functions over ref payloads.
