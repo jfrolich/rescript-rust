@@ -66,6 +66,9 @@ Current focused coverage:
 - `module_pack_patterns.res`: first-class module packing/unpacking,
   package-returning functions, package arrays, `let module` bindings, local
   module aliases, and functor application over unpacked modules.
+- `module_value_patterns.res`: module-value destructuring, private module
+  destructuring, first-class module parameters/results, `module type of`
+  values, and module-typed external arguments.
 - `external_edge_patterns.res`: nested scopes, nullable/null-undefined returns,
   `@string`/`@int` marshalling, tagged templates, `@this` callbacks, constant
   args, property get/set, dynamic import, and module-await lowering.
