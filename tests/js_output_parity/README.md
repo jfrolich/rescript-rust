@@ -110,6 +110,9 @@ Current focused coverage:
 - `tella_scoped_send_patterns.res`: minimized Tella binding output for
   Stripe/Notion-style `@send @scope` methods, nested send scopes, imported
   constructors, escaped record fields, and optional nested payload records.
+- `tella_aws_binding_patterns.res`: minimized Tella AWS/Shaka binding output
+  for `@new @module` command constructors, `@as` record fields, `@send`
+  methods with inserted constant event names, and tuple `@scope` module values.
 - `interface_patterns.res`: a minimized interface-backed case covering `.resi`
   CMI flow, abstract implementation types, nested module signatures, and named
   polymorphic-variant widening.
