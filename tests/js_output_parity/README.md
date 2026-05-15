@@ -100,5 +100,8 @@ Current focused coverage:
   scoped external React component bindings using `@module`, `@scope`,
   escaped prop names, optional callback props, polymorphic event details,
   array props, fragments, and default imports.
+- `react_component_edge_patterns.res`: Tella/test-suite-derived React
+  component output for aliased/default props, module-typed props,
+  `forwardRef`, `memo`, `cloneElement`, and hook-shaped external calls.
 - `jsx_preserve_minimal.res`: JSX v4 preserve output for DOM elements, nested
   children, and spread props.
