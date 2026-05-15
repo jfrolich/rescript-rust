@@ -20,7 +20,7 @@ use rescript_compiler::driver::{
     typecheck_interface_file,
 };
 use rescript_compiler::js_ir::ModuleFormat;
-use rescript_compiler::parser::{Parser, module, sexp_locs};
+use rescript_compiler::parser::{Parser, code_frame, module, sexp_locs};
 use rescript_compiler::source_text::latin1_bytes_to_string;
 use std::env;
 use std::fs;
@@ -111,6 +111,7 @@ struct Options {
     gentype: bool,
     make_runtime: bool,
     read_cmi: bool,
+    color_mode: code_frame::ColorMode,
 }
 
 impl Options {
@@ -157,7 +158,12 @@ fn main() {
 }
 
 fn run() -> Result<()> {
-    let mut opts = Options::default();
+    let mut opts = Options {
+        // OCaml compiler/bsc/rescript_compiler_main.ml:494 sets
+        // `Clflags.color := Some Always` before parsing command-line flags.
+        color_mode: code_frame::ColorMode::Always,
+        ..Options::default()
+    };
     let mut args = env::args().skip(1).peekable();
 
     while let Some(arg) = args.next() {
@@ -253,7 +259,14 @@ fn run() -> Result<()> {
                         opts.external_ppxs.push(val);
                     }
                 }
-                "-color" | "-bs-jsx-mode" | "-pp" | "-ppxopt" => {
+                "-color" => {
+                    if let Some(val) = args.next() {
+                        if let Some(mode) = code_frame::parse_color_mode(&val) {
+                            opts.color_mode = mode;
+                        }
+                    }
+                }
+                "-bs-jsx-mode" | "-pp" | "-ppxopt" => {
                     // Consume the next argument if present (value flags).
                     let _ = args.next();
                 }
@@ -282,6 +295,7 @@ fn run() -> Result<()> {
         .input
         .clone()
         .ok_or_else(|| anyhow!("Missing input file"))?;
+    code_frame::set_color_mode(opts.color_mode);
 
     if opts.bs_ast {
         return generate_ast(

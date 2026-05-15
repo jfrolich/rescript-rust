@@ -2423,7 +2423,8 @@ pub(crate) fn normalize_path_full<'a>(ctx: &'a TypeContext, env: &Env, path: &Pa
     if let Some(cached) = ctx.find_normalized_path_full(env_id, path) {
         return cached;
     }
-    let normalized = normalize_path_full_inner(ctx, env, path, 0, &mut HashSet::new(), true);
+    let normalized =
+        normalize_path_full_inner(ctx, env, path, 0, &mut HashSet::new(), true, false);
     ctx.register_normalized_path_full(env_id, path, normalized.clone());
     normalized
 }
@@ -2503,11 +2504,11 @@ pub(crate) fn force_normalize_path_full_side_effects<'a>(
     // normalized-path cache for this side-effect-only call, because an earlier
     // component-table probe may have cached the same structural answer before
     // the OCaml-equivalent module thunk was forced.
-    normalize_path_full_inner(ctx, env, path, 0, &mut HashSet::new(), true)
+    normalize_path_full_inner(ctx, env, path, 0, &mut HashSet::new(), true, true)
 }
 
 fn normalize_path_forward_only<'a>(ctx: &'a TypeContext, env: &Env, path: &Path) -> Path {
-    normalize_path_full_inner(ctx, env, path, 0, &mut HashSet::new(), false)
+    normalize_path_full_inner(ctx, env, path, 0, &mut HashSet::new(), false, false)
 }
 
 fn normalize_path_full_inner<'a>(
@@ -2517,6 +2518,7 @@ fn normalize_path_full_inner<'a>(
     depth: usize,
     visiting: &mut HashSet<Path>,
     allow_reverse_local_aliases: bool,
+    force_module_lookup_side_effects: bool,
 ) -> Path {
     if depth > 20 {
         return path.clone();
@@ -2525,7 +2527,8 @@ fn normalize_path_full_inner<'a>(
     if let Path::Pdot(parent, module_name, _) = path {
         let path_starts_with_implicit_opened_component =
             env.path_starts_with_implicit_opened_component(path);
-        if !path_starts_with_implicit_opened_component
+        if !force_module_lookup_side_effects
+            && !path_starts_with_implicit_opened_component
             && let Some(alias_path) = ctx.find_module_alias_in_components(parent, module_name)
             && !alias_path.same(path)
         {
@@ -2537,7 +2540,9 @@ fn normalize_path_full_inner<'a>(
             // Initial-env opens from compiler/core/res_compmisc.ml:48-63 keep
             // their root force behavior; source-level opens follow the opened
             // component descriptor path instead of forcing the opened root
-            // through env.ml:865-875.
+            // through env.ml:865-875. Side-effectful compare_type_path calls
+            // skip this shortcut so compiler/ml/env.ml:903-914 can reach
+            // find_module at env.ml:865-882 and force component module thunks.
             return normalize_path_full_inner(
                 ctx,
                 env,
@@ -2545,6 +2550,7 @@ fn normalize_path_full_inner<'a>(
                 depth + 1,
                 visiting,
                 allow_reverse_local_aliases,
+                force_module_lookup_side_effects,
             );
         }
     }
@@ -2566,6 +2572,7 @@ fn normalize_path_full_inner<'a>(
                 depth + 1,
                 visiting,
                 allow_reverse_local_aliases,
+                force_module_lookup_side_effects,
             );
             if p_norm == **p {
                 path.clone()
@@ -2581,6 +2588,7 @@ fn normalize_path_full_inner<'a>(
                 depth + 1,
                 visiting,
                 allow_reverse_local_aliases,
+                force_module_lookup_side_effects,
             );
             let p2_norm = normalize_path_full_inner(
                 ctx,
@@ -2589,6 +2597,7 @@ fn normalize_path_full_inner<'a>(
                 depth + 1,
                 visiting,
                 allow_reverse_local_aliases,
+                force_module_lookup_side_effects,
             );
             if p1_norm == **p1 && p2_norm == **p2 {
                 path.clone()
@@ -2615,7 +2624,8 @@ fn normalize_path_full_inner<'a>(
         }
     }
 
-    if let Path::Pdot(parent, module_name, _) = &path
+    if !force_module_lookup_side_effects
+        && let Path::Pdot(parent, module_name, _) = &path
         && let Some(alias_path) = ctx.find_module_alias_in_components(parent, module_name)
         && !alias_path.same(&path)
     {
@@ -2632,6 +2642,7 @@ fn normalize_path_full_inner<'a>(
             depth + 1,
             visiting,
             allow_reverse_local_aliases,
+            force_module_lookup_side_effects,
         );
     }
 
@@ -2657,6 +2668,7 @@ fn normalize_path_full_inner<'a>(
                     depth + 1,
                     visiting,
                     allow_reverse_local_aliases,
+                    force_module_lookup_side_effects,
                 );
             }
         }
@@ -2680,6 +2692,7 @@ fn normalize_path_full_inner<'a>(
                 depth + 1,
                 visiting,
                 allow_reverse_local_aliases,
+                force_module_lookup_side_effects,
             );
         }
     }

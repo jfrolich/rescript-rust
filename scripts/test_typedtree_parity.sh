@@ -176,9 +176,9 @@ RESET='\033[0m'
 
 # Configuration
 if [[ "$TELLA_MODE" == "true" ]]; then
-    TIMEOUT_SECONDS=30
+    TIMEOUT_SECONDS="${TIMEOUT_SECONDS:-30}"
 else
-    TIMEOUT_SECONDS=10
+    TIMEOUT_SECONDS="${TIMEOUT_SECONDS:-10}"
 fi
 
 # Check if compilers exist
@@ -212,7 +212,12 @@ fi
 export RESCRIPT_RUNTIME
 
 # Create temp directory
-TEMP_DIR=$(mktemp -d)
+if [[ -n "${TMPDIR:-}" ]]; then
+    mkdir -p "$TMPDIR"
+    TEMP_DIR=$(mktemp -d "$TMPDIR/typedtree-parity.XXXXXX")
+else
+    TEMP_DIR=$(mktemp -d)
+fi
 CACHE_DIR="$PROJECT_ROOT/.parity-cache"
 mkdir -p "$CACHE_DIR/tests/diffs" "$CACHE_DIR/tests/ocaml" "$CACHE_DIR/tests/rust"
 BUILD_LOCK_DIR="$CACHE_DIR/typedtree-build.lock"
@@ -586,6 +591,9 @@ print(' '.join(rewritten))" 2>/dev/null) || args=""
             fi
         fi
     fi
+
+    find "$file_temp" -type f -delete 2>/dev/null || true
+    find "$file_temp" -depth -type d -empty -delete 2>/dev/null || true
 
     # Quick mode - exit on failure
     if [[ "$QUICK_MODE" == "true" && ("$ocaml_fail" -eq 1 || "$parity_fail" -eq 1) ]]; then

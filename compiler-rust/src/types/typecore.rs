@@ -4238,6 +4238,7 @@ fn build_as_type(
                             &mut tctx.persistent_env,
                             ctx,
                             false,
+                            true,
                         )
                         .unwrap_or(resolved_label);
                         let field_pat = present_fields_by_pos
@@ -5011,6 +5012,12 @@ fn type_pattern_record(
                 &mut tctx.persistent_env,
                 ctx,
                 false,
+                // OCaml compiler/ml/typecore.ml:942-967 `lookup_from_type`
+                // reads label descriptors without forcing nested field paths;
+                // compiler/ml/typecore.ml:1623-1644 `type_label_pat`
+                // allocates the subpattern binders first. Rust drains those
+                // deferred field-path forces after pattern typing.
+                false,
             )
         });
 
@@ -5063,14 +5070,10 @@ fn type_pattern_record(
             // unifies `ty_res` with the record type, then types the field
             // pattern directly against `ty_arg`. Do not insert an extra fresh
             // field variable here; that changes both sharing and lazy forcing.
-            // The label already carries its `lbl_all` array there; populate
-            // Rust's exact-path raw-lambda cache before `instance_label`, so
-            // compiler/ml/matching.ml:1417-1476 can expand sparse record
-            // patterns through the same full label set instead of falling
-            // back by short name.
-            if !has_dict_pattern_attr {
-                let _ = get_record_labels(ctx, env, &mut tctx.persistent_env, env_label.lbl_res);
-            }
+            // The label already carries its `lbl_all` array there; Rust
+            // populates the exact-path raw-lambda cache after all field
+            // binders are allocated below, preserving OCaml's binder-before-
+            // bookkeeping order from typecore.ml:1623-1644.
             ctx.begin_def();
             let (vars, ty_arg, ty_res) =
                 crate::types::ctype::instance_label(ctx, false, &env_label);
@@ -5230,6 +5233,12 @@ fn type_pattern_record(
             }
         }
         typed_fields.push((field.lid, label_desc, typed_pat, field.opt));
+    }
+
+    if !has_dict_pattern_attr {
+        if let Some((_, label_desc, _, _)) = typed_fields.first() {
+            let _ = get_record_labels(ctx, env, &mut tctx.persistent_env, label_desc.lbl_res);
+        }
     }
 
     // OCaml unifies the inferred record type with the pattern expected type.
@@ -5889,13 +5898,28 @@ fn type_expect_with_recarg<'a>(
             let (typed_bindings, new_env, unpacks) =
                 type_let_bindings(tctx, env, *rec_flag, bindings, true)?;
 
+            // OCaml compiler/ml/typecore.ml:4625-4669 registers unused-local
+            // binding checks with Delayed_checks before typing the let body,
+            // and compiler/ml/delayed_checks.ml:3-13 later forces checks in
+            // registration order. Insert Rust's post-body result at this
+            // pre-body position so nested generated lets, such as optional
+            // default argument rewrites from typecore.ml:2516-2555, report in
+            // the same outer-to-inner order.
+            let local_warning_index = tctx.warnings.len();
+
             // Type check body in extended environment
             let body = tctx.arena.get_expr(*body_idx);
             let typed_body =
                 type_expect_with_module_unpacks(tctx, &new_env, body, expected_ty, &unpacks, None)?;
             let body_type = typed_body.exp_type;
             if !is_fake_optional_arg_let(tctx.arena, bindings) {
-                report_unused_local_let_warnings(tctx, *rec_flag, &typed_bindings, &typed_body);
+                report_unused_local_let_warnings(
+                    tctx,
+                    local_warning_index,
+                    *rec_flag,
+                    &typed_bindings,
+                    &typed_body,
+                );
             }
 
             Ok(Expression::new(
@@ -15962,6 +15986,7 @@ fn type_record(
                 &mut tctx.persistent_env,
                 ctx,
                 false,
+                true,
             )
         } else {
             None
@@ -16015,6 +16040,7 @@ fn type_record(
                     &mut tctx.persistent_env,
                     ctx,
                     false,
+                    true,
                 )
             });
         if record_opath_ty.is_none()
@@ -16146,6 +16172,7 @@ fn type_record(
                                 env,
                                 &mut tctx.persistent_env,
                                 ctx,
+                                true,
                             )
                         })
                         .filter(|expected_label| {
@@ -16928,6 +16955,7 @@ fn type_record(
                     &mut tctx.persistent_env,
                     ctx,
                     false,
+                    true,
                 )
             });
             if let Some(env_label) = label_for_unify {
@@ -17431,6 +17459,7 @@ fn type_field(
             &mut tctx.persistent_env,
             tctx.type_ctx,
             true,
+            true,
         )
     });
     let mut env_label = env_label;
@@ -17602,6 +17631,7 @@ fn type_setfield(
             env,
             &mut tctx.persistent_env,
             ctx,
+            true,
             true,
         )
     });
@@ -20946,11 +20976,16 @@ fn iter_typed_pattern<F: FnMut(&Pattern)>(pat: &Pattern, f: &mut F) {
 fn collect_typed_pattern_idents<'a>(pat: &'a Pattern, out: &mut Vec<(&'a Ident, &'a str, LocIdx)>) {
     match &pat.pat_desc {
         PatternDesc::Tpat_var(id, name) => {
-            out.push((id, id.name(), name.loc));
+            // OCaml compiler/ml/typedtree.ml:444-457 `bound_idents`
+            // conses each identifier onto a shared accumulator and returns it
+            // directly from `pat_bound_idents`, so the observable warning order
+            // is the cons order, not traversal append order. typecore.ml:4652-4670
+            // iterates that list when registering unused-binding checks.
+            out.insert(0, (id, id.name(), name.loc));
         }
         PatternDesc::Tpat_alias(inner, id, name) => {
             collect_typed_pattern_idents(inner, out);
-            out.push((id, id.name(), name.loc));
+            out.insert(0, (id, id.name(), name.loc));
         }
         PatternDesc::Tpat_tuple(items) | PatternDesc::Tpat_array(items) => {
             for item in items {
@@ -20970,9 +21005,8 @@ fn collect_typed_pattern_idents<'a>(pat: &'a Pattern, out: &mut Vec<(&'a Ident, 
                 collect_typed_pattern_idents(field_pat, out);
             }
         }
-        PatternDesc::Tpat_or(left, right, _) => {
+        PatternDesc::Tpat_or(left, _, _) => {
             collect_typed_pattern_idents(left, out);
-            collect_typed_pattern_idents(right, out);
         }
         PatternDesc::Tpat_any
         | PatternDesc::Tpat_constant(_)
@@ -21790,10 +21824,12 @@ fn is_fake_optional_arg_let(
 
 fn report_unused_local_let_warnings(
     tctx: &mut TypeCheckContext<'_>,
+    insert_index: usize,
     rec_flag: RecFlag,
     typed_bindings: &[ValueBinding],
     typed_body: &Expression,
 ) {
+    let mut warning_index = insert_index;
     for binding in typed_bindings {
         let mut bound = Vec::new();
         collect_typed_pattern_idents(&binding.vb_pat, &mut bound);
@@ -21827,7 +21863,9 @@ fn report_unused_local_let_warnings(
                     name: name.to_string(),
                 }
             };
-            tctx.report_warning(loc, warning);
+            if tctx.report_warning_at(warning_index, loc, warning) {
+                warning_index += 1;
+            }
         }
     }
 }
@@ -26020,7 +26058,25 @@ fn lookup_label_by_lid<'a>(
         }
     }
 
-    let mut selected = candidates.into_iter().next()?;
+    let mut selected = candidates.first().cloned()?;
+    if expected_record_ty.is_none() {
+        // OCaml compiler/ml/typecore.ml:990-1006 `Label.disambiguate` takes
+        // the first remaining label, calls its use callback, then runs
+        // typecore.ml:973-980 `ambiguous_types` over the rest. That reaches
+        // typecore.ml:786-787 `compare_type_path` and may force
+        // compiler/ml/env.ml:903-914 `Env.normalize_path` before the next
+        // record field is processed. Qualified record labels follow the same
+        // path after typecore.ml:1098-1126 `disambiguate_record_elem_list`;
+        // preserve that lazy force order instead of treating qualification as
+        // enough to skip ambiguity side effects.
+        force_ambiguous_label_type_path_side_effects(
+            &selected,
+            candidates.iter().skip(1),
+            env,
+            pers_env,
+            ctx,
+        );
+    }
     qualify_label_description_paths(&mut selected, env, pers_env, ctx);
     Some(selected)
 }
@@ -26314,6 +26370,7 @@ fn lookup_label_by_expected_type<'a>(
     env: &Env,
     pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
     ctx: &'a crate::types::context::TypeContext,
+    qualify_field_paths: bool,
 ) -> Option<crate::types::LabelDescription> {
     let visible_path =
         extract_type_path_from_expected_with_persistent_env(record_ty, env, pers_env, ctx)?;
@@ -26335,7 +26392,9 @@ fn lookup_label_by_expected_type<'a>(
             if !label_path.same(&visible_path) {
                 selected.lbl_res = ctx.new_generic_constr(visible_path.clone(), label_args);
             }
-            qualify_label_description_paths(&mut selected, env, pers_env, ctx);
+            if qualify_field_paths {
+                qualify_label_description_paths(&mut selected, env, pers_env, ctx);
+            }
             return Some(selected);
         }
     }
@@ -26369,13 +26428,13 @@ fn lookup_label_by_expected_type<'a>(
                 lbl_loc: ld.ld_loc.clone(),
                 lbl_attributes: ld.ld_attributes.clone(),
             };
-            // OCaml compiler/ml/typecore.ml:942-967 `lookup_from_type` only
-            // asks compiler/ml/env.ml:862-863 for descriptors of the expected
-            // record type. It does not force nested field argument paths here;
-            // compiler/ml/typecore.ml:1192-1198 and compiler/ml/typecore.ml:1623-1644
-            // allocate record pattern binders first, and Rust's caller mirrors that with a deferred
-            // `force_type_paths_for_lookup_from_type` pass.
-            qualify_label_description_paths(&mut selected, env, pers_env, ctx);
+            if qualify_field_paths {
+                // OCaml compiler/ml/typecore.ml:3677-3717 record expression
+                // fields receive already-substituted labels before
+                // `instance_label`, so expression typing keeps the immediate
+                // component qualification.
+                qualify_label_description_paths(&mut selected, env, pers_env, ctx);
+            }
             return Some(selected);
         }
     }
@@ -26524,6 +26583,7 @@ fn disambiguate_label<'a>(
     pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
     ctx: &'a crate::types::context::TypeContext,
     force_ambiguous_side_effects: bool,
+    qualify_lookup_from_type_label: bool,
 ) -> Option<crate::types::LabelDescription> {
     // Extract type path from the record expression's type
     let opath = extract_type_path_from_expected_with_persistent_env(record_ty, env, pers_env, ctx);
@@ -26544,7 +26604,14 @@ fn disambiguate_label<'a>(
     let all_labels = env.find_all_labels(lookup_name);
     if all_labels.is_empty() {
         let mut selected =
-            lookup_label_by_expected_type(lookup_name, record_ty, env, pers_env, ctx);
+            lookup_label_by_expected_type(
+                lookup_name,
+                record_ty,
+                env,
+                pers_env,
+                ctx,
+                qualify_lookup_from_type_label,
+            );
         if let Some(override_name) = override_name {
             if let Some(label) = selected.as_mut() {
                 label.lbl_name = override_name;
@@ -26584,13 +26651,27 @@ fn disambiguate_label<'a>(
         // OCaml disambiguation prefers exact-path matches and then falls back to
         // expected-type-directed lookup. Avoid name-based path matching here.
         if selected.is_none() {
-            selected = lookup_label_by_expected_type(lookup_name, record_ty, env, pers_env, ctx);
+            selected = lookup_label_by_expected_type(
+                lookup_name,
+                record_ty,
+                env,
+                pers_env,
+                ctx,
+                qualify_lookup_from_type_label,
+            );
         }
     }
 
     // Keep expected-type fallback before defaulting to lexical shadowing order.
     if selected.is_none() {
-        selected = lookup_label_by_expected_type(lookup_name, record_ty, env, pers_env, ctx);
+        selected = lookup_label_by_expected_type(
+            lookup_name,
+            record_ty,
+            env,
+            pers_env,
+            ctx,
+            qualify_lookup_from_type_label,
+        );
     }
 
     // In React component bodies, generated `props` labels can leak into the
@@ -26639,7 +26720,7 @@ fn disambiguate_label<'a>(
         }
     }
 
-    if let Some(label) = selected.as_mut() {
+    if opath.is_some() && let Some(label) = selected.as_mut() {
         qualify_label_description_paths(label, env, pers_env, ctx);
     }
 
@@ -28181,16 +28262,21 @@ fn with_resolved_module_components_for_lid_inner<'a, R>(
         }
         Longident::Ldot(prefix, child_idx) => {
             let child_name = arena.get_string(*child_idx).to_string();
-            let parent_path =
-                env.resolve_module_access_path_for_lid(prefix, arena, pers_env, ctx)?;
-            // OCaml compiler/ml/env.ml:1573-1578 records child
-            // `comp_components` independently from env.ml:1568's module
-            // declaration thunk. Preserve that path for `H.H1` component
-            // navigation so we don't force `Subst.modtype` just to descend.
-            let parent_components =
-                with_resolved_module_components_for_path(&parent_path, env, pers_env, ctx, |c| {
-                    c.clone()
-                })?;
+            // OCaml compiler/ml/env.ml:1000-1014 `lookup_module_descr_aux`
+            // resolves a dotted prefix by recursively getting the parent
+            // descriptor, then forcing that descriptor's `comp_components`.
+            // Constructor lookup reaches this through
+            // compiler/ml/typetexp.ml:127-131 and env.ml:1091-1120, so a
+            // cached child access path is not enough: the child component
+            // thunk must be forced in the same order as OCaml.
+            let parent_components = with_resolved_module_components_for_lid_inner(
+                prefix,
+                arena,
+                env,
+                pers_env,
+                ctx,
+                &mut |components| Some(components.clone()),
+            )?;
             with_resolved_child_module_components(
                 &parent_components,
                 child_name.as_str(),
