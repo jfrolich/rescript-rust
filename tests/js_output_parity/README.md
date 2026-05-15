@@ -113,6 +113,10 @@ Current focused coverage:
 - `tella_aws_binding_patterns.res`: minimized Tella AWS/Shaka binding output
   for `@new @module` command constructors, `@as` record fields, `@send`
   methods with inserted constant event names, and tuple `@scope` module values.
+- `tella_chrome_svix_binding_patterns.res`: minimized Tella Chrome/Svix
+  binding output for scoped global event registries, `@get` option accessors,
+  Promise wrappers around callback APIs, `@val @scope(("process", "env"))`
+  nullable reads, and `@send @scope` webhook client methods.
 - `interface_patterns.res`: a minimized interface-backed case covering `.resi`
   CMI flow, abstract implementation types, nested module signatures, and named
   polymorphic-variant widening.
