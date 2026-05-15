@@ -8,7 +8,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 
 use crate::intern::StrIdx;
 use crate::location::{Location, Position};
-use crate::parse_arena::{ArityIdx, LidentIdx, LocIdx, ParseArena, PosIdx};
+use crate::parse_arena::{ArityIdx, CoreTypeIdx, LidentIdx, LocIdx, ParseArena, PosIdx};
 
 use super::longident::Longident;
 
@@ -59,6 +59,20 @@ pub struct ParserSnapshot<'src> {
     diagnostics_len: usize,
     warnings_len: usize,
     comments_len: usize,
+    in_external: bool,
+    current_type_name_path: Option<Vec<String>>,
+    inline_types_found: Option<
+        Vec<(
+            StrIdx,
+            LocIdx,
+            super::ast::TypeKind,
+            Vec<(CoreTypeIdx, super::ast::Variance)>,
+        )>,
+    >,
+    inline_types_params: Vec<(CoreTypeIdx, super::ast::Variance)>,
+    inline_types_collect_free_type_vars: bool,
+    pending_structure_len: usize,
+    pending_signature_len: usize,
     location_id_counter: u32,
     /// Arena position count at snapshot time (for truncation on restore).
     arena_positions_len: usize,
@@ -128,9 +142,22 @@ pub struct Parser<'src> {
     pub current_type_name_path: Option<Vec<String>>,
     /// Collected inline types during type parsing.
     /// When Some, `{...}` in type positions will be extracted as inline record types.
-    pub inline_types_found: Option<Vec<(String, LocIdx, super::ast::TypeKind)>>,
+    pub inline_types_found: Option<
+        Vec<(
+            StrIdx,
+            LocIdx,
+            super::ast::TypeKind,
+            Vec<(CoreTypeIdx, super::ast::Variance)>,
+        )>,
+    >,
     /// Type parameters from the outer type declaration for inline types.
-    pub inline_types_params: Vec<(crate::parse_arena::CoreTypeIdx, super::ast::Variance)>,
+    pub inline_types_params: Vec<(CoreTypeIdx, super::ast::Variance)>,
+    /// Whether inline records should collect free type variables as parameters.
+    pub inline_types_collect_free_type_vars: bool,
+    /// Structure items synthesized after the current item.
+    pub pending_structure_items: Vec<super::ast::StructureItem>,
+    /// Signature items synthesized after the current item.
+    pub pending_signature_items: Vec<super::ast::SignatureItem>,
 }
 
 impl<'src> Parser<'src> {
@@ -173,6 +200,9 @@ impl<'src> Parser<'src> {
             current_type_name_path: None,
             inline_types_found: None,
             inline_types_params: vec![],
+            inline_types_collect_free_type_vars: false,
+            pending_structure_items: vec![],
+            pending_signature_items: vec![],
         };
         // Scan the first token
         parser.next();
@@ -814,6 +844,13 @@ impl<'src> Parser<'src> {
         let diagnostics_len = self.diagnostics.len();
         let warnings_len = self.warnings.len();
         let comments_len = self.comments.len();
+        let in_external = self.in_external;
+        let current_type_name_path = self.current_type_name_path.clone();
+        let inline_types_found = self.inline_types_found.clone();
+        let inline_types_params = self.inline_types_params.clone();
+        let inline_types_collect_free_type_vars = self.inline_types_collect_free_type_vars;
+        let pending_structure_len = self.pending_structure_items.len();
+        let pending_signature_len = self.pending_signature_items.len();
 
         // Enter lookahead mode - next() will skip arena position allocations
         self.lookahead_depth += 1;
@@ -839,6 +876,13 @@ impl<'src> Parser<'src> {
         self.diagnostics.truncate(diagnostics_len);
         self.warnings.truncate(warnings_len);
         self.comments.truncate(comments_len);
+        self.in_external = in_external;
+        self.current_type_name_path = current_type_name_path;
+        self.inline_types_found = inline_types_found;
+        self.inline_types_params = inline_types_params;
+        self.inline_types_collect_free_type_vars = inline_types_collect_free_type_vars;
+        self.pending_structure_items.truncate(pending_structure_len);
+        self.pending_signature_items.truncate(pending_signature_len);
 
         result
     }
@@ -861,6 +905,13 @@ impl<'src> Parser<'src> {
             diagnostics_len: self.diagnostics.len(),
             warnings_len: self.warnings.len(),
             comments_len: self.comments.len(),
+            in_external: self.in_external,
+            current_type_name_path: self.current_type_name_path.clone(),
+            inline_types_found: self.inline_types_found.clone(),
+            inline_types_params: self.inline_types_params.clone(),
+            inline_types_collect_free_type_vars: self.inline_types_collect_free_type_vars,
+            pending_structure_len: self.pending_structure_items.len(),
+            pending_signature_len: self.pending_signature_items.len(),
             location_id_counter: self.location_id_counter.load(Ordering::Relaxed),
             arena_positions_len: self.arena.position_count(),
             arena_locations_len: self.arena.location_count(),
@@ -885,6 +936,15 @@ impl<'src> Parser<'src> {
         self.diagnostics.truncate(snapshot.diagnostics_len);
         self.warnings.truncate(snapshot.warnings_len);
         self.comments.truncate(snapshot.comments_len);
+        self.in_external = snapshot.in_external;
+        self.current_type_name_path = snapshot.current_type_name_path;
+        self.inline_types_found = snapshot.inline_types_found;
+        self.inline_types_params = snapshot.inline_types_params;
+        self.inline_types_collect_free_type_vars = snapshot.inline_types_collect_free_type_vars;
+        self.pending_structure_items
+            .truncate(snapshot.pending_structure_len);
+        self.pending_signature_items
+            .truncate(snapshot.pending_signature_len);
         self.location_id_counter
             .store(snapshot.location_id_counter, Ordering::Relaxed);
         // Note: We don't truncate arena allocations as it's harmless to keep them.

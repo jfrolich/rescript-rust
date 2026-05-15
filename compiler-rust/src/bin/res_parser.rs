@@ -172,7 +172,10 @@ fn main() {
     if is_interface {
         let signature = module::parse_signature(&mut parser);
 
-        print_parser_warnings(&parser, &source, &filename, &mut io::stdout());
+        // OCaml compiler/syntax/src/res_core.ml:292-300 reports deprecated
+        // uncurried-dot syntax through Location.prerr_warning, which writes
+        // to stderr.
+        print_parser_warnings(&parser, &source, &filename, &mut io::stderr());
 
         // Print diagnostics if any
         let has_parse_errors = parser.has_errors();
@@ -300,7 +303,10 @@ fn main() {
     } else {
         let structure = module::parse_structure(&mut parser);
 
-        print_parser_warnings(&parser, &source, &filename, &mut io::stdout());
+        // OCaml compiler/syntax/src/res_core.ml:292-300 reports deprecated
+        // uncurried-dot syntax through Location.prerr_warning, which writes
+        // to stderr.
+        print_parser_warnings(&parser, &source, &filename, &mut io::stderr());
 
         // Print diagnostics if any
         let has_parse_errors = parser.has_errors();
