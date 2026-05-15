@@ -1709,7 +1709,11 @@ fn build_props_pattern_and_body(
                     txt: prefixed_str_idx,
                     loc: base_pat.ppat_loc.clone(),
                 })),
-                ppat_loc: base_pat.ppat_loc.clone(),
+                // OCaml compiler/syntax/src/jsx_v4.ml:693-700 calls Pat.var
+                // without an outer ~loc, so Ast_helper.Pat.var uses
+                // Location.none for ppat_loc while the inner variable loc
+                // comes from Location.mkloc.
+                ppat_loc: empty_loc(),
                 ppat_attributes: Attributes::new(),
             }
         } else {

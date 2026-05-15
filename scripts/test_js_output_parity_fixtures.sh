@@ -68,6 +68,9 @@ script_dir=$(cd "$(dirname "$0")"; pwd -P)
 PROJECT_ROOT=$(cd "$script_dir/.."; pwd -P)
 OCAML_BSC="${OCAML_BSC:-$PROJECT_ROOT/packages/@rescript/$("$PROJECT_ROOT/scripts/platform.sh")/bin/bsc.exe}"
 RUST_BSC="${RUST_BSC:-$PROJECT_ROOT/compiler-rust/target/debug/bsc}"
+REWATCH_BIN="${REWATCH_BIN:-$PROJECT_ROOT/rewatch/target/debug/rescript}"
+RESCRIPT_CLI="${RESCRIPT_CLI:-$PROJECT_ROOT/packages/@rescript/$("$PROJECT_ROOT/scripts/platform.sh")/bin/rescript.exe}"
+RESCRIPT_RUNTIME="${RESCRIPT_RUNTIME:-$PROJECT_ROOT/packages/@rescript/runtime}"
 CASES_FILE="$PROJECT_ROOT/tests/js_output_parity/cases.tsv"
 FIXTURE_DIR="$PROJECT_ROOT/tests/js_output_parity/fixtures"
 CACHE_REL=".parity-cache/js-output-fixtures"
@@ -80,7 +83,7 @@ BOLD='\033[1m'
 RESET='\033[0m'
 
 missing=0
-for exe in "$OCAML_BSC" "$RUST_BSC"; do
+for exe in "$OCAML_BSC" "$RUST_BSC" "$REWATCH_BIN" "$RESCRIPT_CLI"; do
     if [[ ! -x "$exe" ]]; then
         echo -e "${RED}Missing compiler executable:${RESET} $exe" >&2
         missing=1
@@ -90,15 +93,23 @@ if [[ "$missing" -ne 0 ]]; then
     echo "Build first:"
     echo "  make"
     echo "  cargo build --manifest-path compiler-rust/Cargo.toml"
+    echo "  cargo build --manifest-path rewatch/Cargo.toml"
     exit 2
 fi
+if [[ ! -d "$RESCRIPT_RUNTIME" ]]; then
+    echo -e "${RED}Missing ReScript runtime package:${RESET} $RESCRIPT_RUNTIME" >&2
+    exit 2
+fi
+export RESCRIPT_RUNTIME
 if [[ ! -d "$FIXTURE_DIR" ]]; then
     echo -e "${YELLOW}No JS output parity fixtures found:${RESET} $FIXTURE_DIR"
     exit 0
 fi
 
 mkdir -p "$CACHE_DIR/diffs" "$CACHE_DIR/ocaml" "$CACHE_DIR/rust" "$CACHE_DIR/logs" "$CACHE_DIR/sources"
-find "$CACHE_DIR" -type f \( -name '*.js' -o -name '*.mjs' -o -name '*.log' -o -name '*.diff' -o -name '*.status' -o -name '*.res' -o -name '*.resi' -o -name '*.cmi' -o -name '*.cmj' -o -name '*.cmt' \) -delete 2>/dev/null || true
+find "$CACHE_DIR" -type f \( -name '*.js' -o -name '*.mjs' -o -name '*.log' -o -name '*.diff' -o -name '*.status' -o -name '*.res' -o -name '*.resi' -o -name '*.cmi' -o -name '*.cmj' -o -name '*.cmt' -o -name '*.cmti' -o -name '*.ast' -o -name '*.iast' -o -name 'rescript.json' -o -name 'bsconfig.json' -o -name 'build.ninja' -o -name '.compiler.log' -o -name '.sourcedirs.json' \) -delete 2>/dev/null || true
+find "$CACHE_DIR" -depth -type d -empty -delete 2>/dev/null || true
+mkdir -p "$CACHE_DIR/diffs" "$CACHE_DIR/ocaml" "$CACHE_DIR/rust" "$CACHE_DIR/logs" "$CACHE_DIR/sources"
 
 cd "$PROJECT_ROOT"
 
@@ -118,6 +129,48 @@ run_capture() {
     printf '%s\n' "$status" > "$output.status"
 }
 
+write_directory_project_config() {
+    local project_dir="$1"
+    local module_system="$2"
+    local suffix="$3"
+    local case_flags_raw="$4"
+    local mode_flags_raw="$5"
+    local extra_config_path="$6"
+
+    python3 - "$project_dir/rescript.json" "$module_system" "$suffix" "$case_flags_raw" "$mode_flags_raw" "$extra_config_path" <<'PY'
+import json
+import os
+import sys
+
+path, module_system, suffix, case_flags, mode_flags, extra_config_path = sys.argv[1:7]
+compiler_flags = ["-w -a", "-warn-error -a"]
+if mode_flags:
+    compiler_flags.append(mode_flags)
+if case_flags:
+    compiler_flags.append(case_flags)
+
+config = {
+    "name": "js-output-parity",
+    "sources": [{"dir": "src", "subdirs": False}],
+    "package-specs": {
+        "module": module_system,
+        "in-source": True,
+        "suffix": suffix,
+    },
+    "compiler-flags": compiler_flags,
+}
+
+if extra_config_path and os.path.exists(extra_config_path):
+    with open(extra_config_path, encoding="utf-8") as handle:
+        extra_config = json.load(handle)
+    config.update(extra_config)
+
+with open(path, "w", encoding="utf-8") as handle:
+    json.dump(config, handle, indent=2)
+    handle.write("\n")
+PY
+}
+
 total=0
 pass=0
 fail=0
@@ -134,6 +187,119 @@ record_failure() {
     return 0
 }
 
+compare_directory_case() {
+    local source="$1"
+    local case_flags_raw="$2"
+    local mode_name="$3"
+    local module_system="$4"
+    local suffix="$5"
+    local mode_flags_raw="$6"
+    local source_path="$PROJECT_ROOT/$source"
+
+    total=$((total + 1))
+    if [[ "$VERBOSE" == "true" ]]; then
+        echo "[$mode_name] $source"
+    fi
+
+    local safe source_copy_root ocaml_project_dir rust_project_dir ocaml_source_dir rust_source_dir ocaml_log rust_log diff_out
+    local extra_config_path
+    safe=$(safe_name "${mode_name}_${source}")
+    source_copy_root="$CACHE_DIR/sources/$safe"
+    ocaml_project_dir="$source_copy_root/ocaml"
+    rust_project_dir="$source_copy_root/rust"
+    ocaml_source_dir="$ocaml_project_dir/src"
+    rust_source_dir="$rust_project_dir/src"
+    ocaml_log="$CACHE_DIR/logs/ocaml_${safe}.log"
+    rust_log="$CACHE_DIR/logs/rust_${safe}.log"
+    diff_out="$CACHE_DIR/diffs/${safe}.diff"
+    extra_config_path="$source_path/rescript.extra.json"
+
+    mkdir -p "$ocaml_source_dir" "$rust_source_dir"
+
+    local -a implementation_files interface_files
+    implementation_files=()
+    interface_files=()
+
+    local source_file source_base
+    while IFS= read -r source_file; do
+        source_base=$(basename "$source_file")
+        cp "$source_file" "$ocaml_source_dir/$source_base"
+        cp "$source_file" "$rust_source_dir/$source_base"
+        if [[ "$source_base" == *.resi ]]; then
+            interface_files+=("$source_base")
+        else
+            implementation_files+=("$source_base")
+        fi
+    done < <(find "$source_path" -maxdepth 1 -type f \( -name '*.res' -o -name '*.resi' \) | sort)
+
+    if [[ "${#implementation_files[@]}" -eq 0 ]]; then
+        record_failure "$source [$mode_name]" "missing source" || return 1
+        return 0
+    fi
+
+    write_directory_project_config "$ocaml_project_dir" "$module_system" "$suffix" "$case_flags_raw" "$mode_flags_raw" "$extra_config_path"
+    write_directory_project_config "$rust_project_dir" "$module_system" "$suffix" "$case_flags_raw" "$mode_flags_raw" "$extra_config_path"
+
+    run_capture "$ocaml_log" env RESCRIPT_BSC_EXE="$OCAML_BSC" "$RESCRIPT_CLI" build --no-timing true "$ocaml_project_dir"
+    run_capture "$rust_log" env RESCRIPT_BSC_EXE="$RUST_BSC" "$REWATCH_BIN" build --in-process --no-timing true "$rust_project_dir"
+
+    local ocaml_status rust_status
+    ocaml_status=$(cat "$ocaml_log.status")
+    rust_status=$(cat "$rust_log.status")
+
+    if [[ "$ocaml_status" != "0" || "$rust_status" != "0" ]]; then
+        {
+            echo "Compile status differs or fixture does not compile"
+            echo "OCaml: $ocaml_status"
+            echo "Rust:  $rust_status"
+            echo ""
+            echo "--- OCaml compiler output"
+            cat "$ocaml_log"
+            echo ""
+            echo "--- Rust compiler output"
+            cat "$rust_log"
+        } > "$diff_out"
+        record_failure "$source [$mode_name]" "compile error" || return 1
+        return 0
+    fi
+
+    local stem ocaml_out rust_out output_diff
+    for file in "${implementation_files[@]}"; do
+        stem="${file%.res}"
+        ocaml_out="$ocaml_source_dir/${stem}${suffix}"
+        rust_out="$rust_source_dir/${stem}${suffix}"
+        if [[ ! -f "$ocaml_out" || ! -f "$rust_out" ]]; then
+            {
+                echo "Missing generated output for $file"
+                echo "OCaml output: $ocaml_out"
+                echo "Rust output:  $rust_out"
+                echo ""
+                echo "--- OCaml compiler output"
+                cat "$ocaml_log"
+                echo ""
+                echo "--- Rust compiler output"
+                cat "$rust_log"
+            } > "$diff_out"
+            record_failure "$source [$mode_name]" "missing output" || return 1
+            return 0
+        fi
+        if ! cmp -s "$ocaml_out" "$rust_out"; then
+            output_diff="$CACHE_DIR/diffs/${safe}_$(safe_name "$file").diff"
+            diff -u --text "$ocaml_out" "$rust_out" > "$output_diff" 2>&1 || true
+            {
+                echo "Output differs for $file"
+                echo "See: $output_diff"
+                echo ""
+                cat "$output_diff"
+            } > "$diff_out"
+            record_failure "$source [$mode_name]" "output differs" || return 1
+            return 0
+        fi
+    done
+
+    pass=$((pass + 1))
+}
+
 compare_case() {
     local source="$1"
     local case_flags_raw="$2"
@@ -147,6 +313,10 @@ compare_case() {
     fi
 
     local source_path="$PROJECT_ROOT/$source"
+    if [[ -d "$source_path" ]]; then
+        compare_directory_case "$source" "$case_flags_raw" "$mode_name" "$module_system" "$suffix" "$mode_flags_raw" || return 1
+        return 0
+    fi
     if [[ ! -f "$source_path" ]]; then
         record_failure "$source [$mode_name]" "missing source" || return 1
         return 0

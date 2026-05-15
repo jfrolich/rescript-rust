@@ -4238,6 +4238,7 @@ fn build_as_type(
                             &mut tctx.persistent_env,
                             ctx,
                             false,
+                            true,
                         )
                         .unwrap_or(resolved_label);
                         let field_pat = present_fields_by_pos
@@ -5011,6 +5012,12 @@ fn type_pattern_record(
                 &mut tctx.persistent_env,
                 ctx,
                 false,
+                // OCaml compiler/ml/typecore.ml:942-967 `lookup_from_type`
+                // reads label descriptors without forcing nested field paths;
+                // compiler/ml/typecore.ml:1623-1644 `type_label_pat`
+                // allocates the subpattern binders first. Rust drains those
+                // deferred field-path forces after pattern typing.
+                false,
             )
         });
 
@@ -5063,14 +5070,10 @@ fn type_pattern_record(
             // unifies `ty_res` with the record type, then types the field
             // pattern directly against `ty_arg`. Do not insert an extra fresh
             // field variable here; that changes both sharing and lazy forcing.
-            // The label already carries its `lbl_all` array there; populate
-            // Rust's exact-path raw-lambda cache before `instance_label`, so
-            // compiler/ml/matching.ml:1417-1476 can expand sparse record
-            // patterns through the same full label set instead of falling
-            // back by short name.
-            if !has_dict_pattern_attr {
-                let _ = get_record_labels(ctx, env, &mut tctx.persistent_env, env_label.lbl_res);
-            }
+            // The label already carries its `lbl_all` array there; Rust
+            // populates the exact-path raw-lambda cache after all field
+            // binders are allocated below, preserving OCaml's binder-before-
+            // bookkeeping order from typecore.ml:1623-1644.
             ctx.begin_def();
             let (vars, ty_arg, ty_res) =
                 crate::types::ctype::instance_label(ctx, false, &env_label);
@@ -5230,6 +5233,12 @@ fn type_pattern_record(
             }
         }
         typed_fields.push((field.lid, label_desc, typed_pat, field.opt));
+    }
+
+    if !has_dict_pattern_attr {
+        if let Some((_, label_desc, _, _)) = typed_fields.first() {
+            let _ = get_record_labels(ctx, env, &mut tctx.persistent_env, label_desc.lbl_res);
+        }
     }
 
     // OCaml unifies the inferred record type with the pattern expected type.
@@ -5889,13 +5898,28 @@ fn type_expect_with_recarg<'a>(
             let (typed_bindings, new_env, unpacks) =
                 type_let_bindings(tctx, env, *rec_flag, bindings, true)?;
 
+            // OCaml compiler/ml/typecore.ml:4625-4669 registers unused-local
+            // binding checks with Delayed_checks before typing the let body,
+            // and compiler/ml/delayed_checks.ml:3-13 later forces checks in
+            // registration order. Insert Rust's post-body result at this
+            // pre-body position so nested generated lets, such as optional
+            // default argument rewrites from typecore.ml:2516-2555, report in
+            // the same outer-to-inner order.
+            let local_warning_index = tctx.warnings.len();
+
             // Type check body in extended environment
             let body = tctx.arena.get_expr(*body_idx);
             let typed_body =
                 type_expect_with_module_unpacks(tctx, &new_env, body, expected_ty, &unpacks, None)?;
             let body_type = typed_body.exp_type;
             if !is_fake_optional_arg_let(tctx.arena, bindings) {
-                report_unused_local_let_warnings(tctx, *rec_flag, &typed_bindings, &typed_body);
+                report_unused_local_let_warnings(
+                    tctx,
+                    local_warning_index,
+                    *rec_flag,
+                    &typed_bindings,
+                    &typed_body,
+                );
             }
 
             Ok(Expression::new(
@@ -10958,6 +10982,247 @@ fn pattern_variable_paths(pat: &Pattern) -> HashMap<String, Vec<Vec<usize>>> {
     vars
 }
 
+fn collect_pattern_bound_idents(pat: &Pattern, vars: &mut Vec<Ident>) {
+    match &pat.pat_desc {
+        PatternDesc::Tpat_var(id, _) => vars.push(id.clone()),
+        PatternDesc::Tpat_alias(inner, id, _) => {
+            collect_pattern_bound_idents(inner, vars);
+            vars.push(id.clone());
+        }
+        PatternDesc::Tpat_tuple(items) | PatternDesc::Tpat_array(items) => {
+            for item in items {
+                collect_pattern_bound_idents(item, vars);
+            }
+        }
+        PatternDesc::Tpat_construct(_, _, args) => {
+            for arg in args {
+                collect_pattern_bound_idents(arg, vars);
+            }
+        }
+        PatternDesc::Tpat_variant(_, Some(arg), _) => {
+            collect_pattern_bound_idents(arg, vars);
+        }
+        PatternDesc::Tpat_record(fields, _) => {
+            for (_, _, field_pat, _) in fields {
+                collect_pattern_bound_idents(field_pat, vars);
+            }
+        }
+        PatternDesc::Tpat_or(left, right, _) => {
+            collect_pattern_bound_idents(left, vars);
+            collect_pattern_bound_idents(right, vars);
+        }
+        PatternDesc::Tpat_any
+        | PatternDesc::Tpat_constant(_)
+        | PatternDesc::Tpat_variant(_, None, _) => {}
+    }
+}
+
+fn collect_expression_ident_heads(exp: &Expression, ids: &mut Vec<Ident>) {
+    match &exp.exp_desc {
+        ExpressionDesc::Texp_ident(path, _, _) => {
+            ids.extend(path.heads().into_iter().cloned());
+        }
+        ExpressionDesc::Texp_let(_, bindings, body) => {
+            for binding in bindings {
+                collect_expression_ident_heads(&binding.vb_expr, ids);
+            }
+            collect_expression_ident_heads(body, ids);
+        }
+        ExpressionDesc::Texp_function { params, body, .. } => {
+            for param in params {
+                if let Some(default) = &param.default {
+                    collect_expression_ident_heads(default, ids);
+                }
+            }
+            collect_case_expression_ident_heads(body, ids);
+        }
+        ExpressionDesc::Texp_apply { funct, args, .. } => {
+            collect_expression_ident_heads(funct, ids);
+            for arg in args {
+                if let Some(expr) = &arg.expression {
+                    collect_expression_ident_heads(expr, ids);
+                }
+            }
+        }
+        ExpressionDesc::Texp_match(scrutinee, cases, exn_cases, _) => {
+            collect_expression_ident_heads(scrutinee, ids);
+            collect_case_expression_ident_heads(cases, ids);
+            collect_case_expression_ident_heads(exn_cases, ids);
+        }
+        ExpressionDesc::Texp_try(scrutinee, cases) => {
+            collect_expression_ident_heads(scrutinee, ids);
+            collect_case_expression_ident_heads(cases, ids);
+        }
+        ExpressionDesc::Texp_tuple(items) | ExpressionDesc::Texp_array(items) => {
+            for item in items {
+                collect_expression_ident_heads(item, ids);
+            }
+        }
+        ExpressionDesc::Texp_construct(_, _, args) => {
+            for arg in args {
+                collect_expression_ident_heads(arg, ids);
+            }
+        }
+        ExpressionDesc::Texp_variant(_, Some(arg)) => {
+            collect_expression_ident_heads(arg, ids);
+        }
+        ExpressionDesc::Texp_record {
+            fields,
+            extended_expression,
+        }
+        | ExpressionDesc::Texp_record_sparse {
+            fields,
+            extended_expression,
+            ..
+        } => {
+            for (_, _, definition, _) in fields {
+                if let crate::types::typedtree::RecordLabelDefinition::Overridden(_, expr) =
+                    definition
+                {
+                    collect_expression_ident_heads(expr, ids);
+                }
+            }
+            if let Some(expr) = extended_expression {
+                collect_expression_ident_heads(expr, ids);
+            }
+        }
+        ExpressionDesc::Texp_field(expr, _, _) | ExpressionDesc::Texp_assert(expr) => {
+            collect_expression_ident_heads(expr, ids);
+        }
+        ExpressionDesc::Texp_setfield(expr1, _, _, expr2)
+        | ExpressionDesc::Texp_sequence(expr1, expr2)
+        | ExpressionDesc::Texp_while(expr1, expr2)
+        | ExpressionDesc::Texp_for_of(_, _, expr1, expr2)
+        | ExpressionDesc::Texp_for_await_of(_, _, expr1, expr2) => {
+            collect_expression_ident_heads(expr1, ids);
+            collect_expression_ident_heads(expr2, ids);
+        }
+        ExpressionDesc::Texp_ifthenelse(cond, then_, else_) => {
+            collect_expression_ident_heads(cond, ids);
+            collect_expression_ident_heads(then_, ids);
+            if let Some(else_) = else_ {
+                collect_expression_ident_heads(else_, ids);
+            }
+        }
+        ExpressionDesc::Texp_for(_, _, start, stop, _, body) => {
+            collect_expression_ident_heads(start, ids);
+            collect_expression_ident_heads(stop, ids);
+            collect_expression_ident_heads(body, ids);
+        }
+        ExpressionDesc::Texp_send(receiver, _, arg) => {
+            collect_expression_ident_heads(receiver, ids);
+            if let Some(arg) = arg {
+                collect_expression_ident_heads(arg, ids);
+            }
+        }
+        ExpressionDesc::Texp_letmodule(_, _, module_expr, body) => {
+            collect_module_expr_ident_heads(module_expr, ids);
+            collect_expression_ident_heads(body, ids);
+        }
+        ExpressionDesc::Texp_letexception(_, body) => {
+            collect_expression_ident_heads(body, ids);
+        }
+        ExpressionDesc::Texp_pack(module_expr) => {
+            collect_module_expr_ident_heads(module_expr, ids);
+        }
+        ExpressionDesc::Texp_constant(_)
+        | ExpressionDesc::Texp_variant(_, None)
+        | ExpressionDesc::Texp_break
+        | ExpressionDesc::Texp_continue
+        | ExpressionDesc::Texp_extension_constructor(_, _) => {}
+    }
+}
+
+fn collect_case_expression_ident_heads(
+    cases: &[crate::types::typedtree::Case],
+    ids: &mut Vec<Ident>,
+) {
+    for case in cases {
+        if let Some(guard) = &case.c_guard {
+            collect_expression_ident_heads(guard, ids);
+        }
+        collect_expression_ident_heads(&case.c_rhs, ids);
+    }
+}
+
+fn collect_module_expr_ident_heads(module_expr: &ModuleExpr, ids: &mut Vec<Ident>) {
+    match &module_expr.mod_desc {
+        ModuleExprDesc::Tmod_ident(_, _) => {}
+        ModuleExprDesc::Tmod_structure(structure) => {
+            for item in &structure.str_items {
+                match &item.str_desc {
+                    StructureItemDesc::Tstr_eval(expr, _) => {
+                        collect_expression_ident_heads(expr, ids);
+                    }
+                    StructureItemDesc::Tstr_value(_, bindings) => {
+                        for binding in bindings {
+                            collect_expression_ident_heads(&binding.vb_expr, ids);
+                        }
+                    }
+                    StructureItemDesc::Tstr_module(binding) => {
+                        collect_module_expr_ident_heads(&binding.mb_expr, ids);
+                    }
+                    StructureItemDesc::Tstr_recmodule(bindings) => {
+                        for binding in bindings {
+                            collect_module_expr_ident_heads(&binding.mb_expr, ids);
+                        }
+                    }
+                    StructureItemDesc::Tstr_include(include) => {
+                        collect_module_expr_ident_heads(&include.incl_mod, ids);
+                    }
+                    StructureItemDesc::Tstr_primitive(_)
+                    | StructureItemDesc::Tstr_type(_, _)
+                    | StructureItemDesc::Tstr_typext(_)
+                    | StructureItemDesc::Tstr_exception(_)
+                    | StructureItemDesc::Tstr_modtype(_)
+                    | StructureItemDesc::Tstr_open(_)
+                    | StructureItemDesc::Tstr_attribute(_) => {}
+                }
+            }
+        }
+        ModuleExprDesc::Tmod_apply(functor, arg, _) => {
+            collect_module_expr_ident_heads(functor, ids);
+            collect_module_expr_ident_heads(arg, ids);
+        }
+        ModuleExprDesc::Tmod_functor(_, _, mty, body) => {
+            if let Some(mty) = mty {
+                collect_module_type_ident_heads(mty, ids);
+            }
+            collect_module_expr_ident_heads(body, ids);
+        }
+        ModuleExprDesc::Tmod_constraint(module_expr, _, constraint, _) => {
+            collect_module_expr_ident_heads(module_expr, ids);
+            if let ModuleTypeConstraint::Tmodtype_explicit(mty) = constraint {
+                collect_module_type_ident_heads(mty, ids);
+            }
+        }
+        ModuleExprDesc::Tmod_unpack(expr, _) => {
+            collect_expression_ident_heads(expr, ids);
+        }
+    }
+}
+
+fn collect_module_type_ident_heads(module_type: &ModuleType, ids: &mut Vec<Ident>) {
+    match &module_type.mty_desc {
+        ModuleTypeDesc::Tmty_typeof(module_expr) => {
+            collect_module_expr_ident_heads(module_expr, ids);
+        }
+        ModuleTypeDesc::Tmty_functor(_, _, param, body) => {
+            if let Some(param) = param {
+                collect_module_type_ident_heads(param, ids);
+            }
+            collect_module_type_ident_heads(body, ids);
+        }
+        ModuleTypeDesc::Tmty_with(module_type, _) => {
+            collect_module_type_ident_heads(module_type, ids);
+        }
+        ModuleTypeDesc::Tmty_ident(_, _)
+        | ModuleTypeDesc::Tmty_signature(_)
+        | ModuleTypeDesc::Tmty_alias(_, _)
+        | ModuleTypeDesc::Tmty_placeholder => {}
+    }
+}
+
 fn collect_ambiguous_or_pattern_vars(pat: &Pattern, vars: &mut HashSet<String>) {
     match &pat.pat_desc {
         PatternDesc::Tpat_or(left, right, _) => {
@@ -11017,8 +11282,27 @@ fn report_ambiguous_guarded_or_patterns(
             continue;
         }
 
-        let mut vars: Vec<String> = vars.into_iter().collect();
+        let mut pattern_ids = Vec::new();
+        collect_pattern_bound_idents(&case.c_lhs, &mut pattern_ids);
+        let mut guard_ids = Vec::new();
+        if let Some(guard) = &case.c_guard {
+            collect_expression_ident_heads(guard, &mut guard_ids);
+        }
+
+        // OCaml compiler/ml/parmatch.ml:2538-2554 intersects ambiguous
+        // pattern binders with `all_rhs_idents` from the guard before warning.
+        let mut vars: Vec<String> = vars
+            .into_iter()
+            .filter(|name| {
+                pattern_ids.iter().any(|pat_id| {
+                    pat_id.name() == name && guard_ids.iter().any(|guard_id| guard_id.same(pat_id))
+                })
+            })
+            .collect();
         vars.sort();
+        if vars.is_empty() {
+            continue;
+        }
         tctx.report_warning(case.c_lhs.pat_loc, Warning::AmbiguousPattern { vars });
     }
 }
@@ -15702,6 +15986,7 @@ fn type_record(
                 &mut tctx.persistent_env,
                 ctx,
                 false,
+                true,
             )
         } else {
             None
@@ -15755,6 +16040,7 @@ fn type_record(
                     &mut tctx.persistent_env,
                     ctx,
                     false,
+                    true,
                 )
             });
         if record_opath_ty.is_none()
@@ -15886,6 +16172,7 @@ fn type_record(
                                 env,
                                 &mut tctx.persistent_env,
                                 ctx,
+                                true,
                             )
                         })
                         .filter(|expected_label| {
@@ -16668,6 +16955,7 @@ fn type_record(
                     &mut tctx.persistent_env,
                     ctx,
                     false,
+                    true,
                 )
             });
             if let Some(env_label) = label_for_unify {
@@ -17171,6 +17459,7 @@ fn type_field(
             &mut tctx.persistent_env,
             tctx.type_ctx,
             true,
+            true,
         )
     });
     let mut env_label = env_label;
@@ -17342,6 +17631,7 @@ fn type_setfield(
             env,
             &mut tctx.persistent_env,
             ctx,
+            true,
             true,
         )
     });
@@ -20686,11 +20976,16 @@ fn iter_typed_pattern<F: FnMut(&Pattern)>(pat: &Pattern, f: &mut F) {
 fn collect_typed_pattern_idents<'a>(pat: &'a Pattern, out: &mut Vec<(&'a Ident, &'a str, LocIdx)>) {
     match &pat.pat_desc {
         PatternDesc::Tpat_var(id, name) => {
-            out.push((id, id.name(), name.loc));
+            // OCaml compiler/ml/typedtree.ml:444-457 `bound_idents`
+            // conses each identifier onto a shared accumulator and returns it
+            // directly from `pat_bound_idents`, so the observable warning order
+            // is the cons order, not traversal append order. typecore.ml:4652-4670
+            // iterates that list when registering unused-binding checks.
+            out.insert(0, (id, id.name(), name.loc));
         }
         PatternDesc::Tpat_alias(inner, id, name) => {
             collect_typed_pattern_idents(inner, out);
-            out.push((id, id.name(), name.loc));
+            out.insert(0, (id, id.name(), name.loc));
         }
         PatternDesc::Tpat_tuple(items) | PatternDesc::Tpat_array(items) => {
             for item in items {
@@ -20710,9 +21005,8 @@ fn collect_typed_pattern_idents<'a>(pat: &'a Pattern, out: &mut Vec<(&'a Ident, 
                 collect_typed_pattern_idents(field_pat, out);
             }
         }
-        PatternDesc::Tpat_or(left, right, _) => {
+        PatternDesc::Tpat_or(left, _, _) => {
             collect_typed_pattern_idents(left, out);
-            collect_typed_pattern_idents(right, out);
         }
         PatternDesc::Tpat_any
         | PatternDesc::Tpat_constant(_)
@@ -21530,10 +21824,12 @@ fn is_fake_optional_arg_let(
 
 fn report_unused_local_let_warnings(
     tctx: &mut TypeCheckContext<'_>,
+    insert_index: usize,
     rec_flag: RecFlag,
     typed_bindings: &[ValueBinding],
     typed_body: &Expression,
 ) {
+    let mut warning_index = insert_index;
     for binding in typed_bindings {
         let mut bound = Vec::new();
         collect_typed_pattern_idents(&binding.vb_pat, &mut bound);
@@ -21567,7 +21863,9 @@ fn report_unused_local_let_warnings(
                     name: name.to_string(),
                 }
             };
-            tctx.report_warning(loc, warning);
+            if tctx.report_warning_at(warning_index, loc, warning) {
+                warning_index += 1;
+            }
         }
     }
 }
@@ -25760,7 +26058,25 @@ fn lookup_label_by_lid<'a>(
         }
     }
 
-    let mut selected = candidates.into_iter().next()?;
+    let mut selected = candidates.first().cloned()?;
+    if expected_record_ty.is_none() {
+        // OCaml compiler/ml/typecore.ml:990-1006 `Label.disambiguate` takes
+        // the first remaining label, calls its use callback, then runs
+        // typecore.ml:973-980 `ambiguous_types` over the rest. That reaches
+        // typecore.ml:786-787 `compare_type_path` and may force
+        // compiler/ml/env.ml:903-914 `Env.normalize_path` before the next
+        // record field is processed. Qualified record labels follow the same
+        // path after typecore.ml:1098-1126 `disambiguate_record_elem_list`;
+        // preserve that lazy force order instead of treating qualification as
+        // enough to skip ambiguity side effects.
+        force_ambiguous_label_type_path_side_effects(
+            &selected,
+            candidates.iter().skip(1),
+            env,
+            pers_env,
+            ctx,
+        );
+    }
     qualify_label_description_paths(&mut selected, env, pers_env, ctx);
     Some(selected)
 }
@@ -26054,6 +26370,7 @@ fn lookup_label_by_expected_type<'a>(
     env: &Env,
     pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
     ctx: &'a crate::types::context::TypeContext,
+    qualify_field_paths: bool,
 ) -> Option<crate::types::LabelDescription> {
     let visible_path =
         extract_type_path_from_expected_with_persistent_env(record_ty, env, pers_env, ctx)?;
@@ -26075,7 +26392,9 @@ fn lookup_label_by_expected_type<'a>(
             if !label_path.same(&visible_path) {
                 selected.lbl_res = ctx.new_generic_constr(visible_path.clone(), label_args);
             }
-            qualify_label_description_paths(&mut selected, env, pers_env, ctx);
+            if qualify_field_paths {
+                qualify_label_description_paths(&mut selected, env, pers_env, ctx);
+            }
             return Some(selected);
         }
     }
@@ -26109,13 +26428,13 @@ fn lookup_label_by_expected_type<'a>(
                 lbl_loc: ld.ld_loc.clone(),
                 lbl_attributes: ld.ld_attributes.clone(),
             };
-            // OCaml compiler/ml/typecore.ml:942-967 `lookup_from_type` only
-            // asks compiler/ml/env.ml:862-863 for descriptors of the expected
-            // record type. It does not force nested field argument paths here;
-            // compiler/ml/typecore.ml:1192-1198 and compiler/ml/typecore.ml:1623-1644
-            // allocate record pattern binders first, and Rust's caller mirrors that with a deferred
-            // `force_type_paths_for_lookup_from_type` pass.
-            qualify_label_description_paths(&mut selected, env, pers_env, ctx);
+            if qualify_field_paths {
+                // OCaml compiler/ml/typecore.ml:3677-3717 record expression
+                // fields receive already-substituted labels before
+                // `instance_label`, so expression typing keeps the immediate
+                // component qualification.
+                qualify_label_description_paths(&mut selected, env, pers_env, ctx);
+            }
             return Some(selected);
         }
     }
@@ -26264,6 +26583,7 @@ fn disambiguate_label<'a>(
     pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
     ctx: &'a crate::types::context::TypeContext,
     force_ambiguous_side_effects: bool,
+    qualify_lookup_from_type_label: bool,
 ) -> Option<crate::types::LabelDescription> {
     // Extract type path from the record expression's type
     let opath = extract_type_path_from_expected_with_persistent_env(record_ty, env, pers_env, ctx);
@@ -26284,7 +26604,14 @@ fn disambiguate_label<'a>(
     let all_labels = env.find_all_labels(lookup_name);
     if all_labels.is_empty() {
         let mut selected =
-            lookup_label_by_expected_type(lookup_name, record_ty, env, pers_env, ctx);
+            lookup_label_by_expected_type(
+                lookup_name,
+                record_ty,
+                env,
+                pers_env,
+                ctx,
+                qualify_lookup_from_type_label,
+            );
         if let Some(override_name) = override_name {
             if let Some(label) = selected.as_mut() {
                 label.lbl_name = override_name;
@@ -26324,13 +26651,27 @@ fn disambiguate_label<'a>(
         // OCaml disambiguation prefers exact-path matches and then falls back to
         // expected-type-directed lookup. Avoid name-based path matching here.
         if selected.is_none() {
-            selected = lookup_label_by_expected_type(lookup_name, record_ty, env, pers_env, ctx);
+            selected = lookup_label_by_expected_type(
+                lookup_name,
+                record_ty,
+                env,
+                pers_env,
+                ctx,
+                qualify_lookup_from_type_label,
+            );
         }
     }
 
     // Keep expected-type fallback before defaulting to lexical shadowing order.
     if selected.is_none() {
-        selected = lookup_label_by_expected_type(lookup_name, record_ty, env, pers_env, ctx);
+        selected = lookup_label_by_expected_type(
+            lookup_name,
+            record_ty,
+            env,
+            pers_env,
+            ctx,
+            qualify_lookup_from_type_label,
+        );
     }
 
     // In React component bodies, generated `props` labels can leak into the
@@ -26379,7 +26720,7 @@ fn disambiguate_label<'a>(
         }
     }
 
-    if let Some(label) = selected.as_mut() {
+    if opath.is_some() && let Some(label) = selected.as_mut() {
         qualify_label_description_paths(label, env, pers_env, ctx);
     }
 
@@ -27921,16 +28262,21 @@ fn with_resolved_module_components_for_lid_inner<'a, R>(
         }
         Longident::Ldot(prefix, child_idx) => {
             let child_name = arena.get_string(*child_idx).to_string();
-            let parent_path =
-                env.resolve_module_access_path_for_lid(prefix, arena, pers_env, ctx)?;
-            // OCaml compiler/ml/env.ml:1573-1578 records child
-            // `comp_components` independently from env.ml:1568's module
-            // declaration thunk. Preserve that path for `H.H1` component
-            // navigation so we don't force `Subst.modtype` just to descend.
-            let parent_components =
-                with_resolved_module_components_for_path(&parent_path, env, pers_env, ctx, |c| {
-                    c.clone()
-                })?;
+            // OCaml compiler/ml/env.ml:1000-1014 `lookup_module_descr_aux`
+            // resolves a dotted prefix by recursively getting the parent
+            // descriptor, then forcing that descriptor's `comp_components`.
+            // Constructor lookup reaches this through
+            // compiler/ml/typetexp.ml:127-131 and env.ml:1091-1120, so a
+            // cached child access path is not enough: the child component
+            // thunk must be forced in the same order as OCaml.
+            let parent_components = with_resolved_module_components_for_lid_inner(
+                prefix,
+                arena,
+                env,
+                pers_env,
+                ctx,
+                &mut |components| Some(components.clone()),
+            )?;
             with_resolved_child_module_components(
                 &parent_components,
                 child_name.as_str(),

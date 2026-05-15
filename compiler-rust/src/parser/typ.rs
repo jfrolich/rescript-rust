@@ -26,6 +26,86 @@ fn get_string_tag(p: &Parser<'_>) -> Option<Cow<'static, str>> {
     }
 }
 
+fn extend_current_type_name_path(p: &Parser<'_>, field_name: &str) -> Option<Vec<String>> {
+    p.current_type_name_path.as_ref().map(|path| {
+        let mut extended = path.clone();
+        extended.push(field_name.to_string());
+        extended
+    })
+}
+
+fn inline_type_name_exists(p: &Parser<'_>, name: &str) -> bool {
+    p.inline_types_found.as_ref().is_some_and(|items| {
+        items
+            .iter()
+            .any(|(existing, _, _, _)| p.arena().get_string(*existing) == name)
+    })
+}
+
+fn inline_type_param_exists(p: &Parser<'_>, name: &str) -> bool {
+    p.inline_types_params.iter().any(|(typ_idx, _)| {
+        let typ = p.arena().get_core_type(*typ_idx);
+        matches!(&*typ.ptyp_desc, CoreTypeDesc::Ptyp_var(existing) if existing.as_ref() == name)
+    })
+}
+
+fn maybe_track_inline_type_param(p: &mut Parser<'_>, name: &str, loc: LocIdx) {
+    if p.inline_types_collect_free_type_vars && !inline_type_param_exists(p, name) {
+        // OCaml compiler/syntax/src/res_core.ml:49-56 appends free type
+        // variables to the inline record context while parsing externals.
+        let typ = CoreType {
+            ptyp_desc: Box::new(CoreTypeDesc::Ptyp_var(Box::new(Cow::Owned(
+                name.to_string(),
+            )))),
+            ptyp_loc: loc,
+            ptyp_attributes: Attributes::new(),
+        };
+        let typ_idx = p.arena_mut().push_core_type(typ);
+        p.inline_types_params.push((typ_idx, Variance::Invariant));
+    }
+}
+
+fn make_inline_record_type_name(p: &Parser<'_>, base: &str) -> Option<Vec<String>> {
+    let prefix = p.current_type_name_path.as_ref()?;
+    let mut suffix = String::new();
+    loop {
+        let candidate = format!("{base}{suffix}");
+        let mut path = prefix.clone();
+        path.push(candidate);
+        let full_name = path.join(".");
+        if !inline_type_name_exists(p, &full_name) {
+            return Some(path);
+        }
+        suffix.push('$');
+    }
+}
+
+fn make_inline_record_return_type_name(p: &Parser<'_>) -> Option<Vec<String>> {
+    // OCaml compiler/syntax/src/res_core.ml:74-82 uses `return.type` as the
+    // synthesized inline-record path segment for arrow return records.
+    make_inline_record_type_name(p, "return.type")
+}
+
+fn make_inline_record_argument_type_name(p: &Parser<'_>, index: usize) -> Option<Vec<String>> {
+    // OCaml compiler/syntax/src/res_core.ml:79-82 uses `argN` for positional
+    // inline-record argument types.
+    make_inline_record_type_name(p, &format!("arg{index}"))
+}
+
+fn with_current_type_name_path<T, F>(p: &mut Parser<'_>, path: Option<Vec<String>>, f: F) -> T
+where
+    F: FnOnce(&mut Parser<'_>) -> T,
+{
+    if let Some(path) = path {
+        let old_path = p.current_type_name_path.replace(path);
+        let result = f(p);
+        p.current_type_name_path = old_path;
+        result
+    } else {
+        f(p)
+    }
+}
+
 // ============================================================================
 // Type Variable Substitution
 // ============================================================================
@@ -462,7 +542,9 @@ fn parse_arrow_type_rest(
     p.next(); // consume => or ->
     // Parse return type without alias - `as` binds looser than `=>`
     // So `int => unit as 'a` is `(int => unit) as 'a`, not `int => (unit as 'a)`
-    let return_type = parse_typ_expr_inner(p, true);
+    let return_path = make_inline_record_return_type_name(p);
+    let return_type =
+        with_current_type_name_path(p, return_path, |p| parse_typ_expr_inner(p, true));
     // OCaml's parse_arrow_type_rest uses start_pos (before the argument),
     // NOT param_type.ptyp_loc.loc_start. This is different from the special case
     // in parse_poly_type_expr which uses typ.ptyp_loc.loc_start.
@@ -490,6 +572,59 @@ fn parse_arrow_type_rest(
     }
 }
 
+fn without_inline_record_context<T, F>(p: &mut Parser<'_>, f: F) -> T
+where
+    F: FnOnce(&mut Parser<'_>) -> T,
+{
+    let old_path = p.current_type_name_path.take();
+    let old_found = p.inline_types_found.take();
+    let old_params = std::mem::take(&mut p.inline_types_params);
+    let old_collect = p.inline_types_collect_free_type_vars;
+    p.inline_types_collect_free_type_vars = false;
+
+    let result = f(p);
+
+    p.current_type_name_path = old_path;
+    p.inline_types_found = old_found;
+    p.inline_types_params = old_params;
+    p.inline_types_collect_free_type_vars = old_collect;
+    result
+}
+
+fn is_external_bare_arrow_type(p: &mut Parser<'_>) -> bool {
+    // OCaml compiler/syntax/src/res_core.ml:5126-5135 speculatively parses
+    // one atomic type to detect externals like `external f: int => t = "f"`.
+    p.lookahead(|state| {
+        let attrs = parse_attributes(state);
+        match state.token {
+            Token::Lparen | Token::Tilde | Token::DocComment { .. } => false,
+            _ => {
+                let _ = parse_atomic_typ_expr(state, attrs, true);
+                matches!(state.token, Token::EqualGreater | Token::MinusGreater)
+            }
+        }
+    })
+}
+
+pub fn parse_external_type_expr(p: &mut Parser<'_>) -> CoreType {
+    // OCaml compiler/syntax/src/res_core.ml:5137-5155 only passes the inline
+    // record context to arrow externals. Non-arrow externals such as
+    // `@val external x: {a: int} = "x"` stay ordinary record/object types.
+    if is_external_bare_arrow_type(p) {
+        let start_pos_idx = p.start_pos_idx();
+        let attrs = parse_attributes(p);
+        let arg_path = make_inline_record_argument_type_name(p, 0);
+        let typ =
+            with_current_type_name_path(p, arg_path, |p| parse_atomic_typ_expr(p, attrs, true));
+        let typ = parse_arrow_type_rest(p, typ, start_pos_idx);
+        parse_type_alias(p, typ)
+    } else if super::core::is_es6_arrow_type(p) {
+        parse_typ_expr(p)
+    } else {
+        without_inline_record_context(p, parse_typ_expr)
+    }
+}
+
 /// Parse an ES6 arrow type starting at either `~` or a parenthesized parameter list.
 fn parse_es6_arrow_type(p: &mut Parser<'_>, attrs: Attributes) -> CoreType {
     // OCaml line 4711: `let start_pos = p.Parser.start_pos in` — binds to
@@ -502,7 +637,10 @@ fn parse_es6_arrow_type(p: &mut Parser<'_>, attrs: Attributes) -> CoreType {
         // Pass grammar context for error message: "Did you forget a `:` here? It signals the start of a type"
         p.expect_with_grammar(Token::Colon, Some(Grammar::TypeExpression));
 
-        let typ = parse_typ_expr_inner(p, false);
+        // OCaml compiler/syntax/src/res_core.ml:4973-5004 extends
+        // inline-record context through labeled arrow args and `return.type`.
+        let arg_path = extend_current_type_name_path(p, &name);
+        let typ = with_current_type_name_path(p, arg_path, |p| parse_typ_expr_inner(p, false));
         let name_idx = p.arena_mut().push_interned_string(&name);
         let mut lbl = ArgLabel::Labelled(Located::new(name_idx, name_loc));
 
@@ -523,7 +661,9 @@ fn parse_es6_arrow_type(p: &mut Parser<'_>, attrs: Attributes) -> CoreType {
 
         p.expect(Token::EqualGreater);
         // Parse return type without alias - `as` binds looser than `=>`
-        let return_type = parse_typ_expr_inner(p, true);
+        let return_path = make_inline_record_return_type_name(p);
+        let return_type =
+            with_current_type_name_path(p, return_path, |p| parse_typ_expr_inner(p, true));
 
         // OCaml uses prev_end_pos (actual end after parsing return type), not return_type's ptyp_loc.loc_end
         let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
@@ -637,6 +777,7 @@ fn parse_atomic_typ_expr_with_start(
             } else {
                 super::core::parse_ident(p, super::core::error_messages::TYPE_VAR, var_start_idx)
             };
+            maybe_track_inline_type_param(p, &name, var_loc);
             CoreType {
                 ptyp_desc: Box::new(CoreTypeDesc::Ptyp_var(Box::new(Cow::Owned(name)))),
                 ptyp_loc: var_loc,
@@ -883,7 +1024,7 @@ fn parse_type_constr_with_start(
     // Check for multiple inline records in type constructor args (OCaml line 4462)
     if let Some(ref inline_types) = p.inline_types_found {
         // Collect inline type names first to avoid borrow conflict
-        let inline_names: Vec<String> = inline_types.iter().map(|(n, _, _)| n.clone()).collect();
+        let inline_names: Vec<StrIdx> = inline_types.iter().map(|(n, _, _, _)| *n).collect();
         let count = args
             .iter()
             .filter(|arg| {
@@ -891,7 +1032,7 @@ fn parse_type_constr_with_start(
                     let (ref lid, _) = **constr_inner;
                     inline_names
                         .iter()
-                        .any(|iname| p.arena().is_lident(lid.txt, iname))
+                        .any(|iname| p.arena().is_lident(lid.txt, p.arena().get_string(*iname)))
                 } else {
                     false
                 }
@@ -1018,6 +1159,7 @@ fn parse_function_type(p: &mut Parser<'_>, start_pos_idx: PosIdx) -> CoreType {
     // Track both the TypeArg and its start position as PosIdx (for arrow location sharing)
     let mut params: Vec<(TypeArg, crate::parse_arena::PosIdx)> = vec![];
     let mut is_first_param = true;
+    let mut positional_index = 0usize;
 
     while p.token != Token::Rparen && p.token != Token::Eof {
         // Capture position before the uncurried marker - OCaml includes . in argument type location
@@ -1095,7 +1237,10 @@ fn parse_function_type(p: &mut Parser<'_>, start_pos_idx: PosIdx) -> CoreType {
             let (name, name_loc) = parse_lident(p);
             // Pass grammar context for error message: "Did you forget a `:` here? It signals the start of a type"
             p.expect_with_grammar(Token::Colon, Some(Grammar::TypeExpression));
-            let typ = parse_typ_expr(p);
+            // OCaml compiler/syntax/src/res_core.ml:4846-4931 threads
+            // current_type_name_path through labeled parameters.
+            let arg_path = extend_current_type_name_path(p, &name);
+            let typ = with_current_type_name_path(p, arg_path, parse_typ_expr);
             let name_idx = p.arena_mut().push_interned_string(&name);
             (
                 ArgLabel::Labelled(Located::new(name_idx, name_loc)),
@@ -1123,7 +1268,8 @@ fn parse_function_type(p: &mut Parser<'_>, start_pos_idx: PosIdx) -> CoreType {
                 p.err_at(start_pos, end_pos, DiagnosticCategory::Message(error_msg));
                 // Consume the colon
                 p.next();
-                let typ = parse_typ_expr(p);
+                let arg_path = extend_current_type_name_path(p, &name);
+                let typ = with_current_type_name_path(p, arg_path, parse_typ_expr);
                 let name_idx = p.arena_mut().intern_string(&name);
                 // Check for `=?` (optional without default)
                 if p.token == Token::Equal {
@@ -1145,18 +1291,21 @@ fn parse_function_type(p: &mut Parser<'_>, start_pos_idx: PosIdx) -> CoreType {
                 // OCaml parse_type_parameter (Lident non-labeled path):
                 // parse the constructor first with attrs on the constructor type,
                 // then continue with parse_arrow_type_rest/parse_type_alias.
-                let mut typ = parse_type_constr(p);
-                if !typ.ptyp_loc.is_none() {
-                    let constr_end_idx = p.prev_end_pos_idx();
-                    typ.ptyp_loc = p.mk_loc_idx(param_start_idx, constr_end_idx);
-                }
-                if !param_attrs.is_empty() {
-                    typ.ptyp_attributes = param_attrs.clone().concat(typ.ptyp_attributes);
-                }
-                if matches!(p.token, Token::EqualGreater | Token::MinusGreater) {
-                    typ = parse_arrow_type_rest(p, typ, param_start_idx);
-                }
-                let typ = parse_type_alias(p, typ);
+                let positional_path = make_inline_record_argument_type_name(p, positional_index);
+                let typ = with_current_type_name_path(p, positional_path, |p| {
+                    let mut typ = parse_type_constr(p);
+                    if !typ.ptyp_loc.is_none() {
+                        let constr_end_idx = p.prev_end_pos_idx();
+                        typ.ptyp_loc = p.mk_loc_idx(param_start_idx, constr_end_idx);
+                    }
+                    if !param_attrs.is_empty() {
+                        typ.ptyp_attributes = param_attrs.clone().concat(typ.ptyp_attributes);
+                    }
+                    if matches!(p.token, Token::EqualGreater | Token::MinusGreater) {
+                        typ = parse_arrow_type_rest(p, typ, param_start_idx);
+                    }
+                    parse_type_alias(p, typ)
+                });
                 (ArgLabel::Nolabel, typ, true)
             }
         } else {
@@ -1171,8 +1320,11 @@ fn parse_function_type(p: &mut Parser<'_>, start_pos_idx: PosIdx) -> CoreType {
             } else {
                 None
             };
-            let typ = parse_typ_expr_inner_with_start(p, true, outer_start);
-            let typ = parse_type_alias(p, typ);
+            let positional_path = make_inline_record_argument_type_name(p, positional_index);
+            let typ = with_current_type_name_path(p, positional_path, |p| {
+                let typ = parse_typ_expr_inner_with_start(p, true, outer_start);
+                parse_type_alias(p, typ)
+            });
             (ArgLabel::Nolabel, typ, false)
         };
 
@@ -1325,6 +1477,7 @@ fn parse_function_type(p: &mut Parser<'_>, start_pos_idx: PosIdx) -> CoreType {
             },
             param_start_idx,
         ));
+        positional_index += 1;
 
         if !p.optional(&Token::Comma) {
             if super::grammar::is_list_element(&super::grammar::Grammar::TypeParameters, &p.token) {
@@ -1349,7 +1502,9 @@ fn parse_function_type(p: &mut Parser<'_>, start_pos_idx: PosIdx) -> CoreType {
     let rparen_end_idx = p.prev_end_pos_idx();
     p.expect(Token::EqualGreater);
     // Parse return type without alias - `as` binds looser than `=>`
-    let return_type = parse_typ_expr_inner(p, true);
+    let return_path = make_inline_record_return_type_name(p);
+    let return_type =
+        with_current_type_name_path(p, return_path, |p| parse_typ_expr_inner(p, true));
     // OCaml uses prev_end_pos (actual end after parsing return type) for arrow locations,
     // not return_type's ptyp_loc.loc_end. This matters for Ptyp_variant return types
     // whose ptyp_loc doesn't include the closing ]
@@ -1662,37 +1817,40 @@ fn parse_record_or_object_type(p: &mut Parser<'_>) -> CoreType {
 
     // Check if we should extract this as an inline record type
     let has_inline_context = p.inline_types_found.is_some() && p.current_type_name_path.is_some();
-    let is_record_start = matches!(
-        p.token,
-        Token::Lident(_) | Token::Mutable | Token::At | Token::DotDotDot
-    );
+    // OCaml compiler/syntax/src/res_core.ml:4777-4779 delegates this branch
+    // to Grammar.is_field_decl_start from compiler/syntax/src/res_grammar.ml:191-196.
+    // That deliberately excludes `...`, so object spreads stay on the object
+    // field path even when an external inline-record context is active.
+    let is_record_start = grammar::is_field_decl_start(&p.token);
 
     if has_inline_context && is_record_start {
         // Extract as inline record type - mimics OCaml's parse_record_or_object_type
         // when inline_types_context is present
         let current_path = p.current_type_name_path.clone().unwrap();
-        let params = p.inline_types_params.clone();
         let labels = super::module::parse_label_declarations_for_inline(p, Some(start_pos_idx));
         p.expect(Token::Rbrace);
         let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
 
         let inline_type_name = current_path.join(".");
+        let inline_type_idx = p.arena_mut().push_string(inline_type_name);
+        let params = p.inline_types_params.clone();
 
         // Register this inline type (insert at front to match OCaml's prepend order)
         if let Some(ref mut found) = p.inline_types_found {
             found.insert(
                 0,
                 (
-                    inline_type_name.clone(),
+                    inline_type_idx,
                     loc.clone(),
                     TypeKind::Ptype_record(labels),
+                    params.clone(),
                 ),
             );
         }
 
         // Return a Ptyp_constr pointing to the inline type
         let type_args: Vec<CoreTypeIdx> = params.into_iter().map(|(t, _)| t).collect();
-        let lid_idx = p.push_lident(&inline_type_name);
+        let lid_idx = p.push_lident_from_idx(inline_type_idx);
         CoreType {
             ptyp_desc: Box::new(CoreTypeDesc::Ptyp_constr(Box::new((
                 with_loc(lid_idx, loc.clone()),
@@ -1704,7 +1862,14 @@ fn parse_record_or_object_type(p: &mut Parser<'_>) -> CoreType {
     } else {
         // Check for inline record syntax in wrong position: { name: ... } where object type expected.
         // Object markers (`{. ...}` / `{.. ...}`) go through OCaml's object-field parser instead.
-        if !has_inline_context && !is_object && matches!(p.token, Token::Lident(_)) {
+        if !has_inline_context
+            && !p.in_external
+            && !is_object
+            && matches!(p.token, Token::Lident(_))
+        {
+            // OCaml compiler/syntax/src/res_core.ml:5137-5155 parses
+            // non-arrow externals without an inline context, so `{x: int}`
+            // remains an object type there instead of a generated inline type.
             p.err(DiagnosticCategory::Message(
                 "An inline record type declaration is only allowed in a variant constructor's declaration or nested inside of a record type declaration".to_string(),
             ));
@@ -1799,7 +1964,11 @@ fn parse_object_fields(
         let name = match &p.token {
             Token::Lident(n) => {
                 let name = n.to_string();
-                if !in_spread_tail {
+                if !in_spread_tail && !p.in_external {
+                    // OCaml compiler/syntax/src/res_core.ml:5232-5267 still
+                    // builds an object field for lowercase names. For external
+                    // object types, keep the AST path non-fatal so `-bs-ast`
+                    // matches the reference parser output.
                     p.err(DiagnosticCategory::Message(
                         super::core::error_messages::object_quoted_field_name(&name),
                     ));

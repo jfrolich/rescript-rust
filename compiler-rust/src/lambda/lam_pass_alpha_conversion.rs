@@ -79,7 +79,7 @@ impl<'a> Alpha<'a> {
                         status: ApplyStatus::InferFull,
                         ..ap_info.clone()
                     };
-                    transform_under_supply(x - len, &new_info, fn_, args)
+                    transform_under_supply(&self.meta.id_gen, x - len, &new_info, fn_, args)
                 } else {
                     // lam_pass_alpha_conversion.ml:43-48 — over-application:
                     // split into nested `Lam.apply` calls. The inner call
@@ -135,7 +135,7 @@ impl<'a> Alpha<'a> {
                     status: ApplyStatus::InferFull,
                     ..ap_info
                 };
-                transform_under_supply(x - len, &new_info, fn_, args)
+                transform_under_supply(&self.meta.id_gen, x - len, &new_info, fn_, args)
             }
             Some(x) => {
                 let split = x as usize;
@@ -209,7 +209,7 @@ impl<'a> Alpha<'a> {
                 match get_arity(self.meta, arg).get_first_arity() {
                     Some(x) => {
                         let arg = self.simpl(arg);
-                        unsafe_adjust_to_arity(loc.clone(), *len, Some(x), arg)
+                        unsafe_adjust_to_arity(&self.meta.id_gen, loc.clone(), *len, Some(x), arg)
                     }
                     None => Lambda::prim(primitive.clone(), vec![self.simpl(arg)], loc.clone()),
                 }
@@ -385,7 +385,7 @@ impl<'a> Alpha<'a> {
                 match get_arity(self.meta, &arg).get_first_arity() {
                     Some(x) => {
                         let arg = self.simpl_owned(arg);
-                        unsafe_adjust_to_arity(loc, len, Some(x), arg)
+                        unsafe_adjust_to_arity(&self.meta.id_gen, loc, len, Some(x), arg)
                     }
                     None => {
                         Lambda::prim(Primitive::PjsFnMake(len), vec![self.simpl_owned(arg)], loc)

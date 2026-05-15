@@ -4440,12 +4440,27 @@ fn format_persistent_env_path(path: &str) -> String {
     path.to_string()
 }
 
+fn push_compiler_report_intro(output: &mut String, intro: &str) {
+    // OCaml compiler/ml/location.ml:88-95 colors the diagnostic intro with
+    // the `error`, `warning`, or `info` tag after bsc's color mode has been
+    // installed by compiler/ml/location.ml:45-47.
+    output.push_str("\n  ");
+    output.push_str(&code_frame::colorize_intro(intro, true));
+    output.push('\n');
+}
+
+fn push_compiler_report_location(output: &mut String, location: &str) {
+    // OCaml compiler/ml/location.ml:65-85 prints filenames through the
+    // `filename` tag and line/column ranges through the `dim` tag.
+    output.push_str("  ");
+    output.push_str(&code_frame::colorize_location(location));
+    output.push_str("\n\n");
+}
+
 fn format_compiler_error_report_for_file(filename: &str, message: &str) -> String {
     let mut output = String::new();
-    output.push_str("\n  We've found a bug for you!\n");
-    output.push_str("  ");
-    output.push_str(filename);
-    output.push_str("\n\n");
+    push_compiler_report_intro(&mut output, "We've found a bug for you!");
+    push_compiler_report_location(&mut output, filename);
     for line in message.lines() {
         output.push_str("  ");
         output.push_str(line);
@@ -4610,18 +4625,12 @@ fn push_compiler_error_report_header_from_location(
     filename: &str,
     loc: &Location,
 ) {
-    output.push_str("\n  We've found a bug for you!\n");
-    output.push_str("  ");
+    push_compiler_report_intro(output, "We've found a bug for you!");
     if loc.loc_ghost && loc.loc_start.cnum < 0 && loc.loc_end.cnum < 0 {
-        output.push_str(filename);
-        output.push_str("\n\n");
+        push_compiler_report_location(output, filename);
     } else {
-        output.push_str(&code_frame::format_location(
-            filename,
-            &loc.loc_start,
-            &loc.loc_end,
-        ));
-        output.push_str("\n\n");
+        let location = code_frame::format_location(filename, &loc.loc_start, &loc.loc_end);
+        push_compiler_report_location(output, &location);
         output.push_str(&code_frame::print(source, &loc.loc_start, &loc.loc_end));
         output.push('\n');
     }
@@ -4634,16 +4643,14 @@ fn push_compiler_error_report_header(
     filename: &str,
     loc: LocIdx,
 ) {
-    output.push_str("\n  We've found a bug for you!\n");
-    output.push_str("  ");
+    push_compiler_report_intro(output, "We've found a bug for you!");
     let start_pos = arena.loc_start(loc);
     let end_pos = arena.loc_end(loc);
     if arena.loc_ghost(loc) && start_pos.cnum < 0 && end_pos.cnum < 0 {
-        output.push_str(filename);
-        output.push_str("\n\n");
+        push_compiler_report_location(output, filename);
     } else {
-        output.push_str(&code_frame::format_location(filename, start_pos, end_pos));
-        output.push_str("\n\n");
+        let location = code_frame::format_location(filename, start_pos, end_pos);
+        push_compiler_report_location(output, &location);
         output.push_str(&code_frame::print(source, start_pos, end_pos));
         output.push('\n');
     }
@@ -4674,18 +4681,12 @@ fn push_compiler_error_report_header_from_external_location(
     filename: &str,
     loc: &Location,
 ) {
-    output.push_str("\n  We've found a bug for you!\n");
-    output.push_str("  ");
+    push_compiler_report_intro(output, "We've found a bug for you!");
     if loc.loc_ghost && loc.loc_start.cnum < 0 && loc.loc_end.cnum < 0 {
-        output.push_str(filename);
-        output.push_str("\n\n");
+        push_compiler_report_location(output, filename);
     } else {
-        output.push_str(&code_frame::format_location(
-            filename,
-            &loc.loc_start,
-            &loc.loc_end,
-        ));
-        output.push_str("\n\n");
+        let location = code_frame::format_location(filename, &loc.loc_start, &loc.loc_end);
+        push_compiler_report_location(output, &location);
         if let Some(source) = source {
             output.push_str(&code_frame::print(source, &loc.loc_start, &loc.loc_end));
             output.push('\n');
@@ -5520,18 +5521,22 @@ fn format_compiler_warning_report(
     let end_pos = arena.loc_end(warning.loc);
     let mut output = String::new();
 
-    output.push_str("\n  Warning number ");
-    output.push_str(&warning.warning.number().to_string());
+    output.push_str("\n  ");
+    output.push_str(&code_frame::colorize_intro(
+        &format!("Warning number {}", warning.warning.number()),
+        warning.is_error,
+    ));
     if warning.is_error {
         output.push_str(" (configured as error) ");
     }
     output.push('\n');
     output.push_str("  ");
     if arena.loc_ghost(warning.loc) && start_pos.cnum < 0 && end_pos.cnum < 0 {
-        output.push_str(filename);
+        output.push_str(&code_frame::colorize_location(filename));
         output.push_str("\n\n");
     } else {
-        output.push_str(&code_frame::format_location(filename, start_pos, end_pos));
+        let location = code_frame::format_location(filename, start_pos, end_pos);
+        output.push_str(&code_frame::colorize_location(&location));
         output.push_str("\n\n");
         output.push_str(&code_frame::print_warning(source, start_pos, end_pos));
         output.push('\n');

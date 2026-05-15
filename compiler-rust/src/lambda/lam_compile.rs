@@ -58,8 +58,8 @@ use super::lam_coercion::{
     insert_rebound_export_before_equivalent_later_binding,
     keeps_declared_same_name_function_export_alias, max_ident_stamp_in_block,
     max_ident_stamp_in_expression, push_effect_expression, push_s_exp,
-    reorder_trailing_export_bindings_by_export_order, resolve_declared_same_name_self_alias_target,
-    resolve_export_aliases, reusable_same_name_export_binding,
+    resolve_declared_same_name_self_alias_target, resolve_export_aliases,
+    reusable_same_name_export_binding,
     rewrite_toplevel_variable_initializers_through_rewriteable_aliases,
 };
 use super::lam_compile_variant::{empty_switch_case_clause, stable_group_switch_cases};
@@ -828,8 +828,11 @@ impl LambdaCompiler {
             }));
         }
 
+        // OCaml compiler/core/lam_coercion.ml:160-172 folds original flattened
+        // groups back in front of rebound export groups and preserves that
+        // order. Generated JS observes this, so these late bindings must not be
+        // sorted by export-list order.
         block.extend(rebound_exports);
-        reorder_trailing_export_bindings_by_export_order(block, &exports);
         (exports, name_reservations)
     }
 
@@ -1697,7 +1700,8 @@ impl LambdaCompiler {
                 }
             }
 
-            let recursive_functions = recursive_function_bindings_in_group(bindings, &group);
+            let recursive_functions =
+                recursive_function_bindings_in_group(&self.id_gen, bindings, &group);
             let recursive_function_tail_targets = direct_recursive_function_tail_targets_with_group(
                 bindings,
                 &group,
@@ -1743,7 +1747,7 @@ impl LambdaCompiler {
         recursive_functions: &HashMap<Ident, LFunction>,
         recursive_function_ids: &HashSet<Ident>,
     ) -> (Block, Block) {
-        if let Some(func) = recursive_function_binding_value(expr) {
+        if let Some(func) = recursive_function_binding_value(&self.id_gen, expr) {
             return (
                 vec![],
                 vec![Statement::variable(VariableDeclaration {
@@ -2069,6 +2073,22 @@ impl LambdaCompiler {
                     }),
                     self.try_statement(body_block, exn, handler_block),
                 ]
+            }
+            Lambda::Lsequence(first, second) => {
+                // OCaml compiler/core/lam_compile.ml:1862-1869 compiles an
+                // `Llet` RHS with continuation `Declare(kind, id)`. Its
+                // Lsequence arm at compiler/core/lam_compile.ml:1899-1903
+                // emits the head as `EffectCall Not_tail`, then compiles the
+                // tail in the original continuation. That lets
+                // compiler/core/js_stmt_make.ml:62-67 turn a final unit
+                // `Undefined` into `let id;` instead of binding a
+                // `(effect, undefined)` expression.
+                let mut block = self.compile_effect_block(first);
+                if lambda_is_unconditional_exit(first) || block_finishes_output(&block) {
+                    return block;
+                }
+                block.extend(self.compile_let_binding(kind, id, second));
+                block
             }
             Lambda::Lswitch(scrut, switch) => {
                 self.compile_switch_binding_block(kind, id, scrut, switch)
@@ -5075,6 +5095,20 @@ impl LambdaCompiler {
         )
     }
 
+    pub(crate) fn builtin_runtime_call_info() -> CallInfo {
+        // OCaml `E.runtime_call` uses `Js_call_info.builtin_runtime_call`
+        // (`compiler/core/js_exp_make.ml:147-149`), defined as
+        // `{arity = Full; call_info = Call_builtin_runtime}`
+        // (`compiler/core/js_call_info.ml:40-42`). `js_dump.ml:299-344`
+        // relies on exactly that metadata when eta-reducing wrappers like
+        // `fun x y -> Primitive_int.div x y` to `Primitive_int.div`.
+        CallInfo {
+            kind: CallKind::BuiltinRuntime,
+            arity: CallArity::Full,
+            ..CallInfo::default()
+        }
+    }
+
     pub(crate) fn runtime_call_expr(
         &self,
         module_name: &str,
@@ -5084,7 +5118,7 @@ impl LambdaCompiler {
         Expression::call(
             self.runtime_member_expr(module_name, member),
             args,
-            CallInfo::default(),
+            Self::builtin_runtime_call_info(),
         )
     }
 
@@ -6073,12 +6107,12 @@ fn staticcatch_debug_kind(lam: &Lambda) -> &'static str {
     }
 }
 
-fn recursive_function_binding_value(expr: &Lambda) -> Option<LFunction> {
+fn recursive_function_binding_value(id_gen: &IdGenerator, expr: &Lambda) -> Option<LFunction> {
     match expr {
         Lambda::Lfunction(func) => Some(func.clone()),
         Lambda::Lprim(info) => match (&info.primitive, info.args.as_slice()) {
             (Primitive::PjsFnMake(arity), [Lambda::Lfunction(func)]) => Some(
-                adjust_recursive_js_fn_make_function(func, *arity, &info.loc),
+                adjust_recursive_js_fn_make_function(id_gen, func, *arity, &info.loc),
             ),
             (Primitive::PjsFnMakeUnit, [Lambda::Lfunction(func)]) => {
                 let mut func = func.clone();
@@ -6223,16 +6257,20 @@ fn recursive_binding_groups(
     }
 }
 
-fn recursive_function_bindings(bindings: &[(Ident, Lambda)]) -> HashMap<Ident, LFunction> {
+fn recursive_function_bindings(
+    id_gen: &IdGenerator,
+    bindings: &[(Ident, Lambda)],
+) -> HashMap<Ident, LFunction> {
     bindings
         .iter()
         .filter_map(|(id, expr)| {
-            recursive_function_binding_value(expr).map(|func| (id.clone(), func))
+            recursive_function_binding_value(id_gen, expr).map(|func| (id.clone(), func))
         })
         .collect()
 }
 
 fn recursive_function_bindings_in_group(
+    id_gen: &IdGenerator,
     bindings: &[(Ident, Lambda)],
     group: &[usize],
 ) -> HashMap<Ident, LFunction> {
@@ -6240,7 +6278,7 @@ fn recursive_function_bindings_in_group(
         .iter()
         .filter_map(|&index| {
             let (id, expr) = &bindings[index];
-            recursive_function_binding_value(expr).map(|func| (id.clone(), func))
+            recursive_function_binding_value(id_gen, expr).map(|func| (id.clone(), func))
         })
         .collect()
 }
@@ -6275,7 +6313,12 @@ fn recursive_function_binding_alias_target(
     }
 }
 
-fn adjust_recursive_js_fn_make_function(func: &LFunction, to_: i32, loc: &Location) -> LFunction {
+fn adjust_recursive_js_fn_make_function(
+    id_gen: &IdGenerator,
+    func: &LFunction,
+    to_: i32,
+    loc: &Location,
+) -> LFunction {
     let from = func.arity;
     if from == to_ || func.attr.async_ {
         return func.clone();
@@ -6303,8 +6346,12 @@ fn adjust_recursive_js_fn_make_function(func: &LFunction, to_: i32, loc: &Locati
 
     if to_ > from {
         let mut params = func.params.clone();
+        // This mirrors Lam_eta_conversion.unsafe_adjust_to_arity's fresh
+        // Ident.create params for `Pjs_fn_make` expansion
+        // (compiler/core/lam_pass_alpha_conversion.ml:67-74 and
+        // compiler/core/lam_eta_conversion.ml:159-175).
         let extra_args = (0..(to_ - from))
-            .map(|_| Ident::create_local("param"))
+            .map(|_| id_gen.create("param"))
             .collect::<Vec<_>>();
         let mut body = (*func.body).clone();
         for extra_arg in &extra_args {
@@ -6506,7 +6553,15 @@ fn function_has_self_tailcall(tail_targets: &[Ident], lam: &Lambda) -> bool {
 fn direct_recursive_function_tail_targets(
     bindings: &[(Ident, Lambda)],
 ) -> HashMap<Ident, Vec<Ident>> {
-    let recursive_functions = recursive_function_bindings(bindings);
+    let start_stamp = bindings
+        .iter()
+        .fold(Ident::current_local_stamp(), |max_stamp, (_, lam)| {
+            max_stamp.max(crate::lambda::lam_beta_reduce::max_ident_stamp_in_lambda(
+                lam,
+            ))
+        });
+    let id_gen = IdGenerator::with_start_stamp(start_stamp);
+    let recursive_functions = recursive_function_bindings(&id_gen, bindings);
     direct_recursive_function_tail_targets_with_bindings(bindings, &recursive_functions)
 }
 

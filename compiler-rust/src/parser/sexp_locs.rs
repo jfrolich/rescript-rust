@@ -898,24 +898,12 @@ fn expression(expr: &Expression, arena: &ParseArena) -> Sexp {
                 expression(arena.get_expr(*body), arena),
             ])
         }
-        ExpressionDesc::Pexp_for_of(inner) => {
-            let (ref pat, ref iterable, ref body) = **inner;
-            Sexp::list(vec![
-                Sexp::atom("Pexp_for_of"),
-                pattern(arena.get_pat(*pat), arena),
-                expression(arena.get_expr(*iterable), arena),
-                expression(arena.get_expr(*body), arena),
-            ])
-        }
-        ExpressionDesc::Pexp_for_await_of(inner) => {
-            let (ref pat, ref iterable, ref body) = **inner;
-            Sexp::list(vec![
-                Sexp::atom("Pexp_for_await_of"),
-                pattern(arena.get_pat(*pat), arena),
-                expression(arena.get_expr(*iterable), arena),
-                expression(arena.get_expr(*body), arena),
-            ])
-        }
+        // OCaml compiler/syntax/src/res_ast_debugger.ml:1741-1742 keeps
+        // these constructors opaque in SexpAstWithLocs even though the plain
+        // sexp printer expands them at
+        // compiler/syntax/src/res_ast_debugger.ml:678-684.
+        ExpressionDesc::Pexp_for_of(_) => Sexp::list(vec![Sexp::atom("Pexp_for_of")]),
+        ExpressionDesc::Pexp_for_await_of(_) => Sexp::list(vec![Sexp::atom("Pexp_for_await_of")]),
         ExpressionDesc::Pexp_constraint(inner) => {
             let (ref e, ref t) = **inner;
             Sexp::list(vec![

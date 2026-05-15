@@ -176,9 +176,9 @@ RESET='\033[0m'
 
 # Configuration
 if [[ "$TELLA_MODE" == "true" ]]; then
-    TIMEOUT_SECONDS=30
+    TIMEOUT_SECONDS="${TIMEOUT_SECONDS:-30}"
 else
-    TIMEOUT_SECONDS=10
+    TIMEOUT_SECONDS="${TIMEOUT_SECONDS:-10}"
 fi
 
 # Check if compilers exist
@@ -212,7 +212,12 @@ fi
 export RESCRIPT_RUNTIME
 
 # Create temp directory
-TEMP_DIR=$(mktemp -d)
+if [[ -n "${TMPDIR:-}" ]]; then
+    mkdir -p "$TMPDIR"
+    TEMP_DIR=$(mktemp -d "$TMPDIR/typedtree-parity.XXXXXX")
+else
+    TEMP_DIR=$(mktemp -d)
+fi
 CACHE_DIR="$PROJECT_ROOT/.parity-cache"
 mkdir -p "$CACHE_DIR/tests/diffs" "$CACHE_DIR/tests/ocaml" "$CACHE_DIR/tests/rust"
 BUILD_LOCK_DIR="$CACHE_DIR/typedtree-build.lock"
@@ -449,6 +454,11 @@ test_single_file() {
     local file_temp="$TEMP_DIR/work/$safe_name"
     mkdir -p "$file_temp"
 
+    local ocaml_cache="$CACHE_DIR/tests/ocaml/$safe_name.sexp"
+    local rust_cache="$CACHE_DIR/tests/rust/$safe_name.sexp"
+    local diff_cache="$CACHE_DIR/tests/diffs/$safe_name.diff"
+    rm -f "$ocaml_cache" "$rust_cache" "$diff_cache"
+
     # Determine full file path (handle both absolute and relative paths)
     local full_file_path
     if [[ "$file" = /* ]]; then
@@ -556,8 +566,8 @@ print(' '.join(rewritten))" 2>/dev/null) || args=""
             # Save diff for inspection
             diff -ua "$file_temp/ocaml.sexp" "$file_temp/rust.sexp" > "$TEMP_DIR/diffs/$safe_name.diff" 2>&1 || true
             # Save sexp files to persistent cache
-            cp "$file_temp/ocaml.sexp" "$CACHE_DIR/tests/ocaml/$safe_name.sexp" 2>/dev/null || true
-            cp "$file_temp/rust.sexp" "$CACHE_DIR/tests/rust/$safe_name.sexp" 2>/dev/null || true
+            cp "$file_temp/ocaml.sexp" "$ocaml_cache" 2>/dev/null || true
+            cp "$file_temp/rust.sexp" "$rust_cache" 2>/dev/null || true
         fi
     fi
 
@@ -586,6 +596,9 @@ print(' '.join(rewritten))" 2>/dev/null) || args=""
             fi
         fi
     fi
+
+    find "$file_temp" -type f -delete 2>/dev/null || true
+    find "$file_temp" -depth -type d -empty -delete 2>/dev/null || true
 
     # Quick mode - exit on failure
     if [[ "$QUICK_MODE" == "true" && ("$ocaml_fail" -eq 1 || "$parity_fail" -eq 1) ]]; then

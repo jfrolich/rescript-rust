@@ -7,6 +7,7 @@
 use crate::location::Position;
 use std::borrow::Cow;
 use std::io::IsTerminal;
+use std::sync::atomic::{AtomicU8, Ordering};
 
 /// Count the number of digits in a number.
 fn digits_count(n: i32) -> usize {
@@ -126,11 +127,79 @@ enum Emphasis {
 const ANSI_DIM: &str = "\x1b[2m";
 const ANSI_ERR: &str = "\x1b[1;31m";
 const ANSI_WARN: &str = "\x1b[1;33m";
+const ANSI_FILENAME: &str = "\x1b[36m";
 const ANSI_RESET: &str = "\x1b[0m";
 
-fn should_enable_color() -> bool {
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ColorMode {
+    Auto = 0,
+    Always = 1,
+    Never = 2,
+}
+
+impl Default for ColorMode {
+    fn default() -> Self {
+        Self::Auto
+    }
+}
+
+static COLOR_MODE: AtomicU8 = AtomicU8::new(ColorMode::Auto as u8);
+
+pub fn parse_color_mode(value: &str) -> Option<ColorMode> {
+    match value {
+        "auto" => Some(ColorMode::Auto),
+        "always" => Some(ColorMode::Always),
+        "never" => Some(ColorMode::Never),
+        _ => None,
+    }
+}
+
+pub fn set_color_mode(mode: ColorMode) {
+    COLOR_MODE.store(mode as u8, Ordering::Relaxed);
+}
+
+fn color_mode() -> ColorMode {
+    match COLOR_MODE.load(Ordering::Relaxed) {
+        1 => ColorMode::Always,
+        2 => ColorMode::Never,
+        _ => ColorMode::Auto,
+    }
+}
+
+pub fn should_enable_color() -> bool {
+    // OCaml compiler/bsc/rescript_compiler_main.ml:349-358 parses `-color`,
+    // rescript_compiler_main.ml:494 makes `bsc` default to `always`, and
+    // compiler/ext/misc.ml:512-529 plus compiler/ml/code_frame.ml:83-91
+    // choose between always, never, and the stderr TTY heuristic.
+    match color_mode() {
+        ColorMode::Always => true,
+        ColorMode::Never => false,
+        ColorMode::Auto => should_auto_enable_color(),
+    }
+}
+
+fn should_auto_enable_color() -> bool {
     let term = std::env::var("TERM").unwrap_or_default();
     term != "dumb" && !term.is_empty() && std::io::stderr().is_terminal()
+}
+
+pub fn colorize_intro(intro: &str, is_error: bool) -> String {
+    if !should_enable_color() {
+        return intro.to_string();
+    }
+    let color = if is_error { ANSI_ERR } else { ANSI_WARN };
+    format!("{color}{intro}{ANSI_RESET}")
+}
+
+pub fn colorize_location(location: &str) -> String {
+    if !should_enable_color() {
+        return location.to_string();
+    }
+    if let Some((file, rest)) = location.split_once(':') {
+        format!("{ANSI_FILENAME}{file}{ANSI_RESET}:{ANSI_DIM}{rest}{ANSI_RESET}")
+    } else {
+        format!("{ANSI_FILENAME}{location}{ANSI_RESET}")
+    }
 }
 
 fn emphasis_ansi(emphasis: Emphasis) -> &'static str {

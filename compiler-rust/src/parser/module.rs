@@ -94,8 +94,12 @@ fn parse_newline_or_semicolon_signature(p: &mut Parser<'_>) {
 /// desugared into separate type declarations with dotted names like `t.permissions.all`.
 #[derive(Debug)]
 pub struct InlineTypesContext {
-    /// Collected inline types: (dotted_name as StrIdx, location, type_kind)
-    pub found_inline_types: Vec<(StrIdx, Location, TypeKind)>,
+    /// Collected inline types: (dotted_name as StrIdx, location, type_kind, params).
+    ///
+    /// OCaml compiler/syntax/src/res_core.ml:27-36 stores `params` on each
+    /// inline type definition, so external inline records keep the parameter
+    /// set from the moment that record was discovered.
+    pub found_inline_types: Vec<(StrIdx, Location, TypeKind, Vec<(CoreTypeIdx, Variance)>)>,
     /// Type parameters from the outer type declaration
     pub params: Vec<(CoreTypeIdx, Variance)>,
     /// Location of the outer type's name (used for inline type declarations)
@@ -119,18 +123,9 @@ pub fn parse_label_declarations_for_inline(
     lbrace_pos_idx: Option<PosIdx>,
 ) -> Vec<LabelDeclaration> {
     // Create a temporary RefCell<InlineTypesContext> from parser fields
-    // to reuse the existing parse_label_declarations logic
-    // Convert from parser's String-based fields to InlineTypesContext's StrIdx-based fields
-    let found_stridx: Vec<(StrIdx, Location, TypeKind)> = p
-        .inline_types_found
-        .take()
-        .unwrap_or_default()
-        .into_iter()
-        .map(|(name, loc, kind)| {
-            let idx = p.arena_mut().push_string(name);
-            (idx, loc, kind)
-        })
-        .collect();
+    // to reuse the existing parse_label_declarations logic.
+    let found_stridx: Vec<(StrIdx, Location, TypeKind, Vec<(CoreTypeIdx, Variance)>)> =
+        p.inline_types_found.take().unwrap_or_default();
     let inline_ctx = RefCell::new(InlineTypesContext {
         found_inline_types: found_stridx,
         params: p.inline_types_params.clone(),
@@ -144,18 +139,15 @@ pub fn parse_label_declarations_for_inline(
     let labels =
         parse_label_declarations(p, Some(&inline_ctx), current_path.as_ref(), lbrace_pos_idx);
 
-    // Copy back any found inline types to the parser fields
-    // Convert from StrIdx back to String
+    // Copy back any found inline types to the parser fields.
     let ctx = inline_ctx.into_inner();
-    let found_string: Vec<(String, LocIdx, TypeKind)> = ctx
-        .found_inline_types
-        .into_iter()
-        .map(|(idx, loc, kind)| {
-            let name = p.arena().get_string(idx).to_string();
-            (name, loc, kind)
-        })
-        .collect();
-    p.inline_types_found = Some(found_string);
+    let InlineTypesContext {
+        found_inline_types,
+        params,
+        ..
+    } = ctx;
+    p.inline_types_found = Some(found_inline_types);
+    p.inline_types_params = params;
 
     labels
 }
@@ -227,7 +219,14 @@ pub fn parse_structure(p: &mut Parser<'_>) -> Structure {
 
     let mut items = vec![];
 
-    while p.token != Token::Eof {
+    loop {
+        if let Some(item) = p.pending_structure_items.pop() {
+            items.push(item);
+            continue;
+        }
+        if p.token == Token::Eof {
+            break;
+        }
         if let Some(item) = parse_structure_item(p) {
             items.push(item);
         } else {
@@ -573,9 +572,25 @@ pub fn parse_structure_item(p: &mut Parser<'_>) -> Option<StructureItem> {
         Token::External => {
             p.next();
             // Use item_start_idx (which equals start_pos_idx) to share position with pstr_loc
-            let vd = parse_value_description(p, attrs.clone(), item_start_idx, false);
+            let (vd, inline_types) =
+                parse_external_value_description(p, attrs.clone(), item_start_idx);
             parse_newline_or_semicolon_structure(p);
-            Some(StructureItemDesc::Pstr_primitive(Box::new(vd)))
+            if inline_types.is_empty() {
+                Some(StructureItemDesc::Pstr_primitive(Box::new(vd)))
+            } else {
+                // OCaml compiler/syntax/src/res_core.ml:6729-6741 emits the
+                // generated inline type item first, then queues the primitive.
+                let loc = p.mk_loc_idx_to_prev_end(item_start_idx);
+                item_loc_idx = Some(loc.clone());
+                p.pending_structure_items.push(StructureItem {
+                    pstr_desc: Box::new(StructureItemDesc::Pstr_primitive(Box::new(vd))),
+                    pstr_loc: loc,
+                });
+                Some(StructureItemDesc::Pstr_type(Box::new((
+                    RecFlag::Recursive,
+                    inline_types,
+                ))))
+            }
         }
         Token::Exception => {
             // Capture start position BEFORE consuming 'exception' for accurate location
@@ -745,6 +760,10 @@ pub fn parse_signature(p: &mut Parser<'_>) -> Signature {
     let mut items = vec![];
 
     loop {
+        if let Some(item) = p.pending_signature_items.pop() {
+            items.push(item);
+            continue;
+        }
         // Skip semicolons
         while p.token == Token::Semicolon {
             p.next();
@@ -898,9 +917,25 @@ pub fn parse_signature_item(p: &mut Parser<'_>) -> Option<SignatureItem> {
         Token::External => {
             p.next();
             // Use start_pos_idx to share position with psig_loc
-            let vd = parse_value_description(p, attrs.clone(), start_pos_idx, false);
+            let (vd, inline_types) =
+                parse_external_value_description(p, attrs.clone(), start_pos_idx);
             parse_newline_or_semicolon_signature(p);
-            Some(SignatureItemDesc::Psig_value(Box::new(vd)))
+            if inline_types.is_empty() {
+                Some(SignatureItemDesc::Psig_value(Box::new(vd)))
+            } else {
+                // OCaml compiler/syntax/src/res_core.ml:7383-7395 emits the
+                // generated inline type item first, then queues the value item.
+                let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
+                item_loc_idx = Some(loc.clone());
+                p.pending_signature_items.push(SignatureItem {
+                    psig_desc: Box::new(SignatureItemDesc::Psig_value(Box::new(vd))),
+                    psig_loc: loc,
+                });
+                Some(SignatureItemDesc::Psig_type(Box::new((
+                    RecFlag::Recursive,
+                    inline_types,
+                ))))
+            }
         }
         Token::Exception => {
             // Capture start position BEFORE consuming 'exception' for accurate location
@@ -2052,6 +2087,43 @@ fn parse_with_constraints(p: &mut Parser<'_>) -> Vec<WithConstraint> {
     constraints
 }
 
+/// Parse type constraints following a type declaration or `with type` constraint.
+fn parse_type_constraints(p: &mut Parser<'_>) -> Vec<(CoreTypeIdx, CoreTypeIdx, Location)> {
+    let mut cstrs = vec![];
+    while p.token == Token::Constraint {
+        // OCaml compiler/syntax/src/res_core.ml:5838-5866 includes the
+        // `constraint` keyword in both the type variable location and the
+        // tuple location.
+        let cstr_start_idx = p.start_pos_idx();
+        p.next();
+        p.expect(Token::SingleQuote);
+        let var = match &p.token {
+            Token::Lident(name) | Token::Uident(name) => {
+                let name = extend_cow_lifetime(name.clone());
+                let var_end_idx = p.end_pos_idx();
+                p.next();
+                CoreType {
+                    ptyp_desc: Box::new(CoreTypeDesc::Ptyp_var(Box::new(name))),
+                    ptyp_loc: p.mk_loc_idx(cstr_start_idx, var_end_idx),
+                    ptyp_attributes: Attributes::new(),
+                }
+            }
+            _ => {
+                p.err(DiagnosticCategory::Message(
+                    "Expected type variable in constraint".to_string(),
+                ));
+                break;
+            }
+        };
+        p.expect(Token::Equal);
+        let typ = typ::parse_typ_expr(p);
+        let var_idx = p.arena_mut().push_core_type(var);
+        let typ_idx = p.arena_mut().push_core_type(typ);
+        cstrs.push((var_idx, typ_idx, p.mk_loc_idx_to_prev_end(cstr_start_idx)));
+    }
+    cstrs
+}
+
 /// Parse a single with constraint.
 fn parse_with_constraint(p: &mut Parser<'_>) -> Option<WithConstraint> {
     match &p.token {
@@ -2084,13 +2156,22 @@ fn parse_with_constraint(p: &mut Parser<'_>) -> Option<WithConstraint> {
                 PrivateFlag::Public
             };
             let typ = typ::parse_typ_expr(p);
+            let type_constraints = if is_substitution {
+                // OCaml compiler/syntax/src/res_core.ml:7285-7294 returns the
+                // Pwith_typesubst branch immediately after parse_typ_expr. It
+                // only parses parse_type_constraints for the `=` branch at
+                // compiler/syntax/src/res_core.ml:7295-7306.
+                vec![]
+            } else {
+                parse_type_constraints(p)
+            };
 
             let typ_idx = p.arena_mut().push_core_type(typ);
             let decl = TypeDeclaration {
                 // OCaml uses the full longident location for the type name location
                 ptype_name: with_loc(type_name_idx, type_loc.clone()),
                 ptype_params: params,
-                ptype_cstrs: vec![],
+                ptype_cstrs: type_constraints,
                 ptype_kind: TypeKind::Ptype_abstract,
                 ptype_private: private,
                 ptype_manifest: Some(typ_idx),
@@ -2685,12 +2766,12 @@ fn parse_type_declarations(
                 let inline_str_idx = p.arena_mut().intern("res.inlineRecordDefinition");
                 let inline_attr: Attribute =
                     (mknoloc(inline_str_idx), Payload::PStr(Box::new(vec![])));
-                for (inline_name_idx, loc, type_kind) in ctx.found_inline_types.iter() {
+                for (inline_name_idx, loc, type_kind, params) in ctx.found_inline_types.iter() {
                     // OCaml uses the outer type's name location for inline type ptype_name,
                     // not the inline type's location
                     let inline_decl = TypeDeclaration {
                         ptype_name: with_loc(*inline_name_idx, ctx.outer_name_loc.clone()),
-                        ptype_params: ctx.params.clone(),
+                        ptype_params: params.clone(),
                         ptype_cstrs: vec![],
                         ptype_kind: type_kind.clone(),
                         ptype_private: PrivateFlag::Public,
@@ -3314,37 +3395,7 @@ fn parse_type_declaration_with_context(
         (None, TypeKind::Ptype_abstract, PrivateFlag::Public)
     };
 
-    // Parse constraints (constraint 't = type)
-    let mut cstrs = vec![];
-    while p.token == Token::Constraint {
-        // OCaml includes "constraint" keyword in the type variable and constraint locations
-        let cstr_start_idx = p.start_pos_idx();
-        p.next();
-        // Parse the type variable
-        p.expect(Token::SingleQuote);
-        let var = if let Token::Lident(name) = &p.token {
-            let name = extend_cow_lifetime(name.clone());
-            let var_end_idx = p.end_pos_idx();
-            p.next();
-            // OCaml: type variable location starts at "constraint" keyword
-            CoreType {
-                ptyp_desc: Box::new(CoreTypeDesc::Ptyp_var(Box::new(name))),
-                ptyp_loc: p.mk_loc_idx(cstr_start_idx, var_end_idx),
-                ptyp_attributes: Attributes::new(),
-            }
-        } else {
-            p.err(DiagnosticCategory::Message(
-                "Expected type variable in constraint".to_string(),
-            ));
-            break;
-        };
-        p.expect(Token::Equal);
-        let typ = typ::parse_typ_expr(p);
-        // OCaml: constraint tuple location also starts at "constraint" keyword
-        let var_idx = p.arena_mut().push_core_type(var);
-        let typ_idx = p.arena_mut().push_core_type(typ);
-        cstrs.push((var_idx, typ_idx, p.mk_loc_idx_to_prev_end(cstr_start_idx)));
-    }
+    let cstrs = parse_type_constraints(p);
 
     // In type declarations with qualified type constructors (Ldot),
     // OCaml creates a NEW location with the same positions as the longident.
@@ -4587,6 +4638,7 @@ fn parse_label_declaration(
                 .join(".");
             let inline_type_idx = p.arena_mut().push_string(inline_type_name.to_string());
 
+            let params = inline_ctx.borrow().params.clone();
             // Register this inline type (insert at front for correct order)
             inline_ctx.borrow_mut().found_inline_types.insert(
                 0,
@@ -4594,11 +4646,11 @@ fn parse_label_declaration(
                     inline_type_idx,
                     type_loc.clone(),
                     TypeKind::Ptype_record(labels),
+                    params.clone(),
                 ),
             );
 
             // Return a Ptyp_constr pointing to the inline type
-            let params = inline_ctx.borrow().params.clone();
             let type_args: Vec<CoreTypeIdx> = params.into_iter().map(|(t, _)| t).collect();
             let lid_idx = p.push_lident_from_idx(inline_type_idx);
             CoreType {
@@ -4652,35 +4704,15 @@ fn parse_poly_type_with_inline_context(
             .map(|idx| p.arena().get_string(*idx).to_string())
             .collect();
         p.current_type_name_path = Some(string_path);
-        // Convert StrIdx-based found inline types to String-based for parser state
-        let found_string: Vec<(String, LocIdx, TypeKind)> = ctx
-            .borrow()
-            .found_inline_types
-            .iter()
-            .map(|(idx, loc, kind)| {
-                (
-                    p.arena().get_string(*idx).to_string(),
-                    loc.clone(),
-                    kind.clone(),
-                )
-            })
-            .collect();
-        p.inline_types_found = Some(found_string);
+        p.inline_types_found = Some(ctx.borrow().found_inline_types.clone());
         p.inline_types_params = ctx.borrow().params.clone();
 
         let typ = typ::parse_poly_type_expr(p);
 
-        // Copy found inline types back to the RefCell context
-        // Convert String-based back to StrIdx-based
         if let Some(found) = p.inline_types_found.take() {
-            let found_stridx: Vec<(StrIdx, LocIdx, TypeKind)> = found
-                .into_iter()
-                .map(|(name, loc, kind)| {
-                    let idx = p.arena_mut().push_string(name);
-                    (idx, loc, kind)
-                })
-                .collect();
-            ctx.borrow_mut().found_inline_types = found_stridx;
+            let mut ctx = ctx.borrow_mut();
+            ctx.found_inline_types = found;
+            ctx.params = p.inline_types_params.clone();
         }
 
         // Restore old parser fields
@@ -4692,6 +4724,116 @@ fn parse_poly_type_with_inline_context(
     } else {
         typ::parse_poly_type_expr(p)
     }
+}
+
+fn parse_external_value_description(
+    p: &mut Parser<'_>,
+    outer_attrs: Attributes,
+    loc_start_idx: PosIdx,
+) -> (ValueDescription, Vec<TypeDeclaration>) {
+    let inner_attrs = parse_attributes(p);
+    let attrs = outer_attrs.concat(inner_attrs);
+
+    let name = match &p.token {
+        Token::Lident(n) => {
+            let n = n.clone();
+            let loc = p.mk_loc_current();
+            p.next();
+            let n_idx = p.arena_mut().push_interned_string(&n);
+            with_loc(n_idx, loc)
+        }
+        Token::String(s) => {
+            let n = format!("\"{}\"", s);
+            let loc = p.mk_loc_current();
+            p.next();
+            let n_idx = p.arena_mut().push_string(n);
+            with_loc(n_idx, loc)
+        }
+        _ => {
+            p.err(DiagnosticCategory::Lident(p.token.clone().into_owned()));
+            let err_idx = p.arena_mut().intern("error");
+            mknoloc(err_idx)
+        }
+    };
+    let name_text = p.arena().get_string(name.txt).to_string();
+
+    p.expect_with_grammar(Token::Colon, Some(Grammar::TypeExpression));
+
+    let was_in_external = p.in_external;
+    let old_path = p.current_type_name_path.take();
+    let old_found = p.inline_types_found.take();
+    let old_params = std::mem::take(&mut p.inline_types_params);
+    let old_collect = p.inline_types_collect_free_type_vars;
+
+    // OCaml compiler/syntax/src/res_core.ml:6584-6624 parses externals with
+    // InExternal enabled and an inline-types context rooted at the external name.
+    p.in_external = true;
+    p.current_type_name_path = Some(vec![name_text.clone()]);
+    p.inline_types_found = Some(vec![]);
+    p.inline_types_params = vec![];
+    p.inline_types_collect_free_type_vars = true;
+
+    let typ_ct = typ::parse_external_type_expr(p);
+    let inline_types_found = p.inline_types_found.take().unwrap_or_default();
+
+    p.in_external = was_in_external;
+    p.current_type_name_path = old_path;
+    p.inline_types_found = old_found;
+    p.inline_types_params = old_params;
+    p.inline_types_collect_free_type_vars = old_collect;
+
+    let typ = p.arena_mut().push_core_type(typ_ct);
+
+    let prim = if p.token == Token::Equal {
+        let equal_start = p.start_pos.clone();
+        let equal_end = p.end_pos.clone();
+        p.next();
+        match &p.token {
+            Token::String(s) => {
+                let s = s.clone();
+                p.next();
+                vec![p.arena_mut().push_interned_string(&s)]
+            }
+            _ => {
+                let msg = format!(
+                    "An external requires the name of the JS value you're referring to, like \"{}\".",
+                    name_text
+                );
+                p.err_at(equal_start, equal_end, DiagnosticCategory::Message(msg));
+                vec![]
+            }
+        }
+    } else {
+        p.expect(Token::Equal);
+        vec![]
+    };
+
+    let loc = p.mk_loc_idx_to_prev_end(loc_start_idx);
+    let vd = ValueDescription {
+        pval_name: name.clone(),
+        pval_type: typ,
+        pval_prim: prim,
+        pval_attributes: attrs,
+        pval_loc: loc,
+    };
+
+    let inline_attr_name = p.arena_mut().intern("res.inlineRecordDefinition");
+    let inline_attr: Attribute = (mknoloc(inline_attr_name), Payload::PStr(Box::new(vec![])));
+    let inline_types = inline_types_found
+        .into_iter()
+        .map(|(inline_name_idx, loc, kind, params)| TypeDeclaration {
+            ptype_name: with_loc(inline_name_idx, name.loc.clone()),
+            ptype_params: params,
+            ptype_cstrs: vec![],
+            ptype_kind: kind,
+            ptype_private: PrivateFlag::Public,
+            ptype_manifest: None,
+            ptype_attributes: Attributes::from_vec(vec![inline_attr.clone()]),
+            ptype_loc: loc,
+        })
+        .collect();
+
+    (vd, inline_types)
 }
 
 /// Parse a value description (for external).

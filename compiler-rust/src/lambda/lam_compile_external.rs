@@ -261,7 +261,7 @@ impl LambdaCompiler {
             ExpressionDesc::Call(
                 Box::new(self.runtime_member_expr(module_name, member)),
                 args,
-                CallInfo::default(),
+                Self::builtin_runtime_call_info(),
             ),
             "@__PURE__",
         )

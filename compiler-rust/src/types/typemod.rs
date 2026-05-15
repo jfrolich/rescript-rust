@@ -382,6 +382,15 @@ fn apply_warning_attribute(
     arena: &ParseArena,
     attr: &ParsedAttribute,
 ) {
+    apply_warning_attribute_with_ppwarning(tctx, arena, attr, true);
+}
+
+fn apply_warning_attribute_with_ppwarning(
+    tctx: &mut TypeCheckContext<'_>,
+    arena: &ParseArena,
+    attr: &ParsedAttribute,
+    ppwarning: bool,
+) {
     let (name, payload) = attr;
     let attr_name = arena.get_string(name.txt);
     match attr_name {
@@ -421,7 +430,7 @@ fn apply_warning_attribute(
                 tctx.apply_warning_spec(spec);
             }
         }
-        "ppwarning" | "ocaml.ppwarning" => {
+        "ppwarning" | "ocaml.ppwarning" if ppwarning => {
             if let Some((message, loc)) = parser_warning_attribute_payload(arena, payload) {
                 tctx.report_warning(
                     loc,
@@ -433,6 +442,32 @@ fn apply_warning_attribute(
         }
         _ => {}
     }
+}
+
+fn with_warning_scope<'a, T, F>(
+    tctx: &mut TypeCheckContext<'a>,
+    arena: &ParseArena,
+    attrs: &Attributes,
+    ppwarning: bool,
+    f: F,
+) -> TypeModResult<T>
+where
+    F: FnOnce(&mut TypeCheckContext<'a>) -> TypeModResult<T>,
+{
+    if attrs.is_empty() {
+        return f(tctx);
+    }
+
+    let previous_config = tctx.warning_config.clone();
+    // OCaml compiler/ml/builtin_attributes.ml:215-223 applies warning
+    // attributes in reverse order inside a saved warning state, then restores
+    // the previous state after the scoped typing operation.
+    for attr in attrs.iter().rev() {
+        apply_warning_attribute_with_ppwarning(tctx, arena, attr, ppwarning);
+    }
+    let result = f(tctx);
+    tctx.warning_config = previous_config;
+    result
 }
 
 fn parser_deprecated_payload_to_decl_payload(
@@ -18386,6 +18421,20 @@ fn type_module_expr_with_alias<'a>(
     mod_expr: &ParsedModuleExpr,
     alias: bool,
 ) -> TypeModResult<ModuleExpr> {
+    // OCaml compiler/ml/typemod.ml:1222 wraps every `type_module` call in
+    // `Builtin_attributes.warning_scope smod.pmod_attributes`.
+    with_warning_scope(tctx, arena, &mod_expr.pmod_attributes, true, |tctx| {
+        type_module_expr_with_alias_inner(tctx, env, arena, mod_expr, alias)
+    })
+}
+
+fn type_module_expr_with_alias_inner<'a>(
+    tctx: &mut TypeCheckContext<'a>,
+    env: &Env,
+    arena: &'a ParseArena,
+    mod_expr: &ParsedModuleExpr,
+    alias: bool,
+) -> TypeModResult<ModuleExpr> {
     let loc = mod_expr.pmod_loc;
 
     match &*mod_expr.pmod_desc {
@@ -20381,7 +20430,11 @@ fn type_structure_item<'a>(
         ParsedStructureItemDesc::Pstr_eval(inner) => {
             let (ref expr, ref attrs) = **inner;
             // Evaluated expression: E
-            let typed_expr = type_expression(tctx, env, arena.get_expr(*expr))?;
+            // OCaml compiler/ml/typemod.ml:1391-1394 scopes warnings from
+            // `Pstr_eval` attributes around expression typing.
+            let typed_expr = with_warning_scope(tctx, arena, attrs, true, |tctx| {
+                type_expression(tctx, env, arena.get_expr(*expr)).map_err(TypeModError::CoreError)
+            })?;
 
             let desc = StructureItemDesc::Tstr_eval(typed_expr, attrs.clone());
             Ok((
@@ -23277,13 +23330,11 @@ fn type_structure_item<'a>(
             let mod_id = tctx.type_ctx.create_ident(mod_name_str);
 
             // Module binding: module M = ME
-            let typed_mod = type_module_expr_with_alias(
-                tctx,
-                env,
-                arena,
-                arena.get_mod_expr(mb.pmb_expr),
-                true,
-            )?;
+            // OCaml compiler/ml/typemod.ml:1453-1456 scopes warnings from
+            // module-binding attributes around module expression typing.
+            let typed_mod = with_warning_scope(tctx, arena, &mb.pmb_attributes, true, |tctx| {
+                type_module_expr_with_alias(tctx, env, arena, arena.get_mod_expr(mb.pmb_expr), true)
+            })?;
 
             // Extend environment with the new module
             let mut new_env = env.clone();
@@ -23759,7 +23810,12 @@ fn type_structure_item<'a>(
 
         ParsedStructureItemDesc::Pstr_include(incl) => {
             // Include declaration: include ME
-            let typed_mod = type_module_expr(tctx, env, arena, arena.get_mod_expr(incl.pincl_mod))?;
+            // OCaml compiler/ml/typemod.ml:1524-1527 scopes include
+            // attributes around the included module expression typing.
+            let typed_mod =
+                with_warning_scope(tctx, arena, &incl.pincl_attributes, true, |tctx| {
+                    type_module_expr(tctx, env, arena, arena.get_mod_expr(incl.pincl_mod))
+                })?;
             let final_include_sig = resolve_mod_type_to_sig(
                 &typed_mod.mod_type,
                 Some(env),

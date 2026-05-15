@@ -27,7 +27,7 @@ use rescript_compiler::parser::{
 };
 use rescript_compiler::source_text::latin1_bytes_to_string;
 use std::fs;
-use std::io::{self, IsTerminal, Write};
+use std::io::{self, Write};
 use std::path::PathBuf;
 use std::process;
 
@@ -172,7 +172,10 @@ fn main() {
     if is_interface {
         let signature = module::parse_signature(&mut parser);
 
-        print_parser_warnings(&parser, &source, &filename, &mut io::stdout());
+        // OCaml compiler/syntax/src/res_core.ml:292-300 reports deprecated
+        // uncurried-dot syntax through Location.prerr_warning, which writes
+        // to stderr.
+        print_parser_warnings(&parser, &source, &filename, &mut io::stderr());
 
         // Print diagnostics if any
         let has_parse_errors = parser.has_errors();
@@ -300,7 +303,10 @@ fn main() {
     } else {
         let structure = module::parse_structure(&mut parser);
 
-        print_parser_warnings(&parser, &source, &filename, &mut io::stdout());
+        // OCaml compiler/syntax/src/res_core.ml:292-300 reports deprecated
+        // uncurried-dot syntax through Location.prerr_warning, which writes
+        // to stderr.
+        print_parser_warnings(&parser, &source, &filename, &mut io::stderr());
 
         // Print diagnostics if any
         let has_parse_errors = parser.has_errors();
@@ -461,7 +467,7 @@ fn print_parser_warning(
     warning: &ParserWarning,
     out: &mut impl Write,
 ) {
-    let use_color = should_enable_color();
+    let use_color = code_frame::should_enable_color();
     let _ = writeln!(out);
     if use_color {
         let _ = writeln!(
@@ -474,7 +480,7 @@ fn print_parser_warning(
     }
     let location = code_frame::format_location(filename, &warning.start_pos, &warning.end_pos);
     let location = if use_color {
-        colorize_location(&location)
+        code_frame::colorize_location(&location)
     } else {
         location
     };
@@ -495,7 +501,7 @@ fn print_jsx_preprocessor_warnings(
     warnings: &[jsx_ppx::JsxPreprocessorWarning],
     out: &mut impl Write,
 ) {
-    let use_color = should_enable_color();
+    let use_color = code_frame::should_enable_color();
     for warning in warnings {
         let _ = writeln!(out);
         if use_color {
@@ -505,7 +511,7 @@ fn print_jsx_preprocessor_warnings(
         }
         let location = code_frame::format_location(filename, &warning.start_pos, &warning.end_pos);
         let location = if use_color {
-            colorize_location(&location)
+            code_frame::colorize_location(&location)
         } else {
             location
         };
@@ -518,19 +524,6 @@ fn print_jsx_preprocessor_warnings(
         );
         let _ = writeln!(out, "  {}", warning.message);
         let _ = writeln!(out);
-    }
-}
-
-fn should_enable_color() -> bool {
-    let term = std::env::var("TERM").unwrap_or_default();
-    term != "dumb" && !term.is_empty() && std::io::stderr().is_terminal()
-}
-
-fn colorize_location(location: &str) -> String {
-    if let Some((file, rest)) = location.split_once(':') {
-        format!("\x1b[36m{}\x1b[0m:\x1b[2m{}\x1b[0m", file, rest)
-    } else {
-        location.to_string()
     }
 }
 

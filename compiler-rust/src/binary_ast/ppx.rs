@@ -282,7 +282,9 @@ pub enum JsStmtClassification {
 }
 
 /// Check if an OXC expression is an object literal (recursively).
-/// This matches OCaml's `is_obj_literal` function.
+/// This matches OCaml compiler/ml/classify_function.ml:25-38
+/// `is_obj_literal`; Flow does not keep the extra parenthesized wrapper that
+/// OXC reports for raw snippets such as `({})`.
 fn is_obj_literal(expr: &oxc_ast::ast::Expression<'_>) -> bool {
     use oxc_ast::ast::Expression;
     match expr {
@@ -320,6 +322,7 @@ fn is_obj_literal(expr: &oxc_ast::ast::Expression<'_>) -> bool {
                 }
             }
         }),
+        Expression::ParenthesizedExpression(paren) => is_obj_literal(&paren.expression),
         _ => false,
     }
 }
@@ -17782,6 +17785,14 @@ mod tests {
     fn test_classify_js_exp_discards_multiple_leading_literal_comments_like_ocaml() {
         assert_eq!(
             classify_js_exp("/*a*/ /*b*/ 0"),
+            JsExpClassification::JsLiteral { comment: None }
+        );
+    }
+
+    #[test]
+    fn test_classify_parenthesized_raw_object_literal_like_ocaml() {
+        assert_eq!(
+            classify_js_exp("({kind: \"app.created\"})"),
             JsExpClassification::JsLiteral { comment: None }
         );
     }

@@ -31,6 +31,10 @@ function outputParityInt(flag) {
 function outputParityTagged(strings, ...values) {
   return strings.join("|") + "::" + values.join("|")
 }
+
+function outputParityCallWithThis(callback) {
+  return callback.call({base: 5}, 3)
+}
 `)
 
 type router
@@ -65,6 +69,9 @@ external marshalInt: @int
 @val @taggedTemplate
 external tagged: (array<string>, array<int>) => string = "outputParityTagged"
 
+@val
+external callWithThis: (@this ({"base": int}, int) => int) => int = "outputParityCallWithThis"
+
 let taggedValue = tagged`left ${1} middle ${2} right`
 
 let localTagged = (strings, values) => {
@@ -83,6 +90,8 @@ let localTaggedValue = localTagged`a${1}b${2}c`
 
 let thisReader: @this ({"length": int, "offset": int}, int, int) => int =
   @this (receiver, left, right) => receiver["length"] + receiver["offset"] + left + right
+
+let thisCallbackValue = callWithThis(@this (receiver, amount) => receiver["base"] + amount)
 
 type box = {
   mutable value: int,
@@ -123,6 +132,7 @@ let allValues = (
   taggedValue,
   localTaggedValue,
   thisReader,
+  thisCallbackValue,
   boxOps({value: 10}),
   dynamicForEach([1, 2, 3]),
   dynamicModuleLength(),
