@@ -660,6 +660,25 @@ fn raw_record_mutable_flag(
         .unwrap_or(ParserMutableFlag::Immutable)
 }
 
+fn record_field_is_static_optional_none(
+    lbl: &LabelDescription,
+    def: &RecordLabelDefinition,
+) -> bool {
+    if !lbl.lbl_optional {
+        return false;
+    }
+
+    match def {
+        RecordLabelDefinition::OmittedOptionalNone(_, _) => true,
+        RecordLabelDefinition::Overridden(_, expr) => matches!(
+            &expr.exp_desc,
+            ExpressionDesc::Texp_construct(_, cstr, args)
+                if args.is_empty() && cstr.cstr_name == "None" && constructor_has_optional_shape(cstr)
+        ),
+        RecordLabelDefinition::Kept(_) => false,
+    }
+}
+
 fn inlined_record_representation(
     cstr: &crate::types::ConstructorDescription,
 ) -> Option<RecordRepresentation> {
@@ -871,6 +890,7 @@ pub struct RawLambdaConverter<'a> {
     warnings: Vec<TypeCoreWarning>,
     warning_config: WarningConfig,
     suppress_inlined_attribute_check: usize,
+    preserve_expanded_sparse_records: bool,
 }
 
 impl<'a> RawLambdaConverter<'a> {
@@ -897,6 +917,7 @@ impl<'a> RawLambdaConverter<'a> {
             warnings: Vec::new(),
             warning_config: WarningConfig::new(),
             suppress_inlined_attribute_check: 0,
+            preserve_expanded_sparse_records: false,
         }
     }
 
@@ -924,6 +945,7 @@ impl<'a> RawLambdaConverter<'a> {
             warnings: Vec::new(),
             warning_config: WarningConfig::new(),
             suppress_inlined_attribute_check: 0,
+            preserve_expanded_sparse_records: false,
         }
     }
 
@@ -952,6 +974,7 @@ impl<'a> RawLambdaConverter<'a> {
             warnings: Vec::new(),
             warning_config: WarningConfig::new(),
             suppress_inlined_attribute_check: 0,
+            preserve_expanded_sparse_records: false,
         }
     }
 
@@ -968,6 +991,11 @@ impl<'a> RawLambdaConverter<'a> {
 
     pub fn set_noassert(&mut self, noassert: bool) {
         self.noassert = noassert;
+    }
+
+    pub fn set_preserve_expanded_sparse_records(&mut self, preserve: bool) {
+        self.preserve_expanded_sparse_records = preserve;
+        self.lowered.set_preserve_expanded_sparse_records(preserve);
     }
 
     pub fn set_warning_config(&mut self, warning_config: WarningConfig) {
@@ -1450,6 +1478,29 @@ impl<'a> RawLambdaConverter<'a> {
             }
             _ => None,
         }
+    }
+
+    fn logical_record_field_count_for_fields(&self, fields: &[RecordField]) -> Option<usize> {
+        let first_lbl = fields.first().map(|(_, lbl, _, _)| lbl)?;
+        match first_lbl.lbl_repres {
+            RecordRepresentation::RecordRegular | RecordRepresentation::RecordInlined { .. } => {}
+            _ => return None,
+        }
+
+        let labels = self.resolve_all_record_labels(first_lbl.lbl_res)?;
+        if labels.len() <= fields.len() {
+            return None;
+        }
+        labels
+            .iter()
+            .all(|(_, _, _, repr, _)| {
+                matches!(
+                    repr,
+                    RecordRepresentation::RecordRegular
+                        | RecordRepresentation::RecordInlined { .. }
+                )
+            })
+            .then_some(labels.len())
     }
 
     fn global_path(&self) -> Option<crate::types::Path> {
@@ -3460,6 +3511,7 @@ impl<'a> RawLambdaConverter<'a> {
                         fields,
                         extended_expression.as_deref(),
                         inlined_record_representation(cstr),
+                        None,
                     ),
                     ExpressionDesc::Texp_record_sparse {
                         fields,
@@ -3467,17 +3519,17 @@ impl<'a> RawLambdaConverter<'a> {
                         omitted_loc,
                         ..
                     } => {
-                        // Intentional Rust performance representation:
-                        // expand sparse records before raw-lambda conversion
-                        // so inlined records see the same shape as OCaml
-                        // compiler/ml/translcore.ml:1139-1191.
-                        let expanded_fields =
-                            self.expand_sparse_record_fields(all_labels, fields, *omitted_loc);
+                        // Debug/captured lambda keeps OCaml's full `lbl_all`
+                        // stream; normal JS lowering can compact static
+                        // omitted optional None before raw-lambda conversion.
+                        let (record_fields, logical_field_count) =
+                            self.sparse_record_fields_for_lambda(all_labels, fields, *omitted_loc);
                         self.convert_record_raw(
                             self.loc(arg.exp_loc),
-                            &expanded_fields,
+                            &record_fields,
                             None,
                             inlined_record_representation(cstr),
+                            logical_field_count,
                         )
                     }
                     _ => self.convert_expr_raw(arg),
@@ -3529,7 +3581,10 @@ impl<'a> RawLambdaConverter<'a> {
         )],
         base: Option<&Expression>,
         empty_repres: Option<RecordRepresentation>,
+        logical_field_count: Option<usize>,
     ) -> RawLambda {
+        let logical_field_count =
+            logical_field_count.or_else(|| self.logical_record_field_count_for_fields(fields));
         let first_lbl = fields.first().map(|(_, first_lbl, _, _)| first_lbl);
         let repres = first_lbl
             .map(|lbl| lbl.lbl_repres.clone())
@@ -3602,6 +3657,7 @@ impl<'a> RawLambdaConverter<'a> {
                                 0,
                                 TagInfo::Record {
                                     fields: fields_info,
+                                    logical_field_count,
                                     mutable_flag,
                                 },
                                 Mutable::Mutable,
@@ -3614,6 +3670,7 @@ impl<'a> RawLambdaConverter<'a> {
                             0,
                             TagInfo::Record {
                                 fields: fields_info,
+                                logical_field_count,
                                 mutable_flag,
                             },
                             elems,
@@ -3654,6 +3711,7 @@ impl<'a> RawLambdaConverter<'a> {
                         num_nonconst: num_nonconsts,
                         tag,
                         fields: fields_info,
+                        logical_field_count,
                         mutable_flag,
                         attrs: lower_tag_info_attributes(&attrs),
                     };
@@ -3812,6 +3870,56 @@ impl<'a> RawLambdaConverter<'a> {
             }
         }
         expanded
+    }
+
+    fn compact_sparse_record_fields_for_output(
+        &self,
+        all_labels: &std::sync::Arc<Vec<LabelDescription>>,
+        fields: &[RecordField],
+    ) -> Vec<RecordField> {
+        // Normal JS compilation does not need to carry OCaml's omitted
+        // optional `None` placeholders through Lambda: the JS printer omits
+        // optional undefined record properties anyway. Keep the explicit
+        // fields in `lbl_all` order so output stays byte-for-byte aligned with
+        // the expanded OCaml-shaped path.
+        let mut compact = Vec::with_capacity(fields.len());
+        for (idx, label) in all_labels.iter().enumerate() {
+            let label_pos = if label.lbl_pos >= 0 {
+                label.lbl_pos as usize
+            } else {
+                idx
+            };
+            let Some(field) = fields.iter().find(|field| {
+                usize::try_from(field.1.lbl_pos).ok() == Some(label_pos)
+                    || field.1.lbl_name == label.lbl_name
+            }) else {
+                continue;
+            };
+            if record_field_is_static_optional_none(&field.1, &field.2) {
+                continue;
+            }
+            compact.push((*field).clone());
+        }
+        compact
+    }
+
+    fn sparse_record_fields_for_lambda(
+        &self,
+        all_labels: &std::sync::Arc<Vec<LabelDescription>>,
+        fields: &[RecordField],
+        omitted_loc: LocIdx,
+    ) -> (Vec<RecordField>, Option<usize>) {
+        if self.preserve_expanded_sparse_records {
+            (
+                self.expand_sparse_record_fields(all_labels, fields, omitted_loc),
+                None,
+            )
+        } else {
+            (
+                self.compact_sparse_record_fields_for_output(all_labels, fields),
+                Some(all_labels.len()),
+            )
+        }
     }
 
     fn include_bound_idents(sig: &[SignatureItem]) -> Vec<(Ident, usize)> {
@@ -6017,6 +6125,7 @@ impl<'a> RawLambdaConverter<'a> {
                 fields,
                 extended_expression.as_deref(),
                 None,
+                None,
             ),
             ExpressionDesc::Texp_record_sparse {
                 fields,
@@ -6024,9 +6133,15 @@ impl<'a> RawLambdaConverter<'a> {
                 omitted_loc,
                 ..
             } => {
-                let expanded_fields =
-                    self.expand_sparse_record_fields(all_labels, fields, *omitted_loc);
-                self.convert_record_raw(self.loc(expr.exp_loc), &expanded_fields, None, None)
+                let (record_fields, logical_field_count) =
+                    self.sparse_record_fields_for_lambda(all_labels, fields, *omitted_loc);
+                self.convert_record_raw(
+                    self.loc(expr.exp_loc),
+                    &record_fields,
+                    None,
+                    None,
+                    logical_field_count,
+                )
             }
             ExpressionDesc::Texp_field(record, _, lbl) => {
                 if matches!(lbl.lbl_repres, RecordRepresentation::RecordUnboxed(_)) {
@@ -6228,6 +6343,7 @@ impl<'a> RawLambdaConverter<'a> {
                 self.loc(expr.exp_loc),
                 fields,
                 extended_expression.as_deref(),
+                None,
             ),
             ExpressionDesc::Texp_record_sparse {
                 fields,
@@ -6235,9 +6351,14 @@ impl<'a> RawLambdaConverter<'a> {
                 omitted_loc,
                 ..
             } => {
-                let expanded_fields =
-                    self.expand_sparse_record_fields(all_labels, fields, *omitted_loc);
-                self.convert_record(self.loc(expr.exp_loc), &expanded_fields, None)
+                let (record_fields, logical_field_count) =
+                    self.sparse_record_fields_for_lambda(all_labels, fields, *omitted_loc);
+                self.convert_record(
+                    self.loc(expr.exp_loc),
+                    &record_fields,
+                    None,
+                    logical_field_count,
+                )
             }
             ExpressionDesc::Texp_field(record, _, lbl) => {
                 let rec_lam = self.convert_expr(record);
@@ -9868,7 +9989,10 @@ impl<'a> RawLambdaConverter<'a> {
             bool,
         )],
         base: Option<&Expression>,
+        logical_field_count: Option<usize>,
     ) -> Lambda {
+        let logical_field_count =
+            logical_field_count.or_else(|| self.logical_record_field_count_for_fields(fields));
         let mut values = vec![None; fields.len()];
         let base_lam = base.map(|e| self.convert_expr(e));
 
@@ -9913,6 +10037,7 @@ impl<'a> RawLambdaConverter<'a> {
 
         let tag_info = TagInfo::Record {
             fields: fields_info,
+            logical_field_count,
             mutable_flag: fields
                 .iter()
                 .find(|(_, lbl, _, _)| lbl.lbl_mut == TypeMutableFlag::Mutable)

@@ -8557,6 +8557,7 @@ mod tests {
                 num_nonconst: 1,
                 tag: 0,
                 fields: vec![("name".to_string(), false)],
+                logical_field_count: None,
                 mutable_flag: crate::parser::ast::MutableFlag::Immutable,
                 attrs: vec![],
             },

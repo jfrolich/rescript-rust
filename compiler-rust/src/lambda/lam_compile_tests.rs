@@ -7768,6 +7768,7 @@ fn js_flatten_and_mark_dead_materializes_strictopt_identity_optional_record_fiel
                                 ("x".to_string(), true),
                                 ("y".to_string(), true),
                             ],
+                            logical_field_count: None,
                             mutable_flag: crate::parser::ast::MutableFlag::Immutable,
                         },
                     ))),
@@ -7892,6 +7893,7 @@ fn js_flatten_and_mark_dead_materializes_strict_identity_optional_record_fields_
                                 ("exportStatus".to_string(), true),
                                 ("instantPlayerEligible".to_string(), true),
                             ],
+                            logical_field_count: None,
                             mutable_flag: crate::parser::ast::MutableFlag::Immutable,
                         },
                     ))),
@@ -8003,6 +8005,7 @@ fn js_flatten_and_mark_dead_keeps_alias_bound_deep_constant_records_inline_like_
                                         ("xx".to_string(), false),
                                         ("yy".to_string(), false),
                                     ],
+                                    logical_field_count: None,
                                     mutable_flag: crate::parser::ast::MutableFlag::Immutable,
                                 },
                             )),
@@ -8011,6 +8014,7 @@ fn js_flatten_and_mark_dead_keeps_alias_bound_deep_constant_records_inline_like_
                         Box::new(Expression::number(Number::int(0))),
                         TagInfo::Record {
                             fields: vec![("a".to_string(), false), ("b".to_string(), false)],
+                            logical_field_count: None,
                             mutable_flag: crate::parser::ast::MutableFlag::Immutable,
                         },
                     ))),
@@ -8164,6 +8168,7 @@ fn top_level_record_field_assignments_on_pure_fresh_literals_collapse_to_rhs_eff
                         0,
                         TagInfo::Record {
                             fields: vec![("x".to_string(), false)],
+                            logical_field_count: None,
                             mutable_flag: crate::parser::ast::MutableFlag::Mutable,
                         },
                         Mutable::Immutable,
@@ -9158,6 +9163,7 @@ fn lowers_record_pfield_from_pure_caml_block_directly_like_ocaml() {
             Box::new(Expression::number(Number::int(0))),
             TagInfo::Record {
                 fields: vec![("d".to_string(), false)],
+                logical_field_count: None,
                 mutable_flag: crate::parser::ast::MutableFlag::Immutable,
             },
         )),

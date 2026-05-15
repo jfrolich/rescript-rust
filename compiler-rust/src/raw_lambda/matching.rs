@@ -1805,6 +1805,30 @@ pub struct PmHalfCompiledInfo {
 /// Maximum size for make_key normalization (matches OCaml's max_raw = 32).
 const MAX_RAW: i32 = 32;
 
+fn charge_logical_record_fields(
+    count: &mut i32,
+    primitive: &Primitive,
+    actual_arg_count: usize,
+) -> Option<()> {
+    let Primitive::Pmakeblock(
+        _,
+        tag_info @ (TagInfo::Record { .. } | TagInfo::RecordInlined { .. }),
+        _,
+    ) = primitive
+    else {
+        return Some(());
+    };
+
+    let logical_count = tag_info.logical_field_count();
+    if logical_count > actual_arg_count {
+        *count += (logical_count - actual_arg_count) as i32;
+        if *count > MAX_RAW {
+            return None;
+        }
+    }
+    Some(())
+}
+
 /// Normalize a RawLambda for structural comparison.
 /// - Alias lets are substituted (variable replaced by its definition)
 /// - Other let-bound variables get sequential normalized names
@@ -1885,6 +1909,7 @@ fn make_key(e: &RawLambda) -> Option<RawLambda> {
                 ))
             }
             RawLambda::Lprim(info) => {
+                charge_logical_record_fields(count, &info.primitive, info.args.len())?;
                 let args = tr_recs(env, &info.args, count, next_id)?;
                 Some(RawLambda::Lprim(RawPrimInfo {
                     primitive: info.primitive.clone(),
@@ -2149,6 +2174,7 @@ impl MakeKeyWriter {
                 self.write_let(*kind, x, ex, KeyBody::Raw(body), out)
             }
             RawLambda::Lprim(info) => {
+                charge_logical_record_fields(&mut self.count, &info.primitive, info.args.len())?;
                 write!(out, "Lprim({:?},[", info.primitive).ok()?;
                 self.write_raw_list(&info.args, out)?;
                 out.push_str("])");

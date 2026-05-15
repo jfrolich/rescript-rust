@@ -11,7 +11,7 @@ use crate::js_ir::{
 };
 use crate::lambda::lam_compat::Comparison;
 use crate::lambda::lam_primitive::Primitive;
-use crate::lambda::{Lambda, SwitchCaseTag};
+use crate::lambda::{Lambda, SwitchCaseTag, TagInfo};
 
 pub(crate) fn js_expr_no_side_effects(expr: &Expression) -> bool {
     match &expr.desc {
@@ -664,9 +664,32 @@ pub(crate) fn pure_indexed_block_item(target: &Expression, idx: i32) -> Option<E
     }
 }
 
+pub(crate) fn pure_record_field_item(
+    target: &Expression,
+    field: &str,
+    idx: i32,
+) -> Option<Expression> {
+    if !js_expr_no_side_effects(target) {
+        return None;
+    }
+
+    match &target.desc {
+        ExpressionDesc::CamlBlock(items, _, _, TagInfo::Record { fields, .. })
+        | ExpressionDesc::CamlBlock(items, _, _, TagInfo::RecordInlined { fields, .. }) => {
+            for (item, (field_name, _)) in items.iter().zip(fields.iter()) {
+                if field_name == field {
+                    return Some(item.clone());
+                }
+            }
+            None
+        }
+        _ => pure_indexed_block_item(target, idx),
+    }
+}
+
 pub(crate) fn direct_projection_from_pure_literal(
     target: &Expression,
-    _field: Option<&str>,
+    field: Option<&str>,
     index: Option<i32>,
 ) -> Option<Expression> {
     if !js_expr_no_side_effects(target) {
@@ -674,6 +697,20 @@ pub(crate) fn direct_projection_from_pure_literal(
     }
 
     match &target.desc {
+        ExpressionDesc::CamlBlock(items, _, _, TagInfo::Record { fields, .. })
+        | ExpressionDesc::CamlBlock(items, _, _, TagInfo::RecordInlined { fields, .. }) => {
+            if let Some(field) = field {
+                for (item, (field_name, _)) in items.iter().zip(fields.iter()) {
+                    if field_name == field {
+                        return Some(item.clone());
+                    }
+                }
+                None
+            } else {
+                let index = usize::try_from(index?).ok()?;
+                items.get(index).cloned()
+            }
+        }
         ExpressionDesc::Array(items, _) | ExpressionDesc::CamlBlock(items, _, _, _) => {
             let index = usize::try_from(index?).ok()?;
             items.get(index).cloned()

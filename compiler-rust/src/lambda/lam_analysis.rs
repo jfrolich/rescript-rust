@@ -12,7 +12,7 @@ use crate::ident::Ident;
 use crate::lambda::lam_compat::FieldDbgInfo;
 use crate::lambda::lam_constant::Constant;
 use crate::lambda::lam_primitive::Primitive;
-use crate::lambda::{LFunction, Lambda};
+use crate::lambda::{LFunction, Lambda, TagInfo};
 
 /// Check if a constant is definitely not zero.
 /// Used in side effect analysis to determine safe division.
@@ -342,6 +342,29 @@ fn size_inner(lam: &Lambda) -> Option<i32> {
                         return size_inner(&prim_info.args[0]);
                     }
                 }
+                Primitive::Pmakeblock(
+                    _,
+                    tag_info @ (TagInfo::Record { .. } | TagInfo::RecordInlined { .. }),
+                    _,
+                ) => {
+                    let missing_fields = tag_info
+                        .logical_field_count()
+                        .saturating_sub(prim_info.args.len());
+                    return size_lams(1 + missing_fields as i32, &prim_info.args);
+                }
+                Primitive::PjsObjectCreate(obj_params) => {
+                    let logical_arg_count = obj_params
+                        .iter()
+                        .filter(|param| {
+                            !matches!(
+                                param.obj_arg_type,
+                                crate::lambda::lam_primitive::ExternalArgAttr::ArgCst(_)
+                            )
+                        })
+                        .count();
+                    let missing_args = logical_arg_count.saturating_sub(prim_info.args.len());
+                    return size_lams(1 + missing_args as i32, &prim_info.args);
+                }
                 Primitive::PrawJsCode(_) => return None,
                 _ => {}
             }
@@ -417,7 +440,17 @@ fn size_constant(c: &Constant) -> i32 {
 
         Constant::Some(inner) => size_constant(inner),
 
-        Constant::Block { elements, .. } => elements.iter().map(size_constant).sum(),
+        Constant::Block {
+            tag_info, elements, ..
+        } => {
+            let missing_fields = match tag_info {
+                TagInfo::Record { .. } | TagInfo::RecordInlined { .. } => {
+                    tag_info.logical_field_count().saturating_sub(elements.len())
+                }
+                _ => 0,
+            };
+            missing_fields as i32 + elements.iter().map(size_constant).sum::<i32>()
+        }
     }
 }
 
@@ -789,6 +822,19 @@ mod tests {
                 elements: vec![Constant::int(1), Constant::int(2), Constant::int(3)],
             }),
             3
+        );
+
+        assert_eq!(
+            size_constant(&Constant::Block {
+                tag: 0,
+                tag_info: TagInfo::Record {
+                    fields: vec![("className".to_string(), true)],
+                    logical_field_count: Some(4),
+                    mutable_flag: crate::parser::ast::MutableFlag::Immutable,
+                },
+                elements: vec![Constant::Some(Box::new(Constant::string("button")))],
+            }),
+            4
         );
     }
 

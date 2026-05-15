@@ -24,6 +24,7 @@ use crate::lambda::{
 use crate::location::Location;
 use crate::parse_arena::{LidentIdx, LocIdx, Located, ParseArena};
 use crate::parser::ast::{Attributes, DirectionFlag, MutableFlag as ParserMutableFlag, RecFlag};
+use crate::raw_lambda::typeopt::constructor_has_optional_shape;
 use crate::types::asttypes::MutableFlag as TypeMutableFlag;
 use crate::types::decl::{
     ConstructorDescription, ConstructorTag, LabelDescription, RecordRepresentation, ValueKind,
@@ -41,10 +42,30 @@ fn predef_exception_ident(name: &str, stamp: i32) -> Ident {
     Ident::new(name, stamp, IdentFlags::PREDEF_EXN.with_global())
 }
 
+fn record_field_is_static_optional_none(
+    lbl: &LabelDescription,
+    def: &RecordLabelDefinition,
+) -> bool {
+    if !lbl.lbl_optional {
+        return false;
+    }
+
+    match def {
+        RecordLabelDefinition::OmittedOptionalNone(_, _) => true,
+        RecordLabelDefinition::Overridden(_, expr) => matches!(
+            &expr.exp_desc,
+            ExpressionDesc::Texp_construct(_, cstr, args)
+                if args.is_empty() && cstr.cstr_name == "None" && constructor_has_optional_shape(cstr)
+        ),
+        RecordLabelDefinition::Kept(_) => false,
+    }
+}
+
 /// Lambda conversion state.
 pub struct LambdaConverter<'a> {
     id_gen: IdGenerator,
     arena: &'a ParseArena,
+    preserve_expanded_sparse_records: bool,
 }
 
 impl<'a> LambdaConverter<'a> {
@@ -53,6 +74,7 @@ impl<'a> LambdaConverter<'a> {
         Self {
             id_gen: IdGenerator::new(),
             arena,
+            preserve_expanded_sparse_records: false,
         }
     }
 
@@ -61,6 +83,7 @@ impl<'a> LambdaConverter<'a> {
         Self {
             id_gen: IdGenerator::with_start_stamp(start_stamp),
             arena,
+            preserve_expanded_sparse_records: false,
         }
     }
 
@@ -70,6 +93,10 @@ impl<'a> LambdaConverter<'a> {
 
     pub(crate) fn set_current_stamp(&self, stamp: i32) {
         self.id_gen.set_current_stamp(stamp);
+    }
+
+    pub(crate) fn set_preserve_expanded_sparse_records(&mut self, preserve: bool) {
+        self.preserve_expanded_sparse_records = preserve;
     }
 
     /// Helper to convert a LocIdx to a Location.
@@ -217,6 +244,7 @@ impl<'a> LambdaConverter<'a> {
                 self.loc(expr.exp_loc),
                 fields,
                 extended_expression.as_deref(),
+                None,
             ),
             ExpressionDesc::Texp_record_sparse {
                 fields,
@@ -224,12 +252,16 @@ impl<'a> LambdaConverter<'a> {
                 omitted_loc,
                 ..
             } => {
-                // Intentional Rust performance representation: sparse typed
-                // records expand at the lambda boundary to the same field
-                // stream OCaml compiler/ml/translcore.ml:1139-1191 receives.
-                let expanded_fields =
-                    self.expand_sparse_record_fields(all_labels, fields, *omitted_loc);
-                self.convert_record(self.loc(expr.exp_loc), &expanded_fields, None)
+                // Debug/captured lambda keeps OCaml's full `lbl_all` stream;
+                // normal JS lowering can compact static omitted optional None.
+                let (record_fields, logical_field_count) =
+                    self.sparse_record_fields_for_lambda(all_labels, fields, *omitted_loc);
+                self.convert_record(
+                    self.loc(expr.exp_loc),
+                    &record_fields,
+                    None,
+                    logical_field_count,
+                )
             }
             ExpressionDesc::Texp_field(record, _, lbl) => {
                 let rec_lam = self.convert_expr(record);
@@ -1009,6 +1041,7 @@ impl<'a> LambdaConverter<'a> {
             bool,
         )],
         base: Option<&Expression>,
+        logical_field_count: Option<usize>,
     ) -> Lambda {
         let mut values = vec![None; fields.len()];
         let base_lam = base.map(|e| self.convert_expr(e));
@@ -1056,6 +1089,7 @@ impl<'a> LambdaConverter<'a> {
 
         let tag_info = TagInfo::Record {
             fields: fields_info,
+            logical_field_count,
             mutable_flag: fields
                 .iter()
                 .find(|(_, lbl, _, _)| lbl.lbl_mut == TypeMutableFlag::Mutable)
@@ -1131,6 +1165,51 @@ impl<'a> LambdaConverter<'a> {
             }
         }
         expanded
+    }
+
+    fn compact_sparse_record_fields_for_output(
+        &self,
+        all_labels: &std::sync::Arc<Vec<LabelDescription>>,
+        fields: &[RecordField],
+    ) -> Vec<RecordField> {
+        let mut compact = Vec::with_capacity(fields.len());
+        for (idx, label) in all_labels.iter().enumerate() {
+            let label_pos = if label.lbl_pos >= 0 {
+                label.lbl_pos as usize
+            } else {
+                idx
+            };
+            let Some(field) = fields.iter().find(|field| {
+                usize::try_from(field.1.lbl_pos).ok() == Some(label_pos)
+                    || field.1.lbl_name == label.lbl_name
+            }) else {
+                continue;
+            };
+            if record_field_is_static_optional_none(&field.1, &field.2) {
+                continue;
+            }
+            compact.push((*field).clone());
+        }
+        compact
+    }
+
+    fn sparse_record_fields_for_lambda(
+        &self,
+        all_labels: &std::sync::Arc<Vec<LabelDescription>>,
+        fields: &[RecordField],
+        omitted_loc: LocIdx,
+    ) -> (Vec<RecordField>, Option<usize>) {
+        if self.preserve_expanded_sparse_records {
+            (
+                self.expand_sparse_record_fields(all_labels, fields, omitted_loc),
+                None,
+            )
+        } else {
+            (
+                self.compact_sparse_record_fields_for_output(all_labels, fields),
+                Some(all_labels.len()),
+            )
+        }
     }
 
     fn translate_extension_path(&self, path: &crate::types::Path, loc: Location) -> Lambda {

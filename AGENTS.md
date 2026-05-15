@@ -67,7 +67,7 @@ make checkformat
   ```bash
   ./scripts/test_error_output_parity.sh --release
   ```
-  Output parity and error parity are both required gates; do not treat Tella build success alone as sufficient.
+  Output parity and error parity must both stay green; do not treat Tella build success alone as sufficient.
 
 The Makefile’s targets build on each other in this order:
 
@@ -181,7 +181,7 @@ Do not remove these while cleaning parity debt. They are explicit Rust storage/l
 
 - **Sparse typedtree extras:** `typedtree::SparseExtras<T>` stores the common empty extras case without an inline empty `Vec`. This preserves the same slice/iterator behavior as OCaml's `exp_extra = []` / `pat_extra = []`, while reducing per-node memory.
 - **Parser expression side tables:** `ParseArena` keeps rarely-present expression payloads such as function defaults, case guards, record spreads, and coercion sources in sparse `ExprIdx` side tables. This is a storage optimization over OCaml Parsetree records from `compiler/ml/parsetree.ml:210-214` and `compiler/ml/parsetree.ml:226-298`; it must preserve the same AST accessors and marshalling behavior.
-- **Sparse large regular records:** `ExpressionDesc::Texp_record_sparse` and `RecordLabelDefinition::OmittedOptionalNone` avoid allocating hundreds of cloned label descriptions and full `Texp_construct None` nodes for large JSX prop records. The boundary must remain equivalent to OCaml `compiler/ml/typecore.ml:297-300`, `compiler/ml/typecore.ml:2833-2842`, and `compiler/ml/translcore.ml:1139-1191`: serializers and lambda lowering expand over the complete `lbl_all` order and produce the same external shape.
+- **Sparse large regular records:** `ExpressionDesc::Texp_record_sparse` and `RecordLabelDefinition::OmittedOptionalNone` avoid allocating hundreds of cloned label descriptions and full `Texp_construct None` nodes for large JSX prop records. The boundary must remain equivalent to OCaml `compiler/ml/typecore.ml:297-300`, `compiler/ml/typecore.ml:2833-2842`, and `compiler/ml/translcore.ml:1139-1191`: serializers plus debug/captured lambda output expand over the complete `lbl_all` order, while normal JS lowering may compact omitted optional `None` fields only when named record metadata and projection still preserve byte-for-byte JS output parity.
 - **Compact type-node handles:** `TypeExprRef(u32)` and `TypeExprRefMap<T>` are arena-index storage optimizations for OCaml `type_expr` physical identity from `compiler/ml/types.ml:22` and the allocation path in `compiler/ml/btype.ml:46-48`. Keep identity-based behavior; do not replace this with structural keys.
 - **Derived Env alias-scope caches:** `Env::local_module_aliases_cache` and `module_path_requires_env_scoped_cache_cache` are Rust-side memo tables derived from visible bindings, preserving OCaml lookup boundaries in `compiler/ml/env.ml:781-813` and `compiler/ml/env.ml:1516-1538`. They are performance caches only, not path-spelling alias equivalence.
 - **CMJ export lookup caches:** `LambdaCompiler` caches `.cmj` constant/arity/lambda export tables per module because Rust's resolver can cross an I/O boundary. This must preserve OCaml's query/export gates in `compiler/core/lam_compile.ml:234-244`, `compiler/core/lam_compile.ml:274-279`, `compiler/core/lam_stats_export.ml:53-63`, and `compiler/core/js_cmj_format.ml:120-128`.

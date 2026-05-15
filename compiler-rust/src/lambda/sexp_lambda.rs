@@ -189,6 +189,7 @@ fn tag_info(info: &TagInfo) -> Sexp {
         TagInfo::Record {
             fields,
             mutable_flag,
+            ..
         } => Sexp::list(vec![
             Sexp::atom("Blk_record"),
             Sexp::list(fields.iter().map(|(name, _)| string(name)).collect()),

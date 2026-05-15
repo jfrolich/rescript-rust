@@ -7,7 +7,7 @@ use std::collections::HashMap;
 
 use super::js_exp_make::{
     int_expr, js_expr_no_side_effects, poly_var_tag_access, poly_var_value_access,
-    pure_indexed_block_item,
+    pure_indexed_block_item, pure_record_field_item,
 };
 use super::lam_compile::{LambdaCompiler, pointer_info_comment_text};
 use crate::cmi::persistent_env::CmjExportConstant;
@@ -214,7 +214,7 @@ impl LambdaCompiler {
             },
             FieldDbgInfo::Record { name, .. }
             | FieldDbgInfo::RecordInline { name }
-            | FieldDbgInfo::RecordExtension { name } => pure_indexed_block_item(target, idx)
+            | FieldDbgInfo::RecordExtension { name } => pure_record_field_item(target, name, idx)
                 .unwrap_or_else(|| {
                     // OCaml `record_access` keeps the field position in
                     // `Static_index` so `js_pass_flatten_and_mark_dead` can

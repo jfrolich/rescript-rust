@@ -748,13 +748,13 @@ fn try_substitute_caml_block_projection(
             let ExpressionDesc::Number(Number::Int { i, .. }) = right.desc else {
                 return None;
             };
-            substituted_caml_block_item(substitution, id, i)
+            substituted_caml_block_item(substitution, id, None, i)
         }
-        ExpressionDesc::StaticIndex(target, _, Some(index)) => {
+        ExpressionDesc::StaticIndex(target, field, Some(index)) => {
             let ExpressionDesc::Var(crate::js_ir::VIdent::Id(id)) = &target.desc else {
                 return None;
             };
-            substituted_caml_block_item(substitution, id, *index)
+            substituted_caml_block_item(substitution, id, Some(field), *index)
         }
         _ => None,
     }
@@ -763,12 +763,26 @@ fn try_substitute_caml_block_projection(
 fn substituted_caml_block_item(
     substitution: &HashMap<Ident, Expression>,
     id: &Ident,
+    field: Option<&str>,
     index: i32,
 ) -> Option<Expression> {
     let expression = substitution.get(id)?;
-    let ExpressionDesc::CamlBlock(items, MutableFlag::Immutable, _, _) = &expression.desc else {
+    let ExpressionDesc::CamlBlock(items, MutableFlag::Immutable, _, tag_info) = &expression.desc
+    else {
         return None;
     };
+    if let Some(field) = field {
+        match tag_info {
+            TagInfo::Record { fields, .. } | TagInfo::RecordInlined { fields, .. } => {
+                let item = items
+                    .iter()
+                    .zip(fields.iter())
+                    .find_map(|(item, (field_name, _))| (field_name == field).then_some(item))?;
+                return is_simple_substituted_index_value(item).then(|| item.clone());
+            }
+            _ => {}
+        }
+    }
     let item = items.get(usize::try_from(index).ok()?)?;
     is_simple_substituted_index_value(item).then(|| item.clone())
 }
@@ -776,13 +790,19 @@ fn substituted_caml_block_item(
 fn should_materialize_block_binding_items(
     property: LetKind,
     items: &[Expression],
-    _tag_info: &TagInfo,
+    tag_info: &TagInfo,
 ) -> bool {
     // OCaml's substitution pass matches every immutable `Caml_block`
     // with at least two elements, including `Blk_poly_var`, before
     // splitting complex payload fields
     // (`compiler/core/js_pass_flatten_and_mark_dead.ml:174-221`).
-    if items.len() < 2 {
+    let item_count = match tag_info {
+        TagInfo::Record { .. } | TagInfo::RecordInlined { .. } => {
+            tag_info.logical_field_count()
+        }
+        _ => items.len(),
+    };
+    if item_count < 2 {
         return false;
     }
 

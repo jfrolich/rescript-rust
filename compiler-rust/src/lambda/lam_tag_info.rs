@@ -25,6 +25,7 @@ pub enum TagInfo {
         num_nonconst: i32,
         tag: i32,
         fields: Vec<(String, bool)>, // (name, optional)
+        logical_field_count: Option<usize>,
         mutable_flag: MutableFlag,
         attrs: Vec<Attribute>,
     },
@@ -38,6 +39,7 @@ pub enum TagInfo {
     /// Regular record
     Record {
         fields: Vec<(String, bool)>, // (name, optional)
+        logical_field_count: Option<usize>,
         mutable_flag: MutableFlag,
     },
 
@@ -120,6 +122,7 @@ impl TagInfo {
     pub fn ref_tag() -> Self {
         TagInfo::Record {
             fields: vec![("contents".to_string(), false)],
+            logical_field_count: None,
             mutable_flag: MutableFlag::Mutable,
         }
     }
@@ -148,7 +151,25 @@ impl TagInfo {
     pub fn record(fields: Vec<(String, bool)>, mutable_flag: MutableFlag) -> Self {
         TagInfo::Record {
             fields,
+            logical_field_count: None,
             mutable_flag,
+        }
+    }
+
+    /// Number of fields visible to OCaml-shape optimization decisions.
+    pub fn logical_field_count(&self) -> usize {
+        match self {
+            TagInfo::Record {
+                fields,
+                logical_field_count,
+                ..
+            }
+            | TagInfo::RecordInlined {
+                fields,
+                logical_field_count,
+                ..
+            } => logical_field_count.unwrap_or(fields.len()),
+            _ => 0,
         }
     }
 
@@ -194,6 +215,7 @@ mod tests {
             TagInfo::Record {
                 fields,
                 mutable_flag,
+                ..
             } => {
                 assert_eq!(fields.len(), 1);
                 assert_eq!(fields[0].0, "contents");
