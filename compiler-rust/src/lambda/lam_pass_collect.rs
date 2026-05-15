@@ -12,6 +12,8 @@
 //! when external info is missing: downstream passes simply treat the function
 //! as an unknown arity.
 
+use ahash::AHashMap;
+
 use crate::ident::Ident;
 use crate::lambda::lam_analysis::{
     SMALL_INLINE_SIZE, lfunction_can_be_inlined, no_side_effects, size,
@@ -74,8 +76,8 @@ fn alias_ident_or_global(meta: &mut LamStats, k: Ident, v: &Ident, v_kind: IdKin
 }
 
 /// Direct port of `Lam_arity_analysis.arity_of_var` (lam_arity_analysis.ml:25-31).
-fn arity_of_var(meta: &LamStats, v: &Ident) -> Arity {
-    match meta.ident_tbl.get(v) {
+fn arity_of_var(ident_tbl: &AHashMap<Ident, IdKind>, v: &Ident) -> Arity {
+    match ident_tbl.get(v) {
         Some(IdKind::FunctionId { arity, .. }) => arity.clone(),
         _ => Arity::na(),
     }
@@ -93,14 +95,29 @@ fn external_arity_key(
     }
 }
 
-fn query_external_arity<'a>(
-    meta: &'a LamStats,
+fn lookup_cached_external_arity<'a>(
+    external_arities: &'a AHashMap<ExternalArityKey, ExternalArityInfo>,
     module_id: &Ident,
     dynamic_import: bool,
     field_name: &str,
 ) -> Option<&'a ExternalArityInfo> {
-    meta.external_arities
-        .get(&external_arity_key(module_id, dynamic_import, field_name))
+    external_arities.get(&external_arity_key(module_id, dynamic_import, field_name))
+}
+
+fn resolve_external_arity(
+    external_arities: &mut AHashMap<ExternalArityKey, ExternalArityInfo>,
+    module_id: &Ident,
+    dynamic_import: bool,
+    field_name: &str,
+    resolver: &mut ExternalArityResolver<'_>,
+) -> Option<ExternalArityInfo> {
+    let key = external_arity_key(module_id, dynamic_import, field_name);
+    if !external_arities.contains_key(&key) {
+        if let Some(arity) = resolver(module_id, dynamic_import, field_name) {
+            external_arities.insert(key.clone(), arity);
+        }
+    }
+    external_arities.get(&key).cloned()
 }
 
 /// Direct port of `Lam_arity_analysis.get_arity` (lam_arity_analysis.ml:38-132).
@@ -108,14 +125,21 @@ fn query_external_arity<'a>(
 /// The two `Pfield (_, Fld_module _)` arms in OCaml call
 /// `Lam_compile_env.query_external_id_info` to fetch the foreign module's
 /// recorded arity (compiler/core/lam_arity_analysis.ml:43-71).
-pub fn get_arity(meta: &LamStats, lam: &Lambda) -> Arity {
+fn get_arity_impl<F>(
+    ident_tbl: &AHashMap<Ident, IdKind>,
+    lam: &Lambda,
+    lookup_external_arity: &mut F,
+) -> Arity
+where
+    F: FnMut(&Ident, bool, &str) -> Option<ExternalArityInfo>,
+{
     match lam {
         // lam_arity_analysis.ml:40
-        Lambda::Lvar(v) => arity_of_var(meta, v),
+        Lambda::Lvar(v) => arity_of_var(ident_tbl, v),
         // lam_arity_analysis.ml:41
         Lambda::Lconst(_) => Arity::non_function(),
         // lam_arity_analysis.ml:42
-        Lambda::Llet(_, _, _, body) => get_arity(meta, body),
+        Lambda::Llet(_, _, _, body) => get_arity_impl(ident_tbl, body, lookup_external_arity),
         // lam_arity_analysis.ml:43-56 — cross-module Pfield arm.
         Lambda::Lprim(PrimInfo {
             primitive: Primitive::Pfield(_, FieldDbgInfo::Module { name }),
@@ -125,7 +149,7 @@ pub fn get_arity(meta: &LamStats, lam: &Lambda) -> Arity {
             let [Lambda::LglobalModule(id, dynamic_import)] = args.as_slice() else {
                 unreachable!("guarded by matches!");
             };
-            match query_external_arity(meta, id, *dynamic_import, name) {
+            match lookup_external_arity(id, *dynamic_import, name) {
                 Some(ExternalArityInfo::Single(arity)) => arity.clone(),
                 Some(ExternalArityInfo::Submodule(_)) | None => Arity::na(),
             }
@@ -157,7 +181,7 @@ pub fn get_arity(meta: &LamStats, lam: &Lambda) -> Arity {
             let [Lambda::LglobalModule(id, dynamic_import)] = inner_args.as_slice() else {
                 unreachable!("guarded by matches!");
             };
-            match query_external_arity(meta, id, *dynamic_import, name) {
+            match lookup_external_arity(id, *dynamic_import, name) {
                 Some(ExternalArityInfo::Submodule(arities)) => arities
                     .get(*index as usize)
                     .cloned()
@@ -173,10 +197,10 @@ pub fn get_arity(meta: &LamStats, lam: &Lambda) -> Arity {
         // lam_arity_analysis.ml:73-74
         Lambda::LglobalModule(_, _) | Lambda::Lprim(_) => Arity::na(),
         // lam_arity_analysis.ml:87
-        Lambda::Lletrec(_, body) => get_arity(meta, body),
+        Lambda::Lletrec(_, body) => get_arity_impl(ident_tbl, body, lookup_external_arity),
         // lam_arity_analysis.ml:88-105
         Lambda::Lapply(apply) => {
-            let fn_arity = get_arity(meta, &apply.ap_func);
+            let fn_arity = get_arity_impl(ident_tbl, &apply.ap_func, lookup_external_arity);
             match fn_arity {
                 Arity::Na => Arity::na(),
                 Arity::Info { arities, variadic } => {
@@ -211,7 +235,9 @@ pub fn get_arity(meta: &LamStats, lam: &Lambda) -> Arity {
             }
         }
         // lam_arity_analysis.ml:106
-        Lambda::Lfunction(func) => get_arity(meta, &func.body).merge(func.arity),
+        Lambda::Lfunction(func) => {
+            get_arity_impl(ident_tbl, &func.body, lookup_external_arity).merge(func.arity)
+        }
         // lam_arity_analysis.ml:107-122
         Lambda::Lswitch(_, switch) => {
             let mut all: Vec<&Lambda> = switch.sw_consts.iter().map(|(_, l)| l).collect();
@@ -219,31 +245,33 @@ pub fn get_arity(meta: &LamStats, lam: &Lambda) -> Arity {
             if let Some(fail) = switch.sw_failaction.as_deref() {
                 let mut with_fail = vec![fail];
                 with_fail.extend(all);
-                all_lambdas(meta, &with_fail)
+                all_lambdas(ident_tbl, &with_fail, lookup_external_arity)
             } else {
-                all_lambdas(meta, &all)
+                all_lambdas(ident_tbl, &all, lookup_external_arity)
             }
         }
         // lam_arity_analysis.ml:123-126
         Lambda::LstringSwitch(_, sw, d) => {
             let cases: Vec<&Lambda> = sw.iter().map(|(_, l)| l).collect();
             match d.as_deref() {
-                None => all_lambdas(meta, &cases),
+                None => all_lambdas(ident_tbl, &cases, lookup_external_arity),
                 Some(default) => {
                     let mut with_default = vec![default];
                     with_default.extend(cases);
-                    all_lambdas(meta, &with_default)
+                    all_lambdas(ident_tbl, &with_default, lookup_external_arity)
                 }
             }
         }
         // lam_arity_analysis.ml:127
-        Lambda::LstaticCatch(_, _, handler) => get_arity(meta, handler),
+        Lambda::LstaticCatch(_, _, handler) => {
+            get_arity_impl(ident_tbl, handler, lookup_external_arity)
+        }
         // lam_arity_analysis.ml:128
-        Lambda::LtryWith(l1, _, l2) => all_lambdas(meta, &[l1, l2]),
+        Lambda::LtryWith(l1, _, l2) => all_lambdas(ident_tbl, &[l1, l2], lookup_external_arity),
         // lam_arity_analysis.ml:129
-        Lambda::LifThenElse(_, l2, l3) => all_lambdas(meta, &[l2, l3]),
+        Lambda::LifThenElse(_, l2, l3) => all_lambdas(ident_tbl, &[l2, l3], lookup_external_arity),
         // lam_arity_analysis.ml:130
-        Lambda::Lsequence(_, l2) => get_arity(meta, l2),
+        Lambda::Lsequence(_, l2) => get_arity_impl(ident_tbl, l2, lookup_external_arity),
         // lam_arity_analysis.ml:131
         Lambda::LstaticRaise(_, _) => Arity::na(),
         // lam_arity_analysis.ml:132
@@ -257,24 +285,65 @@ pub fn get_arity(meta: &LamStats, lam: &Lambda) -> Arity {
     }
 }
 
+pub fn get_arity(meta: &LamStats, lam: &Lambda) -> Arity {
+    let mut lookup_external_arity = |module_id: &Ident, dynamic_import: bool, field_name: &str| {
+        lookup_cached_external_arity(
+            &meta.external_arities,
+            module_id,
+            dynamic_import,
+            field_name,
+        )
+        .cloned()
+    };
+    get_arity_impl(&meta.ident_tbl, lam, &mut lookup_external_arity)
+}
+
+fn get_arity_with_external_arity(
+    meta: &mut LamStats,
+    lam: &Lambda,
+    resolver: &mut ExternalArityResolver<'_>,
+) -> Arity {
+    let ident_tbl = &meta.ident_tbl;
+    let external_arities = &mut meta.external_arities;
+    let mut lookup_external_arity = |module_id: &Ident, dynamic_import: bool, field_name: &str| {
+        resolve_external_arity(
+            external_arities,
+            module_id,
+            dynamic_import,
+            field_name,
+            resolver,
+        )
+    };
+    get_arity_impl(ident_tbl, lam, &mut lookup_external_arity)
+}
+
 /// Direct port of `Lam_arity_analysis.all_lambdas` (lam_arity_analysis.ml:134-149).
-fn all_lambdas(meta: &LamStats, xs: &[&Lambda]) -> Arity {
+fn all_lambdas<F>(
+    ident_tbl: &AHashMap<Ident, IdKind>,
+    xs: &[&Lambda],
+    lookup_external_arity: &mut F,
+) -> Arity
+where
+    F: FnMut(&Ident, bool, &str) -> Option<ExternalArityInfo>,
+{
     match xs.split_first() {
         None => Arity::na(),
         Some((y, ys)) => {
-            let mut acc = get_arity(meta, y);
+            let mut acc = get_arity_impl(ident_tbl, y, lookup_external_arity);
             for x in ys {
                 match acc {
                     Arity::Na => return Arity::na(),
-                    Arity::Info { arities, variadic } => match get_arity(meta, x) {
-                        Arity::Na => return Arity::na(),
-                        Arity::Info {
-                            arities: ya,
-                            variadic: vy,
-                        } => {
-                            acc = Arity::merge_arities(&arities, &ya, variadic, vy);
+                    Arity::Info { arities, variadic } => {
+                        match get_arity_impl(ident_tbl, x, lookup_external_arity) {
+                            Arity::Na => return Arity::na(),
+                            Arity::Info {
+                                arities: ya,
+                                variadic: vy,
+                            } => {
+                                acc = Arity::merge_arities(&arities, &ya, variadic, vy);
+                            }
                         }
-                    },
+                    }
                 }
             }
             acc
@@ -342,7 +411,13 @@ fn function_payload_needed(func: &LFunction) -> bool {
 }
 
 /// Direct port of `Lam_pass_collect.collect_bind` (lam_pass_collect.ml:58-93).
-fn collect_bind(meta: &mut LamStats, rec_flag: RecFlag, ident: &Ident, lam: &Lambda) {
+fn collect_bind_with_external(
+    meta: &mut LamStats,
+    rec_flag: RecFlag,
+    ident: &Ident,
+    lam: &Lambda,
+    resolver: &mut Option<&mut ExternalArityResolver<'_>>,
+) {
     match lam {
         // lam_pass_collect.ml:60
         Lambda::Lconst(v) => {
@@ -358,7 +433,7 @@ fn collect_bind(meta: &mut LamStats, rec_flag: RecFlag, ident: &Ident, lam: &Lam
             meta.ident_tbl
                 .insert(ident.clone(), kind_of_lambda_block(args));
             for arg in args {
-                collect(meta, arg);
+                collect_with_external(meta, arg, resolver);
             }
         }
         // lam_pass_collect.ml:64-66 — Psome / Psome_not_nest: Normal_optional.
@@ -369,7 +444,7 @@ fn collect_bind(meta: &mut LamStats, rec_flag: RecFlag, ident: &Ident, lam: &Lam
         }) if args.len() == 1 => {
             meta.ident_tbl
                 .insert(ident.clone(), IdKind::NormalOptional(args[0].clone()));
-            collect(meta, &args[0]);
+            collect_with_external(meta, &args[0], resolver);
         }
         // lam_pass_collect.ml:67-68 — Pnull_to_opt with [Lvar]: OptionalBlock(_, Null).
         Lambda::Lprim(PrimInfo {
@@ -406,32 +481,65 @@ fn collect_bind(meta: &mut LamStats, rec_flag: RecFlag, ident: &Ident, lam: &Lam
             for p in &func.params {
                 meta.ident_tbl.insert(p.clone(), IdKind::Parameter);
             }
-            let arity = get_arity(meta, lam);
+            let arity = match resolver.as_deref_mut() {
+                Some(resolver) => get_arity_with_external_arity(meta, lam, resolver),
+                None => get_arity(meta, lam),
+            };
             let payload = function_payload_needed(func).then(|| lam.clone());
             annotate(meta, rec_flag, ident.clone(), arity, payload);
-            collect(meta, &func.body);
+            collect_with_external(meta, &func.body, resolver);
         }
         // lam_pass_collect.ml:90-93 — fallback: collect, annotate exports.
         x => {
-            collect(meta, x);
+            collect_with_external(meta, x, resolver);
             if meta.export_idents.contains(ident) {
-                let arity = get_arity(meta, x);
+                let arity = match resolver.as_deref_mut() {
+                    Some(resolver) => get_arity_with_external_arity(meta, x, resolver),
+                    None => get_arity(meta, x),
+                };
                 annotate(meta, rec_flag, ident.clone(), arity, Some(lam.clone()));
             }
         }
     }
 }
 
+fn collect_module_field_external_arity(
+    meta: &mut LamStats,
+    prim: &PrimInfo,
+    resolver: &mut ExternalArityResolver<'_>,
+) {
+    if let PrimInfo {
+        primitive: Primitive::Pfield(_, FieldDbgInfo::Module { name }),
+        args,
+        ..
+    } = prim
+    {
+        if let [Lambda::LglobalModule(id, dynamic_import)] = args.as_slice() {
+            let _ = resolve_external_arity(
+                &mut meta.external_arities,
+                id,
+                *dynamic_import,
+                name,
+                resolver,
+            );
+        }
+    }
+}
+
 /// Direct port of `Lam_pass_collect.collect` (lam_pass_collect.ml:94-150).
-fn collect(meta: &mut LamStats, lam: &Lambda) {
+fn collect_with_external(
+    meta: &mut LamStats,
+    lam: &Lambda,
+    resolver: &mut Option<&mut ExternalArityResolver<'_>>,
+) {
     match lam {
         // lam_pass_collect.ml:96-97
         Lambda::Lconst(_) | Lambda::Lvar(_) => {}
         // lam_pass_collect.ml:98-100
         Lambda::Lapply(apply) => {
-            collect(meta, &apply.ap_func);
+            collect_with_external(meta, &apply.ap_func, resolver);
             for arg in &apply.ap_args {
-                collect(meta, arg);
+                collect_with_external(meta, arg, resolver);
             }
         }
         // lam_pass_collect.ml:101-104
@@ -439,201 +547,109 @@ fn collect(meta: &mut LamStats, lam: &Lambda) {
             for p in &func.params {
                 meta.ident_tbl.insert(p.clone(), IdKind::Parameter);
             }
-            collect(meta, &func.body);
+            collect_with_external(meta, &func.body, resolver);
         }
         // lam_pass_collect.ml:105-107
         Lambda::Llet(_kind, ident, arg, body) => {
-            collect_bind(meta, RecFlag::NonRec, ident, arg);
-            collect(meta, body);
+            collect_bind_with_external(meta, RecFlag::NonRec, ident, arg, resolver);
+            collect_with_external(meta, body, resolver);
         }
         // lam_pass_collect.ml:108-114
         Lambda::Lletrec(bindings, body) => {
             match bindings.as_slice() {
-                [(ident, arg)] => collect_bind(meta, RecFlag::SelfRec, ident, arg),
+                [(ident, arg)] => {
+                    collect_bind_with_external(meta, RecFlag::SelfRec, ident, arg, resolver)
+                }
                 _ => {
                     for (ident, arg) in bindings {
-                        collect_bind(meta, RecFlag::Rec, ident, arg);
+                        collect_bind_with_external(meta, RecFlag::Rec, ident, arg, resolver);
                     }
                 }
             }
-            collect(meta, body);
+            collect_with_external(meta, body, resolver);
         }
         // lam_pass_collect.ml:115
         Lambda::LglobalModule(_, _) => {}
         // lam_pass_collect.ml:116
         Lambda::Lprim(prim) => {
+            if let Some(resolver) = resolver.as_deref_mut() {
+                collect_module_field_external_arity(meta, prim, resolver);
+            }
             for arg in &prim.args {
-                collect(meta, arg);
+                collect_with_external(meta, arg, resolver);
             }
         }
         // lam_pass_collect.ml:117-121
         Lambda::Lswitch(scrut, switch) => {
-            collect(meta, scrut);
+            collect_with_external(meta, scrut, resolver);
             for (_, body) in &switch.sw_consts {
-                collect(meta, body);
+                collect_with_external(meta, body, resolver);
             }
             for (_, body) in &switch.sw_blocks {
-                collect(meta, body);
+                collect_with_external(meta, body, resolver);
             }
             if let Some(fail) = switch.sw_failaction.as_deref() {
-                collect(meta, fail);
+                collect_with_external(meta, fail, resolver);
             }
         }
         // lam_pass_collect.ml:122-125
         Lambda::LstringSwitch(scrut, sw, d) => {
-            collect(meta, scrut);
+            collect_with_external(meta, scrut, resolver);
             for (_, body) in sw {
-                collect(meta, body);
+                collect_with_external(meta, body, resolver);
             }
             if let Some(default) = d.as_deref() {
-                collect(meta, default);
+                collect_with_external(meta, default, resolver);
             }
         }
         // lam_pass_collect.ml:126
         Lambda::LstaticRaise(_, args) => {
             for arg in args {
-                collect(meta, arg);
+                collect_with_external(meta, arg, resolver);
             }
         }
         // lam_pass_collect.ml:127-129
         Lambda::LstaticCatch(l1, _, l2) => {
-            collect(meta, l1);
-            collect(meta, l2);
+            collect_with_external(meta, l1, resolver);
+            collect_with_external(meta, l2, resolver);
         }
         // lam_pass_collect.ml:130-132
         Lambda::LtryWith(l1, _, l2) => {
-            collect(meta, l1);
-            collect(meta, l2);
+            collect_with_external(meta, l1, resolver);
+            collect_with_external(meta, l2, resolver);
         }
         // lam_pass_collect.ml:133-136
         Lambda::LifThenElse(l1, l2, l3) => {
-            collect(meta, l1);
-            collect(meta, l2);
-            collect(meta, l3);
+            collect_with_external(meta, l1, resolver);
+            collect_with_external(meta, l2, resolver);
+            collect_with_external(meta, l3, resolver);
         }
         // lam_pass_collect.ml:137-139
         Lambda::Lsequence(l1, l2) => {
-            collect(meta, l1);
-            collect(meta, l2);
+            collect_with_external(meta, l1, resolver);
+            collect_with_external(meta, l2, resolver);
         }
         // lam_pass_collect.ml:140-142
         Lambda::Lwhile(l1, l2) => {
-            collect(meta, l1);
-            collect(meta, l2);
+            collect_with_external(meta, l1, resolver);
+            collect_with_external(meta, l2, resolver);
         }
         // lam_pass_collect.ml:143-146
         Lambda::Lfor(_, l1, l2, _, l3) => {
-            collect(meta, l1);
-            collect(meta, l2);
-            collect(meta, l3);
+            collect_with_external(meta, l1, resolver);
+            collect_with_external(meta, l2, resolver);
+            collect_with_external(meta, l3, resolver);
         }
         // lam_pass_collect.ml after #7887: Lfor_of / Lfor_await_of.
         Lambda::Lfor_of(_, l1, l2) | Lambda::Lfor_await_of(_, l1, l2) => {
-            collect(meta, l1);
-            collect(meta, l2);
+            collect_with_external(meta, l1, resolver);
+            collect_with_external(meta, l2, resolver);
         }
         // OCaml `Lam_pass_collect.collect` after #8348:
         // `Lbreak | Lcontinue -> ()`.
         Lambda::Lbreak | Lambda::Lcontinue => {}
         // lam_pass_collect.ml:147-150
-        Lambda::Lassign(_, l) => collect(meta, l),
-    }
-}
-
-fn collect_external_arities(
-    meta: &mut LamStats,
-    lam: &Lambda,
-    resolver: &mut ExternalArityResolver<'_>,
-) {
-    match lam {
-        Lambda::Lconst(_) | Lambda::Lvar(_) | Lambda::LglobalModule(_, _) => {}
-        Lambda::Lapply(apply) => {
-            collect_external_arities(meta, &apply.ap_func, resolver);
-            for arg in &apply.ap_args {
-                collect_external_arities(meta, arg, resolver);
-            }
-        }
-        Lambda::Lfunction(func) => collect_external_arities(meta, &func.body, resolver),
-        Lambda::Llet(_, _, value, body) => {
-            collect_external_arities(meta, value, resolver);
-            collect_external_arities(meta, body, resolver);
-        }
-        Lambda::Lletrec(bindings, body) => {
-            for (_, value) in bindings {
-                collect_external_arities(meta, value, resolver);
-            }
-            collect_external_arities(meta, body, resolver);
-        }
-        Lambda::Lprim(PrimInfo {
-            primitive: Primitive::Pfield(_, FieldDbgInfo::Module { name }),
-            args,
-            ..
-        }) if matches!(args.as_slice(), [Lambda::LglobalModule(_, _)]) => {
-            let [Lambda::LglobalModule(id, dynamic_import)] = args.as_slice() else {
-                unreachable!("guarded by matches!");
-            };
-            let key = external_arity_key(id, *dynamic_import, name);
-            if !meta.external_arities.contains_key(&key) {
-                if let Some(arity) = resolver(id, *dynamic_import, name) {
-                    meta.external_arities.insert(key, arity);
-                }
-            }
-        }
-        Lambda::Lprim(PrimInfo { args, .. }) => {
-            for arg in args {
-                collect_external_arities(meta, arg, resolver);
-            }
-        }
-        Lambda::Lswitch(scrutinee, switch) => {
-            collect_external_arities(meta, scrutinee, resolver);
-            if let Some(failaction) = &switch.sw_failaction {
-                collect_external_arities(meta, failaction, resolver);
-            }
-            for (_, lam) in &switch.sw_consts {
-                collect_external_arities(meta, lam, resolver);
-            }
-            for (_, lam) in &switch.sw_blocks {
-                collect_external_arities(meta, lam, resolver);
-            }
-        }
-        Lambda::LstringSwitch(scrutinee, cases, default) => {
-            collect_external_arities(meta, scrutinee, resolver);
-            for (_, lam) in cases {
-                collect_external_arities(meta, lam, resolver);
-            }
-            if let Some(default) = default {
-                collect_external_arities(meta, default, resolver);
-            }
-        }
-        Lambda::LstaticRaise(_, args) => {
-            for arg in args {
-                collect_external_arities(meta, arg, resolver);
-            }
-        }
-        Lambda::LstaticCatch(body, _, handler) | Lambda::LtryWith(body, _, handler) => {
-            collect_external_arities(meta, body, resolver);
-            collect_external_arities(meta, handler, resolver);
-        }
-        Lambda::LifThenElse(test, consequent, alternate) => {
-            collect_external_arities(meta, test, resolver);
-            collect_external_arities(meta, consequent, resolver);
-            collect_external_arities(meta, alternate, resolver);
-        }
-        Lambda::Lsequence(left, right) | Lambda::Lwhile(left, right) => {
-            collect_external_arities(meta, left, resolver);
-            collect_external_arities(meta, right, resolver);
-        }
-        Lambda::Lfor(_, start, finish, _, body) => {
-            collect_external_arities(meta, start, resolver);
-            collect_external_arities(meta, finish, resolver);
-            collect_external_arities(meta, body, resolver);
-        }
-        Lambda::Lfor_of(_, iterable, body) | Lambda::Lfor_await_of(_, iterable, body) => {
-            collect_external_arities(meta, iterable, resolver);
-            collect_external_arities(meta, body, resolver);
-        }
-        Lambda::Lassign(_, value) => collect_external_arities(meta, value, resolver),
-        Lambda::Lbreak | Lambda::Lcontinue => {}
+        Lambda::Lassign(_, l) => collect_with_external(meta, l, resolver),
     }
 }
 
@@ -641,7 +657,8 @@ fn collect_external_arities(
 /// (lam_pass_collect.ml:57-152). Mutates `meta.ident_tbl` with the kind /
 /// arity info gathered from a single traversal of `lam`.
 pub fn collect_info(meta: &mut LamStats, lam: &Lambda) {
-    collect(meta, lam);
+    let mut resolver = None;
+    collect_with_external(meta, lam, &mut resolver);
 }
 
 pub fn collect_info_with_external_arity(
@@ -649,6 +666,6 @@ pub fn collect_info_with_external_arity(
     lam: &Lambda,
     resolver: &mut ExternalArityResolver<'_>,
 ) {
-    collect_external_arities(meta, lam, resolver);
-    collect(meta, lam);
+    let mut resolver = Some(resolver);
+    collect_with_external(meta, lam, &mut resolver);
 }

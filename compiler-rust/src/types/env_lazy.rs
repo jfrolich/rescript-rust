@@ -1259,22 +1259,23 @@ fn build_local_module_components<'a>(
         && alias_id.is_persistent()
         && cache_mode.forces_alias_sig()
     {
-        let renamed_sig = {
+        let ps = {
             let pers = pers_env.as_mut()?;
-            pers.get_renamed_sig_shared(alias_id.name(), ctx)
+            pers.find_pers_struct(alias_id.name(), ctx)
         };
-        if let Some(renamed_sig) = renamed_sig {
+        if let Some(ps) = ps {
             let source_prefix = Path::pident(Ident::create_persistent(alias_id.name()));
             // OCaml compiler/ml/env.ml:1516-1518 calls `scrape_alias` before
             // component-table construction; scrape_alias at env.ml:1435-1446
             // reaches `find_module`, whose persistent Pident branch at
-            // env.ml:872-875 forces `ps_sig = Subst.signature identity sign`
-            // from env.ml:677. Keep that force, then let the component view
-            // apply the selected access path lazily to forced items.
+            // env.ml:872-875 reads the persistent structure. In in-process
+            // mode the portable signature has already been internalized into
+            // this TypeContext, so share that component signature and let the
+            // view apply the selected access path lazily to forced items.
             return Some(
                 QualifiedModuleComponents::new_with_child_components_arc_and_value_source_prefix(
                     access_path.clone(),
-                    renamed_sig,
+                    ps.ps_sig.clone(),
                     HashMap::new(),
                     Some(source_prefix),
                     ctx,
