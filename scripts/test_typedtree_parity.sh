@@ -454,6 +454,11 @@ test_single_file() {
     local file_temp="$TEMP_DIR/work/$safe_name"
     mkdir -p "$file_temp"
 
+    local ocaml_cache="$CACHE_DIR/tests/ocaml/$safe_name.sexp"
+    local rust_cache="$CACHE_DIR/tests/rust/$safe_name.sexp"
+    local diff_cache="$CACHE_DIR/tests/diffs/$safe_name.diff"
+    rm -f "$ocaml_cache" "$rust_cache" "$diff_cache"
+
     # Determine full file path (handle both absolute and relative paths)
     local full_file_path
     if [[ "$file" = /* ]]; then
@@ -561,8 +566,8 @@ print(' '.join(rewritten))" 2>/dev/null) || args=""
             # Save diff for inspection
             diff -ua "$file_temp/ocaml.sexp" "$file_temp/rust.sexp" > "$TEMP_DIR/diffs/$safe_name.diff" 2>&1 || true
             # Save sexp files to persistent cache
-            cp "$file_temp/ocaml.sexp" "$CACHE_DIR/tests/ocaml/$safe_name.sexp" 2>/dev/null || true
-            cp "$file_temp/rust.sexp" "$CACHE_DIR/tests/rust/$safe_name.sexp" 2>/dev/null || true
+            cp "$file_temp/ocaml.sexp" "$ocaml_cache" 2>/dev/null || true
+            cp "$file_temp/rust.sexp" "$rust_cache" 2>/dev/null || true
         fi
     fi
 
