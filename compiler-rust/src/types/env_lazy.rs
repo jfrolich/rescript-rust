@@ -397,7 +397,9 @@ pub(crate) struct QualifiedModuleComponents {
     constructors: Arc<RefCell<HashMap<String, Arc<Vec<ConstructorDescription>>>>>,
     labels: Arc<RefCell<HashMap<String, Arc<Vec<LabelDescription>>>>>,
     types: Arc<RefCell<HashMap<String, Option<usize>>>>,
+    types_indexed: Arc<Cell<bool>>,
     modules: Arc<RefCell<HashMap<String, Option<(usize, usize)>>>>,
+    modules_indexed: Arc<Cell<bool>>,
     compiler_counters_enabled: bool,
     component_modtypes: Arc<HashMap<String, (Ident, ModtypeDeclaration)>>,
     // OCaml compiler/ml/env.ml:1568-1578 stores `comp_modules` and
@@ -570,17 +572,23 @@ impl QualifiedModuleComponents {
         child_component_scan_complete: bool,
         ctx: &super::context::TypeContext,
     ) -> Self {
+        let mut values = HashMap::new();
+        let mut types = HashMap::new();
+        let mut modules = HashMap::new();
         let mut component_modtypes = HashMap::new();
         let mut runtime_pos = 0usize;
 
-        for item in signature.iter() {
+        for (idx, item) in signature.iter().enumerate() {
             match item {
-                SignatureItem::SigValue(_, desc) => {
+                SignatureItem::SigValue(id, desc) => {
+                    values.insert(id.name().to_string(), Some((idx, runtime_pos)));
                     if !matches!(desc.val_kind, ValueKind::ValPrim(_)) {
                         runtime_pos += 1;
                     }
                 }
-                SignatureItem::SigType(_, _, _) => {}
+                SignatureItem::SigType(id, _, _) => {
+                    types.insert(id.name().to_string(), Some(idx));
+                }
                 SignatureItem::SigTypext(_, _, _) | SignatureItem::SigClass => {
                     runtime_pos += 1;
                 }
@@ -603,6 +611,7 @@ impl QualifiedModuleComponents {
                             );
                         }
                     }
+                    modules.insert(id.name().to_string(), Some((idx, runtime_pos)));
                     runtime_pos += 1;
                 }
                 SignatureItem::SigModtype(id, mtd) => {
@@ -634,13 +643,15 @@ impl QualifiedModuleComponents {
         Self {
             access_path: Arc::new(access_path),
             signature,
-            values: Arc::new(RefCell::new(HashMap::new())),
+            values: Arc::new(RefCell::new(values)),
             component_values: Arc::new(RefCell::new(HashMap::new())),
-            values_indexed: Arc::new(Cell::new(false)),
+            values_indexed: Arc::new(Cell::new(true)),
             constructors: Arc::new(RefCell::new(HashMap::new())),
             labels: Arc::new(RefCell::new(HashMap::new())),
-            types: Arc::new(RefCell::new(HashMap::new())),
-            modules: Arc::new(RefCell::new(HashMap::new())),
+            types: Arc::new(RefCell::new(types)),
+            types_indexed: Arc::new(Cell::new(true)),
+            modules: Arc::new(RefCell::new(modules)),
+            modules_indexed: Arc::new(Cell::new(true)),
             compiler_counters_enabled: ctx.compiler_counters_enabled(),
             component_modtypes: Arc::new(component_modtypes),
             qualified_modules: Arc::new(RefCell::new(HashMap::new())),
@@ -772,6 +783,12 @@ impl QualifiedModuleComponents {
             }
             return cached;
         }
+        if self.types_indexed.get() {
+            if self.compiler_counters_enabled {
+                crate::perf_counters::record_lazy_hit(crate::perf_counters::LazyLookupKind::Type);
+            }
+            return None;
+        }
 
         // OCaml compiler/ml/env.ml:1542 stores type declarations in the
         // component table, but the table itself is behind EnvLazy. Defer this
@@ -801,6 +818,12 @@ impl QualifiedModuleComponents {
                 crate::perf_counters::record_lazy_hit(crate::perf_counters::LazyLookupKind::Module);
             }
             return cached;
+        }
+        if self.modules_indexed.get() {
+            if self.compiler_counters_enabled {
+                crate::perf_counters::record_lazy_hit(crate::perf_counters::LazyLookupKind::Module);
+            }
+            return None;
         }
 
         // OCaml compiler/ml/env.ml:1568 and 1573-1578 expose module
