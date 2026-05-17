@@ -117,6 +117,12 @@ pub fn compile(
     let compile_universe_count = compile_universe.len();
     set_length(compile_universe_count as u64);
 
+    // These timestamps are used as a compile-generation marker by
+    // mark_modules_with_expired_deps_dirty, not as precise wall-clock compile
+    // times. All modules successfully compiled in one pass are mutually
+    // up-to-date for that pass, so they must receive the same timestamp.
+    let compile_timestamp = SystemTime::now();
+
     // start off with all modules that have no deps in this compile universe
     let mut in_progress_modules = compile_universe
         .iter()
@@ -343,8 +349,8 @@ pub fn compile(
                 // Update compilation timestamps for successful compilation
                 if result.is_ok() && interface_result.as_ref().is_none_or(|r| r.is_ok()) {
                     module.compile_dirty = false;
-                    module.last_compiled_cmi = Some(SystemTime::now());
-                    module.last_compiled_cmt = Some(SystemTime::now());
+                    module.last_compiled_cmi = Some(compile_timestamp);
+                    module.last_compiled_cmt = Some(compile_timestamp);
                 }
 
                 (compile_warning, compile_error, interface_warning, interface_error)
