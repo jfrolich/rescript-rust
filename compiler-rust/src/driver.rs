@@ -11389,6 +11389,9 @@ pub fn compile_source_to_js_with_options(
             lambda_start_stamp,
             unit_name,
         );
+    raw_converter.set_preserve_expanded_sparse_records(
+        options.dump_lambda || options.dump_lambda_sexp || options.dump_lambda_sexp_locs,
+    );
     raw_converter.set_no_assert_false(options.no_assert_false);
     raw_converter.set_noassert(options.noassert);
     raw_converter.set_warning_config(tctx.warning_config.clone());
@@ -14653,6 +14656,7 @@ pub fn compile_preprocessed_structure_in_process_until_js(
                     lambda_start_stamp,
                     unit_name,
                 );
+            raw_converter.set_preserve_expanded_sparse_records(options.capture_intermediates);
             raw_converter.set_no_assert_false(options.no_assert_false);
             raw_converter.set_noassert(options.noassert);
             raw_converter.set_warning_config(tctx.warning_config.clone());

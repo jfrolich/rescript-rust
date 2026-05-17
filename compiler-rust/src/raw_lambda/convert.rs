@@ -18,7 +18,6 @@ use crate::lambda::lam_compat::LetKind;
 use crate::lambda::lam_constant::{
     ConstructorRuntimeTag, ConstructorTag as PointerConstructorTag, PointerInfo, StringDelim,
 };
-use crate::lambda::lam_convert::LambdaConverter;
 use crate::lambda::lam_primitive::{
     ExternalArgAttr, ExternalArgConst, ExternalArgDelim, ExternalArgLabel, ExternalArgSpec,
     ExternalFfiKind, ExternalFfiSpec, ExternalModuleBindName, ExternalModuleName, ExternalObjLabel,
@@ -882,7 +881,6 @@ pub struct RawLambdaConverter<'a> {
     id_gen: IdGenerator,
     next_static_raise: i32,
     next_negative_raise: i32,
-    lowered: LambdaConverter<'a>,
     unit_name: String,
     no_assert_false: bool,
     noassert: bool,
@@ -909,7 +907,6 @@ impl<'a> RawLambdaConverter<'a> {
             id_gen: IdGenerator::new(),
             next_static_raise: 0,
             next_negative_raise: 0,
-            lowered: LambdaConverter::new(arena),
             unit_name: String::new(),
             no_assert_false: false,
             noassert: false,
@@ -937,7 +934,6 @@ impl<'a> RawLambdaConverter<'a> {
             id_gen: IdGenerator::with_start_stamp(start_stamp),
             next_static_raise: 0,
             next_negative_raise: 0,
-            lowered: LambdaConverter::with_start_stamp(arena, start_stamp),
             unit_name: String::new(),
             no_assert_false: false,
             noassert: false,
@@ -966,7 +962,6 @@ impl<'a> RawLambdaConverter<'a> {
             id_gen: IdGenerator::with_start_stamp(start_stamp),
             next_static_raise: 0,
             next_negative_raise: 0,
-            lowered: LambdaConverter::with_start_stamp(arena, start_stamp),
             unit_name,
             no_assert_false: false,
             noassert: false,
@@ -995,7 +990,6 @@ impl<'a> RawLambdaConverter<'a> {
 
     pub fn set_preserve_expanded_sparse_records(&mut self, preserve: bool) {
         self.preserve_expanded_sparse_records = preserve;
-        self.lowered.set_preserve_expanded_sparse_records(preserve);
     }
 
     pub fn set_warning_config(&mut self, warning_config: WarningConfig) {
@@ -1003,9 +997,7 @@ impl<'a> RawLambdaConverter<'a> {
     }
 
     pub fn current_stamp(&self) -> i32 {
-        self.id_gen
-            .current_stamp()
-            .max(self.lowered.current_stamp())
+        self.id_gen.current_stamp()
     }
 
     pub fn take_possible_required_modules(&mut self) -> AHashSet<ModuleId> {
@@ -1048,20 +1040,17 @@ impl<'a> RawLambdaConverter<'a> {
         let shared_stamp = self.current_stamp().max(self.type_ctx.current_stamp());
         self.type_ctx.set_current_time(shared_stamp);
         self.id_gen.set_current_stamp(shared_stamp);
-        self.lowered.set_current_stamp(shared_stamp);
     }
 
     fn fresh_ident(&mut self, name: &str) -> Ident {
         // OCaml uses one global `Ident.currentstamp` for both Translcore and
         // Translmod (`compiler/ml/translcore.ml:1250-1271`,
-        // `compiler/ml/translmod.ml:422-448`). Rust has separate raw and
-        // lowered converters, so synchronize before and after minting a raw
-        // identifier to preserve OCaml's physical stamp ordering.
+        // `compiler/ml/translmod.ml:422-448`), so synchronize before and after
+        // minting a raw identifier to preserve OCaml's physical stamp ordering.
         self.sync_local_stamp_generators();
         let id = self.id_gen.create(name);
         let stamp = id.stamp();
         self.type_ctx.set_current_time(stamp);
-        self.lowered.set_current_stamp(stamp);
         id
     }
 
@@ -3022,6 +3011,8 @@ impl<'a> RawLambdaConverter<'a> {
             )),
             "%incr" => Some(Primitive::Poffsetref(1)),
             "%decr" => Some(Primitive::Poffsetref(-1)),
+            "%identity" => Some(Primitive::Pidentity),
+            "%ignore" => Some(Primitive::Pignore),
             // Direct bigint primitives (used by Js.BigInt externals)
             "%negbigint" => Some(Primitive::Pnegbigint),
             "%addbigint" => Some(Primitive::Paddbigint),
@@ -3047,6 +3038,11 @@ impl<'a> RawLambdaConverter<'a> {
             "%gebigint" => Some(Primitive::Pbigintcomp(crate::lambda::Comparison::Ge)),
             // Method wrapping
             "%unsafe_to_method" => Some(Primitive::PjsFnMethod),
+            "%obj_tag" => Some(Primitive::Pobjtag),
+            "%obj_size" => Some(Primitive::Pobjsize),
+            "%obj_dup" => Some(Primitive::Pduprecord),
+            "%obj_get_field" => Some(Primitive::Parrayrefu),
+            "%obj_set_field" => Some(Primitive::Parraysetu),
             // Type-specialized int primitives (from OCaml's prim_table)
             // These are the resolved forms of unified ops when the type is int
             "%negint" => Some(Primitive::Pnegint),
@@ -3118,6 +3114,34 @@ impl<'a> RawLambdaConverter<'a> {
             "%string_length" => Some(Primitive::Pstringlength),
             "%string_safe_get" => Some(Primitive::Pstringrefs),
             "%string_unsafe_get" => Some(Primitive::Pstringrefu),
+            "%string_concat" => Some(Primitive::Pstringadd),
+            "%array_length" => Some(Primitive::Parraylength),
+            "%array_safe_get" => Some(Primitive::Parrayrefs),
+            "%array_safe_set" => Some(Primitive::Parraysets),
+            "%array_unsafe_get" => Some(Primitive::Parrayrefu),
+            "%array_unsafe_set" => Some(Primitive::Parraysetu),
+            "%makedict" => Some(Primitive::Pmakedict),
+            "%dict_has" => Some(Primitive::PdictHas),
+            "%await" => Some(Primitive::Pawait),
+            "%import" => Some(Primitive::Pimport),
+            "%hash" => Some(Primitive::Phash),
+            "%hash_mix_int" => Some(Primitive::PhashMixint),
+            "%hash_mix_string" => Some(Primitive::PhashMixstring),
+            "%hash_final_mix" => Some(Primitive::PhashFinalmix),
+            "%typeof" => Some(Primitive::Ptypeof),
+            "%debugger" => Some(Primitive::Pdebugger),
+            "%intoffloat" => Some(Primitive::Pintoffloat),
+            "%floatofint" => Some(Primitive::Pfloatofint),
+            "%unsafe_eq" => Some(Primitive::Pjscomp(crate::lambda::Comparison::Eq)),
+            "%unsafe_neq" => Some(Primitive::Pjscomp(crate::lambda::Comparison::Neq)),
+            "%unsafe_lt" => Some(Primitive::Pjscomp(crate::lambda::Comparison::Lt)),
+            "%unsafe_le" => Some(Primitive::Pjscomp(crate::lambda::Comparison::Le)),
+            "%unsafe_gt" => Some(Primitive::Pjscomp(crate::lambda::Comparison::Gt)),
+            "%unsafe_ge" => Some(Primitive::Pjscomp(crate::lambda::Comparison::Ge)),
+            "%is_nullable" => Some(Primitive::PisNullUndefined),
+            "%null_to_opt" => Some(Primitive::PnullToOpt),
+            "%nullable_to_opt" => Some(Primitive::PnullUndefinedToOpt),
+            "%wrap_exn" => Some(Primitive::PwrapExn),
             "%powint" => Some(Primitive::Ppowint),
             // OCaml translcore.ml:377-387 maps these runtime externals to
             // dedicated primitives before lambda conversion.
@@ -3132,6 +3156,18 @@ impl<'a> RawLambdaConverter<'a> {
             "%curry_apply8" => Some(Primitive::PjsApply),
             "%makemutablelist" => Some(Primitive::Pmakelist),
             // #-prefixed primitives (from OCaml's translcore.ml prim_table)
+            "#raw_expr" => Some(Primitive::PrawJsCode(
+                crate::lambda::lam_primitive::JsRawInfo {
+                    code: String::new(),
+                    is_stmt: false,
+                },
+            )),
+            "#raw_stmt" => Some(Primitive::PrawJsCode(
+                crate::lambda::lam_primitive::JsRawInfo {
+                    code: String::new(),
+                    is_stmt: true,
+                },
+            )),
             "#null" => Some(Primitive::Pnull),
             "#undefined" => Some(Primitive::Pundefined),
             "#typeof" => Some(Primitive::Ptypeof),
@@ -3156,7 +3192,7 @@ impl<'a> RawLambdaConverter<'a> {
                         ));
                     }
                 }
-                self.lowered.primitive_from_name(prim_name)
+                None
             }
         }
     }
@@ -6005,22 +6041,24 @@ impl<'a> RawLambdaConverter<'a> {
                 partial,
                 arity,
                 async_,
-            } if body.len() == 1 && body[0].c_guard.is_none() => {
+            } => {
                 let directive =
                     Self::get_directive_attribute_from(&expr.exp_attributes, self.arena);
                 let inline = self.get_inline_attribute_from(&expr.exp_attributes);
-                if let Some(lambda) = self.convert_single_case_function_raw_borrowed(
-                    params,
-                    &body[0],
-                    *partial,
-                    *arity,
-                    expr.exp_type,
-                    *async_,
-                    directive.clone(),
-                    inline,
-                    self.loc(expr.exp_loc),
-                ) {
-                    return lambda;
+                if body.len() == 1 {
+                    if let Some(lambda) = self.convert_single_case_function_raw_borrowed(
+                        params,
+                        &body[0],
+                        *partial,
+                        *arity,
+                        expr.exp_type,
+                        *async_,
+                        directive.clone(),
+                        inline,
+                        self.loc(expr.exp_loc),
+                    ) {
+                        return lambda;
+                    }
                 }
                 let pushed_body = body
                     .iter()
@@ -6051,33 +6089,34 @@ impl<'a> RawLambdaConverter<'a> {
                 *partial,
                 *transformed_jsx,
             ),
-            ExpressionDesc::Texp_match(scrut, cases, exn_cases, partial)
-                if !exn_cases.is_empty() =>
-            {
-                // Match with exception cases: wrap in try-with + static catch.
-                // Matches OCaml's transl_match logic from translcore.ml.
-                let loc = self.loc(expr.exp_loc);
-                let partial = *partial;
-                self.compile_match_with_exceptions_raw(loc, scrut, cases, exn_cases, partial, expr)
-            }
-            ExpressionDesc::Texp_match(scrut, cases, exn_cases, partial)
-                if exn_cases.is_empty() =>
-            {
-                // For single-case matches with unboxed constructor patterns,
-                // use the irrefutable path which correctly handles transparent field access.
-                if cases.len() == 1 && cases[0].c_guard.is_none() {
-                    if let PatternDesc::Tpat_construct(_, cstr, _) = &cases[0].c_lhs.pat_desc {
-                        if matches!(cstr.cstr_tag, ConstructorTag::CstrUnboxed) {
-                            if let Some(result) = self.compile_irrefutable_match_raw(scrut, cases) {
-                                return result;
+            ExpressionDesc::Texp_match(scrut, cases, exn_cases, partial) => {
+                if !exn_cases.is_empty() {
+                    // Match with exception cases: wrap in try-with + static catch.
+                    // Matches OCaml's transl_match logic from translcore.ml.
+                    let loc = self.loc(expr.exp_loc);
+                    let partial = *partial;
+                    self.compile_match_with_exceptions_raw(
+                        loc, scrut, cases, exn_cases, partial, expr,
+                    )
+                } else {
+                    // For single-case matches with unboxed constructor patterns,
+                    // use the irrefutable path which correctly handles transparent field access.
+                    if cases.len() == 1 && cases[0].c_guard.is_none() {
+                        if let PatternDesc::Tpat_construct(_, cstr, _) = &cases[0].c_lhs.pat_desc {
+                            if matches!(cstr.cstr_tag, ConstructorTag::CstrUnboxed) {
+                                if let Some(result) =
+                                    self.compile_irrefutable_match_raw(scrut, cases)
+                                {
+                                    return result;
+                                }
                             }
                         }
                     }
+                    let partial = *partial;
+                    let loc = self.loc(expr.exp_loc);
+                    // Use full matching compiler (ported from OCaml's matching.ml)
+                    self.compile_full_matching(loc, scrut, cases, partial, expr)
                 }
-                let partial = *partial;
-                let loc = self.loc(expr.exp_loc);
-                // Use full matching compiler (ported from OCaml's matching.ml)
-                self.compile_full_matching(loc, scrut, cases, partial, expr)
             }
             ExpressionDesc::Texp_try(body, cases) => {
                 let loc = self.loc(expr.exp_loc);
@@ -6230,6 +6269,7 @@ impl<'a> RawLambdaConverter<'a> {
                 Box::new(self.convert_expr_raw(obj_expr)),
                 self.loc(expr.exp_loc),
             ),
+            ExpressionDesc::Texp_send(_, MethKind::Tmeth_val(_), _) => RawLambda::unit(),
             ExpressionDesc::Texp_letmodule(id, _, modl, body) => RawLambda::let_(
                 LetKind::Strict,
                 id.clone(),
@@ -6267,7 +6307,6 @@ impl<'a> RawLambdaConverter<'a> {
                     )
                 }
             }
-            _ => RawLambda::from_lowered(self.convert_expr(expr)),
         }
     }
 
@@ -6325,7 +6364,13 @@ impl<'a> RawLambdaConverter<'a> {
                     })
                     .unwrap_or_else(|| {
                         trace_raw_match_fallback(&self.loc(expr.exp_loc), scrut, cases);
-                        self.lowered.convert_expr(expr)
+                        let raw =
+                            self.compile_full_matching(self.loc(expr.exp_loc), scrut, cases, *partial, expr);
+                        let start_stamp = self.current_stamp();
+                        crate::raw_lambda::lower::lower_to_lambda_with_start_stamp(
+                            raw,
+                            start_stamp,
+                        )
                     })
             }
             ExpressionDesc::Texp_tuple(items) => {
@@ -6340,7 +6385,11 @@ impl<'a> RawLambdaConverter<'a> {
                 ConstructorTag::CstrConstant(_) | ConstructorTag::CstrUnboxed => {
                     self.convert_construct(self.loc(expr.exp_loc), cstr, args)
                 }
-                _ => self.lowered.convert_expr(expr),
+                _ => {
+                    let raw = self.convert_construct_raw(self.loc(expr.exp_loc), expr.exp_env, cstr, args);
+                    let start_stamp = self.current_stamp();
+                    crate::raw_lambda::lower::lower_to_lambda_with_start_stamp(raw, start_stamp)
+                }
             },
             ExpressionDesc::Texp_variant(tag, arg) => self.convert_poly_variant(tag, arg),
             ExpressionDesc::Texp_record {
@@ -6456,7 +6505,9 @@ impl<'a> RawLambdaConverter<'a> {
             }
             _ => {
                 trace_raw_fallback(Self::expr_desc_name(&expr.exp_desc));
-                self.lowered.convert_expr(expr)
+                let raw = self.convert_expr_raw(expr);
+                let start_stamp = self.current_stamp();
+                crate::raw_lambda::lower::lower_to_lambda_with_start_stamp(raw, start_stamp)
             }
         }
     }
@@ -10060,8 +10111,8 @@ impl<'a> RawLambdaConverter<'a> {
     }
 
     fn translate_value_path(&self, loc_idx: LocIdx, path: &crate::types::Path) -> Lambda {
-        if let Some(lam) = self.lowered.value_path_loc_constant(path, loc_idx) {
-            return lam;
+        if let Some(lam) = self.value_path_loc_constant(path, self.loc(loc_idx)) {
+            return crate::raw_lambda::lower::lower_to_lambda(lam);
         }
         match path {
             crate::types::Path::Pident(id) => {
@@ -10235,11 +10286,20 @@ impl<'a> RawLambdaConverter<'a> {
                         .collect();
                     RawLambda::letrec(lam_bindings, body)
                 } else {
-                    RawLambda::from_lowered(self.lowered.convert_let_with_body(
-                        rec_flag,
-                        bindings,
-                        body.into_lowered(),
-                    ))
+                    bindings.iter().rev().fold(body, |acc, binding| {
+                        let mut value = self.convert_expr_raw(&binding.vb_expr);
+                        let inline_attr = self.get_inline_attribute_from(&binding.vb_attributes);
+                        value = self.apply_inline_attribute_raw(value, binding.vb_loc, inline_attr);
+                        full_matching::for_let(
+                            self.type_ctx,
+                            self.arena,
+                            self.loc(binding.vb_pat.pat_loc),
+                            value,
+                            &binding.vb_pat,
+                            acc,
+                            &mut self.next_static_raise,
+                        )
+                    })
                 }
             }
         }
@@ -10585,7 +10645,13 @@ impl<'a> RawLambdaConverter<'a> {
                         Lambda::let_(LetKind::Strict, id, value, acc)
                     })
                 } else {
-                    self.lowered.convert_let_with_body(rec_flag, bindings, body)
+                    let raw = self.convert_let_with_body_raw(
+                        rec_flag,
+                        bindings,
+                        RawLambda::from_lowered(body),
+                    );
+                    let start_stamp = self.current_stamp();
+                    crate::raw_lambda::lower::lower_to_lambda_with_start_stamp(raw, start_stamp)
                 }
             }
             crate::parser::ast::RecFlag::Recursive => {
@@ -10604,7 +10670,13 @@ impl<'a> RawLambdaConverter<'a> {
                         .collect();
                     Lambda::letrec(lam_bindings, body)
                 } else {
-                    self.lowered.convert_let_with_body(rec_flag, bindings, body)
+                    let raw = self.convert_let_with_body_raw(
+                        rec_flag,
+                        bindings,
+                        RawLambda::from_lowered(body),
+                    );
+                    let start_stamp = self.current_stamp();
+                    crate::raw_lambda::lower::lower_to_lambda_with_start_stamp(raw, start_stamp)
                 }
             }
         }
@@ -11285,7 +11357,7 @@ impl<'a> RawLambdaConverter<'a> {
         transformed_jsx: bool,
     ) -> Primitive {
         let raw_name = Self::raw_primitive_name(&prim.prim_name);
-        if let Some(primitive) = self.lowered.primitive_from_name(raw_name) {
+        if let Some(primitive) = self.find_raw_primitive(raw_name) {
             primitive
         } else {
             self.report_unknown_builtin_primitive(loc, raw_name);
@@ -12120,27 +12192,27 @@ mod tests {
 
         converter.sync_matching_stamps();
         assert_eq!(converter.current_stamp(), 202);
-        assert_eq!(converter.lowered.current_stamp(), 202);
+        assert_eq!(converter.id_gen.current_stamp(), 202);
 
         let post_match_raw = converter.id_gen.create("raw_post");
         assert_eq!(post_match_raw.stamp(), 203);
     }
 
     #[test]
-    fn fresh_ident_advances_past_lowered_converter_allocations() {
+    fn fresh_ident_advances_past_type_context_allocations() {
         let arena = ParseArena::new();
         let id_gen = IdGenerator::with_start_stamp(100);
         let ctx = TypeContext::new(std::sync::Arc::new(id_gen));
         let env = initial_env(&ctx);
         let mut converter = RawLambdaConverter::with_start_stamp(&arena, &ctx, &env, 10);
 
-        converter.lowered.set_current_stamp(200);
+        ctx.set_current_time(200);
         let include_id = converter.fresh_ident("include");
         assert_eq!(include_id.stamp(), 201);
         assert_eq!(converter.current_stamp(), 201);
         assert_eq!(ctx.current_stamp(), 201);
 
-        converter.lowered.set_current_stamp(250);
+        ctx.set_current_time(250);
         let match_id = converter.fresh_ident("match");
         assert_eq!(match_id.stamp(), 251);
         assert_eq!(converter.id_gen.current_stamp(), 251);

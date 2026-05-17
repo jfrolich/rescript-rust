@@ -42,7 +42,6 @@ pub mod lam_compile_main;
 pub mod lam_compile_primitive;
 pub mod lam_compile_variant;
 pub mod lam_constant;
-pub mod lam_convert;
 pub mod lam_eta_conversion;
 pub mod lam_exit_code;
 pub mod lam_free_variables;
