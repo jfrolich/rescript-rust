@@ -335,6 +335,20 @@ impl UnifyState {
         self.env.as_mut()
     }
 
+    /// Temporarily move out the environment snapshot.
+    ///
+    /// Some typecore force helpers need `&mut TypeCheckContext` while reading
+    /// the unify environment. Moving the owned snapshot out avoids cloning a
+    /// large environment solely to satisfy the borrow checker.
+    pub(crate) fn take_env(&mut self) -> Option<Env> {
+        self.env.take()
+    }
+
+    /// Restore an environment snapshot previously removed with `take_env`.
+    pub(crate) fn restore_env(&mut self, env: Env) {
+        self.env = Some(env);
+    }
+
     /// Start collecting type lookup paths reached through OCaml-equivalent
     /// `ctype.ml` level lowering.
     pub fn begin_type_lookup_capture(&mut self) -> bool {
@@ -507,8 +521,11 @@ fn get_level_with_lookup_capture(
             paths.push(path.clone());
         }
     }
-    let found_decl = match path {
-        Path::Pident(id) => env.find_type_by_ident(id).ok().cloned(),
+    let found_level = match path {
+        Path::Pident(id) => env
+            .find_type_by_ident(id)
+            .ok()
+            .and_then(|decl| decl.type_newtype_level.map(|(level, _)| level)),
         Path::Pdot(parent, type_name, _) => {
             // OCaml compiler/ml/ctype.ml:666-673 calls Env.find_type, whose
             // dotted path lookup reaches compiler/ml/env.ml:800-813 through
@@ -525,13 +542,11 @@ fn get_level_with_lookup_capture(
                 &mut persistent_env,
                 ctx,
             )
-            .map(|(_, _, decl)| (*decl).clone())
+            .and_then(|(_, _, decl)| decl.type_newtype_level.map(|(level, _)| level))
         }
         Path::Papply(_, _) => None,
     };
-    found_decl
-        .and_then(|decl| decl.type_newtype_level.map(|(level, _)| level))
-        .unwrap_or_else(|| path_binding_time(path))
+    found_level.unwrap_or_else(|| path_binding_time(path))
 }
 
 fn path_root_is_persistent(path: &Path) -> bool {
@@ -1075,7 +1090,7 @@ fn update_level_expand_with_lookup_capture<'a>(
                 // `level < get_level env p` after the outer `ty.level > level`
                 // check. Generic-level constructor nodes are still eligible
                 // for abbreviation expansion during `moregeneral`.
-                let should_try_expand = level < path_level;
+                let should_try_expand = current != GENERIC_LEVEL && level < path_level;
                 drop(desc);
                 // OCaml compiler/ml/ctype.ml:742-768 does not special-case
                 // local Pident constructors here. It attempts abbreviation
@@ -1089,19 +1104,33 @@ fn update_level_expand_with_lookup_capture<'a>(
                 // eagerly, destroying the path form. Skipping here lets the
                 // general Tconstr/Tconstr expansion path handle it correctly
                 // through unify_after_expansion's relink logic.
-                let is_firstclass_module_pdot = matches!(&path, Path::Pdot(parent, _, _) if !path_root_is_persistent(parent))
-                    && env.lookup_type(&path).ok().is_some_and(|decl| {
-                        decl.type_manifest.is_some_and(|manifest| {
-                            let m = ctx.repr(manifest);
-                            let m_level = ctx.get_level(m);
-                            let m_desc = ctx.borrow_desc(m);
-                            m_level != crate::types::type_expr::GENERIC_LEVEL
-                                && matches!(&*m_desc, TypeDesc::Tconstr { path: mp, .. }
-                                    if matches!(mp, Path::Pident(id)
-                                        if id.stamp() != 0 && !is_predef_type_name(id.name())))
-                        })
-                    });
-                if should_try_expand && !is_firstclass_module_pdot {
+                if should_try_expand {
+                    let is_firstclass_module_pdot = matches!(&path, Path::Pdot(parent, _, _) if !path_root_is_persistent(parent))
+                        && env.lookup_type(&path).ok().is_some_and(|decl| {
+                            decl.type_manifest.is_some_and(|manifest| {
+                                let m = ctx.repr(manifest);
+                                let m_level = ctx.get_level(m);
+                                let m_desc = ctx.borrow_desc(m);
+                                m_level != crate::types::type_expr::GENERIC_LEVEL
+                                    && matches!(&*m_desc, TypeDesc::Tconstr { path: mp, .. }
+                                        if matches!(mp, Path::Pident(id)
+                                            if id.stamp() != 0 && !is_predef_type_name(id.name())))
+                            })
+                        });
+                    if is_firstclass_module_pdot {
+                        ctx.set_level(ty, level);
+                        iter_type_expr(ctx, ty, |child| {
+                            update_level_expand_with_lookup_capture(
+                                ctx,
+                                env,
+                                level,
+                                child,
+                                pending_type_lookup_paths,
+                                pending_type_expansion_paths,
+                            );
+                        });
+                        return;
+                    }
                     if let Some(paths) = pending_type_expansion_paths.as_deref_mut() {
                         paths.push(path.clone());
                     }
@@ -2424,7 +2453,7 @@ pub(crate) fn normalize_path_full<'a>(ctx: &'a TypeContext, env: &Env, path: &Pa
         return cached;
     }
     let normalized =
-        normalize_path_full_inner(ctx, env, path, 0, &mut HashSet::new(), true, false);
+        normalize_path_full_inner(ctx, env, path, 0, &mut HashSet::new(), true, false, None);
     ctx.register_normalized_path_full(env_id, path, normalized.clone());
     normalized
 }
@@ -2500,15 +2529,22 @@ pub(crate) fn force_normalize_path_full_side_effects<'a>(
     // compiler/ml/env.ml:923-934 `Env.normalize_path` as an expansion fallback.
     // That path is intentionally side-effectful: env.ml:896-900 reads
     // `comp_modules` and forces the env.ml:1568 module-declaration thunk even
-    // when the normalized path is discarded by the caller. Do not use Rust's
-    // normalized-path cache for this side-effect-only call, because an earlier
-    // component-table probe may have cached the same structural answer before
-    // the OCaml-equivalent module thunk was forced.
-    normalize_path_full_inner(ctx, env, path, 0, &mut HashSet::new(), true, true)
+    // when the normalized path is discarded by the caller. Use a distinct cache
+    // from normal structural normalization: the first lookup still performs
+    // those side effects at the OCaml compare point, while repeated label
+    // disambiguation compares observe the already-forced lazy state.
+    let env_id = env.id();
+    if let Some(cached) = ctx.find_forced_normalized_path_full(env_id, path) {
+        return cached;
+    }
+    let normalized =
+        normalize_path_full_inner(ctx, env, path, 0, &mut HashSet::new(), true, true, None);
+    ctx.register_forced_normalized_path_full(env_id, path, normalized.clone());
+    normalized
 }
 
 fn normalize_path_forward_only<'a>(ctx: &'a TypeContext, env: &Env, path: &Path) -> Path {
-    normalize_path_full_inner(ctx, env, path, 0, &mut HashSet::new(), false, false)
+    normalize_path_full_inner(ctx, env, path, 0, &mut HashSet::new(), false, false, None)
 }
 
 fn normalize_path_full_inner<'a>(
@@ -2519,6 +2555,7 @@ fn normalize_path_full_inner<'a>(
     visiting: &mut HashSet<Path>,
     allow_reverse_local_aliases: bool,
     force_module_lookup_side_effects: bool,
+    root_child: Option<&str>,
 ) -> Path {
     if depth > 20 {
         return path.clone();
@@ -2551,6 +2588,7 @@ fn normalize_path_full_inner<'a>(
                 visiting,
                 allow_reverse_local_aliases,
                 force_module_lookup_side_effects,
+                None,
             );
         }
     }
@@ -2573,6 +2611,7 @@ fn normalize_path_full_inner<'a>(
                 visiting,
                 allow_reverse_local_aliases,
                 force_module_lookup_side_effects,
+                Some(s.as_str()),
             );
             if p_norm == **p {
                 path.clone()
@@ -2589,6 +2628,7 @@ fn normalize_path_full_inner<'a>(
                 visiting,
                 allow_reverse_local_aliases,
                 force_module_lookup_side_effects,
+                None,
             );
             let p2_norm = normalize_path_full_inner(
                 ctx,
@@ -2598,6 +2638,7 @@ fn normalize_path_full_inner<'a>(
                 visiting,
                 allow_reverse_local_aliases,
                 force_module_lookup_side_effects,
+                None,
             );
             if p1_norm == **p1 && p2_norm == **p2 {
                 path.clone()
@@ -2618,7 +2659,15 @@ fn normalize_path_full_inner<'a>(
     // `Stdlib` roots naturally take the persistent force path here.
     if let Path::Pident(id) = &path {
         let has_local_module = env.find_module_same(id).is_ok();
-        let should_force_persistent_sig = id.is_persistent() && !has_local_module;
+        // OCaml compiler/ml/env.ml:1000-1007 can reach selected implicit
+        // `Stdlib` children through persistent `ps_comps`. That descriptor
+        // path does not force env.ml:719-721 `ps_sig`; Rust recursively
+        // normalizes synthetic `Stdlib.<child>.*` paths, so keep the same
+        // component-only root lookup here.
+        let stdlib_component_lookup =
+            id.name() == "Stdlib" && matches!(root_child, Some("ArrayBuffer" | "JSON"));
+        let should_force_persistent_sig =
+            id.is_persistent() && !stdlib_component_lookup && !has_local_module;
         if should_force_persistent_sig {
             ctx.trigger_module_sig_rename(id.name());
         }
@@ -2643,6 +2692,7 @@ fn normalize_path_full_inner<'a>(
             visiting,
             allow_reverse_local_aliases,
             force_module_lookup_side_effects,
+            None,
         );
     }
 
@@ -2669,6 +2719,7 @@ fn normalize_path_full_inner<'a>(
                     visiting,
                     allow_reverse_local_aliases,
                     force_module_lookup_side_effects,
+                    None,
                 );
             }
         }
@@ -2693,6 +2744,7 @@ fn normalize_path_full_inner<'a>(
                 visiting,
                 allow_reverse_local_aliases,
                 force_module_lookup_side_effects,
+                None,
             );
         }
     }
@@ -3850,10 +3902,7 @@ fn subtype_variant_rows(
                 let field2 = btype::row_field_repr(ctx, field2);
                 match (&field1, &field2) {
                     (
-                        RowField::Rpresent(None)
-                        | RowField::Reither {
-                            constant: true, ..
-                        },
+                        RowField::Rpresent(None) | RowField::Reither { constant: true, .. },
                         RowField::Rpresent(None),
                     )
                     | (RowField::Rabsent, _) => {}
@@ -4791,15 +4840,12 @@ pub fn unify_var<'a>(
         (TypeDesc::Tvar(_), _) => {
             drop(desc1);
             drop(desc2);
-            // OCaml compiler/ml/ctype.ml:2280-2286 `unify1_var`
-            // performs `occur` and links directly. Constructor-head
-            // expansion only happens in the earlier deep-occur route through
-            // compiler/ml/ctype.ml:2302 and :2338-2344.
+            // OCaml compiler/ml/ctype.ml:2820-2837 `unify_var`
+            // performs `occur`, lowers levels, and links directly. It does
+            // not call `occur_univar`; that check belongs to the full
+            // `unify1_var` path at ctype.ml:2278-2286.
             if occurs(ctx, t1, t2) {
                 return Err(TypeError::Unify(vec![(t1, t2)]));
-            }
-            if let Some(env) = state.env() {
-                occur_univar(ctx, env, t2)?;
             }
             let level = ctx.get_level(t1);
             let capture_type_lookup_paths = state.should_capture_type_lookup_paths();
@@ -7205,7 +7251,9 @@ fn closed_schema_rec(
         match &*desc {
             TypeDesc::Tvar(_) => Action::Tvar,
             TypeDesc::Tconstr { args, .. } => Action::Tconstr(args.clone()),
-            TypeDesc::Tfield { kind, typ, rest, .. } => Action::Tfield {
+            TypeDesc::Tfield {
+                kind, typ, rest, ..
+            } => Action::Tfield {
                 kind: kind.clone(),
                 typ: *typ,
                 rest: *rest,

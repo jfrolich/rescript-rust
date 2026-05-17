@@ -355,6 +355,39 @@ fn build_labels_for_name(
 }
 
 #[derive(Debug, Clone)]
+struct ChildComponentScanState {
+    working_env: Option<super::env::Env>,
+    next_index: usize,
+    runtime_pos: usize,
+    complete: bool,
+}
+
+impl ChildComponentScanState {
+    fn new() -> Self {
+        Self {
+            working_env: None,
+            next_index: 0,
+            runtime_pos: 0,
+            complete: false,
+        }
+    }
+
+    fn complete() -> Self {
+        Self {
+            working_env: None,
+            next_index: 0,
+            runtime_pos: 0,
+            complete: true,
+        }
+    }
+
+    fn working_env_mut(&mut self) -> &mut super::env::Env {
+        self.working_env
+            .get_or_insert_with(super::env::Env::empty)
+    }
+}
+
+#[derive(Debug, Clone)]
 pub(crate) struct QualifiedModuleComponents {
     access_path: Arc<Path>,
     signature: Arc<Signature>,
@@ -380,16 +413,19 @@ pub(crate) struct QualifiedModuleComponents {
     // lookup for one child does not materialize every sibling in the parent
     // signature.
     child_components: Arc<RefCell<HashMap<String, Option<(usize, Arc<StoredModuleComponents>)>>>>,
+    child_component_scan: Arc<RefCell<ChildComponentScanState>>,
     value_source_prefix: Option<Arc<Path>>,
 }
 
-fn build_child_component_from_signature(
+fn scan_child_component_from_signature(
     access_path: &Path,
     signature: &Arc<Signature>,
+    child_components: &mut HashMap<String, Option<(usize, Arc<StoredModuleComponents>)>>,
+    state: &mut ChildComponentScanState,
     child_name: &str,
-) -> Option<(usize, Arc<StoredModuleComponents>)> {
-    let mut working_env = super::env::Env::empty();
-    let mut runtime_pos = 0usize;
+) -> (Option<(usize, Arc<StoredModuleComponents>)>, usize) {
+    let start_index = state.next_index;
+    let mut found = None;
 
     // OCaml compiler/ml/env.ml:1530-1578 computes component paths once,
     // stores module declarations in `comp_modules` at env.ml:1568-1569, and
@@ -397,47 +433,67 @@ fn build_child_component_from_signature(
     // env.ml:1573-1578. Persistent signatures need the same split so
     // qualified value lookup can descend through child components without
     // forcing `Subst.modtype` on the module declaration thunk.
-    for item in signature.iter() {
+    while state.next_index < signature.len() {
+        let item = &signature[state.next_index];
+        state.next_index += 1;
         match item {
             SignatureItem::SigValue(_, desc) => {
                 if !matches!(desc.val_kind, ValueKind::ValPrim(_)) {
-                    runtime_pos += 1;
+                    state.runtime_pos += 1;
                 }
             }
             SignatureItem::SigType(id, decl, _) => {
-                working_env.add_type(id.clone(), decl.clone());
+                state.working_env_mut().add_type(id.clone(), decl.clone());
             }
             SignatureItem::SigTypext(_, _, _) | SignatureItem::SigClass => {
-                runtime_pos += 1;
+                state.runtime_pos += 1;
             }
             SignatureItem::SigModule(id, md, _) => {
+                let runtime_pos = state.runtime_pos;
                 let child_access_path =
                     qualified_submodule_access_path(access_path, id.name(), runtime_pos, md);
-                working_env.add_module_with_component_context(
-                    id.clone(),
-                    md.clone(),
-                    md.clone(),
-                    child_access_path,
-                    Some((access_path.clone(), signature.clone())),
-                );
+                let stored = {
+                    let working_env = state.working_env_mut();
+                    working_env.add_module_with_component_context(
+                        id.clone(),
+                        md.clone(),
+                        md.clone(),
+                        child_access_path,
+                        Some((access_path.clone(), signature.clone())),
+                    );
+                    working_env
+                        .local_module_components_arc(&Path::pident(id.clone()))
+                        .map(|stored| (runtime_pos, stored))
+                };
+                // OCaml `Tbl.add` shadows earlier entries with the same name
+                // (compiler/ml/env.ml:1577-1578), so keep the latest scanned
+                // child component for this name.
+                child_components.insert(id.name().to_string(), stored.clone());
                 if id.name() == child_name {
-                    if let Some(stored) =
-                        working_env.local_module_components_arc(&Path::pident(id.clone()))
-                    {
-                        return Some((runtime_pos, stored));
-                    }
-                    return None;
+                    found = stored;
+                    state.runtime_pos += 1;
+                    break;
                 }
-                runtime_pos += 1;
+                state.runtime_pos += 1;
             }
             SignatureItem::SigModtype(id, mtd) => {
-                working_env.add_modtype(id.clone(), mtd.clone());
+                state
+                    .working_env_mut()
+                    .add_modtype(id.clone(), mtd.clone());
             }
             SignatureItem::SigClassType => {}
         }
     }
 
-    None
+    if state.next_index >= signature.len() {
+        state.complete = true;
+        state.working_env = None;
+        child_components
+            .entry(child_name.to_string())
+            .or_insert(None);
+    }
+
+    (found, state.next_index - start_index)
 }
 
 impl QualifiedModuleComponents {
@@ -473,11 +529,45 @@ impl QualifiedModuleComponents {
         )
     }
 
+    pub(crate) fn new_with_complete_child_components_arc(
+        access_path: Path,
+        signature: Arc<Signature>,
+        child_components: HashMap<String, (usize, Arc<StoredModuleComponents>)>,
+        ctx: &super::context::TypeContext,
+    ) -> Self {
+        Self::new_with_child_components_arc_and_value_source_prefix_inner(
+            access_path,
+            signature,
+            child_components,
+            None,
+            true,
+            ctx,
+        )
+    }
+
     pub(crate) fn new_with_child_components_arc_and_value_source_prefix(
         access_path: Path,
         signature: Arc<Signature>,
         child_components: HashMap<String, (usize, Arc<StoredModuleComponents>)>,
         value_source_prefix: Option<Path>,
+        ctx: &super::context::TypeContext,
+    ) -> Self {
+        Self::new_with_child_components_arc_and_value_source_prefix_inner(
+            access_path,
+            signature,
+            child_components,
+            value_source_prefix,
+            false,
+            ctx,
+        )
+    }
+
+    fn new_with_child_components_arc_and_value_source_prefix_inner(
+        access_path: Path,
+        signature: Arc<Signature>,
+        child_components: HashMap<String, (usize, Arc<StoredModuleComponents>)>,
+        value_source_prefix: Option<Path>,
+        child_component_scan_complete: bool,
         ctx: &super::context::TypeContext,
     ) -> Self {
         let mut component_modtypes = HashMap::new();
@@ -556,6 +646,11 @@ impl QualifiedModuleComponents {
             qualified_modules: Arc::new(RefCell::new(HashMap::new())),
             qualified_modtypes: Arc::new(RefCell::new(HashMap::new())),
             child_components: Arc::new(RefCell::new(child_components)),
+            child_component_scan: Arc::new(RefCell::new(if child_component_scan_complete {
+                ChildComponentScanState::complete()
+            } else {
+                ChildComponentScanState::new()
+            })),
             value_source_prefix: value_source_prefix.map(Arc::new),
         }
     }
@@ -885,6 +980,7 @@ impl QualifiedModuleComponents {
     pub(crate) fn lookup_child_components(
         &self,
         name: &str,
+        _ctx: &super::context::TypeContext,
     ) -> Option<(usize, Arc<StoredModuleComponents>)> {
         if let Some(cached) = self.child_components.borrow().get(name).cloned() {
             if self.compiler_counters_enabled {
@@ -895,17 +991,29 @@ impl QualifiedModuleComponents {
             return cached;
         }
 
-        let built = build_child_component_from_signature(self.access_path(), &self.signature, name);
+        let mut scan = self.child_component_scan.borrow_mut();
+        if scan.complete {
+            self.child_components
+                .borrow_mut()
+                .insert(name.to_string(), None);
+            return None;
+        }
+
+        let mut child_components = self.child_components.borrow_mut();
+        let (built, scanned_items) = scan_child_component_from_signature(
+            self.access_path(),
+            &self.signature,
+            &mut child_components,
+            &mut scan,
+            name,
+        );
         if self.compiler_counters_enabled {
             crate::perf_counters::record_lazy_scan(
                 crate::perf_counters::LazyLookupKind::ChildComponent,
-                self.signature.len(),
+                scanned_items,
                 usize::from(built.is_some()),
             );
         }
-        self.child_components
-            .borrow_mut()
-            .insert(name.to_string(), built.clone());
         built
     }
 
@@ -1543,7 +1651,7 @@ fn build_local_module_components<'a>(
         }
     }
 
-    Some(QualifiedModuleComponents::new_with_child_components_arc(
+    Some(QualifiedModuleComponents::new_with_complete_child_components_arc(
         access_path.clone(),
         qualified_sig,
         child_components,
@@ -1594,6 +1702,9 @@ impl StoredModuleComponents {
         {
             let cached = self.cached.borrow();
             if let Some(components) = cached.as_ref() {
+                if ctx.compiler_counters_enabled() {
+                    crate::perf_counters::record_stored_component_cached();
+                }
                 return Some(f(components));
             }
         }
@@ -1703,6 +1814,12 @@ impl StoredModuleComponents {
             ctx,
             cache_mode,
         )?;
+        if ctx.compiler_counters_enabled() {
+            crate::perf_counters::record_stored_component_build(
+                cache_mode.counter_name(),
+                cache_mode.publishes(),
+            );
+        }
         if cache_mode.publishes() {
             *self.cached.borrow_mut() = Some(components);
             let cached = self.cached.borrow();

@@ -40,9 +40,7 @@ use crate::types::sexp_typedtree::{
     print_typed_signature, print_typed_signature_with_locs, print_typed_structure,
     print_typed_structure_with_locs,
 };
-use crate::types::typecore::{
-    BuiltinExtensionError, JsxPropKind, TypeCoreError, TypeCoreWarning,
-};
+use crate::types::typecore::{BuiltinExtensionError, JsxPropKind, TypeCoreError, TypeCoreWarning};
 use crate::types::typemod::{TypeExtensionMismatch, TypeModError, UnboundTypeVarDetail};
 use crate::types::{
     ArgLabel as TypeArgLabel, FieldKind, TypeCheckContext, TypeClashContext, TypeContext, TypeDesc,
@@ -4410,7 +4408,7 @@ fn module_path_resolution_error_to_anyhow(
         ),
         ModulePathResolutionError::JsNotFound { js_file } => {
             format!("{js_file} not found, needed in script mode ")
-        },
+        }
         ModulePathResolutionError::MissingMlDependency { module_name } => {
             format!("Missing dependency {module_name} in search path")
         }
@@ -5073,7 +5071,10 @@ fn format_unbound_type_declaration_variable_report(
                 message.push_str(name);
                 message.push_str(" is unbound");
             }
-            UnboundTypeVarDetail::Field { name: field_name, ty } => {
+            UnboundTypeVarDetail::Field {
+                name: field_name,
+                ty,
+            } => {
                 message.push_str("\nIn field ");
                 message.push_str(field_name);
                 message.push_str(": ");
@@ -5082,7 +5083,10 @@ fn format_unbound_type_declaration_variable_report(
                 message.push_str(name);
                 message.push_str(" is unbound");
             }
-            UnboundTypeVarDetail::Method { name: method_name, ty } => {
+            UnboundTypeVarDetail::Method {
+                name: method_name,
+                ty,
+            } => {
                 message.push_str("\nIn method ");
                 message.push_str(method_name);
                 message.push_str(": ");
@@ -6851,9 +6855,7 @@ fn rendered_alias_expansion(
         if actual_side {
             if left_is_candidate && right_text == counterpart_text && left_text != top_text {
                 Some(pair.0)
-            } else if right_is_candidate
-                && left_text == counterpart_text
-                && right_text != top_text
+            } else if right_is_candidate && left_text == counterpart_text && right_text != top_text
             {
                 Some(pair.1)
             } else {
@@ -11189,6 +11191,7 @@ pub fn compile_source_to_js_with_options(
         ppx::rewrite_structure(&structure, parser.arena_mut())
             .map_err(|e| ppx_error_to_anyhow(e, parser.arena(), source, filename))?
     };
+    parser.arena_mut().reserve_typecheck_synthetic_capacity();
 
     // Type check
     crate::ident::Ident::set_current_time(OCAML_NON_PREDEF_STAMP_START);
@@ -11313,7 +11316,7 @@ pub fn compile_source_to_js_with_options(
     // OCaml's type_implementation_more calls normalize_signature ONLY when there
     // is no .resi file (Mli_exists branch skips it). Match this behavior:
     // normalize sorts Tvariant row fields and Tobject field chains alphabetically.
-    if !has_resi {
+    let inferred_simple_signature = if !has_resi {
         let simple_signature =
             crate::types::includemod::simplify_signature(&typed_structure.str_type);
         if let Err(e) =
@@ -11329,7 +11332,10 @@ pub fn compile_source_to_js_with_options(
             ));
         }
         normalize_signature_types(&type_ctx, &typed_structure, &final_env);
-    }
+        Some(simple_signature)
+    } else {
+        None
+    };
 
     // Print typed tree if requested
     if options.dump_typed_sexp {
@@ -11346,12 +11352,14 @@ pub fn compile_source_to_js_with_options(
         );
     }
 
-    prepare_inferred_signature_for_saving(
-        &type_ctx,
-        &typed_structure,
-        options.source_filename.as_deref(),
-        has_resi,
-    );
+    if let Some(simple_signature) = inferred_simple_signature.as_deref() {
+        prepare_inferred_signature_for_saving(
+            &type_ctx,
+            simple_signature,
+            options.source_filename.as_deref(),
+            has_resi,
+        );
+    }
 
     // Typedtree parity runs only need typechecking output.
     // Skipping Lambda/JS lowering avoids unrelated downstream failures
@@ -11362,7 +11370,7 @@ pub fn compile_source_to_js_with_options(
         return Ok(String::new());
     }
 
-    let lambda_start_stamp = type_ctx.current_stamp();
+    let lambda_start_stamp = synchronize_lambda_start_stamp(&type_ctx);
 
     let raw_trace = std::env::var_os("RUST_DRAWLAMBDA_STAGE_TRACE").is_some();
     if options.dump_lambda && raw_trace {
@@ -11876,9 +11884,9 @@ fn format_compunit_mismatch_report(
     message.push_str("  does not match the interface ");
     message.push_str(intf_name);
     message.push_str(":\n");
-    message.push_str(&crate::types::includemod::format_error_without_signature_header(
-        type_ctx, filename, error,
-    ));
+    message.push_str(
+        &crate::types::includemod::format_error_without_signature_header(type_ctx, filename, error),
+    );
     format_compiler_error_report_raw_message_from_location(source, filename, loc, &message)
 }
 
@@ -12074,6 +12082,7 @@ pub fn typecheck_interface_source(
             &ppx_warnings,
         );
     }
+    parser.arena_mut().reserve_typecheck_synthetic_capacity();
 
     // Type check
     crate::ident::Ident::set_current_time(OCAML_NON_PREDEF_STAMP_START);
@@ -12449,6 +12458,7 @@ pub fn typecheck_and_dump_sexp<W: std::io::Write>(
             source,
             filename,
         )?;
+        parser.arena_mut().reserve_typecheck_synthetic_capacity();
 
         // Type check
         crate::ident::Ident::set_current_time(OCAML_NON_PREDEF_STAMP_START);
@@ -12567,6 +12577,7 @@ pub fn typecheck_and_dump_sexp<W: std::io::Write>(
             ppx::rewrite_structure(&structure, parser.arena_mut())
                 .map_err(|e| ppx_error_to_anyhow(e, parser.arena(), source, filename))?
         };
+        parser.arena_mut().reserve_typecheck_synthetic_capacity();
 
         // Type check
         crate::ident::Ident::set_current_time(OCAML_NON_PREDEF_STAMP_START);
@@ -13982,55 +13993,38 @@ pub(crate) fn normalize_signature_types(
     norm_structure(type_ctx, final_env, typed_structure, false);
 }
 
-fn rename_ident_for_save_signature(
-    type_ctx: &TypeContext,
-    id: &crate::ident::Ident,
-) -> crate::ident::Ident {
-    let fresh = type_ctx.create_ident(id.name());
-    if fresh.flags() == id.flags() {
-        fresh
-    } else {
-        crate::ident::Ident::new(id.name(), fresh.stamp(), id.flags())
-    }
-}
-
-fn consume_module_type_save_signature_renames(
-    type_ctx: &TypeContext,
-    mty: &crate::types::decl::ModuleType,
-) {
+fn count_module_type_save_signature_renames(mty: &crate::types::decl::ModuleType) -> i32 {
     use crate::types::decl::ModuleType;
 
     match mty {
-        ModuleType::MtyIdent(_) | ModuleType::MtyAlias(_, _) => {}
-        ModuleType::MtySignature(sig) => consume_signature_save_renames(type_ctx, sig),
+        ModuleType::MtyIdent(_) | ModuleType::MtyAlias(_, _) => 0,
+        ModuleType::MtySignature(sig) => count_signature_save_renames(sig),
         ModuleType::MtyFunctor {
-            param,
+            param: _,
             param_type,
             result,
         } => {
-            let _ = rename_ident_for_save_signature(type_ctx, param);
-            if let Some(param_type) = param_type.as_deref() {
-                consume_module_type_save_signature_renames(type_ctx, param_type);
-            }
-            consume_module_type_save_signature_renames(type_ctx, result);
+            let param_type_count = param_type
+                .as_deref()
+                .map_or(0, count_module_type_save_signature_renames);
+            1 + param_type_count + count_module_type_save_signature_renames(result)
         }
     }
 }
 
-fn consume_signature_save_renames(
-    type_ctx: &TypeContext,
-    sig: &[crate::types::decl::SignatureItem],
-) {
+fn count_signature_save_renames(sig: &[crate::types::decl::SignatureItem]) -> i32 {
     use crate::types::decl::SignatureItem;
+
+    let mut count = 0;
 
     for item in sig {
         match item {
-            SignatureItem::SigType(id, _, _)
-            | SignatureItem::SigModule(id, _, _)
-            | SignatureItem::SigModtype(id, _)
-            | SignatureItem::SigValue(id, _)
-            | SignatureItem::SigTypext(id, _, _) => {
-                let _ = rename_ident_for_save_signature(type_ctx, id);
+            SignatureItem::SigType(_, _, _)
+            | SignatureItem::SigModule(_, _, _)
+            | SignatureItem::SigModtype(_, _)
+            | SignatureItem::SigValue(_, _)
+            | SignatureItem::SigTypext(_, _, _) => {
+                count += 1;
             }
             SignatureItem::SigClass | SignatureItem::SigClassType => {}
         }
@@ -14039,12 +14033,13 @@ fn consume_signature_save_renames(
     for item in sig {
         match item {
             SignatureItem::SigModule(_, md, _) => {
-                consume_module_type_save_signature_renames(type_ctx, &md.md_type);
+                count += count_module_type_save_signature_renames(&md.md_type);
             }
             SignatureItem::SigModtype(_, mtd) => {
-                if let Some(mty) = &mtd.mtd_type {
-                    consume_module_type_save_signature_renames(type_ctx, mty);
-                }
+                count += mtd
+                    .mtd_type
+                    .as_ref()
+                    .map_or(0, count_module_type_save_signature_renames);
             }
             SignatureItem::SigValue(_, _)
             | SignatureItem::SigType(_, _, _)
@@ -14053,11 +14048,20 @@ fn consume_signature_save_renames(
             | SignatureItem::SigClassType => {}
         }
     }
+
+    count
+}
+
+fn consume_signature_save_renames(
+    type_ctx: &TypeContext,
+    sig: &[crate::types::decl::SignatureItem],
+) {
+    type_ctx.consume_ident_stamps(count_signature_save_renames(sig));
 }
 
 fn prepare_inferred_signature_for_saving(
     type_ctx: &TypeContext,
-    typed_structure: &crate::types::typedtree::Structure,
+    simple_sig: &[crate::types::decl::SignatureItem],
     source_filename: Option<&str>,
     has_resi: bool,
 ) {
@@ -14068,8 +14072,20 @@ fn prepare_inferred_signature_for_saving(
         return;
     }
 
-    let simple_sig = crate::types::includemod::simplify_signature(&typed_structure.str_type);
-    consume_signature_save_renames(type_ctx, &simple_sig);
+    consume_signature_save_renames(type_ctx, simple_sig);
+}
+
+fn synchronize_lambda_start_stamp(type_ctx: &TypeContext) -> i32 {
+    // OCaml uses a single mutable `Ident.currentstamp` across typechecking and
+    // Lambda translation. Rust still has a few typedtree locals created through
+    // `Ident::create_local`, so synchronize before raw-lambda creates fresh
+    // identifiers. Otherwise a raw-lambda temp can reuse a typedtree stamp.
+    let stamp = type_ctx
+        .current_stamp()
+        .max(crate::ident::Ident::current_local_stamp());
+    type_ctx.set_current_time(stamp);
+    crate::ident::Ident::set_current_time(stamp);
+    stamp
 }
 
 /// Result of an in-process `.res` compilation.
@@ -14108,12 +14124,19 @@ pub struct InProcessPreJsCompileResult {
     pub lambda_sexp: String,
 }
 
+pub struct InProcessJsMetadataReady {
+    pub is_pure: bool,
+    pub cmj_export_constants: ahash::AHashMap<String, CmjExportConstant>,
+    pub cmj_export_arities: ahash::AHashMap<String, CmjExportArity>,
+    pub pers_struct: Option<PortablePersStruct>,
+    pub new_alias_rewrites: ahash::AHashMap<String, crate::types::path::Path>,
+}
+
 /// Signature payload produced after in-process implementation typechecking but
 /// before Lambda/JS compilation. Rewatch uses this to unblock dependent
 /// typechecking while preserving OCaml's save-before-translation order
 /// (compiler/ml/typemod.ml:1779-1788; compiler/ml/translmod.ml:267).
 pub struct InProcessSignatureReady {
-    pub signature: crate::types::decl::Signature,
     pub pers_struct: Option<PortablePersStruct>,
     pub new_alias_rewrites: ahash::AHashMap<String, crate::types::path::Path>,
 }
@@ -14123,6 +14146,8 @@ pub type InProcessSignatureReadyHook<'a> =
 
 pub type InProcessBeforeJsHook<'a> =
     dyn FnMut(&AHashSet<ModuleId>) -> Result<Option<ModuleRegistry>> + 'a;
+
+pub type InProcessJsMetadataReadyHook<'a> = dyn FnMut(InProcessJsMetadataReady) -> Result<()> + 'a;
 
 /// Result of an in-process `.resi` interface type-check.
 pub struct InProcessInterfaceResult {
@@ -14223,6 +14248,7 @@ pub fn compile_source_in_process(
     };
     let structure =
         crate::binary_ast::writer::apply_no_export_config(parser.arena_mut(), structure);
+    parser.arena_mut().reserve_typecheck_synthetic_capacity();
 
     let mut effective_options = options.clone();
     effective_options.experimental_let_unwrap = experimental_let_unwrap;
@@ -14337,11 +14363,44 @@ fn compile_js_program_for_output_owned(
     ahash::AHashMap<String, CmjExportConstant>,
     ahash::AHashMap<String, CmjExportArity>,
 ) {
+    let mut collected_possible_required_modules =
+        crate::timing::measure(crate::timing::Phase::Codegen, || {
+            crate::lambda::lam_compile::collect_possible_required_modules_for_lambda(
+                &lowered_lambda,
+            )
+        });
+    collected_possible_required_modules.extend(possible_required_modules.iter().cloned());
+    compile_js_program_for_output_owned_with_collected_modules(
+        lowered_lambda,
+        collected_possible_required_modules,
+        options,
+        output_path,
+        output_module_format,
+        persistent_env,
+        jsx_preserve,
+    )
+}
+
+fn compile_js_program_for_output_owned_with_collected_modules(
+    lowered_lambda: crate::lambda::Lambda,
+    possible_required_modules: AHashSet<ModuleId>,
+    options: &CompilerOptions,
+    output_path: Option<&FsPath>,
+    output_module_format: Option<ModuleFormat>,
+    persistent_env: Option<PersistentEnv>,
+    jsx_preserve: bool,
+) -> (
+    DepsProgram,
+    ModulePathResolver,
+    ahash::AHashMap<String, CmjExportConstant>,
+    ahash::AHashMap<String, CmjExportArity>,
+) {
     let _span = info_span!(
         "compiler.js_backend",
         module = options.module_name.as_deref().unwrap_or(""),
         owned = true,
-        possible_required_modules = possible_required_modules.len()
+        possible_required_modules = possible_required_modules.len(),
+        precomputed_possible_required_modules = true
     )
     .entered();
     let mut module_path_resolver = ModulePathResolver::from_compile_options(
@@ -14353,7 +14412,7 @@ fn compile_js_program_for_output_owned(
         persistent_env,
         options.make_runtime,
     );
-    for module in possible_required_modules {
+    for module in &possible_required_modules {
         if matches!(module.kind, Kind::Ml) && !module.dynamic_import {
             if let Some(path) =
                 module_path_resolver.resolve_local_module_fallback_path(module.id.name())
@@ -14368,7 +14427,7 @@ fn compile_js_program_for_output_owned(
         options.check_div_by_zero,
         options.cross_module_inline,
     );
-    let program = compiler.compile_deps_program_with_possible_required_modules_owned(
+    let program = compiler.compile_deps_program_with_collected_possible_required_modules_owned(
         lowered_lambda,
         possible_required_modules,
     );
@@ -14382,7 +14441,6 @@ fn compile_js_program_for_output_owned(
         cmj_export_arities,
     )
 }
-
 pub fn compile_preprocessed_structure_in_process(
     arena: &crate::parse_arena::ParseArena,
     structure: &Structure,
@@ -14512,7 +14570,7 @@ pub fn compile_preprocessed_structure_in_process_until_js(
                 .map_err(|e| anyhow!("Type checking failed: {e:?}"))
         })?;
 
-    let published_signature = {
+    let mut published_signature = {
         let _phase = info_span!("compiler.signature_prepare").entered();
         if has_interface {
             apply_moregen_constraints(
@@ -14539,7 +14597,7 @@ pub fn compile_preprocessed_structure_in_process_until_js(
 
         prepare_inferred_signature_for_saving(
             &type_ctx,
-            &typed_structure,
+            &simple_signature,
             options.source_filename.as_deref(),
             has_interface,
         );
@@ -14553,7 +14611,8 @@ pub fn compile_preprocessed_structure_in_process_until_js(
     // the already-published interface remains the target signature for
     // `Translmod.transl_implementation`; do not replace it with the
     // implementation signature or the export coercion becomes identity.
-    let (pers_struct, new_alias_rewrites, persistent_env_after_signature) = if has_interface {
+    let (mut pers_struct, mut new_alias_rewrites, persistent_env_after_signature) = if has_interface
+    {
         (
             None,
             Default::default(),
@@ -14568,9 +14627,14 @@ pub fn compile_preprocessed_structure_in_process_until_js(
             .take()
             .unwrap_or_else(PersistentEnv::new);
 
+        let signature_for_save = if signature_ready.is_some() {
+            std::mem::take(&mut published_signature)
+        } else {
+            published_signature.clone()
+        };
         internal_env.register_in_memory_signature(
             module_name,
-            published_signature.clone(),
+            signature_for_save,
             filename,
             &type_ctx,
         );
@@ -14609,9 +14673,8 @@ pub fn compile_preprocessed_structure_in_process_until_js(
     };
     if !has_interface && let Some(hook) = signature_ready.as_deref_mut() {
         let _ = hook(InProcessSignatureReady {
-            signature: published_signature.clone(),
-            pers_struct: pers_struct.clone(),
-            new_alias_rewrites: new_alias_rewrites.clone(),
+            pers_struct: pers_struct.take(),
+            new_alias_rewrites: std::mem::take(&mut new_alias_rewrites),
         })?;
     }
     tctx.persistent_env = Some(persistent_env_after_signature);
@@ -14630,14 +14693,14 @@ pub fn compile_preprocessed_structure_in_process_until_js(
         String::new()
     };
 
-    let lambda_start_stamp = type_ctx.current_stamp();
+    let lambda_start_stamp = synchronize_lambda_start_stamp(&type_ctx);
 
     let unit_name = options
         .source_filename
         .as_deref()
         .map(module_name_from_source_filename)
         .unwrap_or_default();
-    let (raw_lambda, raw_diagnostic, possible_required_modules, raw_lambda_current_stamp) =
+    let (raw_lambda, raw_diagnostic, raw_possible_required_modules, raw_lambda_current_stamp) =
         crate::timing::measure(crate::timing::Phase::Lambda, || {
             let _phase = info_span!("compiler.raw_lambda").entered();
             let implementation_coercion = compute_raw_implementation_coercion(
@@ -14694,6 +14757,9 @@ pub fn compile_preprocessed_structure_in_process_until_js(
             raw_lambda_current_stamp,
         )
     });
+    let mut possible_required_modules =
+        crate::lambda::lam_compile::collect_possible_required_modules_for_lambda(&lowered_lambda);
+    possible_required_modules.extend(raw_possible_required_modules);
     // OCaml has one mutable `Ident.currentstamp` through typechecking,
     // `Translmod.transl_implementation`, and `Lam_compile_main.compile`
     // (compiler/ext/ident.ml:26-58; compiler/core/js_implementation.ml:161-167).
@@ -14732,6 +14798,17 @@ pub fn finish_preprocessed_structure_in_process_from_js_boundary(
     options: &CompilerOptions,
     registry: &ModuleRegistry,
 ) -> Result<InProcessCompileResult> {
+    finish_preprocessed_structure_in_process_from_js_boundary_with_metadata_hook(
+        pre_js, options, registry, None,
+    )
+}
+
+pub fn finish_preprocessed_structure_in_process_from_js_boundary_with_metadata_hook(
+    mut pre_js: InProcessPreJsCompileResult,
+    options: &CompilerOptions,
+    registry: &ModuleRegistry,
+    mut metadata_ready: Option<&mut InProcessJsMetadataReadyHook<'_>>,
+) -> Result<InProcessCompileResult> {
     let _span = info_span!(
         "compiler.in_process_js_finish",
         module = options.module_name.as_deref().unwrap_or(""),
@@ -14761,7 +14838,7 @@ pub fn finish_preprocessed_structure_in_process_from_js_boundary(
         .or(options.output_module_format);
     let compile_multiple_js_targets = !options.skip_js_render && js_targets.len() > 1;
     let mut lowered_lambda = Some(pre_js.lowered_lambda);
-    let (program, module_path_resolver, cmj_export_constants, cmj_export_arities) = {
+    let (program, module_path_resolver, mut cmj_export_constants, mut cmj_export_arities) = {
         let _phase = info_span!(
             "compiler.js_compile",
             multiple_targets = compile_multiple_js_targets
@@ -14801,6 +14878,15 @@ pub fn finish_preprocessed_structure_in_process_from_js_boundary(
         )?;
     }
     let is_pure = program.side_effect.is_none();
+    if let Some(hook) = metadata_ready.as_deref_mut() {
+        hook(InProcessJsMetadataReady {
+            is_pure,
+            cmj_export_constants: std::mem::take(&mut cmj_export_constants),
+            cmj_export_arities: std::mem::take(&mut cmj_export_arities),
+            pers_struct: pre_js.pers_struct.take(),
+            new_alias_rewrites: std::mem::take(&mut pre_js.new_alias_rewrites),
+        })?;
+    }
     let mut rendered_programs = if options.skip_js_render {
         crate::js_ir::dispose_deps_program_nonrecursive(program);
         Vec::new()
@@ -14945,6 +15031,7 @@ pub fn typecheck_interface_in_process(
         source,
         filename,
     )?;
+    parser.arena_mut().reserve_typecheck_synthetic_capacity();
 
     typecheck_preprocessed_signature_in_process(
         parser.arena(),
@@ -15083,6 +15170,7 @@ pub fn typecheck_implementation_in_process(
     let file_config = extract_file_config_from_structure(&structure, parser.arena());
     let frontend_warning_specs =
         ppx::collect_leading_builtin_warning_attribute_specs(&structure, parser.arena());
+    parser.arena_mut().reserve_typecheck_synthetic_capacity();
 
     crate::ident::Ident::set_current_time(OCAML_NON_PREDEF_STAMP_START);
     let id_gen = IdGenerator::with_start_stamp(OCAML_NON_PREDEF_STAMP_START);

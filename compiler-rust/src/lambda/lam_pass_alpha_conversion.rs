@@ -9,6 +9,7 @@
 
 use crate::lambda::lam_compile_context::LamStats;
 use crate::lambda::lam_eta_conversion::{transform_under_supply, unsafe_adjust_to_arity};
+use crate::lambda::lam_pass_collect::ExternalArityResolver;
 use crate::lambda::lam_primitive::Primitive;
 use crate::lambda::{
     ApInfo, Apply, ApplyStatus, FunctionAttribute, Lambda, LambdaSwitch, PrimInfo,
@@ -27,19 +28,45 @@ pub fn alpha_conversion(meta: &LamStats, lam: &Lambda) -> Lambda {
 /// pass result in the backend pipeline, preserving the same case behavior while
 /// avoiding an eager clone of the whole tree before the rebuild.
 pub fn alpha_conversion_owned(meta: &LamStats, lam: Lambda) -> Lambda {
-    let alpha = Alpha { meta };
+    let mut meta = meta.clone();
+    let mut alpha = Alpha {
+        meta: &mut meta,
+        external_arity: None,
+    };
     alpha.simpl_owned(lam)
 }
 
-struct Alpha<'a> {
-    meta: &'a LamStats,
+pub fn alpha_conversion_with_external_arity_owned(
+    meta: &mut LamStats,
+    lam: Lambda,
+    external_arity: &mut ExternalArityResolver<'_>,
+) -> Lambda {
+    let mut alpha = Alpha {
+        meta,
+        external_arity: Some(external_arity),
+    };
+    alpha.simpl_owned(lam)
 }
 
-impl<'a> Alpha<'a> {
+struct Alpha<'a, 'r> {
+    meta: &'a mut LamStats,
+    external_arity: Option<&'a mut ExternalArityResolver<'r>>,
+}
+
+impl<'a, 'r> Alpha<'a, 'r> {
+    fn get_arity(&mut self, lam: &Lambda) -> crate::lambda::lam_arity::Arity {
+        match self.external_arity.as_deref_mut() {
+            Some(resolver) => crate::lambda::lam_pass_collect::get_arity_with_external_arity(
+                self.meta, lam, resolver,
+            ),
+            None => crate::lambda::lam_pass_collect::get_arity(self.meta, lam),
+        }
+    }
+
     /// Direct port of `populate_apply_info`
     /// (lam_pass_alpha_conversion.ml:26-49).
     fn populate_apply_info(
-        &self,
+        &mut self,
         ap_transformed_jsx: bool,
         args_arity: &[i32],
         len: i32,
@@ -101,7 +128,7 @@ impl<'a> Alpha<'a> {
     /// Owned form of `populate_apply_info`
     /// (`compiler/core/lam_pass_alpha_conversion.ml:26-49`).
     fn populate_apply_info_owned(
-        &self,
+        &mut self,
         ap_transformed_jsx: bool,
         args_arity: &[i32],
         len: i32,
@@ -157,7 +184,7 @@ impl<'a> Alpha<'a> {
     }
 
     /// Direct port of `simpl` (lam_pass_alpha_conversion.ml:50-126).
-    fn simpl(&self, lam: &Lambda) -> Lambda {
+    fn simpl(&mut self, lam: &Lambda) -> Lambda {
         match lam {
             // lam_pass_alpha_conversion.ml:52-53
             Lambda::Lconst(_) | Lambda::Lvar(_) => lam.clone(),
@@ -169,7 +196,7 @@ impl<'a> Alpha<'a> {
                 ap_info,
                 ap_transformed_jsx,
             }) => {
-                let args_arity = get_arity(self.meta, ap_func).extract_arity();
+                let args_arity = self.get_arity(ap_func).extract_arity();
                 let len = ap_args.len() as i32;
                 self.populate_apply_info(
                     *ap_transformed_jsx,
@@ -206,7 +233,7 @@ impl<'a> Alpha<'a> {
                 loc,
             }) if args.len() == 1 => {
                 let arg = &args[0];
-                match get_arity(self.meta, arg).get_first_arity() {
+                match self.get_arity(arg).get_first_arity() {
                     Some(x) => {
                         let arg = self.simpl(arg);
                         unsafe_adjust_to_arity(&self.meta.id_gen, loc.clone(), *len, Some(x), arg)
@@ -346,7 +373,7 @@ impl<'a> Alpha<'a> {
     }
 
     /// Owned form of `simpl` (`compiler/core/lam_pass_alpha_conversion.ml:50-126`).
-    fn simpl_owned(&self, lam: Lambda) -> Lambda {
+    fn simpl_owned(&mut self, lam: Lambda) -> Lambda {
         match lam {
             Lambda::Lconst(_) | Lambda::Lvar(_) | Lambda::LglobalModule(_, _) => lam,
             Lambda::Lapply(Apply {
@@ -355,7 +382,7 @@ impl<'a> Alpha<'a> {
                 ap_info,
                 ap_transformed_jsx,
             }) => {
-                let args_arity = get_arity(self.meta, &ap_func).extract_arity();
+                let args_arity = self.get_arity(&ap_func).extract_arity();
                 let len = ap_args.len() as i32;
                 self.populate_apply_info_owned(
                     ap_transformed_jsx,
@@ -382,7 +409,7 @@ impl<'a> Alpha<'a> {
                 loc,
             }) if args.len() == 1 => {
                 let arg = args.pop().expect("checked single PjsFnMake arg");
-                match get_arity(self.meta, &arg).get_first_arity() {
+                match self.get_arity(&arg).get_first_arity() {
                     Some(x) => {
                         let arg = self.simpl_owned(arg);
                         unsafe_adjust_to_arity(&self.meta.id_gen, loc, len, Some(x), arg)
@@ -488,13 +515,4 @@ impl<'a> Alpha<'a> {
             Lambda::Lassign(v, l) => Lambda::assign(v, self.simpl_owned(*l)),
         }
     }
-}
-
-// Re-exposes `lam_pass_collect::get_arity` via the public collect_info module.
-// For now the function is private inside `collect_info.rs`; expose a thin
-// wrapper here that calls back into the module via the existing
-// `collect_info` re-export. We only need the read-side, so the implementation
-// lives there to avoid duplicating ~150 lines.
-fn get_arity(meta: &LamStats, lam: &Lambda) -> crate::lambda::lam_arity::Arity {
-    crate::lambda::lam_pass_collect::get_arity(meta, lam)
 }

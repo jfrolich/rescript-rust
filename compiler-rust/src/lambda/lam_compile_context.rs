@@ -82,17 +82,18 @@ pub enum IdKind {
 /// Identifier table for tracking identifier kinds.
 pub type IdentTable = HashMap<Ident, IdKind>;
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct ExternalArityKey {
-    pub module_name: String,
-    pub dynamic_import: bool,
-    pub field_name: String,
-}
-
 #[derive(Debug, Clone)]
 pub enum ExternalArityInfo {
     Single(Arity),
     Submodule(Vec<Arity>),
+}
+
+pub type ExternalArityFieldTable = HashMap<String, Option<ExternalArityInfo>>;
+
+#[derive(Debug, Clone, Default)]
+pub struct ExternalArityTable {
+    pub static_imports: HashMap<String, ExternalArityFieldTable>,
+    pub dynamic_imports: HashMap<String, ExternalArityFieldTable>,
 }
 
 /// Lambda compilation statistics and metadata.
@@ -111,7 +112,7 @@ pub struct LamStats {
     /// (compiler/core/lam_arity_analysis.ml:43-71). Rust keeps the resolved
     /// metadata here so the later collect/alpha passes can consult it without
     /// probing the filesystem themselves.
-    pub external_arities: HashMap<ExternalArityKey, ExternalArityInfo>,
+    pub external_arities: ExternalArityTable,
     /// Shared stamp counter for `Ident::rename` calls across the pipeline.
     ///
     /// OCaml's `Ident.rename` consults a single global mutable counter, so every
@@ -132,7 +133,7 @@ impl LamStats {
             export_idents,
             exports,
             ident_tbl: HashMap::new(),
-            external_arities: HashMap::new(),
+            external_arities: ExternalArityTable::default(),
             id_gen: std::sync::Arc::new(crate::context::IdGenerator::new()),
         }
     }

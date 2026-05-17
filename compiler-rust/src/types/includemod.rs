@@ -743,8 +743,7 @@ fn format_type_declaration_with_options_and_rec(
     );
     let prefix = if decl.type_unboxed.unboxed || type_decl_has_attr(decl, "unboxed") {
         "@unboxed "
-    } else if type_decl_has_attr(decl, "immediate") || type_decl_has_attr(decl, "ocaml.immediate")
-    {
+    } else if type_decl_has_attr(decl, "immediate") || type_decl_has_attr(decl, "ocaml.immediate") {
         "@immediate "
     } else {
         ""
@@ -2533,9 +2532,9 @@ fn substitute_constructor_arguments_with_copied_types(
     types: &mut std::vec::IntoIter<TypeExprRef>,
 ) -> ConstructorArguments {
     match args {
-        ConstructorArguments::CstrTuple(items) => ConstructorArguments::CstrTuple(
-            items.iter().map(|_| next_copied_type(types)).collect(),
-        ),
+        ConstructorArguments::CstrTuple(items) => {
+            ConstructorArguments::CstrTuple(items.iter().map(|_| next_copied_type(types)).collect())
+        }
         ConstructorArguments::CstrRecord(labels) => ConstructorArguments::CstrRecord(
             labels
                 .iter()
@@ -3106,7 +3105,10 @@ pub(crate) fn type_declarations<'a>(
         // Abstract in signature allows any implementation
         (_, TypeKind::TypeAbstract) => {}
 
-        (TypeKind::TypeRecord(impl_labels, impl_rep), TypeKind::TypeRecord(sig_labels, sig_rep)) => {
+        (
+            TypeKind::TypeRecord(impl_labels, impl_rep),
+            TypeKind::TypeRecord(sig_labels, sig_rep),
+        ) => {
             if let Some(detail) = compare_record_declarations(
                 type_ctx,
                 env,
@@ -3168,8 +3170,8 @@ pub(crate) fn type_declarations<'a>(
     }
 
     // Match OCaml's Includecore.type_declarations variance check.
-    let sig_is_abstract = matches!(sig_decl.type_kind, TypeKind::TypeAbstract)
-        && sig_decl.type_manifest.is_none();
+    let sig_is_abstract =
+        matches!(sig_decl.type_kind, TypeKind::TypeAbstract) && sig_decl.type_manifest.is_none();
     let need_variance = sig_is_abstract
         || matches!(impl_decl.type_private, crate::types::PrivateFlag::Private)
         || matches!(impl_decl.type_kind, TypeKind::TypeOpen);
@@ -3381,15 +3383,12 @@ fn type_param_lists_equal_for_inclusion(
         return false;
     }
     let empty_param_map = HashMap::default();
-    impl_params.iter().zip(sig_params.iter()).all(|(impl_ty, sig_ty)| {
-        type_exprs_equal_for_inclusion(
-            type_ctx,
-            Some(env),
-            &empty_param_map,
-            *impl_ty,
-            *sig_ty,
-        )
-    })
+    impl_params
+        .iter()
+        .zip(sig_params.iter())
+        .all(|(impl_ty, sig_ty)| {
+            type_exprs_equal_for_inclusion(type_ctx, Some(env), &empty_param_map, *impl_ty, *sig_ty)
+        })
 }
 
 fn compare_variant_declarations(

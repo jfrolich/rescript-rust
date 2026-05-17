@@ -253,7 +253,7 @@ pub struct CmjModuleImportInfo {
 #[derive(Debug, Clone)]
 pub struct InMemoryModuleInfo {
     /// Source file path (replaces `.ast` source-path lookup)
-    pub source_path: PathBuf,
+    pub source_path: Arc<PathBuf>,
     /// Whether the module is side-effect free (replaces `.cmj` purity lookup)
     pub is_pure: bool,
     /// Closed constant exports (replaces `.cmj` constant lookup)
@@ -263,11 +263,11 @@ pub struct InMemoryModuleInfo {
     /// Whether this module belongs to `@rescript/runtime`
     pub is_runtime: bool,
     /// Package name used by JS import rebasing in `--in-process` builds.
-    pub package_name: Option<String>,
+    pub package_name: Option<Arc<str>>,
     /// Package root used to turn a source path into a package-relative JS path.
-    pub package_root: Option<PathBuf>,
+    pub package_root: Option<Arc<PathBuf>>,
     /// JS suffix for this package's emitted output.
-    pub js_output_suffix: Option<String>,
+    pub js_output_suffix: Option<Arc<str>>,
 }
 
 impl InMemoryModuleInfo {
@@ -278,7 +278,7 @@ impl InMemoryModuleInfo {
         is_runtime: bool,
     ) -> Self {
         Self {
-            source_path,
+            source_path: Arc::new(source_path),
             is_pure,
             cmj_export_constants: Arc::new(cmj_export_constants),
             cmj_export_arities: Arc::new(HashMap::new()),
@@ -303,9 +303,10 @@ impl InMemoryModuleInfo {
         package_root: PathBuf,
         js_output_suffix: Option<String>,
     ) -> Self {
-        self.package_name = Some(package_name);
-        self.package_root = Some(package_root);
-        self.js_output_suffix = js_output_suffix;
+        self.package_name = Some(Arc::from(package_name.into_boxed_str()));
+        self.package_root = Some(Arc::new(package_root));
+        self.js_output_suffix =
+            js_output_suffix.map(|suffix| Arc::from(suffix.into_boxed_str()));
         self
     }
 }
@@ -677,10 +678,12 @@ pub enum PersistentEnvError {
 fn should_register_lazy_raw_sig(name: &str, alias_rewrites: &AliasPrefixRewrites) -> bool {
     // OCaml compiler/ml/env.ml:1516-1518 reaches alias backing signatures only
     // through `scrape_alias` and the component tables built by env.ml:1530-1578.
-    // Rust keeps raw signatures for the same known backing heads; use the
-    // alias table populated by `collect_alias_rewrites` instead of guessing from
-    // flattened name spelling.
-    alias_rewrites.get(name).is_some()
+    // Rust keeps raw signatures for the same known backing unit heads. Ordinary
+    // same-name aliases already resolve through their component table and do
+    // not need to be added to the ps_sig rename set.
+    alias_rewrites
+        .get(name)
+        .is_some_and(|qualified_path| qualified_path.head_name() != name)
 }
 
 impl PersistentEnv {
@@ -989,8 +992,18 @@ impl PersistentEnv {
         name: &str,
         ctx: &'a TypeContext,
     ) -> Option<Arc<PersStruct>> {
+        let debug_pers = std::env::var_os("RUST_DEBUG_PERS_STRUCT").is_some();
+        if debug_pers {
+            eprintln!("[pers] find {name}");
+        }
         // Check cache first (already internalized)
         if let Some((cache_key, cached)) = self.cache_lookup_entry(name) {
+            if debug_pers {
+                eprintln!(
+                    "[pers] cache {name} key={cache_key} hit={}",
+                    cached.is_some()
+                );
+            }
             if let Some(ps) = cached.as_ref() {
                 self.prepare_cached_pers_struct(&cache_key, ps, ctx);
             } else if self.in_process_mode
@@ -1020,6 +1033,9 @@ impl PersistentEnv {
         // 2. Collect alias rewrites
         // 3. Register types by stamp (without cascading alias resolution)
         if let Some((portable_key, portable)) = self.portable_cache_entry(name) {
+            if debug_pers {
+                eprintln!("[pers] portable {name} key={portable_key}");
+            }
             if self.hidden_modules.contains(&portable_key) {
                 return None;
             }
@@ -1071,6 +1087,9 @@ impl PersistentEnv {
             .source_fallback_path_entry(name)
             .map(|(key, _)| key)
             .unwrap_or_else(|| name.to_string());
+        if debug_pers {
+            eprintln!("[pers] load {name} as {load_name}");
+        }
         self.cache_insert(load_name.clone(), None);
 
         // Try to load from disk
@@ -1201,7 +1220,7 @@ impl PersistentEnv {
     pub fn resolve_module_source_path(&self, name: &str) -> Option<PathBuf> {
         // Check in-memory registry first (--in-process mode)
         if let Some(info) = self.in_memory_info(name) {
-            return Some(info.source_path.clone());
+            return Some((*info.source_path).clone());
         }
 
         // In in-process mode, the registry is authoritative — no disk fallback.
@@ -1230,12 +1249,15 @@ impl PersistentEnv {
     }
 
     /// Return in-memory package metadata for JS import rebasing.
-    pub fn module_js_package_info(&self, name: &str) -> Option<(String, PathBuf, Option<String>)> {
+    pub fn module_js_package_info(
+        &self,
+        name: &str,
+    ) -> Option<(Arc<str>, Arc<PathBuf>, Option<Arc<str>>)> {
         let info = self.in_memory_info(name)?;
         Some((
-            info.package_name?,
-            info.package_root?,
-            info.js_output_suffix,
+            info.package_name.clone()?,
+            info.package_root.clone()?,
+            info.js_output_suffix.clone(),
         ))
     }
 
@@ -3532,7 +3554,9 @@ fn substitute_type_paths_in_sig_with_maps(
                     substitute_type_paths_in_sig_with_maps(sub_sig, maps, ctx);
                 }
             }
-            _ => {}
+            SignatureItem::SigModtype(..)
+            | SignatureItem::SigClass
+            | SignatureItem::SigClassType => {}
         }
     }
 }
@@ -4840,6 +4864,15 @@ fn rewrite_path_by_path_prefix(path: &Path, old_prefix: &Path, new_prefix: &Path
     }
 }
 
+fn rewrite_path_by_path_prefixes(path: &Path, prefixes: &[(Path, Path)]) -> Option<Path> {
+    for (old_prefix, new_prefix) in prefixes {
+        if let Some(rewritten) = rewrite_path_by_path_prefix(path, old_prefix, new_prefix) {
+            return Some(rewritten);
+        }
+    }
+    None
+}
+
 fn rewrite_module_type_by_path_prefix(
     module_type: &mut ModuleType,
     old_prefix: &Path,
@@ -5076,6 +5109,103 @@ pub fn rewrite_type_expr_by_path_prefix_pub(
     rewrite_type_expr_by_path_prefix(ty_ref, old_prefix, new_prefix, ctx, &mut visited);
 }
 
+fn rewrite_type_expr_by_path_prefixes(
+    ty_ref: TypeExprRef,
+    prefixes: &[(Path, Path)],
+    ctx: &TypeContext,
+    visited: &mut HashSet<usize>,
+) {
+    if !visited.insert(ty_ref.index()) {
+        return;
+    }
+
+    let desc = ctx.get_desc(ty_ref);
+    match &*desc {
+        TypeDesc::Tconstr { path, args, .. } => {
+            if let Some(new_path) = rewrite_path_by_path_prefixes(path, prefixes) {
+                let mut new_desc = (*desc).clone();
+                if let TypeDesc::Tconstr { ref mut path, .. } = new_desc {
+                    *path = new_path;
+                }
+                ctx.set_desc(ty_ref, new_desc);
+            }
+            for &arg in args {
+                rewrite_type_expr_by_path_prefixes(arg, prefixes, ctx, visited);
+            }
+        }
+        TypeDesc::Tarrow { arg, ret, .. } => {
+            rewrite_type_expr_by_path_prefixes(arg.typ, prefixes, ctx, visited);
+            rewrite_type_expr_by_path_prefixes(*ret, prefixes, ctx, visited);
+        }
+        TypeDesc::Ttuple(types) => {
+            for &t in types {
+                rewrite_type_expr_by_path_prefixes(t, prefixes, ctx, visited);
+            }
+        }
+        TypeDesc::Tlink(t) | TypeDesc::Tsubst(t) => {
+            rewrite_type_expr_by_path_prefixes(*t, prefixes, ctx, visited);
+        }
+        TypeDesc::Tpoly { body, vars } => {
+            rewrite_type_expr_by_path_prefixes(*body, prefixes, ctx, visited);
+            for &v in vars {
+                rewrite_type_expr_by_path_prefixes(v, prefixes, ctx, visited);
+            }
+        }
+        TypeDesc::Tobject { fields, .. } => {
+            rewrite_type_expr_by_path_prefixes(*fields, prefixes, ctx, visited);
+        }
+        TypeDesc::Tfield { typ, rest, .. } => {
+            rewrite_type_expr_by_path_prefixes(*typ, prefixes, ctx, visited);
+            rewrite_type_expr_by_path_prefixes(*rest, prefixes, ctx, visited);
+        }
+        TypeDesc::Tvariant(row) => {
+            if let Some((path, _)) = &row.row_name
+                && let Some(new_path) = rewrite_path_by_path_prefixes(path, prefixes)
+            {
+                let mut new_desc = (*desc).clone();
+                if let TypeDesc::Tvariant(ref mut row) = new_desc
+                    && let Some((ref mut path, _)) = row.row_name
+                {
+                    *path = new_path;
+                }
+                ctx.set_desc(ty_ref, new_desc);
+            }
+            if let Some((_, args)) = &row.row_name {
+                for &arg in args {
+                    rewrite_type_expr_by_path_prefixes(arg, prefixes, ctx, visited);
+                }
+            }
+            rewrite_type_expr_by_path_prefixes(row.row_more, prefixes, ctx, visited);
+            for field in &row.row_fields {
+                match &field.1 {
+                    crate::types::type_expr::RowField::Rpresent(Some(t)) => {
+                        rewrite_type_expr_by_path_prefixes(*t, prefixes, ctx, visited);
+                    }
+                    crate::types::type_expr::RowField::Reither { types, .. } => {
+                        for &t in types {
+                            rewrite_type_expr_by_path_prefixes(t, prefixes, ctx, visited);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        TypeDesc::Tpackage { path, args, .. } => {
+            if let Some(new_path) = rewrite_path_by_path_prefixes(path, prefixes) {
+                let mut new_desc = (*desc).clone();
+                if let TypeDesc::Tpackage { ref mut path, .. } = new_desc {
+                    *path = new_path;
+                }
+                ctx.set_desc(ty_ref, new_desc);
+            }
+            for &arg in args {
+                rewrite_type_expr_by_path_prefixes(arg, prefixes, ctx, visited);
+            }
+        }
+        TypeDesc::Tvar(_) | TypeDesc::Tunivar(_) | TypeDesc::Tnil => {}
+    }
+}
+
 /// Rewrite all type paths in a signature by replacing path prefix `old_prefix`
 /// with `new_prefix`. Used when resolving module aliases like `module J = Js.Json`:
 /// rewrites `Pdot(Pdot(Pident("Js"), "Json"), "Kind")` → `Pdot(Pident("J"), "Kind")`.
@@ -5172,6 +5302,90 @@ pub fn rewrite_sig_by_path_prefix(
             SignatureItem::SigModule(_id, md, _) => {
                 if let ModuleType::MtySignature(sub_sig) = &md.md_type {
                     rewrite_sig_by_path_prefix(sub_sig, old_prefix, new_prefix, ctx);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Rewrite all type paths in a signature using a batch of sibling path-prefix
+/// substitutions. This mirrors OCaml `Subst` maps: one signature traversal can
+/// apply all child component substitutions for a table.
+pub fn rewrite_sig_by_path_prefixes(
+    sig_items: &[SignatureItem],
+    prefixes: &[(Path, Path)],
+    ctx: &TypeContext,
+) {
+    if prefixes.is_empty() {
+        return;
+    }
+
+    let mut visited = HashSet::new();
+
+    for item in sig_items {
+        match item {
+            SignatureItem::SigValue(_id, desc) => {
+                rewrite_type_expr_by_path_prefixes(desc.val_type, prefixes, ctx, &mut visited);
+            }
+            SignatureItem::SigType(_id, decl, _) => {
+                for &param in &decl.type_params {
+                    rewrite_type_expr_by_path_prefixes(param, prefixes, ctx, &mut visited);
+                }
+                if let Some(manifest) = decl.type_manifest {
+                    rewrite_type_expr_by_path_prefixes(manifest, prefixes, ctx, &mut visited);
+                }
+                match &decl.type_kind {
+                    TypeKind::TypeVariant(constrs) => {
+                        for cd in constrs {
+                            match &cd.cd_args {
+                                crate::types::decl::ConstructorArguments::CstrTuple(args) => {
+                                    for &arg in args {
+                                        rewrite_type_expr_by_path_prefixes(
+                                            arg,
+                                            prefixes,
+                                            ctx,
+                                            &mut visited,
+                                        );
+                                    }
+                                }
+                                crate::types::decl::ConstructorArguments::CstrRecord(labels) => {
+                                    for lbl in labels {
+                                        rewrite_type_expr_by_path_prefixes(
+                                            lbl.ld_type,
+                                            prefixes,
+                                            ctx,
+                                            &mut visited,
+                                        );
+                                    }
+                                }
+                            }
+                            if let Some(res) = cd.cd_res {
+                                rewrite_type_expr_by_path_prefixes(
+                                    res,
+                                    prefixes,
+                                    ctx,
+                                    &mut visited,
+                                );
+                            }
+                        }
+                    }
+                    TypeKind::TypeRecord(labels, _) => {
+                        for lbl in labels {
+                            rewrite_type_expr_by_path_prefixes(
+                                lbl.ld_type,
+                                prefixes,
+                                ctx,
+                                &mut visited,
+                            );
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            SignatureItem::SigModule(_id, md, _) => {
+                if let ModuleType::MtySignature(sub_sig) = &md.md_type {
+                    rewrite_sig_by_path_prefixes(sub_sig, prefixes, ctx);
                 }
             }
             _ => {}
@@ -5674,6 +5888,13 @@ fn add_signature_to_env_with_options(
     // only value-bearing items (non-primitive values, modules, extension constructors)
     // get runtime field positions. Types and module types are skipped.
     let mut pos: i32 = 0;
+    let mut opened_values = Vec::new();
+    let mut opened_types = Vec::new();
+    let mut opened_constructors = Vec::new();
+    let mut opened_labels = Vec::new();
+    let mut opened_modules = Vec::new();
+    let mut opened_module_components = Vec::new();
+    let mut opened_modtypes = Vec::new();
     for item in sig_items.iter() {
         let slot_path = |name: &str, p: i32| {
             Path::Pdot(
@@ -5686,7 +5907,8 @@ fn add_signature_to_env_with_options(
             SignatureItem::SigValue(id, desc) => {
                 // Add value binding with qualified path
                 let mut desc = desc.clone();
-                desc.val_path = Some(slot_path(id.name(), pos));
+                let value_pos = pos;
+                desc.val_path = Some(slot_path(id.name(), value_pos));
                 // OCaml: only increment pos for non-primitive values
                 if !matches!(desc.val_kind, crate::types::decl::ValueKind::ValPrim(_)) {
                     pos += 1;
@@ -5717,7 +5939,7 @@ fn add_signature_to_env_with_options(
                     );
                 }
                 if as_opened {
-                    env.add_opened_value(id.clone(), desc);
+                    opened_values.push((id.clone(), desc, value_pos));
                 } else {
                     env.add_value(id.clone(), desc);
                 }
@@ -5727,7 +5949,7 @@ fn add_signature_to_env_with_options(
                 let mut decl = decl.clone();
                 decl.type_path = Some(Path::pdot(module_path.clone(), id.name()));
                 if as_opened {
-                    env.add_opened_type(id.clone(), decl.clone());
+                    opened_types.push((id.clone(), decl.clone()));
                 } else {
                     env.add_type(id.clone(), decl.clone());
                 }
@@ -5867,7 +6089,7 @@ fn add_signature_to_env_with_options(
                                         Path::pdot(type_path.clone(), cstr_desc.cstr_name.clone());
                                     let ty_res = ctx
                                         .new_constr(inline_path, inlined_decl.type_params.clone());
-                                    for (pos, ld) in labels.iter().enumerate() {
+	                                    for (pos, ld) in labels.iter().enumerate() {
                                         let label_desc = LabelDescription {
                                             lbl_name: ld.ld_id.name().to_string(),
                                             lbl_res: ty_res,
@@ -5887,7 +6109,7 @@ fn add_signature_to_env_with_options(
                                             lbl_attributes: ld.ld_attributes.clone(),
                                         };
                                         if as_opened {
-                                            env.add_opened_label(ld.ld_id.clone(), label_desc);
+                                            opened_labels.push((ld.ld_id.clone(), label_desc));
                                         } else {
                                             env.add_label(ld.ld_id.clone(), label_desc);
                                         }
@@ -5896,7 +6118,7 @@ fn add_signature_to_env_with_options(
                             }
 
                             if as_opened {
-                                env.add_opened_constructor(cd.cd_id.clone(), cstr_desc);
+                                opened_constructors.push((cd.cd_id.clone(), cstr_desc));
                             } else {
                                 env.add_constructor(cd.cd_id.clone(), cstr_desc);
                             }
@@ -5925,7 +6147,7 @@ fn add_signature_to_env_with_options(
                                 lbl_attributes: ld.ld_attributes.clone(),
                             };
                             if as_opened {
-                                env.add_opened_label(ld.ld_id.clone(), label_desc);
+                                opened_labels.push((ld.ld_id.clone(), label_desc));
                             } else {
                                 env.add_label(ld.ld_id.clone(), label_desc);
                             }
@@ -5939,7 +6161,8 @@ fn add_signature_to_env_with_options(
                 // Set the qualified path so that when this module is accessed
                 // via Lident (e.g. "Console" from opened Stdlib), we produce
                 // the correct Pdot path (e.g. Pdot(Pident("Stdlib"), "Console"))
-                let access_path = slot_path(id.name(), pos);
+                let module_pos = pos;
+                let access_path = slot_path(id.name(), module_pos);
                 pos += 1;
                 md.md_path = Some(access_path.clone());
                 // Rewrite module-type paths against the opened signature.
@@ -6025,20 +6248,22 @@ fn add_signature_to_env_with_options(
                             Env::empty(),
                             access_path.clone(),
                             md.clone(),
-                        ));
-                        env.add_opened_module_with_components(id.clone(), md.clone(), stored);
-                    } else if let Some((_, stored)) = precomputed_components
-                        .and_then(|components| components.lookup_child_components(id.name()))
-                    {
+	                        ));
+	                        opened_module_components.push((id.clone(), stored, module_pos));
+	                        opened_modules.push((id.clone(), md.clone(), module_pos));
+	                    } else if let Some((_, stored)) = precomputed_components
+	                        .and_then(|components| components.lookup_child_components(id.name(), ctx))
+	                    {
                         // OCaml compiler/ml/env.ml:1841-1877 opens the
                         // already-built `comp_components` table alongside
                         // `comp_modules`. Reuse that child component thunk so
                         // opened-module source lookup follows env.ml:1000-1013
                         // without forcing the parent module declaration.
-                        env.add_opened_module_with_components(id.clone(), md.clone(), stored);
-                    } else {
-                        env.add_opened_module(id.clone(), md.clone());
-                    }
+	                        opened_module_components.push((id.clone(), stored, module_pos));
+	                        opened_modules.push((id.clone(), md.clone(), module_pos));
+	                    } else {
+	                        opened_modules.push((id.clone(), md.clone(), module_pos));
+	                    }
                 } else {
                     env.add_module(id.clone(), md.clone());
                 }
@@ -6060,7 +6285,7 @@ fn add_signature_to_env_with_options(
                     })
                     .unwrap_or_else(|| mtd.clone());
                 if as_opened {
-                    env.add_opened_modtype(id.clone(), mtd);
+                    opened_modtypes.push((id.clone(), mtd));
                 } else {
                     env.add_modtype(id.clone(), mtd);
                 }
@@ -6098,7 +6323,7 @@ fn add_signature_to_env_with_options(
                     cstr_inlined: None,
                 };
                 if as_opened {
-                    env.add_opened_constructor(id.clone(), cstr_desc);
+                    opened_constructors.push((id.clone(), cstr_desc));
                 } else {
                     env.add_constructor(id.clone(), cstr_desc);
                 }
@@ -6107,5 +6332,17 @@ fn add_signature_to_env_with_options(
                 // Skip class/class_type (not used in ReScript)
             }
         }
+    }
+    if as_opened {
+        env.add_opened_component_layers(
+            module_path.clone(),
+            opened_values,
+            opened_types,
+            opened_constructors,
+            opened_labels,
+            opened_modules,
+            opened_module_components,
+            opened_modtypes,
+        );
     }
 }

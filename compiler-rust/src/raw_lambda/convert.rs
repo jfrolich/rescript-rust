@@ -4,6 +4,7 @@
 //! incrementally ports expression lowering from `translcore.ml`.
 
 use ahash::AHashSet;
+use std::borrow::Cow;
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::Path as StdPath;
 use std::sync::{Mutex, OnceLock};
@@ -1467,29 +1468,6 @@ impl<'a> RawLambdaConverter<'a> {
             }
             _ => None,
         }
-    }
-
-    fn logical_record_field_count_for_fields(&self, fields: &[RecordField]) -> Option<usize> {
-        let first_lbl = fields.first().map(|(_, lbl, _, _)| lbl)?;
-        match first_lbl.lbl_repres {
-            RecordRepresentation::RecordRegular | RecordRepresentation::RecordInlined { .. } => {}
-            _ => return None,
-        }
-
-        let labels = self.resolve_all_record_labels(first_lbl.lbl_res)?;
-        if labels.len() <= fields.len() {
-            return None;
-        }
-        labels
-            .iter()
-            .all(|(_, _, _, repr, _)| {
-                matches!(
-                    repr,
-                    RecordRepresentation::RecordRegular
-                        | RecordRepresentation::RecordInlined { .. }
-                )
-            })
-            .then_some(labels.len())
     }
 
     fn global_path(&self) -> Option<crate::types::Path> {
@@ -3619,8 +3597,6 @@ impl<'a> RawLambdaConverter<'a> {
         empty_repres: Option<RecordRepresentation>,
         logical_field_count: Option<usize>,
     ) -> RawLambda {
-        let logical_field_count =
-            logical_field_count.or_else(|| self.logical_record_field_count_for_fields(fields));
         let first_lbl = fields.first().map(|(_, first_lbl, _, _)| first_lbl);
         let repres = first_lbl
             .map(|lbl| lbl.lbl_repres.clone())
@@ -3908,21 +3884,32 @@ impl<'a> RawLambdaConverter<'a> {
         expanded
     }
 
-    fn compact_sparse_record_fields_for_output(
+    fn compact_sparse_record_fields_for_output<'b>(
         &self,
         all_labels: &std::sync::Arc<Vec<LabelDescription>>,
-        fields: &[RecordField],
-    ) -> Vec<RecordField> {
+        fields: &'b [RecordField],
+    ) -> Cow<'b, [RecordField]> {
         // If every selected label has a materialized slot, sorting by `lbl_pos`
         // preserves OCaml `lbl_all` field order without walking omitted fields.
         if fields.iter().all(|field| field.1.lbl_pos >= 0) {
+            let already_ordered = fields
+                .windows(2)
+                .all(|pair| pair[0].1.lbl_pos <= pair[1].1.lbl_pos);
+            let has_static_optional_none = fields
+                .iter()
+                .any(|field| record_field_is_static_optional_none(&field.1, &field.2));
+            if already_ordered && !has_static_optional_none {
+                return Cow::Borrowed(fields);
+            }
             let mut compact = fields
                 .iter()
                 .filter(|field| !record_field_is_static_optional_none(&field.1, &field.2))
                 .cloned()
                 .collect::<Vec<_>>();
-            compact.sort_by_key(|field| field.1.lbl_pos);
-            return compact;
+            if !already_ordered {
+                compact.sort_by_key(|field| field.1.lbl_pos);
+            }
+            return Cow::Owned(compact);
         }
 
         let mut compact = Vec::with_capacity(fields.len());
@@ -3943,18 +3930,18 @@ impl<'a> RawLambdaConverter<'a> {
             }
             compact.push((*field).clone());
         }
-        compact
+        Cow::Owned(compact)
     }
 
-    fn sparse_record_fields_for_lambda(
+    fn sparse_record_fields_for_lambda<'b>(
         &self,
         all_labels: &std::sync::Arc<Vec<LabelDescription>>,
-        fields: &[RecordField],
+        fields: &'b [RecordField],
         omitted_loc: LocIdx,
-    ) -> (Vec<RecordField>, Option<usize>) {
+    ) -> (Cow<'b, [RecordField]>, Option<usize>) {
         if self.preserve_expanded_sparse_records {
             (
-                self.expand_sparse_record_fields(all_labels, fields, omitted_loc),
+                Cow::Owned(self.expand_sparse_record_fields(all_labels, fields, omitted_loc)),
                 None,
             )
         } else {
@@ -10049,8 +10036,6 @@ impl<'a> RawLambdaConverter<'a> {
         base: Option<&Expression>,
         logical_field_count: Option<usize>,
     ) -> Lambda {
-        let logical_field_count =
-            logical_field_count.or_else(|| self.logical_record_field_count_for_fields(fields));
         let mut values = vec![None; fields.len()];
         let base_lam = base.map(|e| self.convert_expr(e));
 
@@ -10924,13 +10909,6 @@ impl<'a> RawLambdaConverter<'a> {
             matches!(lam, Lambda::Lvar(_) | Lambda::Lconst(_))
         }
 
-        fn may_map<T, U, F>(value: Option<T>, f: F) -> Option<U>
-        where
-            F: FnOnce(T) -> U,
-        {
-            value.map(f)
-        }
-
         fn build_apply(
             conv: &mut RawLambdaConverter<'_>,
             lam: Lambda,
@@ -11026,7 +11004,7 @@ impl<'a> RawLambdaConverter<'a> {
             .iter()
             .map(|arg| {
                 (
-                    may_map(arg.expression.clone(), |expr| self.convert_expr(&expr)),
+                    arg.expression.as_ref().map(|expr| self.convert_expr(expr)),
                     arg.label.is_optional(),
                 )
             })
@@ -11064,13 +11042,6 @@ impl<'a> RawLambdaConverter<'a> {
 
         fn is_simple(lam: &RawLambda) -> bool {
             matches!(lam, RawLambda::Lvar(_) | RawLambda::Lconst(_))
-        }
-
-        fn may_map<T, U, F>(value: Option<T>, f: F) -> Option<U>
-        where
-            F: FnOnce(T) -> U,
-        {
-            value.map(f)
         }
 
         fn build_apply(
@@ -11203,7 +11174,9 @@ impl<'a> RawLambdaConverter<'a> {
                     .iter()
                     .map(|arg| {
                         (
-                            may_map(arg.expression.clone(), |expr| self.convert_expr_raw(&expr)),
+                            arg.expression
+                                .as_ref()
+                                .map(|expr| self.convert_expr_raw(expr)),
                             arg.label.is_optional(),
                         )
                     })

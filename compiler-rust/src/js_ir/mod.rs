@@ -332,20 +332,20 @@ impl ModulePathResolver {
             .persistent_env
             .as_ref()?
             .module_js_package_info(module_name)?;
-        if target_package_name == current_package_name {
+        if target_package_name.as_ref() == current_package_name {
             return None;
         }
 
         // OCaml distinguishes same-package rebasing from dependency-package
         // paths through Js_packages_info.query_package_infos and
         // same_package_by_name; see compiler/core/js_name_of_module_id.ml:115-146.
-        let target_package_root = normalize_absolute_path(&target_package_root);
+        let target_package_root = normalize_absolute_path(target_package_root.as_ref());
         let relative_source = target_source.strip_prefix(&target_package_root).ok()?;
         let suffix = target_suffix.as_deref().unwrap_or(&self.output_suffix);
         let relative_output = source_path_with_js_suffix(relative_source, suffix)?;
         Some(format!(
             "{}/{}",
-            target_package_name,
+            target_package_name.as_ref(),
             relative_output.to_string_lossy().replace('\\', "/")
         ))
     }

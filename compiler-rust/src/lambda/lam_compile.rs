@@ -37,7 +37,7 @@ use crate::lambda::lam_compile_context::{Element, ExternalArityInfo, IdKind, Lam
 use crate::lambda::lam_constant::{Constant, PointerInfo};
 use crate::lambda::lam_exit_code::has_exit_code;
 use crate::lambda::lam_free_variables::free_variables;
-use crate::lambda::lam_pass_collect::{collect_info, get_arity};
+use crate::lambda::lam_pass_collect::get_arity;
 use crate::lambda::lam_primitive::{ExternalArgConst, ExternalArgDelim, Primitive};
 use crate::lambda::lam_subst;
 use crate::lambda::{
@@ -508,65 +508,90 @@ impl LambdaCompiler {
             jsx_preserve = self.jsx_preserve
         )
         .entered();
-        self.external_module_ids.clear();
         let mut possible_required_modules =
             crate::timing::measure(crate::timing::Phase::Codegen, || {
                 let _phase = info_span!("compiler.lambda_collect_possible_modules").entered();
-                collect_possible_required_modules(&lam)
+                collect_possible_required_modules_for_lambda(&lam)
             });
         possible_required_modules.extend(extra_possible_required_modules.iter().cloned());
-        let simplified = crate::timing::measure(crate::timing::Phase::LambdaOptimization, || {
-            let _phase = info_span!("compiler.lambda_simplify").entered();
-            let jsx_preserve = self.jsx_preserve;
-            let module_path_resolver = self.module_path_resolver.clone();
-            let cross_module_inline = self.cross_module_inline;
-            let mut cmj_lambda_cache: HashMap<String, Option<Arc<AHashMap<String, Lambda>>>> =
-                HashMap::new();
-            let mut cmj_arity_cache: HashMap<
-                String,
-                Option<Arc<AHashMap<String, CmjExportArity>>>,
-            > = HashMap::new();
-            let mut external_inline =
-                |module_id: &Ident, dynamic_import: bool, field_name: &str| {
-                    if !cross_module_inline {
-                        return None;
-                    }
-                    if !cmj_lambda_cache.contains_key(module_id.name()) {
-                        let lambdas = module_path_resolver.as_ref().and_then(|resolver| {
-                            resolver.module_cmj_export_lambdas(module_id.name())
-                        });
-                        cmj_lambda_cache.insert(module_id.name().to_string(), lambdas);
-                    }
-                    let _ = dynamic_import;
-                    cmj_lambda_cache
-                        .get(module_id.name())
-                        .and_then(|exports| exports.as_ref())
-                        .and_then(|exports| exports.get(field_name).cloned())
-                };
-            let mut external_arity = |module_id: &Ident, dynamic_import: bool, field_name: &str| {
-                if !cmj_arity_cache.contains_key(module_id.name()) {
-                    let arities = module_path_resolver
-                        .as_ref()
-                        .and_then(|resolver| resolver.module_cmj_export_arities(module_id.name()));
-                    cmj_arity_cache.insert(module_id.name().to_string(), arities);
-                }
-                let _ = dynamic_import;
-                cmj_arity_cache
-                    .get(module_id.name())
-                    .and_then(|exports| exports.as_ref())
-                    .and_then(|exports| exports.get(field_name).cloned())
-                    .map(cmj_export_arity_to_external)
-            };
-            crate::lambda::lam_compile_main::simplify_for_js_backend_with_external_inline_owned(
-                lam,
-                jsx_preserve,
-                &mut external_inline,
-                &mut external_arity,
-            )
-        });
+        self.compile_deps_program_with_collected_possible_required_modules_owned(
+            lam,
+            possible_required_modules,
+        )
+    }
+
+    pub fn compile_deps_program_with_collected_possible_required_modules_owned(
+        &mut self,
+        lam: Lambda,
+        possible_required_modules: AHashSet<ModuleId>,
+    ) -> DepsProgram {
+        let _span = info_span!(
+            "compiler.lambda_to_js_collected",
+            possible_required_modules = possible_required_modules.len(),
+            jsx_preserve = self.jsx_preserve
+        )
+        .entered();
+        self.external_module_ids.clear();
+        let simplified_result = crate::timing::measure(
+            crate::timing::Phase::LambdaOptimization,
+            || {
+                let _phase = info_span!("compiler.lambda_simplify").entered();
+                let jsx_preserve = self.jsx_preserve;
+                let module_path_resolver = self.module_path_resolver.clone();
+                let cross_module_inline = self.cross_module_inline;
+                let mut cmj_lambda_cache: HashMap<String, Option<Arc<AHashMap<String, Lambda>>>> =
+                    HashMap::new();
+                let mut cmj_arity_cache: HashMap<
+                    String,
+                    Option<Arc<AHashMap<String, CmjExportArity>>>,
+                > = HashMap::new();
+                let mut external_inline =
+                    |module_id: &Ident, dynamic_import: bool, field_name: &str| {
+                        if !cross_module_inline {
+                            return None;
+                        }
+                        if !cmj_lambda_cache.contains_key(module_id.name()) {
+                            let lambdas = module_path_resolver.as_ref().and_then(|resolver| {
+                                resolver.module_cmj_export_lambdas(module_id.name())
+                            });
+                            cmj_lambda_cache.insert(module_id.name().to_string(), lambdas);
+                        }
+                        let _ = dynamic_import;
+                        cmj_lambda_cache
+                            .get(module_id.name())
+                            .and_then(|exports| exports.as_ref())
+                            .and_then(|exports| exports.get(field_name).cloned())
+                    };
+                let mut external_arity =
+                    |module_id: &Ident, dynamic_import: bool, field_name: &str| {
+                        if !cmj_arity_cache.contains_key(module_id.name()) {
+                            let arities = module_path_resolver.as_ref().and_then(|resolver| {
+                                resolver.module_cmj_export_arities(module_id.name())
+                            });
+                            cmj_arity_cache.insert(module_id.name().to_string(), arities);
+                        }
+                        let _ = dynamic_import;
+                        cmj_arity_cache
+                            .get(module_id.name())
+                            .and_then(|exports| exports.as_ref())
+                            .and_then(|exports| exports.get(field_name).cloned())
+                            .map(cmj_export_arity_to_external)
+                    };
+                crate::lambda::lam_compile_main::simplify_for_js_backend_with_external_inline_and_meta_owned(
+                    lam,
+                    jsx_preserve,
+                    &mut external_inline,
+                    &mut external_arity,
+                )
+            },
+        );
         self.cmj_export_constants =
-            collect_cmj_export_constants_from_simplified_lambda(&simplified);
-        self.cmj_export_arities = collect_cmj_export_arities_from_simplified_lambda(&simplified);
+            collect_cmj_export_constants_from_simplified_lambda(&simplified_result.lambda);
+        self.cmj_export_arities = collect_cmj_export_arities_from_simplified_lambda(
+            &simplified_result.lambda,
+            &simplified_result.meta,
+        );
+        let simplified = simplified_result.lambda;
         // OCaml's `Ext_ident.create` allocations in lam_compile.ml share the
         // same global `Ident.currentstamp` as the Lambda identifiers entering
         // this phase. See compiler/core/lam_compile.ml:60, 771-782, 911 and
@@ -6886,7 +6911,7 @@ fn ocaml_sort_modules(modules: &mut [ModuleId]) {
     modules.swap(0, 1);
 }
 
-fn collect_possible_required_modules(lam: &Lambda) -> AHashSet<ModuleId> {
+pub(crate) fn collect_possible_required_modules_for_lambda(lam: &Lambda) -> AHashSet<ModuleId> {
     // OCaml compiler/core/lam_compile_main.ml:277-284 collects into a hash set
     // and sorts after `populate_required_modules`, so the hash iteration order is
     // intentionally unobservable here.
@@ -6921,18 +6946,16 @@ fn collect_cmj_export_constants_from_simplified_lambda(
 
 fn collect_cmj_export_arities_from_simplified_lambda(
     lam: &Lambda,
+    meta: &LamStats,
 ) -> AHashMap<String, CmjExportArity> {
     // OCaml writes `.cmj` arity metadata from `Lam_stats_export.values_of_export`
-    // (compiler/core/lam_stats_export.ml:32-49). Recompute the same
-    // `Lam_pass_collect.collect_info` view over the simplified lambda and
-    // publish the arity for each top-level export into the in-process registry.
+    // (compiler/core/lam_stats_export.ml:32-49). Use the `LamStats` returned
+    // by the same `Lam_coercion.coerce_and_group_big_lambda` counterpart that
+    // OCaml uses, instead of recomputing `collect_info` after simplification.
     let mut bindings = Vec::new();
     let Some((exports, args)) = collect_toplevel_export_bindings(lam, &mut bindings) else {
         return AHashMap::new();
     };
-
-    let mut meta = LamStats::new(exports.to_vec());
-    collect_info(&mut meta, lam);
 
     let mut arities = AHashMap::new();
     for (export, arg) in exports.iter().zip(args) {

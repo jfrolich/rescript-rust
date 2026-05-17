@@ -8,8 +8,8 @@
 
 use crate::ident::Ident;
 use crate::lambda::lam_compat::LetKind;
-use crate::lambda::lam_compile_context::LamStats;
-use crate::lambda::lam_pass_alpha_conversion::alpha_conversion_owned;
+use crate::lambda::lam_compile_context::{IdKind, LamStats, RecFlag};
+use crate::lambda::lam_pass_alpha_conversion::alpha_conversion_with_external_arity_owned;
 use crate::lambda::lam_pass_collect::{ExternalArityResolver, collect_info_with_external_arity};
 use crate::lambda::lam_pass_deep_flatten::deep_flatten_owned_with_id_gen;
 use crate::lambda::lam_pass_exits::simplify_exits_owned;
@@ -20,6 +20,18 @@ use crate::lambda::lam_pass_remove_alias::{
 use crate::lambda::lam_primitive::Primitive;
 use crate::lambda::lam_tag_info::TagInfo;
 use crate::lambda::{Lambda, PrimInfo};
+
+/// Result of the JS-backend simplify/coercion pipeline.
+///
+/// OCaml returns both the coerced Lambda groups and the updated `Lam_stats.t`
+/// from `Lam_coercion.coerce_and_group_big_lambda`
+/// (compiler/core/lam_coercion.ml:200-208). The final metadata is reused when
+/// writing CMJ export arities, so Rust keeps it with the simplified Lambda
+/// instead of recomputing `collect_info` after the fact.
+pub struct SimplifiedForJsBackend {
+    pub lambda: Lambda,
+    pub meta: LamStats,
+}
 
 /// Direct port of `compiler/core/lam_compile_main.ml:148-200` pipeline.
 pub fn simplify_for_js_backend(lam: &Lambda) -> Lambda {
@@ -62,6 +74,21 @@ pub fn simplify_for_js_backend_with_external_inline_owned(
     external_inline: &mut ExternalInlineResolver<'_>,
     external_arity: &mut ExternalArityResolver<'_>,
 ) -> Lambda {
+    simplify_for_js_backend_with_external_inline_and_meta_owned(
+        lam,
+        jsx_preserve,
+        external_inline,
+        external_arity,
+    )
+    .lambda
+}
+
+pub fn simplify_for_js_backend_with_external_inline_and_meta_owned(
+    lam: Lambda,
+    jsx_preserve: bool,
+    external_inline: &mut ExternalInlineResolver<'_>,
+    external_arity: &mut ExternalArityResolver<'_>,
+) -> SimplifiedForJsBackend {
     // OCaml constructs `meta` once at lam_compile_main.ml:150-153 with
     // `~export_idents` and `~export_ident_sets` from the Lam_compile_main.compile
     // entry point. The exports come from `Translmod.transl_implementation`. In
@@ -125,7 +152,7 @@ pub fn simplify_for_js_backend_with_external_inline_owned(
     collect_info_with_external_arity(&mut meta, &lam, external_arity);
 
     // lam_compile_main.ml:180 — alpha_conversion.
-    let lam = alpha_conversion_owned(&meta, lam);
+    let lam = alpha_conversion_with_external_arity_owned(&mut meta, lam, external_arity);
 
     // lam_compile_main.ml:182 — simplify_exits.
     let lam = simplify_exits_owned(lam, &meta.id_gen);
@@ -142,7 +169,7 @@ pub fn simplify_for_js_backend_with_external_inline_owned(
     );
 
     // lam_compile_main.ml:190 — alpha_conversion.
-    let lam = alpha_conversion_owned(&meta, lam);
+    let lam = alpha_conversion_with_external_arity_owned(&mut meta, lam, external_arity);
 
     // lam_compile_main.ml:193 — simplify_lets (DCE + alias inlining).
     let lam = simplify_lets_owned(lam);
@@ -163,13 +190,14 @@ pub fn simplify_for_js_backend_with_external_inline_owned(
     // instead of inlining `Lconst (Const_block ...)` (etc.) into the
     // module-export block — matching `let X = {...}` snapshots like
     // `variantsMatching.CustomizeTags_d`.
-    handle_exports(&mut meta, lam)
+    handle_exports(meta, lam)
 }
 
 /// Direct port of `compiler/core/lam_coercion.ml:82-172` — `handle_exports`
 /// applied to the trailing module-export `Pmakeblock`.
-fn handle_exports(meta: &mut LamStats, lam: Lambda) -> Lambda {
-    rewrite_export_makeblock(meta, lam)
+fn handle_exports(mut meta: LamStats, lam: Lambda) -> SimplifiedForJsBackend {
+    let lambda = rewrite_export_makeblock(&mut meta, lam);
+    SimplifiedForJsBackend { lambda, meta }
 }
 
 fn rewrite_export_makeblock(meta: &mut LamStats, lam: Lambda) -> Lambda {
@@ -211,8 +239,11 @@ fn rewrite_export_makeblock(meta: &mut LamStats, lam: Lambda) -> Lambda {
                     }
                     // lam_coercion.ml:112-121 — Lvar with mismatched name:
                     // rename the export id, alias-bind it.
-                    Lambda::Lvar(_) => {
+                    Lambda::Lvar(id) => {
                         let newid = orig_export_id.rename(&meta.id_gen);
+                        if let Some(info) = meta.ident_tbl.get(id).cloned() {
+                            meta.ident_tbl.insert(newid.clone(), info);
+                        }
                         new_export_ids.push(newid.clone());
                         new_args.push(Lambda::Lvar(newid.clone()));
                         hoisted.push((newid, arg, LetKind::Alias));
@@ -221,6 +252,15 @@ fn rewrite_export_makeblock(meta: &mut LamStats, lam: Lambda) -> Lambda {
                     // export id, strict-bind it.
                     _ => {
                         let newid = orig_export_id.rename(&meta.id_gen);
+                        let arity = crate::lambda::lam_pass_collect::get_arity(meta, &arg);
+                        if !arity.first_arity_na() {
+                            let lambda = match &arg {
+                                Lambda::Lfunction(_) => Some((arg.clone(), RecFlag::NonRec)),
+                                _ => None,
+                            };
+                            meta.ident_tbl
+                                .insert(newid.clone(), IdKind::FunctionId { arity, lambda });
+                        }
                         new_export_ids.push(newid.clone());
                         new_args.push(Lambda::Lvar(newid.clone()));
                         hoisted.push((newid, arg, LetKind::Strict));

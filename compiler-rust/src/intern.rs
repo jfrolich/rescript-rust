@@ -178,6 +178,11 @@ impl Interner {
         self.strings.len()
     }
 
+    /// Reserve storage for additional strings without changing existing indices.
+    pub fn reserve(&mut self, additional: usize) {
+        self.strings.reserve(additional);
+    }
+
     /// Check if the interner is empty.
     pub fn is_empty(&self) -> bool {
         self.strings.is_empty()

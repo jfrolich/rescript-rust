@@ -5640,11 +5640,16 @@ fn deprecated_warning_from_attrs(
     name: &str,
     attrs: &[crate::types::decl::Attribute],
 ) -> Option<Warning> {
+    let (reason, can_be_automigrated) = deprecated_attr_payload(attrs)?;
+    Some(deprecated_warning(name, reason, can_be_automigrated))
+}
+
+fn deprecated_attr_payload(attrs: &[crate::types::decl::Attribute]) -> Option<(&str, bool)> {
     for attr in attrs {
         if attr.attr_name.txt != "deprecated" && attr.attr_name.txt != "ocaml.deprecated" {
             continue;
         }
-        let (reason, can_be_automigrated) = match &attr.attr_payload {
+        return Some(match &attr.attr_payload {
             crate::types::decl::AttributePayload::Deprecated {
                 reason,
                 can_be_automigrated,
@@ -5652,31 +5657,46 @@ fn deprecated_warning_from_attrs(
             crate::types::decl::AttributePayload::Str(reason) => (reason.as_str(), false),
             crate::types::decl::AttributePayload::Empty => ("", false),
             _ => ("", false),
-        };
-        let message = if reason.is_empty() {
-            name.to_string()
-        } else {
-            format!("{name}\n{reason}")
-        };
-        return Some(Warning::Deprecated {
-            message,
-            def_loc: Location::none(),
-            use_loc: Location::none(),
-            can_be_automigrated,
         });
     }
     None
 }
 
+fn deprecated_warning(name: &str, reason: &str, can_be_automigrated: bool) -> Warning {
+    let message = if reason.is_empty() {
+        name.to_string()
+    } else {
+        format!("{name}\n{reason}")
+    };
+    Warning::Deprecated {
+        message,
+        def_loc: Location::none(),
+        use_loc: Location::none(),
+        can_be_automigrated,
+    }
+}
+
 fn deprecated_warning_for_value(path: &Path, desc: &ValueDescription) -> Option<Warning> {
-    deprecated_warning_from_attrs(&path.name(), &desc.val_attributes)
+    let (reason, can_be_automigrated) = deprecated_attr_payload(&desc.val_attributes)?;
+    let name = path.name();
+    Some(deprecated_warning(
+        name.as_str(),
+        reason,
+        can_be_automigrated,
+    ))
 }
 
 fn deprecated_warning_for_type(
     path: &Path,
     decl: &crate::types::decl::TypeDeclaration,
 ) -> Option<Warning> {
-    deprecated_warning_from_attrs(&path.name(), &decl.type_attributes)
+    let (reason, can_be_automigrated) = deprecated_attr_payload(&decl.type_attributes)?;
+    let name = path.name();
+    Some(deprecated_warning(
+        name.as_str(),
+        reason,
+        can_be_automigrated,
+    ))
 }
 
 fn deprecated_mutable_warning_for_label(
@@ -5790,8 +5810,10 @@ fn type_expect_with_recarg<'a>(
                 }
                 Err(err) => return Err(err),
             };
-            let used_name = tctx.arena.get_string(longident.last_idx()).to_string();
-            tctx.mark_value_used(&used_name, desc.val_loc);
+            if !tctx.value_usage_checks.is_empty() {
+                let used_name = tctx.arena.get_string(longident.last_idx());
+                tctx.mark_value_used(used_name, desc.val_loc);
+            }
             if let Some(warning) = deprecated_warning_for_value(&path, &desc) {
                 tctx.report_warning(lid.loc, warning);
             }
@@ -6261,8 +6283,8 @@ fn type_expect_with_recarg<'a>(
             //     in
             //     body
             if arg_label.is_optional() {
-                let lhs_pat = tctx.arena.get_pat(*lhs);
                 if let Some(default_idx) = default.as_ref() {
+                    let lhs_pat = tctx.arena.get_pat(*lhs);
                     let default_expr = tctx.arena.get_expr(*default_idx);
                     let default_loc = default_expr.pexp_loc;
                     let opt_name = tctx.arena.optional_default_opt_str();
@@ -7685,11 +7707,7 @@ fn force_unify_type_lookup_paths(tctx: &mut TypeCheckContext<'_>, paths: Vec<Pat
         return;
     }
 
-    let Some(env) = tctx
-        .unify_state
-        .env()
-        .map(crate::types::env::Env::clone_preserve_id)
-    else {
+    let Some(env) = tctx.unify_state.take_env() else {
         return;
     };
 
@@ -7701,6 +7719,7 @@ fn force_unify_type_lookup_paths(tctx: &mut TypeCheckContext<'_>, paths: Vec<Pat
         // because persistent component forcing lives in typecore.
         let _ = force_env_find_type_side_effects_for_path(tctx, &env, &path);
     }
+    tctx.unify_state.restore_env(env);
 }
 
 fn force_lower_args_type_lookup_paths(
@@ -7818,11 +7837,7 @@ fn force_lower_args_type_lookup_paths(
         return;
     }
 
-    let Some(env) = tctx
-        .unify_state
-        .env()
-        .map(crate::types::env::Env::clone_preserve_id)
-    else {
+    let Some(env) = tctx.unify_state.take_env() else {
         return;
     };
 
@@ -7863,6 +7878,7 @@ fn force_lower_args_type_lookup_paths(
             visit_manifest(tctx, &env, manifest, &mut seen);
         }
     }
+    tctx.unify_state.restore_env(env);
 }
 
 fn unify_expression_types(
@@ -9480,25 +9496,62 @@ fn type_application(
     ))
 }
 
+#[derive(Clone, Copy)]
+struct PartialCheckCase<'p> {
+    lhs: &'p Pattern,
+    has_guard: bool,
+}
+
+trait PatternCaseRef {
+    fn pattern(&self) -> &Pattern;
+}
+
+impl PatternCaseRef for crate::types::typedtree::Case {
+    fn pattern(&self) -> &Pattern {
+        &self.c_lhs
+    }
+}
+
+impl<'p> PatternCaseRef for PartialCheckCase<'p> {
+    fn pattern(&self) -> &Pattern {
+        self.lhs
+    }
+}
+
 /// Simple exhaustiveness check for pattern matching.
 /// Returns `Total` if the patterns are obviously exhaustive, `Partial` otherwise.
 /// This is a simplified version of OCaml's `Parmatch.check_partial` that handles
 /// the most common cases.
-fn check_partial_simple<'a>(
-    ctx: &'a TypeContext,
+fn check_partial_simple(
+    ctx: &TypeContext,
     env: &Env,
     cases: &[crate::types::typedtree::Case],
+) -> crate::types::typedtree::Partial {
+    let case_rows = cases
+        .iter()
+        .map(|case| PartialCheckCase {
+            lhs: &case.c_lhs,
+            has_guard: case.c_guard.is_some(),
+        })
+        .collect::<Vec<_>>();
+    check_partial_simple_rows(ctx, env, &case_rows)
+}
+
+fn check_partial_simple_rows(
+    ctx: &TypeContext,
+    env: &Env,
+    cases: &[PartialCheckCase<'_>],
 ) -> crate::types::typedtree::Partial {
     use crate::types::typedtree::Partial;
 
     // OCaml Parmatch builds its exhaustiveness matrix from unguarded rows.
     // Guarded rows can still match at runtime, but they cannot prove totality.
     let unguarded_cases;
-    let cases = if cases.iter().any(|case| case.c_guard.is_some()) {
+    let cases = if cases.iter().any(|case| case.has_guard) {
         unguarded_cases = cases
             .iter()
-            .filter(|case| case.c_guard.is_none())
-            .cloned()
+            .filter(|case| !case.has_guard)
+            .copied()
             .collect::<Vec<_>>();
         unguarded_cases.as_slice()
     } else {
@@ -9968,14 +10021,14 @@ fn check_partial_simple<'a>(
 
     // If any case has a catch-all pattern, it's total
     for case in cases {
-        if is_catch_all(&case.c_lhs) {
+        if is_catch_all(case.lhs) {
             return Partial::Total;
         }
     }
 
     let matrix = cases
         .iter()
-        .map(|case| vec![ExhaustPat::Pat(&case.c_lhs)])
+        .map(|case| vec![ExhaustPat::Pat(case.lhs)])
         .collect::<Vec<_>>();
     if matrix_is_exhaustive(ctx, env, &matrix, 1) {
         return Partial::Total;
@@ -9989,7 +10042,7 @@ fn check_partial_simple<'a>(
 
     for case in cases {
         collect_top_constructs(
-            &case.c_lhs,
+            case.lhs,
             &mut construct_names,
             &mut total_constructors,
             &mut has_non_construct,
@@ -10012,7 +10065,7 @@ fn check_partial_simple<'a>(
     let mut has_true = false;
     let mut has_false = false;
     for case in cases {
-        check_bool_coverage(&case.c_lhs, &mut has_true, &mut has_false);
+        check_bool_coverage(case.lhs, &mut has_true, &mut has_false);
     }
     if has_true && has_false {
         return Partial::Total;
@@ -10026,13 +10079,13 @@ fn check_partial_simple<'a>(
     let mut case_tags: HashSet<String> = HashSet::new();
     let mut all_variant_pats = true;
     for case in cases {
-        collect_variant_tags(&case.c_lhs, &mut case_tags, &mut all_variant_pats);
+        collect_variant_tags(case.lhs, &mut case_tags, &mut all_variant_pats);
     }
     if all_variant_pats
         && !case_tags.is_empty()
         && let Some(first_case) = cases.first()
     {
-        let pat_ty = crate::types::ctype::expand_head(ctx, env, first_case.c_lhs.pat_type);
+        let pat_ty = crate::types::ctype::expand_head(ctx, env, first_case.lhs.pat_type);
         let pat_ty = ctx.repr(pat_ty);
         let desc = ctx.get_desc(pat_ty);
         if let TypeDesc::Tvariant(row) = &*desc {
@@ -10188,13 +10241,11 @@ fn report_fragile_match_if_needed(
     }
 }
 
-fn optional_record_field_missing_example(
-    cases: &[crate::types::typedtree::Case],
-) -> Option<String> {
+fn optional_record_field_missing_example<C: PatternCaseRef>(cases: &[C]) -> Option<String> {
     if let [case] = cases {
         let mut examples = Vec::new();
         collect_optional_record_missing_examples_single_case(
-            &case.c_lhs,
+            case.pattern(),
             &mut Vec::new(),
             &mut examples,
         );
@@ -10207,7 +10258,7 @@ fn optional_record_field_missing_example(
     let mut covered_absent: HashSet<(Vec<String>, String)> = HashSet::new();
     for case in cases {
         collect_optional_record_field_coverage(
-            &case.c_lhs,
+            case.pattern(),
             &mut Vec::new(),
             &mut required_present,
             &mut covered_absent,
@@ -10564,13 +10615,7 @@ fn simple_pattern_keys(arena: &ParseArena, pat: &Pattern) -> Option<Vec<SimplePa
                 true
             }
             PatternDesc::Tpat_alias(inner, _, _) => {
-                collect(
-                    arena,
-                    inner,
-                    from_variant_spread,
-                    from_generated_or,
-                    keys,
-                )
+                collect(arena, inner, from_variant_spread, from_generated_or, keys)
             }
             PatternDesc::Tpat_or(left, right, _) => {
                 // OCaml compiler/ml/parmatch.ml:1722-1728 does not expand
@@ -10580,19 +10625,8 @@ fn simple_pattern_keys(arena: &ParseArena, pat: &Pattern) -> Option<Vec<SimplePa
                 // individual generated interval arms.
                 let generated_or = from_generated_or
                     || (arena.loc_ghost(left.pat_loc) && arena.loc_ghost(right.pat_loc));
-                collect(
-                    arena,
-                    left,
-                    from_variant_spread,
-                    generated_or,
-                    keys,
-                ) && collect(
-                    arena,
-                    right,
-                    from_variant_spread,
-                    generated_or,
-                    keys,
-                )
+                collect(arena, left, from_variant_spread, generated_or, keys)
+                    && collect(arena, right, from_variant_spread, generated_or, keys)
             }
             _ => false,
         }
@@ -10639,16 +10673,18 @@ fn typed_pattern_contains_generalized_constructor(pat: &Pattern) -> bool {
                     .iter()
                     .any(typed_pattern_contains_generalized_constructor)
         }
-        PatternDesc::Tpat_tuple(items) | PatternDesc::Tpat_array(items) => {
-            items.iter().any(typed_pattern_contains_generalized_constructor)
-        }
+        PatternDesc::Tpat_tuple(items) | PatternDesc::Tpat_array(items) => items
+            .iter()
+            .any(typed_pattern_contains_generalized_constructor),
         PatternDesc::Tpat_record(fields, _) => fields
             .iter()
             .any(|(_, _, pat, _)| typed_pattern_contains_generalized_constructor(pat)),
         PatternDesc::Tpat_variant(_, Some(arg), _) => {
             typed_pattern_contains_generalized_constructor(arg)
         }
-        PatternDesc::Tpat_alias(inner, _, _) => typed_pattern_contains_generalized_constructor(inner),
+        PatternDesc::Tpat_alias(inner, _, _) => {
+            typed_pattern_contains_generalized_constructor(inner)
+        }
         PatternDesc::Tpat_or(left, right, _) => {
             typed_pattern_contains_generalized_constructor(left)
                 || typed_pattern_contains_generalized_constructor(right)
@@ -10772,7 +10808,7 @@ fn constructor_declaration_matches_scrutinee_type(
 fn report_unreachable_gadt_catch_all_if_needed(
     tctx: &mut TypeCheckContext<'_>,
     env: &Env,
-    previous_unguarded_cases: &[crate::types::typedtree::Case],
+    previous_unguarded_cases: &[PartialCheckCase<'_>],
     case: &crate::types::typedtree::Case,
 ) -> bool {
     if !tctx.warning_config.is_active(&Warning::UnreachableCase)
@@ -10783,7 +10819,7 @@ fn report_unreachable_gadt_catch_all_if_needed(
     }
     if !previous_unguarded_cases
         .iter()
-        .any(|previous| typed_pattern_contains_generalized_constructor(&previous.c_lhs))
+        .any(|previous| typed_pattern_contains_generalized_constructor(previous.lhs))
     {
         // OCaml compiler/ml/typecore.ml:4371-4378 computes `has_gadts`
         // through compiler/ml/typecore.ml:2194-2203 `contains_gadt`, and
@@ -10817,7 +10853,7 @@ fn report_unreachable_gadt_catch_all_if_needed(
 
     let mut covered_constructors = HashSet::default();
     for previous in previous_unguarded_cases {
-        collect_top_constructor_names(&previous.c_lhs, &mut covered_constructors);
+        collect_top_constructor_names(previous.lhs, &mut covered_constructors);
     }
 
     if compatible_constructors
@@ -10840,10 +10876,10 @@ fn add_covered_literal(covered_literals: &mut Vec<Constant>, literal: Constant) 
     }
 }
 
-fn report_unused_match_cases(
+fn report_unused_match_cases<'case>(
     tctx: &mut TypeCheckContext<'_>,
     env: &Env,
-    cases: &[crate::types::typedtree::Case],
+    cases: &'case [crate::types::typedtree::Case],
 ) {
     if !tctx.warning_config.is_active(&Warning::UnusedMatch) {
         return;
@@ -10853,18 +10889,18 @@ fn report_unused_match_cases(
     // Parmatch.check_ambiguous_bindings:
     // Typecore.check_unused -> Parmatch.check_unused.
     let ctx = tctx.type_ctx;
-    let mut previous_unguarded_cases: Vec<crate::types::typedtree::Case> = Vec::new();
+    let mut previous_unguarded_cases: Vec<PartialCheckCase<'case>> = Vec::new();
     let mut covered_keys: HashSet<String> = HashSet::default();
     let mut covered_by_catch_all = false;
 
     for case in cases {
         let previous_cases_are_simple = previous_unguarded_cases.iter().all(|previous| {
-            simple_pattern_keys(tctx.arena, &previous.c_lhs).is_some()
-                || pattern_is_simple_catch_all(&previous.c_lhs)
+            simple_pattern_keys(tctx.arena, previous.lhs).is_some()
+                || pattern_is_simple_catch_all(previous.lhs)
         });
         if previous_cases_are_simple
             && !previous_unguarded_cases.is_empty()
-            && check_partial_simple(ctx, env, &previous_unguarded_cases)
+            && check_partial_simple_rows(ctx, env, &previous_unguarded_cases)
                 == crate::types::typedtree::Partial::Total
         {
             // OCaml compiler/ml/parmatch.ml:2179-2217 runs the full
@@ -10873,14 +10909,20 @@ fn report_unused_match_cases(
             // stay on the more conservative per-key path below.
             tctx.report_warning(case.c_lhs.pat_loc, Warning::UnusedMatch);
             if case.c_guard.is_none() {
-                previous_unguarded_cases.push(case.clone());
+                previous_unguarded_cases.push(PartialCheckCase {
+                    lhs: &case.c_lhs,
+                    has_guard: false,
+                });
             }
             continue;
         }
 
         if report_unreachable_gadt_catch_all_if_needed(tctx, env, &previous_unguarded_cases, case) {
             if case.c_guard.is_none() {
-                previous_unguarded_cases.push(case.clone());
+                previous_unguarded_cases.push(PartialCheckCase {
+                    lhs: &case.c_lhs,
+                    has_guard: false,
+                });
             }
             continue;
         }
@@ -10929,7 +10971,10 @@ fn report_unused_match_cases(
             } else if pattern_is_simple_catch_all(&case.c_lhs) {
                 covered_by_catch_all = true;
             }
-            previous_unguarded_cases.push(case.clone());
+            previous_unguarded_cases.push(PartialCheckCase {
+                lhs: &case.c_lhs,
+                has_guard: false,
+            });
         }
     }
 }
@@ -15525,6 +15570,37 @@ fn qualified_record_label_from_info<'a>(
         })
 }
 
+fn record_label_from_info(
+    info: Option<&RecordLabelDescriptionsInfo>,
+    field_name: &str,
+) -> Option<crate::types::LabelDescription> {
+    info.and_then(|info| info.label_by_name(field_name))
+}
+
+fn fast_exact_unqualified_opath_record_label<'a>(
+    field_name: &str,
+    record_opath_ty: TypeExprRef,
+    label_info: Option<&RecordLabelDescriptionsInfo>,
+    env: &Env,
+    pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
+    ctx: &'a TypeContext,
+) -> Option<crate::types::LabelDescription> {
+    let target_path =
+        extract_type_path_from_expected_with_persistent_env(record_opath_ty, env, pers_env, ctx)?;
+    if target_path.head().is_persistent() {
+        return None;
+    }
+
+    let labels = env.find_all_labels(field_name);
+    let first_label = labels.first()?;
+    let first_path = label_result_path(ctx, first_label)?;
+    if !first_path.same(&target_path) {
+        return None;
+    }
+
+    record_label_from_info(label_info, field_name).or_else(|| Some((*first_label).clone()))
+}
+
 fn ambiguous_record_label_warning_info<'a>(
     selected: &crate::types::LabelDescription,
     candidates: &[&crate::types::LabelDescription],
@@ -15534,7 +15610,7 @@ fn ambiguous_record_label_warning_info<'a>(
 ) -> Option<(Vec<String>, Option<Path>)> {
     let selected_path = label_result_path(ctx, selected)?;
     let mut paths = vec![selected_path.clone()];
-    for candidate in candidates.iter().rev() {
+    for candidate in candidates {
         let Some(candidate_path) = label_result_path(ctx, candidate) else {
             continue;
         };
@@ -15616,20 +15692,17 @@ fn force_unqualified_record_label_disambiguate_by_type_compare<'a>(
         return;
     }
 
-    for label in labels.iter().rev() {
+    for label in labels {
         let Some(label_path) = label_result_path(ctx, label) else {
             continue;
         };
-        // OCaml compiler/ml/typecore.ml:1120-1125 passes the full unqualified
-        // label scope to `Label.disambiguate` when `opath` is present. That then
-        // runs `disambiguate_by_type` at typecore.ml:983-988, calling
-        // `compare_type_path env tpath lbl_tpath` until the first match.
-        // `compare_type_path` reaches typecore.ml:775-787 `expand_path`, whose
-        // `Env.normalize_path` fallback forces persistent `ps_sig` lazies through
-        // compiler/ml/env.ml:914-926 and env.ml:865-875. Rust's canonical
-        // record-label fast path below already knows the selected record, so
-        // replay this comparison before taking it to preserve the same lazy
-        // mutation and identifier-stamp order.
+        // OCaml compiler/ml/typecore.ml:1098-1132 passes the full unqualified
+        // label scope to `Label.disambiguate` when `opath` is present. That
+        // reaches typecore.ml:983-988 `disambiguate_by_type`, calling
+        // `compare_type_path env tpath lbl_tpath` until the first match. The
+        // Rust expected-record fast path below already knows the selected
+        // label, so replay the comparison side effects without constructing a
+        // throwaway label for every large JSX prop.
         if compare_type_paths_for_label_disambiguation(
             &target_path,
             &label_path,
@@ -15666,7 +15739,7 @@ fn select_record_type_for_fields<'a>(
     let first_name = *field_names.first()?;
     let mut matching: Vec<(Option<Path>, TypeExprRef)> = Vec::new();
     let candidates = env.find_all_labels(first_name);
-    for label in candidates.into_iter().rev() {
+    for label in candidates {
         if let Some(info) = build_record_label_descriptions_info(label.lbl_res, env, pers_env, ctx)
         {
             if info.matches_field_names(field_names, closed_record) {
@@ -15946,6 +16019,11 @@ fn type_record(
     let mut explicit_overrides_in_order = Vec::with_capacity(fields.len());
     let mut first_disambiguated_label: Option<crate::types::LabelDescription> = None;
     let mut ambiguous_label_warnings: Vec<(String, Vec<String>, Option<Path>)> = Vec::new();
+    let report_ambiguous_label_warnings = tctx.warning_config.is_active(&Warning::AmbiguousName {
+        names: Vec::new(),
+        types: Vec::new(),
+        is_label: true,
+    });
 
     struct ExplicitField<'a> {
         original_index: usize,
@@ -15979,15 +16057,26 @@ fn type_record(
             // reaches typecore.ml:983-988 `disambiguate_by_type`, so aliases
             // such as `type view = t = {...}` can select the later `view`
             // label family even when the expected type is `t`.
-            disambiguate_label(
+            let record_opath_ty = record_opath_ty.expect("checked above");
+            fast_exact_unqualified_opath_record_label(
                 field_name,
-                record_opath_ty.expect("checked above"),
+                record_opath_ty,
+                expected_label_descriptions.as_ref(),
                 env,
                 &mut tctx.persistent_env,
                 ctx,
-                false,
-                true,
             )
+            .or_else(|| {
+                disambiguate_label(
+                    field_name,
+                    record_opath_ty,
+                    env,
+                    &mut tctx.persistent_env,
+                    ctx,
+                    false,
+                    true,
+                )
+            })
         } else {
             None
         };
@@ -16043,7 +16132,8 @@ fn type_record(
                     true,
                 )
             });
-        if record_opath_ty.is_none()
+        if report_ambiguous_label_warnings
+            && record_opath_ty.is_none()
             && matches!(resolved_lid, Longident::Lident(_))
             && let Some(label) = disambiguated.as_ref()
         {
@@ -16075,7 +16165,9 @@ fn type_record(
             disambiguated,
         });
     }
-    if let Some((_, first_types, first_path)) = ambiguous_label_warnings.first().cloned() {
+    if report_ambiguous_label_warnings
+        && let Some((_, first_types, first_path)) = ambiguous_label_warnings.first().cloned()
+    {
         let same_selected_path = ambiguous_label_warnings.iter().all(|(_, _, path)| {
             match (first_path.as_ref(), path.as_ref()) {
                 (Some(first), Some(path)) => compare_type_paths_for_label_disambiguation(
@@ -16149,21 +16241,7 @@ fn type_record(
                 if let Some(env_label) = disambiguated {
                     let expected_label = expected_label_descriptions
                         .as_ref()
-                        .and_then(|info| info.label_by_name(&field_name))
-                    .map(|mut label| {
-                        // OCaml compiler/ml/typecore.ml:3677-3717 receives the
-                        // already-substituted label chosen by
-                        // typecore.ml:942-967 `lookup_from_type`; qualify the
-                        // expected-type label before `instance_label` so field
-                        // argument paths mirror the reference component table.
-                        qualify_label_description_paths(
-                            &mut label,
-                            env,
-                            &mut tctx.persistent_env,
-                            ctx,
-                        );
-                        label
-                    });
+                        .and_then(|info| info.label_by_name(&field_name));
                     let env_label = expected_label
                         .or_else(|| {
                             lookup_label_by_expected_type(
@@ -16195,6 +16273,20 @@ fn type_record(
                                 &mut tctx.persistent_env,
                                 ctx,
                             )
+                        })
+                        .map(|mut label| {
+                            // OCaml compiler/ml/typecore.ml:3677-3717 receives the
+                            // already-substituted label chosen by
+                            // typecore.ml:942-967 `lookup_from_type`; qualify the
+                            // expected-type label before `instance_label` so field
+                            // argument paths mirror the reference component table.
+                            qualify_label_description_paths(
+                                &mut label,
+                                env,
+                                &mut tctx.persistent_env,
+                                ctx,
+                            );
+                            label
                         })
                         .unwrap_or(env_label);
 
@@ -16559,6 +16651,20 @@ fn type_record(
         None
     };
     let use_sparse_large_record = sparse_all_label_descriptions.is_some();
+    if ctx.compiler_counters_enabled() && typed_base.is_none() && !fields.is_empty() {
+        let label_count = all_label_descriptions
+            .as_ref()
+            .map(|labels| labels.len())
+            .or_else(|| all_labels.as_ref().map(|labels| labels.len()))
+            .unwrap_or(0);
+        if label_count >= 20 {
+            crate::perf_counters::record_sparse_record(
+                use_sparse_large_record,
+                label_count,
+                fields.len(),
+            );
+        }
+    }
 
     if let Some(all_label_descriptions) = all_label_descriptions.clone() {
         if use_sparse_large_record {
@@ -17442,7 +17548,7 @@ fn type_field(
     }
 
     // Disambiguate label: use the record expression's type to find the right label
-    let env_label = lookup_label_by_lid(
+    let (env_label, needs_label_qualification) = if let Some(label) = lookup_label_by_lid(
         &resolved_lid,
         tctx.arena,
         env,
@@ -17450,20 +17556,24 @@ fn type_field(
         tctx.type_ctx,
         label_expected_record_ty,
         None,
-    )
-    .or_else(|| {
-        disambiguate_label(
-            &field_name,
-            label_expected_record_ty.unwrap_or_else(|| tctx.type_ctx.new_var(None)),
-            env,
-            &mut tctx.persistent_env,
-            tctx.type_ctx,
-            true,
-            true,
+    ) {
+        (Some(label), false)
+    } else {
+        (
+            disambiguate_label(
+                &field_name,
+                label_expected_record_ty.unwrap_or_else(|| tctx.type_ctx.new_var(None)),
+                env,
+                &mut tctx.persistent_env,
+                tctx.type_ctx,
+                true,
+                true,
+            ),
+            label_expected_record_ty.is_none(),
         )
-    });
+    };
     let mut env_label = env_label;
-    if let Some(label) = env_label.as_mut() {
+    if needs_label_qualification && let Some(label) = env_label.as_mut() {
         qualify_label_description_paths(label, env, &mut tctx.persistent_env, tctx.type_ctx);
     }
 
@@ -19521,21 +19631,49 @@ fn check_inlined_record_escape(
     ty: TypeExprRef,
     recarg: RecArg,
 ) -> TypeCoreResult<()> {
+    if matches!(recarg, RecArg::Allowed) {
+        return Ok(());
+    }
+
+    {
+        let desc = ctx.borrow_desc(ty);
+        match (recarg, &*desc) {
+            (RecArg::Rejected, TypeDesc::Tconstr { path, .. }) => {
+                if path.is_constructor_typath() {
+                    return Err(TypeCoreError::InlinedRecordEscape { loc });
+                }
+                return Ok(());
+            }
+            (RecArg::Rejected, TypeDesc::Tlink(_)) => {}
+            (RecArg::Rejected, _) => return Ok(()),
+            (RecArg::Required, TypeDesc::Tconstr { path, .. }) => {
+                if !path.is_constructor_typath() {
+                    return Err(TypeCoreError::InlinedRecordEscape { loc });
+                }
+                return Ok(());
+            }
+            (RecArg::Required, TypeDesc::Tvar(_)) => {
+                return Err(TypeCoreError::InlinedRecordEscape { loc });
+            }
+            (RecArg::Required, TypeDesc::Tlink(_)) => {}
+            (RecArg::Required, _) => return Ok(()),
+            (RecArg::Allowed, _) => return Ok(()),
+        }
+    }
+
     let repr = ctx.repr(ty);
-    let desc = ctx.get_desc(repr);
+    let desc = ctx.borrow_desc(repr);
     let is_recarg = match &*desc {
         TypeDesc::Tconstr { path, .. } => path.is_constructor_typath(),
         _ => false,
     };
     let escapes = match (is_recarg, recarg, &*desc) {
-        (_, RecArg::Allowed, _) | (true, RecArg::Required, _) | (false, RecArg::Rejected, _) => {
-            false
-        }
+        (_, RecArg::Allowed, _) => false,
+        (true, RecArg::Required, _) | (false, RecArg::Rejected, _) => false,
         (true, RecArg::Rejected, _)
         | (false, RecArg::Required, TypeDesc::Tvar(_) | TypeDesc::Tconstr { .. }) => true,
         (false, RecArg::Required, _) => false,
     };
-    drop(desc);
 
     if escapes {
         Err(TypeCoreError::InlinedRecordEscape { loc })
@@ -21169,7 +21307,9 @@ fn typed_module_expr_uses_ident(module_expr: &ModuleExpr, target: &Ident) -> boo
 
 fn typed_module_type_uses_ident(module_type: &ModuleType, target: &Ident) -> bool {
     match &module_type.mty_desc {
-        ModuleTypeDesc::Tmty_typeof(module_expr) => typed_module_expr_uses_ident(module_expr, target),
+        ModuleTypeDesc::Tmty_typeof(module_expr) => {
+            typed_module_expr_uses_ident(module_expr, target)
+        }
         ModuleTypeDesc::Tmty_functor(_, _, arg, body) => {
             arg.as_deref()
                 .is_some_and(|arg| typed_module_type_uses_ident(arg, target))
@@ -21207,6 +21347,256 @@ fn typed_signature_item_uses_ident(item: &TypedSignatureItem, target: &Ident) ->
         | TypedSignatureItemDesc::Tsig_exception(_)
         | TypedSignatureItemDesc::Tsig_open(_)
         | TypedSignatureItemDesc::Tsig_attribute(_) => false,
+    }
+}
+
+fn collect_typed_expression_pident_uses(expr: &Expression, used: &mut HashSet<Ident>) {
+    match &expr.exp_desc {
+        ExpressionDesc::Texp_ident(Path::Pident(id), _, _) => {
+            used.insert(id.clone());
+        }
+        ExpressionDesc::Texp_ident(_, _, _) => {}
+        ExpressionDesc::Texp_let(_, bindings, body) => {
+            for binding in bindings {
+                collect_typed_expression_pident_uses(&binding.vb_expr, used);
+            }
+            collect_typed_expression_pident_uses(body, used);
+        }
+        ExpressionDesc::Texp_function { params, body, .. } => {
+            for param in params {
+                if let Some(default) = &param.default {
+                    collect_typed_expression_pident_uses(default, used);
+                }
+            }
+            collect_typed_case_pident_uses(body, used);
+        }
+        ExpressionDesc::Texp_apply { funct, args, .. } => {
+            collect_typed_expression_pident_uses(funct, used);
+            for arg in args {
+                if let Some(expr) = &arg.expression {
+                    collect_typed_expression_pident_uses(expr, used);
+                }
+            }
+        }
+        ExpressionDesc::Texp_match(scrutinee, value_cases, exn_cases, _) => {
+            collect_typed_expression_pident_uses(scrutinee, used);
+            collect_typed_case_pident_uses(value_cases, used);
+            collect_typed_case_pident_uses(exn_cases, used);
+        }
+        ExpressionDesc::Texp_try(body, cases) => {
+            collect_typed_expression_pident_uses(body, used);
+            collect_typed_case_pident_uses(cases, used);
+        }
+        ExpressionDesc::Texp_tuple(items)
+        | ExpressionDesc::Texp_array(items)
+        | ExpressionDesc::Texp_construct(_, _, items) => {
+            for item in items {
+                collect_typed_expression_pident_uses(item, used);
+            }
+        }
+        ExpressionDesc::Texp_variant(_, payload) => {
+            if let Some(expr) = payload {
+                collect_typed_expression_pident_uses(expr, used);
+            }
+        }
+        ExpressionDesc::Texp_record {
+            fields,
+            extended_expression,
+        }
+        | ExpressionDesc::Texp_record_sparse {
+            fields,
+            extended_expression,
+            ..
+        } => {
+            for (_, _, definition, _) in fields {
+                if let crate::types::typedtree::RecordLabelDefinition::Overridden(_, expr) =
+                    definition
+                {
+                    collect_typed_expression_pident_uses(expr, used);
+                }
+            }
+            if let Some(expr) = extended_expression {
+                collect_typed_expression_pident_uses(expr, used);
+            }
+        }
+        ExpressionDesc::Texp_field(base, _, _) | ExpressionDesc::Texp_assert(base) => {
+            collect_typed_expression_pident_uses(base, used);
+        }
+        ExpressionDesc::Texp_setfield(base, _, _, value) => {
+            collect_typed_expression_pident_uses(base, used);
+            collect_typed_expression_pident_uses(value, used);
+        }
+        ExpressionDesc::Texp_ifthenelse(cond, then_expr, else_expr) => {
+            collect_typed_expression_pident_uses(cond, used);
+            collect_typed_expression_pident_uses(then_expr, used);
+            if let Some(expr) = else_expr {
+                collect_typed_expression_pident_uses(expr, used);
+            }
+        }
+        ExpressionDesc::Texp_sequence(first, second)
+        | ExpressionDesc::Texp_while(first, second)
+        | ExpressionDesc::Texp_for_of(_, _, first, second)
+        | ExpressionDesc::Texp_for_await_of(_, _, first, second) => {
+            collect_typed_expression_pident_uses(first, used);
+            collect_typed_expression_pident_uses(second, used);
+        }
+        ExpressionDesc::Texp_for(_, _, start, stop, _, body) => {
+            collect_typed_expression_pident_uses(start, used);
+            collect_typed_expression_pident_uses(stop, used);
+            collect_typed_expression_pident_uses(body, used);
+        }
+        ExpressionDesc::Texp_send(receiver, _, arg) => {
+            collect_typed_expression_pident_uses(receiver, used);
+            if let Some(expr) = arg {
+                collect_typed_expression_pident_uses(expr, used);
+            }
+        }
+        ExpressionDesc::Texp_letmodule(_, _, module_expr, body) => {
+            collect_typed_module_expr_pident_uses(module_expr, used);
+            collect_typed_expression_pident_uses(body, used);
+        }
+        ExpressionDesc::Texp_letexception(_, body) => {
+            collect_typed_expression_pident_uses(body, used);
+        }
+        ExpressionDesc::Texp_pack(module_expr) => {
+            collect_typed_module_expr_pident_uses(module_expr, used);
+        }
+        ExpressionDesc::Texp_constant(_)
+        | ExpressionDesc::Texp_break
+        | ExpressionDesc::Texp_continue
+        | ExpressionDesc::Texp_extension_constructor(_, _) => {}
+    }
+}
+
+fn collect_typed_case_pident_uses(
+    cases: &[crate::types::typedtree::Case],
+    used: &mut HashSet<Ident>,
+) {
+    for case in cases {
+        if let Some(guard) = &case.c_guard {
+            collect_typed_expression_pident_uses(guard, used);
+        }
+        collect_typed_expression_pident_uses(&case.c_rhs, used);
+    }
+}
+
+fn collect_typed_module_expr_pident_uses(module_expr: &ModuleExpr, used: &mut HashSet<Ident>) {
+    match &module_expr.mod_desc {
+        ModuleExprDesc::Tmod_structure(structure) => {
+            for item in &structure.str_items {
+                collect_typed_structure_item_pident_uses(item, used);
+            }
+        }
+        ModuleExprDesc::Tmod_apply(func, arg, _) => {
+            collect_typed_module_expr_pident_uses(func, used);
+            collect_typed_module_expr_pident_uses(arg, used);
+        }
+        ModuleExprDesc::Tmod_functor(_, _, arg, body) => {
+            if let Some(arg) = arg {
+                collect_typed_module_type_pident_uses(arg, used);
+            }
+            collect_typed_module_expr_pident_uses(body, used);
+        }
+        ModuleExprDesc::Tmod_constraint(inner, _, constraint, _) => {
+            collect_typed_module_expr_pident_uses(inner, used);
+            if let ModuleTypeConstraint::Tmodtype_explicit(module_type) = constraint {
+                collect_typed_module_type_pident_uses(module_type, used);
+            }
+        }
+        ModuleExprDesc::Tmod_unpack(expr, _) => {
+            collect_typed_expression_pident_uses(expr, used);
+        }
+        ModuleExprDesc::Tmod_ident(_, _) => {}
+    }
+}
+
+fn collect_typed_module_type_pident_uses(module_type: &ModuleType, used: &mut HashSet<Ident>) {
+    match &module_type.mty_desc {
+        ModuleTypeDesc::Tmty_typeof(module_expr) => {
+            collect_typed_module_expr_pident_uses(module_expr, used);
+        }
+        ModuleTypeDesc::Tmty_functor(_, _, arg, body) => {
+            if let Some(arg) = arg {
+                collect_typed_module_type_pident_uses(arg, used);
+            }
+            collect_typed_module_type_pident_uses(body, used);
+        }
+        ModuleTypeDesc::Tmty_with(inner, _) => {
+            collect_typed_module_type_pident_uses(inner, used);
+        }
+        ModuleTypeDesc::Tmty_signature(signature) => {
+            for item in &signature.sig_items {
+                collect_typed_signature_item_pident_uses(item, used);
+            }
+        }
+        ModuleTypeDesc::Tmty_ident(_, _)
+        | ModuleTypeDesc::Tmty_alias(_, _)
+        | ModuleTypeDesc::Tmty_placeholder => {}
+    }
+}
+
+fn collect_typed_signature_item_pident_uses(
+    item: &TypedSignatureItem,
+    used: &mut HashSet<Ident>,
+) {
+    match &item.sig_desc {
+        TypedSignatureItemDesc::Tsig_module(decl) => {
+            collect_typed_module_type_pident_uses(&decl.md_type, used);
+        }
+        TypedSignatureItemDesc::Tsig_recmodule(decls) => {
+            for decl in decls {
+                collect_typed_module_type_pident_uses(&decl.md_type, used);
+            }
+        }
+        TypedSignatureItemDesc::Tsig_modtype(decl) => {
+            if let Some(module_type) = &decl.mtd_type {
+                collect_typed_module_type_pident_uses(module_type, used);
+            }
+        }
+        TypedSignatureItemDesc::Tsig_include(include) => {
+            collect_typed_module_type_pident_uses(&include.incl_mod, used);
+        }
+        TypedSignatureItemDesc::Tsig_value(_)
+        | TypedSignatureItemDesc::Tsig_type(_, _)
+        | TypedSignatureItemDesc::Tsig_typext(_)
+        | TypedSignatureItemDesc::Tsig_exception(_)
+        | TypedSignatureItemDesc::Tsig_open(_)
+        | TypedSignatureItemDesc::Tsig_attribute(_) => {}
+    }
+}
+
+fn collect_typed_structure_item_pident_uses(item: &StructureItem, used: &mut HashSet<Ident>) {
+    match &item.str_desc {
+        StructureItemDesc::Tstr_eval(expr, _) => {
+            collect_typed_expression_pident_uses(expr, used);
+        }
+        StructureItemDesc::Tstr_value(_, bindings) => {
+            for binding in bindings {
+                collect_typed_expression_pident_uses(&binding.vb_expr, used);
+            }
+        }
+        StructureItemDesc::Tstr_module(binding) => {
+            collect_typed_module_expr_pident_uses(&binding.mb_expr, used);
+        }
+        StructureItemDesc::Tstr_recmodule(bindings) => {
+            for binding in bindings {
+                collect_typed_module_expr_pident_uses(&binding.mb_expr, used);
+            }
+        }
+        StructureItemDesc::Tstr_modtype(decl) => {
+            if let Some(module_type) = &decl.mtd_type {
+                collect_typed_module_type_pident_uses(module_type, used);
+            }
+        }
+        StructureItemDesc::Tstr_include(include) => {
+            collect_typed_module_expr_pident_uses(&include.incl_mod, used);
+        }
+        StructureItemDesc::Tstr_primitive(_)
+        | StructureItemDesc::Tstr_type(_, _)
+        | StructureItemDesc::Tstr_typext(_)
+        | StructureItemDesc::Tstr_exception(_)
+        | StructureItemDesc::Tstr_open(_)
+        | StructureItemDesc::Tstr_attribute(_) => {}
     }
 }
 
@@ -21830,6 +22220,14 @@ fn report_unused_local_let_warnings(
     typed_body: &Expression,
 ) {
     let mut warning_index = insert_index;
+    let mut body_uses = HashSet::default();
+    collect_typed_expression_pident_uses(typed_body, &mut body_uses);
+    let mut recursive_rhs_uses = HashSet::default();
+    if rec_flag == RecFlag::Recursive {
+        for binding in typed_bindings {
+            collect_typed_expression_pident_uses(&binding.vb_expr, &mut recursive_rhs_uses);
+        }
+    }
     for binding in typed_bindings {
         let mut bound = Vec::new();
         collect_typed_pattern_idents(&binding.vb_pat, &mut bound);
@@ -21839,13 +22237,7 @@ fn report_unused_local_let_warnings(
 
         let used = bound
             .iter()
-            .map(|(id, _, _)| {
-                typed_expression_uses_ident(typed_body, id)
-                    || (rec_flag == RecFlag::Recursive
-                        && typed_bindings
-                            .iter()
-                            .any(|binding| typed_expression_uses_ident(&binding.vb_expr, id)))
-            })
+            .map(|(id, _, _)| body_uses.contains(id) || recursive_rhs_uses.contains(id))
             .collect::<Vec<_>>();
         let some_used = used.iter().any(|used| *used);
 
@@ -21886,11 +22278,13 @@ fn report_unused_rec_flag_warning(
         return;
     }
 
-    let rec_needed = bound.iter().any(|(id, _, _)| {
-        typed_bindings
-            .iter()
-            .any(|binding| typed_expression_uses_ident(&binding.vb_expr, id))
-    });
+    let mut recursive_rhs_uses = HashSet::default();
+    for binding in typed_bindings {
+        collect_typed_expression_pident_uses(&binding.vb_expr, &mut recursive_rhs_uses);
+    }
+    let rec_needed = bound
+        .iter()
+        .any(|(id, _, _)| recursive_rhs_uses.contains(id));
     if !rec_needed {
         tctx.report_warning(first_binding.vb_pat.pat_loc, Warning::UnusedRecFlag);
     }
@@ -21903,9 +22297,16 @@ fn report_let_partial_match_warnings<'a>(
 ) {
     let ctx = tctx.type_ctx;
     for binding in bindings {
+        let rhs_stub = Expression::new(
+            ExpressionDesc::Texp_constant(Constant::Int(0)),
+            binding.vb_expr.exp_loc,
+            binding.vb_expr.exp_type,
+            EnvRef(0),
+            Vec::new().into(),
+        );
         let cases = vec![crate::types::typedtree::Case::simple(
             binding.vb_pat.clone(),
-            binding.vb_expr.clone(),
+            rhs_stub,
         )];
         // OCaml compiler/ml/typecore.ml:4695-4710 computes the LetUnwrap
         // partial-match warning hint before calling `check_partial`, and before
@@ -23078,6 +23479,7 @@ fn rewrite_child_module_prefixes_from_sig<'a>(
     skip_child_name: Option<&str>,
     ctx: &'a crate::types::context::TypeContext,
 ) {
+    let mut prefixes = Vec::new();
     for item in source_sig {
         if let crate::types::decl::SignatureItem::SigModule(id, _, _) = item {
             if skip_child_name == Some(id.name()) {
@@ -23085,14 +23487,10 @@ fn rewrite_child_module_prefixes_from_sig<'a>(
             }
             let old_prefix = Path::pdot(old_parent_path.clone(), id.name().to_string());
             let new_prefix = Path::pdot(new_parent_path.clone(), id.name().to_string());
-            crate::cmi::persistent_env::rewrite_sig_by_path_prefix(
-                sig_to_rewrite,
-                &old_prefix,
-                &new_prefix,
-                ctx,
-            );
+            prefixes.push((old_prefix, new_prefix));
         }
     }
+    crate::cmi::persistent_env::rewrite_sig_by_path_prefixes(sig_to_rewrite, &prefixes, ctx);
 }
 
 #[track_caller]
@@ -24915,6 +25313,12 @@ fn compare_type_paths_for_disambiguation_impl<'a>(
     if !force_env_normalize && left.same(right) {
         return true;
     }
+    let env_id = env.id();
+    if force_env_normalize
+        && let Some(cached) = ctx.find_forced_type_path_compare(env_id, left, right)
+    {
+        return cached;
+    }
     let mut left_visiting = HashSet::new();
     let mut right_visiting = HashSet::new();
     let left_expanded = expand_type_path_for_compare(
@@ -24935,7 +25339,15 @@ fn compare_type_paths_for_disambiguation_impl<'a>(
         &mut right_visiting,
         force_env_normalize,
     );
-    left_expanded.same(&right_expanded)
+    let same = left_expanded.same(&right_expanded);
+    if force_env_normalize {
+        // OCaml still performs the first `compare_type_path` expansion at this
+        // call site. Once that side-effectful comparison has run for this
+        // environment, repeated record-label comparisons with the same paths
+        // can reuse the stable result.
+        ctx.register_forced_type_path_compare(env_id, left, right, same);
+    }
+    same
 }
 
 fn label_result_path<'a>(
@@ -25381,15 +25793,9 @@ fn qualify_label_description_paths<'a>(
         } else if path_non_apply_root_ident(path)
             .is_some_and(|id| !id.is_persistent() && id.stamp() != 0)
         {
-            // OCaml compiler/ml/env.ml:1542-1559 builds component labels by
-            // substituting the current component table, and
-            // compiler/ml/typecore.ml:942-967 `lookup_from_type` reads that
-            // substituted label directly. Do not cache labels rooted in local
-            // module paths: reusing one copied label family across later local
-            // environments would create a Rust-only sharing shortcut.
-            QualifiedRecordLabelCacheKeyResult::LocalRoot
+            QualifiedRecordLabelCacheKeyResult::Key(env.id(), path.clone(), label.lbl_pos)
         } else if path_non_apply_root_ident(path).is_some() {
-            QualifiedRecordLabelCacheKeyResult::LocalRoot
+            QualifiedRecordLabelCacheKeyResult::Key(env.id(), path.clone(), label.lbl_pos)
         } else {
             QualifiedRecordLabelCacheKeyResult::Other
         }
@@ -25397,7 +25803,6 @@ fn qualify_label_description_paths<'a>(
 
     enum QualifiedRecordLabelCacheKeyResult {
         Key(u64, Path, i32),
-        LocalRoot,
         Other,
     }
 
@@ -25602,12 +26007,6 @@ fn qualify_label_description_paths<'a>(
         QualifiedRecordLabelCacheKeyResult::Key(env_id, path, lbl_pos) => {
             Some((env_id, path, lbl_pos))
         }
-        QualifiedRecordLabelCacheKeyResult::LocalRoot => {
-            if counters_enabled {
-                crate::perf_counters::record_qualified_record_label_uncached_local_root();
-            }
-            None
-        }
         QualifiedRecordLabelCacheKeyResult::Other => {
             if counters_enabled {
                 crate::perf_counters::record_qualified_record_label_uncached_other();
@@ -25748,7 +26147,7 @@ enum ConstructorDisambiguationSource {
 /// 1. Try to extract the concrete variant type from expected_ty
 /// 2. Find all constructors with the given name in the env
 /// 3. If we have a type path from expected_ty, prefer the constructor matching that type
-/// 4. Otherwise fall back to the most recent constructor in scope
+/// 4. Otherwise fall back to the first constructor in scope
 fn disambiguate_constructor<'a>(
     cstr_name: &str,
     expected_ty: TypeExprRef,
@@ -25782,9 +26181,9 @@ fn disambiguate_constructor<'a>(
     // Step 3: If we have a target type path, try to disambiguate
     if let Some(ref target_path) = opath {
         // Match OCaml NameChoice.disambiguate_by_type: choose the first
-        // path-compatible constructor in scope order (most recent first),
-        // with compare_type_path semantics (alias-expanded path compare).
-        for cstr in all_constrs.iter().rev() {
+        // path-compatible constructor in scope order, with compare_type_path
+        // semantics (alias-expanded path compare).
+        for cstr in &all_constrs {
             let cstr_ty = ctx.repr(cstr.cstr_res);
             let cstr_desc = ctx.get_desc(cstr_ty);
             if let TypeDesc::Tconstr {
@@ -25830,14 +26229,14 @@ fn disambiguate_constructor<'a>(
         }
     }
 
-    // Step 4: Fall back to the most recent constructor (last in the list =
-    // most recently added). OCaml compiler/ml/typecore.ml:990-1008 still runs
+    // Step 4: Fall back to the first constructor in scope. OCaml
+    // compiler/ml/typecore.ml:990-1008 still runs
     // `ambiguous_types` for this `opath = None` branch, so preserve those
     // compare_type_path/env-normalize side effects before returning.
-    let cstr = all_constrs.last().unwrap();
+    let cstr = all_constrs.first().unwrap();
     let ambiguous_types = ambiguous_constructor_warning_types(
         cstr,
-        all_constrs.iter().rev().skip(1).copied(),
+        all_constrs.iter().skip(1).copied(),
         env,
         pers_env,
         ctx,
@@ -26383,7 +26782,8 @@ fn lookup_label_by_expected_type<'a>(
     let visible_path =
         extract_type_path_from_expected_with_persistent_env(record_ty, env, pers_env, ctx)?;
 
-    for env_label in env.find_all_labels(label_name).iter().rev() {
+    let env_labels = env.find_all_labels(label_name);
+    for env_label in env_labels.iter() {
         let label_res = ctx.repr(env_label.lbl_res);
         let (label_path, label_args) = {
             let label_desc = ctx.get_desc(label_res);
@@ -26583,7 +26983,7 @@ fn materialize_dict_pattern_label(
 /// 1. Get all labels with the given name from the env
 /// 2. Extract the type path from the record expression's type
 /// 3. If we have a type path, prefer the label from that type
-/// 4. Otherwise fall back to the most recent label in scope
+/// 4. Otherwise fall back to the first label in scope
 fn disambiguate_label<'a>(
     label_name: &str,
     record_ty: TypeExprRef,
@@ -26611,15 +27011,14 @@ fn disambiguate_label<'a>(
     // Find all labels with this name
     let all_labels = env.find_all_labels(lookup_name);
     if all_labels.is_empty() {
-        let mut selected =
-            lookup_label_by_expected_type(
-                lookup_name,
-                record_ty,
-                env,
-                pers_env,
-                ctx,
-                qualify_lookup_from_type_label,
-            );
+        let mut selected = lookup_label_by_expected_type(
+            lookup_name,
+            record_ty,
+            env,
+            pers_env,
+            ctx,
+            qualify_lookup_from_type_label,
+        );
         if let Some(override_name) = override_name {
             if let Some(label) = selected.as_mut() {
                 label.lbl_name = override_name;
@@ -26631,9 +27030,9 @@ fn disambiguate_label<'a>(
     let mut selected = None;
 
     // If we have a target type path, try to disambiguate by exact path identity.
-    // Prefer the most recently added matching label (reverse iteration).
+    // Prefer the first matching label in OCaml scope order.
     if let Some(ref target_path) = opath {
-        for label in all_labels.iter().rev() {
+        for label in all_labels.iter() {
             let lbl_ty = ctx.repr(label.lbl_res);
             let lbl_desc = ctx.get_desc(lbl_ty);
             if let TypeDesc::Tconstr { path: lbl_path, .. } = &*lbl_desc {
@@ -26689,7 +27088,7 @@ fn disambiguate_label<'a>(
     if selected.is_none() && opath.is_none() {
         let mut has_props = false;
         let mut non_props: Vec<&crate::types::LabelDescription> = Vec::new();
-        for label in &all_labels {
+        for label in all_labels.iter() {
             let lbl_ty = ctx.repr(label.lbl_res);
             let lbl_desc = ctx.get_desc(lbl_ty);
             match &*lbl_desc {
@@ -26701,12 +27100,12 @@ fn disambiguate_label<'a>(
         }
 
         if has_props {
-            selected = non_props.last().map(|label| (*label).clone());
+            selected = non_props.first().map(|label| (*label).clone());
         }
     }
 
     if selected.is_none() && opath.is_none() {
-        selected = all_labels.last().map(|l| (*l).clone());
+        selected = all_labels.first().map(|l| (*l).clone());
     }
 
     if force_ambiguous_side_effects
@@ -26715,7 +27114,7 @@ fn disambiguate_label<'a>(
     {
         force_ambiguous_label_type_path_side_effects(
             label,
-            all_labels.iter().rev().skip(1).copied(),
+            all_labels.iter().skip(1).copied(),
             env,
             pers_env,
             ctx,
@@ -26728,7 +27127,9 @@ fn disambiguate_label<'a>(
         }
     }
 
-    if opath.is_some() && let Some(label) = selected.as_mut() {
+    if opath.is_some()
+        && let Some(label) = selected.as_mut()
+    {
         qualify_label_description_paths(label, env, pers_env, ctx);
     }
 
@@ -28154,7 +28555,8 @@ fn with_resolved_child_module_components<'a, R>(
     // Alias children are the direct `scrape_alias` case: env.ml:1517 calls
     // `scrape_alias`, and env.ml:1441-1444 forces `find_module path env`
     // through env.ml:865-882 before the aliased component table is built.
-    if let Some((runtime_pos, stored)) = parent_components.lookup_child_components(child_name) {
+    if let Some((runtime_pos, stored)) = parent_components.lookup_child_components(child_name, ctx)
+    {
         let access_path = if parent_components.access_path().head().is_persistent()
             || parent_components.access_path().head().stamp() == 0
         {
@@ -28381,7 +28783,7 @@ fn build_module_components_from_parent_path<'a>(
         pers_env,
         ctx,
         cache_mode,
-        |components| components.lookup_child_components(module_name.as_str()),
+        |components| components.lookup_child_components(module_name.as_str(), ctx),
     ) {
         if let Some(components) =
             stored.with_components(pers_env, ctx, cache_mode, |child| child.clone())
@@ -28493,7 +28895,7 @@ fn build_functor_application_components<'a>(
                 cache_mode,
                 |components| {
                     components
-                        .lookup_child_components(module_name.as_str())
+                        .lookup_child_components(module_name.as_str(), ctx)
                         .map(|(_, stored)| stored)
                 },
             )
@@ -28583,6 +28985,14 @@ pub(crate) enum ComponentLookupCacheMode {
 }
 
 impl ComponentLookupCacheMode {
+    pub(crate) fn counter_name(self) -> &'static str {
+        match self {
+            ComponentLookupCacheMode::FindModule => "find_module",
+            ComponentLookupCacheMode::FindModuleDescr => "find_module_descr",
+            ComponentLookupCacheMode::ProbeModuleDescr => "probe_module_descr",
+        }
+    }
+
     pub(crate) fn publishes(self) -> bool {
         matches!(
             self,
@@ -28833,20 +29243,7 @@ fn lookup_type_in_resolved_path_with_cache_mode<'a>(
     if let Path::Pident(id) = parent_module_path
         && id.is_persistent()
     {
-        let persistent_sig = ctx
-            .with_raw_module_sig(id.name(), |raw_sig| Arc::new(raw_sig.clone()))
-            .or_else(|| {
-                pers_env
-                    .as_mut()
-                    .and_then(|pers| pers.find_pers_struct(id.name(), ctx))
-                    .map(|ps| ps.ps_sig.clone())
-            })
-            .or_else(|| {
-                let mut pers = ctx.persistent_env_clone()?;
-                pers.find_pers_struct(id.name(), ctx)
-                    .map(|ps| ps.ps_sig.clone())
-            });
-        if let Some(found) = persistent_sig.and_then(|sig| {
+        let find_in_sig = |sig: &crate::types::decl::Signature| {
             sig.iter().find_map(|item| match item {
                 crate::types::decl::SignatureItem::SigType(sig_id, sig_decl, _)
                     if sig_id.name() == type_name =>
@@ -28859,7 +29256,22 @@ fn lookup_type_in_resolved_path_with_cache_mode<'a>(
                 }
                 _ => None,
             })
-        }) {
+        };
+        let found = ctx
+            .with_raw_module_sig(id.name(), find_in_sig)
+            .flatten()
+            .or_else(|| {
+                pers_env
+                    .as_mut()
+                    .and_then(|pers| pers.find_pers_struct(id.name(), ctx))
+                    .and_then(|ps| find_in_sig(ps.ps_sig.as_ref()))
+            })
+            .or_else(|| {
+                let mut pers = ctx.persistent_env_clone()?;
+                pers.find_pers_struct(id.name(), ctx)
+                    .and_then(|ps| find_in_sig(ps.ps_sig.as_ref()))
+            });
+        if let Some(found) = found {
             // OCaml compiler/ml/env.ml:781-788 returns persistent `ps_comps` for
             // direct module-descriptor lookup, then env.ml:800-813 reads
             // `comp_types`. Rust's `find_pers_struct` path mirrors
@@ -28870,6 +29282,15 @@ fn lookup_type_in_resolved_path_with_cache_mode<'a>(
             // not use the raw CMI reader here: OCaml's `ps_comps` is built from
             // the acknowledged persistent structure, not from an uncomponentized
             // CMI declaration.
+            if cache_mode.publishes() {
+                ctx.register_resolved_module_type(
+                    parent_module_path,
+                    type_name,
+                    found.0.clone(),
+                    found.1.clone(),
+                    found.2.clone(),
+                );
+            }
             return Some(found);
         }
     }
@@ -28928,6 +29349,51 @@ fn lookup_type_decl_in_resolved_path_with_cache_mode<'a>(
 ) -> Option<Arc<crate::types::decl::TypeDeclaration>> {
     if let Some((_, _, decl)) = ctx.find_resolved_module_type(parent_module_path, type_name) {
         return Some(decl);
+    }
+
+    if let Path::Pident(id) = parent_module_path
+        && id.is_persistent()
+    {
+        let find_in_sig = |sig: &crate::types::decl::Signature| {
+            sig.iter().find_map(|item| match item {
+                crate::types::decl::SignatureItem::SigType(sig_id, sig_decl, _)
+                    if sig_id.name() == type_name =>
+                {
+                    Some((sig_id.clone(), Arc::new(sig_decl.clone())))
+                }
+                _ => None,
+            })
+        };
+        let found = ctx
+            .with_raw_module_sig(id.name(), find_in_sig)
+            .flatten()
+            .or_else(|| {
+                pers_env
+                    .as_mut()
+                    .and_then(|pers| pers.find_pers_struct(id.name(), ctx))
+                    .and_then(|ps| find_in_sig(ps.ps_sig.as_ref()))
+            })
+            .or_else(|| {
+                let mut pers = ctx.persistent_env_clone()?;
+                pers.find_pers_struct(id.name(), ctx)
+                    .and_then(|ps| find_in_sig(ps.ps_sig.as_ref()))
+            });
+        if let Some((found_id, decl)) = found {
+            // OCaml compiler/ml/env.ml:781-813 performs descriptor lookup
+            // through the persistent unit's component table. This declaration-
+            // only Rust helper can read the same finalized persistent
+            // signature directly without forcing child-module component views.
+            if cache_mode.publishes() {
+                ctx.register_resolved_module_type(
+                    parent_module_path,
+                    type_name,
+                    parent_module_path.clone(),
+                    found_id,
+                    decl.clone(),
+                );
+            }
+            return Some(decl);
+        }
     }
 
     with_resolved_module_components_for_path_with_cache_mode(

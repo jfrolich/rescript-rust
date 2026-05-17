@@ -444,9 +444,9 @@ fn size_constant(c: &Constant) -> i32 {
             tag_info, elements, ..
         } => {
             let missing_fields = match tag_info {
-                TagInfo::Record { .. } | TagInfo::RecordInlined { .. } => {
-                    tag_info.logical_field_count().saturating_sub(elements.len())
-                }
+                TagInfo::Record { .. } | TagInfo::RecordInlined { .. } => tag_info
+                    .logical_field_count()
+                    .saturating_sub(elements.len()),
                 _ => 0,
             };
             missing_fields as i32 + elements.iter().map(size_constant).sum::<i32>()

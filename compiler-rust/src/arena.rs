@@ -98,6 +98,11 @@ impl<T, Idx: ArenaIdx> Arena<T, Idx> {
         Idx::from_u32(idx)
     }
 
+    /// Reserve capacity for additional items without changing existing indices.
+    pub fn reserve(&mut self, additional: usize) {
+        self.items.reserve(additional);
+    }
+
     /// Reserve a new slot with a placeholder value and return its typed index.
     ///
     /// This enables two-phase construction: reserve index first, then overwrite

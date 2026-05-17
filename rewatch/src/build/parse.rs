@@ -809,9 +809,11 @@ fn generate_ast_with_rust_parser(
             };
 
             let stored = if store_ast {
+                let mut arena = parser.into_arena();
+                arena.reserve_typecheck_synthetic_capacity();
                 Some(super::build_types::StoredAst::Signature(Arc::new(
                     super::build_types::StoredSignatureAst {
-                        arena: parser.into_arena(),
+                        arena,
                         signature,
                         source_len: source.len(),
                     },
@@ -876,9 +878,11 @@ fn generate_ast_with_rust_parser(
             };
 
             let stored = if store_ast {
+                let mut arena = parser.into_arena();
+                arena.reserve_typecheck_synthetic_capacity();
                 Some(super::build_types::StoredAst::Structure(Arc::new(
                     super::build_types::StoredStructureAst {
-                        arena: parser.into_arena(),
+                        arena,
                         structure,
                         source_len: source.len(),
                     },

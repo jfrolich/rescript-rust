@@ -364,6 +364,12 @@ pub struct TypeContext {
     /// Cached full normalize_path results keyed by environment identity.
     normalized_path_full_cache: RefCell<ahash::AHashMap<(u64, Path), Path>>,
 
+    /// Cached side-effectful normalize_path results keyed by environment identity.
+    forced_normalized_path_full_cache: RefCell<ahash::AHashMap<(u64, Path), Path>>,
+
+    /// Cached side-effectful type-path comparisons keyed by environment identity.
+    forced_type_path_compare_cache: RefCell<ahash::AHashMap<(u64, Path, Path), bool>>,
+
     /// Load paths for resolving CMI files during type alias expansion.
     load_paths: RefCell<Vec<std::path::PathBuf>>,
 
@@ -384,6 +390,14 @@ pub struct TypeContext {
     /// Used by trigger_module_sig_rename to lazily rename on first access
     /// from normalize_path, matching OCaml's lazy ps_sig forcing.
     raw_module_sigs: RefCell<ahash::AHashMap<String, Arc<super::decl::Signature>>>,
+
+    /// Raw signatures loaded only for persistent component lookup.
+    ///
+    /// OCaml keeps `ps_comps` separate from `ps_sig`; this cache gives Rust the
+    /// same one-shot component backing store without making
+    /// `trigger_all_module_sig_renames` see modules that were only touched by
+    /// descriptor lookup.
+    raw_component_module_sigs: RefCell<ahash::AHashMap<String, Arc<super::decl::Signature>>>,
 
     /// String table for CMI-decoded Longident components.
     /// CMI decoding happens without a ParseArena, so we allocate synthetic
@@ -521,10 +535,13 @@ impl TypeContext {
             resolved_child_module_path_cache: RefCell::new(ahash::AHashMap::new()),
             qualified_module_decl_cache: RefCell::new(ahash::AHashMap::new()),
             normalized_path_full_cache: RefCell::new(ahash::AHashMap::new()),
+            forced_normalized_path_full_cache: RefCell::new(ahash::AHashMap::new()),
+            forced_type_path_compare_cache: RefCell::new(ahash::AHashMap::new()),
             load_paths: RefCell::new(Vec::new()),
             persistent_env: RefCell::new(None),
             renamed_module_sigs: RefCell::new(ahash::AHashMap::new()),
             raw_module_sigs: RefCell::new(ahash::AHashMap::new()),
+            raw_component_module_sigs: RefCell::new(ahash::AHashMap::new()),
             cmi_longident_names: RefCell::new(ahash::AHashMap::new()),
             arena_longident_names: RefCell::new(ahash::AHashMap::new()),
             next_cmi_longident_idx: Cell::new(0xF000_0000),
@@ -1018,6 +1035,57 @@ impl TypeContext {
             .borrow()
             .get(&(env_id, original_path.clone()))
             .cloned()
+    }
+
+    /// Cache a normalized path after the side-effectful normalize path has run.
+    pub(crate) fn register_forced_normalized_path_full(
+        &self,
+        env_id: u64,
+        original_path: &Path,
+        normalized_path: Path,
+    ) {
+        self.forced_normalized_path_full_cache
+            .borrow_mut()
+            .insert((env_id, original_path.clone()), normalized_path);
+    }
+
+    /// Look up a side-effectful normalize path result for this environment.
+    pub(crate) fn find_forced_normalized_path_full(
+        &self,
+        env_id: u64,
+        original_path: &Path,
+    ) -> Option<Path> {
+        self.forced_normalized_path_full_cache
+            .borrow()
+            .get(&(env_id, original_path.clone()))
+            .cloned()
+    }
+
+    /// Cache a side-effectful type-path comparison after the first comparison
+    /// has already forced the same lazies OCaml would force at that call site.
+    pub(crate) fn register_forced_type_path_compare(
+        &self,
+        env_id: u64,
+        left: &Path,
+        right: &Path,
+        same: bool,
+    ) {
+        let mut cache = self.forced_type_path_compare_cache.borrow_mut();
+        cache.insert((env_id, left.clone(), right.clone()), same);
+        cache.insert((env_id, right.clone(), left.clone()), same);
+    }
+
+    /// Look up a side-effectful type-path comparison for this environment.
+    pub(crate) fn find_forced_type_path_compare(
+        &self,
+        env_id: u64,
+        left: &Path,
+        right: &Path,
+    ) -> Option<bool> {
+        self.forced_type_path_compare_cache
+            .borrow()
+            .get(&(env_id, left.clone(), right.clone()))
+            .copied()
     }
 
     /// Set load paths for resolving CMI files.
@@ -1958,6 +2026,19 @@ impl TypeContext {
         self.id_gen.current_stamp()
     }
 
+    /// Consume one identifier stamp without materializing an `Ident`.
+    ///
+    /// This mirrors OCaml save-signature renaming in places where the renamed
+    /// identifier is immediately discarded but the stamp stream must advance.
+    pub fn consume_ident_stamp(&self) {
+        let _ = self.id_gen.next_stamp();
+    }
+
+    /// Consume multiple identifier stamps without materializing `Ident`s.
+    pub fn consume_ident_stamps(&self, count: i32) {
+        let _ = self.id_gen.advance_stamp_by(count);
+    }
+
     /// Set the ident stamp counter to at least `t`.
     /// Matches OCaml's `Ident.set_current_time`.
     pub fn set_current_time(&self, t: i32) {
@@ -2035,12 +2116,23 @@ impl TypeContext {
         if let Some(sig) = self.raw_module_sigs.borrow().get(module_name).cloned() {
             return Some(sig);
         }
+        if let Some(sig) = self
+            .raw_component_module_sigs
+            .borrow()
+            .get(module_name)
+            .cloned()
+        {
+            return Some(sig);
+        }
         // OCaml compiler/ml/env.ml:669-678 creates persistent `ps_comps` from
         // the CMI signature separately from `ps_sig`, and env.ml:781-788 returns
-        // those components for exact persistent `Pident` descriptor lookup. Load
-        // the component signature here without forcing the renamed `ps_sig` lazy.
+        // those components for exact persistent `Pident` descriptor lookup.
+        // Keep this fallback separate from `raw_module_sigs`: that map drives
+        // ps_sig lazy renaming, and caching component-only loads there makes a
+        // later `trigger_all_module_sig_renames` freshen modules OCaml has only
+        // looked up through ps_comps.
         let sig = self.load_lazy_raw_module_sig_for_rename(module_name)?;
-        self.raw_module_sigs
+        self.raw_component_module_sigs
             .borrow_mut()
             .insert(module_name.to_string(), sig.clone());
         Some(sig)
@@ -2079,6 +2171,12 @@ impl TypeContext {
             let raw = self.raw_module_sigs.borrow();
             raw.get(module_name).cloned()
         }
+        .or_else(|| {
+            self.raw_component_module_sigs
+                .borrow()
+                .get(module_name)
+                .cloned()
+        })
         .or_else(|| self.load_lazy_raw_module_sig_for_rename(module_name));
         if let Some(sig) = raw_sig {
             self.raw_module_sigs

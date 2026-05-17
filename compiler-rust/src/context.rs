@@ -83,6 +83,15 @@ impl IdGenerator {
         self.current_stamp.fetch_add(1, Ordering::Relaxed) + 1
     }
 
+    /// Advance the stamp counter by `count` and return the new current stamp.
+    #[inline]
+    pub fn advance_stamp_by(&self, count: i32) -> i32 {
+        if count <= 0 {
+            return self.current_stamp();
+        }
+        self.current_stamp.fetch_add(count, Ordering::Relaxed) + count
+    }
+
     /// Get the next type ID and increment the counter.
     #[inline]
     pub fn next_type_id(&self) -> i32 {

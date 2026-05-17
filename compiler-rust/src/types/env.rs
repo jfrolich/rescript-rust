@@ -187,188 +187,520 @@ pub enum EnvSummary {
 // Binding Tables
 // ============================================================================
 
-/// A table of bindings indexed by identifier.
-/// Each entry tracks whether it was added locally (via `add`) or from an
-/// opened module (via `add_opened`), matching OCaml's IdTbl which has separate
-/// `current` (local) and `opened` structures.
-#[derive(Debug, Clone)]
-pub struct BindingTable<T> {
-    /// Bindings indexed by name. The bool indicates whether the binding is
-    /// local (true = from `add`, false = from `add_opened`).
-    by_name: im_rc::HashMap<String, Vec<(Ident, T, bool)>>,
-    /// Bindings indexed by identifier stamp. The identifier is stored with the
-    /// value so long-lived in-process environments can reject stamp collisions
-    /// from different source units.
-    by_stamp: im_rc::HashMap<i32, (Ident, T)>,
+/// Origin of a name lookup in an OCaml-shaped `IdTbl`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum IdLookupOrigin {
+    Local,
+    Opened,
 }
 
-impl<T: Clone> BindingTable<T> {
-    /// Create a new empty binding table.
+/// Symbolic opened layer for identifier-indexed tables.
+///
+/// Mirrors OCaml `Env.IdTbl.opened`: one open layer contains the opened
+/// module root, its component table, and the table that existed before the
+/// open.
+#[derive(Debug, Clone)]
+struct IdOpened<T> {
+    root: Option<Path>,
+    components: im_rc::HashMap<String, (Ident, T, i32)>,
+    next: Arc<IdTbl<T>>,
+}
+
+/// A table of bindings indexed by identifier.
+///
+/// This matches OCaml `Env.IdTbl`: local bindings live in `current`, and each
+/// open is represented symbolically as an `opened` layer rather than flattening
+/// every opened binding into the same name map with an origin boolean.
+#[derive(Debug, Clone)]
+pub struct IdTbl<T> {
+    current: im_rc::HashMap<String, Vec<(Ident, T)>>,
+    current_by_stamp: im_rc::HashMap<i32, (Ident, T)>,
+    opened: Option<Arc<IdOpened<T>>>,
+}
+
+impl<T: Clone> IdTbl<T> {
     pub fn new() -> Self {
-        BindingTable {
-            by_name: im_rc::HashMap::new(),
-            by_stamp: im_rc::HashMap::new(),
+        Self {
+            current: im_rc::HashMap::new(),
+            current_by_stamp: im_rc::HashMap::new(),
+            opened: None,
         }
     }
 
-    /// Add a binding (local). Goes at the end of the name vector,
-    /// so it takes precedence over earlier bindings (including opened ones).
     pub fn add(&mut self, id: Ident, value: T) {
         let name = id.name().to_string();
         let stamp = id.stamp();
-
-        self.by_stamp.insert(stamp, (id.clone(), value.clone()));
-
-        match self.by_name.get_mut(&name) {
-            Some(entries) => entries.push((id, value, true)),
+        if stamp != 0 {
+            self.current_by_stamp
+                .insert(stamp, (id.clone(), value.clone()));
+        }
+        match self.current.get_mut(&name) {
+            Some(entries) => entries.push((id, value)),
             None => {
-                self.by_name.insert(name, vec![(id, value, true)]);
+                self.current.insert(name.clone(), vec![(id, value)]);
             }
         }
     }
 
-    /// Add a binding from an opened module. Goes at the end of the name
-    /// vector, just like local bindings. Later opens shadow earlier ones.
-    /// This matches OCaml's behavior where the most recent open takes precedence.
-    pub fn add_opened(&mut self, id: Ident, value: T) {
-        let name = id.name().to_string();
-        let stamp = id.stamp();
-
-        self.by_stamp.insert(stamp, (id.clone(), value.clone()));
-
-        match self.by_name.get_mut(&name) {
-            Some(entries) => entries.push((id, value, false)),
-            None => {
-                self.by_name.insert(name, vec![(id, value, false)]);
-            }
+    pub fn add_open_layer(&mut self, root: Path, components: Vec<(Ident, T, i32)>) {
+        if components.is_empty() {
+            return;
         }
+        let next = std::mem::take(self);
+        let opened_components = components
+            .into_iter()
+            .map(|(id, value, pos)| (id.name().to_string(), (id, value, pos)))
+            .collect();
+        *self = Self {
+            current: im_rc::HashMap::new(),
+            current_by_stamp: im_rc::HashMap::new(),
+            opened: Some(Arc::new(IdOpened {
+                root: Some(root),
+                components: opened_components,
+                next: Arc::new(next),
+            })),
+        };
+    }
+
+    /// Compatibility insertion for existing open code.
+    ///
+    /// This keeps the table shape OCaml-like even before all callers are routed
+    /// through a batched `add_open_layer`: each inserted opened binding becomes
+    /// a symbolic layer and exact identifier lookup still skips opened layers.
+    pub fn add_opened(&mut self, id: Ident, value: T) {
+        let next = std::mem::take(self);
+        let mut components = im_rc::HashMap::new();
+        components.insert(id.name().to_string(), (id, value, 0));
+        *self = Self {
+            current: im_rc::HashMap::new(),
+            current_by_stamp: im_rc::HashMap::new(),
+            opened: Some(Arc::new(IdOpened {
+                root: None,
+                components,
+                next: Arc::new(next),
+            })),
+        };
     }
 
     fn opened_names_added_since(&self, previous: &Self) -> HashSet<String> {
+        let current_counts = self.opened_name_counts();
+        let previous_counts = previous.opened_name_counts();
         let mut names = HashSet::new();
-        for (name, entries) in self.by_name.iter() {
-            let previous_len = previous.by_name.get(name).map_or(0, Vec::len);
-            if entries
-                .iter()
-                .skip(previous_len)
-                .any(|(_, _, is_local)| !*is_local)
-            {
+        for (name, count) in current_counts {
+            if count > previous_counts.get(&name).copied().unwrap_or(0) {
                 names.insert(name.clone());
             }
         }
         names
     }
 
-    /// Find a binding by name.
-    pub fn find_by_name(&self, name: &str) -> Option<&T> {
-        self.by_name
-            .get(name)
-            .and_then(|entries| entries.last())
-            .map(|(_, v, _)| v)
+    fn opened_name_counts(&self) -> HashMap<String, usize> {
+        let mut counts = HashMap::new();
+        self.collect_opened_name_counts(&mut counts);
+        counts
     }
 
-    /// Find a binding by name, returning both the identifier and value.
-    pub fn find_by_name_with_id(&self, name: &str) -> Option<(&Ident, &T)> {
-        self.by_name
-            .get(name)
-            .and_then(|entries| entries.last())
-            .map(|(id, v, _)| (id, v))
-    }
-
-    /// Find a binding by name, returning the identifier, value, and whether
-    /// it's a local binding. Matches OCaml's IdTbl.find_name which returns
-    /// Pident for local bindings and Pdot for opened bindings.
-    pub fn find_by_name_with_origin(&self, name: &str) -> Option<(&Ident, &T, bool)> {
-        self.by_name
-            .get(name)
-            .and_then(|entries| entries.last())
-            .map(|(id, v, is_local)| (id, v, *is_local))
-    }
-
-    /// Find a binding by identifier.
-    /// Note: stamp=0 is shared by all persistent idents, so we skip
-    /// by_stamp lookup for stamp=0 and fall through to by_name lookup.
-    pub fn find_by_ident(&self, id: &Ident) -> Option<&T> {
-        let stamp = id.stamp();
-        if stamp == 0 {
-            // All persistent idents share stamp=0, so by_stamp cannot
-            // distinguish them. For persistent queries, prefer the most
-            // recent persistent binding with that name; this mirrors OCaml's
-            // `find_ident` behavior where persistent paths resolve through
-            // persistent structures rather than opened/local shadowing.
-            self.by_name.get(id.name()).and_then(|entries| {
-                if id.is_persistent() {
-                    return entries
-                        .iter()
-                        .rev()
-                        .find(|(entry_id, _, _)| entry_id.is_persistent())
-                        .map(|(_, value, _)| value);
-                }
-                entries.last().map(|(_, value, _)| value)
-            })
-        } else {
-            if let Some((entry_id, value)) = self.by_stamp.get(&stamp)
-                && entry_id.same(id)
-                && entry_id.name() == id.name()
-            {
-                return Some(value);
+    fn collect_opened_name_counts(&self, counts: &mut HashMap<String, usize>) {
+        if let Some(opened) = &self.opened {
+            for name in opened.components.keys() {
+                *counts.entry(name.clone()).or_default() += 1;
             }
-
-            self.by_name.get(id.name()).and_then(|entries| {
-                entries
-                    .iter()
-                    .rev()
-                    .find(|(entry_id, _, _)| entry_id.same(id) && entry_id.name() == id.name())
-                    .map(|(_, value, _)| value)
-            })
+            opened.next.collect_opened_name_counts(counts);
         }
     }
 
-    /// Find a binding by identifier in the local/current table only.
-    ///
-    /// OCaml compiler/ml/env.ml:285-290 `IdTbl.find_same` walks current
-    /// bindings across open scopes, but intentionally skips opened component
-    /// tables. Use this for exact `Path.Pident` lookups; source-level
-    /// `Longident.Lident` lookup still goes through name lookup so opened
-    /// modules remain visible.
-    pub fn find_local_by_ident(&self, id: &Ident) -> Option<&T> {
+    fn find_current_by_ident(&self, id: &Ident) -> Option<&T> {
         let stamp = id.stamp();
-        self.by_name.get(id.name()).and_then(|entries| {
+        if stamp != 0
+            && let Some((entry_id, value)) = self.current_by_stamp.get(&stamp)
+            && entry_id.same(id)
+            && entry_id.name() == id.name()
+        {
+            return Some(value);
+        }
+
+        self.current.get(id.name()).and_then(|entries| {
             entries
                 .iter()
                 .rev()
-                .find(|(entry_id, _, is_local)| {
-                    if !*is_local {
-                        return false;
-                    }
+                .find(|(entry_id, _)| {
                     if stamp == 0 {
                         entry_id.is_persistent() && entry_id.name() == id.name()
                     } else {
                         entry_id.same(id) && entry_id.name() == id.name()
                     }
                 })
-                .map(|(_, value, _)| value)
+                .map(|(_, value)| value)
         })
     }
 
-    /// Get all bindings with a given name.
+    fn find_name_entry(&self, name: &str) -> Option<(&Ident, &T, IdLookupOrigin)> {
+        if let Some((id, value)) = self.current.get(name).and_then(|entries| entries.last()) {
+            return Some((id, value, IdLookupOrigin::Local));
+        }
+
+        match &self.opened {
+            Some(opened) => opened
+                .components
+                .get(name)
+                .map(|(id, value, _)| (id, value, IdLookupOrigin::Opened))
+                .or_else(|| opened.next.find_name_entry(name)),
+            None => None,
+        }
+    }
+
+    pub fn find_by_name(&self, name: &str) -> Option<&T> {
+        self.find_name_entry(name).map(|(_, value, _)| value)
+    }
+
+    pub fn find_by_name_with_id(&self, name: &str) -> Option<(&Ident, &T)> {
+        self.find_name_entry(name).map(|(id, value, _)| (id, value))
+    }
+
+    pub fn find_by_name_with_origin(&self, name: &str) -> Option<(&Ident, &T, bool)> {
+        self.find_name_entry(name)
+            .map(|(id, value, origin)| (id, value, origin == IdLookupOrigin::Local))
+    }
+
+    pub fn find_by_name_with_path(&self, name: &str) -> Option<(Path, &T)> {
+        if let Some((id, value)) = self.current.get(name).and_then(|entries| entries.last()) {
+            return Some((Path::pident(id.clone()), value));
+        }
+
+        match &self.opened {
+            Some(opened) => opened
+                .components
+                .get(name)
+                .map(|(id, value, pos)| {
+                    let path = opened
+                        .root
+                        .as_ref()
+                        .map(|root| Path::pdot_pos(root.clone(), name.to_string(), *pos))
+                        .unwrap_or_else(|| Path::pident(id.clone()));
+                    (path, value)
+                })
+                .or_else(|| opened.next.find_by_name_with_path(name)),
+            None => None,
+        }
+    }
+
+    /// Find a binding by identifier, matching OCaml `IdTbl.find_same`.
+    ///
+    /// Exact identifier lookup walks `current` bindings through open layers and
+    /// intentionally skips opened component tables.
+    pub fn find_by_ident(&self, id: &Ident) -> Option<&T> {
+        if let Some(value) = self.find_current_by_ident(id) {
+            return Some(value);
+        }
+        self.opened
+            .as_ref()
+            .and_then(|opened| opened.next.find_by_ident(id))
+    }
+
+    pub fn find_local_by_ident(&self, id: &Ident) -> Option<&T> {
+        self.find_by_ident(id)
+    }
+
+    pub fn update_by_name<F>(&mut self, name: &str, f: &mut F) -> Option<(Ident, T)>
+    where
+        F: FnMut(&T) -> T,
+    {
+        if let Some(entries) = self.current.get_mut(name)
+            && let Some((id, value)) = entries.last_mut()
+        {
+            let updated = f(value);
+            *value = updated.clone();
+            if id.stamp() != 0 {
+                self.current_by_stamp
+                    .insert(id.stamp(), (id.clone(), updated.clone()));
+            }
+            return Some((id.clone(), updated));
+        }
+
+        if let Some(opened) = self.opened.as_mut() {
+            let opened = Arc::make_mut(opened);
+            if let Some((id, value, _)) = opened.components.get_mut(name) {
+                let updated = f(value);
+                *value = updated.clone();
+                return Some((id.clone(), updated));
+            }
+            return Arc::make_mut(&mut opened.next).update_by_name(name, f);
+        }
+
+        None
+    }
+
     pub fn find_all(&self, name: &str) -> Vec<&T> {
-        self.by_name
-            .get(name)
-            .map(|entries| entries.iter().map(|(_, v, _)| v).collect())
-            .unwrap_or_default()
+        let mut items = Vec::new();
+        if let Some(entries) = self.current.get(name) {
+            items.extend(entries.iter().rev().map(|(_, value)| value));
+        }
+        if let Some(opened) = &self.opened {
+            if let Some((_, value, _)) = opened.components.get(name) {
+                items.push(value);
+            }
+            items.extend(opened.next.find_all(name));
+        }
+        items
     }
 
-    /// Check if a binding exists.
     pub fn contains(&self, name: &str) -> bool {
-        self.by_name.contains_key(name)
+        self.find_by_name(name).is_some()
     }
 
-    /// Iterate over all bindings.
     pub fn iter(&self) -> impl Iterator<Item = (&Ident, &T)> {
-        self.by_name
-            .values()
-            .flat_map(|entries| entries.iter().map(|(id, v, _)| (id, v)))
+        let mut items = Vec::new();
+        self.collect_iter(&mut items);
+        items.into_iter()
+    }
+
+    fn collect_iter<'a>(&'a self, items: &mut Vec<(&'a Ident, &'a T)>) {
+        for entries in self.current.values() {
+            items.extend(entries.iter().map(|(id, value)| (id, value)));
+        }
+        if let Some(opened) = &self.opened {
+            items.extend(
+                opened
+                    .components
+                    .values()
+                    .map(|(id, value, _)| (id, value)),
+            );
+            opened.next.collect_iter(items);
+        }
+    }
+
+    pub fn visible_local_entries(&self) -> impl Iterator<Item = (&Ident, &T)> {
+        let mut seen = HashSet::new();
+        let mut items = Vec::new();
+        self.collect_visible_local_entries(&mut seen, &mut items);
+        items.into_iter()
+    }
+
+    fn collect_visible_local_entries<'a>(
+        &'a self,
+        seen: &mut HashSet<&'a str>,
+        items: &mut Vec<(&'a Ident, &'a T)>,
+    ) {
+        for (name, entries) in self.current.iter() {
+            if seen.insert(name.as_str())
+                && let Some((id, value)) = entries.last()
+            {
+                items.push((id, value));
+            }
+        }
+        if let Some(opened) = &self.opened {
+            for name in opened.components.keys() {
+                seen.insert(name.as_str());
+            }
+            opened.next.collect_visible_local_entries(seen, items);
+        }
+    }
+}
+
+impl<T: Clone> Default for IdTbl<T> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[derive(Debug, Clone)]
+struct TycompOpened<T> {
+    components: im_rc::HashMap<String, Vec<(Ident, T)>>,
+    next: Arc<TycompTbl<T>>,
+}
+
+/// OCaml-shaped table for constructors and labels.
+///
+/// This mirrors `Env.TycompTbl`: local bindings are kept in `current`; opened
+/// constructor/label buckets stay in symbolic `opened` layers and are returned
+/// as lists.
+#[derive(Debug, Clone)]
+pub struct TycompTbl<T> {
+    current: im_rc::HashMap<String, Vec<(Ident, T)>>,
+    current_by_stamp: im_rc::HashMap<i32, (Ident, T)>,
+    opened: Option<Arc<TycompOpened<T>>>,
+}
+
+impl<T: Clone> TycompTbl<T> {
+    pub fn new() -> Self {
+        Self {
+            current: im_rc::HashMap::new(),
+            current_by_stamp: im_rc::HashMap::new(),
+            opened: None,
+        }
+    }
+
+    pub fn add(&mut self, id: Ident, value: T) {
+        let name = id.name().to_string();
+        if id.stamp() != 0 {
+            self.current_by_stamp
+                .insert(id.stamp(), (id.clone(), value.clone()));
+        }
+        match self.current.get_mut(&name) {
+            Some(entries) => entries.push((id, value)),
+            None => {
+                self.current.insert(name.clone(), vec![(id, value)]);
+            }
+        }
+    }
+
+    pub fn add_opened(&mut self, id: Ident, value: T) {
+        let next = std::mem::take(self);
+        let name = id.name().to_string();
+        let mut components = im_rc::HashMap::new();
+        components.insert(name, vec![(id, value)]);
+        *self = Self {
+            current: im_rc::HashMap::new(),
+            current_by_stamp: im_rc::HashMap::new(),
+            opened: Some(Arc::new(TycompOpened {
+                components,
+                next: Arc::new(next),
+            })),
+        };
+    }
+
+    pub fn add_open_layer(&mut self, components: Vec<(Ident, T)>) {
+        if components.is_empty() {
+            return;
+        }
+        let next = std::mem::take(self);
+        let mut opened_components: im_rc::HashMap<String, Vec<(Ident, T)>> =
+            im_rc::HashMap::new();
+        for (id, value) in components {
+            let name = id.name().to_string();
+            match opened_components.get_mut(&name) {
+                Some(entries) => entries.insert(0, (id, value)),
+                None => {
+                    opened_components.insert(name, vec![(id, value)]);
+                }
+            }
+        }
+        *self = Self {
+            current: im_rc::HashMap::new(),
+            current_by_stamp: im_rc::HashMap::new(),
+            opened: Some(Arc::new(TycompOpened {
+                components: opened_components,
+                next: Arc::new(next),
+            })),
+        };
+    }
+
+    fn opened_names_added_since(&self, previous: &Self) -> HashSet<String> {
+        let current_counts = self.opened_name_counts();
+        let previous_counts = previous.opened_name_counts();
+        let mut names = HashSet::new();
+        for (name, count) in current_counts {
+            if count > previous_counts.get(&name).copied().unwrap_or(0) {
+                names.insert(name.clone());
+            }
+        }
+        names
+    }
+
+    fn opened_name_counts(&self) -> HashMap<String, usize> {
+        let mut counts = HashMap::new();
+        self.collect_opened_name_counts(&mut counts);
+        counts
+    }
+
+    fn collect_opened_name_counts(&self, counts: &mut HashMap<String, usize>) {
+        if let Some(opened) = &self.opened {
+            for (name, entries) in opened.components.iter() {
+                *counts.entry(name.clone()).or_default() += entries.len();
+            }
+            opened.next.collect_opened_name_counts(counts);
+        }
+    }
+
+    pub fn find_by_name(&self, name: &str) -> Option<&T> {
+        if let Some((_, value)) = self.current.get(name).and_then(|entries| entries.last()) {
+            return Some(value);
+        }
+        match &self.opened {
+            Some(opened) => opened
+                .components
+                .get(name)
+                .and_then(|entries| entries.first())
+                .map(|(_, value)| value)
+                .or_else(|| opened.next.find_by_name(name)),
+            None => None,
+        }
+    }
+
+    pub fn find_by_name_with_origin(&self, name: &str) -> Option<(&Ident, &T, bool)> {
+        if let Some((id, value)) = self.current.get(name).and_then(|entries| entries.last()) {
+            return Some((id, value, true));
+        }
+        match &self.opened {
+            Some(opened) => opened
+                .components
+                .get(name)
+                .and_then(|entries| entries.first())
+                .map(|(id, value)| (id, value, false))
+                .or_else(|| opened.next.find_by_name_with_origin(name)),
+            None => None,
+        }
+    }
+
+    pub fn find_by_ident(&self, id: &Ident) -> Option<&T> {
+        let stamp = id.stamp();
+        if stamp != 0
+            && let Some((entry_id, value)) = self.current_by_stamp.get(&stamp)
+            && entry_id.same(id)
+            && entry_id.name() == id.name()
+        {
+            return Some(value);
+        }
+        if let Some(value) = self.current.get(id.name()).and_then(|entries| {
+            entries
+                .iter()
+                .rev()
+                .find(|(entry_id, _)| {
+                    if stamp == 0 {
+                        entry_id.is_persistent() && entry_id.name() == id.name()
+                    } else {
+                        entry_id.same(id) && entry_id.name() == id.name()
+                    }
+                })
+                .map(|(_, value)| value)
+        }) {
+            return Some(value);
+        }
+        self.opened
+            .as_ref()
+            .and_then(|opened| opened.next.find_by_ident(id))
+    }
+
+    pub fn find_all(&self, name: &str) -> Vec<&T> {
+        let mut items = Vec::new();
+        if let Some(entries) = self.current.get(name) {
+            items.extend(entries.iter().rev().map(|(_, value)| value));
+        }
+        if let Some(opened) = &self.opened {
+            if let Some(entries) = opened.components.get(name) {
+                items.extend(entries.iter().map(|(_, value)| value));
+            }
+            items.extend(opened.next.find_all(name));
+        }
+        items
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = (&Ident, &T)> {
+        let mut items = Vec::new();
+        self.collect_iter(&mut items);
+        items.into_iter()
+    }
+
+    fn collect_iter<'a>(&'a self, items: &mut Vec<(&'a Ident, &'a T)>) {
+        for entries in self.current.values() {
+            items.extend(entries.iter().map(|(id, value)| (id, value)));
+        }
+        if let Some(opened) = &self.opened {
+            for entries in opened.components.values() {
+                items.extend(entries.iter().map(|(id, value)| (id, value)));
+            }
+            opened.next.collect_iter(items);
+        }
     }
 }
 
@@ -382,7 +714,7 @@ pub(crate) struct OpenedBindingNames {
     pub(crate) labels: HashSet<String>,
 }
 
-impl<T: Clone> Default for BindingTable<T> {
+impl<T: Clone> Default for TycompTbl<T> {
     fn default() -> Self {
         Self::new()
     }
@@ -406,26 +738,26 @@ pub struct Env {
     id: u64,
 
     /// Value bindings.
-    values: BindingTable<Arc<ValueDescription>>,
+    values: IdTbl<Arc<ValueDescription>>,
 
     /// Type bindings.
-    types: BindingTable<Arc<TypeDeclaration>>,
+    types: IdTbl<Arc<TypeDeclaration>>,
 
     /// Constructor bindings (for variant types).
-    constrs: BindingTable<Arc<ConstructorDescription>>,
+    constrs: TycompTbl<Arc<ConstructorDescription>>,
 
     /// Label bindings (for record fields).
-    labels: BindingTable<Arc<LabelDescription>>,
+    labels: TycompTbl<Arc<LabelDescription>>,
 
     /// Module bindings.
-    modules: BindingTable<Arc<ModuleDeclaration>>,
+    modules: IdTbl<Arc<ModuleDeclaration>>,
 
     /// Lazily-forced qualified component views for local module bindings.
     /// This mirrors OCaml's `env.components` table for local `Pident` paths.
-    module_components: BindingTable<Arc<super::env_lazy::StoredModuleComponents>>,
+    module_components: IdTbl<Arc<super::env_lazy::StoredModuleComponents>>,
 
     /// Module type bindings.
-    modtypes: BindingTable<Arc<ModtypeDeclaration>>,
+    modtypes: IdTbl<Arc<ModtypeDeclaration>>,
 
     /// Intentional Rust performance cache for active local module aliases.
     ///
@@ -494,9 +826,9 @@ impl Clone for Env {
             modtypes: self.modtypes.clone(),
             functor_args: self.functor_args.clone(),
             // These are Rust-only memo tables derived from the binding tables.
-            // Do not duplicate them when snapshotting environments for unifier
-            // state; OCaml Env snapshots carry semantic bindings, not copied
-            // memoized lookup results.
+            // Do not duplicate them when creating a fresh Env identity; OCaml
+            // Env snapshots carry semantic bindings, not copied memoized
+            // lookup results.
             local_module_aliases_cache: RefCell::new(None),
             module_path_requires_env_scoped_cache_cache: RefCell::new(HashMap::new()),
             implicit_open_roots: self.implicit_open_roots.clone(),
@@ -522,13 +854,13 @@ impl Env {
     pub fn empty() -> Self {
         Env {
             id: NEXT_ENV_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
-            values: BindingTable::new(),
-            types: BindingTable::new(),
-            constrs: BindingTable::new(),
-            labels: BindingTable::new(),
-            modules: BindingTable::new(),
-            module_components: BindingTable::new(),
-            modtypes: BindingTable::new(),
+            values: IdTbl::new(),
+            types: IdTbl::new(),
+            constrs: TycompTbl::new(),
+            labels: TycompTbl::new(),
+            modules: IdTbl::new(),
+            module_components: IdTbl::new(),
+            modtypes: IdTbl::new(),
             functor_args: HashSet::new(),
             local_module_aliases_cache: RefCell::new(None),
             module_path_requires_env_scoped_cache_cache: RefCell::new(HashMap::new()),
@@ -623,13 +955,8 @@ impl Env {
         if self.local_module_aliases_cache.borrow().is_none() {
             let mut aliases: Vec<_> = self
                 .modules
-                .by_name
-                .values()
-                .filter_map(|entries| entries.last())
-                .filter_map(|(id, decl, is_local)| {
-                    if !*is_local {
-                        return None;
-                    }
+                .visible_local_entries()
+                .filter_map(|(id, decl)| {
                     match &decl.md_type {
                         ModuleType::MtyAlias(_, target) | ModuleType::MtyIdent(target) => {
                             Some((id.clone(), target.clone()))
@@ -654,6 +981,10 @@ impl Env {
     }
 
     pub(crate) fn module_path_requires_env_scoped_cache(&self, module_path: &Path) -> bool {
+        if module_path.head().is_persistent() {
+            return false;
+        }
+
         let Some(cache_key) = Self::module_path_scope_cache_key(module_path) else {
             return false;
         };
@@ -738,24 +1069,13 @@ impl Env {
     /// Update the visible value binding for `name` with a replacement type.
     /// This replaces the current binding in-place rather than adding a shadowing entry.
     pub fn update_value_type_by_name(&mut self, name: &str, new_type: TypeExprRef) -> bool {
-        let Some(entries) = self.values.by_name.get_mut(name) else {
-            return false;
+        let mut update = |desc: &Arc<ValueDescription>| {
+            let mut updated = (**desc).clone();
+            updated.val_type = new_type;
+            Arc::new(updated)
         };
-        let Some((id, desc, _is_local)) = entries.last_mut() else {
+        if self.values.update_by_name(name, &mut update).is_none() {
             return false;
-        };
-
-        let mut updated = (**desc).clone();
-        updated.val_type = new_type;
-        let updated = Arc::new(updated);
-        *desc = updated.clone();
-
-        // Persistent idents share stamp=0, and lookup for those already goes
-        // through by_name. Keep by_stamp untouched for stamp=0.
-        if id.stamp() != 0 {
-            self.values
-                .by_stamp
-                .insert(id.stamp(), (id.clone(), updated));
         }
 
         self.bump_id();
@@ -1120,6 +1440,75 @@ impl Env {
         self.invalidate_module_alias_caches();
         self.modules.add_opened(id.clone(), Arc::new(decl));
         self.module_components.add_opened(id, components);
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn add_opened_component_layers(
+        &mut self,
+        root: Path,
+        values: Vec<(Ident, ValueDescription, i32)>,
+        types: Vec<(Ident, TypeDeclaration)>,
+        constructors: Vec<(Ident, ConstructorDescription)>,
+        labels: Vec<(Ident, LabelDescription)>,
+        modules: Vec<(Ident, ModuleDeclaration, i32)>,
+        module_components: Vec<(Ident, Arc<super::env_lazy::StoredModuleComponents>, i32)>,
+        modtypes: Vec<(Ident, ModtypeDeclaration)>,
+    ) {
+        let has_bindings = !values.is_empty()
+            || !types.is_empty()
+            || !constructors.is_empty()
+            || !labels.is_empty()
+            || !modules.is_empty()
+            || !module_components.is_empty()
+            || !modtypes.is_empty();
+        if !has_bindings {
+            return;
+        }
+
+        self.bump_id();
+        self.invalidate_module_alias_caches();
+        self.values.add_open_layer(
+            root.clone(),
+            values
+                .into_iter()
+                .map(|(id, desc, pos)| (id, Arc::new(desc), pos))
+                .collect(),
+        );
+        self.types.add_open_layer(
+            root.clone(),
+            types
+                .into_iter()
+                .map(|(id, decl)| (id, Arc::new(decl), crate::types::path::NOPOS))
+                .collect(),
+        );
+        self.constrs.add_open_layer(
+            constructors
+                .into_iter()
+                .map(|(id, desc)| (id, Arc::new(desc)))
+                .collect(),
+        );
+        self.labels.add_open_layer(
+            labels
+                .into_iter()
+                .map(|(id, desc)| (id, Arc::new(desc)))
+                .collect(),
+        );
+        self.modules.add_open_layer(
+            root.clone(),
+            modules
+                .into_iter()
+                .map(|(id, decl, pos)| (id, Arc::new(decl), pos))
+                .collect(),
+        );
+        self.module_components
+            .add_open_layer(root.clone(), module_components);
+        self.modtypes.add_open_layer(
+            root,
+            modtypes
+                .into_iter()
+                .map(|(id, decl)| (id, Arc::new(decl), crate::types::path::NOPOS))
+                .collect(),
+        );
     }
 
     /// Find a module by name.

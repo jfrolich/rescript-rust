@@ -2883,11 +2883,7 @@ fn eta_reduce_function_body<'a>(
                 return None;
             }
         }
-        VIdent::Qualified(module, _) => {
-            if matches!(module.kind, Kind::External { .. }) {
-                return None;
-            }
-        }
+        VIdent::Qualified(_, _) => {}
     }
     Some(v)
 }

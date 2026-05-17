@@ -88,7 +88,7 @@ pub use ctype::{
 };
 
 // env exports
-pub use env::{BindingTable, Env, EnvError, EnvFlags, EnvResult, EnvSummary, initial_env};
+pub use env::{Env, EnvError, EnvFlags, EnvResult, EnvSummary, IdTbl, TycompTbl, initial_env};
 
 // typecore exports
 pub use typecore::{

@@ -3245,9 +3245,7 @@ pub enum TypeModError {
         expected: (bool, bool, bool),
     },
     /// A GADT result type constrains a parameter whose variance cannot be checked.
-    VaryingAnonymous {
-        loc: LocIdx,
-    },
+    VaryingAnonymous { loc: LocIdx },
     /// Invalid untagged variant definition.
     InvalidUntaggedVariantDefinition { loc: Location, reason: String },
     /// A variant type spread could not resolve its source type.
@@ -3658,7 +3656,10 @@ fn check_type_declaration_duplicate_definitions(
             crate::parser::ast::TypeKind::Ptype_variant(constructors_in_decl) => {
                 for constructor in constructors_in_decl {
                     let constructor_name =
-                        duplicate_definition_constructor_name_after_variant_spread(arena, constructor);
+                        duplicate_definition_constructor_name_after_variant_spread(
+                            arena,
+                            constructor,
+                        );
                     if let Some(previous_type_name) = constructors.get(&constructor_name) {
                         tctx.report_warning(
                             constructor.pcd_loc,
@@ -17898,8 +17899,7 @@ fn find_unbound_type_var_name(
                     .find_map(|ty| find_unbound_type_var_name(ctx, *ty, allowed, visited)),
                 _ => None,
             });
-            field_name
-                .or_else(|| find_unbound_type_var_name(ctx, row.row_more, allowed, visited))
+            field_name.or_else(|| find_unbound_type_var_name(ctx, row.row_more, allowed, visited))
         }
         TypeDesc::Tnil => None,
     }
@@ -17955,22 +17955,14 @@ fn collect_unbound_type_vars_in_type_expr(
                     }
                     crate::types::RowField::Reither { types, .. } => {
                         for ty in types {
-                            collect_unbound_type_vars_in_type_expr(
-                                ctx, ty, allowed, visited, vars,
-                            );
+                            collect_unbound_type_vars_in_type_expr(ctx, ty, allowed, visited, vars);
                         }
                     }
                     _ => {}
                 }
             }
             if !crate::types::btype::static_row(ctx, &row) {
-                collect_unbound_type_vars_in_type_expr(
-                    ctx,
-                    row.row_more,
-                    allowed,
-                    visited,
-                    vars,
-                );
+                collect_unbound_type_vars_in_type_expr(ctx, row.row_more, allowed, visited, vars);
             }
         }
         _ => {
@@ -18030,8 +18022,7 @@ fn find_unbound_type_var_in_type_decl(
         }
         crate::types::TypeKind::TypeRecord(labels, _) => {
             for label in labels {
-                if let Some(ty) = find_unbound_type_var_in_type_expr(ctx, label.ld_type, &allowed)
-                {
+                if let Some(ty) = find_unbound_type_var_in_type_expr(ctx, label.ld_type, &allowed) {
                     return Some(ty);
                 }
             }
@@ -18258,24 +18249,24 @@ fn find_unbound_type_var_in_typed_core_type(
         TypedCoreTypeDesc::Ttyp_alias(body, _) => {
             find_unbound_type_var_in_typed_core_type(ctx, body, allowed)
         }
-        TypedCoreTypeDesc::Ttyp_object(fields, _) => fields.iter().find_map(|field| {
-            match &field.of_desc {
+        TypedCoreTypeDesc::Ttyp_object(fields, _) => {
+            fields.iter().find_map(|field| match &field.of_desc {
                 crate::types::typedtree::ObjectFieldDesc::OTtag(_, ty)
                 | crate::types::typedtree::ObjectFieldDesc::OTinherit(ty) => {
                     find_unbound_type_var_in_typed_core_type(ctx, ty, allowed)
                 }
-            }
-        }),
-        TypedCoreTypeDesc::Ttyp_variant(rows, _, _) => rows.iter().find_map(|row| {
-            match &row.rf_desc {
+            })
+        }
+        TypedCoreTypeDesc::Ttyp_variant(rows, _, _) => {
+            rows.iter().find_map(|row| match &row.rf_desc {
                 crate::types::typedtree::RowFieldDesc::Rtag(_, _, types) => types
                     .iter()
                     .find_map(|ctyp| find_unbound_type_var_in_typed_core_type(ctx, ctyp, allowed)),
                 crate::types::typedtree::RowFieldDesc::Rinherit(ctyp) => {
                     find_unbound_type_var_in_typed_core_type(ctx, ctyp, allowed)
                 }
-            }
-        }),
+            })
+        }
         TypedCoreTypeDesc::Ttyp_package(package) => package
             .pack_fields
             .iter()
@@ -18334,12 +18325,11 @@ fn find_unbound_type_var_in_typed_type_decl_before_closed_decl(
                 &allowed,
             )
         }),
-        TypedTypeKind::Ttype_abstract | TypedTypeKind::Ttype_open => decl
-            .typ_manifest
-            .as_ref()
-            .and_then(|ctyp| {
+        TypedTypeKind::Ttype_abstract | TypedTypeKind::Ttype_open => {
+            decl.typ_manifest.as_ref().and_then(|ctyp| {
                 find_unbound_type_var_in_typed_core_type_before_closed_decl(ctx, ctyp, &allowed)
-            }),
+            })
+        }
     }
 }
 
@@ -18364,7 +18354,8 @@ fn find_unbound_type_var_in_typed_type_decl(
     ctx: &crate::types::context::TypeContext,
     decl: &TypedTypeDeclaration,
 ) -> Option<(String, LocIdx, Option<UnboundTypeVarDetail>)> {
-    if let Some((name, loc)) = find_unbound_type_var_in_typed_type_decl_before_closed_decl(ctx, decl)
+    if let Some((name, loc)) =
+        find_unbound_type_var_in_typed_type_decl_before_closed_decl(ctx, decl)
     {
         return Some((name, loc, None));
     }
@@ -22789,8 +22780,10 @@ fn type_structure_item<'a>(
                                     return Err(TypeModError::ConstraintFailed {
                                         loc: ret_type.ptyp_loc,
                                         actual: ty_ref,
-                                        expected: ctx
-                                            .new_constr(path.clone(), typed_param_type_refs.clone()),
+                                        expected: ctx.new_constr(
+                                            path.clone(),
+                                            typed_param_type_refs.clone(),
+                                        ),
                                     });
                                 }
                                 (Some(typed_ct), Some(ty_ref))

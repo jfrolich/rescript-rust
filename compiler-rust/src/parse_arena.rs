@@ -1837,6 +1837,22 @@ impl ParseArena {
         self.strings.len()
     }
 
+    /// Reserve append-only AST space used by typecore synthetic rewrites.
+    ///
+    /// Typechecking creates a few parsed AST fragments to mirror OCaml rewrites
+    /// such as optional-default lowering and variant-spread expansion. This must
+    /// happen before the arena is handed to `TypeCheckContext` for the primary
+    /// AST and identifier arenas: reserving at an append site can reallocate
+    /// backing storage while existing parser refs are still live. Sparse side
+    /// tables are keyed by `ExprIdx` and are only appended alongside synthetic
+    /// expressions, so they do not need an unconditional per-file reserve.
+    pub fn reserve_typecheck_synthetic_capacity(&mut self) {
+        self.expressions.reserve(64);
+        self.patterns.reserve(64);
+        self.longidents.reserve(128);
+        self.strings.reserve(128);
+    }
+
     /// Find the most recently inserted string index for the given content.
     ///
     /// This scans from the end to prefer the latest identity when the same string

@@ -21,7 +21,8 @@ use crate::lambda::lam_analysis::{
 use crate::lambda::lam_arity::Arity;
 use crate::lambda::lam_compat::FieldDbgInfo;
 use crate::lambda::lam_compile_context::{
-    BoxedNullable, Element, ExternalArityInfo, ExternalArityKey, IdKind, LamStats, RecFlag,
+    BoxedNullable, Element, ExternalArityFieldTable, ExternalArityInfo, ExternalArityTable, IdKind,
+    LamStats, RecFlag,
 };
 use crate::lambda::lam_primitive::{Mutable, Primitive};
 use crate::lambda::{InlineAttribute, LFunction, Lambda, PrimInfo};
@@ -83,41 +84,61 @@ fn arity_of_var(ident_tbl: &AHashMap<Ident, IdKind>, v: &Ident) -> Arity {
     }
 }
 
-fn external_arity_key(
+fn lookup_external_arity_entry<'a>(
+    external_arities: &'a ExternalArityTable,
     module_id: &Ident,
     dynamic_import: bool,
     field_name: &str,
-) -> ExternalArityKey {
-    ExternalArityKey {
-        module_name: module_id.name().to_string(),
-        dynamic_import,
-        field_name: field_name.to_string(),
-    }
+) -> Option<&'a Option<ExternalArityInfo>> {
+    let modules = if dynamic_import {
+        &external_arities.dynamic_imports
+    } else {
+        &external_arities.static_imports
+    };
+    modules
+        .get(module_id.name())
+        .and_then(|fields| fields.get(field_name))
 }
 
 fn lookup_cached_external_arity<'a>(
-    external_arities: &'a AHashMap<ExternalArityKey, ExternalArityInfo>,
+    external_arities: &'a ExternalArityTable,
     module_id: &Ident,
     dynamic_import: bool,
     field_name: &str,
 ) -> Option<&'a ExternalArityInfo> {
-    external_arities.get(&external_arity_key(module_id, dynamic_import, field_name))
+    lookup_external_arity_entry(external_arities, module_id, dynamic_import, field_name)
+        .and_then(Option::as_ref)
+}
+
+fn external_arity_modules_mut(
+    external_arities: &mut ExternalArityTable,
+    dynamic_import: bool,
+) -> &mut AHashMap<String, ExternalArityFieldTable> {
+    if dynamic_import {
+        &mut external_arities.dynamic_imports
+    } else {
+        &mut external_arities.static_imports
+    }
 }
 
 fn resolve_external_arity(
-    external_arities: &mut AHashMap<ExternalArityKey, ExternalArityInfo>,
+    external_arities: &mut ExternalArityTable,
     module_id: &Ident,
     dynamic_import: bool,
     field_name: &str,
     resolver: &mut ExternalArityResolver<'_>,
 ) -> Option<ExternalArityInfo> {
-    let key = external_arity_key(module_id, dynamic_import, field_name);
-    if !external_arities.contains_key(&key) {
-        if let Some(arity) = resolver(module_id, dynamic_import, field_name) {
-            external_arities.insert(key.clone(), arity);
-        }
+    if let Some(cached) =
+        lookup_external_arity_entry(external_arities, module_id, dynamic_import, field_name)
+    {
+        return cached.clone();
     }
-    external_arities.get(&key).cloned()
+    let resolved = resolver(module_id, dynamic_import, field_name);
+    external_arity_modules_mut(external_arities, dynamic_import)
+        .entry(module_id.name().to_string())
+        .or_default()
+        .insert(field_name.to_string(), resolved.clone());
+    resolved
 }
 
 /// Direct port of `Lam_arity_analysis.get_arity` (lam_arity_analysis.ml:38-132).
@@ -298,7 +319,7 @@ pub fn get_arity(meta: &LamStats, lam: &Lambda) -> Arity {
     get_arity_impl(&meta.ident_tbl, lam, &mut lookup_external_arity)
 }
 
-fn get_arity_with_external_arity(
+pub(crate) fn get_arity_with_external_arity(
     meta: &mut LamStats,
     lam: &Lambda,
     resolver: &mut ExternalArityResolver<'_>,
@@ -503,29 +524,6 @@ fn collect_bind_with_external(
     }
 }
 
-fn collect_module_field_external_arity(
-    meta: &mut LamStats,
-    prim: &PrimInfo,
-    resolver: &mut ExternalArityResolver<'_>,
-) {
-    if let PrimInfo {
-        primitive: Primitive::Pfield(_, FieldDbgInfo::Module { name }),
-        args,
-        ..
-    } = prim
-    {
-        if let [Lambda::LglobalModule(id, dynamic_import)] = args.as_slice() {
-            let _ = resolve_external_arity(
-                &mut meta.external_arities,
-                id,
-                *dynamic_import,
-                name,
-                resolver,
-            );
-        }
-    }
-}
-
 /// Direct port of `Lam_pass_collect.collect` (lam_pass_collect.ml:94-150).
 fn collect_with_external(
     meta: &mut LamStats,
@@ -572,9 +570,6 @@ fn collect_with_external(
         Lambda::LglobalModule(_, _) => {}
         // lam_pass_collect.ml:116
         Lambda::Lprim(prim) => {
-            if let Some(resolver) = resolver.as_deref_mut() {
-                collect_module_field_external_arity(meta, prim, resolver);
-            }
             for arg in &prim.args {
                 collect_with_external(meta, arg, resolver);
             }
