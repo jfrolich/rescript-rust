@@ -6,7 +6,7 @@ use std::path::Path;
 
 use crate::gentype::code_item;
 use crate::gentype::gen_type_common::{
-    doc_string, unknown, ArgType, Field, Function, Ident, StringMap, Type,
+    ArgType, Field, Function, Ident, StringMap, Type, doc_string, unknown,
 };
 
 pub type RequiresMap = BTreeMap<crate::gentype::module_name::T, crate::gentype::import_path::T>;

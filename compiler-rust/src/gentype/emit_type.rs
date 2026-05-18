@@ -2,8 +2,8 @@
 // This Stage 4 GenType port is intentionally not wired into the crate yet.
 
 use crate::gentype::gen_type_common::{
-    ident, ident_with, is_js_safe_property_name, label_js_to_string, sanitize_type_name, unknown,
-    ArgType, ClosedFlag, Field, Function, Ident, Mutable, Optional, Payload, Type, Variant,
+    ArgType, ClosedFlag, Field, Function, Ident, Mutable, Optional, Payload, Type, Variant, ident,
+    ident_with, is_js_safe_property_name, label_js_to_string, sanitize_type_name, unknown,
 };
 
 pub fn file_header(source_file: &str) -> String {

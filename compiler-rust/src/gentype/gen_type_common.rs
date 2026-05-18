@@ -2,7 +2,7 @@
 // This Stage 1 GenType port is intentionally not wired into the crate yet.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::{Path, MAIN_SEPARATOR};
+use std::path::{MAIN_SEPARATOR, Path};
 
 use crate::ident::Ident as CompilerIdent;
 
@@ -341,13 +341,13 @@ pub fn weakset_t(x: Type) -> Type {
 }
 
 pub mod node_filename {
-    use super::{Path, MAIN_SEPARATOR};
+    use super::{MAIN_SEPARATOR, Path};
 
     // Force "/" separator.
     pub const dir_sep: &str = "/";
 
     pub mod path {
-        use super::{dir_sep, MAIN_SEPARATOR};
+        use super::{MAIN_SEPARATOR, dir_sep};
 
         pub type T = String;
 

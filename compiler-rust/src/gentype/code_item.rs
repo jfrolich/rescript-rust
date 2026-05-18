@@ -1,7 +1,7 @@
 // Port of compiler/gentype/CodeItem.ml:1-58.
 // This Stage 1 GenType port is intentionally not wired into the crate yet.
 
-use crate::gentype::gen_type_common::{doc_string, StringMap, Type};
+use crate::gentype::gen_type_common::{StringMap, Type, doc_string};
 use crate::location::Location;
 
 #[derive(Debug, Clone)]
