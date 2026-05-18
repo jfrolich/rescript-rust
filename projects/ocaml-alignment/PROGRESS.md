@@ -35,13 +35,14 @@ need to be proven against OCaml or replaced with a more direct port.
 
 Continue task 1 in [RALPH_TODO.md](./RALPH_TODO.md):
 
-1. Read OCaml `compiler/ml/env.ml:1533-1579`.
-2. Read Rust `build_local_module_components`, especially child module handling.
-3. Prove or fix whether Rust child `comp_modules` and `comp_components` share
-   the same forced thunk state as OCaml's `EnvLazy.create (sub, md)` and
-   `components_of_module ~deprecated ~loc:md.md_loc !env sub path md.md_type`.
-4. Verify that module declarations are forced at the OCaml
+1. Read OCaml `compiler/ml/env.ml:475-477`, `781-793`, `865-882`,
+   `1516-1588`, and `1841-1877`.
+2. Audit remaining Rust module declaration force sites against those Env API
+   boundaries.
+3. Verify that module declarations are forced at the OCaml
    `EnvLazy.force subst_modtype_maker` boundary, not earlier.
+4. Verify that signature freshening and stamp consumption happen at that same
+   force point.
 
 ## 2026-05-18 Stored Component Thunk Audit
 
@@ -84,3 +85,39 @@ Post-tracker validation on `473cab890`:
 - `./scripts/test_typedtree_parity.sh --quick`: `660/660`.
 - `./scripts/test_typedtree_parity.sh --tella --quick`: `1697/1697`.
 - `./scripts/test_lambda_parity.sh --quick`: `660/660`.
+
+## 2026-05-18 Open Module Component Sharing
+
+Task 1 progress:
+
+- Checked off child `comp_modules` / `comp_components` sharing for opened
+  modules.
+- OCaml references:
+  - `compiler/ml/env.ml:1516-1588`: `components_of_module_maker` stores both
+    child module declarations and child component thunks for each `Sig_module`.
+  - `compiler/ml/env.ml:1841-1860`: `add_components` installs both
+    `comp_modules` and `comp_components` when a signature is opened.
+  - `compiler/ml/env.ml:1874-1877`: `open_signature` opens the component table
+    from `get_components (find_module_descr root)`.
+- Rust change:
+  - Added an opened-module path that reuses the resolved
+    `QualifiedModuleComponents` view instead of reopening a detached signature.
+  - Routed expression opens, structure opens, and signature opens through that
+    shared component view first, falling back to detached signature opening only
+    when no component view can be resolved.
+  - This keeps opened `comp_modules` and `comp_components` on the same lazy
+    component state rather than rebuilding only the module declarations.
+
+Validation evidence:
+
+- `cargo build --release --manifest-path compiler-rust/Cargo.toml`: passed.
+- `cargo build --release --manifest-path rewatch/Cargo.toml`: passed.
+- `./scripts/test_typedtree_parity.sh ModuleWithAlias`: `2/2`.
+- `./scripts/test_typedtree_parity.sh test_include`: `1/1`.
+- `./scripts/test_typedtree_parity.sh nested_module_alias`: `1/1`.
+- `./scripts/test_typedtree_parity.sh`: `660/660`.
+- `./scripts/test_typedtree_parity.sh --tella --quick`: `1697/1697`.
+- `./scripts/test_lambda_parity.sh --quick`: `660/660`.
+- `./scripts/test_js_output_parity.sh --with-external --quick`:
+  focused fixtures `344/344`, local JS output `660/660`, Tella JS output
+  `2127/2127`.

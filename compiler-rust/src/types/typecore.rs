@@ -18118,12 +18118,18 @@ fn type_open(
     // bindings preserve OCaml-style module prefixes in types.
     let path = if let Some(path) = persistent_root_open {
         path
-    } else if let Some((resolved_path, sig_items)) = env.resolve_module_lid(
+    } else if let Some(path) = open_module_lid_components_into_env(
         open_lid,
         tctx.arena,
+        &env.clone_preserve_id(),
+        &mut open_env,
         &mut tctx.persistent_env,
         tctx.type_ctx,
     ) {
+        path
+    } else if let Some((resolved_path, sig_items)) =
+        env.resolve_module_lid(open_lid, tctx.arena, &mut tctx.persistent_env, tctx.type_ctx)
+    {
         crate::cmi::persistent_env::open_signature_components_into_env(
             sig_items.as_ref(),
             &resolved_path,
@@ -29045,6 +29051,26 @@ pub(crate) fn with_resolved_module_components_for_lid<'a, R>(
         ))(components))
     };
     with_resolved_module_components_for_lid_inner(lid, arena, env, pers_env, ctx, &mut wrapper)
+}
+
+pub(crate) fn open_module_lid_components_into_env(
+    lid: &Longident,
+    arena: &ParseArena,
+    lookup_env: &Env,
+    target_env: &mut Env,
+    pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
+    ctx: &crate::types::context::TypeContext,
+) -> Option<Path> {
+    // OCaml compiler/ml/typemod.ml:88-90 and typecore.ml open modules through
+    // `Env.open_signature`, which in compiler/ml/env.ml:1874-1877 forces the
+    // selected module descriptor's component table and then env.ml:1841-1860
+    // installs both `comp_modules` and `comp_components`. Keep Rust opens on the
+    // same component-view path rather than rebuilding from a detached signature.
+    with_resolved_module_components_for_lid(lid, arena, lookup_env, pers_env, ctx, |components| {
+        let path = components.access_path().clone();
+        crate::cmi::persistent_env::open_module_components_into_env(components, target_env, ctx);
+        path
+    })
 }
 
 fn build_module_components_from_parent_path<'a>(

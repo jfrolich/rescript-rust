@@ -40,7 +40,7 @@ Tasks:
       `env.ml:components_of_module_maker`.
 - [x] Replace Rust-specific parent/sibling/alias reconstruction with direct
       OCaml-shaped thunk arguments where possible.
-- [ ] Ensure child `comp_modules` and `comp_components` share the same forced
+- [x] Ensure child `comp_modules` and `comp_components` share the same forced
       thunks as OCaml.
 - [ ] Ensure component module declarations are forced exactly where OCaml calls
       `EnvLazy.force subst_modtype_maker`.

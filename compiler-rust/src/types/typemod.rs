@@ -15774,12 +15774,23 @@ fn translate_module_type_to_decl_with_typed_hint<'a>(
                         )
                         .is_none()
                         {
-                            if let Some((resolved_path, sig_items)) = sig_env.resolve_module_lid(
+                            let lookup_env = sig_env.clone_preserve_id();
+                            if crate::types::typecore::open_module_lid_components_into_env(
                                 open_lid,
                                 arena,
+                                &lookup_env,
+                                &mut sig_env,
                                 &mut tctx.persistent_env,
                                 tctx.type_ctx,
-                            ) {
+                            )
+                            .is_none()
+                                && let Some((resolved_path, sig_items)) = lookup_env.resolve_module_lid(
+                                    open_lid,
+                                    arena,
+                                    &mut tctx.persistent_env,
+                                    tctx.type_ctx,
+                                )
+                            {
                                 crate::cmi::persistent_env::open_signature_components_into_env(
                                     sig_items.as_ref(),
                                     &resolved_path,
@@ -16179,12 +16190,23 @@ fn approx_modtype<'a>(
                 }
                 PSigDesc::Psig_open(od) => {
                     let open_lid = arena.get_longident(od.popen_lid.txt);
-                    if let Some((resolved_path, sig_items)) = sig_env.resolve_module_lid(
+                    let lookup_env = sig_env.clone_preserve_id();
+                    if crate::types::typecore::open_module_lid_components_into_env(
                         open_lid,
                         arena,
+                        &lookup_env,
+                        &mut sig_env,
                         &mut tctx.persistent_env,
                         tctx.type_ctx,
-                    ) {
+                    )
+                    .is_none()
+                        && let Some((resolved_path, sig_items)) = lookup_env.resolve_module_lid(
+                            open_lid,
+                            arena,
+                            &mut tctx.persistent_env,
+                            tctx.type_ctx,
+                        )
+                    {
                         crate::cmi::persistent_env::open_signature_components_into_env(
                             sig_items.as_ref(),
                             &resolved_path,
@@ -19628,12 +19650,21 @@ pub fn transl_signature<'a>(
                     tctx.type_ctx,
                 ) {
                     path
-                } else if let Some((resolved_path, sig_items)) = sig_env.resolve_module_lid(
-                    open_lid,
-                    arena,
-                    &mut tctx.persistent_env,
-                    tctx.type_ctx,
-                ) {
+                } else if let Some(path) = {
+                    let lookup_env = sig_env.clone_preserve_id();
+                    crate::types::typecore::open_module_lid_components_into_env(
+                        open_lid,
+                        arena,
+                        &lookup_env,
+                        &mut sig_env,
+                        &mut tctx.persistent_env,
+                        tctx.type_ctx,
+                    )
+                } {
+                    path
+                } else if let Some((resolved_path, sig_items)) =
+                    sig_env.resolve_module_lid(open_lid, arena, &mut tctx.persistent_env, tctx.type_ctx)
+                {
                     crate::cmi::persistent_env::open_signature_components_into_env(
                         sig_items.as_ref(),
                         &resolved_path,
@@ -23743,6 +23774,18 @@ fn type_structure_item<'a>(
                 // through `Env.open_signature`; for persistent roots that reaches
                 // compiler/ml/env.ml:1874-1877 and forces the cached `ps_comps`
                 // table from env.ml:669-678.
+                path
+            } else if let Some(path) = {
+                let lookup_env = env.clone_preserve_id();
+                crate::types::typecore::open_module_lid_components_into_env(
+                    open_lid,
+                    arena,
+                    &lookup_env,
+                    &mut new_env,
+                    &mut tctx.persistent_env,
+                    tctx.type_ctx,
+                )
+            } {
                 path
             } else if let Some((resolved_path, sig_items)) =
                 env.resolve_module_lid(open_lid, arena, &mut tctx.persistent_env, tctx.type_ctx)

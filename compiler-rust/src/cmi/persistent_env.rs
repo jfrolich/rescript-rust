@@ -5903,6 +5903,28 @@ pub fn open_signature_components_into_env(
     add_signature_to_env_with_options(sig_items, module_path, env, ctx, true, false, true, None);
 }
 
+pub(crate) fn open_module_components_into_env(
+    components: &crate::types::env_lazy::QualifiedModuleComponents,
+    env: &mut Env,
+    ctx: &TypeContext,
+) {
+    // OCaml compiler/ml/env.ml:1874-1877 calls `get_components
+    // (find_module_descr root)` and compiler/ml/env.ml:1841-1860 installs that
+    // same component table into the opened environment. Reuse the component view
+    // that module lookup already forced so opened `comp_modules` and
+    // `comp_components` share the same lazy state.
+    add_signature_to_env_with_options(
+        components.signature(),
+        components.access_path(),
+        env,
+        ctx,
+        true,
+        false,
+        true,
+        Some(components),
+    );
+}
+
 fn add_signature_to_env_with_options(
     sig_items: &[SignatureItem],
     module_path: &Path,
