@@ -132,7 +132,7 @@ fn open_direct_persistent_module<'a>(
         return None;
     };
     let module_name = arena.get_string(*module_idx);
-    if env.find_module_with_origin(module_name).is_ok() {
+    if env.find_module(module_name).is_ok() {
         return None;
     }
     let pers = pers_env.as_mut()?;

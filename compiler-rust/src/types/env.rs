@@ -1001,13 +1001,8 @@ impl Env {
         let requires = self.with_current_local_module_aliases(|aliases| {
             aliases.iter().any(|(_, target_path)| {
                 let target_head = target_path.head();
-                self.find_module_with_origin(target_head.name())
-                    .ok()
-                    .is_some_and(|(origin_id, _, is_local)| {
-                        is_local
-                            && origin_id.same(target_head)
-                            && Self::path_has_prefix(module_path, target_path)
-                    })
+                self.has_module_ident(target_head)
+                    && Self::path_has_prefix(module_path, target_path)
             })
         });
         self.module_path_requires_env_scoped_cache_cache
@@ -1137,11 +1132,10 @@ impl Env {
     }
 
     /// Find a type by name, also returning whether the binding is local.
-    /// Local bindings (from `add_type`) return `is_local=true` and should
-    /// use `Pident(id)` as their path. Opened bindings (from `add_opened_type`)
-    /// return `is_local=false` and should use `decl.type_path`.
-    /// This matches OCaml's IdTbl.find_name which returns Pident for
-    /// current-table bindings and Pdot for opened-table bindings.
+    ///
+    /// Prefer `find_type_with_path` when the caller needs the selected path.
+    /// This origin helper is kept for open-shadow diagnostics while those
+    /// warnings are still modeled outside OCaml's `using` callbacks.
     pub fn find_type_with_origin(&self, name: &str) -> EnvResult<(&Ident, &TypeDeclaration, bool)> {
         self.types
             .find_by_name_with_origin(name)
@@ -1582,15 +1576,9 @@ impl Env {
         let Some(component_path) = Self::first_dotted_component_path(path) else {
             return false;
         };
-        self.find_module_with_origin(component_path.last())
+        self.find_module_with_path(component_path.last())
             .ok()
-            .is_some_and(|(_, md, is_local)| {
-                !is_local
-                    && md
-                        .md_path
-                        .as_ref()
-                        .is_some_and(|opened_path| opened_path.same(&component_path))
-            })
+            .is_some_and(|(selected_path, _)| selected_path.same(&component_path))
     }
 
     pub(crate) fn mark_implicit_open_root(&mut self, name: &str) {

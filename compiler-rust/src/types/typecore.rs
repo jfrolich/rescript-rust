@@ -2067,9 +2067,7 @@ fn module_decl_for_lid_without_scraping(
     match lid {
         Longident::Lident(name_idx) => {
             let name = tctx.arena.get_string(*name_idx);
-            env.find_module_with_origin(name)
-                .ok()
-                .map(|(_, md, _)| md.clone())
+            env.find_module(name).ok().cloned()
         }
         Longident::Ldot(prefix, child_idx) => {
             let parent_path = env.resolve_module_access_path_for_lid(
@@ -18091,7 +18089,7 @@ fn type_open(
     let persistent_root_open = match open_lid {
         Longident::Lident(mod_idx) => {
             let mod_name = tctx.arena.get_string(*mod_idx);
-            if env.find_module_with_origin(mod_name).is_err() {
+            if env.find_module(mod_name).is_err() {
                 if let Some(pers) = tctx.persistent_env.as_mut() {
                     // OCaml compiler/ml/typemod.ml:88-90 implements
                     // expression `open` through `Typetexp.lookup_module`
@@ -27312,17 +27310,15 @@ fn qualify_module_local_type_paths_with_alias_lookup_in_place<'a>(
                 }
                 let direct_alias_target_reexported_by_parent = if direct_alias_target_type {
                     match (module_access_path, &path) {
-                        (Path::Pdot(selected_parent, _, _), Path::Pdot(_, type_name, _)) => env
-                            .find_type_with_origin(type_name)
-                            .ok()
-                            .is_some_and(|(_, decl, is_local)| {
-                                !is_local
-                                    && decl.type_path.as_ref().is_some_and(|type_path| {
-                                        type_path
-                                            .parent()
-                                            .is_some_and(|parent| parent.same(selected_parent))
-                                    })
-                            }),
+                        (Path::Pdot(selected_parent, _, _), Path::Pdot(_, type_name, _)) => {
+                            env.find_type_with_path(type_name)
+                                .ok()
+                                .is_some_and(|(selected_path, _)| {
+                                    selected_path
+                                        .parent()
+                                        .is_some_and(|parent| parent.same(selected_parent))
+                                })
+                        }
                         _ => false,
                     }
                 } else {
@@ -29789,12 +29785,12 @@ fn build_module_signature_for_path<'a>(
                     // values and types with the exact unit.
                     Path::pident(id.clone())
                 } else {
-                    match env.find_module_with_origin(id.name()) {
-                        Ok((origin_id, _, true)) if origin_id.same(id) => Path::pident(id.clone()),
-                        _ => md
-                            .md_path
+                    if env.has_module_ident(id) {
+                        Path::pident(id.clone())
+                    } else {
+                        md.md_path
                             .clone()
-                            .unwrap_or_else(|| Path::pident(id.clone())),
+                            .unwrap_or_else(|| Path::pident(id.clone()))
                     }
                 };
                 let sig = build_qualified_signature_for_access_path(
