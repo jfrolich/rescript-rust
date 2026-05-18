@@ -61,10 +61,16 @@ Run focused error parity around GenType stale CMT behavior after touching
 For each Rust change:
 
 1. Open the OCaml/ReScript reference file first.
-2. Port the same function shape and name when practical.
-3. Add a comment or commit-body reference with the exact source location.
-4. Run the smallest GenType parity gate that covers the change.
-5. Commit before moving to another phase.
+2. During the rewrite stages, port one file at a time, 1:1, with the same
+   function names and module shape where Rust allows it. The crate does not
+   need to compile during these stages.
+3. Run the three per-file review passes: surface/naming, control/data flow, and
+   output-sensitive semantics.
+4. Patch the reviewed file until it visibly matches the reference algorithm.
+5. Add a comment or commit-body reference with the exact source location.
+6. Only after the rewrite and review stages are complete, start fixing
+   compilation and running parity gates.
+7. Commit before moving to another phase.
 
 Do not improve parity by adding file-specific conditions, output
 post-processing, or Rust-only compatibility layers.

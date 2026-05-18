@@ -80,9 +80,12 @@ needed.
 
 ## Next Session
 
-Start with Phase 0 from `PLAN.md`:
+Start with Rewrite Stage 1 from `PLAN.md`:
 
-1. Add `scripts/test_gentype_output_parity.sh`.
-2. Record the current Rust baseline as missing generated outputs.
-3. Keep existing stale CMT error parity covered.
-4. Commit the harness before starting GenType implementation.
+1. Port one low-dependency file at a time from `compiler/gentype`.
+2. Keep function names, helper names, data-flow shape, and source-location
+   references as close to OCaml as Rust allows.
+3. Run the three per-file review passes before marking each file done:
+   surface/naming, control/data flow, and output-sensitive semantics.
+4. Do not make compilation the goal until all four rewrite stages and their
+   reviews are complete.

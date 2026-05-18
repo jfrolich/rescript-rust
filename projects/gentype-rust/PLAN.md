@@ -59,8 +59,151 @@ Rust already has partial plumbing, but not the generator:
 - `compiler-rust/src/binary_ast/ppx.rs:3763-3765` already rewrites
   `@genType.import` and `@gentype.import` externals.
 
-The first real implementation step is to replace the boolean-only `bsc` side
-with a full `GentypeConfig` and `GentypeInput` pipeline.
+The first implementation step is not wiring or compilation. First create a
+non-compiling, file-for-file Rust port of the GenType sources, then review each
+file against its reference until the shape is 1:1. Only after that should the
+project start fixing compilation, integration, and parity output.
+
+## Port-First Rule
+
+Port the GenType implementation file by file before trying to make the crate
+compile. For each reference `.ml`, `.mli`, `.res`, or `.resi` file, create the
+corresponding Rust module with the same public function names, the same helper
+function names where practical, the same data-flow shape, and the same
+branch/order structure. The port should be idiomatic Rust in ownership and data
+representation, but the algorithm must stay visibly traceable to the OCaml code.
+
+During these stages it is acceptable, and expected, that `compiler-rust` does
+not compile. Do not add temporary compatibility wrappers just to make an early
+build pass. Do not skip functions because their types are inconvenient. Use
+`todo!()` only as a typed placeholder for dependencies outside the file being
+ported, not as a substitute for porting that file's own logic.
+
+Each file must carry a header or nearby comments referencing the source file and
+line ranges it ports. Commit file ports atomically enough that a reviewer can
+compare one Rust file to its one reference file without unrelated changes.
+
+## File-For-File Rewrite Stages
+
+### Rewrite Stage 1: Leaf Utilities and Shared Data
+
+Create direct Rust ports for the low-dependency modules first:
+
+- `GenTypeCommon.ml`
+- `Debug.ml`
+- `Log_.ml`
+- `Indent.ml`
+- `GenIdent.ml`
+- `ModuleName.ml` and `ModuleName.mli`
+- `ResolvedName.ml` and `ResolvedName.mli`
+- `TypeVars.ml`
+- `CodeItem.ml`
+- `Translation.ml`
+
+The goal is a readable 1:1 Rust translation, not a compiling integration.
+
+### Rewrite Stage 2: Config, Paths, Imports, and File Effects
+
+Port the modules that define configuration, paths, resolver inputs, and
+generated-file side effects:
+
+- `GenTypeConfig.ml`
+- `Paths.ml`
+- `FindSourceFile.ml` and `FindSourceFile.mli`
+- `GeneratedFiles.ml`
+- `ImportPath.ml` and `ImportPath.mli`
+- `ModuleExtension.ml`
+- `Dependencies.ml`
+- `Runtime.ml` and `Runtime.mli`
+- `ExportModule.ml`
+
+Keep the same function names and field names where practical. Any Rust-side
+type introduced here should correspond to a reference type, not an invented
+integration abstraction.
+
+### Rewrite Stage 3: Annotation, Resolver, Type Environment, and Translation
+
+Port the modules that inspect typedtree/type information and produce the
+intermediate translation:
+
+- `Annotation.ml`
+- `ModuleResolver.ml`
+- `TypeEnv.ml` and `TypeEnv.mli`
+- `TranslateCoreType.ml`
+- `TranslateTypeExprFromTypes.ml`
+- `TranslateTypeDeclarations.ml`
+- `TranslateSignatureFromTypes.ml`
+- `TranslateSignature.ml`
+- `TranslateStructure.ml`
+
+Preserve traversal order, option/result handling, recursion shape, emitted
+warnings, and type-environment mutation order. If Rust typedtree data is
+missing, document the exact required field/accessor and keep the port shaped
+like the reference.
+
+### Rewrite Stage 4: Emitters and Entry Point
+
+Port the output and top-level orchestration modules last:
+
+- `EmitText.ml`
+- `EmitType.ml`
+- `Emitters.ml` and `Emitters.mli`
+- `EmitJs.ml`
+- `Converter.ml`
+- `NamedArgs.ml`
+- `GenTypeMain.ml`
+
+The result after this stage should be a complete non-compiling Rust GenType
+tree that mirrors the source implementation file for file.
+
+## Per-File Review Stages
+
+After each file is ported, run three review passes before considering the file
+ready for compilation work. These reviews are still allowed to leave the crate
+non-compiling.
+
+### Review Stage 1: Surface and Naming Review
+
+Compare the Rust file against the reference file and patch any differences in:
+
+- function names and helper names
+- type/variant/field names
+- function order
+- module boundaries
+- public/private surface
+- comments with source locations
+
+The Rust file should look like an idiomatic Rust rendering of the same source,
+not a redesigned API.
+
+### Review Stage 2: Control-Flow and Data-Flow Review
+
+Compare every function body and patch any differences in:
+
+- match arm order
+- early returns and exception/error paths
+- fold/map/filter direction
+- recursion shape
+- mutable state and side-effect order
+- lazy resolver calls and generated-file actions
+- warning/log behavior
+
+Do not simplify or combine branches unless the reference does so.
+
+### Review Stage 3: Output-Sensitive Semantics Review
+
+Compare output-facing details and patch any differences in:
+
+- emitted string fragments
+- whitespace and newline decisions
+- import/export ordering
+- generated helper ordering
+- source-file and output-file naming
+- shim/dependency/module-resolution decisions
+- annotation payload interpretation
+
+This stage is about eliminating semantic drift before Rust type errors start
+driving the implementation.
 
 ## Architecture
 
@@ -117,9 +260,27 @@ Primary execution should be in-process after Rust typechecking. Reading OCaml
 Marshal CMT files should remain limited to existing stale-artifact behavior
 unless a direct CMT reader becomes necessary for CLI parity.
 
-## Implementation Phases
+## Compile and Integration Phases
 
-### Phase 0: Harness and Baseline
+Start these phases only after the file-for-file rewrite and all three per-file
+review stages are complete.
+
+### Phase 0: Make the Port Compile
+
+- Wire `compiler-rust/src/gentype/mod.rs`.
+- Replace placeholders with real Rust types only where the reference port
+  already determines the shape.
+- Fix ownership and borrow errors without changing the reference algorithm.
+- Keep function names, module boundaries, and branch structure stable unless a
+  review shows the reference requires a different shape.
+- Commit compile-fix clusters separately from semantic parity changes.
+
+Acceptance:
+
+- `cargo build --manifest-path compiler-rust/Cargo.toml` succeeds in debug mode.
+- The GenType module tree remains visibly file-for-file with the reference.
+
+### Phase 1: Harness and Baseline
 
 - Add `scripts/test_gentype_output_parity.sh`.
 - The script must compare raw generated `.gen.tsx` and `.gen.ts` contents from
@@ -136,7 +297,7 @@ Acceptance:
   silently passing.
 - Existing stale CMT error parity remains covered.
 
-### Phase 1: CLI and Config
+### Phase 2: CLI and Config
 
 - Replace `Options { gentype: bool }` with a full GenType option struct in
   `compiler-rust/src/bin/bsc.rs`.
@@ -146,7 +307,7 @@ Acceptance:
   `-bs-gentype-suffix`, `-bs-gentype-shim`, `-bs-gentype-debug`,
   `-bs-gentype-dep`, `-bs-gentype-source-dir`, `-bs-gentype-dep-path`,
   `-bs-gentype-bsb-project-root`.
-- Port `GenTypeConfig.t` from `compiler/gentype/GenTypeConfig.ml`.
+- Wire the reviewed `config.rs` port of `GenTypeConfig.t` into `bsc` options.
 - Keep rewatch's existing config parsing and flag emission stable unless the
   OCaml reference requires a different flag value or order.
 
@@ -155,12 +316,12 @@ Acceptance:
 - Rust can round-trip every GenType config used by the test suites and Tella.
 - Config debug dumps, if added, match the OCaml field semantics.
 
-### Phase 2: Input and Generated File Boundaries
+### Phase 3: Input and Generated File Boundaries
 
 - Add `gentype::main::process_typed_artifact`, shaped like
   `GenTypeMain.process_cmt_file`.
-- Add `paths.rs`, `module_name.rs`, `generated_files.rs`, and source-file
-  fallback behavior.
+- Wire the reviewed `paths.rs`, `module_name.rs`, `generated_files.rs`, and
+  source-file fallback ports.
 - Implement write-if-required and stale-file removal matching
   `GeneratedFiles.ml`.
 - Preserve the current stale CMT error behavior from
@@ -172,11 +333,11 @@ Acceptance:
 - Files with type errors follow the OCaml log action.
 - No TypeScript output is emitted before translation exists.
 
-### Phase 3: Annotation, Names, and Resolver Basics
+### Phase 4: Annotation, Names, and Resolver Basics
 
-- Port `Annotation.ml`, `ModuleName.ml`, `ResolvedName.ml`, `ImportPath.ml`,
-  and enough `ModuleResolver.ml` to resolve local files, shims, and dependency
-  paths.
+- Wire the reviewed `annotation.rs`, `module_name.rs`, `resolved_name.rs`,
+  `import_path.rs`, and `module_resolver.rs` ports into the typed artifact
+  entry point.
 - Support `@genType`, `@gentype`, `@genType.as`, `@genType.import`,
   `@genType.opaque`, `@@genType.ignoreInterface`, and module-level annotations.
 - Match React and ReasonReact resolver exclusions from
@@ -188,10 +349,11 @@ Acceptance:
   GenType suites.
 - Missing/extra output file set matches OCaml before content parity is expected.
 
-### Phase 4: Type Translation Core
+### Phase 5: Type Translation Core
 
-- Port `TypeEnv.ml`, `TypeVars.ml`, `TranslateCoreType.ml`,
-  `TranslateTypeExprFromTypes.ml`, and `TranslateTypeDeclarations.ml`.
+- Integrate the reviewed `type_env.rs`, `type_vars.rs`,
+  `translate_core_type.rs`, `translate_type_expr_from_types.rs`, and
+  `translate_type_declarations.rs` ports.
 - Cover primitive mappings, abstract/opaque types, aliases, records, objects,
   tuples, arrays, lists, option/null/nullable/undefined, promises, dicts,
   recursive and mutually recursive types, variants, polymorphic variants,
@@ -204,10 +366,10 @@ Acceptance:
 - `stdlib-no-shims` generated output and TypeScript typecheck pass.
 - Type-only generated files in `typescript-react-example` match OCaml.
 
-### Phase 5: Structure and Signature Translation
+### Phase 6: Structure and Signature Translation
 
-- Port `TranslateStructure.ml`, `TranslateSignature.ml`, and
-  `TranslateSignatureFromTypes.ml`.
+- Integrate the reviewed `translate_structure.rs`,
+  `translate_signature.rs`, and `translate_signature_from_types.rs` ports.
 - Match declaration filtering from `GenTypeMain.ml:16-24` and
   `GenTypeMain.ml:26-52`.
 - Implement `.resi` selection and `ignoreInterface` behavior exactly.
@@ -218,11 +380,11 @@ Acceptance:
 - Interface-driven generated files match OCaml.
 - Module alias and nested-module fixtures match OCaml.
 
-### Phase 6: Emitters and Runtime Imports
+### Phase 7: Emitters and Runtime Imports
 
-- Port `CodeItem.ml`, `Translation.ml`, `Runtime.ml`, `EmitText.ml`,
-  `EmitType.ml`, `EmitJs.ml`, `Emitters.ml`, `Converter.ml`, and
-  `NamedArgs.ml`.
+- Integrate the reviewed `code_item.rs`, `translation.rs`, `runtime.rs`,
+  `emit_text.rs`, `emit_type.rs`, `emit_js.rs`, `emitters.rs`,
+  `converter.rs`, and `named_args.rs` ports.
 - Match wrapper emission, import/export layout, comments/docstrings, conversion
   helpers, curried/uncurried function handling, labelled and optional args,
   React component output, and generated header text.
@@ -233,7 +395,7 @@ Acceptance:
 - `tests/gentype_tests/typescript-react-example` has zero generated-output
   diffs and passes `yarn typecheck`.
 
-### Phase 7: Cross-File and Dependency Resolution
+### Phase 8: Cross-File and Dependency Resolution
 
 - Finish `ModuleResolver` behavior for source dirs, dependency paths, shims,
   namespace, suffix, generated file extension, and module resolution modes
@@ -247,7 +409,7 @@ Acceptance:
 - Transitive type references and imported JS value fixtures match OCaml.
 - Tella generated import paths match OCaml.
 
-### Phase 8: Tella Parity Hardening
+### Phase 9: Tella Parity Hardening
 
 - Run the Rust compiler through rewatch from the Tella repo root with the
   repo-local compiler and stdlib.
@@ -261,7 +423,7 @@ Acceptance:
 - Tella generated file content matches OCaml.
 - Tella TypeScript typecheck passes with Rust-generated GenType output.
 
-### Phase 9: In-Process Integration and Performance
+### Phase 10: In-Process Integration and Performance
 
 - Avoid reparsing or rereading typed artifacts when Rust already has the typed
   structure/signature in memory.
@@ -278,6 +440,10 @@ Acceptance:
 ## Required Gates
 
 Use debug builds for iteration.
+
+During the rewrite and per-file review stages, these gates are informational
+only; the Rust crate is expected not to compile. They become required once
+Phase 0 of the compile/integration work starts.
 
 ```sh
 cargo build --manifest-path compiler-rust/Cargo.toml
