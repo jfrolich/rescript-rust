@@ -49,13 +49,13 @@ code, read the matching OCaml source first.
 
 | Area | OCaml reference | Rust implementation | Notes |
 | --- | --- | --- | --- |
-| Main implementation driver | `compiler/core/js_implementation.ml` | `src/driver.rs` | OCaml `implementation` parses, applies external PPX, runs `Ppx_entry`, then `after_parsing_impl`. Rust direct source mode mirrors that order in `compile_source_to_js_with_options`. |
-| Interface driver | `compiler/core/js_implementation.ml`, `compiler/ml/typemod.ml` | `src/driver.rs` | Interfaces parse as signatures, run signature PPX/config/warnings, typecheck, then publish `.cmi`-like data. |
+| Main implementation driver | `compiler/core/js_implementation.ml` | `src/driver.rs` | OCaml `implementation` parses, applies external PPX, runs `Ppx_entry`, then `after_parsing_impl`. Rust direct source mode follows the same broad stage order in `compile_source_to_js_with_options`, with external-PPX caveats documented below. |
+| Interface driver | `compiler/core/js_implementation.ml`, `compiler/ml/typemod.ml` | `src/driver.rs` | OCaml interfaces parse as signatures, run signature PPX/config/warnings, typecheck, self-check, force delayed checks, and write `.cmi`/`.cmti`. Rust in-process mode publishes a registry signature; direct Rust helpers currently typecheck/dump but do not write OCaml-compatible interface artifacts. |
 | ReScript syntax parser | `compiler/syntax/`, `compiler/ml/parsetree.ml` | `src/parser/*`, `src/parse_arena.rs` | Rust parser uses arena indices instead of OCaml heap records, but output shape and locations must match. |
 | Frozen PPX AST boundary | `compiler/ml/parsetree0.ml`, `ast_mapper_to0.ml`, `ast_mapper_from0.ml`, `binary_ast.ml` | `src/binary_ast/parsetree0.rs`, `mapper_to0.rs`, `mapper_from0.rs`, `writer.rs`, `marshal.rs` | `parsetree0` is a compatibility wire format. Do not evolve it for new syntax. |
-| Frontend and PPX rewrites | `compiler/frontend/*`, `compiler/core/cmd_ppx_apply.ml`, `compiler/frontend/ppx_entry.ml` | `src/binary_ast/ppx.rs`, `src/parser/jsx_ppx.rs`, `src/parser/let_unwrap_ppx.rs`, `src/driver.rs` | Order is observable through warnings, errors, AST dumps, and generated code. |
+| Frontend and PPX rewrites | `compiler/frontend/*`, `compiler/core/cmd_ppx_apply.ml`, `compiler/frontend/ppx_entry.ml`, `compiler/frontend/ast_config.ml` | `src/binary_ast/ppx.rs`, `src/parser/jsx_ppx.rs`, `src/parser/let_unwrap_ppx.rs`, `src/driver.rs`, `rewatch/src/build/parse.rs` | Order is observable through warnings, errors, AST dumps, and generated code. Rust has several mode-specific caveats listed below. |
 | Initial environment | `compiler/core/res_compmisc.ml`, `compiler/ml/env.ml` | `src/types/predef.rs`, `src/types/env.rs`, `src/cmi/persistent_env.rs`, `src/driver.rs` | Pervasives/Stdlib loading and implicit opens must preserve OCaml lookup and force order. |
-| Persistent environment | `compiler/ml/env.ml`, `compiler/ml/cmi_format.ml`, `compiler/ml/cmi_format.mli` | `src/cmi/persistent_env.rs`, `src/cmi/cmi_format.rs`, `src/cmi/sig_reader.rs`, `src/cmi/portable_types.rs` | Rust has disk-backed and registry-backed modes. Both expose the same logical signatures/metadata. |
+| Persistent environment | `compiler/ml/env.ml`, `compiler/ml/cmi_format.ml`, `compiler/ml/cmi_format.mli`, `compiler/core/js_cmj_format.ml` | `src/cmi/persistent_env.rs`, `src/cmi/cmi_format.rs`, `src/cmi/sig_reader.rs`, `src/cmi/portable_types.rs` | Rust reads OCaml `.cmi`/`.cmj` data and has an in-memory registry mode. Disk writing of `.cmi`/`.cmj` is not currently equivalent to OCaml. |
 | Lazy module components | `compiler/ml/env.ml` (`EnvLazy` module), `compiler/ml/subst.ml` | `src/types/env_lazy.rs`, `src/types/env.rs`, `src/types/context.rs` | This is a high-risk parity area. Rust must preserve OCaml API boundaries such as `find_module_descr` versus `find_module`. |
 | Core type operations | `compiler/ml/ctype.ml`, `compiler/ml/btype.ml` | `src/types/ctype.rs`, `src/types/btype.rs`, `src/types/type_expr.rs` | Physical sharing created by `instance`, `copy`, `link_type`, `unify`, generalization, and row mutation is observable in typedtree sexp parity. |
 | Type declarations and data representation | `compiler/ml/typedecl.ml`, `compiler/ml/datarepr.ml`, `compiler/ml/typetexp.ml` | `src/types/typemod.rs`, `src/types/typecore.rs`, `src/types/decl.rs` | Constructors, labels, records, variants, objects, externals, and type attributes must build equivalent declarations. |
@@ -63,8 +63,8 @@ code, read the matching OCaml source first.
 | Module and signature typing | `compiler/ml/typemod.ml`, `compiler/ml/includemod.ml`, `compiler/ml/mtype.ml` | `src/types/typemod.rs`, `src/types/includemod.rs` | Includes structures, signatures, functors, includes, opens, recursive modules, interface inclusion, delayed checks, and signature simplification. |
 | Typedtree definitions and dumps | `compiler/ml/typedtree.ml`, `compiler/ml/sexp_typedtree.ml` | `src/types/typedtree.rs`, `src/types/sexp_typedtree.rs` | Serializer must reflect typechecker output. It must not normalize content to hide typechecker differences. |
 | Typedtree to first Lambda representation | `compiler/ml/translcore.ml`, `compiler/ml/translmod.ml`, `compiler/ml/matching.ml`, `compiler/ml/typeopt.ml`, `compiler/ml/lambda.ml` | `src/raw_lambda/convert.rs`, `src/raw_lambda/matching.rs`, `src/raw_lambda/typeopt.rs`, `src/raw_lambda/mod.rs` | Rust `RawLambda` is the counterpart of OCaml `Lambda.lambda`. |
-| First Lambda to JS-backend Lambda, then optimization | `compiler/core/lam_convert.ml`, `compiler/core/lam_compile_main.ml`, `compiler/core/lam_pass_*.ml` | `src/raw_lambda/lower.rs`, `src/lambda/lam_compile_main.rs`, `src/lambda/lam_pass_*.rs` | OCaml also has this second Lambda-level representation: `Lam_convert.convert` converts `Lambda.lambda` into backend `Lam.t`. Pass order is fixed by the OCaml backend. |
-| JavaScript backend | `compiler/core/lam_compile.ml`, `compiler/core/js_*.ml`, `compiler/core/j.ml` | `src/lambda/lam_compile.rs`, `src/lambda/js_*`, `src/js_ir/*` | Includes JS IR, externals, primitives, module paths, exports, side effects, and printer behavior. |
+| First Lambda to JS-backend Lambda, then optimization | `compiler/core/lam_convert.ml`, `compiler/core/lam.ml`, `compiler/core/lam_compile_main.ml`, `compiler/core/lam_pass_*.ml` | `src/raw_lambda/lower.rs`, `src/lambda/mod.rs`, `src/lambda/lam_compile_main.rs`, `src/lambda/lam_pass_*.rs` | OCaml also has this second Lambda-level representation: `Lam_convert.convert` converts `Lambda.lambda` into backend `Lam.t`. Pass order is fixed by the OCaml backend. |
+| JavaScript backend | `compiler/core/lam_compile.ml`, `compiler/core/js_*.ml`, `compiler/core/j.ml`, `compiler/core/js_cmj_format.ml` | `src/lambda/lam_compile.rs`, `src/lambda/js_*`, `src/js_ir/*`, `src/cmi/persistent_env.rs` | Includes JS IR, externals, primitives, module paths, exports, side effects, printer behavior, and `.cmj` metadata reads. |
 | Build system integration | OCaml `bsb`/legacy build behavior plus compiler artifact contracts | `rewatch/src/build/*` | Rewatch is Rust-specific, but artifact semantics and compiler invocation semantics must stay compatible. |
 
 ## End-To-End Pipeline
@@ -76,7 +76,7 @@ rescript.json + source graph
   -> rewatch package/source discovery
   -> parse .res/.resi into Parsetree nodes stored in ParseArena
   -> dependency extraction and optional binary .ast/.iast writing
-  -> external PPX plus built-in frontend rewrites
+  -> external PPX where supported plus built-in frontend rewrites
   -> TypeContext + Env + PersistentEnv setup
   -> module/expression/pattern/type checking into Typedtree
   -> interface inclusion, signature simplification, and signature publishing
@@ -144,9 +144,13 @@ rewatch parse step
   -> write JS outputs
 ```
 
-The interface path is the same idea, but it parses a signature, typechecks it as
-a module type, saves/publishes the signature, and produces `.cmti`/`.cmi`-like
-data instead of Lambda/JS.
+The interface path is the same idea, but it parses a signature and typechecks it
+as a module type instead of producing Lambda/JS. OCaml's file-backed interface
+path then runs a self-inclusion check, forces delayed checks, writes `.cmi`,
+writes `.cmti`, and can run GenType. Rust's in-process path publishes the
+signature into `ModuleRegistry`; Rust's direct interface helper currently
+typechecks and dumps typed output but does not write OCaml-compatible `.cmi` or
+`.cmti` files.
 
 ## Observable Invariants
 
@@ -170,8 +174,9 @@ These details are not implementation trivia; tests and users can observe them.
   delayed unused checks, warning-as-error, and fatal errors must be emitted in the
   same order and with the same failure behavior as the OCaml compiler.
 - Binary artifacts are compatibility boundaries. `.ast`, `.iast`, `.cmi`, and
-  `.cmj`-like data must carry the same logical information in subprocess and
-  in-process modes.
+  `.cmj`-like data should carry the same logical information in subprocess and
+  in-process modes; current in-process backend metadata still has narrower CMJ
+  coverage for closed Lambda exports.
 - JavaScript output is byte-level observable. Small changes in Lambda shape,
   export coercion, module ordering, identifier allocation, or printer formatting
   can be user-visible even if runtime behavior is unchanged.
@@ -227,9 +232,10 @@ In-process scheduler detail:
 - Implementation signatures for modules without `.resi` are published early,
   matching OCaml's "save inferred signature before translation" behavior in
   `Typemod.type_implementation_more`.
-- JS metadata such as purity, export constants, export arities, and cross-module
-  inlineable Lambda is published after JavaScript lowering has inspected the
-  simplified module.
+- JS metadata is published after JavaScript lowering has inspected the
+  simplified module. In-process registry metadata currently covers purity,
+  export constants, and export arities; disk `.cmj` reading also supports
+  closed Lambda exports for cross-module inlining.
 - The ready queue uses critical-path priority and a bounded Rayon pool so large
   projects do not submit all work at once and lose scheduling control.
 
@@ -275,21 +281,29 @@ Important files:
 - `src/parser/state.rs`
 - `src/parser/grammar.rs`
 - `src/parser/code_frame.rs`
+- `src/parser/utf8.rs`
 - `src/source_text.rs`
 - `src/location.rs`
 - `src/parse_arena.rs`
 
 Algorithm:
 
-1. `Parser::new` creates parser state for a filename and source string.
-2. The scanner reads bytes and emits tokens with source locations.
-3. ASCII paths are fast; non-ASCII text is decoded as UTF-8 only when needed.
-4. The scanner tracks byte offsets, character positions, UTF-16 code-unit
+1. File-based entrypoints read source bytes through
+   `source_text::latin1_bytes_to_string`: ASCII inputs become UTF-8 strings
+   directly, and non-ASCII inputs map each original byte to one `char` in
+   `0..=255`.
+2. `Parser::new` creates parser state for a filename and source string.
+3. The scanner reads bytes from that string and emits tokens with source
+   locations.
+4. ASCII paths are fast. For raw `&str` callers, non-ASCII text can go through
+   the UTF-8 decoder; for normal file input, the Latin-1 byte-string model is
+   used to match OCaml's byte-oriented source strings.
+5. The scanner tracks byte offsets, character positions, UTF-16 code-unit
    offsets, line starts, and line numbers.
-5. Comments and doc comments are captured instead of discarded.
-6. The parser maintains lookahead, error-recovery state, region state, and the
+6. Comments and doc comments are captured instead of discarded.
+7. The parser maintains lookahead, error-recovery state, region state, and the
    current `ParseArena`.
-7. Diagnostics are accumulated with precise locations and later rendered by the
+8. Diagnostics are accumulated with precise locations and later rendered by the
    driver.
 
 Context-sensitive lexer behavior:
@@ -307,6 +321,10 @@ Rust-specific diversion:
   records. Rust stores positions, locations, strings, longidents, and recursive
   AST nodes in `ParseArena` and passes compact indices through the parsetree.
   This is intended as a representation-only diversion.
+- The Rust scanner has a UTF-8 slow path, but OCaml parity for files relies on
+  the Latin-1 byte-string conversion before scanning. Position bugs often come
+  from accidentally reasoning about Unicode scalar positions when the reference
+  path is byte-oriented.
 
 ## Stage 3: Parsing Into Parsetree
 
@@ -393,7 +411,9 @@ Binary AST algorithm:
 4. In subprocess mode, rewatch or the compiler can write `.ast`/`.iast` files
    for later compiler invocation.
 5. External PPX processes read and write the marshal-compatible payload.
-6. When necessary, map `parsetree0` back into the current parsetree after PPX.
+6. A complete PPX round trip maps `parsetree0` back into the current parsetree
+   after PPX. OCaml does this before later frontend processing; current Rust
+   direct paths do not yet consume the transformed tree.
 
 Dependency extraction algorithm:
 
@@ -415,6 +435,17 @@ Rust-specific diversion:
 - In in-process mode, rewatch can skip writing `.ast`/`.iast` files and keep
   `StoredAst` values in memory. This removes serialization/process overhead but
   does not change the logical stage boundary.
+- In rewatch `--rust` parser mode, `generate_ast_with_rust_parser` applies the
+  Rust parser, per-file config, JSX transform, let-unwrap transform, built-in
+  PPX, no-export wrapping, and dependency extraction. It does not run external
+  `-ppx` rewriters; the default OCaml parser/subprocess path still passes PPX
+  flags to `bsc -bs-ast`.
+- The direct Rust `bsc -bs-ast` helper and direct source driver can execute
+  external PPX commands and validate the output magic, but the current
+  implementation does not re-read the transformed AST back into Rust. Dumps,
+  written ASTs, and continued compilation therefore still use the original Rust
+  parsetree. Treat external PPX parity in Rust paths as incomplete until that
+  round-trip is implemented.
 
 ## Stage 5: Frontend Rewrites, Built-In PPX, And File Directives
 
@@ -427,7 +458,8 @@ spread across `compiler/frontend/`, `compiler/syntax/`, `Cmd_ppx_apply`, and
 Direct source order in Rust:
 
 1. Parse the structure.
-2. Apply external structure PPXs.
+2. Run external structure PPX commands and validate their output magic. Current
+   Rust direct compilation does not consume the transformed AST yet.
 3. Reject invalid polymorphic variant integer literals.
 4. Collect leading built-in warning attributes.
 5. Validate and extract file `@@config`.
@@ -448,16 +480,39 @@ OCaml reference order:
 
 - `js_implementation.implementation` runs `Cmd_ppx_apply.apply_rewriters` before
   `Ppx_entry.rewrite_implementation`.
+- `Ppx_entry.rewrite_implementation` and `rewrite_signature` run invariant
+  warning collection, `Ast_config.process_*`, JSX, and then the built-in mapper
+  unless `-bs-no-builtin-ppx` is set.
 - `after_parsing_impl` then runs `Ast_config.process_str`, optional `no_export`,
   binary AST writing, `as_pp`, `syntax_only`, environment initialization, and
   typechecking.
+- `after_parsing_sig` runs `Ast_config.process_sig`, optional binary AST
+  writing, `as_pp`, `syntax_only`, signature typechecking, signature
+  self-inclusion, delayed checks, fatal-warning checks, `.cmi` save, `.cmti`
+  save, and GenType.
+
+Mode-specific caveats:
+
+- OCaml and the non-Rust parser subprocess path apply external PPX output as the
+  input to later frontend processing. Current Rust direct paths only validate
+  the external PPX output stream and do not consume the transformed tree.
+- Rewatch `--rust` parser mode does not pass external `-ppx` flags into
+  `generate_ast_with_rust_parser`; that path covers Rust parsing, per-file
+  config, JSX, let-unwrap, built-in PPX, no-export wrapping, and dependency
+  extraction.
+- Rust direct source mode collects file config and warning attributes before
+  JSX and built-in rewriting, then runs `expand_extensions` before the full
+  built-in structure rewrite. This should stay aligned with OCaml warning and
+  rewrite observability, but it is not a literal function-by-function clone of
+  `Ppx_entry`.
 
 Why order matters:
 
 - Warning attributes must be collected before generated warnings are emitted.
 - File directives must be preserved until final JS printing.
 - JSX and let-unwrap rewrites must happen before general built-in rewrites.
-- External PPX output must be seen by built-in processing.
+- External PPX output must be seen by built-in processing for reference parity;
+  current Rust direct/Rust-parser paths are known incomplete here.
 - `@@no_export` changes the structure shape before typechecking and export
   coercion.
 
@@ -589,6 +644,23 @@ Current Rust-specific risk:
   port of `Env.components_of_module_maker`. Any performance or parity work here
   should cite the exact OCaml reference path and avoid adding a Rust-only
   compatibility layer.
+- `ComponentLookupCacheMode::{FindModule, ProbeModuleDescr}` in
+  `src/types/typecore.rs` is intended to model OCaml's `Env.find_module` versus
+  `Env.find_module_descr` force boundary. It should be audited at every call
+  site because the reference boundary lives in `env.ml`, not in an arbitrary
+  output or cache mode.
+- `TypeContext` keeps side caches for qualified component views, flattened alias
+  component paths, forced normalized paths, and forced type-path comparisons.
+  The qualified-component cache matches OCaml lazy sharing intent; the alias and
+  forced-path caches are higher-risk and should only memoize effects already
+  produced by the OCaml-aligned lookup path.
+- `PersistentEnv` and `env_lazy` contain flattened alias prefix rewrites for
+  names such as `Stdlib_JSON` versus `Stdlib.JSON`. Treat these as current Rust
+  compatibility machinery to shrink, not as a substitute for declaration,
+  substitution, and component lookup identity.
+- Explicit `Stdlib`/`Pervasives` handling remains in several Rust typing and
+  persistent-environment paths. Each instance must be justified by OCaml's
+  `Res_compmisc.initial_env`, implicit-open setup, and `Env` lookup behavior.
 
 ## Stage 8: Core Type Engine
 
@@ -776,17 +848,27 @@ OCaml `Typemod.type_implementation_more` does the following:
    delayed checks, save `.cmi` and CMT, and return the simple signature.
 6. On error, save a partial CMT before re-raising.
 
-Rust mirrors this behavior in `src/driver.rs` around typechecking:
+Rust aligns with the typechecking and ordering parts of this behavior in
+`src/driver.rs`:
 
 - Typecheck the structure through `typemod::type_structure`.
 - Apply moregen/interface constraints before typedtree sexp output when a `.resi`
   exists.
 - Run inclusion checks.
 - If no `.resi` exists, simplify the inferred signature, check non-generalized
-  schemes, normalize signature types, prepare the signature for saving, and
-  publish it before Lambda conversion.
+  schemes, normalize signature types, and prepare the signature for the same
+  stamp/shape effects as saving before Lambda conversion.
 - If a `.resi` exists, keep the declared interface as the target signature and
   do not replace it with the implementation signature for export coercion.
+- The main in-process compile path also publishes the inferred signature before
+  RawLambda conversion when there is no interface. The exported helper
+  `typecheck_implementation_in_process` is lighter-weight and explicitly lacks
+  the post-typecheck interface constraint pass; do not use it as the model for
+  full implementation compilation.
+- Rust direct interface helpers and `typecheck_preprocessed_signature_in_process`
+  do not currently run the whole OCaml `after_parsing_sig` artifact contract in
+  every mode: direct helpers typecheck and dump, while in-process helpers publish
+  an in-memory signature instead of writing `.cmi`/`.cmti`.
 
 ## Stage 11: Diagnostics And Warnings
 
@@ -860,7 +942,8 @@ Backend metadata:
 - Purity/side-effect status.
 - Export constants.
 - Export arities.
-- Export Lambda values used for cross-module inlining when enabled.
+- Export Lambda values used for cross-module inlining when enabled in
+  file-backed `.cmj` mode.
 
 OCaml reference behavior:
 
@@ -871,12 +954,23 @@ OCaml reference behavior:
 
 Rust behavior:
 
-- Disk/subprocess mode uses file artifacts.
-- In-process mode publishes equivalent logical data through `ModuleRegistry`.
+- Disk/subprocess mode reads file artifacts through `PersistentEnv` and
+  `cmi_format`. Full Rust writing of OCaml-compatible `.cmi`/`.cmj` artifacts is
+  not implemented in the direct Rust CLI path.
+- In-process mode publishes logical signature data and JS metadata through
+  `ModuleRegistry`.
 - The in-process pre-JS stage can publish signatures early, then the JS finish
-  stage publishes backend metadata.
+  stage publishes purity, export constants, and export arities.
+- In-process `PersistentEnv` treats the registry as authoritative and does not
+  fall back to disk `.cmj` data. Closed Lambda export metadata for
+  cross-module inlining is currently available through disk `.cmj` reads, not
+  through the in-process registry.
 - Before JS dependency probing, the current unit is hidden again so it is not
   treated as an importable dependency.
+- Rust `PersistentEnv` also has a source-fallback path that can typecheck
+  dependency source signatures on demand, bounded by a depth limit. That is a
+  Rust-specific fallback for missing registry/file artifacts, not the normal
+  OCaml driver contract.
 
 ## Stage 13: Typedtree To RawLambda
 
@@ -1163,14 +1257,17 @@ Module path resolution:
 - Package modules resolve through package metadata.
 - Dynamic imports keep dynamic import metadata.
 - In-process mode can resolve module paths and metadata through `ModuleRegistry`.
-- `.cmj` metadata provides side-effect, arity, constant, and inlineable Lambda
-  information.
+- File-backed `.cmj` metadata provides side-effect, arity, constant, and
+  inlineable Lambda information. In-process metadata currently provides
+  side-effect, arity, and constant information only.
 
 Metadata output:
 
 - `cmj_export_constants` records constant exports for later modules.
 - `cmj_export_arities` records function arities for later call optimization.
-- Cross-module inlineable Lambda may be read when cross-module inlining is on.
+- Cross-module inlineable Lambda may be read from file-backed `.cmj` artifacts
+  when cross-module inlining is on; it is not currently published through the
+  in-process registry.
 - `is_pure` is derived from final program side-effect state.
 
 ## Stage 19: JavaScript Printing And Output
@@ -1223,6 +1320,8 @@ Direct source mode:
 - Parses source text and runs all stages in one Rust call.
 - Useful for tests, playground-style calls, and direct compiler invocations.
 - Cross-module state comes from disk-backed `PersistentEnv`.
+- Returns JavaScript text or typed/intermediate dumps. It does not write
+  OCaml-compatible `.cmi`/`.cmj` artifacts.
 
 Rewatch subprocess mode:
 
@@ -1230,6 +1329,8 @@ Rewatch subprocess mode:
 - Compilation invokes a compiler process with compiler args.
 - Cross-module state moves through file artifacts.
 - This mode is closest to the historical process boundary.
+- When rewatch is not using the Rust parser, external PPX flags are passed to
+  the compiler subprocess while generating `.ast`/`.iast`.
 
 Rewatch in-process mode:
 
@@ -1242,6 +1343,7 @@ Rewatch in-process mode:
 - The pre-JS result carries lowered Lambda, possible required modules, current
   identifier stamp, directives, debug flags, JSX-preserve state, signature,
   optional registry updates, and captured intermediates.
+- External PPX output is not applied on the Rust parser/in-process path today.
 
 The in-process split is a Rust-specific execution-mode diversion. It must
 preserve OCaml's logical ordering:
@@ -1293,6 +1395,29 @@ Known algorithmic risk areas:
   in `res_compmisc.ml` and `env.ml`, not by a single observed parity fixture.
 - Serializer-level normalization is not a valid typedtree parity fix. The
   serializer should faithfully emit the typechecker result.
+
+Current semantic and coverage caveats:
+
+- External PPX output is not consumed by current Rust direct or Rust parser
+  in-process paths, even though the direct helper can run PPX commands and check
+  output magic.
+- Rust direct interface helpers typecheck and dump signatures but do not write
+  `.cmi`/`.cmti`; in-process interface helpers publish registry signatures
+  instead of running every OCaml file-artifact step.
+- Rust can read OCaml `.cmi`/`.cmj` artifacts, but direct Rust compilation does
+  not yet write full OCaml-compatible interface and backend metadata artifacts.
+- In-process backend metadata covers purity, constants, and arities. Closed
+  Lambda exports for cross-module inlining are decoded from disk `.cmj` files
+  only.
+- `typecheck_implementation_in_process` is a helper for signature publication,
+  not the full implementation compiler; the full in-process compile path is
+  `compile_preprocessed_structure_in_process_until_js` followed by the JS finish
+  step.
+- Source-fallback signature typechecking in `PersistentEnv` is Rust-specific and
+  should not be treated as OCaml's normal compiled-interface lookup behavior.
+- Several lazy-environment side caches and explicit mode splits remain in the
+  Rust typechecker. They are debt unless each call site is proven to correspond
+  to an OCaml lookup or forcing boundary.
 
 When a Rust implementation does something different from OCaml:
 
