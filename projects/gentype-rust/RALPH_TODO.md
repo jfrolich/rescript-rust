@@ -48,13 +48,14 @@ from the reference.
 - [x] Port `TypeEnv.ml` and `TypeEnv.mli`.
 - [x] Port `TranslateCoreType.ml`.
 - [x] Port `TranslateTypeExprFromTypes.ml`.
-- [ ] Port `TranslateTypeDeclarations.ml`.
+- [x] Port `TranslateTypeDeclarations.ml`.
 - [ ] Port `TranslateSignatureFromTypes.ml`.
 - [ ] Port `TranslateSignature.ml`.
 - [ ] Port `TranslateStructure.ml`.
 - [ ] Run the three per-file review passes for every file in this stage.
 - [x] Run the three per-file review passes for `Annotation.ml`,
   `ModuleResolver.ml`, `TranslateCoreType.ml`,
+  `TranslateTypeDeclarations.ml`,
   `TranslateTypeExprFromTypes.ml`, and
   `TypeEnv.ml`/`.mli`.
 - [ ] Commit the stage or commit coherent file clusters.

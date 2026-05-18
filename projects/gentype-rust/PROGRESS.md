@@ -20,8 +20,9 @@ support in Rust is still a stub:
   and export-module tables.
 - Rewrite Stage 3 has started with initial file-for-file Rust ports of
   `Annotation.ml`, `ModuleResolver.ml`, `TranslateCoreType.ml`,
-  `TranslateTypeExprFromTypes.ml`, and `TypeEnv.ml`/`.mli`. These files are
-  still intentionally not wired into the crate.
+  `TranslateTypeDeclarations.ml`, `TranslateTypeExprFromTypes.ml`, and
+  `TypeEnv.ml`/`.mli`. These files are still intentionally not wired into the
+  crate.
 
 ## Reference Inventory
 
@@ -168,6 +169,27 @@ For the typedtree core-type Stage 3 chunk:
 - Rust annotation helpers require `ParseArena` to resolve interned attribute
   names, so the staged Rust signatures thread `arena` explicitly while keeping
   the OCaml traversal order.
+- `rustfmt` was run on the new file and `git diff --check` passed.
+- The new file is not wired into the crate, so debug build/parity gates were
+  not run for this non-compiling rewrite stage.
+
+For the type-declaration Stage 3 chunk:
+
+- `TranslateTypeDeclarations.ml` was ported to
+  `compiler-rust/src/gentype/translate_type_declarations.rs` against
+  `compiler/gentype/TranslateTypeDeclarations.ml:1-373`.
+- The port preserves the OCaml declaration-kind shape, including the misspelled
+  helper `traslate_declaration_kind`, and keeps the import-type, opaque,
+  record, variant, recursive declaration, and type-env update order aligned.
+- Surface/control/output-sensitive review checked type export creation from
+  `TranslateTypeDeclarations.ml:11-21`, `@as` variant case handling from
+  `TranslateTypeDeclarations.ml:23-37`, record field renaming from
+  `TranslateTypeDeclarations.ml:39-53`, declaration dispatch from
+  `TranslateTypeDeclarations.ml:145-321`, and recursive/nonrecursive type-env
+  mutation from `TranslateTypeDeclarations.ml:357-373`.
+- Rust still needs compile-wiring review around full `Location` versus
+  `LocIdx` boundaries for future `Types.type_declaration` inputs, but the
+  typedtree path passes the original `typ_loc` index through annotation checks.
 - `rustfmt` was run on the new file and `git diff --check` passed.
 - The new file is not wired into the crate, so debug build/parity gates were
   not run for this non-compiling rewrite stage.
