@@ -19,7 +19,7 @@ as close to the reference as Rust allows.
 - [x] Port `CodeItem.ml`.
 - [x] Port `Translation.ml`.
 - [x] Run the three per-file review passes for every file in this stage.
-- [ ] Commit the stage or commit coherent file clusters.
+- [x] Commit the stage or commit coherent file clusters.
 
 ## Rewrite Stage 2: Config, Paths, Imports, and File Effects
 
@@ -36,16 +36,16 @@ abstractions that are not present in the reference.
 - [x] Port `Runtime.ml` and `Runtime.mli`.
 - [x] Port `ExportModule.ml`.
 - [x] Run the three per-file review passes for every file in this stage.
-- [ ] Commit the stage or commit coherent file clusters.
+- [x] Commit the stage or commit coherent file clusters.
 
 ## Rewrite Stage 3: Annotation, Resolver, Type Environment, and Translation
 
 These ports do not need to compile yet. Preserve traversal and mutation order
 from the reference.
 
-- [ ] Port `Annotation.ml`.
+- [x] Port `Annotation.ml`.
 - [ ] Port `ModuleResolver.ml`.
-- [ ] Port `TypeEnv.ml` and `TypeEnv.mli`.
+- [x] Port `TypeEnv.ml` and `TypeEnv.mli`.
 - [ ] Port `TranslateCoreType.ml`.
 - [ ] Port `TranslateTypeExprFromTypes.ml`.
 - [ ] Port `TranslateTypeDeclarations.ml`.
@@ -53,6 +53,8 @@ from the reference.
 - [ ] Port `TranslateSignature.ml`.
 - [ ] Port `TranslateStructure.ml`.
 - [ ] Run the three per-file review passes for every file in this stage.
+- [x] Run the three per-file review passes for `Annotation.ml` and
+  `TypeEnv.ml`/`.mli`.
 - [ ] Commit the stage or commit coherent file clusters.
 
 ## Rewrite Stage 4: Emitters and Entry Point

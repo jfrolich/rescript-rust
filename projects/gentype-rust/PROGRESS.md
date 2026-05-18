@@ -18,6 +18,9 @@ support in Rust is still a stub:
 - Rewrite Stage 2 now also has an initial file-for-file Rust port for config,
   paths, imports, generated-file effects, dependency helpers, runtime names,
   and export-module tables.
+- Rewrite Stage 3 has started with initial file-for-file Rust ports of
+  `Annotation.ml` and `TypeEnv.ml`/`.mli`. These files are still intentionally
+  not wired into the crate.
 
 ## Reference Inventory
 
@@ -90,6 +93,25 @@ For the Stage 2 port:
   and final integration must verify whether exact OCaml bucket traversal needs
   a dedicated table representation.
 
+For the first Stage 3 chunk:
+
+- `Annotation.ml` was ported to `compiler-rust/src/gentype/annotation.rs`
+  against `compiler/gentype/Annotation.ml:1-295`.
+- `TypeEnv.ml` and `TypeEnv.mli` were ported to
+  `compiler-rust/src/gentype/type_env.rs` against
+  `compiler/gentype/TypeEnv.ml:1-204` and
+  `compiler/gentype/TypeEnv.mli:1-23`.
+- `rustfmt` was run on the new files and `git diff --check` passed.
+- The new files are not wired into the crate, so debug build/parity gates were
+  not run for this non-compiling rewrite stage.
+- Integration-sensitive point: `Annotation.ml` reads payload strings directly
+  from Parsetree values, while Rust Parsetree stores interned string and
+  longident indices. The Rust draft threads `ParseArena` through annotation
+  helpers so payload interpretation can stay source-order equivalent.
+- Integration-sensitive point: `TypeEnv.ml:76-94` uses record-copy updates for
+  type equations, unlike the mutable map updates earlier in the same file. The
+  Rust draft keeps that copy shape with cloned `Rc<RefCell<_>>` environments.
+
 Earlier setup note:
 
 The latest debug build attempt after merging `fuzz-errors` failed before code
@@ -107,8 +129,8 @@ needed.
 
 Continue with Rewrite Stage 3 from `PLAN.md`:
 
-1. Port one annotation/resolver/type-environment/translation file at a time
-   from `compiler/gentype`.
+1. Continue with `ModuleResolver.ml`, then the remaining translation files from
+   `compiler/gentype`.
 2. Keep function names, helper names, data-flow shape, and source-location
    references as close to OCaml as Rust allows.
 3. Run the three per-file review passes before marking each file done:
