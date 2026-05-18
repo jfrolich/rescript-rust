@@ -12,7 +12,7 @@ cargo build --manifest-path rewatch/Cargo.toml
 If a build fails with `No space left on device`, stop and inspect disk usage.
 Do not use `rm -rf`; remove only explicit files after verifying what they are.
 
-## In-Repo GenType Gates
+## GenType Gates
 
 Reference gate:
 
@@ -20,27 +20,20 @@ Reference gate:
 make test-gentype
 ```
 
-The project-specific parity gate should be added in Phase 0:
+The project-specific parity gate should be added in Phase 1. It is a single
+no-argument script that always runs the two in-repo GenType suites and Tella:
 
 ```sh
-./scripts/test_gentype_output_parity.sh --repo tests/gentype_tests/typescript-react-example
-./scripts/test_gentype_output_parity.sh --repo tests/gentype_tests/stdlib-no-shims
+./scripts/test_gentype_output_parity.sh
 ```
 
 The parity gate must compare raw generated files. Do not sort, normalize,
 rewrite imports, strip comments, or ignore whitespace.
 
-## Tella Gate
-
-When `/Users/jake/dev/tella-fusion` is present:
-
-```sh
-./scripts/test_gentype_output_parity.sh --tella /Users/jake/dev/tella-fusion
-```
-
-Run Tella builds from the Tella repo root, using the compiler and stdlib from
-this repository. The Tella webapp currently uses `generatedFileExtension:
-".gen.ts"` and shims for `Js`, `Pervasives`, and `Spice`.
+The script should run Tella builds from `/Users/jake/dev/tella-fusion`, using
+the compiler and stdlib from this repository. The Tella webapp currently uses
+`generatedFileExtension: ".gen.ts"` and shims for `Js`, `Pervasives`, and
+`Spice`. If that path is missing, the script should fail with a clear message.
 
 ## Regression Gates
 

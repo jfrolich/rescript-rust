@@ -285,8 +285,11 @@ Acceptance:
 - Add `scripts/test_gentype_output_parity.sh`.
 - The script must compare raw generated `.gen.tsx` and `.gen.ts` contents from
   OCaml and Rust without sorting or normalization.
-- Cover both in-repo GenType suites and Tella when
-  `/Users/jake/dev/tella-fusion` is available.
+- It takes no repo arguments. Every run covers all three GenType parity
+  targets: `tests/gentype_tests/typescript-react-example`,
+  `tests/gentype_tests/stdlib-no-shims`, and `/Users/jake/dev/tella-fusion`.
+- If Tella is missing, fail clearly with the expected path instead of silently
+  skipping it.
 - Record counts: generated files, diff hunk count, missing files, extra files,
   and TypeScript typecheck result.
 - Keep cleanup explicit and narrow. Do not add new `rm -rf` cleanup.
@@ -449,9 +452,7 @@ Phase 0 of the compile/integration work starts.
 cargo build --manifest-path compiler-rust/Cargo.toml
 cargo build --manifest-path rewatch/Cargo.toml
 make test-gentype
-./scripts/test_gentype_output_parity.sh --repo tests/gentype_tests/typescript-react-example
-./scripts/test_gentype_output_parity.sh --repo tests/gentype_tests/stdlib-no-shims
-./scripts/test_gentype_output_parity.sh --tella /Users/jake/dev/tella-fusion
+./scripts/test_gentype_output_parity.sh
 ./scripts/test_output_parity.sh --quick
 ./scripts/test_typedtree_parity.sh --quick
 ./scripts/test_lambda_parity.sh --quick
