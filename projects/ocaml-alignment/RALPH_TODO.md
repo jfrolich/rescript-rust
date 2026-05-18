@@ -36,9 +36,9 @@ Files:
 
 Tasks:
 
-- [ ] Audit `StoredModuleComponents::with_components` against
+- [x] Audit `StoredModuleComponents::with_components` against
       `env.ml:components_of_module_maker`.
-- [ ] Replace Rust-specific parent/sibling/alias reconstruction with direct
+- [x] Replace Rust-specific parent/sibling/alias reconstruction with direct
       OCaml-shaped thunk arguments where possible.
 - [ ] Ensure child `comp_modules` and `comp_components` share the same forced
       thunks as OCaml.
@@ -258,4 +258,3 @@ cargo build --release --manifest-path rewatch/Cargo.toml
 
 For authoritative typedtree runs, clear parity cache files first as described in
 the root `AGENTS.md`.
-
