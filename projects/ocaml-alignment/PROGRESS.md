@@ -562,7 +562,6 @@ Validation evidence:
 - Release parity gates after clearing cached typedtree artifacts:
   - `./scripts/test_typedtree_parity.sh --release`: `661/661`.
   - `./scripts/test_lambda_parity.sh --release`: `661/661`.
-
 ## 2026-05-18 Pattern / GADT Backtracking Alignment
 
 Task 7 completion:
@@ -630,6 +629,83 @@ Validation evidence:
   - `./scripts/test_typedtree_parity.sh variantsMatching`: `1/1`.
   - `./scripts/test_typedtree_parity.sh 'complete_parmatch_test|test_simple_pattern_match|nested_pattern_match_test|ffi_js_test'`:
     `4/4`.
+- Full debug typedtree parity after clearing cached typedtree artifacts:
+  `./scripts/test_typedtree_parity.sh`: `661/661`.
+- Tella debug typedtree quick:
+  `./scripts/test_typedtree_parity.sh --tella --quick`: `1697/1697`.
+- Debug lambda quick: `./scripts/test_lambda_parity.sh --quick`: `661/661`.
+- Debug JS output quick with external/Tella:
+  `./scripts/test_js_output_parity.sh --with-external --quick`: focused
+  fixtures `344/344`, local JS output `661/661`, Tella JS output `2127/2127`.
+- Release builds:
+  - `cargo build --release --manifest-path compiler-rust/Cargo.toml`: passed.
+  - `cargo build --release --manifest-path rewatch/Cargo.toml`: passed.
+- Release parity gates after clearing cached typedtree artifacts:
+  - `./scripts/test_typedtree_parity.sh --release`: `661/661`.
+  - `./scripts/test_lambda_parity.sh --release`: `661/661`.
+
+## 2026-05-18 Let / Match Definition-Level Boundary Alignment
+
+Task 8 completion:
+
+- Audited OCaml let-binding staging from pattern typing through
+  generalization. OCaml opens one definition level for the whole binding group,
+  types all patterns through one `type_pattern_list` call, runs delayed pattern
+  forces before RHS expression typing, closes the definition level, applies the
+  value restriction, then generalizes all subpatterns.
+- Fixed Rust `type_let_bindings` to reset `PatternState` once per let group
+  instead of once per binding. This matches OCaml's single `reset_pattern`
+  window for `type_pattern_list`, so duplicate binders across `and` bindings are
+  detected during pattern typing and group binder order is preserved for
+  environment extension.
+- Added a compiler-diagnostic parity fixture for a recursive `and` group with a
+  duplicate value binder. Before the fix, Rust accepted the file and emitted
+  unused warnings; now Rust errors at the same point as OCaml with byte-for-byte
+  diagnostic output.
+- Audited match/case definition-level staging. The Rust batch non-GADT and
+  GADT/sequential paths already model the OCaml shape for this task: establish
+  the case definition level and GADT scope, type patterns before bodies, run
+  delayed pattern unification/forces before body typing, then perform
+  partiality/exhaustiveness and escape checks after typed cases are available.
+  No match/case code change was needed in this pass.
+- Audited local abstract type and existential handling around patterns against
+  the task-7 backtracking work. The existing Rust paths keep `newtype_level`,
+  constructor existential allowance, and GADT instance level lifetime aligned
+  with the OCaml pattern/type-cases boundaries; the let-group bug was isolated
+  to pattern-variable table lifetime.
+
+OCaml references:
+
+- `compiler/ml/ctype.ml:181-194`: `begin_def` and `end_def` save and restore
+  `current_level` and `nongen_level`.
+- `compiler/ml/ctype.ml:628-648`: `generalize_structure`.
+- `compiler/ml/ctype.ml:753-778`: `generalize_expansive`.
+- `compiler/ml/typecore.ml:1848-1888`: `add_pattern_variables`,
+  `type_pattern`, and `type_pattern_list`; `type_pattern_list` calls
+  `reset_pattern` once and types the whole pattern group through one
+  `pattern_variables` table.
+- `compiler/ml/typecore.ml:4366-4536`: `type_cases` order for case definition
+  levels, GADT scope, pattern typing, delayed pattern unification/forces, body
+  typing, partiality/exhaustiveness, and escape checks.
+- `compiler/ml/typecore.ml:4540-4784`: `type_let` order for `begin_def`,
+  `type_pattern_list`, recursive approximation, delayed forces, RHS typing,
+  partiality, `end_def`, value restriction, generalization, and illegal letrec
+  pattern checks.
+
+Validation evidence:
+
+- `cargo check --manifest-path compiler-rust/Cargo.toml`: passed.
+- Debug builds:
+  - `cargo build --manifest-path compiler-rust/Cargo.toml`: passed.
+  - `cargo build --manifest-path rewatch/Cargo.toml`: passed.
+- Diagnostic parity:
+  - `./scripts/test_error_output_parity.sh --compiler-only let_group_duplicate_binder`:
+    `1/1`.
+  - `./scripts/test_error_output_parity.sh --release --compiler-only let_group_duplicate_binder`:
+    `1/1`.
+- Focused valid typedtree parity:
+  - `./scripts/test_typedtree_parity.sh 'minimal_test|fun_pattern_match|bdd|inline_map_test|Import'`:
+    `8/8`.
 - Full debug typedtree parity after clearing cached typedtree artifacts:
   `./scripts/test_typedtree_parity.sh`: `661/661`.
 - Tella debug typedtree quick:

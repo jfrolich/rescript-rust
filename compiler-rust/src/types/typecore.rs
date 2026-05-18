@@ -22484,10 +22484,16 @@ fn type_let_bindings(
         // before typing right-hand-side expressions.
         let mut typed_patterns = Vec::new();
         let mut state = PatternState::new();
+        // OCaml typecore.ml:4560-4568 calls reset_pattern once in
+        // type_pattern_list, then types every pattern in the let group through
+        // the same pattern_variables table. This makes duplicate binders across
+        // `and` bindings observable at enter_variable and preserves the group
+        // binder order used by add_pattern_variables.
+        state.reset(allow_modules);
         let mut all_pattern_vars: Vec<Vec<PatternVariable>> = Vec::new();
 
         for (binding, ty) in bindings.iter().zip(binding_types.iter()) {
-            state.reset(allow_modules);
+            let binding_state = state.checkpoint();
 
             // Type check pattern
             let typed_pat = type_pattern_without_existentials(
@@ -22502,7 +22508,8 @@ fn type_let_bindings(
             typed_patterns.push(typed_pat);
 
             // Save pattern variables from this binding
-            all_pattern_vars.push(state.pattern_variables.clone());
+            all_pattern_vars
+                .push(state.pattern_variables[binding_state.pattern_variables_len..].to_vec());
         }
 
         // Match OCaml type_let/type_pattern_list: recursive RHS typing uses the

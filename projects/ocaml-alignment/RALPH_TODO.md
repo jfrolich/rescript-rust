@@ -189,11 +189,11 @@ Files:
 
 Tasks:
 
-- [ ] Trace let-binding order: pattern typing, delayed forces, expression
+- [x] Trace let-binding order: pattern typing, delayed forces, expression
       typing, partiality, close level, value restriction, generalization.
-- [ ] Trace match/case order and definition levels.
-- [ ] Verify local abstract type and existential handling around patterns.
-- [ ] Add focused tests for ordering-sensitive sharing and diagnostics.
+- [x] Trace match/case order and definition levels.
+- [x] Verify local abstract type and existential handling around patterns.
+- [x] Add focused tests for ordering-sensitive sharing and diagnostics.
 
 Acceptance:
 
