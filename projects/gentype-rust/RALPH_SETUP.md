@@ -20,8 +20,8 @@ Reference gate:
 make test-gentype
 ```
 
-The project-specific parity gate should be added in Phase 1. It is a single
-no-argument script that always runs the two in-repo GenType suites and Tella:
+The project-specific parity gate is a single no-argument script that always
+runs the two in-repo GenType suites and the standard local Tella checkout:
 
 ```sh
 ./scripts/test_gentype_output_parity.sh
@@ -30,10 +30,11 @@ no-argument script that always runs the two in-repo GenType suites and Tella:
 The parity gate must compare raw generated files. Do not sort, normalize,
 rewrite imports, strip comments, or ignore whitespace.
 
-The script should run Tella builds from `/Users/jake/dev/tella-fusion`, using
-the compiler and stdlib from this repository. The Tella webapp currently uses
+The script rejects positional arguments instead of accepting per-repo targets.
+It runs Tella from `/Users/jake/dev/tella-fusion`, using the compiler and
+stdlib from this repository. The Tella webapp currently uses
 `generatedFileExtension: ".gen.ts"` and shims for `Js`, `Pervasives`, and
-`Spice`. If that path is missing, the script should fail with a clear message.
+`Spice`. If that path is missing, the script fails with a clear message.
 
 ## Regression Gates
 

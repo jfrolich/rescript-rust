@@ -11,6 +11,15 @@ Parity is measured by generated output, not by a normalized representation:
 - `tests/gentype_tests/stdlib-no-shims`
 - the Tella repo, especially `packages/core/webapp`
 
+Use one repo-local parity command for all of the above:
+
+```sh
+./scripts/test_gentype_output_parity.sh
+```
+
+The script takes no repo argument and always runs all three scopes. Keep it
+that way so baseline reports are comparable across sessions.
+
 The Rust implementation should port the existing GenType algorithm. Do not
 shell out to the OCaml compiler, do not add output normalizers, and do not
 create compatibility wrappers that hide differences. Keep function and module

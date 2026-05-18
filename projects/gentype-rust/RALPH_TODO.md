@@ -104,14 +104,14 @@ Run this checklist for each file after its first port and before compile work.
 
 ## Phase 1: Harness
 
-- [ ] Add `scripts/test_gentype_output_parity.sh`.
-- [ ] Make it a no-argument script.
-- [ ] Compare raw `.gen.tsx` and `.gen.ts` files without normalization.
-- [ ] Always run `tests/gentype_tests/typescript-react-example`.
-- [ ] Always run `tests/gentype_tests/stdlib-no-shims`.
-- [ ] Always run `/Users/jake/dev/tella-fusion`.
-- [ ] Fail clearly if Tella is missing instead of silently skipping it.
-- [ ] Report generated file counts, missing files, extra files, changed files,
+- [x] Add `scripts/test_gentype_output_parity.sh`.
+- [x] Make it a no-argument script.
+- [x] Compare raw `.gen.tsx` and `.gen.ts` files without normalization.
+- [x] Always run `tests/gentype_tests/typescript-react-example`.
+- [x] Always run `tests/gentype_tests/stdlib-no-shims`.
+- [x] Always run `/Users/jake/dev/tella-fusion`.
+- [x] Fail clearly if Tella is missing instead of silently skipping it.
+- [x] Report generated file counts, missing files, extra files, changed files,
   diff hunk count, and TypeScript typecheck status.
 - [ ] Preserve current stale CMT error parity coverage.
 - [ ] Commit the harness with the current baseline in the commit body.

@@ -24,10 +24,13 @@ support in Rust is still a stub:
   `TranslateStructure.ml`, `TranslateTypeDeclarations.ml`,
   `TranslateTypeExprFromTypes.ml`, and `TypeEnv.ml`/`.mli`. These files are
   still intentionally not wired into the crate.
-- Rewrite Stage 4 has started with initial file-for-file Rust ports of
+- Rewrite Stage 4 has a file-for-file Rust port of
   `EmitText.ml`, `EmitType.ml`, `Emitters.ml`/`.mli`, `EmitJs.ml`,
-  `NamedArgs.ml`, `Converter.ml`, and `GenTypeMain.ml`. These files are still
-  intentionally not wired into the crate.
+  `NamedArgs.ml`, `Converter.ml`, and `GenTypeMain.ml`.
+- The project now has a single no-argument GenType output parity harness:
+  `./scripts/test_gentype_output_parity.sh`. It always compares raw
+  `.gen.ts`/`.gen.tsx` output for the react example, stdlib-no-shims, and
+  `/Users/jake/dev/tella-fusion`.
 
 ## Reference Inventory
 
@@ -76,6 +79,23 @@ Current local counts:
 
 These counts are a starting point for the parity harness. The harness should
 report current counts itself because Tella and fixtures can change.
+
+## Harness Status
+
+`scripts/test_gentype_output_parity.sh` was added as the sole GenType output
+parity entrypoint. It rejects positional arguments, snapshots OCaml-generated
+`.gen.ts`/`.gen.tsx` files, runs the Rust in-process build for the same project,
+then reports generated parity, changed/missing/extra files, diff hunk count,
+and OCaml/Rust TypeScript typecheck status.
+
+The script has only been syntax-checked so far:
+
+```text
+bash -n scripts/test_gentype_output_parity.sh
+```
+
+Full execution is still blocked until the Phase 0 Rust GenType module wiring
+compiles.
 
 ## Recent Verification
 
