@@ -1713,7 +1713,7 @@ pub(crate) struct StoredModuleComponents {
     access_path: Path,
     module_decl: ModuleDeclaration,
     parent_context: Option<(Path, Arc<Signature>)>,
-    cached: RefCell<Option<QualifiedModuleComponents>>,
+    cached: RefCell<Option<Arc<QualifiedModuleComponents>>>,
 }
 
 impl StoredModuleComponents {
@@ -1747,14 +1747,11 @@ impl StoredModuleComponents {
         cache_mode: super::typecore::ComponentLookupCacheMode,
         f: impl FnOnce(&QualifiedModuleComponents) -> R,
     ) -> Option<R> {
-        {
-            let cached = self.cached.borrow();
-            if let Some(components) = cached.as_ref() {
-                if ctx.compiler_counters_enabled() {
-                    crate::perf_counters::record_stored_component_cached();
-                }
-                return Some(f(components));
+        if let Some(components) = self.cached.borrow().clone() {
+            if ctx.compiler_counters_enabled() {
+                crate::perf_counters::record_stored_component_cached();
             }
+            return Some(f(components.as_ref()));
         }
 
         let mut module_decl = self.module_decl.clone();
@@ -1853,7 +1850,7 @@ impl StoredModuleComponents {
                 }
             }
         }
-        let components = build_local_module_components(
+        let components = Arc::new(build_local_module_components(
             self.seed_env.as_ref(),
             &self.access_path,
             &module_decl,
@@ -1861,7 +1858,7 @@ impl StoredModuleComponents {
             pers_env,
             ctx,
             cache_mode,
-        )?;
+        )?);
         if ctx.compiler_counters_enabled() {
             crate::perf_counters::record_stored_component_build(
                 cache_mode.counter_name(),
@@ -1869,13 +1866,9 @@ impl StoredModuleComponents {
             );
         }
         if cache_mode.publishes() {
-            *self.cached.borrow_mut() = Some(components);
-            let cached = self.cached.borrow();
-            let components = cached.as_ref()?;
-            Some(f(components))
-        } else {
-            Some(f(&components))
+            *self.cached.borrow_mut() = Some(components.clone());
         }
+        Some(f(components.as_ref()))
     }
 
     pub(crate) fn instantiate_functor_result_for_application(

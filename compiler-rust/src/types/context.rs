@@ -328,7 +328,7 @@ pub struct TypeContext {
     qualified_module_components_cache: RefCell<
         ahash::AHashMap<
             QualifiedModuleComponentsCacheKey,
-            super::env_lazy::QualifiedModuleComponents,
+            Arc<super::env_lazy::QualifiedModuleComponents>,
         >,
     >,
 
@@ -795,7 +795,7 @@ impl TypeContext {
         }
         self.qualified_module_components_cache
             .borrow_mut()
-            .insert(key, components);
+            .insert(key, Arc::new(components));
     }
 
     /// Borrow a cached qualified module-components view.
@@ -820,9 +820,9 @@ impl TypeContext {
             if self.compiler_counters_enabled {
                 crate::perf_counters::record_qualified_component_hit();
             }
-            components.clone()
+            Arc::clone(components)
         };
-        Some(f(&components))
+        Some(f(components.as_ref()))
     }
 
     pub(crate) fn has_qualified_module_components(
