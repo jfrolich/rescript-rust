@@ -27,6 +27,7 @@ README calls it out as a Rust-specific diversion.
 - [Stage 8: Core Type Engine](#stage-8-core-type-engine)
 - [Stage 9: Expression, Pattern, And Type Syntax Checking](#stage-9-expression-pattern-and-type-syntax-checking)
 - [Stage 10: Module And Signature Typing](#stage-10-module-and-signature-typing)
+- [OCaml Typechecker Algorithm Map](#ocaml-typechecker-algorithm-map)
 - [Stage 11: Diagnostics And Warnings](#stage-11-diagnostics-and-warnings)
 - [Stage 12: Interface And Backend Metadata Artifacts](#stage-12-interface-and-backend-metadata-artifacts)
 - [Stage 13: Typedtree To RawLambda](#stage-13-typedtree-to-rawlambda)
@@ -871,6 +872,862 @@ Rust aligns with the typechecking and ordering parts of this behavior in
   do not currently run the whole OCaml `after_parsing_sig` artifact contract in
   every mode: direct helpers typecheck and dump, while in-process helpers publish
   an in-memory signature instead of writing `.cmi`/`.cmti`.
+
+## OCaml Typechecker Algorithm Map
+
+This section is a source-oriented map of the OCaml typechecker files that define
+the behavior Rust must match. It is intentionally more detailed than the stage
+overview above. When optimizing or fixing parity in Rust, use this as the
+checklist for control flow, mutation points, environment forcing, and type-node
+sharing.
+
+Core OCaml files covered:
+
+- `compiler/ml/btype.ml`: low-level mutable type-node operations, traversal,
+  marks, snapshots, backtracking, row helpers, and copy helpers.
+- `compiler/ml/ctype.ml`: levels, instantiation, abbreviation expansion,
+  unification, subtyping, generalization, equality, non-dependency, and type
+  normalization.
+- `compiler/ml/typetexp.ml`: translation of parsed core type syntax into
+  `Types.type_expr`, plus lookup/error narrowing for types, values,
+  constructors, labels, modules, and module types.
+- `compiler/ml/typedecl.ml`: type declaration, extension, exception, value
+  declaration, `with`-constraint, variance, immediacy, and recursion checking.
+- `compiler/ml/typecore.ml`: expression typing, pattern typing, application,
+  records, variants, let-binding generalization, match typing, delayed checks,
+  and core-language diagnostics.
+- `compiler/ml/typemod.ml`: module type translation, signature translation,
+  module expression typing, structure typing, recursive module checking,
+  implementation/interface checking, and save-time signature normalization.
+- `compiler/ml/includemod.ml`: module/signature inclusion and coercion
+  construction.
+- `compiler/ml/mtype.ml`: module-type scraping, strengthening, non-dependency,
+  enrichment, alias removal, and nongen lowering.
+
+### High-Level Call Graph
+
+The implementation-file path is:
+
+```text
+Typemod.type_implementation_more
+  -> Typemod.type_structure
+     -> Typecore.type_binding / type_expression
+     -> Typedecl.transl_type_decl / transl_type_extension / transl_exception
+     -> Typemod.type_module / transl_modtype / transl_signature
+  -> Typemod.simplify_signature
+  -> Includemod.compunit
+  -> Typemod.check_nongen_schemes
+  -> Typemod.normalize_signature
+  -> Delayed_checks.force_delayed_checks
+  -> Env.save_signature + Cmt_format.save_cmt, when files are written
+```
+
+The core expression path is:
+
+```text
+Typecore.type_expression
+  -> Typetexp.reset_type_variables
+  -> Ctype.begin_def
+  -> Typecore.type_exp
+     -> Typecore.type_expect
+        -> Typecore.type_expect_
+           -> Typetexp lookup/translation helpers
+           -> Ctype.instance / unify / subtype / filter_arrow / filter_method
+           -> Typecore.type_pat / type_cases / type_let / type_application
+  -> Ctype.end_def
+  -> Ctype.generalize_expansive, when expression is expansive
+  -> Ctype.generalize
+```
+
+The top-level binding path is:
+
+```text
+Typecore.type_binding
+  -> Typetexp.reset_type_variables
+  -> Typecore.type_let
+     -> Ctype.begin_def
+     -> Typecore.type_pattern_list
+     -> recursive approximation with Typecore.type_approx, when recursive
+     -> delayed pattern forces
+     -> expression typing under env or recursive env
+     -> partial-match checks for let patterns
+     -> Ctype.end_def
+     -> expansive-value restriction
+     -> Ctype.generalize over pattern types
+```
+
+The signature path is:
+
+```text
+Typemod.transl_signature
+  -> Env.in_signature true
+  -> source-order recursive transl_sig loop
+     -> Typedecl.transl_value_decl
+     -> Typedecl.transl_type_decl
+     -> Typedecl.transl_type_extension / transl_exception
+     -> Typemod.transl_modtype / transl_recmodule_modtypes
+     -> Typemod.type_open
+     -> Env.add_signature for includes
+  -> Typemod.simplify_signature
+```
+
+The module expression path is:
+
+```text
+Typemod.type_module
+  -> Pmod_ident: lookup_module, find_module, strengthen or alias coercion
+  -> Pmod_structure: type_structure, simplify_signature, possible implicit coercion
+  -> Pmod_functor: transl_modtype, Env.enter_module, type_module body
+  -> Pmod_apply: type argument before functor, scrape_alias, Includemod.modtypes,
+     substitute result when argument is a path, otherwise nondep_supertype
+  -> Pmod_constraint: type module, transl_modtype, Includemod.modtypes
+  -> Pmod_unpack: Typecore.type_exp, package type extraction, package constraints
+```
+
+### `btype.ml`: Mutable Type-Node Substrate
+
+`btype.ml` is not just utility code. It defines the mutable graph discipline
+that typedtree parity exposes.
+
+- Every type node has `desc`, `level`, and `id`. `id` is allocated by `newty2`
+  from a mutable counter. Rust `TypeExprRef` must preserve equivalent physical
+  identity and allocation order where dumps expose it.
+- `generic_level`, `lowest_level`, and `pivot_level` are special marker levels.
+  `pivot_level - level` is used to mark nodes during traversals without
+  side tables. Rust can use side tables internally, but the observable order and
+  mutation effects must match the traversal.
+- `repr` follows `Tlink` chains and also skips object fields whose kind has
+  become `Fabsent`. Path compression is logged through the backtracking trail.
+  A Rust shortcut that follows only `Tlink` misses an OCaml representative case.
+- Row helpers such as `row_field_repr`, `row_repr`, `row_field`, `row_more`,
+  `row_fixed`, and `static_row` normalize chained rows and row fields lazily.
+  They are used by typing, unification, subtyping, printing, and declaration
+  checks, so row order and row sharing cannot be treated as presentation detail.
+- `iter_type_expr`, `iter_row`, `iter_type_expr_kind`, and the `type_iterators`
+  record define the canonical structural traversal over types, signatures, and
+  module types. `Typemod`, `Mtype`, `Ctype`, and `Typedecl` reuse these
+  traversals for marking, variance, non-dependency, normalization, and alias
+  analysis.
+- Backtracking is implemented by logging changes to type descriptions,
+  compressed links, levels, row fields, field kinds, commutability cells,
+  univar cells, and type sets. `snapshot`, `backtrack`, and `undo_compress`
+  matter in pattern backtracking, coercion fallback, subtyping, and equality.
+- `copy_type_desc` is the base copy function. It deliberately allocates fresh
+  abbreviation refs for `Tconstr`, preserves `Tunivar` names, shares field kind
+  variables in specific cases, and refuses to copy raw `Tvariant` there because
+  row copying needs special handling.
+- Mark/unmark functions mutate levels in place. A failed pass must unmark or
+  backtrack exactly where OCaml does, otherwise later traversals see different
+  levels and produce different sharing.
+
+Rust parity implications:
+
+- Any arena optimization must keep type-node identity stable and must not turn
+  OCaml's mutating mark/unmark/backtrack pattern into structural rebuilding.
+- Physical identity, not structural content, drives typedtree sexp dedup.
+- Row helpers are algorithmic operations, not serializer conveniences.
+
+### `ctype.ml`: Levels, Instantiation, Expansion, And Unification
+
+`ctype.ml` is the central type engine.
+
+Level state:
+
+- `current_level`, `nongen_level`, `global_level`, and `saved_level` are mutable
+  global state in OCaml. Rust stores equivalent state in context objects, but
+  the nesting behavior must match.
+- `init_def` sets both `current_level` and `nongen_level`.
+- `begin_def` saves both levels, increments `current_level`, and sets
+  `nongen_level` to the new current level.
+- `begin_class_def` increments only the current level.
+- `raise_nongen_level` saves levels and raises `nongen_level`.
+- `end_def` restores the saved pair.
+- `reset_global_level`, `increase_global_level`, and `restore_global_level` are
+  used by `Typetexp` to scope explicit type variables and package translation.
+
+Creation and representation:
+
+- `newty`, `newvar`, `newvar2`, `new_global_var`, `newobj`, and `newconstr`
+  allocate nodes at the active level. A call moved across `begin_def` or
+  `end_def` changes later generalization.
+- `simple_abbrevs` memoizes parameterless abbreviation expansions until the next
+  generalization. This is part of sharing, not just caching.
+- `proper_abbrevs` avoids sharing simple abbreviations when tracing GADT
+  instances, when the constructor has parameters, or when the path is an object
+  type.
+
+Generalization and level lowering:
+
+- `generalize` walks nodes whose level is above `current_level`, marks them
+  generic, traverses abbreviation caches for constructors, and resets
+  `simple_abbrevs`.
+- `generalize_structure` lowers variables to a chosen level but generalizes
+  structure above `current_level`; it clears abbreviation caches for most
+  constructors.
+- `update_level` enforces the invariant that constructor levels cannot escape
+  the binding time of their paths. It first tries without expansion, backtracks
+  on failure, then retries while expanding abbreviations.
+- `generalize_expansive` implements the relaxed value restriction. It follows
+  variance: covariant/weak branches can be generalized structurally, while
+  contravariant branches are made non-generalizable.
+- `limited_generalize` builds an inverse graph of type dependencies and
+  generalizes only the reachable parents from selected roots.
+
+Instantiation:
+
+- `instance`, `instance_def`, `generic_instance`, and `instance_list` all go
+  through `copy` plus `cleanup_types`.
+- `copy` temporarily rewrites generic nodes to `Tsubst` stubs, copies through
+  the graph, then restores the original descriptions. This is why OCaml can
+  preserve recursive sharing while still allocating fresh instances.
+- Non-generic nodes are shared in ordinary instantiation. With partial
+  instantiation, non-generic nodes may become fresh variables or keep their
+  level depending on the `partial` flag and free-univar analysis.
+- Variant row copying is special: OCaml encodes the copied row variable and
+  copied variant in a temporary `Tsubst (Ttuple [more'; t])` so later visits can
+  reuse the same copied row.
+- `instance_constructor` creates local abstract types for existentials in GADT
+  patterns by adding local types to the environment before linking copied
+  existential variables.
+- `instance_label` treats polymorphic label arguments with `instance_poly`.
+
+Abbreviation expansion:
+
+- Expansion is environment-sensitive. `check_abbrev_env` flushes expansion
+  caches when the environment object changes.
+- `expand_abbrev_gen` checks the constructor's expansion cache, then calls
+  `Env.find_type_expansion` or `Env.find_type_expansion_opt`, substitutes
+  parameters with `subst`, records GADT ambiguity chains when needed, and may
+  normalize paths if no expansion is found.
+- `expand_head`, `expand_head_opt`, `try_expand_once`, and `full_expand` differ
+  in privacy and failure behavior. Optimizations that use private manifest
+  information must go through the `_opt` path, not ordinary typing expansion.
+- Expansion can force environment components, allocate type nodes, rewrite
+  abbreviation caches, and link types. It is not a pure query.
+
+Unification:
+
+- `unify` is intentionally staged:
+  1. Fast cases handle identical nodes, variables, univars, and some equal
+     zero-argument constructors.
+  2. `unify2` expands both heads, lowers levels, updates GADT ambiguity chains,
+     and chooses which side controls the trace direction.
+  3. `unify3` performs structural unification and rolls back `t1'` on failure.
+- `unify1_var` performs occurs check, free-univar check, links the variable,
+  then lowers levels in the linked type. If lowering fails, it restores the
+  original variable description.
+- Expression mode links representatives. Pattern mode records equalities and
+  can generate local GADT equations instead of eagerly linking everything.
+- GADT unification uses `unify_gadt`, `newtype_level`, `reify`,
+  `add_gadt_equation`, local constraints in `Env`, and an equality set.
+- Object field unification flattens and sorts fields, associates matching
+  labels, creates a shared row variable with `make_rowvar`, then unifies missing
+  and present fields while restoring row descriptions on error.
+- Variant row unification merges sorted row fields, computes closed/fixed/name
+  state, updates row-more variables through `set_more`, then unifies each
+  matching row field. `Reither` cases can force unification, split shared row
+  refs, or keep passive variants for exhaustiveness checking.
+- Package unification builds missing package type constraints with
+  `complete_type_list`, compares normalized package paths, and delegates module
+  package subtyping back to `Typemod` through `Ctype.package_subtype`.
+
+Subtyping, equality, and non-dependency:
+
+- `moregeneral`, `matches`, and `equal` are implemented by instantiating,
+  rigidifying, temporarily unifying/equating, then backtracking. They are not
+  structural equality checks.
+- `subtype` first accumulates constraints in a stable traversal order, then
+  returns a thunk that enforces them later. This is why coercion typing can bind
+  variables before final subtype constraints are applied.
+- ReScript-specific subtype cases for variant/record coercion and primitive
+  coercion are implemented here, after ordinary abbreviation/private expansion
+  cases.
+- `nondep_type`, `nondep_type_decl`, and `nondep_extension_constructor` copy
+  types while removing references to a module identifier, expanding
+  abbreviations when necessary and preserving row-variable sharing through a
+  separate variant cache.
+- `normalize_type` rewrites row names, sorts row fields, compacts equivalent
+  `Reither` alternatives, normalizes object names, and rebuilds object field
+  chains. It runs before saving/printing signatures and therefore affects
+  interface artifacts and parity.
+
+Rust parity implications:
+
+- Do not move a `newvar`, `instance`, `generalize`, `expand_head`, or `unify`
+  call across a level boundary unless OCaml does.
+- Do not replace `moregeneral`, `matches`, `equal`, or subtype checks with
+  content comparisons; they rely on mutation plus backtracking.
+- Expansion and lookup are linked. If Rust avoids a force in `Ctype`, it may be
+  moving both type allocation and environment side effects.
+
+### `typetexp.ml`: Type Syntax Translation
+
+`typetexp.ml` translates parsed core types and performs narrowed lookup errors.
+
+Lookup behavior:
+
+- `find_component` wraps `Env.lookup_*` functions and calls
+  `narrow_unbound_lid_error` when lookup fails.
+- `narrow_unbound_lid_error` recursively checks module prefixes, distinguishes
+  unbound modules from inaccessible functor applications, reports attempts to
+  access functors as structures, and reports aliases whose target cannot be
+  scraped.
+- `find_type`, `find_value`, `find_constructor`, `find_all_constructors`,
+  `find_all_labels`, `lookup_module`, `find_module`, and `find_modtype` each
+  call the corresponding `Env` API. Their force/load behavior differs.
+
+Variable state:
+
+- `type_variables` stores explicit type parameters already in scope.
+- `univars` stores explicitly quantified universal variables.
+- `pre_univars` stores variables created before final universal checking.
+- `used_variables` stores named type variables encountered in a type expression
+  before they are globalized.
+- `reset_type_variables` resets `Ctype` global level state and the reified
+  variable counter.
+- `narrow`/`widen` save and restore the `Typetexp` type-variable context around
+  module type translation inside package types.
+
+Translation policy:
+
+- `Fixed`: unbound `_` is rejected and unbound variables must be already known.
+- `Extensible`: ordinary type syntax can create fresh variables.
+- `Univars`: syntax creates pre-universal variables for later quantification.
+
+Core translation rules:
+
+- `Ptyp_any` creates a fresh variable according to policy.
+- `Ptyp_var` reuses a univar, reuses a previously used variable, or creates a
+  fresh variable and records it in `used_variables`. Names beginning with `_`
+  are rejected for explicit variables.
+- `Ptyp_arrow` translates the argument and return, wraps optional arguments in
+  `option`, then creates `Tarrow` with the source arity.
+- `Ptyp_constr` resolves the type path, handles the one-`_` shorthand for
+  multi-parameter constructors, checks arity, translates arguments, instantiates
+  declaration parameters, unifies them with arguments, builds `Tconstr`, and
+  enforces constraints.
+- `Ptyp_alias` unifies the alias variable with the inner type and may write the
+  alias name back into a `Tvar` or `Tunivar` proxy.
+- `Ptyp_variant` accumulates fields in a hash table, checks duplicate tags by
+  type equivalence/unification, expands inherited variant types, checks present
+  tags, creates a row, and chooses `Tnil`, a fresh variable, or a pre-univar for
+  `row_more`.
+- `Ptyp_object` uses `transl_fields`, rejects opened inherited objects where
+  required, and builds a `Tobject`.
+- `Ptyp_poly` opens a definition level, creates named univars, translates the
+  body, generalizes it, converts occurring generic variables to `Tunivar`, then
+  wraps the body in `Tpoly`.
+- `Ptyp_package` builds a fake package module type with `with type`
+  constraints, translates it via `Typemod`, restores the variable context, then
+  produces `Tpackage`.
+
+Finalization:
+
+- `make_fixed_univars` marks variant rows fixed when row variables are
+  universal.
+- `globalize_used_variables` creates global variables for used type variables,
+  unifies them with existing parameters when possible, and returns a delayed
+  force function for later consistency checks.
+- `transl_simple_type` translates and immediately globalizes variables.
+- `transl_simple_type_delayed` returns both the typed core type and the delayed
+  globalize function.
+- `transl_type_scheme` resets variables, opens a definition, translates,
+  closes the definition, and generalizes the result.
+
+Rust parity implications:
+
+- Type-variable tables and global-level state are part of the algorithm.
+- Package type translation crosses into module-type translation and back.
+- Delayed type-variable globalization is observable because forcing it can
+  raise errors after other typing work has occurred.
+
+### `typedecl.ml`: Declarations, Recursion, Variance, And Data Shape
+
+`typedecl.ml` translates source declarations into `Types.type_declaration`,
+constructors, labels, extensions, exceptions, and value declarations.
+
+Declaration entry:
+
+- `enter_type` pre-enters recursive type declarations as abstract stubs. For
+  nonrecursive declarations it still pre-enters row helper types and rejects
+  GADT constructor syntax.
+- `update_type` later unifies recursive stubs with their final manifest.
+- Fixed private row types create an extra `#row` type, and `set_fixed_row`
+  rewrites the row variable to a constructor for that row type.
+
+`transl_declaration` order:
+
+1. Validate declaration attributes such as `@notUndefined`, `@boxed`, and
+   `@unboxed`.
+2. Reset type variables and open a definition level.
+3. Translate type parameters with duplicate-parameter detection.
+4. Translate explicit constraints.
+5. Determine unboxed/untagged status and reject invalid unboxed shapes.
+6. Translate the declaration kind:
+   - abstract type,
+   - variant constructors,
+   - record labels,
+   - open type.
+7. ReScript additions such as variant spreads, record type spreads, optional
+   inline record fields, object-spread fallback, `@tag`, untagged variants, and
+   inline-record metadata are handled here before the final `Types` declaration
+   is built.
+8. Translate the manifest with fixed-row awareness.
+9. Build the provisional `type_declaration`.
+10. Unify explicit constraints.
+11. Close the definition level.
+12. Set fixed row variables if needed.
+13. Check cyclic abbreviations.
+14. Return a typedtree `type_declaration`.
+
+`transl_type_decl` group order:
+
+1. Add synthetic fixed-row helper declarations.
+2. Expand ReScript variant spreads, or report variant-spread errors.
+3. Allocate all identifiers.
+4. Initialize the Ctype definition level to `Ident.current_time`.
+5. Pre-enter declarations into a temporary environment.
+6. Translate all declarations under the temporary environment.
+7. Attach inline-record metadata to declarations.
+8. Check duplicate constructor/label names and warning behavior.
+9. Build the final environment from provisional declarations.
+10. For recursive declarations, update stubs against the final environment.
+11. End the definition level and generalize every declaration.
+12. Check well-founded manifests and declarations.
+13. Check regular recursive abbreviation use.
+14. Check closed type variables.
+15. Run delayed untagged-variant well-formedness checks.
+16. Check constraints using source locations from the original declaration.
+17. Force private recursive row aliases through the type name when needed.
+18. Compute variance and immediacy to a fixpoint.
+19. Check re-export/coherence against manifest record/variant definitions.
+20. Return typed declarations and the final environment.
+
+Variance and immediacy:
+
+- `compute_variance` traverses type bodies with `Btype` iterators and respects
+  constructor variance from the environment.
+- GADT constructors are handled with `compute_variance_gadt`; anonymous
+  varying parameters can be rejected.
+- `compute_properties_fixpoint` repeatedly adds candidate variances and
+  immediacy flags to a temporary environment until both stabilize, then performs
+  final required-variance checks.
+- `compute_immediacy` looks through unboxed single-field records/variants and
+  manifest types using `Ctype.maybe_pointer_type`.
+
+Extensions, exceptions, and values:
+
+- `transl_type_extension` resolves the extended type, checks it is open and not
+  illegally private, translates extension parameters, unifies them with the
+  original declaration parameters, translates constructors, generalizes, checks
+  closed variables, checks variance, and adds extensions to the environment.
+- `transl_exception` is the same constructor translation specialized to
+  `Predef.path_exn`.
+- Rebound extension constructors instantiate the original constructor, check
+  result type compatibility, preserve inlined-record payloads, and reject
+  privacy escapes.
+- `transl_value_decl` translates a type scheme, accepts plain values only in
+  signatures, parses primitives/externals in structures, rejects null-arity
+  externals, and enters the value with the correct unused warning callback.
+- `transl_with_constraint` is a constrained subset of type declaration
+  translation for module type `with` constraints.
+
+Rust parity implications:
+
+- Type declaration translation is a group algorithm, not independent per
+  declaration. Temporary env, final env, stub update, and fixpoint ordering all
+  affect sharing and errors.
+- ReScript-specific declaration features should still be placed at the same
+  conceptual points: before declaration construction, before final env, or after
+  final env depending on which OCaml check they interact with.
+- Variance and immediacy are fixpoint properties. One-pass shortcuts are likely
+  wrong for recursive groups.
+
+### `typecore.ml`: Pattern Typing
+
+Pattern typing uses mutable global side state in OCaml:
+
+- `pattern_variables` stores value bindings discovered while typing a pattern.
+- `pattern_force` stores delayed type-variable force functions from annotated
+  patterns.
+- `pattern_scope` controls annotation recording.
+- `allow_modules` gates unpack patterns.
+- `module_variables` stores unpacked module bindings.
+- `reset_pattern` clears all of this before each pattern group.
+
+Backtracking and modes:
+
+- `save_state` captures a `Btype` snapshot, `Ctype` levels, and the current
+  environment. `set_state` restores all three.
+- `type_pat_mode` controls or-pattern behavior:
+  - `Normal`,
+  - `Splitting_or`,
+  - `Inside_or`,
+  - `Split_or`.
+- `Need_backtrack` tells pattern typing to retry an or-pattern branch under
+  Parmatch-generated constructor/label information.
+- Pattern typing can update the environment through local GADT constraints, so
+  the environment is passed as `Env.t ref`.
+
+Core pattern flow:
+
+- `type_pat` applies attribute warning scope, expands variant-spread patterns
+  when necessary, then delegates to `type_pat_aux`.
+- Wildcard patterns may be exploded by `Parmatch.ppat_of_type` for GADT
+  exhaustiveness checking.
+- Variable patterns call `enter_variable`; duplicate names are rejected before
+  the variable reaches the environment.
+- Explicit polymorphic variable constraints translate with
+  `Typetexp.transl_simple_type_delayed`, unify with the expected type, delay the
+  force, instantiate the poly body, and generalize the variable type.
+- Alias patterns type the inner pattern first, then build the alias type with
+  `build_as_type`, generalize it, and bind the alias variable.
+- Constructor patterns resolve candidates, disambiguate through expected type,
+  mark usage, reject unqualified GADT patterns where needed, instantiate
+  constructor arguments and result, perform ordinary or GADT unification, check
+  inlined-record escape rules, then type each subpattern.
+- Polymorphic variant patterns create a row with `Reither`, unify it with the
+  expected type, and type the payload under the payload type.
+- Record patterns choose a record path from the expected type when possible,
+  disambiguate labels, sort by label position, instantiate labels, type
+  subpatterns, check polymorphic labels, check duplicate/missing labels, and
+  finally unify the record type with the expected type.
+- Or-patterns first try typing both sides without splitting; they sort and
+  unify bound variables by name, alpha-rename the second side, and fall back to
+  split mode under Parmatch when necessary.
+- Open patterns type under the opened environment, then copy local additions
+  back to the outer environment.
+- Exception patterns are only accepted at the top match-case split point, not
+  below arbitrary pattern positions.
+
+Post-pattern functions:
+
+- `type_pattern` resets pattern state, types one pattern with existentials
+  allowed, adds pattern variables to the environment, and returns delayed force
+  functions plus unpacked modules.
+- `type_pattern_list` types parallel binding patterns against preallocated
+  expected types and only then adds variables to the environment.
+- `partial_pred`, `check_partial`, and `check_unused` call back into pattern
+  typing under snapshots and passive variants for exhaustiveness/redundancy.
+
+Rust parity implications:
+
+- Do not add pattern variables to the environment as soon as a subpattern is
+  seen if OCaml waits until the whole pattern group is typed.
+- Or-pattern backtracking must restore both type graph and Ctype levels.
+- GADT local constraints are environment mutations; they must occur at the same
+  pattern typing points.
+
+### `typecore.ml`: Expression Typing And Let Generalization
+
+Expression typing centers on `type_expect`.
+
+Expected-type discipline:
+
+- `type_exp` is just `type_expect ... (newvar ())`.
+- `type_expect` wraps attribute warning scope and records the typed expression
+  in CMT state.
+- `type_expect_` constructs expressions and uses `rue` to unify the expression's
+  type with an instance of the expected type after recording the expression
+  type. This "record before final unification" behavior matters for typedtree
+  shape and error locations.
+
+Important expression rules:
+
+- Identifiers call `Typetexp.find_value`, check deprecation, instantiate the
+  value type, and enforce inlined-record escape rules through the `recarg`
+  mode.
+- Let expressions delegate to `type_let`, then type the body under the new
+  environment and run recursive binding checks afterward.
+- Functions use `type_function`: optionally unify the expected type with an
+  uncurried arity arrow, instantiate and filter an arrow with `filter_arrow`,
+  generalize argument/result shapes when local constraints exist, type match
+  cases, warn for unerasable optional arguments, and build a single-case
+  `Texp_function`.
+- Applications type the function before the arguments under one definition
+  level, instantiate its type, lower unused arguments, then type arguments under
+  a new definition level. `type_application` handles labelled/optional
+  arguments, ignored optional arguments, arity, uncurried total application,
+  `ignore`, partial application warnings, and label-order diagnostics.
+- ReScript unified operators are a deliberate special path before ordinary
+  application argument typing.
+- Match expressions type and generalize the scrutinee before typing cases, split
+  exception cases, and pass call-context information for error text.
+- Tuple, array, if/else, sequence, loop, break/continue, for-of, constraint,
+  coercion, send, let-module, let-exception, newtype, pack, open, and extension
+  forms all thread expected-type information in specific places. Moving the
+  expected-type unification earlier or later changes diagnostics and sharing.
+- Record expressions infer or select a record type from the expected type,
+  disambiguate labels, type fields, perform final record-type unification,
+  check duplicates/missing labels, fill omitted optional fields with `None`,
+  and build `Texp_record`.
+- Record updates type the base expression first, infer record type from expected
+  type or base type, disambiguate fields, unify kept fields against the base,
+  and warn about useless record-with.
+- Field access and setfield go through `type_label_access` and
+  `type_label_exp`; dict field access has a ReScript-specific rejection path.
+- Constructors are disambiguated from expected type, instantiated, optionally
+  separated under local constraints, and only then are payload expressions typed
+  with paired original/fresh argument types.
+
+Match cases:
+
+- `type_cases` detects polymorphic variants and GADTs before typing patterns.
+- GADT cases copy argument/result types and duplicate environment value types.
+- Pattern typing happens for all cases before case bodies are typed.
+- The first pass instances the argument type per pattern, collects delayed
+  pattern forces, and unifies all pattern types against a fresh `ty_arg'`.
+- Polymorphic variant rows are finalized before delayed pattern forces run.
+- If propagation is needed, OCaml re-instances and re-unifies pattern types,
+  then generalizes pattern nodes after closing the propagation definition level.
+- Bodies are typed afterward under each pattern environment. Guards are typed
+  before the body.
+- Exhaustiveness and unused checks may be delayed when polymorphic variants or
+  GADTs are involved.
+- Existential escape is checked by unifying the result type with a fresh
+  variable after closing the GADT level.
+
+Let bindings:
+
+- `type_let` opens a definition level, preallocates one expected type per
+  pattern, types all patterns as a group, and only later adds variables to the
+  environment.
+- Recursive lets first unify each pattern against `type_approx` of the
+  corresponding expression.
+- Variant rows in patterns are pressure-finalized before expressions are typed.
+- Delayed pattern forces run before expression typing.
+- Recursive expression bodies type under the new environment; nonrecursive
+  bodies type under the old environment.
+- Polymorphic pattern annotations instantiate their universal variables,
+  type the expression against the instantiated body, then run `check_univars`.
+- Unused-recursive-binding analysis installs value-used callbacks during
+  expression typing and replays dependency slots later.
+- Let-pattern exhaustiveness checks run before closing the definition level.
+- After `end_def`, expansive right-hand sides trigger
+  `generalize_expansive` on each pattern type; then every pattern type is
+  generalized.
+- Recursive lets reject complex patterns after typing, so the error happens
+  after the type effects OCaml has already performed.
+
+Nonexpansive/value restriction:
+
+- `is_nonexpansive` is a typedtree predicate, not a parsetree predicate.
+- ReScript partial applications are treated as nonexpansive.
+- Empty arrays are expansive.
+- Records are nonexpansive only when mutable fields are not overridden and the
+  extension expression is nonexpansive.
+- Exceptions/rebindings/type extensions have module-level nonexpansive rules
+  used by module non-generalization checks.
+
+Rust parity implications:
+
+- For typedtree parity, the order "type patterns, run delayed forces, type
+  expressions, check let-pattern partiality, close level, value restriction,
+  generalize" must be preserved.
+- Record typing is highly sensitive to expected-type propagation and final
+  `instance env ty_expected` calls. Sparse record representations must expand
+  to the same typedtree and RawLambda-facing shape.
+- Application typing has nested definition levels. Collapsing them can change
+  level numbers and generalization.
+
+### `typemod.ml`: Modules, Signatures, And Implementation Checking
+
+`typemod.ml` ties the core checker to the module language.
+
+Module types and signatures:
+
+- `type_open_` uses `Typetexp.lookup_module ~load:true`, then
+  `Env.open_signature`; if opening fails it finds the module and checks that
+  scraping its alias yields a signature.
+- `transl_modtype` translates identifiers, aliases, signatures, functors,
+  `with` constraints, `module type of`, and extension errors.
+- Functor module types enter the parameter module before translating the result
+  and call `Ctype.init_def (Ident.current_time ())` before the body.
+- `transl_signature` runs under `Env.in_signature true`, checks uniqueness of
+  type/module/module-type/extension names, translates items in source order,
+  extends the environment after each item, expands includes by adding their
+  signatures, and simplifies duplicate value specifications at the end.
+- Recursive module signatures are translated by approximation first, then two
+  real passes, with recursive type declaration checks after each real pass.
+
+`with` constraints:
+
+- `merge_constraint` descends into a signature by name path.
+- Type constraints call `Typedecl.transl_with_constraint`, then
+  `Includemod.type_declarations`, then `Typedecl.check_coherence`.
+- Module constraints find and strengthen the replacement module.
+- Destructive substitutions build a substitution over all real paths removed
+  from the signature and check applicative functor uses/aliases that would
+  become ill-typed.
+- Fixed private row constraints create and thread the synthetic `#row`
+  declaration.
+
+Module expressions:
+
+- `Pmod_ident` looks up the module path. In alias mode it avoids loading unless
+  required; otherwise aliases can be normalized, expanded through
+  `Includemod.expand_module_alias`, and wrapped in an implicit alias coercion.
+  Non-alias paths are strengthened when `sttn` asks for strengthening.
+- `Pmod_structure` types the nested structure, produces `Mty_signature`, then
+  wraps an implicit coercion if signature simplification drops duplicate values.
+- `Pmod_functor` translates the optional parameter module type, enters the
+  parameter, resets the Ctype definition level to the current identifier time,
+  then types the body.
+- `Pmod_apply` types the argument first, records its path when possible, types
+  the functor with strengthening only if the argument has a path, checks
+  inclusion against the parameter module type, and computes the result by
+  substitution for path arguments or `Mtype.nondep_supertype` for non-path
+  arguments.
+- Generative functors can only be applied to `()` and are disallowed in
+  applicative functor bodies when the functor result can create types.
+- `Pmod_constraint` wraps the module expression with an explicit inclusion
+  coercion.
+- `Pmod_unpack` types the expression, extracts a package type, rejects
+  incomplete packages, and rejects type-creating unpack in functor bodies.
+
+Structures:
+
+- `type_structure` processes items in source order and returns typedtree items,
+  signature items, and the final environment.
+- Each structure item calls `Ctype.init_def (Ident.current_time ())` before
+  typing the item. This is a major stamp/level synchronization point.
+- Value items call `Typecore.type_binding`; the signature exposes the final
+  `Env.find_value` entries without triggering value-used callbacks.
+- Type items call `Typedecl.transl_type_decl` and then `Mtype.enrich_typedecl`
+  when an anchor path exists.
+- Module bindings type the module expression before entering the declaration,
+  enrich anchored module types, lower non-generalizable variables below the
+  binding time, then add the module to the environment.
+- Recursive modules require explicit module types, translate recursive module
+  types first, type all bodies under the recursive environment, then run the
+  recursive inclusion unrolling algorithm.
+- Includes type the module, extract/simplify the included signature, check
+  name uniqueness, and extend the environment with those signature items.
+- Items marked `internal.local` are hidden from the produced signature.
+
+Implementation checking:
+
+- `type_implementation_more` clears CMT state, resets delayed checks, types the
+  structure, and computes `simple_sg = simplify_signature sg`.
+- With an interface, it locates the `.cmi`, reads the declared signature, runs
+  `Includemod.compunit initial_env sourcefile sg intf_file dclsig`, forces
+  delayed checks, saves CMT, and returns the declared signature.
+- Without an interface, it includes the inferred signature against the simplified
+  signature, checks non-generalized schemes, normalizes the signature, forces
+  delayed checks, saves `.cmi`/`.cmt` when file writing is enabled, and returns
+  the simplified signature.
+- On error, it saves a partial CMT before re-raising.
+
+Rust parity implications:
+
+- Structure typing is a recursive source-order fold. Parallelizing inside a
+  module would need to reproduce all environment, stamp, level, warning, and
+  delayed-check effects.
+- In-process signature publication must correspond to the no-interface branch
+  after simplification/non-generalization/normalization effects that OCaml
+  performs before Lambda translation.
+- The `.resi` path must keep the declared signature as the export target after
+  inclusion; replacing it with the implementation signature changes coercion and
+  JS exports.
+
+### `includemod.ml`: Inclusion And Coercion
+
+`includemod.ml` implements module/signature inclusion and produces module
+coercions used by later translation.
+
+- Inclusion is directional: `mty1` is the implementation/actual module type and
+  `mty2` is the expected/specification module type.
+- Value inclusion marks the implementation value as used and delegates to
+  `Includecore.value_descriptions` after substituting the expected description.
+- Type inclusion marks the implementation type as used and delegates to
+  `Includecore.type_declarations`.
+- Module-type inclusion handles aliases first, module type identifiers through
+  expansion, signatures through `signatures`, and functors contravariantly on
+  arguments plus covariantly on results.
+- Alias inclusion can return `Tcoerce_alias` when the implementation alias is
+  absent but the expected alias is present.
+- Signature inclusion builds a component table from the implementation
+  signature, matches each expected component by kind/name, builds a substitution
+  from expected ids to implementation ids, accumulates missing fields, then
+  checks paired components in expected-signature order.
+- Runtime positions only count runtime components. Primitive values, types,
+  module types, and class types do not increment runtime position; ordinary
+  values, type extensions, modules, and classes do.
+- Structure coercions are simplified to `Tcoerce_none` only if runtime positions
+  form the identity coercion.
+- Module declarations are strengthened with `Mtype.strengthen ~aliasable:true`
+  before inclusion.
+- `compunit` wraps signature inclusion and prepends the implementation/interface
+  mismatch context on failure.
+
+Rust parity implications:
+
+- Inclusion is both a check and an effect: it marks values/types/modules as
+  used, builds substitutions, and computes runtime coercion positions.
+- A name-based export filter is not equivalent to `Includemod.compunit`; it can
+  miss coercions, alias coercions, runtime positions, and use-marking effects.
+
+### `mtype.ml`: Strengthening, Non-Dependency, And Alias Removal
+
+`mtype.ml` is small but central for module path shape.
+
+- `scrape` expands module type identifiers through `Env.find_modtype_expansion`
+  until it reaches a non-identifier.
+- `freshen` is `Subst.modtype Subst.identity`; it copies a module type through
+  the standard substitution machinery.
+- `strengthen` turns abstract type components into manifest paths rooted at a
+  module path and recursively strengthens applicative functor results as
+  `Papply (p, Pident param)`.
+- `strengthen_sig` tracks runtime position exactly like `EnvLazy` and
+  `Includemod`: primitive values/types/module types do not increment; runtime
+  values/type extensions/modules do.
+- `strengthen_decl` either keeps module aliases, turns aliasable declarations
+  into `Mty_alias (Mta_present, p)`, or strengthens the module type.
+- `nondep_supertype` removes references to a module id from a module type,
+  using covariance/contravariance/strictness to decide when removal can abstract
+  components.
+- `enrich_typedecl` adds a manifest path to abstract type declarations when the
+  original environment has a matching type at that path and arity.
+- `type_paths` extracts type paths from module types for recursive-module
+  declaration checks.
+- `contains_type` detects module types whose evaluation can create fresh types;
+  `Typemod` uses it to reject some functor-body operations.
+- `remove_aliases` collects argument paths used in applicative functors, keeps
+  aliases that are needed for those paths, and scrapes/removes other aliases.
+- `lower_nongen` traverses module types and lowers non-generalizable variables
+  above a threshold.
+
+Rust parity implications:
+
+- Strengthening and alias removal are the source of many path spelling and
+  manifest-type shapes. Do not repair path spelling after the fact if the
+  strengthening/nondep step is where OCaml creates it.
+- Runtime position accounting must match across `Mtype`, `EnvLazy`, and
+  `Includemod`.
+
+### Source-Derived Audit Points
+
+These are the concrete questions to ask before changing Rust typechecker code:
+
+- Is this call inside the same `begin_def`/`end_def` region as OCaml?
+- Does Rust allocate a type node where OCaml reuses a non-generic node, or reuse
+  one where OCaml's `copy` allocates a `Tsubst`-backed instance?
+- Does the call use the same `Env` API as OCaml (`lookup_module ~load:true`,
+  `find_module`, `find_module_descr`, `find_type_expansion`,
+  `find_type_expansion_opt`, `open_signature`)?
+- If the operation can fail and retry, does Rust restore the type graph,
+  levels, environment, and delayed side state like OCaml snapshots do?
+- Is a row or object helper being replaced by structural normalization?
+- Is a module path produced by `Mtype.strengthen`, `Subst`, `Env.normalize_path`,
+  `Includemod`, or `Ctype.expand_abbrev`, or is Rust inventing the spelling
+  later?
+- Does a delayed force from `Typetexp.transl_simple_type_delayed` run at the
+  same point?
+- Does inclusion mark values/types/modules as used before delayed unused checks
+  are forced?
+- Does a performance representation expand to the OCaml shape before any
+  observable boundary: typedtree dump, RawLambda conversion, Lambda dump, JS
+  output, `.cmi`/registry signature, or error text?
 
 ## Stage 11: Diagnostics And Warnings
 
