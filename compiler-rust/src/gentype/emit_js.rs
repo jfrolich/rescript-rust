@@ -985,7 +985,6 @@ pub fn emit_translation_as_string(
             .get(s)
             .or_else(|| env.export_type_map_from_other_files.get(s))
             .cloned()
-            .unwrap_or_else(|| panic!("Not_found"))
     };
 
     let emitters = crate::gentype::emitters::initial();
@@ -1024,9 +1023,15 @@ pub fn emit_translation_as_string(
             name,
             type_args,
         }) => {
-            let code_item::ExportTypeItem {
+            let Some(code_item::ExportTypeItem {
                 type_, type_vars, ..
-            } = lookupId_(&env_for_code_items, name);
+            }) = lookupId_(&env_for_code_items, name)
+            else {
+                // Mirrors compiler/gentype/EmitJs.ml:662-678: a missing
+                // export type while inlining is caught as Not_found and leaves
+                // the original type unchanged.
+                return type_.clone();
+            };
             let pairs = type_vars
                 .iter()
                 .cloned()

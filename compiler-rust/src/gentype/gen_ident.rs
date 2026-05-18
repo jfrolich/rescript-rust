@@ -19,17 +19,18 @@ pub fn create_type_vars_gen() -> TypeVarsGen {
 }
 
 pub fn js_type_name_for_anonymous_type_id(type_vars_gen: &TypeVarsGen, id: i32) -> String {
-    match type_vars_gen.type_name_map.borrow().get(&id) {
-        Some(name) => name.clone(),
-        None => {
-            let next = type_vars_gen.type_name_counter.get() + 1;
-            type_vars_gen.type_name_counter.set(next);
-            let name = format!("T{}", next);
-            type_vars_gen
-                .type_name_map
-                .borrow_mut()
-                .insert(id, name.clone());
-            name
-        }
+    // Mirrors compiler/gentype/GenIdent.ml:16-23: lookup first, then mutate
+    // the map only after the failed lookup path. Drop Rust's immutable borrow
+    // before taking the mutable one.
+    if let Some(name) = type_vars_gen.type_name_map.borrow().get(&id).cloned() {
+        return name;
     }
+    let next = type_vars_gen.type_name_counter.get() + 1;
+    type_vars_gen.type_name_counter.set(next);
+    let name = format!("T{}", next);
+    type_vars_gen
+        .type_name_map
+        .borrow_mut()
+        .insert(id, name.clone());
+    name
 }

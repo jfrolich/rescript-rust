@@ -11,7 +11,9 @@ support in Rust is still incomplete:
 - Rust `bsc` recognizes `-bs-gentype`.
 - Rust `bsc` checks selected CMT files enough to preserve stale-artifact error
   output parity.
-- Rust `bsc` does not generate `.gen.tsx` or `.gen.ts`.
+- Rust CLI `bsc` still does not generate `.gen.tsx` or `.gen.ts`, but the
+  rewatch in-process compiler now invokes the Rust GenType generator from
+  typed artifacts.
 - Rewrite Stage 1 has an initial file-for-file Rust port under
   `compiler-rust/src/gentype/`.
 - Rewrite Stage 2 now also has an initial file-for-file Rust port for config,
@@ -36,6 +38,12 @@ support in Rust is still incomplete:
   `compiler/gentype/TranslateTypeExprFromTypes.ml:5-12`,
   `compiler/gentype/TranslateTypeExprFromTypes.ml:470-742`, and
   `compiler/gentype/TypeVars.ml:3-16`.
+- The in-process driver now calls `process_typed_artifact` for typed
+  interfaces and no-interface implementations, matching the observable
+  GenType hook at `compiler/core/js_implementation.ml:33-34` and
+  `compiler/core/js_implementation.ml:170`. The `.resi` implementation branch
+  follows `compiler/gentype/Paths.ml:61-86`: the `.cmti` artifact owns the
+  output path there.
 - The project now has a single no-argument GenType output parity harness:
   `./scripts/test_gentype_output_parity.sh`. It always compares raw
   `.gen.ts`/`.gen.tsx` output for the react example, stdlib-no-shims, and
@@ -110,8 +118,8 @@ stdlib-no-shims:          0/1 generated outputs match, 1 missing, 0 changed, 0 e
 Tella:                    0/112 generated outputs match, 112 missing, 0 changed, 0 extra, 0 diff hunks; TypeScript typecheck not configured
 ```
 
-This confirms Rust in-process currently compiles the projects but does not yet
-invoke the Rust GenType generator.
+Older missing-output baseline before the in-process hook. Current baseline is
+listed under "Phase 3/7 In-Process Generation Hook" below.
 
 ## Phase 0 Compile Wiring
 
@@ -222,8 +230,8 @@ OCaml reference's direct `type_expr.desc` reads at
 `compiler/gentype/TranslateTypeExprFromTypes.ml:470-742`, and
 `compiler/gentype/TypeVars.ml:3-16`.
 
-Current generated-output parity remains unchanged because `driver.rs` still
-does not invoke `process_typed_artifact`:
+Generated-output parity at the time of this TypeContext-only step was still the
+old missing-output baseline:
 
 ```text
 typescript-react-example: 0/71 generated outputs match, 71 missing
@@ -231,12 +239,50 @@ stdlib-no-shims:          0/1 generated outputs match, 1 missing
 Tella:                    0/112 generated outputs match, 112 missing
 ```
 
+The later in-process generation hook supersedes this baseline.
+
 Debug verification:
 
 ```text
 cargo build --manifest-path compiler-rust/Cargo.toml
 cargo build --manifest-path rewatch/Cargo.toml
 git diff --check -- compiler-rust/src/gentype/main.rs compiler-rust/src/gentype/translate_core_type.rs compiler-rust/src/gentype/translate_signature.rs compiler-rust/src/gentype/translate_signature_from_types.rs compiler-rust/src/gentype/translate_structure.rs compiler-rust/src/gentype/translate_type_declarations.rs compiler-rust/src/gentype/translate_type_expr_from_types.rs compiler-rust/src/gentype/translation.rs compiler-rust/src/gentype/type_vars.rs projects/gentype-rust/PROGRESS.md projects/gentype-rust/RALPH_TODO.md
+```
+
+## Phase 3/7 In-Process Generation Hook
+
+The rewatch in-process compiler now calls Rust GenType directly from typed
+artifacts instead of waiting for serialized CMT files. This mirrors
+`compiler/core/js_implementation.ml:33-34` / `170`, with the typed artifacts
+that `compiler/ml/typemod.ml:1763-1764` and `1785-1787` would have saved in
+the OCaml path. For `.resi + .res`, implementation processing is left to the
+interface artifact because `compiler/gentype/Paths.ml:61-86` selects `.cmti`
+before `.cmt` for the implementation output prefix.
+
+Two small emission fixes were needed once generation ran:
+
+- `gen_ident.rs` now drops the immutable map borrow before inserting a fresh
+  anonymous type variable, matching `compiler/gentype/GenIdent.ml:16-23`.
+- `emit_js.rs` keeps `inline_one_level` missing-type lookup non-fatal, matching
+  the `Not_found` handler in `compiler/gentype/EmitJs.ml:662-678`.
+
+Current generated-output parity:
+
+```text
+./scripts/test_gentype_output_parity.sh
+
+typescript-react-example: 30/71 generated outputs match, 41 changed, 0 missing, 0 extra, 69 diff hunks; OCaml typecheck 0, Rust typecheck 2
+stdlib-no-shims:          1/1 generated outputs match, 0 changed, 0 missing, 0 extra, 0 diff hunks; OCaml typecheck 0, Rust typecheck 0
+Tella:                    46/112 generated outputs match, 64 changed, 2 missing, 0 extra, 86 diff hunks; TypeScript typecheck not configured
+```
+
+Debug verification:
+
+```text
+cargo build --manifest-path compiler-rust/Cargo.toml
+cargo build --manifest-path rewatch/Cargo.toml
+./scripts/test_gentype_output_parity.sh
+git diff --check -- compiler-rust/src/driver.rs compiler-rust/src/gentype/emit_js.rs compiler-rust/src/gentype/gen_ident.rs projects/gentype-rust/PROGRESS.md projects/gentype-rust/RALPH_TODO.md
 ```
 
 ## Recent Verification

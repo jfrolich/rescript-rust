@@ -14162,6 +14162,35 @@ pub struct InProcessInterfaceResult {
     pub new_alias_rewrites: ahash::AHashMap<String, crate::types::path::Path>,
 }
 
+fn process_gentype_typed_artifact_if_enabled<'a>(
+    options: &CompilerOptions,
+    annots: crate::gentype::main::TypedArtifactAnnots<'a>,
+    arena: &'a ParseArena,
+    type_ctx: &'a TypeContext,
+    filename: &str,
+    module_name: &str,
+    is_interface: bool,
+) -> Result<()> {
+    let Some(config) = options.gentype_config.as_ref() else {
+        return Ok(());
+    };
+    // Mirrors compiler/core/js_implementation.ml:33-34 and 170, but uses the
+    // in-memory typedtree that Rust already has instead of reopening the CMT
+    // saved by compiler/ml/typemod.ml:1763-1764 and 1785-1787.
+    crate::gentype::main::process_typed_artifact(
+        config,
+        crate::gentype::main::TypedArtifact {
+            annots,
+            arena,
+            ctx: type_ctx,
+            source_file: Some(filename),
+            file_name: module_name.to_string(),
+            is_interface,
+        },
+    )
+    .with_context(|| format!("GenType failed for {filename}"))
+}
+
 pub fn compile_source_in_process(
     source: &str,
     filename: &str,
@@ -14705,6 +14734,22 @@ pub fn compile_preprocessed_structure_in_process_until_js(
         String::new()
     };
 
+    if !has_interface {
+        // With a `.resi`, compiler/gentype/Paths.ml:61-86 makes the
+        // implementation output prefix select the `.cmti` artifact first. The
+        // in-process interface step above owns that artifact path, so the
+        // implementation branch only processes no-interface modules here.
+        process_gentype_typed_artifact_if_enabled(
+            options,
+            crate::gentype::main::TypedArtifactAnnots::Implementation(&typed_structure),
+            arena,
+            &type_ctx,
+            filename,
+            module_name,
+            false,
+        )?;
+    }
+
     let lambda_start_stamp = synchronize_lambda_start_stamp(&type_ctx);
 
     let unit_name = options
@@ -15110,6 +15155,15 @@ pub fn typecheck_preprocessed_signature_in_process(
         transl_signature(&mut tctx, &env, arena, signature)
             .map_err(|e| anyhow!("Type checking failed: {e:?}"))
     })?;
+    process_gentype_typed_artifact_if_enabled(
+        options,
+        crate::gentype::main::TypedArtifactAnnots::Interface(&typed_signature),
+        arena,
+        &type_ctx,
+        filename,
+        module_name,
+        true,
+    )?;
     let decl_signature =
         crate::types::typemod::decl_signature_from_typed_signature(&typed_signature, arena);
 

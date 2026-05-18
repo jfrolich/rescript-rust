@@ -131,8 +131,12 @@ Run this checklist for each file after its first port and before compile work.
 - [x] Add `gentype::main::process_typed_artifact`.
 - [x] Add `TypedArtifact` carrying module name, source file, annotation source,
   typedtree payload, and type-error state.
-- [ ] Wire reviewed `paths.rs`, `module_name.rs`, and `generated_files.rs`
-  behavior into the entry point.
+- [x] Wire reviewed `paths.rs`, `module_name.rs`, and `generated_files.rs`
+  behavior into the in-process typed-artifact entry point.
+- [x] Invoke Rust GenType from rewatch in-process typed interfaces and
+  no-interface implementations, matching
+  `compiler/core/js_implementation.ml:33-34` / `170` and
+  `compiler/gentype/Paths.ml:61-86`.
 - [ ] Preserve stale CMT error behavior from `GenTypeMain.ml:85-91`.
 - [x] Commit the typed-artifact boundary before wiring compiler call sites.
 - [ ] Commit once no-annotation stale output behavior matches OCaml.
@@ -169,7 +173,7 @@ Run this checklist for each file after its first port and before compile work.
 - [ ] Integrate reviewed `translate_core_type.rs` fully.
 - [ ] Integrate reviewed `translate_type_expr_from_types.rs` fully.
 - [ ] Integrate reviewed `translate_type_declarations.rs` fully.
-- [ ] Reach `stdlib-no-shims` output parity.
+- [x] Reach `stdlib-no-shims` output parity: 1/1 with 0 diff hunks.
 - [ ] Commit each type-family improvement atomically with parity status.
 
 ## Phase 6: Structure and Signature Translation
@@ -186,10 +190,14 @@ Run this checklist for each file after its first port and before compile work.
 
 - [ ] Integrate reviewed `code_item.rs`.
 - [ ] Integrate reviewed `translation.rs`.
+- [x] Match `GenIdent.ml:16-23` anonymous type-variable lookup-then-insert
+  mutation without keeping a stale Rust borrow.
 - [ ] Integrate reviewed `runtime.rs`.
 - [ ] Integrate reviewed `emit_text.rs`.
 - [ ] Integrate reviewed `emit_type.rs`.
 - [ ] Integrate reviewed `emit_js.rs`.
+- [x] Match `EmitJs.ml:662-678` by leaving `inline_one_level` unchanged when
+  export type lookup raises `Not_found`.
 - [ ] Integrate reviewed `emitters.rs`.
 - [ ] Integrate reviewed `converter.rs`.
 - [ ] Integrate reviewed `named_args.rs`.
