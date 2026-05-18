@@ -8,17 +8,17 @@ commit must cite the OCaml/ReScript reference location it ports.
 These ports do not need to compile yet. Keep function names and file structure
 as close to the reference as Rust allows.
 
-- [ ] Port `GenTypeCommon.ml`.
-- [ ] Port `Debug.ml`.
-- [ ] Port `Log_.ml`.
-- [ ] Port `Indent.ml`.
-- [ ] Port `GenIdent.ml`.
-- [ ] Port `ModuleName.ml` and `ModuleName.mli`.
-- [ ] Port `ResolvedName.ml` and `ResolvedName.mli`.
-- [ ] Port `TypeVars.ml`.
-- [ ] Port `CodeItem.ml`.
-- [ ] Port `Translation.ml`.
-- [ ] Run the three per-file review passes for every file in this stage.
+- [x] Port `GenTypeCommon.ml`.
+- [x] Port `Debug.ml`.
+- [x] Port `Log_.ml`.
+- [x] Port `Indent.ml`.
+- [x] Port `GenIdent.ml`.
+- [x] Port `ModuleName.ml` and `ModuleName.mli`.
+- [x] Port `ResolvedName.ml` and `ResolvedName.mli`.
+- [x] Port `TypeVars.ml`.
+- [x] Port `CodeItem.ml`.
+- [x] Port `Translation.ml`.
+- [x] Run the three per-file review passes for every file in this stage.
 - [ ] Commit the stage or commit coherent file clusters.
 
 ## Rewrite Stage 2: Config, Paths, Imports, and File Effects

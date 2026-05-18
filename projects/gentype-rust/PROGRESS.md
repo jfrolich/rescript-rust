@@ -12,8 +12,9 @@ support in Rust is still a stub:
 - Rust `bsc` checks selected CMT files enough to preserve stale-artifact error
   output parity.
 - Rust `bsc` does not generate `.gen.tsx` or `.gen.ts`.
-
-No Rust GenType implementation modules exist yet.
+- Rewrite Stage 1 now has an initial file-for-file Rust port under
+  `compiler-rust/src/gentype/`. These files are intentionally not wired into
+  the crate yet.
 
 ## Reference Inventory
 
@@ -65,7 +66,18 @@ report current counts itself because Tella and fixtures can change.
 
 ## Recent Verification
 
-No build or test gate was run for this docs-only project creation.
+For the Stage 1 port:
+
+- `rustfmt compiler-rust/src/gentype/*.rs` was run on the new files.
+- The new files are not wired into the crate, so debug build/parity gates were
+  not run for this non-compiling rewrite stage.
+- Surface/control/output-sensitive review was performed while porting. The
+  known integration gap is exact `Log_.ml` filename rendering:
+  `compiler/gentype/Log_.ml:54-77` gets a filename string from
+  `Location.get_pos_info`, while Rust `Location` currently stores an interned
+  filename id and will need the arena/source resolver when the port is wired.
+
+Earlier setup note:
 
 The latest debug build attempt after merging `fuzz-errors` failed before code
 diagnostics with:
@@ -80,9 +92,10 @@ needed.
 
 ## Next Session
 
-Start with Rewrite Stage 1 from `PLAN.md`:
+Continue with Rewrite Stage 2 from `PLAN.md`:
 
-1. Port one low-dependency file at a time from `compiler/gentype`.
+1. Port one config/path/import/file-effect file at a time from
+   `compiler/gentype`.
 2. Keep function names, helper names, data-flow shape, and source-location
    references as close to OCaml as Rust allows.
 3. Run the three per-file review passes before marking each file done:
