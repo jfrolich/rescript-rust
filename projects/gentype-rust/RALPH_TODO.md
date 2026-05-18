@@ -127,13 +127,14 @@ Run this checklist for each file after its first port and before compile work.
 
 ## Phase 3: Input Boundary
 
-- [ ] Add `compiler-rust/src/gentype/mod.rs`.
-- [ ] Add `gentype::main::process_typed_artifact`.
-- [ ] Add `GentypeInput` carrying module name, source file, output paths,
-  annotation source, typedtree payload, and type-error state.
+- [x] Add `compiler-rust/src/gentype/mod.rs`.
+- [x] Add `gentype::main::process_typed_artifact`.
+- [x] Add `TypedArtifact` carrying module name, source file, annotation source,
+  typedtree payload, and type-error state.
 - [ ] Wire reviewed `paths.rs`, `module_name.rs`, and `generated_files.rs`
   behavior into the entry point.
 - [ ] Preserve stale CMT error behavior from `GenTypeMain.ml:85-91`.
+- [x] Commit the typed-artifact boundary before wiring compiler call sites.
 - [ ] Commit once no-annotation stale output behavior matches OCaml.
 
 ## Phase 4: Annotations and Resolver Skeleton

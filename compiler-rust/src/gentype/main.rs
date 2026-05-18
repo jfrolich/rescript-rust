@@ -24,6 +24,22 @@ pub struct InputCmt {
     pub arena: ParseArena,
 }
 
+pub enum TypedArtifactAnnots<'a> {
+    Implementation(&'a Structure),
+    Interface(&'a TypedSignature),
+    Packed,
+    PartialImplementation,
+    PartialInterface,
+}
+
+pub struct TypedArtifact<'a> {
+    pub annots: TypedArtifactAnnots<'a>,
+    pub arena: &'a ParseArena,
+    pub source_file: Option<&'a str>,
+    pub file_name: crate::gentype::module_name::T,
+    pub is_interface: bool,
+}
+
 pub fn cmt_check_annotations(
     check_annotation: &impl Fn(&ParseArena, LocIdx, &Attributes) -> bool,
     input_cmt: &InputCmt,
@@ -58,6 +74,41 @@ pub fn cmt_has_type_errors(input_cmt: &InputCmt) -> bool {
     )
 }
 
+pub fn typed_artifact_check_annotations(
+    check_annotation: &impl Fn(&ParseArena, LocIdx, &Attributes) -> bool,
+    artifact: &TypedArtifact<'_>,
+) -> bool {
+    // Mirrors compiler/gentype/GenTypeMain.ml:3-10 for in-memory typed
+    // artifacts, using the same Annotation traversal that CMT decoding feeds.
+    match artifact.annots {
+        TypedArtifactAnnots::Implementation(structure) => {
+            crate::gentype::annotation::structure_check_annotation(
+                artifact.arena,
+                &|loc, attributes| check_annotation(artifact.arena, loc, attributes),
+                structure,
+            )
+        }
+        TypedArtifactAnnots::Interface(signature) => {
+            crate::gentype::annotation::signature_check_annotation(
+                artifact.arena,
+                &|loc, attributes| check_annotation(artifact.arena, loc, attributes),
+                signature,
+            )
+        }
+        TypedArtifactAnnots::Packed
+        | TypedArtifactAnnots::PartialImplementation
+        | TypedArtifactAnnots::PartialInterface => false,
+    }
+}
+
+pub fn typed_artifact_has_type_errors(artifact: &TypedArtifact<'_>) -> bool {
+    // Mirrors compiler/gentype/GenTypeMain.ml:11-14 for the in-memory path.
+    matches!(
+        artifact.annots,
+        TypedArtifactAnnots::PartialImplementation | TypedArtifactAnnots::PartialInterface
+    )
+}
+
 pub fn structure_item_is_declaration(struct_item: &StructureItem) -> bool {
     // Mirrors compiler/gentype/GenTypeMain.ml:16-20.
     matches!(
@@ -73,6 +124,47 @@ pub fn signature_item_is_declaration(signature_item: &TypedSignatureItem) -> boo
     matches!(
         &signature_item.sig_desc,
         TypedSignatureItemDesc::Tsig_type(_, _) | TypedSignatureItemDesc::Tsig_modtype(_)
+    )
+}
+
+pub fn translate_typed_artifact(
+    config: &crate::gentype::config::T,
+    output_file_relative: &str,
+    resolver: &crate::gentype::module_resolver::Resolver,
+    artifact: &TypedArtifact<'_>,
+) -> crate::gentype::translation::T {
+    // Mirrors compiler/gentype/GenTypeMain.ml:53-70 for in-memory artifacts.
+    let type_env = crate::gentype::type_env::root();
+    let translations = match artifact.annots {
+        TypedArtifactAnnots::Implementation(structure) => {
+            crate::gentype::translate_structure::translate_structure(
+                artifact.arena,
+                config,
+                output_file_relative,
+                resolver,
+                &type_env,
+                structure,
+            )
+        }
+        TypedArtifactAnnots::Interface(signature) => {
+            crate::gentype::translate_signature::translate_signature(
+                artifact.arena,
+                config,
+                output_file_relative,
+                resolver,
+                &type_env,
+                signature,
+            )
+        }
+        TypedArtifactAnnots::Packed
+        | TypedArtifactAnnots::PartialImplementation
+        | TypedArtifactAnnots::PartialInterface => {
+            vec![]
+        }
+    };
+    crate::gentype::translation::add_type_declarations_from_module_equations(
+        &type_env,
+        crate::gentype::translation::combine(&translations),
     )
 }
 
@@ -355,6 +447,83 @@ pub fn process_cmt_file(cmt: &str) -> std::io::Result<()> {
             if Path::new(&output_file).exists() {
                 std::fs::remove_file(&output_file)?;
             }
+        }
+    }
+    Ok(())
+}
+
+pub fn process_typed_artifact(
+    config: &crate::gentype::config::T,
+    artifact: TypedArtifact<'_>,
+) -> std::io::Result<()> {
+    // Mirrors compiler/gentype/GenTypeMain.ml:136-175, but starts from the
+    // typedtree already produced in-process instead of re-reading a .cmt/.cmti.
+    // The OCaml call site is compiler/core/js_implementation.ml:33-34 and
+    // compiler/core/js_implementation.ml:170 after Typemod saved the CMT at
+    // compiler/ml/typemod.ml:1763-1764 or compiler/ml/typemod.ml:1785-1787.
+    let mut config = config.clone();
+    if crate::gentype::debug::basic.load(std::sync::atomic::Ordering::Relaxed) {
+        crate::gentype::log_::item(&format!(
+            "Typed artifact {}\n",
+            crate::gentype::module_name::to_string(&artifact.file_name)
+        ));
+    }
+    let source_file = artifact
+        .source_file
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| {
+            format!(
+                "{}{}",
+                crate::gentype::module_name::to_string(&artifact.file_name),
+                match artifact.is_interface {
+                    true => ".resi",
+                    false => ".res",
+                }
+            )
+        });
+    let output_file = crate::gentype::paths::get_output_file(&config, &source_file);
+    let output_file_relative =
+        crate::gentype::paths::get_output_file_relative(&config, &source_file);
+    let resolver = crate::gentype::module_resolver::create_lazy_resolver(
+        &config,
+        &[".res".to_string(), ".shim.ts".to_string()],
+        |fname| fname == "React.res" || fname == "ReasonReact.res",
+    );
+    let has_gentype_annotations = typed_artifact_check_annotations(
+        &|arena, _loc, attributes| {
+            crate::gentype::annotation::get_attribute_payload(
+                arena,
+                crate::gentype::annotation::tag_is_one_of_the_gentype_annotations,
+                attributes,
+            )
+            .is_some()
+        },
+        &artifact,
+    );
+    if has_gentype_annotations {
+        let translation =
+            translate_typed_artifact(&config, &output_file_relative, &resolver, &artifact);
+        emit_translation(
+            &mut config,
+            &artifact.file_name,
+            &output_file,
+            &output_file_relative,
+            &resolver,
+            &source_file,
+            &translation,
+        )?;
+    } else if typed_artifact_has_type_errors(&artifact) {
+        crate::gentype::generated_files::log_file_action(
+            crate::gentype::generated_files::FileAction::TypeError,
+            &output_file,
+        );
+    } else {
+        crate::gentype::generated_files::log_file_action(
+            crate::gentype::generated_files::FileAction::NoMatch,
+            &output_file,
+        );
+        if Path::new(&output_file).exists() {
+            std::fs::remove_file(&output_file)?;
         }
     }
     Ok(())

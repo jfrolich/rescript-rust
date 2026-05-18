@@ -183,6 +183,31 @@ is present but currently blocked by unrelated dirty test code in
 `compiler-rust/src/cmi/persistent_env.rs`, where `mod tests` is defined twice.
 The normal debug builds above still pass.
 
+## Phase 3 Typed-Artifact Boundary
+
+`compiler-rust/src/gentype/main.rs` now has an in-memory
+`process_typed_artifact` entrypoint alongside the CMT path. It mirrors the
+observable shape of `compiler/gentype/GenTypeMain.ml:136-175` while accepting
+the typedtree already available in the Rust compiler. The boundary also keeps
+the same annotation scan and type-error branch as
+`compiler/gentype/GenTypeMain.ml:3-14`, and documents the OCaml call/save order
+from `compiler/core/js_implementation.ml:33-34`,
+`compiler/core/js_implementation.ml:170`, and
+`compiler/ml/typemod.ml:1763-1764` / `1785-1787`.
+
+This is not wired into `driver.rs` yet. The next step is to call it from the
+interface and implementation typecheck paths, then thread `TypeContext` through
+the translation modules so annotated files do not hit the temporary
+`TypeExprRef` descriptor placeholder.
+
+Debug verification:
+
+```text
+cargo build --manifest-path compiler-rust/Cargo.toml
+cargo build --manifest-path rewatch/Cargo.toml
+git diff --check -- compiler-rust/src/gentype/main.rs projects/gentype-rust/PROGRESS.md projects/gentype-rust/RALPH_TODO.md
+```
+
 ## Recent Verification
 
 For the Stage 1 port:
