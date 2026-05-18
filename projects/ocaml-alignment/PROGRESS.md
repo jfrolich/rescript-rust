@@ -14,33 +14,20 @@ Recent branch work already moved several areas in the right direction:
 - reduced Env path lookup churn
 - removal of the legacy Rust direct lambda converter
 
-Those changes are useful, but they do not close the project. The remaining risk
-is still algorithmic: Rust has several explicit reconstruction paths around
-lazy module components, alias identity, force modes, and type graph sharing that
-need to be proven against OCaml or replaced with a more direct port.
+Those changes were the starting point. The later entries in this file document
+the OCaml source audits, Rust changes, focused repros, and parity gates that
+closed every checklist item in [RALPH_TODO.md](./RALPH_TODO.md).
 
-## Current Open Questions
+## Completion Status
 
-- Does every `ComponentLookupCacheMode` call site correspond exactly to an
-  OCaml Env API boundary?
-- Are signature-content inference helpers still affecting force order?
-- Do `ctype.rs` abbreviation caches have the same lifetime and env dependency
-  behavior as OCaml?
-- Are copy/instance row and non-generic sharing rules exact enough for strict
-  typedtree sexp identity parity?
+As of commit `cd06632c3`:
 
-## Next Recommended Session
-
-Continue task 6 in [RALPH_TODO.md](./RALPH_TODO.md):
-
-1. Read OCaml `compiler/ml/ctype.ml` and `compiler/ml/btype.ml` around
-   `copy`, `instance`, `copy_type_desc`, `Tsubst`, row copying, and
-   `cleanup_types`.
-2. Audit Rust `copy_type_cached`, `instance`, and row-copy code against the
-   exact temporary-mutation and cleanup sequence.
-3. Replace remaining Rust-only stale-copy compensations with the OCaml-shaped
-   temporary `Tsubst`/copy-cache behavior where possible.
-4. Keep internal and Tella typedtree/lambda/JS parity green.
+- every checklist item in [RALPH_TODO.md](./RALPH_TODO.md) is complete
+- internal typedtree, lambda, diagnostic, and JS output parity are green
+- Tella typedtree and JS output parity are green
+- the remaining documented Rust/OCaml differences are intentional ReScript
+  layout, in-process, or performance differences rather than typechecker
+  semantic compensations
 
 ## 2026-05-18 Stored Component Thunk Audit
 
