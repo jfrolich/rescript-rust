@@ -154,6 +154,32 @@ enum WorkerMsg {
     Completed(CompletionMsg),
 }
 
+fn pop_ready_js(
+    ready_js: &mut Vec<PreJsMsg>,
+    waiting_js_by_dep: &AHashMap<String, Vec<String>>,
+) -> Option<PreJsMsg> {
+    match ready_js.len() {
+        0 => None,
+        1 => ready_js.pop(),
+        len => {
+            let mut best_idx = len - 1;
+            let mut best_waiters = waiting_js_by_dep
+                .get(&ready_js[best_idx].module_name)
+                .map_or(0, Vec::len);
+            for idx in (0..len - 1).rev() {
+                let waiters = waiting_js_by_dep
+                    .get(&ready_js[idx].module_name)
+                    .map_or(0, Vec::len);
+                if waiters > best_waiters {
+                    best_idx = idx;
+                    best_waiters = waiters;
+                }
+            }
+            Some(ready_js.remove(best_idx))
+        }
+    }
+}
+
 #[derive(Clone)]
 struct InProcessSchedulerHooks {
     tx: mpsc::Sender<WorkerMsg>,
@@ -786,7 +812,7 @@ pub fn compile(
                 );
             }
             while in_flight < capacity && !has_errors {
-                if let Some(pre_js_msg) = ready_js.pop() {
+                if let Some(pre_js_msg) = pop_ready_js(&mut ready_js, &waiting_js_by_dep) {
                     if let Some(counters) = scheduler_counters.as_mut() {
                         counters.scheduled_js += 1;
                         if !ready_heap.is_empty() {
