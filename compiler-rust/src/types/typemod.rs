@@ -10856,22 +10856,12 @@ pub fn lookup_module_path_by_lid<'b>(
                 |components| {
                     components
                         .lookup_module(submod_name)
-                        .map(|(runtime_pos, _, md)| {
-                            if path_non_apply_root_is_persistent_or_global(components.access_path())
-                            {
-                                md.md_path.clone().unwrap_or_else(|| {
-                                    Path::pdot(
-                                        components.access_path().clone(),
-                                        submod_name.to_string(),
-                                    )
-                                })
-                            } else {
-                                Path::pdot_pos(
-                                    components.access_path().clone(),
-                                    submod_name.to_string(),
-                                    runtime_pos as i32,
-                                )
-                            }
+                        .map(|(runtime_pos, _, _md)| {
+                            Path::pdot_pos(
+                                components.access_path().clone(),
+                                submod_name.to_string(),
+                                runtime_pos as i32,
+                            )
                         })
                 },
             )

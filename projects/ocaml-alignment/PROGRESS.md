@@ -121,3 +121,35 @@ Validation evidence:
 - `./scripts/test_js_output_parity.sh --with-external --quick`:
   focused fixtures `344/344`, local JS output `660/660`, Tella JS output
   `2127/2127`.
+
+## 2026-05-18 Dotted Module Path Lookup
+
+Task 1 progress:
+
+- Fixed one descriptor-only module path lookup to stop observing a child module
+  declaration's `md_path`.
+- OCaml reference:
+  - `compiler/ml/env.ml:1064-1073`: `lookup_module` for `Ldot` reads
+    `comp_modules` only for the runtime position and returns `Pdot(p, s, pos)`;
+    it does not force the child module declaration with `subst_modtype_maker`.
+- Rust change:
+  - `typemod` `lookup_module_path_by_lid` now returns the selected component
+    path from the parent component table for dotted longidents instead of using
+    the child declaration's alias path.
+  - This keeps path construction on the same descriptor/component boundary as
+    OCaml and reserves module declaration observation for real
+    `find_module`-style force sites.
+
+Validation evidence:
+
+- `cargo check --manifest-path compiler-rust/Cargo.toml`: passed.
+- `./scripts/test_typedtree_parity.sh ModuleWithAlias`: `2/2`.
+- `./scripts/test_typedtree_parity.sh nested_module_alias`: `1/1`.
+- `./scripts/test_typedtree_parity.sh DynamicImportModuleWithAlias`: `1/1`.
+- `./scripts/test_typedtree_parity.sh global_module_alias_test`: `1/1`.
+- `./scripts/test_typedtree_parity.sh`: `660/660`.
+- `./scripts/test_typedtree_parity.sh --tella --quick`: `1697/1697`.
+- `./scripts/test_lambda_parity.sh --quick`: `660/660`.
+- `./scripts/test_js_output_parity.sh --with-external --quick`:
+  focused fixtures `344/344`, local JS output `660/660`, Tella JS output
+  `2127/2127`.
