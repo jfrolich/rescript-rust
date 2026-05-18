@@ -621,6 +621,58 @@ Validation evidence:
   - `./scripts/test_typedtree_parity.sh --release`: `662/662`.
   - `./scripts/test_lambda_parity.sh --release`: `662/662`.
 
+## 2026-05-18 Destructive Substitution Path Repair Cleanup
+
+Task 10 completion:
+
+- Removed the Rust-only `fallback_substituted_item_usage_paths` path guess from
+  destructive-substitution alias/applicative-functor checking. OCaml computes
+  the affected paths from the recursive `merge` that rewrites the signature; it
+  does not retry by reconstructing `A.B.t` paths from signature item names if
+  that traversal fails.
+- Kept the remaining flattened-alias helpers that are driven by registered
+  persistent alias/component evidence. Those helpers model ReScript's flattened
+  module-unit layout while preserving the OCaml `Env.scrape_alias` /
+  `Env.prefix_idents` / `Subst.signature` boundary; they do not fabricate
+  semantic alias identity from `Foo__Bar` spelling.
+
+OCaml references:
+
+- `compiler/ml/typemod.ml:221-267`: destructive substitution comment and
+  `check_usage_of_path_of_substituted_item`.
+- `compiler/ml/typemod.ml:302-454`: `merge_constraint`; `real_ids` are built
+  by the recursive signature merge, checked in reverse order, and then reused
+  for `Subst.signature`.
+- `compiler/ml/env.ml:1516-1538`: alias scraping and `prefix_idents` component
+  path construction for flattened ReScript module units.
+
+Validation evidence:
+
+- `cargo check --manifest-path compiler-rust/Cargo.toml`: passed.
+- Debug build: `cargo build --manifest-path compiler-rust/Cargo.toml`: passed.
+- Focused compiler diagnostic parity:
+  - `./scripts/test_error_output_parity.sh --compiler-only with_changes_module_alias`: `1/1`.
+  - `./scripts/test_error_output_parity.sh --compiler-only with_makes_applicative_functor_ill_typed`:
+    `1/1`.
+  - `./scripts/test_error_output_parity.sh --compiler-only with_no_component_type`: `1/1`.
+- Full compiler diagnostic parity:
+  `./scripts/test_error_output_parity.sh --compiler-only`: `1089/1089`.
+- Full debug typedtree parity after clearing cached typedtree artifacts:
+  `./scripts/test_typedtree_parity.sh`: `662/662`.
+- Tella debug typedtree quick:
+  `./scripts/test_typedtree_parity.sh --tella --quick`: `1697/1697`.
+- Debug lambda quick: `./scripts/test_lambda_parity.sh --quick`: `662/662`.
+- Debug JS output quick with external/Tella:
+  `./scripts/test_js_output_parity.sh --with-external --quick`: fixtures
+  `344/344`, local JS output `662/662`, Tella JS output `2127/2127`.
+- Release validation:
+  - `cargo build --release --manifest-path compiler-rust/Cargo.toml`: passed.
+  - `cargo build --release --manifest-path rewatch/Cargo.toml`: passed.
+  - `./scripts/test_error_output_parity.sh --release --compiler-only`:
+    `1089/1089`.
+  - `./scripts/test_typedtree_parity.sh --release`: `662/662`.
+  - `./scripts/test_lambda_parity.sh --release`: `662/662`.
+
 ## 2026-05-18 Type Declaration Group Staging Alignment
 
 Task 9 completion:

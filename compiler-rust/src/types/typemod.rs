@@ -13593,12 +13593,6 @@ fn check_destructive_substitution_alias_usage<'a>(
         return Ok(());
     };
 
-    fn path_from_ident_and_tail(id: &Ident, tail: &[String]) -> Path {
-        tail.iter().fold(Path::pident(id.clone()), |path, name| {
-            Path::pdot(path, name.as_str())
-        })
-    }
-
     fn path_concat(head: &Ident, path: &Path) -> Path {
         match path {
             Path::Pident(id) => Path::pdot(Path::pident(head.clone()), id.name()),
@@ -13689,32 +13683,6 @@ fn check_destructive_substitution_alias_usage<'a>(
         Some((signature, paths))
     }
 
-    fn collect_substituted_item_usage_paths(id: &Ident, tail: &[String]) -> Vec<Path> {
-        if tail.is_empty() {
-            Vec::new()
-        } else {
-            vec![path_from_ident_and_tail(id, tail)]
-        }
-    }
-
-    fn fallback_substituted_item_usage_paths(
-        signature: &[crate::types::decl::SignatureItem],
-        components: &[String],
-    ) -> Vec<Path> {
-        let Some((head, tail)) = components.split_first() else {
-            return Vec::new();
-        };
-        for item in signature {
-            if let crate::types::decl::SignatureItem::SigModule(id, _, _) = item {
-                if id.name() == head {
-                    return collect_substituted_item_usage_paths(id, tail);
-                }
-            }
-        }
-
-        Vec::new()
-    }
-
     for constraint in constraints {
         let (lid, needs_type) = match constraint {
             crate::parser::ast::WithConstraint::Pwith_typesubst(lid, _) => (lid, true),
@@ -13735,19 +13703,15 @@ fn check_destructive_substitution_alias_usage<'a>(
             _ => continue,
         };
         if matches!(path, Path::Pdot(..)) {
-            let (signature_to_check, paths) = destructive_substitution_signature_and_paths(
+            let Some((signature_to_check, paths)) = destructive_substitution_signature_and_paths(
                 tctx,
                 env,
                 &signature,
                 &components,
                 needs_type,
-            )
-            .unwrap_or_else(|| {
-                (
-                    signature.clone(),
-                    fallback_substituted_item_usage_paths(&signature, &components),
-                )
-            });
+            ) else {
+                continue;
+            };
             check_usage_of_path_of_substituted_item(
                 tctx,
                 env,

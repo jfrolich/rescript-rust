@@ -237,7 +237,7 @@ Tasks:
 - [x] Audit alias removal.
 - [x] Audit `lower_nongen`.
 - [x] Audit inclusion substitutions and runtime coercion positions.
-- [ ] Remove path-spelling repair code when the algorithm should produce the
+- [x] Remove path-spelling repair code when the algorithm should produce the
       right path directly.
 
 Acceptance:
