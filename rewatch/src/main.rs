@@ -168,13 +168,14 @@ fn configure_rayon_for_in_process(build_mode: rescript::build::build_types::Buil
 fn default_in_process_threads() -> usize {
     let logical = num_cpus::get().max(1);
     let target = logical.saturating_mul(8).div_ceil(5);
+    let scaling_cap = logical.saturating_add(8);
     // In-process compilation publishes signatures before JS is emitted so
     // dependents can type-check early. Those workers can later block before JS
     // while waiting for dependency cmj metadata, so a CPU-sized pool leaves
     // runnable modules stranded behind parked workers. A small oversubscription
-    // keeps that overlap without scheduling enough workers to push compiler
-    // allocation and module-refresh work onto slower cores.
-    target.min(16)
+    // keeps that overlap, while a scaling cap avoids limiting larger builders
+    // to the core count of this development machine.
+    target.min(scaling_cap)
 }
 
 const IN_PROCESS_STACK_SIZE: usize = 256 * 1024 * 1024;
