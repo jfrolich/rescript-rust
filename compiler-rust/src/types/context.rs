@@ -258,10 +258,6 @@ pub struct TypeContext {
     /// Dedicated memo ref for OCaml's simple_abbrevs (nullary, non-object
     /// abbreviations). This points to a mutable AbbrevMemo cell.
     simple_abbrevs: Cell<AbbrevMemoRef>,
-    /// Reuse cache for generic dotted nullary constructors coming from cached
-    /// persistent signatures. Keyed by the original source node identity for
-    /// the lifetime of this typing context.
-    generic_dotted_constr_copies: RefCell<ahash::AHashMap<TypeExprRef, TypeExprRef>>,
     /// Counters for OCaml `Ctype.get_new_abstract_name` when reifying local
     /// GADT constraint variables.
     reified_var_counters: RefCell<ahash::AHashMap<String, usize>>,
@@ -517,7 +513,6 @@ impl TypeContext {
             saved_levels: RefCell::new(Vec::new()),
             trace_gadt_instances: Cell::new(false),
             simple_abbrevs: Cell::new(AbbrevMemoRef(1)),
-            generic_dotted_constr_copies: RefCell::new(ahash::AHashMap::new()),
             reified_var_counters: RefCell::new(ahash::AHashMap::new()),
             previous_env_id: Cell::new(0),
             current_abbreviations: Cell::new(AbbrevMemoRef::nil()),
@@ -1715,20 +1710,6 @@ impl TypeContext {
     /// Access the dedicated simple_abbrevs memo reference.
     pub fn simple_abbrevs_memo(&self) -> AbbrevMemoRef {
         self.simple_abbrevs.get()
-    }
-
-    pub fn find_generic_dotted_constr_copy(&self, source: TypeExprRef) -> Option<TypeExprRef> {
-        self.generic_dotted_constr_copies
-            .borrow()
-            .get(&source)
-            .copied()
-    }
-
-    pub fn remember_generic_dotted_constr_copy(&self, source: TypeExprRef, copied: TypeExprRef) {
-        self.generic_dotted_constr_copies
-            .borrow_mut()
-            .entry(source)
-            .or_insert(copied);
     }
 
     /// Clear simple abbreviations. Called during generalize/generalize_structure,

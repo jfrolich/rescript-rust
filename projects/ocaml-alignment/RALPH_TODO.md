@@ -128,11 +128,11 @@ Files:
 
 Tasks:
 
-- [ ] Audit Rust expansion caches against OCaml `simple_abbrevs`,
+- [x] Audit Rust expansion caches against OCaml `simple_abbrevs`,
       `proper_abbrevs`, and `check_abbrev_env`.
-- [ ] Verify cache lifetime across environment changes.
-- [ ] Verify cache effects on allocation, sharing, and force order.
-- [ ] Add focused tests for repeated expansion through changing module envs.
+- [x] Verify cache lifetime across environment changes.
+- [x] Verify cache effects on allocation, sharing, and force order.
+- [x] Add focused tests for repeated expansion through changing module envs.
 
 Acceptance:
 

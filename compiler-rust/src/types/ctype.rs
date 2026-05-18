@@ -11136,7 +11136,7 @@ fn nondep_type_rec<'a>(
 
     let desc = ctx.get_desc(ty).clone();
     let new_desc = match &desc {
-        TypeDesc::Tconstr { path, args, .. } => {
+        TypeDesc::Tconstr { path, args, abbrev } => {
             if path.is_free(mid) {
                 let normalized_path = env.normalize_path_prefix(path);
                 if normalized_path != *path && !normalized_path.is_free(mid) {
@@ -11149,11 +11149,7 @@ fn nondep_type_rec<'a>(
                         .iter()
                         .map(|a| nondep_type_rec(ctx, env, mid, *a, cache))
                         .collect();
-                    let result = ctx.new_generic_type(TypeDesc::Tconstr {
-                        path: normalized_path,
-                        args: new_args?,
-                        abbrev: super::type_expr::AbbrevMemoRef::nil(),
-                    });
+                    let result = ctx.new_generic_constr(normalized_path, new_args?);
                     ctx.set_desc(stub, TypeDesc::Tlink(result));
                     cache.insert(ty, result);
                     return Some(result);
@@ -11175,7 +11171,7 @@ fn nondep_type_rec<'a>(
                                 ctx,
                                 env,
                                 ty,
-                                super::type_expr::AbbrevMemoRef::nil(),
+                                proper_abbrevs(ctx, path, args, *abbrev),
                                 PrivateFlag::Public,
                                 params,
                                 args,
@@ -11219,7 +11215,7 @@ fn nondep_type_rec<'a>(
                 TypeDesc::Tconstr {
                     path: path.clone(),
                     args: new_args,
-                    abbrev: super::type_expr::AbbrevMemoRef::nil(),
+                    abbrev: ctx.alloc_abbrev(AbbrevMemo::Mnil),
                 }
             }
         }
@@ -11405,7 +11401,7 @@ fn unroll_abbrev<'a>(
     let constr = ctx.new_type(TypeDesc::Tconstr {
         path: Path::pident(id.clone()),
         args: params.to_vec(),
-        abbrev: AbbrevMemoRef::nil(),
+        abbrev: ctx.alloc_abbrev(AbbrevMemo::Mnil),
     });
     ctx.set_level(constr, level);
     link_type(ctx, ty, constr);
@@ -11533,6 +11529,45 @@ mod tests {
         ModuleDeclaration, ModuleType, RecStatus, SignatureItem, TypeDeclaration, TypeKind,
     };
 
+    fn manifest_decl(manifest: TypeExprRef, type_path: Option<Path>) -> TypeDeclaration {
+        TypeDeclaration {
+            type_params: vec![],
+            type_arity: 0,
+            type_kind: TypeKind::TypeAbstract,
+            type_private: PrivateFlag::Public,
+            type_manifest: Some(manifest),
+            type_variance: vec![],
+            type_newtype_level: None,
+            type_loc: crate::location::Location::none(),
+            type_attributes: vec![],
+            type_immediate: false,
+            type_unboxed: crate::types::decl::UnboxedStatus::default(),
+            type_inlined_types: vec![],
+            type_path,
+        }
+    }
+
+    fn module_with_t(type_id: Ident, type_decl: TypeDeclaration) -> ModuleDeclaration {
+        ModuleDeclaration {
+            md_type: ModuleType::MtySignature(vec![SignatureItem::SigType(
+                type_id,
+                type_decl,
+                RecStatus::TrecNot,
+            )]),
+            md_attributes: vec![],
+            md_loc: crate::location::Location::none(),
+            md_path: None,
+        }
+    }
+
+    fn assert_type_path(ctx: &TypeContext, ty: TypeExprRef, expected: &Path) {
+        let ty = ctx.repr(ty);
+        assert!(matches!(
+            &*ctx.get_desc(ty),
+            TypeDesc::Tconstr { path, .. } if path.same(expected)
+        ));
+    }
+
     #[test]
     fn test_unify_same_type() {
         let id_gen = IdGenerator::new();
@@ -11649,6 +11684,47 @@ mod tests {
         // a -> b -> c
         let f2 = ctx.new_arrow_simple(a, ctx.new_arrow_simple(b, c));
         assert_eq!(function_arity(&ctx, f2), 2);
+    }
+
+    #[test]
+    fn simple_abbrev_cache_clears_when_module_env_changes() {
+        let id_gen = IdGenerator::new();
+        let ctx = TypeContext::new(std::sync::Arc::new(id_gen));
+        let mut env = crate::types::Env::empty();
+
+        let module_id = Ident::create_local("M");
+        let type_id = Ident::create_local("t");
+        let module_path = Path::pident(module_id.clone());
+        let type_path = Path::pdot(module_path, "t".to_string());
+
+        let int_ty = ctx.new_constr(crate::types::predef::path_int(), vec![]);
+        env.add_module(
+            module_id.clone(),
+            module_with_t(
+                type_id.clone(),
+                manifest_decl(int_ty, Some(type_path.clone())),
+            ),
+        );
+
+        let first = ctx.new_constr(type_path.clone(), vec![]);
+        let first_expanded = try_expand_head(&ctx, &env, first).expect("expand first M.t");
+        assert_type_path(&ctx, first_expanded, &crate::types::predef::path_int());
+        assert!(
+            ctx.find_abbrev_expansion(ctx.simple_abbrevs_memo(), PrivateFlag::Public, &type_path,)
+                .is_some()
+        );
+
+        let old_env_id = env.id();
+        let string_ty = ctx.new_constr(crate::types::predef::path_string(), vec![]);
+        env.add_module(
+            module_id,
+            module_with_t(type_id, manifest_decl(string_ty, Some(type_path.clone()))),
+        );
+        assert_ne!(env.id(), old_env_id);
+
+        let second = ctx.new_constr(type_path.clone(), vec![]);
+        let second_expanded = try_expand_head(&ctx, &env, second).expect("expand rebound M.t");
+        assert_type_path(&ctx, second_expanded, &crate::types::predef::path_string());
     }
 
     #[test]

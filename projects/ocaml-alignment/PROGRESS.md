@@ -31,14 +31,15 @@ need to be proven against OCaml or replaced with a more direct port.
 
 ## Next Recommended Session
 
-Continue task 4 in [RALPH_TODO.md](./RALPH_TODO.md):
+Continue task 6 in [RALPH_TODO.md](./RALPH_TODO.md):
 
-1. Read OCaml `compiler/ml/typecore.ml` and `compiler/ml/env.ml` around the
-   remaining Rust signature-content inference helpers.
-2. Inventory helpers that scan signatures to guess type-family or module-path
-   identity.
-3. Replace each guess with the corresponding lookup, substitution, or
-   normalization path from OCaml.
+1. Read OCaml `compiler/ml/ctype.ml` and `compiler/ml/btype.ml` around
+   `copy`, `instance`, `copy_type_desc`, `Tsubst`, row copying, and
+   `cleanup_types`.
+2. Audit Rust `copy_type_cached`, `instance`, and row-copy code against the
+   exact temporary-mutation and cleanup sequence.
+3. Replace remaining Rust-only stale-copy compensations with the OCaml-shaped
+   temporary `Tsubst`/copy-cache behavior where possible.
 4. Keep internal and Tella typedtree/lambda/JS parity green.
 
 ## 2026-05-18 Stored Component Thunk Audit
@@ -274,6 +275,7 @@ Validation evidence:
 - Debug JS output quick with external/Tella:
   `./scripts/test_js_output_parity.sh --with-external --quick`: focused fixtures
   `344/344`, local JS output `660/660`, Tella JS output `2127/2127`.
+
 - Release typedtree parity: `./scripts/test_typedtree_parity.sh --release`:
   `660/660`.
 - Release lambda parity: `./scripts/test_lambda_parity.sh --release`: `660/660`.
@@ -413,3 +415,79 @@ Validation evidence:
 - Debug JS output quick with external/Tella:
   `./scripts/test_js_output_parity.sh --with-external --quick`: focused fixtures
   `344/344`, local JS output `660/660`, Tella JS output `2127/2127`.
+
+## 2026-05-18 Abbreviation Expansion Cache Alignment
+
+Task 5 completion:
+
+- Audited live Rust abbreviation caches against OCaml's `simple_abbrevs`,
+  `proper_abbrevs`, `check_abbrev_env`, `memorize_abbrev`, and `find_expans`.
+- Removed the dead `generic_dotted_constr_copies` cache from `TypeContext`.
+  It had no producers or consumers and did not correspond to an OCaml
+  abbreviation cache.
+- Replaced remaining shared-nil `Tconstr` construction in `nondep_type_rec` and
+  `unroll_abbrev` with fresh mutable `Mnil` cells, matching OCaml `ref Mnil`
+  constructor allocation.
+- Changed the direct `nondep_type_rec` abbreviation-substitution path to pass
+  `proper_abbrevs path args abbrev` into `subst_with_memo` instead of a detached
+  nil memo. This keeps `subst` on the same memo target that OCaml gets from
+  `expand_abbrev env (newty2 ty.level ty.desc)`.
+- Added two focused tests:
+  - `simple_abbrev_cache_clears_when_module_env_changes` covers the exact
+    same-path cache lifetime case by rebinding a module declaration in an Env
+    and requiring `check_abbrev_env` to clear `simple_abbrevs`.
+  - `tests/tests/src/abbrev_env_cache_test.res` covers repeated nullary type
+    abbreviation expansion through changed opened module environments in the
+    normal typedtree parity suite.
+
+OCaml references:
+
+- `compiler/ml/ctype.ml:236-241`: `simple_abbrevs` and `proper_abbrevs`.
+- `compiler/ml/btype.ml:531-536`: `find_expans`.
+- `compiler/ml/btype.ml:555-564`: `cleanup_abbrev` and `memorize_abbrev`.
+- `compiler/ml/ctype.ml:1270-1292`: `subst` memorizes the original
+  abbreviation before `instance_parameterized_type`, sets `abbreviations`, then
+  clears it before unification.
+- `compiler/ml/ctype.ml:1322-1325`: `check_abbrev_env` clears all memorized
+  abbreviation refs when the physical environment object changes.
+- `compiler/ml/ctype.ml:1346-1372`: `expand_abbrev_gen` checks memoized
+  expansions before `Env.find_type_expansion` and normalizes only after that
+  lookup fails.
+- `compiler/ml/ctype.ml:4307-4330`: `nondep_type_rec` expands escaping
+  constructors with `expand_abbrev env (newty2 ty.level ty.desc)`, preserving
+  the constructor's abbreviation memo ref.
+- `compiler/ml/ctype.ml:4380-4388`: `unroll_abbrev` relinks through a fresh
+  `Tconstr (Path.Pident id, params, ref Mnil)`.
+
+Validation evidence:
+
+- `cargo check --manifest-path compiler-rust/Cargo.toml`: passed.
+- `cargo build --manifest-path compiler-rust/Cargo.toml`: passed.
+- `cargo build --manifest-path rewatch/Cargo.toml`: passed.
+- `git diff --check -- compiler-rust/src/types/context.rs compiler-rust/src/types/ctype.rs`:
+  passed.
+- `rustfmt --edition 2024 --check compiler-rust/src/types/ctype.rs`: passed.
+- Focused typedtree parity:
+  - `./scripts/test_typedtree_parity.sh abbrev_env_cache_test`: `1/1`.
+  - `./scripts/test_typedtree_parity.sh module_alias_test`: `3/3` after
+    rerunning without overlapping build-artifact writers.
+  - `./scripts/test_typedtree_parity.sh global_module_alias_test`: `1/1`.
+  - `./scripts/test_typedtree_parity.sh defunctor_make_test`: `1/1`.
+  - `./scripts/test_typedtree_parity.sh module_parameter_test`: `1/1`.
+  - `./scripts/test_typedtree_parity.sh bs_poly_map_test`: `1/1`.
+  - `./scripts/test_typedtree_parity.sh --tella API__AnalyticsEvents`: `1/1`.
+- Full debug typedtree parity after clearing cached typedtree artifacts:
+  `./scripts/test_typedtree_parity.sh`: `661/661`.
+- Tella debug typedtree quick after clearing cached typedtree artifacts:
+  `./scripts/test_typedtree_parity.sh --tella --quick`: `1697/1697`.
+- Debug lambda quick: `./scripts/test_lambda_parity.sh --quick`: `661/661`.
+- Debug JS output quick with external/Tella:
+  `./scripts/test_js_output_parity.sh --with-external --quick`: focused fixtures
+  `344/344`, local JS output `661/661`, Tella JS output `2127/2127`.
+
+Unit-test caveat:
+
+- `cargo test --manifest-path compiler-rust/Cargo.toml simple_abbrev_cache_clears_when_module_env_changes --lib`
+  still fails before running the focused test because the crate's lib/test
+  target has pre-existing unrelated compile errors, including duplicate
+  `persistent_env.rs` test modules and stale Lambda/typecore test APIs.
