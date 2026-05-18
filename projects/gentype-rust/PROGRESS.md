@@ -84,23 +84,27 @@ report current counts itself because Tella and fixtures can change.
 
 ## Harness Status
 
-`scripts/test_gentype_output_parity.sh` was added as the sole GenType output
-parity entrypoint. It rejects positional arguments, snapshots OCaml-generated
-`.gen.ts`/`.gen.tsx` files, runs the Rust in-process build for the same project,
-then reports generated parity, changed/missing/extra files, diff hunk count,
-and OCaml/Rust TypeScript typecheck status.
+`scripts/test_gentype_output_parity.sh` is the sole GenType output parity
+entrypoint. It rejects positional arguments, snapshots OCaml-generated
+`.gen.ts`/`.gen.tsx` files, clears only those generated GenType candidates
+before the Rust run, runs the Rust in-process build for the same project, then
+reports generated parity, changed/missing/extra files, diff hunk count, and
+OCaml/Rust TypeScript typecheck status. The script also snapshots and restores
+common source-adjacent JS build artifacts (`.res.js`, `.js`, `.mjs`, `.cjs`) so
+the parity run does not leave generated files dirty.
 
-The script has only been syntax-checked so far:
+Current real Rust in-process generated-output baseline:
 
 ```text
-bash -n scripts/test_gentype_output_parity.sh
+./scripts/test_gentype_output_parity.sh
+
+typescript-react-example: 0/71 generated outputs match, 71 missing, 0 changed, 0 extra, 0 diff hunks; OCaml typecheck 0, Rust typecheck 2
+stdlib-no-shims:          0/1 generated outputs match, 1 missing, 0 changed, 0 extra, 0 diff hunks; OCaml typecheck 0, Rust typecheck 2
+Tella:                    0/112 generated outputs match, 112 missing, 0 changed, 0 extra, 0 diff hunks; TypeScript typecheck not configured
 ```
 
-Full execution is still blocked until the Phase 0 Rust GenType module wiring
-compiles.
-
-Update: Phase 0 module wiring now compiles, so the next useful harness run
-should establish the Rust generated-output baseline.
+This confirms Rust in-process currently compiles the projects but does not yet
+invoke the Rust GenType generator.
 
 ## Phase 0 Compile Wiring
 

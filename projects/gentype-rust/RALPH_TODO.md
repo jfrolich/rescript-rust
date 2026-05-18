@@ -114,7 +114,7 @@ Run this checklist for each file after its first port and before compile work.
 - [x] Report generated file counts, missing files, extra files, changed files,
   diff hunk count, and TypeScript typecheck status.
 - [ ] Preserve current stale CMT error parity coverage.
-- [ ] Commit the harness with the current baseline in the commit body.
+- [x] Commit the harness with the current baseline in the commit body.
 
 ## Phase 2: CLI and Config
 

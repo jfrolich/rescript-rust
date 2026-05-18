@@ -147,6 +147,74 @@ with out_file.open("w", encoding="utf-8") as handle:
 PY
 }
 
+make_restore_candidates() {
+    local project_dir="$1"
+    local out_file="$2"
+
+    python3 - "$project_dir" "$out_file" <<'PY'
+import os
+import sys
+from pathlib import Path
+
+root = Path(sys.argv[1]).resolve()
+out_file = Path(sys.argv[2])
+skip_names = {
+    ".git",
+    ".hg",
+    ".next",
+    "_build",
+    "dist",
+    "lib",
+    "node_modules",
+    "target",
+}
+generated_exts = (".gen.ts", ".gen.tsx")
+js_suffixes = (".js", ".mjs", ".cjs")
+candidates = set()
+
+for dirpath, dirnames, filenames in os.walk(root):
+    dirnames[:] = [name for name in dirnames if name not in skip_names]
+    current = Path(dirpath)
+    for filename in filenames:
+        path = current / filename
+        if filename.endswith(generated_exts):
+            candidates.add(path.resolve())
+            continue
+        if filename.endswith(".res") or filename.endswith(".resi"):
+            stem = path.with_suffix("")
+            for ext in generated_exts:
+                candidates.add(Path(str(stem) + ext).resolve())
+            for suffix in js_suffixes:
+                candidates.add(Path(str(path) + suffix).resolve())
+                candidates.add(Path(str(stem) + suffix).resolve())
+
+with out_file.open("w", encoding="utf-8") as handle:
+    for path in sorted(candidates):
+        print(path, file=handle)
+PY
+}
+
+remove_candidates() {
+    local candidates_file="$1"
+
+    python3 - "$candidates_file" <<'PY'
+import os
+import sys
+
+removed = 0
+with open(sys.argv[1], encoding="utf-8") as candidates:
+    for raw in candidates:
+        path = raw.rstrip("\n")
+        if not path:
+            continue
+        if os.path.isfile(path) or os.path.islink(path):
+            os.unlink(path)
+            removed += 1
+
+print(f"Cleared {removed} generated GenType candidates before Rust build")
+PY
+}
+
 snapshot_candidates() {
     local candidates_file="$1"
     local backup_dir="$2"
@@ -403,6 +471,7 @@ run_suite() {
     local suite_cache="$CACHE_DIR/$suite_name"
     local temp_dir
     local candidates_file
+    local restore_candidates_file
     local state_file
     local manifest_file
     local metrics_file
@@ -421,6 +490,7 @@ run_suite() {
     mkdir -p "$suite_cache/errors"
     temp_dir=$(mktemp -d)
     candidates_file="$temp_dir/candidates.txt"
+    restore_candidates_file="$temp_dir/restore-candidates.txt"
     state_file="$temp_dir/original-state.tsv"
     manifest_file="$temp_dir/expected-manifest.tsv"
     metrics_file="$temp_dir/metrics.env"
@@ -438,7 +508,8 @@ run_suite() {
     }
 
     make_candidates "$project_dir" "$candidates_file"
-    snapshot_candidates "$candidates_file" "$temp_dir/original" "$state_file"
+    make_restore_candidates "$project_dir" "$restore_candidates_file"
+    snapshot_candidates "$restore_candidates_file" "$temp_dir/original" "$state_file"
 
     if ! run_build "$suite_name: building expected outputs with OCaml bsc" "$suite_cache/errors/ocaml-build.log" bash -c '
         set -e
@@ -459,6 +530,8 @@ run_suite() {
     run_typecheck "$suite_name" "$project_dir" "OCaml" "$suite_cache/errors/ocaml-typecheck.log"
     local ocaml_typecheck
     ocaml_typecheck=$(cat "$suite_cache/errors/ocaml-typecheck.log.status" 2>/dev/null || echo "not-run")
+    echo ""
+    remove_candidates "$candidates_file"
     echo ""
 
     if ! run_build "$suite_name: building actual outputs with Rust in-process compiler" "$suite_cache/errors/rust-build.log" bash -c '
