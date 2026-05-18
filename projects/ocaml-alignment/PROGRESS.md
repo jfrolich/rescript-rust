@@ -491,3 +491,74 @@ Unit-test caveat:
   still fails before running the focused test because the crate's lib/test
   target has pre-existing unrelated compile errors, including duplicate
   `persistent_env.rs` test modules and stale Lambda/typecore test APIs.
+
+## 2026-05-18 Copy / Instantiation Sharing Alignment
+
+Task 6 completion:
+
+- Audited Rust `instance`, `instance_list`, `instance_parameterized_type`,
+  `copy_type_cached`, `copy_sep_inner`, `subst_identity_copy_rec`,
+  `copy_type_deep`, and `copy_row_cached` against OCaml's instantiation and
+  copy helpers.
+- Verified the normal `partial = None` rule: generic nodes are copied through
+  one scoped copy window, while non-generic nodes are returned by identity.
+- Verified Rust's scoped node and row marker tables model OCaml's temporary
+  `Tsubst` mutation window without serializer normalization.
+- Verified row-copy behavior for polymorphic variants and object rows against
+  `copy_row`: payload types are copied, `Reither` links are kept only when the
+  source row is kept, fixed rows force matched cases, and row names copy their
+  type arguments.
+- Fixed the one concrete audit mismatch: copied arrows now preserve OCaml
+  commutability-copy semantics. Rust previously rebuilt copied arrows as
+  `Cok`; it now uses `copy_commutable`, which returns `Cok` only for a
+  representative `Cok` source and otherwise allocates a fresh
+  `Clink(Cunknown)`, matching OCaml `copy_commu`.
+
+OCaml references:
+
+- `compiler/ml/ctype.ml:872-1044`: `copy` handles generic/non-generic
+  sharing, installs temporary `Tsubst` stubs, handles constructor abbreviation
+  representatives, and registers row-more recursion markers.
+- `compiler/ml/ctype.ml:1052-1138`: `instance`, `instance_list`,
+  `instance_constructor`, and `instance_parameterized_type` share one copy
+  window until `cleanup_types`.
+- `compiler/ml/ctype.ml:1191-1255`: `copy_sep` / `instance_poly` copy with
+  free-univar-sensitive sharing and delayed generic copies.
+- `compiler/ml/btype.ml:384-410`: `copy_row` preserves row field order and
+  controls `Reither` link and fixed-row behavior.
+- `compiler/ml/btype.ml:418-432`: `copy_commu` and `copy_type_desc` preserve
+  arrow commutability as `Cok` or fresh `Clink(Cunknown)`.
+- `compiler/ml/btype.ml:456-475`: `save_desc`, `dup_kind`, and
+  `cleanup_types` define the temporary mutation window Rust models with scoped
+  copy caches.
+- `compiler/ml/subst.ml:130-239`: `Subst.typexp` uses the same
+  `copy_type_desc` and row-more `Tsubst(Ttuple [...])` shape for full
+  structural substitution copies.
+
+Validation evidence:
+
+- `rustfmt --edition 2024 --check compiler-rust/src/types/ctype.rs`: passed.
+- `cargo check --manifest-path compiler-rust/Cargo.toml`: passed.
+- Debug builds:
+  - `cargo build --manifest-path compiler-rust/Cargo.toml`: passed.
+  - `cargo build --manifest-path rewatch/Cargo.toml`: passed.
+- Focused typedtree parity:
+  - `./scripts/test_typedtree_parity.sh label_uncurry`: `1/1`.
+  - `./scripts/test_typedtree_parity.sh test_type_based_arity`: `1/1`.
+  - `./scripts/test_typedtree_parity.sh poly_variant_test`: `2/2`.
+  - `./scripts/test_typedtree_parity.sh object_type_spreads`: `1/1`.
+  - `./scripts/test_typedtree_parity.sh abbrev_env_cache_test`: `1/1`.
+- Full debug typedtree parity after clearing cached typedtree artifacts:
+  `./scripts/test_typedtree_parity.sh`: `661/661`.
+- Tella debug typedtree quick after clearing cached typedtree artifacts:
+  `./scripts/test_typedtree_parity.sh --tella --quick`: `1697/1697`.
+- Debug lambda quick: `./scripts/test_lambda_parity.sh --quick`: `661/661`.
+- Debug JS output quick with external/Tella:
+  `./scripts/test_js_output_parity.sh --with-external --quick`: focused fixtures
+  `344/344`, local JS output `661/661`, Tella JS output `2127/2127`.
+- Release builds:
+  - `cargo build --release --manifest-path compiler-rust/Cargo.toml`: passed.
+  - `cargo build --release --manifest-path rewatch/Cargo.toml`: passed.
+- Release parity gates after clearing cached typedtree artifacts:
+  - `./scripts/test_typedtree_parity.sh --release`: `661/661`.
+  - `./scripts/test_lambda_parity.sh --release`: `661/661`.

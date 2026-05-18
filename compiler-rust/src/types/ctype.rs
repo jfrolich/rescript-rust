@@ -8645,6 +8645,14 @@ fn bound_conflicts(
     bound.iter().any(|ty| free_univars.contains(&ctx.repr(*ty)))
 }
 
+fn copy_commutable(ctx: &TypeContext, commutable: &Commutable) -> Commutable {
+    if matches!(ctx.commutable_repr(commutable), Commutable::Cok) {
+        Commutable::Cok
+    } else {
+        Commutable::Clink(ctx.alloc_commutable(Commutable::Cunknown))
+    }
+}
+
 fn build_inverse_type_graph(
     ctx: &TypeContext,
     parent: Option<TypeExprRef>,
@@ -8883,7 +8891,10 @@ fn copy_sep_inner(
     let copied_desc = match desc {
         TypeDesc::Tvar(_) => TypeDesc::Tvar(None),
         TypeDesc::Tarrow {
-            arg, ret, arity, ..
+            arg,
+            ret,
+            commutable,
+            arity,
         } => TypeDesc::Tarrow {
             arg: super::type_expr::TypeArg {
                 lbl: arg.lbl,
@@ -8906,7 +8917,7 @@ fn copy_sep_inner(
                 &visited_for_children,
                 delayed_copy,
             ),
-            commutable: super::type_expr::Commutable::Cok,
+            commutable: copy_commutable(ctx, &commutable),
             arity,
         },
         TypeDesc::Ttuple(types) => TypeDesc::Ttuple(
@@ -9477,15 +9488,27 @@ pub fn copy_type_deep(
             fresh
         }
         TypeDesc::Tarrow {
-            arg, ret, arity, ..
+            arg,
+            ret,
+            commutable,
+            arity,
         } => {
             // Create placeholder first to handle cycles
             let placeholder = ctx.new_var(None);
             cache.insert(ty, placeholder);
             let arg_lbl = arg.lbl.clone();
+            let commutable = commutable.clone();
             let new_arg_typ = copy_type_deep(ctx, arg.typ, cache);
             let new_ret = copy_type_deep(ctx, *ret, cache);
-            let new_ty = ctx.new_arrow(arg_lbl, new_arg_typ, new_ret, *arity);
+            let new_ty = ctx.new_type(TypeDesc::Tarrow {
+                arg: crate::types::type_expr::TypeArg {
+                    lbl: arg_lbl,
+                    typ: new_arg_typ,
+                },
+                ret: new_ret,
+                commutable: copy_commutable(ctx, &commutable),
+                arity: *arity,
+            });
             // Update placeholder to point to the real type
             ctx.set_desc(placeholder, TypeDesc::Tlink(new_ty));
             cache.insert(ty, new_ty);
@@ -9925,11 +9948,15 @@ fn subst_identity_copy_rec(
                     );
                 }
                 TypeDesc::Tarrow {
-                    arg, ret, arity, ..
+                    arg,
+                    ret,
+                    commutable,
+                    arity,
                 } => {
                     let arg_typ = arg.typ;
                     let arg_lbl = arg.lbl.clone();
                     let ret = *ret;
+                    let commutable = commutable.clone();
                     let arity = *arity;
                     drop(desc);
                     let arg_copy = subst_identity_copy_rec(
@@ -9952,7 +9979,7 @@ fn subst_identity_copy_rec(
                             typ: arg_copy,
                         },
                         ret: ret_copy,
-                        commutable: crate::types::type_expr::Commutable::Cok,
+                        commutable: copy_commutable(ctx, &commutable),
                         arity,
                     }
                 }
@@ -10339,6 +10366,7 @@ fn copy_type_cached(ctx: &TypeContext, ty: TypeExprRef, cache: &mut CopyCache) -
             arg_lbl: super::asttypes::ArgLabel,
             arg_typ: TypeExprRef,
             ret: TypeExprRef,
+            commutable: Commutable,
             arity: Option<i32>,
         },
         Tuple(Vec<TypeExprRef>),
@@ -10418,11 +10446,15 @@ fn copy_type_cached(ctx: &TypeContext, ty: TypeExprRef, cache: &mut CopyCache) -
                 TypeDesc::Tvar(_) => CopyAction::NewVar(None),
                 TypeDesc::Tunivar(name) => CopyAction::NewUnivar(name.clone()),
                 TypeDesc::Tarrow {
-                    arg, ret, arity, ..
+                    arg,
+                    ret,
+                    commutable,
+                    arity,
                 } => CopyAction::Arrow {
                     arg_lbl: arg.lbl.clone(),
                     arg_typ: arg.typ,
                     ret: *ret,
+                    commutable: commutable.clone(),
                     arity: *arity,
                 },
                 TypeDesc::Ttuple(types) => CopyAction::Tuple(types.clone()),
@@ -10496,6 +10528,7 @@ fn copy_type_cached(ctx: &TypeContext, ty: TypeExprRef, cache: &mut CopyCache) -
                     arg_lbl,
                     arg_typ,
                     ret,
+                    commutable,
                     arity,
                 } => {
                     let arg_copy = copy_type_cached(ctx, arg_typ, cache);
@@ -10506,7 +10539,7 @@ fn copy_type_cached(ctx: &TypeContext, ty: TypeExprRef, cache: &mut CopyCache) -
                             typ: arg_copy,
                         },
                         ret: ret_copy,
-                        commutable: crate::types::type_expr::Commutable::Cok,
+                        commutable: copy_commutable(ctx, &commutable),
                         arity,
                     }
                 }

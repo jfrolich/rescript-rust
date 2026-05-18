@@ -149,10 +149,10 @@ Files:
 
 Tasks:
 
-- [ ] Audit `instance`, `copy`, and generic/non-generic sharing behavior.
-- [ ] Verify temporary `Tsubst`-style behavior or its Rust equivalent.
-- [ ] Verify row-copy behavior, including polymorphic variants and object rows.
-- [ ] Verify when non-generic nodes are shared versus copied.
+- [x] Audit `instance`, `copy`, and generic/non-generic sharing behavior.
+- [x] Verify temporary `Tsubst`-style behavior or its Rust equivalent.
+- [x] Verify row-copy behavior, including polymorphic variants and object rows.
+- [x] Verify when non-generic nodes are shared versus copied.
 
 Acceptance:
 
