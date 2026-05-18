@@ -19,8 +19,8 @@ support in Rust is still a stub:
   paths, imports, generated-file effects, dependency helpers, runtime names,
   and export-module tables.
 - Rewrite Stage 3 has started with initial file-for-file Rust ports of
-  `Annotation.ml` and `TypeEnv.ml`/`.mli`. These files are still intentionally
-  not wired into the crate.
+  `Annotation.ml`, `ModuleResolver.ml`, and `TypeEnv.ml`/`.mli`. These files
+  are still intentionally not wired into the crate.
 
 ## Reference Inventory
 
@@ -112,6 +112,22 @@ For the first Stage 3 chunk:
   type equations, unlike the mutable map updates earlier in the same file. The
   Rust draft keeps that copy shape with cloned `Rc<RefCell<_>>` environments.
 
+For the resolver Stage 3 chunk:
+
+- `ModuleResolver.ml` was ported to
+  `compiler-rust/src/gentype/module_resolver.rs` against
+  `compiler/gentype/ModuleResolver.ml:1-201`.
+- The Rust draft preserves the OCaml lazy resolver boundary from
+  `ModuleResolver.ml:73-106`: source/dependency maps are constructed on first
+  `apply`, not during resolver creation.
+- The filesystem traversal, uppercase/lowercase fallback, shim branch, and
+  relative import path construction were reviewed against
+  `ModuleResolver.ml:6-69`, `ModuleResolver.ml:86-105`, and
+  `ModuleResolver.ml:111-201`.
+- `rustfmt` was run on the new file and `git diff --check` passed.
+- The new file is not wired into the crate, so debug build/parity gates were
+  not run for this non-compiling rewrite stage.
+
 Earlier setup note:
 
 The latest debug build attempt after merging `fuzz-errors` failed before code
@@ -129,8 +145,7 @@ needed.
 
 Continue with Rewrite Stage 3 from `PLAN.md`:
 
-1. Continue with `ModuleResolver.ml`, then the remaining translation files from
-   `compiler/gentype`.
+1. Continue with the remaining translation files from `compiler/gentype`.
 2. Keep function names, helper names, data-flow shape, and source-location
    references as close to OCaml as Rust allows.
 3. Run the three per-file review passes before marking each file done:

@@ -44,7 +44,7 @@ These ports do not need to compile yet. Preserve traversal and mutation order
 from the reference.
 
 - [x] Port `Annotation.ml`.
-- [ ] Port `ModuleResolver.ml`.
+- [x] Port `ModuleResolver.ml`.
 - [x] Port `TypeEnv.ml` and `TypeEnv.mli`.
 - [ ] Port `TranslateCoreType.ml`.
 - [ ] Port `TranslateTypeExprFromTypes.ml`.
@@ -53,8 +53,8 @@ from the reference.
 - [ ] Port `TranslateSignature.ml`.
 - [ ] Port `TranslateStructure.ml`.
 - [ ] Run the three per-file review passes for every file in this stage.
-- [x] Run the three per-file review passes for `Annotation.ml` and
-  `TypeEnv.ml`/`.mli`.
+- [x] Run the three per-file review passes for `Annotation.ml`,
+  `ModuleResolver.ml`, and `TypeEnv.ml`/`.mli`.
 - [ ] Commit the stage or commit coherent file clusters.
 
 ## Rewrite Stage 4: Emitters and Entry Point
