@@ -5,7 +5,7 @@ Last updated: 2026-05-18.
 ## Current State
 
 The `fuzz-errors` branch has been fast-forward merged into `combined`. GenType
-support in Rust is still a stub:
+support in Rust is still incomplete:
 
 - rewatch parses `gentypeconfig` and forwards GenType flags.
 - Rust `bsc` recognizes `-bs-gentype`.
@@ -13,8 +13,7 @@ support in Rust is still a stub:
   output parity.
 - Rust `bsc` does not generate `.gen.tsx` or `.gen.ts`.
 - Rewrite Stage 1 has an initial file-for-file Rust port under
-  `compiler-rust/src/gentype/`. These files are intentionally not wired into
-  the crate yet.
+  `compiler-rust/src/gentype/`.
 - Rewrite Stage 2 now also has an initial file-for-file Rust port for config,
   paths, imports, generated-file effects, dependency helpers, runtime names,
   and export-module tables.
@@ -22,8 +21,7 @@ support in Rust is still a stub:
   `Annotation.ml`, `ModuleResolver.ml`, `TranslateCoreType.ml`,
   `TranslateSignature.ml`, `TranslateSignatureFromTypes.ml`,
   `TranslateStructure.ml`, `TranslateTypeDeclarations.ml`,
-  `TranslateTypeExprFromTypes.ml`, and `TypeEnv.ml`/`.mli`. These files are
-  still intentionally not wired into the crate.
+  `TranslateTypeExprFromTypes.ml`, and `TypeEnv.ml`/`.mli`.
 - Rewrite Stage 4 has a file-for-file Rust port of
   `EmitText.ml`, `EmitType.ml`, `Emitters.ml`/`.mli`, `EmitJs.ml`,
   `NamedArgs.ml`, `Converter.ml`, and `GenTypeMain.ml`.
@@ -32,6 +30,12 @@ support in Rust is still a stub:
 - Phase 2 now threads a parsed GenType config through both Rust `bsc` and the
   rewatch in-process compiler options. Rust still uses the same observable
   `-bs-gentype-*` flag stream as the OCaml path before constructing the config.
+- Phase 5 has started: typedtree/type-signature translation now receives the
+  Rust `TypeContext` wherever the OCaml GenType reference reads
+  `Types.type_expr.desc`, matching `compiler/ml/types.ml:22`,
+  `compiler/gentype/TranslateTypeExprFromTypes.ml:5-12`,
+  `compiler/gentype/TranslateTypeExprFromTypes.ml:470-742`, and
+  `compiler/gentype/TypeVars.ml:3-16`.
 - The project now has a single no-argument GenType output parity harness:
   `./scripts/test_gentype_output_parity.sh`. It always compares raw
   `.gen.ts`/`.gen.tsx` output for the react example, stdlib-no-shims, and
@@ -126,15 +130,10 @@ The staged GenType tree is now part of the compiler crate:
 
 Known Phase 5 adapters still present:
 
-- `translate_type_expr_from_types::type_expr_desc` still needs a real
-  TypeContext-backed descriptor reader for `compiler/ml/types.ml:type_expr.desc`.
-- `type_vars::extract_from_type_expr_refs` uses arity placeholders until
-  TypeContext is threaded so it can read the actual `Tvar` names from
-  `compiler/gentype/TypeVars.ml:3-13`.
 - `TranslateTypeExprFromTypes.ml:560-565` has an OCaml record-copy branch for
-  `Tconstr(path, [{desc = Tlink te}], r)`; the Rust branch currently relies on
-  argument translation following the `Tlink` until TypeContext-backed record
-  copy is wired.
+  `Tconstr(path, [{desc = Tlink te}], r)`; the Rust branch now has the
+  TypeContext access needed to mirror it, but still currently relies on
+  argument translation following the `Tlink`.
 - Package `Tpackage` constraint longidents from
   `TranslateTypeExprFromTypes.ml:639-670` still need `ParseArena` threading so
   Rust can flatten the stored `Longident` indices to names.
@@ -195,10 +194,10 @@ from `compiler/core/js_implementation.ml:33-34`,
 `compiler/core/js_implementation.ml:170`, and
 `compiler/ml/typemod.ml:1763-1764` / `1785-1787`.
 
-This is not wired into `driver.rs` yet. The next step is to call it from the
-interface and implementation typecheck paths, then thread `TypeContext` through
-the translation modules so annotated files do not hit the temporary
-`TypeExprRef` descriptor placeholder.
+This is not wired into `driver.rs` yet. `TypedArtifact` now carries the
+`TypeContext`, and the translation modules use it for descriptor reads. The
+next step is to call the entry point from the interface and implementation
+typecheck paths.
 
 Debug verification:
 
@@ -206,6 +205,38 @@ Debug verification:
 cargo build --manifest-path compiler-rust/Cargo.toml
 cargo build --manifest-path rewatch/Cargo.toml
 git diff --check -- compiler-rust/src/gentype/main.rs projects/gentype-rust/PROGRESS.md projects/gentype-rust/RALPH_TODO.md
+```
+
+## Phase 5 TypeContext Translation
+
+Typedtree/type-signature GenType translation now receives `&TypeContext`
+through `main.rs`, `translate_structure.rs`, `translate_signature.rs`,
+`translate_signature_from_types.rs`, `translate_type_declarations.rs`,
+`translate_core_type.rs`, `translate_type_expr_from_types.rs`,
+`translation.rs`, and `type_vars.rs`.
+
+This removes the previous `TypeExprRef` descriptor placeholder and arity-based
+type-variable fallback. The Rust descriptor reads now explicitly mirror the
+OCaml reference's direct `type_expr.desc` reads at
+`compiler/ml/types.ml:22`, `compiler/gentype/TranslateTypeExprFromTypes.ml:5-12`,
+`compiler/gentype/TranslateTypeExprFromTypes.ml:470-742`, and
+`compiler/gentype/TypeVars.ml:3-16`.
+
+Current generated-output parity remains unchanged because `driver.rs` still
+does not invoke `process_typed_artifact`:
+
+```text
+typescript-react-example: 0/71 generated outputs match, 71 missing
+stdlib-no-shims:          0/1 generated outputs match, 1 missing
+Tella:                    0/112 generated outputs match, 112 missing
+```
+
+Debug verification:
+
+```text
+cargo build --manifest-path compiler-rust/Cargo.toml
+cargo build --manifest-path rewatch/Cargo.toml
+git diff --check -- compiler-rust/src/gentype/main.rs compiler-rust/src/gentype/translate_core_type.rs compiler-rust/src/gentype/translate_signature.rs compiler-rust/src/gentype/translate_signature_from_types.rs compiler-rust/src/gentype/translate_structure.rs compiler-rust/src/gentype/translate_type_declarations.rs compiler-rust/src/gentype/translate_type_expr_from_types.rs compiler-rust/src/gentype/translation.rs compiler-rust/src/gentype/type_vars.rs projects/gentype-rust/PROGRESS.md projects/gentype-rust/RALPH_TODO.md
 ```
 
 ## Recent Verification
@@ -456,13 +487,13 @@ The later Phase 0 debug builds listed above completed.
 
 ## Next Session
 
-Continue with Phase 2/3 integration from `PLAN.md`:
+Continue with Phase 3/5 integration from `PLAN.md`:
 
-1. Replace the remaining Phase 5 adapters above with real TypeContext/ParseArena
-   access where the OCaml reference reads `type_expr.desc`, `Tvar` names, or
-   package constraint longidents.
-2. Keep function names, helper names, data-flow shape, and source-location
-   references as close to OCaml as Rust allows.
-3. Wire `gentype::main` from Rust `bsc`/in-process typed artifacts and run
+1. Wire `gentype::main` from Rust `bsc`/in-process typed artifacts and run
    `./scripts/test_gentype_output_parity.sh` to get the first generated-output
    baseline.
+2. Keep function names, helper names, data-flow shape, and source-location
+   references as close to OCaml as Rust allows.
+3. Replace the remaining Phase 5 ParseArena access where the OCaml reference
+   reads package constraint longidents, and mirror the
+   `TranslateTypeExprFromTypes.ml:560-565` linked-argument record-copy branch.

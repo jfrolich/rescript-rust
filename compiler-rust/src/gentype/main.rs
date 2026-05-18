@@ -6,6 +6,7 @@ use std::path::Path;
 
 use crate::parse_arena::{LocIdx, ParseArena};
 use crate::parser::ast::Attributes;
+use crate::types::context::TypeContext;
 use crate::types::typedtree::{
     Structure, StructureItem, StructureItemDesc, TypedSignature, TypedSignatureItem,
     TypedSignatureItemDesc,
@@ -19,9 +20,10 @@ pub enum BinaryAnnots {
     PartialInterface,
 }
 
-pub struct InputCmt {
+pub struct InputCmt<'a> {
     pub cmt_annots: BinaryAnnots,
     pub arena: ParseArena,
+    pub ctx: &'a TypeContext,
 }
 
 pub enum TypedArtifactAnnots<'a> {
@@ -35,6 +37,7 @@ pub enum TypedArtifactAnnots<'a> {
 pub struct TypedArtifact<'a> {
     pub annots: TypedArtifactAnnots<'a>,
     pub arena: &'a ParseArena,
+    pub ctx: &'a TypeContext,
     pub source_file: Option<&'a str>,
     pub file_name: crate::gentype::module_name::T,
     pub is_interface: bool,
@@ -42,7 +45,7 @@ pub struct TypedArtifact<'a> {
 
 pub fn cmt_check_annotations(
     check_annotation: &impl Fn(&ParseArena, LocIdx, &Attributes) -> bool,
-    input_cmt: &InputCmt,
+    input_cmt: &InputCmt<'_>,
 ) -> bool {
     // Mirrors compiler/gentype/GenTypeMain.ml:3-10.
     match &input_cmt.cmt_annots {
@@ -66,7 +69,7 @@ pub fn cmt_check_annotations(
     }
 }
 
-pub fn cmt_has_type_errors(input_cmt: &InputCmt) -> bool {
+pub fn cmt_has_type_errors(input_cmt: &InputCmt<'_>) -> bool {
     // Mirrors compiler/gentype/GenTypeMain.ml:11-14.
     matches!(
         &input_cmt.cmt_annots,
@@ -138,6 +141,7 @@ pub fn translate_typed_artifact(
     let translations = match artifact.annots {
         TypedArtifactAnnots::Implementation(structure) => {
             crate::gentype::translate_structure::translate_structure(
+                artifact.ctx,
                 artifact.arena,
                 config,
                 output_file_relative,
@@ -148,6 +152,7 @@ pub fn translate_typed_artifact(
         }
         TypedArtifactAnnots::Interface(signature) => {
             crate::gentype::translate_signature::translate_signature(
+                artifact.ctx,
                 artifact.arena,
                 config,
                 output_file_relative,
@@ -172,7 +177,7 @@ pub fn input_cmt_translate_type_declarations_from_cmt(
     config: &crate::gentype::config::T,
     output_file_relative: &str,
     resolver: &crate::gentype::module_resolver::Resolver,
-    input_cmt: &InputCmt,
+    input_cmt: &InputCmt<'_>,
 ) -> crate::gentype::translation::T {
     // Mirrors compiler/gentype/GenTypeMain.ml:26-52.
     let type_env = crate::gentype::type_env::root();
@@ -183,6 +188,7 @@ pub fn input_cmt_translate_type_declarations_from_cmt(
                 .str_items
                 .retain(|item| structure_item_is_declaration(item));
             crate::gentype::translate_structure::translate_structure(
+                input_cmt.ctx,
                 &input_cmt.arena,
                 config,
                 output_file_relative,
@@ -197,6 +203,7 @@ pub fn input_cmt_translate_type_declarations_from_cmt(
                 .sig_items
                 .retain(|item| signature_item_is_declaration(item));
             crate::gentype::translate_signature::translate_signature(
+                input_cmt.ctx,
                 &input_cmt.arena,
                 config,
                 output_file_relative,
@@ -238,13 +245,14 @@ pub fn translate_c_m_t(
     config: &crate::gentype::config::T,
     output_file_relative: &str,
     resolver: &crate::gentype::module_resolver::Resolver,
-    input_cmt: &InputCmt,
+    input_cmt: &InputCmt<'_>,
 ) -> crate::gentype::translation::T {
     // Mirrors compiler/gentype/GenTypeMain.ml:53-70.
     let type_env = crate::gentype::type_env::root();
     let translations = match &input_cmt.cmt_annots {
         BinaryAnnots::Implementation(structure) => {
             crate::gentype::translate_structure::translate_structure(
+                input_cmt.ctx,
                 &input_cmt.arena,
                 config,
                 output_file_relative,
@@ -255,6 +263,7 @@ pub fn translate_c_m_t(
         }
         BinaryAnnots::Interface(signature) => {
             crate::gentype::translate_signature::translate_signature(
+                input_cmt.ctx,
                 &input_cmt.arena,
                 config,
                 output_file_relative,
@@ -305,7 +314,7 @@ pub fn emit_translation(
     crate::gentype::generated_files::write_file_if_required(output_file, &file_contents)
 }
 
-pub fn read_cmt(cmt_file: &str) -> InputCmt {
+pub fn read_cmt(cmt_file: &str) -> InputCmt<'static> {
     // Mirrors compiler/gentype/GenTypeMain.ml:85-91. Actual CMT decoding is
     // wired later; this staged port preserves the stale-artifact error boundary.
     match std::fs::read(cmt_file) {
@@ -335,7 +344,7 @@ fn chop_extension(path: &str) -> String {
     }
 }
 
-pub fn read_input_cmt(is_interface: bool, cmt_file: &str) -> (InputCmt, bool) {
+pub fn read_input_cmt(is_interface: bool, cmt_file: &str) -> (InputCmt<'static>, bool) {
     // Mirrors compiler/gentype/GenTypeMain.ml:93-134.
     let input_cmt = read_cmt(cmt_file);
     let ignore_interface = Cell::new(false);

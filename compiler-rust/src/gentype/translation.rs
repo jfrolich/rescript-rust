@@ -131,6 +131,7 @@ pub fn translate_dependencies(
 }
 
 pub fn translate_value<F>(
+    ctx: &crate::types::context::TypeContext,
     arena: &ParseArena,
     attributes: &Attributes,
     config: &crate::gentype::config::T,
@@ -150,6 +151,7 @@ where
         _ => name.to_string(),
     };
     translate_value_with_name_as(
+        ctx,
         Some(name_as),
         config,
         doc_string,
@@ -163,6 +165,7 @@ where
 }
 
 pub fn translate_value_with_name_as<F>(
+    ctx: &crate::types::context::TypeContext,
     name_as: Option<String>,
     config: &crate::gentype::config::T,
     doc_string: crate::gentype::gen_type_common::doc_string::T,
@@ -182,7 +185,7 @@ where
     let name_as = name_as.unwrap_or_else(|| name.to_string());
     let type_expr_translation =
         crate::gentype::translate_type_expr_from_types::translate_type_expr_from_types(
-            config, type_env, &type_expr,
+            ctx, config, type_env, &type_expr,
         );
     let type_vars = crate::gentype::type_vars::free(&type_expr_translation.type_);
     let type_ = add_annotations_to_function(abstract_the_type_parameters(
@@ -218,6 +221,7 @@ where
 /// [@genType]
 /// [@module] external myBanner : ReasonReact.reactClass = "./MyBanner";
 pub fn translate_primitive(
+    ctx: &crate::types::context::TypeContext,
     arena: &ParseArena,
     config: &crate::gentype::config::T,
     output_file_relative: &str,
@@ -236,6 +240,7 @@ pub fn translate_primitive(
     };
 
     let type_expr_translation = crate::gentype::translate_core_type::translate_core_type(
+        ctx,
         arena,
         config,
         type_env,

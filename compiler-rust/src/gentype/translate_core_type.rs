@@ -2,13 +2,14 @@
 // This Stage 3 GenType port is intentionally not wired into the crate yet.
 
 use crate::gentype::gen_type_common::{
-    create_variant, dep_to_string, ident, is_number, unknown, Case as VariantCase,
-    ClosedFlag as GenClosedFlag, Dep, Function, Label, LabelJs, Payload, Type,
+    Case as VariantCase, ClosedFlag as GenClosedFlag, Dep, Function, Label, LabelJs, Payload, Type,
+    create_variant, dep_to_string, ident, is_number, unknown,
 };
 use crate::parse_arena::ParseArena;
 use crate::parser::ast::ClosedFlag as AstClosedFlag;
 use crate::parser::longident::Longident;
 use crate::types::asttypes::ArgLabel;
+use crate::types::context::TypeContext;
 use crate::types::path::Path;
 use crate::types::typedtree::{
     ObjectField, ObjectFieldDesc, RowFieldDesc, RowFieldType, TypedCoreType, TypedCoreTypeDesc,
@@ -77,6 +78,7 @@ pub fn process_variant(row_fields: &[RowFieldType]) -> ProcessVariant {
 
 #[allow(non_snake_case)]
 pub fn translate_arrow_type(
+    ctx: &TypeContext,
     arena: &ParseArena,
     config: &crate::gentype::config::T,
     type_vars_gen: &crate::gentype::gen_ident::TypeVarsGen,
@@ -92,12 +94,13 @@ pub fn translate_arrow_type(
             if matches!(arg.lbl, ArgLabel::Nolabel) && (arity.is_none() || rev_args.is_empty()) =>
         {
             let translation =
-                translateCoreType_(arena, config, type_vars_gen, false, type_env, &arg.typ);
+                translateCoreType_(ctx, arena, config, type_vars_gen, false, type_env, &arg.typ);
             let mut next_rev_deps = translation.dependencies;
             next_rev_deps.extend(rev_arg_deps);
             let mut next_rev_args = vec![(Label::Nolabel, translation.type_)];
             next_rev_args.extend(rev_args);
             translate_arrow_type(
+                ctx,
                 arena,
                 config,
                 type_vars_gen,
@@ -119,8 +122,15 @@ pub fn translate_arrow_type(
             .unwrap_or_default();
             match remove_option(&arg.lbl, &arg.typ) {
                 None => {
-                    let translation =
-                        translateCoreType_(arena, config, type_vars_gen, false, type_env, &arg.typ);
+                    let translation = translateCoreType_(
+                        ctx,
+                        arena,
+                        config,
+                        type_vars_gen,
+                        false,
+                        type_env,
+                        &arg.typ,
+                    );
                     let mut next_rev_deps = translation.dependencies;
                     next_rev_deps.extend(rev_arg_deps);
                     let label = match as_label.is_empty() {
@@ -130,6 +140,7 @@ pub fn translate_arrow_type(
                     let mut next_rev_args = vec![(Label::Label(label), translation.type_)];
                     next_rev_args.extend(rev_args);
                     translate_arrow_type(
+                        ctx,
                         arena,
                         config,
                         type_vars_gen,
@@ -142,12 +153,13 @@ pub fn translate_arrow_type(
                 }
                 Some((lbl, t1)) => {
                     let translation =
-                        translateCoreType_(arena, config, type_vars_gen, false, type_env, &t1);
+                        translateCoreType_(ctx, arena, config, type_vars_gen, false, type_env, &t1);
                     let mut next_rev_deps = translation.dependencies;
                     next_rev_deps.extend(rev_arg_deps);
                     let mut next_rev_args = vec![(Label::OptLabel(lbl), translation.type_)];
                     next_rev_args.extend(rev_args);
                     translate_arrow_type(
+                        ctx,
                         arena,
                         config,
                         type_vars_gen,
@@ -161,8 +173,15 @@ pub fn translate_arrow_type(
             }
         }
         _ => {
-            let translation =
-                translateCoreType_(arena, config, type_vars_gen, false, type_env, core_type);
+            let translation = translateCoreType_(
+                ctx,
+                arena,
+                config,
+                type_vars_gen,
+                false,
+                type_env,
+                core_type,
+            );
             let mut all_deps = rev_arg_deps;
             if !no_function_return_dependencies {
                 all_deps.extend(translation.dependencies);
@@ -184,6 +203,7 @@ pub fn translate_arrow_type(
 
 #[allow(non_snake_case)]
 pub fn translateCoreType_(
+    ctx: &TypeContext,
     arena: &ParseArena,
     config: &crate::gentype::config::T,
     type_vars_gen: &crate::gentype::gen_ident::TypeVarsGen,
@@ -194,13 +214,13 @@ pub fn translateCoreType_(
     // Mirrors compiler/gentype/TranslateCoreType.ml:122-280.
     match &core_type.ctyp_desc {
         TypedCoreTypeDesc::Ttyp_alias(ct, _) => {
-            translateCoreType_(arena, config, type_vars_gen, false, type_env, ct)
+            translateCoreType_(ctx, arena, config, type_vars_gen, false, type_env, ct)
         }
         TypedCoreTypeDesc::Ttyp_object(t_obj, closed_flag) => {
             let fields_translations = t_obj
                 .iter()
                 .map(|object_field| {
-                    get_field_type(arena, config, type_vars_gen, type_env, object_field)
+                    get_field_type(ctx, arena, config, type_vars_gen, type_env, object_field)
                 })
                 .collect::<Vec<_>>();
             crate::gentype::translate_type_expr_from_types::translate_obj_type(
@@ -213,7 +233,7 @@ pub fn translateCoreType_(
         }
         TypedCoreTypeDesc::Ttyp_constr(path, _, type_params) => {
             let params_translation =
-                translateCoreTypes_(arena, config, type_vars_gen, type_env, type_params);
+                translateCoreTypes_(ctx, arena, config, type_vars_gen, type_env, type_params);
             crate::gentype::translate_type_expr_from_types::translate_constr(
                 config,
                 &params_translation,
@@ -222,6 +242,7 @@ pub fn translateCoreType_(
             )
         }
         TypedCoreTypeDesc::Ttyp_poly(_, t) => translateCoreType_(
+            ctx,
             arena,
             config,
             type_vars_gen,
@@ -230,6 +251,7 @@ pub fn translateCoreType_(
             t,
         ),
         TypedCoreTypeDesc::Ttyp_arrow(_, _, _) => translate_arrow_type(
+            ctx,
             arena,
             config,
             type_vars_gen,
@@ -241,7 +263,7 @@ pub fn translateCoreType_(
         ),
         TypedCoreTypeDesc::Ttyp_tuple(list_exp) => {
             let inner_types_translation =
-                translateCoreTypes_(arena, config, type_vars_gen, type_env, list_exp);
+                translateCoreTypes_(ctx, arena, config, type_vars_gen, type_env, list_exp);
             crate::gentype::translate_type_expr_from_types::Translation {
                 dependencies: inner_types_translation
                     .iter()
@@ -268,6 +290,7 @@ pub fn translateCoreType_(
             }
         }
         TypedCoreTypeDesc::Ttyp_variant(row_fields, _, _) => translate_variant(
+            ctx,
             arena,
             config,
             type_vars_gen,
@@ -276,13 +299,14 @@ pub fn translateCoreType_(
             row_fields,
         ),
         TypedCoreTypeDesc::Ttyp_package(package) => {
-            translate_package(arena, config, type_vars_gen, type_env, package)
+            translate_package(ctx, arena, config, type_vars_gen, type_env, package)
         }
     }
 }
 
 #[allow(non_snake_case)]
 pub fn translateCoreTypes_(
+    ctx: &TypeContext,
     arena: &ParseArena,
     config: &crate::gentype::config::T,
     type_vars_gen: &crate::gentype::gen_ident::TypeVarsGen,
@@ -293,12 +317,21 @@ pub fn translateCoreTypes_(
     type_exprs
         .iter()
         .map(|core_type| {
-            translateCoreType_(arena, config, type_vars_gen, false, type_env, core_type)
+            translateCoreType_(
+                ctx,
+                arena,
+                config,
+                type_vars_gen,
+                false,
+                type_env,
+                core_type,
+            )
         })
         .collect()
 }
 
 pub fn translate_core_type(
+    ctx: &TypeContext,
     arena: &ParseArena,
     config: &crate::gentype::config::T,
     type_env: &crate::gentype::type_env::T,
@@ -306,7 +339,15 @@ pub fn translate_core_type(
 ) -> crate::gentype::translate_type_expr_from_types::Translation {
     // Mirrors compiler/gentype/TranslateCoreType.ml:286-295.
     let type_vars_gen = crate::gentype::gen_ident::create_type_vars_gen();
-    let translation = translateCoreType_(arena, config, &type_vars_gen, false, type_env, core_type);
+    let translation = translateCoreType_(
+        ctx,
+        arena,
+        config,
+        &type_vars_gen,
+        false,
+        type_env,
+        core_type,
+    );
     if crate::gentype::debug::dependencies.load(std::sync::atomic::Ordering::Relaxed) {
         for dep in &translation.dependencies {
             crate::gentype::log_::item(&format!("Dependency: {}\n", dep_to_string(dep)));
@@ -316,6 +357,7 @@ pub fn translate_core_type(
 }
 
 fn get_field_type(
+    ctx: &TypeContext,
     arena: &ParseArena,
     config: &crate::gentype::config::T,
     type_vars_gen: &crate::gentype::gen_ident::TypeVarsGen,
@@ -333,17 +375,18 @@ fn get_field_type(
                     dependencies: vec![],
                     type_: ident(""),
                 },
-                false => translateCoreType_(arena, config, type_vars_gen, false, type_env, t),
+                false => translateCoreType_(ctx, arena, config, type_vars_gen, false, type_env, t),
             },
         ),
         ObjectFieldDesc::OTinherit(t) => (
             "Inherit".to_string(),
-            translateCoreType_(arena, config, type_vars_gen, false, type_env, t),
+            translateCoreType_(ctx, arena, config, type_vars_gen, false, type_env, t),
         ),
     }
 }
 
 fn translate_variant(
+    ctx: &TypeContext,
     arena: &ParseArena,
     config: &crate::gentype::config::T,
     type_vars_gen: &crate::gentype::gen_ident::TypeVarsGen,
@@ -403,7 +446,15 @@ fn translate_variant(
                     (
                         label.clone(),
                         attributes.clone(),
-                        translateCoreType_(arena, config, type_vars_gen, false, type_env, payload),
+                        translateCoreType_(
+                            ctx,
+                            arena,
+                            config,
+                            type_vars_gen,
+                            false,
+                            type_env,
+                            payload,
+                        ),
                     )
                 })
                 .collect::<Vec<_>>();
@@ -421,7 +472,7 @@ fn translate_variant(
                 })
                 .collect::<Vec<_>>();
             let inherits_translations =
-                translateCoreTypes_(arena, config, type_vars_gen, type_env, &inherits);
+                translateCoreTypes_(ctx, arena, config, type_vars_gen, type_env, &inherits);
             let inherits = inherits_translations
                 .iter()
                 .map(|translation| translation.type_.clone())
@@ -444,6 +495,7 @@ fn translate_variant(
 }
 
 fn translate_package(
+    ctx: &TypeContext,
     arena: &ParseArena,
     config: &crate::gentype::config::T,
     type_vars_gen: &crate::gentype::gen_ident::TypeVarsGen,
@@ -458,7 +510,7 @@ fn translate_package(
                 .map(|(x, t)| {
                     (
                         longident_to_strings(arena, arena.get_longident(x.txt)),
-                        translateCoreType_(arena, config, type_vars_gen, false, &type_env, t),
+                        translateCoreType_(ctx, arena, config, type_vars_gen, false, &type_env, t),
                     )
                 })
                 .collect::<Vec<_>>();
@@ -474,6 +526,7 @@ fn translate_package(
                 crate::gentype::type_env::add_type_equations(&type_equations, &type_env);
             let (mut dependencies_from_record_type, type_) =
                 crate::gentype::translate_type_expr_from_types::signature_to_module_runtime_representation(
+                    ctx,
                     config,
                     type_vars_gen,
                     &type_env1,

@@ -151,10 +151,24 @@ Run this checklist for each file after its first port and before compile work.
 ## Phase 5: Type Translation
 
 - [ ] Integrate reviewed `type_env.rs`.
-- [ ] Integrate reviewed `type_vars.rs`.
-- [ ] Integrate reviewed `translate_core_type.rs`.
-- [ ] Integrate reviewed `translate_type_expr_from_types.rs`.
-- [ ] Integrate reviewed `translate_type_declarations.rs`.
+- [x] Thread `TypeContext` through `type_vars.rs` so
+  `extract_from_type_expr_refs` reads actual `Tvar` names like
+  `compiler/gentype/TypeVars.ml:3-16`.
+- [x] Thread `TypeContext` through `translate_core_type.rs`,
+  `translate_type_expr_from_types.rs`, `translate_type_declarations.rs`,
+  `translate_signature_from_types.rs`, `translate_signature.rs`,
+  `translate_structure.rs`, and `translation.rs` wherever the OCaml reference
+  reads `Types.type_expr.desc` directly, especially
+  `compiler/gentype/TranslateTypeExprFromTypes.ml:5-12` and
+  `compiler/gentype/TranslateTypeExprFromTypes.ml:470-742`.
+- [ ] Mirror `TranslateTypeExprFromTypes.ml:560-565` for the
+  linked-argument `Tconstr` record-copy branch.
+- [ ] Thread `ParseArena` for `TranslateTypeExprFromTypes.ml:639-670` package
+  constraint longidents.
+- [ ] Integrate reviewed `type_vars.rs` fully.
+- [ ] Integrate reviewed `translate_core_type.rs` fully.
+- [ ] Integrate reviewed `translate_type_expr_from_types.rs` fully.
+- [ ] Integrate reviewed `translate_type_declarations.rs` fully.
 - [ ] Reach `stdlib-no-shims` output parity.
 - [ ] Commit each type-family improvement atomically with parity status.
 

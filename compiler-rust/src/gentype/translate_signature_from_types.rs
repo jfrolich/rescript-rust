@@ -6,6 +6,7 @@ use crate::parser::ast::Attributes;
 use crate::types::decl::{ModuleType, SignatureItem, TypeKind};
 
 pub fn translate_type_declaration_from_types(
+    ctx: &crate::types::context::TypeContext,
     arena: &ParseArena,
     config: &crate::gentype::config::T,
     output_file_relative: &str,
@@ -18,7 +19,7 @@ pub fn translate_type_declaration_from_types(
     crate::gentype::type_env::new_type(id.name(), type_env);
     let type_name = id.name().to_string();
     let type_vars =
-        crate::gentype::type_vars::extract_from_type_expr_refs(&type_declaration.type_params);
+        crate::gentype::type_vars::extract_from_type_expr_refs(ctx, &type_declaration.type_params);
     if crate::gentype::debug::translation.load(std::sync::atomic::Ordering::Relaxed) {
         crate::gentype::log_::item(&format!("Translate Types.type_declaration {type_name}\n"));
     }
@@ -46,6 +47,7 @@ pub fn translate_type_declaration_from_types(
     };
     let empty_attributes = Attributes::new();
     crate::gentype::translate_type_declarations::traslate_declaration_kind(
+        ctx,
         arena,
         config,
         type_declaration.type_loc.clone(),
@@ -61,6 +63,7 @@ pub fn translate_type_declaration_from_types(
 }
 
 pub fn translate_module_declaration_from_types(
+    ctx: &crate::types::context::TypeContext,
     arena: &ParseArena,
     config: &crate::gentype::config::T,
     output_file_relative: &str,
@@ -74,6 +77,7 @@ pub fn translate_module_declaration_from_types(
         ModuleType::MtySignature(signature) => {
             let name = id.name();
             crate::gentype::translation::combine(&translate_signature_from_types(
+                ctx,
                 arena,
                 config,
                 output_file_relative,
@@ -104,6 +108,7 @@ pub fn translate_module_declaration_from_types(
 }
 
 pub fn translate_signature_item_from_types(
+    ctx: &crate::types::context::TypeContext,
     arena: &ParseArena,
     config: &crate::gentype::config::T,
     output_file_relative: &str,
@@ -117,6 +122,7 @@ pub fn translate_signature_item_from_types(
             import_types: vec![],
             code_items: vec![],
             type_declarations: translate_type_declaration_from_types(
+                ctx,
                 arena,
                 config,
                 output_file_relative,
@@ -134,6 +140,7 @@ pub fn translate_signature_item_from_types(
             );
             crate::gentype::type_env::update_module_item(module_item, type_env);
             translate_module_declaration_from_types(
+                ctx,
                 arena,
                 &config,
                 output_file_relative,
@@ -157,6 +164,7 @@ pub fn translate_signature_item_from_types(
             ) == crate::gentype::annotation::T::GenType
             {
                 crate::gentype::translation::translate_value_with_name_as(
+                    ctx,
                     crate::gentype::annotation::get_decl_gentype_as_renaming(
                         &value_description.val_attributes,
                     ),
@@ -183,6 +191,7 @@ pub fn translate_signature_item_from_types(
 }
 
 pub fn translate_signature_from_types(
+    ctx: &crate::types::context::TypeContext,
     arena: &ParseArena,
     config: &crate::gentype::config::T,
     output_file_relative: &str,
@@ -198,6 +207,7 @@ pub fn translate_signature_from_types(
         .iter()
         .map(|signature_item| {
             translate_signature_item_from_types(
+                ctx,
                 arena,
                 config,
                 output_file_relative,

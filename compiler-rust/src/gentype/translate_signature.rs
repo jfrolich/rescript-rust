@@ -8,6 +8,7 @@ use crate::types::typedtree::{
 };
 
 pub fn translate_signature_value(
+    ctx: &crate::types::context::TypeContext,
     arena: &ParseArena,
     config: &crate::gentype::config::T,
     output_file_relative: &str,
@@ -32,6 +33,7 @@ pub fn translate_signature_value(
         crate::gentype::annotation::T::GenType => {
             let name = unwrap_uppercase_exotic(value_description.val_id.name()).to_string();
             crate::gentype::translation::translate_value(
+                ctx,
                 arena,
                 &value_description.val_attributes,
                 config,
@@ -52,6 +54,7 @@ pub fn translate_signature_value(
 }
 
 pub fn translate_module_declaration(
+    ctx: &crate::types::context::TypeContext,
     arena: &ParseArena,
     config: &crate::gentype::config::T,
     output_file_relative: &str,
@@ -68,6 +71,7 @@ pub fn translate_module_declaration(
     match &module_declaration.md_type.mty_desc {
         ModuleTypeDesc::Tmty_signature(signature) => {
             crate::gentype::translation::combine(&translate_signature(
+                ctx,
                 arena,
                 config,
                 output_file_relative,
@@ -81,6 +85,7 @@ pub fn translate_module_declaration(
                 None => crate::gentype::translation::empty(),
                 Some((signature, _, type_env)) => {
                     crate::gentype::translation::combine(&translate_signature(
+                        ctx,
                         arena,
                         config,
                         output_file_relative,
@@ -100,6 +105,7 @@ pub fn translate_module_declaration(
 }
 
 pub fn translate_module_type_declaration(
+    ctx: &crate::types::context::TypeContext,
     arena: &ParseArena,
     config: &crate::gentype::config::T,
     output_file_relative: &str,
@@ -124,6 +130,7 @@ pub fn translate_module_type_declaration(
                     .sig_items
                     .retain(|item| !matches!(item.sig_desc, TypedSignatureItemDesc::Tsig_value(_)));
                 crate::gentype::translation::combine(&translate_signature(
+                    ctx,
                     arena,
                     config,
                     output_file_relative,
@@ -150,6 +157,7 @@ pub fn translate_module_type_declaration(
 }
 
 pub fn translate_signature_item(
+    ctx: &crate::types::context::TypeContext,
     arena: &ParseArena,
     config: &crate::gentype::config::T,
     output_file_relative: &str,
@@ -165,6 +173,7 @@ pub fn translate_signature_item(
                 code_items: vec![],
                 type_declarations:
                     crate::gentype::translate_type_declarations::translate_type_declarations(
+                        ctx,
                         arena,
                         config,
                         output_file_relative,
@@ -183,6 +192,7 @@ pub fn translate_signature_item(
             );
             if !value_description.val_prim.is_empty() || is_import {
                 crate::gentype::translation::translate_primitive(
+                    ctx,
                     arena,
                     config,
                     output_file_relative,
@@ -195,6 +205,7 @@ pub fn translate_signature_item(
                     crate::gentype::runtime::new_module_item(value_description.val_id.name());
                 crate::gentype::type_env::update_module_item(module_item, type_env);
                 translate_signature_value(
+                    ctx,
                     arena,
                     config,
                     output_file_relative,
@@ -205,6 +216,7 @@ pub fn translate_signature_item(
             }
         }
         TypedSignatureItemDesc::Tsig_module(module_declaration) => translate_module_declaration(
+            ctx,
             arena,
             config,
             output_file_relative,
@@ -222,6 +234,7 @@ pub fn translate_signature_item(
             );
             crate::gentype::type_env::update_module_item(module_item, type_env);
             translate_module_type_declaration(
+                ctx,
                 arena,
                 &config,
                 output_file_relative,
@@ -240,6 +253,7 @@ pub fn translate_signature_item(
 }
 
 pub fn translate_signature(
+    ctx: &crate::types::context::TypeContext,
     arena: &ParseArena,
     config: &crate::gentype::config::T,
     output_file_relative: &str,
@@ -256,6 +270,7 @@ pub fn translate_signature(
         .iter()
         .map(|signature_item| {
             translate_signature_item(
+                ctx,
                 arena,
                 config,
                 output_file_relative,

@@ -6,6 +6,7 @@ use crate::gentype::gen_type_common::{
     Optional, Payload, Type, create_variant, dep_to_string, ident, ident_with, is_number, unknown,
 };
 use crate::types::asttypes::ArgLabel;
+use crate::types::context::TypeContext;
 use crate::types::path::Path;
 use crate::types::type_expr::{RowDesc, RowField, TypeDesc, TypeExprRef};
 
@@ -15,22 +16,28 @@ pub struct Translation {
     pub type_: Type,
 }
 
-fn type_expr_desc(_type_expr: &TypeExprRef) -> TypeDesc {
-    // Temporary Phase 0 adapter for compiler/ml/types.ml:type_expr.desc access.
-    // The integrated port must read through the Rust TypeContext arena while
-    // preserving OCaml TranslateTypeExprFromTypes.ml traversal order.
-    unimplemented!("TypeExprRef descriptor access is wired in Phase 5")
+fn type_expr_desc(ctx: &TypeContext, type_expr: &TypeExprRef) -> TypeDesc {
+    // Mirrors direct `type_expr.desc` reads throughout
+    // compiler/gentype/TranslateTypeExprFromTypes.ml. Rust stores type nodes in
+    // TypeContext's arena, so descriptor access is explicit while preserving the
+    // OCaml traversal order.
+    let desc = ctx.get_desc(*type_expr);
+    (*desc).clone()
 }
 
-pub fn remove_option(label: &ArgLabel, type_expr: &TypeExprRef) -> Option<(String, TypeExprRef)> {
+pub fn remove_option(
+    ctx: &TypeContext,
+    label: &ArgLabel,
+    type_expr: &TypeExprRef,
+) -> Option<(String, TypeExprRef)> {
     // Mirrors compiler/gentype/TranslateTypeExprFromTypes.ml:5-12.
-    match (type_expr_desc(type_expr), label) {
+    match (type_expr_desc(ctx, type_expr), label) {
         (TypeDesc::Tconstr { path, args, .. }, ArgLabel::Optional(lbl))
             if matches!(&path, Path::Pident(id) if id.name() == "option") && args.len() == 1 =>
         {
             Some((lbl.txt.clone(), args[0]))
         }
-        (TypeDesc::Tlink(t), _) => remove_option(label, &t),
+        (TypeDesc::Tlink(t), _) => remove_option(ctx, label, &t),
         _ => None,
     }
 }
@@ -446,6 +453,7 @@ pub fn process_variant(row_fields: &[(crate::types::asttypes::Label, RowField)])
 
 #[allow(non_snake_case)]
 pub fn translate_arrow_type(
+    ctx: &TypeContext,
     config: &crate::gentype::config::T,
     type_vars_gen: &crate::gentype::gen_ident::TypeVarsGen,
     type_env: &crate::gentype::type_env::T,
@@ -454,22 +462,29 @@ pub fn translate_arrow_type(
     type_expr: &TypeExprRef,
 ) -> Translation {
     // Mirrors compiler/gentype/TranslateTypeExprFromTypes.ml:470-524.
-    match type_expr_desc(type_expr) {
-        TypeDesc::Tlink(t) => {
-            translate_arrow_type(config, type_vars_gen, type_env, rev_arg_deps, rev_args, &t)
-        }
+    match type_expr_desc(ctx, type_expr) {
+        TypeDesc::Tlink(t) => translate_arrow_type(
+            ctx,
+            config,
+            type_vars_gen,
+            type_env,
+            rev_arg_deps,
+            rev_args,
+            &t,
+        ),
         TypeDesc::Tarrow {
             arg, ret, arity, ..
         } if matches!(arg.lbl, ArgLabel::Nolabel) && (arity.is_none() || rev_args.is_empty()) => {
             let Translation {
                 dependencies,
                 type_,
-            } = translateTypeExprFromTypes_(config, type_vars_gen, type_env, &arg.typ);
+            } = translateTypeExprFromTypes_(ctx, config, type_vars_gen, type_env, &arg.typ);
             let mut next_rev_deps = dependencies;
             next_rev_deps.extend(rev_arg_deps);
             let mut next_rev_args = vec![(Label::Nolabel, type_)];
             next_rev_args.extend(rev_args);
             translate_arrow_type(
+                ctx,
                 config,
                 type_vars_gen,
                 type_env,
@@ -481,17 +496,18 @@ pub fn translate_arrow_type(
         TypeDesc::Tarrow {
             arg, ret, arity, ..
         } if !matches!(arg.lbl, ArgLabel::Nolabel) && (arity.is_none() || rev_args.is_empty()) => {
-            match remove_option(&arg.lbl, &arg.typ) {
+            match remove_option(ctx, &arg.lbl, &arg.typ) {
                 None => {
                     let Translation {
                         dependencies,
                         type_: type1,
-                    } = translateTypeExprFromTypes_(config, type_vars_gen, type_env, &arg.typ);
+                    } = translateTypeExprFromTypes_(ctx, config, type_vars_gen, type_env, &arg.typ);
                     let mut next_rev_deps = dependencies;
                     next_rev_deps.extend(rev_arg_deps);
                     let mut next_rev_args = vec![(Label::Label(label_name(&arg.lbl)), type1)];
                     next_rev_args.extend(rev_args);
                     translate_arrow_type(
+                        ctx,
                         config,
                         type_vars_gen,
                         type_env,
@@ -504,12 +520,13 @@ pub fn translate_arrow_type(
                     let Translation {
                         dependencies,
                         type_: type1,
-                    } = translateTypeExprFromTypes_(config, type_vars_gen, type_env, &t1);
+                    } = translateTypeExprFromTypes_(ctx, config, type_vars_gen, type_env, &t1);
                     let mut next_rev_deps = dependencies;
                     next_rev_deps.extend(rev_arg_deps);
                     let mut next_rev_args = vec![(Label::OptLabel(lbl), type1)];
                     next_rev_args.extend(rev_args);
                     translate_arrow_type(
+                        ctx,
                         config,
                         type_vars_gen,
                         type_env,
@@ -524,7 +541,7 @@ pub fn translate_arrow_type(
             let Translation {
                 dependencies,
                 type_: ret_type,
-            } = translateTypeExprFromTypes_(config, type_vars_gen, type_env, type_expr);
+            } = translateTypeExprFromTypes_(ctx, config, type_vars_gen, type_env, type_expr);
             let mut all_deps = rev_arg_deps;
             all_deps.extend(dependencies);
             let mut labeled_convertable_types = rev_args;
@@ -544,13 +561,14 @@ pub fn translate_arrow_type(
 
 #[allow(non_snake_case)]
 pub fn translateTypeExprFromTypes_(
+    ctx: &TypeContext,
     config: &crate::gentype::config::T,
     type_vars_gen: &crate::gentype::gen_ident::TypeVarsGen,
     type_env: &crate::gentype::type_env::T,
     type_expr: &TypeExprRef,
 ) -> Translation {
     // Mirrors compiler/gentype/TranslateTypeExprFromTypes.ml:526-672.
-    match type_expr_desc(type_expr) {
+    match type_expr_desc(ctx, type_expr) {
         TypeDesc::Tvar(None) => Translation {
             dependencies: vec![],
             type_: Type::TypeVar(
@@ -565,37 +583,43 @@ pub fn translateTypeExprFromTypes_(
             type_: Type::TypeVar(s),
         },
         TypeDesc::Tconstr { path, args, .. }
-            if path.name() == "Js.t" && args.len() == 1 && is_js_t_preserved(&args[0]) =>
+            if path.name() == "Js.t" && args.len() == 1 && is_js_t_preserved(ctx, &args[0]) =>
         {
             translate_obj_type(ClosedFlag::Closed, vec![])
         }
         TypeDesc::Tconstr { path, args, .. } if path.name() == "Js.t" && args.len() == 1 => {
-            translateTypeExprFromTypes_(config, type_vars_gen, type_env, &args[0])
+            translateTypeExprFromTypes_(ctx, config, type_vars_gen, type_env, &args[0])
         }
         TypeDesc::Tobject { fields, .. } => {
             let (closed_flag, fields_translations) =
-                get_field_types(config, type_vars_gen, type_env, &fields);
+                get_field_types(ctx, config, type_vars_gen, type_env, &fields);
             translate_obj_type(closed_flag, fields_translations)
         }
         TypeDesc::Tconstr { path, args, .. } => {
             // OCaml TranslateTypeExprFromTypes.ml:560-565 has a dedicated
             // `{type_expr with desc = Tconstr(path, [te], r)}` branch when the
-            // single argument is Tlink. Rust Phase 5 must reproduce that
-            // record-copy shape once TypeContext-backed descriptor access is
-            // threaded here; until then the argument translation follows Tlink.
+            // single argument is Tlink. Rust still needs that exact branch; for
+            // now the argument translation follows Tlink through the same
+            // TypeContext-backed descriptor reads.
             let params_translation =
-                translateTypeExprsFromTypes_(config, type_vars_gen, type_env, &args);
+                translateTypeExprsFromTypes_(ctx, config, type_vars_gen, type_env, &args);
             translate_constr(config, &params_translation, &path, type_env)
         }
         TypeDesc::Tpoly { body, vars } if vars.is_empty() => {
-            translateTypeExprFromTypes_(config, type_vars_gen, type_env, &body)
+            translateTypeExprFromTypes_(ctx, config, type_vars_gen, type_env, &body)
         }
-        TypeDesc::Tarrow { .. } => {
-            translate_arrow_type(config, type_vars_gen, type_env, vec![], vec![], type_expr)
-        }
+        TypeDesc::Tarrow { .. } => translate_arrow_type(
+            ctx,
+            config,
+            type_vars_gen,
+            type_env,
+            vec![],
+            vec![],
+            type_expr,
+        ),
         TypeDesc::Ttuple(list_exp) => {
             let inner_types_translation =
-                translateTypeExprsFromTypes_(config, type_vars_gen, type_env, &list_exp);
+                translateTypeExprsFromTypes_(ctx, config, type_vars_gen, type_env, &list_exp);
             Translation {
                 dependencies: inner_types_translation
                     .iter()
@@ -609,9 +633,9 @@ pub fn translateTypeExprFromTypes_(
                 ),
             }
         }
-        TypeDesc::Tlink(t) => translateTypeExprFromTypes_(config, type_vars_gen, type_env, &t),
+        TypeDesc::Tlink(t) => translateTypeExprFromTypes_(ctx, config, type_vars_gen, type_env, &t),
         TypeDesc::Tvariant(row_desc) => {
-            translate_variant(config, type_vars_gen, type_env, &row_desc)
+            translate_variant(ctx, config, type_vars_gen, type_env, &row_desc)
         }
         TypeDesc::Tpackage {
             path,
@@ -621,7 +645,7 @@ pub fn translateTypeExprFromTypes_(
             // OCaml TranslateTypeExprFromTypes.ml:639-670 uses package
             // constraint longidents here. Rust Phase 5 must thread the
             // ParseArena so those Longident indices can be flattened to names.
-            translate_package(config, type_vars_gen, type_env, &path, &[], &types)
+            translate_package(ctx, config, type_vars_gen, type_env, &path, &[], &types)
         }
         TypeDesc::Tfield { .. }
         | TypeDesc::Tnil
@@ -636,6 +660,7 @@ pub fn translateTypeExprFromTypes_(
 
 #[allow(non_snake_case)]
 pub fn translateTypeExprsFromTypes_(
+    ctx: &TypeContext,
     config: &crate::gentype::config::T,
     type_vars_gen: &crate::gentype::gen_ident::TypeVarsGen,
     type_env: &crate::gentype::type_env::T,
@@ -644,11 +669,14 @@ pub fn translateTypeExprsFromTypes_(
     // Mirrors compiler/gentype/TranslateTypeExprFromTypes.ml:674-677.
     type_exprs
         .iter()
-        .map(|type_expr| translateTypeExprFromTypes_(config, type_vars_gen, type_env, type_expr))
+        .map(|type_expr| {
+            translateTypeExprFromTypes_(ctx, config, type_vars_gen, type_env, type_expr)
+        })
         .collect()
 }
 
 pub fn signature_to_module_runtime_representation(
+    ctx: &TypeContext,
     config: &crate::gentype::config::T,
     type_vars_gen: &crate::gentype::gen_ident::TypeVarsGen,
     type_env: &crate::gentype::type_env::T,
@@ -667,6 +695,7 @@ pub fn signature_to_module_runtime_representation(
                 ) => {}
             crate::types::decl::SignatureItem::SigValue(id, value_description) => {
                 let translation = translateTypeExprFromTypes_(
+                    ctx,
                     config,
                     type_vars_gen,
                     type_env,
@@ -689,6 +718,7 @@ pub fn signature_to_module_runtime_representation(
                 let (module_dependencies, type_) = match &module_declaration.md_type {
                     crate::types::decl::ModuleType::MtySignature(signature) => {
                         signature_to_module_runtime_representation(
+                            ctx,
                             config,
                             type_vars_gen,
                             &type_env1,
@@ -720,25 +750,28 @@ pub fn signature_to_module_runtime_representation(
 }
 
 pub fn translate_type_expr_from_types(
+    ctx: &TypeContext,
     config: &crate::gentype::config::T,
     type_env: &crate::gentype::type_env::T,
     type_expr: &TypeExprRef,
 ) -> Translation {
     // Mirrors compiler/gentype/TranslateTypeExprFromTypes.ml:739-748.
     let type_vars_gen = crate::gentype::gen_ident::create_type_vars_gen();
-    let translation = translateTypeExprFromTypes_(config, &type_vars_gen, type_env, type_expr);
+    let translation = translateTypeExprFromTypes_(ctx, config, &type_vars_gen, type_env, type_expr);
     log_dependencies(&translation);
     translation
 }
 
 pub fn translate_type_exprs_from_types(
+    ctx: &TypeContext,
     config: &crate::gentype::config::T,
     type_env: &crate::gentype::type_env::T,
     type_exprs: &[TypeExprRef],
 ) -> Vec<Translation> {
     // Mirrors compiler/gentype/TranslateTypeExprFromTypes.ml:750-761.
     let type_vars_gen = crate::gentype::gen_ident::create_type_vars_gen();
-    let translations = translateTypeExprsFromTypes_(config, &type_vars_gen, type_env, type_exprs);
+    let translations =
+        translateTypeExprsFromTypes_(ctx, config, &type_vars_gen, type_env, type_exprs);
     for translation in &translations {
         log_dependencies(translation);
     }
@@ -854,38 +887,41 @@ fn label_name(label: &ArgLabel) -> String {
     }
 }
 
-fn is_js_t_preserved(type_expr: &TypeExprRef) -> bool {
+fn is_js_t_preserved(ctx: &TypeContext, type_expr: &TypeExprRef) -> bool {
     matches!(
-        type_expr_desc(type_expr),
+        type_expr_desc(ctx, type_expr),
         TypeDesc::Tvar(_) | TypeDesc::Tconstr { .. }
     )
 }
 
 fn get_field_types(
+    ctx: &TypeContext,
     config: &crate::gentype::config::T,
     type_vars_gen: &crate::gentype::gen_ident::TypeVarsGen,
     type_env: &crate::gentype::type_env::T,
     type_expr: &TypeExprRef,
 ) -> (ClosedFlag, Vec<(String, Translation)>) {
-    match type_expr_desc(type_expr) {
+    match type_expr_desc(ctx, type_expr) {
         TypeDesc::Tfield {
             name, typ, rest, ..
         } => {
-            let (closed_flag, mut fields) = get_field_types(config, type_vars_gen, type_env, &rest);
+            let (closed_flag, mut fields) =
+                get_field_types(ctx, config, type_vars_gen, type_env, &rest);
             let translation = match crate::gentype::runtime::is_mutable_object_field(&name) {
                 true => tr(ident("")),
-                false => translateTypeExprFromTypes_(config, type_vars_gen, type_env, &typ),
+                false => translateTypeExprFromTypes_(ctx, config, type_vars_gen, type_env, &typ),
             };
             fields.insert(0, (name, translation));
             (closed_flag, fields)
         }
-        TypeDesc::Tlink(te) => get_field_types(config, type_vars_gen, type_env, &te),
+        TypeDesc::Tlink(te) => get_field_types(ctx, config, type_vars_gen, type_env, &te),
         TypeDesc::Tvar(None) => (ClosedFlag::Open, vec![]),
         _ => (ClosedFlag::Closed, vec![]),
     }
 }
 
 fn translate_variant(
+    ctx: &TypeContext,
     config: &crate::gentype::config::T,
     type_vars_gen: &crate::gentype::gen_ident::TypeVarsGen,
     type_env: &crate::gentype::type_env::T,
@@ -921,7 +957,7 @@ fn translate_variant(
             payloads,
             unknowns,
         } if no_payloads.is_empty() && payloads.len() == 1 && unknowns.is_empty() => {
-            translateTypeExprFromTypes_(config, type_vars_gen, type_env, &payloads[0].1)
+            translateTypeExprFromTypes_(ctx, config, type_vars_gen, type_env, &payloads[0].1)
         }
         ProcessVariant {
             no_payloads,
@@ -939,7 +975,7 @@ fn translate_variant(
                 .map(|(label, payload)| {
                     (
                         label.clone(),
-                        translateTypeExprFromTypes_(config, type_vars_gen, type_env, payload),
+                        translateTypeExprFromTypes_(ctx, config, type_vars_gen, type_env, payload),
                     )
                 })
                 .collect::<Vec<_>>();
@@ -967,6 +1003,7 @@ fn translate_variant(
 }
 
 fn translate_package(
+    ctx: &TypeContext,
     config: &crate::gentype::config::T,
     type_vars_gen: &crate::gentype::gen_ident::TypeVarsGen,
     type_env: &crate::gentype::type_env::T,
@@ -982,7 +1019,7 @@ fn translate_package(
                 .map(|(x, t)| {
                     (
                         x.clone(),
-                        translateTypeExprFromTypes_(config, type_vars_gen, &type_env, t),
+                        translateTypeExprFromTypes_(ctx, config, type_vars_gen, &type_env, t),
                     )
                 })
                 .collect::<Vec<_>>();
@@ -998,6 +1035,7 @@ fn translate_package(
                 crate::gentype::type_env::add_type_equations(&type_equations, &type_env);
             let (mut dependencies_from_record_type, type_) =
                 signature_to_module_runtime_representation(
+                    ctx,
                     config,
                     type_vars_gen,
                     &type_env1,

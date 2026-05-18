@@ -157,6 +157,7 @@ pub fn remove_value_binding_duplicates(structure_items: &[StructureItem]) -> Vec
 }
 
 pub fn translate_value_binding(
+    ctx: &crate::types::context::TypeContext,
     arena: &ParseArena,
     config: &crate::gentype::config::T,
     output_file_relative: &str,
@@ -183,6 +184,7 @@ pub fn translate_value_binding(
     ) == crate::gentype::annotation::T::GenType
     {
         crate::gentype::translation::translate_value(
+            ctx,
             arena,
             &value_binding.vb_attributes,
             config,
@@ -240,6 +242,7 @@ pub fn remove_duplicate_value_bindings(
 }
 
 pub fn translate_module_binding(
+    ctx: &crate::types::context::TypeContext,
     arena: &ParseArena,
     config: &crate::gentype::config::T,
     output_file_relative: &str,
@@ -269,6 +272,7 @@ pub fn translate_module_binding(
             match &module_binding.mb_expr.mod_type {
                 DeclModuleType::MtySignature(signature) => crate::gentype::translation::combine(
                     &crate::gentype::translate_signature_from_types::translate_signature_from_types(
+                        ctx,
                         arena,
                         &config,
                         output_file_relative,
@@ -292,6 +296,7 @@ pub fn translate_module_binding(
                 crate::gentype::translation::empty()
             } else {
                 crate::gentype::translation::combine(&translate_structure(
+                    ctx,
                     arena,
                     &config,
                     output_file_relative,
@@ -304,6 +309,7 @@ pub fn translate_module_binding(
         ModuleExprDesc::Tmod_apply(_, _, _) => match &module_binding.mb_expr.mod_type {
             DeclModuleType::MtySignature(signature) => crate::gentype::translation::combine(
                 &crate::gentype::translate_signature_from_types::translate_signature_from_types(
+                    ctx,
                     arena,
                     &config,
                     output_file_relative,
@@ -319,6 +325,7 @@ pub fn translate_module_binding(
         ModuleExprDesc::Tmod_unpack(_, module_type) => match module_type {
             DeclModuleType::MtySignature(signature) => crate::gentype::translation::combine(
                 &crate::gentype::translate_signature_from_types::translate_signature_from_types(
+                    ctx,
                     arena,
                     &config,
                     output_file_relative,
@@ -332,6 +339,7 @@ pub fn translate_module_binding(
                     None => crate::gentype::translation::empty(),
                     Some((signature, _, type_env)) => crate::gentype::translation::combine(
                         &crate::gentype::translate_signature::translate_signature(
+                            ctx,
                             arena,
                             &config,
                             output_file_relative,
@@ -348,6 +356,7 @@ pub fn translate_module_binding(
         ModuleExprDesc::Tmod_functor(_, _, _, _) => not_implemented("Tmod_functor"),
         ModuleExprDesc::Tmod_constraint(_, module_type, module_type_constraint, coercion) => {
             translate_module_constraint(
+                ctx,
                 arena,
                 &config,
                 output_file_relative,
@@ -362,6 +371,7 @@ pub fn translate_module_binding(
 }
 
 pub fn translate_structure_item(
+    ctx: &crate::types::context::TypeContext,
     arena: &ParseArena,
     config: &crate::gentype::config::T,
     output_file_relative: &str,
@@ -377,6 +387,7 @@ pub fn translate_structure_item(
                 code_items: vec![],
                 type_declarations:
                     crate::gentype::translate_type_declarations::translate_type_declarations(
+                        ctx,
                         arena,
                         config,
                         output_file_relative,
@@ -392,6 +403,7 @@ pub fn translate_structure_item(
                 .iter()
                 .map(|value_binding| {
                     translate_value_binding(
+                        ctx,
                         arena,
                         config,
                         output_file_relative,
@@ -404,6 +416,7 @@ pub fn translate_structure_item(
         ),
         StructureItemDesc::Tstr_primitive(value_description) => {
             crate::gentype::translation::translate_primitive(
+                ctx,
                 arena,
                 config,
                 output_file_relative,
@@ -413,6 +426,7 @@ pub fn translate_structure_item(
             )
         }
         StructureItemDesc::Tstr_module(module_binding) => translate_module_binding(
+            ctx,
             arena,
             config,
             output_file_relative,
@@ -422,6 +436,7 @@ pub fn translate_structure_item(
         ),
         StructureItemDesc::Tstr_modtype(module_type_declaration) => {
             crate::gentype::translate_signature::translate_module_type_declaration(
+                ctx,
                 arena,
                 config,
                 output_file_relative,
@@ -435,6 +450,7 @@ pub fn translate_structure_item(
                 .iter()
                 .map(|module_binding| {
                     translate_module_binding(
+                        ctx,
                         arena,
                         config,
                         output_file_relative,
@@ -448,6 +464,7 @@ pub fn translate_structure_item(
         StructureItemDesc::Tstr_include(include_declaration) => {
             crate::gentype::translation::combine(
                 &crate::gentype::translate_signature_from_types::translate_signature_from_types(
+                    ctx,
                     arena,
                     config,
                     output_file_relative,
@@ -466,6 +483,7 @@ pub fn translate_structure_item(
 }
 
 pub fn translate_structure(
+    ctx: &crate::types::context::TypeContext,
     arena: &ParseArena,
     config: &crate::gentype::config::T,
     output_file_relative: &str,
@@ -481,6 +499,7 @@ pub fn translate_structure(
         .iter()
         .map(|struct_item| {
             translate_structure_item(
+                ctx,
                 arena,
                 config,
                 output_file_relative,
@@ -493,6 +512,7 @@ pub fn translate_structure(
 }
 
 fn translate_module_constraint(
+    ctx: &crate::types::context::TypeContext,
     arena: &ParseArena,
     config: &crate::gentype::config::T,
     output_file_relative: &str,
@@ -508,6 +528,7 @@ fn translate_module_constraint(
                 None => crate::gentype::translation::empty(),
                 Some((signature, _, type_env)) => crate::gentype::translation::combine(
                     &crate::gentype::translate_signature::translate_signature(
+                        ctx,
                         arena,
                         config,
                         output_file_relative,
@@ -521,6 +542,7 @@ fn translate_module_constraint(
         (DeclModuleType::MtySignature(signature), ModuleTypeConstraint::Tmodtype_explicit(_)) => {
             crate::gentype::translation::combine(
                 &crate::gentype::translate_signature_from_types::translate_signature_from_types(
+                    ctx,
                     arena,
                     config,
                     output_file_relative,
@@ -541,6 +563,7 @@ fn translate_module_constraint(
             {
                 crate::gentype::translation::combine(
                     &crate::gentype::translate_signature::translate_signature(
+                        ctx,
                         arena,
                         config,
                         output_file_relative,

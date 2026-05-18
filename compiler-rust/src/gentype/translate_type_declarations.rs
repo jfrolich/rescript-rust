@@ -3,8 +3,8 @@
 
 use crate::gentype::code_item;
 use crate::gentype::gen_type_common::{
-    create_variant, ident_with, sanitize_type_name, unknown, Case as VariantCase, ClosedFlag,
-    Field, LabelJs, Mutable, Optional, Payload, Type,
+    Case as VariantCase, ClosedFlag, Field, LabelJs, Mutable, Optional, Payload, Type,
+    create_variant, ident_with, sanitize_type_name, unknown,
 };
 use crate::location::Location;
 use crate::parse_arena::{LocIdx, ParseArena};
@@ -139,6 +139,7 @@ pub fn rename_record_field_from_decl_attributes(
 
 #[allow(non_snake_case)]
 pub fn traslate_declaration_kind(
+    ctx: &crate::types::context::TypeContext,
     arena: &ParseArena,
     config: &crate::gentype::config::T,
     loc: Location,
@@ -260,13 +261,13 @@ pub fn traslate_declaration_kind(
         (DeclarationKind::GeneralDeclarationFromTypes(Some(type_expr)), None) => {
             let translation =
                 crate::gentype::translate_type_expr_from_types::translate_type_expr_from_types(
-                    config, type_env, &type_expr,
+                    ctx, config, type_env, &type_expr,
                 );
             return_type_declaration(handle_general_declaration(translation))
         }
         (DeclarationKind::GeneralDeclaration(Some(core_type)), None) => {
             let translation = crate::gentype::translate_core_type::translate_core_type(
-                arena, config, type_env, &core_type,
+                ctx, arena, config, type_env, &core_type,
             );
             let type_ = match (&core_type.ctyp_desc, translation.type_.clone()) {
                 (
@@ -304,6 +305,7 @@ pub fn traslate_declaration_kind(
         }
         (DeclarationKind::RecordDeclarationFromTypes(label_declarations), None) => {
             let translation = translate_label_declarations(
+                ctx,
                 arena,
                 config,
                 type_env,
@@ -341,6 +343,7 @@ pub fn traslate_declaration_kind(
                     let args_translation = match &constructor_declaration.cd_args {
                         ConstructorArguments::CstrTuple(type_exprs) => {
                             crate::gentype::translate_type_expr_from_types::translate_type_exprs_from_types(
+                                ctx,
                                 config,
                                 type_env,
                                 type_exprs,
@@ -348,6 +351,7 @@ pub fn traslate_declaration_kind(
                         }
                         ConstructorArguments::CstrRecord(label_declarations) => vec![
                             translate_label_declarations(
+                                ctx,
                                 arena,
                                 config,
                                 type_env,
@@ -438,6 +442,7 @@ pub fn has_some_gadt_leaf(constructor_declarations: &[ConstructorDeclaration]) -
 }
 
 pub fn translate_type_declaration(
+    ctx: &crate::types::context::TypeContext,
     arena: &ParseArena,
     config: &crate::gentype::config::T,
     output_file_relative: &str,
@@ -472,6 +477,7 @@ pub fn translate_type_declaration(
         _ => DeclarationKind::NoDeclaration,
     };
     traslate_declaration_kind(
+        ctx,
         arena,
         config,
         arena.to_location(type_declaration.typ_loc),
@@ -495,6 +501,7 @@ pub fn add_type_declaration_id_to_type_env(
 }
 
 pub fn translate_type_declarations(
+    ctx: &crate::types::context::TypeContext,
     arena: &ParseArena,
     config: &crate::gentype::config::T,
     output_file_relative: &str,
@@ -513,6 +520,7 @@ pub fn translate_type_declarations(
         .iter()
         .flat_map(|type_declaration| {
             let res = translate_type_declaration(
+                ctx,
                 arena,
                 config,
                 output_file_relative,
@@ -529,6 +537,7 @@ pub fn translate_type_declarations(
 }
 
 fn translate_label_declarations(
+    ctx: &crate::types::context::TypeContext,
     _arena: &ParseArena,
     config: &crate::gentype::config::T,
     type_env: &crate::gentype::type_env::T,
@@ -554,6 +563,7 @@ fn translate_label_declarations(
                 mutable_,
                 label_declaration.ld_optional,
                 crate::gentype::translate_type_expr_from_types::translate_type_expr_from_types(
+                    ctx,
                     config,
                     type_env,
                     &label_declaration.ld_type,
