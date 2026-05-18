@@ -7,7 +7,7 @@
 //! module-resolution paths use as their source of truth.
 
 use ahash::AHashMap as HashMap;
-use std::cell::{Cell, RefCell};
+use std::cell::{Cell, OnceCell, RefCell};
 use std::sync::Arc;
 
 use crate::ident::Ident;
@@ -1713,7 +1713,7 @@ pub(crate) struct StoredModuleComponents {
     access_path: Path,
     module_decl: ModuleDeclaration,
     parent_context: Option<(Path, Arc<Signature>)>,
-    cached: RefCell<Option<Arc<QualifiedModuleComponents>>>,
+    cached: OnceCell<Arc<QualifiedModuleComponents>>,
 }
 
 impl StoredModuleComponents {
@@ -1736,7 +1736,7 @@ impl StoredModuleComponents {
             access_path,
             module_decl,
             parent_context,
-            cached: RefCell::new(None),
+            cached: OnceCell::new(),
         }
     }
 
@@ -1747,7 +1747,7 @@ impl StoredModuleComponents {
         cache_mode: super::typecore::ComponentLookupCacheMode,
         f: impl FnOnce(&QualifiedModuleComponents) -> R,
     ) -> Option<R> {
-        if let Some(components) = self.cached.borrow().clone() {
+        if let Some(components) = self.cached.get().cloned() {
             if ctx.compiler_counters_enabled() {
                 crate::perf_counters::record_stored_component_cached();
             }
@@ -1866,7 +1866,11 @@ impl StoredModuleComponents {
             );
         }
         if cache_mode.publishes() {
-            *self.cached.borrow_mut() = Some(components.clone());
+            if self.cached.set(components.clone()).is_err()
+                && let Some(cached) = self.cached.get().cloned()
+            {
+                return Some(f(cached.as_ref()));
+            }
         }
         Some(f(components.as_ref()))
     }
