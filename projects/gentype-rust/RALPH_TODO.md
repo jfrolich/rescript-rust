@@ -49,16 +49,16 @@ from the reference.
 - [x] Port `TranslateCoreType.ml`.
 - [x] Port `TranslateTypeExprFromTypes.ml`.
 - [x] Port `TranslateTypeDeclarations.ml`.
-- [ ] Port `TranslateSignatureFromTypes.ml`.
-- [ ] Port `TranslateSignature.ml`.
-- [ ] Port `TranslateStructure.ml`.
-- [ ] Run the three per-file review passes for every file in this stage.
+- [x] Port `TranslateSignatureFromTypes.ml`.
+- [x] Port `TranslateSignature.ml`.
+- [x] Port `TranslateStructure.ml`.
+- [x] Run the three per-file review passes for every file in this stage.
 - [x] Run the three per-file review passes for `Annotation.ml`,
   `ModuleResolver.ml`, `TranslateCoreType.ml`,
   `TranslateTypeDeclarations.ml`,
   `TranslateTypeExprFromTypes.ml`, and
   `TypeEnv.ml`/`.mli`.
-- [ ] Commit the stage or commit coherent file clusters.
+- [x] Commit the stage or commit coherent file clusters.
 
 ## Rewrite Stage 4: Emitters and Entry Point
 

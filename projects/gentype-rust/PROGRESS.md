@@ -20,9 +20,10 @@ support in Rust is still a stub:
   and export-module tables.
 - Rewrite Stage 3 has started with initial file-for-file Rust ports of
   `Annotation.ml`, `ModuleResolver.ml`, `TranslateCoreType.ml`,
-  `TranslateTypeDeclarations.ml`, `TranslateTypeExprFromTypes.ml`, and
-  `TypeEnv.ml`/`.mli`. These files are still intentionally not wired into the
-  crate.
+  `TranslateSignature.ml`, `TranslateSignatureFromTypes.ml`,
+  `TranslateStructure.ml`, `TranslateTypeDeclarations.ml`,
+  `TranslateTypeExprFromTypes.ml`, and `TypeEnv.ml`/`.mli`. These files are
+  still intentionally not wired into the crate.
 
 ## Reference Inventory
 
@@ -192,6 +193,32 @@ For the type-declaration Stage 3 chunk:
   typedtree path passes the original `typ_loc` index through annotation checks.
 - `rustfmt` was run on the new file and `git diff --check` passed.
 - The new file is not wired into the crate, so debug build/parity gates were
+  not run for this non-compiling rewrite stage.
+
+For the signature/structure Stage 3 chunk:
+
+- `TranslateSignatureFromTypes.ml`, `TranslateSignature.ml`, and
+  `TranslateStructure.ml` were ported to:
+  `compiler-rust/src/gentype/translate_signature_from_types.rs`,
+  `compiler-rust/src/gentype/translate_signature.rs`, and
+  `compiler-rust/src/gentype/translate_structure.rs`.
+- References:
+  `compiler/gentype/TranslateSignatureFromTypes.ml:1-110`,
+  `compiler/gentype/TranslateSignature.ml:1-169`, and
+  `compiler/gentype/TranslateStructure.ml:1-366`.
+- Surface/control/output-sensitive review checked signature item dispatch and
+  module-type filtering from `TranslateSignature.ml:97-169`,
+  Types-signature dispatch from `TranslateSignatureFromTypes.ml:51-110`, value
+  annotation recovery from `TranslateStructure.ml:3-73`, value-binding
+  duplicate filtering from `TranslateStructure.ml:75-159`, module binding
+  dispatch from `TranslateStructure.ml:161-270`, and structure item dispatch
+  from `TranslateStructure.ml:272-366`.
+- Rust typedtree currently has a newer multi-parameter `Texp_function` shape,
+  so `translate_structure.rs` preserves the OCaml traversal intent while using
+  the first typed function parameter/body path as the staged adapter. Compile
+  wiring must revisit this adapter against actual generated output.
+- `rustfmt` was run on the new files and `git diff --check` passed.
+- The new files are not wired into the crate, so debug build/parity gates were
   not run for this non-compiling rewrite stage.
 
 Earlier setup note:
