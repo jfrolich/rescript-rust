@@ -382,40 +382,44 @@ impl ChildComponentScanState {
     }
 
     fn working_env_mut(&mut self) -> &mut super::env::Env {
-        self.working_env
-            .get_or_insert_with(super::env::Env::empty)
+        self.working_env.get_or_insert_with(super::env::Env::empty)
     }
 }
 
 #[derive(Debug, Clone)]
-pub(crate) struct QualifiedModuleComponents {
-    access_path: Arc<Path>,
-    signature: Arc<Signature>,
-    values: Arc<RefCell<HashMap<String, Option<(usize, usize)>>>>,
-    component_values: Arc<RefCell<HashMap<String, Option<(usize, Ident, ValueDescription)>>>>,
-    values_indexed: Arc<Cell<bool>>,
-    constructors: Arc<RefCell<HashMap<String, Arc<Vec<ConstructorDescription>>>>>,
-    labels: Arc<RefCell<HashMap<String, Arc<Vec<LabelDescription>>>>>,
-    types: Arc<RefCell<HashMap<String, Option<usize>>>>,
-    types_indexed: Arc<Cell<bool>>,
-    modules: Arc<RefCell<HashMap<String, Option<(usize, usize)>>>>,
-    modules_indexed: Arc<Cell<bool>>,
-    compiler_counters_enabled: bool,
-    component_modtypes: Arc<HashMap<String, (Ident, ModtypeDeclaration)>>,
+struct StructureComponentTables {
+    values: RefCell<HashMap<String, Option<(usize, usize)>>>,
+    component_values: RefCell<HashMap<String, Option<(usize, Ident, ValueDescription)>>>,
+    values_indexed: Cell<bool>,
+    constructors: RefCell<HashMap<String, Arc<Vec<ConstructorDescription>>>>,
+    labels: RefCell<HashMap<String, Arc<Vec<LabelDescription>>>>,
+    types: RefCell<HashMap<String, Option<usize>>>,
+    types_indexed: Cell<bool>,
+    modules: RefCell<HashMap<String, Option<(usize, usize)>>>,
+    modules_indexed: Cell<bool>,
+    modtypes: HashMap<String, (Ident, ModtypeDeclaration)>,
     // OCaml compiler/ml/env.ml:1568-1578 stores `comp_modules` and
     // `comp_modtypes` declarations in EnvLazy-backed component tables, and
     // env.ml:568-571/865-882 forces those thunks at most once per component
     // table. Rust clones component views out of the global cache before
     // running callbacks, so the forced-declaration memo must be shared by
     // those clones to preserve the same lazy identifier-renaming order.
-    qualified_modules: Arc<RefCell<HashMap<String, (Ident, Arc<ModuleDeclaration>)>>>,
-    qualified_modtypes: Arc<RefCell<HashMap<String, (Ident, ModtypeDeclaration)>>>,
+    qualified_modules: RefCell<HashMap<String, (Ident, Arc<ModuleDeclaration>)>>,
+    qualified_modtypes: RefCell<HashMap<String, (Ident, ModtypeDeclaration)>>,
     // OCaml keeps `comp_components` lazy (compiler/ml/env.ml:1573-1578).
     // Cache forced child component thunks by name, including misses, so a
     // lookup for one child does not materialize every sibling in the parent
     // signature.
-    child_components: Arc<RefCell<HashMap<String, Option<(usize, Arc<StoredModuleComponents>)>>>>,
-    child_component_scan: Arc<RefCell<ChildComponentScanState>>,
+    child_components: RefCell<HashMap<String, Option<(usize, Arc<StoredModuleComponents>)>>>,
+    child_component_scan: RefCell<ChildComponentScanState>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct QualifiedModuleComponents {
+    access_path: Arc<Path>,
+    signature: Arc<Signature>,
+    tables: Arc<StructureComponentTables>,
+    compiler_counters_enabled: bool,
     value_source_prefix: Option<Arc<Path>>,
 }
 
@@ -479,9 +483,7 @@ fn scan_child_component_from_signature(
                 state.runtime_pos += 1;
             }
             SignatureItem::SigModtype(id, mtd) => {
-                state
-                    .working_env_mut()
-                    .add_modtype(id.clone(), mtd.clone());
+                state.working_env_mut().add_modtype(id.clone(), mtd.clone());
             }
             SignatureItem::SigClassType => {}
         }
@@ -643,25 +645,27 @@ impl QualifiedModuleComponents {
         Self {
             access_path: Arc::new(access_path),
             signature,
-            values: Arc::new(RefCell::new(values)),
-            component_values: Arc::new(RefCell::new(HashMap::new())),
-            values_indexed: Arc::new(Cell::new(true)),
-            constructors: Arc::new(RefCell::new(HashMap::new())),
-            labels: Arc::new(RefCell::new(HashMap::new())),
-            types: Arc::new(RefCell::new(types)),
-            types_indexed: Arc::new(Cell::new(true)),
-            modules: Arc::new(RefCell::new(modules)),
-            modules_indexed: Arc::new(Cell::new(true)),
+            tables: Arc::new(StructureComponentTables {
+                values: RefCell::new(values),
+                component_values: RefCell::new(HashMap::new()),
+                values_indexed: Cell::new(true),
+                constructors: RefCell::new(HashMap::new()),
+                labels: RefCell::new(HashMap::new()),
+                types: RefCell::new(types),
+                types_indexed: Cell::new(true),
+                modules: RefCell::new(modules),
+                modules_indexed: Cell::new(true),
+                modtypes: component_modtypes,
+                qualified_modules: RefCell::new(HashMap::new()),
+                qualified_modtypes: RefCell::new(HashMap::new()),
+                child_components: RefCell::new(child_components),
+                child_component_scan: RefCell::new(if child_component_scan_complete {
+                    ChildComponentScanState::complete()
+                } else {
+                    ChildComponentScanState::new()
+                }),
+            }),
             compiler_counters_enabled: ctx.compiler_counters_enabled(),
-            component_modtypes: Arc::new(component_modtypes),
-            qualified_modules: Arc::new(RefCell::new(HashMap::new())),
-            qualified_modtypes: Arc::new(RefCell::new(HashMap::new())),
-            child_components: Arc::new(RefCell::new(child_components)),
-            child_component_scan: Arc::new(RefCell::new(if child_component_scan_complete {
-                ChildComponentScanState::complete()
-            } else {
-                ChildComponentScanState::new()
-            })),
             value_source_prefix: value_source_prefix.map(Arc::new),
         }
     }
@@ -683,13 +687,13 @@ impl QualifiedModuleComponents {
     }
 
     fn cached_value_index(&self, name: &str) -> Option<(usize, usize)> {
-        if let Some(cached) = self.values.borrow().get(name).cloned() {
+        if let Some(cached) = self.tables.values.borrow().get(name).cloned() {
             if self.compiler_counters_enabled {
                 crate::perf_counters::record_lazy_hit(crate::perf_counters::LazyLookupKind::Value);
             }
             return cached;
         }
-        if self.values_indexed.get() {
+        if self.tables.values_indexed.get() {
             if self.compiler_counters_enabled {
                 crate::perf_counters::record_lazy_hit(crate::perf_counters::LazyLookupKind::Value);
             }
@@ -697,7 +701,7 @@ impl QualifiedModuleComponents {
         }
 
         if self.signature.len() >= ADAPTIVE_VALUE_INDEX_MIN_SIGNATURE_ITEMS
-            && self.values.borrow().len() >= ADAPTIVE_VALUE_INDEX_MIN_CACHED_NAMES
+            && self.tables.values.borrow().len() >= ADAPTIVE_VALUE_INDEX_MIN_CACHED_NAMES
         {
             return self.build_value_index_and_get(name);
         }
@@ -728,7 +732,10 @@ impl QualifiedModuleComponents {
                 | SignatureItem::SigClassType => {}
             }
         }
-        self.values.borrow_mut().insert(name.to_string(), found);
+        self.tables
+            .values
+            .borrow_mut()
+            .insert(name.to_string(), found);
         if self.compiler_counters_enabled {
             crate::perf_counters::record_lazy_scan(
                 crate::perf_counters::LazyLookupKind::Value,
@@ -740,8 +747,8 @@ impl QualifiedModuleComponents {
     }
 
     fn build_value_index_and_get(&self, name: &str) -> Option<(usize, usize)> {
-        let mut values = self.values.borrow_mut();
-        if !self.values_indexed.get() {
+        let mut values = self.tables.values.borrow_mut();
+        if !self.tables.values_indexed.get() {
             let mut runtime_pos = 0usize;
             let mut result_items = 0usize;
             for (idx, item) in self.signature.iter().enumerate() {
@@ -764,7 +771,7 @@ impl QualifiedModuleComponents {
                     | SignatureItem::SigClassType => {}
                 }
             }
-            self.values_indexed.set(true);
+            self.tables.values_indexed.set(true);
             if self.compiler_counters_enabled {
                 crate::perf_counters::record_lazy_scan(
                     crate::perf_counters::LazyLookupKind::Value,
@@ -777,13 +784,13 @@ impl QualifiedModuleComponents {
     }
 
     fn cached_type_index(&self, name: &str) -> Option<usize> {
-        if let Some(cached) = self.types.borrow().get(name).cloned() {
+        if let Some(cached) = self.tables.types.borrow().get(name).cloned() {
             if self.compiler_counters_enabled {
                 crate::perf_counters::record_lazy_hit(crate::perf_counters::LazyLookupKind::Type);
             }
             return cached;
         }
-        if self.types_indexed.get() {
+        if self.tables.types_indexed.get() {
             if self.compiler_counters_enabled {
                 crate::perf_counters::record_lazy_hit(crate::perf_counters::LazyLookupKind::Type);
             }
@@ -801,7 +808,10 @@ impl QualifiedModuleComponents {
                 found = Some(idx);
             }
         }
-        self.types.borrow_mut().insert(name.to_string(), found);
+        self.tables
+            .types
+            .borrow_mut()
+            .insert(name.to_string(), found);
         if self.compiler_counters_enabled {
             crate::perf_counters::record_lazy_scan(
                 crate::perf_counters::LazyLookupKind::Type,
@@ -813,13 +823,13 @@ impl QualifiedModuleComponents {
     }
 
     fn cached_module_index(&self, name: &str) -> Option<(usize, usize)> {
-        if let Some(cached) = self.modules.borrow().get(name).cloned() {
+        if let Some(cached) = self.tables.modules.borrow().get(name).cloned() {
             if self.compiler_counters_enabled {
                 crate::perf_counters::record_lazy_hit(crate::perf_counters::LazyLookupKind::Module);
             }
             return cached;
         }
-        if self.modules_indexed.get() {
+        if self.tables.modules_indexed.get() {
             if self.compiler_counters_enabled {
                 crate::perf_counters::record_lazy_hit(crate::perf_counters::LazyLookupKind::Module);
             }
@@ -852,7 +862,10 @@ impl QualifiedModuleComponents {
                 | SignatureItem::SigClassType => {}
             }
         }
-        self.modules.borrow_mut().insert(name.to_string(), found);
+        self.tables
+            .modules
+            .borrow_mut()
+            .insert(name.to_string(), found);
         if self.compiler_counters_enabled {
             crate::perf_counters::record_lazy_scan(
                 crate::perf_counters::LazyLookupKind::Module,
@@ -876,7 +889,7 @@ impl QualifiedModuleComponents {
         name: &str,
         ctx: &super::context::TypeContext,
     ) -> Option<(usize, Ident, ValueDescription)> {
-        if let Some(cached) = self.component_values.borrow().get(name).cloned() {
+        if let Some(cached) = self.tables.component_values.borrow().get(name).cloned() {
             if self.compiler_counters_enabled {
                 crate::perf_counters::record_lazy_hit(crate::perf_counters::LazyLookupKind::Value);
             }
@@ -905,7 +918,8 @@ impl QualifiedModuleComponents {
         // the same substituted type nodes instead of rerunning the Rust-side
         // scan/copy/substitution path.
         let result = Some((runtime_pos, id.clone(), desc));
-        self.component_values
+        self.tables
+            .component_values
             .borrow_mut()
             .insert(name.to_string(), result.clone());
         result
@@ -916,7 +930,7 @@ impl QualifiedModuleComponents {
         name: &str,
         ctx: &super::context::TypeContext,
     ) -> Arc<Vec<ConstructorDescription>> {
-        if let Some(cached) = self.constructors.borrow().get(name).cloned() {
+        if let Some(cached) = self.tables.constructors.borrow().get(name).cloned() {
             if self.compiler_counters_enabled {
                 crate::perf_counters::record_lazy_hit(
                     crate::perf_counters::LazyLookupKind::Constructor,
@@ -943,7 +957,8 @@ impl QualifiedModuleComponents {
                 built.len(),
             );
         }
-        self.constructors
+        self.tables
+            .constructors
             .borrow_mut()
             .insert(name.to_string(), built.clone());
         built
@@ -954,7 +969,7 @@ impl QualifiedModuleComponents {
         name: &str,
         ctx: &super::context::TypeContext,
     ) -> Arc<Vec<LabelDescription>> {
-        if let Some(cached) = self.labels.borrow().get(name).cloned() {
+        if let Some(cached) = self.tables.labels.borrow().get(name).cloned() {
             if self.compiler_counters_enabled {
                 crate::perf_counters::record_lazy_hit(crate::perf_counters::LazyLookupKind::Label);
             }
@@ -978,7 +993,8 @@ impl QualifiedModuleComponents {
                 built.len(),
             );
         }
-        self.labels
+        self.tables
+            .labels
             .borrow_mut()
             .insert(name.to_string(), built.clone());
         built
@@ -1005,7 +1021,7 @@ impl QualifiedModuleComponents {
         name: &str,
         _ctx: &super::context::TypeContext,
     ) -> Option<(usize, Arc<StoredModuleComponents>)> {
-        if let Some(cached) = self.child_components.borrow().get(name).cloned() {
+        if let Some(cached) = self.tables.child_components.borrow().get(name).cloned() {
             if self.compiler_counters_enabled {
                 crate::perf_counters::record_lazy_hit(
                     crate::perf_counters::LazyLookupKind::ChildComponent,
@@ -1014,15 +1030,16 @@ impl QualifiedModuleComponents {
             return cached;
         }
 
-        let mut scan = self.child_component_scan.borrow_mut();
+        let mut scan = self.tables.child_component_scan.borrow_mut();
         if scan.complete {
-            self.child_components
+            self.tables
+                .child_components
                 .borrow_mut()
                 .insert(name.to_string(), None);
             return None;
         }
 
-        let mut child_components = self.child_components.borrow_mut();
+        let mut child_components = self.tables.child_components.borrow_mut();
         let (built, scanned_items) = scan_child_component_from_signature(
             self.access_path(),
             &self.signature,
@@ -1046,7 +1063,7 @@ impl QualifiedModuleComponents {
         ctx: &super::context::TypeContext,
     ) -> Option<(usize, Ident, Arc<ModuleDeclaration>)> {
         let (idx, runtime_pos) = self.cached_module_index(name)?;
-        if let Some((id, md)) = self.qualified_modules.borrow().get(name).cloned() {
+        if let Some((id, md)) = self.tables.qualified_modules.borrow().get(name).cloned() {
             let selected_path =
                 qualified_submodule_access_path(self.access_path.as_ref(), name, runtime_pos, &md);
             if !module_decl_is_self_alias_for_access_path(&md, &selected_path) {
@@ -1067,7 +1084,8 @@ impl QualifiedModuleComponents {
             let selected_path =
                 qualified_submodule_access_path(self.access_path.as_ref(), name, runtime_pos, &md);
             if !module_decl_is_self_alias_for_access_path(&md, &selected_path) {
-                self.qualified_modules
+                self.tables
+                    .qualified_modules
                     .borrow_mut()
                     .insert(name.to_string(), (id.clone(), md.clone()));
                 return Some((runtime_pos, id, md));
@@ -1096,7 +1114,8 @@ impl QualifiedModuleComponents {
                 // same forced env.ml:1568 module-declaration thunk. Rust has
                 // separate component views, so reuse the backing declaration
                 // instead of running compiler/ml/subst.ml:351-364 again.
-                self.qualified_modules
+                self.tables
+                    .qualified_modules
                     .borrow_mut()
                     .insert(name.to_string(), (id.clone(), md.clone()));
                 ctx.register_qualified_module_decl(
@@ -1118,7 +1137,8 @@ impl QualifiedModuleComponents {
             if !module_decl_is_self_alias_for_access_path(&md, &selected_path) {
                 // Same sharing as above, but reached from the flattened backing
                 // component view after the selected path forced the declaration.
-                self.qualified_modules
+                self.tables
+                    .qualified_modules
                     .borrow_mut()
                     .insert(name.to_string(), (id.clone(), md.clone()));
                 ctx.register_qualified_module_decl(
@@ -1157,7 +1177,8 @@ impl QualifiedModuleComponents {
                 ctx,
             );
             let md = Arc::new(md);
-            self.qualified_modules
+            self.tables
+                .qualified_modules
                 .borrow_mut()
                 .insert(name.to_string(), (raw_id.clone(), md.clone()));
             ctx.register_qualified_module_decl(
@@ -1196,7 +1217,8 @@ impl QualifiedModuleComponents {
             ctx,
         );
         let md = Arc::new(md);
-        self.qualified_modules
+        self.tables
+            .qualified_modules
             .borrow_mut()
             .insert(name.to_string(), (id.clone(), md.clone()));
         ctx.register_qualified_module_decl(self.access_path.as_ref(), name, id.clone(), md.clone());
@@ -1217,7 +1239,7 @@ impl QualifiedModuleComponents {
         name: &str,
         _ctx: &super::context::TypeContext,
     ) -> Option<(Ident, ModtypeDeclaration)> {
-        self.component_modtypes.get(name).cloned()
+        self.tables.modtypes.get(name).cloned()
     }
 
     pub(crate) fn lookup_qualified_modtype(
@@ -1225,7 +1247,7 @@ impl QualifiedModuleComponents {
         name: &str,
         ctx: &super::context::TypeContext,
     ) -> Option<(Ident, ModtypeDeclaration)> {
-        if let Some((id, mtd)) = self.qualified_modtypes.borrow().get(name).cloned() {
+        if let Some((id, mtd)) = self.tables.qualified_modtypes.borrow().get(name).cloned() {
             return Some((id, mtd));
         }
 
@@ -1235,7 +1257,8 @@ impl QualifiedModuleComponents {
         // substitution pass again here; it would double-substitute package
         // identities that were already handled while building the component.
         let (id, mtd) = self.lookup_modtype(name, ctx)?;
-        self.qualified_modtypes
+        self.tables
+            .qualified_modtypes
             .borrow_mut()
             .insert(name.to_string(), (id.clone(), mtd.clone()));
         Some((id, mtd))
@@ -1674,12 +1697,14 @@ fn build_local_module_components<'a>(
         }
     }
 
-    Some(QualifiedModuleComponents::new_with_complete_child_components_arc(
-        access_path.clone(),
-        qualified_sig,
-        child_components,
-        ctx,
-    ))
+    Some(
+        QualifiedModuleComponents::new_with_complete_child_components_arc(
+            access_path.clone(),
+            qualified_sig,
+            child_components,
+            ctx,
+        ),
+    )
 }
 
 #[derive(Debug, Clone)]
