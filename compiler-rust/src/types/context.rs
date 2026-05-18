@@ -332,10 +332,16 @@ pub struct TypeContext {
         >,
     >,
 
-    /// Flattened persistent aliases discovered while building component tables.
-    /// OCaml keeps this relationship in `comp_components`; Rust needs an
-    /// explicit side table for paths that later appear without `PersistentEnv`.
-    flattened_alias_component_paths: RefCell<ahash::AHashMap<String, Path>>,
+    /// Module alias source paths discovered while building component tables.
+    ///
+    /// OCaml compiler/ml/env.ml:1517 scrapes `Mty_alias`/`Mty_ident` through
+    /// `find_module`, and env.ml:1530-1578 stores component thunks under the
+    /// selected path returned by `prefix_idents`. This relation keeps that
+    /// declaration-derived source path available when Rust later reaches a
+    /// cached component view without `PersistentEnv`; it must not be inferred
+    /// from flattened module-name spelling.
+    component_alias_sources: RefCell<ahash::AHashMap<Path, Vec<Path>>>,
+    component_paths_by_alias_source: RefCell<ahash::AHashMap<Path, Vec<Path>>>,
 
     /// Cached dotted value lookups keyed by resolved module access path.
     resolved_module_value_cache: RefCell<
@@ -494,6 +500,12 @@ pub struct TypeContext {
     typed_envs_by_id: RefCell<ahash::AHashMap<u64, EnvRef>>,
 }
 
+fn push_unique_path(paths: &mut Vec<Path>, path: Path) {
+    if !paths.iter().any(|existing| existing.same(&path)) {
+        paths.push(path);
+    }
+}
+
 impl TypeContext {
     /// Create a new type context.
     pub fn new(id_gen: Arc<IdGenerator>) -> Self {
@@ -529,7 +541,8 @@ impl TypeContext {
             resolved_pdot_type_cache: RefCell::new(ahash::AHashMap::new()),
             resolved_module_sig_cache: RefCell::new(ahash::AHashMap::new()),
             qualified_module_components_cache: RefCell::new(ahash::AHashMap::new()),
-            flattened_alias_component_paths: RefCell::new(ahash::AHashMap::new()),
+            component_alias_sources: RefCell::new(ahash::AHashMap::new()),
+            component_paths_by_alias_source: RefCell::new(ahash::AHashMap::new()),
             resolved_module_value_cache: RefCell::new(ahash::AHashMap::new()),
             resolved_module_type_cache: RefCell::new(ahash::AHashMap::new()),
             resolved_child_module_path_cache: RefCell::new(ahash::AHashMap::new()),
@@ -834,42 +847,116 @@ impl TypeContext {
             .contains_key(key)
     }
 
-    pub(crate) fn register_flattened_alias_component_path(
+    pub(crate) fn register_component_alias_source(
         &self,
-        flat_head: &str,
         component_path: Path,
+        alias_source: Path,
     ) {
-        // OCaml compiler/ml/env.ml:1530 builds `prefix_idents`, and
-        // env.ml:1573-1578 stores child `comp_components` under that prefixed
-        // path. Keep the same alias-to-component-path fact available even
-        // when Rust reaches a later helper without `PersistentEnv`.
-        self.flattened_alias_component_paths
-            .borrow_mut()
-            .entry(flat_head.to_string())
-            .or_insert(component_path);
+        // OCaml compiler/ml/env.ml:1440-1446 scrapes aliases by resolving the
+        // target path through `find_module`; env.ml:1530 then prefixes the
+        // selected component path. Record exactly that pair so later helpers
+        // recover alias identity from declarations, not from name spelling.
+        let mut alias_sources = vec![alias_source];
+        for backing_source in self.flattened_backing_sources_for_alias_source(&alias_sources[0]) {
+            if !alias_sources
+                .iter()
+                .any(|source| source.same(&backing_source))
+            {
+                alias_sources.push(backing_source);
+            }
+        }
+
+        for alias_source in alias_sources {
+            let component_key = {
+                let by_component = self.component_alias_sources.borrow();
+                by_component
+                    .keys()
+                    .find(|existing| existing.same(&component_path))
+                    .cloned()
+                    .unwrap_or_else(|| component_path.clone())
+            };
+            let mut by_component = self.component_alias_sources.borrow_mut();
+            push_unique_path(
+                by_component.entry(component_key).or_default(),
+                alias_source.clone(),
+            );
+
+            let source_key = {
+                let by_source = self.component_paths_by_alias_source.borrow();
+                by_source
+                    .keys()
+                    .find(|existing| existing.same(&alias_source))
+                    .cloned()
+                    .unwrap_or_else(|| alias_source.clone())
+            };
+            let mut by_source = self.component_paths_by_alias_source.borrow_mut();
+            push_unique_path(
+                by_source.entry(source_key).or_default(),
+                component_path.clone(),
+            );
+        }
     }
 
-    pub(crate) fn find_flattened_alias_component_path(&self, flat_head: &str) -> Option<Path> {
-        self.flattened_alias_component_paths
-            .borrow()
-            .get(flat_head)
-            .cloned()
+    fn flattened_backing_sources_for_alias_source(&self, alias_source: &Path) -> Vec<Path> {
+        let Ok((head, components)) = alias_source.flatten() else {
+            return Vec::new();
+        };
+        if components.is_empty() {
+            return Vec::new();
+        }
+
+        let persistent_env = self.persistent_env.borrow();
+        let Some(pers) = persistent_env.as_ref() else {
+            return Vec::new();
+        };
+
+        let mut sources = Vec::new();
+        for split in 1..=components.len() {
+            let mut qualified_prefix = Path::pident(head.clone());
+            for component in &components[..split] {
+                qualified_prefix = Path::pdot(qualified_prefix, *component);
+            }
+
+            for flat_head in pers.flattened_alias_heads_for_path(&qualified_prefix) {
+                let mut source = Path::pident(Ident::create_persistent(&flat_head));
+                for component in &components[split..] {
+                    source = Path::pdot(source, *component);
+                }
+                if !sources.iter().any(|existing: &Path| existing.same(&source)) {
+                    sources.push(source);
+                }
+            }
+        }
+        sources
     }
 
-    /// Return flattened persistent heads that back a selected component path.
+    pub(crate) fn component_paths_for_alias_source(&self, alias_source: &Path) -> Vec<Path> {
+        let mut paths = Vec::new();
+        for (source, component_paths) in self.component_paths_by_alias_source.borrow().iter() {
+            if source.same(alias_source) {
+                for component_path in component_paths {
+                    push_unique_path(&mut paths, component_path.clone());
+                }
+            }
+        }
+        paths
+    }
+
+    /// Return alias source paths that back a selected component path.
     ///
-    /// This mirrors the alias source selected by OCaml compiler/ml/env.ml:1513
-    /// through `scrape_alias`, while env.ml:1573-1578 stores child component
-    /// paths under the selected access path.
-    pub(crate) fn flattened_alias_heads_for_component_path(
-        &self,
-        component_path: &Path,
-    ) -> Vec<String> {
-        self.flattened_alias_component_paths
-            .borrow()
-            .iter()
-            .filter_map(|(flat_head, path)| path.same(component_path).then(|| flat_head.clone()))
-            .collect()
+    /// This mirrors the source path selected by OCaml compiler/ml/env.ml:1513
+    /// through `scrape_alias`, while env.ml:1573-1578 stores child
+    /// declaration/component thunks under the selected access path.
+    pub(crate) fn alias_sources_for_component_path(&self, component_path: &Path) -> Vec<Path> {
+        let mut sources = Vec::new();
+        for (path, alias_sources) in self.component_alias_sources.borrow().iter() {
+            if path.same(component_path) {
+                for alias_source in alias_sources {
+                    push_unique_path(&mut sources, alias_source.clone());
+                }
+            }
+        }
+        sources
     }
 
     /// Look up a module alias target from the qualified module components cache.
@@ -2467,6 +2554,56 @@ mod tests {
 
         ctx.end_def();
         assert_eq!(ctx.current_level(), 0);
+    }
+
+    #[test]
+    fn component_alias_sources_are_path_based() {
+        let id_gen = IdGenerator::new();
+        let ctx = TypeContext::new(std::sync::Arc::new(id_gen));
+
+        let selected_path = Path::pdot_pos(
+            Path::pident(Ident::create_persistent("Selected")),
+            "Child",
+            7,
+        );
+        let selected_path_no_pos = Path::pdot(
+            Path::pident(Ident::create_persistent("Selected")),
+            "Child",
+        );
+        let alias_source = Path::pdot_pos(
+            Path::pident(Ident::create_persistent("Selected__Backing")),
+            "Child",
+            3,
+        );
+        let alias_source_no_pos = Path::pdot(
+            Path::pident(Ident::create_persistent("Selected__Backing")),
+            "Child",
+        );
+        let spelling_only_source = Path::pident(Ident::create_persistent("Other__Child"));
+
+        assert!(
+            ctx.component_paths_for_alias_source(&alias_source_no_pos)
+                .is_empty()
+        );
+        assert!(
+            ctx.alias_sources_for_component_path(&selected_path_no_pos)
+                .is_empty()
+        );
+
+        ctx.register_component_alias_source(selected_path.clone(), alias_source.clone());
+
+        assert!(ctx
+            .component_paths_for_alias_source(&alias_source_no_pos)
+            .iter()
+            .any(|path| path.same(&selected_path_no_pos)));
+        assert!(ctx
+            .alias_sources_for_component_path(&selected_path_no_pos)
+            .iter()
+            .any(|path| path.same(&alias_source_no_pos)));
+        assert!(
+            ctx.component_paths_for_alias_source(&spelling_only_source)
+                .is_empty()
+        );
     }
 
     #[test]

@@ -4317,13 +4317,12 @@ pub fn substitute_type_paths_in_value_from_sig(
         &mut visited,
     );
 
-    for flat_head in ctx.flattened_alias_heads_for_component_path(module_path) {
-        let flat_parent = Path::pident(Ident::create_persistent(&flat_head));
+    for alias_source in ctx.alias_sources_for_component_path(module_path) {
         for item in sig_items {
             let SignatureItem::SigType(id, _, _) = item else {
                 continue;
             };
-            let old_path = Path::pdot(flat_parent.clone(), id.name());
+            let old_path = Path::pdot(alias_source.clone(), id.name());
             let new_path = Path::pdot(module_path.clone(), id.name());
             if old_path.same(&new_path) {
                 continue;

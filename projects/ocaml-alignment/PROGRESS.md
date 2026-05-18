@@ -23,8 +23,6 @@ need to be proven against OCaml or replaced with a more direct port.
 
 - Does every `ComponentLookupCacheMode` call site correspond exactly to an
   OCaml Env API boundary?
-- Can `flattened_alias_component_paths` be removed by carrying component thunk
-  identity through alias scraping and substitution instead?
 - Are signature-content inference helpers still affecting force order?
 - Do `ctype.rs` abbreviation caches have the same lifetime and env dependency
   behavior as OCaml?
@@ -33,16 +31,15 @@ need to be proven against OCaml or replaced with a more direct port.
 
 ## Next Recommended Session
 
-Continue task 1 in [RALPH_TODO.md](./RALPH_TODO.md):
+Continue task 4 in [RALPH_TODO.md](./RALPH_TODO.md):
 
-1. Read OCaml `compiler/ml/env.ml:475-477`, `781-793`, `865-882`,
-   `1516-1588`, and `1841-1877`.
-2. Audit remaining Rust module declaration force sites against those Env API
-   boundaries.
-3. Verify that module declarations are forced at the OCaml
-   `EnvLazy.force subst_modtype_maker` boundary, not earlier.
-4. Verify that signature freshening and stamp consumption happen at that same
-   force point.
+1. Read OCaml `compiler/ml/typecore.ml` and `compiler/ml/env.ml` around the
+   remaining Rust signature-content inference helpers.
+2. Inventory helpers that scan signatures to guess type-family or module-path
+   identity.
+3. Replace each guess with the corresponding lookup, substitution, or
+   normalization path from OCaml.
+4. Keep internal and Tella typedtree/lambda/JS parity green.
 
 ## 2026-05-18 Stored Component Thunk Audit
 
@@ -286,3 +283,74 @@ Formatting note:
 - `rustfmt --edition 2024 --check compiler-rust/src/types/env_lazy.rs compiler-rust/src/types/typecore.rs`
   still reports pre-existing formatting diffs in unrelated `typecore.rs`
   regions. This patch did not apply broad formatting churn.
+
+## 2026-05-18 Declaration-Derived Component Aliases
+
+Task 3 completion:
+
+- Removed the old `flattened_alias_component_paths` side-channel from
+  `TypeContext`.
+- Replaced it with a declaration-derived relation between selected component
+  paths and alias source paths:
+  - Producer: `QualifiedModuleComponents` records `SigModule` declarations whose
+    module type is `MtyAlias` or `MtyIdent`.
+  - Consumers: component module lookup, raw backing signature lookup,
+    include-alias heads, selected value substitution, and the remaining
+    typecore alias helpers now ask for alias sources/component paths instead of
+    matching flattened string heads.
+- The relation uses `Path::same` for lookup and insertion, so OCaml-style path
+  identity ignores runtime position hints. This fixed the Tella repro where
+  `TellaStd.Request.json` still carried `Webapi__Fetch.Request.t`.
+- Persistent flattened-module metadata is still used only to derive backing
+  source paths from an already registered alias declaration prefix. It no longer
+  creates semantic alias identity by spelling alone.
+- Added `component_alias_sources_are_path_based` to cover declaration-backed,
+  position-insensitive path lookup and to reject unrelated spelling-only names.
+
+OCaml references:
+
+- `compiler/ml/env.ml:1435-1449`: `scrape_alias` resolves `Mty_alias` through
+  `find_module` and strengthens non-alias module types.
+- `compiler/ml/env.ml:1454-1505`: `prefix_idents` constructs selected
+  component paths and substitution entries.
+- `compiler/ml/env.ml:1513-1530`: `components_of_module_maker` scrapes aliases
+  before building component tables.
+- `compiler/ml/env.ml:1530-1588`: component table construction stores selected
+  values, types, modules, and child components under the prefixed path.
+- `compiler/ml/env.ml:865-882`: `find_module` forces module declarations through
+  the lazy component boundary.
+- `compiler/ml/subst.ml:345-389`: `Subst.modtype` and related substitution
+  functions rewrite module declarations/signatures at that boundary.
+
+Validation evidence:
+
+- `cargo check --manifest-path compiler-rust/Cargo.toml`: passed.
+- `cargo build --manifest-path compiler-rust/Cargo.toml`: passed.
+- `cargo build --release --manifest-path compiler-rust/Cargo.toml`: passed.
+- `cargo build --release --manifest-path rewatch/Cargo.toml`: passed.
+- `git diff --check -- compiler-rust/src/types/context.rs compiler-rust/src/types/env_lazy.rs compiler-rust/src/types/typecore.rs compiler-rust/src/types/typemod.rs compiler-rust/src/cmi/persistent_env.rs`:
+  passed.
+- Focused typedtree parity:
+  - `./scripts/test_typedtree_parity.sh --tella API__AnalyticsEvents`: `1/1`.
+  - `./scripts/test_typedtree_parity.sh ModuleWithAlias`: `2/2`.
+  - `./scripts/test_typedtree_parity.sh nested_module_alias`: `1/1`.
+  - `./scripts/test_typedtree_parity.sh global_module_alias_test`: `1/1`.
+- Full debug typedtree parity: `./scripts/test_typedtree_parity.sh`: `660/660`.
+- Tella debug typedtree quick: `./scripts/test_typedtree_parity.sh --tella --quick`:
+  `1697/1697`.
+- Debug lambda quick: `./scripts/test_lambda_parity.sh --quick`: `660/660`.
+- Debug JS output quick with external/Tella:
+  `./scripts/test_js_output_parity.sh --with-external --quick`: focused fixtures
+  `344/344`, local JS output `660/660`, Tella JS output `2127/2127`.
+- Release typedtree parity: `./scripts/test_typedtree_parity.sh --release`:
+  `660/660`.
+- Release lambda parity: `./scripts/test_lambda_parity.sh --release`: `660/660`.
+- Release Tella clean in-process `hyperfine`: `2.664s +/- 0.032s` over 10 runs,
+  range `2.606s..2.706s`, with load averages `2.93 4.89 5.47`.
+
+Unit-test caveat:
+
+- `cargo test --manifest-path compiler-rust/Cargo.toml component_alias_sources_are_path_based`
+  still fails before running the focused test because the crate's lib/test
+  target has pre-existing unrelated compile errors, including duplicate
+  `persistent_env.rs` test modules and stale Lambda/comptime test APIs.

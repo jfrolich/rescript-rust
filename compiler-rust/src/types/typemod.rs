@@ -920,9 +920,15 @@ fn include_module_alias_heads(
     let mut heads = pers_env
         .map(|pers| pers.flattened_alias_heads_for_path(&root_path))
         .unwrap_or_default();
-    for head in ctx.flattened_alias_heads_for_component_path(&root_path) {
-        if !heads.iter().any(|existing| existing == &head) {
-            heads.push(head);
+    for alias_source in ctx.alias_sources_for_component_path(&root_path) {
+        let Path::Pident(id) = alias_source else {
+            continue;
+        };
+        if !(id.is_persistent() || id.stamp() == 0) {
+            continue;
+        }
+        if !heads.iter().any(|existing| existing == id.name()) {
+            heads.push(id.name().to_string());
         }
     }
     heads

@@ -7663,8 +7663,8 @@ fn lower_args_manifest_needs_component_force(
                     .is_some()
             });
             let ctx_flat_hit = root.is_some_and(|head| {
-                ctx.find_flattened_alias_component_path(head.name())
-                    .is_some()
+                let source = Path::pident(head.clone());
+                !ctx.component_paths_for_alias_source(&source).is_empty()
             });
             let parent_depth = path
                 .parent()
@@ -23691,14 +23691,16 @@ fn should_rewrite_nested_alias_self_path(
     // selected path. If the resolved name is a registered backing unit for the
     // parent component, or for one of its selected child components, leave it
     // for that alias path; do not infer descendants from flattened spelling.
-    let old_name_is_parent_head = ctx
-        .flattened_alias_heads_for_component_path(parent_path)
+    let old_path = Path::pident(Ident::create_persistent(old_name));
+    let old_name_is_parent_source = ctx
+        .alias_sources_for_component_path(parent_path)
         .into_iter()
-        .any(|flat_head| old_name == flat_head);
+        .any(|source| source.same(&old_path));
     let old_name_is_registered_component_child = ctx
-        .find_flattened_alias_component_path(old_name)
-        .is_some_and(|component_path| same_or_descendant(&component_path, parent_path));
-    !(old_name_is_parent_head || old_name_is_registered_component_child)
+        .component_paths_for_alias_source(&old_path)
+        .into_iter()
+        .any(|component_path| same_or_descendant(&component_path, parent_path));
+    !(old_name_is_parent_source || old_name_is_registered_component_child)
 }
 
 fn rewrite_flattened_alias_child_prefixes<'a>(
@@ -23735,6 +23737,13 @@ fn rewrite_flattened_alias_head_prefixes<'a>(
         }
     };
 
+    fn append_components(mut path: Path, components: &[&str]) -> Path {
+        for component in components {
+            path = Path::pdot(path, *component);
+        }
+        path
+    }
+
     if let Ok((head, components)) = qualified_alias_path.flatten() {
         for split in 1..=components.len() {
             let prefix_components = &components[..split];
@@ -23744,14 +23753,9 @@ fn rewrite_flattened_alias_head_prefixes<'a>(
                 qualified_prefix = Path::pdot(qualified_prefix, *component);
             }
 
-            let mut flat_heads = pers_env
+            let flat_heads = pers_env
                 .map(|pers| pers.flattened_alias_heads_for_path(&qualified_prefix))
                 .unwrap_or_default();
-            for flat_head in ctx.flattened_alias_heads_for_component_path(&qualified_prefix) {
-                if !flat_heads.iter().any(|item| item == &flat_head) {
-                    flat_heads.push(flat_head);
-                }
-            }
             // OCaml compiler/ml/env.ml:1516-1538 discovers alias backing paths by
             // scraping real module declarations, and env.ml:1567-1578 stores the
             // selected child component path in the component table. Do not
@@ -23759,10 +23763,13 @@ fn rewrite_flattened_alias_head_prefixes<'a>(
             // prefix must come from the persistent alias table or the component
             // relation registered while building that table.
             for flat_head in flat_heads {
-                let mut source_prefix = Path::pident(Ident::create_persistent(&flat_head));
-                for component in remaining_components {
-                    source_prefix = Path::pdot(source_prefix, *component);
-                }
+                add_source_prefix(append_components(
+                    Path::pident(Ident::create_persistent(&flat_head)),
+                    remaining_components,
+                ));
+            }
+            for alias_source in ctx.alias_sources_for_component_path(&qualified_prefix) {
+                let source_prefix = append_components(alias_source, remaining_components);
                 add_source_prefix(source_prefix);
             }
         }
@@ -29280,11 +29287,17 @@ fn flattened_alias_component_parent<'a>(
     // flattened backing relation was registered from that alias scrape, not
     // from the spelling of the persistent head.
     let head = parent.head();
-    head.is_persistent()
-        && pers_env
-            .and_then(|pers| pers.qualified_alias_path_for_flattened_head(head.name()))
-            .or_else(|| ctx.find_flattened_alias_component_path(head.name()))
-            .is_some()
+    if !head.is_persistent() {
+        return false;
+    }
+
+    let source_path = Path::pident(head.clone());
+    pers_env
+        .and_then(|pers| pers.qualified_alias_path_for_flattened_head(head.name()))
+        .is_some()
+        || !ctx
+            .component_paths_for_alias_source(&source_path)
+            .is_empty()
 }
 
 fn build_shared_persistent_root_components<'a>(
@@ -30289,9 +30302,14 @@ fn build_module_signature_for_path<'a>(
                     }
                     Some((access_path, sig))
                 } else {
+                    let source_path = Path::pident(id.clone());
                     let qualified_alias_path = pers
                         .qualified_alias_path_for_flattened_head(id.name())
-                        .or_else(|| ctx.find_flattened_alias_component_path(id.name()))
+                        .or_else(|| {
+                            ctx.component_paths_for_alias_source(&source_path)
+                                .into_iter()
+                                .find(|qualified_alias_path| !qualified_alias_path.same(module_path))
+                        })
                         .filter(|qualified_alias_path| !qualified_alias_path.same(module_path));
                     if let Some(qualified_alias_path) = qualified_alias_path {
                         // OCaml compiler/ml/env.ml:1000-1007 resolves the
@@ -30354,8 +30372,9 @@ fn build_module_signature_for_path<'a>(
                     // signature cache without forcing the full-signature copy.
                     let access_path = Path::pident(id.clone());
                     let mut sig = raw_sig;
+                    let source_path = Path::pident(id.clone());
                     if let Some(qualified_alias_path) =
-                        ctx.find_flattened_alias_component_path(id.name())
+                        ctx.component_paths_for_alias_source(&source_path).into_iter().next()
                     {
                         crate::cmi::persistent_env::rewrite_sig_by_path_prefix(
                             &sig,
@@ -30377,9 +30396,11 @@ fn build_module_signature_for_path<'a>(
                     }
                     return Some((access_path, sig));
                 }
+                let source_path = Path::pident(id.clone());
                 let qualified_alias_path = ctx
-                    .find_flattened_alias_component_path(id.name())
-                    .filter(|qualified_alias_path| !qualified_alias_path.same(module_path));
+                    .component_paths_for_alias_source(&source_path)
+                    .into_iter()
+                    .find(|qualified_alias_path| !qualified_alias_path.same(module_path));
                 if let Some(qualified_alias_path) = qualified_alias_path {
                     // OCaml compiler/ml/env.ml:1000-1007 resolves the exact
                     // module first; env.ml:1529-1538 then prefixes component

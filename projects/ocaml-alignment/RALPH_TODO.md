@@ -86,12 +86,12 @@ Files:
 
 Tasks:
 
-- [ ] Inventory `flattened_alias_component_paths` producers and consumers.
-- [ ] Replace path-spelling alias facts with data produced by alias scraping,
+- [x] Inventory `flattened_alias_component_paths` producers and consumers.
+- [x] Replace path-spelling alias facts with data produced by alias scraping,
       substitution, and shared component thunks.
-- [ ] Remove fallback success based on flattened/unflattened spelling when
+- [x] Remove fallback success based on flattened/unflattened spelling when
       declaration lookup fails.
-- [ ] Add tests that prove alias identity comes from declarations, not names.
+- [x] Add tests that prove alias identity comes from declarations, not names.
 
 Acceptance:
 

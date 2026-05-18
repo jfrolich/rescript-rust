@@ -34,12 +34,6 @@ fn path_non_apply_root_is_persistent_or_global(path: &Path) -> bool {
     root_ident(path).is_some_and(|id| id.is_persistent() || id.stamp() == 0)
 }
 
-fn flattened_component_head(path: &Path) -> Option<&Ident> {
-    // OCaml compiler/ml/path.ml:63-69 refuses to flatten `Papply`; flattened
-    // alias sharing only applies to paths with a stable selected module head.
-    path.flatten().ok().map(|(head, _)| head)
-}
-
 fn build_matching_type_constructors(
     out: &mut Vec<ConstructorDescription>,
     access_path: &Path,
@@ -595,23 +589,19 @@ impl QualifiedModuleComponents {
                     runtime_pos += 1;
                 }
                 SignatureItem::SigModule(id, _, _) => {
-                    if let SignatureItem::SigModule(_, md, _) = item {
-                        if let super::decl::ModuleType::MtyAlias(_, Path::Pident(alias_id))
-                        | super::decl::ModuleType::MtyIdent(Path::Pident(alias_id)) = &md.md_type
-                        {
-                            let component_path =
-                                Path::pdot_pos(access_path.clone(), id.name(), runtime_pos as i32);
-                            // OCaml compiler/ml/env.ml:1530 prefixes child
-                            // identifiers with the selected component path,
-                            // then env.ml:1573-1578 stores that same path in
-                            // `comp_components`. Remember the scraped backing
-                            // unit so later raw child-thunk recovery uses the
-                            // same alias relation instead of path spelling.
-                            ctx.register_flattened_alias_component_path(
-                                alias_id.name(),
-                                component_path,
-                            );
-                        }
+                    if let SignatureItem::SigModule(_, md, _) = item
+                        && let super::decl::ModuleType::MtyAlias(_, alias_source)
+                        | super::decl::ModuleType::MtyIdent(alias_source) = &md.md_type
+                    {
+                        let component_path =
+                            Path::pdot_pos(access_path.clone(), id.name(), runtime_pos as i32);
+                        // OCaml compiler/ml/env.ml:1517 `scrape_alias` follows
+                        // the module declaration's alias path through
+                        // env.ml:865-882 `find_module`, then env.ml:1530-1578
+                        // stores thunks under the selected component path.
+                        // Preserve the actual source path from the declaration
+                        // instead of recovering it from flattened spelling.
+                        ctx.register_component_alias_source(component_path, alias_source.clone());
                     }
                     modules.insert(id.name().to_string(), Some((idx, runtime_pos)));
                     runtime_pos += 1;
@@ -1094,8 +1084,7 @@ impl QualifiedModuleComponents {
             // above: do not let a TypeContext-level self-alias placeholder hide
             // the raw component module-declaration thunk.
         }
-        for flat_head in ctx.flattened_alias_heads_for_component_path(self.access_path.as_ref()) {
-            let source_prefix = Path::pident(Ident::create_persistent(&flat_head));
+        for source_prefix in ctx.alias_sources_for_component_path(self.access_path.as_ref()) {
             if let Some((id, md)) = ctx.find_qualified_module_decl(&source_prefix, name) {
                 let selected_path = qualified_submodule_access_path(
                     self.access_path.as_ref(),
@@ -1127,11 +1116,10 @@ impl QualifiedModuleComponents {
                 return Some((runtime_pos, id, md));
             }
         }
-        if let Some(head) = flattened_component_head(self.access_path.as_ref())
-            && head.is_persistent()
-            && let Some(component_path) = ctx.find_flattened_alias_component_path(head.name())
-            && let Some((id, md)) = ctx.find_qualified_module_decl(&component_path, name)
-        {
+        for component_path in ctx.component_paths_for_alias_source(self.access_path.as_ref()) {
+            let Some((id, md)) = ctx.find_qualified_module_decl(&component_path, name) else {
+                continue;
+            };
             let selected_path =
                 qualified_submodule_access_path(self.access_path.as_ref(), name, runtime_pos, &md);
             if !module_decl_is_self_alias_for_access_path(&md, &selected_path) {
@@ -1316,10 +1304,16 @@ pub(crate) fn force_component_module_declaration_thunk(
     (id, md)
 }
 
-fn raw_sig_candidate_names_for_access_path(
+fn push_path_unique(candidates: &mut Vec<Path>, candidate: Path) {
+    if !candidates.iter().any(|existing| existing.same(&candidate)) {
+        candidates.push(candidate);
+    }
+}
+
+fn raw_sig_candidate_paths_for_access_path(
     access_path: &Path,
     ctx: &super::context::TypeContext,
-) -> Vec<String> {
+) -> Vec<Path> {
     let Ok((head, _components)) = access_path.flatten() else {
         return Vec::new();
     };
@@ -1328,21 +1322,16 @@ fn raw_sig_candidate_names_for_access_path(
     }
 
     let mut candidates = Vec::new();
-    let mut push_candidate = |candidate: String| {
-        if !candidates.iter().any(|existing| existing == &candidate) {
-            candidates.push(candidate);
-        }
-    };
     // OCaml compiler/ml/env.ml:1517 scrapes the alias target before
     // env.ml:1530 `prefix_idents`; env.ml:1567-1578 then stores child
     // declaration/component thunks from that raw signature item. Rust records
-    // the same alias-to-selected-component relation when building the component
-    // table, so raw backing signatures come from the captured alias relation
-    // rather than flattened path spelling.
-    for flat_head in ctx.flattened_alias_heads_for_component_path(access_path) {
-        push_candidate(flat_head);
+    // the same alias-source-to-selected-component relation when building the
+    // component table, so raw backing signatures come from the captured alias
+    // declaration rather than flattened path spelling.
+    for alias_source in ctx.alias_sources_for_component_path(access_path) {
+        push_path_unique(&mut candidates, alias_source);
     }
-    push_candidate(head.name().to_string());
+    push_path_unique(&mut candidates, Path::pident(head.clone()));
     candidates
 }
 
@@ -1364,11 +1353,16 @@ fn self_alias_raw_parent_module_item(
         return None;
     }
 
-    raw_sig_candidate_names_for_access_path(access_path, ctx)
+    raw_sig_candidate_paths_for_access_path(access_path, ctx)
         .into_iter()
-        .filter_map(|name| {
-            let raw_parent_sig = ctx.find_raw_module_sig(&name)?;
-            let raw_parent_path = Path::pident(Ident::create_persistent(&name));
+        .filter_map(|raw_parent_path| {
+            let Path::Pident(id) = &raw_parent_path else {
+                return None;
+            };
+            if !(id.is_persistent() || id.stamp() == 0) {
+                return None;
+            }
+            let raw_parent_sig = ctx.find_raw_module_sig(id.name())?;
             Some((raw_parent_sig, raw_parent_path))
         })
         .find_map(|(raw_parent_sig, raw_parent_path)| {
@@ -1400,15 +1394,9 @@ fn alias_target_matches_raw_parent_child(
         return true;
     }
 
-    raw_sig_candidate_names_for_access_path(access_path, ctx)
+    raw_sig_candidate_paths_for_access_path(access_path, ctx)
         .into_iter()
-        .any(|candidate| {
-            matches!(
-                &parent,
-                Path::Pident(id)
-                    if (id.is_persistent() || id.stamp() == 0) && id.name() == candidate
-            )
-        })
+        .any(|candidate| parent.same(&candidate))
 }
 
 fn access_path_is_direct_opened_component(env: &super::env::Env, access_path: &Path) -> bool {
