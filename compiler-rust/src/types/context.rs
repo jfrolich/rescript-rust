@@ -801,27 +801,23 @@ impl TypeContext {
     /// Borrow a cached qualified module-components view.
     /// OCaml stores lazy module components once and keeps that table visible to
     /// recursive lookup while forcing nested thunks (compiler/ml/env.ml:1513-1514,
-    /// 1516-1588). Clone only the Arc-backed view here so re-entrant lookups
-    /// observe the same cached component table instead of rebuilding and
-    /// freshening bound identifiers again.
+    /// 1516-1588). Borrow the cached view directly; the view itself owns the
+    /// shared lazy component state needed by recursive lookups.
     pub(crate) fn with_qualified_module_components<R>(
         &self,
         key: &QualifiedModuleComponentsCacheKey,
         f: impl FnOnce(&super::env_lazy::QualifiedModuleComponents) -> R,
     ) -> Option<R> {
-        let components = {
-            let cache = self.qualified_module_components_cache.borrow();
-            let Some(components) = cache.get(key) else {
-                if self.compiler_counters_enabled {
-                    crate::perf_counters::record_qualified_component_miss();
-                }
-                return None;
-            };
+        let cache = self.qualified_module_components_cache.borrow();
+        let Some(components) = cache.get(key) else {
             if self.compiler_counters_enabled {
-                crate::perf_counters::record_qualified_component_hit();
+                crate::perf_counters::record_qualified_component_miss();
             }
-            Arc::clone(components)
+            return None;
         };
+        if self.compiler_counters_enabled {
+            crate::perf_counters::record_qualified_component_hit();
+        }
         Some(f(components.as_ref()))
     }
 
