@@ -26,8 +26,8 @@ support in Rust is still a stub:
   still intentionally not wired into the crate.
 - Rewrite Stage 4 has started with initial file-for-file Rust ports of
   `EmitText.ml`, `EmitType.ml`, `Emitters.ml`/`.mli`, `EmitJs.ml`,
-  `NamedArgs.ml`, and `Converter.ml`. These files are still intentionally not
-  wired into the crate.
+  `NamedArgs.ml`, `Converter.ml`, and `GenTypeMain.ml`. These files are still
+  intentionally not wired into the crate.
 
 ## Reference Inventory
 
@@ -294,6 +294,24 @@ For the `EmitJs.ml` Stage 4 chunk:
 - The new file is not wired into the crate, so debug build/parity gates were not
   run for this non-compiling rewrite stage.
 
+For the `GenTypeMain.ml` Stage 4 chunk:
+
+- `GenTypeMain.ml` was ported to `compiler-rust/src/gentype/main.rs` against
+  `compiler/gentype/GenTypeMain.ml:1-175`.
+- Surface/control/output-sensitive review checked CMT annotation classification
+  from `GenTypeMain.ml:3-24`, declaration-only translation for imported CMTs
+  from `GenTypeMain.ml:26-52`, full CMT translation from `GenTypeMain.ml:53-70`,
+  generated-file emission from `GenTypeMain.ml:72-83`, stale artifact handling
+  from `GenTypeMain.ml:85-91`, interface/implementation selection and
+  `@@genType.ignoreInterface` handling from `GenTypeMain.ml:93-134`, and
+  `process_cmt_file` orchestration from `GenTypeMain.ml:136-175`.
+- The staged Rust port defines the `BinaryAnnots`/`InputCmt` boundary used by
+  earlier staged files. Actual CMT decoding remains a Phase 3 wiring task, while
+  the stale-artifact logging boundary mirrors `GenTypeMain.ml:85-91`.
+- `rustfmt` was run on the new file and `git diff --check` passed.
+- The new file is not wired into the crate, so debug build/parity gates were not
+  run for this non-compiling rewrite stage.
+
 Earlier setup note:
 
 The latest debug build attempt after merging `fuzz-errors` failed before code
@@ -309,10 +327,9 @@ needed.
 
 ## Next Session
 
-Continue with Rewrite Stage 4 from `PLAN.md`:
+Continue with Phase 0 from `PLAN.md`:
 
-1. Continue with the remaining emitter and entry-point files from
-   `compiler/gentype`.
+1. Wire `compiler-rust/src/gentype/mod.rs`.
 2. Keep function names, helper names, data-flow shape, and source-location
    references as close to OCaml as Rust allows.
 3. Run the three per-file review passes before marking each file done:
