@@ -1149,6 +1149,17 @@ impl Env {
             .ok_or_else(|| EnvError::TypeNotFound(name.to_string()))
     }
 
+    /// Find a type by name with the path selected by OCaml `IdTbl.find_name`.
+    ///
+    /// Local bindings resolve to `Pident(id)`, while opened bindings resolve to
+    /// `Pdot(root, name, pos)` from the symbolic open layer.
+    pub fn find_type_with_path(&self, name: &str) -> EnvResult<(Path, &TypeDeclaration)> {
+        self.types
+            .find_by_name_with_path(name)
+            .map(|(path, decl)| (path, decl.as_ref()))
+            .ok_or_else(|| EnvError::TypeNotFound(name.to_string()))
+    }
+
     /// Iterate over visible type bindings.
     pub fn iter_types(&self) -> impl Iterator<Item = (&Ident, &TypeDeclaration)> {
         self.types.iter().map(|(id, decl)| (id, decl.as_ref()))
@@ -1536,6 +1547,17 @@ impl Env {
         self.modules
             .find_by_name_with_origin(name)
             .map(|(id, decl, is_local)| (id, decl.as_ref(), is_local))
+            .ok_or_else(|| EnvError::ModuleNotFound(name.to_string()))
+    }
+
+    /// Find a module by name with the path selected by OCaml `IdTbl.find_name`.
+    ///
+    /// Local bindings resolve to `Pident(id)`, while opened bindings resolve to
+    /// `Pdot(root, name, pos)` from the symbolic open layer.
+    pub fn find_module_with_path(&self, name: &str) -> EnvResult<(Path, &ModuleDeclaration)> {
+        self.modules
+            .find_by_name_with_path(name)
+            .map(|(path, decl)| (path, decl.as_ref()))
             .ok_or_else(|| EnvError::ModuleNotFound(name.to_string()))
     }
 

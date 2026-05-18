@@ -1948,21 +1948,8 @@ pub(crate) fn resolve_type_constructor_path(
     match lid {
         Longident::Lident(name_idx) => {
             let name = tctx.arena.get_string(*name_idx);
-            match env.find_type_with_origin(name) {
-                Ok((id, decl, is_local)) => {
-                    // Match OCaml's IdTbl.find_name behavior:
-                    // - Local/included bindings (tbl.current): return Pident(id)
-                    // - Opened bindings (tbl.opened): return the decl's type_path
-                    //   (which is the qualified Pdot path from the opened module)
-                    let path = if is_local {
-                        Path::pident(id.clone())
-                    } else {
-                        decl.type_path
-                            .clone()
-                            .unwrap_or_else(|| Path::pident(id.clone()))
-                    };
-                    (path, Some(decl.clone()))
-                }
+            match env.find_type_with_path(name) {
+                Ok((path, decl)) => (path, Some(decl.clone())),
                 Err(_) => {
                     let path = crate::types::predef::find_predef_path(name)
                         .unwrap_or_else(|| Path::pident(Ident::create_persistent(name)));
@@ -8397,14 +8384,7 @@ fn lookup_module_value_by_name(
     pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
     ctx: &TypeContext,
 ) -> Option<(Path, ValueDescription)> {
-    let (id, md, is_local) = env.find_module_with_origin(module_name).ok()?;
-    let module_path = if is_local {
-        Path::pident(id.clone())
-    } else {
-        md.md_path
-            .clone()
-            .unwrap_or_else(|| Path::pident(id.clone()))
-    };
+    let (module_path, _) = env.find_module_with_path(module_name).ok()?;
 
     if let Some(cached) = ctx.find_resolved_module_value(&module_path, value_name) {
         return Some(cached);
@@ -19356,14 +19336,7 @@ fn unbound_value_module_suggestion(
         return None;
     };
     let candidate = capitalize_ascii(tctx.arena.get_string(*idx));
-    let (id, md, is_local) = env.find_module_with_origin(&candidate).ok()?;
-    let path = if is_local {
-        Path::pident(id.clone())
-    } else {
-        md.md_path
-            .clone()
-            .unwrap_or_else(|| Path::pident(id.clone()))
-    };
+    let (path, _) = env.find_module_with_path(&candidate).ok()?;
     Some(format_arity_suggestion_path(&path))
 }
 
@@ -23760,16 +23733,8 @@ impl Env {
         match lid {
             Longident::Lident(mod_idx) => {
                 let mod_name = arena.get_string(*mod_idx);
-                if let Ok((mod_id, md, is_local)) = self.find_module_with_origin(mod_name) {
-                    if is_local {
-                        Some(Path::pident(mod_id.clone()))
-                    } else {
-                        Some(
-                            md.md_path
-                                .clone()
-                                .unwrap_or_else(|| Path::pident(mod_id.clone())),
-                        )
-                    }
+                if let Ok((module_path, _)) = self.find_module_with_path(mod_name) {
+                    Some(module_path)
                 } else {
                     let module_path = Path::pident(Ident::create_persistent(mod_name));
                     with_resolved_module_components_for_path(
@@ -23881,14 +23846,7 @@ impl Env {
             Longident::Lident(mod_idx) => {
                 let mod_name = arena.get_string(*mod_idx);
                 // First try local environment
-                if let Ok((mod_id, md, is_local)) = self.find_module_with_origin(mod_name) {
-                    let access_path_hint = if is_local {
-                        Path::pident(mod_id.clone())
-                    } else {
-                        md.md_path
-                            .clone()
-                            .unwrap_or_else(|| Path::pident(mod_id.clone()))
-                    };
+                if let Ok((access_path_hint, md)) = self.find_module_with_path(mod_name) {
                     let module_cache_key = path_cache_key(&access_path_hint)
                         .map(|key| {
                             format!(
@@ -23898,12 +23856,7 @@ impl Env {
                             )
                         })
                         .unwrap_or_else(|| {
-                            format!(
-                                "module::lident::{}#{}::subst{}",
-                                mod_id.name(),
-                                mod_id.stamp(),
-                                apply_subst as u8
-                            )
+                            format!("module::lident::{}::subst{}", mod_name, apply_subst as u8)
                         });
                     if let Some(cached) = ctx.find_resolved_module_sig(&module_cache_key) {
                         return Some(cached);
@@ -23948,16 +23901,7 @@ impl Env {
                         }
                     }
                     if let Some((sig, resolved_name)) = result {
-                        // Match OCaml IdTbl path selection:
-                        // - Local module bindings keep their local identifier path (Pident)
-                        // - Opened module bindings use their qualified md_path (Pdot), if any.
-                        let path = if is_local {
-                            Path::pident(mod_id.clone())
-                        } else if let Some(ref qualified_path) = md.md_path {
-                            qualified_path.clone()
-                        } else {
-                            Path::pident(mod_id.clone())
-                        };
+                        let path = access_path_hint.clone();
                         // OCaml compiler/ml/env.ml:1530-1538 always builds a
                         // component substitution with `prefix_idents`, and
                         // compiler/ml/subst.ml:303-309 applies it to value
@@ -28643,8 +28587,8 @@ fn with_resolved_module_components_for_lid_inner<'a, R>(
     match lid {
         Longident::Lident(mod_idx) => {
             let mod_name = arena.get_string(*mod_idx);
-            let module_path =
-                if let Ok((mod_id, md, is_local)) = env.find_module_with_origin(mod_name) {
+            let module_path = if let Ok((module_path, _)) = env.find_module_with_path(mod_name) {
+                if let Path::Pident(mod_id) = &module_path {
                     let pident_path = Path::pident(mod_id.clone());
                     if let Some(result) = env
                         .with_local_module_components(&pident_path, |stored| {
@@ -28660,14 +28604,11 @@ fn with_resolved_module_components_for_lid_inner<'a, R>(
                     {
                         return Some(result);
                     }
-                    if is_local {
-                        pident_path
-                    } else {
-                        md.md_path.clone().unwrap_or(pident_path)
-                    }
-                } else {
-                    Path::pident(Ident::create_persistent(mod_name))
-                };
+                }
+                module_path
+            } else {
+                Path::pident(Ident::create_persistent(mod_name))
+            };
             with_resolved_module_components_for_path(&module_path, env, pers_env, ctx, f).flatten()
         }
         Longident::Ldot(prefix, child_idx) => {
