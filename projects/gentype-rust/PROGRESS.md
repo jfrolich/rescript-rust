@@ -29,6 +29,9 @@ support in Rust is still a stub:
   `NamedArgs.ml`, `Converter.ml`, and `GenTypeMain.ml`.
 - Phase 0 has wired `compiler-rust/src/gentype/mod.rs` into the crate and the
   debug compiler/rewatch builds now complete.
+- Phase 2 now threads a parsed GenType config through both Rust `bsc` and the
+  rewatch in-process compiler options. Rust still uses the same observable
+  `-bs-gentype-*` flag stream as the OCaml path before constructing the config.
 - The project now has a single no-argument GenType output parity harness:
   `./scripts/test_gentype_output_parity.sh`. It always compares raw
   `.gen.ts`/`.gen.tsx` output for the react example, stdlib-no-shims, and
@@ -147,6 +150,38 @@ cargo build --manifest-path compiler-rust/Cargo.toml
 cargo build --manifest-path rewatch/Cargo.toml
 git diff --check -- compiler-rust/src/lib.rs compiler-rust/src/gentype/mod.rs compiler-rust/src/gentype/annotation.rs compiler-rust/src/gentype/dependencies.rs compiler-rust/src/gentype/export_module.rs compiler-rust/src/gentype/gen_ident.rs compiler-rust/src/gentype/translation.rs compiler-rust/src/gentype/type_env.rs compiler-rust/src/gentype/type_vars.rs compiler-rust/src/gentype/translate_core_type.rs compiler-rust/src/gentype/translate_signature.rs compiler-rust/src/gentype/translate_signature_from_types.rs compiler-rust/src/gentype/translate_structure.rs compiler-rust/src/gentype/translate_type_declarations.rs compiler-rust/src/gentype/translate_type_expr_from_types.rs
 ```
+
+## Phase 2 Config Wiring
+
+The in-process compiler now receives the same GenType config data that the OCaml
+compiler path derives from CLI flags:
+
+- `compiler-rust/src/gentype/config.rs` can build `GenTypeConfig.t` from an
+  explicit flag state or from the `-bs-gentype-*` CLI argument stream, matching
+  `compiler/gentype/GenTypeConfig.ml:112-177` and
+  `compiler/bsc/rescript_compiler_main.ml:300-343`.
+- `compiler-rust/src/bin/bsc.rs` parses `-bs-project-root` plus the full
+  GenType flag set before storing `CompilerOptions.gentype_config`.
+- `rewatch/src/build/compile.rs` materializes the same flags with
+  `get_gentype_args` and feeds them through the shared Rust config builder, so
+  subprocess and in-process compilation use one config construction path.
+- `compiler-rust/src/driver.rs` now carries `Option<gentype::config::T>` in
+  `CompilerOptions`. The config is still not consumed by a generator entrypoint,
+  so generated-output parity remains at the current missing-output baseline.
+
+Debug verification:
+
+```text
+cargo build --manifest-path compiler-rust/Cargo.toml
+cargo build --manifest-path rewatch/Cargo.toml
+git diff --check -- compiler-rust/src/gentype/config.rs compiler-rust/src/driver.rs compiler-rust/src/bin/bsc.rs rewatch/src/build/compile.rs projects/gentype-rust/PROGRESS.md projects/gentype-rust/RALPH_TODO.md
+```
+
+The focused unit test
+`cargo test --manifest-path compiler-rust/Cargo.toml gentype::config::tests::parses_cli_backed_gentype_config`
+is present but currently blocked by unrelated dirty test code in
+`compiler-rust/src/cmi/persistent_env.rs`, where `mod tests` is defined twice.
+The normal debug builds above still pass.
 
 ## Recent Verification
 

@@ -109,6 +109,7 @@ struct Options {
     no_builtin_ppx: bool,
     external_ppxs: Vec<String>,
     gentype: bool,
+    gentype_flags: rescript_compiler::gentype::config::FlagState,
     make_runtime: bool,
     read_cmi: bool,
     color_mode: code_frame::ColorMode,
@@ -212,6 +213,12 @@ fn run() -> Result<()> {
                         opts.runtime_path = Some(PathBuf::from(val));
                     }
                 }
+                // Mirrors compiler/bsc/rescript_compiler_main.ml:266-270.
+                "-bs-project-root" => {
+                    if let Some(val) = args.next() {
+                        opts.gentype_flags.project_root = val;
+                    }
+                }
                 "-bs-package-name" => {
                     if let Some(val) = args.next() {
                         opts.package_name = Some(val);
@@ -244,6 +251,70 @@ fn run() -> Result<()> {
                 "-noassert" => opts.noassert = true,
                 "-bs-no-builtin-ppx" => opts.no_builtin_ppx = true,
                 "-bs-gentype" => opts.gentype = true,
+                // Mirrors compiler/bsc/rescript_compiler_main.ml:300-343.
+                "-bs-gentype-module" => {
+                    if let Some(val) = args.next() {
+                        opts.gentype_flags.module_flag =
+                            rescript_compiler::gentype::config::module_of_string(&val);
+                    }
+                }
+                "-bs-gentype-module-resolution" => {
+                    if let Some(val) = args.next() {
+                        opts.gentype_flags.module_resolution_flag =
+                            rescript_compiler::gentype::config::module_resolution_of_string(&val);
+                    }
+                }
+                "-bs-gentype-export-interfaces" => {
+                    opts.gentype_flags.export_interfaces_flag = true;
+                }
+                "-bs-gentype-generated-extension" => {
+                    if let Some(val) = args.next() {
+                        opts.gentype_flags.generated_file_extension_flag = Some(val);
+                    }
+                }
+                "-bs-gentype-suffix" => {
+                    if let Some(val) = args.next() {
+                        opts.gentype_flags.suffix_flag = Some(val);
+                    }
+                }
+                "-bs-gentype-shim" => {
+                    if let Some(val) = args.next()
+                        && let Some((from_module, to_module)) = val.split_once('=')
+                    {
+                        opts.gentype_flags
+                            .shims
+                            .insert(0, (from_module.to_string(), to_module.to_string()));
+                    }
+                }
+                "-bs-gentype-debug" => {
+                    if let Some(val) = args.next() {
+                        rescript_compiler::gentype::debug::set_item(&val);
+                    }
+                }
+                "-bs-gentype-dep" => {
+                    if let Some(val) = args.next() {
+                        opts.gentype_flags.bs_dependencies_flag.insert(0, val);
+                    }
+                }
+                "-bs-gentype-source-dir" => {
+                    if let Some(val) = args.next() {
+                        opts.gentype_flags.source_dirs_flag.insert(0, val);
+                    }
+                }
+                "-bs-gentype-dep-path" => {
+                    if let Some(val) = args.next()
+                        && let Some((name, path)) = val.split_once('=')
+                    {
+                        opts.gentype_flags
+                            .dep_paths_flag
+                            .insert(0, (name.to_string(), path.to_string()));
+                    }
+                }
+                "-bs-gentype-bsb-project-root" => {
+                    if let Some(val) = args.next() {
+                        opts.gentype_flags.bsb_project_root = val;
+                    }
+                }
                 "-w" => {
                     if let Some(val) = args.next() {
                         opts.warning_specs.push(val);
@@ -364,6 +435,12 @@ fn run() -> Result<()> {
         package_name: opts.package_name.clone(),
         make_runtime: opts.make_runtime,
         assume_compiled_interface: opts.read_cmi,
+        gentype_config: opts.gentype.then(|| {
+            rescript_compiler::gentype::config::build_config_from_flags(
+                opts.namespace.clone(),
+                opts.gentype_flags.clone(),
+            )
+        }),
         capture_intermediates: false,
         skip_js_render: false,
         publish_in_process_signature: true,

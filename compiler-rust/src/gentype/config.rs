@@ -194,7 +194,13 @@ pub fn add_dep_path(raw: &str) {
 // ----- Build the Config.t from flags ----------------------------------
 
 pub fn build_config(namespace: Option<String>) -> T {
-    let flags = flags().lock().unwrap().clone();
+    build_config_from_flags(namespace, flags().lock().unwrap().clone())
+}
+
+pub fn build_config_from_flags(namespace: Option<String>, flags: FlagState) -> T {
+    // Mirrors compiler/gentype/GenTypeConfig.ml:112-177. The input is the
+    // same CLI-backed flag state that OCaml populates from
+    // compiler/bsc/rescript_compiler_main.ml:300-343.
     let shims_map =
         flags
             .shims
@@ -258,5 +264,164 @@ pub fn build_config(namespace: Option<String>) -> T {
         shims_map,
         sources: flags.source_dirs_flag,
         suffix,
+    }
+}
+
+pub fn flag_state_from_cli_args(args: &[String]) -> FlagState {
+    // Mirrors compiler/bsc/rescript_compiler_main.ml:300-343. This helper lets
+    // the bsc subprocess path and rewatch in-process path build GenTypeConfig.t
+    // from the same observable flags.
+    let mut flags = FlagState::default();
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "-bs-project-root" => {
+                if let Some(value) = args.get(i + 1) {
+                    flags.project_root = value.clone();
+                }
+                i += 2;
+            }
+            "-bs-gentype-module" => {
+                if let Some(value) = args.get(i + 1) {
+                    flags.module_flag = module_of_string(value);
+                }
+                i += 2;
+            }
+            "-bs-gentype-module-resolution" => {
+                if let Some(value) = args.get(i + 1) {
+                    flags.module_resolution_flag = module_resolution_of_string(value);
+                }
+                i += 2;
+            }
+            "-bs-gentype-export-interfaces" => {
+                flags.export_interfaces_flag = true;
+                i += 1;
+            }
+            "-bs-gentype-generated-extension" => {
+                if let Some(value) = args.get(i + 1) {
+                    flags.generated_file_extension_flag = Some(value.clone());
+                }
+                i += 2;
+            }
+            "-bs-gentype-suffix" => {
+                if let Some(value) = args.get(i + 1) {
+                    flags.suffix_flag = Some(value.clone());
+                }
+                i += 2;
+            }
+            "-bs-gentype-shim" => {
+                if let Some(value) = args.get(i + 1)
+                    && let Some((from_module, to_module)) = value.split_once('=')
+                {
+                    flags
+                        .shims
+                        .insert(0, (from_module.to_string(), to_module.to_string()));
+                }
+                i += 2;
+            }
+            "-bs-gentype-debug" => {
+                if let Some(value) = args.get(i + 1) {
+                    crate::gentype::debug::set_item(value);
+                }
+                i += 2;
+            }
+            "-bs-gentype-dep" => {
+                if let Some(value) = args.get(i + 1) {
+                    flags.bs_dependencies_flag.insert(0, value.clone());
+                }
+                i += 2;
+            }
+            "-bs-gentype-source-dir" => {
+                if let Some(value) = args.get(i + 1) {
+                    flags.source_dirs_flag.insert(0, value.clone());
+                }
+                i += 2;
+            }
+            "-bs-gentype-dep-path" => {
+                if let Some(value) = args.get(i + 1)
+                    && let Some((name, path)) = value.split_once('=')
+                {
+                    flags
+                        .dep_paths_flag
+                        .insert(0, (name.to_string(), path.to_string()));
+                }
+                i += 2;
+            }
+            "-bs-gentype-bsb-project-root" => {
+                if let Some(value) = args.get(i + 1) {
+                    flags.bsb_project_root = value.clone();
+                }
+                i += 2;
+            }
+            _ => {
+                i += 1;
+            }
+        }
+    }
+    flags
+}
+
+pub fn build_config_from_cli_args(namespace: Option<String>, args: &[String]) -> T {
+    build_config_from_flags(namespace, flag_state_from_cli_args(args))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn strings(args: &[&str]) -> Vec<String> {
+        args.iter().map(|arg| (*arg).to_string()).collect()
+    }
+
+    #[test]
+    fn parses_cli_backed_gentype_config() {
+        let args = strings(&[
+            "-bs-project-root",
+            "/repo/pkg",
+            "-bs-gentype",
+            "-bs-gentype-module",
+            "commonjs",
+            "-bs-gentype-module-resolution",
+            "node16",
+            "-bs-gentype-export-interfaces",
+            "-bs-gentype-generated-extension",
+            ".gen.ts",
+            "-bs-gentype-suffix",
+            ".res.js",
+            "-bs-gentype-shim",
+            "Js=JsShim",
+            "-bs-gentype-dep",
+            "@scope/dep",
+            "-bs-gentype-source-dir",
+            "src",
+            "-bs-gentype-dep-path",
+            "@scope/dep=/repo/node_modules/@scope/dep",
+            "-bs-gentype-bsb-project-root",
+            "/repo",
+        ]);
+
+        let config = build_config_from_cli_args(Some("Ns".to_string()), &args);
+
+        assert_eq!(config.project_root, "/repo/pkg");
+        assert_eq!(config.bsb_project_root, "/repo");
+        assert_eq!(config.module_, Module::CommonJS);
+        assert_eq!(config.module_resolution, ModuleResolution::Node16);
+        assert!(config.export_interfaces);
+        assert_eq!(config.generated_file_extension.as_deref(), Some(".gen.ts"));
+        assert_eq!(config.suffix, ".res.js");
+        assert_eq!(config.namespace.as_deref(), Some("Ns"));
+        assert_eq!(config.bs_dependencies, vec!["@scope/dep".to_string()]);
+        assert_eq!(config.sources, vec!["src".to_string()]);
+        assert_eq!(
+            config.dep_paths.get("@scope/dep").map(String::as_str),
+            Some("/repo/node_modules/@scope/dep")
+        );
+        assert_eq!(
+            config
+                .shims_map
+                .get(&crate::gentype::module_name::from_string_unsafe("Js"))
+                .cloned(),
+            Some(crate::gentype::module_name::from_string_unsafe("JsShim"))
+        );
     }
 }

@@ -1394,6 +1394,8 @@ pub struct CompilerOptions {
     pub make_runtime: bool,
     /// Mirror `Clflags.assume_no_mli := Mli_exists` from `-bs-read-cmi`.
     pub assume_compiled_interface: bool,
+    /// GenType configuration derived from `-bs-gentype-*` flags.
+    pub gentype_config: Option<crate::gentype::config::T>,
     /// When true, `compile_source_in_process` captures the typed tree,
     /// raw lambda, and lambda sexps for display (used by the playground).
     pub capture_intermediates: bool,
@@ -1444,6 +1446,7 @@ impl Default for CompilerOptions {
             package_name: None,
             make_runtime: false,
             assume_compiled_interface: false,
+            gentype_config: None,
             capture_intermediates: false,
             skip_js_render: false,
             publish_in_process_signature: true,

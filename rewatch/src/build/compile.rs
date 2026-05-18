@@ -1730,6 +1730,39 @@ fn build_compiler_options(
     let js_output_targets = js_output_targets_for_source(package, source_file_path, root_config);
     let output_module_format = js_output_targets.first().map(|target| target.module_format);
     let output_path = js_output_targets.first().map(|target| target.path.clone());
+    let gentype_config = if package.config.gentype_config.is_some() {
+        // Mirrors the bsc CLI path in compiler/bsc/rescript_compiler_main.ml:300-343:
+        // rewatch first materializes the exact -bs-gentype-* flags, then the
+        // Rust compiler builds GenTypeConfig.t from that flag stream.
+        let current_package_dirs: &[PathBuf] = package.gentype_dirs.as_deref().unwrap_or(&[]);
+        let dep_paths: Vec<(String, PathBuf)> = package
+            .config
+            .dependencies
+            .as_ref()
+            .map(|deps| {
+                deps.iter()
+                    .filter_map(|dep| {
+                        let name = dep.name();
+                        build_state
+                            .packages
+                            .get(name)
+                            .map(|pkg| (name.to_string(), pkg.path.clone()))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        let gentype_args = package.config.get_gentype_args(
+            current_package_dirs,
+            Some(project_context.get_root_path()),
+            &dep_paths,
+        );
+        Some(rescript_compiler::gentype::config::build_config_from_cli_args(
+            package.config.get_namespace().to_suffix(),
+            &gentype_args,
+        ))
+    } else {
+        None
+    };
 
     Ok(rescript_compiler::driver::CompilerOptions {
         include_paths,
@@ -1755,6 +1788,7 @@ fn build_compiler_options(
         module_name: Some(module_name.to_string()),
         package_name: Some(package.config.name.clone()),
         make_runtime: parsed_flags.make_runtime,
+        gentype_config,
         ..Default::default()
     })
 }

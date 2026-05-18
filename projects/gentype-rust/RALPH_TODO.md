@@ -118,11 +118,12 @@ Run this checklist for each file after its first port and before compile work.
 
 ## Phase 2: CLI and Config
 
-- [ ] Replace boolean-only `Options::gentype` in `compiler-rust/src/bin/bsc.rs`.
-- [ ] Wire the reviewed `config.rs` port of `GenTypeConfig.t`.
-- [ ] Parse all `-bs-gentype-*` flags emitted by rewatch.
-- [ ] Add unit tests for config combinations used by in-repo suites and Tella.
-- [ ] Commit with in-repo and Tella config baseline.
+- [x] Keep `Options::gentype` as the enable flag and carry the parsed
+  `GenTypeConfig.t` equivalent through `CompilerOptions`.
+- [x] Wire the reviewed `config.rs` port of `GenTypeConfig.t`.
+- [x] Parse all `-bs-gentype-*` flags emitted by rewatch.
+- [x] Add unit tests for config combinations used by in-repo suites and Tella.
+- [x] Commit with in-repo and Tella config baseline.
 
 ## Phase 3: Input Boundary
 
