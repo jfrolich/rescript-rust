@@ -255,26 +255,6 @@ impl<T: Clone> IdTbl<T> {
         };
     }
 
-    /// Compatibility insertion for existing open code.
-    ///
-    /// This keeps the table shape OCaml-like even before all callers are routed
-    /// through a batched `add_open_layer`: each inserted opened binding becomes
-    /// a symbolic layer and exact identifier lookup still skips opened layers.
-    pub fn add_opened(&mut self, id: Ident, value: T) {
-        let next = std::mem::take(self);
-        let mut components = im_rc::HashMap::new();
-        components.insert(id.name().to_string(), (id, value, 0));
-        *self = Self {
-            current: im_rc::HashMap::new(),
-            current_by_stamp: im_rc::HashMap::new(),
-            opened: Some(Arc::new(IdOpened {
-                root: None,
-                components,
-                next: Arc::new(next),
-            })),
-        };
-    }
-
     fn opened_names_added_since(&self, previous: &Self) -> HashSet<String> {
         let current_counts = self.opened_name_counts();
         let previous_counts = previous.opened_name_counts();
@@ -530,21 +510,6 @@ impl<T: Clone> TycompTbl<T> {
                 self.current.insert(name.clone(), vec![(id, value)]);
             }
         }
-    }
-
-    pub fn add_opened(&mut self, id: Ident, value: T) {
-        let next = std::mem::take(self);
-        let name = id.name().to_string();
-        let mut components = im_rc::HashMap::new();
-        components.insert(name, vec![(id, value)]);
-        *self = Self {
-            current: im_rc::HashMap::new(),
-            current_by_stamp: im_rc::HashMap::new(),
-            opened: Some(Arc::new(TycompOpened {
-                components,
-                next: Arc::new(next),
-            })),
-        };
     }
 
     pub fn add_open_layer(&mut self, components: Vec<(Ident, T)>) {
@@ -1010,13 +975,6 @@ impl Env {
         self.values.add(id, desc);
     }
 
-    /// Add a value binding from an opened module (lower priority than local bindings).
-    pub fn add_opened_value(&mut self, id: Ident, desc: ValueDescription) {
-        self.bump_id();
-        let desc = Arc::new(desc);
-        self.values.add_opened(id, desc);
-    }
-
     /// Find a value by name.
     pub fn find_value(&self, name: &str) -> EnvResult<&ValueDescription> {
         self.values
@@ -1092,13 +1050,6 @@ impl Env {
         self.bump_id();
         let decl = Arc::new(decl);
         self.types.add(id, decl);
-    }
-
-    /// Add a type binding from an opened module (lower priority than local bindings).
-    pub fn add_opened_type(&mut self, id: Ident, decl: TypeDeclaration) {
-        self.bump_id();
-        let decl = Arc::new(decl);
-        self.types.add_opened(id, decl);
     }
 
     /// Find a type by name.
@@ -1235,13 +1186,6 @@ impl Env {
         self.constrs.add(id, desc);
     }
 
-    /// Add a constructor binding from an opened module (lower priority than local bindings).
-    pub fn add_opened_constructor(&mut self, id: Ident, desc: ConstructorDescription) {
-        self.bump_id();
-        let desc = Arc::new(desc);
-        self.constrs.add_opened(id, desc);
-    }
-
     /// Find a constructor by name.
     pub fn find_constructor(&self, name: &str) -> EnvResult<&ConstructorDescription> {
         self.constrs
@@ -1284,13 +1228,6 @@ impl Env {
         self.bump_id();
         let desc = Arc::new(desc);
         self.labels.add(id, desc);
-    }
-
-    /// Add a label binding from an opened module (lower priority than local bindings).
-    pub fn add_opened_label(&mut self, id: Ident, desc: LabelDescription) {
-        self.bump_id();
-        let desc = Arc::new(desc);
-        self.labels.add_opened(id, desc);
     }
 
     /// Find a label by name.
@@ -1396,31 +1333,6 @@ impl Env {
             Path::Pdot(parent, _, _) => self.is_functor_arg_path(parent),
             Path::Papply(_, _) => true,
         }
-    }
-
-    /// Add a module binding from an opened module (lower priority than local bindings).
-    pub fn add_opened_module(&mut self, id: Ident, decl: ModuleDeclaration) {
-        self.bump_id();
-        self.invalidate_module_alias_caches();
-        let decl = Arc::new(decl);
-        self.modules.add_opened(id, decl);
-    }
-
-    pub(crate) fn add_opened_module_with_components(
-        &mut self,
-        id: Ident,
-        decl: ModuleDeclaration,
-        components: Arc<super::env_lazy::StoredModuleComponents>,
-    ) {
-        // OCaml compiler/ml/env.ml:1841-1877 `open_signature` adds both
-        // `comp_modules` and `comp_components` to the opened environment. Keep
-        // the opened component thunk with the opened module declaration so a
-        // source `Lident` lookup can reuse env.ml:1874-1877's component table
-        // instead of rebuilding through the parent module path.
-        self.bump_id();
-        self.invalidate_module_alias_caches();
-        self.modules.add_opened(id.clone(), Arc::new(decl));
-        self.module_components.add_opened(id, components);
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1735,13 +1647,6 @@ impl Env {
         self.bump_id();
         let decl = Arc::new(decl);
         self.modtypes.add(id, decl);
-    }
-
-    /// Add a module type binding from an opened module (lower priority than local bindings).
-    pub fn add_opened_modtype(&mut self, id: Ident, decl: ModtypeDeclaration) {
-        self.bump_id();
-        let decl = Arc::new(decl);
-        self.modtypes.add_opened(id, decl);
     }
 
     /// Find a module type by name.
