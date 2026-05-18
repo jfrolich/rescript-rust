@@ -23543,82 +23543,108 @@ where
     TP: Fn(&Path) -> Path,
     MP: Fn(&Path) -> Path,
 {
+    copy_lookup_signature_with_paths_and_idents(
+        sig_items,
+        ctx,
+        cache,
+        type_path,
+        module_path,
+        None::<std::vec::IntoIter<Option<Ident>>>,
+    )
+}
+
+fn copy_lookup_signature_with_paths_and_idents<TP, MP, I>(
+    sig_items: &[crate::types::decl::SignatureItem],
+    ctx: &TypeContext,
+    cache: &mut TypeExprRefMap<TypeExprRef>,
+    type_path: &TP,
+    module_path: &MP,
+    mut new_idents: Option<I>,
+) -> crate::types::decl::Signature
+where
+    TP: Fn(&Path) -> Path,
+    MP: Fn(&Path) -> Path,
+    I: Iterator<Item = Option<Ident>>,
+{
     sig_items
         .iter()
-        .map(|item| match item {
-            crate::types::decl::SignatureItem::SigValue(id, desc) => {
-                crate::types::decl::SignatureItem::SigValue(
-                    id.clone(),
-                    copy_lookup_value_description_with_paths(
-                        desc,
-                        ctx,
-                        cache,
-                        type_path,
-                        module_path,
-                    ),
-                )
-            }
-            crate::types::decl::SignatureItem::SigType(id, decl, rec_status) => {
-                crate::types::decl::SignatureItem::SigType(
-                    id.clone(),
-                    copy_lookup_type_decl_with_paths(decl, ctx, cache, type_path, module_path),
-                    *rec_status,
-                )
-            }
-            crate::types::decl::SignatureItem::SigTypext(id, ext, ext_status) => {
-                crate::types::decl::SignatureItem::SigTypext(
-                    id.clone(),
-                    copy_lookup_extension_constructor_with_paths(
-                        ext,
-                        ctx,
-                        cache,
-                        type_path,
-                        module_path,
-                    ),
-                    *ext_status,
-                )
-            }
-            crate::types::decl::SignatureItem::SigModule(id, md, rec_status) => {
-                crate::types::decl::SignatureItem::SigModule(
-                    id.clone(),
-                    crate::types::decl::ModuleDeclaration {
-                        md_type: copy_lookup_module_type_with_paths(
-                            &md.md_type,
+        .map(|item| {
+            let new_id = new_idents.as_mut().and_then(|idents| idents.next()).flatten();
+            match item {
+                crate::types::decl::SignatureItem::SigValue(id, desc) => {
+                    crate::types::decl::SignatureItem::SigValue(
+                        new_id.unwrap_or_else(|| id.clone()),
+                        copy_lookup_value_description_with_paths(
+                            desc,
                             ctx,
                             cache,
                             type_path,
                             module_path,
                         ),
-                        md_attributes: md.md_attributes.clone(),
-                        md_loc: md.md_loc.clone(),
-                        md_path: md.md_path.as_ref().map(type_path),
-                    },
-                    *rec_status,
-                )
-            }
-            crate::types::decl::SignatureItem::SigModtype(id, mtd) => {
-                crate::types::decl::SignatureItem::SigModtype(
-                    id.clone(),
-                    crate::types::decl::ModtypeDeclaration {
-                        mtd_type: mtd.mtd_type.as_ref().map(|mty| {
-                            copy_lookup_module_type_with_paths(
-                                mty,
+                    )
+                }
+                crate::types::decl::SignatureItem::SigType(id, decl, rec_status) => {
+                    crate::types::decl::SignatureItem::SigType(
+                        new_id.unwrap_or_else(|| id.clone()),
+                        copy_lookup_type_decl_with_paths(decl, ctx, cache, type_path, module_path),
+                        *rec_status,
+                    )
+                }
+                crate::types::decl::SignatureItem::SigTypext(id, ext, ext_status) => {
+                    crate::types::decl::SignatureItem::SigTypext(
+                        new_id.unwrap_or_else(|| id.clone()),
+                        copy_lookup_extension_constructor_with_paths(
+                            ext,
+                            ctx,
+                            cache,
+                            type_path,
+                            module_path,
+                        ),
+                        *ext_status,
+                    )
+                }
+                crate::types::decl::SignatureItem::SigModule(id, md, rec_status) => {
+                    crate::types::decl::SignatureItem::SigModule(
+                        new_id.unwrap_or_else(|| id.clone()),
+                        crate::types::decl::ModuleDeclaration {
+                            md_type: copy_lookup_module_type_with_paths(
+                                &md.md_type,
                                 ctx,
                                 cache,
                                 type_path,
                                 module_path,
-                            )
-                        }),
-                        mtd_attributes: mtd.mtd_attributes.clone(),
-                        mtd_loc: mtd.mtd_loc.clone(),
-                    },
-                )
-            }
-            crate::types::decl::SignatureItem::SigClass => {
-                crate::types::decl::SignatureItem::SigClass
-            }
-            crate::types::decl::SignatureItem::SigClassType => {
-                crate::types::decl::SignatureItem::SigClassType
+                            ),
+                            md_attributes: md.md_attributes.clone(),
+                            md_loc: md.md_loc.clone(),
+                            md_path: md.md_path.as_ref().map(type_path),
+                        },
+                        *rec_status,
+                    )
+                }
+                crate::types::decl::SignatureItem::SigModtype(id, mtd) => {
+                    crate::types::decl::SignatureItem::SigModtype(
+                        new_id.unwrap_or_else(|| id.clone()),
+                        crate::types::decl::ModtypeDeclaration {
+                            mtd_type: mtd.mtd_type.as_ref().map(|mty| {
+                                copy_lookup_module_type_with_paths(
+                                    mty,
+                                    ctx,
+                                    cache,
+                                    type_path,
+                                    module_path,
+                                )
+                            }),
+                            mtd_attributes: mtd.mtd_attributes.clone(),
+                            mtd_loc: mtd.mtd_loc.clone(),
+                        },
+                    )
+                }
+                crate::types::decl::SignatureItem::SigClass => {
+                    crate::types::decl::SignatureItem::SigClass
+                }
+                crate::types::decl::SignatureItem::SigClassType => {
+                    crate::types::decl::SignatureItem::SigClassType
+                }
             }
         })
         .collect()
@@ -23813,6 +23839,35 @@ where
     }
     let mut cache = TypeExprRefMap::new();
     copy_lookup_signature_with_paths(sig_items, ctx, &mut cache, type_path, module_path)
+}
+
+#[track_caller]
+pub(crate) fn copy_lookup_signature_for_subst_with_paths_and_idents<TP, MP>(
+    sig_items: &[crate::types::decl::SignatureItem],
+    ctx: &TypeContext,
+    type_path: &TP,
+    module_path: &MP,
+    new_idents: Vec<Option<Ident>>,
+) -> crate::types::decl::Signature
+where
+    TP: Fn(&Path) -> Path,
+    MP: Fn(&Path) -> Path,
+{
+    if ctx.compiler_counters_enabled() {
+        crate::perf_counters::record_signature_copy(
+            std::panic::Location::caller(),
+            sig_items.len(),
+        );
+    }
+    let mut cache = TypeExprRefMap::new();
+    copy_lookup_signature_with_paths_and_idents(
+        sig_items,
+        ctx,
+        &mut cache,
+        type_path,
+        module_path,
+        Some(new_idents.into_iter()),
+    )
 }
 
 /// Deep-copy a module type, creating new type expression nodes.

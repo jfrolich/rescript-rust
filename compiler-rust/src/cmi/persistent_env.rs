@@ -3206,27 +3206,6 @@ fn freshened_signature_ident_plan(
     (new_idents, local_maps, has_nested_module_types)
 }
 
-fn apply_freshened_signature_idents(
-    sig_items: &mut [SignatureItem],
-    new_idents: Vec<Option<Ident>>,
-) {
-    for (item, new_id) in sig_items.iter_mut().zip(new_idents) {
-        let Some(new_id) = new_id else {
-            continue;
-        };
-        match item {
-            SignatureItem::SigValue(id, _)
-            | SignatureItem::SigType(id, _, _)
-            | SignatureItem::SigTypext(id, _, _)
-            | SignatureItem::SigModule(id, _, _)
-            | SignatureItem::SigModtype(id, _) => {
-                *id = new_id;
-            }
-            SignatureItem::SigClass | SignatureItem::SigClassType => {}
-        }
-    }
-}
-
 fn freshen_nested_signature_module_types(sig_items: &mut [SignatureItem], ctx: &TypeContext) {
     for item in sig_items.iter_mut() {
         match item {
@@ -3257,8 +3236,8 @@ pub(crate) fn freshened_signature_bound_idents_from_kind(
     ctx: &TypeContext,
 ) -> Signature {
     // Mirrors OCaml `Subst.signature` (compiler/ml/subst.ml:358-364):
-    // copy each component through the substitution, then rename bound
-    // identifiers and rewrite references within that copied signature.
+    // first build the global binder substitution, then copy each component
+    // through that substitution with its renamed binder.
     if ctx.compiler_counters_enabled() {
         crate::perf_counters::record_signature_freshen(kind, sig_items.len());
     }
@@ -3291,13 +3270,13 @@ pub(crate) fn freshened_signature_bound_idents_from_kind(
             )
         }
     };
-    let mut copied = crate::types::typecore::copy_lookup_signature_for_subst_with_paths(
+    let mut copied = crate::types::typecore::copy_lookup_signature_for_subst_with_paths_and_idents(
         sig_items,
         ctx,
         &rewrite_type_path,
         &rewrite_module_path,
+        new_idents,
     );
-    apply_freshened_signature_idents(&mut copied, new_idents);
     if has_nested_module_types {
         freshen_nested_signature_module_types(&mut copied, ctx);
     }
