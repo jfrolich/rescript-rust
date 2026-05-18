@@ -2232,7 +2232,7 @@ fn lookup_component_module_sig_type<'a>(
             env,
             &mut persistent_env,
             ctx,
-            crate::types::typecore::ComponentLookupCacheMode::FindModule,
+            crate::types::typecore::ComponentLookupApi::FindType,
             |components| {
                 components
                     .lookup_type(type_name)

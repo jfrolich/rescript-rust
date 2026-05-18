@@ -62,13 +62,13 @@ Files:
 
 Tasks:
 
-- [ ] Inventory every `ComponentLookupCacheMode::FindModule` call site.
-- [ ] Inventory every `ComponentLookupCacheMode::ProbeModuleDescr` call site.
-- [ ] Map each call site to the exact OCaml API: `find_module`,
+- [x] Inventory every `ComponentLookupCacheMode::FindModule` call site.
+- [x] Inventory every `ComponentLookupCacheMode::ProbeModuleDescr` call site.
+- [x] Map each call site to the exact OCaml API: `find_module`,
       `find_module_descr`, `find_type`, `find_modtype`, or component lookup.
-- [ ] Rename or split Rust APIs so the force behavior follows the API boundary
+- [x] Rename or split Rust APIs so the force behavior follows the API boundary
       rather than a generic mode flag.
-- [ ] Remove any mode usage that exists only to preserve a local parity score.
+- [x] Remove any mode usage that exists only to preserve a local parity score.
 
 Acceptance:
 

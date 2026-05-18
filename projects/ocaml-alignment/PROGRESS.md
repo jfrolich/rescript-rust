@@ -182,3 +182,52 @@ Validation evidence:
 - `./scripts/test_js_output_parity.sh --with-external --quick`:
   focused fixtures `344/344`, local JS output `660/660`, Tella JS output
   `2127/2127`.
+
+## 2026-05-18 Component Lookup API Boundaries
+
+Task 2 progress:
+
+- Replaced the generic `ComponentLookupCacheMode` name with
+  `ComponentLookupApi` and split the normal publishing paths by the OCaml Env
+  API they model.
+- Direct Rust API boundaries now have one-line OCaml citations in the enum:
+  - `FindModule`: `compiler/ml/env.ml:865-882`.
+  - `LookupModule`: `compiler/ml/env.ml:1036-1074`.
+  - `FindModuleDescr`: `compiler/ml/env.ml:781-793`.
+  - `FindType`: `compiler/ml/env.ml:800-813` and `1091-1143`.
+  - `FindModtype`: `compiler/ml/env.ml:800-815` and `1091-1145`.
+  - `OpenSignature`: `compiler/ml/env.ml:1841-1860` and `1874-1877`.
+- `forces_alias_sig` now follows OCaml `components_of_module_maker`: every real
+  component-table lookup can run `scrape_alias` at `env.ml:1516-1518`, which
+  may reach `find_module` through `env.ml:1435-1446`. Only
+  `ProbeModuleDescr` suppresses publish/alias forcing, because those call sites
+  are Rust-only existence probes that do not correspond to an OCaml lookup step.
+- Call-site mapping:
+  - Let-module alias-root resolution stays on `FindModule`.
+  - Source module longident signature resolution uses `LookupModule`.
+  - Generic component descent uses `FindModuleDescr`.
+  - Type and module-type component lookup use `FindType` and `FindModtype`.
+  - Opened modules use `OpenSignature`.
+  - The remaining probe callers are limited to unresolved-local-path and
+    qualification existence checks.
+
+Validation evidence:
+
+- `cargo check --manifest-path compiler-rust/Cargo.toml`: passed.
+- `cargo build --manifest-path compiler-rust/Cargo.toml`: passed.
+- `cargo build --manifest-path rewatch/Cargo.toml`: passed.
+- `./scripts/test_typedtree_parity.sh ModuleWithAlias`: `2/2`.
+- `./scripts/test_typedtree_parity.sh nested_module_alias`: `1/1`.
+- `./scripts/test_typedtree_parity.sh test_include`: `1/1`.
+- `./scripts/test_typedtree_parity.sh`: `660/660`.
+- `./scripts/test_typedtree_parity.sh --tella --quick`: `1697/1697`.
+- `./scripts/test_lambda_parity.sh --quick`: `660/660`.
+- `./scripts/test_js_output_parity.sh --with-external --quick`: focused
+  fixtures `344/344`, local JS output `660/660`, Tella JS output `2127/2127`.
+
+Formatting note:
+
+- `cargo fmt --manifest-path compiler-rust/Cargo.toml --check` still reports
+  pre-existing repo-wide formatting diffs in files outside this slice, plus
+  unrelated older formatting opportunities in `typecore.rs`. This patch avoided
+  applying whole-file formatting churn.

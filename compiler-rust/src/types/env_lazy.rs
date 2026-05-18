@@ -1405,7 +1405,7 @@ fn build_local_module_components<'a>(
     parent_substitution_context: Option<(&Path, &[SignatureItem])>,
     pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
     ctx: &'a super::context::TypeContext,
-    cache_mode: super::typecore::ComponentLookupCacheMode,
+    cache_mode: super::typecore::ComponentLookupApi,
 ) -> Option<QualifiedModuleComponents> {
     if ctx.persistent_env_is_in_process()
         && let super::decl::ModuleType::MtyAlias(_, Path::Pident(alias_id))
@@ -1450,11 +1450,9 @@ fn build_local_module_components<'a>(
                     // OCaml compiler/ml/env.ml:1517 calls `scrape_alias` for
                     // real component-table construction, and scrape_alias
                     // reaches env.ml:865-882 `find_module`, which forces
-                    // env.ml:1568's module-declaration thunk. Callers under
-                    // probe mode mirror env.ml:781-793 `find_module_descr`
-                    // and env.ml:800-813 type lookup: they read component
-                    // descriptors without forcing the alias target module
-                    // declaration.
+                    // env.ml:1568's module-declaration thunk. Rust-only probe
+                    // callers skip this branch because they are existence
+                    // checks with no corresponding OCaml lookup step.
                     let _ = crate::types::typecore::lookup_module_in_resolved_path(
                         parent,
                         name.as_str(),
@@ -1465,10 +1463,11 @@ fn build_local_module_components<'a>(
                 }
             }
             Path::Pident(id) if id.is_persistent() => {
-                // OCaml compiler/ml/env.ml:800-813 can read qualified type
-                // components without forcing env.ml:719-721 `ps_sig`; callers
-                // that are only probing typedecl.ml:767-779 constraints use
-                // probe mode to keep the alias target lazy.
+                // OCaml compiler/ml/env.ml:1516-1518 scrapes aliases while
+                // building real component tables, which can force
+                // env.ml:719-721 `ps_sig` through env.ml:865-875. Rust-only
+                // existence probes suppress that force because no OCaml lookup
+                // reaches this alias at that point.
                 if cache_mode.forces_alias_sig()
                     && let Some(pers) = pers_env.as_mut()
                 {
@@ -1488,10 +1487,9 @@ fn build_local_module_components<'a>(
                     // detect that through the opened Env binding from
                     // compiler/ml/env.ml:1874-1877. The TypeContext guard is
                     // set while compiler/ml/typemod.ml:1710-1719's package
-                    // `wrap_constraint` equivalent walks inclusion types in
-                    // probe mode, where OCaml keeps env.ml:800-813/1573-1578
-                    // component-table laziness instead of forcing this alias
-                    // target.
+                    // `wrap_constraint` equivalent walks inclusion types in a
+                    // Rust-only probe, where no OCaml lookup has yet forced
+                    // this alias target.
                     ctx.trigger_module_sig_rename(id.name());
                 }
             }
@@ -1746,7 +1744,7 @@ impl StoredModuleComponents {
         &self,
         pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
         ctx: &'a super::context::TypeContext,
-        cache_mode: super::typecore::ComponentLookupCacheMode,
+        cache_mode: super::typecore::ComponentLookupApi,
         f: impl FnOnce(&QualifiedModuleComponents) -> R,
     ) -> Option<R> {
         if let Some(components) = self.cached.get().cloned() {

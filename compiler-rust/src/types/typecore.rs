@@ -19011,7 +19011,7 @@ pub(crate) fn resolve_letmodule_direct_type_family_root<'a>(
                 &md.md_type,
                 pers_env,
                 ctx,
-                ComponentLookupCacheMode::FindModule,
+                ComponentLookupApi::FindModule,
             )
             .map(|(sig, _)| copy_lookup_signature_for_subst(&sig, ctx))?,
         DeclMty::MtyFunctor { .. } => return None,
@@ -20375,7 +20375,7 @@ fn type_pack(
     // every packed module. Do not reuse a previous package coercion here:
     // Includemod expansion allocates/freshens hidden identifiers, and strict
     // typedtree parity depends on doing that work at the same program points.
-    // Component-table probes now carry `ComponentLookupCacheMode::ProbeModuleDescr`
+    // Component-table probes now carry `ComponentLookupApi::ProbeModuleDescr`
     // explicitly, so package wrapping can call inclusion directly without
     // changing global lazy-forcing state.
     let coercion =
@@ -24275,7 +24275,7 @@ impl Env {
                         &md.md_type,
                         pers_env,
                         ctx,
-                        ComponentLookupCacheMode::FindModule,
+                        ComponentLookupApi::LookupModule,
                     );
                     // Some opened submodules carry alias module types with hidden
                     // local idents (e.g. ArrayExt!) that are not directly
@@ -24506,7 +24506,7 @@ impl Env {
                             &sub_md.md_type,
                             pers_env,
                             ctx,
-                            ComponentLookupCacheMode::FindModule,
+                            ComponentLookupApi::LookupModule,
                         );
                         if let Some((sig, resolved_name)) = result {
                             let (alias_target_pdot, alias_target_pident) = if apply_subst {
@@ -24680,7 +24680,7 @@ impl Env {
         mty: &crate::types::decl::ModuleType,
         pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
         ctx: &'b crate::types::context::TypeContext,
-        cache_mode: ComponentLookupCacheMode,
+        cache_mode: ComponentLookupApi,
     ) -> Option<(crate::types::decl::Signature, Option<String>)> {
         use HashSet;
 
@@ -24690,7 +24690,7 @@ impl Env {
             pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
             ctx: &'b crate::types::context::TypeContext,
             visiting: &mut HashSet<Path>,
-            cache_mode: ComponentLookupCacheMode,
+            cache_mode: ComponentLookupApi,
         ) -> Option<(crate::types::decl::Signature, Option<String>)> {
             match mty {
                 crate::types::decl::ModuleType::MtySignature(sig) => Some((sig.clone(), None)),
@@ -24713,7 +24713,7 @@ impl Env {
             pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
             ctx: &'b crate::types::context::TypeContext,
             visiting: &mut HashSet<Path>,
-            cache_mode: ComponentLookupCacheMode,
+            cache_mode: ComponentLookupApi,
         ) -> Option<(crate::types::decl::Signature, Option<String>)> {
             use crate::types::decl::SignatureItem;
 
@@ -24827,7 +24827,7 @@ impl Env {
             pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
             ctx: &'b crate::types::context::TypeContext,
             visiting: &mut HashSet<Path>,
-            cache_mode: ComponentLookupCacheMode,
+            cache_mode: ComponentLookupApi,
         ) -> Option<(crate::types::decl::Signature, Option<String>)> {
             use crate::types::decl::SignatureItem;
             if !visiting.insert(path.clone()) {
@@ -28878,7 +28878,7 @@ fn with_resolved_child_module_components<'a, R>(
     env: &Env,
     pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
     ctx: &'a crate::types::context::TypeContext,
-    cache_mode: ComponentLookupCacheMode,
+    cache_mode: ComponentLookupApi,
     f: impl FnOnce(&crate::types::env_lazy::QualifiedModuleComponents) -> R,
 ) -> Option<R> {
     let mut f = Some(f);
@@ -28975,6 +28975,7 @@ fn with_resolved_module_components_for_lid_inner<'a, R>(
     env: &Env,
     pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
     ctx: &'a crate::types::context::TypeContext,
+    api: ComponentLookupApi,
     f: &mut dyn FnMut(&crate::types::env_lazy::QualifiedModuleComponents) -> Option<R>,
 ) -> Option<R> {
     match lid {
@@ -28988,7 +28989,7 @@ fn with_resolved_module_components_for_lid_inner<'a, R>(
                             stored.with_components(
                                 pers_env,
                                 ctx,
-                                ComponentLookupCacheMode::FindModule,
+                                api,
                                 |components| f(components),
                             )
                         })
@@ -29002,7 +29003,15 @@ fn with_resolved_module_components_for_lid_inner<'a, R>(
             } else {
                 Path::pident(Ident::create_persistent(mod_name))
             };
-            with_resolved_module_components_for_path(&module_path, env, pers_env, ctx, f).flatten()
+            with_resolved_module_components_for_path_with_cache_mode(
+                &module_path,
+                env,
+                pers_env,
+                ctx,
+                api,
+                |components| f(components),
+            )
+            .flatten()
         }
         Longident::Ldot(prefix, child_idx) => {
             let child_name = arena.get_string(*child_idx).to_string();
@@ -29019,6 +29028,7 @@ fn with_resolved_module_components_for_lid_inner<'a, R>(
                 env,
                 pers_env,
                 ctx,
+                api,
                 &mut |components| Some(components.clone()),
             )?;
             with_resolved_child_module_components(
@@ -29027,7 +29037,7 @@ fn with_resolved_module_components_for_lid_inner<'a, R>(
                 env,
                 pers_env,
                 ctx,
-                ComponentLookupCacheMode::FindModule,
+                api,
                 |components| f(components),
             )
             .flatten()
@@ -29050,7 +29060,15 @@ pub(crate) fn with_resolved_module_components_for_lid<'a, R>(
             "qualified module components by lid callback reused",
         ))(components))
     };
-    with_resolved_module_components_for_lid_inner(lid, arena, env, pers_env, ctx, &mut wrapper)
+    with_resolved_module_components_for_lid_inner(
+        lid,
+        arena,
+        env,
+        pers_env,
+        ctx,
+        ComponentLookupApi::FindModuleDescr,
+        &mut wrapper,
+    )
 }
 
 pub(crate) fn open_module_lid_components_into_env(
@@ -29066,11 +29084,20 @@ pub(crate) fn open_module_lid_components_into_env(
     // selected module descriptor's component table and then env.ml:1841-1860
     // installs both `comp_modules` and `comp_components`. Keep Rust opens on the
     // same component-view path rather than rebuilding from a detached signature.
-    with_resolved_module_components_for_lid(lid, arena, lookup_env, pers_env, ctx, |components| {
+    let mut wrapper = |components: &crate::types::env_lazy::QualifiedModuleComponents| {
         let path = components.access_path().clone();
         crate::cmi::persistent_env::open_module_components_into_env(components, target_env, ctx);
-        path
-    })
+        Some(path)
+    };
+    with_resolved_module_components_for_lid_inner(
+        lid,
+        arena,
+        lookup_env,
+        pers_env,
+        ctx,
+        ComponentLookupApi::OpenSignature,
+        &mut wrapper,
+    )
 }
 
 fn build_module_components_from_parent_path<'a>(
@@ -29078,7 +29105,7 @@ fn build_module_components_from_parent_path<'a>(
     env: &Env,
     pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
     ctx: &'a crate::types::context::TypeContext,
-    cache_mode: ComponentLookupCacheMode,
+    cache_mode: ComponentLookupApi,
 ) -> Option<crate::types::env_lazy::QualifiedModuleComponents> {
     let Path::Pdot(parent, module_name, _) = module_path else {
         return None;
@@ -29223,7 +29250,7 @@ fn build_functor_application_components<'a>(
     env: &Env,
     pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
     ctx: &'a crate::types::context::TypeContext,
-    cache_mode: ComponentLookupCacheMode,
+    cache_mode: ComponentLookupApi,
 ) -> Option<crate::types::env_lazy::QualifiedModuleComponents> {
     let Path::Papply(functor_path, arg_path) = module_path else {
         return None;
@@ -29332,30 +29359,56 @@ fn build_shared_persistent_root_components<'a>(
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum ComponentLookupCacheMode {
+pub(crate) enum ComponentLookupApi {
+    /// OCaml `Env.find_module`, `env.ml:865-882`: force the selected
+    /// `comp_modules` declaration and build any alias component table normally.
     FindModule,
+    /// OCaml `Env.lookup_module`, `env.ml:1036-1074`: source longident lookup.
+    LookupModule,
+    /// OCaml `Env.find_module_descr`, `env.ml:781-793`: read component
+    /// descriptors through `get_components`.
+    FindModuleDescr,
+    /// OCaml `Env.find_type` / `Env.lookup_type`, `env.ml:800-813` and
+    /// `env.ml:1091-1145`: read `comp_types` from component tables.
+    FindType,
+    /// OCaml `Env.find_modtype` / `Env.lookup_modtype`, `env.ml:800-815` and
+    /// `env.ml:1091-1145`: read `comp_modtypes` from component tables.
+    FindModtype,
+    /// OCaml `Env.open_signature`, `env.ml:1874-1877`: open the selected
+    /// descriptor's component table into another environment.
+    OpenSignature,
+    /// Rust-only no-publish existence probe for checks that do not correspond
+    /// to an OCaml lookup step. It may inspect the descriptor shape but must not
+    /// publish a component-table cache entry or force alias signatures on behalf
+    /// of a later real lookup.
     ProbeModuleDescr,
 }
 
-impl ComponentLookupCacheMode {
+impl ComponentLookupApi {
     pub(crate) fn counter_name(self) -> &'static str {
         match self {
-            ComponentLookupCacheMode::FindModule => "find_module",
-            ComponentLookupCacheMode::ProbeModuleDescr => "probe_module_descr",
+            ComponentLookupApi::FindModule => "find_module",
+            ComponentLookupApi::LookupModule => "lookup_module",
+            ComponentLookupApi::FindModuleDescr => "find_module_descr",
+            ComponentLookupApi::FindType => "find_type",
+            ComponentLookupApi::FindModtype => "find_modtype",
+            ComponentLookupApi::OpenSignature => "open_signature",
+            ComponentLookupApi::ProbeModuleDescr => "probe_module_descr",
         }
     }
 
     pub(crate) fn publishes(self) -> bool {
-        matches!(self, ComponentLookupCacheMode::FindModule)
+        !matches!(self, ComponentLookupApi::ProbeModuleDescr)
     }
 
     pub(crate) fn forces_alias_sig(self) -> bool {
-        // OCaml compiler/ml/env.ml:865-882 `find_module` forces the selected
-        // module-declaration thunk, and env.ml:1435-1449 `scrape_alias` may
-        // force a persistent alias target's `ps_sig`. Descriptor lookup through
-        // env.ml:781-813 (`find_module_descr`/`find_type`) publishes component
-        // tables but does not force that alias target signature.
-        matches!(self, ComponentLookupCacheMode::FindModule)
+        // OCaml compiler/ml/env.ml:1516-1518 runs `scrape_alias` whenever
+        // `get_components` builds a component table. That scrape reaches
+        // env.ml:1435-1446 and may call env.ml:865-882 `find_module` for an
+        // alias target even when the outer API is `find_type` or
+        // `find_module_descr`. Only Rust-only no-publish probes suppress that
+        // side effect, because there is no corresponding OCaml lookup step.
+        !matches!(self, ComponentLookupApi::ProbeModuleDescr)
     }
 }
 
@@ -29364,7 +29417,7 @@ pub(crate) fn with_resolved_module_components_for_path_with_cache_mode<'a, R>(
     env: &Env,
     pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
     ctx: &'a crate::types::context::TypeContext,
-    cache_mode: ComponentLookupCacheMode,
+    cache_mode: ComponentLookupApi,
     f: impl FnOnce(&crate::types::env_lazy::QualifiedModuleComponents) -> R,
 ) -> Option<R> {
     let local_module_path = match module_path {
@@ -29447,7 +29500,7 @@ pub(crate) fn with_resolved_module_components_for_path<'a, R>(
         env,
         pers_env,
         ctx,
-        ComponentLookupCacheMode::FindModule,
+        ComponentLookupApi::FindModuleDescr,
         f,
     )
 }
@@ -29485,20 +29538,27 @@ pub(crate) fn lookup_module_in_resolved_path<'a>(
     pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
     ctx: &'a crate::types::context::TypeContext,
 ) -> Option<(Path, Path, crate::types::decl::ModuleDeclaration)> {
-    with_resolved_module_components_for_path(parent_module_path, env, pers_env, ctx, |components| {
-        components
-            .lookup_qualified_module(module_name, ctx)
-            .map(|(runtime_pos, _, md)| {
-                let parent_access_path = components.access_path().clone();
-                let access_path = qualified_submodule_access_path(
-                    &parent_access_path,
-                    module_name,
-                    runtime_pos,
-                    &md,
-                );
-                (parent_access_path, access_path, md)
-            })
-    })
+    with_resolved_module_components_for_path_with_cache_mode(
+        parent_module_path,
+        env,
+        pers_env,
+        ctx,
+        ComponentLookupApi::FindModule,
+        |components| {
+            components
+                .lookup_qualified_module(module_name, ctx)
+                .map(|(runtime_pos, _, md)| {
+                    let parent_access_path = components.access_path().clone();
+                    let access_path = qualified_submodule_access_path(
+                        &parent_access_path,
+                        module_name,
+                        runtime_pos,
+                        &md,
+                    );
+                    (parent_access_path, access_path, md)
+                })
+        },
+    )
     .flatten()
 }
 
@@ -29508,12 +29568,19 @@ pub(crate) fn copy_resolved_module_signature_for_path<'a>(
     pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
     ctx: &'a crate::types::context::TypeContext,
 ) -> Option<(Path, crate::types::decl::Signature)> {
-    with_resolved_module_components_for_path(module_path, env, pers_env, ctx, |components| {
-        (
-            components.access_path().clone(),
-            copy_lookup_signature_for_subst(components.signature(), ctx),
-        )
-    })
+    with_resolved_module_components_for_path_with_cache_mode(
+        module_path,
+        env,
+        pers_env,
+        ctx,
+        ComponentLookupApi::FindModule,
+        |components| {
+            (
+                components.access_path().clone(),
+                copy_lookup_signature_for_subst(components.signature(), ctx),
+            )
+        },
+    )
 }
 
 pub(crate) fn copy_module_signature_in_resolved_path<'a>(
@@ -29535,11 +29602,18 @@ pub(crate) fn lookup_modtype_in_resolved_path<'a>(
     pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
     ctx: &'a crate::types::context::TypeContext,
 ) -> Option<(Path, crate::types::decl::ModtypeDeclaration)> {
-    with_resolved_module_components_for_path(parent_module_path, env, pers_env, ctx, |components| {
-        components
-            .lookup_qualified_modtype(modtype_name, ctx)
-            .map(|(_, mtd)| (components.access_path().clone(), mtd))
-    })
+    with_resolved_module_components_for_path_with_cache_mode(
+        parent_module_path,
+        env,
+        pers_env,
+        ctx,
+        ComponentLookupApi::FindModtype,
+        |components| {
+            components
+                .lookup_qualified_modtype(modtype_name, ctx)
+                .map(|(_, mtd)| (components.access_path().clone(), mtd))
+        },
+    )
     .flatten()
 }
 
@@ -29556,7 +29630,7 @@ pub(crate) fn lookup_type_in_resolved_path<'a>(
         env,
         pers_env,
         ctx,
-        ComponentLookupCacheMode::FindModule,
+        ComponentLookupApi::FindType,
     )
 }
 
@@ -29573,7 +29647,7 @@ pub(crate) fn lookup_type_in_resolved_path_for_probe<'a>(
         env,
         pers_env,
         ctx,
-        ComponentLookupCacheMode::ProbeModuleDescr,
+        ComponentLookupApi::ProbeModuleDescr,
     )
 }
 
@@ -29583,7 +29657,7 @@ fn lookup_type_in_resolved_path_with_cache_mode<'a>(
     env: &Env,
     pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
     ctx: &'a crate::types::context::TypeContext,
-    cache_mode: ComponentLookupCacheMode,
+    cache_mode: ComponentLookupApi,
 ) -> Option<(Path, Ident, Arc<crate::types::decl::TypeDeclaration>)> {
     if let Some(cached) = ctx.find_resolved_module_type(parent_module_path, type_name) {
         return Some(cached);
@@ -29694,7 +29768,7 @@ fn lookup_type_decl_in_resolved_path_with_cache_mode<'a>(
     env: &Env,
     pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
     ctx: &'a crate::types::context::TypeContext,
-    cache_mode: ComponentLookupCacheMode,
+    cache_mode: ComponentLookupApi,
 ) -> Option<Arc<crate::types::decl::TypeDeclaration>> {
     if let Some((_, _, decl)) = ctx.find_resolved_module_type(parent_module_path, type_name) {
         return Some(decl);
@@ -29786,7 +29860,7 @@ fn lookup_type_decl_in_resolved_path<'a>(
         env,
         pers_env,
         ctx,
-        ComponentLookupCacheMode::FindModule,
+        ComponentLookupApi::FindType,
     )
 }
 
@@ -29803,7 +29877,7 @@ fn lookup_type_decl_in_resolved_path_for_probe<'a>(
         env,
         pers_env,
         ctx,
-        ComponentLookupCacheMode::ProbeModuleDescr,
+        ComponentLookupApi::ProbeModuleDescr,
     )
 }
 
@@ -30145,7 +30219,7 @@ pub(crate) fn build_qualified_signature_for_access_path<'a>(
     mty: &crate::types::decl::ModuleType,
     pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
     ctx: &'a crate::types::context::TypeContext,
-    cache_mode: ComponentLookupCacheMode,
+    cache_mode: ComponentLookupApi,
 ) -> Option<crate::types::decl::Signature> {
     let (sig, resolved_name) = env.resolve_module_type(mty, pers_env, ctx, cache_mode)?;
     Some(qualify_resolved_signature_for_access_path(
@@ -30182,7 +30256,7 @@ fn build_module_signature_for_path<'a>(
     env: &Env,
     pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
     ctx: &'a crate::types::context::TypeContext,
-    cache_mode: ComponentLookupCacheMode,
+    cache_mode: ComponentLookupApi,
 ) -> Option<(Path, crate::types::decl::Signature)> {
     let resolved = match module_path {
         Path::Pident(id) => {
@@ -30697,7 +30771,7 @@ fn lookup_type_decl_for_path<'a>(
         env,
         pers_env,
         ctx,
-        ComponentLookupCacheMode::FindModule,
+        ComponentLookupApi::FindType,
     )
 }
 
@@ -30712,7 +30786,7 @@ fn lookup_type_decl_for_path_for_probe<'a>(
         env,
         pers_env,
         ctx,
-        ComponentLookupCacheMode::ProbeModuleDescr,
+        ComponentLookupApi::ProbeModuleDescr,
     )
 }
 
@@ -30721,14 +30795,14 @@ fn lookup_type_decl_for_path_with_cache_mode<'a>(
     env: &Env,
     pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
     ctx: &'a crate::types::context::TypeContext,
-    cache_mode: ComponentLookupCacheMode,
+    cache_mode: ComponentLookupApi,
 ) -> Option<Arc<crate::types::decl::TypeDeclaration>> {
     fn lookup_raw_type_decl_from_module_path<'a>(
         module_path: &Path,
         type_name: &str,
         env: &Env,
         ctx: &'a crate::types::context::TypeContext,
-        cache_mode: ComponentLookupCacheMode,
+        cache_mode: ComponentLookupApi,
     ) -> Option<Arc<crate::types::decl::TypeDeclaration>> {
         // OCaml compiler/ml/env.ml:1095-1105 and 1138-1143 resolve labels
         // through descriptor component tables; env.ml:800-813 does the same
