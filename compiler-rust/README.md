@@ -38,6 +38,8 @@ README calls it out as a Rust-specific diversion.
 - [Stage 19: JavaScript Printing And Output](#stage-19-javascript-printing-and-output)
 - [Direct, Subprocess, And In-Process Modes](#direct-subprocess-and-in-process-modes)
 - [Rust-Specific Diversions](#rust-specific-diversions)
+- [Possible Algorithmic Gaps With OCaml](#possible-algorithmic-gaps-with-ocaml)
+- [Performance Improvements Versus OCaml](#performance-improvements-versus-ocaml)
 - [Performance Instrumentation](#performance-instrumentation)
 - [Optimization Map](#optimization-map)
 - [Workflow For Architecture Changes](#workflow-for-architecture-changes)
@@ -1356,6 +1358,56 @@ preserve OCaml's logical ordering:
 - Carry the identifier stamp across the split because OCaml has one mutable
   global stamp through translation and JS compilation.
 
+Detailed in-process algorithm:
+
+1. The parse phase runs `generate_ast_with_rust_parser` for `.res` and `.resi`
+   files. It reads source bytes through the Latin-1-compatible path, parses into
+   a `ParseArena`, applies per-file config, JSX, let-unwrap, built-in PPX unless
+   disabled, applies `@@no_export` for structures, extracts dependencies, then
+   stores `StoredAst` and dependency payloads in memory. It does not run or
+   consume external PPX output.
+2. The scheduler snapshots the stored AST table and a `ModuleRegistry` template
+   once for the compile wave. The registry snapshot shares Arc-backed maps so
+   worker-local registries can read published dependency signatures and metadata
+   without a global mutable `PersistentEnv`.
+3. Ready typecheck work is held in a priority heap and bounded by the current
+   Rayon pool size. This keeps critical-path ordering meaningful instead of
+   submitting the whole graph to Rayon at once.
+4. `compile_module_in_process_to_js_boundary` builds compiler options, inserts
+   provisional module metadata into a local registry, and typechecks the stored
+   `.resi` first when one exists. The interface result is registered locally so
+   the implementation can run the same `.resi` constraints OCaml would read from
+   `.cmi`, and a `SignatureReady` message can unblock dependents.
+5. The implementation path calls
+   `compile_preprocessed_structure_in_process_until_js`. It creates a fresh
+   `TypeContext`, `TypeCheckContext`, local `Env`, and registry-backed
+   `PersistentEnv`, then runs `type_structure`.
+6. With an interface, Rust applies the moregen constraints before typedtree
+   capture and keeps the declared interface as the export target. With no
+   interface, it simplifies the inferred signature, checks non-generalized
+   schemes, normalizes signature types, prepares save-time stamp/shape effects,
+   registers the signature in the local registry, and publishes the signature
+   through the scheduler hook before RawLambda conversion.
+7. The current unit's just-published signature remains visible through RawLambda
+   conversion, matching OCaml's save-before-translation behavior. The pre-JS
+   result contains the lowered Lambda, possible required modules, the identifier
+   stamp at the JS boundary, directives, debug/JSX-preserve flags, the signature,
+   optional registry updates, and captured intermediates.
+8. The scheduler converts the possible required module set into backend-visible
+   dependencies and waits for those modules' JS metadata before finalizing JS.
+   Type dependents can start after signature publication; JS finalization waits
+   only for backend-visible metadata.
+9. `finish_preprocessed_structure_in_process_from_js_boundary_with_metadata_hook`
+   creates a fresh registry-backed `PersistentEnv` for JS, unregisters the
+   current unit so dependency probing cannot import it as a normal dependency,
+   restores the carried identifier stamp, runs the JS backend, publishes
+   `is_pure`, `cmj_export_constants`, and `cmj_export_arities`, then renders zero,
+   one, or many JS outputs.
+10. In-process mode writes JS outputs and build-state data, but it does not write
+    `.ast`, `.iast`, `.cmi`, `.cmj`, `.cmt`, or `.cmti` artifacts for ordinary
+    source modules. Those artifact contracts are represented by `StoredAst`,
+    `ModuleRegistry`, `PortablePersStruct`, and backend metadata.
+
 ## Rust-Specific Diversions
 
 Rust-specific diversions fall into two groups: representation-only differences
@@ -1426,6 +1478,125 @@ When a Rust implementation does something different from OCaml:
 3. If semantic, either remove it or document the exact intended ReScript language
    change.
 4. Add tests for the behavior that would diverge.
+
+## Possible Algorithmic Gaps With OCaml
+
+These are the main areas where the current Rust implementation is known or
+suspected to differ from the OCaml reference algorithm. Some are intentional
+execution-mode differences, but each one needs care when claiming byte-for-byte
+parity.
+
+- External PPX round trips are incomplete in Rust direct and Rust parser
+  in-process paths. OCaml applies the transformed marshal AST before built-in
+  frontend processing; Rust currently runs/checks the PPX output magic in direct
+  helpers but keeps compiling the original parsetree.
+- Interface artifact behavior is not a full `after_parsing_sig` port. OCaml
+  self-checks the signature, forces delayed checks, checks fatal warnings, saves
+  `.cmi`, saves `.cmti`, and can run GenType. Rust direct helpers typecheck and
+  dump; in-process helpers publish a registry signature instead of writing those
+  files.
+- Rust reads OCaml `.cmi`/`.cmj` files but does not yet write full
+  OCaml-compatible `.cmi`/`.cmj` artifacts from the direct Rust CLI path.
+  Rewatch in-process replaces them with registry data, so bugs can hide at the
+  file artifact boundary until subprocess/file-backed mode is tested.
+- In-process CMJ metadata currently publishes purity, constant exports, and
+  arities. OCaml `.cmj` can also carry non-constant closed Lambda exports when
+  `cross_module_inline` is enabled; Rust can decode those from disk `.cmj` but
+  does not publish them through `ModuleRegistry`.
+- The lazy module environment is not yet a mechanical port of `env.ml`.
+  `ComponentLookupCacheMode`, flattened-alias side tables, forced path caches,
+  and explicit `Stdlib`/`Pervasives` handling should be treated as audit points
+  until each call site is proven to correspond to an OCaml lookup or forcing
+  boundary.
+- Source-fallback signature typechecking in `PersistentEnv` is Rust-specific.
+  It can recover missing registry/file artifacts by typechecking source up to a
+  depth limit; OCaml's normal driver expects compiled interfaces.
+- `typecheck_implementation_in_process` is only a helper for signature
+  publication and intentionally lacks the post-typecheck interface constraint
+  pass. Use `compile_preprocessed_structure_in_process_until_js` plus the JS
+  finish step as the authoritative in-process implementation path.
+- Implementation coercion for a `.resi` path is recomputed at RawLambda
+  conversion time. If `Includemod.compunit` fails there, Rust currently falls
+  back to `build_name_based_coercion` so exports are filtered by name. That is
+  not OCaml's algorithm and should be treated as a temporary compatibility
+  fallback because it can hide real inclusion failures if used too broadly.
+- Rust direct source mode follows the same broad frontend stage order as OCaml,
+  but it is not a function-by-function clone of `Ppx_entry` and
+  `after_parsing_impl`. Warning order, config timing, JSX, extension expansion,
+  and built-in rewrite ordering should be checked against OCaml before changing
+  this area.
+- Typedtree and Lambda dump parity can depend on internal performance
+  representations such as sparse record nodes and sparse extras. Those
+  representations are valid only because serializers and RawLambda lowering
+  restore the OCaml-facing shape at observable boundaries.
+
+## Performance Improvements Versus OCaml
+
+Rust can use different storage and scheduling strategies as long as the
+observable compiler products remain aligned with OCaml. These are current
+performance-oriented differences and near-term candidates.
+
+Current Rust performance-oriented differences:
+
+- `ParseArena` stores positions, locations, longidents, recursive AST nodes, and
+  strings behind compact typed indices. OCaml uses ordinary heap records and
+  pointers. The Rust representation reduces pointer-heavy AST allocation and
+  makes common handles four bytes while preserving OCaml-facing identity where
+  binary AST and dumps need it.
+- `TypeContext` stores type expressions in a per-compilation `typed_arena`
+  allocation with stable addresses and `TypeExprRef` indices. This keeps OCaml's
+  mutable type-node model while avoiding global type storage and allowing one
+  independent type arena per concurrently compiled module.
+- Parse-time sparse side tables keep uncommon expression payloads out of the
+  main `Expression` enum. Function defaults, case guards, constructor payloads,
+  variant payloads, record spreads, else branches, and coercion source types are
+  keyed by stable `ExprIdx` instead of inflating every expression node.
+- `SparseExtras` stores the common "no typedtree extras" case as `None` instead
+  of an inline empty vector on every typed pattern/expression.
+- `Texp_record_sparse` is an internal representation for large closed regular
+  records with many omitted optional fields, especially JSX prop bags. OCaml
+  materializes one field entry per label from `lbl_all`; Rust stores explicit
+  fields plus a shared `Arc<Vec<LabelDescription>>`, then expands or compacts at
+  typedtree, RawLambda, and Lambda boundaries so output remains equivalent.
+- In-process compilation avoids subprocess startup, marshal I/O, `.ast`/`.iast`
+  write/read cycles, and local `.cmi`/`.cmj` write/read cycles. `StoredAst`,
+  `ModuleRegistry`, `PortablePersStruct`, and backend metadata replace those
+  file artifacts inside one build wave.
+- The in-process scheduler publishes signatures before JS finalization, so
+  dependent typechecking can overlap with upstream Lambda/JS work while still
+  waiting for backend-visible metadata before JS dependency probing.
+- Registry snapshots and stored AST snapshots share Arc-backed payloads across
+  workers. Workers get local registry views for provisional module/interface
+  entries instead of contending on one mutable persistent environment.
+- Lazy module component views, stored component `OnceCell`s, child-component
+  laziness, qualified component caches, and qualified record-label caches reduce
+  repeated signature qualification, substitution, and constructor/label table
+  work. These optimizations must still follow OCaml lazy lookup boundaries.
+- The JS finish path consumes the lowered Lambda tree for the common single
+  output target, avoiding extra clones. It keeps a shared lowered tree only when
+  multiple JS targets must be rendered from one pre-JS result.
+- ASCII and Latin-1 source handling keeps the file path byte-oriented like OCaml
+  while giving the scanner a fast ASCII path and avoiding Unicode decoding work
+  for the common case.
+
+Candidate improvements that still need proof:
+
+- Replace selected short-lived typechecker or parser temporaries with
+  thread-local bump allocation, or `bumpalo`, after proving that physical
+  `TypeExprRef` identity, arena indices, and mutation points remain unchanged.
+  The current type-expression arena uses `typed_arena`; the current
+  `ParseArena` is a typed-index `Vec` arena.
+- Reduce or remove flattened-alias and forced-path side caches by moving more
+  behavior into the OCaml-aligned lazy `Env`/`Ctype` boundaries. This is both a
+  correctness simplification and likely a performance improvement if it removes
+  duplicate lookup work.
+- Publish closed Lambda exports through `ModuleRegistry` when
+  `cross_module_inline` is enabled, matching disk `.cmj` capability without
+  reintroducing file I/O.
+- Keep extending counters around signature copy/freshen, qualified component
+  cache hits, sparse records, and registry snapshots before committing
+  performance changes. The right optimization target should be selected from
+  measured hot paths, not intuition.
 
 ## Performance Instrumentation
 
