@@ -26,16 +26,16 @@ as close to the reference as Rust allows.
 These ports do not need to compile yet. Do not introduce integration
 abstractions that are not present in the reference.
 
-- [ ] Port `GenTypeConfig.ml`.
-- [ ] Port `Paths.ml`.
-- [ ] Port `FindSourceFile.ml` and `FindSourceFile.mli`.
-- [ ] Port `GeneratedFiles.ml`.
-- [ ] Port `ImportPath.ml` and `ImportPath.mli`.
-- [ ] Port `ModuleExtension.ml`.
-- [ ] Port `Dependencies.ml`.
-- [ ] Port `Runtime.ml` and `Runtime.mli`.
-- [ ] Port `ExportModule.ml`.
-- [ ] Run the three per-file review passes for every file in this stage.
+- [x] Port `GenTypeConfig.ml`.
+- [x] Port `Paths.ml`.
+- [x] Port `FindSourceFile.ml` and `FindSourceFile.mli`.
+- [x] Port `GeneratedFiles.ml`.
+- [x] Port `ImportPath.ml` and `ImportPath.mli`.
+- [x] Port `ModuleExtension.ml`.
+- [x] Port `Dependencies.ml`.
+- [x] Port `Runtime.ml` and `Runtime.mli`.
+- [x] Port `ExportModule.ml`.
+- [x] Run the three per-file review passes for every file in this stage.
 - [ ] Commit the stage or commit coherent file clusters.
 
 ## Rewrite Stage 3: Annotation, Resolver, Type Environment, and Translation

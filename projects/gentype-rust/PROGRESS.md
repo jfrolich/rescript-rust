@@ -12,9 +12,12 @@ support in Rust is still a stub:
 - Rust `bsc` checks selected CMT files enough to preserve stale-artifact error
   output parity.
 - Rust `bsc` does not generate `.gen.tsx` or `.gen.ts`.
-- Rewrite Stage 1 now has an initial file-for-file Rust port under
+- Rewrite Stage 1 has an initial file-for-file Rust port under
   `compiler-rust/src/gentype/`. These files are intentionally not wired into
   the crate yet.
+- Rewrite Stage 2 now also has an initial file-for-file Rust port for config,
+  paths, imports, generated-file effects, dependency helpers, runtime names,
+  and export-module tables.
 
 ## Reference Inventory
 
@@ -77,6 +80,16 @@ For the Stage 1 port:
   `Location.get_pos_info`, while Rust `Location` currently stores an interned
   filename id and will need the arena/source resolver when the port is wired.
 
+For the Stage 2 port:
+
+- `rustfmt` was run on the new Stage 2 files.
+- Surface/control/output-sensitive review was performed while porting.
+- Known integration-sensitive point: `compiler/gentype/ExportModule.ml:3-9`
+  uses OCaml `Hashtbl` and `ExportModule.ml:104-106` folds it in hash-table
+  order. The Rust draft uses an order-sensitive `IndexMap`, not a sorted map,
+  and final integration must verify whether exact OCaml bucket traversal needs
+  a dedicated table representation.
+
 Earlier setup note:
 
 The latest debug build attempt after merging `fuzz-errors` failed before code
@@ -92,10 +105,10 @@ needed.
 
 ## Next Session
 
-Continue with Rewrite Stage 2 from `PLAN.md`:
+Continue with Rewrite Stage 3 from `PLAN.md`:
 
-1. Port one config/path/import/file-effect file at a time from
-   `compiler/gentype`.
+1. Port one annotation/resolver/type-environment/translation file at a time
+   from `compiler/gentype`.
 2. Keep function names, helper names, data-flow shape, and source-location
    references as close to OCaml as Rust allows.
 3. Run the three per-file review passes before marking each file done:
