@@ -25,8 +25,8 @@ support in Rust is still a stub:
   `TranslateTypeExprFromTypes.ml`, and `TypeEnv.ml`/`.mli`. These files are
   still intentionally not wired into the crate.
 - Rewrite Stage 4 has started with initial file-for-file Rust ports of
-  `EmitText.ml`, `NamedArgs.ml`, and `Converter.ml`. These files are still
-  intentionally not wired into the crate.
+  `EmitText.ml`, `EmitType.ml`, `NamedArgs.ml`, and `Converter.ml`. These files
+  are still intentionally not wired into the crate.
 
 ## Reference Inventory
 
@@ -241,6 +241,21 @@ For the first Stage 4 utility/emitter chunk:
 - The new files are not wired into the crate, so debug build/parity gates were
   not run for this non-compiling rewrite stage.
 
+For the `EmitType.ml` Stage 4 chunk:
+
+- `EmitType.ml` was ported to `compiler-rust/src/gentype/emit_type.rs` against
+  `compiler/gentype/EmitType.ml:1-455`.
+- Surface/control/output-sensitive review checked header/interface/react helper
+  emission from `EmitType.ml:3-62`, recursive type rendering and variant union
+  formatting from `EmitType.ml:63-253`, object field/function rendering from
+  `EmitType.ml:254-329`, and export/import/type-cast helpers from
+  `EmitType.ml:331-455`.
+- The Rust draft keeps the OCaml helper boundary for `require ~early` from
+  `EmitType.ml:419-425` even though Rust emits through a direct function call.
+- `rustfmt` was run on the new file and `git diff --check` passed.
+- The new file is not wired into the crate, so debug build/parity gates were not
+  run for this non-compiling rewrite stage.
+
 Earlier setup note:
 
 The latest debug build attempt after merging `fuzz-errors` failed before code
@@ -256,9 +271,10 @@ needed.
 
 ## Next Session
 
-Continue with Rewrite Stage 3 from `PLAN.md`:
+Continue with Rewrite Stage 4 from `PLAN.md`:
 
-1. Continue with the remaining translation files from `compiler/gentype`.
+1. Continue with the remaining emitter and entry-point files from
+   `compiler/gentype`.
 2. Keep function names, helper names, data-flow shape, and source-location
    references as close to OCaml as Rust allows.
 3. Run the three per-file review passes before marking each file done:
