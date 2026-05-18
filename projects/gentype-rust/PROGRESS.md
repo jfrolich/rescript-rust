@@ -19,9 +19,9 @@ support in Rust is still a stub:
   paths, imports, generated-file effects, dependency helpers, runtime names,
   and export-module tables.
 - Rewrite Stage 3 has started with initial file-for-file Rust ports of
-  `Annotation.ml`, `ModuleResolver.ml`, `TranslateTypeExprFromTypes.ml`, and
-  `TypeEnv.ml`/`.mli`. These files are still intentionally not wired into the
-  crate.
+  `Annotation.ml`, `ModuleResolver.ml`, `TranslateCoreType.ml`,
+  `TranslateTypeExprFromTypes.ml`, and `TypeEnv.ml`/`.mli`. These files are
+  still intentionally not wired into the crate.
 
 ## Reference Inventory
 
@@ -148,6 +148,26 @@ For the first type-translation Stage 3 chunk:
 - Rust type access still has integration friction: the staged file preserves
   the OCaml control flow but assumes direct `TypeExprRef` descriptor access
   until the compile-wiring phase chooses the final context/arena adapter.
+- `rustfmt` was run on the new file and `git diff --check` passed.
+- The new file is not wired into the crate, so debug build/parity gates were
+  not run for this non-compiling rewrite stage.
+
+For the typedtree core-type Stage 3 chunk:
+
+- `TranslateCoreType.ml` was ported to
+  `compiler-rust/src/gentype/translate_core_type.rs` against
+  `compiler/gentype/TranslateCoreType.ml:1-295`.
+- The port preserves the OCaml helper names and order for `remove_option`,
+  `process_variant`, `translate_arrow_type`, `translateCoreType_`,
+  `translateCoreTypes_`, and `translate_core_type`.
+- Surface/control/output-sensitive review checked arrow argument dependency
+  accumulation from `TranslateCoreType.ml:52-120`, typedtree core-type dispatch
+  from `TranslateCoreType.ml:122-280`, polymorphic variant label handling from
+  `TranslateCoreType.ml:177-249`, and package lowering from
+  `TranslateCoreType.ml:250-279`.
+- Rust annotation helpers require `ParseArena` to resolve interned attribute
+  names, so the staged Rust signatures thread `arena` explicitly while keeping
+  the OCaml traversal order.
 - `rustfmt` was run on the new file and `git diff --check` passed.
 - The new file is not wired into the crate, so debug build/parity gates were
   not run for this non-compiling rewrite stage.
