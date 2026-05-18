@@ -2,7 +2,7 @@
 // This Stage 3 GenType port is intentionally not wired into the crate yet.
 
 use crate::gentype::gen_type_common::{
-    create_variant, dep_to_string, ident, is_number, unknown, ArgType, Case as VariantCase,
+    create_variant, dep_to_string, ident, is_number, unknown, Case as VariantCase,
     ClosedFlag as GenClosedFlag, Dep, Function, Label, LabelJs, Payload, Type,
 };
 use crate::parse_arena::ParseArena;
@@ -451,7 +451,7 @@ fn translate_package(
     package: &crate::types::typedtree::PackageType,
 ) -> crate::gentype::translate_type_expr_from_types::Translation {
     match crate::gentype::type_env::lookup_module_type_signature(&package.pack_path, type_env) {
-        Some((signature, type_env)) => {
+        Some((_, signature, type_env)) => {
             let type_equations_translation = package
                 .pack_fields
                 .iter()
@@ -477,7 +477,7 @@ fn translate_package(
                     config,
                     type_vars_gen,
                     &type_env1,
-                    &signature.sig_type,
+                    &signature,
                 );
             let mut dependencies = dependencies_from_type_equations;
             dependencies.append(&mut dependencies_from_record_type);

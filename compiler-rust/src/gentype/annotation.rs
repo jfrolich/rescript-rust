@@ -217,9 +217,10 @@ pub fn get_attribute_import_renaming(
             (Some(import_string), gentype_as_renaming)
         }
         Some((_, AttributePayload::TuplePayload(payloads))) => match payloads.as_slice() {
-            [AttributePayload::StringPayload(import_string), AttributePayload::StringPayload(rename_string)] => {
-                (Some(import_string.clone()), Some(rename_string.clone()))
-            }
+            [
+                AttributePayload::StringPayload(import_string),
+                AttributePayload::StringPayload(rename_string),
+            ] => (Some(import_string.clone()), Some(rename_string.clone())),
             _ => (None, gentype_as_renaming),
         },
         _ => (None, gentype_as_renaming),
@@ -500,6 +501,201 @@ pub fn update_config_for_module(
 ) -> crate::gentype::config::T {
     // Mirrors compiler/gentype/Annotation.ml:292-295.
     if has_attribute(arena, tag_is_gentype, attributes) {
+        let mut config = config.clone();
+        config.everything = true;
+        config
+    } else {
+        config.clone()
+    }
+}
+
+fn decl_attribute_payload_is_empty(payload: &crate::types::decl::AttributePayload) -> bool {
+    matches!(
+        payload,
+        crate::types::decl::AttributePayload::Empty
+            | crate::types::decl::AttributePayload::Structure(_)
+    )
+}
+
+fn decl_attribute_payload_as_string(
+    payload: &crate::types::decl::AttributePayload,
+) -> Option<String> {
+    match payload {
+        crate::types::decl::AttributePayload::Str(s) => Some(s.clone()),
+        _ => None,
+    }
+}
+
+fn decl_attribute_payload_as_int(payload: &crate::types::decl::AttributePayload) -> Option<i32> {
+    match payload {
+        crate::types::decl::AttributePayload::Int(n) => i32::try_from(*n).ok(),
+        crate::types::decl::AttributePayload::IntLiteral(s) => s.parse().ok(),
+        _ => None,
+    }
+}
+
+pub fn get_decl_attribute_payload<'a>(
+    check_text: impl Fn(&str) -> bool + Copy,
+    attributes: &'a [crate::types::decl::Attribute],
+) -> Option<&'a crate::types::decl::AttributePayload> {
+    // Mirrors compiler/gentype/Annotation.ml:69-95 for Types.signature
+    // attributes. Rust stores these payloads in decl::Attribute instead of
+    // parser::Payload after typemod conversion.
+    attributes
+        .iter()
+        .find(|attribute| check_text(&attribute.attr_name.txt))
+        .map(|attribute| &attribute.attr_payload)
+}
+
+pub fn get_decl_gentype_as_renaming(
+    attributes: &[crate::types::decl::Attribute],
+) -> Option<String> {
+    match get_decl_attribute_payload(tag_is_gentype_as, attributes)
+        .and_then(decl_attribute_payload_as_string)
+    {
+        Some(s) => Some(s),
+        None => get_decl_attribute_payload(tag_is_gentype, attributes)
+            .and_then(decl_attribute_payload_as_string),
+    }
+}
+
+pub fn get_decl_as_string(attributes: &[crate::types::decl::Attribute]) -> Option<String> {
+    get_decl_attribute_payload(tag_is_as, attributes).and_then(decl_attribute_payload_as_string)
+}
+
+pub fn get_decl_as_int(attributes: &[crate::types::decl::Attribute]) -> Option<i32> {
+    get_decl_attribute_payload(tag_is_as, attributes).and_then(decl_attribute_payload_as_int)
+}
+
+pub fn get_decl_as_label_js(
+    attributes: &[crate::types::decl::Attribute],
+) -> Option<crate::gentype::gen_type_common::LabelJs> {
+    match get_decl_attribute_payload(tag_is_as, attributes)? {
+        crate::types::decl::AttributePayload::Ident(s) if s == "null" => {
+            Some(crate::gentype::gen_type_common::LabelJs::NullLabel)
+        }
+        crate::types::decl::AttributePayload::Ident(s) if s == "undefined" => {
+            Some(crate::gentype::gen_type_common::LabelJs::UndefinedLabel)
+        }
+        crate::types::decl::AttributePayload::Bool(b) => {
+            Some(crate::gentype::gen_type_common::LabelJs::BoolLabel(*b))
+        }
+        crate::types::decl::AttributePayload::Float(s) => Some(
+            crate::gentype::gen_type_common::LabelJs::FloatLabel(s.clone()),
+        ),
+        crate::types::decl::AttributePayload::Int(n) => Some(
+            crate::gentype::gen_type_common::LabelJs::IntLabel(n.to_string()),
+        ),
+        crate::types::decl::AttributePayload::IntLiteral(s) => Some(
+            crate::gentype::gen_type_common::LabelJs::IntLabel(s.clone()),
+        ),
+        crate::types::decl::AttributePayload::Str(s) => Some(
+            crate::gentype::gen_type_common::LabelJs::StringLabel(s.clone()),
+        ),
+        _ => None,
+    }
+}
+
+pub fn get_decl_tag(attributes: &[crate::types::decl::Attribute]) -> Option<String> {
+    get_decl_attribute_payload(tag_is_tag, attributes).and_then(decl_attribute_payload_as_string)
+}
+
+pub fn get_decl_doc_payload(attributes: &[crate::types::decl::Attribute]) -> Option<String> {
+    get_decl_attribute_payload(tag_is_doc, attributes)
+        .and_then(decl_attribute_payload_as_string)
+        .filter(|doc_string| !doc_string.is_empty())
+}
+
+pub fn doc_string_from_decl_attrs(
+    attributes: &[crate::types::decl::Attribute],
+) -> crate::gentype::gen_type_common::doc_string::T {
+    get_decl_doc_payload(attributes)
+}
+
+pub fn has_decl_attribute(
+    check_text: impl Fn(&str) -> bool + Copy,
+    attributes: &[crate::types::decl::Attribute],
+) -> bool {
+    get_decl_attribute_payload(check_text, attributes).is_some()
+}
+
+pub fn get_decl_attribute_import_renaming(
+    attributes: &[crate::types::decl::Attribute],
+) -> (Option<String>, Option<String>) {
+    // Mirrors compiler/gentype/Annotation.ml:136-148. The Rust decl attribute
+    // payload currently preserves the common string import payload; tuple import
+    // payloads need a typedtree payload-preservation pass before final parity.
+    let attribute_import = get_decl_attribute_payload(tag_is_gentype_import, attributes);
+    let gentype_as_renaming = get_decl_gentype_as_renaming(attributes);
+    match attribute_import.and_then(decl_attribute_payload_as_string) {
+        Some(import_string) => (Some(import_string), gentype_as_renaming),
+        None => (None, gentype_as_renaming),
+    }
+}
+
+fn warn_gentype_as_renaming_decl(loc: &Location) {
+    crate::gentype::log_::color::setup();
+    crate::gentype::log_::info(
+        || {
+            "\n@genType.as is not supported anymore in type definitions. Use @as from the language."
+                .to_string()
+        },
+        loc,
+        "Warning genType",
+    );
+}
+
+pub fn check_unsupported_decl_gentype_as_renaming(attributes: &[crate::types::decl::Attribute]) {
+    if let Some(attribute) = attributes
+        .iter()
+        .find(|attribute| tag_is_gentype_as(&attribute.attr_name.txt))
+        .or_else(|| {
+            attributes
+                .iter()
+                .find(|attribute| tag_is_gentype(&attribute.attr_name.txt))
+        })
+    {
+        warn_gentype_as_renaming_decl(&attribute.attr_loc);
+    }
+}
+
+pub fn from_decl_attributes(
+    config: &crate::gentype::config::T,
+    loc: &Location,
+    attributes: &[crate::types::decl::Attribute],
+) -> T {
+    // Mirrors compiler/gentype/Annotation.ml:166-181 for Types.signature
+    // attributes, whose locations are already materialized as Location values.
+    let default = match config.everything {
+        true => T::GenType,
+        false => T::NoGenType,
+    };
+    if has_decl_attribute(tag_is_gentype_opaque, attributes) {
+        T::GenTypeOpaque
+    } else if has_decl_attribute(|s| tag_is_gentype(s) || tag_is_gentype_as(s), attributes) {
+        if let Some(payload) = get_decl_attribute_payload(tag_is_gentype, attributes)
+            && !decl_attribute_payload_is_empty(payload)
+        {
+            crate::gentype::log_::color::setup();
+            crate::gentype::log_::info(
+                || "Annotation payload is ignored".to_string(),
+                loc,
+                "Warning genType",
+            );
+        }
+        T::GenType
+    } else {
+        default
+    }
+}
+
+pub fn update_config_for_decl_module(
+    config: &crate::gentype::config::T,
+    attributes: &[crate::types::decl::Attribute],
+) -> crate::gentype::config::T {
+    // Mirrors compiler/gentype/Annotation.ml:292-295 for Types.signature
+    // attributes.
+    if has_decl_attribute(tag_is_gentype, attributes) {
         let mut config = config.clone();
         config.everything = true;
         config

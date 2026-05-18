@@ -5,13 +5,14 @@ use crate::gentype::gen_type_common::{ArgType, StringSet, Type};
 use crate::parse_arena::ParseArena;
 use crate::types::decl::ModuleType as DeclModuleType;
 use crate::types::typedtree::{
-    ApplyArg, Expression, ExpressionDesc, FunctionParam, FunctionParamPattern, ModuleBinding,
-    ModuleExprDesc, ModuleTypeConstraint, Pattern, PatternDesc, Structure, StructureItem,
-    StructureItemDesc, ValueBinding,
+    ApplyArg, Expression, ExpressionDesc, FunctionParam, ModuleBinding, ModuleExprDesc,
+    ModuleTypeConstraint, Pattern, PatternDesc, Structure, StructureItem, StructureItemDesc,
+    ValueBinding,
 };
 
 #[allow(non_snake_case)]
 pub fn addAnnotationsToTypes_(
+    arena: &ParseArena,
     config: &crate::gentype::config::T,
     expr: &Expression,
     arg_types: &[ArgType],
@@ -22,8 +23,8 @@ pub fn addAnnotationsToTypes_(
             ExpressionDesc::Texp_function { params, body, .. },
             Some((ArgType { a_type, .. }, next_types)),
         ) if !params.is_empty() && !body.is_empty() => {
-            let next_types1 = addAnnotationsToTypes_(config, &body[0].c_rhs, next_types);
-            let a_name = function_param_name(&params[0]);
+            let next_types1 = addAnnotationsToTypes_(arena, config, &body[0].c_rhs, next_types);
+            let a_name = function_param_name(arena, &params[0]);
             let mut out = vec![ArgType {
                 a_name,
                 a_type: a_type.clone(),
@@ -35,7 +36,7 @@ pub fn addAnnotationsToTypes_(
             if is_uncurried_fn_mk_apply(funct, args) =>
         {
             if let Some(expr1) = args.iter().find_map(|arg| arg.expression.as_ref()) {
-                addAnnotationsToTypes_(config, expr1, arg_types)
+                addAnnotationsToTypes_(arena, config, expr1, arg_types)
             } else {
                 arg_types.to_vec()
             }
@@ -45,12 +46,13 @@ pub fn addAnnotationsToTypes_(
 }
 
 pub fn add_annotations_to_types(
+    arena: &ParseArena,
     config: &crate::gentype::config::T,
     expr: &Expression,
     arg_types: &[ArgType],
 ) -> Vec<ArgType> {
     // Mirrors compiler/gentype/TranslateStructure.ml:34-47.
-    let arg_types = addAnnotationsToTypes_(config, expr, arg_types);
+    let arg_types = addAnnotationsToTypes_(arena, config, expr, arg_types);
     if arg_types
         .iter()
         .filter(|ArgType { a_name, .. }| a_name == "param")
@@ -79,7 +81,10 @@ pub fn add_annotations_to_fields(
 ) -> (Vec<crate::gentype::gen_type_common::Field>, Vec<ArgType>) {
     // Mirrors compiler/gentype/TranslateStructure.ml:48-62.
     match (&expr.exp_desc, fields.split_first()) {
-        (_, None) => (vec![], add_annotations_to_types(config, expr, arg_types)),
+        (_, None) => (
+            vec![],
+            add_annotations_to_types(arena, config, expr, arg_types),
+        ),
         (ExpressionDesc::Texp_function { body, .. }, Some((field, next_fields)))
             if !body.is_empty() =>
         {
@@ -108,7 +113,8 @@ pub fn add_annotations_to_function_type(
     // Mirrors compiler/gentype/TranslateStructure.ml:64-73.
     match type_ {
         Type::Function(mut function_) => {
-            function_.arg_types = add_annotations_to_types(config, expr, &function_.arg_types);
+            function_.arg_types =
+                add_annotations_to_types(arena, config, expr, &function_.arg_types);
             Type::Function(function_)
         }
         _ => type_,
@@ -177,6 +183,7 @@ pub fn translate_value_binding(
     ) == crate::gentype::annotation::T::GenType
     {
         crate::gentype::translation::translate_value(
+            arena,
             &value_binding.vb_attributes,
             config,
             crate::gentype::annotation::doc_string_from_attrs(arena, &value_binding.vb_attributes),
@@ -323,7 +330,7 @@ pub fn translate_module_binding(
             DeclModuleType::MtyIdent(path) => {
                 match crate::gentype::type_env::lookup_module_type_signature(path, &type_env) {
                     None => crate::gentype::translation::empty(),
-                    Some((signature, _)) => crate::gentype::translation::combine(
+                    Some((signature, _, type_env)) => crate::gentype::translation::combine(
                         &crate::gentype::translate_signature::translate_signature(
                             arena,
                             &config,
@@ -397,6 +404,7 @@ pub fn translate_structure_item(
         ),
         StructureItemDesc::Tstr_primitive(value_description) => {
             crate::gentype::translation::translate_primitive(
+                arena,
                 config,
                 output_file_relative,
                 resolver,
@@ -498,13 +506,13 @@ fn translate_module_constraint(
         (DeclModuleType::MtyIdent(path), ModuleTypeConstraint::Tmodtype_explicit(_)) => {
             match crate::gentype::type_env::lookup_module_type_signature(path, type_env) {
                 None => crate::gentype::translation::empty(),
-                Some((signature, _)) => crate::gentype::translation::combine(
+                Some((signature, _, type_env)) => crate::gentype::translation::combine(
                     &crate::gentype::translate_signature::translate_signature(
                         arena,
                         config,
                         output_file_relative,
                         resolver,
-                        type_env,
+                        &type_env,
                         &signature,
                     ),
                 ),
@@ -561,11 +569,11 @@ fn value_binding_id(pattern: &Pattern) -> Option<&crate::ident::Ident> {
     }
 }
 
-fn function_param_name(param: &FunctionParam) -> String {
+fn function_param_name(arena: &ParseArena, param: &FunctionParam) -> String {
     let a_name = param.param_id.name();
     if a_name == "*opt*" {
         match &param.label {
-            crate::parser::ast::ArgLabel::Optional(loc) => loc.txt.clone(),
+            crate::parser::ast::ArgLabel::Optional(loc) => arena.get_string(loc.txt).to_string(),
             _ => String::new(),
         }
     } else {

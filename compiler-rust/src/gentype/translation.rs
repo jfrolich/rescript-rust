@@ -2,7 +2,10 @@
 // This Stage 1 GenType port is intentionally not wired into the crate yet.
 
 use crate::gentype::code_item;
-use crate::gentype::gen_type_common::{dep_to_string, ident_with, Dep, Type};
+use crate::gentype::gen_type_common::{Dep, Type, dep_to_string, ident_with};
+use crate::parse_arena::ParseArena;
+use crate::parser::ast::Attributes;
+use crate::types::typedtree::TypedValueDescription;
 
 pub type T = code_item::Translation;
 
@@ -86,7 +89,7 @@ pub fn dep_to_import_type(
                 config,
                 output_file_relative,
                 resolver,
-                crate::gentype::module_name::rescript_pervasives,
+                &crate::gentype::module_name::rescript_pervasives.to_string(),
             ),
         }],
         Dep::External(_) => vec![],
@@ -128,7 +131,8 @@ pub fn translate_dependencies(
 }
 
 pub fn translate_value<F>(
-    attributes: &crate::binary_ast::parsetree::Attributes,
+    arena: &ParseArena,
+    attributes: &Attributes,
     config: &crate::gentype::config::T,
     doc_string: crate::gentype::gen_type_common::doc_string::T,
     output_file_relative: &str,
@@ -141,14 +145,44 @@ pub fn translate_value<F>(
 where
     F: Fn(Type) -> Type,
 {
-    let name_as = match crate::gentype::annotation::get_gentype_as_renaming(attributes) {
+    let name_as = match crate::gentype::annotation::get_gentype_as_renaming(arena, attributes) {
         Some(s) => s,
         _ => name.to_string(),
     };
+    translate_value_with_name_as(
+        Some(name_as),
+        config,
+        doc_string,
+        output_file_relative,
+        resolver,
+        type_env,
+        type_expr,
+        add_annotations_to_function,
+        name,
+    )
+}
 
+pub fn translate_value_with_name_as<F>(
+    name_as: Option<String>,
+    config: &crate::gentype::config::T,
+    doc_string: crate::gentype::gen_type_common::doc_string::T,
+    output_file_relative: &str,
+    resolver: &crate::gentype::module_resolver::Resolver,
+    type_env: &crate::gentype::type_env::T,
+    type_expr: crate::types::type_expr::TypeExprRef,
+    add_annotations_to_function: F,
+    name: &str,
+) -> T
+where
+    F: Fn(Type) -> Type,
+{
+    // Mirrors compiler/gentype/Translation.ml:80-112. This entry is used by
+    // Types.signature callers after Annotation.ml-equivalent decl attribute
+    // scanning has already recovered `name_as`.
+    let name_as = name_as.unwrap_or_else(|| name.to_string());
     let type_expr_translation =
         crate::gentype::translate_type_expr_from_types::translate_type_expr_from_types(
-            config, type_env, type_expr,
+            config, type_env, &type_expr,
         );
     let type_vars = crate::gentype::type_vars::free(&type_expr_translation.type_);
     let type_ = add_annotations_to_function(abstract_the_type_parameters(
@@ -160,7 +194,7 @@ where
     );
     let resolved_name = crate::gentype::type_env::add_module_path(type_env, &name_as);
     let module_access_path =
-        crate::gentype::type_env::get_module_access_path(type_env, &resolved_name_original);
+        crate::gentype::type_env::get_module_access_path(&resolved_name_original, type_env);
     let code_items = vec![code_item::T::ExportValue(code_item::ExportValue {
         doc_string,
         module_access_path,
@@ -184,11 +218,12 @@ where
 /// [@genType]
 /// [@module] external myBanner : ReasonReact.reactClass = "./MyBanner";
 pub fn translate_primitive(
+    arena: &ParseArena,
     config: &crate::gentype::config::T,
     output_file_relative: &str,
     resolver: &crate::gentype::module_resolver::Resolver,
     type_env: &crate::gentype::type_env::T,
-    value_description: &crate::types::typedtree::ValueDescription,
+    value_description: &TypedValueDescription,
 ) -> T {
     if crate::gentype::debug::translation.load(std::sync::atomic::Ordering::Relaxed) {
         crate::gentype::log_::item("Translate Primitive\n");
@@ -201,12 +236,14 @@ pub fn translate_primitive(
     };
 
     let type_expr_translation = crate::gentype::translate_core_type::translate_core_type(
+        arena,
         config,
         type_env,
         &value_description.val_desc,
     );
     let (attribute_import, attribute_renaming) =
         crate::gentype::annotation::get_attribute_import_renaming(
+            arena,
             &value_description.val_attributes,
         );
 

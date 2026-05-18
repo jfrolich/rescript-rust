@@ -4,7 +4,7 @@
 use std::collections::BTreeSet;
 
 use crate::gentype::gen_type_common::{ArgType, Field, Function, Ident, Payload, Type, Variant};
-use crate::types::type_expr::{TypeDesc, TypeExpr};
+use crate::types::type_expr::{TypeDesc, TypeExpr, TypeExprRef};
 use crate::types::typedtree::{TypedCoreType, TypedCoreTypeDesc};
 
 pub fn extract_from_type_expr(type_params: &[TypeExpr]) -> Vec<String> {
@@ -24,6 +24,17 @@ pub fn extract_from_type_expr(type_params: &[TypeExpr]) -> Vec<String> {
     }
 
     so_far
+}
+
+pub fn extract_from_type_expr_refs(type_params: &[TypeExprRef]) -> Vec<String> {
+    // Mirrors compiler/gentype/TypeVars.ml:3-13 at the Types.type_expr
+    // boundary. Phase 5 must thread TypeContext here so Rust can inspect the
+    // referenced Tvar names instead of using arity placeholders.
+    type_params
+        .iter()
+        .enumerate()
+        .map(|(i, _)| format!("T{i}"))
+        .collect()
 }
 
 pub fn extract_from_core_type(type_params: &[TypedCoreType]) -> Vec<String> {

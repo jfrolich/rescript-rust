@@ -3,7 +3,7 @@
 
 use crate::parse_arena::{LocIdx, ParseArena};
 use crate::parser::ast::Attributes;
-use crate::types::decl::{ModuleType, SignatureItem, TypeKind, ValueKind};
+use crate::types::decl::{ModuleType, SignatureItem, TypeKind};
 
 pub fn translate_type_declaration_from_types(
     arena: &ParseArena,
@@ -18,7 +18,7 @@ pub fn translate_type_declaration_from_types(
     crate::gentype::type_env::new_type(id.name(), type_env);
     let type_name = id.name().to_string();
     let type_vars =
-        crate::gentype::type_vars::extract_from_type_expr(&type_declaration.type_params);
+        crate::gentype::type_vars::extract_from_type_expr_refs(&type_declaration.type_params);
     if crate::gentype::debug::translation.load(std::sync::atomic::Ordering::Relaxed) {
         crate::gentype::log_::item(&format!("Translate Types.type_declaration {type_name}\n"));
     }
@@ -44,6 +44,7 @@ pub fn translate_type_declaration_from_types(
         }
         _ => crate::gentype::translate_type_declarations::DeclarationKind::NoDeclaration,
     };
+    let empty_attributes = Attributes::new();
     crate::gentype::translate_type_declarations::traslate_declaration_kind(
         arena,
         config,
@@ -51,7 +52,7 @@ pub fn translate_type_declaration_from_types(
         LocIdx::default(),
         output_file_relative,
         resolver,
-        &attributes_from_vec(&type_declaration.type_attributes),
+        &empty_attributes,
         type_env,
         &type_name,
         type_vars,
@@ -127,10 +128,9 @@ pub fn translate_signature_item_from_types(
         },
         SignatureItem::SigModule(id, module_declaration, _) => {
             let module_item = crate::gentype::runtime::new_module_item(id.name());
-            let config = crate::gentype::annotation::update_config_for_module(
-                arena,
+            let config = crate::gentype::annotation::update_config_for_decl_module(
                 config,
-                &attributes_from_vec(&module_declaration.md_attributes),
+                &module_declaration.md_attributes,
             );
             crate::gentype::type_env::update_module_item(module_item, type_env);
             translate_module_declaration_from_types(
@@ -150,18 +150,20 @@ pub fn translate_signature_item_from_types(
             }
             let module_item = crate::gentype::runtime::new_module_item(&name);
             crate::gentype::type_env::update_module_item(module_item, type_env);
-            let attributes = attributes_from_vec(&value_description.val_attributes);
-            if crate::gentype::annotation::from_attributes(
-                arena,
+            if crate::gentype::annotation::from_decl_attributes(
                 config,
-                LocIdx::default(),
-                &attributes,
+                &value_description.val_loc,
+                &value_description.val_attributes,
             ) == crate::gentype::annotation::T::GenType
             {
-                crate::gentype::translation::translate_value(
-                    &attributes,
+                crate::gentype::translation::translate_value_with_name_as(
+                    crate::gentype::annotation::get_decl_gentype_as_renaming(
+                        &value_description.val_attributes,
+                    ),
                     config,
-                    crate::gentype::annotation::doc_string_from_attrs(arena, &attributes),
+                    crate::gentype::annotation::doc_string_from_decl_attrs(
+                        &value_description.val_attributes,
+                    ),
                     output_file_relative,
                     resolver,
                     type_env,

@@ -32,6 +32,7 @@ pub fn translate_signature_value(
         crate::gentype::annotation::T::GenType => {
             let name = unwrap_uppercase_exotic(value_description.val_id.name()).to_string();
             crate::gentype::translation::translate_value(
+                arena,
                 &value_description.val_attributes,
                 config,
                 crate::gentype::annotation::doc_string_from_attrs(
@@ -78,14 +79,16 @@ pub fn translate_module_declaration(
         ModuleTypeDesc::Tmty_ident(path, _) => {
             match crate::gentype::type_env::lookup_module_type_signature(path, &type_env) {
                 None => crate::gentype::translation::empty(),
-                Some((signature, _)) => crate::gentype::translation::combine(&translate_signature(
-                    arena,
-                    config,
-                    output_file_relative,
-                    resolver,
-                    &type_env,
-                    &signature,
-                )),
+                Some((signature, _, type_env)) => {
+                    crate::gentype::translation::combine(&translate_signature(
+                        arena,
+                        config,
+                        output_file_relative,
+                        resolver,
+                        &type_env,
+                        &signature,
+                    ))
+                }
             }
         }
         ModuleTypeDesc::Tmty_functor(_, _, _, _) => not_implemented("Tmty_functor"),
@@ -125,7 +128,14 @@ pub fn translate_module_type_declaration(
                     config,
                     output_file_relative,
                     resolver,
-                    &crate::gentype::type_env::new_module_type(name, signature.clone(), type_env),
+                    &crate::gentype::type_env::new_module_type(
+                        name,
+                        signature.clone(),
+                        crate::types::typemod::decl_signature_from_typed_signature(
+                            signature, arena,
+                        ),
+                        type_env,
+                    ),
                     &signature_without_values,
                 ))
             }
@@ -173,6 +183,7 @@ pub fn translate_signature_item(
             );
             if !value_description.val_prim.is_empty() || is_import {
                 crate::gentype::translation::translate_primitive(
+                    arena,
                     config,
                     output_file_relative,
                     resolver,

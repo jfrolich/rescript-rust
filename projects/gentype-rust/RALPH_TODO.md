@@ -94,13 +94,13 @@ Run this checklist for each file after its first port and before compile work.
 
 ## Phase 0: Make the Port Compile
 
-- [ ] Wire `compiler-rust/src/gentype/mod.rs`.
+- [x] Wire `compiler-rust/src/gentype/mod.rs`.
 - [ ] Replace cross-file placeholders with the Rust types determined by the
   reviewed ports.
-- [ ] Fix ownership and borrow errors without changing reference control flow.
-- [ ] Keep module and function names stable.
-- [ ] Build with `cargo build --manifest-path compiler-rust/Cargo.toml`.
-- [ ] Commit compile-fix clusters separately from semantic parity changes.
+- [x] Fix ownership and borrow errors without changing reference control flow.
+- [x] Keep module and function names stable.
+- [x] Build with `cargo build --manifest-path compiler-rust/Cargo.toml`.
+- [x] Commit compile-fix clusters separately from semantic parity changes.
 
 ## Phase 1: Harness
 

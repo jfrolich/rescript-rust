@@ -1,7 +1,7 @@
 // Port of compiler/gentype/Dependencies.ml:1-73.
 // This Stage 2 GenType port is intentionally not wired into the crate yet.
 
-use crate::gentype::gen_type_common::{dep_to_string, Dep};
+use crate::gentype::gen_type_common::{Dep, dep_to_string};
 use crate::types::Path;
 
 pub fn handle_namespace(name: &str, dep: &Dep) -> Dep {
@@ -22,15 +22,15 @@ pub fn from_path1(
     match path {
         Path::Pident(id) => {
             let name = id.name();
-            match crate::gentype::type_env::lookup(type_env, name) {
+            match crate::gentype::type_env::lookup(name, type_env) {
                 None => (type_env.clone(), Dep::External(name.to_string())),
                 Some(type_env1) => {
-                    let type_env2 = match crate::gentype::type_env::get_module(type_env, name) {
+                    let type_env2 = match crate::gentype::type_env::get_module(name, type_env) {
                         Some(type_env2) => type_env2,
                         None => type_env1.clone(),
                     };
                     match crate::gentype::type_env::expand_alias_to_external_module(
-                        &type_env1, name,
+                        name, &type_env1,
                     ) {
                         Some(dep) => (type_env2, dep),
                         None => {
@@ -60,7 +60,7 @@ pub fn from_path1(
         }
         Path::Pdot(p, s, _pos) => {
             let (type_env_from_p, dep) = from_path1(config, type_env, p);
-            match crate::gentype::type_env::expand_alias_to_external_module(&type_env_from_p, s) {
+            match crate::gentype::type_env::expand_alias_to_external_module(s, &type_env_from_p) {
                 Some(dep) => (type_env_from_p, dep),
                 None => (type_env_from_p, Dep::Dot(Box::new(dep), s.clone())),
             }

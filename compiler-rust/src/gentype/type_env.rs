@@ -4,7 +4,7 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use crate::gentype::gen_type_common::{dep_to_resolved_name, dep_to_string, Dep, StringMap, Type};
+use crate::gentype::gen_type_common::{Dep, StringMap, Type, dep_to_resolved_name, dep_to_string};
 use crate::types::path::Path;
 use crate::types::typedtree::TypedSignature;
 
@@ -17,7 +17,7 @@ pub struct ModuleEquation {
 #[derive(Debug, Clone)]
 pub struct TypeEnv {
     pub map: StringMap<Entry>,
-    pub map_module_types: StringMap<(TypedSignature, T)>,
+    pub map_module_types: StringMap<(TypedSignature, crate::types::decl::Signature, T)>,
     pub module_equation: Option<ModuleEquation>,
     pub module_item: crate::gentype::runtime::ModuleItem,
     pub name: String,
@@ -74,8 +74,16 @@ pub fn new_module(name: &str, type_env: &T) -> T {
     new_type_env
 }
 
-pub fn new_module_type(name: &str, signature: TypedSignature, type_env: &T) -> T {
+pub fn new_module_type(
+    name: &str,
+    signature: TypedSignature,
+    signature_type: crate::types::decl::Signature,
+    type_env: &T,
+) -> T {
     // Mirrors compiler/gentype/TypeEnv.ml:39-45.
+    // OCaml Typedtree.signature carries `sig_type`; Rust stores the typed
+    // items and decl signature separately while preserving the same lookup
+    // boundary for TranslateTypeExprFromTypes.ml:639-670.
     if crate::gentype::debug::type_env.load(std::sync::atomic::Ordering::Relaxed) {
         crate::gentype::log_::item(&format!(
             "TypeEnv.newModuleType {} {}\n",
@@ -84,10 +92,10 @@ pub fn new_module_type(name: &str, signature: TypedSignature, type_env: &T) -> T
         ));
     }
     let new_type_env = create_type_env(name, Some(type_env.clone()));
-    type_env
-        .borrow_mut()
-        .map_module_types
-        .insert(name.to_string(), (signature, new_type_env.clone()));
+    type_env.borrow_mut().map_module_types.insert(
+        name.to_string(),
+        (signature, signature_type, new_type_env.clone()),
+    );
     new_type_env
 }
 
@@ -202,7 +210,7 @@ pub fn apply_type_equations(
                         "Typenv.applyTypeEquations {} name:{} type_:{}\n",
                         to_string(type_env),
                         id.name(),
-                        crate::gentype::emit_type::type_to_string(config, |_| false, type_)
+                        crate::gentype::emit_type::type_to_string(config, &|_| false, type_)
                     ));
                 }
                 Some(type_.clone())
@@ -227,7 +235,10 @@ pub fn lookup(name: &str, type_env: &T) -> Option<T> {
     }
 }
 
-fn lookup_module_type(path: &[String], type_env: &T) -> Option<(TypedSignature, T)> {
+fn lookup_module_type(
+    path: &[String],
+    type_env: &T,
+) -> Option<(TypedSignature, crate::types::decl::Signature, T)> {
     // Mirrors compiler/gentype/TypeEnv.ml:129-152.
     match path {
         [module_type_name] => {
@@ -244,7 +255,7 @@ fn lookup_module_type(path: &[String], type_env: &T) -> Option<(TypedSignature, 
                 .get(module_type_name)
                 .cloned();
             match found {
-                Some(x) => Some(x.clone()),
+                Some(x) => Some(x),
                 None => match type_env.borrow().parent.clone() {
                     None => None,
                     Some(parent) => lookup_module_type(path, &parent),
@@ -286,7 +297,10 @@ pub fn path_to_list(path: &Path) -> Vec<String> {
     }
 }
 
-pub fn lookup_module_type_signature(path: &Path, type_env: &T) -> Option<(TypedSignature, T)> {
+pub fn lookup_module_type_signature(
+    path: &Path,
+    type_env: &T,
+) -> Option<(TypedSignature, crate::types::decl::Signature, T)> {
     // Mirrors compiler/gentype/TypeEnv.ml:160-164.
     if crate::gentype::debug::type_env.load(std::sync::atomic::Ordering::Relaxed) {
         crate::gentype::log_::item(&format!(

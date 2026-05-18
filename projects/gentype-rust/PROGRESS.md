@@ -27,6 +27,8 @@ support in Rust is still a stub:
 - Rewrite Stage 4 has a file-for-file Rust port of
   `EmitText.ml`, `EmitType.ml`, `Emitters.ml`/`.mli`, `EmitJs.ml`,
   `NamedArgs.ml`, `Converter.ml`, and `GenTypeMain.ml`.
+- Phase 0 has wired `compiler-rust/src/gentype/mod.rs` into the crate and the
+  debug compiler/rewatch builds now complete.
 - The project now has a single no-argument GenType output parity harness:
   `./scripts/test_gentype_output_parity.sh`. It always compares raw
   `.gen.ts`/`.gen.tsx` output for the react example, stdlib-no-shims, and
@@ -96,6 +98,51 @@ bash -n scripts/test_gentype_output_parity.sh
 
 Full execution is still blocked until the Phase 0 Rust GenType module wiring
 compiles.
+
+Update: Phase 0 module wiring now compiles, so the next useful harness run
+should establish the Rust generated-output baseline.
+
+## Phase 0 Compile Wiring
+
+The staged GenType tree is now part of the compiler crate:
+
+- `compiler-rust/src/lib.rs` exports `pub mod gentype`.
+- `compiler-rust/src/gentype/mod.rs` mirrors the OCaml GenType module set.
+- `TypeEnv.new_module_type` now stores the typed signature plus the decl
+  signature derived by `typemod::decl_signature_from_typed_signature`, matching
+  OCaml's `Typedtree.signature.sig_type` use in
+  `compiler/gentype/TypeEnv.ml:39-45` and package translation in
+  `compiler/gentype/TranslateTypeExprFromTypes.ml:639-670`.
+- Decl-attribute helpers in `annotation.rs` let Types-signature translation
+  read the same annotation tags as `compiler/gentype/Annotation.ml:69-181`
+  after Rust typemod has converted parser payloads to `decl::Attribute`.
+
+Known Phase 5 adapters still present:
+
+- `translate_type_expr_from_types::type_expr_desc` still needs a real
+  TypeContext-backed descriptor reader for `compiler/ml/types.ml:type_expr.desc`.
+- `type_vars::extract_from_type_expr_refs` uses arity placeholders until
+  TypeContext is threaded so it can read the actual `Tvar` names from
+  `compiler/gentype/TypeVars.ml:3-13`.
+- `TranslateTypeExprFromTypes.ml:560-565` has an OCaml record-copy branch for
+  `Tconstr(path, [{desc = Tlink te}], r)`; the Rust branch currently relies on
+  argument translation following the `Tlink` until TypeContext-backed record
+  copy is wired.
+- Package `Tpackage` constraint longidents from
+  `TranslateTypeExprFromTypes.ml:639-670` still need `ParseArena` threading so
+  Rust can flatten the stored `Longident` indices to names.
+- Decl-signature type declarations currently use parser-empty top-level
+  attributes in `translate_signature_from_types`; constructor/label/value/module
+  decl attributes are handled, but top-level type attributes still need a
+  direct decl-attribute path before output parity work.
+
+Verification:
+
+```text
+cargo build --manifest-path compiler-rust/Cargo.toml
+cargo build --manifest-path rewatch/Cargo.toml
+git diff --check -- compiler-rust/src/lib.rs compiler-rust/src/gentype/mod.rs compiler-rust/src/gentype/annotation.rs compiler-rust/src/gentype/dependencies.rs compiler-rust/src/gentype/export_module.rs compiler-rust/src/gentype/gen_ident.rs compiler-rust/src/gentype/translation.rs compiler-rust/src/gentype/type_env.rs compiler-rust/src/gentype/type_vars.rs compiler-rust/src/gentype/translate_core_type.rs compiler-rust/src/gentype/translate_signature.rs compiler-rust/src/gentype/translate_signature_from_types.rs compiler-rust/src/gentype/translate_structure.rs compiler-rust/src/gentype/translate_type_declarations.rs compiler-rust/src/gentype/translate_type_expr_from_types.rs
+```
 
 ## Recent Verification
 
@@ -332,7 +379,7 @@ For the `GenTypeMain.ml` Stage 4 chunk:
 - The new file is not wired into the crate, so debug build/parity gates were not
   run for this non-compiling rewrite stage.
 
-Earlier setup note:
+Resolved setup note:
 
 The latest debug build attempt after merging `fuzz-errors` failed before code
 diagnostics with:
@@ -341,18 +388,17 @@ diagnostics with:
 rustc-LLVM ERROR: IO failure on output stream: No space left on device
 ```
 
-Free disk space before doing implementation work. Do not use `rm -rf`; inspect
-large files first and remove only explicit, known-safe files if cleanup is
-needed.
+The later Phase 0 debug builds listed above completed.
 
 ## Next Session
 
-Continue with Phase 0 from `PLAN.md`:
+Continue with Phase 2/3 integration from `PLAN.md`:
 
-1. Wire `compiler-rust/src/gentype/mod.rs`.
+1. Replace the remaining Phase 5 adapters above with real TypeContext/ParseArena
+   access where the OCaml reference reads `type_expr.desc`, `Tvar` names, or
+   package constraint longidents.
 2. Keep function names, helper names, data-flow shape, and source-location
    references as close to OCaml as Rust allows.
-3. Run the three per-file review passes before marking each file done:
-   surface/naming, control/data flow, and output-sensitive semantics.
-4. Do not make compilation the goal until all four rewrite stages and their
-   reviews are complete.
+3. Wire `gentype::main` from Rust `bsc`/in-process typed artifacts and run
+   `./scripts/test_gentype_output_parity.sh` to get the first generated-output
+   baseline.

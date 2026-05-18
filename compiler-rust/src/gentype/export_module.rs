@@ -2,7 +2,7 @@
 // This Stage 2 GenType port is intentionally not wired into the crate yet.
 
 use crate::gentype::gen_type_common::{
-    doc_string, ident, ClosedFlag, Field, Mutable, Optional, Type,
+    ClosedFlag, Field, Mutable, Optional, Type, doc_string, ident,
 };
 use indexmap::IndexMap;
 
@@ -208,14 +208,15 @@ pub fn emit_all_module_items(
             let emitted_module_item =
                 crate::gentype::module_name::for_inner_module(file_name, module_name);
             crate::gentype::emit_type::emit_export_const(
-                &emitted_module_item,
-                doc_string,
                 false,
+                "",
                 config,
+                doc_string,
                 emitters,
                 module_name,
-                type_for_type,
-                |_name| false,
+                &type_for_type,
+                &|_name| false,
+                &emitted_module_item,
             )
         },
         export_module_items,

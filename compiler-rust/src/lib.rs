@@ -48,6 +48,8 @@ pub mod context;
 pub mod debug_flags;
 pub mod diagnostics;
 pub mod driver;
+/// GenType TypeScript emitter port.
+pub mod gentype;
 pub mod ident;
 pub mod intern;
 pub mod js_ir;
