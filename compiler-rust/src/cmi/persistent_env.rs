@@ -3094,6 +3094,7 @@ fn freshen_signature_bound_idents_with_maps(
     ctx: &TypeContext,
 ) {
     let mut local_maps = SubstMaps::default();
+    let mut has_nested_module_types = false;
 
     if !maps.is_empty() {
         substitute_type_paths_in_sig_with_maps(sig_items, maps, ctx);
@@ -3105,13 +3106,21 @@ fn freshen_signature_bound_idents_with_maps(
             SignatureItem::SigValue(id, _) | SignatureItem::SigTypext(id, _, _) => {
                 *id = ctx.rename_ident(id);
             }
-            SignatureItem::SigType(id, _, _) | SignatureItem::SigModtype(id, _) => {
+            SignatureItem::SigType(id, _, _) => {
+                let old_id = id.clone();
+                let new_id = ctx.rename_ident(&old_id);
+                insert_type_subst_path(&mut local_maps, &old_id, &new_id);
+                *id = new_id;
+            }
+            SignatureItem::SigModtype(id, mtd) => {
+                has_nested_module_types |= mtd.mtd_type.is_some();
                 let old_id = id.clone();
                 let new_id = ctx.rename_ident(&old_id);
                 insert_type_subst_path(&mut local_maps, &old_id, &new_id);
                 *id = new_id;
             }
             SignatureItem::SigModule(id, _, _) => {
+                has_nested_module_types = true;
                 let old_id = id.clone();
                 let new_id = ctx.rename_ident(&old_id);
                 insert_module_subst_path(&mut local_maps, &old_id, &new_id);
@@ -3126,16 +3135,31 @@ fn freshen_signature_bound_idents_with_maps(
         substitute_sig_decl_paths_in_place_with_maps(sig_items, &local_maps);
     }
 
-    let combined_maps = merge_subst_maps(maps, &local_maps);
+    if !has_nested_module_types {
+        return;
+    }
+
+    let owned_combined_maps = if local_maps.is_empty() {
+        None
+    } else if maps.is_empty() && maps.protected_module_head.is_none() {
+        None
+    } else {
+        Some(merge_subst_maps(maps, &local_maps))
+    };
+    let combined_maps = match owned_combined_maps.as_ref() {
+        Some(combined_maps) => combined_maps,
+        None if local_maps.is_empty() => maps,
+        None => &local_maps,
+    };
 
     for item in sig_items.iter_mut() {
         match item {
             SignatureItem::SigModule(_, md, _) => {
-                freshen_module_type_bound_idents_with_maps(&mut md.md_type, &combined_maps, ctx);
+                freshen_module_type_bound_idents_with_maps(&mut md.md_type, combined_maps, ctx);
             }
             SignatureItem::SigModtype(_, mtd) => {
                 if let Some(module_type) = mtd.mtd_type.as_mut() {
-                    freshen_module_type_bound_idents_with_maps(module_type, &combined_maps, ctx);
+                    freshen_module_type_bound_idents_with_maps(module_type, combined_maps, ctx);
                 }
             }
             _ => {}
