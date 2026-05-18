@@ -1714,6 +1714,7 @@ pub(crate) struct StoredModuleComponents {
     module_decl: ModuleDeclaration,
     parent_context: Option<(Path, Arc<Signature>)>,
     cached: OnceCell<Arc<QualifiedModuleComponents>>,
+    functor_result_subst_cache: OnceCell<RefCell<HashMap<Path, ModuleType>>>,
 }
 
 impl StoredModuleComponents {
@@ -1737,6 +1738,7 @@ impl StoredModuleComponents {
             module_decl,
             parent_context,
             cached: OnceCell::new(),
+            functor_result_subst_cache: OnceCell::new(),
         }
     }
 
@@ -1883,6 +1885,11 @@ impl StoredModuleComponents {
         let ModuleType::MtyFunctor { param, result, .. } = &self.module_decl.md_type else {
             return None;
         };
+        if let Some(cache) = self.functor_result_subst_cache.get()
+            && let Some(cached) = cache.borrow().get(arg_path).cloned()
+        {
+            return Some(cached);
+        }
         let parent_context = self
             .parent_context
             .as_ref()
@@ -1892,14 +1899,17 @@ impl StoredModuleComponents {
             parent_context,
             ctx,
         );
-        Some(
-            crate::cmi::persistent_env::substitute_functor_result_module_path(
-                &component_result,
-                param,
-                arg_path,
-                ctx,
-            ),
-        )
+        let substituted = crate::cmi::persistent_env::substitute_functor_result_module_path(
+            &component_result,
+            param,
+            arg_path,
+            ctx,
+        );
+        self.functor_result_subst_cache
+            .get_or_init(|| RefCell::new(HashMap::new()))
+            .borrow_mut()
+            .insert(arg_path.clone(), substituted.clone());
+        Some(substituted)
     }
 }
 
