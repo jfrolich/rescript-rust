@@ -42,9 +42,9 @@ Tasks:
       OCaml-shaped thunk arguments where possible.
 - [x] Ensure child `comp_modules` and `comp_components` share the same forced
       thunks as OCaml.
-- [ ] Ensure component module declarations are forced exactly where OCaml calls
+- [x] Ensure component module declarations are forced exactly where OCaml calls
       `EnvLazy.force subst_modtype_maker`.
-- [ ] Keep module signature freshening and stamp consumption at the OCaml force
+- [x] Keep module signature freshening and stamp consumption at the OCaml force
       point, not earlier.
 
 Acceptance:

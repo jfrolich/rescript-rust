@@ -231,3 +231,58 @@ Formatting note:
   pre-existing repo-wide formatting diffs in files outside this slice, plus
   unrelated older formatting opportunities in `typecore.rs`. This patch avoided
   applying whole-file formatting churn.
+
+## 2026-05-18 Component Module Declaration Force Point
+
+Task 1 completion:
+
+- Centralized component module-declaration forcing in
+  `env_lazy::force_component_module_declaration_thunk`.
+- Removed the unused open-coded `raw_qualified_child_module_decl` helper in
+  `typecore.rs`.
+- Routed the remaining raw self-alias recovery paths through the same helper
+  used by `QualifiedModuleComponents::lookup_qualified_module_shared`.
+- OCaml references:
+  - `compiler/ml/env.ml:475-477`: `subst_modtype_maker` applies
+    `Subst.modtype sub md.md_type` when a lazy module declaration is forced.
+  - `compiler/ml/env.ml:865-882`: `find_module` is the API boundary that forces
+    `comp_modules`.
+  - `compiler/ml/env.ml:1516-1530`: `components_of_module_maker` scrapes aliases
+    and builds the component substitution before table construction.
+  - `compiler/ml/env.ml:1567-1578`: `Sig_module` stores separate lazy
+    `comp_modules` and `comp_components` entries.
+  - `compiler/ml/subst.ml:345-356` and `358-389`: `Subst.modtype` and
+    `Subst.signature` freshen module-type/signature binders.
+- Task 1 checklist is now complete: module signature freshening and stamp
+  consumption for component module declarations goes through the OCaml-cited
+  force helper instead of scattered Rust call-site freshening.
+
+Validation evidence:
+
+- `cargo check --manifest-path compiler-rust/Cargo.toml`: passed.
+- `cargo build --manifest-path compiler-rust/Cargo.toml`: passed.
+- `cargo build --manifest-path rewatch/Cargo.toml`: passed.
+- `cargo build --release --manifest-path compiler-rust/Cargo.toml`: passed.
+- `cargo build --release --manifest-path rewatch/Cargo.toml`: passed.
+- `git diff --check -- compiler-rust/src/types/env_lazy.rs compiler-rust/src/types/typecore.rs`:
+  passed.
+- Focused typedtree parity:
+  - `./scripts/test_typedtree_parity.sh ModuleWithAlias`: `2/2`.
+  - `./scripts/test_typedtree_parity.sh nested_module_alias`: `1/1`.
+  - `./scripts/test_typedtree_parity.sh global_module_alias_test`: `1/1`.
+- Full debug typedtree parity: `./scripts/test_typedtree_parity.sh`: `660/660`.
+- Tella debug typedtree quick: `./scripts/test_typedtree_parity.sh --tella --quick`:
+  `1697/1697`.
+- Debug lambda quick: `./scripts/test_lambda_parity.sh --quick`: `660/660`.
+- Debug JS output quick with external/Tella:
+  `./scripts/test_js_output_parity.sh --with-external --quick`: focused fixtures
+  `344/344`, local JS output `660/660`, Tella JS output `2127/2127`.
+- Release typedtree parity: `./scripts/test_typedtree_parity.sh --release`:
+  `660/660`.
+- Release lambda parity: `./scripts/test_lambda_parity.sh --release`: `660/660`.
+
+Formatting note:
+
+- `rustfmt --edition 2024 --check compiler-rust/src/types/env_lazy.rs compiler-rust/src/types/typecore.rs`
+  still reports pre-existing formatting diffs in unrelated `typecore.rs`
+  regions. This patch did not apply broad formatting churn.

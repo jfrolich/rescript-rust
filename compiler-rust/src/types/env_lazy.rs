@@ -1156,7 +1156,7 @@ impl QualifiedModuleComponents {
             // compiler/ml/subst.ml:351-364 before returning it.
         }
 
-        let (id, mut md) = match &self.signature[idx] {
+        let (id, md) = match &self.signature[idx] {
             SignatureItem::SigModule(id, md, _) => (id.clone(), md.clone()),
             _ => return None,
         };
@@ -1169,24 +1169,19 @@ impl QualifiedModuleComponents {
             // persistent child can appear here as a self alias, but forcing the
             // thunk must still apply compiler/ml/subst.ml:352-400 to the raw
             // child signature and consume those child binder stamps.
-            md = raw_md;
-            crate::cmi::persistent_env::freshen_component_module_declaration_bound_idents(
-                &mut md,
+            let (raw_id, md) = force_component_module_declaration_thunk(
+                self.access_path.as_ref(),
+                name,
+                self.access_path.as_ref(),
                 &raw_parent_sig,
-                &self.access_path,
+                raw_id,
+                raw_md,
                 ctx,
             );
-            let md = Arc::new(md);
             self.tables
                 .qualified_modules
                 .borrow_mut()
                 .insert(name.to_string(), (raw_id.clone(), md.clone()));
-            ctx.register_qualified_module_decl(
-                self.access_path.as_ref(),
-                name,
-                raw_id.clone(),
-                md.clone(),
-            );
             // OCaml compiler/ml/env.ml:1568 stores one lazy module-declaration
             // thunk for the raw component item, and env.ml:1517-1519 can reach
             // that same thunk through a strengthened alias path after
@@ -1210,18 +1205,19 @@ impl QualifiedModuleComponents {
         // `Subst.modtype sub md.md_type`. For `Mty_signature`, that reaches
         // compiler/ml/subst.ml:378-400 and renames the child signature's bound
         // identifiers before lookup observes them.
-        crate::cmi::persistent_env::freshen_component_module_declaration_bound_idents(
-            &mut md,
+        let (id, md) = force_component_module_declaration_thunk(
+            self.access_path.as_ref(),
+            name,
+            self.access_path.as_ref(),
             &self.signature,
-            &self.access_path,
+            id,
+            md,
             ctx,
         );
-        let md = Arc::new(md);
         self.tables
             .qualified_modules
             .borrow_mut()
             .insert(name.to_string(), (id.clone(), md.clone()));
-        ctx.register_qualified_module_decl(self.access_path.as_ref(), name, id.clone(), md.clone());
         Some((runtime_pos, id, md))
     }
 
@@ -1292,6 +1288,32 @@ fn qualified_submodule_access_path(
 
 fn module_decl_is_self_alias_for_access_path(md: &ModuleDeclaration, access_path: &Path) -> bool {
     matches!(&md.md_type, ModuleType::MtyAlias(_, target) if target.same(access_path))
+}
+
+pub(crate) fn force_component_module_declaration_thunk(
+    cache_parent_path: &Path,
+    child_name: &str,
+    subst_parent_path: &Path,
+    parent_sig: &[SignatureItem],
+    id: Ident,
+    mut md: ModuleDeclaration,
+    ctx: &super::context::TypeContext,
+) -> (Ident, Arc<ModuleDeclaration>) {
+    // OCaml compiler/ml/env.ml:1568 stores `EnvLazy.create (sub, md)` in
+    // `comp_modules`, env.ml:865-882 forces that thunk only for
+    // `Env.find_module`, and env.ml:475-477 applies
+    // `Subst.modtype sub md.md_type`. Keep all Rust component-declaration
+    // freshening through this single force point so signature binder stamps are
+    // consumed where the OCaml lazy thunk is forced.
+    crate::cmi::persistent_env::freshen_component_module_declaration_bound_idents(
+        &mut md,
+        parent_sig,
+        subst_parent_path,
+        ctx,
+    );
+    let md = Arc::new(md);
+    ctx.register_qualified_module_decl(cache_parent_path, child_name, id.clone(), md.clone());
+    (id, md)
 }
 
 fn raw_sig_candidate_names_for_access_path(

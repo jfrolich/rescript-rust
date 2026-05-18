@@ -24777,33 +24777,6 @@ impl Env {
             result
         }
 
-        fn raw_qualified_child_module_decl(
-            parent: &Path,
-            parent_sig: &crate::types::decl::Signature,
-            child_name: &str,
-            ctx: &crate::types::context::TypeContext,
-        ) -> Option<std::sync::Arc<crate::types::decl::ModuleDeclaration>> {
-            use crate::types::decl::SignatureItem;
-
-            if let Some((_, md)) = ctx.find_qualified_module_decl(parent, child_name) {
-                return Some(md);
-            }
-
-            let (raw_id, raw_md) = parent_sig.iter().find_map(|sig_item| match sig_item {
-                SignatureItem::SigModule(id, md, _) if id.name() == child_name => {
-                    Some((id.clone(), md.clone()))
-                }
-                _ => None,
-            })?;
-            let mut md = raw_md;
-            crate::cmi::persistent_env::freshen_component_module_declaration_bound_idents(
-                &mut md, parent_sig, parent, ctx,
-            );
-            let md = std::sync::Arc::new(md);
-            ctx.register_qualified_module_decl(parent, child_name, raw_id, md.clone());
-            Some(md)
-        }
-
         fn raw_signature_for_persistent_path<'b>(
             path: &Path,
             pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
@@ -24892,20 +24865,16 @@ impl Env {
                                 ) {
                                 cached_md
                             } else {
-                                let mut md = raw_md;
-                                crate::cmi::persistent_env::freshen_component_module_declaration_bound_idents(
-                                    &mut md,
-                                    parent_sig.as_ref(),
-                                    parent,
-                                    ctx,
-                                );
-                                let md = std::sync::Arc::new(md);
-                                ctx.register_qualified_module_decl(
-                                    parent,
-                                    submod_name.as_str(),
-                                    raw_id,
-                                    md.clone(),
-                                );
+                                let (_, md) =
+                                    crate::types::env_lazy::force_component_module_declaration_thunk(
+                                        parent,
+                                        submod_name.as_str(),
+                                        parent,
+                                        parent_sig.as_ref(),
+                                        raw_id,
+                                        raw_md,
+                                        ctx,
+                                    );
                                 md
                             };
                             let result = resolve_module_type_inner(
@@ -25057,20 +25026,16 @@ impl Env {
                                             ) {
                                             cached_md
                                         } else {
-                                            let mut md = raw_md;
-                                            crate::cmi::persistent_env::freshen_component_module_declaration_bound_idents(
-                                                &mut md,
-                                                &raw_parent_sig,
-                                                parent,
-                                                ctx,
-                                            );
-                                            let md = Arc::new(md);
-                                            ctx.register_qualified_module_decl(
-                                                parent,
-                                                submod_name.as_str(),
-                                                raw_id,
-                                                md.clone(),
-                                            );
+                                            let (_, md) =
+                                                crate::types::env_lazy::force_component_module_declaration_thunk(
+                                                    parent,
+                                                    submod_name.as_str(),
+                                                    parent,
+                                                    &raw_parent_sig,
+                                                    raw_id,
+                                                    raw_md,
+                                                    ctx,
+                                                );
                                             md
                                         };
                                         let result = resolve_module_type_inner(
