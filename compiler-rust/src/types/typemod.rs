@@ -16803,7 +16803,7 @@ fn localize_alias_child_module_sig_paths_in_structure_sig(
             ModuleExprDesc::Tmod_ident(Path::Pdot(..), _)
         ) {
             crate::types::typecore::rebind_direct_sig_type_family_to_access_path(
-                type_ctx, child_path, sub_sig, true,
+                type_ctx, child_path, sub_sig,
             );
             crate::cmi::persistent_env::substitute_type_paths_in_sig(sub_sig, child_path, type_ctx);
             crate::cmi::persistent_env::substitute_sig_decl_paths_in_place(sub_sig, child_path);

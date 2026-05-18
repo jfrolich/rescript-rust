@@ -107,11 +107,11 @@ Files:
 
 Tasks:
 
-- [ ] Find helpers that scan signatures to infer/rebind type-family paths.
-- [ ] Find branches based on shape guesses such as "only values" or
+- [x] Find helpers that scan signatures to infer/rebind type-family paths.
+- [x] Find branches based on shape guesses such as "only values" or
       self-manifest signatures.
-- [ ] Replace those branches with the same lookup/substitution path OCaml uses.
-- [ ] Remove output-mode or observed-diff guards that change typechecker
+- [x] Replace those branches with the same lookup/substitution path OCaml uses.
+- [x] Remove output-mode or observed-diff guards that change typechecker
       semantics.
 
 Acceptance:

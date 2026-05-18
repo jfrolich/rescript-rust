@@ -354,3 +354,62 @@ Unit-test caveat:
   still fails before running the focused test because the crate's lib/test
   target has pre-existing unrelated compile errors, including duplicate
   `persistent_env.rs` test modules and stale Lambda/comptime test APIs.
+
+## 2026-05-18 Signature-Content Inference Removed
+
+Task 4 completion:
+
+- Removed `Env::signature_has_package_self_manifests`, which recursively scanned
+  signatures for direct self-manifest type declarations and used that shape
+  guess to skip component substitution.
+- Removed the direct type-family inference path
+  (`infer_direct_sig_type_family_path` plus its whole-signature type-expression
+  walk). Rebinding now uses only declaration `type_path` fields and direct
+  manifest paths already produced by lookup/substitution.
+- Removed the let-module cleanup fallback that searched a resolved signature for
+  the unique path that looked like a matching type family. The remaining cleanup
+  follows the OCaml-shaped path: one-step abbreviation expansion first, then
+  explicit alias-root replacement.
+- Kept the component qualification flow unconditional: copied signatures always
+  run through the selected access-path substitution boundary instead of
+  branching on "only values", self-manifest signatures, or inferred unique
+  contents.
+
+OCaml references:
+
+- `compiler/ml/env.ml:1513-1588`: `components_of_module_maker` always builds
+  component tables through `prefix_idents` and `Subst.value_description`,
+  `Subst.type_declaration`, `Subst.extension_constructor`, and lazy module
+  component thunks. It does not scan the signature first to decide whether
+  substitution should run.
+- `compiler/ml/mtype.ml:56-102`: strengthening rewrites type declarations and
+  child module declarations while walking declarations directly, not by
+  inferring paths from all value/type payloads in the signature.
+- `compiler/ml/typecore.ml:3399-3424`: `Pexp_letmodule` enforces scoping through
+  the normal body typing and final `Ctype.unify_var` step.
+- `compiler/ml/ctype.ml:4307-4378`: `nondep_type_rec` handles escaping
+  let-module paths by trying abbreviation expansion and package-path
+  normalization; it does not inspect sibling signature contents to guess a
+  replacement type-family root.
+
+Validation evidence:
+
+- `cargo check --manifest-path compiler-rust/Cargo.toml`: passed.
+- `cargo build --manifest-path compiler-rust/Cargo.toml`: passed.
+- `cargo build --manifest-path rewatch/Cargo.toml`: passed.
+- Focused typedtree parity:
+  - `./scripts/test_typedtree_parity.sh --tella API__AnalyticsEvents`: `1/1`.
+  - `./scripts/test_typedtree_parity.sh module_parameter_test`: `1/1`.
+  - `./scripts/test_typedtree_parity.sh defunctor_make_test`: `1/1`.
+  - `./scripts/test_typedtree_parity.sh bs_poly_map_test`: `1/1`.
+  - `./scripts/test_typedtree_parity.sh bs_poly_set_test`: `1/1`.
+  - `./scripts/test_typedtree_parity.sh global_module_alias_test`: `1/1`.
+  - `./scripts/test_typedtree_parity.sh module_alias_test`: `3/3`.
+- Full debug typedtree parity after clearing cached typedtree artifacts:
+  `./scripts/test_typedtree_parity.sh`: `660/660`.
+- Tella debug typedtree quick after clearing cached typedtree artifacts:
+  `./scripts/test_typedtree_parity.sh --tella --quick`: `1697/1697`.
+- Debug lambda quick: `./scripts/test_lambda_parity.sh --quick`: `660/660`.
+- Debug JS output quick with external/Tella:
+  `./scripts/test_js_output_parity.sh --with-external --quick`: focused fixtures
+  `344/344`, local JS output `660/660`, Tella JS output `2127/2127`.
