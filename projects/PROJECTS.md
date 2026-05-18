@@ -128,6 +128,17 @@ Achieve byte-for-byte emitted JavaScript parity between the Rust and OCaml compi
 | [RALPH_TODO.md](./js-output-parity/RALPH_TODO.md) | Agent task tracking and current baseline |
 | [RALPH_SETUP.md](./js-output-parity/RALPH_SETUP.md) | Build, baseline, direct repro, and artifact inspection instructions |
 
+### [gentype-rust](./gentype-rust/)
+
+Implement GenType inside the Rust compiler so `bsc -bs-gentype` emits the same `.gen.tsx` and `.gen.ts` files as the OCaml compiler. Parity is measured by the in-repo GenType suites and Tella generated output, with TypeScript typecheck as a secondary gate. The plan ports the existing `compiler/gentype` implementation directly instead of shelling out, normalizing output, or adding Rust-only compatibility wrappers.
+
+| Document | Description |
+|----------|-------------|
+| [PLAN.md](./gentype-rust/PLAN.md) | Full Rust GenType implementation plan, phases, architecture, and acceptance gates |
+| [PROGRESS.md](./gentype-rust/PROGRESS.md) | Current Rust baseline, source inventory, test counts, and next session |
+| [RALPH_TODO.md](./gentype-rust/RALPH_TODO.md) | Phase-by-phase task list for implementation sessions |
+| [RALPH_SETUP.md](./gentype-rust/RALPH_SETUP.md) | Build, in-repo, Tella, and regression parity commands |
+
 ### [printer-parity](./printer-parity/)
 
 Achieve byte-for-byte identical printer/formatter output between Rust and OCaml. Covers the AST printer, OCaml Format module compatibility, and roundtrip idempotence. Currently at 423/506 syntax tests passing (83%).
