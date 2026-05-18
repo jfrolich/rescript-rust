@@ -65,12 +65,12 @@ from the reference.
 These ports do not need to compile yet. After this stage the Rust GenType tree
 should exist file for file.
 
-- [ ] Port `EmitText.ml`.
+- [x] Port `EmitText.ml`.
 - [ ] Port `EmitType.ml`.
 - [ ] Port `Emitters.ml` and `Emitters.mli`.
 - [ ] Port `EmitJs.ml`.
-- [ ] Port `Converter.ml`.
-- [ ] Port `NamedArgs.ml`.
+- [x] Port `Converter.ml`.
+- [x] Port `NamedArgs.ml`.
 - [ ] Port `GenTypeMain.ml`.
 - [ ] Run the three per-file review passes for every file in this stage.
 - [ ] Commit the stage or commit coherent file clusters.

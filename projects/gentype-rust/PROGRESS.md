@@ -24,6 +24,9 @@ support in Rust is still a stub:
   `TranslateStructure.ml`, `TranslateTypeDeclarations.ml`,
   `TranslateTypeExprFromTypes.ml`, and `TypeEnv.ml`/`.mli`. These files are
   still intentionally not wired into the crate.
+- Rewrite Stage 4 has started with initial file-for-file Rust ports of
+  `EmitText.ml`, `NamedArgs.ml`, and `Converter.ml`. These files are still
+  intentionally not wired into the crate.
 
 ## Reference Inventory
 
@@ -217,6 +220,23 @@ For the signature/structure Stage 3 chunk:
   so `translate_structure.rs` preserves the OCaml traversal intent while using
   the first typed function parameter/body path as the staged adapter. Compile
   wiring must revisit this adapter against actual generated output.
+- `rustfmt` was run on the new files and `git diff --check` passed.
+- The new files are not wired into the crate, so debug build/parity gates were
+  not run for this non-compiling rewrite stage.
+
+For the first Stage 4 utility/emitter chunk:
+
+- `EmitText.ml`, `NamedArgs.ml`, and `Converter.ml` were ported to
+  `compiler-rust/src/gentype/emit_text.rs`,
+  `compiler-rust/src/gentype/named_args.rs`, and
+  `compiler-rust/src/gentype/converter.rs`.
+- References:
+  `compiler/gentype/EmitText.ml:1-13`,
+  `compiler/gentype/NamedArgs.ml:1-14`, and
+  `compiler/gentype/Converter.ml:1-89`.
+- Surface/control/output-sensitive review checked generic string formatting,
+  optional argument grouping, unit-argument removal, inline type substitution,
+  circular-reference detection, and converter debug logging.
 - `rustfmt` was run on the new files and `git diff --check` passed.
 - The new files are not wired into the crate, so debug build/parity gates were
   not run for this non-compiling rewrite stage.
