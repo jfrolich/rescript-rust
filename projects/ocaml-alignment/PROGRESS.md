@@ -153,3 +153,32 @@ Validation evidence:
 - `./scripts/test_js_output_parity.sh --with-external --quick`:
   focused fixtures `344/344`, local JS output `660/660`, Tella JS output
   `2127/2127`.
+
+## 2026-05-18 Forced Child Module Owner Paths
+
+Task 1 progress:
+
+- Removed the same `md_path` owner-path shortcut from the force-through-module
+  path used while resolving constrained module components.
+- OCaml reference:
+  - `compiler/ml/env.ml:1064-1073`: the selected module path for dotted lookup
+    is `Pdot(p, s, pos)`.
+  - `compiler/ml/env.ml:865-882`: forcing `comp_modules` returns the module
+    declaration; it does not replace the caller's selected path with the
+    declaration's alias target path.
+- Rust change:
+  - The forced child module branch now anchors non-alias module types at the
+    selected component path and follows aliases through `md_type`, matching the
+    OCaml separation between path selection and module-declaration forcing.
+
+Validation evidence:
+
+- `cargo check --manifest-path compiler-rust/Cargo.toml`: passed.
+- `./scripts/test_typedtree_parity.sh ModuleWithAlias`: `2/2`.
+- `./scripts/test_typedtree_parity.sh global_module_alias_test`: `1/1`.
+- `./scripts/test_typedtree_parity.sh`: `660/660`.
+- `./scripts/test_typedtree_parity.sh --tella --quick`: `1697/1697`.
+- `./scripts/test_lambda_parity.sh --quick`: `660/660`.
+- `./scripts/test_js_output_parity.sh --with-external --quick`:
+  focused fixtures `344/344`, local JS output `660/660`, Tella JS output
+  `2127/2127`.
