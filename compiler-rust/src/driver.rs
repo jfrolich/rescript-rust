@@ -11511,7 +11511,7 @@ pub fn compile_source_to_js_with_options(
         }
     }
     let mut compiler = LambdaCompiler::with_module_path_resolver_and_options(
-        Some(module_path_resolver.clone()),
+        Some(module_path_resolver),
         jsx_preserve,
         options.check_div_by_zero,
         options.cross_module_inline,
@@ -11532,6 +11532,9 @@ pub fn compile_source_to_js_with_options(
         )
         .into());
     }
+    let module_path_resolver = compiler
+        .take_module_path_resolver()
+        .expect("lambda compiler retained module path resolver");
     check_module_path_resolution_errors(&program, &module_path_resolver, filename)?;
 
     // JS IR -> JS source
@@ -14329,7 +14332,7 @@ fn compile_js_program_for_output(
         }
     }
     let mut compiler = LambdaCompiler::with_module_path_resolver_and_options(
-        Some(module_path_resolver.clone()),
+        Some(module_path_resolver),
         jsx_preserve,
         options.check_div_by_zero,
         options.cross_module_inline,
@@ -14338,6 +14341,9 @@ fn compile_js_program_for_output(
         lowered_lambda,
         possible_required_modules,
     );
+    let module_path_resolver = compiler
+        .take_module_path_resolver()
+        .expect("lambda compiler retained module path resolver");
     let cmj_export_constants = compiler.take_cmj_export_constants();
     let cmj_export_arities = compiler.take_cmj_export_arities();
 
@@ -14422,7 +14428,7 @@ fn compile_js_program_for_output_owned_with_collected_modules(
         }
     }
     let mut compiler = LambdaCompiler::with_module_path_resolver_and_options(
-        Some(module_path_resolver.clone()),
+        Some(module_path_resolver),
         jsx_preserve,
         options.check_div_by_zero,
         options.cross_module_inline,
@@ -14431,6 +14437,9 @@ fn compile_js_program_for_output_owned_with_collected_modules(
         lowered_lambda,
         possible_required_modules,
     );
+    let module_path_resolver = compiler
+        .take_module_path_resolver()
+        .expect("lambda compiler retained module path resolver");
     let cmj_export_constants = compiler.take_cmj_export_constants();
     let cmj_export_arities = compiler.take_cmj_export_arities();
 

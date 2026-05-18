@@ -18,7 +18,7 @@ pub mod printer;
 pub mod program_printer;
 
 use ahash::AHashMap;
-use std::collections::HashMap;
+use std::cell::RefCell;
 use std::ffi::OsString;
 use std::fs;
 use std::path::{Component, Path as FsPath, PathBuf};
@@ -70,7 +70,15 @@ pub struct ModulePathResolver {
     runtime_path: Option<PathBuf>,
     persistent_env: Option<PersistentEnv>,
     current_package_is_runtime: bool,
-    path_overrides: HashMap<String, String>,
+    path_overrides: AHashMap<String, String>,
+    module_path_cache: RefCell<AHashMap<String, Option<String>>>,
+    runtime_module_cache: RefCell<AHashMap<String, bool>>,
+    pure_module_cache: RefCell<AHashMap<String, bool>>,
+    cmj_export_constants_cache:
+        RefCell<AHashMap<String, Option<Arc<AHashMap<String, CmjExportConstant>>>>>,
+    cmj_export_arities_cache:
+        RefCell<AHashMap<String, Option<Arc<AHashMap<String, CmjExportArity>>>>>,
+    cmj_export_lambdas_cache: RefCell<AHashMap<String, Option<Arc<AHashMap<String, Lambda>>>>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -110,13 +118,20 @@ impl ModulePathResolver {
             runtime_path: runtime_path.map(normalize_absolute_path),
             persistent_env,
             current_package_is_runtime,
-            path_overrides: HashMap::new(),
+            path_overrides: AHashMap::new(),
+            module_path_cache: RefCell::new(AHashMap::new()),
+            runtime_module_cache: RefCell::new(AHashMap::new()),
+            pure_module_cache: RefCell::new(AHashMap::new()),
+            cmj_export_constants_cache: RefCell::new(AHashMap::new()),
+            cmj_export_arities_cache: RefCell::new(AHashMap::new()),
+            cmj_export_lambdas_cache: RefCell::new(AHashMap::new()),
         }
     }
 
     /// Override a module's emitted JS import path.
     pub fn set_module_path_override(&mut self, module_name: &str, path: String) {
         self.path_overrides.insert(module_name.to_string(), path);
+        self.module_path_cache.borrow_mut().remove(module_name);
     }
 
     /// Module format for the current output target.
@@ -152,19 +167,27 @@ impl ModulePathResolver {
             Kind::External { name, .. } => Some(name.clone()),
             Kind::Runtime => Some(self.runtime_module_path(module.id.name())),
             Kind::Ml => {
-                if self.is_runtime_module(module.id.name()) {
+                let module_name = module.id.name();
+                if let Some(cached) = self.module_path_cache.borrow().get(module_name).cloned() {
+                    return cached;
+                }
+                let resolved = if self.is_runtime_module(module_name) {
                     Some(self.runtime_module_path(module.id.name()))
                 } else {
                     let target_source = self
                         .persistent_env
                         .as_ref()
-                        .and_then(|env| env.resolve_module_source_path(module.id.name()))
-                        .map(|path| normalize_absolute_path(&path))?;
-                    if let Some(path) = self.package_module_path(module.id.name(), &target_source) {
-                        return Some(path);
-                    }
-                    self.relative_output_path(&target_source)
-                }
+                        .and_then(|env| env.resolve_module_source_path(module_name))
+                        .map(|path| normalize_absolute_path(&path));
+                    target_source.and_then(|target_source| {
+                        self.package_module_path(module_name, &target_source)
+                            .or_else(|| self.relative_output_path(&target_source))
+                    })
+                };
+                self.module_path_cache
+                    .borrow_mut()
+                    .insert(module_name.to_string(), resolved.clone());
+                resolved
             }
         }
     }
@@ -235,9 +258,22 @@ impl ModulePathResolver {
         &self,
         module_name: &str,
     ) -> Option<Arc<AHashMap<String, CmjExportConstant>>> {
-        self.persistent_env
+        if let Some(cached) = self
+            .cmj_export_constants_cache
+            .borrow()
+            .get(module_name)
+            .cloned()
+        {
+            return cached;
+        }
+        let resolved = self
+            .persistent_env
             .as_ref()
-            .and_then(|env| env.module_cmj_export_constants(module_name))
+            .and_then(|env| env.module_cmj_export_constants(module_name));
+        self.cmj_export_constants_cache
+            .borrow_mut()
+            .insert(module_name.to_string(), resolved.clone());
+        resolved
     }
 
     /// Read arity metadata recorded in a module's companion `.cmj`.
@@ -245,9 +281,22 @@ impl ModulePathResolver {
         &self,
         module_name: &str,
     ) -> Option<Arc<AHashMap<String, CmjExportArity>>> {
-        self.persistent_env
+        if let Some(cached) = self
+            .cmj_export_arities_cache
+            .borrow()
+            .get(module_name)
+            .cloned()
+        {
+            return cached;
+        }
+        let resolved = self
+            .persistent_env
             .as_ref()
-            .and_then(|env| env.module_cmj_export_arities(module_name))
+            .and_then(|env| env.module_cmj_export_arities(module_name));
+        self.cmj_export_arities_cache
+            .borrow_mut()
+            .insert(module_name.to_string(), resolved.clone());
+        resolved
     }
 
     /// Read closed lambda exports recorded in a module's companion `.cmj`.
@@ -255,9 +304,22 @@ impl ModulePathResolver {
         &self,
         module_name: &str,
     ) -> Option<Arc<AHashMap<String, Lambda>>> {
-        self.persistent_env
+        if let Some(cached) = self
+            .cmj_export_lambdas_cache
+            .borrow()
+            .get(module_name)
+            .cloned()
+        {
+            return cached;
+        }
+        let resolved = self
+            .persistent_env
             .as_ref()
-            .and_then(|env| env.module_cmj_export_lambdas(module_name))
+            .and_then(|env| env.module_cmj_export_lambdas(module_name));
+        self.cmj_export_lambdas_cache
+            .borrow_mut()
+            .insert(module_name.to_string(), resolved.clone());
+        resolved
     }
 
     fn runtime_module_path(&self, module_name: &str) -> String {
@@ -278,6 +340,18 @@ impl ModulePathResolver {
     }
 
     fn is_runtime_module(&self, module_name: &str) -> bool {
+        if let Some(cached) = self.runtime_module_cache.borrow().get(module_name).copied() {
+            return cached;
+        }
+
+        let resolved = self.compute_is_runtime_module(module_name);
+        self.runtime_module_cache
+            .borrow_mut()
+            .insert(module_name.to_string(), resolved);
+        resolved
+    }
+
+    fn compute_is_runtime_module(&self, module_name: &str) -> bool {
         if let Some(env) = &self.persistent_env {
             if env.module_is_runtime(module_name) {
                 return true;
@@ -297,19 +371,28 @@ impl ModulePathResolver {
     }
 
     fn is_pure_module(&self, module: &ModuleId) -> bool {
-        match &module.kind {
-            Kind::Runtime => true,
-            Kind::External { .. } => false,
-            // OCaml only treats Lam_module_ident.Runtime as automatically
-            // pure; Ml modules still read their `.cmj` purity even when their
-            // JS path points into @rescript/runtime. See
-            // compiler/core/lam_compile_env.ml:124-136.
-            Kind::Ml => self
-                .persistent_env
-                .as_ref()
-                .and_then(|env| env.module_cmj_is_pure(module.id.name()))
-                .unwrap_or(false),
+        if !matches!(module.kind, Kind::Ml) {
+            return matches!(module.kind, Kind::Runtime);
         }
+
+        // OCaml only treats Lam_module_ident.Runtime as automatically pure;
+        // Ml modules still read their `.cmj` purity even when their JS path
+        // points into @rescript/runtime. See
+        // compiler/core/lam_compile_env.ml:124-136.
+        let module_name = module.id.name();
+        if let Some(cached) = self.pure_module_cache.borrow().get(module_name).copied() {
+            return cached;
+        }
+
+        let resolved = self
+            .persistent_env
+            .as_ref()
+            .and_then(|env| env.module_cmj_is_pure(module_name))
+            .unwrap_or(false);
+        self.pure_module_cache
+            .borrow_mut()
+            .insert(module_name.to_string(), resolved);
+        resolved
     }
 
     fn relative_output_path(&self, target_source: &FsPath) -> Option<String> {

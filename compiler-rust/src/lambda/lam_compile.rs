@@ -537,7 +537,7 @@ impl LambdaCompiler {
             || {
                 let _phase = info_span!("compiler.lambda_simplify").entered();
                 let jsx_preserve = self.jsx_preserve;
-                let module_path_resolver = self.module_path_resolver.clone();
+                let module_path_resolver = self.module_path_resolver.as_ref();
                 let cross_module_inline = self.cross_module_inline;
                 let mut cmj_lambda_cache: HashMap<String, Option<Arc<AHashMap<String, Lambda>>>> =
                     HashMap::new();
@@ -679,6 +679,10 @@ impl LambdaCompiler {
 
     pub(crate) fn take_cmj_export_arities(&mut self) -> AHashMap<String, CmjExportArity> {
         std::mem::take(&mut self.cmj_export_arities)
+    }
+
+    pub(crate) fn take_module_path_resolver(&mut self) -> Option<ModulePathResolver> {
+        self.module_path_resolver.take()
     }
 
     pub(crate) fn take_diagnostic(&mut self) -> Option<LambdaDiagnostic> {

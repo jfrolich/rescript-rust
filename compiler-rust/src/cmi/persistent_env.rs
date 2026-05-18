@@ -166,6 +166,15 @@ impl<V: Clone> SharedRegistryMap<V> {
 }
 
 impl<V> SharedRegistryMap<V> {
+    fn get_case_with<R>(&self, name: &str, mut f: impl FnMut(&str, &V) -> R) -> Option<R> {
+        let map = self.inner.read().unwrap();
+        if let Some((key, value)) = map.get_key_value(name) {
+            return Some(f(key, value));
+        }
+        let variant = first_char_case_variant(name)?;
+        map.get_key_value(&variant).map(|(key, value)| f(key, value))
+    }
+
     fn for_each(&self, mut f: impl FnMut(&String, &V)) {
         let map = self.inner.read().unwrap();
         for (key, value) in map.iter() {
@@ -844,6 +853,28 @@ impl PersistentEnv {
         Some(info)
     }
 
+    fn in_memory_info_with<R>(
+        &self,
+        name: &str,
+        mut f: impl FnMut(&InMemoryModuleInfo) -> R,
+    ) -> Option<R> {
+        if let Some(key) = resolve_first_char_case_key(&self.in_memory_module_overrides, name) {
+            if self.hidden_modules.contains(key) {
+                return None;
+            }
+            return self.in_memory_module_overrides.get(key).map(|info| f(info));
+        }
+        self.in_memory_modules
+            .get_case_with(name, |key, info| {
+                if self.hidden_modules.contains(key) {
+                    None
+                } else {
+                    Some(f(info))
+                }
+            })
+            .flatten()
+    }
+
     fn portable_cache_entry(&self, name: &str) -> Option<(String, Arc<PortablePersStruct>)> {
         if let Some(key) = resolve_first_char_case_key(&self.portable_cache_overrides, name) {
             return self
@@ -1219,8 +1250,10 @@ impl PersistentEnv {
     /// import paths.
     pub fn resolve_module_source_path(&self, name: &str) -> Option<PathBuf> {
         // Check in-memory registry first (--in-process mode)
-        if let Some(info) = self.in_memory_info(name) {
-            return Some((*info.source_path).clone());
+        if let Some(source_path) =
+            self.in_memory_info_with(name, |info| (*info.source_path).clone())
+        {
+            return Some(source_path);
         }
 
         // In in-process mode, the registry is authoritative — no disk fallback.
@@ -1253,12 +1286,13 @@ impl PersistentEnv {
         &self,
         name: &str,
     ) -> Option<(Arc<str>, Arc<PathBuf>, Option<Arc<str>>)> {
-        let info = self.in_memory_info(name)?;
-        Some((
-            info.package_name.clone()?,
-            info.package_root.clone()?,
-            info.js_output_suffix.clone(),
-        ))
+        self.in_memory_info_with(name, |info| {
+            Some((
+                info.package_name.clone()?,
+                info.package_root.clone()?,
+                info.js_output_suffix.clone(),
+            ))
+        })?
     }
 
     /// Return package metadata recorded in a dependency `.cmj`, matching
@@ -1289,7 +1323,7 @@ impl PersistentEnv {
     }
 
     pub fn module_has_in_memory_info(&self, name: &str) -> bool {
-        self.in_memory_info(name).is_some()
+        self.in_memory_info_with(name, |_| ()).is_some()
     }
 
     pub fn file_exists_in_load_path_uncap(&self, filename: &str) -> bool {
@@ -1306,8 +1340,8 @@ impl PersistentEnv {
     /// In `--in-process` mode, returns the in-memory purity flag instead.
     pub fn module_cmj_is_pure(&self, name: &str) -> Option<bool> {
         // Check in-memory registry first (--in-process mode)
-        if let Some(info) = self.in_memory_info(name) {
-            return Some(info.is_pure);
+        if let Some(is_pure) = self.in_memory_info_with(name, |info| info.is_pure) {
+            return Some(is_pure);
         }
 
         // In in-process mode, the registry is authoritative — no disk fallback.
@@ -1330,8 +1364,10 @@ impl PersistentEnv {
         name: &str,
     ) -> Option<Arc<HashMap<String, CmjExportConstant>>> {
         // Check in-memory registry first (--in-process mode)
-        if let Some(info) = self.in_memory_info(name) {
-            return Some(info.cmj_export_constants.clone());
+        if let Some(constants) =
+            self.in_memory_info_with(name, |info| info.cmj_export_constants.clone())
+        {
+            return Some(constants);
         }
 
         // In in-process mode, the registry is authoritative — no disk fallback.
@@ -1352,8 +1388,10 @@ impl PersistentEnv {
         &self,
         name: &str,
     ) -> Option<Arc<HashMap<String, CmjExportArity>>> {
-        if let Some(info) = self.in_memory_info(name) {
-            return Some(info.cmj_export_arities.clone());
+        if let Some(arities) =
+            self.in_memory_info_with(name, |info| info.cmj_export_arities.clone())
+        {
+            return Some(arities);
         }
 
         // In in-process mode, the registry is authoritative — no disk fallback.
@@ -2016,8 +2054,7 @@ impl PersistentEnv {
     }
 
     pub fn module_is_runtime(&self, name: &str) -> bool {
-        self.in_memory_info(name)
-            .map(|info| info.is_runtime)
+        self.in_memory_info_with(name, |info| info.is_runtime)
             .unwrap_or(false)
     }
 }
