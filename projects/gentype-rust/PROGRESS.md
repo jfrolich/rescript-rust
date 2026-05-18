@@ -19,8 +19,9 @@ support in Rust is still a stub:
   paths, imports, generated-file effects, dependency helpers, runtime names,
   and export-module tables.
 - Rewrite Stage 3 has started with initial file-for-file Rust ports of
-  `Annotation.ml`, `ModuleResolver.ml`, and `TypeEnv.ml`/`.mli`. These files
-  are still intentionally not wired into the crate.
+  `Annotation.ml`, `ModuleResolver.ml`, `TranslateTypeExprFromTypes.ml`, and
+  `TypeEnv.ml`/`.mli`. These files are still intentionally not wired into the
+  crate.
 
 ## Reference Inventory
 
@@ -124,6 +125,29 @@ For the resolver Stage 3 chunk:
   relative import path construction were reviewed against
   `ModuleResolver.ml:6-69`, `ModuleResolver.ml:86-105`, and
   `ModuleResolver.ml:111-201`.
+- `rustfmt` was run on the new file and `git diff --check` passed.
+- The new file is not wired into the crate, so debug build/parity gates were
+  not run for this non-compiling rewrite stage.
+
+For the first type-translation Stage 3 chunk:
+
+- `TranslateTypeExprFromTypes.ml` was ported to
+  `compiler-rust/src/gentype/translate_type_expr_from_types.rs` against
+  `compiler/gentype/TranslateTypeExprFromTypes.ml:1-761`.
+- Helper names and flow-sensitive boundaries are preserved, including
+  `remove_option`, `path_to_list`, `translate_obj_type`, `translate_constr`,
+  `process_variant`, `translate_arrow_type`, `translateTypeExprFromTypes_`,
+  `translateTypeExprsFromTypes_`, and
+  `signature_to_module_runtime_representation`.
+- Surface/control/output-sensitive review checked the constructor-special-case
+  order from `TranslateTypeExprFromTypes.ml:78-439`, polymorphic variant
+  branches from `TranslateTypeExprFromTypes.ml:447-468` and
+  `TranslateTypeExprFromTypes.ml:590-638`, package handling from
+  `TranslateTypeExprFromTypes.ml:639-670`, and signature object lowering from
+  `TranslateTypeExprFromTypes.ml:679-737`.
+- Rust type access still has integration friction: the staged file preserves
+  the OCaml control flow but assumes direct `TypeExprRef` descriptor access
+  until the compile-wiring phase chooses the final context/arena adapter.
 - `rustfmt` was run on the new file and `git diff --check` passed.
 - The new file is not wired into the crate, so debug build/parity gates were
   not run for this non-compiling rewrite stage.
