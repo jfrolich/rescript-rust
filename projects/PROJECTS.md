@@ -69,6 +69,23 @@ more like OCaml's lazy cached module-components model.
 | [CORPUS_BASELINE.md](./typechecker-performance/CORPUS_BASELINE.md) | Canonical 657-file benchmark baseline, slower-file clusters, and fix directions |
 | [IMPORT_RES_PERFORMANCE_HANDOFF.md](./typechecker-performance/IMPORT_RES_PERFORMANCE_HANDOFF.md) | Link to the detailed investigation and fix guidance |
 
+### [ocaml-alignment](./ocaml-alignment/)
+
+Correctness project for bringing Rust typechecker and module-environment
+behavior closer to the OCaml reference implementation, excluding intentional
+in-process and performance differences. Focus areas include lazy Env component
+sharing, Env lookup API boundaries, alias identity, abbreviation caches,
+copy/instantiation sharing, pattern/GADT restoration, definition levels,
+type-declaration groups, and module type algorithms.
+
+| Document | Description |
+|----------|-------------|
+| [PLAN.md](./ocaml-alignment/PLAN.md) | Project goal, scope, guardrails, workstreams, and acceptance criteria |
+| [PROGRESS.md](./ocaml-alignment/PROGRESS.md) | Current baseline, open questions, and next recommended session |
+| [RALPH_PROMPT.md](./ocaml-alignment/RALPH_PROMPT.md) | Agent loop instructions for OCaml-alignment sessions |
+| [RALPH_TODO.md](./ocaml-alignment/RALPH_TODO.md) | Top-ten checklist with files, OCaml references, and acceptance gates |
+| [RALPH_SETUP.md](./ocaml-alignment/RALPH_SETUP.md) | Build, parity, analyzer, direct repro, and source-reference workflow |
+
 ### [in-process-performance](./in-process-performance/)
 
 Performance engineering for clean in-process builds through `rewatch` and the Rust compiler. Tella is the current benchmark target, with priority on shared immutable signatures, lazy env/component views, critical-path scheduler work, module-registry snapshots, Lambda/JS IR allocation, and non-Icon slow files.
