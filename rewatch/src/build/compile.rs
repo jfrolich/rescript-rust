@@ -715,20 +715,19 @@ pub fn compile(
     // Expand the compile universe: every dirty module plus everything that
     // transitively depends on it.
     let mut compile_universe = dirty_modules.clone();
-    let mut frontier = compile_universe.clone();
-    loop {
-        let mut dependents: AHashSet<String> = AHashSet::new();
-        for module_name in frontier.iter() {
-            dependents.extend(build_state.get_module(module_name).unwrap().dependents.clone());
+    let mut frontier = dirty_modules.iter().cloned().collect::<Vec<_>>();
+    while !frontier.is_empty() {
+        let mut next_frontier = Vec::new();
+        for module_name in &frontier {
+            let module = build_state.get_module(module_name).unwrap();
+            for dependent in &module.dependents {
+                if !compile_universe.contains(dependent) {
+                    compile_universe.insert(dependent.clone());
+                    next_frontier.push(dependent.clone());
+                }
+            }
         }
-        frontier = dependents
-            .difference(&compile_universe)
-            .cloned()
-            .collect::<AHashSet<String>>();
-        if frontier.is_empty() {
-            break;
-        }
-        compile_universe.extend(frontier.iter().cloned());
+        frontier = next_frontier;
     }
 
     let compile_universe_count = compile_universe.len();
@@ -776,15 +775,19 @@ pub fn compile(
     let build_state_ref: &BuildState = &build_state.build_state;
     let build_command_state_ref: &BuildCommandState = build_state;
 
-    // Snapshot the registry once before the scope. The DAG scheduler only
-    // dispatches a module once all its dependencies have completed, so their
-    // registrations have already been published to the shared registry —
-    // but workers need a lock-free view, so each worker gets a snapshot taken
-    // at spawn time. (Taking one per spawn is cheap vs. type-checking.)
     let (tx, rx) = mpsc::channel::<WorkerMsg>();
     // Bound concurrency to rayon's pool size so the priority heap actually
     // orders work — dumping everything into rayon's deque would defeat #2.
     let capacity = rayon::current_num_threads().max(1);
+    // Worker snapshots share the registry's Arc-backed maps. Publishing a
+    // dependency updates those shared maps, so a single template snapshot is
+    // enough; each worker still clones it before adding local provisional
+    // module/interface entries.
+    let worker_registry_template = if in_process_mode {
+        build_state.snapshot_module_registry()
+    } else {
+        ModuleRegistry::new()
+    };
 
     let mut completed: AHashSet<String> = AHashSet::new();
     let mut signature_ready: AHashSet<String> = AHashSet::new();
@@ -823,11 +826,7 @@ pub fn compile(
                     let tx = tx.clone();
                     let inc_ref = &inc;
                     let parent_span = compile_parent_span.clone();
-                    let registry_snapshot = if in_process_mode {
-                        build_state.snapshot_module_registry()
-                    } else {
-                        ModuleRegistry::new()
-                    };
+                    let registry_snapshot = worker_registry_template.clone();
                     in_flight += 1;
                     if let Some(counters) = scheduler_counters.as_mut() {
                         counters.observe_queues(
@@ -872,15 +871,7 @@ pub fn compile(
                         in_flight,
                     );
                 }
-                // Take a per-spawn snapshot of the registry so workers have
-                // a stable view including any deps that published registry
-                // entries before this module was unblocked. Subprocess mode
-                // ignores the snapshot.
-                let registry_snapshot = if in_process_mode {
-                    build_state.snapshot_module_registry()
-                } else {
-                    ModuleRegistry::new()
-                };
+                let registry_snapshot = worker_registry_template.clone();
                 let stored_asts = stored_asts_snapshot.as_ref();
                 let parent_span = compile_parent_span.clone();
                 let in_process_hooks = in_process_mode.then(|| InProcessSchedulerHooks {
@@ -2274,6 +2265,7 @@ fn compile_runtime_modules_parallel(
 
     let (tx, rx) = mpsc::channel::<RuntimeCompletionMsg>();
     let capacity = rayon::current_num_threads().max(1);
+    let worker_registry_template = build_state.snapshot_module_registry();
     let mut in_flight = 0usize;
     let mut completed = vec![false; runtime_modules.len()];
     let mut completed_count = 0usize;
@@ -2285,7 +2277,7 @@ fn compile_runtime_modules_parallel(
                 let Some(work) = ready_heap.pop() else { break };
                 let idx = work.idx;
                 let module = &runtime_modules[idx];
-                let registry_snapshot = build_state.snapshot_module_registry();
+                let registry_snapshot = worker_registry_template.clone();
                 let tx = tx.clone();
                 in_flight += 1;
                 scope.spawn(move |_| {
@@ -2358,11 +2350,12 @@ fn compile_runtime_cycle_remainder_serial(
     completed: &[bool],
 ) -> Result<()> {
     debug!("runtime dependency graph has a cycle; compiling remaining modules serially");
+    let worker_registry_template = build_state.snapshot_module_registry();
     for idx in runtime_compile_order(runtime_modules) {
         if completed[idx] {
             continue;
         }
-        let registry_snapshot = build_state.snapshot_module_registry();
+        let registry_snapshot = worker_registry_template.clone();
         compile_runtime_module_from_source(
             build_state,
             runtime_root,
