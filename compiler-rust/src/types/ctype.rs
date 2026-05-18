@@ -280,6 +280,21 @@ pub struct UnifyState {
     pub newtype_level: Option<i32>,
 }
 
+/// Snapshot of mutable unifier state for OCaml-style speculative pattern
+/// backtracking.
+pub(crate) struct UnifyStateSnapshot {
+    unified_pairs: HashSet<(u32, u32)>,
+    mode: UnifyMode,
+    generate_equations: bool,
+    assume_injective: bool,
+    env: Option<Env>,
+    pending_type_lookup_paths: Vec<Path>,
+    pending_type_expansion_paths: Vec<Path>,
+    capture_type_lookup_paths: bool,
+    recursion_depth: usize,
+    newtype_level: Option<i32>,
+}
+
 impl UnifyState {
     /// Create a new unify state.
     pub fn new() -> Self {
@@ -333,6 +348,37 @@ impl UnifyState {
     /// Get a mutable reference to the environment, if set.
     pub fn env_mut(&mut self) -> Option<&mut Env> {
         self.env.as_mut()
+    }
+
+    /// Save the complete mutable state that can be affected by speculative
+    /// pattern typing.
+    pub(crate) fn snapshot_backtrack_state(&self) -> UnifyStateSnapshot {
+        UnifyStateSnapshot {
+            unified_pairs: self.unified_pairs.clone(),
+            mode: self.mode,
+            generate_equations: self.generate_equations,
+            assume_injective: self.assume_injective,
+            env: self.env.as_ref().map(Env::clone_preserve_id),
+            pending_type_lookup_paths: self.pending_type_lookup_paths.clone(),
+            pending_type_expansion_paths: self.pending_type_expansion_paths.clone(),
+            capture_type_lookup_paths: self.capture_type_lookup_paths,
+            recursion_depth: self.recursion_depth,
+            newtype_level: self.newtype_level,
+        }
+    }
+
+    /// Restore a snapshot created by `snapshot_backtrack_state`.
+    pub(crate) fn restore_backtrack_state(&mut self, snapshot: UnifyStateSnapshot) {
+        self.unified_pairs = snapshot.unified_pairs;
+        self.mode = snapshot.mode;
+        self.generate_equations = snapshot.generate_equations;
+        self.assume_injective = snapshot.assume_injective;
+        self.env = snapshot.env;
+        self.pending_type_lookup_paths = snapshot.pending_type_lookup_paths;
+        self.pending_type_expansion_paths = snapshot.pending_type_expansion_paths;
+        self.capture_type_lookup_paths = snapshot.capture_type_lookup_paths;
+        self.recursion_depth = snapshot.recursion_depth;
+        self.newtype_level = snapshot.newtype_level;
     }
 
     /// Temporarily move out the environment snapshot.

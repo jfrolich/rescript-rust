@@ -562,3 +562,85 @@ Validation evidence:
 - Release parity gates after clearing cached typedtree artifacts:
   - `./scripts/test_typedtree_parity.sh --release`: `661/661`.
   - `./scripts/test_lambda_parity.sh --release`: `661/661`.
+
+## 2026-05-18 Pattern / GADT Backtracking Alignment
+
+Task 7 completion:
+
+- Audited OCaml's pattern backtracking state model. `save_state` captures the
+  `Btype` mutation snapshot, saved `Ctype` levels, and the mutable Env ref;
+  `set_state` restores all three before retrying a split or-pattern branch.
+- Added an internal Rust `NeedBacktrack` sentinel and `PatternMode::SplitOr`
+  so the mode lattice matches OCaml's `Normal`, `Splitting_or`, `Inside_or`,
+  and `Split_or`.
+- Added Rust pattern backtracking checkpoints for pattern variables, module
+  variables, and delayed label-argument forces, plus a full speculative state
+  snapshot covering mutable type nodes, levels, abbreviation memos, unifier
+  state, pending force paths, and `newtype_level`.
+- Reworked parsed `Ppat_or` typing to match OCaml's non-split branch order:
+  type branch 1 in `Inside_or`, keep its pattern/module binders, restore only
+  binder lists before branch 2, then alpha-rename branch 2 onto branch 1 and
+  keep branch 1's binders live.
+- Added the OCaml split retry shape for the Rust `NeedBacktrack` path: restore
+  the saved state, retry branch 1 in split mode, and on a typed error restore
+  again before retrying branch 2.
+- Fixed constructor-pattern GADT unification to follow the PR#7214 rule:
+  generalized constructors use GADT unification only outside `Inside_or` and
+  only when existentials are allowed; `Inside_or` and no-existential contexts
+  use plain pattern unification.
+- Audited the Parmatch callback difference. OCaml's `partial_pred` retypes
+  generated witness patterns and always restores `Btype`, levels, and Env
+  afterward. Rust's current exhaustiveness/unused logic works from typed
+  patterns and does not expose the same untyped `constrs`/`labels` callback, so
+  the new full restore machinery is wired to the internal split/backtrack path
+  that exists in Rust rather than adding a second Rust-only Parmatch algorithm.
+
+OCaml references:
+
+- `compiler/ml/typecore.ml:1251-1259`: `unify_head_only` instantiates a GADT
+  constructor head, replaces result arguments with fresh vars, enforces
+  constraints, and unifies with the expected pattern type.
+- `compiler/ml/typecore.ml:1262-1271`: `state`, `save_state`, and `set_state`
+  define the backtracking snapshot over `Btype`, `Ctype` levels, and Env.
+- `compiler/ml/typecore.ml:1273-1299`: pattern mode definitions and the
+  `Splitting_or -> Normal` recursive default.
+- `compiler/ml/typecore.ml:1489-1527`: constructor pattern flow, `Inside_or`
+  `Need_backtrack` for Parmatch GADT witnesses, and the PR#7214
+  `unify_pat_types` / `unify_pat_types_gadt` choice.
+- `compiler/ml/typecore.ml:1688-1733`: `Ppat_or` branch typing, binder reset,
+  alpha-renaming, state restore, and split fallback retry order.
+- `compiler/ml/typecore.ml:1813-1832`: `partial_pred` saves state, retypes a
+  witness pattern for Parmatch, then restores state on success and typed error.
+- `compiler/ml/typecore.ml:4366-4536`: `type_cases` GADT scope lifetime and
+  post-pattern/body/exhaustiveness escape check ordering.
+- `compiler/ml/ctype.ml:1492-1505`: `enforce_constraints` checks constructor
+  type parameter constraints through declaration substitution.
+
+Validation evidence:
+
+- `git diff --check -- compiler-rust/src/types/ctype.rs compiler-rust/src/types/typecore.rs`:
+  passed.
+- `cargo check --manifest-path compiler-rust/Cargo.toml`: passed.
+- Debug builds:
+  - `cargo build --manifest-path compiler-rust/Cargo.toml`: passed.
+  - `cargo build --manifest-path rewatch/Cargo.toml`: passed.
+- Focused typedtree parity:
+  - `./scripts/test_typedtree_parity.sh typeof_test`: `1/1`.
+  - `./scripts/test_typedtree_parity.sh poly_variant_test`: `2/2`.
+  - `./scripts/test_typedtree_parity.sh variantsMatching`: `1/1`.
+  - `./scripts/test_typedtree_parity.sh 'complete_parmatch_test|test_simple_pattern_match|nested_pattern_match_test|ffi_js_test'`:
+    `4/4`.
+- Full debug typedtree parity after clearing cached typedtree artifacts:
+  `./scripts/test_typedtree_parity.sh`: `661/661`.
+- Tella debug typedtree quick:
+  `./scripts/test_typedtree_parity.sh --tella --quick`: `1697/1697`.
+- Debug lambda quick: `./scripts/test_lambda_parity.sh --quick`: `661/661`.
+- Debug JS output quick with external/Tella:
+  `./scripts/test_js_output_parity.sh --with-external --quick`: focused
+  fixtures `344/344`, local JS output `661/661`, Tella JS output `2127/2127`.
+- Release builds:
+  - `cargo build --release --manifest-path compiler-rust/Cargo.toml`: passed.
+  - `cargo build --release --manifest-path rewatch/Cargo.toml`: passed.
+- Release parity gates after clearing cached typedtree artifacts:
+  - `./scripts/test_typedtree_parity.sh --release`: `661/661`.
+  - `./scripts/test_lambda_parity.sh --release`: `661/661`.

@@ -169,10 +169,10 @@ Files:
 
 Tasks:
 
-- [ ] Audit or-pattern splitting state snapshots.
-- [ ] Audit GADT constraint introduction and restoration.
-- [ ] Audit Parmatch retry/backtracking restore points.
-- [ ] Ensure type graph, levels, delayed forces, and Env state are restored at
+- [x] Audit or-pattern splitting state snapshots.
+- [x] Audit GADT constraint introduction and restoration.
+- [x] Audit Parmatch retry/backtracking restore points.
+- [x] Ensure type graph, levels, delayed forces, and Env state are restored at
       the same points as OCaml.
 
 Acceptance:

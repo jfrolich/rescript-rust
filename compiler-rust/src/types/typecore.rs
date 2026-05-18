@@ -501,6 +501,9 @@ pub(crate) fn inline_record_type_params(
 /// Errors that can occur during type checking.
 #[derive(Debug, Clone)]
 pub enum TypeCoreError {
+    /// Internal sentinel matching OCaml Typecore.Need_backtrack.
+    NeedBacktrack,
+
     /// Polymorphic label in pattern.
     PolymorphicLabel { loc: LocIdx, lid: Longident },
 
@@ -997,10 +1000,12 @@ pub type TypeCoreResult<T> = Result<T, TypeCoreError>;
 pub enum PatternMode {
     /// Normal pattern matching.
     Normal,
-    /// Inside an or-pattern.
-    InsideOr,
     /// Splitting an or-pattern.
     SplittingOr,
+    /// Inside a non-split or-pattern.
+    InsideOr,
+    /// Always split or-patterns.
+    SplitOr,
 }
 
 /// Whether recursive arguments are allowed.
@@ -1029,6 +1034,13 @@ pub struct PatternState {
     /// Label argument paths whose component-table side effects must run after
     /// the whole pattern has allocated binders.
     deferred_label_arg_path_forces: Vec<TypeExprRef>,
+}
+
+#[derive(Clone, Copy)]
+struct PatternStateCheckpoint {
+    pattern_variables_len: usize,
+    module_variables_len: usize,
+    deferred_label_arg_path_forces_len: usize,
 }
 
 /// A pattern variable with its binding information.
@@ -1133,6 +1145,30 @@ impl PatternState {
 
     fn take_deferred_label_arg_path_forces(&mut self) -> Vec<TypeExprRef> {
         std::mem::take(&mut self.deferred_label_arg_path_forces)
+    }
+
+    fn checkpoint(&self) -> PatternStateCheckpoint {
+        PatternStateCheckpoint {
+            pattern_variables_len: self.pattern_variables.len(),
+            module_variables_len: self.module_variables.len(),
+            deferred_label_arg_path_forces_len: self.deferred_label_arg_path_forces.len(),
+        }
+    }
+
+    fn restore_checkpoint(&mut self, checkpoint: PatternStateCheckpoint) {
+        self.pattern_variables
+            .truncate(checkpoint.pattern_variables_len);
+        self.module_variables
+            .truncate(checkpoint.module_variables_len);
+        self.deferred_label_arg_path_forces
+            .truncate(checkpoint.deferred_label_arg_path_forces_len);
+    }
+
+    fn restore_binding_checkpoint(&mut self, checkpoint: PatternStateCheckpoint) {
+        self.pattern_variables
+            .truncate(checkpoint.pattern_variables_len);
+        self.module_variables
+            .truncate(checkpoint.module_variables_len);
     }
 }
 
@@ -3442,6 +3478,41 @@ fn type_pattern_without_existentials(
     type_pattern_with_existentials(tctx, env, pat, expected_ty, mode, false, state)
 }
 
+struct PatternBacktrackState {
+    type_state: crate::types::context::TypeMutationSnapshot,
+    unify_state: crate::types::ctype::UnifyStateSnapshot,
+    pattern_state: PatternStateCheckpoint,
+    newtype_level: Option<i32>,
+}
+
+fn save_pattern_backtrack_state(
+    tctx: &TypeCheckContext<'_>,
+    state: &PatternState,
+) -> PatternBacktrackState {
+    PatternBacktrackState {
+        type_state: tctx.type_ctx.snapshot_type_state(),
+        unify_state: tctx.unify_state.snapshot_backtrack_state(),
+        pattern_state: state.checkpoint(),
+        newtype_level: tctx.newtype_level,
+    }
+}
+
+fn restore_pattern_backtrack_state(
+    tctx: &mut TypeCheckContext<'_>,
+    state: &mut PatternState,
+    snapshot: PatternBacktrackState,
+) {
+    tctx.type_ctx.restore_type_state(snapshot.type_state);
+    tctx.unify_state
+        .restore_backtrack_state(snapshot.unify_state);
+    state.restore_checkpoint(snapshot.pattern_state);
+    tctx.newtype_level = snapshot.newtype_level;
+}
+
+fn is_need_backtrack(err: &TypeCoreError) -> bool {
+    matches!(err, TypeCoreError::NeedBacktrack)
+}
+
 fn type_pattern_with_existentials(
     tctx: &mut TypeCheckContext<'_>,
     env: &Env,
@@ -3651,73 +3722,152 @@ fn type_pattern_inner(
 
         PD::Ppat_or(p1_idx, p2_idx) => {
             // Or-pattern: P1 | P2
-            let inner_mode = if mode == PatternMode::SplittingOr {
-                PatternMode::Normal
+            let or_entry_state = state.checkpoint();
+            let backtrack_state = if matches!(mode, PatternMode::SplitOr | PatternMode::SplittingOr)
+            {
+                Some(save_pattern_backtrack_state(tctx, state))
             } else {
-                mode
+                None
             };
+            let typed_or_result = (|| -> TypeCoreResult<Pattern> {
+                if matches!(mode, PatternMode::SplitOr | PatternMode::SplittingOr) {
+                    return Err(TypeCoreError::NeedBacktrack);
+                }
 
-            // Save pattern variables before p1
-            let vars_before = state.pattern_variables.len();
-            let module_vars_before = state.module_variables.len();
+                // OCaml typecore.ml:1688-1718 types both branches of a
+                // non-split or-pattern in Inside_or mode, while only
+                // restoring pattern/module binders between branches.
+                let initial_state = state.checkpoint();
 
-            // Type check first branch
-            let p1 = tctx.arena.get_pat(*p1_idx);
-            let typed_p1 = type_pattern_inner(
-                tctx,
-                env,
-                p1,
-                expected_ty,
-                inner_mode,
-                allow_existentials,
-                state,
-                0,
-            )?;
+                // Type check first branch
+                let p1 = tctx.arena.get_pat(*p1_idx);
+                let typed_p1 = match type_pattern_inner(
+                    tctx,
+                    env,
+                    p1,
+                    expected_ty,
+                    PatternMode::InsideOr,
+                    allow_existentials,
+                    state,
+                    0,
+                ) {
+                    Ok(pat) => Some(pat),
+                    Err(err) if is_need_backtrack(&err) => None,
+                    Err(err) => return Err(err),
+                };
 
-            // Save p1's variables
-            let p1_vars: Vec<_> = state.pattern_variables[vars_before..].to_vec();
-            let p1_module_vars: Vec<_> = state.module_variables[module_vars_before..].to_vec();
+                // Save p1's variables
+                let p1_vars: Vec<_> =
+                    state.pattern_variables[initial_state.pattern_variables_len..].to_vec();
+                let p1_module_vars: Vec<_> =
+                    state.module_variables[initial_state.module_variables_len..].to_vec();
 
-            // Reset for p2
-            state.pattern_variables.truncate(vars_before);
-            state.module_variables.truncate(module_vars_before);
+                // Reset pattern/module binders for p2 without restoring type
+                // graph mutations; OCaml only uses set_state when falling back
+                // to split mode.
+                state.restore_binding_checkpoint(initial_state);
 
-            // Type check second branch
-            let p2 = tctx.arena.get_pat(*p2_idx);
-            let typed_p2 = type_pattern_inner(
-                tctx,
-                env,
-                p2,
-                expected_ty,
-                inner_mode,
-                allow_existentials,
-                state,
-                0,
-            )?;
+                // Type check second branch
+                let p2 = tctx.arena.get_pat(*p2_idx);
+                let typed_p2 = match type_pattern_inner(
+                    tctx,
+                    env,
+                    p2,
+                    expected_ty,
+                    PatternMode::InsideOr,
+                    allow_existentials,
+                    state,
+                    0,
+                ) {
+                    Ok(pat) => Some(pat),
+                    Err(err) if is_need_backtrack(&err) => None,
+                    Err(err) => return Err(err),
+                };
 
-            // Get p2's variables
-            let p2_vars: Vec<_> = state.pattern_variables[vars_before..].to_vec();
+                // Get p2's variables
+                let p2_vars: Vec<_> =
+                    state.pattern_variables[initial_state.pattern_variables_len..].to_vec();
 
-            // Match OCaml typecore.ml:
-            // - verify both branches bind the same variables,
-            // - alpha-rename branch 2 onto branch 1's ids,
-            // - keep only branch 1's bindings live after typing the or-pattern.
-            let alpha_env = merge_or_pattern_variables(tctx, loc, &p1_vars, &p2_vars)?;
-            let typed_p2 = alpha_pattern(&alpha_env, &typed_p2);
-            state.pattern_variables.truncate(vars_before);
-            state.pattern_variables.extend(p1_vars.iter().cloned());
-            state.module_variables.truncate(module_vars_before);
-            state
-                .module_variables
-                .extend(p1_module_vars.iter().cloned());
+                match (typed_p1, typed_p2) {
+                    (None, None) => Err(TypeCoreError::NeedBacktrack),
+                    (Some(typed_p1), None) => {
+                        state.restore_binding_checkpoint(initial_state);
+                        state.pattern_variables.extend(p1_vars.iter().cloned());
+                        state
+                            .module_variables
+                            .extend(p1_module_vars.iter().cloned());
+                        Ok(typed_p1)
+                    }
+                    (None, Some(typed_p2)) => Ok(typed_p2),
+                    (Some(typed_p1), Some(typed_p2)) => {
+                        // Match OCaml typecore.ml:
+                        // - verify both branches bind the same variables,
+                        // - alpha-rename branch 2 onto branch 1's ids,
+                        // - keep only branch 1's bindings live after typing the or-pattern.
+                        let alpha_env = merge_or_pattern_variables(tctx, loc, &p1_vars, &p2_vars)?;
+                        let typed_p2 = alpha_pattern(&alpha_env, &typed_p2);
+                        state.restore_binding_checkpoint(initial_state);
+                        state.pattern_variables.extend(p1_vars.iter().cloned());
+                        state
+                            .module_variables
+                            .extend(p1_module_vars.iter().cloned());
 
-            Ok(Pattern::new(
-                PatternDesc::Tpat_or(Box::new(typed_p1), Box::new(typed_p2), None),
-                loc,
-                expected_ty,
-                pat_env_ref,
-                pat.ppat_attributes.clone(),
-            ))
+                        Ok(Pattern::new(
+                            PatternDesc::Tpat_or(Box::new(typed_p1), Box::new(typed_p2), None),
+                            loc,
+                            expected_ty,
+                            pat_env_ref,
+                            pat.ppat_attributes.clone(),
+                        ))
+                    }
+                }
+            })();
+
+            match typed_or_result {
+                Ok(pat) => Ok(pat),
+                Err(err) if is_need_backtrack(&err) && mode != PatternMode::InsideOr => {
+                    if let Some(backtrack_state) = backtrack_state {
+                        restore_pattern_backtrack_state(tctx, state, backtrack_state);
+                    } else {
+                        state.restore_checkpoint(or_entry_state);
+                    }
+                    let split_mode = if mode == PatternMode::SplitOr {
+                        PatternMode::SplitOr
+                    } else {
+                        PatternMode::SplittingOr
+                    };
+                    let split_retry_state = save_pattern_backtrack_state(tctx, state);
+                    let p1 = tctx.arena.get_pat(*p1_idx);
+                    match type_pattern_inner(
+                        tctx,
+                        env,
+                        p1,
+                        expected_ty,
+                        split_mode,
+                        allow_existentials,
+                        state,
+                        0,
+                    ) {
+                        Ok(pat) => Ok(pat),
+                        Err(err) if !is_need_backtrack(&err) => {
+                            restore_pattern_backtrack_state(tctx, state, split_retry_state);
+                            let p2 = tctx.arena.get_pat(*p2_idx);
+                            type_pattern_inner(
+                                tctx,
+                                env,
+                                p2,
+                                expected_ty,
+                                split_mode,
+                                allow_existentials,
+                                state,
+                                0,
+                            )
+                        }
+                        Err(err) => Err(err),
+                    }
+                }
+                Err(err) => Err(err),
+            }
         }
 
         PD::Ppat_array(pats) => {
@@ -4692,9 +4842,10 @@ fn type_pattern_construct(
     } else {
         crate::types::instance_constructor(ctx, &cstr_desc)
     };
-    // PR#7214: use GADT unification only for generalized constructors
-    // (not for toplevel lets or inside 'or' patterns)
-    if cstr_desc.cstr_generalized && mode != PatternMode::SplittingOr {
+    // OCaml compiler/ml/typecore.ml:1523-1527 (PR#7214): use GADT
+    // unification only for generalized constructors outside non-split
+    // or-patterns and when existentials are allowed.
+    if cstr_desc.cstr_generalized && mode != PatternMode::InsideOr && allow_existentials {
         unify_pattern_types_gadt(tctx, loc, result_ty, expected_ty)?;
     } else {
         unify_pattern_types(tctx, loc, result_ty, expected_ty)?;
