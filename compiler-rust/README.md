@@ -62,8 +62,8 @@ code, read the matching OCaml source first.
 | Expression and pattern typing | `compiler/ml/typecore.ml`, `compiler/ml/typeopt.ml`, `compiler/ml/parmatch.ml` | `src/types/typecore.rs`, `src/raw_lambda/typeopt.rs` | Includes expression inference, pattern typing, labels, application, rows, warnings, and error messages. |
 | Module and signature typing | `compiler/ml/typemod.ml`, `compiler/ml/includemod.ml`, `compiler/ml/mtype.ml` | `src/types/typemod.rs`, `src/types/includemod.rs` | Includes structures, signatures, functors, includes, opens, recursive modules, interface inclusion, delayed checks, and signature simplification. |
 | Typedtree definitions and dumps | `compiler/ml/typedtree.ml`, `compiler/ml/sexp_typedtree.ml` | `src/types/typedtree.rs`, `src/types/sexp_typedtree.rs` | Serializer must reflect typechecker output. It must not normalize content to hide typechecker differences. |
-| Typedtree to Lambda | `compiler/ml/translcore.ml`, `compiler/ml/translmod.ml`, `compiler/ml/matching.ml`, `compiler/ml/typeopt.ml` | `src/raw_lambda/convert.rs`, `src/raw_lambda/matching.rs`, `src/raw_lambda/typeopt.rs` | Rust splits this into RawLambda plus lowering. That is a Rust decomposition; behavior should match OCaml translation. |
-| Lambda conversion and optimization | `compiler/core/lam_convert.ml`, `compiler/core/lam_compile_main.ml`, `compiler/core/lam_pass_*.ml` | `src/raw_lambda/lower.rs`, `src/lambda/lam_compile_main.rs`, `src/lambda/lam_pass_*.rs` | Pass order is fixed by the OCaml backend. |
+| Typedtree to first Lambda representation | `compiler/ml/translcore.ml`, `compiler/ml/translmod.ml`, `compiler/ml/matching.ml`, `compiler/ml/typeopt.ml`, `compiler/ml/lambda.ml` | `src/raw_lambda/convert.rs`, `src/raw_lambda/matching.rs`, `src/raw_lambda/typeopt.rs`, `src/raw_lambda/mod.rs` | Rust `RawLambda` is the counterpart of OCaml `Lambda.lambda`. |
+| First Lambda to JS-backend Lambda, then optimization | `compiler/core/lam_convert.ml`, `compiler/core/lam_compile_main.ml`, `compiler/core/lam_pass_*.ml` | `src/raw_lambda/lower.rs`, `src/lambda/lam_compile_main.rs`, `src/lambda/lam_pass_*.rs` | OCaml also has this second Lambda-level representation: `Lam_convert.convert` converts `Lambda.lambda` into backend `Lam.t`. Pass order is fixed by the OCaml backend. |
 | JavaScript backend | `compiler/core/lam_compile.ml`, `compiler/core/js_*.ml`, `compiler/core/j.ml` | `src/lambda/lam_compile.rs`, `src/lambda/js_*`, `src/js_ir/*` | Includes JS IR, externals, primitives, module paths, exports, side effects, and printer behavior. |
 | Build system integration | OCaml `bsb`/legacy build behavior plus compiler artifact contracts | `rewatch/src/build/*` | Rewatch is Rust-specific, but artifact semantics and compiler invocation semantics must stay compatible. |
 
@@ -80,8 +80,8 @@ rescript.json + source graph
   -> TypeContext + Env + PersistentEnv setup
   -> module/expression/pattern/type checking into Typedtree
   -> interface inclusion, signature simplification, and signature publishing
-  -> Typedtree to RawLambda
-  -> RawLambda to Lambda
+  -> Typedtree to RawLambda (OCaml Lambda.lambda equivalent)
+  -> RawLambda to JS-backend Lambda (OCaml Lam.t equivalent)
   -> Lambda simplification and JS-backend optimization
   -> Lambda to JavaScript IR
   -> JS IR passes, dependency collection, and backend metadata
@@ -881,7 +881,8 @@ Rust behavior:
 ## Stage 13: Typedtree To RawLambda
 
 RawLambda is the first Rust backend IR. It corresponds to OCaml
-`Translcore`/`Translmod` output before the Rust lowering step.
+`Lambda.lambda`, the representation produced by `Translcore` and `Translmod`
+before the JS backend calls `Lam_convert.convert`.
 
 Important files:
 
@@ -895,10 +896,13 @@ OCaml reference:
 
 - `Translmod.transl_implementation module_name (str, coercion)` creates a
   persistent module identifier, translates the typed structure with module
-  coercion, records exported identifiers, and returns Lambda plus exports.
+  coercion, records exported identifiers, and returns `Lambda.lambda` plus
+  exports.
 - `Translcore.transl_exp` translates typed expressions to Lambda.
 - `Typeopt` queries type information to choose optimized primitive and runtime
   representations.
+- `Lam_compile_main.compile` receives this `Lambda.lambda` and then calls
+  `Lam_convert.convert` before running backend Lambda passes.
 
 Rust algorithm:
 
@@ -923,12 +927,14 @@ RawLambda covers:
   modules, functors, includes, externals, optional values, unboxed/untagged
   encodings, dynamic imports, and primitive operations.
 
-Rust-specific diversion:
+Representation mapping:
 
-- OCaml `Translmod` returns Lambda directly. Rust introduces RawLambda as an
-  explicit intermediate before lowering to the Lambda IR used by the JS backend.
-  This decomposition exists for implementation and parity-dump reasons; it
-  should not change observable behavior.
+- OCaml has two Lambda-level representations: `Lambda.lambda` from
+  `compiler/ml/lambda.ml`, then backend `Lam.t` after
+  `compiler/core/lam_convert.ml`.
+- Rust mirrors that split with `raw_lambda::RawLambda`, then `lambda::Lambda`
+  after `raw_lambda::lower`.
+- The names differ, but this is not meant to be a semantic extra stage.
 
 ## Stage 14: Pattern-Matching Compilation
 
@@ -973,8 +979,9 @@ Why this stage is sensitive:
 
 ## Stage 15: RawLambda To Lambda
 
-The lowered Lambda IR lives in `src/lambda/mod.rs`. The RawLambda boundary is
-implemented in `src/raw_lambda/lower.rs`.
+The lowered Lambda IR lives in `src/lambda/mod.rs`. It corresponds to OCaml's
+JS-backend `Lam.t`, the representation produced by `Lam_convert.convert`. The
+Rust RawLambda boundary is implemented in `src/raw_lambda/lower.rs`.
 
 Algorithm:
 
@@ -997,9 +1004,11 @@ module-export blocks.
 
 OCaml reference alignment:
 
-- This boundary replaces part of what OCaml gets from `Translmod` plus
-  `Lam_convert.convert`. Any lowering change should be checked against the
-  reference Lambda dump and JS output, not only runtime behavior.
+- This boundary should match the semantics of `Lam_convert.convert`: convert the
+  first Lambda representation into the JS-backend Lambda representation, record
+  required modules, and preserve the shape expected by `Lam_compile_main`.
+- Any lowering change should be checked against the reference Lambda dump and JS
+  output, not only runtime behavior.
 
 ## Stage 16: Lambda Simplification
 
@@ -1010,7 +1019,7 @@ pipeline in `src/lambda/lam_compile_main.rs`. This is intentionally aligned with
 Pipeline order:
 
 ```text
-Lam_convert.convert equivalent already completed by RawLambda lowering
+RawLambda lowering has already performed the Lam_convert.convert-equivalent step
 dump lambda sexp when requested
 deep_flatten
 collect_info
@@ -1261,7 +1270,8 @@ Representation-only diversions:
 - `TypeCheckContext` threads warning state, feature flags, persistent env, and
   typechecker side effects explicitly.
 - `PersistentEnv` can be disk-backed or registry-backed.
-- `RawLambda` is an explicit Rust IR between typedtree and Lambda.
+- `RawLambda` and `lambda::Lambda` make the OCaml `Lambda.lambda` to backend
+  `Lam.t` split explicit in Rust naming.
 - Lambda passes often have owned variants so Rust can move trees instead of
   cloning them.
 - Performance counters and tracing spans are Rust-only instrumentation.
