@@ -462,6 +462,29 @@ pub fn translate_structure_item(
                 .collect::<Vec<_>>(),
         ),
         StructureItemDesc::Tstr_include(include_declaration) => {
+            // ReScript encodes `@genType.import external` as an include with a
+            // constrained one-item structure. Match the OCaml GenType unwrap at
+            // compiler/gentype/TranslateStructure.ml:309-331 before falling
+            // back to signature-from-types include translation.
+            if let ModuleExprDesc::Tmod_constraint(inner, _, _, _) =
+                &include_declaration.incl_mod.mod_desc
+            {
+                if let ModuleExprDesc::Tmod_structure(structure) = &inner.mod_desc {
+                    if let [struct_item1] = structure.str_items.as_slice() {
+                        if matches!(struct_item1.str_desc, StructureItemDesc::Tstr_primitive(_)) {
+                            return translate_structure_item(
+                                ctx,
+                                arena,
+                                config,
+                                output_file_relative,
+                                resolver,
+                                type_env,
+                                struct_item1,
+                            );
+                        }
+                    }
+                }
+            }
             crate::gentype::translation::combine(
                 &crate::gentype::translate_signature_from_types::translate_signature_from_types(
                     ctx,
