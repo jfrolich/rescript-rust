@@ -79,6 +79,165 @@ fn type_decl_manifest_uses_fixed_type_variables(
     !type_decl_is_fixed_type(arena, decl, manifest)
 }
 
+fn parser_variance_to_types(variance: ParserVariance) -> TypesVariance {
+    match variance {
+        ParserVariance::Covariant => TypesVariance::covariant(),
+        ParserVariance::Contravariant => TypesVariance::contravariant(),
+        ParserVariance::Invariant => TypesVariance::null(),
+    }
+}
+
+fn fixed_row_name(name: &str) -> String {
+    format!("{name}#row")
+}
+
+fn type_decl_fixed_row_id(
+    arena: &ParseArena,
+    decl: &crate::parser::ast::TypeDeclaration,
+    row_ids: &[Option<Ident>],
+    decl_idx: usize,
+) -> Option<Ident> {
+    let manifest = decl
+        .ptype_manifest
+        .map(|manifest| arena.get_core_type(manifest))?;
+    if type_decl_is_fixed_type(arena, decl, manifest) {
+        row_ids.get(decl_idx).and_then(Clone::clone)
+    } else {
+        None
+    }
+}
+
+fn translate_type_declaration_params<'a>(
+    tctx: &mut TypeCheckContext<'a>,
+    env: &Env,
+    arena: &'a ParseArena,
+    params: &[(crate::parse_arena::CoreTypeIdx, ParserVariance)],
+) -> TypeModResult<(Vec<(TypedCoreType, TypesVariance)>, Vec<TypeExprRef>)> {
+    let ctx = tctx.type_ctx;
+    let mut typed_params = Vec::with_capacity(params.len());
+    let mut internal_params = Vec::with_capacity(params.len());
+
+    for (core_type_idx, parser_var) in params {
+        let core_type = arena.get_core_type(*core_type_idx);
+        let (typed_core_type, type_ref) = match &*core_type.ptyp_desc {
+            crate::parser::ast::CoreTypeDesc::Ptyp_any => {
+                let type_ref = ctx.new_var(Some("_".to_string()));
+                (
+                    TypedCoreType {
+                        ctyp_desc: TypedCoreTypeDesc::Ttyp_var(None),
+                        ctyp_type: type_ref,
+                        ctyp_env: EnvRef(0),
+                        ctyp_loc: core_type.ptyp_loc,
+                        ctyp_attributes: core_type.ptyp_attributes.clone(),
+                    },
+                    type_ref,
+                )
+            }
+            crate::parser::ast::CoreTypeDesc::Ptyp_var(name) => {
+                let name = name.as_ref().as_ref();
+                check_type_variable_name(core_type.ptyp_loc, name)?;
+                if tctx.type_variables.contains_key(name) {
+                    return Err(TypeModError::RepeatedParameter {
+                        loc: core_type.ptyp_loc,
+                    });
+                }
+                let type_ref = ctx.new_var(Some(name.to_string()));
+                (
+                    TypedCoreType {
+                        ctyp_desc: TypedCoreTypeDesc::Ttyp_var(Some(name.to_string())),
+                        ctyp_type: type_ref,
+                        ctyp_env: EnvRef(0),
+                        ctyp_loc: core_type.ptyp_loc,
+                        ctyp_attributes: core_type.ptyp_attributes.clone(),
+                    },
+                    type_ref,
+                )
+            }
+            _ => transl_type(tctx, env, core_type)?,
+        };
+
+        internal_params.push(type_ref);
+        if let crate::parser::ast::CoreTypeDesc::Ptyp_var(name) = &*core_type.ptyp_desc {
+            tctx.type_variables.insert(name.to_string(), type_ref);
+        }
+        typed_params.push((typed_core_type, parser_variance_to_types(*parser_var)));
+    }
+
+    Ok((typed_params, internal_params))
+}
+
+fn fixed_row_placeholder_decl(
+    ctx: &crate::types::context::TypeContext,
+    arena: &ParseArena,
+    decl: &crate::parser::ast::TypeDeclaration,
+    row_id: &Ident,
+) -> crate::types::TypeDeclaration {
+    let arity = decl.ptype_params.len();
+    crate::types::TypeDeclaration {
+        type_params: (0..arity).map(|_| ctx.new_generic_var(None)).collect(),
+        type_arity: arity as i32,
+        type_kind: crate::types::TypeKind::TypeAbstract,
+        type_private: crate::types::PrivateFlag::Private,
+        type_manifest: None,
+        type_variance: (0..arity).map(|_| TypesVariance::full()).collect(),
+        type_newtype_level: None,
+        type_loc: arena.to_location(decl.ptype_loc),
+        type_attributes: parser_attrs_to_decl_attrs(arena, &decl.ptype_attributes),
+        type_immediate: false,
+        type_unboxed: crate::types::UnboxedStatus::default(),
+        type_inlined_types: vec![],
+        type_path: Some(Path::pident(row_id.clone())),
+    }
+}
+
+fn translate_fixed_row_type_declaration<'a>(
+    tctx: &mut TypeCheckContext<'a>,
+    env: &Env,
+    arena: &'a ParseArena,
+    row_id: Ident,
+    row_name: String,
+    decl: &crate::parser::ast::TypeDeclaration,
+    type_path: Option<Path>,
+) -> TypeModResult<TypedTypeDeclaration> {
+    let saved_type_variables = std::mem::take(&mut tctx.type_variables);
+    let result = translate_type_declaration_params(tctx, env, arena, &decl.ptype_params);
+    tctx.type_variables = saved_type_variables;
+    let (typ_params, internal_type_params) = result?;
+
+    let type_attributes = parser_attrs_to_decl_attrs(arena, &decl.ptype_attributes);
+    let internal_decl = crate::types::TypeDeclaration {
+        type_params: internal_type_params,
+        type_arity: decl.ptype_params.len() as i32,
+        type_kind: crate::types::TypeKind::TypeAbstract,
+        type_private: crate::types::PrivateFlag::Private,
+        type_manifest: None,
+        type_variance: typ_params.iter().map(|(_, variance)| *variance).collect(),
+        type_newtype_level: None,
+        type_loc: arena.to_location(decl.ptype_loc),
+        type_attributes,
+        type_immediate: false,
+        type_unboxed: crate::types::UnboxedStatus::default(),
+        type_inlined_types: vec![],
+        type_path,
+    };
+
+    Ok(TypedTypeDeclaration {
+        typ_id: row_id,
+        typ_name: crate::parse_arena::Located {
+            txt: row_name,
+            loc: decl.ptype_name.loc,
+        },
+        typ_params,
+        typ_type: internal_decl,
+        typ_cstrs: Vec::new(),
+        typ_kind: TypedTypeKind::Ttype_abstract,
+        typ_private: decl.ptype_private,
+        typ_manifest: None,
+        typ_loc: decl.ptype_loc,
+        typ_attributes: decl.ptype_attributes.clone(),
+    })
+}
+
 fn check_type_variable_name(loc: LocIdx, name: &str) -> TypeModResult<()> {
     if name.starts_with('_') {
         Err(TypeModError::CoreError(
@@ -20985,12 +21144,37 @@ fn type_structure_item<'a>(
             tctx.type_variables.clear();
             ctx.begin_def();
 
+            // OCaml typedecl.ml:1447-1484 prepends synthetic `t#row`
+            // declarations for fixed private rows, allocates their identifiers
+            // before the real type identifiers, and enters row placeholders even
+            // for Nonrecursive groups.
+            let mut fixed_row_type_ids: Vec<Option<Ident>> = vec![None; decls.len()];
+            for (decl_idx, decl) in decls.iter().enumerate() {
+                if let Some(manifest_idx) = decl.ptype_manifest {
+                    let manifest = arena.get_core_type(manifest_idx);
+                    if type_decl_is_fixed_type(arena, decl, manifest) {
+                        let row_name = fixed_row_name(arena.get_string(decl.ptype_name.txt));
+                        fixed_row_type_ids[decl_idx] = Some(ctx.create_ident(&row_name));
+                    }
+                }
+            }
+
             // Predeclare type names in the environment so recursive references
             // resolve to the current declaration group (matching OCaml typedecl).
-            // OCaml: enter_type only adds placeholders for Recursive types.
-            // For Nonrecursive, types refer to previous definitions (e.g., opened types).
+            // OCaml: enter_type adds placeholders for Recursive declarations and
+            // for Nonrecursive fixed-row synthetic declarations.
             let mut declared_type_ids: Vec<Ident> = Vec::with_capacity(decls.len());
+            let mut type_entry_ids: Vec<Ident> = Vec::new();
+            let mut type_entry_parser_indices: Vec<Option<usize>> = Vec::new();
+            let mut type_entry_is_synthetic_row: Vec<bool> = Vec::new();
             let needs_placeholder = matches!(rec_flag, crate::parser::ast::RecFlag::Recursive);
+            for (decl_idx, row_id) in fixed_row_type_ids.iter().enumerate() {
+                if let Some(row_id) = row_id {
+                    let placeholder_decl =
+                        fixed_row_placeholder_decl(ctx, arena, &decls[decl_idx], row_id);
+                    new_env.add_type(row_id.clone(), placeholder_decl);
+                }
+            }
             for decl in decls.iter() {
                 check_nonrecursive_gadt_enter_type(*rec_flag, decl)?;
                 let type_name = decl.ptype_name.txt;
@@ -21026,6 +21210,33 @@ fn type_structure_item<'a>(
             // are NOT visible to each other (they resolve to outer scope definitions).
             // new_env accumulates the final declarations and is returned.
             let temp_env = new_env.clone();
+
+            for (decl_idx, row_id) in fixed_row_type_ids.iter().enumerate() {
+                let Some(row_id) = row_id.clone() else {
+                    continue;
+                };
+                let row_name = fixed_row_name(arena.get_string(decls[decl_idx].ptype_name.txt));
+                let typed_row_decl = translate_fixed_row_type_declaration(
+                    tctx,
+                    &temp_env,
+                    arena,
+                    row_id.clone(),
+                    row_name.clone(),
+                    &decls[decl_idx],
+                    None,
+                )?;
+                let row_internal_decl = typed_row_decl.typ_type.clone();
+                new_env.add_type(row_id.clone(), row_internal_decl.clone());
+                ctx.register_type_decl(&row_name, row_internal_decl.clone());
+                if row_id.stamp() != 0 {
+                    ctx.register_type_decl_by_stamp(row_id.stamp(), row_internal_decl.clone());
+                }
+                type_entry_ids.push(row_id);
+                type_entry_parser_indices.push(Some(decl_idx));
+                type_entry_is_synthetic_row.push(true);
+                internal_decls_for_generalize.push(row_internal_decl);
+                typed_tree_decls.push(typed_row_decl);
+            }
 
             for (decl_idx, decl) in decls.iter().enumerate() {
                 let type_name = decl.ptype_name.txt;
@@ -22252,11 +22463,19 @@ fn type_structure_item<'a>(
                                 };
                             touch_manifest_cyclic_abbrev_check(ctx, &temp_env, type_ref);
                             if is_fixed_type {
+                                let row_id = type_decl_fixed_row_id(
+                                    arena,
+                                    decl,
+                                    &fixed_row_type_ids,
+                                    decl_idx,
+                                )
+                                .expect("fixed private row type must have a synthetic row id");
+                                let row_path = Path::pident(row_id);
                                 set_fixed_row(
                                     ctx,
                                     &temp_env,
                                     decl.ptype_loc,
-                                    &type_path,
+                                    &row_path,
                                     &internal_type_params,
                                     type_ref,
                                 )?;
@@ -22374,7 +22593,7 @@ fn type_structure_item<'a>(
                 // Convert private flag
                 // Create typed tree type declaration
                 let typed_tree_decl = TypedTypeDeclaration {
-                    typ_id: type_id,
+                    typ_id: type_id.clone(),
                     typ_name: crate::parse_arena::Located {
                         txt: type_name_str.to_string(),
                         loc: decl.ptype_name.loc,
@@ -22390,6 +22609,9 @@ fn type_structure_item<'a>(
                 };
 
                 typed_tree_decls.push(typed_tree_decl);
+                type_entry_ids.push(type_id.clone());
+                type_entry_parser_indices.push(Some(decl_idx));
+                type_entry_is_synthetic_row.push(false);
                 tctx.type_variables = saved_type_variables;
             }
 
@@ -22425,12 +22647,18 @@ fn type_structure_item<'a>(
                 crate::types::ctype::generalize(ctx, *ty);
             }
 
+            let original_internal_decls_for_checks: Vec<_> = internal_decls_for_generalize
+                .iter()
+                .zip(type_entry_is_synthetic_row.iter())
+                .filter_map(|(decl, is_row)| (!*is_row).then_some(decl.clone()))
+                .collect();
+
             check_type_declaration_abbrev_cycles(
                 ctx,
                 &new_env,
                 &declared_type_ids,
                 decls,
-                &internal_decls_for_generalize,
+                &original_internal_decls_for_checks,
             )?;
 
             for typed_decl in &typed_tree_decls {
@@ -22452,31 +22680,34 @@ fn type_structure_item<'a>(
 
             // OCaml typedecl.ml compute_properties_fixpoint:
             // recompute variances for the whole declaration group as a fixpoint.
-            let required_variances: Vec<Vec<(bool, bool, bool)>> = decls
+            let required_variances: Vec<Vec<(bool, bool, bool)>> = type_entry_parser_indices
                 .iter()
-                .map(|decl| {
-                    decl.ptype_params
+                .map(|parser_idx| {
+                    let Some(parser_idx) = parser_idx else {
+                        return Vec::new();
+                    };
+                    decls[*parser_idx]
+                        .ptype_params
                         .iter()
                         .map(|(_, variance)| parser_variance_requirement(*variance))
                         .collect()
                 })
                 .collect();
-            let resolved_variances = compute_type_variance_fixpoint(
-                ctx,
-                &new_env,
-                &declared_type_ids,
-                &required_variances,
-            );
-            if resolved_variances.len() == declared_type_ids.len() {
-                for (idx, type_id) in declared_type_ids.iter().enumerate() {
+            let resolved_variances =
+                compute_type_variance_fixpoint(ctx, &new_env, &type_entry_ids, &required_variances);
+            if resolved_variances.len() == type_entry_ids.len() {
+                for (idx, type_id) in type_entry_ids.iter().enumerate() {
                     let Some(variance_row) = resolved_variances.get(idx) else {
                         continue;
                     };
-                    if let Some(typed_decl) = typed_tree_decls.get(idx) {
+                    if !type_entry_is_synthetic_row[idx]
+                        && let Some(parser_idx) = type_entry_parser_indices[idx]
+                        && let Some(typed_decl) = typed_tree_decls.get(idx)
+                    {
                         check_type_decl_variance_requirements(
                             ctx,
                             &new_env,
-                            &decls[idx],
+                            &decls[parser_idx],
                             typed_decl,
                             variance_row,
                         )?;
@@ -22496,15 +22727,30 @@ fn type_structure_item<'a>(
                         internal_decl.type_variance = variance_row.clone();
                     }
 
-                    let type_name = arena.get_string(decls[idx].ptype_name.txt);
-                    ctx.register_type_decl(type_name, updated_decl.clone());
+                    let type_name = if type_entry_is_synthetic_row[idx] {
+                        let parser_idx = type_entry_parser_indices[idx]
+                            .expect("synthetic row entries keep their source declaration index");
+                        fixed_row_name(arena.get_string(decls[parser_idx].ptype_name.txt))
+                    } else {
+                        let parser_idx = type_entry_parser_indices[idx]
+                            .expect("type entries keep their source declaration index");
+                        arena
+                            .get_string(decls[parser_idx].ptype_name.txt)
+                            .to_string()
+                    };
+                    ctx.register_type_decl(&type_name, updated_decl.clone());
                     if type_id.stamp() != 0 {
                         ctx.register_type_decl_by_stamp(type_id.stamp(), updated_decl.clone());
                     }
                 }
             }
 
-            for (idx, internal_decl) in internal_decls_for_generalize.iter().enumerate() {
+            for (entry_idx, internal_decl) in internal_decls_for_generalize.iter().enumerate() {
+                if type_entry_is_synthetic_row[entry_idx] {
+                    continue;
+                }
+                let idx = type_entry_parser_indices[entry_idx]
+                    .expect("type entries keep their source declaration index");
                 check_type_declaration_coherence(
                     ctx,
                     &new_env,
@@ -24198,6 +24444,20 @@ fn transl_sig_type_declarations_with_ids_and_originals<'a>(
     let ctx = tctx.type_ctx;
     let mut typed_tree_decls = Vec::new();
     let mut internal_decls_for_generalize: Vec<crate::types::TypeDeclaration> = Vec::new();
+    // OCaml typedecl.ml:1447-1484 prepends synthetic `t#row`
+    // declarations for fixed private rows before the user-written
+    // declarations. Signature declarations go through the same
+    // Typedecl.transl_type_decl path as structures.
+    let mut fixed_row_type_ids: Vec<Option<Ident>> = vec![None; decls.len()];
+    for (decl_idx, decl) in decls.iter().enumerate() {
+        if let Some(manifest_idx) = decl.ptype_manifest {
+            let manifest = arena.get_core_type(manifest_idx);
+            if type_decl_is_fixed_type(arena, decl, manifest) {
+                let row_name = fixed_row_name(arena.get_string(decl.ptype_name.txt));
+                fixed_row_type_ids[decl_idx] = Some(ctx.create_ident(&row_name));
+            }
+        }
+    }
     let declared_type_ids: Vec<Ident> = match predeclared_type_ids {
         Some(ids) => {
             debug_assert_eq!(ids.len(), decls.len());
@@ -24214,8 +24474,17 @@ fn transl_sig_type_declarations_with_ids_and_originals<'a>(
         }
     };
     let mut temp_env = env.clone();
+    let mut type_entry_ids: Vec<Ident> = Vec::new();
+    let mut type_entry_parser_indices: Vec<Option<usize>> = Vec::new();
+    let mut type_entry_is_synthetic_row: Vec<bool> = Vec::new();
     for decl in decls {
         check_nonrecursive_gadt_enter_type(rec_flag, decl)?;
+    }
+    for (decl_idx, row_id) in fixed_row_type_ids.iter().enumerate() {
+        if let Some(row_id) = row_id {
+            let placeholder_decl = fixed_row_placeholder_decl(ctx, arena, &decls[decl_idx], row_id);
+            temp_env.add_type(row_id.clone(), placeholder_decl);
+        }
     }
     if matches!(rec_flag, RecFlag::Recursive) {
         for (type_id, decl) in declared_type_ids.iter().zip(decls.iter()) {
@@ -24248,6 +24517,28 @@ fn transl_sig_type_declarations_with_ids_and_originals<'a>(
     // translate inside begin_def/end_def, then generalize declarations.
     ctx.begin_def();
     let loop_result: TypeModResult<()> = (|| {
+        for (decl_idx, row_id) in fixed_row_type_ids.iter().enumerate() {
+            let Some(row_id) = row_id.clone() else {
+                continue;
+            };
+            let row_name = fixed_row_name(arena.get_string(decls[decl_idx].ptype_name.txt));
+            let typed_row_decl = translate_fixed_row_type_declaration(
+                tctx,
+                &temp_env,
+                arena,
+                row_id.clone(),
+                row_name.clone(),
+                &decls[decl_idx],
+                Some(Path::pident(row_id.clone())),
+            )?;
+            let row_internal_decl = typed_row_decl.typ_type.clone();
+            type_entry_ids.push(row_id);
+            type_entry_parser_indices.push(Some(decl_idx));
+            type_entry_is_synthetic_row.push(true);
+            internal_decls_for_generalize.push(row_internal_decl);
+            typed_tree_decls.push(typed_row_decl);
+        }
+
         for (decl_idx, decl) in decls.iter().enumerate() {
             let type_name = decl.ptype_name.txt;
             let type_name_str = arena.get_string(type_name);
@@ -24672,9 +24963,29 @@ fn transl_sig_type_declarations_with_ids_and_originals<'a>(
             // recursive manifests see forward type identifiers.
             let (typ_manifest, manifest_type_ref) = match &decl.ptype_manifest {
                 Some(manifest) => {
+                    let manifest_ct = arena.get_core_type(*manifest);
+                    let is_fixed_type = type_decl_is_fixed_type(arena, decl, manifest_ct);
                     let (typed_manifest, manifest_ref) =
-                        transl_type(tctx, &temp_env, arena.get_core_type(*manifest))?;
+                        if type_decl_manifest_uses_fixed_type_variables(arena, decl, manifest_ct) {
+                            transl_type_fixed(tctx, &temp_env, manifest_ct)?
+                        } else {
+                            transl_type(tctx, &temp_env, manifest_ct)?
+                        };
                     touch_manifest_cyclic_abbrev_check(ctx, &temp_env, manifest_ref);
+                    if is_fixed_type {
+                        let row_id =
+                            type_decl_fixed_row_id(arena, decl, &fixed_row_type_ids, decl_idx)
+                                .expect("fixed private row type must have a synthetic row id");
+                        let row_path = Path::pident(row_id);
+                        set_fixed_row(
+                            ctx,
+                            &temp_env,
+                            decl.ptype_loc,
+                            &row_path,
+                            &internal_type_params,
+                            manifest_ref,
+                        )?;
+                    }
                     (Some(typed_manifest), Some(manifest_ref))
                 }
                 None => (None, None),
@@ -24739,7 +25050,7 @@ fn transl_sig_type_declarations_with_ids_and_originals<'a>(
             internal_decls_for_generalize.push(internal_decl.clone());
 
             typed_tree_decls.push(TypedTypeDeclaration {
-                typ_id: type_id,
+                typ_id: type_id.clone(),
                 typ_name: crate::parse_arena::Located {
                     txt: type_name_str.to_string(),
                     loc: decl.ptype_name.loc,
@@ -24753,6 +25064,9 @@ fn transl_sig_type_declarations_with_ids_and_originals<'a>(
                 typ_loc: decl.ptype_loc,
                 typ_attributes: decl.ptype_attributes.clone(),
             });
+            type_entry_ids.push(type_id);
+            type_entry_parser_indices.push(Some(decl_idx));
+            type_entry_is_synthetic_row.push(false);
         }
         Ok(())
     })();
@@ -24777,19 +25091,25 @@ fn transl_sig_type_declarations_with_ids_and_originals<'a>(
     }
 
     let mut variance_env = env.clone();
-    for (type_id, decl) in declared_type_ids
+    for (type_id, decl) in type_entry_ids
         .iter()
         .zip(internal_decls_for_generalize.iter())
     {
         variance_env.add_type(type_id.clone(), decl.clone());
     }
 
+    let original_internal_decls_for_checks: Vec<_> = internal_decls_for_generalize
+        .iter()
+        .zip(type_entry_is_synthetic_row.iter())
+        .filter_map(|(decl, is_row)| (!*is_row).then_some(decl.clone()))
+        .collect();
+
     check_type_declaration_abbrev_cycles(
         ctx,
         &variance_env,
         &declared_type_ids,
         decls,
-        &internal_decls_for_generalize,
+        &original_internal_decls_for_checks,
     )?;
 
     // OCaml transl_signature routes Psig_type through
@@ -24802,24 +25122,31 @@ fn transl_sig_type_declarations_with_ids_and_originals<'a>(
         touch_type_declaration_constraints(ctx, &variance_env, &mut tctx.persistent_env, decl);
     }
 
-    let required_variances: Vec<Vec<(bool, bool, bool)>> = decls
+    let required_variances: Vec<Vec<(bool, bool, bool)>> = type_entry_parser_indices
         .iter()
-        .map(|decl| {
-            decl.ptype_params
+        .map(|parser_idx| {
+            let Some(parser_idx) = parser_idx else {
+                return Vec::new();
+            };
+            decls[*parser_idx]
+                .ptype_params
                 .iter()
                 .map(|(_, variance)| parser_variance_requirement(*variance))
                 .collect()
         })
         .collect();
     let resolved_variances =
-        compute_type_variance_fixpoint(ctx, &variance_env, &declared_type_ids, &required_variances);
-    if resolved_variances.len() == declared_type_ids.len() {
+        compute_type_variance_fixpoint(ctx, &variance_env, &type_entry_ids, &required_variances);
+    if resolved_variances.len() == type_entry_ids.len() {
         for (idx, variance_row) in resolved_variances.iter().enumerate() {
-            if let Some(typed_decl) = typed_tree_decls.get(idx) {
+            if !type_entry_is_synthetic_row[idx]
+                && let Some(parser_idx) = type_entry_parser_indices[idx]
+                && let Some(typed_decl) = typed_tree_decls.get(idx)
+            {
                 check_type_decl_variance_requirements(
                     ctx,
                     &variance_env,
-                    &decls[idx],
+                    &decls[parser_idx],
                     typed_decl,
                     variance_row,
                 )?;
@@ -24833,7 +25160,12 @@ fn transl_sig_type_declarations_with_ids_and_originals<'a>(
         }
     }
 
-    for (idx, internal_decl) in internal_decls_for_generalize.iter().enumerate() {
+    for (entry_idx, internal_decl) in internal_decls_for_generalize.iter().enumerate() {
+        if type_entry_is_synthetic_row[entry_idx] {
+            continue;
+        }
+        let idx = type_entry_parser_indices[entry_idx]
+            .expect("type entries keep their source declaration index");
         check_type_declaration_coherence(
             ctx,
             &variance_env,

@@ -562,6 +562,90 @@ Validation evidence:
 - Release parity gates after clearing cached typedtree artifacts:
   - `./scripts/test_typedtree_parity.sh --release`: `661/661`.
   - `./scripts/test_lambda_parity.sh --release`: `661/661`.
+
+## 2026-05-18 Type Declaration Group Staging Alignment
+
+Task 9 completion:
+
+- Audited OCaml `Typedecl.transl_type_decl` as the shared implementation for
+  structure and signature type declarations. The important group shape is:
+  prepend synthetic fixed-row declarations, allocate row identifiers before the
+  user-written type identifiers, enter abstract placeholders at the OCaml
+  `enter_type` boundary, translate declarations under one definition level,
+  then run duplicate, recursion, constraint, variance, immediacy, and
+  abbreviation checks over the finalized declaration group.
+- Fixed Rust fixed private row declarations to emit the OCaml synthetic
+  `t#row` declaration before the main private type declaration. The row
+  variable in the manifest now links to the synthetic row path, not to the main
+  type path.
+- Applied the same synthetic-row staging to `Psig_type` translation. Signature
+  fixed rows now allocate, enter, translate, generalize, and participate in the
+  variance fixpoint like structure fixed rows.
+- Kept ordinary recursive and nonrecursive declaration visibility semantics
+  unchanged: recursive groups still translate through main-type placeholders;
+  nonrecursive groups only enter the synthetic row placeholders, matching
+  OCaml's `enter_type` exception for row names.
+- Audited variance and immediacy ordering. Rust still computes immediacy after
+  kind/manifest translation, and variance is now computed across the combined
+  row-plus-main declaration entry list while skipping source-variance checks for
+  synthetic rows.
+- Audited constraints and extension constructors against the OCaml phase order.
+  Constraint unification remains before `end_def`/generalization, constraint
+  touching remains after untagged checks, and extension constructor translation
+  stays outside the fixed-row declaration change.
+- Did not split out a new `compiler-rust/src/types/typedecl.rs` in this pass:
+  the OCaml-aligned helpers are now factored at the top of `typemod.rs`, and a
+  file split would be mechanical rather than improving the current phase match.
+
+OCaml references:
+
+- `compiler/ml/typedecl.ml:80-115`: `enter_type` enters all recursive
+  placeholders and, for nonrecursive groups, still enters row-name placeholders.
+- `compiler/ml/typedecl.ml:159-194`: fixed type detection and `set_fixed_row`
+  link the manifest row variable to the synthetic row type.
+- `compiler/ml/typedecl.ml:370-397`: `transl_declaration` resets type
+  variables and begins per-declaration type translation inside the group.
+- `compiler/ml/typedecl.ml:692-733`: kind/manifest translation, constraint
+  handling, `end_def`, and fixed-row setup.
+- `compiler/ml/typedecl.ml:767-845`: declaration constraint checking.
+- `compiler/ml/typedecl.ml:1030-1388`: variance and immediacy fixpoint
+  computation.
+- `compiler/ml/typedecl.ml:1399-1443`: duplicate checks and name recursion.
+- `compiler/ml/typedecl.ml:1446-1620`: full `transl_type_decl` phase order,
+  including synthetic fixed-row prepending and final checks.
+- `compiler/ml/typedecl.ml:1624-1845`: type extension constructor
+  translation.
+- `compiler/ml/typedecl.ml:2059-2065`: recursive module type declaration
+  checks.
+- `compiler/ml/typemod.ml:300-370`: with-constraint fixed rows create a
+  synthetic row signature item.
+- `compiler/ml/mtype.ml:51-54`: strengthening skips synthetic row types before
+  private types.
+
+Validation evidence:
+
+- `cargo check --manifest-path compiler-rust/Cargo.toml`: passed.
+- Debug builds:
+  - `cargo build --manifest-path compiler-rust/Cargo.toml`: passed.
+  - `cargo build --manifest-path rewatch/Cargo.toml`: passed.
+- Focused typedtree parity:
+  - `./scripts/test_typedtree_parity.sh fixed_private_row_test`: `1/1`.
+  - `./scripts/test_typedtree_parity.sh 'fixed_private_row_test|type_coercion_free_vars|record_name_test|bs_abstract_test|Import'`:
+    `8/8`.
+- Full debug typedtree parity after clearing cached typedtree artifacts:
+  `./scripts/test_typedtree_parity.sh`: `662/662`.
+- Tella debug typedtree quick:
+  `./scripts/test_typedtree_parity.sh --tella --quick`: `1697/1697`.
+- Debug lambda quick: `./scripts/test_lambda_parity.sh --quick`: `662/662`.
+- Debug JS output quick with external/Tella:
+  `./scripts/test_js_output_parity.sh --with-external --quick`: focused
+  fixtures `344/344`, local JS output `662/662`, Tella JS output `2127/2127`.
+- Release builds:
+  - `cargo build --release --manifest-path compiler-rust/Cargo.toml`: passed.
+  - `cargo build --release --manifest-path rewatch/Cargo.toml`: passed.
+- Release parity gates after clearing cached typedtree artifacts:
+  - `./scripts/test_typedtree_parity.sh --release`: `662/662`.
+  - `./scripts/test_lambda_parity.sh --release`: `662/662`.
 ## 2026-05-18 Pattern / GADT Backtracking Alignment
 
 Task 7 completion:

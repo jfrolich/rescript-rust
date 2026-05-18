@@ -209,11 +209,11 @@ Files:
 
 Tasks:
 
-- [ ] Audit recursive stubs and declaration-group environment staging.
-- [ ] Audit fixed private rows.
-- [ ] Audit variance and immediacy fixpoints.
-- [ ] Audit constraint timing and extension constructors.
-- [ ] Split Rust code toward a dedicated `typedecl.rs` shape if that better
+- [x] Audit recursive stubs and declaration-group environment staging.
+- [x] Audit fixed private rows.
+- [x] Audit variance and immediacy fixpoints.
+- [x] Audit constraint timing and extension constructors.
+- [x] Split Rust code toward a dedicated `typedecl.rs` shape if that better
       mirrors OCaml.
 
 Acceptance:
