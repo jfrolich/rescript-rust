@@ -1475,7 +1475,7 @@ fn build_local_module_components<'a>(
                     let _ = pers.force_lazy_signature_rename(id.name(), ctx);
                 } else if access_path_is_direct_opened_component(env, access_path)
                     && cache_mode.forces_alias_sig()
-                    && env.find_module_with_origin(id.name()).is_err()
+                    && env.find_module(id.name()).is_err()
                 {
                     // OCaml compiler/ml/env.ml:1440-1446 reaches
                     // env.ml:865-875 for persistent alias targets while

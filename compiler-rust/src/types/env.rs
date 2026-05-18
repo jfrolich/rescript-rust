@@ -187,13 +187,6 @@ pub enum EnvSummary {
 // Binding Tables
 // ============================================================================
 
-/// Origin of a name lookup in an OCaml-shaped `IdTbl`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum IdLookupOrigin {
-    Local,
-    Opened,
-}
-
 /// Symbolic opened layer for identifier-indexed tables.
 ///
 /// Mirrors OCaml `Env.IdTbl.opened`: one open layer contains the opened
@@ -334,32 +327,27 @@ impl<T: Clone> IdTbl<T> {
         })
     }
 
-    fn find_name_entry(&self, name: &str) -> Option<(&Ident, &T, IdLookupOrigin)> {
+    fn find_name_entry(&self, name: &str) -> Option<(&Ident, &T)> {
         if let Some((id, value)) = self.current.get(name).and_then(|entries| entries.last()) {
-            return Some((id, value, IdLookupOrigin::Local));
+            return Some((id, value));
         }
 
         match &self.opened {
             Some(opened) => opened
                 .components
                 .get(name)
-                .map(|(id, value, _)| (id, value, IdLookupOrigin::Opened))
+                .map(|(id, value, _)| (id, value))
                 .or_else(|| opened.next.find_name_entry(name)),
             None => None,
         }
     }
 
     pub fn find_by_name(&self, name: &str) -> Option<&T> {
-        self.find_name_entry(name).map(|(_, value, _)| value)
+        self.find_name_entry(name).map(|(_, value)| value)
     }
 
     pub fn find_by_name_with_id(&self, name: &str) -> Option<(&Ident, &T)> {
-        self.find_name_entry(name).map(|(id, value, _)| (id, value))
-    }
-
-    pub fn find_by_name_with_origin(&self, name: &str) -> Option<(&Ident, &T, bool)> {
         self.find_name_entry(name)
-            .map(|(id, value, origin)| (id, value, origin == IdLookupOrigin::Local))
     }
 
     pub fn find_by_name_with_path(&self, name: &str) -> Option<(Path, &T)> {
@@ -1045,14 +1033,14 @@ impl Env {
             .ok_or_else(|| EnvError::ValueNotFound(name.to_string()))
     }
 
-    /// Find a value by name with its local/opened origin flag.
-    pub fn find_value_with_origin(
-        &self,
-        name: &str,
-    ) -> EnvResult<(&Ident, &ValueDescription, bool)> {
+    /// Find a value by name with the path selected by OCaml `IdTbl.find_name`.
+    ///
+    /// Local bindings resolve to `Pident(id)`, while opened bindings resolve to
+    /// `Pdot(root, name, pos)` from the symbolic open layer.
+    pub fn find_value_with_path(&self, name: &str) -> EnvResult<(Path, &ValueDescription)> {
         self.values
-            .find_by_name_with_origin(name)
-            .map(|(id, v, is_local)| (id, v.as_ref(), is_local))
+            .find_by_name_with_path(name)
+            .map(|(path, desc)| (path, desc.as_ref()))
             .ok_or_else(|| EnvError::ValueNotFound(name.to_string()))
     }
 
@@ -1128,18 +1116,6 @@ impl Env {
         self.types
             .find_by_name_with_id(name)
             .map(|(id, decl)| (id, decl.as_ref()))
-            .ok_or_else(|| EnvError::TypeNotFound(name.to_string()))
-    }
-
-    /// Find a type by name, also returning whether the binding is local.
-    ///
-    /// Prefer `find_type_with_path` when the caller needs the selected path.
-    /// This origin helper is kept for open-shadow diagnostics while those
-    /// warnings are still modeled outside OCaml's `using` callbacks.
-    pub fn find_type_with_origin(&self, name: &str) -> EnvResult<(&Ident, &TypeDeclaration, bool)> {
-        self.types
-            .find_by_name_with_origin(name)
-            .map(|(id, decl, is_local)| (id, decl.as_ref(), is_local))
             .ok_or_else(|| EnvError::TypeNotFound(name.to_string()))
     }
 
@@ -1532,18 +1508,6 @@ impl Env {
             .ok_or_else(|| EnvError::ModuleNotFound(name.to_string()))
     }
 
-    /// Find a module by name, returning the identifier, declaration, and
-    /// whether the binding is local (from `add_module`) vs opened.
-    pub fn find_module_with_origin(
-        &self,
-        name: &str,
-    ) -> EnvResult<(&Ident, &ModuleDeclaration, bool)> {
-        self.modules
-            .find_by_name_with_origin(name)
-            .map(|(id, decl, is_local)| (id, decl.as_ref(), is_local))
-            .ok_or_else(|| EnvError::ModuleNotFound(name.to_string()))
-    }
-
     /// Find a module by name with the path selected by OCaml `IdTbl.find_name`.
     ///
     /// Local bindings resolve to `Pident(id)`, while opened bindings resolve to
@@ -1796,15 +1760,14 @@ impl Env {
             .ok_or_else(|| EnvError::ModuleNotFound(name.to_string()))
     }
 
-    /// Find a module type by name, returning the identifier, declaration, and
-    /// whether the binding is local (from `add_modtype`) vs opened.
-    pub fn find_modtype_with_origin(
-        &self,
-        name: &str,
-    ) -> EnvResult<(&Ident, &ModtypeDeclaration, bool)> {
+    /// Find a module type by name with the path selected by OCaml `IdTbl.find_name`.
+    ///
+    /// Local bindings resolve to `Pident(id)`, while opened bindings resolve to
+    /// `Pdot(root, name, pos)` from the symbolic open layer.
+    pub fn find_modtype_with_path(&self, name: &str) -> EnvResult<(Path, &ModtypeDeclaration)> {
         self.modtypes
-            .find_by_name_with_origin(name)
-            .map(|(id, decl, is_local)| (id, decl.as_ref(), is_local))
+            .find_by_name_with_path(name)
+            .map(|(path, decl)| (path, decl.as_ref()))
             .ok_or_else(|| EnvError::ModuleNotFound(name.to_string()))
     }
 

@@ -6900,20 +6900,15 @@ fn collect_open_shadow_identifier_use_checks(
         if !opened_names.values.contains(name) {
             continue;
         }
-        let Ok(_) = env_before_open.find_value_with_origin(name) else {
+        let Ok(_) = env_before_open.find_value(name) else {
             continue;
         };
-        let Ok((opened_id, opened_desc, is_local)) = env_after_open.find_value_with_origin(name)
-        else {
+        let Ok((opened_path, _opened_desc)) = env_after_open.find_value_with_path(name) else {
             continue;
         };
-        if is_local {
+        if matches!(opened_path, Path::Pident(_)) {
             continue;
         }
-        let opened_path = opened_desc
-            .val_path
-            .clone()
-            .unwrap_or_else(|| Path::pident(opened_id.clone()));
         out.push(OpenShadowIdentifierUseCheck {
             kind: "value",
             name: name.to_string(),
@@ -6933,20 +6928,15 @@ fn collect_open_shadow_identifier_use_checks(
         if !opened_names.types.contains(name) {
             continue;
         }
-        let Ok(_) = env_before_open.find_type_with_origin(name) else {
+        let Ok(_) = env_before_open.find_type(name) else {
             continue;
         };
-        let Ok((opened_id, opened_desc, is_local)) = env_after_open.find_type_with_origin(name)
-        else {
+        let Ok((opened_path, _opened_desc)) = env_after_open.find_type_with_path(name) else {
             continue;
         };
-        if is_local {
+        if matches!(opened_path, Path::Pident(_)) {
             continue;
         }
-        let opened_path = opened_desc
-            .type_path
-            .clone()
-            .unwrap_or_else(|| Path::pident(opened_id.clone()));
         out.push(OpenShadowIdentifierUseCheck {
             kind: "type",
             name: name.to_string(),
@@ -6966,20 +6956,15 @@ fn collect_open_shadow_identifier_use_checks(
         if !opened_names.modules.contains(name) {
             continue;
         }
-        let Ok(_) = env_before_open.find_module_with_origin(name) else {
+        let Ok(_) = env_before_open.find_module(name) else {
             continue;
         };
-        let Ok((opened_id, opened_desc, is_local)) = env_after_open.find_module_with_origin(name)
-        else {
+        let Ok((opened_path, _opened_desc)) = env_after_open.find_module_with_path(name) else {
             continue;
         };
-        if is_local {
+        if matches!(opened_path, Path::Pident(_)) {
             continue;
         }
-        let opened_path = opened_desc
-            .md_path
-            .clone()
-            .unwrap_or_else(|| Path::pident(opened_id.clone()));
         out.push(OpenShadowIdentifierUseCheck {
             kind: "module",
             name: name.to_string(),
@@ -6999,15 +6984,18 @@ fn collect_open_shadow_identifier_use_checks(
         if !opened_names.modtypes.contains(name) {
             continue;
         }
-        let Ok(_) = env_before_open.find_modtype_with_origin(name) else {
+        let Ok(_) = env_before_open.find_modtype(name) else {
             continue;
         };
-        let Ok((opened_id, _, is_local)) = env_after_open.find_modtype_with_origin(name) else {
+        let Ok((opened_path, _)) = env_after_open.find_modtype_with_path(name) else {
             continue;
         };
-        if is_local {
+        if matches!(opened_path, Path::Pident(_)) {
             continue;
         }
+        let Ok((opened_id, _)) = env_after_open.find_modtype_with_id(name) else {
+            continue;
+        };
         let opened_path = Path::pident(opened_id.clone());
         out.push(OpenShadowIdentifierUseCheck {
             kind: "module type",
