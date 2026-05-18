@@ -417,12 +417,12 @@ pub fn emit_export_const(
     comment: &str,
     config: &crate::gentype::config::T,
     doc_string: crate::gentype::gen_type_common::doc_string::T,
-    emitters: &mut crate::gentype::emitters::T,
+    emitters: crate::gentype::emitters::T,
     name: &str,
     type_: &Type,
     type_name_is_interface: &impl Fn(&str) -> bool,
     line: &str,
-) {
+) -> crate::gentype::emitters::T {
     // Mirrors compiler/gentype/EmitType.ml:331-343.
     let type_string = type_to_string(config, type_name_is_interface, type_);
     let output = format!(
@@ -434,19 +434,22 @@ pub fn emit_export_const(
         crate::gentype::gen_type_common::doc_string::render(&doc_string)
     );
     if early {
-        crate::gentype::emitters::export_early(emitters, output);
+        crate::gentype::emitters::export_early(emitters, output)
     } else {
-        crate::gentype::emitters::export(emitters, output);
+        crate::gentype::emitters::export(emitters, output)
     }
 }
 
-pub fn emit_export_default(emitters: &mut crate::gentype::emitters::T, name: &str) {
-    crate::gentype::emitters::export(emitters, format!("export default {name};"));
+pub fn emit_export_default(
+    emitters: crate::gentype::emitters::T,
+    name: &str,
+) -> crate::gentype::emitters::T {
+    crate::gentype::emitters::export(emitters, format!("export default {name};"))
 }
 
 pub fn emit_export_type(
     config: &crate::gentype::config::T,
-    emitters: &mut crate::gentype::emitters::T,
+    emitters: crate::gentype::emitters::T,
     name_as: Option<String>,
     opaque: bool,
     type_: &Type,
@@ -454,7 +457,7 @@ pub fn emit_export_type(
     type_vars: &[String],
     doc_string: crate::gentype::gen_type_common::doc_string::T,
     resolved_type_name: &str,
-) {
+) -> crate::gentype::emitters::T {
     // Mirrors compiler/gentype/EmitType.ml:348-388.
     let doc_string = crate::gentype::gen_type_common::doc_string::render(&doc_string);
     let type_params_string = crate::gentype::emit_text::generics_string(type_vars);
@@ -490,15 +493,15 @@ pub fn emit_export_type(
             export_name_as
         )
     };
-    crate::gentype::emitters::export(emitters, output);
+    crate::gentype::emitters::export(emitters, output)
 }
 
 pub fn emit_import_value_as_early(
-    emitters: &mut crate::gentype::emitters::T,
+    emitters: crate::gentype::emitters::T,
     name: &str,
     name_as: Option<String>,
     import_path: &crate::gentype::import_path::T,
-) {
+) -> crate::gentype::emitters::T {
     // Mirrors compiler/gentype/EmitType.ml:390-398.
     crate::gentype::emitters::require_early(
         emitters,
@@ -510,17 +513,17 @@ pub fn emit_import_value_as_early(
             },
             crate::gentype::import_path::emit(import_path)
         ),
-    );
+    )
 }
 
 pub fn emit_require(
     imported_value_or_component: bool,
     early: bool,
-    emitters: &mut crate::gentype::emitters::T,
+    emitters: crate::gentype::emitters::T,
     config: &crate::gentype::config::T,
     module_name: &crate::gentype::module_name::T,
     import_path: &crate::gentype::import_path::T,
-) {
+) -> crate::gentype::emitters::T {
     // Mirrors compiler/gentype/EmitType.ml:400-417.
     let module_name_string = crate::gentype::module_name::to_string(module_name);
     let import_path_string = crate::gentype::import_path::emit(import_path);
@@ -531,38 +534,42 @@ pub fn emit_require(
         _ => format!("const {module_name_string} = require('{import_path_string}');"),
     };
     if early {
-        crate::gentype::emitters::require_early(emitters, output);
+        crate::gentype::emitters::require_early(emitters, output)
     } else {
-        crate::gentype::emitters::require(emitters, output);
+        crate::gentype::emitters::require(emitters, output)
     }
 }
 
-pub fn emit_import_react(emitters: &mut crate::gentype::emitters::T) {
+pub fn emit_import_react(emitters: crate::gentype::emitters::T) -> crate::gentype::emitters::T {
     // Mirrors compiler/gentype/EmitType.ml:419-425.
     require(
         true,
         emitters,
         "import * as React from 'react';".to_string(),
-    );
+    )
 }
 
-pub fn require(early: bool, emitters: &mut crate::gentype::emitters::T, output: String) {
+pub fn require(
+    early: bool,
+    emitters: crate::gentype::emitters::T,
+    output: String,
+) -> crate::gentype::emitters::T {
     // Mirrors compiler/gentype/EmitType.ml:419-422.
     if early {
-        crate::gentype::emitters::require_early(emitters, output);
+        crate::gentype::emitters::require_early(emitters, output)
     } else {
-        crate::gentype::emitters::require(emitters, output);
+        crate::gentype::emitters::require(emitters, output)
     }
 }
 
 pub fn emit_import_type_as(
-    emitters: &mut crate::gentype::emitters::T,
+    emitters: crate::gentype::emitters::T,
     config: &crate::gentype::config::T,
     type_name: &str,
     as_type_name: Option<String>,
     type_name_is_interface: &impl Fn(&str) -> bool,
     import_path: &crate::gentype::import_path::T,
-) {
+) -> crate::gentype::emitters::T {
     // Mirrors compiler/gentype/EmitType.ml:427-452.
     let type_name = sanitize_type_name(type_name);
     let as_type_name = as_type_name.map(|s| sanitize_type_name(&s));
@@ -584,7 +591,7 @@ pub fn emit_import_type_as(
             },
             crate::gentype::import_path::emit(import_path)
         ),
-    );
+    )
 }
 
 pub fn emit_type_cast(

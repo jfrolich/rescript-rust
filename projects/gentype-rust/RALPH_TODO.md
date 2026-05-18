@@ -67,13 +67,14 @@ should exist file for file.
 
 - [x] Port `EmitText.ml`.
 - [x] Port `EmitType.ml`.
-- [ ] Port `Emitters.ml` and `Emitters.mli`.
+- [x] Port `Emitters.ml` and `Emitters.mli`.
 - [ ] Port `EmitJs.ml`.
 - [x] Port `Converter.ml`.
 - [x] Port `NamedArgs.ml`.
 - [ ] Port `GenTypeMain.ml`.
 - [ ] Run the three per-file review passes for every file in this stage.
-  `EmitText.ml`, `EmitType.ml`, `NamedArgs.ml`, and `Converter.ml` have passed.
+  `EmitText.ml`, `EmitType.ml`, `Emitters.ml`/`.mli`, `NamedArgs.ml`, and
+  `Converter.ml` have passed.
 - [ ] Commit the stage or commit coherent file clusters.
 
 ## Per-File Review Checklist

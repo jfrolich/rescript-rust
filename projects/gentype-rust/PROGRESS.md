@@ -25,8 +25,8 @@ support in Rust is still a stub:
   `TranslateTypeExprFromTypes.ml`, and `TypeEnv.ml`/`.mli`. These files are
   still intentionally not wired into the crate.
 - Rewrite Stage 4 has started with initial file-for-file Rust ports of
-  `EmitText.ml`, `EmitType.ml`, `NamedArgs.ml`, and `Converter.ml`. These files
-  are still intentionally not wired into the crate.
+  `EmitText.ml`, `EmitType.ml`, `Emitters.ml`/`.mli`, `NamedArgs.ml`, and
+  `Converter.ml`. These files are still intentionally not wired into the crate.
 
 ## Reference Inventory
 
@@ -253,6 +253,25 @@ For the `EmitType.ml` Stage 4 chunk:
 - The Rust draft keeps the OCaml helper boundary for `require ~early` from
   `EmitType.ml:419-425` even though Rust emits through a direct function call.
 - `rustfmt` was run on the new file and `git diff --check` passed.
+- The new file is not wired into the crate, so debug build/parity gates were not
+  run for this non-compiling rewrite stage.
+
+For the `Emitters.ml` Stage 4 chunk:
+
+- `Emitters.ml` and `Emitters.mli` were ported to
+  `compiler-rust/src/gentype/emitters.rs` against
+  `compiler/gentype/Emitters.ml:1-52` and
+  `compiler/gentype/Emitters.mli:1-9`.
+- Surface/control/output-sensitive review checked the emitter bucket layout from
+  `Emitters.ml:1-16`, prepend-style string accumulation from
+  `Emitters.ml:18-42`, and final bucket/reverse ordering from
+  `Emitters.ml:44-52`.
+- The previous `EmitType` draft was corrected to thread `Emitters.t` by value
+  and return the updated emitter, matching the OCaml call pattern in
+  `EmitType.ml:331-452` and the `Emitters.mli` signatures at
+  `Emitters.mli:4-9`.
+- `rustfmt` was run on `emitters.rs` and `emit_type.rs`, and `git diff --check`
+  passed.
 - The new file is not wired into the crate, so debug build/parity gates were not
   run for this non-compiling rewrite stage.
 
