@@ -3167,24 +3167,6 @@ fn freshen_signature_bound_idents_with_maps(
     }
 }
 
-pub(crate) fn freshen_signature_bound_idents(sig_items: &mut [SignatureItem], ctx: &TypeContext) {
-    // OCaml compiler/ml/subst.ml:245-248 always copies type expressions,
-    // then subst.ml:378-400 renames signature binders and applies that
-    // substitution to the copied components.
-    let copied =
-        freshened_signature_bound_idents_from_kind("freshen_signature_in_place", sig_items, ctx);
-    for (target, source) in sig_items.iter_mut().zip(copied) {
-        *target = source;
-    }
-}
-
-pub(crate) fn freshened_signature_bound_idents_from(
-    sig_items: &[SignatureItem],
-    ctx: &TypeContext,
-) -> Signature {
-    freshened_signature_bound_idents_from_kind("freshened_signature_direct", sig_items, ctx)
-}
-
 pub(crate) fn freshened_signature_bound_idents_from_kind(
     kind: &'static str,
     sig_items: &[SignatureItem],
