@@ -1756,106 +1756,16 @@ impl StoredModuleComponents {
             return Some(f(components.as_ref()));
         }
 
-        let mut module_decl = self.module_decl.clone();
-        let mut parent_substitution_context = None;
-        if let Some((parent_access_path, parent_sig)) = &self.parent_context {
-            let pident_sibling_alias = match &module_decl.md_type {
-                super::decl::ModuleType::MtyAlias(_, Path::Pident(alias_id))
-                    if parent_sig.iter().any(|item| {
-                        matches!(
-                            item,
-                            SignatureItem::SigModule(id, _, _) if id.same(alias_id)
-                        )
-                    }) =>
-                {
-                    true
-                }
-                _ => false,
-            };
-            let sibling_alias = match &module_decl.md_type {
-                super::decl::ModuleType::MtyAlias(_, Path::Pdot(parent, name, _))
-                    if parent_matches_component_context(parent, parent_access_path, ctx) =>
-                {
-                    raw_component_module_type(parent_access_path, name.as_str(), ctx).or_else(
-                        || {
-                            parent_sig.iter().find_map(|item| match item {
-                                SignatureItem::SigModule(id, md, _)
-                                    if id.name() == name.as_str() =>
-                                {
-                                    Some(md.md_type.clone())
-                                }
-                                _ => None,
-                            })
-                        },
-                    )
-                }
-                _ => None,
-            };
-            if pident_sibling_alias {
-                // OCaml compiler/ml/env.ml:1568 forces child module
-                // declarations by applying `Subst.modtype sub` with the
-                // parent component substitution from env.ml:1530. For an alias
-                // that still points to a sibling binder by `Pident`,
-                // compiler/ml/subst.ml:69-76 `module_path` maps that binder
-                // through the parent component substitution. Keep the alias
-                // module type itself intact here so env.ml:1516-1518 can still
-                // scrape it without forcing the sibling declaration early; the
-                // copied signature is rewritten after scraping below.
-                parent_substitution_context =
-                    Some((parent_access_path, parent_sig.as_ref().as_slice()));
-            } else if sibling_alias.is_some() {
-                // OCaml compiler/ml/env.ml:1516-1578 runs
-                // `scrape_alias` on child module types before `prefix_idents`
-                // applies the selected component path.
-                // Keep the child module type as the alias, rather than
-                // replacing it with the sibling's raw module type: after
-                // env.ml:1435-1446 `scrape_alias` obtains that raw signature,
-                // env.ml:1530-1538 `prefix_idents` still prefixes value and
-                // type paths with the selected alias path. Replacing the alias
-                // here would qualify component value types through the target
-                // sibling path instead.
-                parent_substitution_context =
-                    Some((parent_access_path, parent_sig.as_ref().as_slice()));
-            } else {
-                let keep_alias_target_for_scrape = matches!(
-                    &module_decl.md_type,
-                    super::decl::ModuleType::MtyAlias(_, Path::Pident(id))
-                        if id.is_persistent()
-                ) || matches!(
-                    &module_decl.md_type,
-                    super::decl::ModuleType::MtyAlias(_, Path::Pdot(parent, _, _))
-                        if !parent.same(parent_access_path)
-                );
-                if keep_alias_target_for_scrape {
-                    // OCaml compiler/ml/env.ml:1517 scrapes the raw alias
-                    // target first, then env.ml:1530 applies the parent
-                    // substitution captured in the component thunk. Defer the
-                    // substitution instead of rewriting the alias path before
-                    // it is resolved.
-                    parent_substitution_context =
-                        Some((parent_access_path, parent_sig.as_ref().as_slice()));
-                } else {
-                    // OCaml compiler/ml/env.ml:1573-1578 stores child
-                    // component thunks with the child module type, and
-                    // env.ml:1517 scrapes aliases before env.ml:1530-1538
-                    // prefixes the selected component path. Only rewrite
-                    // aliases that still point through the selected parent;
-                    // persistent aliases such as `Js_typed_array2` and
-                    // already-qualified aliases such as `Stdlib_Date.UTC`/
-                    // `Js.Json.Kind` must remain available to `scrape_alias`.
-                    crate::cmi::persistent_env::substitute_type_paths_in_child_module_type(
-                        &mut module_decl.md_type,
-                        parent_sig,
-                        parent_access_path,
-                        ctx,
-                    );
-                }
-            }
-        }
+        let parent_substitution_context =
+            self.parent_context
+                .as_ref()
+                .map(|(parent_access_path, parent_sig)| {
+                    (parent_access_path, parent_sig.as_ref().as_slice())
+                });
         let components = Arc::new(build_local_module_components(
             self.seed_env.as_ref(),
             &self.access_path,
-            &module_decl,
+            &self.module_decl,
             parent_substitution_context,
             pers_env,
             ctx,
@@ -1911,39 +1821,4 @@ impl StoredModuleComponents {
             .insert(arg_path.clone(), substituted.clone());
         Some(substituted)
     }
-}
-
-fn parent_matches_component_context(
-    parent: &Path,
-    parent_access_path: &Path,
-    ctx: &super::context::TypeContext,
-) -> bool {
-    if parent.same(parent_access_path) {
-        return true;
-    }
-    if let Some(head) = flattened_component_head(parent_access_path)
-        && (head.is_persistent() || head.stamp() == 0)
-        && let Some(alias_path) = ctx.find_flattened_alias_component_path(head.name())
-    {
-        return parent.same(&alias_path);
-    }
-    false
-}
-
-fn raw_component_module_type(
-    parent_access_path: &Path,
-    module_name: &str,
-    ctx: &super::context::TypeContext,
-) -> Option<super::decl::ModuleType> {
-    raw_sig_candidate_names_for_access_path(parent_access_path, ctx)
-        .into_iter()
-        .find_map(|name| {
-            let raw_parent_sig = ctx.find_raw_module_sig(&name)?;
-            raw_parent_sig.iter().find_map(|item| match item {
-                SignatureItem::SigModule(id, md, _) if id.name() == module_name => {
-                    Some(md.md_type.clone())
-                }
-                _ => None,
-            })
-        })
 }
