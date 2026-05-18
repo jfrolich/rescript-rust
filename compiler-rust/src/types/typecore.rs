@@ -28399,7 +28399,19 @@ fn strengthen_sig_for_module_access_path<'a>(
     let mut strengthened = Vec::with_capacity(sig_items.len());
     let mut runtime_pos = 0i32;
 
-    for item in sig_items {
+    let mut index = 0usize;
+    while index < sig_items.len() {
+        let item = &sig_items[index];
+        if let crate::types::decl::SignatureItem::SigType(id, decl, _) = item
+            && matches!(decl.type_kind, crate::types::TypeKind::TypeAbstract)
+            && let Some(crate::types::decl::SignatureItem::SigType(next_id, next_decl, _)) =
+                sig_items.get(index + 1)
+            && next_decl.type_private == crate::types::PrivateFlag::Private
+            && id.name() == format!("{}#row", next_id.name())
+        {
+            index += 1;
+            continue;
+        }
         match item {
             crate::types::decl::SignatureItem::SigValue(id, desc) => {
                 strengthened.push(crate::types::decl::SignatureItem::SigValue(
@@ -28478,6 +28490,7 @@ fn strengthen_sig_for_module_access_path<'a>(
                 strengthened.push(crate::types::decl::SignatureItem::SigClassType);
             }
         }
+        index += 1;
     }
 
     strengthened

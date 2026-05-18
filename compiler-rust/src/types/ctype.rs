@@ -2203,7 +2203,18 @@ fn strengthen_signature_for_module_access_path<'a>(
 
     let mut strengthened = Vec::with_capacity(sig.len());
     let mut env = env.clone();
-    for item in sig {
+    let mut index = 0;
+    while index < sig.len() {
+        let item = &sig[index];
+        if let SignatureItem::SigType(id, decl, _) = item
+            && matches!(decl.type_kind, crate::types::TypeKind::TypeAbstract)
+            && let Some(SignatureItem::SigType(next_id, next_decl, _)) = sig.get(index + 1)
+            && next_decl.type_private == PrivateFlag::Private
+            && id.name() == format!("{}#row", next_id.name())
+        {
+            index += 1;
+            continue;
+        }
         let new_item = match item {
             SignatureItem::SigValue(id, desc) => {
                 if !matches!(desc.val_kind, ValueKind::ValPrim(_)) {
@@ -2249,6 +2260,7 @@ fn strengthen_signature_for_module_access_path<'a>(
             SignatureItem::SigClassType => SignatureItem::SigClassType,
         };
         strengthened.push(new_item);
+        index += 1;
     }
     strengthened
 }

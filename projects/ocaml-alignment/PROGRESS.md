@@ -563,6 +563,64 @@ Validation evidence:
   - `./scripts/test_typedtree_parity.sh --release`: `661/661`.
   - `./scripts/test_lambda_parity.sh --release`: `661/661`.
 
+## 2026-05-18 Module Type Fixed Private Row Inclusion
+
+Task 10 partial completion:
+
+- Audited `Mtype.strengthen`, `Mtype.nondep_supertype`,
+  `Mtype.remove_aliases`, and `Mtype.lower_nongen` against the current Rust
+  module typing paths. No Rust code change was needed for `nondep_supertype`,
+  alias removal, or `lower_nongen` in this pass.
+- Fixed Rust strengthening to skip the synthetic fixed-private-row helper
+  declaration immediately preceding the private row type, matching OCaml's
+  `mtype.ml` strengthening rule.
+- Fixed module type inclusion for private fixed polymorphic variants and
+  object rows by porting the relevant `Includecore.type_manifest` behavior:
+  when the expected declaration is private and carries an abstract fixed row,
+  compare the implementation row against the expected row's abstract `more`
+  type and field constraints instead of requiring direct manifest equality.
+- Extended `fixed_private_row_test.res` with module aliases and constrained
+  module inclusion cases that OCaml accepts and Rust previously rejected.
+
+OCaml references:
+
+- `compiler/ml/mtype.ml:41-96`: `strengthen_sig`, including the private-row
+  helper skip at `mtype.ml:51-54`.
+- `compiler/ml/mtype.ml:106-183`: `nondep_supertype`.
+- `compiler/ml/mtype.ml:365-395`: `remove_aliases`.
+- `compiler/ml/mtype.ml:399-410`: `lower_nongen`.
+- `compiler/ml/includecore.ml:87-159`: private fixed variant/object
+  `type_manifest` inclusion.
+- `compiler/ml/includemod.ml:194-267`: `modtypes` dispatch and substitution
+  flow.
+- `compiler/ml/includemod.ml:287-381`: signature pairing, per-item
+  substitution, and runtime coercion collection.
+
+Validation evidence:
+
+- `cargo check --manifest-path compiler-rust/Cargo.toml`: passed.
+- Debug builds:
+  - `cargo build --manifest-path compiler-rust/Cargo.toml`: passed.
+  - `cargo build --manifest-path rewatch/Cargo.toml`: passed.
+- Focused typedtree parity:
+  - `./scripts/test_typedtree_parity.sh fixed_private_row_test`: `1/1`.
+  - `./scripts/test_typedtree_parity.sh 'fixed_private_row_test|global_module_alias_test|module_alias_test|module_parameter_test|Import|test_include|coercion_module_alias_test'`:
+    `10/10`.
+- Full debug typedtree parity after clearing cached typedtree artifacts:
+  `./scripts/test_typedtree_parity.sh`: `662/662`.
+- Tella debug typedtree quick:
+  `./scripts/test_typedtree_parity.sh --tella --quick`: `1697/1697`.
+- Debug lambda quick: `./scripts/test_lambda_parity.sh --quick`: `662/662`.
+- Debug JS output quick with external/Tella:
+  `./scripts/test_js_output_parity.sh --with-external --quick`: focused
+  fixtures `344/344`, local JS output `662/662`, Tella JS output `2127/2127`.
+- Release builds:
+  - `cargo build --release --manifest-path compiler-rust/Cargo.toml`: passed.
+  - `cargo build --release --manifest-path rewatch/Cargo.toml`: passed.
+- Release parity gates after clearing cached typedtree artifacts:
+  - `./scripts/test_typedtree_parity.sh --release`: `662/662`.
+  - `./scripts/test_lambda_parity.sh --release`: `662/662`.
+
 ## 2026-05-18 Type Declaration Group Staging Alignment
 
 Task 9 completion:
