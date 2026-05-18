@@ -78,3 +78,9 @@ Performance note:
 - Same-session release Tella clean in-process `hyperfine` comparison did not
   show a material speedup: previous `af8b2ede7` measured `2.640s +/- 0.028s`,
   current `b67270ba6` measured `2.629s +/- 0.022s`.
+
+Post-tracker validation on `473cab890`:
+
+- `./scripts/test_typedtree_parity.sh --quick`: `660/660`.
+- `./scripts/test_typedtree_parity.sh --tella --quick`: `1697/1697`.
+- `./scripts/test_lambda_parity.sh --quick`: `660/660`.
