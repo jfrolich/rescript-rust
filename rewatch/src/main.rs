@@ -167,14 +167,14 @@ fn configure_rayon_for_in_process(build_mode: rescript::build::build_types::Buil
 
 fn default_in_process_threads() -> usize {
     let logical = num_cpus::get().max(1);
-    let target = logical.saturating_mul(3);
+    let target = logical.saturating_mul(8).div_ceil(5);
     // In-process compilation publishes signatures before JS is emitted so
     // dependents can type-check early. Those workers can later block before JS
     // while waiting for dependency cmj metadata, so a CPU-sized pool leaves
-    // runnable modules stranded behind parked workers. A 24-worker cap kept
-    // the Tella clean build faster than the previous 64-worker cap while
-    // reducing scheduler pressure and worker stack reservations.
-    target.min(24).max(logical)
+    // runnable modules stranded behind parked workers. A small oversubscription
+    // keeps that overlap without scheduling enough workers to push compiler
+    // allocation and module-refresh work onto slower cores.
+    target.min(16)
 }
 
 const IN_PROCESS_STACK_SIZE: usize = 256 * 1024 * 1024;
