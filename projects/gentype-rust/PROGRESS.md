@@ -25,8 +25,9 @@ support in Rust is still a stub:
   `TranslateTypeExprFromTypes.ml`, and `TypeEnv.ml`/`.mli`. These files are
   still intentionally not wired into the crate.
 - Rewrite Stage 4 has started with initial file-for-file Rust ports of
-  `EmitText.ml`, `EmitType.ml`, `Emitters.ml`/`.mli`, `NamedArgs.ml`, and
-  `Converter.ml`. These files are still intentionally not wired into the crate.
+  `EmitText.ml`, `EmitType.ml`, `Emitters.ml`/`.mli`, `EmitJs.ml`,
+  `NamedArgs.ml`, and `Converter.ml`. These files are still intentionally not
+  wired into the crate.
 
 ## Reference Inventory
 
@@ -272,6 +273,24 @@ For the `Emitters.ml` Stage 4 chunk:
   `Emitters.mli:4-9`.
 - `rustfmt` was run on `emitters.rs` and `emit_type.rs`, and `git diff --check`
   passed.
+- The new file is not wired into the crate, so debug build/parity gates were not
+  run for this non-compiling rewrite stage.
+
+For the `EmitJs.ml` Stage 4 chunk:
+
+- `EmitJs.ml` was ported to `compiler-rust/src/gentype/emit_js.rs` against
+  `compiler/gentype/EmitJs.ml:1-711`.
+- Surface/control/output-sensitive review checked environment/require map
+  updates from `EmitJs.ml:3-24`, type export-map construction from
+  `EmitJs.ml:26-61`, type export/interface decisions from `EmitJs.ml:74-137`,
+  import/export value emission and React props rewriting from
+  `EmitJs.ml:139-389`, require emission from `EmitJs.ml:391-415`, recursive CMT
+  import-type loading from `EmitJs.ml:417-511`, annotation propagation from
+  `EmitJs.ml:513-602`, and final emission ordering from `EmitJs.ml:604-711`.
+- The staged Rust port keeps the same emitter value-threading API as
+  `Emitters.mli:4-9` and uses a Rust callback boundary for CMT translation where
+  OCaml calls `Cmt_format.read_cmt` at `EmitJs.ml:449-453`.
+- `rustfmt` was run on the new file and `git diff --check` passed.
 - The new file is not wired into the crate, so debug build/parity gates were not
   run for this non-compiling rewrite stage.
 
