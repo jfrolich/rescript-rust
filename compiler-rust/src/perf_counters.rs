@@ -52,7 +52,6 @@ static QUALIFIED_COMPONENT_MISSES: AtomicU64 = AtomicU64::new(0);
 static QUALIFIED_COMPONENT_REGISTERED: AtomicU64 = AtomicU64::new(0);
 static STORED_COMPONENT_CACHED: AtomicU64 = AtomicU64::new(0);
 static STORED_COMPONENT_BUILD_FIND_MODULE: AtomicU64 = AtomicU64::new(0);
-static STORED_COMPONENT_BUILD_FIND_MODULE_DESCR: AtomicU64 = AtomicU64::new(0);
 static STORED_COMPONENT_BUILD_PROBE_MODULE_DESCR: AtomicU64 = AtomicU64::new(0);
 static STORED_COMPONENT_PUBLISHED: AtomicU64 = AtomicU64::new(0);
 static STORED_COMPONENT_TRANSIENT: AtomicU64 = AtomicU64::new(0);
@@ -302,7 +301,6 @@ pub fn reset() {
         &QUALIFIED_COMPONENT_REGISTERED,
         &STORED_COMPONENT_CACHED,
         &STORED_COMPONENT_BUILD_FIND_MODULE,
-        &STORED_COMPONENT_BUILD_FIND_MODULE_DESCR,
         &STORED_COMPONENT_BUILD_PROBE_MODULE_DESCR,
         &STORED_COMPONENT_PUBLISHED,
         &STORED_COMPONENT_TRANSIENT,
@@ -428,9 +426,6 @@ pub(crate) fn record_stored_component_build(mode: &'static str, published: bool)
     match mode {
         "find_module" => {
             STORED_COMPONENT_BUILD_FIND_MODULE.fetch_add(1, Ordering::Relaxed);
-        }
-        "find_module_descr" => {
-            STORED_COMPONENT_BUILD_FIND_MODULE_DESCR.fetch_add(1, Ordering::Relaxed);
         }
         "probe_module_descr" => {
             STORED_COMPONENT_BUILD_PROBE_MODULE_DESCR.fetch_add(1, Ordering::Relaxed);
@@ -701,10 +696,9 @@ pub fn print_report() {
         QUALIFIED_COMPONENT_REGISTERED.load(Ordering::Relaxed),
     );
     eprintln!(
-        "[compiler-counter] stored_components cached={} build_find_module={} build_find_module_descr={} build_probe_module_descr={} published={} transient={}",
+        "[compiler-counter] stored_components cached={} build_find_module={} build_probe_module_descr={} published={} transient={}",
         STORED_COMPONENT_CACHED.load(Ordering::Relaxed),
         STORED_COMPONENT_BUILD_FIND_MODULE.load(Ordering::Relaxed),
-        STORED_COMPONENT_BUILD_FIND_MODULE_DESCR.load(Ordering::Relaxed),
         STORED_COMPONENT_BUILD_PROBE_MODULE_DESCR.load(Ordering::Relaxed),
         STORED_COMPONENT_PUBLISHED.load(Ordering::Relaxed),
         STORED_COMPONENT_TRANSIENT.load(Ordering::Relaxed),

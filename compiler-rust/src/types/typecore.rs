@@ -28917,7 +28917,6 @@ fn build_shared_persistent_root_components<'a>(
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum ComponentLookupCacheMode {
     FindModule,
-    FindModuleDescr,
     ProbeModuleDescr,
 }
 
@@ -28925,16 +28924,12 @@ impl ComponentLookupCacheMode {
     pub(crate) fn counter_name(self) -> &'static str {
         match self {
             ComponentLookupCacheMode::FindModule => "find_module",
-            ComponentLookupCacheMode::FindModuleDescr => "find_module_descr",
             ComponentLookupCacheMode::ProbeModuleDescr => "probe_module_descr",
         }
     }
 
     pub(crate) fn publishes(self) -> bool {
-        matches!(
-            self,
-            ComponentLookupCacheMode::FindModule | ComponentLookupCacheMode::FindModuleDescr
-        )
+        matches!(self, ComponentLookupCacheMode::FindModule)
     }
 
     pub(crate) fn forces_alias_sig(self) -> bool {
