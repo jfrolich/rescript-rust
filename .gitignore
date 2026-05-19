@@ -49,6 +49,7 @@ node_modules
 coverage
 
 lib/ocaml
+lib/bs/
 tests/build_tests/*/lib/
 #ignore temporary directory
 *.goog.js
@@ -112,6 +113,10 @@ tests/parity_baselines/*.txt
 __pycache__/
 .cache
 tmp_diffs
+.performance-cache/
+tests/tests/src/**/*.ocaml.mjs
+tests/tests/src/**/*.js
+!tests/tests/src/tagged_template_lib.js
 
 # Parity test cache (generated diffs/summaries, inspected by LLM agents)
 .parity-cache/

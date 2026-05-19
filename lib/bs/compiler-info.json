@@ -1,8 +1,0 @@
-{
-  "version": "13.0.0-alpha.1",
-  "bsc_path": "/Users/jake/dev/rescript-rust/packages/@rescript/darwin-arm64/bin/bsc.exe",
-  "bsc_hash": "67d91d2bf08acf2f9cabfb7ed541c900c666e01f497507e291df08fb5f630300",
-  "rescript_config_hash": "446f7f3b3610b6a6b64de9dc9f3cfb5ced324490d928b460644ccb168145e1e6",
-  "runtime_path": "/Users/jake/dev/rescript-rust/node_modules/@rescript/runtime",
-  "generated_at": "1772181682549"
-}
