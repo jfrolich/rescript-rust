@@ -116,12 +116,20 @@ support in Rust is still incomplete:
   first-class package translation find local module-type declarations through
   the same unqualified path shape that OCaml GenType reads from saved typed
   artifacts.
+- Rust GenType's Types-signature declaration path now preserves
+  `Types.type_declaration.type_attributes` when translating declarations from
+  scraped module signatures, matching
+  `compiler/gentype/TranslateSignatureFromTypes.ml:3-29` feeding those
+  attributes into `compiler/gentype/TranslateTypeDeclarations.ml:54-321`. This
+  keeps `@genType`, `@as`, doc, tag, unboxed, and import metadata visible for
+  alias-module declarations instead of replacing them with an empty parser
+  attribute list.
 - Latest debug verification: `cargo build --quiet --manifest-path
   compiler-rust/Cargo.toml`, `cargo build --quiet --manifest-path
   rewatch/Cargo.toml`, and `./scripts/test_gentype_output_parity.sh`. Results:
-  react example `69/71` generated files with `2` changed, `0` missing, `0`
-  extra, `2` hunks, TypeScript `0` for OCaml and `0` for Rust; stdlib-no-shims
-  `1/1`; Tella `108/112` with `2` changed, `2` missing, `0` extra, `2` hunks.
+  react example `70/71` generated files with `1` changed, `0` missing, `0`
+  extra, `1` hunk, TypeScript `0` for OCaml and `0` for Rust; stdlib-no-shims
+  `1/1`; Tella `109/112` with `1` changed, `2` missing, `0` extra, `1` hunk.
 
 ## Reference Inventory
 
@@ -203,6 +211,17 @@ stdlib-no-shims:          1/1 generated outputs match, 0 changed, 0 missing, 0 e
 Tella:                    108/112 generated outputs match, 2 changed, 2 missing, 0 extra, 2 diff hunks; TypeScript typecheck not configured
 ```
 
+Latest focused generated-output parity after preserving decl attributes in the
+Types-signature declaration translator:
+
+```text
+./scripts/test_gentype_output_parity.sh
+
+typescript-react-example: 70/71 generated outputs match, 1 changed, 0 missing, 0 extra, 1 diff hunk; OCaml typecheck 0, Rust typecheck 0
+stdlib-no-shims:          1/1 generated outputs match, 0 changed, 0 missing, 0 extra, 0 diff hunks; OCaml typecheck 0, Rust typecheck 0
+Tella:                    109/112 generated outputs match, 1 changed, 2 missing, 0 extra, 1 diff hunk; TypeScript typecheck not configured
+```
+
 Older missing-output baselines before the in-process hook are superseded by the
 current counts above and the detailed Phase 3/7 notes below.
 
@@ -232,10 +251,10 @@ Known Phase 5 adapters still present:
   indices to names, but the remaining module-alias output diffs still need
   closer comparison against the alias/dependency path through
   `compiler/gentype/TypeEnv.ml` and `compiler/gentype/EmitJs.ml`.
-- Decl-signature type declarations currently use parser-empty top-level
-  attributes in `translate_signature_from_types`; constructor/label/value/module
-  decl attributes are handled, but top-level type attributes still need a
-  direct decl-attribute path before output parity work.
+- Decl-signature type declarations now use decl top-level attributes in
+  `translate_signature_from_types`; remaining declaration-attribute risk is
+  limited to payload forms not yet preserved by typemod's decl-attribute
+  conversion.
 
 Verification:
 

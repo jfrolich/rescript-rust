@@ -27,6 +27,16 @@ pub enum DeclarationKind {
     NoDeclaration,
 }
 
+struct DeclarationAttributeInfo {
+    doc_string: crate::gentype::gen_type_common::doc_string::T,
+    annotation: crate::gentype::annotation::T,
+    opaque: Option<bool>,
+    import_string_opt: Option<String>,
+    name_as: Option<String>,
+    unboxed_annotation: bool,
+    tag_annotation: Option<String>,
+}
+
 pub fn create_export_type_from_type_declaration(
     annotation: crate::gentype::annotation::T,
     loc: Location,
@@ -188,6 +198,111 @@ pub fn traslate_declaration_kind(
         type_attributes,
     );
     let tag_annotation = crate::gentype::annotation::get_tag(arena, type_attributes);
+
+    let attribute_info = DeclarationAttributeInfo {
+        doc_string,
+        annotation,
+        opaque,
+        import_string_opt,
+        name_as,
+        unboxed_annotation,
+        tag_annotation,
+    };
+    traslate_declaration_kind_with_attribute_info(
+        ctx,
+        arena,
+        config,
+        loc,
+        output_file_relative,
+        resolver,
+        attribute_info,
+        type_env,
+        type_name,
+        type_vars,
+        declaration_kind,
+    )
+}
+
+#[allow(non_snake_case)]
+pub fn traslate_declaration_kind_from_decl_attributes(
+    ctx: &crate::types::context::TypeContext,
+    arena: &ParseArena,
+    config: &crate::gentype::config::T,
+    loc: Location,
+    output_file_relative: &str,
+    resolver: &crate::gentype::module_resolver::Resolver,
+    type_attributes: &[DeclAttribute],
+    type_env: &crate::gentype::type_env::T,
+    type_name: &str,
+    type_vars: Vec<String>,
+    declaration_kind: DeclarationKind,
+) -> Vec<code_item::TypeDeclaration> {
+    // OCaml TranslateSignatureFromTypes.ml:3-29 passes
+    // Types.type_declaration.type_attributes through to
+    // TranslateTypeDeclarations.ml:54-321. Rust decl attributes have already
+    // been converted out of parser payloads, so compute the same annotation
+    // facts from decl::Attribute instead of using an empty parser attribute set.
+    let doc_string = crate::gentype::annotation::doc_string_from_decl_attrs(type_attributes);
+    let annotation =
+        crate::gentype::annotation::from_decl_attributes(config, &loc, type_attributes);
+    let opaque = match annotation == crate::gentype::annotation::T::GenTypeOpaque {
+        true => Some(true),
+        false => None,
+    };
+    let (import_string_opt, name_as) =
+        crate::gentype::annotation::get_decl_attribute_import_renaming(type_attributes);
+    let unboxed_annotation = crate::gentype::annotation::has_decl_attribute(
+        crate::gentype::annotation::tag_is_unboxed,
+        type_attributes,
+    );
+    let tag_annotation = crate::gentype::annotation::get_decl_tag(type_attributes);
+
+    let attribute_info = DeclarationAttributeInfo {
+        doc_string,
+        annotation,
+        opaque,
+        import_string_opt,
+        name_as,
+        unboxed_annotation,
+        tag_annotation,
+    };
+    traslate_declaration_kind_with_attribute_info(
+        ctx,
+        arena,
+        config,
+        loc,
+        output_file_relative,
+        resolver,
+        attribute_info,
+        type_env,
+        type_name,
+        type_vars,
+        declaration_kind,
+    )
+}
+
+fn traslate_declaration_kind_with_attribute_info(
+    ctx: &crate::types::context::TypeContext,
+    arena: &ParseArena,
+    config: &crate::gentype::config::T,
+    loc: Location,
+    output_file_relative: &str,
+    resolver: &crate::gentype::module_resolver::Resolver,
+    attribute_info: DeclarationAttributeInfo,
+    type_env: &crate::gentype::type_env::T,
+    type_name: &str,
+    type_vars: Vec<String>,
+    declaration_kind: DeclarationKind,
+) -> Vec<code_item::TypeDeclaration> {
+    let DeclarationAttributeInfo {
+        doc_string,
+        annotation,
+        opaque,
+        import_string_opt,
+        name_as,
+        unboxed_annotation,
+        tag_annotation,
+    } = attribute_info;
 
     let return_type_declaration =
         |mut type_declaration: code_item::TypeDeclaration| -> Vec<code_item::TypeDeclaration> {

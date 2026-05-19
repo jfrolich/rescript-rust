@@ -1,8 +1,7 @@
 // Port of compiler/gentype/TranslateSignatureFromTypes.ml:1-110.
 // This Stage 3 GenType port is intentionally not wired into the crate yet.
 
-use crate::parse_arena::{LocIdx, ParseArena};
-use crate::parser::ast::Attributes;
+use crate::parse_arena::ParseArena;
 use crate::types::decl::{ModuleType, SignatureItem, TypeKind};
 
 pub fn translate_type_declaration_from_types(
@@ -45,16 +44,14 @@ pub fn translate_type_declaration_from_types(
         }
         _ => crate::gentype::translate_type_declarations::DeclarationKind::NoDeclaration,
     };
-    let empty_attributes = Attributes::new();
-    crate::gentype::translate_type_declarations::traslate_declaration_kind(
+    crate::gentype::translate_type_declarations::traslate_declaration_kind_from_decl_attributes(
         ctx,
         arena,
         config,
         type_declaration.type_loc.clone(),
-        LocIdx::default(),
         output_file_relative,
         resolver,
-        &empty_attributes,
+        &type_declaration.type_attributes,
         type_env,
         &type_name,
         type_vars,
@@ -224,10 +221,6 @@ fn not_implemented(name: &str) -> crate::gentype::translation::T {
         "{name} compiler/gentype/TranslateSignatureFromTypes.ml"
     ));
     crate::gentype::translation::empty()
-}
-
-fn attributes_from_vec(attributes: &[crate::parser::ast::Attribute]) -> Attributes {
-    Attributes::from_vec(attributes.to_vec())
 }
 
 fn unwrap_uppercase_exotic(name: &str) -> &str {
