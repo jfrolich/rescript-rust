@@ -212,6 +212,13 @@ Run this checklist for each file after its first port and before compile work.
 ## Phase 8: Cross-File Resolution
 
 - [ ] Finish source-dir lookup.
+- [x] Pass package-local `-bs-project-root` into rewatch's in-process GenType
+  config so `GenTypeConfig.project_root`, `Paths.get_output_file_relative`,
+  and `ModuleResolver.resolve_module` follow the OCaml path at
+  `compiler/bsc/rescript_compiler_main.ml:266-269`,
+  `compiler/gentype/GenTypeConfig.ml:124-131`,
+  `compiler/gentype/Paths.ml:48-56`, and
+  `compiler/gentype/ModuleResolver.ml:111-164`.
 - [ ] Finish dependency-path lookup.
 - [ ] Finish shim resolution.
 - [ ] Finish namespace and suffix handling.

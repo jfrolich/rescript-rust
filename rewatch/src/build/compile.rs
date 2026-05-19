@@ -1751,11 +1751,19 @@ fn build_compiler_options(
                     .collect()
             })
             .unwrap_or_default();
-        let gentype_args = package.config.get_gentype_args(
+        // OCaml bsc wires -bs-project-root into GenTypeConfig.project_root at
+        // compiler/bsc/rescript_compiler_main.ml:266-269 before
+        // compiler/gentype/GenTypeConfig.ml:124-131 builds Config.t. Keep
+        // the in-process path on the same flag-shaped input so
+        // compiler/gentype/Paths.ml:48-56 and
+        // compiler/gentype/ModuleResolver.ml:111-164 resolve package-local
+        // output/source directories from the package root.
+        let mut gentype_args = package.config.get_project_root_args();
+        gentype_args.extend(package.config.get_gentype_args(
             current_package_dirs,
             Some(project_context.get_root_path()),
             &dep_paths,
-        );
+        ));
         Some(rescript_compiler::gentype::config::build_config_from_cli_args(
             package.config.get_namespace().to_suffix(),
             &gentype_args,

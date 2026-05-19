@@ -122,7 +122,7 @@ Current Rust in-process generated-output baseline:
 
 typescript-react-example: 56/71 generated outputs match, 15 changed, 0 missing, 0 extra, 17 diff hunks; OCaml typecheck 0, Rust typecheck 2
 stdlib-no-shims:          1/1 generated outputs match, 0 changed, 0 missing, 0 extra, 0 diff hunks; OCaml typecheck 0, Rust typecheck 0
-Tella:                    88/112 generated outputs match, 22 changed, 2 missing, 0 extra, 27 diff hunks; TypeScript typecheck not configured
+Tella:                    103/112 generated outputs match, 7 changed, 2 missing, 0 extra, 8 diff hunks; TypeScript typecheck not configured
 ```
 
 Older missing-output baselines before the in-process hook are superseded by the
@@ -280,7 +280,7 @@ Current generated-output parity:
 
 typescript-react-example: 56/71 generated outputs match, 15 changed, 0 missing, 0 extra, 17 diff hunks; OCaml typecheck 0, Rust typecheck 2
 stdlib-no-shims:          1/1 generated outputs match, 0 changed, 0 missing, 0 extra, 0 diff hunks; OCaml typecheck 0, Rust typecheck 0
-Tella:                    88/112 generated outputs match, 22 changed, 2 missing, 0 extra, 27 diff hunks; TypeScript typecheck not configured
+Tella:                    103/112 generated outputs match, 7 changed, 2 missing, 0 extra, 8 diff hunks; TypeScript typecheck not configured
 ```
 
 This improvement comes from aligning Rust's in-process typed artifact with the
@@ -291,6 +291,14 @@ paths in `compiler/gentype/Dependencies.ml:15-38` and
 `compiler/gentype/TranslateTypeExprFromTypes.ml:78-439`. That removes self
 imports and lets local `Core.Map.t`/`Core.Set.t` paths hit the same special
 cases as OCaml.
+
+The Tella import-path improvement comes from passing the same package-root flag
+into the rewatch in-process GenType config that the OCaml bsc CLI path sees:
+`compiler/bsc/rescript_compiler_main.ml:266-269` sets
+`GenTypeConfig.project_root`, `compiler/gentype/GenTypeConfig.ml:124-131`
+builds `Config.t` from it, and `compiler/gentype/Paths.ml:48-56` plus
+`compiler/gentype/ModuleResolver.ml:111-164` use it for relative output/source
+resolution.
 
 Debug verification:
 
