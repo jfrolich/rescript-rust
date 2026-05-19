@@ -16130,6 +16130,29 @@ fn generate_accessor_include(
     build_structure_signature_include(structure_items, signature_items, loc, arena)
 }
 
+fn gentype_attrs_for_derived_accessors(core_type: &CoreType, arena: &mut ParseArena) -> Attributes {
+    // OCaml compiler/frontend/ast_derive_projector.ml:30-38 and
+    // compiler/frontend/ast_derive_projector.ml:124-132 check whether the
+    // synthesized core type carries a GenType attribute; when it does, generated
+    // accessors receive exactly `Ast_attributes.gentype`
+    // from compiler/frontend/ast_attributes.ml:285-290.
+    let has_gentype = core_type.ptyp_attributes.iter().any(|(attr_name, _)| {
+        matches!(arena.get_string(attr_name.txt), "genType" | "gentype")
+    });
+
+    if has_gentype {
+        Attributes::from_vec(vec![(
+            Located {
+                txt: arena.intern_string("genType"),
+                loc: arena.none_loc(),
+            },
+            Payload::PStr(Box::new(vec![])),
+        )])
+    } else {
+        Attributes::new()
+    }
+}
+
 /// Generate accessor structure items and signature items for record fields
 fn generate_record_accessors_and_sigs(
     labels: &[current::LabelDeclaration],
@@ -16140,6 +16163,7 @@ fn generate_record_accessors_and_sigs(
 ) -> (Vec<StructureItem>, Vec<SignatureItem>) {
     let mut structure_items = Vec::new();
     let mut signature_items = Vec::new();
+    let gentype_attrs = gentype_attrs_for_derived_accessors(structure_core_type, arena);
 
     // OCaml uses Location.none (ghost) for generated expression/pattern locations
     // because Exp.field, Exp.ident, Pat.var, Pat.constraint_, Ast_compatible.fun_
@@ -16225,7 +16249,7 @@ fn generate_record_accessors_and_sigs(
                 ppat_attributes: Attributes::new(),
             }),
             pvb_expr: arena.push_expr(fun_expr),
-            pvb_attributes: Attributes::new(),
+            pvb_attributes: gentype_attrs.clone(),
             pvb_loc: none_loc,
         };
 
@@ -16264,7 +16288,7 @@ fn generate_record_accessors_and_sigs(
             },
             pval_type: arena.push_core_type(arrow_type),
             pval_prim: vec![],
-            pval_attributes: Attributes::new(),
+            pval_attributes: gentype_attrs.clone(),
             pval_loc: none_loc,
         };
 
@@ -16288,6 +16312,7 @@ fn generate_variant_accessors_and_sigs(
 ) -> (Vec<StructureItem>, Vec<SignatureItem>) {
     let mut structure_items = Vec::new();
     let mut signature_items = Vec::new();
+    let gentype_attrs = gentype_attrs_for_derived_accessors(structure_core_type, arena);
     let none_loc = arena.none_loc();
 
     for ctor in constructors {
@@ -16347,7 +16372,7 @@ fn generate_variant_accessors_and_sigs(
                     ppat_attributes: Attributes::new(),
                 }),
                 pvb_expr: arena.push_expr(ctor_expr),
-                pvb_attributes: Attributes::new(),
+                pvb_attributes: gentype_attrs.clone(),
                 pvb_loc: none_loc,
             };
 
@@ -16367,7 +16392,7 @@ fn generate_variant_accessors_and_sigs(
                 },
                 pval_type: arena.push_core_type(signature_annotate_type),
                 pval_prim: vec![],
-                pval_attributes: Attributes::new(),
+                pval_attributes: gentype_attrs.clone(),
                 pval_loc: none_loc,
             };
 
@@ -16473,7 +16498,7 @@ fn generate_variant_accessors_and_sigs(
                     ppat_attributes: Attributes::new(),
                 }),
                 pvb_expr: arena.push_expr(final_expr),
-                pvb_attributes: Attributes::new(),
+                pvb_attributes: gentype_attrs.clone(),
                 pvb_loc: none_loc,
             };
 
@@ -16507,7 +16532,7 @@ fn generate_variant_accessors_and_sigs(
                 },
                 pval_type: arena.push_core_type(arrow_type),
                 pval_prim: vec![],
-                pval_attributes: Attributes::new(),
+                pval_attributes: gentype_attrs.clone(),
                 pval_loc: none_loc,
             };
 

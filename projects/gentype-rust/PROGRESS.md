@@ -62,6 +62,12 @@ support in Rust is still incomplete:
   `compiler/gentype/Paths.ml:61-86`, so lowercase source files such as
   `counter.res` emit imports from `counter.res.js` rather than the capitalized
   compiler module path.
+- Rust deriving accessors now keep the `@genType` marker on generated accessor
+  values/signatures when the source type has `@deriving(accessors)`. This
+  follows `compiler/frontend/ast_derive_projector.ml:30-38`,
+  `compiler/frontend/ast_derive_projector.ml:124-132`, and
+  `compiler/frontend/ast_attributes.ml:285-290`, allowing GenType to see the
+  same generated accessor annotations as the OCaml pipeline.
 
 ## Reference Inventory
 
@@ -127,7 +133,7 @@ Current Rust in-process generated-output baseline:
 ```text
 ./scripts/test_gentype_output_parity.sh
 
-typescript-react-example: 60/71 generated outputs match, 11 changed, 0 missing, 0 extra, 13 diff hunks; OCaml typecheck 0, Rust typecheck 2
+typescript-react-example: 61/71 generated outputs match, 10 changed, 0 missing, 0 extra, 12 diff hunks; OCaml typecheck 0, Rust typecheck 2
 stdlib-no-shims:          1/1 generated outputs match, 0 changed, 0 missing, 0 extra, 0 diff hunks; OCaml typecheck 0, Rust typecheck 0
 Tella:                    103/112 generated outputs match, 7 changed, 2 missing, 0 extra, 8 diff hunks; TypeScript typecheck not configured
 ```
