@@ -31,8 +31,8 @@ use crate::lambda::lam_compile::LambdaCompiler;
 use crate::location::Location;
 use crate::parse_arena::{ExprIdx, LocIdx, ModExprIdx, ParseArena, StrIdx};
 use crate::parser::ast::{
-    ArgLabel as ParserArgLabel, Attribute, Constant, Expression, ExpressionDesc, ModuleExpr,
-    ModuleExprDesc, PatternDesc, Payload, Signature, SignatureItemDesc, Structure,
+    ArgLabel as ParserArgLabel, Attribute, Attributes, Constant, Expression, ExpressionDesc,
+    ModuleExpr, ModuleExprDesc, PatternDesc, Payload, Signature, SignatureItemDesc, Structure,
     StructureItemDesc,
 };
 use crate::parser::{Longident, Parser, code_frame, jsx_ppx, module};
@@ -4594,6 +4594,38 @@ fn interface_source_name(source_file: &str) -> String {
     let mut intf = std::path::PathBuf::from(source_file);
     intf.set_extension("resi");
     intf.to_string_lossy().into_owned()
+}
+
+fn parsed_signature_has_gentype_ignore_interface(arena: &ParseArena, signature: &Signature) -> bool {
+    // OCaml compiler/gentype/GenTypeMain.ml:93-134 discovers
+    // @@genType.ignoreInterface while scanning the interface CMT before
+    // deciding whether the implementation artifact should own GenType output.
+    signature.iter().any(|item| match item.psig_desc.as_ref() {
+        SignatureItemDesc::Psig_attribute(attribute) => {
+            let attributes = Attributes::from_vec(vec![attribute.as_ref().clone()]);
+            crate::gentype::annotation::get_attribute_payload(
+                arena,
+                crate::gentype::annotation::tag_is_gentype_ignore_interface,
+                &attributes,
+            )
+            .is_some()
+        }
+        _ => false,
+    })
+}
+
+fn interface_source_has_gentype_ignore_interface(source_file: &str) -> bool {
+    let intf_name = interface_source_name(source_file);
+    let Ok(bytes) = std::fs::read(&intf_name) else {
+        return false;
+    };
+    let source = crate::source_text::latin1_bytes_to_string(bytes);
+    let mut parser = Parser::new(&intf_name, &source);
+    let signature = module::parse_signature(&mut parser);
+    if parser.has_errors() {
+        return false;
+    }
+    parsed_signature_has_gentype_ignore_interface(parser.arena(), &signature)
 }
 
 fn source_has_interface(options: &CompilerOptions, source_file: &str) -> bool {
@@ -11271,6 +11303,9 @@ pub fn compile_source_to_js_with_options(
     let source_file_for_interface = options.source_filename.as_deref().unwrap_or(filename);
     let has_resi = source_file_for_interface.ends_with(".res")
         && source_has_interface(options, source_file_for_interface);
+    let gentype_ignore_interface = options.gentype_config.is_some()
+        && has_resi
+        && interface_source_has_gentype_ignore_interface(source_file_for_interface);
     if options.assume_compiled_interface
         && source_file_for_interface.ends_with(".res")
         && !compiled_interface_file_exists(options, source_file_for_interface)
@@ -11362,6 +11397,38 @@ pub fn compile_source_to_js_with_options(
             options.source_filename.as_deref(),
             has_resi,
         );
+    }
+
+    if options.gentype_config.is_some() && (!has_resi || gentype_ignore_interface) {
+        let module_name = current_unit_name.clone().unwrap_or_else(|| {
+            module_name_from_source_filename(source_file_for_interface)
+        });
+        if !has_resi
+            && let Some(simple_signature) = inferred_simple_signature.as_deref()
+        {
+            // OCaml saves the inferred signature before GenType consumes CMT
+            // data in compiler/ml/typemod.ml:1779-1788 and
+            // compiler/gentype/GenTypeMain.ml:136-175. The direct Rust CLI
+            // path does not write/read a CMT, so expose the same pre-finalized
+            // raw signature to GenType's alias scraping path.
+            let current_raw_sig = std::sync::Arc::new(
+                crate::types::typecore::copy_lookup_signature_for_subst(
+                    simple_signature,
+                    &type_ctx,
+                ),
+            );
+            type_ctx.register_gentype_raw_module_sig(&module_name, current_raw_sig.clone());
+            type_ctx.register_raw_module_sig(&module_name, current_raw_sig);
+        }
+        process_gentype_typed_artifact_if_enabled(
+            options,
+            crate::gentype::main::TypedArtifactAnnots::Implementation(&typed_structure),
+            parser.arena(),
+            &type_ctx,
+            source_file_for_interface,
+            &module_name,
+            false,
+        )?;
     }
 
     // Typedtree parity runs only need typechecking output.
