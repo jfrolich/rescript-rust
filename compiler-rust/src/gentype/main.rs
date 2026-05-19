@@ -39,6 +39,7 @@ pub struct TypedArtifact<'a> {
     pub arena: &'a ParseArena,
     pub ctx: &'a TypeContext,
     pub source_file: Option<&'a str>,
+    pub compiler_module_name: crate::gentype::module_name::T,
     pub file_name: crate::gentype::module_name::T,
     pub is_interface: bool,
 }
@@ -179,8 +180,16 @@ fn current_module_names_for_typed_artifact(artifact: &TypedArtifact<'_>) -> Vec<
     // The OCaml GenType entry point reads CMT/CMTI files selected by
     // compiler/gentype/Paths.ml:61-86. Rust's in-process hook receives the
     // typedtree before that file boundary, so keep both the compiler module
-    // name and source basename available for current-unit path stripping.
-    let mut names = vec![crate::gentype::module_name::to_string(&artifact.file_name)];
+    // name from compiler/core/js_implementation.ml:51/142 and the GenType
+    // file name from compiler/gentype/GenTypeMain.ml:141 available for
+    // current-unit path stripping.
+    let mut names = vec![crate::gentype::module_name::to_string(
+        &artifact.compiler_module_name,
+    )];
+    let file_name = crate::gentype::module_name::to_string(&artifact.file_name);
+    if !file_name.is_empty() && !names.contains(&file_name) {
+        names.push(file_name);
+    }
     if let Some(source_file) = artifact.source_file {
         if let Some(stem) = std::path::Path::new(source_file)
             .file_stem()

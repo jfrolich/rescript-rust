@@ -55,6 +55,13 @@ support in Rust is still incomplete:
   `compiler/gentype/Paths.ml:61-86`, before the paths reach
   `compiler/gentype/Dependencies.ml:15-38` and
   `compiler/gentype/TranslateTypeExprFromTypes.ml:78-439`.
+- Rust in-process GenType now keeps the compiler module name separate from the
+  GenType output-prefix file name. The file name follows
+  `compiler/core/js_implementation.ml:72`, `compiler/core/js_implementation.ml:170`,
+  `compiler/gentype/GenTypeMain.ml:141`, and
+  `compiler/gentype/Paths.ml:61-86`, so lowercase source files such as
+  `counter.res` emit imports from `counter.res.js` rather than the capitalized
+  compiler module path.
 
 ## Reference Inventory
 
@@ -120,7 +127,7 @@ Current Rust in-process generated-output baseline:
 ```text
 ./scripts/test_gentype_output_parity.sh
 
-typescript-react-example: 58/71 generated outputs match, 13 changed, 0 missing, 0 extra, 15 diff hunks; OCaml typecheck 0, Rust typecheck 2
+typescript-react-example: 60/71 generated outputs match, 11 changed, 0 missing, 0 extra, 13 diff hunks; OCaml typecheck 0, Rust typecheck 2
 stdlib-no-shims:          1/1 generated outputs match, 0 changed, 0 missing, 0 extra, 0 diff hunks; OCaml typecheck 0, Rust typecheck 0
 Tella:                    103/112 generated outputs match, 7 changed, 2 missing, 0 extra, 8 diff hunks; TypeScript typecheck not configured
 ```
@@ -278,7 +285,7 @@ Current generated-output parity:
 ```text
 ./scripts/test_gentype_output_parity.sh
 
-typescript-react-example: 58/71 generated outputs match, 13 changed, 0 missing, 0 extra, 15 diff hunks; OCaml typecheck 0, Rust typecheck 2
+typescript-react-example: 60/71 generated outputs match, 11 changed, 0 missing, 0 extra, 13 diff hunks; OCaml typecheck 0, Rust typecheck 2
 stdlib-no-shims:          1/1 generated outputs match, 0 changed, 0 missing, 0 extra, 0 diff hunks; OCaml typecheck 0, Rust typecheck 0
 Tella:                    103/112 generated outputs match, 7 changed, 2 missing, 0 extra, 8 diff hunks; TypeScript typecheck not configured
 ```
@@ -305,13 +312,21 @@ The record-field quote improvement comes from mirroring OCaml's
 Rust now preserves apostrophes inside double-quoted TypeScript property names
 instead of using `escape_default`'s Rust literal escaping.
 
+The lowercase source import improvement comes from deriving the in-process
+GenType `file_name` from the CMT/output-prefix shape rather than from the
+capitalized compiler module name. This follows the OCaml call chain from
+`compiler/core/js_implementation.ml:72` / `170` into
+`compiler/gentype/GenTypeMain.ml:141` and `compiler/gentype/Paths.ml:61-86`.
+The compiler module name is still threaded separately for current-unit type
+path stripping.
+
 Debug verification:
 
 ```text
 cargo build --manifest-path compiler-rust/Cargo.toml
 cargo build --manifest-path rewatch/Cargo.toml
 ./scripts/test_gentype_output_parity.sh
-git diff --check -- compiler-rust/src/driver.rs compiler-rust/src/gentype/emit_js.rs compiler-rust/src/gentype/gen_ident.rs projects/gentype-rust/PROGRESS.md projects/gentype-rust/RALPH_TODO.md
+git diff --check -- compiler-rust/src/driver.rs compiler-rust/src/gentype/emit_js.rs compiler-rust/src/gentype/gen_ident.rs compiler-rust/src/gentype/main.rs compiler-rust/src/gentype/paths.rs projects/gentype-rust/PROGRESS.md projects/gentype-rust/RALPH_TODO.md
 ```
 
 ## Recent Verification

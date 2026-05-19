@@ -131,6 +131,11 @@ Run this checklist for each file after its first port and before compile work.
 - [x] Add `gentype::main::process_typed_artifact`.
 - [x] Add `TypedArtifact` carrying module name, source file, annotation source,
   typedtree payload, and type-error state.
+- [x] Keep the compiler module name separate from the GenType output-prefix
+  file name in the in-process typed-artifact boundary, matching
+  `compiler/core/js_implementation.ml:72`, `compiler/core/js_implementation.ml:170`,
+  `compiler/gentype/GenTypeMain.ml:141`, and
+  `compiler/gentype/Paths.ml:61-86`.
 - [x] Wire reviewed `paths.rs`, `module_name.rs`, and `generated_files.rs`
   behavior into the in-process typed-artifact entry point.
 - [x] Invoke Rust GenType from rewatch in-process typed interfaces and

@@ -93,6 +93,15 @@ pub fn get_module_name(cmt: &str) -> crate::gentype::module_name::T {
     crate::gentype::module_name::from_string_unsafe(basename)
 }
 
+pub fn get_module_name_from_source_path(source_path: &str) -> crate::gentype::module_name::T {
+    // The in-process GenType hook has the source filename instead of the
+    // outputprefix.cmt passed by compiler/core/js_implementation.ml:72 and
+    // compiler/core/js_implementation.ml:170. Rebuild that cmt-shaped input
+    // before applying compiler/gentype/Paths.ml:61-86 so lowercase source
+    // basenames keep their OCaml GenType import name.
+    get_module_name(&format!("{}.cmt", chop_extension(source_path)))
+}
+
 pub fn get_cmt_file(cmt: &str) -> String {
     let path_cmt = if Path::new(cmt).is_relative() {
         std::env::current_dir()
