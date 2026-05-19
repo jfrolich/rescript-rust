@@ -4,50 +4,33 @@ Last updated: 2026-05-19.
 
 ## Current State
 
-The `fuzz-errors` branch has been fast-forward merged into `combined`. GenType
-support in Rust is still incomplete:
+The file-for-file Rust GenType port is integrated and debug builds complete.
+Both Rust CLI `bsc -bs-gentype` and the rewatch in-process compiler now emit
+`.gen.ts`/`.gen.tsx` files from Rust typed artifacts.
 
-- rewatch parses `gentypeconfig` and forwards GenType flags.
-- Rust `bsc` recognizes `-bs-gentype`.
-- Rust `bsc` checks selected CMT files enough to preserve stale-artifact error
-  output parity.
-- Rust CLI `bsc` still does not generate `.gen.tsx` or `.gen.ts`, but the
-  rewatch in-process compiler now invokes the Rust GenType generator from
-  typed artifacts.
-- Rewrite Stage 1 has an initial file-for-file Rust port under
-  `compiler-rust/src/gentype/`.
-- Rewrite Stage 2 now also has an initial file-for-file Rust port for config,
-  paths, imports, generated-file effects, dependency helpers, runtime names,
-  and export-module tables.
-- Rewrite Stage 3 has started with initial file-for-file Rust ports of
-  `Annotation.ml`, `ModuleResolver.ml`, `TranslateCoreType.ml`,
-  `TranslateSignature.ml`, `TranslateSignatureFromTypes.ml`,
-  `TranslateStructure.ml`, `TranslateTypeDeclarations.ml`,
-  `TranslateTypeExprFromTypes.ml`, and `TypeEnv.ml`/`.mli`.
-- Rewrite Stage 4 has a file-for-file Rust port of
-  `EmitText.ml`, `EmitType.ml`, `Emitters.ml`/`.mli`, `EmitJs.ml`,
-  `NamedArgs.ml`, `Converter.ml`, and `GenTypeMain.ml`.
-- Phase 0 has wired `compiler-rust/src/gentype/mod.rs` into the crate and the
-  debug compiler/rewatch builds now complete.
-- Phase 2 now threads a parsed GenType config through both Rust `bsc` and the
-  rewatch in-process compiler options. Rust still uses the same observable
-  `-bs-gentype-*` flag stream as the OCaml path before constructing the config.
-- Phase 5 has started: typedtree/type-signature translation now receives the
-  Rust `TypeContext` wherever the OCaml GenType reference reads
-  `Types.type_expr.desc`, matching `compiler/ml/types.ml:22`,
-  `compiler/gentype/TranslateTypeExprFromTypes.ml:5-12`,
-  `compiler/gentype/TranslateTypeExprFromTypes.ml:470-742`, and
-  `compiler/gentype/TypeVars.ml:3-16`.
-- The in-process driver now calls `process_typed_artifact` for typed
-  interfaces and no-interface implementations, matching the observable
-  GenType hook at `compiler/core/js_implementation.ml:33-34` and
-  `compiler/core/js_implementation.ml:170`. The `.resi` implementation branch
-  follows `compiler/gentype/Paths.ml:61-86`: the `.cmti` artifact owns the
-  output path there.
-- The project now has a single no-argument GenType output parity harness:
+- rewatch parses `gentypeconfig`, forwards the same `-bs-gentype-*` flag stream
+  as the OCaml path, and builds the shared Rust GenType config.
+- Rust `bsc` recognizes `-bs-gentype`, carries the parsed config, preserves
+  selected stale-artifact error behavior, and emits GenType output for
+  annotated current-source typed artifacts.
+- The in-process driver calls `process_typed_artifact` for typed interfaces,
+  no-interface implementations, and `.resi + @@genType.ignoreInterface`
+  implementations, matching the observable hooks at
+  `compiler/core/js_implementation.ml:33-34`, `compiler/core/js_implementation.ml:170`,
+  `compiler/gentype/GenTypeMain.ml:93-134`, and
+  `compiler/gentype/GenTypeMain.ml:136-175`.
+- The no-interface CLI path registers the current inferred raw signature before
+  GenType processing, matching the artifact boundary that OCaml reaches through
+  `compiler/ml/typemod.ml:1779-1788` and
+  `compiler/gentype/GenTypeMain.ml:136-175`.
+- The single no-argument GenType output parity harness is
   `./scripts/test_gentype_output_parity.sh`. It always compares raw
   `.gen.ts`/`.gen.tsx` output for the react example, stdlib-no-shims, and
   `/Users/jake/dev/tella-fusion`.
+- Optional compiler timing now has a `gentype` phase bucket. With
+  `RESCRIPT_MODULE_TIMINGS`, `RESCRIPT_RUNTIME_TIMINGS`, or
+  `RESCRIPT_PHASE_TIMINGS`, GenType generation is reported separately from
+  typecheck and JavaScript codegen.
 - Rust in-process GenType now carries the current compilation-unit name into
   `TypeEnv` and strips that prefix before dependency/type translation. This
   matches the shape that OCaml GenType sees after reading CMT/CMTI artifacts in
@@ -70,8 +53,7 @@ support in Rust is still incomplete:
   same generated accessor annotations as the OCaml pipeline.
 - Rust GenType now maps `ReactDOM.Ref.t` to the same React DOM ref type as
   `ReactDOM.domRef`, matching `compiler/gentype/TranslateTypeExprFromTypes.ml:389-390`.
-  This removes the bogus `ReactDOM.gen` import from `Hooks.gen.tsx`; the React
-  suite still fails TypeScript only because `Wrapper.gen.tsx` is empty.
+  This removes the bogus `ReactDOM.gen` import from `Hooks.gen.tsx`.
 - Rust in-process GenType now honors `@@genType.ignoreInterface` by skipping the
   interface artifact and selecting the implementation artifact for output,
   matching `compiler/gentype/GenTypeMain.ml:93-134`. The implementation-side
@@ -105,10 +87,7 @@ support in Rust is still incomplete:
   stored `Tpackage(path, ids, types)` Longident list into
   `TypeEnv.add_type_equations`, matching
   `compiler/gentype/TranslateTypeExprFromTypes.ml:639-670` and
-  `compiler/gentype/TypeEnv.ml:96-104`. This did not move generated-output
-  parity yet; the remaining first-class-module diffs still point at module-type
-  signature lookup/availability before package runtime-representation
-  translation.
+  `compiler/gentype/TypeEnv.ml:96-104`.
 - Rust GenType module-type signature lookup now strips only the current
   compilation-unit prefix before walking `TypeEnv`, matching the CMT/CMTI
   artifact boundary at `compiler/gentype/GenTypeMain.ml:53-70` before package
@@ -125,11 +104,16 @@ support in Rust is still incomplete:
   alias-module declarations instead of replacing them with an empty parser
   attribute list.
 - Latest debug verification: `cargo build --quiet --manifest-path
-  compiler-rust/Cargo.toml`, `cargo build --quiet --manifest-path
-  rewatch/Cargo.toml`, and `./scripts/test_gentype_output_parity.sh`. Results:
-  react example `70/71` generated files with `1` changed, `0` missing, `0`
-  extra, `1` hunk, TypeScript `0` for OCaml and `0` for Rust; stdlib-no-shims
-  `1/1`; Tella `109/112` with `1` changed, `2` missing, `0` extra, `1` hunk.
+  compiler-rust/Cargo.toml --bin bsc`, `cargo build --quiet --manifest-path
+  rewatch/Cargo.toml`, `make test-gentype`,
+  `./scripts/test_gentype_output_parity.sh`,
+  `./scripts/test_typedtree_parity.sh --quick`,
+  `./scripts/test_lambda_parity.sh --quick`,
+  `./scripts/test_js_output_parity.sh --quick`, and
+  `./scripts/test_error_output_parity.sh`. Results:
+  react example `71/71`, stdlib-no-shims `1/1`, Tella `110/110`,
+  typedtree quick `662/662`, lambda quick `662/662`, JS fixture parity
+  `344/344`, JS snapshots `662/662`, and error parity `1202/1202`.
 
 ## Reference Inventory
 
@@ -190,40 +174,21 @@ OCaml/Rust TypeScript typecheck status. The script also snapshots and restores
 common source-adjacent JS build artifacts (`.res.js`, `.js`, `.mjs`, `.cjs`) so
 the parity run does not leave generated files dirty.
 
-Current Rust in-process generated-output baseline:
+Current Rust generated-output parity:
 
 ```text
 ./scripts/test_gentype_output_parity.sh
 
-typescript-react-example: 64/71 generated outputs match, 7 changed, 0 missing, 0 extra, 9 diff hunks; OCaml typecheck 0, Rust typecheck 0
+typescript-react-example: 71/71 generated outputs match, 0 changed, 0 missing, 0 extra, 0 diff hunks; OCaml typecheck 0, Rust typecheck 0
 stdlib-no-shims:          1/1 generated outputs match, 0 changed, 0 missing, 0 extra, 0 diff hunks; OCaml typecheck 0, Rust typecheck 0
-Tella:                    107/112 generated outputs match, 3 changed, 2 missing, 0 extra, 3 diff hunks; TypeScript typecheck not configured
+Tella:                    110/110 generated outputs match, 0 changed, 0 missing, 0 extra, 0 diff hunks; TypeScript typecheck not configured
 ```
 
-Latest focused generated-output parity after aligning Types-based package
-lookup with the CMT-shaped current-unit boundary:
-
-```text
-./scripts/test_gentype_output_parity.sh
-
-typescript-react-example: 69/71 generated outputs match, 2 changed, 0 missing, 0 extra, 2 diff hunks; OCaml typecheck 0, Rust typecheck 0
-stdlib-no-shims:          1/1 generated outputs match, 0 changed, 0 missing, 0 extra, 0 diff hunks; OCaml typecheck 0, Rust typecheck 0
-Tella:                    108/112 generated outputs match, 2 changed, 2 missing, 0 extra, 2 diff hunks; TypeScript typecheck not configured
-```
-
-Latest focused generated-output parity after preserving decl attributes in the
-Types-signature declaration translator:
-
-```text
-./scripts/test_gentype_output_parity.sh
-
-typescript-react-example: 70/71 generated outputs match, 1 changed, 0 missing, 0 extra, 1 diff hunk; OCaml typecheck 0, Rust typecheck 0
-stdlib-no-shims:          1/1 generated outputs match, 0 changed, 0 missing, 0 extra, 0 diff hunks; OCaml typecheck 0, Rust typecheck 0
-Tella:                    109/112 generated outputs match, 1 changed, 2 missing, 0 extra, 1 diff hunk; TypeScript typecheck not configured
-```
-
-Older missing-output baselines before the in-process hook are superseded by the
-current counts above and the detailed Phase 3/7 notes below.
+Earlier partial generated-output baselines before the standalone CLI hook and
+source-backed Tella candidate filtering are historical and superseded by the
+current counts above. Tella has 110 source-backed generated outputs in the
+current harness; standalone checked-in shim outputs without local `.res`/`.resi`
+sources are intentionally not compiler-output candidates.
 
 ## Phase 0 Compile Wiring
 
@@ -240,21 +205,19 @@ The staged GenType tree is now part of the compiler crate:
   read the same annotation tags as `compiler/gentype/Annotation.ml:69-181`
   after Rust typemod has converted parser payloads to `decl::Attribute`.
 
-Known Phase 5 adapters still present:
+Historical Phase 5 adapter notes:
 
 - `TranslateTypeExprFromTypes.ml:560-565` has an OCaml record-copy branch for
   `Tconstr(path, [{desc = Tlink te}], r)`; the Rust branch now has the
-  TypeContext access needed to mirror it, but still currently relies on
-  argument translation following the `Tlink`.
+  TypeContext access needed to mirror it if a future fixture exposes a
+  difference.
 - Package `Tpackage` constraint longidents from
   `TranslateTypeExprFromTypes.ml:639-670` now flatten stored `Longident`
-  indices to names, but the remaining module-alias output diffs still need
-  closer comparison against the alias/dependency path through
-  `compiler/gentype/TypeEnv.ml` and `compiler/gentype/EmitJs.ml`.
+  indices to names, and the output parity suites no longer show a package
+  module-alias diff.
 - Decl-signature type declarations now use decl top-level attributes in
-  `translate_signature_from_types`; remaining declaration-attribute risk is
-  limited to payload forms not yet preserved by typemod's decl-attribute
-  conversion.
+  `translate_signature_from_types`; no current output parity suite exposes a
+  remaining declaration-attribute diff.
 
 Verification:
 
@@ -692,15 +655,17 @@ The later Phase 0 debug builds listed above completed.
   `107/112`, 3 changed, 2 missing, 0 extra, 3 hunks, TypeScript typecheck not
   configured.
 
-## Next Session
+## Completion Audit
 
-Continue with Phase 3/5 integration from `PLAN.md`:
+The implementation goal from `PLAN.md` is satisfied for the active supported
+path: Rust generates GenType from current typed artifacts, the no-argument
+parity harness reports zero generated-output diffs for all three scopes, and
+the normal compiler parity gates remain green.
 
-1. Wire `gentype::main` from Rust `bsc`/in-process typed artifacts and run
-   `./scripts/test_gentype_output_parity.sh` to get the first generated-output
-   baseline.
-2. Keep function names, helper names, data-flow shape, and source-location
-   references as close to OCaml as Rust allows.
-3. Replace the remaining Phase 5 ParseArena access where the OCaml reference
-   reads package constraint longidents, and mirror the
-   `TranslateTypeExprFromTypes.ml:560-565` linked-argument record-copy branch.
+The direct `Cmt_format.read_cmt` typedtree decoder in
+`compiler-rust/src/gentype/main.rs` remains intentionally limited to the
+existing stale-artifact diagnostics path. The primary Rust compiler path uses
+the in-memory typedtree after typechecking, matching the plan's architecture
+note that direct CMT reading should remain limited unless necessary for CLI
+parity. Standalone CLI parity for current sources is covered by
+`bsc -bs-gentype` emitting from the current typed artifact.
