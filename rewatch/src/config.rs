@@ -1400,12 +1400,12 @@ pub mod tests {
         "#;
 
         let config = serde_json::from_str::<Config>(json).unwrap();
-        if let Some(OneOrMore::Single(source)) = config.sources {
-            let source = source.to_qualified_without_children(None);
-            assert_eq!(source.type_, Some(String::from("dev")));
-        } else {
-            dbg!(config.sources);
-            unreachable!()
+        match config.sources {
+            Some(OneOrMore::Single(source)) => {
+                let source = source.to_qualified_without_children(None);
+                assert_eq!(source.type_, Some(String::from("dev")));
+            }
+            other => panic!("Expected single dev source, got {other:?}"),
         }
     }
 
@@ -1432,14 +1432,14 @@ pub mod tests {
         "#;
 
         let config = serde_json::from_str::<Config>(json).unwrap();
-        if let Some(OneOrMore::Multiple(sources)) = config.sources {
-            assert_eq!(sources.len(), 2);
-            let test_dir = sources[1].to_qualified_without_children(None);
+        match config.sources {
+            Some(OneOrMore::Multiple(sources)) => {
+                assert_eq!(sources.len(), 2);
+                let test_dir = sources[1].to_qualified_without_children(None);
 
-            assert_eq!(test_dir.type_, Some(String::from("dev")));
-        } else {
-            dbg!(config.sources);
-            unreachable!()
+                assert_eq!(test_dir.type_, Some(String::from("dev")));
+            }
+            other => panic!("Expected multiple dev sources, got {other:?}"),
         }
     }
 
@@ -1853,16 +1853,13 @@ pub mod tests {
         "#;
 
         let config = Config::new_from_json_string(json).expect("a valid json string");
-        if let Some(flags) = &config.compiler_flags {
-            if let Some(OneOrMore::Single(flag)) = flags.first() {
+        match config.compiler_flags.as_ref().and_then(|flags| flags.first()) {
+            Some(OneOrMore::Single(flag)) => {
                 assert_eq!(flag.as_str(), "-open ABC");
-            } else {
-                dbg!(config.compiler_flags);
-                unreachable!("Expected first flag to be OneOrMore::Single");
             }
-        } else {
-            dbg!(config.compiler_flags);
-            unreachable!("Expected compiler flags to be Some");
+            other => {
+                panic!("Expected first compiler flag to be OneOrMore::Single, got {other:?}")
+            }
         }
         assert!(config.get_deprecations().is_empty());
     }
