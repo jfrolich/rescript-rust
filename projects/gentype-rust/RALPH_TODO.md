@@ -155,6 +155,11 @@ Run this checklist for each file after its first port and before compile work.
 ## Phase 5: Type Translation
 
 - [ ] Integrate reviewed `type_env.rs`.
+- [x] Strip only the current compilation-unit prefix before dependency/type
+  translation, matching CMT-shaped OCaml GenType input from
+  `compiler/gentype/GenTypeMain.ml:53-70` and `compiler/gentype/Paths.ml:61-86`
+  as it reaches `compiler/gentype/Dependencies.ml:15-38` and
+  `compiler/gentype/TranslateTypeExprFromTypes.ml:78-439`.
 - [x] Thread `TypeContext` through `type_vars.rs` so
   `extract_from_type_expr_refs` reads actual `Tvar` names like
   `compiler/gentype/TypeVars.ml:3-16`.

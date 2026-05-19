@@ -1,7 +1,7 @@
 // Port of compiler/gentype/Dependencies.ml:1-73.
 // This Stage 2 GenType port is intentionally not wired into the crate yet.
 
-use crate::gentype::gen_type_common::{Dep, dep_to_string};
+use crate::gentype::gen_type_common::{dep_to_string, Dep};
 use crate::types::Path;
 
 pub fn handle_namespace(name: &str, dep: &Dep) -> Dep {
@@ -19,6 +19,9 @@ pub fn from_path1(
     type_env: &crate::gentype::type_env::T,
     path: &Path,
 ) -> (crate::gentype::type_env::T, Dep) {
+    let stripped_path = crate::gentype::type_env::strip_current_module_prefix(path, type_env);
+    let path = stripped_path.as_ref().unwrap_or(path);
+
     match path {
         Path::Pident(id) => {
             let name = id.name();

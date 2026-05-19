@@ -1,6 +1,6 @@
 # Rust GenType Progress
 
-Last updated: 2026-05-18.
+Last updated: 2026-05-19.
 
 ## Current State
 
@@ -48,6 +48,13 @@ support in Rust is still incomplete:
   `./scripts/test_gentype_output_parity.sh`. It always compares raw
   `.gen.ts`/`.gen.tsx` output for the react example, stdlib-no-shims, and
   `/Users/jake/dev/tella-fusion`.
+- Rust in-process GenType now carries the current compilation-unit name into
+  `TypeEnv` and strips that prefix before dependency/type translation. This
+  matches the shape that OCaml GenType sees after reading CMT/CMTI artifacts in
+  `compiler/gentype/GenTypeMain.ml:53-70`, selected through
+  `compiler/gentype/Paths.ml:61-86`, before the paths reach
+  `compiler/gentype/Dependencies.ml:15-38` and
+  `compiler/gentype/TranslateTypeExprFromTypes.ml:78-439`.
 
 ## Reference Inventory
 
@@ -108,18 +115,18 @@ OCaml/Rust TypeScript typecheck status. The script also snapshots and restores
 common source-adjacent JS build artifacts (`.res.js`, `.js`, `.mjs`, `.cjs`) so
 the parity run does not leave generated files dirty.
 
-Current real Rust in-process generated-output baseline:
+Current Rust in-process generated-output baseline:
 
 ```text
 ./scripts/test_gentype_output_parity.sh
 
-typescript-react-example: 0/71 generated outputs match, 71 missing, 0 changed, 0 extra, 0 diff hunks; OCaml typecheck 0, Rust typecheck 2
-stdlib-no-shims:          0/1 generated outputs match, 1 missing, 0 changed, 0 extra, 0 diff hunks; OCaml typecheck 0, Rust typecheck 2
-Tella:                    0/112 generated outputs match, 112 missing, 0 changed, 0 extra, 0 diff hunks; TypeScript typecheck not configured
+typescript-react-example: 56/71 generated outputs match, 15 changed, 0 missing, 0 extra, 17 diff hunks; OCaml typecheck 0, Rust typecheck 2
+stdlib-no-shims:          1/1 generated outputs match, 0 changed, 0 missing, 0 extra, 0 diff hunks; OCaml typecheck 0, Rust typecheck 0
+Tella:                    88/112 generated outputs match, 22 changed, 2 missing, 0 extra, 27 diff hunks; TypeScript typecheck not configured
 ```
 
-Older missing-output baseline before the in-process hook. Current baseline is
-listed under "Phase 3/7 In-Process Generation Hook" below.
+Older missing-output baselines before the in-process hook are superseded by the
+current counts above and the detailed Phase 3/7 notes below.
 
 ## Phase 0 Compile Wiring
 
@@ -271,10 +278,19 @@ Current generated-output parity:
 ```text
 ./scripts/test_gentype_output_parity.sh
 
-typescript-react-example: 30/71 generated outputs match, 41 changed, 0 missing, 0 extra, 69 diff hunks; OCaml typecheck 0, Rust typecheck 2
+typescript-react-example: 56/71 generated outputs match, 15 changed, 0 missing, 0 extra, 17 diff hunks; OCaml typecheck 0, Rust typecheck 2
 stdlib-no-shims:          1/1 generated outputs match, 0 changed, 0 missing, 0 extra, 0 diff hunks; OCaml typecheck 0, Rust typecheck 0
-Tella:                    46/112 generated outputs match, 64 changed, 2 missing, 0 extra, 86 diff hunks; TypeScript typecheck not configured
+Tella:                    88/112 generated outputs match, 22 changed, 2 missing, 0 extra, 27 diff hunks; TypeScript typecheck not configured
 ```
+
+This improvement comes from aligning Rust's in-process typed artifact with the
+CMT-shaped input that OCaml GenType reads. `main.rs` records the current module
+name selected by `compiler/gentype/Paths.ml:61-86`; `type_env.rs` strips exactly
+that compilation-unit prefix before the reference dependency/type translation
+paths in `compiler/gentype/Dependencies.ml:15-38` and
+`compiler/gentype/TranslateTypeExprFromTypes.ml:78-439`. That removes self
+imports and lets local `Core.Map.t`/`Core.Set.t` paths hit the same special
+cases as OCaml.
 
 Debug verification:
 

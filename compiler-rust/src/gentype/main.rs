@@ -137,7 +137,9 @@ pub fn translate_typed_artifact(
     artifact: &TypedArtifact<'_>,
 ) -> crate::gentype::translation::T {
     // Mirrors compiler/gentype/GenTypeMain.ml:53-70 for in-memory artifacts.
-    let type_env = crate::gentype::type_env::root();
+    let type_env = crate::gentype::type_env::root_for_current_module_names(
+        current_module_names_for_typed_artifact(artifact),
+    );
     let translations = match artifact.annots {
         TypedArtifactAnnots::Implementation(structure) => {
             crate::gentype::translate_structure::translate_structure(
@@ -171,6 +173,30 @@ pub fn translate_typed_artifact(
         &type_env,
         crate::gentype::translation::combine(&translations),
     )
+}
+
+fn current_module_names_for_typed_artifact(artifact: &TypedArtifact<'_>) -> Vec<String> {
+    // The OCaml GenType entry point reads CMT/CMTI files selected by
+    // compiler/gentype/Paths.ml:61-86. Rust's in-process hook receives the
+    // typedtree before that file boundary, so keep both the compiler module
+    // name and source basename available for current-unit path stripping.
+    let mut names = vec![crate::gentype::module_name::to_string(&artifact.file_name)];
+    if let Some(source_file) = artifact.source_file {
+        if let Some(stem) = std::path::Path::new(source_file)
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+        {
+            let mut chars = stem.chars();
+            let source_module_name = match chars.next() {
+                None => String::new(),
+                Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
+            };
+            if !source_module_name.is_empty() && !names.contains(&source_module_name) {
+                names.push(source_module_name);
+            }
+        }
+    }
+    names
 }
 
 pub fn input_cmt_translate_type_declarations_from_cmt(

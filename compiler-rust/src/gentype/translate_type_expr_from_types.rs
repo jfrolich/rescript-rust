@@ -2,8 +2,9 @@
 // This Stage 3 GenType port is intentionally not wired into the crate yet.
 
 use crate::gentype::gen_type_common::{
-    ArgType, Case as VariantCase, ClosedFlag, Dep, Field, Function, Ident, Label, LabelJs, Mutable,
-    Optional, Payload, Type, create_variant, dep_to_string, ident, ident_with, is_number, unknown,
+    create_variant, dep_to_string, ident, ident_with, is_number, unknown, ArgType,
+    Case as VariantCase, ClosedFlag, Dep, Field, Function, Ident, Label, LabelJs, Mutable,
+    Optional, Payload, Type,
 };
 use crate::types::asttypes::ArgLabel;
 use crate::types::context::TypeContext;
@@ -120,6 +121,8 @@ pub fn translate_constr(
     type_env: &crate::gentype::type_env::T,
 ) -> Translation {
     // Mirrors compiler/gentype/TranslateTypeExprFromTypes.ml:59-439.
+    let stripped_path = crate::gentype::type_env::strip_current_module_prefix(path, type_env);
+    let path = stripped_path.as_ref().unwrap_or(path);
     let mut path_list = path_to_list(path);
     path_list.reverse();
 

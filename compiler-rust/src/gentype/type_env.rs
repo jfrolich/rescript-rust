@@ -4,7 +4,7 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use crate::gentype::gen_type_common::{Dep, StringMap, Type, dep_to_resolved_name, dep_to_string};
+use crate::gentype::gen_type_common::{dep_to_resolved_name, dep_to_string, Dep, StringMap, Type};
 use crate::types::path::Path;
 use crate::types::typedtree::TypedSignature;
 
@@ -23,6 +23,7 @@ pub struct TypeEnv {
     pub name: String,
     pub parent: Option<T>,
     pub type_equations: StringMap<Type>,
+    pub current_module_names: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -36,6 +37,10 @@ pub type T = Rc<RefCell<TypeEnv>>;
 pub fn create_type_env(name: &str, parent: Option<T>) -> T {
     // Mirrors compiler/gentype/TypeEnv.ml:17-27.
     let module_item = crate::gentype::runtime::new_module_item(name);
+    let current_module_names = parent
+        .as_ref()
+        .map(|parent| parent.borrow().current_module_names.clone())
+        .unwrap_or_default();
     Rc::new(RefCell::new(TypeEnv {
         map: StringMap::new(),
         map_module_types: StringMap::new(),
@@ -44,12 +49,47 @@ pub fn create_type_env(name: &str, parent: Option<T>) -> T {
         name: name.to_string(),
         parent,
         type_equations: StringMap::new(),
+        current_module_names,
     }))
 }
 
 pub fn root() -> T {
     // Mirrors compiler/gentype/TypeEnv.ml:29.
     create_type_env("__root__", None)
+}
+
+pub fn root_for_current_module_names(module_names: Vec<String>) -> T {
+    // OCaml GenType reads the saved CMT at compiler/gentype/GenTypeMain.ml:53-70,
+    // where current-unit type paths reach Dependencies.ml:15-38 and
+    // TranslateTypeExprFromTypes.ml:78-439 without the compilation-unit
+    // module prefix. Rust's in-process typedtree is captured before that
+    // serialized CMT boundary, so it can still contain paths like
+    // CurrentModule.t. Record the current unit names here so callers can strip
+    // exactly that prefix before running the reference GenType algorithm.
+    let root = root();
+    root.borrow_mut().current_module_names = module_names;
+    root
+}
+
+pub fn is_current_module_name(type_env: &T, name: &str) -> bool {
+    type_env
+        .borrow()
+        .current_module_names
+        .iter()
+        .any(|current_name| current_name == name)
+}
+
+pub fn strip_current_module_prefix(path: &Path, type_env: &T) -> Option<Path> {
+    match path {
+        Path::Pdot(prefix, segment, _) if matches!(prefix.as_ref(), Path::Pident(id) if is_current_module_name(type_env, id.name())) => {
+            Some(Path::Pident(crate::ident::Ident::create_local(
+                segment.as_str(),
+            )))
+        }
+        Path::Pdot(prefix, segment, pos) => strip_current_module_prefix(prefix, type_env)
+            .map(|stripped_prefix| Path::pdot_pos(stripped_prefix, segment.clone(), *pos)),
+        Path::Pident(_) | Path::Papply(_, _) => None,
+    }
 }
 
 pub fn to_string(type_env: &T) -> String {
