@@ -269,7 +269,19 @@ pub fn translate_module_binding(
             let dep = crate::gentype::dependencies::from_path(&config, &type_env, path);
             let internal = crate::gentype::dependencies::is_internal(&dep);
             crate::gentype::type_env::add_module_equation(dep, internal, &type_env);
-            match &module_binding.mb_expr.mod_type {
+            let scraped_module_type =
+                ctx.get_typed_env(module_binding.mb_expr.mod_env)
+                    .and_then(|env| {
+                        scrape_direct_persistent_alias_for_gentype(
+                            ctx,
+                            env.as_ref(),
+                            &module_binding.mb_expr.mod_type,
+                        )
+                    });
+            let module_type = scraped_module_type
+                .as_ref()
+                .unwrap_or(&module_binding.mb_expr.mod_type);
+            match module_type {
                 DeclModuleType::MtySignature(signature) => crate::gentype::translation::combine(
                     &crate::gentype::translate_signature_from_types::translate_signature_from_types(
                         ctx,
@@ -601,6 +613,48 @@ fn translate_module_constraint(
         }
         _ => not_implemented("Tmod_constraint"),
     }
+}
+
+fn scrape_direct_persistent_alias_for_gentype(
+    ctx: &crate::types::context::TypeContext,
+    env: &crate::types::env::Env,
+    mty: &DeclModuleType,
+) -> Option<DeclModuleType> {
+    // Mirrors the persistent-module branch used by
+    // compiler/gentype/TranslateStructure.ml:174-183 through
+    // compiler/ml/env.ml:1435-1449: GenType treats `module M = N` as
+    // `include N` when `Env.scrape_alias` can resolve the alias to a concrete
+    // signature. For Rust's already-materialized local alias module types, the
+    // later TypeEnv module-equation pass from compiler/gentype/Translation.ml:173-216
+    // owns alias type declarations; re-scraping those local aliases here would
+    // duplicate the same exports.
+    let DeclModuleType::MtyAlias(_, crate::types::path::Path::Pident(id)) = mty else {
+        return None;
+    };
+    if !id.is_persistent() {
+        return None;
+    }
+    let alias_path = crate::types::path::Path::pident(id.clone());
+    let module_type = match env.lookup_module(&alias_path) {
+        Ok(md) => md.md_type.clone(),
+        Err(_) => {
+            // OCaml compiler/ml/env.ml:865-875 resolves persistent Pident
+            // aliases through `find_pers_struct` before Env.scrape_alias
+            // strengthens the resolved module type at compiler/ml/env.ml:1441-1446.
+            // Rust's local Env may not carry a root module binding for an
+            // in-process dependency, so use the raw persistent signature cache
+            // that backs the same component lookup boundary.
+            DeclModuleType::MtySignature((*ctx.get_or_load_raw_module_sig(id.name())?).clone())
+        }
+    };
+    Some(
+        crate::types::ctype::strengthen_module_type_for_inclusion_path(
+            ctx,
+            env,
+            &alias_path,
+            &module_type,
+        ),
+    )
 }
 
 fn value_binding_id(pattern: &Pattern) -> Option<&crate::ident::Ident> {

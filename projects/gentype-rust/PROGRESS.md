@@ -156,7 +156,7 @@ Current Rust in-process generated-output baseline:
 ```text
 ./scripts/test_gentype_output_parity.sh
 
-typescript-react-example: 61/71 generated outputs match, 10 changed, 0 missing, 0 extra, 12 diff hunks; OCaml typecheck 0, Rust typecheck 2
+typescript-react-example: 62/71 generated outputs match, 9 changed, 0 missing, 0 extra, 11 diff hunks; OCaml typecheck 0, Rust typecheck 0
 stdlib-no-shims:          1/1 generated outputs match, 0 changed, 0 missing, 0 extra, 0 diff hunks; OCaml typecheck 0, Rust typecheck 0
 Tella:                    103/112 generated outputs match, 7 changed, 2 missing, 0 extra, 8 diff hunks; TypeScript typecheck not configured
 ```
@@ -603,6 +603,31 @@ rustc-LLVM ERROR: IO failure on output stream: No space left on device
 ```
 
 The later Phase 0 debug builds listed above completed.
+
+## Persistent Alias Scrape
+
+- `compiler-rust/src/gentype/translate_structure.rs` now mirrors the
+  persistent-module branch of `Env.scrape_alias` for `module M = N` aliases.
+  The reference path is `compiler/gentype/TranslateStructure.ml:174-183`,
+  `compiler/ml/env.ml:1435-1449`, and the persistent `find_module` branch at
+  `compiler/ml/env.ml:865-875`.
+- The Rust implementation first uses the typed `mod_env` lookup when available,
+  then falls back to `TypeContext::get_or_load_raw_module_sig` for persistent
+  `Pident` aliases that are available through the in-process persistent
+  environment but not installed as root module bindings in the local `Env`.
+- This is intentionally not a generated-output normalization. The remaining
+  `Wrapper.gen.tsx` diff shows the next real issue: the fallback signature is
+  already persistent-path substituted, so value types still print through
+  `MyModule_t` instead of OCaml's `MyModuleAlias_t`. A naive cross-file
+  typed-signature cache was tested and rejected because `TypeExprRef` values are
+  scoped to each file's `TypeContext`.
+- Debug verification: `cargo build --quiet --manifest-path
+  compiler-rust/Cargo.toml`, `cargo build --quiet --manifest-path
+  rewatch/Cargo.toml`, and `./scripts/test_gentype_output_parity.sh`.
+  Results: React `62/71`, 9 changed, 0 missing, 0 extra, 11 hunks, OCaml/Rust
+  typecheck `0/0`; stdlib-no-shims `1/1`, OCaml/Rust typecheck `0/0`; Tella
+  `103/112`, 7 changed, 2 missing, 0 extra, 8 hunks, TypeScript typecheck not
+  configured.
 
 ## Next Session
 
