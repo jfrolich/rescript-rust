@@ -101,6 +101,14 @@ support in Rust is still incomplete:
   matches `compiler/gentype/TranslateStructure.ml:234-267`: structurally
   coerced explicit signatures fall through to the typed-signature branch so
   attributes from the explicit signature are preserved.
+- Rust GenType's Types-based first-class package translator now threads the
+  stored `Tpackage(path, ids, types)` Longident list into
+  `TypeEnv.add_type_equations`, matching
+  `compiler/gentype/TranslateTypeExprFromTypes.ml:639-670` and
+  `compiler/gentype/TypeEnv.ml:96-104`. This did not move generated-output
+  parity yet; the remaining first-class-module diffs still point at module-type
+  signature lookup/availability before package runtime-representation
+  translation.
 - Latest debug verification: `cargo build --quiet --manifest-path
   compiler-rust/Cargo.toml`, `cargo build --quiet --manifest-path
   rewatch/Cargo.toml`, and `./scripts/test_gentype_output_parity.sh`. Results:

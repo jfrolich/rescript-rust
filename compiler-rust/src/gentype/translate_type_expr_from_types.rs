@@ -648,13 +648,18 @@ pub fn translateTypeExprFromTypes_(
         }
         TypeDesc::Tpackage {
             path,
-            lids: _,
+            lids,
             args: types,
         } => {
-            // OCaml TranslateTypeExprFromTypes.ml:639-670 uses package
-            // constraint longidents here. Rust Phase 5 must thread the
-            // ParseArena so those Longident indices can be flattened to names.
-            translate_package(ctx, config, type_vars_gen, type_env, &path, &[], &types)
+            // Mirrors compiler/gentype/TranslateTypeExprFromTypes.ml:639-670:
+            // `Tpackage(path, ids, types)` translates package constraints by
+            // pairing the stored Longident list with the stored type list before
+            // calling `TypeEnv.add_type_equations`.
+            let ids = lids
+                .iter()
+                .map(|lid| longident_to_strings(ctx, lid))
+                .collect::<Vec<_>>();
+            translate_package(ctx, config, type_vars_gen, type_env, &path, &ids, &types)
         }
         TypeDesc::Tfield { .. }
         | TypeDesc::Tnil
@@ -1009,6 +1014,24 @@ fn translate_variant(
         ProcessVariant { unknowns, .. } if !unknowns.is_empty() => tr(unknown()),
         _ => tr(unknown()),
     }
+}
+
+fn longident_to_strings(
+    ctx: &TypeContext,
+    longident: &crate::parser::longident::Longident,
+) -> Vec<String> {
+    // OCaml compiler/gentype/TypeEnv.ml:96-104 calls `Longident.flatten` for
+    // package type equations. Rust stores arena-backed Longident components in
+    // `TypeDesc::Tpackage`; TypeCheckContext::new registers the arena names on
+    // TypeContext so this Types-based translator can flatten them after typing.
+    longident
+        .flatten_idx()
+        .into_iter()
+        .map(|idx| {
+            ctx.resolve_any_longident_component(idx)
+                .expect("package Longident component should be registered on TypeContext")
+        })
+        .collect()
 }
 
 fn translate_package(
