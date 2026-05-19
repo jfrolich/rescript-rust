@@ -393,6 +393,15 @@ pub struct TypeContext {
     /// from normalize_path, matching OCaml's lazy ps_sig forcing.
     raw_module_sigs: RefCell<ahash::AHashMap<String, Arc<super::decl::Signature>>>,
 
+    /// Raw signature copies used only by GenType's CMT-shaped alias scraping.
+    ///
+    /// OCaml GenType reads CMT data and then calls Env.scrape_alias at
+    /// compiler/gentype/TranslateStructure.ml:174-183. In-process Rust crosses
+    /// TypeContext boundaries through PortablePersStruct, so keep those raw
+    /// copied signatures separate from `raw_module_sigs`; typechecking lookup
+    /// paths expect the normal component/rename caches, not this CMT view.
+    gentype_raw_module_sigs: RefCell<ahash::AHashMap<String, Arc<super::decl::Signature>>>,
+
     /// Raw signatures loaded only for persistent component lookup.
     ///
     /// OCaml keeps `ps_comps` separate from `ps_sig`; this cache gives Rust the
@@ -549,6 +558,7 @@ impl TypeContext {
             persistent_env: RefCell::new(None),
             renamed_module_sigs: RefCell::new(ahash::AHashMap::new()),
             raw_module_sigs: RefCell::new(ahash::AHashMap::new()),
+            gentype_raw_module_sigs: RefCell::new(ahash::AHashMap::new()),
             raw_component_module_sigs: RefCell::new(ahash::AHashMap::new()),
             cmi_longident_names: RefCell::new(ahash::AHashMap::new()),
             arena_longident_names: RefCell::new(ahash::AHashMap::new()),
@@ -2150,6 +2160,23 @@ impl TypeContext {
         self.raw_module_sigs
             .borrow_mut()
             .insert(name.to_string(), sig);
+    }
+
+    pub(crate) fn register_gentype_raw_module_sig(
+        &self,
+        name: &str,
+        sig: Arc<super::decl::Signature>,
+    ) {
+        self.gentype_raw_module_sigs
+            .borrow_mut()
+            .insert(name.to_string(), sig);
+    }
+
+    pub(crate) fn get_gentype_raw_module_sig(
+        &self,
+        name: &str,
+    ) -> Option<Arc<super::decl::Signature>> {
+        self.gentype_raw_module_sigs.borrow().get(name).cloned()
     }
 
     pub fn has_raw_module_sig(&self, name: &str) -> bool {

@@ -497,10 +497,12 @@ impl ModuleRegistry {
             ps_name: namespace_name.to_string(),
             ps_filename: format!("{}.mlmap", namespace_name),
             ps_sig: sig_items,
+            raw_ps_sig: None,
             cmi_longident_names: Vec::new(),
             type_graph: portable_types::PortableTypeGraph {
                 entries: Vec::new(),
             },
+            raw_type_graph: None,
             fingerprint,
         };
         self.insert_cached_module(namespace_name.to_string(), Arc::new(portable));

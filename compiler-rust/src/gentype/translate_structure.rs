@@ -679,26 +679,30 @@ fn scrape_direct_persistent_alias_for_gentype(
         return None;
     }
     let alias_path = crate::types::path::Path::pident(id.clone());
-    let module_type = match env.lookup_module(&alias_path) {
-        Ok(md) => md.md_type.clone(),
-        Err(_) => {
+    let module_type = ctx
+        .get_gentype_raw_module_sig(id.name())
+        .or_else(|| ctx.get_or_load_raw_module_sig(id.name()))
+        .map(|sig| {
             // OCaml compiler/ml/env.ml:865-875 resolves persistent Pident
-            // aliases through `find_pers_struct` before Env.scrape_alias
-            // strengthens the resolved module type at compiler/ml/env.ml:1441-1446.
-            // Rust's local Env may not carry a root module binding for an
-            // in-process dependency, so use the raw persistent signature cache
-            // that backs the same component lookup boundary.
-            DeclModuleType::MtySignature((*ctx.get_or_load_raw_module_sig(id.name())?).clone())
-        }
-    };
-    Some(
-        crate::types::ctype::strengthen_module_type_for_inclusion_path(
-            ctx,
-            env,
-            &alias_path,
-            &module_type,
-        ),
-    )
+            // aliases through `find_pers_struct` and forces the raw `ps_sig`
+            // before Env.scrape_alias strengthens the result at
+            // compiler/ml/env.ml:1441-1446. Prefer that raw persistent
+            // signature so value descriptions keep their local type paths,
+            // matching GenType's alias-signature translation.
+            DeclModuleType::MtySignature((*sig).clone())
+        })
+        .or_else(|| {
+            env.lookup_module(&alias_path)
+                .ok()
+                .map(|md| md.md_type.clone())
+        })?;
+    let strengthened = crate::types::ctype::strengthen_module_type_for_inclusion_path(
+        ctx,
+        env,
+        &alias_path,
+        &module_type,
+    );
+    Some(strengthened)
 }
 
 fn value_binding_id(pattern: &Pattern) -> Option<&crate::ident::Ident> {

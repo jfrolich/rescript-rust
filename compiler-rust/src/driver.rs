@@ -14686,6 +14686,20 @@ pub fn compile_preprocessed_structure_in_process_until_js(
         } else {
             published_signature.clone()
         };
+        // OCaml compiler/ml/env.ml:1949-1952 saves a fresh
+        // `Subst.signature (Subst.for_saving Subst.identity) sg` copy before
+        // installing the persistent structure. Keep Rust's GenType raw-signature
+        // cache on its own type nodes too; `register_in_memory_signature`
+        // finalizes component lookup paths in-place, and sharing those refs
+        // would leak qualified `Current.t` paths back into the CMT-shaped
+        // signature that compiler/gentype/TranslateStructure.ml:174-183 reads
+        // through Env.scrape_alias.
+        let current_raw_sig = std::sync::Arc::new(
+            crate::types::typecore::copy_lookup_signature_for_subst(
+                &signature_for_save,
+                &type_ctx,
+            ),
+        );
         internal_env.register_in_memory_signature(
             module_name,
             signature_for_save,
@@ -14696,13 +14710,12 @@ pub fn compile_preprocessed_structure_in_process_until_js(
         // lambda translation (compiler/ml/typemod.ml:1779-1788). That save
         // also installs `ps_sig` for later lazy component forcing
         // (compiler/ml/env.ml:1960-1977). In-process builds do not write/read
-        // the `.cmi`, so keep the just-saved current signature in the
+        // the `.cmi`, so keep the pre-finalized current signature in the
         // TypeContext raw-signature cache before hiding the transient module.
-        let current_raw_sig = internal_env.read_raw_sig_shared(module_name, &type_ctx).unwrap_or_else(|| {
-            panic!(
-                "in-process invariant violated: saved signature for {module_name} was not available"
-            )
-        });
+        // This preserves the OCaml split between raw `ps_sig` and later lazy
+        // component substitution in compiler/ml/env.ml:669-678 and
+        // compiler/ml/env.ml:1513-1530.
+        type_ctx.register_gentype_raw_module_sig(module_name, current_raw_sig.clone());
         type_ctx.register_raw_module_sig(module_name, current_raw_sig);
 
         let (pers_struct, new_alias_rewrites) = if options.publish_in_process_signature {

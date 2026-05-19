@@ -130,10 +130,21 @@ pub struct PortablePersStruct {
     pub ps_filename: String,
     /// Signature with TypeExprRef values being indices into `type_graph.entries`.
     pub ps_sig: Signature,
+    /// Raw `ps_sig` copy for OCaml-style lazy alias scraping.
+    ///
+    /// OCaml stores `ps_sig = lazy (Subst.signature Subst.identity sign)` in
+    /// compiler/ml/env.ml:669-678 and compiler/ml/env.ml:1960-1977, separately
+    /// from component-table substitution at compiler/ml/env.ml:1513-1530. The
+    /// in-process registry crosses TypeContext boundaries, so carry that raw
+    /// copied signature portably instead of rebuilding it from the substituted
+    /// component signature later.
+    pub raw_ps_sig: Option<Signature>,
     /// Synthetic longident component names created while reading CMI files.
     pub cmi_longident_names: Vec<(u32, String)>,
     /// Self-contained type graph.
     pub type_graph: PortableTypeGraph,
+    /// Self-contained type graph for `raw_ps_sig`.
+    pub raw_type_graph: Option<PortableTypeGraph>,
     /// Stamp-independent structural fingerprint of the type graph.
     /// Computed during serialization by hashing type structure with name-based
     /// path identity (ignoring stamps). Two compilations producing the same
@@ -555,24 +566,44 @@ pub fn serialize_pers_struct(
     ctx: &TypeContext,
     arena: Option<&ParseArena>,
 ) -> PortablePersStruct {
+    let (sig, type_graph) = serialize_signature(ps.ps_sig.as_ref(), ctx, arena);
+    let raw = ctx
+        .find_raw_module_sig(&ps.ps_name)
+        .map(|raw_sig| serialize_signature(&raw_sig, ctx, arena));
+    let (raw_ps_sig, raw_type_graph) = match raw {
+        Some((sig, graph)) => (Some(sig), Some(graph)),
+        None => (None, None),
+    };
+    let fingerprint = compute_type_graph_fingerprint(&type_graph.entries, &sig);
+    PortablePersStruct {
+        ps_name: ps.ps_name.clone(),
+        ps_filename: ps.ps_filename.clone(),
+        ps_sig: sig,
+        raw_ps_sig,
+        cmi_longident_names: ctx.snapshot_cmi_longident_names(),
+        type_graph,
+        raw_type_graph,
+        fingerprint,
+    }
+}
+
+fn serialize_signature(
+    sig: &Signature,
+    ctx: &TypeContext,
+    arena: Option<&ParseArena>,
+) -> (Signature, PortableTypeGraph) {
     let mut ser = TypeGraphSerializer {
         ctx,
         arena,
         entries: Vec::new(),
         cache: HashMap::new(),
     };
-    let mut sig = ps.ps_sig.as_ref().clone();
+    let mut sig = sig.clone();
     ser.remap_signature(&mut sig);
-    let entries = ser.entries;
-    let fingerprint = compute_type_graph_fingerprint(&entries, &sig);
-    PortablePersStruct {
-        ps_name: ps.ps_name.clone(),
-        ps_filename: ps.ps_filename.clone(),
-        ps_sig: sig,
-        cmi_longident_names: ctx.snapshot_cmi_longident_names(),
-        type_graph: PortableTypeGraph { entries },
-        fingerprint,
-    }
+    let type_graph = PortableTypeGraph {
+        entries: ser.entries,
+    };
+    (sig, type_graph)
 }
 
 struct TypeGraphSerializer<'a> {
@@ -864,8 +895,24 @@ impl<'a> TypeGraphSerializer<'a> {
 pub fn internalize_pers_struct(pps: &PortablePersStruct, ctx: &TypeContext) -> PersStruct {
     ctx.import_cmi_longident_names(&pps.cmi_longident_names);
 
-    let graph = &pps.type_graph;
+    let sig = internalize_signature(&pps.ps_sig, &pps.type_graph, ctx);
+    if let (Some(raw_ps_sig), Some(raw_type_graph)) = (&pps.raw_ps_sig, &pps.raw_type_graph) {
+        let raw_sig = internalize_signature(raw_ps_sig, raw_type_graph, ctx);
+        ctx.register_gentype_raw_module_sig(&pps.ps_name, Arc::new(raw_sig));
+    }
 
+    PersStruct {
+        ps_name: pps.ps_name.clone(),
+        ps_sig: Arc::new(sig),
+        ps_filename: pps.ps_filename.clone(),
+    }
+}
+
+fn internalize_signature(
+    portable_sig: &Signature,
+    graph: &PortableTypeGraph,
+    ctx: &TypeContext,
+) -> Signature {
     // Phase 1: allocate placeholder TypeExprRefs for all entries.
     let remap: Vec<TypeExprRef> = graph
         .entries
@@ -887,14 +934,9 @@ pub fn internalize_pers_struct(pps: &PortablePersStruct, ctx: &TypeContext) -> P
     }
 
     // Phase 3: clone and remap the signature.
-    let mut sig = pps.ps_sig.clone();
+    let mut sig = portable_sig.clone();
     remap_signature_refs(&mut sig, &remap);
-
-    PersStruct {
-        ps_name: pps.ps_name.clone(),
-        ps_sig: Arc::new(sig),
-        ps_filename: pps.ps_filename.clone(),
-    }
+    sig
 }
 
 fn internalize_desc(desc: &PortableTypeDesc, remap: &[TypeExprRef], ctx: &TypeContext) -> TypeDesc {
