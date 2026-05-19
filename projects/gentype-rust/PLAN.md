@@ -52,26 +52,29 @@ Use these sources as the reference implementation for every semantic change:
 Every implementation commit should cite the exact reference file and line range
 that the Rust change follows.
 
-## Existing Rust Surface
+## Current Rust Surface
 
-Rust already has partial plumbing, but not the generator:
+Rust now has the GenType generator wired through both supported compiler paths:
 
 - `rewatch/src/config.rs:286-409` parses `gentypeconfig`.
 - `rewatch/src/config.rs:820-899` emits `-bs-gentype-*` flags.
-- `rewatch/src/build/compile.rs` passes those flags into `bsc`.
-- `compiler-rust/src/driver.rs:13509-13540` accepts GenType flags at the
-  driver layer.
-- `compiler-rust/src/bin/bsc.rs:111` stores only a boolean `gentype`.
-- `compiler-rust/src/bin/bsc.rs:642-690` currently only checks selected CMT
-  files for stale-artifact error parity. It does not generate `.gen.tsx` or
-  `.gen.ts`.
-- `compiler-rust/src/binary_ast/ppx.rs:3763-3765` already rewrites
+- `rewatch/src/build/compile.rs` builds the same Rust GenType config for
+  in-process compilation and invokes Rust GenType from typed artifacts.
+- `compiler-rust/src/driver.rs` accepts GenType flags, carries the parsed
+  config, invokes GenType from current-source typed interfaces and
+  implementations, and records GenType time in the optional timing counters.
+- Rust standalone `bsc -bs-gentype` emits `.gen.tsx`/`.gen.ts` for annotated
+  current-source typed artifacts.
+- The stale CMT diagnostics path is preserved for error-output parity. Direct
+  `Cmt_format.read_cmt` typedtree decoding remains intentionally limited unless
+  a future CLI parity case requires it.
+- `compiler-rust/src/binary_ast/ppx.rs:3763-3765` rewrites
   `@genType.import` and `@gentype.import` externals.
 
-The first implementation step is not wiring or compilation. First create a
-non-compiling, file-for-file Rust port of the GenType sources, then review each
-file against its reference until the shape is 1:1. Only after that should the
-project start fixing compilation, integration, and parity output.
+The first implementation step was to create a non-compiling, file-for-file Rust
+port of the GenType sources, then review each file against its reference until
+the shape was 1:1. That rewrite work is now complete; this plan is kept as the
+implementation/audit record.
 
 ## Port-First Rule
 
