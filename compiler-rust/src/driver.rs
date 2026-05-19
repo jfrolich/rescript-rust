@@ -14160,6 +14160,10 @@ pub struct InProcessInterfaceResult {
     pub signature: crate::types::decl::Signature,
     pub pers_struct: Option<PortablePersStruct>,
     pub new_alias_rewrites: ahash::AHashMap<String, crate::types::path::Path>,
+    /// Mirrors compiler/gentype/GenTypeMain.ml:93-134: when a `.resi`
+    /// contains `@@genType.ignoreInterface`, GenType must select the
+    /// implementation typed artifact for generated output.
+    pub gentype_ignore_interface: bool,
 }
 
 fn process_gentype_typed_artifact_if_enabled<'a>(
@@ -14530,6 +14534,7 @@ pub fn compile_preprocessed_structure_in_process_with_signature_hook(
         options,
         registry,
         has_interface,
+        false,
         signature_ready.as_deref_mut(),
     )?;
 
@@ -14550,6 +14555,7 @@ pub fn compile_preprocessed_structure_in_process_until_js(
     options: &CompilerOptions,
     registry: &ModuleRegistry,
     has_interface: bool,
+    gentype_ignore_interface: bool,
     mut signature_ready: Option<&mut InProcessSignatureReadyHook<'_>>,
 ) -> Result<InProcessPreJsCompileResult> {
     let _span = info_span!(
@@ -14741,11 +14747,12 @@ pub fn compile_preprocessed_structure_in_process_until_js(
         String::new()
     };
 
-    if !has_interface {
+    if !has_interface || gentype_ignore_interface {
         // With a `.resi`, compiler/gentype/Paths.ml:61-86 makes the
         // implementation output prefix select the `.cmti` artifact first. The
-        // in-process interface step above owns that artifact path, so the
-        // implementation branch only processes no-interface modules here.
+        // in-process interface step above owns that artifact path unless
+        // compiler/gentype/GenTypeMain.ml:93-134 selected the implementation
+        // because the interface carries `@@genType.ignoreInterface`.
         process_gentype_typed_artifact_if_enabled(
             options,
             crate::gentype::main::TypedArtifactAnnots::Implementation(&typed_structure),
@@ -15162,15 +15169,30 @@ pub fn typecheck_preprocessed_signature_in_process(
         transl_signature(&mut tctx, &env, arena, signature)
             .map_err(|e| anyhow!("Type checking failed: {e:?}"))
     })?;
-    process_gentype_typed_artifact_if_enabled(
-        options,
-        crate::gentype::main::TypedArtifactAnnots::Interface(&typed_signature),
-        arena,
-        &type_ctx,
-        filename,
-        module_name,
-        true,
-    )?;
+    let gentype_ignore_interface = options.gentype_config.is_some()
+        && crate::gentype::annotation::signature_check_annotation(
+            arena,
+            &|_loc, attributes| {
+                crate::gentype::annotation::get_attribute_payload(
+                    arena,
+                    crate::gentype::annotation::tag_is_gentype_ignore_interface,
+                    attributes,
+                )
+                .is_some()
+            },
+            &typed_signature,
+        );
+    if !gentype_ignore_interface {
+        process_gentype_typed_artifact_if_enabled(
+            options,
+            crate::gentype::main::TypedArtifactAnnots::Interface(&typed_signature),
+            arena,
+            &type_ctx,
+            filename,
+            module_name,
+            true,
+        )?;
+    }
     let decl_signature =
         crate::types::typemod::decl_signature_from_typed_signature(&typed_signature, arena);
 
@@ -15214,6 +15236,7 @@ pub fn typecheck_preprocessed_signature_in_process(
         signature: published_signature,
         pers_struct,
         new_alias_rewrites,
+        gentype_ignore_interface,
     })
 }
 
@@ -15309,6 +15332,7 @@ pub fn typecheck_implementation_in_process(
         signature: published_signature,
         pers_struct,
         new_alias_rewrites,
+        gentype_ignore_interface: false,
     })
 }
 

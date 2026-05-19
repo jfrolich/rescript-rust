@@ -1,8 +1,9 @@
 // Port of compiler/gentype/GenTypeMain.ml:1-175.
-// This Stage 4 GenType port is intentionally not wired into the crate yet.
 
 use std::cell::Cell;
-use std::path::Path;
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+use std::sync::{Mutex, OnceLock};
 
 use crate::parse_arena::{LocIdx, ParseArena};
 use crate::parser::ast::Attributes;
@@ -11,6 +12,9 @@ use crate::types::typedtree::{
     Structure, StructureItem, StructureItemDesc, TypedSignature, TypedSignatureItem,
     TypedSignatureItemDesc,
 };
+
+type InProcessTypeDeclarations = Vec<crate::gentype::code_item::TypeDeclaration>;
+type InProcessTypeDeclarationsCache = Mutex<HashMap<String, InProcessTypeDeclarations>>;
 
 pub enum BinaryAnnots {
     Implementation(Structure),
@@ -42,6 +46,34 @@ pub struct TypedArtifact<'a> {
     pub compiler_module_name: crate::gentype::module_name::T,
     pub file_name: crate::gentype::module_name::T,
     pub is_interface: bool,
+}
+
+fn in_process_type_declarations_cache() -> &'static InProcessTypeDeclarationsCache {
+    static CACHE: OnceLock<InProcessTypeDeclarationsCache> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn normalize_cmt_cache_key(cmt_file: &str) -> String {
+    std::fs::canonicalize(cmt_file)
+        .unwrap_or_else(|_| PathBuf::from(cmt_file))
+        .to_string_lossy()
+        .to_string()
+}
+
+fn lookup_in_process_type_declarations(cmt_file: &str) -> Option<InProcessTypeDeclarations> {
+    in_process_type_declarations_cache()
+        .lock()
+        .ok()
+        .and_then(|cache| cache.get(&normalize_cmt_cache_key(cmt_file)).cloned())
+}
+
+fn register_in_process_type_declarations(
+    cmt_file: &str,
+    type_declarations: InProcessTypeDeclarations,
+) {
+    if let Ok(mut cache) = in_process_type_declarations_cache().lock() {
+        cache.insert(normalize_cmt_cache_key(cmt_file), type_declarations);
+    }
 }
 
 pub fn cmt_check_annotations(
@@ -259,6 +291,60 @@ pub fn input_cmt_translate_type_declarations_from_cmt(
     )
 }
 
+pub fn typed_artifact_translate_type_declarations(
+    config: &crate::gentype::config::T,
+    output_file_relative: &str,
+    resolver: &crate::gentype::module_resolver::Resolver,
+    artifact: &TypedArtifact<'_>,
+) -> crate::gentype::translation::T {
+    // Mirrors compiler/gentype/GenTypeMain.ml:26-52 for Rust's in-process
+    // typedtree path. OCaml reopens the imported CMT at EmitJs.ml:437-453;
+    // Rust already has the typed artifact here, so cache the same declaration
+    // translation under the CMT path before EmitJs asks for it recursively.
+    let type_env = crate::gentype::type_env::root();
+    let translations = match artifact.annots {
+        TypedArtifactAnnots::Implementation(structure) => {
+            let mut structure = structure.clone();
+            structure
+                .str_items
+                .retain(|item| structure_item_is_declaration(item));
+            crate::gentype::translate_structure::translate_structure(
+                artifact.ctx,
+                artifact.arena,
+                config,
+                output_file_relative,
+                resolver,
+                &type_env,
+                &structure,
+            )
+        }
+        TypedArtifactAnnots::Interface(signature) => {
+            let mut signature = signature.clone();
+            signature
+                .sig_items
+                .retain(|item| signature_item_is_declaration(item));
+            crate::gentype::translate_signature::translate_signature(
+                artifact.ctx,
+                artifact.arena,
+                config,
+                output_file_relative,
+                resolver,
+                &type_env,
+                &signature,
+            )
+        }
+        TypedArtifactAnnots::Packed
+        | TypedArtifactAnnots::PartialImplementation
+        | TypedArtifactAnnots::PartialInterface => {
+            vec![]
+        }
+    };
+    crate::gentype::translation::add_type_declarations_from_module_equations(
+        &type_env,
+        crate::gentype::translation::combine(&translations),
+    )
+}
+
 pub fn input_cmt_translate_type_declarations(
     config: &mut crate::gentype::config::T,
     output_file_relative: &str,
@@ -267,6 +353,13 @@ pub fn input_cmt_translate_type_declarations(
 ) -> crate::gentype::translation::T {
     // This is the Rust callback boundary used by emit_js.rs for
     // compiler/gentype/EmitJs.ml:449-453.
+    if let Some(type_declarations) = lookup_in_process_type_declarations(cmt_file) {
+        return crate::gentype::translation::T {
+            import_types: vec![],
+            code_items: vec![],
+            type_declarations,
+        };
+    }
     let input_cmt = read_cmt(cmt_file);
     input_cmt_translate_type_declarations_from_cmt(
         config,
@@ -533,6 +626,20 @@ pub fn process_typed_artifact(
         &[".res".to_string(), ".shim.ts".to_string()],
         |fname| fname == "React.res" || fname == "ReasonReact.res",
     );
+    let type_declaration_translation = typed_artifact_translate_type_declarations(
+        &config,
+        &output_file_relative,
+        &resolver,
+        &artifact,
+    );
+    if let Some(cmt_file) =
+        cmt_file_for_typed_artifact(&config, &source_file, artifact.is_interface)
+    {
+        register_in_process_type_declarations(
+            &cmt_file,
+            type_declaration_translation.type_declarations,
+        );
+    }
     let has_gentype_annotations = typed_artifact_check_annotations(
         &|arena, _loc, attributes| {
             crate::gentype::annotation::get_attribute_payload(
@@ -571,4 +678,32 @@ pub fn process_typed_artifact(
         }
     }
     Ok(())
+}
+
+fn cmt_file_for_typed_artifact(
+    config: &crate::gentype::config::T,
+    source_file: &str,
+    is_interface: bool,
+) -> Option<String> {
+    // OCaml passes outputprefix.cmt/cmt_file through compiler/gentype/Paths.ml:61-86
+    // before GenTypeMain.ml:136-175. Rust starts from the source path, so rebuild
+    // the CMT-shaped path used by ImportPath.to_cmt at compiler/gentype/ImportPath.ml:24-32.
+    let source_path = Path::new(source_file);
+    let parent = source_path.parent().unwrap_or_else(|| Path::new(""));
+    let stem = source_path.file_stem()?.to_str()?;
+    let namespace = config
+        .namespace
+        .as_ref()
+        .map(|namespace| format!("-{namespace}"))
+        .unwrap_or_default();
+    let extension = match is_interface {
+        true => "cmti",
+        false => "cmt",
+    };
+    Some(
+        parent
+            .join(format!("{stem}{namespace}.{extension}"))
+            .to_string_lossy()
+            .to_string(),
+    )
 }

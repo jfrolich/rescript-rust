@@ -2901,6 +2901,7 @@ fn compile_module_in_process_to_js_boundary(
     // Build a local registry that includes the .resi result (if any).
     let mut local_registry = registry.clone();
     let mut interface_registry_update: Option<PendingRegistryUpdate> = None;
+    let mut gentype_ignore_interface = false;
 
     // Register this module's metadata in the local registry
     local_registry.insert_module_info(module_name.to_string(), provisional_module_info.clone());
@@ -2946,6 +2947,7 @@ fn compile_module_in_process_to_js_boundary(
 
         // Register the .resi's PersStruct in the local registry so the
         // .res compilation can find it for moregen constraints.
+        gentype_ignore_interface = intf_result.gentype_ignore_interface;
         let intf_fingerprint = intf_result
             .pers_struct
             .as_ref()
@@ -3067,6 +3069,7 @@ fn compile_module_in_process_to_js_boundary(
                         &options,
                         &local_registry,
                         has_interface,
+                        gentype_ignore_interface,
                         signature_hook,
                     )
                 }

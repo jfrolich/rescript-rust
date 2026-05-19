@@ -72,6 +72,25 @@ support in Rust is still incomplete:
   `ReactDOM.domRef`, matching `compiler/gentype/TranslateTypeExprFromTypes.ml:389-390`.
   This removes the bogus `ReactDOM.gen` import from `Hooks.gen.tsx`; the React
   suite still fails TypeScript only because `Wrapper.gen.tsx` is empty.
+- Rust in-process GenType now honors `@@genType.ignoreInterface` by skipping the
+  interface artifact and selecting the implementation artifact for output,
+  matching `compiler/gentype/GenTypeMain.ml:93-134`. The implementation-side
+  hook still runs through the same source/output-file setup as
+  `compiler/gentype/GenTypeMain.ml:136-175`.
+- Rust in-process GenType now caches declaration-only translations for typed
+  artifacts under their `.cmt`/`.cmti` paths before `EmitJs` performs recursive
+  imported-type lookup. This is the in-memory equivalent of
+  `compiler/gentype/GenTypeMain.ml:26-52` feeding
+  `compiler/gentype/EmitJs.ml:437-453`, avoiding the staged CMT decoder while
+  preserving the same declaration translation boundary.
+- Latest debug verification: `cargo build --quiet --manifest-path
+  compiler-rust/Cargo.toml`, `cargo build --quiet --manifest-path
+  rewatch/Cargo.toml`, and `./scripts/test_gentype_output_parity.sh`. Results:
+  react example `62/71` generated files with `9` changed, `0` missing, `0`
+  extra, `11` hunks, TypeScript `0` for OCaml and `2` for Rust; stdlib-no-shims
+  `1/1`; Tella `103/112` with `7` changed, `2` missing, `0` extra, `8` hunks.
+  The remaining React TypeScript blocker is still `Wrapper.gen.tsx` not being a
+  module.
 
 ## Reference Inventory
 
