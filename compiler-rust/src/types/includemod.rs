@@ -3026,12 +3026,15 @@ pub(crate) fn type_declarations<'a>(
             }
         }
         (Some(impl_manifest), Some(sig_manifest)) => {
-            if !type_exprs_equal_for_inclusion(
+            if !type_manifest_for_inclusion(
                 type_ctx,
-                Some(env),
-                &param_map,
+                env,
                 impl_manifest,
+                &impl_decl.type_params,
                 sig_manifest,
+                &sig_decl.type_params,
+                sig_decl.type_private,
+                &param_map,
             ) {
                 return Err(type_decl_mismatch(id, impl_decl, sig_decl, String::new()));
             }
@@ -3389,6 +3392,334 @@ fn type_param_lists_equal_for_inclusion(
         .all(|(impl_ty, sig_ty)| {
             type_exprs_equal_for_inclusion(type_ctx, Some(env), &empty_param_map, *impl_ty, *sig_ty)
         })
+}
+
+fn type_expr_lists_equal_for_inclusion(
+    type_ctx: &TypeContext,
+    env: &Env,
+    param_map: &HashMap<TypeExprRef, TypeExprRef>,
+    impl_types: &[TypeExprRef],
+    sig_types: &[TypeExprRef],
+) -> bool {
+    impl_types.len() == sig_types.len()
+        && impl_types
+            .iter()
+            .zip(sig_types.iter())
+            .all(|(impl_ty, sig_ty)| {
+                type_exprs_equal_for_inclusion(
+                    type_ctx,
+                    Some(env),
+                    param_map,
+                    *impl_ty,
+                    *sig_ty,
+                )
+            })
+}
+
+fn type_manifest_is_absrow(type_ctx: &TypeContext, env: &Env, ty: TypeExprRef) -> bool {
+    let ty = type_ctx.repr(ty);
+    let is_pident_constr = {
+        let desc = type_ctx.get_desc(ty);
+        matches!(&*desc, TypeDesc::Tconstr { path: Path::Pident(_), .. })
+    };
+    if !is_pident_constr {
+        return false;
+    }
+
+    let expanded = type_ctx.repr(crate::types::ctype::expand_head(type_ctx, env, ty));
+    let desc = type_ctx.get_desc(expanded);
+    matches!(&*desc, TypeDesc::Tobject { .. } | TypeDesc::Tvariant(_))
+}
+
+fn row_more_can_match_fixed_private_super(type_ctx: &TypeContext, row_more: TypeExprRef) -> bool {
+    let row_more = type_ctx.repr(row_more);
+    let desc = type_ctx.get_desc(row_more);
+    matches!(
+        &*desc,
+        TypeDesc::Tvar(_) | TypeDesc::Tconstr { .. } | TypeDesc::Tnil
+    )
+}
+
+fn fixed_private_row_extra_field_allowed(type_ctx: &TypeContext, field: &RowField) -> bool {
+    matches!(
+        crate::types::btype::row_field_repr(type_ctx, field),
+        RowField::Rabsent | RowField::Reither { .. }
+    )
+}
+
+fn fixed_private_row_pair_types(
+    type_ctx: &TypeContext,
+    impl_field: &RowField,
+    sig_field: &RowField,
+    impl_types: &mut Vec<TypeExprRef>,
+    sig_types: &mut Vec<TypeExprRef>,
+) -> bool {
+    let impl_field = crate::types::btype::row_field_repr(type_ctx, impl_field);
+    let sig_field = crate::types::btype::row_field_repr(type_ctx, sig_field);
+    match (&impl_field, &sig_field) {
+        (RowField::Rpresent(Some(impl_ty)), RowField::Rpresent(Some(sig_ty))) => {
+            impl_types.push(*impl_ty);
+            sig_types.push(*sig_ty);
+            true
+        }
+        (
+            RowField::Rpresent(Some(impl_ty)),
+            RowField::Reither {
+                constant: false,
+                types,
+                ..
+            },
+        ) if types.len() == 1 => {
+            impl_types.push(*impl_ty);
+            sig_types.push(types[0]);
+            true
+        }
+        (RowField::Rpresent(None), RowField::Rpresent(None)) => true,
+        (
+            RowField::Rpresent(None),
+            RowField::Reither {
+                constant: true,
+                types,
+                ..
+            },
+        ) if types.is_empty() => true,
+        (
+            RowField::Reither {
+                constant: impl_constant,
+                types: impl_field_types,
+                ..
+            },
+            RowField::Reither {
+                constant: sig_constant,
+                types: sig_field_types,
+                ..
+            },
+        ) if impl_constant == sig_constant && impl_field_types.len() == sig_field_types.len() => {
+            impl_types.extend(impl_field_types.iter().copied());
+            sig_types.extend(sig_field_types.iter().copied());
+            true
+        }
+        (RowField::Rabsent, RowField::Reither { .. } | RowField::Rabsent) => true,
+        _ => false,
+    }
+}
+
+fn fixed_private_variant_manifest_for_inclusion(
+    type_ctx: &TypeContext,
+    env: &Env,
+    impl_manifest: TypeExprRef,
+    impl_params: &[TypeExprRef],
+    sig_params: &[TypeExprRef],
+    impl_row: &RowDesc,
+    sig_row: &RowDesc,
+    param_map: &HashMap<TypeExprRef, TypeExprRef>,
+) -> bool {
+    // Direct port of compiler/ml/includecore.ml:87-125:
+    // private fixed rows compare the implementation row against the abstract
+    // row carried by the signature manifest, while preserving the declaration
+    // parameter equality checks in the same Ctype.equal calls.
+    let impl_row = crate::types::btype::row_repr(type_ctx, impl_row);
+    let sig_row = crate::types::btype::row_repr(type_ctx, sig_row);
+
+    let mut impl_head_and_params = Vec::with_capacity(impl_params.len() + 1);
+    impl_head_and_params.push(impl_manifest);
+    impl_head_and_params.extend_from_slice(impl_params);
+    let mut sig_head_and_params = Vec::with_capacity(sig_params.len() + 1);
+    sig_head_and_params.push(sig_row.row_more);
+    sig_head_and_params.extend_from_slice(sig_params);
+    if !type_expr_lists_equal_for_inclusion(
+        type_ctx,
+        env,
+        param_map,
+        &impl_head_and_params,
+        &sig_head_and_params,
+    ) {
+        return false;
+    }
+
+    if !row_more_can_match_fixed_private_super(type_ctx, impl_row.row_more) {
+        return false;
+    }
+
+    let (impl_only, sig_only, pairs) =
+        crate::types::ctype::merge_row_fields(&impl_row.row_fields, &sig_row.row_fields);
+    let impl_only_is_empty_after_filter = impl_only
+        .iter()
+        .all(|(_, field)| crate::types::btype::row_field_is_absent(type_ctx, field));
+    if sig_row.row_closed && (!impl_row.row_closed || !impl_only_is_empty_after_filter) {
+        return false;
+    }
+    if sig_only
+        .iter()
+        .any(|(_, field)| !fixed_private_row_extra_field_allowed(type_ctx, field))
+    {
+        return false;
+    }
+
+    let mut impl_types = impl_params.to_vec();
+    let mut sig_types = sig_params.to_vec();
+    for (_, impl_field, sig_field) in pairs {
+        if !fixed_private_row_pair_types(
+            type_ctx,
+            impl_field,
+            sig_field,
+            &mut impl_types,
+            &mut sig_types,
+        ) {
+            return false;
+        }
+    }
+
+    type_expr_lists_equal_for_inclusion(type_ctx, env, param_map, &impl_types, &sig_types)
+}
+
+fn fixed_private_object_manifest_for_inclusion(
+    type_ctx: &TypeContext,
+    env: &Env,
+    impl_manifest: TypeExprRef,
+    impl_params: &[TypeExprRef],
+    sig_params: &[TypeExprRef],
+    impl_fields: TypeExprRef,
+    sig_fields: TypeExprRef,
+    param_map: &HashMap<TypeExprRef, TypeExprRef>,
+) -> bool {
+    // Direct port of compiler/ml/includecore.ml:126-151 for private fixed
+    // object rows.
+    let (sig_fields_flat, sig_rest) = flatten_object_fields_for_inclusion(type_ctx, sig_fields);
+    let mut impl_head_and_params = Vec::with_capacity(impl_params.len() + 1);
+    impl_head_and_params.push(impl_manifest);
+    impl_head_and_params.extend_from_slice(impl_params);
+    let mut sig_head_and_params = Vec::with_capacity(sig_params.len() + 1);
+    sig_head_and_params.push(sig_rest);
+    sig_head_and_params.extend_from_slice(sig_params);
+    if !type_expr_lists_equal_for_inclusion(
+        type_ctx,
+        env,
+        param_map,
+        &impl_head_and_params,
+        &sig_head_and_params,
+    ) {
+        return false;
+    }
+
+    let (impl_fields_flat, impl_rest) = flatten_object_fields_for_inclusion(type_ctx, impl_fields);
+    let rest_ok = {
+        let impl_rest = type_ctx.repr(impl_rest);
+        let desc = type_ctx.get_desc(impl_rest);
+        matches!(
+            &*desc,
+            TypeDesc::Tnil | TypeDesc::Tvar(_) | TypeDesc::Tconstr { .. }
+        )
+    };
+    if !rest_ok {
+        return false;
+    }
+
+    let (pairs, _impl_only, sig_only) =
+        associate_object_fields_for_inclusion(impl_fields_flat, sig_fields_flat);
+    if !sig_only.is_empty() {
+        return false;
+    }
+
+    let mut impl_types = impl_params.to_vec();
+    let mut sig_types = sig_params.to_vec();
+    for (_, _, impl_ty, _, sig_ty) in pairs {
+        impl_types.push(impl_ty);
+        sig_types.push(sig_ty);
+    }
+    type_expr_lists_equal_for_inclusion(type_ctx, env, param_map, &impl_types, &sig_types)
+}
+
+fn type_manifest_for_inclusion(
+    type_ctx: &TypeContext,
+    env: &Env,
+    impl_manifest: TypeExprRef,
+    impl_params: &[TypeExprRef],
+    sig_manifest: TypeExprRef,
+    sig_params: &[TypeExprRef],
+    sig_private: crate::types::PrivateFlag,
+    param_map: &HashMap<TypeExprRef, TypeExprRef>,
+) -> bool {
+    // Direct port of compiler/ml/includecore.ml:87-159 `type_manifest`.
+    let impl_expanded = type_ctx.repr(crate::types::ctype::expand_head(
+        type_ctx,
+        env,
+        impl_manifest,
+    ));
+    let sig_expanded =
+        type_ctx.repr(crate::types::ctype::expand_head(type_ctx, env, sig_manifest));
+    let impl_desc = type_ctx.get_desc(impl_expanded).clone();
+    let sig_desc = type_ctx.get_desc(sig_expanded).clone();
+
+    match (&impl_desc, &sig_desc) {
+        (TypeDesc::Tvariant(impl_row), TypeDesc::Tvariant(sig_row))
+            if type_manifest_is_absrow(type_ctx, env, sig_row.row_more) =>
+        {
+            return fixed_private_variant_manifest_for_inclusion(
+                type_ctx,
+                env,
+                impl_manifest,
+                impl_params,
+                sig_params,
+                impl_row,
+                sig_row,
+                param_map,
+            );
+        }
+        (
+            TypeDesc::Tobject {
+                fields: impl_fields,
+                ..
+            },
+            TypeDesc::Tobject {
+                fields: sig_fields, ..
+            },
+        ) if {
+            let (_, sig_rest) = flatten_object_fields_for_inclusion(type_ctx, *sig_fields);
+            type_manifest_is_absrow(type_ctx, env, sig_rest)
+        } =>
+        {
+            return fixed_private_object_manifest_for_inclusion(
+                type_ctx,
+                env,
+                impl_manifest,
+                impl_params,
+                sig_params,
+                *impl_fields,
+                *sig_fields,
+                param_map,
+            );
+        }
+        _ => {}
+    }
+
+    if type_exprs_equal_for_inclusion(
+        type_ctx,
+        Some(env),
+        param_map,
+        impl_manifest,
+        sig_manifest,
+    ) {
+        return true;
+    }
+
+    if sig_private != crate::types::PrivateFlag::Private {
+        return false;
+    }
+
+    let mut current = impl_expanded;
+    let mut seen = HashSet::new();
+    while seen.insert(current) {
+        let Some(next) = crate::types::ctype::expand_head_once(type_ctx, env, current) else {
+            break;
+        };
+        current = type_ctx.repr(next);
+        if type_exprs_equal_for_inclusion(type_ctx, Some(env), param_map, current, sig_manifest) {
+            return true;
+        }
+    }
+
+    false
 }
 
 fn compare_variant_declarations(

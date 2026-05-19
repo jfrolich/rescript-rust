@@ -14,33 +14,20 @@ Recent branch work already moved several areas in the right direction:
 - reduced Env path lookup churn
 - removal of the legacy Rust direct lambda converter
 
-Those changes are useful, but they do not close the project. The remaining risk
-is still algorithmic: Rust has several explicit reconstruction paths around
-lazy module components, alias identity, force modes, and type graph sharing that
-need to be proven against OCaml or replaced with a more direct port.
+Those changes were the starting point. The later entries in this file document
+the OCaml source audits, Rust changes, focused repros, and parity gates that
+closed every checklist item in [RALPH_TODO.md](./RALPH_TODO.md).
 
-## Current Open Questions
+## Completion Status
 
-- Does every `ComponentLookupCacheMode` call site correspond exactly to an
-  OCaml Env API boundary?
-- Are signature-content inference helpers still affecting force order?
-- Do `ctype.rs` abbreviation caches have the same lifetime and env dependency
-  behavior as OCaml?
-- Are copy/instance row and non-generic sharing rules exact enough for strict
-  typedtree sexp identity parity?
+As of commit `cd06632c3`:
 
-## Next Recommended Session
-
-Continue task 6 in [RALPH_TODO.md](./RALPH_TODO.md):
-
-1. Read OCaml `compiler/ml/ctype.ml` and `compiler/ml/btype.ml` around
-   `copy`, `instance`, `copy_type_desc`, `Tsubst`, row copying, and
-   `cleanup_types`.
-2. Audit Rust `copy_type_cached`, `instance`, and row-copy code against the
-   exact temporary-mutation and cleanup sequence.
-3. Replace remaining Rust-only stale-copy compensations with the OCaml-shaped
-   temporary `Tsubst`/copy-cache behavior where possible.
-4. Keep internal and Tella typedtree/lambda/JS parity green.
+- every checklist item in [RALPH_TODO.md](./RALPH_TODO.md) is complete
+- internal typedtree, lambda, diagnostic, and JS output parity are green
+- Tella typedtree and JS output parity are green
+- the remaining documented Rust/OCaml differences are intentional ReScript
+  layout, in-process, or performance differences rather than typechecker
+  semantic compensations
 
 ## 2026-05-18 Stored Component Thunk Audit
 
@@ -562,6 +549,116 @@ Validation evidence:
 - Release parity gates after clearing cached typedtree artifacts:
   - `./scripts/test_typedtree_parity.sh --release`: `661/661`.
   - `./scripts/test_lambda_parity.sh --release`: `661/661`.
+
+## 2026-05-18 Module Type Fixed Private Row Inclusion
+
+Task 10 partial completion:
+
+- Audited `Mtype.strengthen`, `Mtype.nondep_supertype`,
+  `Mtype.remove_aliases`, and `Mtype.lower_nongen` against the current Rust
+  module typing paths. No Rust code change was needed for `nondep_supertype`,
+  alias removal, or `lower_nongen` in this pass.
+- Fixed Rust strengthening to skip the synthetic fixed-private-row helper
+  declaration immediately preceding the private row type, matching OCaml's
+  `mtype.ml` strengthening rule.
+- Fixed module type inclusion for private fixed polymorphic variants and
+  object rows by porting the relevant `Includecore.type_manifest` behavior:
+  when the expected declaration is private and carries an abstract fixed row,
+  compare the implementation row against the expected row's abstract `more`
+  type and field constraints instead of requiring direct manifest equality.
+- Extended `fixed_private_row_test.res` with module aliases and constrained
+  module inclusion cases that OCaml accepts and Rust previously rejected.
+
+OCaml references:
+
+- `compiler/ml/mtype.ml:41-96`: `strengthen_sig`, including the private-row
+  helper skip at `mtype.ml:51-54`.
+- `compiler/ml/mtype.ml:106-183`: `nondep_supertype`.
+- `compiler/ml/mtype.ml:365-395`: `remove_aliases`.
+- `compiler/ml/mtype.ml:399-410`: `lower_nongen`.
+- `compiler/ml/includecore.ml:87-159`: private fixed variant/object
+  `type_manifest` inclusion.
+- `compiler/ml/includemod.ml:194-267`: `modtypes` dispatch and substitution
+  flow.
+- `compiler/ml/includemod.ml:287-381`: signature pairing, per-item
+  substitution, and runtime coercion collection.
+
+Validation evidence:
+
+- `cargo check --manifest-path compiler-rust/Cargo.toml`: passed.
+- Debug builds:
+  - `cargo build --manifest-path compiler-rust/Cargo.toml`: passed.
+  - `cargo build --manifest-path rewatch/Cargo.toml`: passed.
+- Focused typedtree parity:
+  - `./scripts/test_typedtree_parity.sh fixed_private_row_test`: `1/1`.
+  - `./scripts/test_typedtree_parity.sh 'fixed_private_row_test|global_module_alias_test|module_alias_test|module_parameter_test|Import|test_include|coercion_module_alias_test'`:
+    `10/10`.
+- Full debug typedtree parity after clearing cached typedtree artifacts:
+  `./scripts/test_typedtree_parity.sh`: `662/662`.
+- Tella debug typedtree quick:
+  `./scripts/test_typedtree_parity.sh --tella --quick`: `1697/1697`.
+- Debug lambda quick: `./scripts/test_lambda_parity.sh --quick`: `662/662`.
+- Debug JS output quick with external/Tella:
+  `./scripts/test_js_output_parity.sh --with-external --quick`: focused
+  fixtures `344/344`, local JS output `662/662`, Tella JS output `2127/2127`.
+- Release builds:
+  - `cargo build --release --manifest-path compiler-rust/Cargo.toml`: passed.
+  - `cargo build --release --manifest-path rewatch/Cargo.toml`: passed.
+- Release parity gates after clearing cached typedtree artifacts:
+  - `./scripts/test_typedtree_parity.sh --release`: `662/662`.
+  - `./scripts/test_lambda_parity.sh --release`: `662/662`.
+
+## 2026-05-18 Destructive Substitution Path Repair Cleanup
+
+Task 10 completion:
+
+- Removed the Rust-only `fallback_substituted_item_usage_paths` path guess from
+  destructive-substitution alias/applicative-functor checking. OCaml computes
+  the affected paths from the recursive `merge` that rewrites the signature; it
+  does not retry by reconstructing `A.B.t` paths from signature item names if
+  that traversal fails.
+- Kept the remaining flattened-alias helpers that are driven by registered
+  persistent alias/component evidence. Those helpers model ReScript's flattened
+  module-unit layout while preserving the OCaml `Env.scrape_alias` /
+  `Env.prefix_idents` / `Subst.signature` boundary; they do not fabricate
+  semantic alias identity from `Foo__Bar` spelling.
+
+OCaml references:
+
+- `compiler/ml/typemod.ml:221-267`: destructive substitution comment and
+  `check_usage_of_path_of_substituted_item`.
+- `compiler/ml/typemod.ml:302-454`: `merge_constraint`; `real_ids` are built
+  by the recursive signature merge, checked in reverse order, and then reused
+  for `Subst.signature`.
+- `compiler/ml/env.ml:1516-1538`: alias scraping and `prefix_idents` component
+  path construction for flattened ReScript module units.
+
+Validation evidence:
+
+- `cargo check --manifest-path compiler-rust/Cargo.toml`: passed.
+- Debug build: `cargo build --manifest-path compiler-rust/Cargo.toml`: passed.
+- Focused compiler diagnostic parity:
+  - `./scripts/test_error_output_parity.sh --compiler-only with_changes_module_alias`: `1/1`.
+  - `./scripts/test_error_output_parity.sh --compiler-only with_makes_applicative_functor_ill_typed`:
+    `1/1`.
+  - `./scripts/test_error_output_parity.sh --compiler-only with_no_component_type`: `1/1`.
+- Full compiler diagnostic parity:
+  `./scripts/test_error_output_parity.sh --compiler-only`: `1089/1089`.
+- Full debug typedtree parity after clearing cached typedtree artifacts:
+  `./scripts/test_typedtree_parity.sh`: `662/662`.
+- Tella debug typedtree quick:
+  `./scripts/test_typedtree_parity.sh --tella --quick`: `1697/1697`.
+- Debug lambda quick: `./scripts/test_lambda_parity.sh --quick`: `662/662`.
+- Debug JS output quick with external/Tella:
+  `./scripts/test_js_output_parity.sh --with-external --quick`: fixtures
+  `344/344`, local JS output `662/662`, Tella JS output `2127/2127`.
+- Release validation:
+  - `cargo build --release --manifest-path compiler-rust/Cargo.toml`: passed.
+  - `cargo build --release --manifest-path rewatch/Cargo.toml`: passed.
+  - `./scripts/test_error_output_parity.sh --release --compiler-only`:
+    `1089/1089`.
+  - `./scripts/test_typedtree_parity.sh --release`: `662/662`.
+  - `./scripts/test_lambda_parity.sh --release`: `662/662`.
 
 ## 2026-05-18 Type Declaration Group Staging Alignment
 

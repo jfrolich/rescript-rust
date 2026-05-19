@@ -232,12 +232,12 @@ Files:
 
 Tasks:
 
-- [ ] Audit strengthening.
-- [ ] Audit `nondep_supertype`.
-- [ ] Audit alias removal.
-- [ ] Audit `lower_nongen`.
-- [ ] Audit inclusion substitutions and runtime coercion positions.
-- [ ] Remove path-spelling repair code when the algorithm should produce the
+- [x] Audit strengthening.
+- [x] Audit `nondep_supertype`.
+- [x] Audit alias removal.
+- [x] Audit `lower_nongen`.
+- [x] Audit inclusion substitutions and runtime coercion positions.
+- [x] Remove path-spelling repair code when the algorithm should produce the
       right path directly.
 
 Acceptance:
