@@ -139,6 +139,19 @@ Implement GenType inside the Rust compiler so `bsc -bs-gentype` emits the same `
 | [RALPH_TODO.md](./gentype-rust/RALPH_TODO.md) | Phase-by-phase task list for implementation sessions |
 | [RALPH_SETUP.md](./gentype-rust/RALPH_SETUP.md) | Build, in-repo, Tella, and regression parity commands |
 
+### [cleanup](./cleanup/)
+
+Beta-release cleanup audit for the `ocaml-to-rust-rewrite` branch. Tracks
+release blockers, generated artifacts, machine-local files, debug leftovers,
+script portability issues, and must-review Rust/compiler changes before beta.
+
+| Document | Description |
+|----------|-------------|
+| [PLAN.md](./cleanup/PLAN.md) | Review scope, method, workstreams, and release acceptance gates |
+| [INVENTORY.md](./cleanup/INVENTORY.md) | Full diff counts, changed-file inventory, added-file categories, and largest additions |
+| [FINDINGS.md](./cleanup/FINDINGS.md) | Prioritized release blockers and cleanup findings with file references |
+| [RALPH_TODO.md](./cleanup/RALPH_TODO.md) | Actionable cleanup checklist and verification commands |
+
 ### [printer-parity](./printer-parity/)
 
 Achieve byte-for-byte identical printer/formatter output between Rust and OCaml. Covers the AST printer, OCaml Format module compatibility, and roundtrip idempotence. Currently at 423/506 syntax tests passing (83%).
