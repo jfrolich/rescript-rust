@@ -109,6 +109,7 @@ package.tgz
 # Parser parity test baselines (machine-generated, local tracking)
 tests/parity_baselines/*.txt
 scripts/failure_categories.json
+projects/**/.tmp/
 
 # Python
 __pycache__/
