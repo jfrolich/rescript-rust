@@ -2237,21 +2237,24 @@ fn pre_compile_runtime_modules(build_state: &BuildCommandState) -> Result<()> {
         let typecheck = duration_delta(after.typecheck, before.typecheck);
         let lambda = duration_delta(after.lambda, before.lambda);
         let lambda_optimization = duration_delta(after.lambda_optimization, before.lambda_optimization);
+        let gentype = duration_delta(after.gentype, before.gentype);
         let codegen = duration_delta(after.codegen, before.codegen);
         let recorded = parse
             .saturating_add(typecheck)
             .saturating_add(lambda)
             .saturating_add(lambda_optimization)
+            .saturating_add(gentype)
             .saturating_add(codegen);
         let overhead = wall.saturating_sub(recorded);
         eprintln!(
-            "[runtime-timing] modules={} wall_ms={:.3} parse_ms={:.3} typecheck_ms={:.3} lambda_ms={:.3} lambda_optimization_ms={:.3} codegen_ms={:.3} overhead_ms={:.3}",
+            "[runtime-timing] modules={} wall_ms={:.3} parse_ms={:.3} typecheck_ms={:.3} lambda_ms={:.3} lambda_optimization_ms={:.3} gentype_ms={:.3} codegen_ms={:.3} overhead_ms={:.3}",
             runtime_modules.len(),
             duration_ms(wall),
             duration_ms(parse),
             duration_ms(typecheck),
             duration_ms(lambda),
             duration_ms(lambda_optimization),
+            duration_ms(gentype),
             duration_ms(codegen),
             duration_ms(overhead)
         );
@@ -3109,15 +3112,17 @@ fn compile_module_in_process_to_js_boundary(
         let typecheck = timings.typecheck;
         let lambda = timings.lambda;
         let lambda_optimization = timings.lambda_optimization;
+        let gentype = timings.gentype;
         let codegen = timings.codegen;
         let recorded = parse
             .saturating_add(typecheck)
             .saturating_add(lambda)
             .saturating_add(lambda_optimization)
+            .saturating_add(gentype)
             .saturating_add(codegen);
         let overhead = wall.saturating_sub(recorded);
         eprintln!(
-            "[module-timing] module={} package={} wall_ms={:.3} parse_ms={:.3} typecheck_ms={:.3} lambda_ms={:.3} lambda_optimization_ms={:.3} codegen_ms={:.3} overhead_ms={:.3}",
+            "[module-timing] module={} package={} wall_ms={:.3} parse_ms={:.3} typecheck_ms={:.3} lambda_ms={:.3} lambda_optimization_ms={:.3} gentype_ms={:.3} codegen_ms={:.3} overhead_ms={:.3}",
             module_name,
             package.name,
             duration_ms(wall),
@@ -3125,6 +3130,7 @@ fn compile_module_in_process_to_js_boundary(
             duration_ms(typecheck),
             duration_ms(lambda),
             duration_ms(lambda_optimization),
+            duration_ms(gentype),
             duration_ms(codegen),
             duration_ms(overhead)
         );

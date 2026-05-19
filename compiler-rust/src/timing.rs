@@ -21,6 +21,8 @@ pub enum Phase {
     Lambda,
     /// Lambda simplification before JavaScript IR generation.
     LambdaOptimization,
+    /// GenType generation from the already-typed artifact.
+    Gentype,
     /// JavaScript IR generation and JavaScript text rendering.
     Codegen,
 }
@@ -38,6 +40,8 @@ pub struct PhaseTimingSnapshot {
     pub lambda: Duration,
     /// Aggregate lambda optimization phase time.
     pub lambda_optimization: Duration,
+    /// Aggregate GenType generation phase time.
+    pub gentype: Duration,
     /// Aggregate codegen phase time.
     pub codegen: Duration,
 }
@@ -49,6 +53,7 @@ impl PhaseTimingSnapshot {
             .saturating_add(self.typecheck)
             .saturating_add(self.lambda)
             .saturating_add(self.lambda_optimization)
+            .saturating_add(self.gentype)
             .saturating_add(self.codegen)
     }
 
@@ -63,6 +68,7 @@ static PARSE_NS: AtomicU64 = AtomicU64::new(0);
 static TYPECHECK_NS: AtomicU64 = AtomicU64::new(0);
 static LAMBDA_NS: AtomicU64 = AtomicU64::new(0);
 static LAMBDA_OPT_NS: AtomicU64 = AtomicU64::new(0);
+static GENTYPE_NS: AtomicU64 = AtomicU64::new(0);
 static CODEGEN_NS: AtomicU64 = AtomicU64::new(0);
 
 thread_local! {
@@ -75,6 +81,7 @@ struct ThreadPhaseCounters {
     typecheck_ns: u64,
     lambda_ns: u64,
     lambda_optimization_ns: u64,
+    gentype_ns: u64,
     codegen_ns: u64,
 }
 
@@ -87,6 +94,7 @@ impl ThreadPhaseCounters {
             Phase::LambdaOptimization => {
                 self.lambda_optimization_ns = self.lambda_optimization_ns.saturating_add(nanos);
             }
+            Phase::Gentype => self.gentype_ns = self.gentype_ns.saturating_add(nanos),
             Phase::Codegen => self.codegen_ns = self.codegen_ns.saturating_add(nanos),
         }
     }
@@ -98,6 +106,7 @@ impl ThreadPhaseCounters {
             typecheck: Duration::from_nanos(self.typecheck_ns),
             lambda: Duration::from_nanos(self.lambda_ns),
             lambda_optimization: Duration::from_nanos(self.lambda_optimization_ns),
+            gentype: Duration::from_nanos(self.gentype_ns),
             codegen: Duration::from_nanos(self.codegen_ns),
         }
     }
@@ -198,6 +207,7 @@ pub fn reset() {
     TYPECHECK_NS.store(0, Ordering::Relaxed);
     LAMBDA_NS.store(0, Ordering::Relaxed);
     LAMBDA_OPT_NS.store(0, Ordering::Relaxed);
+    GENTYPE_NS.store(0, Ordering::Relaxed);
     CODEGEN_NS.store(0, Ordering::Relaxed);
 
     #[cfg(not(target_arch = "wasm32"))]
@@ -217,6 +227,7 @@ pub fn record(phase: Phase, duration: Duration) {
         Phase::Typecheck => TYPECHECK_NS.fetch_add(nanos, Ordering::Relaxed),
         Phase::Lambda => LAMBDA_NS.fetch_add(nanos, Ordering::Relaxed),
         Phase::LambdaOptimization => LAMBDA_OPT_NS.fetch_add(nanos, Ordering::Relaxed),
+        Phase::Gentype => GENTYPE_NS.fetch_add(nanos, Ordering::Relaxed),
         Phase::Codegen => CODEGEN_NS.fetch_add(nanos, Ordering::Relaxed),
     };
     THREAD_TIMINGS.with(|timings| {
@@ -267,6 +278,7 @@ pub fn snapshot() -> PhaseTimingSnapshot {
         typecheck: Duration::from_nanos(TYPECHECK_NS.load(Ordering::Relaxed)),
         lambda: Duration::from_nanos(LAMBDA_NS.load(Ordering::Relaxed)),
         lambda_optimization: Duration::from_nanos(LAMBDA_OPT_NS.load(Ordering::Relaxed)),
+        gentype: Duration::from_nanos(GENTYPE_NS.load(Ordering::Relaxed)),
         codegen: Duration::from_nanos(CODEGEN_NS.load(Ordering::Relaxed)),
     }
 }
@@ -289,6 +301,7 @@ pub fn print_report() {
     print_phase("typecheck", snapshot.typecheck, total);
     print_phase("lambda", snapshot.lambda, total);
     print_phase("lambda_optimization", snapshot.lambda_optimization, total);
+    print_phase("gentype", snapshot.gentype, total);
     print_phase("codegen", snapshot.codegen, total);
     print_phase("overhead", snapshot.overhead(), total);
 }

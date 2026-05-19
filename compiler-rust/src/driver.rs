@@ -14248,24 +14248,26 @@ fn process_gentype_typed_artifact_if_enabled<'a>(
     // Mirrors compiler/core/js_implementation.ml:33-34 and 170, but uses the
     // in-memory typedtree that Rust already has instead of reopening the CMT
     // saved by compiler/ml/typemod.ml:1763-1764 and 1785-1787.
-    crate::gentype::main::process_typed_artifact(
-        config,
-        crate::gentype::main::TypedArtifact {
-            annots,
-            arena,
-            ctx: type_ctx,
-            source_file: Some(filename),
-            compiler_module_name: module_name.to_string(),
-            // OCaml passes outputprefix.cmt into GenTypeMain.process_cmt_file
-            // from compiler/core/js_implementation.ml:72/170, then computes
-            // file_name with compiler/gentype/Paths.ml:61-86. The in-process
-            // path has the source filename here, so derive the same
-            // outputprefix-shaped GenType name instead of reusing the
-            // capitalized compiler module name.
-            file_name: crate::gentype::paths::get_module_name_from_source_path(filename),
-            is_interface,
-        },
-    )
+    crate::timing::measure(crate::timing::Phase::Gentype, || {
+        crate::gentype::main::process_typed_artifact(
+            config,
+            crate::gentype::main::TypedArtifact {
+                annots,
+                arena,
+                ctx: type_ctx,
+                source_file: Some(filename),
+                compiler_module_name: module_name.to_string(),
+                // OCaml passes outputprefix.cmt into GenTypeMain.process_cmt_file
+                // from compiler/core/js_implementation.ml:72/170, then computes
+                // file_name with compiler/gentype/Paths.ml:61-86. The in-process
+                // path has the source filename here, so derive the same
+                // outputprefix-shaped GenType name instead of reusing the
+                // capitalized compiler module name.
+                file_name: crate::gentype::paths::get_module_name_from_source_path(filename),
+                is_interface,
+            },
+        )
+    })
     .with_context(|| format!("GenType failed for {filename}"))
 }
 

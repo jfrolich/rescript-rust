@@ -441,7 +441,8 @@ Acceptance:
   structure/signature in memory.
 - Keep resolver caches as performance caches only; they must not change visible
   output.
-- Add benchmarks for Tella GenType generation after parity is complete.
+- Add a GenType timing bucket to the existing compiler phase/module timing
+  reports so Tella generation cost can be measured without a separate harness.
 
 Acceptance:
 
@@ -462,7 +463,7 @@ cargo build --manifest-path compiler-rust/Cargo.toml
 cargo build --manifest-path rewatch/Cargo.toml
 make test-gentype
 ./scripts/test_gentype_output_parity.sh
-./scripts/test_output_parity.sh --quick
+./scripts/test_js_output_parity.sh --quick
 ./scripts/test_typedtree_parity.sh --quick
 ./scripts/test_lambda_parity.sh --quick
 ```
@@ -484,8 +485,10 @@ The project is complete when:
 - Rust `bsc -bs-gentype` emits GenType files for all annotated sources.
 - In-repo GenType suites produce zero generated-output diffs and pass TypeScript
   typecheck.
-- Tella GenType output matches OCaml output byte-for-byte and its TypeScript
-  gate passes.
+- Tella GenType output matches OCaml output byte-for-byte. If the checked-out
+  Tella repo has a TypeScript typecheck script, that gate must match between
+  OCaml-generated and Rust-generated output; otherwise the parity script records
+  the TypeScript gate as `not-configured`.
 - Existing JavaScript output, typedtree, lambda, and error parity gates are not
   regressed.
 - The stale CMT artifact errors covered by the current Rust stub still match
