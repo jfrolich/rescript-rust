@@ -8,14 +8,14 @@ use crate::gentype::gen_type_common::{
 
 pub fn type_get_inlined(
     config: &crate::gentype::config::T,
-    lookup_id: &impl Fn(&str) -> code_item::ExportTypeItem,
+    lookup_id: &impl Fn(&str) -> Option<code_item::ExportTypeItem>,
     type_name_is_interface: &impl Fn(&str) -> bool,
     type0: &Type,
 ) -> Type {
     // Mirrors compiler/gentype/Converter.ml:3-89.
     fn visit(
         config: &crate::gentype::config::T,
-        lookup_id: &impl Fn(&str) -> code_item::ExportTypeItem,
+        lookup_id: &impl Fn(&str) -> Option<code_item::ExportTypeItem>,
         type_name_is_interface: &impl Fn(&str) -> bool,
         circular: &mut String,
         visited: &StringSet,
@@ -71,17 +71,19 @@ pub fn type_get_inlined(
                 } else {
                     let mut visited = visited.clone();
                     visited.insert(name.clone());
-                    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| lookup_id(name)))
-                    {
-                        Ok(code_item::ExportTypeItem {
+                    // Mirrors compiler/gentype/Converter.ml:26-46: a missing
+                    // type id takes the Not_found branch and keeps the Ident
+                    // shape while recursively visiting its type arguments.
+                    match lookup_id(name) {
+                        Some(code_item::ExportTypeItem {
                             annotation: crate::gentype::annotation::T::GenTypeOpaque,
                             ..
                         })
-                        | Ok(code_item::ExportTypeItem {
+                        | Some(code_item::ExportTypeItem {
                             annotation: crate::gentype::annotation::T::NoGenType,
                             ..
                         }) => type_.clone(),
-                        Ok(code_item::ExportTypeItem {
+                        Some(code_item::ExportTypeItem {
                             type_vars, type_, ..
                         }) => {
                             let pairs = type_vars
@@ -105,7 +107,7 @@ pub fn type_get_inlined(
                                 &substituted,
                             )
                         }
-                        Err(_) => Type::Ident(Ident {
+                        None => Type::Ident(Ident {
                             builtin: false,
                             name: name.clone(),
                             type_args: type_args
@@ -208,7 +210,7 @@ pub fn type_get_inlined(
 
     fn arg_type_to_grouped_arg(
         config: &crate::gentype::config::T,
-        lookup_id: &impl Fn(&str) -> code_item::ExportTypeItem,
+        lookup_id: &impl Fn(&str) -> Option<code_item::ExportTypeItem>,
         type_name_is_interface: &impl Fn(&str) -> bool,
         circular: &mut String,
         visited: &StringSet,

@@ -53,11 +53,45 @@ fn in_process_type_declarations_cache() -> &'static InProcessTypeDeclarationsCac
     CACHE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
+fn normalize_cmt_path_lexically(path: PathBuf) -> PathBuf {
+    path.components()
+        .filter(|component| !matches!(component, std::path::Component::CurDir))
+        .fold(PathBuf::new(), |mut normalized, component| {
+            normalized.push(component.as_os_str());
+            normalized
+        })
+}
+
 fn normalize_cmt_cache_key(cmt_file: &str) -> String {
-    std::fs::canonicalize(cmt_file)
-        .unwrap_or_else(|_| PathBuf::from(cmt_file))
+    // Keep the in-process cache key on the same absolute path base that
+    // compiler/gentype/Paths.ml:61-64 applies before selecting .cmti/.cmt
+    // artifacts. OCaml then checks physical files at
+    // compiler/gentype/Paths.ml:79-83, where `./` segments are resolved by
+    // the filesystem; the virtual in-process CMT cache has to remove those
+    // lexical no-op segments before comparing keys.
+    let path = PathBuf::from(cmt_file);
+    let path = if path.is_relative() {
+        std::env::current_dir()
+            .unwrap_or_else(|_| PathBuf::new())
+            .join(path)
+    } else {
+        path
+    };
+    std::fs::canonicalize(&path)
+        .unwrap_or_else(|_| normalize_cmt_path_lexically(path))
         .to_string_lossy()
         .to_string()
+}
+
+fn has_in_process_type_declarations(cmt_file: &Path) -> bool {
+    let Some(cmt_file) = cmt_file.to_str() else {
+        return false;
+    };
+    let key = normalize_cmt_cache_key(cmt_file);
+    in_process_type_declarations_cache()
+        .lock()
+        .map(|cache| cache.contains_key(&key))
+        .unwrap_or(false)
 }
 
 fn lookup_in_process_type_declarations(cmt_file: &str) -> Option<InProcessTypeDeclarations> {
@@ -74,6 +108,21 @@ fn register_in_process_type_declarations(
     if let Ok(mut cache) = in_process_type_declarations_cache().lock() {
         cache.insert(normalize_cmt_cache_key(cmt_file), type_declarations);
     }
+}
+
+fn get_cmt_file_for_typed_artifact_import(project_root: &str, cmt: &str) -> String {
+    // OCaml saves CMTs before GenType reads imports through
+    // compiler/ml/typemod.ml:1763-1764 and compiler/ml/typemod.ml:1785-1787;
+    // EmitJs then selects the artifact at compiler/gentype/EmitJs.ml:438-453
+    // using the path order in compiler/gentype/Paths.ml:61-86. Rewatch's
+    // in-process Rust path keeps those typed artifacts in memory and compiles
+    // from the workspace root, so use Config.project_root as the package cwd
+    // that compiler/gentype/GenTypeConfig.ml:124-131 gives OCaml GenType.
+    crate::gentype::paths::get_cmt_file_from_cwd_with_exists(
+        Path::new(project_root),
+        cmt,
+        |path| path.exists() || has_in_process_type_declarations(path),
+    )
 }
 
 pub fn cmt_check_annotations(
@@ -418,6 +467,7 @@ pub fn emit_translation(
     output_file: &str,
     output_file_relative: &str,
     resolver: &crate::gentype::module_resolver::Resolver,
+    get_cmt_file: &crate::gentype::emit_js::GetCmtFile<'_>,
     source_file: &str,
     translation: &crate::gentype::translation::T,
 ) -> std::io::Result<()> {
@@ -425,6 +475,7 @@ pub fn emit_translation(
     let code_text = crate::gentype::emit_js::emit_translation_as_string(
         config,
         file_name,
+        get_cmt_file,
         &input_cmt_translate_type_declarations,
         output_file_relative,
         resolver,
@@ -568,6 +619,7 @@ pub fn process_cmt_file(cmt: &str) -> std::io::Result<()> {
                 &output_file,
                 &output_file_relative,
                 &resolver,
+                &crate::gentype::paths::get_cmt_file,
                 &source_file,
                 &translation,
             )?;
@@ -654,12 +706,16 @@ pub fn process_typed_artifact(
     if has_gentype_annotations {
         let translation =
             translate_typed_artifact(&config, &output_file_relative, &resolver, &artifact);
+        let project_root = config.project_root.clone();
+        let get_cmt_file =
+            |cmt: &str| get_cmt_file_for_typed_artifact_import(&project_root, cmt);
         emit_translation(
             &mut config,
             &artifact.file_name,
             &output_file,
             &output_file_relative,
             &resolver,
+            &get_cmt_file,
             &source_file,
             &translation,
         )?;

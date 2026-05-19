@@ -102,11 +102,16 @@ pub fn get_module_name_from_source_path(source_path: &str) -> crate::gentype::mo
     get_module_name(&format!("{}.cmt", chop_extension(source_path)))
 }
 
-pub fn get_cmt_file(cmt: &str) -> String {
+pub fn get_cmt_file_from_cwd_with_exists(
+    cwd: &Path,
+    cmt: &str,
+    exists: impl Fn(&Path) -> bool,
+) -> String {
+    // Mirrors compiler/gentype/Paths.ml:61-86. The caller supplies the
+    // existence predicate so in-process GenType can expose the same saved-CMT
+    // lookup order as OCaml while reading typed artifacts from memory.
     let path_cmt = if Path::new(cmt).is_relative() {
-        std::env::current_dir()
-            .unwrap_or_else(|_| PathBuf::new())
-            .join(cmt)
+        cwd.join(cmt)
     } else {
         PathBuf::from(cmt)
     };
@@ -128,13 +133,13 @@ pub fn get_cmt_file(cmt: &str) -> String {
             chop_extension(path_cmt_lower_case.to_string_lossy().as_ref())
         ));
 
-        if path_cmti_lower_case.exists() {
+        if exists(&path_cmti_lower_case) {
             path_cmti_lower_case
-        } else if path_cmti.exists() {
+        } else if exists(&path_cmti) {
             path_cmti
-        } else if path_cmt_lower_case.exists() {
+        } else if exists(&path_cmt_lower_case) {
             path_cmt_lower_case
-        } else if path_cmt.exists() {
+        } else if exists(&path_cmt) {
             path_cmt
         } else {
             PathBuf::new()
@@ -144,6 +149,15 @@ pub fn get_cmt_file(cmt: &str) -> String {
     };
 
     cmt_file.to_string_lossy().to_string()
+}
+
+pub fn get_cmt_file_with_exists(cmt: &str, exists: impl Fn(&Path) -> bool) -> String {
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::new());
+    get_cmt_file_from_cwd_with_exists(&cwd, cmt, exists)
+}
+
+pub fn get_cmt_file(cmt: &str) -> String {
+    get_cmt_file_with_exists(cmt, |path| path.exists())
 }
 
 pub fn read_config(namespace: Option<String>) -> crate::gentype::config::T {

@@ -30,6 +30,8 @@ pub type InputCmtTranslateTypeDeclarations<'a> = dyn Fn(
     ) -> crate::gentype::translation::T
     + 'a;
 
+pub type GetCmtFile<'a> = dyn Fn(&str) -> String + 'a;
+
 pub fn require_module(
     import: bool,
     mut env: Env,
@@ -625,12 +627,7 @@ pub fn type_get_inlined(
     // Mirrors compiler/gentype/EmitJs.ml:411-415.
     crate::gentype::converter::type_get_inlined(
         config,
-        &|s| {
-            export_type_map
-                .get(s)
-                .cloned()
-                .unwrap_or_else(|| panic!("Not_found"))
-        },
+        &|s| export_type_map.get(s).cloned(),
         &|_| false,
         type_,
     )
@@ -639,6 +636,7 @@ pub fn type_get_inlined(
 pub fn read_cmt_files_recursively(
     config: &mut crate::gentype::config::T,
     env: Env,
+    get_cmt_file: &GetCmtFile<'_>,
     input_cmt_translate_type_declarations: &InputCmtTranslateTypeDeclarations<'_>,
     output_file_relative: &str,
     resolver: &crate::gentype::module_resolver::Resolver,
@@ -666,7 +664,10 @@ pub fn read_cmt_files_recursively(
         }
     }
 
-    let cmt_file = crate::gentype::paths::get_cmt_file(&crate::gentype::import_path::to_cmt(
+    // Mirrors compiler/gentype/EmitJs.ml:438-453: resolve the imported
+    // module through ImportPath.to_cmt and Paths.get_cmt_file before reading
+    // declarations from that typed artifact.
+    let cmt_file = get_cmt_file(&crate::gentype::import_path::to_cmt(
         config,
         output_file_relative,
         &import_type.import_path,
@@ -715,6 +716,7 @@ pub fn read_cmt_files_recursively(
                         read_cmt_files_recursively(
                             config,
                             env,
+                            get_cmt_file,
                             input_cmt_translate_type_declarations,
                             output_file_relative,
                             resolver,
@@ -732,6 +734,7 @@ pub fn emit_import_type(
     config: &mut crate::gentype::config::T,
     emitters: crate::gentype::emitters::T,
     env: Env,
+    get_cmt_file: &GetCmtFile<'_>,
     input_cmt_translate_type_declarations: &InputCmtTranslateTypeDeclarations<'_>,
     output_file_relative: &str,
     resolver: &crate::gentype::module_resolver::Resolver,
@@ -742,6 +745,7 @@ pub fn emit_import_type(
     let env = read_cmt_files_recursively(
         config,
         env,
+        get_cmt_file,
         input_cmt_translate_type_declarations,
         output_file_relative,
         resolver,
@@ -762,6 +766,7 @@ pub fn emit_import_types(
     config: &mut crate::gentype::config::T,
     emitters: crate::gentype::emitters::T,
     env: Env,
+    get_cmt_file: &GetCmtFile<'_>,
     input_cmt_translate_type_declarations: &InputCmtTranslateTypeDeclarations<'_>,
     output_file_relative: &str,
     resolver: &crate::gentype::module_resolver::Resolver,
@@ -776,6 +781,7 @@ pub fn emit_import_types(
                 config,
                 emitters,
                 env,
+                get_cmt_file,
                 input_cmt_translate_type_declarations,
                 output_file_relative,
                 resolver,
@@ -941,6 +947,7 @@ pub fn propagate_annotation_to_sub_types(
 pub fn emit_translation_as_string(
     config: &mut crate::gentype::config::T,
     file_name: &crate::gentype::module_name::T,
+    get_cmt_file: &GetCmtFile<'_>,
     input_cmt_translate_type_declarations: &InputCmtTranslateTypeDeclarations<'_>,
     output_file_relative: &str,
     resolver: &crate::gentype::module_resolver::Resolver,
@@ -1001,6 +1008,7 @@ pub fn emit_translation_as_string(
         config,
         emitters,
         env,
+        get_cmt_file,
         input_cmt_translate_type_declarations,
         output_file_relative,
         resolver,
