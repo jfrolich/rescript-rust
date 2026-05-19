@@ -3,8 +3,8 @@
 
 use crate::gentype::code_item;
 use crate::gentype::gen_type_common::{
-    Case as VariantCase, ClosedFlag, Field, LabelJs, Mutable, Optional, Payload, Type,
-    create_variant, ident_with, sanitize_type_name, unknown,
+    create_variant, ident_with, sanitize_type_name, unknown, Case as VariantCase, ClosedFlag,
+    Field, LabelJs, Mutable, Optional, Payload, Type,
 };
 use crate::location::Location;
 use crate::parse_arena::{LocIdx, ParseArena};
@@ -119,7 +119,7 @@ pub fn rename_record_field(arena: &ParseArena, attributes: &Attributes, name: &s
     // Mirrors compiler/gentype/TranslateTypeDeclarations.ml:39-53.
     crate::gentype::annotation::check_unsupported_gentype_as_renaming(arena, attributes);
     match crate::gentype::annotation::get_as_string(arena, attributes) {
-        Some(s) => s.escape_default().to_string(),
+        Some(s) => string_escaped_like_ocaml(&s),
         None => unwrap_uppercase_exotic(name).to_string(),
     }
 }
@@ -132,9 +132,29 @@ pub fn rename_record_field_from_decl_attributes(
     // Types.signature attributes.
     crate::gentype::annotation::check_unsupported_decl_gentype_as_renaming(attributes);
     match crate::gentype::annotation::get_decl_as_string(attributes) {
-        Some(s) => s.escape_default().to_string(),
+        Some(s) => string_escaped_like_ocaml(&s),
         None => unwrap_uppercase_exotic(name).to_string(),
     }
+}
+
+fn string_escaped_like_ocaml(s: &str) -> String {
+    // OCaml TranslateTypeDeclarations.ml:51 uses String.escaped for @as
+    // payloads. Mirror that byte-oriented escaping instead of Rust's
+    // escape_default, which also escapes apostrophes.
+    let mut out = String::new();
+    for byte in s.bytes() {
+        match byte {
+            b'"' => out.push_str("\\\""),
+            b'\\' => out.push_str("\\\\"),
+            b'\n' => out.push_str("\\n"),
+            b'\t' => out.push_str("\\t"),
+            b'\r' => out.push_str("\\r"),
+            8 => out.push_str("\\b"),
+            32..=126 => out.push(byte as char),
+            _ => out.push_str(&format!("\\{byte:03}")),
+        }
+    }
+    out
 }
 
 #[allow(non_snake_case)]

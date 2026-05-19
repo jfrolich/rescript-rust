@@ -120,7 +120,7 @@ Current Rust in-process generated-output baseline:
 ```text
 ./scripts/test_gentype_output_parity.sh
 
-typescript-react-example: 56/71 generated outputs match, 15 changed, 0 missing, 0 extra, 17 diff hunks; OCaml typecheck 0, Rust typecheck 2
+typescript-react-example: 58/71 generated outputs match, 13 changed, 0 missing, 0 extra, 15 diff hunks; OCaml typecheck 0, Rust typecheck 2
 stdlib-no-shims:          1/1 generated outputs match, 0 changed, 0 missing, 0 extra, 0 diff hunks; OCaml typecheck 0, Rust typecheck 0
 Tella:                    103/112 generated outputs match, 7 changed, 2 missing, 0 extra, 8 diff hunks; TypeScript typecheck not configured
 ```
@@ -278,7 +278,7 @@ Current generated-output parity:
 ```text
 ./scripts/test_gentype_output_parity.sh
 
-typescript-react-example: 56/71 generated outputs match, 15 changed, 0 missing, 0 extra, 17 diff hunks; OCaml typecheck 0, Rust typecheck 2
+typescript-react-example: 58/71 generated outputs match, 13 changed, 0 missing, 0 extra, 15 diff hunks; OCaml typecheck 0, Rust typecheck 2
 stdlib-no-shims:          1/1 generated outputs match, 0 changed, 0 missing, 0 extra, 0 diff hunks; OCaml typecheck 0, Rust typecheck 0
 Tella:                    103/112 generated outputs match, 7 changed, 2 missing, 0 extra, 8 diff hunks; TypeScript typecheck not configured
 ```
@@ -299,6 +299,11 @@ into the rewatch in-process GenType config that the OCaml bsc CLI path sees:
 builds `Config.t` from it, and `compiler/gentype/Paths.ml:48-56` plus
 `compiler/gentype/ModuleResolver.ml:111-164` use it for relative output/source
 resolution.
+
+The record-field quote improvement comes from mirroring OCaml's
+`String.escaped` call in `compiler/gentype/TranslateTypeDeclarations.ml:51`.
+Rust now preserves apostrophes inside double-quoted TypeScript property names
+instead of using `escape_default`'s Rust literal escaping.
 
 Debug verification:
 

@@ -178,6 +178,9 @@ Run this checklist for each file after its first port and before compile work.
 - [ ] Integrate reviewed `translate_core_type.rs` fully.
 - [ ] Integrate reviewed `translate_type_expr_from_types.rs` fully.
 - [ ] Integrate reviewed `translate_type_declarations.rs` fully.
+- [x] Match `TranslateTypeDeclarations.ml:51` `String.escaped` behavior for
+  `@as` record field names, including preserving apostrophes inside quoted
+  TypeScript property names.
 - [x] Reach `stdlib-no-shims` output parity: 1/1 with 0 diff hunks.
 - [ ] Commit each type-family improvement atomically with parity status.
 
