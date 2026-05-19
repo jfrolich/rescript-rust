@@ -4,8 +4,9 @@
 #
 # This is intentionally one no-argument entrypoint. It always runs the two
 # in-repo GenType suites and the local Tella checkout, comparing raw generated
-# .gen.ts/.gen.tsx files from the OCaml compiler against the Rust in-process
-# compiler. Do not add normalization or repo-selection options here.
+# .gen.ts/.gen.tsx files that correspond to local .res/.resi source artifacts
+# from the OCaml compiler against the Rust in-process compiler. Do not add
+# normalization or repo-selection options here.
 
 set -uo pipefail
 
@@ -133,9 +134,6 @@ for dirpath, dirnames, filenames in os.walk(root):
     current = Path(dirpath)
     for filename in filenames:
         path = current / filename
-        if filename.endswith(generated_exts):
-            candidates.add(path.resolve())
-            continue
         if filename.endswith(".res") or filename.endswith(".resi"):
             stem = path.with_suffix("")
             for ext in generated_exts:
@@ -177,9 +175,6 @@ for dirpath, dirnames, filenames in os.walk(root):
     current = Path(dirpath)
     for filename in filenames:
         path = current / filename
-        if filename.endswith(generated_exts):
-            candidates.add(path.resolve())
-            continue
         if filename.endswith(".res") or filename.endswith(".resi"):
             stem = path.with_suffix("")
             for ext in generated_exts:
