@@ -366,19 +366,23 @@ pub fn translate_module_binding(
             DeclModuleType::MtyAlias(_, _) => not_implemented("Mty_alias"),
         },
         ModuleExprDesc::Tmod_functor(_, _, _, _) => not_implemented("Tmod_functor"),
-        ModuleExprDesc::Tmod_constraint(_, module_type, module_type_constraint, coercion) => {
-            translate_module_constraint(
-                ctx,
-                arena,
-                &config,
-                output_file_relative,
-                resolver,
-                &type_env,
-                module_type,
-                module_type_constraint,
-                coercion,
-            )
-        }
+        ModuleExprDesc::Tmod_constraint(
+            module_expr,
+            module_type,
+            module_type_constraint,
+            coercion,
+        ) => translate_module_constraint(
+            ctx,
+            arena,
+            &config,
+            output_file_relative,
+            resolver,
+            &type_env,
+            module_expr,
+            module_type,
+            module_type_constraint,
+            coercion,
+        ),
     }
 }
 
@@ -553,10 +557,35 @@ fn translate_module_constraint(
     output_file_relative: &str,
     resolver: &crate::gentype::module_resolver::Resolver,
     type_env: &crate::gentype::type_env::T,
+    module_expr: &crate::types::typedtree::ModuleExpr,
     module_type: &DeclModuleType,
     module_type_constraint: &ModuleTypeConstraint,
-    _coercion: &crate::types::typedtree::ModuleCoercion,
+    coercion: &crate::types::typedtree::ModuleCoercion,
 ) -> crate::gentype::translation::T {
+    if let (
+        ModuleExprDesc::Tmod_structure(structure),
+        ModuleTypeConstraint::Tmodtype_implicit,
+        crate::types::typedtree::ModuleCoercion::Tcoerce_structure(_, _, _),
+    ) = (&module_expr.mod_desc, module_type_constraint, coercion)
+    {
+        // Matches compiler/gentype/TranslateStructure.ml:248-258: implicit
+        // structural constraints created around duplicate JSX `make` bindings
+        // are translated from the inner structure after the OCaml duplicate
+        // value-binding pass.
+        let (_, str_items) = remove_duplicate_value_bindings(&structure.str_items);
+        let mut structure = structure.clone();
+        structure.str_items = str_items;
+        return crate::gentype::translation::combine(&translate_structure(
+            ctx,
+            arena,
+            config,
+            output_file_relative,
+            resolver,
+            type_env,
+            &structure,
+        ));
+    }
+
     match (module_type, module_type_constraint) {
         (DeclModuleType::MtyIdent(path), ModuleTypeConstraint::Tmodtype_explicit(_)) => {
             match crate::gentype::type_env::lookup_module_type_signature(path, type_env) {

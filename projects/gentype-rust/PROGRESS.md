@@ -90,12 +90,18 @@ support in Rust is still incomplete:
   `compiler/gentype/ExportModule.ml:104-125`, and the OCaml stdlib table
   mechanics in `hashtbl.ml:73-78`, `hashtbl.ml:207-223`,
   `hashtbl.ml:505-508`, and `hashtbl.ml:592-598`.
+- Rust GenType module translation now handles implicit structural constraints
+  around inner structures the same way OCaml does: remove duplicate value
+  bindings and translate the inner structure. This matches
+  `compiler/gentype/TranslateStructure.ml:248-258` and recovers GenType output
+  for JSX component modules whose PPX output contains duplicate `make`
+  bindings.
 - Latest debug verification: `cargo build --quiet --manifest-path
   compiler-rust/Cargo.toml`, `cargo build --quiet --manifest-path
   rewatch/Cargo.toml`, and `./scripts/test_gentype_output_parity.sh`. Results:
-  react example `64/71` generated files with `7` changed, `0` missing, `0`
-  extra, `9` hunks, TypeScript `0` for OCaml and `0` for Rust; stdlib-no-shims
-  `1/1`; Tella `107/112` with `3` changed, `2` missing, `0` extra, `3` hunks.
+  react example `66/71` generated files with `5` changed, `0` missing, `0`
+  extra, `5` hunks, TypeScript `0` for OCaml and `0` for Rust; stdlib-no-shims
+  `1/1`; Tella `108/112` with `2` changed, `2` missing, `0` extra, `2` hunks.
 
 ## Reference Inventory
 
