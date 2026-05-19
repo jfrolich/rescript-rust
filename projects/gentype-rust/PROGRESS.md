@@ -68,6 +68,10 @@ support in Rust is still incomplete:
   `compiler/frontend/ast_derive_projector.ml:124-132`, and
   `compiler/frontend/ast_attributes.ml:285-290`, allowing GenType to see the
   same generated accessor annotations as the OCaml pipeline.
+- Rust GenType now maps `ReactDOM.Ref.t` to the same React DOM ref type as
+  `ReactDOM.domRef`, matching `compiler/gentype/TranslateTypeExprFromTypes.ml:389-390`.
+  This removes the bogus `ReactDOM.gen` import from `Hooks.gen.tsx`; the React
+  suite still fails TypeScript only because `Wrapper.gen.tsx` is empty.
 
 ## Reference Inventory
 

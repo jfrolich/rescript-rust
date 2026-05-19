@@ -186,7 +186,13 @@ pub fn translate_constr(
             [a, b, c, d] if a == "Stdlib" && b == "Intl" && d == "t" => {
                 return tr(ident(&format!("Intl.{c}")));
             }
+            // OCaml compiler/gentype/TranslateTypeExprFromTypes.ml:389-390
+            // maps both `ReactDOM.domRef` and `ReactDOM.Ref.t` to the same
+            // React DOM ref type.
             [a, b] if a == "ReactDOM" && b == "domRef" => {
+                return tr(crate::gentype::emit_type::type_react_d_o_m_re_dom_ref());
+            }
+            [a, b, c] if a == "ReactDOM" && b == "Ref" && c == "t" => {
                 return tr(crate::gentype::emit_type::type_react_d_o_m_re_dom_ref());
             }
             [a, b, c] if a == "ReactDOM" && b == "Ref" && c == "currentDomRef" => {
