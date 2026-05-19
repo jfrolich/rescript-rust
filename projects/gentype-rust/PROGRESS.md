@@ -96,11 +96,16 @@ support in Rust is still incomplete:
   `compiler/gentype/TranslateStructure.ml:248-258` and recovers GenType output
   for JSX component modules whose PPX output contains duplicate `make`
   bindings.
+- Rust GenType explicit module-constraint translation now respects OCaml's
+  `Tcoerce_none` split before choosing declaration-signature translation. This
+  matches `compiler/gentype/TranslateStructure.ml:234-267`: structurally
+  coerced explicit signatures fall through to the typed-signature branch so
+  attributes from the explicit signature are preserved.
 - Latest debug verification: `cargo build --quiet --manifest-path
   compiler-rust/Cargo.toml`, `cargo build --quiet --manifest-path
   rewatch/Cargo.toml`, and `./scripts/test_gentype_output_parity.sh`. Results:
-  react example `66/71` generated files with `5` changed, `0` missing, `0`
-  extra, `5` hunks, TypeScript `0` for OCaml and `0` for Rust; stdlib-no-shims
+  react example `67/71` generated files with `4` changed, `0` missing, `0`
+  extra, `4` hunks, TypeScript `0` for OCaml and `0` for Rust; stdlib-no-shims
   `1/1`; Tella `108/112` with `2` changed, `2` missing, `0` extra, `2` hunks.
 
 ## Reference Inventory

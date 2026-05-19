@@ -586,8 +586,15 @@ fn translate_module_constraint(
         ));
     }
 
-    match (module_type, module_type_constraint) {
-        (DeclModuleType::MtyIdent(path), ModuleTypeConstraint::Tmodtype_explicit(_)) => {
+    match (module_type, module_type_constraint, coercion) {
+        (
+            DeclModuleType::MtyIdent(path),
+            ModuleTypeConstraint::Tmodtype_explicit(_),
+            crate::types::typedtree::ModuleCoercion::Tcoerce_none,
+        ) => {
+            // Mirrors compiler/gentype/TranslateStructure.ml:234-241: this
+            // module-type lookup path is only used when the explicit
+            // constraint needs no structural coercion.
             match crate::gentype::type_env::lookup_module_type_signature(path, type_env) {
                 None => crate::gentype::translation::empty(),
                 Some((signature, _, type_env)) => crate::gentype::translation::combine(
@@ -603,7 +610,15 @@ fn translate_module_constraint(
                 ),
             }
         }
-        (DeclModuleType::MtySignature(signature), ModuleTypeConstraint::Tmodtype_explicit(_)) => {
+        (
+            DeclModuleType::MtySignature(signature),
+            ModuleTypeConstraint::Tmodtype_explicit(_),
+            crate::types::typedtree::ModuleCoercion::Tcoerce_none,
+        ) => {
+            // Mirrors compiler/gentype/TranslateStructure.ml:242-247. When a
+            // structural coercion is present, OCaml falls through to the typed
+            // signature branch at compiler/gentype/TranslateStructure.ml:259-267
+            // so attributes from the explicit signature are preserved.
             crate::gentype::translation::combine(
                 &crate::gentype::translate_signature_from_types::translate_signature_from_types(
                     ctx,
@@ -616,7 +631,7 @@ fn translate_module_constraint(
                 ),
             )
         }
-        (_, ModuleTypeConstraint::Tmodtype_explicit(module_type))
+        (_, ModuleTypeConstraint::Tmodtype_explicit(module_type), _)
             if matches!(
                 module_type.mty_desc,
                 crate::types::typedtree::ModuleTypeDesc::Tmty_signature(_)
