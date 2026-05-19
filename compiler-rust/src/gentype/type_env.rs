@@ -349,6 +349,13 @@ pub fn lookup_module_type_signature(
             path.name()
         ));
     }
+    // OCaml GenType reads saved CMT/CMTI artifacts at
+    // compiler/gentype/GenTypeMain.ml:53-70 before package paths reach
+    // compiler/gentype/TypeEnv.ml:160-164. Rust's in-process typedtree can
+    // still carry the current compilation-unit prefix (`Current.MT`), so strip
+    // only that boundary prefix before running the same TypeEnv lookup.
+    let stripped_path = strip_current_module_prefix(path, type_env);
+    let path = stripped_path.as_ref().unwrap_or(path);
     let mut path = path_to_list(path);
     path.reverse();
     lookup_module_type(&path, type_env)

@@ -109,11 +109,18 @@ support in Rust is still incomplete:
   parity yet; the remaining first-class-module diffs still point at module-type
   signature lookup/availability before package runtime-representation
   translation.
+- Rust GenType module-type signature lookup now strips only the current
+  compilation-unit prefix before walking `TypeEnv`, matching the CMT/CMTI
+  artifact boundary at `compiler/gentype/GenTypeMain.ml:53-70` before package
+  lookup reaches `compiler/gentype/TypeEnv.ml:160-164`. This lets Types-based
+  first-class package translation find local module-type declarations through
+  the same unqualified path shape that OCaml GenType reads from saved typed
+  artifacts.
 - Latest debug verification: `cargo build --quiet --manifest-path
   compiler-rust/Cargo.toml`, `cargo build --quiet --manifest-path
   rewatch/Cargo.toml`, and `./scripts/test_gentype_output_parity.sh`. Results:
-  react example `67/71` generated files with `4` changed, `0` missing, `0`
-  extra, `4` hunks, TypeScript `0` for OCaml and `0` for Rust; stdlib-no-shims
+  react example `69/71` generated files with `2` changed, `0` missing, `0`
+  extra, `2` hunks, TypeScript `0` for OCaml and `0` for Rust; stdlib-no-shims
   `1/1`; Tella `108/112` with `2` changed, `2` missing, `0` extra, `2` hunks.
 
 ## Reference Inventory
@@ -185,6 +192,17 @@ stdlib-no-shims:          1/1 generated outputs match, 0 changed, 0 missing, 0 e
 Tella:                    107/112 generated outputs match, 3 changed, 2 missing, 0 extra, 3 diff hunks; TypeScript typecheck not configured
 ```
 
+Latest focused generated-output parity after aligning Types-based package
+lookup with the CMT-shaped current-unit boundary:
+
+```text
+./scripts/test_gentype_output_parity.sh
+
+typescript-react-example: 69/71 generated outputs match, 2 changed, 0 missing, 0 extra, 2 diff hunks; OCaml typecheck 0, Rust typecheck 0
+stdlib-no-shims:          1/1 generated outputs match, 0 changed, 0 missing, 0 extra, 0 diff hunks; OCaml typecheck 0, Rust typecheck 0
+Tella:                    108/112 generated outputs match, 2 changed, 2 missing, 0 extra, 2 diff hunks; TypeScript typecheck not configured
+```
+
 Older missing-output baselines before the in-process hook are superseded by the
 current counts above and the detailed Phase 3/7 notes below.
 
@@ -210,8 +228,10 @@ Known Phase 5 adapters still present:
   TypeContext access needed to mirror it, but still currently relies on
   argument translation following the `Tlink`.
 - Package `Tpackage` constraint longidents from
-  `TranslateTypeExprFromTypes.ml:639-670` still need `ParseArena` threading so
-  Rust can flatten the stored `Longident` indices to names.
+  `TranslateTypeExprFromTypes.ml:639-670` now flatten stored `Longident`
+  indices to names, but the remaining module-alias output diffs still need
+  closer comparison against the alias/dependency path through
+  `compiler/gentype/TypeEnv.ml` and `compiler/gentype/EmitJs.ml`.
 - Decl-signature type declarations currently use parser-empty top-level
   attributes in `translate_signature_from_types`; constructor/label/value/module
   decl attributes are handled, but top-level type attributes still need a
