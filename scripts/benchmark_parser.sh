@@ -42,7 +42,16 @@ fi
 
 # Create temp directory
 TEMP_DIR=$(mktemp -d)
-trap "rm -rf $TEMP_DIR" EXIT
+
+cleanup_dir_tree() {
+    local dir="$1"
+    [[ -n "$dir" && -d "$dir" ]] || return 0
+    find "$dir" -type f -exec rm -f {} + 2>/dev/null || true
+    find "$dir" -type l -exec rm -f {} + 2>/dev/null || true
+    find "$dir" -depth -type d -empty -exec rmdir {} \; 2>/dev/null || true
+}
+
+trap 'cleanup_dir_tree "$TEMP_DIR"' EXIT
 
 echo -e "${BOLD}Parser Performance Benchmark${RESET}"
 echo "============================================"

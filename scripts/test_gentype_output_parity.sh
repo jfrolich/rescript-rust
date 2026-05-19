@@ -26,7 +26,7 @@ RUST_BSC="${RUST_BSC:-$PROJECT_ROOT/compiler-rust/target/$RUST_TARGET/bsc}"
 REWATCH_BIN="${REWATCH_BIN:-$PROJECT_ROOT/rewatch/target/$REWATCH_TARGET/rescript}"
 RESCRIPT_CLI="${RESCRIPT_CLI:-$PROJECT_ROOT/packages/@rescript/$("$script_dir/platform.sh")/bin/rescript.exe}"
 RESCRIPT_RUNTIME="${RESCRIPT_RUNTIME:-$PROJECT_ROOT/packages/@rescript/runtime}"
-TELLA_DIR="/Users/jake/dev/tella-fusion"
+TELLA_DIR="${TELLA_DIR:-$HOME/dev/tella-fusion}"
 CACHE_DIR="$PROJECT_ROOT/.parity-cache/gentype-output"
 export RESCRIPT_RUNTIME
 
@@ -74,7 +74,7 @@ check_prerequisites() {
 
     if [[ ! -d "$TELLA_DIR" ]]; then
         echo -e "${RED}Error: Tella checkout not found at $TELLA_DIR${RESET}" >&2
-        echo "This script always includes Tella; clone it at the standard local path before running." >&2
+        echo "This script always includes Tella; set TELLA_DIR to the local checkout before running." >&2
         missing=true
     fi
 

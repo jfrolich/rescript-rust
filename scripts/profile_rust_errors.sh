@@ -8,13 +8,22 @@ scriptDir=$(dirname "$0")
 PROJECT_ROOT=$(cd "$scriptDir/.."; pwd -P)
 RUST_TARGET="${RUST_TARGET:-debug}"
 RUST_BSC="$PROJECT_ROOT/compiler-rust/target/$RUST_TARGET/bsc"
-RESCRIPT_CLI="$PROJECT_ROOT/packages/@rescript/darwin-arm64/bin/rescript.exe"
+RESCRIPT_CLI="${RESCRIPT_CLI:-$PROJECT_ROOT/packages/@rescript/$("$scriptDir/platform.sh")/bin/rescript.exe}"
 OCAML_BSC="$PROJECT_ROOT/_build/install/default/bin/bsc"
 TEST_PROJECT="$PROJECT_ROOT/tests/tests"
 TIMEOUT_SECONDS=10
 
 TEMP_DIR=$(mktemp -d)
-trap "rm -rf $TEMP_DIR" EXIT
+
+cleanup_dir_tree() {
+    local dir="$1"
+    [[ -n "$dir" && -d "$dir" ]] || return 0
+    find "$dir" -type f -exec rm -f {} + 2>/dev/null || true
+    find "$dir" -type l -exec rm -f {} + 2>/dev/null || true
+    find "$dir" -depth -type d -empty -exec rmdir {} \; 2>/dev/null || true
+}
+
+trap 'cleanup_dir_tree "$TEMP_DIR"' EXIT
 
 echo "Profiling Rust compiler errors..."
 echo "================================="

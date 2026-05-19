@@ -188,7 +188,16 @@ fi
 
 # Create temp directory
 TEMP_DIR=$(mktemp -d)
-trap "rm -rf $TEMP_DIR" EXIT
+
+cleanup_dir_tree() {
+    local dir="$1"
+    [[ -n "$dir" && -d "$dir" ]] || return 0
+    find "$dir" -type f -exec rm -f {} + 2>/dev/null || true
+    find "$dir" -type l -exec rm -f {} + 2>/dev/null || true
+    find "$dir" -depth -type d -empty -exec rmdir {} \; 2>/dev/null || true
+}
+
+trap 'cleanup_dir_tree "$TEMP_DIR"' EXIT
 
 echo -e "${BOLD}AST0 Parity Test (PPX-compatible format)${RESET}"
 echo "============================================"
@@ -377,10 +386,11 @@ test_single_file() {
     echo "$file:$parse_pass:$sexp0_locs_diff:$roundtrip_diff:$roundtrip_locs_diff:$binary0_diff:$ocaml_fail:$rust_fail" > "$result_file"
 
     # Clean up per-file temp
-    rm -rf "$file_temp"
+    cleanup_dir_tree "$file_temp"
 }
 
 export -f test_single_file
+export -f cleanup_dir_tree
 export RESULTS_DIR
 
 echo -e "${BOLD}Running AST0 parity tests...${RESET}"

@@ -24,8 +24,22 @@ from inspect_binary_ast import (
     SharedNode, BlockNode, StringNode, IntNode, DoubleNode
 )
 
+def rescript_platform():
+    platform_script = os.path.join(SCRIPT_DIR, "platform.sh")
+    result = subprocess.run(
+        [platform_script],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return result.stdout.strip()
+
+
 # Binary paths
-OCAML_BSC = os.path.join(PROJECT_ROOT, "packages/@rescript/darwin-arm64/bin/bsc.exe")
+OCAML_BSC = os.environ.get(
+    "OCAML_BSC",
+    os.path.join(PROJECT_ROOT, "packages/@rescript", rescript_platform(), "bin/bsc.exe"),
+)
 RUST_TARGET = os.environ.get("RUST_TARGET", "debug")
 RUST_BSC = os.environ.get(
     "RUST_BSC",

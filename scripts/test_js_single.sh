@@ -105,6 +105,15 @@ fi
 
 # Compile with Rust
 tmp_dir=$(mktemp -d)
+
+cleanup_dir_tree() {
+    local dir="$1"
+    [[ -n "$dir" && -d "$dir" ]] || return 0
+    find "$dir" -type f -exec rm -f {} + 2>/dev/null || true
+    find "$dir" -type l -exec rm -f {} + 2>/dev/null || true
+    find "$dir" -depth -type d -empty -exec rmdir {} \; 2>/dev/null || true
+}
+
 output_name=$(basename "$expected_file")
 actual_file="$tmp_dir/$output_name"
 compile_output="$tmp_dir/compile.txt"
@@ -130,14 +139,14 @@ fi
 if ! $compile_ok; then
     echo "COMPILE ERROR: $res_file"
     cat "$compile_output"
-    rm -rf "$tmp_dir"
+    cleanup_dir_tree "$tmp_dir"
     exit 2
 fi
 
 if [[ ! -f "$actual_file" ]]; then
     echo "NO OUTPUT: $res_file (compiled but no .js file produced)"
     cat "$compile_output"
-    rm -rf "$tmp_dir"
+    cleanup_dir_tree "$tmp_dir"
     exit 2
 fi
 
@@ -155,7 +164,7 @@ case "$SHOW_MODE" in
     *)
         if diff -q "$expected_file" "$actual_file" > /dev/null 2>&1; then
             echo "PASS: $res_file"
-            rm -rf "$tmp_dir"
+            cleanup_dir_tree "$tmp_dir"
             exit 0
         else
             echo "FAIL: $res_file"
@@ -166,10 +175,10 @@ case "$SHOW_MODE" in
             echo "    $0 $res_file --diff       # see diff"
             echo "    $0 $res_file --rust       # see Rust output"
             echo "    $0 $res_file --expected   # see OCaml output"
-            rm -rf "$tmp_dir"
+            cleanup_dir_tree "$tmp_dir"
             exit 1
         fi
         ;;
 esac
 
-rm -rf "$tmp_dir"
+cleanup_dir_tree "$tmp_dir"

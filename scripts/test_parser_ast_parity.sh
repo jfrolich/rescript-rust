@@ -187,9 +187,6 @@ OCAML_BSC="$PROJECT_ROOT/packages/@rescript/$($PROJECT_ROOT/scripts/platform.sh)
 
 # Spice PPX parity configuration
 SPICE_PPX="${SPICE_PPX:-$PROJECT_ROOT/node_modules/@jfrolich/ppx-spice/ppx}"
-if [[ ! -x "$SPICE_PPX" && -x "/Users/jaapf/conductor/repos/ppx_spice/ppx" ]]; then
-    SPICE_PPX="/Users/jaapf/conductor/repos/ppx_spice/ppx"
-fi
 SPICE_TEST_DIR="$PROJECT_ROOT/tests/ppx_spice/src"
 INSPECT_SCRIPT="$PROJECT_ROOT/scripts/inspect_binary_ast.py"
 
@@ -238,7 +235,16 @@ fi
 
 # Create temp directory
 TEMP_DIR=$(mktemp -d)
-trap "rm -rf $TEMP_DIR" EXIT
+
+cleanup_dir_tree() {
+    local dir="$1"
+    [[ -n "$dir" && -d "$dir" ]] || return 0
+    find "$dir" -type f -exec rm -f {} + 2>/dev/null || true
+    find "$dir" -type l -exec rm -f {} + 2>/dev/null || true
+    find "$dir" -depth -type d -empty -exec rmdir {} \; 2>/dev/null || true
+}
+
+trap 'cleanup_dir_tree "$TEMP_DIR"' EXIT
 
 echo -e "${BOLD}AST Parity Test${RESET}"
 echo "============================================"
@@ -516,10 +522,11 @@ test_single_file() {
     echo "$file:$locs_pass:$locs_diff:$sexp_locs_ppx_diff:$sexp_locs_ppx_spice_checked:$sexp_locs_ppx_spice_diff:$bsc_ast_diff:$ocaml_fail:$rust_fail" > "$result_file"
 
     # Clean up per-file temp
-    rm -rf "$file_temp"
+    cleanup_dir_tree "$file_temp"
 }
 
 export -f test_single_file
+export -f cleanup_dir_tree
 export RESULTS_DIR
 
 echo -e "${BOLD}Running AST parity tests...${RESET}"

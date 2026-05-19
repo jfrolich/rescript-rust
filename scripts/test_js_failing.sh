@@ -104,6 +104,14 @@ error_count=0
 newly_passing=()
 still_failing=()
 
+cleanup_dir_tree() {
+    local dir="$1"
+    [[ -n "$dir" && -d "$dir" ]] || return 0
+    find "$dir" -type f -exec rm -f {} + 2>/dev/null || true
+    find "$dir" -type l -exec rm -f {} + 2>/dev/null || true
+    find "$dir" -depth -type d -empty -exec rmdir {} \; 2>/dev/null || true
+}
+
 find_project_root() {
     local d
     d=$(dirname "$1")
@@ -164,7 +172,7 @@ for res_file in "${failing_files[@]}"; do
     if ! $compile_ok || [[ ! -f "$actual_file" ]]; then
         error_count=$((error_count + 1))
         still_failing+=("$res_file (compile error)")
-        rm -rf "$tmp_dir"
+        cleanup_dir_tree "$tmp_dir"
         continue
     fi
 
@@ -184,7 +192,7 @@ for res_file in "${failing_files[@]}"; do
         diff -u "$expected_file" "$actual_file" > "$DIFF_DIR/js_${safe}.diff" 2>&1 || true
     fi
 
-    rm -rf "$tmp_dir"
+    cleanup_dir_tree "$tmp_dir"
 done
 
 # Report
