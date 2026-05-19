@@ -3150,6 +3150,36 @@ fn find_existing_lident_idx(arena: &ParseArena, name: &str) -> Option<LidentIdx>
     None
 }
 
+fn push_synthetic_pat(arena: &ParseArena, pat: ParsedPattern) -> crate::parse_arena::PatIdx {
+    // Safety: Typecore appends compiler-synthesized AST nodes after parsing,
+    // matching OCaml typecore rewrites such as build_or_pat at
+    // compiler/ml/typecore.ml:556-620 and optional-default lowering at
+    // compiler/ml/typecore.ml:2431-2467. Existing typed code stores arena
+    // indices, not references to Vec slots, and callers must not hold arena
+    // element borrows across these append-only mutations.
+    unsafe { (*(arena as *const ParseArena as *mut ParseArena)).push_pat(pat) }
+}
+
+fn push_synthetic_expr(arena: &ParseArena, expr: ParsedExpression) -> crate::parse_arena::ExprIdx {
+    // Safety: see `push_synthetic_pat`.
+    unsafe { (*(arena as *const ParseArena as *mut ParseArena)).push_expr(expr) }
+}
+
+fn push_synthetic_longident(arena: &ParseArena, lid: Longident) -> LidentIdx {
+    // Safety: see `push_synthetic_pat`.
+    unsafe { (*(arena as *const ParseArena as *mut ParseArena)).push_longident(lid) }
+}
+
+fn push_synthetic_lident(arena: &ParseArena, name: &str) -> LidentIdx {
+    // Safety: see `push_synthetic_pat`.
+    unsafe { (*(arena as *const ParseArena as *mut ParseArena)).push_lident(name) }
+}
+
+fn intern_synthetic_string(arena: &ParseArena, name: &str) -> StrIdx {
+    // Safety: see `push_synthetic_pat`.
+    unsafe { (*(arena as *const ParseArena as *mut ParseArena)).intern_string(name) }
+}
+
 /// Build an or-pattern from a poly variant type definition.
 /// Matches OCaml typecore.ml:537-609 `build_or_pat`.
 ///
@@ -3378,7 +3408,6 @@ fn build_ppat_or_for_variant_spread(
         Located::mknoloc(tctx.arena.pat_from_variant_spread_attr_str()),
         crate::parser::ast::Payload::PStr(Box::new(vec![])),
     );
-    let arena_ptr = tctx.arena as *const ParseArena as *mut ParseArena;
     let mut synthetic_pattern_idxs = Vec::with_capacity(constructors.len());
     for cstr in constructors {
         let cstr_name = cstr.cd_id.name();
@@ -3394,13 +3423,14 @@ fn build_ppat_or_for_variant_spread(
         };
         let cstr_arg = match cstr.cd_args {
             crate::types::ConstructorArguments::CstrTuple(ref args) if args.is_empty() => None,
-            _ => Some(unsafe {
-                (*arena_ptr).push_pat(ParsedPattern {
+            _ => Some(push_synthetic_pat(
+                tctx.arena,
+                ParsedPattern {
                     ppat_desc: Box::new(crate::parser::ast::PatternDesc::Ppat_any),
                     ppat_loc: LocIdx::none(),
                     ppat_attributes: Attributes::new(),
-                })
-            }),
+                },
+            )),
         };
         let parsed = ParsedPattern {
             ppat_desc: Box::new(crate::parser::ast::PatternDesc::Ppat_construct(
@@ -3409,14 +3439,14 @@ fn build_ppat_or_for_variant_spread(
             ppat_loc: lident.loc,
             ppat_attributes: vec![pat_from_variant_spread_attr.clone()].into(),
         };
-        synthetic_pattern_idxs.push(unsafe { (*arena_ptr).push_pat(parsed) });
+        synthetic_pattern_idxs.push(push_synthetic_pat(tctx.arena, parsed));
     }
 
     synthetic_pattern_idxs.reverse();
     let expanded_pattern = match synthetic_pattern_idxs
         .into_iter()
-        .reduce(|lhs, rhs| unsafe {
-            (*arena_ptr).push_pat(ParsedPattern {
+        .reduce(|lhs, rhs| {
+            push_synthetic_pat(tctx.arena, ParsedPattern {
                 ppat_desc: Box::new(crate::parser::ast::PatternDesc::Ppat_or(lhs, rhs)),
                 ppat_loc: LocIdx::none(),
                 ppat_attributes: Attributes::new(),
@@ -5073,13 +5103,12 @@ fn qualify_unqualified_pattern_record_fields(
         return fields.to_vec();
     };
 
-    let arena_ptr = tctx.arena as *const ParseArena as *mut ParseArena;
     let mut rewritten = Vec::with_capacity(fields.len());
     for field in fields {
         let mut field = field.clone();
         if let Longident::Lident(field_name) = tctx.arena.get_longident(field.lid.txt) {
             let qualified = Longident::Ldot(Box::new(module_qualifier.clone()), *field_name);
-            let qualified_idx = unsafe { (*arena_ptr).push_longident(qualified) };
+            let qualified_idx = push_synthetic_longident(tctx.arena, qualified);
             field.lid = Located {
                 txt: qualified_idx,
                 loc: field.lid.loc,
@@ -6410,7 +6439,8 @@ fn type_expect_with_recarg<'a>(
                 ref arity,
                 ref is_async,
             } = **inner;
-            // Match OCaml typecore.ml optional-default rewrite:
+            // Match OCaml compiler/ml/typecore.ml:2431-2467
+            // optional-default rewrite:
             //   fun ?x:(p=default) -> body
             // becomes
             //   fun ?x:*opt* ->
@@ -6434,10 +6464,9 @@ fn type_expect_with_recarg<'a>(
                         find_loc_idx_by_bounds(tctx.arena, sloc_start, sloc_end)
                             .unwrap_or(lhs_pat.ppat_loc)
                     };
-                    let arena_ptr = tctx.arena as *const ParseArena as *mut ParseArena;
-
-                    let matched_pat = unsafe {
-                        (*arena_ptr).push_pat(ParsedPattern {
+                    let matched_pat = push_synthetic_pat(
+                        tctx.arena,
+                        ParsedPattern {
                             ppat_desc: Box::new(crate::parser::ast::PatternDesc::Ppat_var(
                                 Located {
                                     txt: sth_name,
@@ -6446,11 +6475,12 @@ fn type_expect_with_recarg<'a>(
                             )),
                             ppat_loc: default_loc,
                             ppat_attributes: crate::parser::ast::Attributes::new(),
-                        })
-                    };
+                        },
+                    );
 
-                    let some_pat = unsafe {
-                        (*arena_ptr).push_pat(ParsedPattern {
+                    let some_pat = push_synthetic_pat(
+                        tctx.arena,
+                        ParsedPattern {
                             ppat_desc: Box::new(crate::parser::ast::PatternDesc::Ppat_construct(
                                 Located {
                                     txt: tctx.arena.predef_some_lid(),
@@ -6460,11 +6490,12 @@ fn type_expect_with_recarg<'a>(
                             )),
                             ppat_loc: default_loc,
                             ppat_attributes: crate::parser::ast::Attributes::new(),
-                        })
-                    };
+                        },
+                    );
 
-                    let none_pat = unsafe {
-                        (*arena_ptr).push_pat(ParsedPattern {
+                    let none_pat = push_synthetic_pat(
+                        tctx.arena,
+                        ParsedPattern {
                             ppat_desc: Box::new(crate::parser::ast::PatternDesc::Ppat_construct(
                                 Located {
                                     txt: tctx.arena.predef_none_lid(),
@@ -6474,11 +6505,12 @@ fn type_expect_with_recarg<'a>(
                             )),
                             ppat_loc: default_loc,
                             ppat_attributes: crate::parser::ast::Attributes::new(),
-                        })
-                    };
+                        },
+                    );
 
-                    let some_rhs = unsafe {
-                        (*arena_ptr).push_expr(ParsedExpression {
+                    let some_rhs = push_synthetic_expr(
+                        tctx.arena,
+                        ParsedExpression {
                             pexp_desc: Box::new(crate::parser::ast::ExpressionDesc::Pexp_ident(
                                 Located {
                                     txt: sth_lid,
@@ -6487,21 +6519,23 @@ fn type_expect_with_recarg<'a>(
                             )),
                             pexp_loc: default_loc,
                             pexp_attributes: crate::parser::ast::Attributes::new(),
-                        })
-                    };
+                        },
+                    );
 
-                    let match_scrutinee = unsafe {
-                        (*arena_ptr).push_expr(ParsedExpression {
+                    let match_scrutinee = push_synthetic_expr(
+                        tctx.arena,
+                        ParsedExpression {
                             pexp_desc: Box::new(crate::parser::ast::ExpressionDesc::Pexp_ident(
                                 Located { txt: opt_lid, loc },
                             )),
                             pexp_loc: loc,
                             pexp_attributes: crate::parser::ast::Attributes::new(),
-                        })
-                    };
+                        },
+                    );
 
-                    let match_expr_idx = unsafe {
-                        (*arena_ptr).push_expr(ParsedExpression {
+                    let match_expr_idx = push_synthetic_expr(
+                        tctx.arena,
+                        ParsedExpression {
                             pexp_desc: Box::new(crate::parser::ast::ExpressionDesc::Pexp_match(
                                 Box::new((
                                     match_scrutinee,
@@ -6523,8 +6557,8 @@ fn type_expect_with_recarg<'a>(
                             )),
                             pexp_loc: sloc,
                             pexp_attributes: crate::parser::ast::Attributes::new(),
-                        })
-                    };
+                        },
+                    );
 
                     let default_attr = (
                         Located::mknoloc(tctx.arena.default_attr_str()),
@@ -15970,13 +16004,12 @@ fn qualify_unqualified_record_fields<'a>(
         return Cow::Borrowed(fields);
     };
 
-    let arena_ptr = tctx.arena as *const ParseArena as *mut ParseArena;
     let mut rewritten = Vec::with_capacity(fields.len());
     for field in fields {
         let mut field = field.clone();
         if let Longident::Lident(field_name) = tctx.arena.get_longident(field.lid.txt) {
             let qualified = Longident::Ldot(Box::new(module_qualifier.clone()), *field_name);
-            let qualified_idx = unsafe { (*arena_ptr).push_longident(qualified) };
+            let qualified_idx = push_synthetic_longident(tctx.arena, qualified);
             field.lid = Located {
                 txt: qualified_idx,
                 loc: field.lid.loc,
@@ -16902,9 +16935,7 @@ fn type_record(
                         .unwrap_or_else(|| {
                             let lid = find_existing_lident_idx(tctx.arena, &label_name)
                                 .unwrap_or_else(|| {
-                                    let arena_ptr =
-                                        tctx.arena as *const ParseArena as *mut ParseArena;
-                                    unsafe { (*arena_ptr).push_lident(&label_name) }
+                                    push_synthetic_lident(tctx.arena, &label_name)
                                 });
                             ctx.cache_synthesized_record_lident(label_name.clone(), lid);
                             lid
@@ -17056,12 +17087,8 @@ fn type_record(
                 let label_lid_idx = ctx
                     .get_synthesized_record_lident(&label_name)
                     .unwrap_or_else(|| {
-                        let lid = find_existing_lident_idx(tctx.arena, &label_name).unwrap_or_else(
-                            || {
-                                let arena_ptr = tctx.arena as *const ParseArena as *mut ParseArena;
-                                unsafe { (*arena_ptr).push_lident(&label_name) }
-                            },
-                        );
+                        let lid = find_existing_lident_idx(tctx.arena, &label_name)
+                            .unwrap_or_else(|| push_synthetic_lident(tctx.arena, &label_name));
                         ctx.cache_synthesized_record_lident(label_name.clone(), lid);
                         lid
                     });
@@ -20616,16 +20643,14 @@ fn type_expect_with_module_unpacks(
         }
         // TypeCore runs after parsing and needs to synthesize a few internal
         // attributes (`#modulepat`) exactly like OCaml typecore.
-        let arena_ptr = arena as *const ParseArena as *mut ParseArena;
-        unsafe { (*arena_ptr).intern_string(s) }
+        intern_synthetic_string(arena, s)
     }
 
     fn ensure_lident_idx(arena: &ParseArena, name: &str) -> LidentIdx {
         if let Some(idx) = find_existing_lident_idx(arena, name) {
             return idx;
         }
-        let arena_ptr = arena as *const ParseArena as *mut ParseArena;
-        unsafe { (*arena_ptr).push_lident(name) }
+        push_synthetic_lident(arena, name)
     }
 
     let Some((unpack, rest)) = unpacks.split_first() else {

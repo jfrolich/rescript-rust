@@ -8674,25 +8674,6 @@ fn compile_no_test(
     Ok((lambda, jumps_map(|c| up_ctx(&c), &total)))
 }
 
-/// Shared mutable counter for next_raise_count.
-/// Uses interior mutability to allow multiple closures to share access.
-/// This is safe because pattern matching compilation is single-threaded.
-struct RaiseCounter(*mut i32);
-
-impl RaiseCounter {
-    fn new(r: &mut i32) -> Self {
-        RaiseCounter(r as *mut i32)
-    }
-
-    fn get_mut(&self) -> &mut i32 {
-        unsafe { &mut *self.0 }
-    }
-}
-
-// Safety: pattern matching compilation is single-threaded
-unsafe impl Send for RaiseCounter {}
-unsafe impl Sync for RaiseCounter {}
-
 /// Wrapper for compile_test that handles the type-specific divide and combine.
 /// This replaces the OCaml pattern of passing `compile_match repr partial` as a function.
 ///
@@ -8713,9 +8694,7 @@ fn compile_test_wrapper<K: Clone>(
     pm: &PatternMatching,
     next_raise_count: &mut i32,
 ) -> Result<(RawLambda, Jumps), Unused> {
-    // Use a raw pointer to allow sharing next_raise_count between closures.
-    // This is safe because compilation is single-threaded.
-    let rc = RaiseCounter::new(next_raise_count);
+    let raise_counter = std::cell::Cell::new(*next_raise_count);
 
     // Step 1: divide
     let division = divide_fn(ctx, pm);
@@ -8724,19 +8703,29 @@ fn compile_test_wrapper<K: Clone>(
     let c_div = {
         let mut compile_fn =
             |ctx: &[Ctx], pm: &PatternMatching| -> Result<(RawLambda, Jumps), Unused> {
-                compile_match(ctx_ref, arena, None, partial, ctx, pm, rc.get_mut())
+                let mut next_raise = raise_counter.get();
+                let result = compile_match(ctx_ref, arena, None, partial, ctx, pm, &mut next_raise);
+                raise_counter.set(next_raise);
+                result
             };
         compile_list(&mut compile_fn, division)?
     };
 
     // Step 3: combine
-    match &c_div {
+    let result = match &c_div {
         (list, _, _) if list.is_empty() => match mk_failaction_neg(partial, ctx, &pm.default) {
             (None, _) => Err(Unused),
             (Some(l), total) => Ok((l, total)),
         },
-        _ => Ok(combine_fn(ctx, &pm.default, c_div, rc.get_mut())),
-    }
+        _ => {
+            let mut next_raise = raise_counter.get();
+            let result = combine_fn(ctx, &pm.default, c_div, &mut next_raise);
+            raise_counter.set(next_raise);
+            Ok(result)
+        }
+    };
+    *next_raise_count = raise_counter.get();
+    result
 }
 
 /// Extract all record label descriptions from a Tpat_record pattern's fields.

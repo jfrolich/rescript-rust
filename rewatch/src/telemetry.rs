@@ -2,6 +2,8 @@
 //!
 //! OTLP export is enabled only when `OTEL_EXPORTER_OTLP_ENDPOINT` or
 //! `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` is set. Otherwise tracing stays no-op.
+//! This keeps beta builds opt-in: no telemetry is configured, exported, or
+//! flushed unless the caller explicitly provides an OTLP endpoint.
 
 use opentelemetry::trace::TracerProvider as _;
 use opentelemetry_otlp::{Protocol, SpanExporter, WithExportConfig};

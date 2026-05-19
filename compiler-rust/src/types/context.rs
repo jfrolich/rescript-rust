@@ -56,6 +56,9 @@ impl TypeArena {
 
     #[inline]
     fn get(&self, r: TypeExprRef) -> &TypeExpr {
+        // Safety: `r` is an arena index returned by `push`, and `types` only
+        // grows append-only after the pointed `TypeExpr` has been arena
+        // allocated.
         unsafe {
             let types = &*self.types.get();
             types[r.index()].as_ref()
@@ -64,6 +67,9 @@ impl TypeArena {
 
     fn push(&self, ty: TypeExpr) -> TypeExprRef {
         let ptr = NonNull::from(self.arena.alloc(ty));
+        // Safety: `types` is an append-only side table of stable arena
+        // pointers. `UnsafeCell` is used so `TypeContext` can allocate through
+        // shared references like OCaml's mutable type arena.
         unsafe {
             let types = &mut *self.types.get();
             let idx = types.len();
@@ -73,6 +79,7 @@ impl TypeArena {
     }
 
     fn len(&self) -> usize {
+        // Safety: immutable length read from the append-only side table.
         unsafe { (*self.types.get()).len() }
     }
 }

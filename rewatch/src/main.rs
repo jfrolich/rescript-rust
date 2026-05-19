@@ -4,6 +4,10 @@ use log::LevelFilter;
 use std::{io::Write, path::Path};
 
 #[global_allocator]
+// Intentional rewatch performance choice: clean and in-process builds allocate
+// many short-lived graph nodes and compiler artifacts, and mimalloc has been a
+// measurable win for that workload. Keep this separate from compiler parity
+// work; it must not change generated typedtree/lambda/JS output.
 static GLOBAL_ALLOCATOR: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 use rescript::{
