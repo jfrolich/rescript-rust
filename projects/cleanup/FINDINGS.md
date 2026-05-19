@@ -111,3 +111,70 @@ risk; each item below records whether it was fixed or explicitly accepted.
 - `bash -n` for the touched shell scripts
 - `python3 -m py_compile scripts/categorize_failures.py`
 - `git diff --check`
+
+## Follow-Up Scan: 2026-05-19
+
+Additional cleanup opportunities found after the first release-blocker pass.
+
+1. **Resolved:** tracked project temp artifact removed.
+
+   `projects/typedtree-parity/.tmp/current_failures_with_locs.txt` was a
+   generated parity snapshot from 2026-02-17 and reported stale `611/657`
+   status. It was deleted, and `projects/**/.tmp/` is now ignored.
+
+2. **Resolved:** committed `dbg!` macros removed from rewatch config tests.
+
+   `rewatch/src/config.rs` had `dbg!(config.sources)` and
+   `dbg!(config.compiler_flags)` in test failure branches. Those are now normal
+   panic messages.
+
+3. **Resolved:** personal Hyperindex checkout path removed.
+
+   `analysis/reactive/experiments/hyperindex_replay_build_times.sh` no longer
+   defaults to `/Users/cristianocalcagno/GitHub/hyperindex`; it requires
+   `HYPERINDEX_REPO` and uses `${TMPDIR:-/tmp}` for the output directory.
+
+4. **Resolved:** stale AST parity helper made platform-aware.
+
+   `scripts/test_ast_parity_suite.sh` no longer hardcodes
+   `packages/@rescript/darwin-arm64/bin/bsc.exe`; it uses
+   `scripts/platform.sh` and keeps the Rust compiler on debug artifacts by
+   default.
+
+5. **Open:** rewatch library tests currently do not compile.
+
+   `cargo test --manifest-path rewatch/Cargo.toml test_dev_sources --lib`
+   fails before running the selected config tests because
+   `rewatch/src/watcher.rs:683` calls `BuildCommandState::new` with the old
+   six-argument shape. Normal `cargo build --manifest-path rewatch/Cargo.toml`
+   passes, so this is a test-only cleanup blocker rather than a runtime build
+   blocker.
+
+6. **Open:** top-level scratch analysis files should be relocated or removed.
+
+   `DICT_PATTERN_ANALYSIS.md` and `MATCHING_PORT_CHECKLIST.md` are useful
+   parity notes, but they sit at repository root. Move them under the relevant
+   `projects/` subdirectory or fold them into the active project docs before
+   beta.
+
+7. **Open:** `ralph.sh` is local agent automation at repository root.
+
+   The script writes fixed `/tmp/ralph_output.txt` and
+   `/tmp/ralph_output.jsonl` files, so concurrent runs collide. If this remains
+   tracked, move it under a dev/agent script area and give each run isolated
+   output paths.
+
+8. **Open:** platform package binaries need a prepack guard.
+
+   Platform binaries are intentionally ignored by git and generated before
+   packaging. `npm pack --dry-run --json` for the current Darwin ARM64 package
+   included the local binaries, while a non-current package such as
+   `packages/@rescript/linux-x64` packed only `bin/.gitkeep`. Add a release
+   validation step that fails if a platform package is packed without the four
+   expected executables.
+
+9. **Open:** very large agent handoff docs should be archived or compacted.
+
+   `projects/js-output-parity/RALPH_TODO.md` is about 1.2 MB. It is not included
+   in the npm package, but it slows review/search and should be rotated into a
+   compact summary plus archived raw logs if the project remains active.
