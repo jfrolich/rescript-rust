@@ -417,94 +417,6 @@ let has_variants p =
     false
   with Exit -> true
 
-let debug_variant_row_filter () =
-  match Sys.getenv_opt "OCAML_DEBUG_VARIANT_ROWS" with
-  | None -> None
-  | Some raw ->
-    let labels =
-      raw |> String.split_on_char ','
-      |> List.map String.trim
-      |> List.filter (fun label -> label <> "")
-    in
-    if labels = [] then None else Some labels
-
-let debug_loc_string loc =
-  let start = loc.Location.loc_start in
-  let stop = loc.Location.loc_end in
-  Printf.sprintf
-    "%d:%d-%d:%d"
-    start.Lexing.pos_lnum
-    (start.Lexing.pos_cnum - start.Lexing.pos_bol)
-    stop.Lexing.pos_lnum
-    (stop.Lexing.pos_cnum - stop.Lexing.pos_bol)
-
-let debug_variant_row_type stage label env ty seen filter =
-  match expand_head env ty with
-  | {desc = Tvariant row; id} ->
-    let row = row_repr row in
-    let labels = List.map fst row.row_fields in
-    if
-      List.for_all (fun needle -> List.mem needle labels) filter
-      && not (List.mem id !seen)
-    then (
-      seen := id :: !seen;
-      Format.eprintf
-        "[variant-row %s] %s repr=#%d closed=%b fixed=%b labels=[%s]@."
-        stage label id row.row_closed (row_fixed row)
-        (String.concat "," labels))
-  | _ -> ()
-
-let rec debug_variant_rows_in_pattern stage label pat seen filter =
-  let label = Printf.sprintf "%s@%s" label (debug_loc_string pat.pat_loc) in
-  debug_variant_row_type stage label pat.pat_env pat.pat_type seen filter;
-  match pat.pat_desc with
-  | Tpat_variant (_, Some arg, _) -> debug_variant_rows_in_pattern stage label arg seen filter
-  | Tpat_alias (inner, _, _) -> debug_variant_rows_in_pattern stage label inner seen filter
-  | Tpat_or (left, right, _) ->
-    debug_variant_rows_in_pattern stage label left seen filter;
-    debug_variant_rows_in_pattern stage label right seen filter
-  | Tpat_tuple items -> List.iter (fun item -> debug_variant_rows_in_pattern stage label item seen filter) items
-  | Tpat_construct (_, _, args) ->
-    List.iter (fun arg -> debug_variant_rows_in_pattern stage label arg seen filter) args
-  | Tpat_record (fields, _) ->
-    List.iter
-      (fun (_, _, field_pat, _) -> debug_variant_rows_in_pattern stage label field_pat seen filter)
-      fields
-  | Tpat_array items ->
-    List.iter (fun item -> debug_variant_rows_in_pattern stage label item seen filter) items
-  | Tpat_variant (_, None, _) | Tpat_any | Tpat_var _ | Tpat_constant _ -> ()
-
-let debug_case_loc_string ({pc_guard; pc_rhs; _} : Parsetree.case) =
-  let loc =
-    let open Location in
-    match pc_guard with
-    | None -> pc_rhs.pexp_loc
-    | Some guard -> {pc_rhs.pexp_loc with loc_start = guard.pexp_loc.loc_start}
-  in
-  debug_loc_string loc
-
-let debug_variant_match_state stage env ty_arg ty_arg' pat_env_list caselist =
-  match debug_variant_row_filter () with
-  | None -> ()
-  | Some filter ->
-    let seen = ref [] in
-    let match_loc =
-      match caselist with
-      | case :: _ -> debug_case_loc_string case
-      | [] -> "unknown"
-    in
-    debug_variant_row_type stage (Printf.sprintf "ty_arg@%s" match_loc) env ty_arg seen filter;
-    debug_variant_row_type stage (Printf.sprintf "ty_arg'@%s" match_loc) env ty_arg' seen filter;
-    List.iteri
-      (fun index ((pat, _), case) ->
-        debug_variant_rows_in_pattern
-          stage
-          (Printf.sprintf "case[%d]@%s" index (debug_case_loc_string case))
-          pat
-          seen
-          filter)
-      (List.combine pat_env_list caselist)
-
 (* pattern environment *)
 let pattern_variables =
   ref
@@ -2758,12 +2670,6 @@ and type_expect_ ?deprecated_context ~context ?in_function ?(recarg = Rejected)
       | None -> None
     in
     let jsx_component_error_info = get_jsx_component_error_info () in
-    let debug_record_final_unify =
-      Sys.getenv_opt "OCAML_DEBUG_RECORD_FINAL_UNIFY" <> None
-      && List.exists
-           (fun {lid = {txt; _}; _} -> Longident.last txt = "status")
-           lid_sexp_list
-    in
     let lbl_exp_list =
       wrap_disambiguate "This record expression is expected to have" ty_record
         (type_record_elem_list loc true env
@@ -2774,28 +2680,7 @@ and type_expect_ ?deprecated_context ~context ?in_function ?(recarg = Rejected)
            opath lid_sexp_list)
         (fun x -> x)
     in
-    let ty_expected_inst = instance env ty_expected in
-    let () =
-      if debug_record_final_unify then
-        Format.eprintf
-          "[ocaml-record-final-unify] stage=before line=%d col=%d ty_record=%d@%d ty_expected=%d@%d ty_expected_inst=%d@%d@."
-          loc.loc_start.pos_lnum
-          (loc.loc_start.pos_cnum - loc.loc_start.pos_bol)
-          ty_record.id ty_record.level
-          ty_expected.id ty_expected.level
-          ty_expected_inst.id ty_expected_inst.level
-    in
-    unify_exp_types ~context:None loc env ty_record ty_expected_inst;
-    let () =
-      if debug_record_final_unify then
-        Format.eprintf
-          "[ocaml-record-final-unify] stage=after line=%d col=%d ty_record=%d@%d ty_expected=%d@%d ty_expected_inst=%d@%d@."
-          loc.loc_start.pos_lnum
-          (loc.loc_start.pos_cnum - loc.loc_start.pos_bol)
-          ty_record.id ty_record.level
-          ty_expected.id ty_expected.level
-          ty_expected_inst.id ty_expected_inst.level
-    in
+    unify_exp_types ~context:None loc env ty_record (instance env ty_expected);
     check_duplicates ~get_jsx_component_error_info loc env lbl_exp_list;
     let label_descriptions, representation =
       match (lbl_exp_list, repr_opt) with
@@ -2896,12 +2781,6 @@ and type_expect_ ?deprecated_context ~context ?in_function ?(recarg = Rejected)
     in
     let closed = false in
     let jsx_component_error_info = get_jsx_component_error_info () in
-    let debug_record_final_unify =
-      Sys.getenv_opt "OCAML_DEBUG_RECORD_FINAL_UNIFY" <> None
-      && List.exists
-           (fun {lid = {txt; _}; _} -> Longident.last txt = "status")
-           lid_sexp_list
-    in
     let lbl_exp_list =
       wrap_disambiguate "This record expression is expected to have" ty_record
         (type_record_elem_list loc closed env
@@ -2912,28 +2791,7 @@ and type_expect_ ?deprecated_context ~context ?in_function ?(recarg = Rejected)
            opath lid_sexp_list)
         (fun x -> x)
     in
-    let ty_expected_inst = instance env ty_expected in
-    let () =
-      if debug_record_final_unify then
-        Format.eprintf
-          "[ocaml-record-final-unify] stage=before line=%d col=%d ty_record=%d@%d ty_expected=%d@%d ty_expected_inst=%d@%d@."
-          loc.loc_start.pos_lnum
-          (loc.loc_start.pos_cnum - loc.loc_start.pos_bol)
-          ty_record.id ty_record.level
-          ty_expected.id ty_expected.level
-          ty_expected_inst.id ty_expected_inst.level
-    in
-    unify_exp_types ~context:None loc env ty_record ty_expected_inst;
-    let () =
-      if debug_record_final_unify then
-        Format.eprintf
-          "[ocaml-record-final-unify] stage=after line=%d col=%d ty_record=%d@%d ty_expected=%d@%d ty_expected_inst=%d@%d@."
-          loc.loc_start.pos_lnum
-          (loc.loc_start.pos_cnum - loc.loc_start.pos_bol)
-          ty_record.id ty_record.level
-          ty_expected.id ty_expected.level
-          ty_expected_inst.id ty_expected_inst.level
-    in
+    unify_exp_types ~context:None loc env ty_record (instance env ty_expected);
     check_duplicates ~get_jsx_component_error_info loc env lbl_exp_list;
     let opt_exp, label_definitions =
       let _lid, lbl, _lbl_exp, _opt = List.hd lbl_exp_list in
@@ -3733,79 +3591,11 @@ and type_label_exp ~call_context create env loc ty_expected
       | Error (_, _, Less_general _) as e -> raise e
       | _ -> raise exn (* In case of failure return the first error *))
   in
-  let () =
-    if Sys.getenv_opt "OCAML_DEBUG_RECORD_FIELD_TYPES" <> None
-       && Longident.last lid.txt = "status"
-    then
-      let field_loc = sarg.pexp_loc.loc_start in
-      Format.eprintf
-        "[record-field-types] stage=before-final-instance line=%d col=%d field=%s expected=%d@%d ty_arg=%d@%d arg=%d@%d@."
-        field_loc.pos_lnum
-        (field_loc.pos_cnum - field_loc.pos_bol)
-        (Longident.last lid.txt)
-        ty_expected.id
-        ty_expected.level
-        ty_arg.id
-        ty_arg.level
-        arg.exp_type.id
-        arg.exp_type.level
-  in
-  let arg = {arg with exp_type = instance env arg.exp_type} in
-  let () =
-    if Sys.getenv_opt "OCAML_DEBUG_RECORD_FIELD_TYPES" <> None
-       && Longident.last lid.txt = "status"
-    then
-      let field_loc = sarg.pexp_loc.loc_start in
-      Format.eprintf
-        "[record-field-types] stage=after-final-instance line=%d col=%d field=%s expected=%d@%d final=%d@%d@."
-        field_loc.pos_lnum
-        (field_loc.pos_cnum - field_loc.pos_bol)
-        (Longident.last lid.txt)
-        ty_expected.id
-        ty_expected.level
-        arg.exp_type.id
-        arg.exp_type.level
-  in
-  (lid, label, arg, opt)
+  (lid, label, {arg with exp_type = instance env arg.exp_type}, opt)
 
 and type_argument ~context ?recarg env sarg ty_expected' ty_expected =
   let texp = type_expect ~context ?recarg env sarg ty_expected' in
   unify_exp ~context env texp ty_expected;
-  let () =
-    match Sys.getenv_opt "OCAML_DEBUG_APPLY_LINE" with
-    | Some line -> (
-      match int_of_string_opt line with
-      | Some line when sarg.pexp_loc.loc_start.pos_lnum = line ->
-        let summarize ty =
-          let ty = Ctype.repr ty in
-          match ty.desc with
-          | Tarrow ({typ = arg; _}, ret, _, _) ->
-            Format.asprintf "arrow#%d@%d(%d->%d)" ty.id ty.level
-              (Ctype.repr arg).id (Ctype.repr ret).id
-          | Tconstr (path, args, _) ->
-            let arg_ids =
-              args
-              |> List.map (fun arg -> string_of_int (Ctype.repr arg).id)
-              |> String.concat ","
-            in
-            Format.asprintf "%s#%d@%d(%s)" (Path.name path) ty.id ty.level arg_ids
-          | Tvar _ -> Format.asprintf "tvar#%d@%d" ty.id ty.level
-          | Tlink t ->
-            Format.asprintf "tlink#%d@%d->%d" ty.id ty.level (Ctype.repr t).id
-          | Tsubst t ->
-            Format.asprintf "tsubst#%d@%d->%d" ty.id ty.level (Ctype.repr t).id
-          | _ -> Format.asprintf "other#%d@%d" ty.id ty.level
-        in
-        Format.eprintf
-          "[ocaml-type-argument] line=%d col=%d expected'=%s expected=%s result=%s@."
-          sarg.pexp_loc.loc_start.pos_lnum
-          (sarg.pexp_loc.loc_start.pos_cnum - sarg.pexp_loc.loc_start.pos_bol)
-          (summarize ty_expected')
-          (summarize ty_expected)
-          (summarize texp.exp_type)
-      | _ -> ())
-    | None -> ()
-  in
   texp
 
 (** This is ad-hoc translation for unifying specific primitive operations
@@ -3927,47 +3717,6 @@ and type_application ~context total_app env funct (sargs : sargs) :
     tvar || List.mem l ls
   in
   let ignored = ref [] in
-  let debug_apply_line =
-    match Sys.getenv_opt "OCAML_DEBUG_APPLY_LINE" with
-    | Some s -> (try Some (int_of_string s) with _ -> None)
-    | None -> None
-  in
-  let debug_apply =
-    match debug_apply_line with
-    | Some line -> funct.exp_loc.loc_start.pos_lnum = line
-    | None -> false
-  in
-  let debug_apply_name =
-    extract_function_name funct
-    |> Option.map Longident.last
-    |> Option.value ~default:"<non-ident>"
-  in
-  let summarize_apply_endpoint ty =
-    let ty = Ctype.repr ty in
-    match ty.desc with
-    | Tarrow _ -> Format.asprintf "arrow#%d@%d" ty.id ty.level
-    | Ttuple _ -> Format.asprintf "tuple#%d@%d" ty.id ty.level
-    | Tconstr (path, args, _) ->
-      let arg_ids =
-        args
-        |> List.map (fun arg -> string_of_int (Ctype.repr arg).id)
-        |> String.concat ","
-      in
-      Format.asprintf "%s#%d@%d(%s)" (Path.name path) ty.id ty.level arg_ids
-    | Tvar _ -> Format.asprintf "tvar#%d@%d" ty.id ty.level
-    | Tlink t -> Format.asprintf "tlink#%d@%d->%d" ty.id ty.level (Ctype.repr t).id
-    | Tsubst t ->
-      Format.asprintf "tsubst#%d@%d->%d" ty.id ty.level (Ctype.repr t).id
-    | _ -> Format.asprintf "other#%d@%d" ty.id ty.level
-  in
-  let summarize_apply_ty ty =
-    let ty = Ctype.repr ty in
-    match ty.desc with
-    | Tarrow ({typ = arg; _}, ret, _, _) ->
-      Format.asprintf "arrow#%d@%d(%s->%s)" ty.id ty.level
-        (summarize_apply_endpoint arg) (summarize_apply_endpoint ret)
-    | _ -> summarize_apply_endpoint ty
-  in
   let force_tvar =
     let t = funct.exp_type in
     match (expand_head env t).desc with
@@ -4110,17 +3859,6 @@ and type_application ~context total_app env funct (sargs : sargs) :
                    env,
                    Apply_non_function (expand_head env funct.exp_type) )))
       in
-      let () =
-        if debug_apply then
-          Format.eprintf
-            "[ocaml-apply-step] fn=%s loc=%d:%d kind=unknown arg_index=%d expected=%s result=%s@."
-            debug_apply_name
-            funct.exp_loc.loc_start.pos_lnum
-            (funct.exp_loc.loc_start.pos_cnum - funct.exp_loc.loc_start.pos_bol)
-            (List.length args)
-            (summarize_apply_ty ty1)
-            (summarize_apply_ty ty2)
-      in
       let optional = is_optional l1 in
       let arg1 () =
         let arg1 = type_expect ~context env sarg1 ty1 in
@@ -4137,20 +3875,6 @@ and type_application ~context total_app env funct (sargs : sargs) :
         {desc = Tarrow ({typ = ty0}, ty_fun0, _, _)} )
       when sargs <> [] && commu_repr com = Cok && List.length args < max_arity
       ->
-      let () =
-        if debug_apply then
-          Format.eprintf
-            "[ocaml-apply-step] fn=%s loc=%d:%d kind=labelled arg_index=%d label=%s ty=%s ty0=%s ret=%s ret0=%s@."
-            debug_apply_name
-            funct.exp_loc.loc_start.pos_lnum
-            (funct.exp_loc.loc_start.pos_cnum - funct.exp_loc.loc_start.pos_bol)
-            (List.length args)
-            (label_name l)
-            (summarize_apply_ty ty)
-            (summarize_apply_ty ty0)
-            (summarize_apply_ty ty_fun)
-            (summarize_apply_ty ty_fun0)
-      in
       let name = label_name l and optional = is_optional l in
       let sargs, omitted, arg =
         match extract_label name sargs with
@@ -4225,17 +3949,6 @@ and type_application ~context total_app env funct (sargs : sargs) :
       update_uncurried_arity funct
         ~nargs:(List.length !ignored + List.length sargs)
         ret_t
-    in
-    let () =
-      if debug_apply then
-        Format.eprintf
-          "[ocaml-apply-final] fn=%s loc=%d:%d funct=%s result=%s fully_applied=%b@."
-          debug_apply_name
-          funct.exp_loc.loc_start.pos_lnum
-          (funct.exp_loc.loc_start.pos_cnum - funct.exp_loc.loc_start.pos_bol)
-          (summarize_apply_ty funct.exp_type)
-          (summarize_apply_ty ret_t)
-          fully_applied
     in
     (targs, ret_t, fully_applied)
 
@@ -4442,26 +4155,15 @@ and type_cases ~(call_context : [`LetUnwrap | `Switch | `Function | `Try])
     List.iter (fun (pat, (ext_env, _)) -> unify_pat ext_env pat ty) pat_env_list
   in
   unify_pats ty_arg';
-  debug_variant_match_state "after-unify-pats" env ty_arg ty_arg' pat_env_list caselist;
   (* Check for polymorphic variants to close *)
   let patl = List.map fst pat_env_list in
   if List.exists has_variants patl then (
     Parmatch.pressure_variants env patl;
     List.iter (iter_pattern finalize_variant) patl);
-  debug_variant_match_state "after-finalize" env ty_arg ty_arg' pat_env_list caselist;
   (* `Contaminating' unifications start here *)
   List.iter (fun f -> f ()) !pattern_force;
   (* Post-processing and generalization *)
-  if propagate || erase_either then (
-    let propagated = instance env ty_arg in
-    unify_pats propagated;
-    debug_variant_match_state
-      "after-propagate"
-      env
-      propagated
-      ty_arg'
-      pat_env_list
-      caselist);
+  if propagate || erase_either then unify_pats (instance env ty_arg);
   if propagate then (
     List.iter
       (iter_pattern (fun {pat_type = t} -> unify_var env t (newvar ())))

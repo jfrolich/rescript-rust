@@ -75,7 +75,6 @@ comptime-inline = ["boa_engine"]
 [profile.release]
 lto = true
 codegen-units = 1
-panic = "abort"
 
 [profile.dev]
 # Fast compilation for development

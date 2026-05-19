@@ -118,11 +118,9 @@ fn get_cmt_file_for_typed_artifact_import(project_root: &str, cmt: &str) -> Stri
     // in-process Rust path keeps those typed artifacts in memory and compiles
     // from the workspace root, so use Config.project_root as the package cwd
     // that compiler/gentype/GenTypeConfig.ml:124-131 gives OCaml GenType.
-    crate::gentype::paths::get_cmt_file_from_cwd_with_exists(
-        Path::new(project_root),
-        cmt,
-        |path| path.exists() || has_in_process_type_declarations(path),
-    )
+    crate::gentype::paths::get_cmt_file_from_cwd_with_exists(Path::new(project_root), cmt, |path| {
+        path.exists() || has_in_process_type_declarations(path)
+    })
 }
 
 pub fn cmt_check_annotations(
@@ -498,7 +496,11 @@ pub fn read_cmt(cmt_file: &str) -> InputCmt<'static> {
     // wired later; this staged port preserves the stale-artifact error boundary.
     match std::fs::read(cmt_file) {
         Ok(data) if data.starts_with(b"Caml1999T022") => {
-            unimplemented!("Cmt_format.read_cmt typedtree decoding is wired in Phase 3")
+            crate::gentype::log_::item(&format!("Error loading {cmt_file}\n\n"));
+            crate::gentype::log_::item(
+                "Standalone CMT decoding is not available in the Rust GenType path yet.\n",
+            );
+            panic!("Fatal error: exception Cmt_format.Error(_)")
         }
         Ok(data) if data.starts_with(b"Caml1999I022") => {
             panic!("Fatal error: exception Cmt_format.Error(_)")
@@ -707,8 +709,7 @@ pub fn process_typed_artifact(
         let translation =
             translate_typed_artifact(&config, &output_file_relative, &resolver, &artifact);
         let project_root = config.project_root.clone();
-        let get_cmt_file =
-            |cmt: &str| get_cmt_file_for_typed_artifact_import(&project_root, cmt);
+        let get_cmt_file = |cmt: &str| get_cmt_file_for_typed_artifact_import(&project_root, cmt);
         emit_translation(
             &mut config,
             &artifact.file_name,

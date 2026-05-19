@@ -112,42 +112,6 @@ exception Recursive_abbrev
 (* GADT: recursive abbrevs can appear as a result of local constraints *)
 exception Unification_recursive_abbrev of type_pairs
 
-let debug_unify_row_filter () =
-  match Sys.getenv_opt "OCAML_DEBUG_UNIFY_ROWS" with
-  | None -> None
-  | Some raw ->
-    let labels =
-      raw |> String.split_on_char ','
-      |> List.map String.trim
-      |> List.filter (fun label -> label <> "")
-    in
-    if labels = [] then None else Some labels
-
-let debug_row_labels fields = List.map fst fields
-
-let debug_unify_rows_enabled filter row1 row2 r1 r2 pairs =
-  let labels =
-    debug_row_labels row1.row_fields
-    @ debug_row_labels row2.row_fields
-    @ debug_row_labels r1 @ debug_row_labels r2
-    @ List.map (fun (label, _, _) -> label) pairs
-  in
-  List.for_all (fun needle -> List.mem needle labels) filter
-
-let debug_unify_rows_log stage row1 row2 r1 r2 pairs =
-  Format.eprintf
-    "[unify-rows %s] row1={closed:%b fixed:%b labels=[%s]} row2={closed:%b fixed:%b labels=[%s]} r1=[%s] r2=[%s] pairs=[%s]@."
-    stage
-    row1.row_closed
-    (row_fixed row1)
-    (String.concat "," (debug_row_labels row1.row_fields))
-    row2.row_closed
-    (row_fixed row2)
-    (String.concat "," (debug_row_labels row2.row_fields))
-    (String.concat "," (debug_row_labels r1))
-    (String.concat "," (debug_row_labels r2))
-    (String.concat "," (List.map (fun (label, _, _) -> label) pairs))
-
 (**** Type level management ****)
 
 let current_level = ref 0
@@ -926,29 +890,10 @@ let rec copy ?env ?partial ?keep_names ty =
       t.desc <-
         (match desc with
           | Tconstr (p, tl, _) -> (
-            let debug_copy_path = Sys.getenv_opt "OCAML_DEBUG_COPY_PATH" in
-            let path_name = Path.name p in
-            let should_debug =
-              match debug_copy_path with
-              | Some needle ->
-                String.length needle > 0
-                && (path_name = needle || Path.last p = needle)
-              | None -> false
-            in
             let abbrevs = proper_abbrevs p tl !abbreviations in
             match find_repr p !abbrevs with
-            | Some ty when repr ty != t ->
-              if should_debug then
-                Format.eprintf
-                  "[ocaml-copy-path] action=hit path=%s ty=%d@%d t=%d@%d found=%d@%d repr_found=%d@%d@."
-                  path_name ty.id ty.level t.id t.level ty.id ty.level
-                  (repr ty).id (repr ty).level;
-              Tlink ty
+            | Some ty when repr ty != t -> Tlink ty
             | _ ->
-              if should_debug then
-                Format.eprintf
-                  "[ocaml-copy-path] action=copy path=%s ty=%d@%d t=%d@%d@."
-                  path_name ty.id ty.level t.id t.level;
               (*
              One must allocate a new reference, so that abbrevia-
              tions belonging to different branches of a type are
@@ -2596,12 +2541,6 @@ and unify_row env row1 row2 =
   if unify_eq rm1 rm2 then ()
   else
     let r1, r2, pairs = merge_row_fields row1.row_fields row2.row_fields in
-    let debug_rows =
-      match debug_unify_row_filter () with
-      | Some filter -> debug_unify_rows_enabled filter row1 row2 r1 r2 pairs
-      | None -> false
-    in
-    if debug_rows then debug_unify_rows_log "start" row1 row2 r1 r2 pairs;
     let fixed1 = row_fixed row1 and fixed2 = row_fixed row2 in
     let more =
       if fixed1 then rm1
@@ -2656,13 +2595,6 @@ and unify_row env row1 row2 =
       let rest =
         if closed then filter_row_fields row.row_closed rest else rest
       in
-      if debug_rows then
-        Format.eprintf
-          "[unify-rows set-more] target={closed:%b fixed:%b labels=[%s]} rest=[%s]@."
-          row.row_closed
-          (row_fixed row)
-          (String.concat "," (debug_row_labels row.row_fields))
-          (String.concat "," (debug_row_labels rest));
       (if
          (rest <> [] && (row.row_closed || row_fixed row))
          || (closed && row_fixed row && not row.row_closed)
@@ -2689,7 +2621,6 @@ and unify_row env row1 row2 =
       set_more row1 r2;
       List.iter
         (fun (l, f1, f2) ->
-          if debug_rows then Format.eprintf "[unify-rows field] label=%s@." l;
           try unify_row_field env fixed1 fixed2 more l f1 f2
           with Unify trace ->
             raise

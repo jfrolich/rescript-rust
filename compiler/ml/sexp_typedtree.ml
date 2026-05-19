@@ -253,36 +253,7 @@ and type_expr te =
   type_expr_inline state te
 
 and row_desc_sexp state row =
-  let debug_sexp_row_filter () =
-    match Sys.getenv_opt "OCAML_DEBUG_SEXP_ROWS" with
-    | None -> None
-    | Some raw ->
-      let labels =
-        raw |> String.split_on_char ','
-        |> List.map String.trim
-        |> List.filter (fun label -> label <> "")
-      in
-      if labels = [] then None else Some labels
-  in
-  let rec raw_row_blocks row =
-    let block = List.map fst row.Types.row_fields in
-    match (Btype.repr row.Types.row_more).desc with
-    | Tvariant inner -> block :: raw_row_blocks inner
-    | _ -> [block]
-  in
-  let raw_blocks = raw_row_blocks row in
   let row = Btype.row_repr row in
-  (match debug_sexp_row_filter () with
-  | Some filter ->
-    let flat_labels = List.map fst row.Types.row_fields in
-    if List.for_all (fun needle -> List.mem needle flat_labels) filter then
-      Format.eprintf
-        "[sexp-row] raw=%s flat=[%s] closed=%b fixed=%b@."
-        (String.concat ";" (List.map (fun block -> "[" ^ String.concat "," block ^ "]") raw_blocks))
-        (String.concat "," flat_labels)
-        row.Types.row_closed
-        row.Types.row_fixed
-  | None -> ());
   let fields_sexp = Sexp.list (List.map (fun (l, rf) ->
     let rf_sexp = row_field_sexp state rf in
     Sexp.list [string l; rf_sexp]

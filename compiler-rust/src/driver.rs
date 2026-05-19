@@ -12695,6 +12695,52 @@ pub fn typecheck_and_dump_sexp<W: std::io::Write>(
     Ok(())
 }
 
+struct MoregenDebugLog {
+    lines: Option<Vec<String>>,
+}
+
+macro_rules! moregen_debug {
+    ($debug:expr, $($arg:tt)*) => {
+        if $debug.enabled() {
+            $debug.push(format!($($arg)*));
+        }
+    };
+}
+
+impl MoregenDebugLog {
+    fn from_env() -> Self {
+        let lines = std::env::var_os("RUST_DEBUG_MOREGEN").map(|_| Vec::new());
+        Self { lines }
+    }
+
+    fn enabled(&self) -> bool {
+        self.lines.is_some()
+    }
+
+    fn push(&mut self, line: String) {
+        if let Some(lines) = self.lines.as_mut() {
+            lines.push(line);
+        }
+    }
+
+    fn write(&self, module_name: &str) {
+        let Some(lines) = self.lines.as_ref() else {
+            return;
+        };
+        if lines.is_empty() {
+            return;
+        }
+        let debug_file = std::env::temp_dir().join(format!("moregen_debug_{}.txt", module_name));
+        let Ok(mut file) = std::fs::File::create(debug_file) else {
+            return;
+        };
+        use std::io::Write;
+        for line in lines {
+            let _ = writeln!(file, "{}", line);
+        }
+    }
+}
+
 /// Apply moregen-like interface constraints: link non-generic Tvars in the
 /// implementation to corresponding types from the .resi interface.
 ///
@@ -12839,60 +12885,57 @@ fn apply_moregen_constraints(
 
     // Walk top-level implementation structure items and match with interface.
     // Also recurse into modules to find inner non-generic Tvars.
-    let mut debug = Vec::new();
+    let mut debug = MoregenDebugLog::from_env();
 
     // Debug: dump all top-level binding names and types
-    debug.push(format!(
-        "TOTAL TOP-LEVEL ITEMS: {}",
-        typed_structure.str_items.len()
-    ));
-    for item in &typed_structure.str_items {
-        match &item.str_desc {
-            crate::types::typedtree::StructureItemDesc::Tstr_value(_, bindings) => {
-                for binding in bindings {
-                    let name = extract_pat_name(&binding.vb_pat);
-                    debug.push(format!("TOP-LEVEL VALUE: {:?}", name));
-                    if name.as_deref() == Some("wrapJsForReason") {
-                        debug.push(format!(
-                            "=== wrapJsForReason pat_type={:?} level={}",
-                            binding.vb_pat.pat_type,
-                            type_ctx.get_level(type_ctx.repr(binding.vb_pat.pat_type))
-                        ));
-                        dump_all_tvars(
-                            type_ctx,
-                            binding.vb_pat.pat_type,
-                            &mut debug,
-                            &mut ahash::AHashSet::new(),
-                            0,
-                        );
+    if debug.enabled() {
+        moregen_debug!(
+            debug,
+            "TOTAL TOP-LEVEL ITEMS: {}",
+            typed_structure.str_items.len()
+        );
+        for item in &typed_structure.str_items {
+            match &item.str_desc {
+                crate::types::typedtree::StructureItemDesc::Tstr_value(_, bindings) => {
+                    for binding in bindings {
+                        let name = extract_pat_name(&binding.vb_pat);
+                        moregen_debug!(debug, "TOP-LEVEL VALUE: {:?}", name);
+                        if name.as_deref() == Some("wrapJsForReason") {
+                            moregen_debug!(
+                                debug,
+                                "=== wrapJsForReason pat_type={:?} level={}",
+                                binding.vb_pat.pat_type,
+                                type_ctx.get_level(type_ctx.repr(binding.vb_pat.pat_type))
+                            );
+                            dump_all_tvars(
+                                type_ctx,
+                                binding.vb_pat.pat_type,
+                                &mut debug,
+                                &mut ahash::AHashSet::new(),
+                                0,
+                            );
+                        }
                     }
                 }
-            }
-            crate::types::typedtree::StructureItemDesc::Tstr_module(mb) => {
-                debug.push(format!("TOP-LEVEL MODULE: {}", mb.mb_name.txt));
-            }
-            _ => {
-                debug.push(format!("TOP-LEVEL OTHER"));
+                crate::types::typedtree::StructureItemDesc::Tstr_module(mb) => {
+                    moregen_debug!(debug, "TOP-LEVEL MODULE: {}", mb.mb_name.txt);
+                }
+                _ => {
+                    moregen_debug!(debug, "TOP-LEVEL OTHER");
+                }
             }
         }
     }
 
     moregen_link_structure(type_ctx, typed_structure, &iface_val_types, &mut debug);
-    if !debug.is_empty() {
-        use std::io::Write;
-        let debug_file = format!("/tmp/moregen_debug_{}.txt", module_name);
-        let mut f = std::fs::File::create(&debug_file).unwrap();
-        for line in &debug {
-            writeln!(f, "{}", line).unwrap();
-        }
-    }
+    debug.write(&module_name);
 }
 
 fn moregen_link_structure(
     type_ctx: &TypeContext,
     structure: &crate::types::typedtree::Structure,
     iface_val_types: &ahash::AHashMap<String, crate::types::type_expr::TypeExprRef>,
-    debug: &mut Vec<String>,
+    debug: &mut MoregenDebugLog,
 ) {
     for item in &structure.str_items {
         match &item.str_desc {
@@ -12901,10 +12944,13 @@ fn moregen_link_structure(
                     let name = extract_pat_name(&binding.vb_pat);
                     if let Some(ref name) = name {
                         if let Some(&iface_ty) = iface_val_types.get(name) {
-                            debug.push(format!(
+                            moregen_debug!(
+                                debug,
                                 "moregen_link: {} impl={:?} iface={:?}",
-                                name, binding.vb_pat.pat_type, iface_ty
-                            ));
+                                name,
+                                binding.vb_pat.pat_type,
+                                iface_ty
+                            );
                             let iface_inst = crate::types::ctype::instance(type_ctx, iface_ty);
                             moregen_link(
                                 type_ctx,
@@ -12916,10 +12962,13 @@ fn moregen_link_structure(
                             if let crate::types::typedtree::ExpressionDesc::Texp_ident(_, _, desc) =
                                 &binding.vb_expr.exp_desc
                             {
-                                debug.push(format!(
+                                moregen_debug!(
+                                    debug,
                                     "moregen_link_alias: {} aliased={:?} iface={:?}",
-                                    name, desc.val_type, iface_ty
-                                ));
+                                    name,
+                                    desc.val_type,
+                                    iface_ty
+                                );
                                 let iface_inst = crate::types::ctype::instance(type_ctx, iface_ty);
                                 moregen_link_exported_alias(
                                     type_ctx,
@@ -12944,7 +12993,7 @@ fn moregen_link_structure(
                                 );
                             }
                         } else {
-                            debug.push(format!("no iface match: {}", name));
+                            moregen_debug!(debug, "no iface match: {}", name);
                         }
                     }
                 }
@@ -12961,7 +13010,7 @@ fn moregen_link_mod_expr(
     type_ctx: &TypeContext,
     mod_expr: &crate::types::typedtree::ModuleExpr,
     iface_val_types: &ahash::AHashMap<String, crate::types::type_expr::TypeExprRef>,
-    debug: &mut Vec<String>,
+    debug: &mut MoregenDebugLog,
 ) {
     match &mod_expr.mod_desc {
         crate::types::typedtree::ModuleExprDesc::Tmod_structure(s) => {
@@ -12977,7 +13026,7 @@ fn moregen_link_mod_expr(
 fn dump_all_tvars(
     ctx: &TypeContext,
     ty: crate::types::type_expr::TypeExprRef,
-    debug: &mut Vec<String>,
+    debug: &mut MoregenDebugLog,
     seen: &mut ahash::AHashSet<crate::types::type_expr::TypeExprRef>,
     depth: usize,
 ) {
@@ -12996,20 +13045,26 @@ fn dump_all_tvars(
             } else {
                 "NON-GENERIC"
             };
-            debug.push(format!(
+            moregen_debug!(
+                debug,
                 "{}Tvar({:?}) {:?} {} level={}",
-                indent, name, ty, generic_str, level
-            ));
+                indent,
+                name,
+                ty,
+                generic_str,
+                level
+            );
         }
         TypeDesc::Tconstr { path, args, .. } => {
-            debug.push(format!(
+            moregen_debug!(
+                debug,
                 "{}Tconstr({:?}) {:?} level={} args={}",
                 indent,
                 path,
                 ty,
                 level,
                 args.len()
-            ));
+            );
             let args = args.clone();
             drop(desc);
             for arg in &args {
@@ -13070,7 +13125,7 @@ fn moregen_link(
         crate::types::type_expr::TypeExprRef,
         crate::types::type_expr::TypeExprRef,
     )>,
-    debug: &mut Vec<String>,
+    debug: &mut MoregenDebugLog,
 ) {
     moregen_link_impl(ctx, impl_ty, iface_ty, visited, debug, false);
 }
@@ -13083,7 +13138,7 @@ fn moregen_link_exported_alias(
         crate::types::type_expr::TypeExprRef,
         crate::types::type_expr::TypeExprRef,
     )>,
-    debug: &mut Vec<String>,
+    debug: &mut MoregenDebugLog,
 ) {
     // OCaml Ctype.moregeneral instantiates generic variables on copies before
     // comparison (compiler/ml/ctype.ml:3124-3139). Only non-generic variables
@@ -13099,7 +13154,7 @@ fn moregen_link_impl(
         crate::types::type_expr::TypeExprRef,
         crate::types::type_expr::TypeExprRef,
     )>,
-    debug: &mut Vec<String>,
+    debug: &mut MoregenDebugLog,
     allow_generic_anonymous: bool,
 ) {
     use crate::types::type_expr::{GENERIC_LEVEL, TypeDesc};
@@ -13119,46 +13174,53 @@ fn moregen_link_impl(
     match (&*impl_desc, &*iface_desc) {
         (TypeDesc::Tvar(name), _) if ctx.get_level(impl_ty) != GENERIC_LEVEL => {
             // Non-generic impl Tvar: link to interface type
-            let iface_summary = match &*iface_desc {
-                TypeDesc::Tvar(n) => format!("Tvar({:?})", n),
-                TypeDesc::Tconstr { path, .. } => format!("Tconstr({:?})", path),
-                _ => "other".to_string(),
-            };
-            debug.push(format!(
-                "  LINK {:?} Tvar({:?}) level={} -> {}",
-                impl_ty,
-                name,
-                ctx.get_level(impl_ty),
-                iface_summary
-            ));
+            if debug.enabled() {
+                let iface_summary = match &*iface_desc {
+                    TypeDesc::Tvar(n) => format!("Tvar({:?})", n),
+                    TypeDesc::Tconstr { path, .. } => format!("Tconstr({:?})", path),
+                    _ => "other".to_string(),
+                };
+                moregen_debug!(
+                    debug,
+                    "  LINK {:?} Tvar({:?}) level={} -> {}",
+                    impl_ty,
+                    name,
+                    ctx.get_level(impl_ty),
+                    iface_summary
+                );
+            }
             drop(impl_desc);
             drop(iface_desc);
             crate::types::ctype::link_type(ctx, impl_ty, iface_ty);
         }
         (TypeDesc::Tvar(name), _) if allow_generic_anonymous && name.is_none() => {
-            let iface_summary = match &*iface_desc {
-                TypeDesc::Tvar(n) => format!("Tvar({:?})", n),
-                TypeDesc::Tconstr { path, .. } => format!("Tconstr({:?})", path),
-                _ => "other".to_string(),
-            };
-            debug.push(format!(
-                "  LINK exported generic {:?} Tvar({:?}) level={} -> {}",
-                impl_ty,
-                name,
-                ctx.get_level(impl_ty),
-                iface_summary
-            ));
+            if debug.enabled() {
+                let iface_summary = match &*iface_desc {
+                    TypeDesc::Tvar(n) => format!("Tvar({:?})", n),
+                    TypeDesc::Tconstr { path, .. } => format!("Tconstr({:?})", path),
+                    _ => "other".to_string(),
+                };
+                moregen_debug!(
+                    debug,
+                    "  LINK exported generic {:?} Tvar({:?}) level={} -> {}",
+                    impl_ty,
+                    name,
+                    ctx.get_level(impl_ty),
+                    iface_summary
+                );
+            }
             drop(impl_desc);
             drop(iface_desc);
             crate::types::ctype::link_type(ctx, impl_ty, iface_ty);
         }
         (TypeDesc::Tvar(name), _) => {
-            debug.push(format!(
+            moregen_debug!(
+                debug,
                 "  SKIP generic {:?} Tvar({:?}) level={}",
                 impl_ty,
                 name,
                 ctx.get_level(impl_ty)
-            ));
+            );
         }
         (
             TypeDesc::Tconstr {
@@ -13168,12 +13230,13 @@ fn moregen_link_impl(
                 path: p2, args: a2, ..
             },
         ) if moregen_paths_compatible(p1, p2) && a1.len() == a2.len() => {
-            debug.push(format!(
+            moregen_debug!(
+                debug,
                 "  Tconstr match: {:?} ~ {:?} args={}",
                 p1,
                 p2,
                 a1.len()
-            ));
+            );
             let a1 = a1.clone();
             let a2 = a2.clone();
             drop(impl_desc);
@@ -13190,7 +13253,7 @@ fn moregen_link_impl(
                 arg: a2, ret: r2, ..
             },
         ) => {
-            debug.push(format!("  Tarrow match"));
+            moregen_debug!(debug, "  Tarrow match");
             let (a1t, r1) = (a1.typ, *r1);
             let (a2t, r2) = (a2.typ, *r2);
             drop(impl_desc);
@@ -13215,16 +13278,17 @@ fn moregen_link_impl(
                 path: p2, args: a2, ..
             },
         ) => {
-            debug.push(format!(
+            moregen_debug!(
+                debug,
                 "  Tconstr MISMATCH: impl={:?}({}) iface={:?}({})",
                 p1,
                 a1.len(),
                 p2,
                 a2.len()
-            ));
+            );
         }
         _ => {
-            debug.push(format!("  NO match"));
+            moregen_debug!(debug, "  NO match");
         }
     }
 }
