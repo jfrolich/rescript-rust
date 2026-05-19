@@ -15922,12 +15922,13 @@ fn translate_module_type_to_decl_with_typed_hint<'a>(
                                 tctx.type_ctx,
                             )
                             .is_none()
-                                && let Some((resolved_path, sig_items)) = lookup_env.resolve_module_lid(
-                                    open_lid,
-                                    arena,
-                                    &mut tctx.persistent_env,
-                                    tctx.type_ctx,
-                                )
+                                && let Some((resolved_path, sig_items)) = lookup_env
+                                    .resolve_module_lid(
+                                        open_lid,
+                                        arena,
+                                        &mut tctx.persistent_env,
+                                        tctx.type_ctx,
+                                    )
                             {
                                 crate::cmi::persistent_env::open_signature_components_into_env(
                                     sig_items.as_ref(),
@@ -19800,9 +19801,12 @@ pub fn transl_signature<'a>(
                     )
                 } {
                     path
-                } else if let Some((resolved_path, sig_items)) =
-                    sig_env.resolve_module_lid(open_lid, arena, &mut tctx.persistent_env, tctx.type_ctx)
-                {
+                } else if let Some((resolved_path, sig_items)) = sig_env.resolve_module_lid(
+                    open_lid,
+                    arena,
+                    &mut tctx.persistent_env,
+                    tctx.type_ctx,
+                ) {
                     crate::cmi::persistent_env::open_signature_components_into_env(
                         sig_items.as_ref(),
                         &resolved_path,

@@ -172,7 +172,8 @@ impl<V> SharedRegistryMap<V> {
             return Some(f(key, value));
         }
         let variant = first_char_case_variant(name)?;
-        map.get_key_value(&variant).map(|(key, value)| f(key, value))
+        map.get_key_value(&variant)
+            .map(|(key, value)| f(key, value))
     }
 
     fn for_each(&self, mut f: impl FnMut(&String, &V)) {
@@ -314,8 +315,7 @@ impl InMemoryModuleInfo {
     ) -> Self {
         self.package_name = Some(Arc::from(package_name.into_boxed_str()));
         self.package_root = Some(Arc::new(package_root));
-        self.js_output_suffix =
-            js_output_suffix.map(|suffix| Arc::from(suffix.into_boxed_str()));
+        self.js_output_suffix = js_output_suffix.map(|suffix| Arc::from(suffix.into_boxed_str()));
         self
     }
 }
@@ -6255,7 +6255,7 @@ fn add_signature_to_env_with_options(
                                         Path::pdot(type_path.clone(), cstr_desc.cstr_name.clone());
                                     let ty_res = ctx
                                         .new_constr(inline_path, inlined_decl.type_params.clone());
-	                                    for (pos, ld) in labels.iter().enumerate() {
+                                    for (pos, ld) in labels.iter().enumerate() {
                                         let label_desc = LabelDescription {
                                             lbl_name: ld.ld_id.name().to_string(),
                                             lbl_res: ty_res,
@@ -6414,22 +6414,22 @@ fn add_signature_to_env_with_options(
                             Env::empty(),
                             access_path.clone(),
                             md.clone(),
-	                        ));
-	                        opened_module_components.push((id.clone(), stored, module_pos));
-	                        opened_modules.push((id.clone(), md.clone(), module_pos));
-	                    } else if let Some((_, stored)) = precomputed_components
-	                        .and_then(|components| components.lookup_child_components(id.name(), ctx))
-	                    {
+                        ));
+                        opened_module_components.push((id.clone(), stored, module_pos));
+                        opened_modules.push((id.clone(), md.clone(), module_pos));
+                    } else if let Some((_, stored)) = precomputed_components
+                        .and_then(|components| components.lookup_child_components(id.name(), ctx))
+                    {
                         // OCaml compiler/ml/env.ml:1841-1877 opens the
                         // already-built `comp_components` table alongside
                         // `comp_modules`. Reuse that child component thunk so
                         // opened-module source lookup follows env.ml:1000-1013
                         // without forcing the parent module declaration.
-	                        opened_module_components.push((id.clone(), stored, module_pos));
-	                        opened_modules.push((id.clone(), md.clone(), module_pos));
-	                    } else {
-	                        opened_modules.push((id.clone(), md.clone(), module_pos));
-	                    }
+                        opened_module_components.push((id.clone(), stored, module_pos));
+                        opened_modules.push((id.clone(), md.clone(), module_pos));
+                    } else {
+                        opened_modules.push((id.clone(), md.clone(), module_pos));
+                    }
                 } else {
                     env.add_module(id.clone(), md.clone());
                 }

@@ -427,12 +427,7 @@ impl<T: Clone> IdTbl<T> {
             items.extend(entries.iter().map(|(id, value)| (id, value)));
         }
         if let Some(opened) = &self.opened {
-            items.extend(
-                opened
-                    .components
-                    .values()
-                    .map(|(id, value, _)| (id, value)),
-            );
+            items.extend(opened.components.values().map(|(id, value, _)| (id, value)));
             opened.next.collect_iter(items);
         }
     }
@@ -517,8 +512,7 @@ impl<T: Clone> TycompTbl<T> {
             return;
         }
         let next = std::mem::take(self);
-        let mut opened_components: im_rc::HashMap<String, Vec<(Ident, T)>> =
-            im_rc::HashMap::new();
+        let mut opened_components: im_rc::HashMap<String, Vec<(Ident, T)>> = im_rc::HashMap::new();
         for (id, value) in components {
             let name = id.name().to_string();
             match opened_components.get_mut(&name) {
@@ -909,13 +903,11 @@ impl Env {
             let mut aliases: Vec<_> = self
                 .modules
                 .visible_local_entries()
-                .filter_map(|(id, decl)| {
-                    match &decl.md_type {
-                        ModuleType::MtyAlias(_, target) | ModuleType::MtyIdent(target) => {
-                            Some((id.clone(), target.clone()))
-                        }
-                        _ => None,
+                .filter_map(|(id, decl)| match &decl.md_type {
+                    ModuleType::MtyAlias(_, target) | ModuleType::MtyIdent(target) => {
+                        Some((id.clone(), target.clone()))
                     }
+                    _ => None,
                 })
                 .collect();
             aliases.sort_by(|(left_id, left_target), (right_id, right_target)| {

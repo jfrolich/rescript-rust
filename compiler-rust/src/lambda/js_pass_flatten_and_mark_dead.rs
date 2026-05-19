@@ -797,9 +797,7 @@ fn should_materialize_block_binding_items(
     // splitting complex payload fields
     // (`compiler/core/js_pass_flatten_and_mark_dead.ml:174-221`).
     let item_count = match tag_info {
-        TagInfo::Record { .. } | TagInfo::RecordInlined { .. } => {
-            tag_info.logical_field_count()
-        }
+        TagInfo::Record { .. } | TagInfo::RecordInlined { .. } => tag_info.logical_field_count(),
         _ => items.len(),
     };
     if item_count < 2 {

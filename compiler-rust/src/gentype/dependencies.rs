@@ -1,7 +1,7 @@
 // Port of compiler/gentype/Dependencies.ml:1-73.
 // This Stage 2 GenType port is intentionally not wired into the crate yet.
 
-use crate::gentype::gen_type_common::{dep_to_string, Dep};
+use crate::gentype::gen_type_common::{Dep, dep_to_string};
 use crate::types::Path;
 
 pub fn handle_namespace(name: &str, dep: &Dep) -> Dep {

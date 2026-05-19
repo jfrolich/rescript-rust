@@ -6351,13 +6351,15 @@ impl<'a> RawLambdaConverter<'a> {
                     })
                     .unwrap_or_else(|| {
                         trace_raw_match_fallback(&self.loc(expr.exp_loc), scrut, cases);
-                        let raw =
-                            self.compile_full_matching(self.loc(expr.exp_loc), scrut, cases, *partial, expr);
+                        let raw = self.compile_full_matching(
+                            self.loc(expr.exp_loc),
+                            scrut,
+                            cases,
+                            *partial,
+                            expr,
+                        );
                         let start_stamp = self.current_stamp();
-                        crate::raw_lambda::lower::lower_to_lambda_with_start_stamp(
-                            raw,
-                            start_stamp,
-                        )
+                        crate::raw_lambda::lower::lower_to_lambda_with_start_stamp(raw, start_stamp)
                     })
             }
             ExpressionDesc::Texp_tuple(items) => {
@@ -6373,7 +6375,12 @@ impl<'a> RawLambdaConverter<'a> {
                     self.convert_construct(self.loc(expr.exp_loc), cstr, args)
                 }
                 _ => {
-                    let raw = self.convert_construct_raw(self.loc(expr.exp_loc), expr.exp_env, cstr, args);
+                    let raw = self.convert_construct_raw(
+                        self.loc(expr.exp_loc),
+                        expr.exp_env,
+                        cstr,
+                        args,
+                    );
                     let start_stamp = self.current_stamp();
                     crate::raw_lambda::lower::lower_to_lambda_with_start_stamp(raw, start_stamp)
                 }

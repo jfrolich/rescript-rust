@@ -852,11 +852,7 @@ impl TypeContext {
             .contains_key(key)
     }
 
-    pub(crate) fn register_component_alias_source(
-        &self,
-        component_path: Path,
-        alias_source: Path,
-    ) {
+    pub(crate) fn register_component_alias_source(&self, component_path: Path, alias_source: Path) {
         // OCaml compiler/ml/env.ml:1440-1446 scrapes aliases by resolving the
         // target path through `find_module`; env.ml:1530 then prefixes the
         // selected component path. Record exactly that pair so later helpers
@@ -2574,10 +2570,8 @@ mod tests {
             "Child",
             7,
         );
-        let selected_path_no_pos = Path::pdot(
-            Path::pident(Ident::create_persistent("Selected")),
-            "Child",
-        );
+        let selected_path_no_pos =
+            Path::pdot(Path::pident(Ident::create_persistent("Selected")), "Child");
         let alias_source = Path::pdot_pos(
             Path::pident(Ident::create_persistent("Selected__Backing")),
             "Child",
@@ -2600,14 +2594,16 @@ mod tests {
 
         ctx.register_component_alias_source(selected_path.clone(), alias_source.clone());
 
-        assert!(ctx
-            .component_paths_for_alias_source(&alias_source_no_pos)
-            .iter()
-            .any(|path| path.same(&selected_path_no_pos)));
-        assert!(ctx
-            .alias_sources_for_component_path(&selected_path_no_pos)
-            .iter()
-            .any(|path| path.same(&alias_source_no_pos)));
+        assert!(
+            ctx.component_paths_for_alias_source(&alias_source_no_pos)
+                .iter()
+                .any(|path| path.same(&selected_path_no_pos))
+        );
+        assert!(
+            ctx.alias_sources_for_component_path(&selected_path_no_pos)
+                .iter()
+                .any(|path| path.same(&alias_source_no_pos))
+        );
         assert!(
             ctx.component_paths_for_alias_source(&spelling_only_source)
                 .is_empty()

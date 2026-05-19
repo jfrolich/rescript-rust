@@ -16136,9 +16136,10 @@ fn gentype_attrs_for_derived_accessors(core_type: &CoreType, arena: &mut ParseAr
     // synthesized core type carries a GenType attribute; when it does, generated
     // accessors receive exactly `Ast_attributes.gentype`
     // from compiler/frontend/ast_attributes.ml:285-290.
-    let has_gentype = core_type.ptyp_attributes.iter().any(|(attr_name, _)| {
-        matches!(arena.get_string(attr_name.txt), "genType" | "gentype")
-    });
+    let has_gentype = core_type
+        .ptyp_attributes
+        .iter()
+        .any(|(attr_name, _)| matches!(arena.get_string(attr_name.txt), "genType" | "gentype"));
 
     if has_gentype {
         Attributes::from_vec(vec![(
