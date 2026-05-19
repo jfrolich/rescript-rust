@@ -11,8 +11,14 @@
 
 set -euo pipefail
 
-RUST_BSC="./compiler-rust/target/debug/bsc"
-OCAML_BSC="packages/@rescript/darwin-arm64/bin/bsc.exe"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+PLATFORM="$("$PROJECT_ROOT/scripts/platform.sh")"
+
+cd "$PROJECT_ROOT"
+
+RUST_BSC="${RUST_BSC:-$PROJECT_ROOT/compiler-rust/target/debug/bsc}"
+OCAML_BSC="${OCAML_BSC:-$PROJECT_ROOT/packages/@rescript/$PLATFORM/bin/bsc.exe}"
 
 # Colors for output
 RED='\033[0;31m'
@@ -45,7 +51,7 @@ done
 
 # Build Rust compiler
 echo "Building Rust compiler..."
-cargo build --manifest-path compiler-rust/Cargo.toml 2>/dev/null
+cargo build --manifest-path "$PROJECT_ROOT/compiler-rust/Cargo.toml" 2>/dev/null
 
 # Statistics
 total=0
@@ -58,9 +64,10 @@ rust_parse_error=0
 ocaml_parse_error=0
 
 # Temporary files (must use .ast extension for OCaml compiler)
-RUST_AST="/tmp/parity_test_rust_$$.ast"
-OCAML_AST="/tmp/parity_test_ocaml_$$.ast"
-trap "rm -f $RUST_AST $OCAML_AST" EXIT
+TEMP_PREFIX="${TMPDIR:-/tmp}/rescript_ast_parity_$$"
+RUST_AST="${TEMP_PREFIX}.rust.ast"
+OCAML_AST="${TEMP_PREFIX}.ocaml.ast"
+trap 'rm -f "$RUST_AST" "$OCAML_AST"' EXIT
 
 compare_file() {
     local file="$1"
