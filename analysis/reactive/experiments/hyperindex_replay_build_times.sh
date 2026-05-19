@@ -4,8 +4,8 @@ set -euo pipefail
 # Fixed benchmark range/repo:
 START_REF="benchmark/rescript-baseline"
 END_REF="benchmark/rescript-followup"
-HYPERINDEX_REPO="/Users/cristianocalcagno/GitHub/hyperindex"
-OUT_DIR="${OUT_DIR:-/tmp/hyperindex-replay-times-refs}"
+HYPERINDEX_REPO="${HYPERINDEX_REPO:-}"
+OUT_DIR="${OUT_DIR:-${TMPDIR:-/tmp}/hyperindex-replay-times-refs}"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 RESCRIPT_REPO="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 TOOLS_BIN="$RESCRIPT_REPO/_build/default/tools/bin/main.exe"
@@ -16,6 +16,11 @@ FIXPOINT_ASSERT="${FIXPOINT_ASSERT:-1}"
 FIXPOINT_METRICS="${FIXPOINT_METRICS:-1}"
 
 mkdir -p "$OUT_DIR"
+
+if [[ -z "$HYPERINDEX_REPO" ]]; then
+  echo "Set HYPERINDEX_REPO to the hyperindex checkout to replay." >&2
+  exit 1
+fi
 
 cd "$HYPERINDEX_REPO"
 ORIG_REF="$(git rev-parse --abbrev-ref HEAD)"
