@@ -83,14 +83,19 @@ support in Rust is still incomplete:
   `compiler/gentype/GenTypeMain.ml:26-52` feeding
   `compiler/gentype/EmitJs.ml:437-453`, avoiding the staged CMT decoder while
   preserving the same declaration translation boundary.
+- Rust GenType export-module object emission now follows OCaml's
+  `Hashtbl.create 1` / `Hashtbl.replace` / `Hashtbl.fold ... :: acc` order
+  instead of reversing Rust `IndexMap` insertion order. This matches
+  `compiler/gentype/ExportModule.ml:41-57`,
+  `compiler/gentype/ExportModule.ml:104-125`, and the OCaml stdlib table
+  mechanics in `hashtbl.ml:73-78`, `hashtbl.ml:207-223`,
+  `hashtbl.ml:505-508`, and `hashtbl.ml:592-598`.
 - Latest debug verification: `cargo build --quiet --manifest-path
   compiler-rust/Cargo.toml`, `cargo build --quiet --manifest-path
   rewatch/Cargo.toml`, and `./scripts/test_gentype_output_parity.sh`. Results:
-  react example `62/71` generated files with `9` changed, `0` missing, `0`
-  extra, `11` hunks, TypeScript `0` for OCaml and `2` for Rust; stdlib-no-shims
-  `1/1`; Tella `103/112` with `7` changed, `2` missing, `0` extra, `8` hunks.
-  The remaining React TypeScript blocker is still `Wrapper.gen.tsx` not being a
-  module.
+  react example `64/71` generated files with `7` changed, `0` missing, `0`
+  extra, `9` hunks, TypeScript `0` for OCaml and `0` for Rust; stdlib-no-shims
+  `1/1`; Tella `107/112` with `3` changed, `2` missing, `0` extra, `3` hunks.
 
 ## Reference Inventory
 
@@ -156,9 +161,9 @@ Current Rust in-process generated-output baseline:
 ```text
 ./scripts/test_gentype_output_parity.sh
 
-typescript-react-example: 62/71 generated outputs match, 9 changed, 0 missing, 0 extra, 11 diff hunks; OCaml typecheck 0, Rust typecheck 0
+typescript-react-example: 64/71 generated outputs match, 7 changed, 0 missing, 0 extra, 9 diff hunks; OCaml typecheck 0, Rust typecheck 0
 stdlib-no-shims:          1/1 generated outputs match, 0 changed, 0 missing, 0 extra, 0 diff hunks; OCaml typecheck 0, Rust typecheck 0
-Tella:                    103/112 generated outputs match, 7 changed, 2 missing, 0 extra, 8 diff hunks; TypeScript typecheck not configured
+Tella:                    107/112 generated outputs match, 3 changed, 2 missing, 0 extra, 3 diff hunks; TypeScript typecheck not configured
 ```
 
 Older missing-output baselines before the in-process hook are superseded by the
@@ -314,9 +319,9 @@ Current generated-output parity:
 ```text
 ./scripts/test_gentype_output_parity.sh
 
-typescript-react-example: 60/71 generated outputs match, 11 changed, 0 missing, 0 extra, 13 diff hunks; OCaml typecheck 0, Rust typecheck 2
+typescript-react-example: 64/71 generated outputs match, 7 changed, 0 missing, 0 extra, 9 diff hunks; OCaml typecheck 0, Rust typecheck 0
 stdlib-no-shims:          1/1 generated outputs match, 0 changed, 0 missing, 0 extra, 0 diff hunks; OCaml typecheck 0, Rust typecheck 0
-Tella:                    103/112 generated outputs match, 7 changed, 2 missing, 0 extra, 8 diff hunks; TypeScript typecheck not configured
+Tella:                    107/112 generated outputs match, 3 changed, 2 missing, 0 extra, 3 diff hunks; TypeScript typecheck not configured
 ```
 
 This improvement comes from aligning Rust's in-process typed artifact with the
@@ -624,9 +629,9 @@ The later Phase 0 debug builds listed above completed.
 - Debug verification: `cargo build --quiet --manifest-path
   compiler-rust/Cargo.toml`, `cargo build --quiet --manifest-path
   rewatch/Cargo.toml`, and `./scripts/test_gentype_output_parity.sh`.
-  Results: React `62/71`, 9 changed, 0 missing, 0 extra, 11 hunks, OCaml/Rust
+  Results: React `64/71`, 7 changed, 0 missing, 0 extra, 9 hunks, OCaml/Rust
   typecheck `0/0`; stdlib-no-shims `1/1`, OCaml/Rust typecheck `0/0`; Tella
-  `103/112`, 7 changed, 2 missing, 0 extra, 8 hunks, TypeScript typecheck not
+  `107/112`, 3 changed, 2 missing, 0 extra, 3 hunks, TypeScript typecheck not
   configured.
 
 ## Next Session

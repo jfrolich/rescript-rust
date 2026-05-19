@@ -38,6 +38,109 @@ pub struct FieldInfo {
     pub field_for_type: Field,
 }
 
+fn ocaml_hashtbl_power_2_above(mut x: usize, n: usize) -> usize {
+    while x < n {
+        if x > (isize::MAX as usize / 2) {
+            break;
+        }
+        x *= 2;
+    }
+    x
+}
+
+fn ocaml_hash_mix_uint32(mut h: u32, mut d: u32) -> u32 {
+    d = d.wrapping_mul(0xcc9e2d51);
+    d = d.rotate_left(15);
+    d = d.wrapping_mul(0x1b873593);
+    h ^= d;
+    h = h.rotate_left(13);
+    h.wrapping_mul(5).wrapping_add(0xe6546b64)
+}
+
+fn ocaml_hash_final_mix(mut h: u32) -> u32 {
+    h ^= h >> 16;
+    h = h.wrapping_mul(0x85ebca6b);
+    h ^= h >> 13;
+    h = h.wrapping_mul(0xc2b2ae35);
+    h ^= h >> 16;
+    h
+}
+
+fn ocaml_hashtbl_hash_string(s: &str) -> u32 {
+    let bytes = s.as_bytes();
+    let len = bytes.len();
+    let mut h = 0u32;
+    let mut i = 0usize;
+
+    while i + 4 <= len {
+        let w = u32::from_le_bytes([bytes[i], bytes[i + 1], bytes[i + 2], bytes[i + 3]]);
+        h = ocaml_hash_mix_uint32(h, w);
+        i += 4;
+    }
+
+    let rem = len & 3;
+    if rem != 0 {
+        let mut w = 0u32;
+        if rem >= 3 {
+            w |= (bytes[i + 2] as u32) << 16;
+        }
+        if rem >= 2 {
+            w |= (bytes[i + 1] as u32) << 8;
+        }
+        w |= bytes[i] as u32;
+        h = ocaml_hash_mix_uint32(h, w);
+    }
+
+    h ^= len as u32;
+    ocaml_hash_final_mix(h) & 0x3fff_ffff
+}
+
+fn ocaml_hashtbl_replace_fold_cons_order<'a>(
+    keys_in_replace_order: impl Iterator<Item = &'a String>,
+) -> Vec<String> {
+    // GenType's OCaml ExportModule uses `Hashtbl.create 1`,
+    // `Hashtbl.replace`, and `Hashtbl.fold (fun k v acc -> ... :: acc)`;
+    // see compiler/gentype/ExportModule.ml:41-57 and 104-125. The table
+    // mechanics here follow OCaml stdlib hashtbl.ml:73-78, 207-223,
+    // 505-508, and 592-598 for string keys with the default seed.
+    let keys: Vec<String> = keys_in_replace_order.cloned().collect();
+    let mut buckets: Vec<Vec<usize>> = vec![Vec::new(); ocaml_hashtbl_power_2_above(16, 1)];
+    let mut size = 0usize;
+
+    for (entry_idx, key) in keys.iter().enumerate() {
+        let bucket_idx = (ocaml_hashtbl_hash_string(key) as usize) & (buckets.len() - 1);
+        if buckets[bucket_idx]
+            .iter()
+            .any(|&idx| keys[idx].as_str() == key.as_str())
+        {
+            continue;
+        }
+        buckets[bucket_idx].insert(0, entry_idx);
+        size += 1;
+
+        if size > (buckets.len() << 1) {
+            let mut new_buckets = vec![Vec::new(); buckets.len() * 2];
+            for bucket in &buckets {
+                for &idx in bucket {
+                    let new_idx =
+                        (ocaml_hashtbl_hash_string(&keys[idx]) as usize) & (new_buckets.len() - 1);
+                    new_buckets[new_idx].push(idx);
+                }
+            }
+            buckets = new_buckets;
+        }
+    }
+
+    let mut traversal = Vec::with_capacity(size);
+    for bucket in &buckets {
+        for &idx in bucket {
+            traversal.push(keys[idx].clone());
+        }
+    }
+    traversal.reverse();
+    traversal
+}
+
 pub fn export_module_value_to_type(
     config: &crate::gentype::config::T,
     export_module_value: &ExportModuleValue,
@@ -79,10 +182,10 @@ pub fn export_module_item_to_fields(
     config: &crate::gentype::config::T,
     export_module_item: &ExportModuleItem,
 ) -> Vec<FieldInfo> {
-    export_module_item
-        .iter()
-        .rev()
-        .map(|(field_name, export_module_value)| {
+    ocaml_hashtbl_replace_fold_cons_order(export_module_item.keys())
+        .into_iter()
+        .filter_map(|field_name| {
+            let export_module_value = export_module_item.get(&field_name)?;
             let Types {
                 type_for_value,
                 type_for_type,
@@ -99,10 +202,10 @@ pub fn export_module_item_to_fields(
                 type_: type_for_value,
                 ..field_for_type.clone()
             };
-            FieldInfo {
+            Some(FieldInfo {
                 field_for_value,
                 field_for_type,
-            }
+            })
         })
         .collect()
 }
@@ -181,7 +284,12 @@ pub fn rev_fold<F, TBase>(f: F, tbl: &ExportModuleItems, base: TBase) -> TBase
 where
     F: Fn(&String, &ExportModuleItem, TBase) -> TBase,
 {
-    tbl.iter().rev().fold(base, |x, (k, v)| f(k, v, x))
+    ocaml_hashtbl_replace_fold_cons_order(tbl.keys())
+        .iter()
+        .fold(base, |x, k| match tbl.get(k) {
+            Some(v) => f(k, v, x),
+            None => x,
+        })
 }
 
 pub fn emit_all_module_items(
