@@ -64,11 +64,14 @@ fn type_decl_is_fixed_type(
     decl: &crate::parser::ast::TypeDeclaration,
     manifest: &crate::parser::ast::CoreType,
 ) -> bool {
+    type_decl_could_be_fixed_type(decl) && core_type_has_row_var(arena, manifest)
+}
+
+fn type_decl_could_be_fixed_type(decl: &crate::parser::ast::TypeDeclaration) -> bool {
     matches!(
         &decl.ptype_kind,
         crate::parser::ast::TypeKind::Ptype_abstract
     ) && matches!(decl.ptype_private, crate::parser::ast::PrivateFlag::Private)
-        && core_type_has_row_var(arena, manifest)
 }
 
 fn type_decl_manifest_uses_fixed_type_variables(
@@ -91,20 +94,44 @@ fn fixed_row_name(name: &str) -> String {
     format!("{name}#row")
 }
 
-fn type_decl_fixed_row_id(
-    arena: &ParseArena,
-    decl: &crate::parser::ast::TypeDeclaration,
-    row_ids: &[Option<Ident>],
+#[derive(Clone)]
+struct FixedRowTypeId {
     decl_idx: usize,
-) -> Option<Ident> {
-    let manifest = decl
-        .ptype_manifest
-        .map(|manifest| arena.get_core_type(manifest))?;
-    if type_decl_is_fixed_type(arena, decl, manifest) {
-        row_ids.get(decl_idx).and_then(Clone::clone)
-    } else {
-        None
+    id: Ident,
+    name: String,
+}
+
+fn collect_fixed_row_type_ids(
+    ctx: &crate::types::context::TypeContext,
+    arena: &ParseArena,
+    decls: &[crate::parser::ast::TypeDeclaration],
+) -> Vec<FixedRowTypeId> {
+    let mut row_ids = Vec::new();
+    for (decl_idx, decl) in decls.iter().enumerate() {
+        if !type_decl_could_be_fixed_type(decl) {
+            continue;
+        }
+        let Some(manifest_idx) = decl.ptype_manifest else {
+            continue;
+        };
+        let manifest = arena.get_core_type(manifest_idx);
+        if core_type_has_row_var(arena, manifest) {
+            let name = fixed_row_name(arena.get_string(decl.ptype_name.txt));
+            row_ids.push(FixedRowTypeId {
+                decl_idx,
+                id: ctx.create_ident(&name),
+                name,
+            });
+        }
     }
+    row_ids
+}
+
+fn fixed_row_type_id_for_decl(
+    row_ids: &[FixedRowTypeId],
+    decl_idx: usize,
+) -> Option<&FixedRowTypeId> {
+    row_ids.iter().find(|row_id| row_id.decl_idx == decl_idx)
 }
 
 fn translate_type_declaration_params<'a>(
@@ -21112,32 +21139,24 @@ fn type_structure_item<'a>(
             // declarations for fixed private rows, allocates their identifiers
             // before the real type identifiers, and enters row placeholders even
             // for Nonrecursive groups.
-            let mut fixed_row_type_ids: Vec<Option<Ident>> = vec![None; decls.len()];
-            for (decl_idx, decl) in decls.iter().enumerate() {
-                if let Some(manifest_idx) = decl.ptype_manifest {
-                    let manifest = arena.get_core_type(manifest_idx);
-                    if type_decl_is_fixed_type(arena, decl, manifest) {
-                        let row_name = fixed_row_name(arena.get_string(decl.ptype_name.txt));
-                        fixed_row_type_ids[decl_idx] = Some(ctx.create_ident(&row_name));
-                    }
-                }
-            }
+            let fixed_row_type_ids = collect_fixed_row_type_ids(ctx, arena, decls);
+            let has_fixed_rows = !fixed_row_type_ids.is_empty();
 
             // Predeclare type names in the environment so recursive references
             // resolve to the current declaration group (matching OCaml typedecl).
             // OCaml: enter_type adds placeholders for Recursive declarations and
             // for Nonrecursive fixed-row synthetic declarations.
             let mut declared_type_ids: Vec<Ident> = Vec::with_capacity(decls.len());
-            let mut type_entry_ids: Vec<Ident> = Vec::new();
-            let mut type_entry_parser_indices: Vec<Option<usize>> = Vec::new();
-            let mut type_entry_is_synthetic_row: Vec<bool> = Vec::new();
+            let type_entry_capacity = decls.len() + fixed_row_type_ids.len();
+            let mut type_entry_ids: Vec<Ident> = Vec::with_capacity(type_entry_capacity);
+            let mut type_entry_parser_indices: Vec<Option<usize>> =
+                Vec::with_capacity(type_entry_capacity);
+            let mut type_entry_is_synthetic_row: Vec<bool> = Vec::with_capacity(type_entry_capacity);
             let needs_placeholder = matches!(rec_flag, crate::parser::ast::RecFlag::Recursive);
-            for (decl_idx, row_id) in fixed_row_type_ids.iter().enumerate() {
-                if let Some(row_id) = row_id {
-                    let placeholder_decl =
-                        fixed_row_placeholder_decl(ctx, arena, &decls[decl_idx], row_id);
-                    new_env.add_type(row_id.clone(), placeholder_decl);
-                }
+            for row_id in &fixed_row_type_ids {
+                let placeholder_decl =
+                    fixed_row_placeholder_decl(ctx, arena, &decls[row_id.decl_idx], &row_id.id);
+                new_env.add_type(row_id.id.clone(), placeholder_decl);
             }
             for decl in decls.iter() {
                 check_nonrecursive_gadt_enter_type(*rec_flag, decl)?;
@@ -21175,28 +21194,24 @@ fn type_structure_item<'a>(
             // new_env accumulates the final declarations and is returned.
             let temp_env = new_env.clone();
 
-            for (decl_idx, row_id) in fixed_row_type_ids.iter().enumerate() {
-                let Some(row_id) = row_id.clone() else {
-                    continue;
-                };
-                let row_name = fixed_row_name(arena.get_string(decls[decl_idx].ptype_name.txt));
+            for row_id in &fixed_row_type_ids {
                 let typed_row_decl = translate_fixed_row_type_declaration(
                     tctx,
                     &temp_env,
                     arena,
-                    row_id.clone(),
-                    row_name.clone(),
-                    &decls[decl_idx],
+                    row_id.id.clone(),
+                    row_id.name.clone(),
+                    &decls[row_id.decl_idx],
                     None,
                 )?;
                 let row_internal_decl = typed_row_decl.typ_type.clone();
-                new_env.add_type(row_id.clone(), row_internal_decl.clone());
-                ctx.register_type_decl(&row_name, row_internal_decl.clone());
-                if row_id.stamp() != 0 {
-                    ctx.register_type_decl_by_stamp(row_id.stamp(), row_internal_decl.clone());
+                new_env.add_type(row_id.id.clone(), row_internal_decl.clone());
+                ctx.register_type_decl(&row_id.name, row_internal_decl.clone());
+                if row_id.id.stamp() != 0 {
+                    ctx.register_type_decl_by_stamp(row_id.id.stamp(), row_internal_decl.clone());
                 }
-                type_entry_ids.push(row_id);
-                type_entry_parser_indices.push(Some(decl_idx));
+                type_entry_ids.push(row_id.id.clone());
+                type_entry_parser_indices.push(Some(row_id.decl_idx));
                 type_entry_is_synthetic_row.push(true);
                 internal_decls_for_generalize.push(row_internal_decl);
                 typed_tree_decls.push(typed_row_decl);
@@ -22427,14 +22442,10 @@ fn type_structure_item<'a>(
                                 };
                             touch_manifest_cyclic_abbrev_check(ctx, &temp_env, type_ref);
                             if is_fixed_type {
-                                let row_id = type_decl_fixed_row_id(
-                                    arena,
-                                    decl,
-                                    &fixed_row_type_ids,
-                                    decl_idx,
-                                )
-                                .expect("fixed private row type must have a synthetic row id");
-                                let row_path = Path::pident(row_id);
+                                let row_id =
+                                    fixed_row_type_id_for_decl(&fixed_row_type_ids, decl_idx)
+                                        .expect("fixed private row type must have a synthetic row id");
+                                let row_path = Path::pident(row_id.id.clone());
                                 set_fixed_row(
                                     ctx,
                                     &temp_env,
@@ -22573,9 +22584,11 @@ fn type_structure_item<'a>(
                 };
 
                 typed_tree_decls.push(typed_tree_decl);
-                type_entry_ids.push(type_id.clone());
-                type_entry_parser_indices.push(Some(decl_idx));
-                type_entry_is_synthetic_row.push(false);
+                if has_fixed_rows {
+                    type_entry_ids.push(type_id.clone());
+                    type_entry_parser_indices.push(Some(decl_idx));
+                    type_entry_is_synthetic_row.push(false);
+                }
                 tctx.type_variables = saved_type_variables;
             }
 
@@ -22611,11 +22624,15 @@ fn type_structure_item<'a>(
                 crate::types::ctype::generalize(ctx, *ty);
             }
 
-            let original_internal_decls_for_checks: Vec<_> = internal_decls_for_generalize
-                .iter()
-                .zip(type_entry_is_synthetic_row.iter())
-                .filter_map(|(decl, is_row)| (!*is_row).then_some(decl.clone()))
-                .collect();
+            let original_internal_decls_for_checks: Vec<_> = if has_fixed_rows {
+                internal_decls_for_generalize
+                    .iter()
+                    .zip(type_entry_is_synthetic_row.iter())
+                    .filter_map(|(decl, is_row)| (!*is_row).then_some(decl.clone()))
+                    .collect()
+            } else {
+                internal_decls_for_generalize.clone()
+            };
 
             check_type_declaration_abbrev_cycles(
                 ctx,
@@ -22644,84 +22661,156 @@ fn type_structure_item<'a>(
 
             // OCaml typedecl.ml compute_properties_fixpoint:
             // recompute variances for the whole declaration group as a fixpoint.
-            let required_variances: Vec<Vec<(bool, bool, bool)>> = type_entry_parser_indices
-                .iter()
-                .map(|parser_idx| {
-                    let Some(parser_idx) = parser_idx else {
-                        return Vec::new();
-                    };
-                    decls[*parser_idx]
-                        .ptype_params
-                        .iter()
-                        .map(|(_, variance)| parser_variance_requirement(*variance))
-                        .collect()
-                })
-                .collect();
-            let resolved_variances =
-                compute_type_variance_fixpoint(ctx, &new_env, &type_entry_ids, &required_variances);
-            if resolved_variances.len() == type_entry_ids.len() {
-                for (idx, type_id) in type_entry_ids.iter().enumerate() {
-                    let Some(variance_row) = resolved_variances.get(idx) else {
-                        continue;
-                    };
-                    if !type_entry_is_synthetic_row[idx]
-                        && let Some(parser_idx) = type_entry_parser_indices[idx]
-                        && let Some(typed_decl) = typed_tree_decls.get(idx)
-                    {
-                        check_type_decl_variance_requirements(
-                            ctx,
-                            &new_env,
-                            &decls[parser_idx],
-                            typed_decl,
-                            variance_row,
-                        )?;
-                    }
-                    let path = Path::pident(type_id.clone());
-                    let Ok(updated_decl_ref) = new_env.lookup_type(&path) else {
-                        continue;
-                    };
-                    let mut updated_decl = updated_decl_ref.clone();
-                    updated_decl.type_variance = variance_row.clone();
-                    new_env.add_type(type_id.clone(), updated_decl.clone());
-
-                    if let Some(typed_decl) = typed_tree_decls.get_mut(idx) {
-                        typed_decl.typ_type.type_variance = variance_row.clone();
-                    }
-                    if let Some(internal_decl) = internal_decls_for_generalize.get_mut(idx) {
-                        internal_decl.type_variance = variance_row.clone();
-                    }
-
-                    let type_name = if type_entry_is_synthetic_row[idx] {
-                        let parser_idx = type_entry_parser_indices[idx]
-                            .expect("synthetic row entries keep their source declaration index");
-                        fixed_row_name(arena.get_string(decls[parser_idx].ptype_name.txt))
-                    } else {
-                        let parser_idx = type_entry_parser_indices[idx]
-                            .expect("type entries keep their source declaration index");
-                        arena
-                            .get_string(decls[parser_idx].ptype_name.txt)
-                            .to_string()
-                    };
-                    ctx.register_type_decl(&type_name, updated_decl.clone());
-                    if type_id.stamp() != 0 {
-                        ctx.register_type_decl_by_stamp(type_id.stamp(), updated_decl.clone());
-                    }
-                }
-            }
-
-            for (entry_idx, internal_decl) in internal_decls_for_generalize.iter().enumerate() {
-                if type_entry_is_synthetic_row[entry_idx] {
-                    continue;
-                }
-                let idx = type_entry_parser_indices[entry_idx]
-                    .expect("type entries keep their source declaration index");
-                check_type_declaration_coherence(
+            if has_fixed_rows {
+                let required_variances: Vec<Vec<(bool, bool, bool)>> = type_entry_parser_indices
+                    .iter()
+                    .map(|parser_idx| {
+                        let Some(parser_idx) = parser_idx else {
+                            return Vec::new();
+                        };
+                        decls[*parser_idx]
+                            .ptype_params
+                            .iter()
+                            .map(|(_, variance)| parser_variance_requirement(*variance))
+                            .collect()
+                    })
+                    .collect();
+                let resolved_variances = compute_type_variance_fixpoint(
                     ctx,
                     &new_env,
-                    decls[idx].ptype_loc,
-                    &declared_type_ids[idx],
-                    internal_decl,
-                )?;
+                    &type_entry_ids,
+                    &required_variances,
+                );
+                if resolved_variances.len() == type_entry_ids.len() {
+                    for (idx, type_id) in type_entry_ids.iter().enumerate() {
+                        let Some(variance_row) = resolved_variances.get(idx) else {
+                            continue;
+                        };
+                        if !type_entry_is_synthetic_row[idx]
+                            && let Some(parser_idx) = type_entry_parser_indices[idx]
+                            && let Some(typed_decl) = typed_tree_decls.get(idx)
+                        {
+                            check_type_decl_variance_requirements(
+                                ctx,
+                                &new_env,
+                                &decls[parser_idx],
+                                typed_decl,
+                                variance_row,
+                            )?;
+                        }
+                        let path = Path::pident(type_id.clone());
+                        let Ok(updated_decl_ref) = new_env.lookup_type(&path) else {
+                            continue;
+                        };
+                        let mut updated_decl = updated_decl_ref.clone();
+                        updated_decl.type_variance = variance_row.clone();
+                        new_env.add_type(type_id.clone(), updated_decl.clone());
+
+                        if let Some(typed_decl) = typed_tree_decls.get_mut(idx) {
+                            typed_decl.typ_type.type_variance = variance_row.clone();
+                        }
+                        if let Some(internal_decl) = internal_decls_for_generalize.get_mut(idx) {
+                            internal_decl.type_variance = variance_row.clone();
+                        }
+
+                        let type_name = if type_entry_is_synthetic_row[idx] {
+                            let parser_idx = type_entry_parser_indices[idx]
+                                .expect("synthetic row entries keep their source declaration index");
+                            fixed_row_type_id_for_decl(&fixed_row_type_ids, parser_idx)
+                                .map(|row_id| row_id.name.clone())
+                                .unwrap_or_else(|| {
+                                    fixed_row_name(arena.get_string(decls[parser_idx].ptype_name.txt))
+                                })
+                        } else {
+                            let parser_idx = type_entry_parser_indices[idx]
+                                .expect("type entries keep their source declaration index");
+                            arena
+                                .get_string(decls[parser_idx].ptype_name.txt)
+                                .to_string()
+                        };
+                        ctx.register_type_decl(&type_name, updated_decl.clone());
+                        if type_id.stamp() != 0 {
+                            ctx.register_type_decl_by_stamp(type_id.stamp(), updated_decl.clone());
+                        }
+                    }
+                }
+
+                for (entry_idx, internal_decl) in internal_decls_for_generalize.iter().enumerate() {
+                    if type_entry_is_synthetic_row[entry_idx] {
+                        continue;
+                    }
+                    let idx = type_entry_parser_indices[entry_idx]
+                        .expect("type entries keep their source declaration index");
+                    check_type_declaration_coherence(
+                        ctx,
+                        &new_env,
+                        decls[idx].ptype_loc,
+                        &declared_type_ids[idx],
+                        internal_decl,
+                    )?;
+                }
+            } else {
+                let required_variances: Vec<Vec<(bool, bool, bool)>> = decls
+                    .iter()
+                    .map(|decl| {
+                        decl.ptype_params
+                            .iter()
+                            .map(|(_, variance)| parser_variance_requirement(*variance))
+                            .collect()
+                    })
+                    .collect();
+                let resolved_variances = compute_type_variance_fixpoint(
+                    ctx,
+                    &new_env,
+                    &declared_type_ids,
+                    &required_variances,
+                );
+                if resolved_variances.len() == declared_type_ids.len() {
+                    for (idx, type_id) in declared_type_ids.iter().enumerate() {
+                        let Some(variance_row) = resolved_variances.get(idx) else {
+                            continue;
+                        };
+                        if let Some(typed_decl) = typed_tree_decls.get(idx) {
+                            check_type_decl_variance_requirements(
+                                ctx,
+                                &new_env,
+                                &decls[idx],
+                                typed_decl,
+                                variance_row,
+                            )?;
+                        }
+                        let path = Path::pident(type_id.clone());
+                        let Ok(updated_decl_ref) = new_env.lookup_type(&path) else {
+                            continue;
+                        };
+                        let mut updated_decl = updated_decl_ref.clone();
+                        updated_decl.type_variance = variance_row.clone();
+                        new_env.add_type(type_id.clone(), updated_decl.clone());
+
+                        if let Some(typed_decl) = typed_tree_decls.get_mut(idx) {
+                            typed_decl.typ_type.type_variance = variance_row.clone();
+                        }
+                        if let Some(internal_decl) = internal_decls_for_generalize.get_mut(idx) {
+                            internal_decl.type_variance = variance_row.clone();
+                        }
+
+                        let type_name = arena.get_string(decls[idx].ptype_name.txt);
+                        ctx.register_type_decl(type_name, updated_decl.clone());
+                        if type_id.stamp() != 0 {
+                            ctx.register_type_decl_by_stamp(type_id.stamp(), updated_decl.clone());
+                        }
+                    }
+                }
+
+                for (idx, internal_decl) in internal_decls_for_generalize.iter().enumerate() {
+                    check_type_declaration_coherence(
+                        ctx,
+                        &new_env,
+                        decls[idx].ptype_loc,
+                        &declared_type_ids[idx],
+                        internal_decl,
+                    )?;
+                }
             }
 
             let item_sig = sig_type_rec_statuses(*rec_flag, typed_tree_decls.as_slice())
@@ -24412,16 +24501,8 @@ fn transl_sig_type_declarations_with_ids_and_originals<'a>(
     // declarations for fixed private rows before the user-written
     // declarations. Signature declarations go through the same
     // Typedecl.transl_type_decl path as structures.
-    let mut fixed_row_type_ids: Vec<Option<Ident>> = vec![None; decls.len()];
-    for (decl_idx, decl) in decls.iter().enumerate() {
-        if let Some(manifest_idx) = decl.ptype_manifest {
-            let manifest = arena.get_core_type(manifest_idx);
-            if type_decl_is_fixed_type(arena, decl, manifest) {
-                let row_name = fixed_row_name(arena.get_string(decl.ptype_name.txt));
-                fixed_row_type_ids[decl_idx] = Some(ctx.create_ident(&row_name));
-            }
-        }
-    }
+    let fixed_row_type_ids = collect_fixed_row_type_ids(ctx, arena, decls);
+    let has_fixed_rows = !fixed_row_type_ids.is_empty();
     let declared_type_ids: Vec<Ident> = match predeclared_type_ids {
         Some(ids) => {
             debug_assert_eq!(ids.len(), decls.len());
@@ -24438,17 +24519,18 @@ fn transl_sig_type_declarations_with_ids_and_originals<'a>(
         }
     };
     let mut temp_env = env.clone();
-    let mut type_entry_ids: Vec<Ident> = Vec::new();
-    let mut type_entry_parser_indices: Vec<Option<usize>> = Vec::new();
-    let mut type_entry_is_synthetic_row: Vec<bool> = Vec::new();
+    let type_entry_capacity = decls.len() + fixed_row_type_ids.len();
+    let mut type_entry_ids: Vec<Ident> = Vec::with_capacity(type_entry_capacity);
+    let mut type_entry_parser_indices: Vec<Option<usize>> =
+        Vec::with_capacity(type_entry_capacity);
+    let mut type_entry_is_synthetic_row: Vec<bool> = Vec::with_capacity(type_entry_capacity);
     for decl in decls {
         check_nonrecursive_gadt_enter_type(rec_flag, decl)?;
     }
-    for (decl_idx, row_id) in fixed_row_type_ids.iter().enumerate() {
-        if let Some(row_id) = row_id {
-            let placeholder_decl = fixed_row_placeholder_decl(ctx, arena, &decls[decl_idx], row_id);
-            temp_env.add_type(row_id.clone(), placeholder_decl);
-        }
+    for row_id in &fixed_row_type_ids {
+        let placeholder_decl =
+            fixed_row_placeholder_decl(ctx, arena, &decls[row_id.decl_idx], &row_id.id);
+        temp_env.add_type(row_id.id.clone(), placeholder_decl);
     }
     if matches!(rec_flag, RecFlag::Recursive) {
         for (type_id, decl) in declared_type_ids.iter().zip(decls.iter()) {
@@ -24481,23 +24563,19 @@ fn transl_sig_type_declarations_with_ids_and_originals<'a>(
     // translate inside begin_def/end_def, then generalize declarations.
     ctx.begin_def();
     let loop_result: TypeModResult<()> = (|| {
-        for (decl_idx, row_id) in fixed_row_type_ids.iter().enumerate() {
-            let Some(row_id) = row_id.clone() else {
-                continue;
-            };
-            let row_name = fixed_row_name(arena.get_string(decls[decl_idx].ptype_name.txt));
+        for row_id in &fixed_row_type_ids {
             let typed_row_decl = translate_fixed_row_type_declaration(
                 tctx,
                 &temp_env,
                 arena,
-                row_id.clone(),
-                row_name.clone(),
-                &decls[decl_idx],
-                Some(Path::pident(row_id.clone())),
+                row_id.id.clone(),
+                row_id.name.clone(),
+                &decls[row_id.decl_idx],
+                Some(Path::pident(row_id.id.clone())),
             )?;
             let row_internal_decl = typed_row_decl.typ_type.clone();
-            type_entry_ids.push(row_id);
-            type_entry_parser_indices.push(Some(decl_idx));
+            type_entry_ids.push(row_id.id.clone());
+            type_entry_parser_indices.push(Some(row_id.decl_idx));
             type_entry_is_synthetic_row.push(true);
             internal_decls_for_generalize.push(row_internal_decl);
             typed_tree_decls.push(typed_row_decl);
@@ -24937,10 +25015,9 @@ fn transl_sig_type_declarations_with_ids_and_originals<'a>(
                         };
                     touch_manifest_cyclic_abbrev_check(ctx, &temp_env, manifest_ref);
                     if is_fixed_type {
-                        let row_id =
-                            type_decl_fixed_row_id(arena, decl, &fixed_row_type_ids, decl_idx)
-                                .expect("fixed private row type must have a synthetic row id");
-                        let row_path = Path::pident(row_id);
+                        let row_id = fixed_row_type_id_for_decl(&fixed_row_type_ids, decl_idx)
+                            .expect("fixed private row type must have a synthetic row id");
+                        let row_path = Path::pident(row_id.id.clone());
                         set_fixed_row(
                             ctx,
                             &temp_env,
@@ -25028,9 +25105,11 @@ fn transl_sig_type_declarations_with_ids_and_originals<'a>(
                 typ_loc: decl.ptype_loc,
                 typ_attributes: decl.ptype_attributes.clone(),
             });
-            type_entry_ids.push(type_id);
-            type_entry_parser_indices.push(Some(decl_idx));
-            type_entry_is_synthetic_row.push(false);
+            if has_fixed_rows {
+                type_entry_ids.push(type_id);
+                type_entry_parser_indices.push(Some(decl_idx));
+                type_entry_is_synthetic_row.push(false);
+            }
         }
         Ok(())
     })();
@@ -25055,18 +25134,31 @@ fn transl_sig_type_declarations_with_ids_and_originals<'a>(
     }
 
     let mut variance_env = env.clone();
-    for (type_id, decl) in type_entry_ids
-        .iter()
-        .zip(internal_decls_for_generalize.iter())
-    {
-        variance_env.add_type(type_id.clone(), decl.clone());
+    if has_fixed_rows {
+        for (type_id, decl) in type_entry_ids
+            .iter()
+            .zip(internal_decls_for_generalize.iter())
+        {
+            variance_env.add_type(type_id.clone(), decl.clone());
+        }
+    } else {
+        for (type_id, decl) in declared_type_ids
+            .iter()
+            .zip(internal_decls_for_generalize.iter())
+        {
+            variance_env.add_type(type_id.clone(), decl.clone());
+        }
     }
 
-    let original_internal_decls_for_checks: Vec<_> = internal_decls_for_generalize
-        .iter()
-        .zip(type_entry_is_synthetic_row.iter())
-        .filter_map(|(decl, is_row)| (!*is_row).then_some(decl.clone()))
-        .collect();
+    let original_internal_decls_for_checks: Vec<_> = if has_fixed_rows {
+        internal_decls_for_generalize
+            .iter()
+            .zip(type_entry_is_synthetic_row.iter())
+            .filter_map(|(decl, is_row)| (!*is_row).then_some(decl.clone()))
+            .collect()
+    } else {
+        internal_decls_for_generalize.clone()
+    };
 
     check_type_declaration_abbrev_cycles(
         ctx,
@@ -25086,57 +25178,104 @@ fn transl_sig_type_declarations_with_ids_and_originals<'a>(
         touch_type_declaration_constraints(ctx, &variance_env, &mut tctx.persistent_env, decl);
     }
 
-    let required_variances: Vec<Vec<(bool, bool, bool)>> = type_entry_parser_indices
-        .iter()
-        .map(|parser_idx| {
-            let Some(parser_idx) = parser_idx else {
-                return Vec::new();
-            };
-            decls[*parser_idx]
-                .ptype_params
-                .iter()
-                .map(|(_, variance)| parser_variance_requirement(*variance))
-                .collect()
-        })
-        .collect();
-    let resolved_variances =
-        compute_type_variance_fixpoint(ctx, &variance_env, &type_entry_ids, &required_variances);
-    if resolved_variances.len() == type_entry_ids.len() {
-        for (idx, variance_row) in resolved_variances.iter().enumerate() {
-            if !type_entry_is_synthetic_row[idx]
-                && let Some(parser_idx) = type_entry_parser_indices[idx]
-                && let Some(typed_decl) = typed_tree_decls.get(idx)
-            {
-                check_type_decl_variance_requirements(
-                    ctx,
-                    &variance_env,
-                    &decls[parser_idx],
-                    typed_decl,
-                    variance_row,
-                )?;
-            }
-            if let Some(typed_decl) = typed_tree_decls.get_mut(idx) {
-                typed_decl.typ_type.type_variance = variance_row.clone();
-            }
-            if let Some(internal_decl) = internal_decls_for_generalize.get_mut(idx) {
-                internal_decl.type_variance = variance_row.clone();
+    if has_fixed_rows {
+        let required_variances: Vec<Vec<(bool, bool, bool)>> = type_entry_parser_indices
+            .iter()
+            .map(|parser_idx| {
+                let Some(parser_idx) = parser_idx else {
+                    return Vec::new();
+                };
+                decls[*parser_idx]
+                    .ptype_params
+                    .iter()
+                    .map(|(_, variance)| parser_variance_requirement(*variance))
+                    .collect()
+            })
+            .collect();
+        let resolved_variances =
+            compute_type_variance_fixpoint(ctx, &variance_env, &type_entry_ids, &required_variances);
+        if resolved_variances.len() == type_entry_ids.len() {
+            for (idx, variance_row) in resolved_variances.iter().enumerate() {
+                if !type_entry_is_synthetic_row[idx]
+                    && let Some(parser_idx) = type_entry_parser_indices[idx]
+                    && let Some(typed_decl) = typed_tree_decls.get(idx)
+                {
+                    check_type_decl_variance_requirements(
+                        ctx,
+                        &variance_env,
+                        &decls[parser_idx],
+                        typed_decl,
+                        variance_row,
+                    )?;
+                }
+                if let Some(typed_decl) = typed_tree_decls.get_mut(idx) {
+                    typed_decl.typ_type.type_variance = variance_row.clone();
+                }
+                if let Some(internal_decl) = internal_decls_for_generalize.get_mut(idx) {
+                    internal_decl.type_variance = variance_row.clone();
+                }
             }
         }
-    }
 
-    for (entry_idx, internal_decl) in internal_decls_for_generalize.iter().enumerate() {
-        if type_entry_is_synthetic_row[entry_idx] {
-            continue;
+        for (entry_idx, internal_decl) in internal_decls_for_generalize.iter().enumerate() {
+            if type_entry_is_synthetic_row[entry_idx] {
+                continue;
+            }
+            let idx = type_entry_parser_indices[entry_idx]
+                .expect("type entries keep their source declaration index");
+            check_type_declaration_coherence(
+                ctx,
+                &variance_env,
+                decls[idx].ptype_loc,
+                &declared_type_ids[idx],
+                internal_decl,
+            )?;
         }
-        let idx = type_entry_parser_indices[entry_idx]
-            .expect("type entries keep their source declaration index");
-        check_type_declaration_coherence(
+    } else {
+        let required_variances: Vec<Vec<(bool, bool, bool)>> = decls
+            .iter()
+            .map(|decl| {
+                decl.ptype_params
+                    .iter()
+                    .map(|(_, variance)| parser_variance_requirement(*variance))
+                    .collect()
+            })
+            .collect();
+        let resolved_variances = compute_type_variance_fixpoint(
             ctx,
             &variance_env,
-            decls[idx].ptype_loc,
-            &declared_type_ids[idx],
-            internal_decl,
-        )?;
+            &declared_type_ids,
+            &required_variances,
+        );
+        if resolved_variances.len() == declared_type_ids.len() {
+            for (idx, variance_row) in resolved_variances.iter().enumerate() {
+                if let Some(typed_decl) = typed_tree_decls.get(idx) {
+                    check_type_decl_variance_requirements(
+                        ctx,
+                        &variance_env,
+                        &decls[idx],
+                        typed_decl,
+                        variance_row,
+                    )?;
+                }
+                if let Some(typed_decl) = typed_tree_decls.get_mut(idx) {
+                    typed_decl.typ_type.type_variance = variance_row.clone();
+                }
+                if let Some(internal_decl) = internal_decls_for_generalize.get_mut(idx) {
+                    internal_decl.type_variance = variance_row.clone();
+                }
+            }
+        }
+
+        for (idx, internal_decl) in internal_decls_for_generalize.iter().enumerate() {
+            check_type_declaration_coherence(
+                ctx,
+                &variance_env,
+                decls[idx].ptype_loc,
+                &declared_type_ids[idx],
+                internal_decl,
+            )?;
+        }
     }
 
     Ok(typed_tree_decls)
