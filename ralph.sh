@@ -4,11 +4,12 @@
 # Usage: ./ralph.sh [PROMPT_FILE] [--agent claude|codex]
 # Default prompt: projects/typedtree-parity/RALPH_PROMPT.md
 # Default agent: claude (or RALPH_AGENT env var)
+# Output logs: per-run files in RALPH_OUTPUT_DIR, TMPDIR, or /tmp
 
 PROMPT_FILE="projects/typedtree-parity/RALPH_PROMPT.md"
 AGENT="${RALPH_AGENT:-claude}"
-OUTPUT_FILE="/tmp/ralph_output.txt"
-OUTPUT_JSON_FILE="/tmp/ralph_output.jsonl"
+OUTPUT_FILE=""
+OUTPUT_JSON_FILE=""
 ITERATION=0
 CODEX_LAST_TEXT=""
 CODEX_MCP_UNREACHABLE_REPORTED=0
@@ -98,6 +99,18 @@ fi
 # Derive project directory from prompt file location
 PROJECT_DIR="$(dirname "$PROMPT_FILE")"
 TODO_FILE="$PROJECT_DIR/RALPH_TODO.md"
+
+init_output_files() {
+  local output_dir="${RALPH_OUTPUT_DIR:-${TMPDIR:-/tmp}}"
+
+  if [[ ! -d "$output_dir" ]]; then
+    echo "Error: Output directory '$output_dir' not found"
+    exit 1
+  fi
+
+  OUTPUT_FILE="$(mktemp "${output_dir%/}/ralph_output.XXXXXX")" || exit 1
+  OUTPUT_JSON_FILE="$(mktemp "${output_dir%/}/ralph_output_json.XXXXXX")" || exit 1
+}
 
 build_prompt_input() {
   {
@@ -376,12 +389,16 @@ has_control_token() {
   grep -Eq "^[[:space:]]*${token}[[:space:]]*$" "$OUTPUT_FILE"
 }
 
+init_output_files
+
 clear
 echo "╔══════════════════════════════════════════════════════════════════════╗"
 echo "║                         RALPH LOOP                                   ║"
 echo "║  Prompt: $(printf '%-58s' "$PROMPT_FILE")  ║"
 echo "║  Project: $(printf '%-57s' "$PROJECT_DIR/") ║"
 echo "║  Agent: $(printf '%-59s' "$AGENT_DISPLAY") ║"
+echo "║  Text log: $(printf '%-56s' "$OUTPUT_FILE") ║"
+echo "║  JSON log: $(printf '%-56s' "$OUTPUT_JSON_FILE") ║"
 echo "║  Press Ctrl+C to stop                                                ║"
 echo "╚══════════════════════════════════════════════════════════════════════╝"
 echo ""

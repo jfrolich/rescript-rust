@@ -232,8 +232,9 @@ The script automatically:
 **Manual version** (if you want to customize):
 
 ```bash
+output_file="$(mktemp "${TMPDIR:-/tmp}/ralph_output.XXXXXX")"
 while true; do
-  cat RALPH_PROMPT.md | claude --dangerously-skip-permissions --print | tee /tmp/ralph_output.txt
+  cat RALPH_PROMPT.md | claude --dangerously-skip-permissions --print | tee "$output_file"
 
   if ! grep -q "^- \\[ \\]" RALPH_TODO.md; then
     echo "Ralph loop complete!"

@@ -154,12 +154,12 @@ Additional cleanup opportunities found after the first release-blocker pass.
    `DICT_PATTERN_ANALYSIS.md` now lives under `projects/typedtree-parity/`, and
    `MATCHING_PORT_CHECKLIST.md` now lives under `projects/raw-lambda-parity/`.
 
-7. **Open:** `ralph.sh` is local agent automation at repository root.
+7. **Resolved in place:** `ralph.sh` uses isolated per-run output files.
 
-   The script writes fixed `/tmp/ralph_output.txt` and
-   `/tmp/ralph_output.jsonl` files, so concurrent runs collide. If this remains
-   tracked, move it under a dev/agent script area and give each run isolated
-   output paths.
+   The helper remains at repository root because project setup docs call it
+   from there. Its text and JSON logs now use `mktemp` under
+   `RALPH_OUTPUT_DIR`, `TMPDIR`, or `/tmp`, and the manual setup snippets use
+   the same per-run temp-file pattern.
 
 8. **Open:** platform package binaries need a prepack guard.
 
