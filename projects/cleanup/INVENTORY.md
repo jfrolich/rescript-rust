@@ -116,21 +116,21 @@ CLAUDE.md
 ## Largest Added Files
 
 ```text
-1994861 playground/public/stdlib.json
-1300604 projects/js-output-parity/RALPH_TODO.md
-1291849 compiler-rust/src/types/typecore.rs
-1119919 tests/tests/src/ticker.js
+1292688 compiler-rust/src/types/typecore.rs
 1079820 compiler-rust/src/types/typemod.rs
  693703 compiler-rust/src/binary_ast/ppx.rs
- 558969 compiler-rust/src/driver.rs
+ 560667 compiler-rust/src/driver.rs
  539772 compiler-rust/src/raw_lambda/convert.rs
  446130 compiler-rust/src/types/ctype.rs
  387751 compiler-rust/src/parser/printer.rs
- 366653 compiler-rust/src/raw_lambda/matching.rs
+ 366366 compiler-rust/src/raw_lambda/matching.rs
  360595 compiler-rust/src/lambda/lam_compile_tests.rs
  329085 compiler-rust/src/lambda/lam_compile.rs
  322527 compiler-rust/src/parser/expr.rs
  320646 compiler-rust/src/js_ir/printer.rs
+ 263585 compiler-rust/src/cmi/persistent_env.rs
+ 226223 compiler-rust/src/parser/module.rs
+ 200445 compiler-rust/src/js_ir/mod.rs
 ```
 
 ## High-Risk Added File Groups
