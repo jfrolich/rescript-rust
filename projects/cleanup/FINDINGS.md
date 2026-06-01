@@ -213,3 +213,10 @@ Additional cleanup opportunities found after the first release-blocker pass.
     aborts with a stack overflow. This was hidden before item 13 because the
     lib-test target did not compile at all. Treat this as test-suite cleanup
     debt separate from the normal debug compiler build, which still passes.
+
+15. **Resolved:** JS output parity wrapper no longer fails on Spice PPX AST parity.
+
+    `scripts/test_js_output_parity.sh` now skips Spice PPX AST parity by
+    default and offers `--with-spice-ppx` for the combined check. The JS output
+    gate therefore reports focused JS fixtures plus the canonical in-repo JS
+    snapshot suite, while Spice remains an explicit separate parity concern.

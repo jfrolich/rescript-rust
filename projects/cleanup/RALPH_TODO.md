@@ -58,6 +58,8 @@
 - [x] Replace a personal-looking binary AST writer test fixture path with a
   neutral absolute path.
 - [x] Restore the compiler-rust lib-test target enough for focused tests to run.
+- [x] Make the JS output parity wrapper skip Spice PPX AST parity by default,
+  with explicit opt-in.
 - [ ] Make the full `cargo test --manifest-path compiler-rust/Cargo.toml --lib`
   suite green, or split/retire stale JS/lambda unit tests with a documented
   replacement gate.
