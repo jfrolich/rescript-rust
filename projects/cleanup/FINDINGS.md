@@ -173,3 +173,13 @@ Additional cleanup opportunities found after the first release-blocker pass.
    `projects/js-output-parity/RALPH_TODO.md` now records the current 660/660
    baseline, final fixed diffs, and retained historical cautions without the
    repeated stale loop transcripts.
+
+## Additional Follow-Up Scan: 2026-06-01
+
+10. **Resolved:** remaining helper scripts made platform-aware.
+
+    `scripts/test_binary_ast_parity.sh` and
+    `scripts/benchmark_typechecker_performance.py` no longer hardcode the
+    Darwin ARM64 platform package. They now resolve the package path through
+    `scripts/platform.sh`; the benchmark keeps its release Rust compiler default
+    because it is explicitly a performance measurement script.

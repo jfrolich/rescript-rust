@@ -95,11 +95,15 @@ def repo_root() -> Path:
 
 
 def default_paths(root: Path) -> dict[str, Path]:
+    platform = subprocess.check_output(
+        [str(root / "scripts" / "platform.sh")],
+        text=True,
+    ).strip()
     return {
         "project_root": root,
         "test_project": root / "tests" / "tests",
         "workdir": root / "tests" / "tests" / "lib" / "bs",
-        "rescript_cli": root / "packages" / "@rescript" / "darwin-arm64" / "bin" / "rescript.exe",
+        "rescript_cli": root / "packages" / "@rescript" / platform / "bin" / "rescript.exe",
         "ocaml_bsc": root / "_build" / "install" / "default" / "bin" / "bsc",
         "rust_bsc": root / "compiler-rust" / "target" / "release" / "bsc",
         "output_dir": root / ".performance-cache" / "typechecker",

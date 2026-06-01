@@ -7,8 +7,12 @@
 
 set -euo pipefail
 
-RUST_BSC="./compiler-rust/target/debug/bsc"
-OCAML_BSC="packages/@rescript/darwin-arm64/bin/bsc.exe"
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+project_root="$(cd "$script_dir/.." && pwd)"
+platform="$("$script_dir/platform.sh")"
+
+RUST_BSC="$project_root/compiler-rust/target/debug/bsc"
+OCAML_BSC="$project_root/packages/@rescript/$platform/bin/bsc.exe"
 
 # Colors for output
 RED='\033[0;31m'
@@ -18,7 +22,7 @@ NC='\033[0m' # No Color
 
 # Build Rust compiler
 echo "Building Rust compiler..."
-cargo build --manifest-path compiler-rust/Cargo.toml 2>/dev/null
+cargo build --manifest-path "$project_root/compiler-rust/Cargo.toml" 2>/dev/null
 
 # Statistics
 total=0
@@ -29,9 +33,10 @@ parse_error_rust=0
 parse_error_ocaml=0
 
 # Temporary files (OCaml requires .ast extension)
-RUST_AST=$(mktemp /tmp/rust_ast_XXXXXX.ast)
-OCAML_AST=$(mktemp /tmp/ocaml_ast_XXXXXX.ast)
-trap "rm -f $RUST_AST $OCAML_AST" EXIT
+tmp_dir="${TMPDIR:-/tmp}"
+RUST_AST=$(mktemp "${tmp_dir%/}/rust_ast_XXXXXX.ast")
+OCAML_AST=$(mktemp "${tmp_dir%/}/ocaml_ast_XXXXXX.ast")
+trap 'rm -f "$RUST_AST" "$OCAML_AST"' EXIT
 
 compare_file() {
     local file="$1"
@@ -105,7 +110,7 @@ else
     files=()
     while IFS= read -r line; do
         files+=("$line")
-    done < <(find tests/syntax_tests/data/parsing/grammar -name "*.res" 2>/dev/null | head -100)
+    done < <(find "$project_root/tests/syntax_tests/data/parsing/grammar" -name "*.res" 2>/dev/null | head -100)
 fi
 
 echo "Testing ${#files[@]} files..."

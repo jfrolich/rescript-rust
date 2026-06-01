@@ -51,6 +51,8 @@
 - [x] Isolate `ralph.sh` output files per run.
 - [x] Add a prepack guard for platform package binaries.
 - [x] Compact the JS output parity handoff.
+- [x] Make the remaining binary-AST and typechecker benchmark helpers
+  platform-aware.
 
 ## Verification Commands
 
