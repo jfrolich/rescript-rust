@@ -42,6 +42,9 @@
   "engines": {
     "node": ">=20.11.0"
   },
+  "scripts": {
+    "prepack": "node ../../../scripts/validatePlatformPackageBins.js"
+  },
   "os": [
     "darwin"
   ],

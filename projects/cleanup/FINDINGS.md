@@ -161,14 +161,12 @@ Additional cleanup opportunities found after the first release-blocker pass.
    `RALPH_OUTPUT_DIR`, `TMPDIR`, or `/tmp`, and the manual setup snippets use
    the same per-run temp-file pattern.
 
-8. **Open:** platform package binaries need a prepack guard.
+8. **Resolved:** platform package binaries have a prepack guard.
 
-   Platform binaries are intentionally ignored by git and generated before
-   packaging. `npm pack --dry-run --json` for the current Darwin ARM64 package
-   included the local binaries, while a non-current package such as
-   `packages/@rescript/linux-x64` packed only `bin/.gitkeep`. Add a release
-   validation step that fails if a platform package is packed without the four
-   expected executables.
+   Each platform package now runs
+   `scripts/validatePlatformPackageBins.js` during `prepack`. The guard reads
+   `publishConfig.executableFiles` and fails if any expected binary is missing,
+   empty, or not executable on non-Windows packages.
 
 9. **Open:** very large agent handoff docs should be archived or compacted.
 

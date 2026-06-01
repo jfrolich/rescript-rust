@@ -27,7 +27,7 @@ Path status counts:
 1719 tests
  195 compiler-rust
   78 projects
-  27 scripts
+  28 scripts
   19 playground
    6 compiler
    5 src
