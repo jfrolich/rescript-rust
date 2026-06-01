@@ -26,7 +26,7 @@ Path status counts:
 ```text
 1719 tests
  195 compiler-rust
-  76 projects
+  78 projects
   27 scripts
   19 playground
    6 compiler
@@ -37,8 +37,6 @@ Path status counts:
    1 ralph.sh
    1 packages
    1 fix_boxing.py
-   1 MATCHING_PORT_CHECKLIST.md
-   1 DICT_PATTERN_ANALYSIS.md
 ```
 
 ## Added Files by Type

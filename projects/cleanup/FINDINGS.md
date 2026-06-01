@@ -149,12 +149,10 @@ Additional cleanup opportunities found after the first release-blocker pass.
    --lib` and `cargo test --manifest-path rewatch/Cargo.toml test_compiler_flags
    --lib`.
 
-6. **Open:** top-level scratch analysis files should be relocated or removed.
+6. **Resolved:** top-level scratch analysis files relocated.
 
-   `DICT_PATTERN_ANALYSIS.md` and `MATCHING_PORT_CHECKLIST.md` are useful
-   parity notes, but they sit at repository root. Move them under the relevant
-   `projects/` subdirectory or fold them into the active project docs before
-   beta.
+   `DICT_PATTERN_ANALYSIS.md` now lives under `projects/typedtree-parity/`, and
+   `MATCHING_PORT_CHECKLIST.md` now lives under `projects/raw-lambda-parity/`.
 
 7. **Open:** `ralph.sh` is local agent automation at repository root.
 
