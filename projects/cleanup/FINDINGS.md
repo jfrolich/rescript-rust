@@ -205,3 +205,11 @@ Additional cleanup opportunities found after the first release-blocker pass.
     because several crate tests had stale imports, helper visibility, enum
     patterns, and error-constructor shapes. Those were updated without changing
     runtime compiler behavior; the focused test now runs and passes.
+
+14. **Open:** full compiler-rust lib-test suite is still not green.
+
+    `timeout 120 cargo test --manifest-path compiler-rust/Cargo.toml --lib`
+    now starts executing tests, but many JS/lambda unit tests fail and the run
+    aborts with a stack overflow. This was hidden before item 13 because the
+    lib-test target did not compile at all. Treat this as test-suite cleanup
+    debt separate from the normal debug compiler build, which still passes.
