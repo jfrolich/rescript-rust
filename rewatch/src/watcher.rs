@@ -686,6 +686,9 @@ mod tests {
             packages,
             compiler,
             None,
+            BuildMode::Default,
+            false,
+            false,
             None,
         );
         build_state.insert_module(module_name, module);

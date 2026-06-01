@@ -141,14 +141,13 @@ Additional cleanup opportunities found after the first release-blocker pass.
    `scripts/platform.sh` and keeps the Rust compiler on debug artifacts by
    default.
 
-5. **Open:** rewatch library tests currently do not compile.
+5. **Resolved:** rewatch library tests compile again.
 
-   `cargo test --manifest-path rewatch/Cargo.toml test_dev_sources --lib`
-   fails before running the selected config tests because
-   `rewatch/src/watcher.rs:683` calls `BuildCommandState::new` with the old
-   six-argument shape. Normal `cargo build --manifest-path rewatch/Cargo.toml`
-   passes, so this is a test-only cleanup blocker rather than a runtime build
-   blocker.
+   `rewatch/src/watcher.rs` now passes the current `BuildCommandState::new`
+   build-mode and dependency flags in its test helper. Focused debug test
+   filters pass: `cargo test --manifest-path rewatch/Cargo.toml test_dev_sources
+   --lib` and `cargo test --manifest-path rewatch/Cargo.toml test_compiler_flags
+   --lib`.
 
 6. **Open:** top-level scratch analysis files should be relocated or removed.
 
