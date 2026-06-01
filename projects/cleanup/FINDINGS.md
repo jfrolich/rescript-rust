@@ -183,3 +183,11 @@ Additional cleanup opportunities found after the first release-blocker pass.
     Darwin ARM64 platform package. They now resolve the package path through
     `scripts/platform.sh`; the benchmark keeps its release Rust compiler default
     because it is explicitly a performance measurement script.
+
+11. **Resolved:** rewatch watcher no longer carries unused build flags.
+
+    `rewatch/src/watcher.rs` stopped passing `build_mode`, `subprocess`, and
+    `dump_typed_sexp` through `AsyncWatchArgs` after the initial build state
+    already captured them. Full rebuilds continue to read the values from
+    `BuildCommandState`, so the cleanup removes warning noise without changing
+    watch behavior.

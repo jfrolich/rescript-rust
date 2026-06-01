@@ -53,6 +53,8 @@
 - [x] Compact the JS output parity handoff.
 - [x] Make the remaining binary-AST and typechecker benchmark helpers
   platform-aware.
+- [x] Remove redundant rewatch watcher fields that produced debug-build warning
+  noise.
 
 ## Verification Commands
 
