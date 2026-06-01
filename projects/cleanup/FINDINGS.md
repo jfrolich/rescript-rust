@@ -168,8 +168,8 @@ Additional cleanup opportunities found after the first release-blocker pass.
    `publishConfig.executableFiles` and fails if any expected binary is missing,
    empty, or not executable on non-Windows packages.
 
-9. **Open:** very large agent handoff docs should be archived or compacted.
+9. **Resolved:** very large agent handoff doc compacted.
 
-   `projects/js-output-parity/RALPH_TODO.md` is about 1.2 MB. It is not included
-   in the npm package, but it slows review/search and should be rotated into a
-   compact summary plus archived raw logs if the project remains active.
+   `projects/js-output-parity/RALPH_TODO.md` now records the current 660/660
+   baseline, final fixed diffs, and retained historical cautions without the
+   repeated stale loop transcripts.
