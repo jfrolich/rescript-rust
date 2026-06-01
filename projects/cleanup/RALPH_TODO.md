@@ -55,6 +55,9 @@
   platform-aware.
 - [x] Remove redundant rewatch watcher fields that produced debug-build warning
   noise.
+- [x] Replace a personal-looking binary AST writer test fixture path with a
+  neutral absolute path.
+- [x] Restore the compiler-rust lib-test target enough for focused tests to run.
 
 ## Verification Commands
 

@@ -350,6 +350,12 @@ mod tests {
         Ident::new(name, stamp, IdentFlags::NONE)
     }
 
+    fn lookup(occ: &OccTbl, ident: &Ident) -> UsedInfo {
+        occ.get(ident)
+            .map(|cell| *cell.borrow())
+            .unwrap_or_else(dummy_info)
+    }
+
     /// `let v = 1 in v + v` should record times=2, captured=false for v.
     /// Mirrors lam_pass_count.ml:131-135 + the Lvar arm 125.
     #[test]

@@ -191,3 +191,17 @@ Additional cleanup opportunities found after the first release-blocker pass.
     already captured them. Full rebuilds continue to read the values from
     `BuildCommandState`, so the cleanup removes warning noise without changing
     watch behavior.
+
+12. **Resolved:** binary AST writer test fixture no longer looks personal.
+
+    `compiler-rust/src/binary_ast/writer.rs` still tests that source paths are
+    preserved verbatim, but the fixture path now uses `/workspace/...` instead
+    of a `/Users/...` path.
+
+13. **Resolved:** compiler-rust lib-test target compiles again.
+
+    A focused `cargo test --manifest-path compiler-rust/Cargo.toml
+    test_source_path_preserved --lib` initially failed before running any test
+    because several crate tests had stale imports, helper visibility, enum
+    patterns, and error-constructor shapes. Those were updated without changing
+    runtime compiler behavior; the focused test now runs and passes.

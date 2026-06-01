@@ -723,7 +723,7 @@ mod tests {
     fn test_source_path_preserved() {
         let mut arena = make_test_arena();
         let ast: Structure = vec![];
-        let source_path = "/Users/dev/project/src/Main.res";
+        let source_path = "/workspace/project/src/Main.res";
         let result = write_structure_ast_to_vec(source_path, &mut arena, &ast);
 
         let dep_size = u32::from_be_bytes([result[0], result[1], result[2], result[3]]) as usize;

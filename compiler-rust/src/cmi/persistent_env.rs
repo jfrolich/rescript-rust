@@ -2144,7 +2144,7 @@ fn find_in_path(load_path: &[PathBuf], filename: &str) -> Option<String> {
 }
 
 #[cfg(test)]
-mod tests {
+mod cmj_export_tests {
     use super::*;
     use crate::context::IdGenerator;
     use tempfile::tempdir;

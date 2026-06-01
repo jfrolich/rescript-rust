@@ -1601,7 +1601,7 @@ fn external_module_import_attributes_preserve_all_fields() {
 #[test]
 fn dynamic_import_only_possible_required_modules_still_mark_effects_like_ocaml() {
     let mut compiler = LambdaCompiler::new();
-    let extras = std::collections::HashSet::from([ModuleId {
+    let extras = ahash::AHashSet::from([ModuleId {
         id: Ident::create_persistent("Side_effect"),
         kind: Kind::Ml,
         dynamic_import: true,

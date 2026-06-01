@@ -1699,7 +1699,7 @@ impl LambdaCompiler {
         ))
     }
 
-    fn switch_case_expr(tag: &SwitchCaseTag) -> Expression {
+    pub(crate) fn switch_case_expr(tag: &SwitchCaseTag) -> Expression {
         match tag {
             SwitchCaseTag::String(value) => Expression::new(ExpressionDesc::Str {
                 delim: Delim::StarJ,
@@ -1838,7 +1838,7 @@ impl LambdaCompiler {
         }
     }
 
-    fn normalize_runtime_test_return_body(block: Block) -> Block {
+    pub(crate) fn normalize_runtime_test_return_body(block: Block) -> Block {
         let block = Self::peel_single_block_statement(block);
         Self::shared_trailing_return_guard_block(&block).unwrap_or(block)
     }
@@ -2275,7 +2275,7 @@ impl LambdaCompiler {
         ))]
     }
 
-    fn compile_named_string_switch_effect_with_strategy(
+    pub(crate) fn compile_named_string_switch_effect_with_strategy(
         &mut self,
         test: Expression,
         cases: &[(SwitchCaseTag, &Lambda)],

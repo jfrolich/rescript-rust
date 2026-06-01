@@ -4,17 +4,24 @@ pub(super) use crate::js_ir::{
     ModulePathResolver, print_block, print_deps_program, print_deps_program_with_directives,
     print_expression,
 };
-pub(super) use crate::lambda::lam_constant::{
-    Constant, ConstructorRuntimeTag, ConstructorTag, PointerInfo,
+pub(super) use crate::js_ir::op::{ImportAttributes as JsImportAttributes, PropertyName};
+pub(super) use crate::lambda::js_exp_make::{
+    int32_band, int32_bxor, int32_mul, ocaml_typeof_expr, raw_typeof_comparison,
 };
+pub(super) use crate::lambda::js_shake::later_toplevel_effect_allows_tail_move;
+pub(super) use crate::lambda::lam_constant::{
+    Constant, ConstructorRuntimeTag, ConstructorTag, PointerInfo, StringDelim,
+};
+pub(super) use crate::lambda::lam_coercion::resolve_export_aliases;
+pub(super) use crate::lambda::lam_compile_external::external_module_import_attributes;
 pub(super) use crate::lambda::lam_primitive::{
     ExternalArgAttr, ExternalArgConst, ExternalArgDelim, ExternalArgLabel, ExternalArgSpec,
     ExternalFfiKind, ExternalFfiSpec, ExternalModuleBindName, ExternalModuleName, ExternalObjLabel,
-    ExternalObjSpec, ExternalReturnWrapper, ExternalSpec, JsRawInfo, Primitive,
+    ExternalObjSpec, ExternalReturnWrapper, ExternalSpec, JsRawInfo, Mutable, Primitive,
 };
 pub(super) use crate::lambda::{
-    ApInfo, Apply, ApplyStatus, FunctionAttribute, InlineAttribute, Lambda, SwitchBlock,
-    SwitchNames, SwitchTag,
+    ApInfo, Apply, ApplyStatus, Comparison, FieldDbgInfo, FunctionAttribute, InlineAttribute,
+    Lambda, SwitchBlock, SwitchNames, SwitchTag,
 };
 pub(super) use crate::location::Location;
 use std::fs;
@@ -5396,7 +5403,7 @@ pub(super) fn assert_switch_case_assigns_int_result(block: &Block, result: &Iden
         }
         other => panic!("expected a result assignment, got {other:?}"),
     }
-    assert!(matches!(break_stmt.desc, StatementDesc::Break));
+    assert!(matches!(break_stmt.desc, StatementDesc::Break(_)));
 }
 
 pub(super) fn assert_switch_default_assigns_int_result(
@@ -5406,7 +5413,7 @@ pub(super) fn assert_switch_default_assigns_int_result(
 ) {
     let assign = match block.as_slice() {
         [assign] => assign,
-        [assign, break_stmt] if matches!(break_stmt.desc, StatementDesc::Break) => assign,
+        [assign, break_stmt] if matches!(break_stmt.desc, StatementDesc::Break(_)) => assign,
         _ => panic!("expected a default assignment with an optional break"),
     };
     match &assign.desc {

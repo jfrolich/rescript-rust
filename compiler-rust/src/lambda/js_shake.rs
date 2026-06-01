@@ -686,7 +686,7 @@ fn ml_module_field_tail_move_replacement(replacement: &Expression) -> bool {
     )
 }
 
-fn later_toplevel_effect_allows_tail_move(
+pub(crate) fn later_toplevel_effect_allows_tail_move(
     block: &[Statement],
     target: &Ident,
     initializer_kind: TailMoveInitializerKind,

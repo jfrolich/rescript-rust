@@ -25298,7 +25298,10 @@ mod tests {
 
     #[test]
     fn test_type_module_error_conversion() {
-        let core_error = TypeCoreError::MultiplyBoundVariable("x".to_string());
+        let core_error = TypeCoreError::MultiplyBoundVariable {
+            loc: LocIdx::none(),
+            name: "x".to_string(),
+        };
         let mod_error: TypeModError = core_error.into();
         match mod_error {
             TypeModError::CoreError(_) => {}
