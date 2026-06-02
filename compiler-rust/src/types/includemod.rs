@@ -3953,6 +3953,30 @@ fn type_exprs_equal_for_inclusion_inner(
         return false;
     }
 
+    if let (
+        TypeDesc::Tconstr {
+            path: impl_path,
+            args: impl_args,
+            ..
+        },
+        TypeDesc::Tconstr {
+            path: sig_path,
+            args: sig_args,
+            ..
+        },
+    ) = (&*type_ctx.get_desc(impl_ty), &*type_ctx.get_desc(sig_ty))
+        && impl_args.is_empty()
+        && sig_args.is_empty()
+        && impl_path.same(sig_path)
+    {
+        // OCaml compiler/ml/ctype.ml:3165 handles equal nullary Tconstr
+        // paths before `expand_head_rigid`; Includecore reaches this through
+        // compiler/ml/includecore.ml:216-228 and :229-271 when comparing
+        // constructor arguments. Do not force persistent module normalization
+        // for already-equal nullary field types.
+        return true;
+    }
+
     if let Some(env) = env {
         let impl_expanded = type_ctx.repr(crate::types::ctype::expand_head(type_ctx, env, impl_ty));
         let sig_expanded = type_ctx.repr(crate::types::ctype::expand_head(type_ctx, env, sig_ty));
