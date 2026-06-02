@@ -36,7 +36,7 @@ pub(super) fn write_ast_source_stub(ast_path: &std::path::Path, source_path: &st
     fs::write(ast_path, bytes).expect("failed to write ast source stub");
 }
 
-pub(super) fn compile_checked_in_test_file_to_js(module_name: &str) -> String {
+fn compile_checked_in_test_file_to_js_inner(module_name: &str) -> String {
     let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .expect("repo root")
@@ -72,6 +72,54 @@ pub(super) fn compile_checked_in_test_file_to_js(module_name: &str) -> String {
 
     crate::driver::compile_file_to_js_with_options(&source_path, &options)
         .unwrap_or_else(|err| panic!("failed to compile {module_name}.res: {err:#}"))
+}
+
+pub(super) fn compile_checked_in_test_file_to_js(module_name: &str) -> String {
+    let module_name = module_name.to_string();
+    std::thread::Builder::new()
+        .name(format!("compile_checked_in_test_file_to_js:{module_name}"))
+        .stack_size(32 * 1024 * 1024)
+        .spawn(move || compile_checked_in_test_file_to_js_inner(&module_name))
+        .expect("failed to spawn compiler fixture test thread")
+        .join()
+        .expect("compiler fixture test thread panicked")
+}
+
+fn compile_test_source_to_js_inner(source: &str, filename: &str) -> anyhow::Result<String> {
+    let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("repo root")
+        .to_path_buf();
+    let options = crate::driver::CompilerOptions {
+        include_paths: vec![
+            repo_root
+                .join("tests")
+                .join("tests")
+                .join("lib")
+                .join("ocaml"),
+        ],
+        runtime_path: Some(
+            repo_root
+                .join("node_modules")
+                .join("@rescript")
+                .join("runtime"),
+        ),
+        ..crate::driver::CompilerOptions::default()
+    };
+
+    crate::driver::compile_source_to_js_with_options(source, filename, &options)
+}
+
+pub(super) fn compile_test_source_to_js(source: &str, filename: &str) -> anyhow::Result<String> {
+    let source = source.to_string();
+    let filename = filename.to_string();
+    std::thread::Builder::new()
+        .name(format!("compile_test_source_to_js:{filename}"))
+        .stack_size(32 * 1024 * 1024)
+        .spawn(move || compile_test_source_to_js_inner(&source, &filename))
+        .expect("failed to spawn compiler source test thread")
+        .join()
+        .expect("compiler source test thread panicked")
 }
 
 pub(super) fn find_variable_initializer<'a>(
@@ -8223,7 +8271,7 @@ type u = {mutable x: int}
 }
 "#;
 
-    let output = crate::driver::compile_source_to_js(source, "fresh_record_set.res").unwrap();
+    let output = compile_test_source_to_js(source, "fresh_record_set.res").unwrap();
     assert!(
         output.contains("console.log(\"hi\");"),
         "expected the RHS effect to survive source compilation, got:\n{output}"
@@ -8249,8 +8297,7 @@ x: {
   }.x = x + 1
 "#;
 
-    let output =
-        crate::driver::compile_source_to_js(source, "fresh_record_set_impure.res").unwrap();
+    let output = compile_test_source_to_js(source, "fresh_record_set_impure.res").unwrap();
     assert!(
         output.contains("console.log(\"hi\")"),
         "expected the impure target initializer to stay visible, got:\n{output}"
@@ -8267,7 +8314,7 @@ fn source_json_template_falls_back_to_regular_string_interpolation_like_ocaml() 
 let x = json`some random ${"string"}`
 "#;
 
-    let output = crate::driver::compile_source_to_js(source, "json_template_test.res").unwrap();
+    let output = compile_test_source_to_js(source, "json_template_test.res").unwrap();
 
     assert!(
         output.contains("let x = \"some random \" + \"string\";"),
@@ -8290,7 +8337,7 @@ b := b.contents + tmp
 }
 "#;
 
-    let output = crate::driver::compile_source_to_js(source, "fib_ref_alias_test.res").unwrap();
+    let output = compile_test_source_to_js(source, "fib_ref_alias_test.res").unwrap();
 
     assert!(
         output.contains("let tmp = a;"),

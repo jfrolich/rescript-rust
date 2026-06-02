@@ -708,8 +708,7 @@ let arg_pair = #Pair("hi", 1)
 let _ = log1(arg_pair)
 "#;
 
-    let output =
-        crate::driver::compile_source_to_js(source, "bs_unwrap_exported_polyvars.res").unwrap();
+    let output = compile_test_source_to_js(source, "bs_unwrap_exported_polyvars.res").unwrap();
 
     assert!(
         output.contains("console.log(arg_string.VAL);"),
