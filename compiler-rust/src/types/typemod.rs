@@ -25325,7 +25325,7 @@ mod tests {
     }
 
     #[test]
-    fn constrained_include_structure_keeps_original_alias_path() {
+    fn constrained_include_structure_localizes_alias_path() {
         let typed = type_test_structure(
             r#"
 module M' = {
@@ -25345,17 +25345,6 @@ module M3: {
 "#,
         );
 
-        let m_prime = typed
-            .str_items
-            .iter()
-            .find_map(|item| match &item.str_desc {
-                StructureItemDesc::Tstr_module(binding) if binding.mb_id.name() == "M'" => {
-                    Some(binding.mb_id.clone())
-                }
-                _ => None,
-            })
-            .expect("M' binding");
-
         let inner_structure = typed
             .str_items
             .iter()
@@ -25374,6 +25363,17 @@ module M3: {
             })
             .expect("M3 structure");
 
+        let local_n = inner_structure
+            .str_type
+            .iter()
+            .find_map(|item| match item {
+                crate::types::decl::SignatureItem::SigModule(id, _, _) if id.name() == "N" => {
+                    Some(id.clone())
+                }
+                _ => None,
+            })
+            .expect("N signature item");
+
         let n_prime_decl = inner_structure
             .str_type
             .iter()
@@ -25385,13 +25385,12 @@ module M3: {
             })
             .expect("N' signature item");
 
+        // OCaml compiler/ml/subst.ml:345-356 and compiler/ml/subst.ml:379
+        // localize module aliases through `Subst.modtype` while copying a signature.
         assert!(matches!(
             &n_prime_decl.md_type,
-            crate::types::decl::ModuleType::MtyAlias(
-                _,
-                Path::Pdot(prefix, name, _)
-            ) if matches!(prefix.as_ref(), Path::Pident(id) if id.same(&m_prime))
-                && name == "N"
+            crate::types::decl::ModuleType::MtyAlias(_, Path::Pident(id))
+                if id.same(&local_n)
         ));
     }
 }
