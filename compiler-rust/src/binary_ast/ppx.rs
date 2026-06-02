@@ -11932,7 +11932,7 @@ fn generate_js_converter_include(
 /// Handle @deriving for type declarations
 ///
 /// OCaml transforms `@deriving(accessors) type t = { x: int }` into:
-/// ```
+/// ```rescript
 /// include (struct
 ///   type t = { x: int }   // @deriving stripped
 ///   include (struct
@@ -15431,13 +15431,13 @@ fn validate_expression_this_errors(expr: &Expression, arena: &mut ParseArena) ->
 /// Handle @deriving(abstract) which transforms record types into abstract types with accessors
 ///
 /// For a type like:
-/// ```
+/// ```rescript
 /// @deriving(abstract)
 /// type t = { @optional cite: React.component<...>, info: props }
 /// ```
 ///
 /// Generates:
-/// ```
+/// ```rescript
 /// include (struct
 ///   include (struct type t = { ... } end : sig end)  // Original type hidden
 ///   type t                                           // Abstract type

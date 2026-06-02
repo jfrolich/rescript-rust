@@ -28,9 +28,10 @@
 //! # Example
 //!
 //! ```rust
+//! use rescript_compiler::intern::StrIdx;
 //! use rescript_compiler::parser::{Token, Scanner};
 //!
-//! let mut scanner = Scanner::new("test.res", "let x = 42");
+//! let mut scanner = Scanner::new(StrIdx::from_raw(0), "let x = 42");
 //! let result = scanner.scan();
 //! assert!(matches!(result.token, Token::Let { unwrap: false }));
 //! ```
