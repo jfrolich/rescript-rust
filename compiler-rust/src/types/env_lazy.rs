@@ -1722,6 +1722,7 @@ pub(crate) struct StoredModuleComponents {
     module_decl: ModuleDeclaration,
     parent_context: Option<(Path, Arc<Signature>)>,
     cached: OnceCell<Arc<QualifiedModuleComponents>>,
+    functor_component_result: OnceCell<ModuleType>,
     functor_result_subst_cache: OnceCell<RefCell<HashMap<Path, ModuleType>>>,
 }
 
@@ -1746,6 +1747,7 @@ impl StoredModuleComponents {
             module_decl,
             parent_context,
             cached: OnceCell::new(),
+            functor_component_result: OnceCell::new(),
             functor_result_subst_cache: OnceCell::new(),
         }
     }
@@ -1812,13 +1814,20 @@ impl StoredModuleComponents {
             .parent_context
             .as_ref()
             .map(|(path, sig)| (path, sig.as_ref().as_slice()));
-        let component_result = crate::cmi::persistent_env::freshen_functor_component_module_type(
-            result.as_ref(),
-            parent_context,
-            ctx,
-        );
+        let component_result = self.functor_component_result.get_or_init(|| {
+            // OCaml compiler/ml/env.ml:1595-1602 stores `fcomp_res =
+            // Subst.modtype sub ty_res` in `Functor_comps` when the functor
+            // component table is forced. compiler/ml/env.ml:1744-1756 then
+            // reuses that cached result for each `components_of_functor_appl`
+            // argument before applying `Subst.add_module fcomp_param p2`.
+            crate::cmi::persistent_env::freshen_functor_component_module_type(
+                result.as_ref(),
+                parent_context,
+                ctx,
+            )
+        });
         let substituted = crate::cmi::persistent_env::substitute_functor_result_module_path(
-            &component_result,
+            component_result,
             param,
             arg_path,
             ctx,

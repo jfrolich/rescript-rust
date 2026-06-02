@@ -24458,7 +24458,9 @@ impl Env {
                         }
                         if apply_subst {
                             if should_rebind_direct_type_family {
-                                rebind_direct_sig_type_family_to_access_path(ctx, &path, &sig);
+                                rebind_direct_sig_type_family_to_access_path(
+                                    ctx, &path, &mut sig,
+                                );
                             }
                             if let Some(ref old_name) = resolved_name {
                                 crate::cmi::persistent_env::rewrite_module_prefix_in_sig(
@@ -24660,7 +24662,7 @@ impl Env {
                                 }
                                 if should_rebind_direct_type_family {
                                     rebind_direct_sig_type_family_to_access_path(
-                                        ctx, &sub_path, &sig,
+                                        ctx, &sub_path, &mut sig,
                                     );
                                 }
                                 // Match OCaml Subst behavior for nested module access:
@@ -25000,8 +25002,12 @@ impl Env {
                     );
                     let result = if module_type_has_hidden_unpack_ident(&sub_md.md_type) {
                         result.map(|(sig, resolved_name)| {
-                            let sig = copy_lookup_signature_for_subst(&sig, ctx);
-                            rebind_direct_sig_type_family_to_access_path(ctx, &access_path, &sig);
+                            let mut sig = copy_lookup_signature_for_subst(&sig, ctx);
+                            rebind_direct_sig_type_family_to_access_path(
+                                ctx,
+                                &access_path,
+                                &mut sig,
+                            );
                             crate::cmi::persistent_env::substitute_type_paths_in_sig(
                                 &sig,
                                 &access_path,
@@ -25158,11 +25164,11 @@ impl Env {
                                 {
                                     result.map(|(sig, resolved_name)| {
                                         let access_path = path.clone();
-                                        let sig = copy_lookup_signature_for_subst(&sig, ctx);
+                                        let mut sig = copy_lookup_signature_for_subst(&sig, ctx);
                                         rebind_direct_sig_type_family_to_access_path(
                                             ctx,
                                             &access_path,
-                                            &sig,
+                                            &mut sig,
                                         );
                                         crate::cmi::persistent_env::substitute_type_paths_in_sig(
                                             &sig,
@@ -28519,7 +28525,7 @@ fn strengthen_sig_module_decls_for_module_access_path(
 ) {
     let mut runtime_pos = 0i32;
 
-    for item in sig_items {
+    for item in sig_items.iter_mut() {
         match item {
             crate::types::decl::SignatureItem::SigValue(_, desc) => {
                 if !matches!(desc.val_kind, crate::types::decl::ValueKind::ValPrim(_)) {
@@ -28589,16 +28595,74 @@ fn should_rebind_direct_sig_type_family(
     }
 }
 
+fn path_is_direct_apply_type_family_member(
+    path: &Path,
+    item_name: &str,
+    rebound_path: &Path,
+) -> bool {
+    if path.same(rebound_path) {
+        return false;
+    }
+    matches!(
+        path,
+        Path::Pdot(parent, name, _)
+            if name == item_name && matches!(parent.as_ref(), Path::Papply(_, _))
+    )
+}
+
+fn signature_has_direct_apply_type_family<'a>(
+    sig_items: &[crate::types::decl::SignatureItem],
+    access_path: &Path,
+    ctx: &'a crate::types::context::TypeContext,
+) -> bool {
+    use crate::types::decl::SignatureItem;
+    use crate::types::type_expr::TypeDesc;
+
+    // OCaml compiler/ml/typemod.ml:1318-1325 substitutes the functor result
+    // module type with the applicative argument path, then
+    // compiler/ml/env.ml:1530-1538 prefixes direct component identifiers when the selected module
+    // components are built. compiler/ml/subst.ml:87-100 does not accept
+    // `Papply` as a final type path, so a selected local component signature
+    // must expose direct type families under `access_path`, not under the
+    // intermediate functor application path cached by
+    // compiler/ml/env.ml:1744-1756.
+    if path_non_apply_root_is_persistent(access_path) {
+        return false;
+    }
+
+    sig_items.iter().any(|item| {
+        let SignatureItem::SigType(id, decl, _) = item else {
+            return false;
+        };
+        let rebound_path = Path::pdot(access_path.clone(), id.name());
+        if decl.type_path.as_ref().is_some_and(|path| {
+            path_is_direct_apply_type_family_member(path, id.name(), &rebound_path)
+        }) {
+            return true;
+        }
+        let Some(manifest) = decl.type_manifest else {
+            return false;
+        };
+        let manifest = ctx.repr(manifest);
+        matches!(
+            &*ctx.get_desc(manifest),
+            TypeDesc::Tconstr { path, args, .. }
+                if args.len() == decl.type_params.len()
+                    && path_is_direct_apply_type_family_member(path, id.name(), &rebound_path)
+        )
+    })
+}
+
 pub(crate) fn rebind_direct_sig_type_family_to_access_path<'a>(
     ctx: &'a crate::types::context::TypeContext,
     access_path: &Path,
-    sig_items: &[crate::types::decl::SignatureItem],
+    sig_items: &mut [crate::types::decl::SignatureItem],
 ) {
     use crate::types::decl::SignatureItem;
     use crate::types::type_expr::TypeDesc;
 
     let mut rewrites = Vec::<(Path, Path)>::new();
-    for item in sig_items {
+    for item in sig_items.iter() {
         if let SignatureItem::SigType(id, decl, _) = item {
             let rebound_path = Path::pdot(access_path.clone(), id.name());
             if let Some(old_path) = decl.type_path.as_ref() {
@@ -28637,6 +28701,17 @@ pub(crate) fn rebind_direct_sig_type_family_to_access_path<'a>(
             &old_path,
             &rebound_path,
             ctx,
+        );
+        // OCaml compiler/ml/env.ml:1530-1538 builds the component substitution
+        // for both declaration descriptors and the identifier paths stored in
+        // those declarations; compiler/ml/subst.ml:87-100 applies the same
+        // path map to `type_path`. Keep Rust declaration paths in step with
+        // the rewritten type expressions so later Env/Ctype lookups do not
+        // force a separate functor-application component view.
+        crate::cmi::persistent_env::rewrite_sig_paths_by_path_prefix(
+            sig_items,
+            &old_path,
+            &rebound_path,
         );
     }
 }
@@ -29801,6 +29876,8 @@ fn qualify_resolved_signature_for_access_path_inner<'a>(
     // empty. Do not skip the signature copy based on item shape; the value-type
     // sharing must come from compiler/ml/subst.ml:303-309.
     let mut sig = copy_lookup_signature_for_subst(resolved_sig, ctx);
+    let should_rebind_apply_type_family =
+        signature_has_direct_apply_type_family(&sig, access_path, ctx);
     let alias_requires_exact_persistent_prefix = matches!(
         (mty, access_path),
         (
@@ -29827,8 +29904,8 @@ fn qualify_resolved_signature_for_access_path_inner<'a>(
         alias_module_strengthen_path = Some(strengthen_path.clone());
         sig = strengthen_sig_for_module_access_path(ctx, strengthen_path, &sig);
     }
-    if should_rebind_direct_type_family {
-        rebind_direct_sig_type_family_to_access_path(ctx, access_path, &sig);
+    if should_rebind_direct_type_family || should_rebind_apply_type_family {
+        rebind_direct_sig_type_family_to_access_path(ctx, access_path, &mut sig);
     }
     if let Some(old_name) = resolved_name {
         let resolved_alias_to_persistent_root = matches!(
@@ -30328,7 +30405,7 @@ fn build_module_signature_for_path<'a>(
                 should_rebind_direct_type_family = true;
             }
             if should_rebind_direct_type_family {
-                rebind_direct_sig_type_family_to_access_path(ctx, &access_path, &sig);
+                rebind_direct_sig_type_family_to_access_path(ctx, &access_path, &mut sig);
             }
             if let Some(ref old_name) = resolved_name {
                 if should_rewrite_nested_alias_self_path(ctx, old_name, &resolved_parent_path) {
