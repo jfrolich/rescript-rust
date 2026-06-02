@@ -28906,6 +28906,31 @@ pub(crate) fn open_module_lid_components_into_env(
     // selected module descriptor's component table and then env.ml:1841-1860
     // installs both `comp_modules` and `comp_components`. Keep Rust opens on the
     // same component-view path rather than rebuilding from a detached signature.
+    if let Longident::Lident(mod_idx) = lid {
+        let mod_name = arena.get_string(*mod_idx);
+        if let Ok((Path::Pdot(parent, child_name, _), _)) =
+            lookup_env.find_module_with_path(mod_name)
+        {
+            // OCaml compiler/ml/typetexp.ml:144-151 calls
+            // compiler/ml/env.ml:1036-1055 `lookup_module` before
+            // `Env.open_signature`. For an unqualified module selected from an
+            // opened layer, env.ml:1040-1043 forces the `comp_modules`
+            // declaration thunk with `EnvLazy.force subst_modtype_maker`; if
+            // that module type is a signature, compiler/ml/subst.ml:351-364
+            // freshens its bound identifiers before env.ml:1874-1877 opens the
+            // separate `comp_components` thunk. Preserve that force order here;
+            // dotted opens stay on the descriptor path below, matching
+            // env.ml:1064-1073.
+            let _ = with_resolved_module_components_for_path_with_cache_mode(
+                parent.as_ref(),
+                lookup_env,
+                pers_env,
+                ctx,
+                ComponentLookupApi::LookupModule,
+                |components| components.lookup_qualified_module(child_name.as_str(), ctx),
+            );
+        }
+    }
     let mut wrapper = |components: &crate::types::env_lazy::QualifiedModuleComponents| {
         let path = components.access_path().clone();
         crate::cmi::persistent_env::open_module_components_into_env(components, target_env, ctx);
