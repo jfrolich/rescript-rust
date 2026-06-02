@@ -11375,6 +11375,17 @@ pub fn compile_source_to_js_with_options(
         None
     };
 
+    // OCaml compiler/ml/typemod.ml:1769-1776 forces delayed checks before
+    // compiler/core/js_implementation.ml:148-156 prints `-dtyped-sexp`; Rust
+    // typedtree-only runs must therefore flush value-usage checks before the dump.
+    tctx.flush_value_usage_checks();
+    let delayed_warnings = &tctx.warnings[delayed_type_warning_start..];
+    emit_type_warnings(parser.arena(), source, filename, delayed_warnings);
+    if type_warnings_have_errors(delayed_warnings) {
+        return Err(UserDiagnostic::new(String::new(), 2).into());
+    }
+    let post_type_warning_start = tctx.warnings.len();
+
     // Print typed tree if requested
     if options.dump_typed_sexp {
         let mut stderr = std::io::stderr();
@@ -11498,10 +11509,9 @@ pub fn compile_source_to_js_with_options(
         )
         .into());
     }
-    tctx.flush_value_usage_checks();
-    let delayed_warnings = &tctx.warnings[delayed_type_warning_start..];
-    emit_type_warnings(parser.arena(), source, filename, delayed_warnings);
-    if type_warnings_have_errors(delayed_warnings) {
+    let late_type_warnings = &tctx.warnings[post_type_warning_start..];
+    emit_type_warnings(parser.arena(), source, filename, late_type_warnings);
+    if type_warnings_have_errors(late_type_warnings) {
         return Err(UserDiagnostic::new(String::new(), 2).into());
     }
     emit_type_warnings(parser.arena(), source, filename, &raw_warnings);
