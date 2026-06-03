@@ -23646,22 +23646,12 @@ fn type_structure_item<'a>(
             let mut decl_mod_type = decl_module_type_from_typed_module_expr_for_sig(&typed_mod)
                 .unwrap_or_else(|| crate::types::decl::ModuleType::MtySignature(vec![]));
             anchor_local_module_aliases_to_owner(&mut decl_mod_type, &Path::pident(mod_id.clone()));
-            if let crate::types::decl::ModuleType::MtySignature(sig) = &decl_mod_type {
-                let should_substitute_sig_paths = !matches!(
-                    &*arena.get_mod_expr(mb.pmb_expr).pmod_desc,
-                    ParsedModuleExprDesc::Pmod_structure(_)
-                );
-                if should_substitute_sig_paths {
-                    let sig =
-                        crate::types::typecore::copy_lookup_signature_for_subst(sig, tctx.type_ctx);
-                    crate::cmi::persistent_env::substitute_type_paths_in_sig(
-                        &sig,
-                        &Path::pident(mod_id.clone()),
-                        tctx.type_ctx,
-                    );
-                    decl_mod_type = crate::types::decl::ModuleType::MtySignature(sig);
-                }
-            }
+            // OCaml compiler/ml/typemod.ml:1451-1471 stores
+            // `enrich_module_type anchor name modl.mod_type env` directly in the
+            // module declaration. For a non-structure module expression such as an
+            // applicative functor application, that preserves the result
+            // signature's applicative paths until Env component forcing reaches
+            // compiler/ml/env.ml:1744-1756 `components_of_functor_appl`.
             // Match OCaml typemod.ml:
             // Mtype.lower_nongen (Ident.binding_time id - 1) md.md_type
             crate::types::ctype::lower_nongen_module_type(
