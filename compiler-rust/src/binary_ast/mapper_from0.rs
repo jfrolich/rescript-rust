@@ -893,7 +893,7 @@ impl<'a> Mapper<'a> {
         // encoding (see `ast_mapper_from0.ml` after #7887). The for-of /
         // for-await-of variant is reconstructed below via
         // `extract_for_*_iterable` on the original (unfiltered) attrs.
-        let attrs = if has_for_of_attribute(&expr.pexp_attributes) {
+        let mut attrs = if has_for_of_attribute(&expr.pexp_attributes) {
             self.map_attributes(&remove_for_of_attributes(&expr.pexp_attributes))
         } else {
             self.map_attributes(&expr.pexp_attributes)
@@ -941,6 +941,17 @@ impl<'a> Mapper<'a> {
                 arity,
                 is_async,
             } => {
+                let has_async_attr = has_async_attribute(self.arena, &attrs);
+                let is_async = *is_async || has_async_attr;
+                if is_async && !has_async_attr {
+                    attrs.insert(
+                        0,
+                        (
+                            self.mk_string_noloc("res.async"),
+                            current::Payload::PStr(Box::new(vec![])),
+                        ),
+                    );
+                }
                 let default_idx = default.as_ref().map(|e| self.push_expr(e));
                 let rhs_idx = self.push_expr(body);
                 current::ExpressionDesc::Pexp_fun(Box::new(PexpFun {
@@ -949,7 +960,7 @@ impl<'a> Mapper<'a> {
                     lhs: self.push_pat(pat),
                     rhs: rhs_idx,
                     arity: map_arity(arity, self.arena),
-                    is_async: *is_async,
+                    is_async,
                 }))
             }
             pt0::ExpressionDesc::Apply {

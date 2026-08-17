@@ -184,7 +184,8 @@ impl<'a> Mapper<'a> {
         )
     }
 
-    fn mk_await_attr(&mut self, loc: LocIdx) -> pt0::Attribute {
+    fn mk_await_attr(&mut self) -> pt0::Attribute {
+        let loc = self.arena.none_loc();
         (
             OldLocated::new("res.await".to_string(), self.loc(loc)),
             pt0::Payload::PStr(vec![]),
@@ -748,6 +749,12 @@ impl<'a> Mapper<'a> {
         expr: &current::Expression,
         owner_idx: Option<ExprIdx>,
     ) -> pt0::Expression {
+        if let current::ExpressionDesc::Pexp_await(inner_idx) = &*expr.pexp_desc {
+            let mut inner = self.map_expr_idx(*inner_idx);
+            inner.pexp_attributes.insert(0, self.mk_await_attr());
+            return inner;
+        }
+
         // Check if this is a JSX element that needs the [@JSX] attribute
         let is_jsx = matches!(
             &*expr.pexp_desc,
@@ -1133,10 +1140,9 @@ impl<'a> Mapper<'a> {
                 pt0::ExpressionDesc::Extension(self.map_extension(ext))
             }
             current::ExpressionDesc::Pexp_await(e_idx) => {
-                // Convert await to inner expression with [@res.await] attribute
-                let mut inner = self.map_expr_idx(*e_idx);
-                inner.pexp_attributes.insert(0, self.mk_await_attr(loc));
-                inner.pexp_desc
+                // The complete inner expression receives [@res.await] in
+                // map_expression_with_owner, matching OCaml's mapper.
+                self.map_expr_idx(*e_idx).pexp_desc
             }
             current::ExpressionDesc::Pexp_jsx_element(jsx) => {
                 // Convert JSX element to old-style function application with [@JSX] attribute
