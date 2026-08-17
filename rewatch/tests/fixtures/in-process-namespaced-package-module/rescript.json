@@ -1,0 +1,12 @@
+{
+  "name": "in-process-namespaced-package-module",
+  "namespace": "InProcessNamespace",
+  "sources": {
+    "dir": "src"
+  },
+  "package-specs": {
+    "module": "esmodule",
+    "in-source": false
+  },
+  "suffix": ".mjs"
+}

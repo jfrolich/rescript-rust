@@ -3543,6 +3543,15 @@ fn type_mod_error_to_anyhow(
             2,
         )
         .into(),
+        TypeModError::CoreError(TypeCoreError::UnboundModtype {
+            loc,
+            lid,
+            alternatives,
+        }) => UserDiagnostic::new(
+            format_unbound_modtype_report(arena, source, filename, *loc, lid, alternatives),
+            2,
+        )
+        .into(),
         TypeModError::CoreError(TypeCoreError::AccessFunctorAsStructure { loc, lid }) => {
             UserDiagnostic::new(
                 format_access_functor_as_structure_report(arena, source, filename, *loc, lid),
