@@ -577,6 +577,58 @@ def compare_trees(node_a, node_b, path="root", context_before=5):
     return diffs
 
 
+def compare_value_trees(node_a, node_b, decoder_a, decoder_b, max_diffs=10):
+    """Compare decoded values while ignoring Marshal object-sharing layout.
+
+    OCaml's Marshal encoder may emit a shared reference where another encoder
+    emits the same value inline. Dereference those nodes before comparing the
+    complete AST value, including block tags, shapes, and inferred type hints.
+    """
+    diffs = []
+    stack = [(node_a, node_b, "root")]
+
+    def deref(node, decoder):
+        while isinstance(node, SharedNode):
+            target = decoder.objects.get(node.target_idx)
+            if target is None:
+                break
+            node = target
+        return node
+
+    while stack and len(diffs) < max_diffs:
+        a, b, path = stack.pop()
+        a = deref(a, decoder_a)
+        b = deref(b, decoder_b)
+
+        if type(a) is not type(b):
+            diffs.append({"path": path, "kind": "type_mismatch"})
+            continue
+
+        if isinstance(a, IntNode):
+            if a.value != b.value:
+                diffs.append({"path": path, "kind": "int_value"})
+        elif isinstance(a, StringNode):
+            if a.value != b.value:
+                diffs.append({"path": path, "kind": "string_value"})
+        elif isinstance(a, DoubleNode):
+            if a.value != b.value:
+                diffs.append({"path": path, "kind": "double_value"})
+        elif isinstance(a, BlockNode):
+            if (
+                a.tag != b.tag
+                or len(a.children) != len(b.children)
+                or a.type_hint != b.type_hint
+            ):
+                diffs.append({"path": path, "kind": "block_mismatch"})
+                continue
+            for i in range(len(a.children) - 1, -1, -1):
+                stack.append((a.children[i], b.children[i], f"{path}/[{i}]"))
+        elif repr(a) != repr(b):
+            diffs.append({"path": path, "kind": "repr_mismatch"})
+
+    return diffs
+
+
 def _compare_recursive(a, b, path, diffs, max_diffs):
     """Iterative tree comparison using an explicit stack."""
     stack = [(a, b, path)]

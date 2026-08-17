@@ -896,49 +896,7 @@ ast_a = mod.BinaryAstFile(a_path)
 ast_b = mod.BinaryAstFile(b_path)
 root_a, dec_a = ast_a.decode_ast()
 root_b, dec_b = ast_b.decode_ast()
-
-def deref(node, decoder):
-    while isinstance(node, mod.SharedNode):
-        target = decoder.objects.get(node.target_idx)
-        if target is None:
-            break
-        node = target
-    return node
-
-def compare_value_trees(a_root, b_root, dec_a, dec_b, max_diffs=10):
-    diffs = []
-    stack = [(a_root, b_root, "root")]
-    while stack and len(diffs) < max_diffs:
-        a, b, path = stack.pop()
-        a = deref(a, dec_a)
-        b = deref(b, dec_b)
-
-        if type(a) != type(b):
-            diffs.append({"path": path, "kind": "type_mismatch"})
-            continue
-
-        if isinstance(a, mod.IntNode):
-            if a.value != b.value:
-                diffs.append({"path": path, "kind": "int_value"})
-        elif isinstance(a, mod.StringNode):
-            if a.value != b.value:
-                diffs.append({"path": path, "kind": "string_value"})
-        elif isinstance(a, mod.DoubleNode):
-            if a.value != b.value:
-                diffs.append({"path": path, "kind": "double_value"})
-        elif isinstance(a, mod.BlockNode):
-            if a.tag != b.tag or len(a.children) != len(b.children) or a.type_hint != b.type_hint:
-                diffs.append({"path": path, "kind": "block_mismatch"})
-                continue
-            for i in range(len(a.children) - 1, -1, -1):
-                stack.append((a.children[i], b.children[i], f"{path}/[{i}]"))
-        else:
-            # Unknown node type; fall back to repr equality
-            if repr(a) != repr(b):
-                diffs.append({"path": path, "kind": "repr_mismatch"})
-    return diffs
-
-diffs = compare_value_trees(root_a, root_b, dec_a, dec_b)
+diffs = mod.compare_value_trees(root_a, root_b, dec_a, dec_b)
 sys.exit(1 if diffs else 0)
 PY
         then

@@ -604,9 +604,9 @@ spec.loader.exec_module(mod)
 
 ast_a = mod.BinaryAstFile(a_path)
 ast_b = mod.BinaryAstFile(b_path)
-root_a, _ = ast_a.decode_ast()
-root_b, _ = ast_b.decode_ast()
-diffs = mod.compare_trees(root_a, root_b)
+root_a, dec_a = ast_a.decode_ast()
+root_b, dec_b = ast_b.decode_ast()
+diffs = mod.compare_value_trees(root_a, root_b, dec_a, dec_b)
 sys.exit(1 if diffs else 0)
 PY
         then
