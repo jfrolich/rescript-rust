@@ -19,6 +19,12 @@ use crate::parser::token::Token;
 // Printer State
 // ============================================================================
 
+#[derive(Debug, Clone)]
+struct PendingInlineRecordDefinitions {
+    external_name: String,
+    definitions: Vec<TypeDeclaration>,
+}
+
 /// Printer state for tracking custom layout depth and inline record definitions.
 ///
 /// This is used to limit the depth of nested custom layouts to avoid
@@ -35,6 +41,7 @@ pub struct PrinterState {
     /// When printing a type constructor that references one of these definitions,
     /// we print the record definition inline instead of as a type reference.
     inline_record_definitions: Option<Vec<TypeDeclaration>>,
+    pending_inline_record_definitions: Option<PendingInlineRecordDefinitions>,
 }
 
 impl PrinterState {
@@ -46,6 +53,7 @@ impl PrinterState {
         Self {
             custom_layout: 0,
             inline_record_definitions: None,
+            pending_inline_record_definitions: None,
         }
     }
 
@@ -54,6 +62,7 @@ impl PrinterState {
         Self {
             custom_layout: self.custom_layout + 1,
             inline_record_definitions: self.inline_record_definitions.clone(),
+            pending_inline_record_definitions: self.pending_inline_record_definitions.clone(),
         }
     }
 
@@ -70,6 +79,7 @@ impl PrinterState {
         Self {
             custom_layout: self.custom_layout,
             inline_record_definitions: Some(inline_record_definitions),
+            pending_inline_record_definitions: self.pending_inline_record_definitions.clone(),
         }
     }
 
@@ -83,6 +93,10 @@ impl PrinterState {
             defs.iter()
                 .find(|decl| arena.get_string(decl.ptype_name.txt) == name)
         })
+    }
+
+    fn clear_pending_inline_record_definitions(&mut self) {
+        self.pending_inline_record_definitions = None;
     }
 }
 
@@ -573,57 +587,54 @@ pub fn get_first_leading_comment<'a>(
 pub fn print_list<'a, T, F, G>(
     get_loc: F,
     nodes: &'a [T],
-    print: G,
+    mut print: G,
     cmt_tbl: &mut CommentTable,
     arena: &ParseArena,
     force_break: bool,
 ) -> Doc
 where
     F: Fn(&'a T) -> LocIdx,
-    G: Fn(&'a T, &mut CommentTable) -> Doc,
+    G: FnMut(&'a T, &mut CommentTable) -> Doc,
 {
     if nodes.is_empty() {
         return Doc::nil();
     }
 
     let mut docs = Vec::with_capacity(nodes.len() * 2);
-    let first = &nodes[0];
-    let first_loc = get_loc(first);
-    let first_doc = {
-        let doc = print(first, cmt_tbl);
-        print_comments(doc, cmt_tbl, first_loc, arena)
-    };
-    docs.push(first_doc);
+    let mut first_loc = None;
+    let mut previous_loc = None;
 
-    let mut prev_loc = first_loc;
-
-    for node in &nodes[1..] {
+    for node in nodes {
         let loc = get_loc(node);
 
-        // Determine separator based on line distance
         let start_pos = match get_first_leading_comment(cmt_tbl, loc, arena) {
             Some(comment) => comment.loc().loc_start.clone(),
             None => arena.loc_start(loc).clone(),
         };
 
-        let prev_end = arena.loc_end(prev_loc);
-        let sep = if start_pos.line as i32 - prev_end.line as i32 > 1 {
-            Doc::concat(vec![Doc::hard_line(), Doc::hard_line()])
-        } else {
-            Doc::hard_line()
-        };
+        let raw_doc = print(node, cmt_tbl);
+        if matches!(raw_doc, Doc::Nil) {
+            continue;
+        }
 
-        docs.push(sep);
+        if let Some(previous_loc) = previous_loc {
+            let previous_end = arena.loc_end(previous_loc);
+            let separator = if start_pos.line as i32 - previous_end.line as i32 > 1 {
+                Doc::concat(vec![Doc::hard_line(), Doc::hard_line()])
+            } else {
+                Doc::hard_line()
+            };
+            docs.push(separator);
+        }
 
-        let doc = print(node, cmt_tbl);
-        let doc = print_comments(doc, cmt_tbl, loc, arena);
-        docs.push(doc);
-
-        prev_loc = loc;
+        docs.push(print_comments(raw_doc, cmt_tbl, loc, arena));
+        first_loc.get_or_insert(loc);
+        previous_loc = Some(loc);
     }
 
-    // Determine if we need to force break based on span
-    let last_loc = get_loc(&nodes[nodes.len() - 1]);
+    let (Some(first_loc), Some(last_loc)) = (first_loc, previous_loc) else {
+        return Doc::nil();
+    };
     let should_break =
         force_break || arena.loc_start(first_loc).line != arena.loc_end(last_loc).line;
 
@@ -8129,11 +8140,12 @@ pub fn print_structure(
         return print_comments_inside_file(cmt_tbl, arena);
     }
 
+    let mut sequential_state = state.clone();
     print_list(
         |item: &StructureItem| item.pstr_loc,
         structure,
         |item: &StructureItem, cmt_tbl: &mut CommentTable| {
-            print_structure_item(state, item, cmt_tbl, arena)
+            print_structure_item_sequential(&mut sequential_state, item, cmt_tbl, arena)
         },
         cmt_tbl,
         arena,
@@ -8152,11 +8164,12 @@ pub fn print_signature(
         return print_comments_inside_file(cmt_tbl, arena);
     }
 
+    let mut sequential_state = state.clone();
     print_list(
         |item: &SignatureItem| item.psig_loc,
         signature,
         |item: &SignatureItem, cmt_tbl: &mut CommentTable| {
-            print_signature_item(state, item, cmt_tbl, arena)
+            print_signature_item_sequential(&mut sequential_state, item, cmt_tbl, arena)
         },
         cmt_tbl,
         arena,
@@ -8171,6 +8184,31 @@ pub fn print_signature_item(
     cmt_tbl: &mut CommentTable,
     arena: &ParseArena,
 ) -> Doc {
+    let mut sequential_state = state.clone();
+    print_signature_item_sequential(&mut sequential_state, item, cmt_tbl, arena)
+}
+
+fn print_signature_item_sequential(
+    state: &mut PrinterState,
+    item: &SignatureItem,
+    cmt_tbl: &mut CommentTable,
+    arena: &ParseArena,
+) -> Doc {
+    match &*item.psig_desc {
+        SignatureItemDesc::Psig_value(_) | SignatureItemDesc::Psig_type(_) => {}
+        SignatureItemDesc::Psig_typext(_)
+        | SignatureItemDesc::Psig_exception(_)
+        | SignatureItemDesc::Psig_module(_)
+        | SignatureItemDesc::Psig_recmodule(_)
+        | SignatureItemDesc::Psig_modtype(_)
+        | SignatureItemDesc::Psig_open(_)
+        | SignatureItemDesc::Psig_include(_)
+        | SignatureItemDesc::Psig_attribute(_)
+        | SignatureItemDesc::Psig_extension(_) => {
+            state.clear_pending_inline_record_definitions();
+        }
+    }
+
     match &*item.psig_desc {
         SignatureItemDesc::Psig_value(val_desc) => {
             print_value_description(state, val_desc, cmt_tbl, arena)
@@ -8330,6 +8368,33 @@ pub fn print_structure_item(
     cmt_tbl: &mut CommentTable,
     arena: &ParseArena,
 ) -> Doc {
+    let mut sequential_state = state.clone();
+    print_structure_item_sequential(&mut sequential_state, item, cmt_tbl, arena)
+}
+
+fn print_structure_item_sequential(
+    state: &mut PrinterState,
+    item: &StructureItem,
+    cmt_tbl: &mut CommentTable,
+    arena: &ParseArena,
+) -> Doc {
+    match &*item.pstr_desc {
+        StructureItemDesc::Pstr_type(_) | StructureItemDesc::Pstr_primitive(_) => {}
+        StructureItemDesc::Pstr_value(_)
+        | StructureItemDesc::Pstr_typext(_)
+        | StructureItemDesc::Pstr_exception(_)
+        | StructureItemDesc::Pstr_module(_)
+        | StructureItemDesc::Pstr_recmodule(_)
+        | StructureItemDesc::Pstr_modtype(_)
+        | StructureItemDesc::Pstr_open(_)
+        | StructureItemDesc::Pstr_include(_)
+        | StructureItemDesc::Pstr_attribute(_)
+        | StructureItemDesc::Pstr_extension(_)
+        | StructureItemDesc::Pstr_eval(_) => {
+            state.clear_pending_inline_record_definitions();
+        }
+    }
+
     match &*item.pstr_desc {
         StructureItemDesc::Pstr_value(inner) => {
             let (ref rec_flag, ref bindings) = **inner;
@@ -8412,12 +8477,40 @@ fn has_inline_type_definitions(arena: &ParseArena, decls: &[TypeDeclaration]) ->
     })
 }
 
+fn inline_record_external_name<'a>(
+    arena: &'a ParseArena,
+    declaration: &TypeDeclaration,
+) -> Option<&'a str> {
+    arena
+        .get_string(declaration.ptype_name.txt)
+        .split_once('.')
+        .map(|(external_name, _)| external_name)
+}
+
+fn pending_inline_record_definitions(
+    arena: &ParseArena,
+    definitions: &[TypeDeclaration],
+) -> Option<PendingInlineRecordDefinitions> {
+    let external_name = inline_record_external_name(arena, definitions.first()?)?.to_string();
+    let all_definitions_match = definitions.iter().all(|declaration| {
+        inline_record_external_name(arena, declaration) == Some(external_name.as_str())
+    });
+    if !all_definitions_match {
+        return None;
+    }
+
+    Some(PendingInlineRecordDefinitions {
+        external_name,
+        definitions: definitions.to_vec(),
+    })
+}
+
 /// Print type declarations.
 /// Print type declarations with proper comment handling using print_listi.
 /// This matches the OCaml implementation which uses print_listi for type declarations.
 /// The rec_flag parameter is printed as part of the first declaration's prefix.
 fn print_type_declarations_with_rec_flag(
-    state: &PrinterState,
+    state: &mut PrinterState,
     rec_flag: &RecFlag,
     decls: &[TypeDeclaration],
     cmt_tbl: &mut CommentTable,
@@ -8433,6 +8526,17 @@ fn print_type_declarations_with_rec_flag(
                     &decl.ptype_attributes,
                 )
             });
+
+        if regular_declarations.is_empty() {
+            if let Some(pending) =
+                pending_inline_record_definitions(arena, &inline_record_definitions)
+            {
+                state.pending_inline_record_definitions = Some(pending);
+                return Doc::nil();
+            }
+        }
+
+        state.pending_inline_record_definitions = None;
 
         // Adjust rec flag: only add "rec" if more than 1 regular declaration
         let adjusted_rec_doc = match rec_flag {
@@ -8479,6 +8583,7 @@ fn print_type_declarations_with_rec_flag(
             false,
         )
     } else {
+        state.pending_inline_record_definitions = None;
         // No inline record definitions, print normally
         let rec_doc = match rec_flag {
             RecFlag::Nonrecursive => Doc::nil(),
@@ -8950,7 +9055,7 @@ fn print_constructor_arguments(
 
 /// Print value description (external or let declaration in signatures).
 fn print_value_description(
-    state: &PrinterState,
+    state: &mut PrinterState,
     val_desc: &ValueDescription,
     cmt_tbl: &mut CommentTable,
     arena: &ParseArena,
@@ -8967,8 +9072,21 @@ fn print_value_description(
     );
     let name_doc = print_ident_like(arena.get_string(val_desc.pval_name.txt), false, false);
     let name_doc = print_comments(name_doc, cmt_tbl, val_desc.pval_name.loc, arena);
+
+    let pending_inline_record_definitions = state.pending_inline_record_definitions.take();
+    let inline_record_definitions = match pending_inline_record_definitions {
+        Some(pending)
+            if is_external && pending.external_name == arena.get_string(val_desc.pval_name.txt) =>
+        {
+            Some(pending.definitions)
+        }
+        Some(_) | None => None,
+    };
+    let state_with_inline = inline_record_definitions
+        .map(|definitions| state.with_inline_record_definitions(definitions));
+    let type_state = state_with_inline.as_ref().unwrap_or(state);
     let typ_doc = print_typ_expr(
-        state,
+        type_state,
         arena.get_core_type(val_desc.pval_type),
         cmt_tbl,
         arena,
