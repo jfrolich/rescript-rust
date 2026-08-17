@@ -3340,17 +3340,14 @@ fn try_print_dict_expr(
 
 /// Print dict{key: value, ...} syntax
 /// Matches OCaml's print_literal_dict_expr and print_bs_object_row
-fn print_dict_expr(
+fn print_dict_rows(
     state: &PrinterState,
-    expr: &Expression,
     key_values: &Expression,
+    leading_line: bool,
+    trailing_comma: bool,
     cmt_tbl: &mut CommentTable,
     arena: &ParseArena,
 ) -> Doc {
-    let start = arena.loc_start(key_values.pexp_loc);
-    let end = arena.loc_end(key_values.pexp_loc);
-    let force_break = start.line < end.line;
-
     let rows: Vec<Doc> = if let ExpressionDesc::Pexp_array(items) = &*key_values.pexp_desc {
         items
             .iter()
@@ -3413,25 +3410,100 @@ fn print_dict_expr(
     };
 
     let rows_empty = rows.is_empty();
-    let inner = Doc::concat(vec![
-        print_comments_inside(cmt_tbl, expr.pexp_loc, arena),
-        Doc::indent(Doc::concat(vec![
-            if rows_empty {
+    let rows_doc = Doc::join(Doc::concat(vec![Doc::text(","), Doc::line()]), rows);
+    let force_break = arena.loc_start(key_values.pexp_loc).line
+        < arena.loc_end(key_values.pexp_loc).line
+        || rows_doc.will_break();
+    Doc::breakable_group(
+        Doc::concat(vec![
+            Doc::indent(Doc::concat(vec![
+                if rows_empty || !leading_line {
+                    Doc::nil()
+                } else {
+                    Doc::soft_line()
+                },
+                rows_doc,
+            ])),
+            if rows_empty || !trailing_comma {
                 Doc::nil()
             } else {
-                Doc::soft_line()
+                Doc::concat(vec![Doc::trailing_comma(), Doc::soft_line()])
             },
-            Doc::join(Doc::concat(vec![Doc::text(","), Doc::line()]), rows),
-        ])),
-        if rows_empty {
-            Doc::nil()
-        } else {
-            Doc::concat(vec![Doc::trailing_comma(), Doc::soft_line()])
-        },
-    ]);
+        ]),
+        force_break,
+    )
+}
+
+fn print_dict_expr(
+    state: &PrinterState,
+    expr: &Expression,
+    key_values: &Expression,
+    cmt_tbl: &mut CommentTable,
+    arena: &ParseArena,
+) -> Doc {
+    Doc::concat(vec![
+        Doc::text("dict{"),
+        print_comments_inside(cmt_tbl, expr.pexp_loc, arena),
+        print_dict_rows(state, key_values, true, true, cmt_tbl, arena),
+        Doc::rbrace(),
+    ])
+}
+
+fn print_spread_dict_expr(
+    state: &PrinterState,
+    parts: &[parsetree_viewer::DictExprPart<'_>],
+    expr: &Expression,
+    cmt_tbl: &mut CommentTable,
+    arena: &ParseArena,
+) -> Doc {
+    let mut part_docs = Vec::with_capacity(parts.len());
+    for part in parts {
+        match part {
+            parsetree_viewer::DictExprPart::Rows(rows) => {
+                part_docs.push(print_dict_rows(state, rows, false, false, cmt_tbl, arena))
+            }
+            parsetree_viewer::DictExprPart::Spread(spread) => {
+                let leading = print_leading_comments(Doc::nil(), cmt_tbl, spread.pexp_loc, arena);
+                let spread_doc = print_expression(state, spread, cmt_tbl, arena);
+                let spread_doc = match parens::expr(arena, spread) {
+                    ParenKind::Parenthesized => add_parens(spread_doc),
+                    ParenKind::Braced(braces) => print_braces(spread_doc, spread, braces, arena),
+                    ParenKind::Nothing => spread_doc,
+                };
+                let full_loc = arena.to_location(spread.pexp_loc);
+                let trailing = cmt_tbl.remove_trailing_comments_by_loc(spread.pexp_loc, arena);
+                let spread_doc = print_trailing_comments_with(spread_doc, trailing, &full_loc);
+                part_docs.push(Doc::concat(vec![leading, Doc::dotdotdot(), spread_doc]));
+            }
+        }
+    }
+
+    let parts_empty = part_docs.is_empty();
+    let parts_doc = Doc::join(Doc::concat(vec![Doc::text(","), Doc::line()]), part_docs);
+    let inside_comments = print_comments_inside(cmt_tbl, expr.pexp_loc, arena);
+    let force_break = arena.loc_start(expr.pexp_loc).line < arena.loc_end(expr.pexp_loc).line
+        || inside_comments.will_break()
+        || parts_doc.will_break();
 
     Doc::breakable_group(
-        Doc::concat(vec![Doc::text("dict{"), inner, Doc::rbrace()]),
+        Doc::concat(vec![
+            Doc::text("dict{"),
+            inside_comments,
+            Doc::indent(Doc::concat(vec![
+                if parts_empty {
+                    Doc::nil()
+                } else {
+                    Doc::soft_line()
+                },
+                parts_doc,
+            ])),
+            if parts_empty {
+                Doc::nil()
+            } else {
+                Doc::concat(vec![Doc::trailing_comma(), Doc::soft_line()])
+            },
+            Doc::rbrace(),
+        ]),
         force_break,
     )
 }
@@ -4164,6 +4236,10 @@ fn print_pexp_apply(
     // Check for tagged template literal: tag`...`
     if is_tagged_template_literal(arena, expr) {
         return print_tagged_template_literal(state, funct, args, cmt_tbl, arena);
+    }
+
+    if let Some(parts) = parsetree_viewer::collect_spread_dict_expr_parts(arena, expr) {
+        return print_spread_dict_expr(state, &parts, expr, cmt_tbl, arena);
     }
 
     // Check for dict{} syntax: Primitive_dict.make([("key", value), ...])
