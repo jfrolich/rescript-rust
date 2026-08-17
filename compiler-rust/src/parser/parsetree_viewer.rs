@@ -617,6 +617,100 @@ pub fn should_inline_rhs_binary_expr(expr: &Expression) -> bool {
 // Dict and List Utilities
 // ============================================================================
 
+/// A source fragment in a dictionary spread expression.
+pub enum DictExprPart<'a> {
+    /// Literal dictionary rows encoded as a `Primitive_dict.make` argument.
+    Rows(&'a Expression),
+    /// An expression introduced with dictionary spread syntax.
+    Spread(&'a Expression),
+}
+
+/// Recover the source fragments of a dictionary spread expression.
+///
+/// This mirrors `collect_spread_dict_expr_parts` in the OCaml parsetree
+/// viewer. The parser encodes `dict{...a, "b": c}` as an attributed call to
+/// `Primitive_dict.spread`; the printer uses these fragments to reconstruct
+/// the surface syntax.
+pub fn collect_spread_dict_expr_parts<'a>(
+    arena: &'a ParseArena,
+    expr: &'a Expression,
+) -> Option<Vec<DictExprPart<'a>>> {
+    fn literal_dict_rows<'a>(
+        arena: &'a ParseArena,
+        expr: &'a Expression,
+    ) -> Option<&'a Expression> {
+        let ExpressionDesc::Pexp_apply(apply) = &*expr.pexp_desc else {
+            return None;
+        };
+        let function = arena.get_expr(apply.funct);
+        let ExpressionDesc::Pexp_ident(identifier) = &*function.pexp_desc else {
+            return None;
+        };
+        let Longident::Ldot(parent, field) = arena.get_longident(identifier.txt) else {
+            return None;
+        };
+        let Longident::Lident(module_name) = parent.as_ref() else {
+            return None;
+        };
+        if arena.get_string(*module_name) != "Primitive_dict"
+            || arena.get_string(*field) != "make"
+            || apply.args.len() != 1
+            || !matches!(apply.args[0].0, ArgLabel::Nolabel)
+        {
+            return None;
+        }
+        let rows = arena.get_expr(apply.args[0].1);
+        is_tuple_array(arena, rows).then_some(rows)
+    }
+
+    let ExpressionDesc::Pexp_apply(apply) = &*expr.pexp_desc else {
+        return None;
+    };
+    let function = arena.get_expr(apply.funct);
+    let ExpressionDesc::Pexp_ident(identifier) = &*function.pexp_desc else {
+        return None;
+    };
+    let Longident::Ldot(parent, field) = arena.get_longident(identifier.txt) else {
+        return None;
+    };
+    let Longident::Lident(module_name) = parent.as_ref() else {
+        return None;
+    };
+    if arena.get_string(*module_name) != "Primitive_dict"
+        || arena.get_string(*field) != "spread"
+        || !function
+            .pexp_attributes
+            .iter()
+            .any(|attribute| arena.get_string(attribute.0.txt) == "res.dictSpread")
+        || apply.args.len() != 2
+        || !apply
+            .args
+            .iter()
+            .all(|(label, _)| matches!(label, ArgLabel::Nolabel))
+    {
+        return None;
+    }
+
+    let target = arena.get_expr(apply.args[0].1);
+    let sources = arena.get_expr(apply.args[1].1);
+    let ExpressionDesc::Pexp_array(source_indices) = &*sources.pexp_desc else {
+        return None;
+    };
+
+    let mut parts = Vec::with_capacity(source_indices.len() + 1);
+    for part in std::iter::once(target).chain(source_indices.iter().map(|idx| arena.get_expr(*idx)))
+    {
+        if let Some(rows) = literal_dict_rows(arena, part) {
+            if !matches!(&*rows.pexp_desc, ExpressionDesc::Pexp_array(items) if items.is_empty()) {
+                parts.push(DictExprPart::Rows(rows));
+            }
+        } else {
+            parts.push(DictExprPart::Spread(part));
+        }
+    }
+    Some(parts)
+}
+
 /// Check if an expression is an array of tuples (for dict detection).
 /// Used to detect dict{} syntax which desugars to Primitive_dict.make([("key", value), ...])
 pub fn is_tuple_array(arena: &ParseArena, expr: &Expression) -> bool {
