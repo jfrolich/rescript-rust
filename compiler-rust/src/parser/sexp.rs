@@ -221,13 +221,19 @@ impl Sexp {
     }
 }
 
-/// Quote a string for sexp output.
-/// If `escape_quotes` is true, escape quotes with backslash (for regular strings).
-/// If false, output quotes as-is (for tagged/template strings).
-fn quote_string_impl(s: &str, _escape_quotes: bool) -> String {
-    // The scanner now keeps escape sequences as text (e.g., \n is two chars: \ and n).
-    // The sexp printer just wraps the string in quotes without additional escaping.
-    // OCaml's output is simply the string contents surrounded by double quotes.
+/// Unwrap an uppercase exotic identifier encoding.
+/// `\"Uident"` becomes `Uident`; other strings pass through unchanged.
+/// Matches OCaml's `Ext_ident.unwrap_uppercase_exotic`.
+fn unwrap_uppercase_exotic(s: &str) -> &str {
+    let bytes = s.as_bytes();
+    if bytes.len() >= 3 && bytes[0] == b'\\' && bytes[1] == b'"' && bytes[bytes.len() - 1] == b'"' {
+        &s[2..s.len() - 1]
+    } else {
+        s
+    }
+}
+
+fn quote_string_literal(s: &str) -> String {
     let mut result = String::with_capacity(s.len() + 2);
     result.push('"');
     result.push_str(s);
@@ -236,13 +242,11 @@ fn quote_string_impl(s: &str, _escape_quotes: bool) -> String {
 }
 
 fn quote_string(s: &str) -> String {
-    // Default: escape quotes (for regular strings)
-    quote_string_impl(s, true)
+    quote_string_literal(unwrap_uppercase_exotic(s))
 }
 
 fn quote_string_tagged(s: &str) -> String {
-    // For tagged strings (template literals): don't escape quotes
-    quote_string_impl(s, false)
+    quote_string_literal(s)
 }
 
 fn map_empty<T, F>(items: &[T], f: F) -> Vec<Sexp>
@@ -382,19 +386,19 @@ fn constant_inner(c: &Constant) -> Sexp {
             if tag.as_ref().map(|t| &**t) == Some("INTERNAL_RES_CHAR_CONTENTS") {
                 Sexp::list(vec![Sexp::atom("Pconst_char")])
             } else {
-                // Tagged strings (template literals) don't escape quotes in sexp output
                 let quoted = if tag.is_some() {
                     quote_string_tagged(txt)
                 } else {
-                    quote_string(txt)
+                    quote_string_literal(txt)
                 };
                 Sexp::list(vec![
                     Sexp::atom("Pconst_string"),
                     Sexp::atom(&quoted),
                     match tag {
-                        Some(t) => {
-                            Sexp::list(vec![Sexp::atom("Some"), Sexp::atom(&quote_string(t))])
-                        }
+                        Some(t) => Sexp::list(vec![
+                            Sexp::atom("Some"),
+                            Sexp::atom(&quote_string_literal(t)),
+                        ]),
                         None => Sexp::atom("None"),
                     },
                 ])
