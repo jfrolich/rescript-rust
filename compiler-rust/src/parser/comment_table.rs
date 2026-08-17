@@ -2110,6 +2110,23 @@ fn walk_expression(
                 }
             }
 
+            // Dictionary spreads are encoded as a call to
+            // `Primitive_dict.spread`. Walk the reconstructed source parts so
+            // comments attach to the spread expressions and literal rows that
+            // the printer emits, rather than to the synthetic call.
+            if let Some(parts) = parsetree_viewer::collect_spread_dict_expr_parts(arena, expr) {
+                let source_parts: Vec<Expression> = parts
+                    .into_iter()
+                    .map(|part| match part {
+                        parsetree_viewer::DictExprPart::Rows(rows)
+                        | parsetree_viewer::DictExprPart::Spread(rows) => rows.clone(),
+                    })
+                    .collect();
+                let nodes: Vec<Node<'_>> = source_parts.iter().map(Node::Expression).collect();
+                walk_list(&nodes, t, comments, arena);
+                return;
+            }
+
             // Special case for Primitive_dict.make (dict{} syntax)
             // Match OCaml: just walk the key_values array expression
             if args.len() == 1 {
