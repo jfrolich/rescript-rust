@@ -135,7 +135,7 @@ rust-compiler: $(RUST_BSC) $(RUST_PARSER)
 $(RUST_BSC) $(RUST_PARSER): $(RUST_COMPILER_SOURCES)
 	cargo build --manifest-path compiler-rust/Cargo.toml --release
 
-rust-test: compiler rust-compiler
+rust-test: test rust-compiler
 	./scripts/test_rust_parity.sh --release
 
 rust-test-parser: compiler rust-compiler
