@@ -2100,15 +2100,20 @@ fn print_pexp_fun(
             ) => true,
             _ => false,
         };
-        let should_indent = !matches!(
-            &*return_expr.pexp_desc,
-            ExpressionDesc::Pexp_sequence(_, _)
+        let should_indent = match (&*return_expr.pexp_desc, in_callback) {
+            (
+                ExpressionDesc::Pexp_sequence(_, _)
                 | ExpressionDesc::Pexp_let(_)
                 | ExpressionDesc::Pexp_letmodule(_)
                 | ExpressionDesc::Pexp_letexception(_)
-                | ExpressionDesc::Pexp_open(_)
-                | ExpressionDesc::Pexp_jsx_element(_)
-        );
+                | ExpressionDesc::Pexp_open(_),
+                _,
+            ) => false,
+            (ExpressionDesc::Pexp_jsx_element(element), InCallback::NoCallback) => {
+                !matches!(&**element, JsxElement::Fragment(_))
+            }
+            _ => true,
+        };
 
         let return_doc = {
             let doc = print_expression_with_comments(state, return_expr, cmt_tbl, arena);
