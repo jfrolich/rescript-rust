@@ -398,51 +398,6 @@ fn is_dict_type_path(path: &Path) -> bool {
     path.same(&crate::types::predef::path_dict())
 }
 
-fn resolve_package_modtype_path(lid: &Longident, env: &Env, arena: &ParseArena) -> Path {
-    match lid {
-        Longident::Lident(name) => {
-            let name_str = arena.get_string(*name);
-            if let Ok((id, _)) = env.find_modtype_with_id(name_str) {
-                Path::pident(id.clone())
-            } else {
-                Path::pident(Ident::create_persistent(name_str))
-            }
-        }
-        Longident::Ldot(prefix, name) => {
-            // Resolve the prefix through the env to get the correct ident
-            // (persistent for CMI modules), matching OCaml's behavior.
-            let prefix_path = resolve_package_module_prefix(prefix, env, arena);
-            Path::pdot(prefix_path, arena.get_string(*name))
-        }
-        Longident::Lapply(functor, arg) => Path::papply(
-            crate::types::typemod::path_from_longident(functor, |idx| arena.get_string(idx)),
-            crate::types::typemod::path_from_longident(arg, |idx| arena.get_string(idx)),
-        ),
-    }
-}
-
-/// Resolve a module prefix longident through the environment, so that
-/// persistent modules use their persistent ident (stamp 0) instead of
-/// creating fresh local idents.
-fn resolve_package_module_prefix(lid: &Longident, env: &Env, arena: &ParseArena) -> Path {
-    match lid {
-        Longident::Lident(name) => {
-            let name_str = arena.get_string(*name);
-            // Try to find the module in the env to get the correct ident
-            if let Ok(md) = env.find_module_with_id(name_str) {
-                Path::pident(md.0.clone())
-            } else {
-                Path::pident(Ident::create_persistent(name_str))
-            }
-        }
-        Longident::Ldot(prefix, name) => {
-            let prefix_path = resolve_package_module_prefix(prefix, env, arena);
-            Path::pdot(prefix_path, arena.get_string(*name))
-        }
-        _ => crate::types::typemod::path_from_longident(lid, |idx| arena.get_string(idx)),
-    }
-}
-
 /// Match OCaml polymorphic compare over `Longident.t`:
 /// constructor order `Lident < Ldot < Lapply`, then recursive field compare.
 fn compare_longident(arena: &ParseArena, left: &Longident, right: &Longident) -> Ordering {
@@ -632,6 +587,13 @@ pub enum TypeCoreError {
     UnboundModule {
         loc: LocIdx,
         name: String,
+        alternatives: Vec<String>,
+    },
+
+    /// Unbound module-type identifier.
+    UnboundModtype {
+        loc: LocIdx,
+        lid: Longident,
         alternatives: Vec<String>,
     },
 
@@ -3187,8 +3149,34 @@ fn transl_type_inner(
         CTD::Ptyp_package(inner) => {
             let (mod_lid, constraints) = &**inner;
             // Package type: (module S with type t = T)
-            let longident = tctx.resolve_lid(mod_lid.txt);
-            let pack_path = resolve_package_modtype_path(longident, env, tctx.arena);
+            // OCaml `Typetexp.transl_type` resolves the package module type
+            // through `transl_modtype_longident`. Preserve the selected
+            // component path here: opened namespace modules are not local
+            // `Pident`s, even when their source-level name is unqualified.
+            let longident = tctx.resolve_lid(mod_lid.txt).clone();
+            let pack_path = match crate::types::typemod::lookup_modtype_path_by_lid(
+                &longident,
+                tctx.arena,
+                env,
+                &mut tctx.persistent_env,
+                ctx,
+            ) {
+                Some(path) => path,
+                None => {
+                    let alternatives = crate::types::typemod::unbound_modtype_alternatives(
+                        &longident,
+                        tctx.arena,
+                        env,
+                        &mut tctx.persistent_env,
+                        ctx,
+                    );
+                    return Err(TypeCoreError::UnboundModtype {
+                        loc,
+                        lid: longident,
+                        alternatives,
+                    });
+                }
+            };
 
             // Match OCaml Typetexp.create_package_mty:
             // - sort constraints by longident

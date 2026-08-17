@@ -11194,7 +11194,7 @@ fn lookup_modtype_path_or_error<'b>(
     })
 }
 
-fn unbound_modtype_alternatives<'b>(
+pub(crate) fn unbound_modtype_alternatives<'b>(
     lid: &crate::parser::longident::Longident,
     arena: &ParseArena,
     env: &Env,
