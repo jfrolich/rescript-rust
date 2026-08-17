@@ -15,7 +15,7 @@ use std::{borrow::Cow, fmt};
 
 use super::ast::*;
 use super::longident::Longident;
-use crate::parse_arena::{CoreTypeIdx, ExprIdx, LidentIdx, Located, ParseArena};
+use crate::parse_arena::{CoreTypeIdx, ExprIdx, LidentIdx, Located, ParseArena, StrIdx};
 
 /// Component description type - mirrors OCaml's componentDescription
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -2236,16 +2236,12 @@ fn transform_react_component_external(
 
     // OCaml uses the original return type's location for the outer core_type,
     // and the external's full location for the longident
-    let module_str_idx = arena.push_interned_string(&config.module_name);
     let component_str_idx = arena.intern_string("component");
     let props_type_ref_idx = arena.push_core_type(props_type_ref);
     let component_type = CoreType {
         ptyp_desc: Box::new(CoreTypeDesc::Ptyp_constr(Box::new((
             Loc {
-                txt: arena.push_longident(Longident::Ldot(
-                    Box::new(Longident::Lident(module_str_idx)),
-                    component_str_idx,
-                )),
+                txt: module_access_name_with_idx(arena, config, component_str_idx),
                 loc: loc.clone(),
             },
             vec![props_type_ref_idx],
@@ -2857,15 +2853,11 @@ fn strip_js_nullable(arena: &ParseArena, core_type: &CoreType) -> Option<CoreTyp
 
 /// Create React.element type constraint
 fn jsx_element_type(arena: &mut ParseArena, config: &JsxConfig, loc: &Location) -> CoreType {
-    let module_str_idx = arena.push_interned_string(&config.module_name);
     let element_str_idx = arena.intern_string("element");
     CoreType {
         ptyp_desc: Box::new(CoreTypeDesc::Ptyp_constr(Box::new((
             Loc {
-                txt: arena.push_longident(Longident::Ldot(
-                    Box::new(Longident::Lident(module_str_idx)),
-                    element_str_idx,
-                )),
+                txt: module_access_name_with_idx(arena, config, element_str_idx),
                 loc: loc.clone(),
             },
             vec![],
@@ -3001,16 +2993,32 @@ fn capitalize_first(s: &str) -> String {
     }
 }
 
-/// Build module access path: capitalize(module_) + "." + value -> parsed as Longident
-/// Matches OCaml's module_access_name
-fn module_access_name(arena: &mut ParseArena, config: &JsxConfig, value: &str) -> LidentIdx {
+/// Parse the dotted JSX module path the same way as OCaml `Longident.parse`.
+fn jsx_module_longident(arena: &mut ParseArena, config: &JsxConfig) -> Longident {
     let capitalized = capitalize_first(&config.module_name);
-    let cap_str_idx = arena.push_string(capitalized);
+    let mut segments = capitalized.split('.');
+    let first = segments.next().unwrap_or("");
+    let mut longident = Longident::Lident(arena.push_string(first));
+    for segment in segments {
+        longident = Longident::Ldot(Box::new(longident), arena.push_string(segment));
+    }
+    longident
+}
+
+fn module_access_name_with_idx(
+    arena: &mut ParseArena,
+    config: &JsxConfig,
+    value: StrIdx,
+) -> LidentIdx {
+    let module_path = jsx_module_longident(arena, config);
+    arena.push_longident(Longident::Ldot(Box::new(module_path), value))
+}
+
+/// Build module access path: capitalize(module_) + "." + value -> parsed as Longident.
+/// Matches OCaml `Jsx_v4.module_access_name`.
+fn module_access_name(arena: &mut ParseArena, config: &JsxConfig, value: &str) -> LidentIdx {
     let val_str_idx = arena.intern_string(value);
-    arena.push_longident(Longident::Ldot(
-        Box::new(Longident::Lident(cap_str_idx)),
-        val_str_idx,
-    ))
+    module_access_name_with_idx(arena, config, val_str_idx)
 }
 
 /// Try to find the key prop in a list of JSX props
@@ -4347,9 +4355,9 @@ fn mk_react_jsx(
                     let react_dom_idx = arena.intern_string("ReactDOM");
                     Longident::Lident(react_dom_idx)
                 } else {
-                    let cap_idx = arena.push_string(capitalize_first(&config.module_name));
                     let elements_idx = arena.intern_string("Elements");
-                    Longident::Ldot(Box::new(Longident::Lident(cap_idx)), elements_idx)
+                    let module_path = jsx_module_longident(arena, config);
+                    Longident::Ldot(Box::new(module_path), elements_idx)
                 };
                 let jsx_part_idx = arena.intern_string(jsx_part);
                 arena.push_longident(Longident::Ldot(Box::new(element_binding), jsx_part_idx))
@@ -4421,9 +4429,9 @@ fn append_children_prop(
                     let react_dom_idx = arena.intern_string("ReactDOM");
                     Longident::Lident(react_dom_idx)
                 } else {
-                    let cap_idx = arena.push_string(capitalize_first(&config.module_name));
                     let elements_idx = arena.intern_string("Elements");
-                    Longident::Ldot(Box::new(Longident::Lident(cap_idx)), elements_idx)
+                    let module_path = jsx_module_longident(arena, config);
+                    Longident::Ldot(Box::new(module_path), elements_idx)
                 };
                 let some_element_idx = arena.intern_string("someElement");
                 let some_element_path = arena
@@ -4885,8 +4893,31 @@ fn transform_jsx_container(
 
 #[cfg(test)]
 mod tests {
-    use super::transform_structure;
-    use crate::parser::{Parser, module, sexp_locs};
+    use super::{JsxConfig, module_access_name, transform_structure};
+    use crate::parser::{Longident, Parser, module, sexp_locs};
+
+    #[test]
+    fn parses_dotted_custom_jsx_module_paths() {
+        let mut parser = Parser::new("test.res".to_string(), "");
+        let config = JsxConfig {
+            module_name: "BaseUi.BaseUiJsxDOM".to_string(),
+            ..JsxConfig::default()
+        };
+
+        let path = module_access_name(parser.arena_mut(), &config, "jsx");
+        let Longident::Ldot(module_path, jsx_name) = parser.arena().get_longident(path) else {
+            panic!("expected a qualified JSX access path");
+        };
+        assert_eq!(parser.arena().get_string(*jsx_name), "jsx");
+        let Longident::Ldot(base_ui, runtime_name) = module_path.as_ref() else {
+            panic!("expected the configured JSX module to remain qualified");
+        };
+        assert_eq!(parser.arena().get_string(*runtime_name), "BaseUiJsxDOM");
+        let Longident::Lident(base_ui_name) = base_ui.as_ref() else {
+            panic!("expected BaseUi to be the JSX module root");
+        };
+        assert_eq!(parser.arena().get_string(*base_ui_name), "BaseUi");
+    }
 
     #[test]
     fn transforms_jsx_inside_functor_module_body() {
