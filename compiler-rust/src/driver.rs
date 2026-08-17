@@ -11466,11 +11466,7 @@ pub fn compile_source_to_js_with_options(
     if options.dump_lambda && raw_trace {
         eprintln!("[drawlambda-stage] start");
     }
-    let unit_name = options
-        .source_filename
-        .as_deref()
-        .map(module_name_from_source_filename)
-        .unwrap_or_default();
+    let unit_name = options.current_unit_name().unwrap_or_default();
     let implementation_coercion = compute_raw_implementation_coercion(
         &mut tctx,
         &type_ctx,
@@ -14931,11 +14927,7 @@ pub fn compile_preprocessed_structure_in_process_until_js(
 
     let lambda_start_stamp = synchronize_lambda_start_stamp(&type_ctx);
 
-    let unit_name = options
-        .source_filename
-        .as_deref()
-        .map(module_name_from_source_filename)
-        .unwrap_or_default();
+    let unit_name = options.current_unit_name().unwrap_or_default();
     let (raw_lambda, raw_diagnostic, raw_possible_required_modules, raw_lambda_current_stamp) =
         crate::timing::measure(crate::timing::Phase::Lambda, || {
             let _phase = info_span!("compiler.raw_lambda").entered();

@@ -4256,6 +4256,20 @@ impl<'a> RawLambdaConverter<'a> {
         }
     }
 
+    fn module_declaration_for_path_normalization<'e>(
+        env: &'e crate::types::env::Env,
+        path: &crate::types::Path,
+    ) -> Option<&'e crate::types::decl::ModuleDeclaration> {
+        match path {
+            // OCaml Env.find_module resolves Pident through IdTbl.find_same
+            // (compiler/ml/env.ml:865-875). Do not let an opened same-name
+            // component answer for an already-selected persistent root.
+            crate::types::Path::Pident(id) => env.find_module_same(id).ok(),
+            crate::types::Path::Pdot(..) => env.lookup_module(path).ok(),
+            crate::types::Path::Papply(..) => None,
+        }
+    }
+
     fn normalize_module_path_in_env(
         &mut self,
         env: &crate::types::env::Env,
@@ -4290,7 +4304,7 @@ impl<'a> RawLambdaConverter<'a> {
             return self.normalize_module_path_in_env(env, &alias_target);
         }
 
-        if let Ok(md) = env.lookup_module(&path) {
+        if let Some(md) = Self::module_declaration_for_path_normalization(env, &path) {
             match &md.md_type {
                 crate::types::decl::ModuleType::MtyAlias(_, alias_path) => {
                     if !alias_path.same(&path) {
@@ -4376,7 +4390,7 @@ impl<'a> RawLambdaConverter<'a> {
             return self.normalize_value_prefix_path_in_env(env, &alias_target);
         }
 
-        if let Ok(md) = env.lookup_module(&path) {
+        if let Some(md) = Self::module_declaration_for_path_normalization(env, &path) {
             match &md.md_type {
                 crate::types::decl::ModuleType::MtyAlias(_, alias_path) => {
                     if !alias_path.same(&path) {
