@@ -91,25 +91,6 @@ impl fmt::Display for UserDiagnostic {
 
 impl std::error::Error for UserDiagnostic {}
 
-/// WASM-safe timing: native returns `Instant::now()`, WASM returns `None`
-/// (Instant::now panics on WASM since time isn't implemented there).
-#[inline]
-fn phase_now() -> Option<std::time::Instant> {
-    #[cfg(not(target_arch = "wasm32"))]
-    {
-        Some(std::time::Instant::now())
-    }
-    #[cfg(target_arch = "wasm32")]
-    {
-        None
-    }
-}
-
-#[inline]
-fn phase_elapsed_ms(t: Option<std::time::Instant>) -> u128 {
-    t.map(|t| t.elapsed().as_millis()).unwrap_or(0)
-}
-
 pub fn enable_cli_cleanup_skip() {
     SKIP_CLI_CLEANUP.store(true, Ordering::Relaxed);
 }
