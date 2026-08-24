@@ -1138,57 +1138,6 @@ fn structure_has_config_string(
     })
 }
 
-fn module_expr_needs_jsx_rewrite(
-    module_expr: &ModuleExpr,
-    arena: &crate::parse_arena::ParseArena,
-) -> bool {
-    match &*module_expr.pmod_desc {
-        ModuleExprDesc::Pmod_structure(structure) => structure_needs_jsx_rewrite(structure, arena),
-        ModuleExprDesc::Pmod_functor(inner) => {
-            let (_, _, body) = &**inner;
-            module_expr_needs_jsx_rewrite(arena.get_mod_expr(*body), arena)
-        }
-        ModuleExprDesc::Pmod_apply(lhs, rhs) => {
-            module_expr_needs_jsx_rewrite(arena.get_mod_expr(*lhs), arena)
-                || module_expr_needs_jsx_rewrite(arena.get_mod_expr(*rhs), arena)
-        }
-        ModuleExprDesc::Pmod_constraint(inner, _) => {
-            module_expr_needs_jsx_rewrite(arena.get_mod_expr(*inner), arena)
-        }
-        _ => false,
-    }
-}
-
-fn structure_needs_jsx_rewrite(
-    structure: &Structure,
-    arena: &crate::parse_arena::ParseArena,
-) -> bool {
-    structure.iter().any(|item| match &*item.pstr_desc {
-        // External @react.component declarations need JSX PPX lowering.
-        StructureItemDesc::Pstr_primitive(vd) => {
-            has_react_component_attr(&vd.pval_attributes, arena)
-                || has_react_component_with_props_attr(&vd.pval_attributes, arena)
-        }
-        StructureItemDesc::Pstr_value(inner) => {
-            let (_, bindings) = &**inner;
-            bindings.iter().any(|vb| {
-                has_react_component_attr(&vb.pvb_attributes, arena)
-                    || has_react_component_with_props_attr(&vb.pvb_attributes, arena)
-            })
-        }
-        StructureItemDesc::Pstr_module(mb) => {
-            module_expr_needs_jsx_rewrite(arena.get_mod_expr(mb.pmb_expr), arena)
-        }
-        StructureItemDesc::Pstr_recmodule(mbs) => mbs
-            .iter()
-            .any(|mb| module_expr_needs_jsx_rewrite(arena.get_mod_expr(mb.pmb_expr), arena)),
-        StructureItemDesc::Pstr_include(incl) => {
-            module_expr_needs_jsx_rewrite(arena.get_mod_expr(incl.pincl_mod), arena)
-        }
-        _ => false,
-    })
-}
-
 fn reject_invalid_react_component_destructure_in_structure(
     structure: &Structure,
     arena: &ParseArena,
