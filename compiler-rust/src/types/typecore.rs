@@ -17643,9 +17643,9 @@ fn get_record_labels<'a>(
     {
         if let crate::types::TypeKind::TypeRecord(ref labels, ref repr) = type_decl.type_kind {
             // Cache record labels for raw lambda all-field binding.
-            // Use a unique cache key that includes path stamps to avoid collisions
-            // between different record types with the same name.
-            let cache_key = format!("{:?}", path);
+            // The full Path (including Ident stamps) is the cache key, so
+            // different record types with the same name never collide.
+            let cache_key = path.clone();
             let cache_entries: Vec<_> = labels
                 .iter()
                 .enumerate()

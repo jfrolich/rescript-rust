@@ -1363,10 +1363,9 @@ impl<'a> RawLambdaConverter<'a> {
                         return Some(labels);
                     }
                 }
-                // Try the record labels cache (populated during type checking)
-                // Use Debug format of path for unique key (includes stamps)
-                let cache_key = format!("{:?}", path);
-                if let Some(labels) = self.type_ctx.get_record_labels(&cache_key) {
+                // Try the record labels cache (populated during type checking),
+                // keyed by the exact type path (including stamps)
+                if let Some(labels) = self.type_ctx.get_record_labels(path) {
                     return Some(labels);
                 }
                 // Try env lookup

@@ -8882,10 +8882,9 @@ fn resolve_labels_from_type(
 
     // Match OCaml `lbl.lbl_all` use in compiler/ml/matching.ml:1417-1476.
     // Typecore registers this lightweight cache while reconstructing record
-    // labels for raw lambda conversion, using the exact type path including
-    // stamps. Prefer it before any declaration-name fallback.
-    let cache_key = format!("{:?}", path);
-    if let Some(labels) = ctx_ref.get_record_labels(&cache_key) {
+    // labels for raw lambda conversion, keyed by the exact type path
+    // (including stamps). Prefer it before any declaration-name fallback.
+    if let Some(labels) = ctx_ref.get_record_labels(&path) {
         return Some(label_descriptions_from_cached_entries(labels));
     }
 

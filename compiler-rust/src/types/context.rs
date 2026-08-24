@@ -456,7 +456,7 @@ pub struct TypeContext {
     /// Used by raw lambda conversion to bind ALL record fields (matching OCaml's make_record_matching).
     record_labels_cache: RefCell<
         ahash::AHashMap<
-            String,
+            Path,
             Vec<(
                 String,
                 i32,
@@ -1563,7 +1563,7 @@ impl TypeContext {
     /// Called during type checking when record patterns are processed.
     pub fn register_record_labels(
         &self,
-        type_path_name: &str,
+        type_path: &Path,
         labels: Vec<(
             String,
             i32,
@@ -1574,13 +1574,13 @@ impl TypeContext {
     ) {
         self.record_labels_cache
             .borrow_mut()
-            .insert(type_path_name.to_string(), labels);
+            .insert(type_path.clone(), labels);
     }
 
     /// Look up cached record labels for a type path.
     pub fn get_record_labels(
         &self,
-        type_path_name: &str,
+        type_path: &Path,
     ) -> Option<
         Vec<(
             String,
@@ -1592,7 +1592,7 @@ impl TypeContext {
     > {
         self.record_labels_cache
             .borrow()
-            .get(type_path_name)
+            .get(type_path)
             .cloned()
     }
 
