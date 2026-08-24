@@ -1391,7 +1391,7 @@ impl<'a> RawLambdaConverter<'a> {
                                     (
                                         name,
                                         pos as i32,
-                                        ld.ld_mutable.clone(),
+                                        ld.ld_mutable,
                                         repr.clone(),
                                         ld.ld_attributes.clone(),
                                     )
@@ -1423,7 +1423,7 @@ impl<'a> RawLambdaConverter<'a> {
                                     (
                                         name,
                                         pos as i32,
-                                        ld.ld_mutable.clone(),
+                                        ld.ld_mutable,
                                         repr.clone(),
                                         ld.ld_attributes.clone(),
                                     )
@@ -1454,7 +1454,7 @@ impl<'a> RawLambdaConverter<'a> {
                                     (
                                         name,
                                         pos as i32,
-                                        ld.ld_mutable.clone(),
+                                        ld.ld_mutable,
                                         repr.clone(),
                                         ld.ld_attributes.clone(),
                                     )

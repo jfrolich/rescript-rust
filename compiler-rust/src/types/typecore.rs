@@ -4518,7 +4518,7 @@ fn build_as_type(
                             // result type must point to the concrete record type.
                             lbl_res: record_res,
                             lbl_arg: crate::types::instance(ctx, label_decl.ld_type),
-                            lbl_mut: label_decl.ld_mutable.clone(),
+                            lbl_mut: label_decl.ld_mutable,
                             lbl_optional: label_decl.ld_optional,
                             lbl_pos: idx as i32,
                             lbl_all: crate::types::LabelArrayRef(0),
@@ -17234,7 +17234,7 @@ fn type_record(
                         lbl_name: label_name.clone(),
                         lbl_res: record_ty,
                         lbl_arg: crate::types::instance(ctx, label_decl.ld_type),
-                        lbl_mut: label_decl.ld_mutable.clone(),
+                        lbl_mut: label_decl.ld_mutable,
                         lbl_optional: label_decl.ld_optional,
                         lbl_pos: lbl_idx as i32,
                         lbl_all: crate::types::LabelArrayRef(0),
@@ -17274,7 +17274,7 @@ fn type_record(
                         lbl_name: label_name.clone(),
                         lbl_res: record_ty,
                         lbl_arg: option_ty,
-                        lbl_mut: label_decl.ld_mutable.clone(),
+                        lbl_mut: label_decl.ld_mutable,
                         lbl_optional: true,
                         lbl_pos: lbl_idx as i32,
                         lbl_all: crate::types::LabelArrayRef(0),
@@ -17662,7 +17662,7 @@ fn get_record_labels<'a>(
                     (
                         name,
                         pos as i32,
-                        ld.ld_mutable.clone(),
+                        ld.ld_mutable,
                         repr.clone(),
                         ld.ld_attributes.clone(),
                     )
@@ -23496,7 +23496,7 @@ where
                     .iter()
                     .map(|label| crate::types::decl::LabelDeclaration {
                         ld_id: label.ld_id.clone(),
-                        ld_mutable: label.ld_mutable.clone(),
+                        ld_mutable: label.ld_mutable,
                         ld_optional: label.ld_optional,
                         ld_type: copy_lookup_type_expr_with_paths(
                             ctx,
@@ -23548,7 +23548,7 @@ where
                     .iter()
                     .map(|label| crate::types::decl::LabelDeclaration {
                         ld_id: label.ld_id.clone(),
-                        ld_mutable: label.ld_mutable.clone(),
+                        ld_mutable: label.ld_mutable,
                         ld_optional: label.ld_optional,
                         ld_type: copy_lookup_type_expr_with_paths(
                             ctx,
@@ -23622,7 +23622,7 @@ where
                     .iter()
                     .map(|label| crate::types::decl::LabelDeclaration {
                         ld_id: label.ld_id.clone(),
-                        ld_mutable: label.ld_mutable.clone(),
+                        ld_mutable: label.ld_mutable,
                         ld_optional: label.ld_optional,
                         ld_type: copy_lookup_type_expr_with_paths(
                             ctx,
