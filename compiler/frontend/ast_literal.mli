@@ -26,10 +26,6 @@ type 'a lit = ?loc:Location.t -> unit -> 'a
 
 val predef_option : Longident.t
 
-val predef_some : Longident.t
-
-val predef_none : Longident.t
-
 module Lid : sig
   type t = Longident.t
 
@@ -43,13 +39,11 @@ module Lid : sig
 
   val pervasives : t
 
-  val js_oo : t
+  val js_extern : t
 
-  val js_meth_callback : t
+  val method_callback : t
 
   val hidden_field : string -> t
-
-  val ignore_id : t
 
   val js_null : t
 

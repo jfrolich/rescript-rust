@@ -116,6 +116,8 @@ let primitive ppf = function
   | Pfield (n, fld) -> fprintf ppf "field:%s/%i" (str_of_field_info fld) n
   | Psetfield (n, _) -> fprintf ppf "setfield %i" n
   | Pduprecord -> fprintf ppf "duprecord"
+  | Precord_rest excluded ->
+    fprintf ppf "record_rest(%s)" (String.concat ", " excluded)
   | Pccall p -> fprintf ppf "%s" p.prim_name
   | Praise k -> fprintf ppf "%s" (Lambda.raise_kind k)
   | Pobjcomp Ceq -> fprintf ppf "=="
@@ -221,14 +223,12 @@ let primitive ppf = function
   | Pstringmax -> fprintf ppf "max"
   | Pstringadd -> fprintf ppf "string.concat"
   | Parraylength -> fprintf ppf "array.length"
-  | Pmakearray Mutable -> fprintf ppf "makearray"
-  | Pmakearray Immutable -> fprintf ppf "makearray_imm"
+  | Pmakearray -> fprintf ppf "makearray"
   | Parrayrefu -> fprintf ppf "array.unsafe_get"
   | Parraysetu -> fprintf ppf "array.unsafe_set"
   | Parrayrefs -> fprintf ppf "array.get"
   | Parraysets -> fprintf ppf "array.set"
-  | Pmakelist Mutable -> fprintf ppf "makelist"
-  | Pmakelist Immutable -> fprintf ppf "makelist_imm"
+  | Pmakelist -> fprintf ppf "makelist"
   | Pmakedict -> fprintf ppf "makedict"
   | Pdict_has -> fprintf ppf "dict.has"
   | Pisint -> fprintf ppf "isint"
@@ -260,9 +260,9 @@ let primitive ppf = function
   | Pis_poly_var_block -> fprintf ppf "#is_poly_var_block"
   | Pjs_raw_expr -> fprintf ppf "#raw_expr"
   | Pjs_raw_stmt -> fprintf ppf "#raw_stmt"
-  | Pjs_fn_make arity -> fprintf ppf "#fn_mk(%d)" arity
-  | Pjs_fn_make_unit -> fprintf ppf "#fn_mk_unit"
   | Pjs_fn_method -> fprintf ppf "#fn_method"
+  (* Debug-only dump, exercised solely under -drawlambda/-dlambda. *)
+  | Ptagged_template -> fprintf ppf "#tagged_template" [@coverage off]
 
 let function_attribute ppf {inline; is_a_functor; return_unit} =
   if is_a_functor then fprintf ppf "is_a_functor@ ";

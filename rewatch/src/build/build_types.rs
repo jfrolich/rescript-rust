@@ -1,5 +1,5 @@
 use crate::build::packages::{Namespace, Package};
-use crate::config::Config;
+use crate::config::{Config, SourceMapCommand};
 use crate::project_context::ProjectContext;
 use ahash::{AHashMap, AHashSet};
 use blake3::Hash;
@@ -202,6 +202,7 @@ pub struct BuildState {
     pub deleted_modules: AHashSet<String>,
     pub compiler_info: CompilerInfo,
     pub deps_initialized: bool,
+    pub source_map_command: SourceMapCommand,
 }
 
 /// Extended build state that includes command-line specific overrides.
@@ -285,6 +286,7 @@ impl BuildState {
         project_context: ProjectContext,
         packages: AHashMap<String, Package>,
         compiler: CompilerInfo,
+        source_map_command: SourceMapCommand,
     ) -> Self {
         Self {
             project_context,
@@ -294,6 +296,7 @@ impl BuildState {
             deleted_modules: AHashSet::new(),
             compiler_info: compiler,
             deps_initialized: false,
+            source_map_command,
         }
     }
 
@@ -318,10 +321,11 @@ impl BuildCommandState {
         subprocess: bool,
         dump_typed_sexp: bool,
         features: Option<Vec<String>>,
+        source_map_command: SourceMapCommand,
     ) -> Self {
         Self {
             root_folder,
-            build_state: BuildState::new(project_context, packages, compiler),
+            build_state: BuildState::new(project_context, packages, compiler, source_map_command),
             warn_error_override,
             build_mode,
             subprocess,

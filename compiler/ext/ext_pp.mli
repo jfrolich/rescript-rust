@@ -35,13 +35,9 @@ type t
     }
 *)
 
-val indent_length : int
-
 val string : t -> string -> unit
 
 val space : t -> unit
-
-val nspace : t -> int -> unit
 
 val group : t -> int -> (unit -> 'a) -> 'a
 (** [group] will record current indentation 
@@ -77,3 +73,5 @@ val from_channel : out_channel -> t
 val from_buffer : Buffer.t -> t
 
 val flush : t -> unit -> unit
+
+val position : t -> int * int

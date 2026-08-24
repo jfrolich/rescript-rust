@@ -287,9 +287,7 @@ module Delim = struct
     | _ -> Unrecognized
 
   let escaped_j_delimiter = "*j" (* not user level syntax allowed *)
-  let escaped_back_quote_delimiter = "bq"
   let some_escaped_back_quote_delimiter = Some "bq"
-  let unescaped_js_delimiter = "js"
   let some_escaped_j_delimiter = Some escaped_j_delimiter
 end
 
@@ -334,11 +332,5 @@ let transform_pat (p : Parsetree.pattern) s delim : Parsetree.pattern =
           (Pconst_string (s, Delim.some_escaped_back_quote_delimiter));
     }
   | Unrecognized -> p
-
-let is_unicode_string opt =
-  Ext_string.equal opt Delim.escaped_j_delimiter
-  || Ext_string.equal opt Delim.escaped_back_quote_delimiter
-
-let is_unescaped s = Ext_string.equal s Delim.unescaped_js_delimiter
 
 let parse_processed_delim = Delim.parse_processed

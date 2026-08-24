@@ -43,6 +43,13 @@ type pattern = {
   pat_attributes: attributes;
 }
 
+and record_pat_rest = {
+  rest_ident: Ident.t;
+  rest_name: string loc;
+  rest_type: type_expr;
+  excluded_runtime_labels: string list;
+}
+
 and pat_extra =
   | Tpat_constraint of core_type
       (** P : T          { pat_desc = P
@@ -85,10 +92,11 @@ and pattern_desc =
   | Tpat_record of
       (Longident.t loc * label_description * pattern * bool (* optional *)) list
       * closed_flag
+      * record_pat_rest option
       (** { l1=P1; ...; ln=Pn }     (flag = Closed)
             { l1=P1; ...; ln=Pn; _}   (flag = Open)
 
-            Invariant: n > 0
+            Invariant: n > 0 unless this is a rest-only record pattern
          *)
   | Tpat_array of pattern list  (** [| P1; ...; Pn |] *)
   | Tpat_or of pattern * pattern * row_desc option
@@ -115,7 +123,6 @@ and exp_extra =
       (** let open[!] M in    [Texp_open (!, P, M, env)]
                                 where [env] is the environment after opening [P]
          *)
-  | Texp_newtype of string  (** fun (type t) ->  *)
 
 and expression_desc =
   | Texp_ident of Path.t * Longident.t loc * Types.value_description
@@ -128,11 +135,8 @@ and expression_desc =
             let rec P1 = E1 and ... and Pn = EN in E   (flag = Recursive)
          *)
   | Texp_function of {
-      arg_label: arg_label;
-      arity: arity;
-      param: Ident.t;
-      case: case;
-      partial: partial;
+      params: function_param list;
+      body: expression;
       async: bool;
     }
       (** [Pexp_fun] and [Pexp_function] both translate to [Texp_function].
@@ -220,18 +224,28 @@ and expression_desc =
       * expression
       * direction_flag
       * expression
-  | Texp_for_of of Ident.t * Parsetree.pattern * expression * expression
-  | Texp_for_await_of of Ident.t * Parsetree.pattern * expression * expression
   | Texp_send of expression * meth * expression option
   | Texp_letmodule of Ident.t * string loc * module_expr * expression
   | Texp_letexception of extension_constructor * expression
   | Texp_assert of expression
   | Texp_pack of module_expr
   | Texp_extension_constructor of Longident.t loc * Path.t
+  (* Keep new expression constructors at the end. CMT files are marshalled by
+     runtime constructor tag, so inserting constructors before existing ones
+     breaks analysis when it reads CMTs produced by older compiler versions. *)
+  | Texp_for_of of Ident.t * Parsetree.pattern * expression * expression
+  | Texp_for_await_of of Ident.t * Parsetree.pattern * expression * expression
 
 and meth = Tmeth_name of string
 
 and case = {c_lhs: pattern; c_guard: expression option; c_rhs: expression}
+
+and function_param = {
+  fp_lbl: arg_label;
+  fp_param: Ident.t; (* the name the compiled parameter binds to *)
+  fp_pat: pattern;
+  fp_partial: partial; (* whether [fp_pat] is exhaustive *)
+}
 
 and record_label_definition =
   | Kept of Types.type_expr
@@ -384,7 +398,6 @@ and open_description = {
   open_path: Path.t;
   open_txt: Longident.t loc;
   open_override: override_flag;
-  open_loc: Location.t;
   open_attributes: attribute list;
 }
 
@@ -418,7 +431,7 @@ and arg = {attrs: attributes; lbl: arg_label; typ: core_type}
 and core_type_desc =
   | Ttyp_any
   | Ttyp_var of string
-  | Ttyp_arrow of arg * core_type * arity
+  | Ttyp_arrow of arg list * core_type
   | Ttyp_tuple of core_type list
   | Ttyp_constr of Path.t * Longident.t loc * core_type list
   | Ttyp_object of object_field list * closed_flag
@@ -430,8 +443,6 @@ and core_type_desc =
 and package_type = {
   pack_path: Path.t;
   pack_fields: (Longident.t loc * core_type) list;
-  pack_type: Types.module_type;
-  pack_txt: Longident.t loc;
 }
 
 and row_field =
@@ -496,7 +507,6 @@ and constructor_arguments =
 
 and type_extension = {
   tyext_path: Path.t;
-  tyext_txt: Longident.t loc;
   tyext_params: (core_type * variance) list;
   tyext_constructors: extension_constructor list;
   tyext_private: private_flag;

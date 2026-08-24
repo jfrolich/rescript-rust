@@ -129,14 +129,14 @@ let x = /* before */ user /* c0 */. /* c1 */ name /* c2 */
 
 // Pexp_ifthenelse
 if /* c0 */ user.name === "Steve" /* c1 */ {
-  /* c2 */ Js.log("It's Steve") /* c3 */
+  /* c2 */ Console.log("It's Steve") /* c3 */
 } // trailing
 
 if /* c0 */ user.name === "John" /* c1 */ {
-  /* c2 */ Js.log("It's John…") /* c3 */
+  /* c2 */ Console.log("It's John…") /* c3 */
 } else {
   // c4
-  /* c5 */ Js.log("we need John") /* c6 */
+  /* c5 */ Console.log("we need John") /* c6 */
 } // trailing
 
 if a {
@@ -174,6 +174,18 @@ while /* c0 */ condition.contents /* c1 */ {
 // Pexp_for
 for /* c0 */ i /* c1 */ in /* c2 */ 0 /* c3 */ to /* c4 */ 10  /* c5 */ {
   /* c6 */ doStuff() /* c7 */
+} // trailing
+
+// Pexp_for_of
+for /* c0 */ x /* c1 */ of /* c2 */ xs /* c3 */ {
+  // c4
+  doStuff()
+} // trailing
+
+// Pexp_for_await_of
+for await /* c0 */ x /* c1 */ of /* c2 */ xs /* c3 */ {
+  // c4
+  doStuff()
 } // trailing
 
 // Pexp_pack
@@ -269,7 +281,7 @@ f((~a)
 let x = /* c0 */ test /* c1 */ ? /* c2 */ true /* c3 */ : /* c4 */ false /* c5 */
 
 // Pexp_if case, don't duplicate comments
-if next == Js.null {
+if next == null {
   /* only one element */
   clear(q)
   Some(contentGet(x))

@@ -3,6 +3,7 @@
 import * as Stdlib_IntTests from "./Stdlib_IntTests.mjs";
 import * as Stdlib_DictTests from "./Stdlib_DictTests.mjs";
 import * as Stdlib_JsonTests from "./Stdlib_JsonTests.mjs";
+import * as Stdlib_ListTests from "./Stdlib_ListTests.mjs";
 import * as Stdlib_TestTests from "./Stdlib_TestTests.mjs";
 import * as Stdlib_ArrayTests from "./Stdlib_ArrayTests.mjs";
 import * as Stdlib_ErrorTests from "./Stdlib_ErrorTests.mjs";
@@ -68,6 +69,12 @@ let assertWillThrow = Stdlib_TypedArrayTests.assertWillThrow;
 let areSame = Stdlib_TypedArrayTests.areSame;
 
 let o = Stdlib_TypedArrayTests.o;
+
+let nan = Stdlib_FloatTests.nan;
+
+let infinity = Stdlib_FloatTests.infinity;
+
+let neg_infinity = Stdlib_FloatTests.neg_infinity;
 
 let decodeJsonTest = Stdlib_JsonTests.decodeJsonTest;
 
@@ -193,6 +200,9 @@ export {
   assertWillThrow,
   areSame,
   o,
+  nan,
+  infinity,
+  neg_infinity,
   decodeJsonTest,
   shouldHandleNullableValues,
   someString,

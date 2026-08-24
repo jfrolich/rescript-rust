@@ -1,12 +1,12 @@
-module StringMap = Map.Make (String)
+module String_map = Map.Make (String)
 
 let t_equals t1 t2 = t1.Types.level = t2.Types.level && t1.id = t2.id
 
 let substitute_types ~type_map (t : Types.type_expr) =
-  if StringMap.is_empty type_map then t
+  if String_map.is_empty type_map then t
   else
     let apply_substitution type_variable_name t =
-      match StringMap.find_opt type_variable_name type_map with
+      match String_map.find_opt type_variable_name type_map with
       | None -> t
       | Some substituted_type -> substituted_type
     in
@@ -22,10 +22,15 @@ let substitute_types ~type_map (t : Types.type_expr) =
       | Tsubst t -> {t with desc = Tsubst (loop t)}
       | Tvariant rd -> {t with desc = Tvariant (row_desc rd)}
       | Tnil -> t
-      | Tarrow (arg, ret, c, arity) ->
+      | Tarrow (params, ret) ->
         {
           t with
-          desc = Tarrow ({arg with typ = loop arg.typ}, loop ret, c, arity);
+          desc =
+            Tarrow
+              ( List.map
+                  (fun (arg : Types.arg) -> {arg with typ = loop arg.typ})
+                  params,
+                loop ret );
         }
       | Ttuple tl -> {t with desc = Ttuple (tl |> List.map loop)}
       | Tobject (t, r) -> {t with desc = Tobject (loop t, r)}
@@ -59,8 +64,9 @@ let substitute_type_vars (type_vars : (string * Types.type_expr) list)
   let type_map =
     type_vars
     |> List.fold_left
-         (fun acc (tvar_name, tvar_typ) -> StringMap.add tvar_name tvar_typ acc)
-         StringMap.empty
+         (fun acc (tvar_name, tvar_typ) ->
+           String_map.add tvar_name tvar_typ acc)
+         String_map.empty
   in
   substitute_types ~type_map typ
 

@@ -467,6 +467,15 @@ JS IR
 JavaScript Code
 ```
 
+### Platform-specific compiler modules
+
+The Dune `browser` profile builds the playground compiler. Platform-dependent
+modules are stored below `platform/native/` and `platform/playground/` in their
+owning compiler directory. Rules in that directory's `dune` file copy the
+selected implementation into the build directory as an ordinary `.ml` module;
+all other profiles select the native source. Generated module paths in errors
+or stack traces therefore map back to one of those two source directories.
+
 ### Key Directory Structure
 
 ```
@@ -521,6 +530,8 @@ tests/
    - Unit tests for utility functions
    - Always check JavaScript output quality
 
+4. **Add a `CHANGELOG.md` entry** for any user-facing change (bug fix, feature, or breaking change). Put it under the matching section of the current `(Unreleased)` version and end the line with the PR link. See [CONTRIBUTING.md](CONTRIBUTING.md). PRs are expected to include one.
+
 ### Debugging Techniques
 
 #### View Intermediate Representations
@@ -563,7 +574,25 @@ tests/
 2. **Integration tests** (`tests/tests/`) - End-to-end behavior
 3. **Unit tests** (`tests/ounit_tests/`) - Compiler functions
 4. **Build tests** (`tests/build_tests/`) - Error cases and edge cases
-5. **Type tests** (`tests/build_tests/super_errors/`) - Type checking behavior
+5. **Type tests** (`tests/build_tests/super_errors/`) - Single-file type checking errors
+6. **Multi-file error tests** (`tests/build_tests/super_errors_multi/`) - Cross-module errors that need separate `.res` / `.resi` files
+
+#### Error variant catalog
+
+[`tests/ERROR_VARIANTS.md`](tests/ERROR_VARIANTS.md) is a per-module
+catalog of every error and warning variant the compiler can emit, with
+each entry mapped to a fixture (or a documented reason it's unreachable).
+
+**When adding or removing an error variant**, also update the catalog:
+
+1. Add (or remove) the row in the relevant module section.
+2. Set the status (`✓` covered / `⚠` unreachable / `☐` TODO).
+3. If covered, link the fixture path; if unreachable, note the reason.
+
+**When adding or removing a fixture**, update the corresponding row's
+`Fixture` and status columns so the catalog stays in sync with the test
+suite. The catalog is the primary tool for finding coverage gaps and
+dead-code removal candidates; stale entries make both jobs harder.
 
 ## Build Commands & Development
 
@@ -692,6 +721,14 @@ These principles apply to all performance-sensitive Rust code in the compiler, e
 - Include appropriate tests with all changes
 - Build must pass before committing
 - **Commit atomically** - Each commit should address exactly one concern (one bug fix, one feature, one refactor). When making multiple related changes, split them into separate atomic commits. For example, if fixing a parity issue requires adding a new field to a struct and then using that field in parsing logic, make two commits: one for the struct change, one for the parsing logic. This makes it easier to review changes, bisect issues, revert specific changes if needed, and understand the evolution of the codebase. Each commit message should clearly describe what was changed and why.
+
+### Stacked pull requests
+
+When a PR depends on another unmerged PR, create a native GitHub stack with
+`gh stack` rather than only targeting the preceding feature branch. Keep the
+branches linear and in the same repository, and list branches or PRs from
+bottom to top. For existing PRs, use `gh stack link BOTTOM_PR [NEXT_PR...]`,
+then verify that GitHub reports stack metadata and runs CI for every PR.
 
 ### Code Quality
 
@@ -853,6 +890,39 @@ This is useful for iterating on a specific test without running the full suite.
 - **Compiler Args**: Check generated `bsc` arguments in `compile.rs`
 - **Dependencies**: Inspect module dependency graph in `deps.rs`
 - **File Watching**: Monitor file change events in `watcher.rs`
+
+#### OpenTelemetry Tracing
+
+Rewatch supports OpenTelemetry (OTEL) tracing for build and watch commands. To visualize traces locally, run a Jaeger all-in-one container:
+
+```bash
+docker run -d --name jaeger \
+  -p 4317:4317 -p 4318:4318 -p 16686:16686 \
+  jaegertracing/all-in-one
+```
+
+Then run rewatch with the OTLP endpoint set:
+
+```bash
+OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318 cargo run --manifest-path rewatch/Cargo.toml -- build
+```
+
+Open http://localhost:16686 to view traces in the Jaeger UI.
+
+Note: Use `tracing::debug!` (not `log::debug!`) for events you want to appear in OTEL traces — they use separate logging systems.
+
+##### Honored environment variables
+
+Rewatch follows the OTEL spec for configuration — no rewatch-specific knobs exist.
+
+| Variable | Purpose |
+|---|---|
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | Base endpoint of the collector (e.g. `http://localhost:4318`). `/v1/traces` is appended for the trace exporter. Setting this (or `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`) is what enables telemetry — if neither is set, tracing is a no-op. |
+| `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` | Full trace endpoint used verbatim. Overrides the general endpoint for traces. |
+| `OTEL_EXPORTER_OTLP_HEADERS` | Extra headers on exporter requests (e.g. `authorization=Bearer xyz`). |
+| `OTEL_SERVICE_NAME` | Service name reported on spans. Defaults to `rewatch`. |
+| `OTEL_RESOURCE_ATTRIBUTES` | Comma-separated `key=value` pairs added as resource attributes (e.g. `deployment.environment=ci,host.name=$HOSTNAME`). |
+| `RUST_LOG` | Controls which span/event levels are captured (e.g. `RUST_LOG=info`, `RUST_LOG=rewatch=debug`). Defaults to `debug` when telemetry is enabled. |
 
 #### Running Rewatch Directly
 

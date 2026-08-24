@@ -53,6 +53,7 @@ and lfunction = {
   params: ident list;
   body: t;
   attr: Lambda.function_attribute;
+  loc: Location.t;
 }
 
 and prim_info = private {
@@ -91,8 +92,6 @@ and t = private
    we should use record for trivial debugger info
 *)
 
-val inner_map : t -> (t -> t) -> t
-
 val handle_bs_non_obj_ffi :
   ?transformed_jsx:bool ->
   External_arg_spec.params ->
@@ -116,6 +115,7 @@ val const : Lam_constant.t -> t
 val apply : ?ap_transformed_jsx:bool -> t -> t list -> ap_info -> t
 
 val function_ :
+  loc:Location.t ->
   attr:Lambda.function_attribute ->
   arity:int ->
   params:ident list ->

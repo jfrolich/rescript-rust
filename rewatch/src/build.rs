@@ -12,6 +12,7 @@ pub mod read_compile_state;
 use self::parse::parser_args;
 use crate::build::compile::{mark_modules_with_deleted_deps_dirty, mark_modules_with_expired_deps_dirty};
 use crate::build::compiler_info::{CompilerCheckResult, verify_compiler_info, write_compiler_info};
+use crate::config::SourceMapCommand;
 use crate::helpers::emojis::*;
 use crate::helpers::{self};
 use crate::lock::{LockKind, drop_lock, get_lock_or_exit};
@@ -28,7 +29,7 @@ use std::fs::File;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
-use tracing::info_span;
+use tracing::{info_span, instrument};
 
 fn is_dirty(module: &Module) -> bool {
     match module.source_type {
@@ -109,6 +110,7 @@ pub fn format_finished_compilation_message(
     )
 }
 
+#[instrument(name = "rewatch.compiler_args", skip_all, fields(file_path = %rescript_file_path.display()))]
 pub fn get_compiler_args(rescript_file_path: &Path) -> Result<String> {
     let _span = info_span!(
         "rewatch.compiler_args",
@@ -161,7 +163,8 @@ pub fn get_compiler_args(rescript_file_path: &Path) -> Result<String> {
         is_type_dev,
         true,
         None, // No warn_error_override for compiler-args command
-        &[],  // Source dirs not available outside full build; gentype falls back to defaults.
+        SourceMapCommand::Build,
+        &[], // Source dirs not available outside full build; gentype falls back to defaults.
     )?;
 
     let result = serde_json::to_string_pretty(&CompilerArgs {
@@ -187,6 +190,7 @@ pub fn get_compiler_info(project_context: &ProjectContext) -> Result<CompilerInf
 }
 
 #[allow(clippy::too_many_arguments)]
+#[instrument(name = "build.initialize", skip_all)]
 pub fn initialize_build(
     default_timing: Option<Duration>,
     filter: &Option<regex::Regex>,
@@ -199,6 +203,7 @@ pub fn initialize_build(
     dump_typed_sexp: bool,
     prod: bool,
     features: Option<Vec<String>>,
+    source_map_command: SourceMapCommand,
 ) -> Result<BuildCommandState> {
     let _span = info_span!(
         "build.initialize",
@@ -214,7 +219,10 @@ pub fn initialize_build(
     let timing_clean_start = Instant::now();
     let packages = packages::make(filter, &project_context, show_progress, prod, features.as_ref())?;
 
-    let compiler_check = verify_compiler_info(&packages, &compiler);
+    let source_map_args = project_context
+        .get_root_config()
+        .get_source_map_args(source_map_command);
+    let compiler_check = verify_compiler_info(&packages, &compiler, &source_map_args);
 
     if !packages::validate_packages_dependencies(&packages) {
         return Err(anyhow!("Failed to validate package dependencies"));
@@ -230,6 +238,7 @@ pub fn initialize_build(
         subprocess,
         dump_typed_sexp,
         features,
+        source_map_command,
     );
     packages::parse_packages(&mut build_state)?;
 
@@ -313,6 +322,15 @@ impl fmt::Display for IncrementalBuildError {
     }
 }
 
+pub fn with_build_lock<T>(path: &Path, f: impl FnOnce() -> T) -> T {
+    let build_folder = path.to_string_lossy().to_string();
+    let _lock = get_lock_or_exit(LockKind::Build, &build_folder);
+    let result = f();
+    let _lock = drop_lock(LockKind::Build, &build_folder);
+    result
+}
+
+#[instrument(name = "build.incremental", skip_all, fields(module_count = build_state.modules.len()))]
 pub fn incremental_build(
     build_state: &mut BuildCommandState,
     default_timing: Option<Duration>,
@@ -322,13 +340,32 @@ pub fn incremental_build(
     create_sourcedirs: bool,
     plain_output: bool,
 ) -> Result<CompilationOutcome, IncrementalBuildError> {
-    let _span = info_span!(
-        "build.incremental",
-        module_count = build_state.modules.len(),
-        initial_build,
-        in_process = build_state.build_mode().is_in_process()
-    )
-    .entered();
+    let build_folder = build_state.root_folder.clone();
+    with_build_lock(&build_folder, || {
+        incremental_build_without_lock(
+            build_state,
+            default_timing,
+            initial_build,
+            show_progress,
+            only_incremental,
+            create_sourcedirs,
+            plain_output,
+        )
+    })
+}
+
+// `build` needs to lock before initialization because initialization mutates previous
+// build artifacts. Keep the compile body separate so it can run under that wider lock.
+#[instrument(name = "build.incremental.unlocked", skip_all, fields(module_count = build_state.modules.len()))]
+pub fn incremental_build_without_lock(
+    build_state: &mut BuildCommandState,
+    default_timing: Option<Duration>,
+    initial_build: bool,
+    show_progress: bool,
+    only_incremental: bool,
+    create_sourcedirs: bool,
+    plain_output: bool,
+) -> Result<CompilationOutcome, IncrementalBuildError> {
     let phase_timing_enabled = rescript_compiler::timing::enabled();
     if phase_timing_enabled {
         rescript_compiler::timing::reset();
@@ -337,10 +374,6 @@ pub fn incremental_build(
     if compiler_counters_enabled {
         rescript_compiler::perf_counters::reset();
     }
-    let build_folder = build_state.root_folder.to_string_lossy().to_string();
-
-    let _lock = get_lock_or_exit(LockKind::Build, &build_folder);
-
     logs::initialize(&build_state.packages);
 
     // When dump_typed_sexp is set, force all modules parse_dirty and compile_dirty
@@ -401,7 +434,6 @@ pub fn incremental_build(
             }
 
             eprintln!("{}", &err);
-            let _lock = drop_lock(LockKind::Build, &build_folder);
             print_compiler_reports(phase_timing_enabled, compiler_counters_enabled);
 
             return Err(IncrementalBuildError {
@@ -471,7 +503,6 @@ pub fn incremental_build(
     )
     .map_err(|e| {
         let _error_span = info_span!("build.compile_error").entered();
-        let _lock = drop_lock(LockKind::Build, &build_folder);
         print_compiler_reports(phase_timing_enabled, compiler_counters_enabled);
 
         IncrementalBuildError {
@@ -488,6 +519,7 @@ pub fn incremental_build(
     }
     pb.finish();
     if !compile_errors.is_empty() {
+        let _error_span = info_span!("build.compile_error").entered();
         if show_progress {
             if plain_output {
                 eprintln!("Compiled {num_compiled_modules} modules")
@@ -503,6 +535,7 @@ pub fn incremental_build(
             }
         }
         if has_output(&compile_warnings) {
+            let _warning_span = info_span!("build.compile_warning").entered();
             eprintln!("{}", &compile_warnings);
         }
         if initial_build {
@@ -512,9 +545,7 @@ pub fn incremental_build(
             eprintln!("{}", &compile_errors);
         }
 
-        let _lock = drop_lock(LockKind::Build, &build_folder);
         print_compiler_reports(phase_timing_enabled, compiler_counters_enabled);
-
         Err(IncrementalBuildError {
             kind: IncrementalBuildErrorKind::CompileError(None),
             plain_output,
@@ -553,7 +584,6 @@ pub fn incremental_build(
         // Write per-package compiler metadata to `lib/bs/compiler-info.json` (idempotent)
         write_compiler_info(build_state);
 
-        let _lock = drop_lock(LockKind::Build, &build_folder);
         print_compiler_reports(phase_timing_enabled, compiler_counters_enabled);
         Ok(outcome)
     }
@@ -668,6 +698,7 @@ pub fn write_build_ninja(build_state: &BuildCommandState) {
 }
 
 #[allow(clippy::too_many_arguments)]
+#[instrument(name = "rewatch.build", skip_all, fields(working_dir = %path.display()))]
 pub fn build(
     filter: &Option<regex::Regex>,
     path: &Path,
@@ -696,57 +727,143 @@ pub fn build(
         None
     };
     let timing_total = Instant::now();
-    let mut build_state = initialize_build(
-        default_timing,
-        filter,
-        show_progress,
-        path,
-        plain_output,
-        warn_error,
-        build_mode,
-        subprocess,
-        dump_typed_sexp,
-        prod,
-        features,
-    )
-    .with_context(|| "Could not initialize build")?;
+    with_build_lock(path, || {
+        let mut build_state = initialize_build(
+            default_timing,
+            filter,
+            show_progress,
+            path,
+            plain_output,
+            warn_error,
+            build_mode,
+            subprocess,
+            dump_typed_sexp,
+            prod,
+            features,
+            crate::config::SourceMapCommand::Build,
+        )
+        .with_context(|| "Could not initialize build")?;
 
-    match incremental_build(
-        &mut build_state,
-        default_timing,
-        true,
-        show_progress,
-        false,
-        create_sourcedirs,
-        plain_output,
-    ) {
-        Ok(result) => {
-            if !plain_output && show_progress {
-                let timing_total_elapsed = timing_total.elapsed();
-                println!(
-                    "\n{}",
-                    format_finished_compilation_message(
-                        None,
-                        result,
-                        default_timing.unwrap_or(timing_total_elapsed),
-                    )
-                );
+        match incremental_build_without_lock(
+            &mut build_state,
+            default_timing,
+            true,
+            show_progress,
+            false,
+            create_sourcedirs,
+            plain_output,
+        ) {
+            Ok(result) => {
+                if !plain_output && show_progress {
+                    let timing_total_elapsed = timing_total.elapsed();
+                    println!(
+                        "\n{}",
+                        format_finished_compilation_message(
+                            None,
+                            result,
+                            default_timing.unwrap_or(timing_total_elapsed),
+                        )
+                    );
+                }
+                clean::cleanup_after_build(&build_state);
+                write_build_ninja(&build_state);
+                Ok(build_state)
             }
-            clean::cleanup_after_build(&build_state);
-            write_build_ninja(&build_state);
-            Ok(build_state)
+            Err(e) => {
+                clean::cleanup_after_build(&build_state);
+                write_build_ninja(&build_state);
+                Err(anyhow!("Incremental build failed. Error: {e}"))
+            }
         }
-        Err(e) => {
-            clean::cleanup_after_build(&build_state);
-            write_build_ninja(&build_state);
-            Err(anyhow!("Incremental build failed. Error: {e}"))
-        }
-    }
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
+    use std::process;
+    use std::sync::mpsc;
+    use std::thread;
+    use tempfile::TempDir;
+
+    #[test]
+    fn with_build_lock_holds_lock_while_running_work() {
+        let temp_dir = TempDir::new().expect("temp dir should be created");
+        let project_folder = temp_dir.path();
+        let build_lock_path = project_folder.join("lib").join(LockKind::Build.file_name());
+
+        let result = with_build_lock(project_folder, || {
+            assert!(
+                build_lock_path.exists(),
+                "build lock should be held while guarded work runs"
+            );
+            42
+        });
+
+        assert_eq!(result, 42);
+        assert!(
+            !build_lock_path.exists(),
+            "build lock should be removed after guarded work finishes"
+        );
+    }
+
+    #[test]
+    fn with_build_lock_drops_lock_after_error_result() {
+        let temp_dir = TempDir::new().expect("temp dir should be created");
+        let project_folder = temp_dir.path();
+        let build_lock_path = project_folder.join("lib").join(LockKind::Build.file_name());
+
+        let result: Result<(), &str> = with_build_lock(project_folder, || Err("failed"));
+
+        assert_eq!(result, Err("failed"));
+        assert!(
+            !build_lock_path.exists(),
+            "build lock should be removed after guarded work returns an error"
+        );
+    }
+
+    #[test]
+    fn build_waits_for_lock_before_initializing() {
+        let temp_dir = TempDir::new().expect("temp dir should be created");
+        let project_folder = temp_dir.path().to_path_buf();
+        let lib_dir = project_folder.join("lib");
+        let build_lock_path = lib_dir.join(LockKind::Build.file_name());
+        fs::create_dir_all(&lib_dir).expect("lib directory should be created");
+        fs::write(&build_lock_path, process::id().to_string()).expect("lockfile should be written");
+
+        let (sender, receiver) = mpsc::channel();
+        let build_project_folder = project_folder.clone();
+        let build_thread = thread::spawn(move || {
+            // This temp project has no config, so initialization would fail immediately
+            // if `build` did not wait for the lock first.
+            let result = build(
+                &None,
+                &build_project_folder,
+                false,
+                true,
+                false,
+                true,
+                None,
+                false,
+                None,
+            );
+            sender.send(result.is_err()).expect("result should be sent");
+        });
+
+        assert!(
+            receiver.recv_timeout(Duration::from_millis(250)).is_err(),
+            "build should wait for build.lock before running initialization"
+        );
+
+        fs::remove_file(&build_lock_path).expect("lockfile should be removed");
+        assert!(
+            receiver
+                .recv_timeout(Duration::from_secs(5))
+                .expect("build should finish after lock is removed")
+        );
+        build_thread.join().expect("build thread should complete");
+    }
 
     #[test]
     fn formats_successful_completion_message() {

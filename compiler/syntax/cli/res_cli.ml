@@ -76,9 +76,6 @@ module Color = struct
 
   let cur_styles = ref default_styles
 
-  (* let get_styles () = !cur_styles *)
-  (* let set_styles s = cur_styles := s *)
-
   (* map a tag to a style, if the tag is known.
      @raise Not_found otherwise *)
   let style_of_tag s =
@@ -155,7 +152,7 @@ module Color = struct
 end
 
 (* command line flags *)
-module ResClflags : sig
+module Res_clflags : sig
   val recover : bool ref
   val print : string ref
   val width : int ref
@@ -221,7 +218,7 @@ end = struct
   let parse () = Arg.parse spec (fun f -> file := f) usage
 end
 
-module CliArgProcessor = struct
+module Cli_arg_processor = struct
   type backend = Parser : 'diagnostics Res_driver.parsing_engine -> backend
   [@@unboxed]
 
@@ -330,11 +327,11 @@ end
 
 let () =
   if not !Sys.interactive then (
-    ResClflags.parse ();
-    CliArgProcessor.process_file ~is_interface:!ResClflags.interface
-      ~width:!ResClflags.width ~recover:!ResClflags.recover
-      ~target:!ResClflags.print ~jsx_version:!ResClflags.jsx_version
-      ~jsx_module:!ResClflags.jsx_module ~typechecker:!ResClflags.typechecker
-      !ResClflags.file
-      ~test_ast_conversion:!ResClflags.test_ast_conversion)
+    Res_clflags.parse ();
+    Cli_arg_processor.process_file ~is_interface:!Res_clflags.interface
+      ~width:!Res_clflags.width ~recover:!Res_clflags.recover
+      ~target:!Res_clflags.print ~jsx_version:!Res_clflags.jsx_version
+      ~jsx_module:!Res_clflags.jsx_module ~typechecker:!Res_clflags.typechecker
+      !Res_clflags.file
+      ~test_ast_conversion:!Res_clflags.test_ast_conversion)
 [@@raises exit]

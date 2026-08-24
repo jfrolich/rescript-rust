@@ -14,7 +14,7 @@ let a = 3->foo(4)
 
 Console.log(a) // Test automatic uncurried application
 
-let _ = Js.Array2.map([1], x => x + 1)
+let _ = Array.map([1], x => x + 1)
 
 let ptl = foo(10, ...) // force partial application
 
@@ -25,7 +25,7 @@ let foo3 = (x, y, z) => x + y + z
 let bar3: _ => _ = foo3(_, 3, 4)
 
 type cmp = Jsx.component<int>
-let q: cmp = _ => Jsx.null // Check that subtyping works past type definitions
+let q: cmp = Jsx.component(_ => Jsx.null) // Check that subtyping works past type definitions
 
 @inline
 let inl = () => ()

@@ -36,6 +36,8 @@ type t =
   | Pfield of int * Lambda.field_dbg_info
   | Psetfield of int * Lambda.set_field_dbg_info
   | Pduprecord
+  | Ptagged_template
+  | Precord_rest of string list
   | Pjs_call of {
       (* Location.t *  [loc] is passed down *)
       prim_name: string;
@@ -149,8 +151,6 @@ type t =
   | Pinit_mod
   | Pupdate_mod
   | Praw_js_code of Js_raw_info.t
-  | Pjs_fn_make of int
-  | Pjs_fn_make_unit
   | Pjs_fn_method
   | Pnull_to_opt
   | Pnull_undefined_to_opt

@@ -91,9 +91,11 @@ module T = struct
     match desc with
     | Ptyp_any -> Typ.any ~loc ~attrs ()
     | Ptyp_var s -> Typ.var ~loc ~attrs s
-    | Ptyp_arrow {arg; ret; arity} ->
-      Typ.arrow ~loc ~attrs ~arity
-        {arg with typ = sub.typ sub arg.typ}
+    | Ptyp_arrow {params; ret} ->
+      Typ.arrow ~loc ~attrs
+        (List.map
+           (fun (arg : Parsetree.arg) -> {arg with typ = sub.typ sub arg.typ})
+           params)
         (sub.typ sub ret)
     | Ptyp_tuple tyl -> Typ.tuple ~loc ~attrs (List.map (sub.typ sub) tyl)
     | Ptyp_constr (lid, tl) ->
@@ -286,11 +288,21 @@ module E = struct
     | Pexp_constant x -> constant ~loc ~attrs x
     | Pexp_let (r, vbs, e) ->
       let_ ~loc ~attrs r (List.map (sub.value_binding sub) vbs) (sub.expr sub e)
-    | Pexp_fun {arg_label = lab; default = def; lhs = p; rhs = e; arity; async}
-      ->
-      fun_ ~loc ~attrs ~arity ~async lab
-        (map_opt (sub.expr sub) def)
-        (sub.pat sub p) (sub.expr sub e)
+    | Pexp_fun {newtypes; params; body; async} ->
+      fun_ ~loc ~attrs ~async
+        ~newtypes:
+          (List.map
+             (fun (name, attrs) -> (map_loc sub name, sub.attributes sub attrs))
+             newtypes)
+        (List.map
+           (fun param ->
+             {
+               param with
+               p_default = map_opt (sub.expr sub) param.p_default;
+               p_pat = sub.pat sub param.p_pat;
+             })
+           params)
+        (sub.expr sub body)
     | Pexp_apply {funct = e; args = l; partial; transformed_jsx} ->
       apply ~loc ~attrs ~partial ~transformed_jsx (sub.expr sub e)
         (List.map (map_snd (sub.expr sub)) l)
@@ -345,8 +357,6 @@ module E = struct
         (sub.extension_constructor sub cd)
         (sub.expr sub e)
     | Pexp_assert e -> assert_ ~loc ~attrs (sub.expr sub e)
-    | Pexp_newtype (s, e) ->
-      newtype ~loc ~attrs (map_loc sub s) (sub.expr sub e)
     | Pexp_pack me -> pack ~loc ~attrs (sub.module_expr sub me)
     | Pexp_open (ovf, lid, e) ->
       open_ ~loc ~attrs ovf (map_loc sub lid) (sub.expr sub e)
@@ -397,8 +407,18 @@ module P = struct
     | Ppat_construct (l, p) ->
       construct ~loc ~attrs (map_loc sub l) (map_opt (sub.pat sub) p)
     | Ppat_variant (l, p) -> variant ~loc ~attrs l (map_opt (sub.pat sub) p)
-    | Ppat_record (lpl, cf) ->
+    | Ppat_record (lpl, cf, rest) ->
       record ~loc ~attrs
+        ?rest:
+          (match rest with
+          | None -> None
+          | Some {rest_loc; rest_name; rest_type} ->
+            Some
+              {
+                rest_loc = sub.location sub rest_loc;
+                rest_name = map_loc sub rest_name;
+                rest_type = map_opt (sub.typ sub) rest_type;
+              })
         (List.map
            (fun {lid; x = pat; opt} ->
              {lid = map_loc sub lid; x = sub.pat sub pat; opt})
@@ -477,8 +497,19 @@ let default_mapper =
           ~loc:(this.location this pincl_loc)
           ~attrs:(this.attributes this pincl_attributes));
     value_binding =
-      (fun this {pvb_pat; pvb_expr; pvb_attributes; pvb_loc} ->
-        Vb.mk (this.pat this pvb_pat) (this.expr this pvb_expr)
+      (fun this {pvb_pat; pvb_expr; pvb_constraint; pvb_attributes; pvb_loc} ->
+        let pvb_pat = this.pat this pvb_pat in
+        let constraint_ =
+          Option.map
+            (fun {pvc_newtypes; pvc_type} ->
+              {
+                pvc_newtypes = List.map (map_loc this) pvc_newtypes;
+                pvc_type = this.typ this pvc_type;
+              })
+            pvb_constraint
+        in
+        let pvb_expr = this.expr this pvb_expr in
+        Vb.mk pvb_pat pvb_expr ?constraint_
           ~loc:(this.location this pvb_loc)
           ~attrs:(this.attributes this pvb_attributes));
     constructor_declaration =
@@ -526,26 +557,18 @@ let rec extension_of_error {loc; msg; if_highlight; sub} =
        ]
       @ List.map (fun ext -> Str.extension (extension_of_error ext)) sub) )
 
-let attribute_of_warning loc s =
-  ( {loc; txt = "ocaml.ppwarning"},
-    PStr [Str.eval ~loc (Exp.constant (Pconst_string (s, None)))] )
-
-module StringMap = Map.Make (struct
+module String_map = Map.Make (struct
   type t = string
   let compare = compare
 end)
 
-let cookies = ref StringMap.empty
-
-let get_cookie k = try Some (StringMap.find k !cookies) with Not_found -> None
-
-let set_cookie k v = cookies := StringMap.add k v !cookies
+let cookies = ref String_map.empty
 
 let tool_name_ref = ref "_none_"
 
 let tool_name () = !tool_name_ref
 
-module PpxContext = struct
+module Ppx_context = struct
   open Longident
   open Asttypes
   open Ast_helper
@@ -572,7 +595,7 @@ module PpxContext = struct
       x =
         make_list
           (make_pair make_string (fun x -> x))
-          (StringMap.bindings !cookies);
+          (String_map.bindings !cookies);
       opt = false;
     }
 
@@ -663,7 +686,9 @@ module PpxContext = struct
       | "cookies" ->
         let l = get_list (get_pair get_string (fun x -> x)) payload in
         cookies :=
-          List.fold_left (fun s (k, v) -> StringMap.add k v s) StringMap.empty l
+          List.fold_left
+            (fun s (k, v) -> String_map.add k v s)
+            String_map.empty l
       | _ -> ()
     in
     List.iter
@@ -681,7 +706,7 @@ module PpxContext = struct
     fields @ [get_cookies ()]
 end
 
-let ppx_context = PpxContext.make
+let ppx_context = Ppx_context.make
 
 let extension_of_exn exn =
   match error_of_exn exn with
@@ -695,10 +720,10 @@ let apply_lazy ~source ~target mapper =
     let fields, ast =
       match ast with
       | {pstr_desc = Pstr_attribute ({txt = "ocaml.ppx.context"}, x)} :: l ->
-        (PpxContext.get_fields x, l)
+        (Ppx_context.get_fields x, l)
       | _ -> ([], ast)
     in
-    PpxContext.restore fields;
+    Ppx_context.restore fields;
     let ast =
       try
         let mapper = mapper () in
@@ -711,17 +736,17 @@ let apply_lazy ~source ~target mapper =
           };
         ]
     in
-    let fields = PpxContext.update_cookies fields in
-    Str.attribute (PpxContext.mk fields) :: ast
+    let fields = Ppx_context.update_cookies fields in
+    Str.attribute (Ppx_context.mk fields) :: ast
   in
   let iface ast =
     let fields, ast =
       match ast with
       | {psig_desc = Psig_attribute ({txt = "ocaml.ppx.context"}, x)} :: l ->
-        (PpxContext.get_fields x, l)
+        (Ppx_context.get_fields x, l)
       | _ -> ([], ast)
     in
-    PpxContext.restore fields;
+    Ppx_context.restore fields;
     let ast =
       try
         let mapper = mapper () in
@@ -734,8 +759,8 @@ let apply_lazy ~source ~target mapper =
           };
         ]
     in
-    let fields = PpxContext.update_cookies fields in
-    Sig.attribute (PpxContext.mk fields) :: ast
+    let fields = Ppx_context.update_cookies fields in
+    Sig.attribute (Ppx_context.mk fields) :: ast
   in
 
   let ic = open_in_bin source in
@@ -767,14 +792,14 @@ let apply_lazy ~source ~target mapper =
 let drop_ppx_context_str ~restore = function
   | {pstr_desc = Pstr_attribute ({Location.txt = "ocaml.ppx.context"}, a)}
     :: items ->
-    if restore then PpxContext.restore (PpxContext.get_fields a);
+    if restore then Ppx_context.restore (Ppx_context.get_fields a);
     items
   | items -> items
 
 let drop_ppx_context_sig ~restore = function
   | {psig_desc = Psig_attribute ({Location.txt = "ocaml.ppx.context"}, a)}
     :: items ->
-    if restore then PpxContext.restore (PpxContext.get_fields a);
+    if restore then Ppx_context.restore (Ppx_context.get_fields a);
     items
   | items -> items
 

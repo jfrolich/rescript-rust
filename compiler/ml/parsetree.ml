@@ -78,11 +78,11 @@ and arg = {attrs: attributes; lbl: arg_label; typ: core_type}
 and core_type_desc =
   | Ptyp_any (*  _ *)
   | Ptyp_var of string (* 'a *)
-  | Ptyp_arrow of {arg: arg; ret: core_type; arity: arity}
-    (* T1 -> T2       Simple
-       ~l:T1 -> T2    Labelled
-       ?l:T1 -> T2    Optional
-    *)
+  | Ptyp_arrow of {params: arg list; ret: core_type}
+    (* (T1, ~l:T2, ?l:T3) => T       n-ary uncurried function type.
+       The function's arity is [List.length params]; a function returning
+       another function is a nested [Ptyp_arrow] in [ret].
+       Invariant: params <> [] (a zero-argument function takes [unit]). *)
   | Ptyp_tuple of core_type list
     (* T1 * ... * Tn
 
@@ -161,6 +161,12 @@ and pattern = {
   ppat_attributes: attributes; (* ... [@id1] [@id2] *)
 }
 
+and record_pat_rest = {
+  rest_loc: Location.t;
+  rest_name: string loc;
+  rest_type: core_type option;
+}
+
 and pattern_desc =
   | Ppat_any (* _ *)
   | Ppat_var of string loc (* x *)
@@ -184,9 +190,12 @@ and pattern_desc =
     (* `A             (None)
        `A P           (Some P)
     *)
-  | Ppat_record of pattern record_element list * closed_flag
-    (* { l1=P1; ...; ln=Pn }     (flag = Closed)
-       { l1=P1; ...; ln=Pn; _}   (flag = Open)
+  | Ppat_record of
+      pattern record_element list * closed_flag * record_pat_rest option
+    (* { l1=P1; ...; ln=Pn }        (flag = Closed, rest = None)
+       { l1=P1; ...; ln=Pn; _}      (flag = Open, rest = None)
+       { l1=P1; ...; ...T as r }    (rest = Some {rest_type = Some T; _})
+       { l1=P1; ...; ...restName }  (rest = Some {rest_type = None; _})
 
        Invariant: n > 0
     *)
@@ -224,23 +233,22 @@ and expression_desc =
        let rec P1 = E1 and ... and Pn = EN in E   (flag = Recursive)
     *)
   | Pexp_fun of {
-      arg_label: arg_label;
-      default: expression option;
-      lhs: pattern;
-      rhs: expression;
-      arity: arity;
+      newtypes: (string loc * attributes) list;
+      params: fun_param list;
+      body: expression;
       async: bool;
     }
-    (* fun P -> E1                          (Simple, None)
-       fun ~l:P -> E1                       (Labelled l, None)
-       fun ?l:P -> E1                       (Optional l, None)
-       fun ?l:(P = E0) -> E1                (Optional l, Some E0)
+    (* (type t, P1, ~l:P2, ?l:P3=E0) => E   n-ary uncurried function.
+       The function's arity is [List.length params]; a function returning
+       another function is a nested [Pexp_fun] in [body].
+       [newtypes] are the function's locally abstract types, each with its
+       own attributes; the parser hoists them in front of the value
+       parameters.
 
        Notes:
-       - If E0 is provided, only Optional is allowed.
-       - "fun P1 P2 .. Pn -> E1" is represented as nested Pexp_fun.
+       - A default expression is only allowed on Optional parameters.
        - "let f P = E" is represented using Pexp_fun.
-    *)
+       - Invariant: params <> [] (a zero-argument function takes [unit]). *)
   | Pexp_apply of {
       funct: expression;
       args: (arg_label * expression) list;
@@ -290,10 +298,6 @@ and expression_desc =
     (* for i = E1 to E2 do E3 done      (flag = Upto)
        for i = E1 downto E2 do E3 done  (flag = Downto)
     *)
-  | Pexp_for_of of pattern * expression * expression
-    (* for pattern of array_expr do body_expr *)
-  | Pexp_for_await_of of pattern * expression * expression
-    (* for await pattern of iterable_expr do body_expr *)
   | Pexp_constraint of expression * core_type (* (E : T) *)
   | Pexp_coerce of expression * unit * core_type
     (* (E :> T)        (None, T)
@@ -307,7 +311,6 @@ and expression_desc =
     (* assert E
        Note: "assert false" is treated in a special way by the
        type-checker. *)
-  | Pexp_newtype of string loc * expression (* fun (type t) -> E *)
   | Pexp_pack of module_expr
     (* (module ME)
 
@@ -322,6 +325,10 @@ and expression_desc =
   (* . *)
   | Pexp_await of expression
   | Pexp_jsx_element of jsx_element
+  | Pexp_for_of of pattern * expression * expression
+    (* for pattern of array_expr do body_expr *)
+  | Pexp_for_await_of of pattern * expression * expression
+(* for await pattern of iterable_expr do body_expr *)
 
 (* an element of a record pattern or expression *)
 and 'a record_element = {lid: Longident.t loc; x: 'a; opt: bool (* optional *)}
@@ -397,6 +404,13 @@ and case = {
   pc_lhs: pattern;
   pc_guard: expression option;
   pc_rhs: expression;
+}
+
+and fun_param = {
+  p_attrs: attributes;
+  p_lbl: arg_label;
+  p_default: expression option; (* ~l=E0 default; only for Optional labels *)
+  p_pat: pattern;
 }
 
 (* Value descriptions *)
@@ -655,9 +669,16 @@ and structure_item_desc =
   | Pstr_extension of extension * attributes
 (* [%%id] *)
 
+and value_constraint = {
+  pvc_newtypes: string loc list;
+  (* Nonempty for parser-produced [let x: type a. t = e] bindings. *)
+  pvc_type: core_type;
+}
+
 and value_binding = {
   pvb_pat: pattern;
   pvb_expr: expression;
+  pvb_constraint: value_constraint option;
   pvb_attributes: attributes;
   pvb_loc: Location.t;
 }

@@ -6,7 +6,8 @@
     "clean": "rescript clean"
   },
   "dependencies": {
-    "@rescript/react": "link:../../../dependencies/rescript-react",
+    "@rescript/belt": "workspace:^",
+    "@rescript/react": "workspace:^",
     "rescript": "workspace:^"
   }
 }

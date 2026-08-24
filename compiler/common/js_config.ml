@@ -26,12 +26,14 @@
 
 type jsx_version = Jsx_v4
 type jsx_module = React | Generic of {module_name: string}
+type source_map = No_source_map | Linked | Inline | Hidden
 
 let no_version_header = ref false
 
 let directives = ref []
 let cross_module_inline = ref false
-let diagnose = ref false
+let debug_ir = ref false
+let check_lam = ref false
 
 (* let (//) = Filename.concat *)
 
@@ -40,7 +42,6 @@ let diagnose = ref false
 let no_builtin_ppx = ref false
 let tool_name = "ReScript"
 let check_div_by_zero = ref true
-let get_check_div_by_zero () = !check_div_by_zero
 let syntax_only = ref false
 let binary_ast = ref false
 let test_ast_conversion = ref false
@@ -53,6 +54,9 @@ let jsx_version = ref None
 let jsx_module = ref React
 let jsx_preserve = ref false
 let js_stdout = ref true
+let source_map = ref No_source_map
+let source_map_sources_content = ref false
+let source_map_root = ref ""
 let all_module_aliases = ref false
 let no_stdlib = ref false
 let no_export = ref false

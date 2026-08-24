@@ -35,6 +35,13 @@ type pattern = {
   pat_attributes: attribute list;
 }
 
+and record_pat_rest = {
+  rest_ident: Ident.t;
+  rest_name: string loc;
+  rest_type: type_expr;
+  excluded_runtime_labels: string list;
+}
+
 and pat_extra =
   | Tpat_constraint of core_type
   | Tpat_type of Path.t * Longident.t loc
@@ -52,6 +59,7 @@ and pattern_desc =
   | Tpat_record of
       (Longident.t loc * label_description * pattern * bool (* optional *)) list
       * closed_flag
+      * record_pat_rest option
   | Tpat_array of pattern list
   | Tpat_or of pattern * pattern * row_desc option
 
@@ -68,18 +76,14 @@ and exp_extra =
   | Texp_constraint of core_type
   | Texp_coerce of core_type
   | Texp_open of override_flag * Path.t * Longident.t loc * Env.t
-  | Texp_newtype of string
 
 and expression_desc =
   | Texp_ident of Path.t * Longident.t loc * Types.value_description
   | Texp_constant of constant
   | Texp_let of rec_flag * value_binding list * expression
   | Texp_function of {
-      arg_label: arg_label;
-      arity: arity;
-      param: Ident.t;
-      case: case;
-      partial: partial;
+      params: function_param list;
+      body: expression;
       async: bool;
     }
   | Texp_apply of {
@@ -119,18 +123,28 @@ and expression_desc =
       * expression
       * direction_flag
       * expression
-  | Texp_for_of of Ident.t * Parsetree.pattern * expression * expression
-  | Texp_for_await_of of Ident.t * Parsetree.pattern * expression * expression
   | Texp_send of expression * meth * expression option
   | Texp_letmodule of Ident.t * string loc * module_expr * expression
   | Texp_letexception of extension_constructor * expression
   | Texp_assert of expression
   | Texp_pack of module_expr
   | Texp_extension_constructor of Longident.t loc * Path.t
+  (* Keep new expression constructors at the end. CMT files are marshalled by
+     runtime constructor tag, so inserting constructors before existing ones
+     breaks analysis when it reads CMTs produced by older compiler versions. *)
+  | Texp_for_of of Ident.t * Parsetree.pattern * expression * expression
+  | Texp_for_await_of of Ident.t * Parsetree.pattern * expression * expression
 
 and meth = Tmeth_name of string
 
 and case = {c_lhs: pattern; c_guard: expression option; c_rhs: expression}
+
+and function_param = {
+  fp_lbl: arg_label;
+  fp_param: Ident.t; (* the name the compiled parameter binds to *)
+  fp_pat: pattern;
+  fp_partial: partial; (* whether [fp_pat] is exhaustive *)
+}
 
 and record_label_definition =
   | Kept of Types.type_expr
@@ -278,7 +292,6 @@ and open_description = {
   open_path: Path.t;
   open_txt: Longident.t loc;
   open_override: override_flag;
-  open_loc: Location.t;
   open_attributes: attribute list;
 }
 
@@ -312,7 +325,7 @@ and arg = {attrs: attributes; lbl: arg_label; typ: core_type}
 and core_type_desc =
   | Ttyp_any
   | Ttyp_var of string
-  | Ttyp_arrow of arg * core_type * arity
+  | Ttyp_arrow of arg list * core_type
   | Ttyp_tuple of core_type list
   | Ttyp_constr of Path.t * Longident.t loc * core_type list
   | Ttyp_object of object_field list * closed_flag
@@ -324,8 +337,6 @@ and core_type_desc =
 and package_type = {
   pack_path: Path.t;
   pack_fields: (Longident.t loc * core_type) list;
-  pack_type: Types.module_type;
-  pack_txt: Longident.t loc;
 }
 
 and row_field =
@@ -390,7 +401,6 @@ and constructor_arguments =
 
 and type_extension = {
   tyext_path: Path.t;
-  tyext_txt: Longident.t loc;
   tyext_params: (core_type * variance) list;
   tyext_constructors: extension_constructor list;
   tyext_private: private_flag;
@@ -417,7 +427,7 @@ let iter_pattern_desc f = function
   | Tpat_tuple patl -> List.iter f patl
   | Tpat_construct (_, _, patl) -> List.iter f patl
   | Tpat_variant (_, pat, _) -> may f pat
-  | Tpat_record (lbl_pat_list, _) ->
+  | Tpat_record (lbl_pat_list, _, _rest) ->
     List.iter (fun (_, _, pat, _) -> f pat) lbl_pat_list
   | Tpat_array patl -> List.iter f patl
   | Tpat_or (p1, p2, _) ->
@@ -429,8 +439,9 @@ let map_pattern_desc f d =
   match d with
   | Tpat_alias (p1, id, s) -> Tpat_alias (f p1, id, s)
   | Tpat_tuple pats -> Tpat_tuple (List.map f pats)
-  | Tpat_record (lpats, closed) ->
-    Tpat_record (List.map (fun (lid, l, p, o) -> (lid, l, f p, o)) lpats, closed)
+  | Tpat_record (lpats, closed, rest) ->
+    Tpat_record
+      (List.map (fun (lid, l, p, o) -> (lid, l, f p, o)) lpats, closed, rest)
   | Tpat_construct (lid, c, pats) -> Tpat_construct (lid, c, List.map f pats)
   | Tpat_array pats -> Tpat_array (List.map f pats)
   | Tpat_variant (x1, Some p1, x2) -> Tpat_variant (x1, Some (f p1), x2)
@@ -450,6 +461,12 @@ let rec bound_idents pat =
   | Tpat_or (p1, _, _) ->
     (* Invariant : both arguments binds the same variables *)
     bound_idents p1
+  | Tpat_record (_, _, Some rest) ->
+    (* Record rest is stored on Tpat_record, not as a child Tpat_var that
+       iter_pattern_desc can visit. Add it here so Lambda compilation sees the
+       binding. *)
+    idents := (rest.rest_ident, rest.rest_name) :: !idents;
+    iter_pattern_desc bound_idents pat.pat_desc
   | d -> iter_pattern_desc bound_idents d
 
 let pat_bound_idents pat =
@@ -487,6 +504,16 @@ let rec alpha_pat env p =
     let new_p = alpha_pat env p1 in
     try {p with pat_desc = Tpat_alias (new_p, alpha_var env id, s)}
     with Not_found -> new_p)
+  | Tpat_record (lpats, closed, Some rest) ->
+    let rest_ident =
+      try alpha_var env rest.rest_ident with Not_found -> rest.rest_ident
+    in
+    let lpats =
+      List.map
+        (fun (lid, lbl, pat, opt) -> (lid, lbl, alpha_pat env pat, opt))
+        lpats
+    in
+    {p with pat_desc = Tpat_record (lpats, closed, Some {rest with rest_ident})}
   | d -> {p with pat_desc = map_pattern_desc (alpha_pat env) d}
 
 let mkloc = Location.mkloc

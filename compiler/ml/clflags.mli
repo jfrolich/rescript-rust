@@ -25,7 +25,6 @@ val dump_typed_sexp_locs : bool ref
 val dump_lambda_sexp : bool ref
 val dump_lambda_sexp_locs : bool ref
 val dump_rawlambda : bool ref
-val dump_lambda : bool ref
 val dont_write_files : bool ref
 val keep_locs : bool ref
 val only_parse : bool ref

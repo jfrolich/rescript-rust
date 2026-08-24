@@ -89,11 +89,7 @@ and strengthen_sig ~aliasable env sg p pos =
     in
     Sig_modtype (id, newdecl)
     :: strengthen_sig ~aliasable (Env.add_modtype id decl env) rem p pos
-    (* Need to add the module type in case it is manifest *)
-  | (Sig_class _ as sigelt) :: rem ->
-    sigelt :: strengthen_sig ~aliasable env rem p (pos + 1)
-  | (Sig_class_type _ as sigelt) :: rem ->
-    sigelt :: strengthen_sig ~aliasable env rem p pos
+(* Need to add the module type in case it is manifest *)
 
 and strengthen_decl ~aliasable env md p =
   match md.md_type with
@@ -160,9 +156,7 @@ let nondep_supertype env mid mty =
                 {mtd_type = None; mtd_loc = Location.none; mtd_attributes = []}
               )
             :: rem'
-          | _ -> raise Not_found))
-      | Sig_class () -> assert false
-      | Sig_class_type () -> assert false)
+          | _ -> raise Not_found)))
   and nondep_modtype_decl env mtd =
     {mtd with mtd_type = Misc.may_map (nondep_mty env Strict) mtd.mtd_type}
   in
@@ -229,8 +223,7 @@ and type_paths_sig env p pos sg =
         p (pos + 1) rem
   | Sig_modtype (id, decl) :: rem ->
     type_paths_sig (Env.add_modtype id decl env) p pos rem
-  | (Sig_typext _ | Sig_class _) :: rem -> type_paths_sig env p (pos + 1) rem
-  | Sig_class_type _ :: rem -> type_paths_sig env p pos rem
+  | Sig_typext _ :: rem -> type_paths_sig env p (pos + 1) rem
 
 let rec no_code_needed env mty =
   match scrape env mty with
@@ -252,9 +245,8 @@ and no_code_needed_sig env sg =
     && no_code_needed_sig
          (Env.add_module_declaration ~check:false id md env)
          rem
-  | (Sig_type _ | Sig_modtype _ | Sig_class_type _) :: rem ->
-    no_code_needed_sig env rem
-  | (Sig_typext _ | Sig_class _) :: _ -> false
+  | (Sig_type _ | Sig_modtype _) :: rem -> no_code_needed_sig env rem
+  | Sig_typext _ :: _ -> false
 
 (* Check whether a module type may return types *)
 
@@ -286,8 +278,7 @@ and contains_type_item env = function
        is kept local to expressions. *)
     raise Exit
   | Sig_module (_, {md_type = mty}, _) -> contains_type env mty
-  | Sig_value _ | Sig_type _ | Sig_typext _ | Sig_class _ | Sig_class_type _ ->
-    ()
+  | Sig_value _ | Sig_type _ | Sig_typext _ -> ()
 
 let contains_type env mty =
   try
@@ -297,24 +288,24 @@ let contains_type env mty =
 
 (* Remove module aliases from a signature *)
 
-module PathSet = Set.Make (Path)
-module PathMap = Map.Make (Path)
-module IdentSet = Set.Make (Ident)
+module Path_set = Set.Make (Path)
+module Path_map = Map.Make (Path)
+module Ident_set = Set.Make (Ident)
 
 let rec get_prefixes = function
-  | Pident _ -> PathSet.empty
-  | Pdot (p, _, _) | Papply (p, _) -> PathSet.add p (get_prefixes p)
+  | Pident _ -> Path_set.empty
+  | Pdot (p, _, _) | Papply (p, _) -> Path_set.add p (get_prefixes p)
 
 let rec get_arg_paths = function
-  | Pident _ -> PathSet.empty
+  | Pident _ -> Path_set.empty
   | Pdot (p, _, _) -> get_arg_paths p
   | Papply (p1, p2) ->
-    PathSet.add p2
-      (PathSet.union (get_prefixes p2)
-         (PathSet.union (get_arg_paths p1) (get_arg_paths p2)))
+    Path_set.add p2
+      (Path_set.union (get_prefixes p2)
+         (Path_set.union (get_arg_paths p1) (get_arg_paths p2)))
 
 let rec rollback_path subst p =
-  try Pident (PathMap.find p subst)
+  try Pident (Path_map.find p subst)
   with Not_found -> (
     match p with
     | Pident _ | Papply _ -> p
@@ -327,19 +318,19 @@ let rec collect_ids subst bindings p =
   | Pident id ->
     let ids =
       try collect_ids subst bindings (Ident.find_same id bindings)
-      with Not_found -> IdentSet.empty
+      with Not_found -> Ident_set.empty
     in
-    IdentSet.add id ids
-  | _ -> IdentSet.empty
+    Ident_set.add id ids
+  | _ -> Ident_set.empty
 
 let collect_arg_paths mty =
   let open Btype in
-  let paths = ref PathSet.empty
-  and subst = ref PathMap.empty
+  let paths = ref Path_set.empty
+  and subst = ref Path_map.empty
   and bindings = ref Ident.empty in
   (* let rt = Ident.create "Root" in
      and prefix = ref (Path.Pident rt) in *)
-  let it_path p = paths := PathSet.union (get_arg_paths p) !paths
+  let it_path p = paths := Path_set.union (get_arg_paths p) !paths
   and it_signature_item it si =
     type_iterators.it_signature_item it si;
     match si with
@@ -350,7 +341,7 @@ let collect_arg_paths mty =
         (function
           | Sig_module (id', _, _) ->
             subst :=
-              PathMap.add (Pdot (Pident id, Ident.name id', -1)) id' !subst
+              Path_map.add (Pdot (Pident id, Ident.name id', -1)) id' !subst
           | _ -> ())
         sg
     | _ -> ()
@@ -358,9 +349,9 @@ let collect_arg_paths mty =
   let it = {type_iterators with it_path; it_signature_item} in
   it.it_module_type it mty;
   it.it_module_type unmark_iterators mty;
-  PathSet.fold
-    (fun p -> IdentSet.union (collect_ids !subst !bindings p))
-    !paths IdentSet.empty
+  Path_set.fold
+    (fun p -> Ident_set.union (collect_ids !subst !bindings p))
+    !paths Ident_set.empty
 
 let rec remove_aliases env excl mty =
   match mty with
@@ -378,7 +369,7 @@ and remove_aliases_sig env excl sg =
   | Sig_module (id, md, rs) :: rem ->
     let mty =
       match md.md_type with
-      | Mty_alias _ when IdentSet.mem id excl -> md.md_type
+      | Mty_alias _ when Ident_set.mem id excl -> md.md_type
       | mty -> remove_aliases env excl mty
     in
     Sig_module (id, {md with md_type = mty}, rs)

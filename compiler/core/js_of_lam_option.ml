@@ -24,8 +24,6 @@
 
 module E = Js_exp_make
 
-type option_unwrap_time = Static_unwrapped | Runtime_maybe_unwrapped
-
 (** Another way: 
     {[
       | Var _  ->
@@ -79,7 +77,7 @@ let get_default_undefined_from_optional (arg : J.expression) : J.expression =
       if Js_analyzer.is_okay_to_duplicate arg then
         (* FIXME: no need do such inlining*)
         E.econd (is_not_none arg) (val_from_option arg) E.undefined
-      else E.runtime_call Primitive_modules.option "toUndefined" [arg]
+      else E.runtime_call Primitive_modules.option "valFromOption" [arg]
 
 let option_unwrap (arg : J.expression) : J.expression =
   let desc = arg.expression_desc in
@@ -102,7 +100,5 @@ let destruct_optional ~for_sure_none ~for_sure_some ~not_sure
 let some = E.optional_block
 
 let null_to_opt e = E.econd (E.is_null e) none (some e)
-
-let undef_to_opt e = E.econd (E.is_undef e) none (some e)
 
 let null_undef_to_opt e = E.econd (E.is_null_undefined e) none (some e)

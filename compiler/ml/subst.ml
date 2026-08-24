@@ -24,30 +24,30 @@ type type_replacement =
   | Path of Path.t
   | Type_function of {params: type_expr list; body: type_expr}
 
-module PathMap = Map.Make (Path)
+module Path_map = Map.Make (Path)
 
 type t = {
-  types: type_replacement PathMap.t;
-  modules: Path.t PathMap.t;
+  types: type_replacement Path_map.t;
+  modules: Path.t Path_map.t;
   modtypes: (Ident.t, module_type) Tbl.t;
   for_saving: bool;
 }
 
 let identity =
   {
-    types = PathMap.empty;
-    modules = PathMap.empty;
+    types = Path_map.empty;
+    modules = Path_map.empty;
     modtypes = Tbl.empty;
     for_saving = false;
   }
 
-let add_type_path id p s = {s with types = PathMap.add id (Path p) s.types}
+let add_type_path id p s = {s with types = Path_map.add id (Path p) s.types}
 let add_type id p s = add_type_path (Pident id) p s
 
 let add_type_function id ~params ~body s =
-  {s with types = PathMap.add id (Type_function {params; body}) s.types}
+  {s with types = Path_map.add id (Type_function {params; body}) s.types}
 
-let add_module_path id p s = {s with modules = PathMap.add id p s.modules}
+let add_module_path id p s = {s with modules = Path_map.add id p s.modules}
 let add_module id p s = add_module_path (Pident id) p s
 
 let add_modtype id ty s = {s with modtypes = Tbl.add id ty s.modtypes}
@@ -67,7 +67,7 @@ let attrs s x =
   else x
 
 let rec module_path s path =
-  try PathMap.find path s.modules
+  try Path_map.find path s.modules
   with Not_found -> (
     match path with
     | Pident _ -> path
@@ -85,7 +85,7 @@ let modtype_path s = function
   | Papply _ -> fatal_error "Subst.modtype_path"
 
 let type_path s path =
-  match PathMap.find path s.types with
+  match Path_map.find path s.types with
   | Path p -> p
   | Type_function _ -> assert false
   | exception Not_found -> (
@@ -102,7 +102,7 @@ let type_path s p =
   | Ext (p, cstr) -> Pdot (module_path s p, cstr, nopos)
 
 let to_subst_by_type_function s p =
-  match PathMap.find p s.types with
+  match Path_map.find p s.types with
   | Path _ -> false
   | Type_function _ -> true
   | exception Not_found -> false
@@ -172,7 +172,7 @@ let rec typexp s ty =
          match desc with
          | Tconstr (p, args, _abbrev) -> (
            let args = List.map (typexp s) args in
-           match PathMap.find p s.types with
+           match Path_map.find p s.types with
            | exception Not_found -> Tconstr (type_path s p, args, ref Mnil)
            | Path _ -> Tconstr (type_path s p, args, ref Mnil)
            | Type_function {params; body} ->
@@ -337,11 +337,9 @@ let rec rename_bound_idents s idents = function
     rename_bound_idents
       (add_modtype id (Mty_ident (Pident id')) s)
       (id' :: idents) sg
-  | Sig_class_type () :: _ -> assert false
   | (Sig_value (id, _) | Sig_typext (id, _, _)) :: sg ->
     let id' = Ident.rename id in
     rename_bound_idents s (id' :: idents) sg
-  | Sig_class _ :: _ -> assert false
 let rec modtype s = function
   | Mty_ident p as mty -> (
     match p with
@@ -371,8 +369,6 @@ and signature_component s comp newid =
     Sig_typext (newid, extension_constructor s ext, es)
   | Sig_module (_id, d, rs) -> Sig_module (newid, module_declaration s d, rs)
   | Sig_modtype (_id, d) -> Sig_modtype (newid, modtype_declaration s d)
-  | Sig_class () -> Sig_class ()
-  | Sig_class_type () -> Sig_class_type ()
 
 and module_declaration s decl =
   {

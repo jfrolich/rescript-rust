@@ -146,12 +146,28 @@ fn run_main(otel_enabled: bool) -> Result<()> {
         }
         cli::Command::Clean { folder, prod } => {
             let _lock = get_lock_or_exit(LockKind::Build, &folder);
-            let result = build::clean::clean(Path::new(&folder as &str), show_progress, plain_output, prod);
-            let _lock = drop_lock(LockKind::Build, &folder);
+            let result = build::clean::clean(
+                folder.as_ref(),
+                show_progress,
+                plain_output,
+                prod,
+            );
+            let _ = drop_lock(LockKind::Build, &folder);
 
             result
         }
         cli::Command::Format { stdin, check, files } => format::format(stdin, check, files),
+    }
+}
+
+/// Map a command's Result<()> to a process exit code, printing the error on failure.
+fn exit_code(result: Result<()>) -> i32 {
+    match result {
+        Ok(()) => 0,
+        Err(e) => {
+            eprintln!("{:#}", e);
+            1
+        }
     }
 }
 

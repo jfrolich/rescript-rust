@@ -147,7 +147,7 @@ make checkformat
 
 ## Adding new Files to the Npm Packages
 
-To make sure that no files are added to or removed from the `rescript` or `@rescript/runtime` npm package inadvertently, an artifact list is kept at `packages/artifacts.json`. During CI build, it is verified that only the files that are listed there are actually included in the npm packages.
+To make sure that no files are added to or removed from the `rescript`, `@rescript/runtime`, or `@rescript/belt` npm package inadvertently, an artifact list is kept at `packages/artifacts.json`. During CI build, it is verified that only the files that are listed there are actually included in the npm packages.
 
 After adding a new file to the repository that should go into one of the npm packages - e.g., a new stdlib module -, run `make artifacts`.
 
@@ -297,6 +297,20 @@ The "Playground bundle" is a JS version of the ReScript compiler; including all 
 
 The ReScript source code is compiled with a tool called [JSOO (js_of_ocaml)](https://ocsigen.org/js_of_ocaml/latest/manual/overview), which uses OCaml bytecode to compile to JavaScript and is part of the bigger OCaml ecosystem.
 
+### Platform-specific compiler modules
+
+Within `compiler/`, the Dune `browser` profile specifically means the
+playground compiler. A few modules have implementations under
+`platform/native/` and `platform/playground/`; mutually exclusive rules in the
+owning `dune` file copy the appropriate implementation into the build directory
+as an ordinary `.ml` module. Other profiles select the native implementation.
+
+Consequently, a generated filename such as `ext_platform_primitives.ml` may
+appear in a compiler stack trace even though it is not present in the source
+tree. Its source is the corresponding file below `platform/native/` or
+`platform/playground/` in the same compiler directory. Keep both
+implementations API-compatible when changing one of these modules.
+
 ### Building the Bundle
 
 The entry point of the JSOO bundle is located in `compiler/jsoo/jsoo_playground_main.ml`, the compiler and its relevant runtime cmij files can be built via make:
@@ -310,9 +324,10 @@ Note that building the cmijs is based on the dependencies defined in `packages/p
 
 After a successful compilation, you will find following files in your project:
 
-- `playground/compiler.js` -> This is the ReScript compiler, which binds the ReScript API to the `window` object.
-- `playground/packages/compiler-builtins` -> The compiler base cmij containing all the relevant core modules (`Js`, `Belt`, `Pervasives`, etc.)
-- `playground/packages/*` -> Contains third party deps with cmij.js files (as defined in `packages/playground/rescript.json`)
+- `packages/playground/compiler.js` -> This is the ReScript compiler, which binds the ReScript API to the `window` object.
+- `packages/playground/packages/compiler-builtins` -> The compiler base cmij containing the runtime and standard-library modules
+- `packages/playground/packages/@rescript/belt` -> The Belt cmij, packaged separately from the compiler built-ins
+- `packages/playground/packages/*` -> Contains third party deps with cmij.js files (as defined in `packages/playground/rescript.json`)
 
 You can now use the `compiler.js` file either directly by using a `<script src="/path/to/compiler.js"/>` and `<script src="/path/to/packages/compilerCmij.js"/>` inside a html file, use a browser bundler infrastructure to optimize it, or use `nodejs` to run it on a command line:
 
@@ -464,16 +479,20 @@ We'll merge `11.0_release` into `master` from time to time to propagate those ch
 
 ## Release Process
 
+The repository's `npm-release` GitHub environment should have required reviewers configured. Publishing uses npm trusted publishing and provenance, so no npm token is required.
+
 To build a new version and release it on NPM, follow these steps:
 
 1. Verify that the version number is already set correctly for the release. (It should have been incremented after releasing the previous version.)
 1. Create a PR to update `CHANGELOG.md`, removing the "(Unreleased)" for the version to be released.
-1. Once that PR is merged and built successfully, tag the commit with the version number (e.g., "v10.0.0", or "v10.0.0-beta.1") and push the tag.
-1. This triggers a tag build that will upload the playground bundle to Cloudflare R2 and publish the `rescript` npm package with the tag "ci".
+1. Once that PR is merged and built successfully, run the `Publish` workflow from the GitHub Actions tab. Use the "Run workflow" branch dropdown to select the release branch (normally `master`, or the relevant maintenance branch) and indicate whether this is the current stable release. The version is read from that branch's `package.json`, and the npm tag is derived automatically:
+   - A current stable release is published as `latest`.
+   - A stable maintenance release for an older major is published as `latest-<major>`, for example `latest-12`.
+   - A prerelease is published as `next-<major>`, for example `next-13`. Prereleases cannot be marked as the current stable release.
+1. Review the generated release plan and approve the protected `npm-release` environment. The workflow reuses the normal CI build and installation tests, creates the version tag, and publishes directly with the selected npm tags.
 1. Verify that the playground bundle for the new version is now present on the settings tab in https://rescript-lang.org/try.
-1. Run `npm info rescript` to verify that the new version is now present with tag "ci".
+1. Run `npm info rescript` to verify that the new version is present with the expected tag.
 1. Test the new version.
-1. Tag all packages for the new version as appropriate (`latest` or `next`): `./scripts/npmRelease.js --version <version> --tag <tag>`
 1. Create a release entry for the version tag on the [Github Releases page](https://github.com/rescript-lang/rescript-compiler/releases), copying the changes from `CHANGELOG.md`.
 1. Create a PR with the following changes to prepare for development of the next version:
    - Increment the `EXPECTED_VERSION` number in `yarn.config.cjs` for the next version.

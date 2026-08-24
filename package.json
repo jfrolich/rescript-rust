@@ -1,6 +1,6 @@
 {
   "name": "rescript",
-  "version": "13.0.0-alpha.4",
+  "version": "13.0.0-alpha.6",
   "description": "ReScript toolchain",
   "type": "module",
   "keywords": [
@@ -26,7 +26,6 @@
     "Cristiano Calcagno (https://github.com/cristianoc)",
     "Dmitry Zakharov (https://github.com/DZakh)",
     "Florian Hammerschmidt (https://github.com/fhammerschmidt)",
-    "Florian Verdonck (https://github.com/nojaf)",
     "Gabriel Nordeborn (https://github.com/zth)",
     "Hyeseong Kim (https://github.com/cometkim)",
     "Jaap Frolich (https://github.com/jfrolich)",
@@ -41,7 +40,7 @@
     "provenance": true
   },
   "engines": {
-    "node": ">=20.11.0"
+    "node": ">=22"
   },
   "bin": {
     "bsc": "cli/bsc.js",
@@ -52,6 +51,7 @@
     "test": "node scripts/test.js -all",
     "test-build": "node scripts/test.js -build",
     "test-ocaml": "node scripts/test.js -ounit",
+    "test-release-plan": "node --test scripts/releasePlan.test.js",
     "check": "biome check --no-errors-on-unmatched .",
     "check:all": "biome check .",
     "format": "biome check --no-errors-on-unmatched . --fix",
@@ -87,23 +87,26 @@
     "@rescript/win32-x64": "workspace:packages/@rescript/win32-x64"
   },
   "devDependencies": {
-    "@biomejs/biome": "2.4.10",
+    "@biomejs/biome": "2.5.5",
     "@jfrolich/ppx-spice": "0.3.6",
-    "@types/node": "^25.0.3",
+    "@types/node": "^26.1.1",
     "@types/semver": "^7.7.0",
     "@yarnpkg/types": "^4.0.1",
-    "mocha": "11.7.5",
+    "mocha": "11.7.6",
     "nyc": "18.0.0",
     "semver": "^7.7.2",
     "typescript": "6.0.3"
   },
   "workspaces": [
+    "packages/dev-playground",
     "packages/playground",
     "packages/@rescript/*",
     "tests/dependencies/**",
     "tests/analysis_tests/**",
     "tests/docstring_tests",
+    "tests/belt_tests",
     "tests/gentype_tests/**",
+    "tests/tests",
     "tests/tools_tests",
     "tests/commonjs_tests",
     "scripts/res"

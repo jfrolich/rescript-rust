@@ -22,8 +22,6 @@ open Primitive
 open Types
 open Typetexp
 
-type native_repr_kind = Unboxed | Untagged
-
 type error =
   | Repeated_parameter
   | Duplicate_constructor of string
@@ -34,6 +32,7 @@ type error =
   | Definition_mismatch of type_expr * Includecore.type_mismatch list
   | Constraint_failed of type_expr * type_expr
   | Inconsistent_constraint of Env.t * (type_expr * type_expr) list
+  (* Appears dead; retained pending proof. See update_type for details. *)
   | Type_clash of Env.t * (type_expr * type_expr) list
   | Parameters_differ of Path.t * type_expr * type_expr
   | Null_arity_external
@@ -49,7 +48,6 @@ type error =
   | Bad_fixed_type of string
   | Unbound_type_var_ext of type_expr * extension_constructor
   | Varying_anonymous
-  | Val_in_structure
   | Invalid_attribute of string
   | Bad_immediate_attribute
   | Bad_unboxed_attribute of string
@@ -121,6 +119,12 @@ let update_type temp_env env id loc =
   | None -> ()
   | Some ty -> (
     let params = List.map (fun _ -> Ctype.newvar ()) decl.type_params in
+    (* The [Type_clash] handler appears to be dead: this unifies
+       [t<fresh params>] against [t]'s own manifest [ty], i.e. a type against
+       an alpha-renamed copy of itself, which cannot head-clash. Genuine
+       inconsistencies are caught elsewhere (Cycle_in_def, Recursive_abbrev,
+       Parameters_differ, ...). Retained pending an airtight proof rather than
+       replaced with [assert false]. *)
     try Ctype.unify env (Ctype.newconstr path params) ty
     with Ctype.Unify trace -> raise (Error (loc, Type_clash (env, trace))))
 
@@ -195,7 +199,7 @@ let set_fixed_row env loc p decl =
 
 (* Translate one type declaration *)
 
-module StringSet = Set.Make (struct
+module String_set = Set.Make (struct
   type t = string
   let compare (x : t) y = compare x y
 end)
@@ -463,12 +467,12 @@ let transl_declaration ~type_record_as_object ~untagged_wfc env sdecl id =
               pcd_args = rewrite_optional_inline_record_fields pcd_args;
             })
       in
-      let all_constrs = ref StringSet.empty in
+      let all_constrs = ref String_set.empty in
       List.iter
         (fun {pcd_name = {txt = name}} ->
-          if StringSet.mem name !all_constrs then
+          if String_set.mem name !all_constrs then
             raise (Error (sdecl.ptype_loc, Duplicate_constructor name));
-          all_constrs := StringSet.add name !all_constrs)
+          all_constrs := String_set.add name !all_constrs)
         scstrs;
       let copy_tag_attr_from_decl attr =
         let tag_attrs =
@@ -639,14 +643,14 @@ let transl_declaration ~type_record_as_object ~untagged_wfc env sdecl id =
         | [] -> ()
         | lbl :: rest ->
           let name = lbl.ld_id.name in
-          if StringSet.mem name seen then
+          if String_set.mem name seen then
             raise
               (Error (loc, Duplicate_label (name, Some sdecl.ptype_name.txt)));
-          check_duplicates loc rest (StringSet.add name seen)
+          check_duplicates loc rest (String_set.add name seen)
       in
       match lbls_opt with
       | Some (lbls, lbls') ->
-        check_duplicates sdecl.ptype_loc lbls StringSet.empty;
+        check_duplicates sdecl.ptype_loc lbls String_set.empty;
         let optional = Ext_list.exists lbls (fun lbl -> lbl.ld_optional) in
         ( Ttype_record lbls,
           Type_record
@@ -761,14 +765,14 @@ let generalize_decl decl =
 
 (* Check that all constraints are enforced *)
 
-module TypeSet = Btype.TypeSet
-module TypeMap = Btype.TypeMap
+module Type_set = Btype.Type_set
+module Type_map = Btype.Type_map
 
 let rec check_constraints_rec env loc visited ty =
   let ty = Ctype.repr ty in
-  if TypeSet.mem ty !visited then ()
+  if Type_set.mem ty !visited then ()
   else (
-    visited := TypeSet.add ty !visited;
+    visited := Type_set.add ty !visited;
     match ty.desc with
     | Tconstr (path, args, _) ->
       let args' = List.map (fun _ -> Ctype.newvar ()) args in
@@ -784,7 +788,7 @@ let rec check_constraints_rec env loc visited ty =
       check_constraints_rec env loc visited ty
     | _ -> Btype.iter_type_expr (check_constraints_rec env loc visited) ty)
 
-module SMap = Map.Make (String)
+module S_map = Map.Make (String)
 
 let check_constraints_labels env visited l pl =
   let rec get_loc name = function
@@ -798,7 +802,7 @@ let check_constraints_labels env visited l pl =
     l
 
 let check_constraints ~type_record_as_object env sdecl (_, decl) =
-  let visited = ref TypeSet.empty in
+  let visited = ref Type_set.empty in
   (match decl.type_kind with
   | Type_abstract -> ()
   | Type_variant l ->
@@ -808,13 +812,13 @@ let check_constraints ~type_record_as_object env sdecl (_, decl) =
     in
     let pl = find_pl sdecl.ptype_kind in
     let pl_index =
-      let foldf acc x = SMap.add x.pcd_name.txt x acc in
-      List.fold_left foldf SMap.empty pl
+      let foldf acc x = S_map.add x.pcd_name.txt x acc in
+      List.fold_left foldf S_map.empty pl
     in
     List.iter
       (fun {Types.cd_id = name; cd_args; cd_res} ->
         let {pcd_args; pcd_res; _} =
-          try SMap.find (Ident.name name) pl_index
+          try S_map.find (Ident.name name) pl_index
           with Not_found -> assert false
         in
         (match (cd_args, pcd_args) with
@@ -892,10 +896,10 @@ let check_abbrev env sdecl (id, decl) =
 (* Check that recursion is well-founded *)
 
 let check_well_founded env loc path to_check ty =
-  let visited = ref TypeMap.empty in
+  let visited = ref Type_map.empty in
   let rec check ty0 parents ty =
     let ty = Btype.repr ty in
-    if TypeSet.mem ty parents then
+    if Type_set.mem ty parents then
       (*Format.eprintf "@[%a@]@." Printtyp.raw_type_expr ty;*)
       if
         match ty0.desc with
@@ -905,9 +909,9 @@ let check_well_founded env loc path to_check ty =
       else raise (Error (loc, Cycle_in_def (Path.name path, ty0)));
     let fini, parents =
       try
-        let prev = TypeMap.find ty !visited in
-        if TypeSet.subset parents prev then (true, parents)
-        else (false, TypeSet.union parents prev)
+        let prev = Type_map.find ty !visited in
+        if Type_set.subset parents prev then (true, parents)
+        else (false, Type_set.union parents prev)
       with Not_found -> (false, parents)
     in
     if fini then ()
@@ -919,12 +923,12 @@ let check_well_founded env loc path to_check ty =
         | Tobject _ | Tvariant _ -> true
         | _ -> false (* !Clflags.recursive_types*)
       in
-      let visited' = TypeMap.add ty parents !visited in
+      let visited' = Type_map.add ty parents !visited in
       let arg_exn =
         try
           visited := visited';
           let parents =
-            if rec_ok then TypeSet.empty else TypeSet.add ty parents
+            if rec_ok then Type_set.empty else Type_set.add ty parents
           in
           Btype.iter_type_expr (check ty0 parents) ty;
           None
@@ -935,16 +939,16 @@ let check_well_founded env loc path to_check ty =
       match ty.desc with
       | Tconstr (p, _, _) when arg_exn <> None || to_check p -> (
         if to_check p then may raise arg_exn
-        else Btype.iter_type_expr (check ty0 TypeSet.empty) ty;
+        else Btype.iter_type_expr (check ty0 Type_set.empty) ty;
         try
           let ty' = Ctype.try_expand_once_opt env ty in
-          let ty0 = if TypeSet.is_empty parents then ty else ty0 in
-          check ty0 (TypeSet.add ty parents) ty'
+          let ty0 = if Type_set.is_empty parents then ty else ty0 in
+          check ty0 (Type_set.add ty parents) ty'
         with Ctype.Cannot_expand -> may raise arg_exn)
       | _ -> may raise arg_exn
   in
   let snap = Btype.snapshot () in
-  try Ctype.wrap_trace_gadt_instances env (check ty TypeSet.empty) ty
+  try Ctype.wrap_trace_gadt_instances env (check ty Type_set.empty) ty
   with Ctype.Unify _ ->
     (* Will be detected by check_recursion *)
     Btype.backtrack snap
@@ -1035,7 +1039,7 @@ let check_abbrev_recursion env id_loc_list to_check tdecl =
 (* Compute variance *)
 
 let get_variance ty visited =
-  try TypeMap.find ty !visited with Not_found -> Variance.null
+  try Type_map.find ty !visited with Not_found -> Variance.null
 
 let compute_variance env visited vari ty =
   let rec compute_variance_rec vari ty =
@@ -1045,16 +1049,18 @@ let compute_variance env visited vari ty =
     if Variance.subset vari vari' then ()
     else
       let vari = Variance.union vari vari' in
-      visited := TypeMap.add ty vari !visited;
+      visited := Type_map.add ty vari !visited;
       let compute_same = compute_variance_rec vari in
       match ty.desc with
-      | Tarrow (arg, ret, _, _) ->
+      | Tarrow (params, ret) ->
         let open Variance in
         let v = conjugate vari in
         let v1 =
           if mem May_pos v || mem May_neg v then set May_weak true v else v
         in
-        compute_variance_rec v1 arg.typ;
+        List.iter
+          (fun ({typ} : Types.arg) -> compute_variance_rec v1 typ)
+          params;
         compute_same ret
       | Ttuple tl -> List.iter compute_same tl
       | Tconstr (path, tl, _) -> (
@@ -1134,7 +1140,7 @@ let compute_variance_type env check (required, loc) decl tyl =
   in
   (* Prepare *)
   let params = List.map Btype.repr decl.type_params in
-  let tvl = ref TypeMap.empty in
+  let tvl = ref Type_map.empty in
   (* Compute occurrences in the body *)
   let open Variance in
   List.iter
@@ -1160,7 +1166,7 @@ let compute_variance_type env check (required, loc) decl tyl =
     (* If there are no extra variables there is nothing to do *)
     if fvl = [] then ()
     else
-      let tvl2 = ref TypeMap.empty in
+      let tvl2 = ref Type_map.empty in
       List.iter2
         (fun ty (p, n, _) ->
           if Btype.is_Tvar ty then ()
@@ -1170,17 +1176,17 @@ let compute_variance_type env check (required, loc) decl tyl =
             in
             compute_variance env tvl2 v ty)
         params required;
-      let visited = ref TypeSet.empty in
+      let visited = ref Type_set.empty in
       let rec check ty =
         let ty = Ctype.repr ty in
-        if TypeSet.mem ty !visited then ()
+        if Type_set.mem ty !visited then ()
         else
-          let visited' = TypeSet.add ty !visited in
+          let visited' = Type_set.add ty !visited in
           visited := visited';
           let v1 = get_variance ty tvl in
           let snap = Btype.snapshot () in
           let v2 =
-            TypeMap.fold
+            Type_map.fold
               (fun t vt v ->
                 if Ctype.equal env false [ty] [t] then union vt v else v)
               !tvl2 null
@@ -1822,7 +1828,6 @@ let transl_type_extension extend env loc styext =
   let tyext =
     {
       tyext_path = type_path;
-      tyext_txt = styext.ptyext_path;
       tyext_params = ttype_params;
       tyext_constructors = constructors;
       tyext_private = styext.ptyext_private;
@@ -1853,14 +1858,7 @@ let transl_exception env sext =
   let newenv = Env.add_extension ~check:true ext.ext_id ext.ext_type env in
   (ext, newenv)
 
-let rec arity_from_arrow_type env core_type ty =
-  match (core_type.ptyp_desc, (Ctype.repr ty).desc) with
-  | Ptyp_arrow {ret = ct2}, Tarrow (_, ret, _, _) ->
-    1 + arity_from_arrow_type env ct2 ret
-  | Ptyp_arrow _, _ | _, Tarrow _ -> assert false
-  | _ -> 0
-
-let parse_arity env core_type ty =
+let parse_arity env _core_type ty =
   match Ctype.get_arity env ty with
   | Some arity ->
     let from_constructor =
@@ -1869,7 +1867,7 @@ let parse_arity env core_type ty =
       | _ -> false
     in
     (arity, from_constructor)
-  | None -> (arity_from_arrow_type env core_type ty, false)
+  | None -> (0, false)
 
 (* Translate a value declaration *)
 let transl_value_decl env loc valdecl =
@@ -1884,7 +1882,13 @@ let transl_value_decl env loc valdecl =
         Types.val_loc = loc;
         val_attributes = valdecl.pval_attributes;
       }
-    | [] -> raise (Error (valdecl.pval_loc, Val_in_structure))
+    | [] ->
+      (* unreachable: `pval_prim = []` outside a signature can only arise
+         from the parser's `external` recovery, which sets `prim = []`
+         *after* emitting a syntax error, so the typer never sees the
+         declaration. A bare `val x: int` in a .res is also rejected at
+         parse time. *)
+      assert false
     | _ ->
       let arity, from_constructor = parse_arity env valdecl.pval_type ty in
       let prim = Primitive.parse_declaration valdecl ~arity ~from_constructor in
@@ -2260,8 +2264,6 @@ let report_error ppf = function
   | Varying_anonymous ->
     fprintf ppf "@[%s@ %s@ %s@]" "In this GADT definition,"
       "the variance of some parameter" "cannot be checked"
-  | Val_in_structure ->
-    fprintf ppf "Value declarations are only allowed in signatures"
   | Bad_immediate_attribute ->
     fprintf ppf "@[%s@ %s@]" "Types marked with the immediate attribute must be"
       "non-pointer types like int or bool"

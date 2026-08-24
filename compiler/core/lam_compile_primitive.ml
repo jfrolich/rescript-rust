@@ -65,7 +65,13 @@ let wrap_then import value =
   E.call ~info:call_info (E.dot import "then")
     [
       E.ocaml_fun ~return_unit:false ~async:false ~one_unit_arg:false [arg]
-        [{statement_desc = J.Return (E.dot (E.var arg) value); comment = None}];
+        [
+          {
+            statement_desc = J.Return (E.dot (E.var arg) value);
+            comment = None;
+            source_loc = None;
+          };
+        ];
     ]
 
 let translate output_prefix loc (cxt : Lam_compile_context.t)
@@ -87,6 +93,16 @@ let translate output_prefix loc (cxt : Lam_compile_context.t)
   | Pjs_apply -> (
     match args with
     | fn :: rest -> E.call ~info:call_info fn rest
+    | _ -> assert false)
+  | Ptagged_template -> (
+    (* [tag; strings_array; values_array] -> tag`...` *)
+    match args with
+    | [
+     fn;
+     {expression_desc = Array strings; _};
+     {expression_desc = Array values; _};
+    ] ->
+      E.tagged_template fn strings values
     | _ -> assert false)
   | Pnull_to_opt -> (
     match args with
@@ -139,8 +155,7 @@ let translate output_prefix loc (cxt : Lam_compile_context.t)
   | Pis_undefined -> E.is_undef (Ext_list.singleton_exn args)
   | Pis_null_undefined -> E.is_null_undefined (Ext_list.singleton_exn args)
   | Ptypeof -> E.typeof (Ext_list.singleton_exn args)
-  | Pjs_unsafe_downgrade _ | Pdebugger | Pjs_fn_make _ | Pjs_fn_make_unit
-  | Pjs_fn_method ->
+  | Pjs_unsafe_downgrade _ | Pdebugger | Pjs_fn_method ->
     assert false (* already handled by {!Lam_compile} *)
   | Pstringadd -> (
     match args with
@@ -389,23 +404,19 @@ let translate output_prefix loc (cxt : Lam_compile_context.t)
               || E.is_null_undefined_constant e2) ->
       E.neq_null_undefined_boolean e1 e2
     | [e1; e2] ->
-      Location.prerr_warning loc Warnings.Bs_polymorphic_comparison;
       E.runtime_call Primitive_modules.object_
         (Lam_compile_util.runtime_of_comp cmp)
         args
     | _ -> assert false)
   | Pobjorder -> (
-    Location.prerr_warning loc Warnings.Bs_polymorphic_comparison;
     match args with
     | [a; b] -> E.runtime_call Primitive_modules.object_ "compare" args
     | _ -> assert false)
   | Pobjmin -> (
-    Location.prerr_warning loc Warnings.Bs_polymorphic_comparison;
     match args with
     | [a; b] -> E.runtime_call Primitive_modules.object_ "min" args
     | _ -> assert false)
   | Pobjmax -> (
-    Location.prerr_warning loc Warnings.Bs_polymorphic_comparison;
     match args with
     | [a; b] -> E.runtime_call Primitive_modules.object_ "max" args
     | _ -> assert false)
@@ -556,7 +567,7 @@ let translate output_prefix loc (cxt : Lam_compile_context.t)
     | _ -> assert false)
   | Parrayrefs -> E.runtime_call Primitive_modules.array "get" args
   | Parraysets -> E.runtime_call Primitive_modules.array "set" args
-  | Pmakearray -> Js_of_lam_array.make_array Mutable args
+  | Pmakearray -> Js_of_lam_array.make_array args
   | Pmakelist ->
     Js_of_lam_block.make_block
       (Js_op_util.of_lam_mutable_flag Mutable)
@@ -564,7 +575,7 @@ let translate output_prefix loc (cxt : Lam_compile_context.t)
       (E.small_int 0) args
   | Pmakedict -> (
     match args with
-    | [{expression_desc = Array (items, _)}] ->
+    | [{expression_desc = Array items}] ->
       E.obj
         (items
         |> List.filter_map (fun (exp : J.expression) ->
@@ -602,6 +613,16 @@ let translate output_prefix loc (cxt : Lam_compile_context.t)
   | Pduprecord -> (
     match args with
     | [e1] -> E.obj ~dup:e1 []
+    | _ -> assert false)
+  | Precord_rest excluded -> (
+    match args with
+    | [e1] ->
+      E.record_rest
+        (List.map
+           (fun record_rest_label ->
+             {J.record_rest_label; record_rest_ident = None})
+           excluded)
+        e1
     | _ -> assert false)
   | Phash -> (
     match args with

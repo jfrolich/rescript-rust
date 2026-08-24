@@ -24,6 +24,7 @@
 
 type jsx_version = Jsx_v4
 type jsx_module = React | Generic of {module_name: string}
+type source_map = No_source_map | Linked | Inline | Hidden
 
 (* val get_packages_info :
    unit -> Js_packages_info.t *)
@@ -48,16 +49,17 @@ val directives : string list ref
 val cross_module_inline : bool ref
 (** cross module inline option *)
 
-val diagnose : bool ref
-(** diagnose option *)
+val debug_ir : bool ref
+(** dump intermediate representations and related diagnostics *)
+
+val check_lam : bool ref
+(** check Lam invariants after optimization passes *)
 
 val no_builtin_ppx : bool ref
 (** options for builtin ppx *)
 
 val check_div_by_zero : bool ref
 (** check-div-by-zero option *)
-
-val get_check_div_by_zero : unit -> bool
 
 val tool_name : string
 
@@ -85,6 +87,12 @@ val jsx_module : jsx_module ref
 val jsx_preserve : bool ref
 
 val js_stdout : bool ref
+
+val source_map : source_map ref
+
+val source_map_sources_content : bool ref
+
+val source_map_root : string ref
 
 val all_module_aliases : bool ref
 

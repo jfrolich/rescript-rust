@@ -8,14 +8,15 @@
     "typecheck": "tsc"
   },
   "dependencies": {
-    "@rescript/react": "^0.14.0",
-    "react": "^18.3.1",
-    "react-dom": "^18.3.1",
+    "@rescript/belt": "workspace:^",
+    "@rescript/react": "workspace:^",
+    "react": "^19.2.8",
+    "react-dom": "^19.2.8",
     "rescript": "workspace:^"
   },
   "devDependencies": {
-    "@types/react": "^18.3.3",
-    "@types/react-dom": "^18.3.0",
+    "@types/react": "^19.2.18",
+    "@types/react-dom": "^19.2.4",
     "typescript": "6.0.3"
   }
 }

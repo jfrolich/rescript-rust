@@ -52,9 +52,6 @@ let super = Ast_iterator.default_iterator
 
 let check_constant loc (const : Parsetree.constant) =
   match const with
-  | Pconst_string (_, Some s) ->
-    if Ast_utf8_string_interp.is_unescaped s then
-      Bs_warnings.error_unescaped_delimiter loc s
   | Pconst_integer (s, None) -> (
     (* range check using int32
        It is better to give a warning instead of error to avoid make people unhappy.
@@ -124,10 +121,11 @@ let emit_external_warnings : iterator =
         | ({pval_loc; pval_prim = [byte_name]; pval_type} :
             Parsetree.value_description) -> (
           match byte_name with
-          | "%identity" when not (Ast_core_type.is_arity_one pval_type) ->
+          | ("%identity" | "%component_identity")
+            when not (Ast_core_type.is_arity_one pval_type) ->
             Location.raise_errorf ~loc:pval_loc
-              "%%identity expects a function type of the form 'a => 'b (arity \
-               1)"
+              "%s expects a function type of the form 'a => 'b (arity 1)"
+              byte_name
           | _ ->
             if byte_name <> "" then
               let c = String.unsafe_get byte_name 0 in

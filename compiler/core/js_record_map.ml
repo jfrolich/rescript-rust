@@ -87,14 +87,11 @@ let property_map : property_map fn =
       (_x0, _x1))
     _self arg
 
-let length_object : length_object fn = unknown
-
 let expression_desc : expression_desc fn =
  fun _self -> function
-  | Length (_x0, _x1) ->
+  | Length _x0 ->
     let _x0 = _self.expression _self _x0 in
-    let _x1 = length_object _self _x1 in
-    Length (_x0, _x1)
+    Length _x0
   | Is_null_or_undefined _x0 ->
     let _x0 = _self.expression _self _x0 in
     Is_null_or_undefined _x0
@@ -155,9 +152,7 @@ let expression_desc : expression_desc fn =
     Static_index (_x0, _x1, _x2)
   | New (_x0, _x1) ->
     let _x0 = _self.expression _self _x0 in
-    let _x1 =
-      option (fun _self arg -> list _self.expression _self arg) _self _x1
-    in
+    let _x1 = list _self.expression _self _x1 in
     New (_x0, _x1)
   | Var _x0 ->
     let _x0 = _self.vident _self _x0 in
@@ -168,9 +163,9 @@ let expression_desc : expression_desc fn =
     Fun {fun_ with params; body}
   | Str _ as v -> v
   | Raw_js_code _ as v -> v
-  | Array (_x0, _x1) ->
+  | Array _x0 ->
     let _x0 = list _self.expression _self _x0 in
-    Array (_x0, _x1)
+    Array _x0
   | Optional_block (_x0, _x1) ->
     let _x0 = _self.expression _self _x0 in
     Optional_block (_x0, _x1)
@@ -194,6 +189,9 @@ let expression_desc : expression_desc fn =
   | Spread _x0 ->
     let _x0 = _self.expression _self _x0 in
     Spread _x0
+  | Record_rest (_x0, _x1) ->
+    let _x1 = _self.expression _self _x1 in
+    Record_rest (_x0, _x1)
 
 let for_ident_expression : for_ident_expression fn =
  fun _self arg -> _self.expression _self arg
@@ -202,9 +200,10 @@ let finish_ident_expression : finish_ident_expression fn =
  fun _self arg -> _self.expression _self arg
 
 let case_clause : case_clause fn =
- fun _self {switch_body = _x0; should_break = _x1; comment = _x2} ->
+ fun _self
+     {switch_body = _x0; should_break = _x1; comment = _x2; source_loc = _x3} ->
   let _x0 = _self.block _self _x0 in
-  {switch_body = _x0; should_break = _x1; comment = _x2}
+  {switch_body = _x0; should_break = _x1; comment = _x2; source_loc = _x3}
 
 let string_clause : string_clause fn =
  fun _self (_x0, _x1) ->
@@ -286,14 +285,14 @@ let statement_desc : statement_desc fn =
   | Debugger as v -> v
 
 let expression : expression fn =
- fun _self {expression_desc = _x0; comment = _x1} ->
+ fun _self {expression_desc = _x0; comment = _x1; source_loc = _x2} ->
   let _x0 = expression_desc _self _x0 in
-  {expression_desc = _x0; comment = _x1}
+  {expression_desc = _x0; comment = _x1; source_loc = _x2}
 
 let statement : statement fn =
- fun _self {statement_desc = _x0; comment = _x1} ->
+ fun _self {statement_desc = _x0; comment = _x1; source_loc = _x2} ->
   let _x0 = statement_desc _self _x0 in
-  {statement_desc = _x0; comment = _x1}
+  {statement_desc = _x0; comment = _x1; source_loc = _x2}
 
 let variable_declaration : variable_declaration fn =
  fun _self {ident = _x0; value = _x1; property = _x2; ident_info = _x3} ->

@@ -21,9 +21,9 @@ open Types
 
 (**** Sets, maps and hashtables of types ****)
 
-module TypeSet = Set.Make (TypeOps)
-module TypeMap = Map.Make (TypeOps)
-module TypeHash = Hashtbl.Make (TypeOps)
+module Type_set = Set.Make (Type_ops)
+module Type_map = Map.Make (Type_ops)
+module Type_hash = Hashtbl.Make (Type_ops)
 
 (**** Forward declarations ****)
 
@@ -83,9 +83,8 @@ type change =
       (Path.t * type_expr list) option ref * (Path.t * type_expr list) option
   | Crow of row_field option ref * row_field option
   | Ckind of field_kind option ref * field_kind option
-  | Ccommu of commutable ref * commutable
   | Cuniv of type_expr option ref * type_expr option
-  | Ctypeset of TypeSet.t ref * TypeSet.t
+  | Ctypeset of Type_set.t ref * Type_set.t
 
 type changes = Change of change * changes ref | Unchanged | Invalid
 
@@ -121,10 +120,6 @@ let repr t =
   | Tfield (_, k, _, t') as d when field_kind_repr k = Fabsent ->
     repr_link false t d t'
   | _ -> t
-
-let rec commu_repr = function
-  | Clink r when !r <> Cunknown -> commu_repr !r
-  | c -> c
 
 let rec row_field_repr_aux tl = function
   | Reither (_, tl', _, {contents = Some fi}) ->
@@ -260,9 +255,9 @@ let rec iter_row f row =
 let iter_type_expr f ty =
   match ty.desc with
   | Tvar _ -> ()
-  | Tarrow ({typ = ty1}, ty2, _, _) ->
-    f ty1;
-    f ty2
+  | Tarrow (params, ret) ->
+    List.iter (fun {typ} -> f typ) params;
+    f ret
   | Ttuple l -> List.iter f l
   | Tconstr (_, l, _) -> List.iter f l
   | Tobject (ty, {contents = Some (_, p)}) ->
@@ -335,8 +330,6 @@ let type_iterators =
     | Sig_typext (_, td, _) -> it.it_extension_constructor it td
     | Sig_module (_, md, _) -> it.it_module_declaration it md
     | Sig_modtype (_, mtd) -> it.it_modtype_declaration it mtd
-    | Sig_class () -> assert false
-    | Sig_class_type () -> assert false
   and it_value_description it vd = it.it_type_expr it vd.val_type
   and it_type_declaration it td =
     List.iter (it.it_type_expr it) td.type_params;
@@ -415,8 +408,6 @@ let rec copy_kind = function
   | Fpresent -> Fpresent
   | Fabsent -> assert false
 
-let copy_commu c = if commu_repr c = Cok then Cok else Clink (ref Cunknown)
-
 (* Since univars may be used as row variables, we need to do some
    encoding during substitution *)
 let rec norm_univar ty =
@@ -428,8 +419,8 @@ let rec norm_univar ty =
 
 let rec copy_type_desc ?(keep_names = false) f = function
   | Tvar _ as ty -> if keep_names then ty else Tvar None
-  | Tarrow (arg, ret, c, arity) ->
-    Tarrow ({arg with typ = f arg.typ}, f ret, copy_commu c, arity)
+  | Tarrow (params, ret) ->
+    Tarrow (List.map (fun arg -> {arg with typ = f arg.typ}) params, f ret)
   | Ttuple l -> Ttuple (List.map f l)
   | Tconstr (p, l, _) -> Tconstr (p, List.map f l, ref Mnil)
   | Tobject (ty, {contents = Some (p, tl)}) ->
@@ -485,8 +476,6 @@ let rec mark_type ty =
 let mark_type_node ty =
   let ty = repr ty in
   if ty.level >= lowest_level then ty.level <- pivot_level - ty.level
-
-let mark_type_params ty = iter_type_expr mark_type ty
 
 let type_iterators =
   let it_type_expr it ty =
@@ -633,7 +622,6 @@ let undo_change = function
   | Cname (r, v) -> r := v
   | Crow (r, v) -> r := v
   | Ckind (r, v) -> r := v
-  | Ccommu (r, v) -> r := v
   | Cuniv (r, v) -> r := v
   | Ctypeset (r, v) -> r := v
 
@@ -679,9 +667,6 @@ let set_row_field e v =
 let set_kind rk k =
   log_change (Ckind (rk, !rk));
   rk := Some k
-let set_commu rc c =
-  log_change (Ccommu (rc, !rc));
-  rc := c
 let set_typeset rs s =
   log_change (Ctypeset (rs, !rs));
   rs := s

@@ -22,56 +22,12 @@
  * along with this program; if not, write to the Free Software
  * Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA 02111-1307, USA. *)
 
-(**
-   {[
-     Js.undefinedToOption 
-       (if Js.typeof x = "undefined" then undefined 
-        else x  )
-
-   ]}
-
-   @deprecated
-*)
-let handle_external loc (x : string) : Parsetree.expression =
-  let raw_exp : Ast_exp.t =
-    let str_exp =
-      Ast_compatible.const_exp_string ~loc x ~delimiter:Ext_string.empty
-    in
-    {
-      str_exp with
-      pexp_desc =
-        Ast_external_mk.local_external_apply loc ~pval_prim:["#raw_expr"]
-          ~pval_type:
-            (Ast_helper.Typ.arrows
-               [{attrs = []; lbl = Nolabel; typ = Ast_helper.Typ.any ()}]
-               (Ast_helper.Typ.any ()))
-          [str_exp];
-    }
-  in
-  let empty =
-    (* FIXME: the empty delimiter does not make sense*)
-    Ast_helper.Exp.ident ~loc
-      {txt = Ldot (Ldot (Lident "Js", "Undefined"), "empty"); loc}
-  in
-  let undefined_typeof =
-    Ast_helper.Exp.ident {loc; txt = Ldot (Lident "Js", "undefinedToOption")}
-  in
-  let typeof = Ast_helper.Exp.ident {loc; txt = Ldot (Lident "Js", "typeof")} in
-
-  Ast_compatible.app1 ~loc undefined_typeof
-    (Ast_helper.Exp.ifthenelse ~loc
-       (Ast_compatible.app2 ~loc
-          (Ast_helper.Exp.ident ~loc {loc; txt = Lident "=="})
-          (Ast_compatible.app1 ~loc typeof raw_exp)
-          (Ast_compatible.const_exp_string ~loc "undefined"))
-       empty (Some raw_exp))
-
 let handle_debugger loc (payload : Ast_payload.t) =
   match payload with
   | PStr [] ->
     Ast_external_mk.local_external_apply loc ~pval_prim:["%debugger"]
       ~pval_type:
-        (Ast_helper.Typ.arrows
+        (Ast_helper.Typ.arrow
            [{attrs = []; lbl = Nolabel; typ = Ast_helper.Typ.any ()}]
            (Ast_literal.type_unit ()))
       [Ast_literal.val_unit ~loc ()]
@@ -98,7 +54,7 @@ let handle_raw ~kind loc payload =
       pexp_desc =
         Ast_external_mk.local_external_apply loc ~pval_prim:["#raw_expr"]
           ~pval_type:
-            (Ast_helper.Typ.arrows
+            (Ast_helper.Typ.arrow
                [{attrs = []; lbl = Nolabel; typ = Ast_helper.Typ.any ()}]
                (Ast_helper.Typ.any ()))
           [exp];
@@ -131,7 +87,7 @@ let handle_ffi ~loc ~payload =
           Ext_list.init effective_arity (fun _ ->
               ({attrs = []; lbl = Nolabel; typ = any} : Parsetree.arg))
         in
-        Ast_helper.Typ.arrows ~loc args any
+        Ast_helper.Typ.arrow ~loc args any
       in
       match !is_function with
       | Some arity -> Ast_helper.Exp.constraint_ ~loc e (arrow ~arity)
@@ -143,7 +99,7 @@ let handle_ffi ~loc ~payload =
         pexp_desc =
           Ast_external_mk.local_external_apply loc ~pval_prim:["#raw_expr"]
             ~pval_type:
-              (Ast_helper.Typ.arrows
+              (Ast_helper.Typ.arrow
                  [{attrs = []; lbl = Nolabel; typ = Ast_helper.Typ.any ()}]
                  (Ast_helper.Typ.any ()))
             [exp];
@@ -162,7 +118,7 @@ let handle_raw_structure loc payload =
         pexp_desc =
           Ast_external_mk.local_external_apply loc ~pval_prim:["#raw_stmt"]
             ~pval_type:
-              (Ast_helper.Typ.arrows
+              (Ast_helper.Typ.arrow
                  [{attrs = []; lbl = Nolabel; typ = Ast_helper.Typ.any ()}]
                  (Ast_helper.Typ.any ()))
             [exp];

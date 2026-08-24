@@ -213,12 +213,12 @@ let ctx_matcher p =
       | Tpat_tuple args when List.length args = len -> (p, args @ rem)
       | Tpat_any -> (p, omegas @ rem)
       | _ -> raise NoMatch)
-  | Tpat_record (((_, lbl, _, _) :: _ as l), _) -> (
+  | Tpat_record (((_, lbl, _, _) :: _ as l), _, _rest) -> (
     (* Records are normalized *)
     let len = Array.length lbl.lbl_all in
     fun q rem ->
       match q.pat_desc with
-      | Tpat_record (((_, lbl', _, _) :: _ as l'), _)
+      | Tpat_record (((_, lbl', _, _) :: _ as l'), _, _rest')
         when Array.length lbl'.lbl_all = len ->
         let l' = all_record_args l' in
         (p, List.fold_right (fun (_, _, p, _) r -> p :: r) l' rem)
@@ -439,7 +439,7 @@ let pretty_precompiled_res first nexts =
    in case action sharing is present.
 *)
 
-module StoreExp = Switch.Store (struct
+module Store_exp = Switch.Store (struct
   type t = lambda
   type key = lambda
   let compare_key = compare
@@ -447,14 +447,6 @@ module StoreExp = Switch.Store (struct
 end)
 
 let make_exit i = Lstaticraise (i, [])
-
-(* Introduce a catch, if worth it *)
-let make_catch d k =
-  match d with
-  | Lstaticraise (_, []) -> k d
-  | _ ->
-    let e = next_raise_count () in
-    Lstaticcatch (k (make_exit e), (e, []), d)
 
 (* Introduce a catch, if worth it, delayed version *)
 let rec as_simple_exit = function
@@ -536,12 +528,20 @@ let simplify_or p =
         let q2 = simpl_rec p2 in
         {p with pat_desc = Tpat_or (q1, q2, o)}
       with Var q2 -> raise (Var {p with pat_desc = Tpat_or (q1, q2, o)}))
-    | {pat_desc = Tpat_record (lbls, closed)} ->
+    | {pat_desc = Tpat_record (lbls, closed, rest)} ->
       let all_lbls = all_record_args lbls in
-      {p with pat_desc = Tpat_record (all_lbls, closed)}
+      {p with pat_desc = Tpat_record (all_lbls, closed, rest)}
     | _ -> p
   in
   try simpl_rec p with Var p -> p
+
+let bind_record_rest loc arg rest action =
+  Llet
+    ( Strict,
+      Pgenval,
+      rest.rest_ident,
+      Lprim (Precord_rest rest.excluded_runtime_labels, [arg], loc),
+      action )
 
 let simplify_cases args cls =
   match args with
@@ -556,10 +556,23 @@ let simplify_cases args cls =
         | Tpat_any -> cl :: simplify rem
         | Tpat_alias (p, id, _) ->
           simplify ((p :: patl, bind Alias id arg action) :: rem)
-        | Tpat_record ([], _) -> (omega :: patl, action) :: simplify rem
-        | Tpat_record (lbls, closed) ->
+        | Tpat_record ([], _, rest) ->
+          let action =
+            match rest with
+            | None -> action
+            | Some rest -> bind_record_rest pat.pat_loc arg rest action
+          in
+          (omega :: patl, action) :: simplify rem
+        | Tpat_record (lbls, closed, rest) ->
           let all_lbls = all_record_args lbls in
-          let full_pat = {pat with pat_desc = Tpat_record (all_lbls, closed)} in
+          let full_pat =
+            {pat with pat_desc = Tpat_record (all_lbls, closed, None)}
+          in
+          let action =
+            match rest with
+            | None -> action
+            | Some rest -> bind_record_rest pat.pat_loc arg rest action
+          in
           (full_pat :: patl, action) :: simplify rem
         | Tpat_or _ -> (
           let pat_simple = simplify_or pat in
@@ -612,11 +625,14 @@ let default_compat p def =
 (* Or-pattern expansion, variables are a complication w.r.t. the article *)
 let rec extract_vars r p =
   match p.pat_desc with
-  | Tpat_var (id, _) -> IdentSet.add id r
-  | Tpat_alias (p, id, _) -> extract_vars (IdentSet.add id r) p
+  | Tpat_var (id, _) -> Ident_set.add id r
+  | Tpat_alias (p, id, _) -> extract_vars (Ident_set.add id r) p
   | Tpat_tuple pats -> List.fold_left extract_vars r pats
-  | Tpat_record (lpats, _) ->
-    List.fold_left (fun r (_, _, p, _) -> extract_vars r p) r lpats
+  | Tpat_record (lpats, _, rest) -> (
+    let r = List.fold_left (fun r (_, _, p, _) -> extract_vars r p) r lpats in
+    match rest with
+    | None -> r
+    | Some rest -> Ident_set.add rest.rest_ident r)
   | Tpat_construct (_, _, pats) -> List.fold_left extract_vars r pats
   | Tpat_array pats -> List.fold_left extract_vars r pats
   | Tpat_variant (_, Some p, _) -> extract_vars r p
@@ -652,8 +668,8 @@ let rec explode_or_pat arg patl mk_action rem vars aliases = function
 
 let pm_free_variables {cases} =
   List.fold_right
-    (fun (_, act) r -> IdentSet.union (free_variables act) r)
-    cases IdentSet.empty
+    (fun (_, act) r -> Ident_set.union (free_variables act) r)
+    cases Ident_set.empty
 
 (* Basic grouping predicates *)
 let pat_as_constr = function
@@ -735,8 +751,8 @@ let insert_or_append p ps act ors no =
       if is_or q then
         if may_compat p q then
           if
-            IdentSet.is_empty (extract_vars IdentSet.empty p)
-            && IdentSet.is_empty (extract_vars IdentSet.empty q)
+            Ident_set.is_empty (extract_vars Ident_set.empty p)
+            && Ident_set.is_empty (extract_vars Ident_set.empty q)
             && equiv_pat p q
           then
             (* attempt insert, for equivalent orpats with no variables *)
@@ -1046,9 +1062,9 @@ and precompile_or argo cls ors args def k =
           }
         in
         let vars =
-          IdentSet.elements
-            (IdentSet.inter
-               (extract_vars IdentSet.empty orp)
+          Ident_set.elements
+            (Ident_set.inter
+               (extract_vars Ident_set.empty orp)
                (pm_free_variables orpm))
         in
         let or_num = next_raise_count () in
@@ -1422,7 +1438,7 @@ let record_matching_line num_fields lbl_pat_list =
 let get_args_record num_fields p rem =
   match p with
   | {pat_desc = Tpat_any} -> record_matching_line num_fields [] @ rem
-  | {pat_desc = Tpat_record (lbl_pat_list, _)} ->
+  | {pat_desc = Tpat_record (lbl_pat_list, _, _rest)} ->
     record_matching_line num_fields lbl_pat_list @ rem
   | _ -> assert false
 
@@ -1430,8 +1446,8 @@ let matcher_record num_fields p rem =
   match p.pat_desc with
   | Tpat_or (_, _, _) -> raise OrPat
   | Tpat_any | Tpat_var _ -> record_matching_line num_fields [] @ rem
-  | Tpat_record ([], _) when num_fields = 0 -> rem
-  | Tpat_record (((_, lbl, _, _) :: _ as lbl_pat_list), _)
+  | Tpat_record ([], _, _rest) when num_fields = 0 -> rem
+  | Tpat_record (((_, lbl, _, _) :: _ as lbl_pat_list), _, _rest)
     when Array.length lbl.lbl_all = num_fields ->
     record_matching_line num_fields lbl_pat_list @ rem
   | _ -> raise NoMatch
@@ -1515,97 +1531,7 @@ let make_array_matching p def ctx = function
 let divide_array ctx pm =
   divide make_array_matching ( = ) get_key_array get_args_array ctx pm
 
-(*
-   Specific string test sequence
-   Will be called by the bytecode compiler, from bytegen.ml.
-   The strategy is first dichotomic search (we perform 3-way tests
-   with compare_string), then sequence of equality tests
-   when there are less then T=strings_test_threshold static strings to match.
-
-  Increasing T entails (slightly) less code, decreasing T
-  (slightly) favors runtime speed.
-  T=8 looks a decent tradeoff.
-*)
-
-(* Utilities *)
-
-let strings_test_threshold = 8
-
-let bind_sw arg k =
-  match arg with
-  | Lvar _ -> k arg
-  | _ ->
-    let id = Ident.create "switch" in
-    Llet (Strict, Pgenval, id, arg, k (Lvar id))
-
-(* Sequential equality tests *)
-
-let make_string_test_sequence loc arg sw d =
-  let d, sw =
-    match d with
-    | None -> (
-      match sw with
-      | (_, d) :: sw -> (d, sw)
-      | [] -> assert false)
-    | Some d -> (d, sw)
-  in
-  bind_sw arg (fun arg ->
-      List.fold_right
-        (fun (s, lam) k ->
-          Lifthenelse
-            ( Lprim (Pstringcomp Cneq, [arg; Lconst (Const_immstring s)], loc),
-              k,
-              lam ))
-        sw d)
-
-let rec split k xs =
-  match xs with
-  | [] -> assert false
-  | x0 :: xs ->
-    if k <= 1 then ([], x0, xs)
-    else
-      let xs, y0, ys = split (k - 2) xs in
-      (x0 :: xs, y0, ys)
-
-let zero_lam = Lconst (Const_base (Const_int 0))
-
-let tree_way_test loc arg lt eq gt =
-  Lifthenelse
-    ( Lprim (Pintcomp Clt, [arg; zero_lam], loc),
-      lt,
-      Lifthenelse (Lprim (Pintcomp Clt, [zero_lam; arg], loc), gt, eq) )
-
-(* Dichotomic tree *)
-
-let rec do_make_string_test_tree loc arg sw delta d =
-  let len = List.length sw in
-  if len <= strings_test_threshold + delta then
-    make_string_test_sequence loc arg sw d
-  else
-    let lt, (s, act), gt = split len sw in
-    bind_sw
-      (Lprim (Pstringcomp Ceq, [arg; Lconst (Const_immstring s)], loc))
-      (fun r ->
-        tree_way_test loc r
-          (do_make_string_test_tree loc arg lt delta d)
-          act
-          (do_make_string_test_tree loc arg gt delta d))
-
 (* Entry point *)
-let expand_stringswitch loc arg sw d =
-  match d with
-  | None -> bind_sw arg (fun arg -> do_make_string_test_tree loc arg sw 0 None)
-  | Some e ->
-    bind_sw arg (fun arg ->
-        make_catch e (fun d -> do_make_string_test_tree loc arg sw 1 (Some d)))
-
-(**********************)
-(* Generic test trees *)
-(**********************)
-
-(* Sharing *)
-
-(* Add handler, if shared *)
 let handle_shared () =
   let hs = ref (fun x -> x) in
   let handle_shared act =
@@ -1620,7 +1546,7 @@ let handle_shared () =
   (hs, handle_shared)
 
 let share_actions_tree sw d =
-  let store = StoreExp.mk_store () in
+  let store = Store_exp.mk_store () in
   (* Default action is always shared *)
   let d =
     match d with
@@ -1706,7 +1632,7 @@ let make_test_sequence loc fail tst lt_tst arg const_lambda_list =
   in
   hs (make_test_sequence const_lambda_list)
 
-module SArg = struct
+module S_arg = struct
   type primitive = Lambda.primitive
 
   let eqint = Pintcomp Ceq
@@ -1760,7 +1686,7 @@ end
 (* Action sharing for Lswitch argument *)
 let share_actions_sw sw =
   (* Attempt sharing on all actions *)
-  let store = StoreExp.mk_store () in
+  let store = Store_exp.mk_store () in
   let fail =
     match sw.sw_failaction with
     | None -> None
@@ -1832,7 +1758,7 @@ let reintroduce_fail sw =
     else sw
   | Some _ -> sw
 
-module Switcher = Switch.Make (SArg)
+module Switcher = Switch.Make (S_arg)
 open Switch
 
 let rec last def = function
@@ -1846,7 +1772,7 @@ let get_edges low high l =
   | (x, _) :: _ -> (x, last high l)
 
 let as_interval_canfail fail low high l =
-  let store = StoreExp.mk_store () in
+  let store = Store_exp.mk_store () in
 
   let do_store _tag act =
     let i = store.act_store act in
@@ -1896,7 +1822,7 @@ let as_interval_canfail fail low high l =
   (Array.of_list r, store)
 
 let as_interval_nofail l =
-  let store = StoreExp.mk_store () in
+  let store = Store_exp.mk_store () in
   let rec some_hole = function
     | [] | [_] -> false
     | (i, _) :: ((j, _) :: _ as rem) -> j > i + 1 || some_hole rem
@@ -2561,7 +2487,7 @@ and do_compile_matching repr partial ctx arg pmh =
       compile_no_test
         (divide_tuple (List.length patl) (normalize_pat pat))
         ctx_combine repr partial ctx pm
-    | Tpat_record ((_, lbl, _, _) :: _, _) ->
+    | Tpat_record ((_, lbl, _, _) :: _, _, _rest) ->
       compile_no_test
         (divide_record lbl.lbl_all (normalize_pat pat))
         ctx_combine repr partial ctx pm
@@ -2636,7 +2562,7 @@ let find_in_pat pred =
     | Tpat_alias (p, _, _) | Tpat_variant (_, Some p, _) -> find_rec p
     | Tpat_tuple ps | Tpat_construct (_, _, ps) | Tpat_array ps ->
       List.exists find_rec ps
-    | Tpat_record (lpats, _) ->
+    | Tpat_record (lpats, _, _rest) ->
       List.exists (fun (_, _, p, _) -> find_rec p) lpats
     | Tpat_or (p, q, _) -> find_rec p || find_rec q
     | Tpat_constant _ | Tpat_var _ | Tpat_any | Tpat_variant (_, None, _) ->
@@ -2646,7 +2572,7 @@ let find_in_pat pred =
 
 let have_mutable_field p =
   match p with
-  | Tpat_record (lps, _) ->
+  | Tpat_record (lps, _, _rest) ->
     List.exists
       (fun (_, lbl, _, _) ->
         match lbl.Types.lbl_mut with
@@ -2677,7 +2603,6 @@ let check_partial is_mutable pat_act_list = function
     then Partial
     else Total
 
-let check_partial_list = check_partial (List.exists is_mutable)
 let check_partial = check_partial is_mutable
 
 (* have toplevel handler when appropriate *)
@@ -2814,24 +2739,6 @@ let for_let loc param pat body =
 (* Handling of tupled functions and matchings *)
 
 (* Easy case since variables are available *)
-let for_tupled_function loc paraml pats_act_list partial =
-  let partial = check_partial_list pats_act_list partial in
-  let raise_num = next_raise_count () in
-  let omegas = [List.map (fun _ -> omega) paraml] in
-  let pm =
-    {
-      cases = pats_act_list;
-      args = List.map (fun id -> (Lvar id, Strict)) paraml;
-      default = [(omegas, raise_num)];
-    }
-  in
-  try
-    let lambda, total =
-      compile_match None partial (start_ctx (List.length paraml)) pm
-    in
-    check_total total lambda raise_num (partial_function loc)
-  with Unused -> partial_function loc ()
-
 let flatten_pattern size p =
   match p.pat_desc with
   | Tpat_tuple args -> args

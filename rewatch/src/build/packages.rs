@@ -18,6 +18,7 @@ use std::fs::{self};
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
+use tracing::{info_span, instrument};
 
 #[derive(Debug, Clone)]
 pub struct SourceFileMeta {
@@ -395,23 +396,7 @@ fn read_dependencies(
                     }
                 };
 
-            let is_local_dep = {
-                match &project_context.monorepo_context {
-                    None => project_context.current_config.name.as_str() == package_name
-                    ,
-                    Some(MonoRepoContext::MonorepoRoot {
-                             local_dependencies,
-                             local_dev_dependencies,
-                         }) => {
-                        local_dependencies.contains(package_name) || local_dev_dependencies.contains(package_name)
-                    },
-                    Some(MonoRepoContext::MonorepoPackage {
-                             parent_config,
-                         }) => {
-                        helpers::is_local_package(&parent_config.path, &canonical_path)
-                    }
-                }
-            };
+            let is_local_dep = is_local_dependency(project_context, package_name, &canonical_path);
 
             let dependencies = read_dependencies(
                 &mut registered_dependencies_set.to_owned(),
@@ -431,6 +416,18 @@ fn read_dependencies(
             }
         })
         .collect()
+}
+
+fn is_local_dependency(project_context: &ProjectContext, package_name: &str, canonical_path: &Path) -> bool {
+    match &project_context.monorepo_context {
+        None => project_context.current_config.name.as_str() == package_name,
+        Some(MonoRepoContext::MonorepoRoot { .. }) => {
+            helpers::is_local_package(project_context.get_root_path(), canonical_path)
+        }
+        Some(MonoRepoContext::MonorepoPackage { parent_config }) => {
+            helpers::is_local_package(&parent_config.path, canonical_path)
+        }
+    }
 }
 
 fn flatten_dependencies(dependencies: Vec<Dependency>) -> Vec<Dependency> {
@@ -668,6 +665,7 @@ fn extend_with_children(
     prod: bool,
 ) -> AHashMap<String, Package> {
     for (_key, package) in build.iter_mut() {
+        let _span = info_span!("build.load_package_sources", package = %package.name).entered();
         let mut map: AHashMap<PathBuf, SourceFileMeta> = AHashMap::new();
         package
             .source_folders
@@ -857,6 +855,7 @@ pub fn compute_active_features(
 ///    interface files.
 ///
 /// The two step process is there to reduce IO overhead.
+#[instrument(name = "packages.make", skip_all)]
 pub fn make(
     filter: &Option<regex::Regex>,
     project_context: &ProjectContext,
@@ -885,6 +884,7 @@ pub fn make(
     Ok(result)
 }
 
+#[instrument(name = "packages.parse_packages", skip_all)]
 pub fn parse_packages(build_state: &mut BuildState) -> Result<()> {
     let packages = build_state.packages.clone();
     for (package_name, package) in packages.iter() {
@@ -1255,11 +1255,13 @@ pub fn validate_packages_dependencies(packages: &AHashMap<String, Package>) -> b
 #[cfg(test)]
 mod test {
     use crate::config;
+    use crate::project_context::{MonoRepoContext, ProjectContext};
 
     use super::{Namespace, Package, read_issue_tracker_url, read_package_name};
     use ahash::{AHashMap, AHashSet};
     use std::fs;
     use std::path::PathBuf;
+    use std::sync::RwLock;
     use tempfile::TempDir;
 
     pub struct CreatePackageArgs {
@@ -1463,6 +1465,47 @@ mod test {
         let temp_dir = TempDir::new().unwrap();
         write_pkg_json(temp_dir.path(), r#"{"name":"x"}"#);
         assert_eq!(read_issue_tracker_url(temp_dir.path()), None);
+    }
+
+    #[test]
+    fn monorepo_root_marks_transitive_workspace_dependencies_as_local() {
+        let temp_dir = TempDir::new().unwrap();
+        let root = temp_dir.path();
+
+        let mut local_dependencies = AHashSet::new();
+        local_dependencies.insert("direct".to_string());
+
+        let project_context = ProjectContext {
+            current_config: config::tests::create_config(config::tests::CreateConfigArgs {
+                name: "root".to_string(),
+                bs_deps: vec!["direct".to_string()],
+                build_dev_deps: vec![],
+                allowed_dependents: None,
+                path: root.join("rescript.json"),
+            }),
+            monorepo_context: Some(MonoRepoContext::MonorepoRoot {
+                local_dependencies,
+                local_dev_dependencies: AHashSet::new(),
+            }),
+            node_modules_exist_cache: RwLock::new(AHashMap::new()),
+            packages_cache: RwLock::new(AHashMap::new()),
+        };
+
+        assert!(super::is_local_dependency(
+            &project_context,
+            "direct",
+            &root.join("packages/direct")
+        ));
+        assert!(super::is_local_dependency(
+            &project_context,
+            "transitive",
+            &root.join("packages/transitive")
+        ));
+        assert!(!super::is_local_dependency(
+            &project_context,
+            "external",
+            &root.join("node_modules/external")
+        ));
     }
 
     fn root_package_with_features(

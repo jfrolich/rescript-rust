@@ -34,8 +34,5 @@ val scan_template_literal_token :
 
 val scan_regex : t -> Lexing.position * Lexing.position * Res_token.t
 
-(* Look ahead to see if the next non-whitespace character is a minus *)
-val peekMinus : t -> bool
-
 (* Look ahead to see if the next non-whitespace character is a slash *)
-val peekSlash : t -> bool
+val peek_slash : t -> bool

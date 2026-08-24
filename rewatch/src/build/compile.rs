@@ -34,13 +34,29 @@ use std::sync::mpsc;
 use std::time::Duration;
 use std::time::Instant;
 use std::time::SystemTime;
-use tracing::{Span, info_span};
+use tracing::{Span, info_span, instrument};
+
+/// Decode captured compiler output (stdout or stderr) into a String.
+///
+/// The output is not guaranteed to be valid UTF-8: a code frame can truncate a
+/// multi-byte character. Decode lossily so a bad byte becomes a replacement
+/// character instead of crashing the build.
+fn compiler_output_to_string(bytes: &[u8]) -> String {
+    String::from_utf8_lossy(bytes).to_string()
+}
 
 /// Execute js-post-build command for a compiled JavaScript file.
 /// The command runs in the directory containing the rescript.json that defines it.
 /// The absolute path to the JS file is passed as an argument.
 fn execute_post_build_command(cmd: &str, js_file_path: &Path, working_dir: &Path) -> Result<()> {
     let full_command = format!("{} {}", cmd, js_file_path.display());
+
+    let _span = info_span!(
+        "build.js_post_build",
+        command = %cmd,
+        js_file = %js_file_path.display(),
+    )
+    .entered();
 
     debug!(
         "Executing js-post-build: {} (in {})",
@@ -399,6 +415,11 @@ fn compute_module_costs(
 
 /// Compute the weighted critical-path priority of every module in the universe:
 /// `priority(m) = cost(m) + max(priority(d) for d in in-universe dependents of m)`.
+struct CompileWarning {
+    module_name: String,
+    package_name: String,
+    warning: String,
+}
 /// Runs a reverse-topological sweep from leaves to roots. Modules stuck in a
 /// cycle get priority 0, and the actual cycle is diagnosed later by
 /// `dependency_cycle::find` when the dispatcher detects a stall.
@@ -551,6 +572,31 @@ fn compile_one(
             }
         }
         SourceType::SourceFile(source_file) => {
+            // Construct span + attributes only when a subscriber is listening.
+            // Otherwise root_config.get_package_specs() (which clones) and the
+            // attribute formatting run per-module on the build hot path.
+            let _file_span = if tracing::enabled!(tracing::Level::INFO) {
+                let root_config = build_state.get_root_config();
+                let specs = root_config.get_package_specs();
+                // A package can be built under multiple specs (e.g. ESM + CJS).
+                // Report all of them joined by "," instead of silently picking
+                // the first — the compile_file span covers work for every spec.
+                let suffix = specs
+                    .iter()
+                    .map(|s| root_config.get_suffix(s))
+                    .collect::<Vec<_>>()
+                    .join(",");
+                let module_system = specs
+                    .iter()
+                    .map(|s| s.module.as_str())
+                    .collect::<Vec<_>>()
+                    .join(",");
+                let namespace = package.namespace.to_suffix().unwrap_or_default();
+                info_span!("build.compile_file", module = %module_name, package = %package.name, suffix, module_system, namespace).entered()
+            } else {
+                tracing::Span::none().entered()
+            };
+
             let cmi_path = helpers::get_compiler_asset(
                 package,
                 &package.namespace,
@@ -633,6 +679,62 @@ fn extract_sexp_from_stderr(stderr: &str) -> (String, Option<String>) {
     }
 }
 
+fn collect_stored_warnings_for_modules_not_recompiled(
+    build_state: &BuildState,
+    recompiled_modules: &AHashSet<String>,
+) -> Vec<CompileWarning> {
+    // Collect warnings from modules that were not recompiled in this build but still have stored
+    // warnings from a previous compilation. This includes ready modules that were in the compile
+    // universe but never scheduled because an earlier module failed.
+    let mut warnings = Vec::new();
+    for (module_name, module) in build_state.modules.iter() {
+        if recompiled_modules.contains(module_name) {
+            continue;
+        }
+        if let SourceType::SourceFile(ref source_file) = module.source_type {
+            if let Some(ref warning) = source_file.implementation.compile_warnings {
+                warnings.push(CompileWarning {
+                    module_name: module_name.clone(),
+                    package_name: module.package_name.clone(),
+                    warning: warning.clone(),
+                });
+            }
+            if let Some(ref interface) = source_file.interface
+                && let Some(ref warning) = interface.compile_warnings
+            {
+                warnings.push(CompileWarning {
+                    module_name: module_name.clone(),
+                    package_name: module.package_name.clone(),
+                    warning: warning.clone(),
+                });
+            }
+        }
+    }
+    warnings
+}
+
+// Warning output should use the same deterministic module-name order whether a
+// warning was emitted by this compile pass or replayed from a previous one.
+fn append_compile_warnings(
+    build_state: &BuildState,
+    mut warning_entries: Vec<CompileWarning>,
+    compile_warnings: &mut String,
+) {
+    warning_entries.sort_by(|a, b| a.module_name.cmp(&b.module_name));
+    for CompileWarning {
+        package_name,
+        warning,
+        ..
+    } in warning_entries
+    {
+        if let Some(package) = build_state.get_package(&package_name) {
+            logs::append(package, &warning);
+        }
+        compile_warnings.push_str(&warning);
+    }
+}
+
+#[instrument(name = "build.compile", skip_all)]
 pub fn compile(
     build_state: &mut BuildCommandState,
     show_progress: bool,
@@ -775,6 +877,7 @@ pub fn compile(
     let dump_typed_sexp = build_state.dump_typed_sexp();
     let build_state_ref: &BuildState = &build_state.build_state;
     let build_command_state_ref: &BuildCommandState = build_state;
+    let compile_span = tracing::Span::current();
 
     let (tx, rx) = mpsc::channel::<WorkerMsg>();
     // Bound concurrency to rayon's pool size so the priority heap actually
@@ -861,6 +964,7 @@ pub fn compile(
                 let module_name = work.module_name.clone();
                 let is_dirty = dirty_set.contains(&module_name);
                 let warn_override = warn_error_override.clone();
+                let parent_span = compile_span.clone();
                 let tx = tx.clone();
                 let inc_ref = &inc;
                 in_flight += 1;
@@ -1096,6 +1200,7 @@ pub fn compile(
 
     let mut compile_errors = String::new();
     let mut compile_warnings = String::new();
+    let mut warning_entries = Vec::new();
     let mut num_compiled_modules = 0;
 
     // Persist propagated dirtiness back onto build_state. Modules that were
@@ -1115,6 +1220,14 @@ pub fn compile(
     // though modules complete in arbitrary order.
     results_buffer.sort_by(|a, b| a.module_name.cmp(&b.module_name));
 
+    // These timestamps are used as a compile-generation marker by
+    // mark_modules_with_expired_deps_dirty, not as precise wall-clock compile
+    // times. All modules successfully compiled in one pass are mutually
+    // up-to-date for that pass, so they must receive the same timestamp.
+    let compile_timestamp = SystemTime::now();
+
+    let mut recompiled_modules = AHashSet::<String>::new();
+
     for msg in results_buffer {
         let CompletionMsg {
             module_name,
@@ -1126,6 +1239,7 @@ pub fn compile(
 
         if is_compiled {
             num_compiled_modules += 1;
+            recompiled_modules.insert(module_name.clone());
         }
 
         let package_name = {
@@ -1156,6 +1270,7 @@ pub fn compile(
                     (None, None)
                 }
                 SourceType::SourceFile(ref mut source_file) => match &result {
+                    Ok(None) if !is_compiled => (None, None),
                     Ok(Some(err)) => {
                         let warning_text = err.to_string();
                         source_file.implementation.compile_state = CompileState::Warning;
@@ -1179,6 +1294,7 @@ pub fn compile(
                 module.source_type
             {
                 match &interface_result {
+                    Some(Ok(None)) if !is_compiled => (None, None),
                     Some(Ok(Some(err))) => {
                         let warning_text = err.to_string();
                         source_file.interface.as_mut().unwrap().compile_state = CompileState::Warning;
@@ -1205,24 +1321,30 @@ pub fn compile(
 
             if result.is_ok() && interface_result.as_ref().is_none_or(|r| r.is_ok()) {
                 module.compile_dirty = false;
-                module.last_compiled_cmi = Some(SystemTime::now());
-                module.last_compiled_cmt = Some(SystemTime::now());
+                module.last_compiled_cmi = Some(compile_timestamp);
+                module.last_compiled_cmt = Some(compile_timestamp);
             }
 
             (compile_warning, compile_error, interface_warning, interface_error)
         };
 
         if let Some(warning) = compile_warning {
-            logs::append(package, &warning);
-            compile_warnings.push_str(&warning);
+            warning_entries.push(CompileWarning {
+                module_name: module_name.clone(),
+                package_name: package_name.clone(),
+                warning,
+            });
         }
         if let Some(error) = compile_error {
             logs::append(package, &error);
             compile_errors.push_str(&error);
         }
         if let Some(warning) = interface_warning {
-            logs::append(package, &warning);
-            compile_warnings.push_str(&warning);
+            warning_entries.push(CompileWarning {
+                module_name: module_name.clone(),
+                package_name: package_name.clone(),
+                warning,
+            });
         }
         if let Some(error) = interface_error {
             logs::append(package, &error);
@@ -1259,31 +1381,13 @@ pub fn compile(
         compile_errors.push_str(&message);
     }
 
-    // Collect warnings from modules that were not recompiled in this build
-    // but still have stored warnings from a previous compilation.
-    // This ensures warnings are not lost during incremental builds in watch mode.
-    for (module_name, module) in build_state.modules.iter() {
-        if compile_universe.contains(module_name) {
-            continue;
-        }
-        if let SourceType::SourceFile(ref source_file) = module.source_type {
-            let package = build_state.get_package(&module.package_name);
-            if let Some(ref warning) = source_file.implementation.compile_warnings {
-                if let Some(package) = package {
-                    logs::append(package, warning);
-                }
-                compile_warnings.push_str(warning);
-            }
-            if let Some(ref interface) = source_file.interface
-                && let Some(ref warning) = interface.compile_warnings
-            {
-                if let Some(package) = package {
-                    logs::append(package, warning);
-                }
-                compile_warnings.push_str(warning);
-            }
-        }
-    }
+    // Collect replayed warnings into the same list as fresh warnings so mixed
+    // output matches the sorted order used when every module compiles normally.
+    warning_entries.extend(collect_stored_warnings_for_modules_not_recompiled(
+        &build_state.build_state,
+        &recompiled_modules,
+    ));
+    append_compile_warnings(&build_state.build_state, warning_entries, &mut compile_warnings);
 
     Ok((compile_errors, compile_warnings, num_compiled_modules))
 }
@@ -1336,6 +1440,7 @@ pub fn compiler_args(
     is_local_dep: bool,
     // Command-line --warn-error flag override (takes precedence over rescript.json config)
     warn_error_override: Option<String>,
+    source_map_command: config::SourceMapCommand,
     // Pre-expanded source directories for the current package (used by gentype).
     // Pass an empty slice when unavailable (e.g. the compiler-args CLI command).
     current_package_dirs: &[PathBuf],
@@ -1370,6 +1475,7 @@ pub fn compiler_args(
     let jsx_module_args = root_config.get_jsx_module_args();
     let jsx_mode_args = root_config.get_jsx_mode_args();
     let jsx_preserve_args = root_config.get_jsx_preserve_args();
+    let source_map_args = root_config.get_source_map_args(source_map_command);
     let bsb_project_root = project_context.get_root_path();
     let dep_paths: Vec<(String, PathBuf)> = if config.gentype_config.is_some() {
         let resolved = packages.as_ref().map(|pkgs| {
@@ -1454,6 +1560,7 @@ pub fn compiler_args(
         jsx_module_args,
         jsx_mode_args,
         jsx_preserve_args,
+        source_map_args,
         bsc_flags.to_owned(),
         warning_args,
         gentype_arg,
@@ -3425,6 +3532,7 @@ fn compile_file(
         is_type_dev,
         package.is_local_dep,
         warn_error_override,
+        build_state.source_map_command,
         current_package_dirs,
     )?;
 
@@ -3588,7 +3696,7 @@ fn compile_file(
             "Could not compile file. Error: {e}. Path to AST: {ast_path:?}"
         )),
         Ok(x) => {
-            let raw_stderr = String::from_utf8_lossy(&x.stderr).to_string();
+            let raw_stderr = compiler_output_to_string(&x.stderr);
 
             let err = if dump_typed_sexp {
                 let (warnings, sexp) = extract_sexp_from_stderr(&raw_stderr);
@@ -3701,6 +3809,20 @@ fn compile_file(
 
                     if source.exists() {
                         let _ = std::fs::copy(&source, &destination).expect("copying source file failed");
+                    }
+
+                    let mut source_map = source.clone().into_os_string();
+                    source_map.push(".map");
+                    let source_map = PathBuf::from(source_map);
+                    let mut destination_map = destination.clone().into_os_string();
+                    destination_map.push(".map");
+                    let destination_map = PathBuf::from(destination_map);
+
+                    if source_map.exists() {
+                        let _ = std::fs::copy(&source_map, &destination_map)
+                            .expect("copying source map file failed");
+                    } else {
+                        let _ = std::fs::remove_file(&destination_map);
                     }
                 }
             });
@@ -3821,7 +3943,7 @@ pub fn mark_modules_with_expired_deps_dirty(build_state: &mut BuildCommandState)
                 let dependent_module = build_state.modules.get(dependent).unwrap();
                 match dependent_module.source_type {
                     SourceType::SourceFile(_) => {
-                        match (module.last_compiled_cmt, module.last_compiled_cmt) {
+                        match (module.last_compiled_cmt, module.last_compiled_cmi) {
                             (None, None) | (Some(_), None) | (None, Some(_)) => {
                                 // println!(
                                 //     "🛑 {} is a dependent of {} but has no cmt/cmi",
@@ -3888,6 +4010,116 @@ pub fn mark_modules_with_expired_deps_dirty(build_state: &mut BuildCommandState)
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::build::packages::{Namespace, Package};
+    use crate::config;
+    use crate::project_context::ProjectContext;
+    use ahash::AHashMap;
+    use std::fs;
+    use std::path::{Path, PathBuf};
+    use std::sync::RwLock;
+    use std::time::SystemTime;
+    use tempfile::TempDir;
+
+    // The compiler can write a code frame that truncates a multi-byte character, so the
+    // captured output is not always valid UTF-8. Decoding it must not panic.
+    #[test]
+    fn compiler_output_to_string_handles_invalid_utf8() {
+        // 0xe2 0x80 is the start of an em dash (U+2014); the third byte is missing.
+        let truncated = [b'W', b'a', b'r', b'n', b'i', b'n', b'g', b' ', 0xe2, 0x80];
+        let decoded = compiler_output_to_string(&truncated);
+        assert!(decoded.starts_with("Warning "));
+    }
+
+    fn test_project_context(root: &Path) -> ProjectContext {
+        let config = config::tests::create_config(config::tests::CreateConfigArgs {
+            name: "test-root".to_string(),
+            bs_deps: vec![],
+            build_dev_deps: vec![],
+            allowed_dependents: None,
+            path: root.to_path_buf(),
+        });
+
+        ProjectContext {
+            current_config: config,
+            monorepo_context: None,
+            node_modules_exist_cache: RwLock::new(AHashMap::new()),
+            packages_cache: RwLock::new(AHashMap::new()),
+        }
+    }
+
+    fn test_package(name: &str, path: PathBuf) -> Package {
+        Package {
+            name: name.to_string(),
+            config: config::tests::create_config(config::tests::CreateConfigArgs {
+                name: name.to_string(),
+                bs_deps: vec![],
+                build_dev_deps: vec![],
+                allowed_dependents: None,
+                path: path.clone(),
+            }),
+            source_folders: Default::default(),
+            source_files: None,
+            namespace: Namespace::NoNamespace,
+            modules: None,
+            path,
+            dirs: None,
+            gentype_dirs: None,
+            is_local_dep: true,
+            is_root: true,
+        }
+    }
+
+    fn test_module(package_name: &str, implementation_warning: Option<&str>) -> Module {
+        Module {
+            source_type: SourceType::SourceFile(SourceFile {
+                implementation: Implementation {
+                    path: PathBuf::from("src/ModuleA.res"),
+                    parse_state: ParseState::Success,
+                    compile_state: if implementation_warning.is_some() {
+                        CompileState::Warning
+                    } else {
+                        CompileState::Success
+                    },
+                    last_modified: SystemTime::UNIX_EPOCH,
+                    parse_dirty: false,
+                    compile_warnings: implementation_warning.map(str::to_string),
+                },
+                interface: None,
+            }),
+            deps: Default::default(),
+            dependents: Default::default(),
+            package_name: package_name.to_string(),
+            compile_dirty: false,
+            last_compiled_cmi: None,
+            last_compiled_cmt: None,
+            deps_dirty: false,
+            is_type_dev: false,
+        }
+    }
+
+    fn test_build_state(temp_dir: &TempDir, module_name: &str, module: Module) -> BuildState {
+        let package = test_package("test-package", temp_dir.path().to_path_buf());
+        fs::create_dir_all(package.get_build_path()).expect("build log directory should be created");
+
+        let mut packages = AHashMap::new();
+        packages.insert(package.name.clone(), package);
+
+        let compiler = CompilerInfo {
+            bsc_path: temp_dir.path().join("bsc"),
+            bsc_hash: blake3::hash(b"test-bsc"),
+            runtime_path: temp_dir.path().join("runtime"),
+        };
+
+        let mut build_state = BuildState::new(
+            test_project_context(temp_dir.path()),
+            packages,
+            compiler,
+            config::SourceMapCommand::Build,
+        );
+        build_state.insert_module(module_name, module);
+        logs::initialize(&build_state.packages);
+        build_state
+    }
 
     #[test]
     fn retain_critical_external_warnings_returns_none_without_marker() {
@@ -3921,5 +4153,95 @@ mod tests {
             .expect("uncurried-dot warning should survive on Windows too");
         assert!(kept.contains("`(. ...)` uncurried syntax"));
         assert!(!kept.contains("unused variable"));
+    }
+
+    #[test]
+    fn replays_stored_warning_for_module_that_did_not_recompile() {
+        let temp_dir = TempDir::new().expect("temp dir should be created");
+        let build_state = test_build_state(
+            &temp_dir,
+            "ModuleA",
+            test_module("test-package", Some("warning: carried forward\n")),
+        );
+        let recompiled_modules = Default::default();
+
+        let compile_warnings =
+            collect_stored_warnings_for_modules_not_recompiled(&build_state, &recompiled_modules)
+                .into_iter()
+                .map(|entry| entry.warning)
+                .collect::<String>();
+
+        assert_eq!(compile_warnings, "warning: carried forward\n");
+    }
+
+    #[test]
+    fn replays_stored_warnings_in_module_name_order() {
+        let temp_dir = TempDir::new().expect("temp dir should be created");
+        let mut build_state = test_build_state(
+            &temp_dir,
+            "Zed",
+            test_module("test-package", Some("warning: zed\n")),
+        );
+        build_state.insert_module("Alpha", test_module("test-package", Some("warning: alpha\n")));
+        let mut compile_warnings = String::new();
+        let recompiled_modules = Default::default();
+
+        append_compile_warnings(
+            &build_state,
+            collect_stored_warnings_for_modules_not_recompiled(&build_state, &recompiled_modules),
+            &mut compile_warnings,
+        );
+
+        assert_eq!(compile_warnings, "warning: alpha\nwarning: zed\n");
+    }
+
+    #[test]
+    fn appends_fresh_and_stored_warnings_in_shared_module_name_order() {
+        let temp_dir = TempDir::new().expect("temp dir should be created");
+        let build_state = test_build_state(
+            &temp_dir,
+            "ModuleA",
+            test_module("test-package", Some("warning: stored\n")),
+        );
+        let mut compile_warnings = String::new();
+
+        append_compile_warnings(
+            &build_state,
+            vec![
+                CompileWarning {
+                    module_name: "Zed".to_string(),
+                    package_name: "test-package".to_string(),
+                    warning: "warning: fresh\n".to_string(),
+                },
+                CompileWarning {
+                    module_name: "Alpha".to_string(),
+                    package_name: "test-package".to_string(),
+                    warning: "warning: stored\n".to_string(),
+                },
+            ],
+            &mut compile_warnings,
+        );
+
+        assert_eq!(compile_warnings, "warning: stored\nwarning: fresh\n");
+    }
+
+    #[test]
+    fn does_not_replay_stored_warning_for_module_that_recompiled() {
+        let temp_dir = TempDir::new().expect("temp dir should be created");
+        let build_state = test_build_state(
+            &temp_dir,
+            "ModuleA",
+            test_module("test-package", Some("warning: already emitted\n")),
+        );
+        let mut recompiled_modules = ahash::AHashSet::new();
+        recompiled_modules.insert("ModuleA".to_string());
+
+        let compile_warnings =
+            collect_stored_warnings_for_modules_not_recompiled(&build_state, &recompiled_modules)
+                .into_iter()
+                .map(|entry| entry.warning)
+                .collect::<String>();
+
+        assert!(compile_warnings.is_empty());
     }
 }

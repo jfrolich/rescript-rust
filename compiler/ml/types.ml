@@ -25,7 +25,7 @@ and arg = {lbl: arg_label; typ: type_expr}
 
 and type_desc =
   | Tvar of string option
-  | Tarrow of arg * type_expr * commutable * arity
+  | Tarrow of arg list * type_expr
   | Ttuple of type_expr list
   | Tconstr of Path.t * type_expr list * abbrev_memo ref
   | Tobject of type_expr * (Path.t * type_expr list) option ref
@@ -61,9 +61,7 @@ and abbrev_memo =
 
 and field_kind = Fvar of field_kind option ref | Fpresent | Fabsent
 
-and commutable = Cok | Cunknown | Clink of commutable ref
-
-module TypeOps = struct
+module Type_ops = struct
   type t = type_expr
   let compare t1 t2 = t1.id - t2.id
   let hash t = t.id
@@ -72,11 +70,11 @@ end
 
 (* Maps of methods and instance variables *)
 
-module OrderedString = struct
+module Ordered_string = struct
   type t = string
   let compare (x : t) y = compare x y
 end
-module Meths = Map.Make (OrderedString)
+module Meths = Map.Make (Ordered_string)
 module Vars = Meths
 
 (* Value descriptions *)
@@ -206,7 +204,7 @@ type extension_constructor = {
 
 (* Type expressions for the class language *)
 
-module Concr = Set.Make (OrderedString)
+module Concr = Set.Make (Ordered_string)
 
 (* Type expressions for the module language *)
 
@@ -226,8 +224,6 @@ and signature_item =
   | Sig_typext of Ident.t * extension_constructor * ext_status
   | Sig_module of Ident.t * module_declaration * rec_status
   | Sig_modtype of Ident.t * modtype_declaration
-  | Sig_class of unit
-  | Sig_class_type of unit (* Dummy AST node *)
 
 and module_declaration = {
   md_type: module_type;

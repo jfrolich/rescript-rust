@@ -129,7 +129,7 @@ let pat sub {pat_extra; pat_desc; pat_env; _} =
   | Tpat_tuple l -> List.iter (sub.pat sub) l
   | Tpat_construct (_, _, l) -> List.iter (sub.pat sub) l
   | Tpat_variant (_, po, _) -> Option.iter (sub.pat sub) po
-  | Tpat_record (l, _) -> List.iter (fun (_, _, i, _) -> sub.pat sub i) l
+  | Tpat_record (l, _, _rest) -> List.iter (fun (_, _, i, _) -> sub.pat sub i) l
   | Tpat_array l -> List.iter (sub.pat sub) l
   | Tpat_or (p1, p2, _) ->
     sub.pat sub p1;
@@ -140,7 +140,6 @@ let expr sub {exp_extra; exp_desc; exp_env; _} =
   let extra = function
     | Texp_constraint cty -> sub.typ sub cty
     | Texp_coerce cty2 -> sub.typ sub cty2
-    | Texp_newtype _ -> ()
     | Texp_open (_, _, _, _) -> ()
   in
   List.iter (fun (e, _, _) -> extra e) exp_extra;
@@ -151,7 +150,9 @@ let expr sub {exp_extra; exp_desc; exp_env; _} =
   | Texp_let (rec_flag, list, exp) ->
     sub.value_bindings sub (rec_flag, list);
     sub.expr sub exp
-  | Texp_function {case; _} -> sub.case sub case
+  | Texp_function {params; body} ->
+    List.iter (fun {fp_pat} -> sub.pat sub fp_pat) params;
+    sub.expr sub body
   | Texp_apply {funct = exp; args = list} ->
     sub.expr sub exp;
     List.iter (fun (_, o) -> Option.iter (sub.expr sub) o) list
@@ -291,8 +292,8 @@ let typ sub {ctyp_desc; ctyp_env; _} =
   match ctyp_desc with
   | Ttyp_any -> ()
   | Ttyp_var _ -> ()
-  | Ttyp_arrow (arg, ret, _) ->
-    sub.typ sub arg.typ;
+  | Ttyp_arrow (params, ret) ->
+    List.iter (fun (arg : Typedtree.arg) -> sub.typ sub arg.typ) params;
     sub.typ sub ret
   | Ttyp_tuple list -> List.iter (sub.typ sub) list
   | Ttyp_constr (_, _, list) -> List.iter (sub.typ sub) list

@@ -35,7 +35,6 @@ let print_res_poly_identifier : (string -> string) ref =
 let rec longident ppf = function
   | Lident s -> pp_print_string ppf s
   | Ldot (p, s) -> fprintf ppf "%a.%s" longident p s
-  | Lapply (p1, p2) -> fprintf ppf "%a(%a)" longident p1 longident p2
 
 (* Print an identifier *)
 
@@ -132,12 +131,6 @@ let rec safe_kind_repr v = function
   | Fpresent -> "Fpresent"
   | Fabsent -> "Fabsent"
 
-let rec safe_commu_repr v = function
-  | Cok -> "Cok"
-  | Cunknown -> "Cunknown"
-  | Clink r ->
-    if List.memq r v then "Clink loop" else safe_commu_repr (r :: v) !r
-
 let rec safe_repr v = function
   | {desc = Tlink t} when not (List.memq t v) -> safe_repr (t :: v) t
   | t -> t
@@ -156,10 +149,6 @@ let string_of_label = function
   | Labelled {txt} -> txt
   | Optional {txt} -> "?" ^ txt
 
-let string_of_arity = function
-  | None -> ""
-  | Some arity -> string_of_int arity
-
 let visited = ref []
 let rec raw_type ppf ty =
   let ty = safe_repr [] ty in
@@ -173,10 +162,12 @@ and raw_type_list tl = raw_list raw_type tl
 
 and raw_type_desc ppf = function
   | Tvar name -> fprintf ppf "Tvar %a" print_name name
-  | Tarrow (arg, ret, c, a) ->
-    fprintf ppf "@[<hov1>Tarrow(\"%s\",@,%a,@,%a,@,%s,@,%s)@]"
-      (string_of_label arg.lbl) raw_type arg.typ raw_type ret
-      (safe_commu_repr [] c) (string_of_arity a)
+  | Tarrow (params, ret) ->
+    fprintf ppf "@[<hov1>Tarrow(%a,@,%a)@]"
+      (raw_list (fun ppf (arg : Types.arg) ->
+           fprintf ppf "@[\"%s\":%a@]" (string_of_label arg.lbl) raw_type
+             arg.typ))
+      params raw_type ret
   | Ttuple tl -> fprintf ppf "@[<1>Ttuple@,%a@]" raw_type_list tl
   | Tconstr (p, tl, abbrev) ->
     fprintf ppf "@[<hov1>Tconstr(@,%a,@,%a,@,%a)@]" path p raw_type_list tl
@@ -259,8 +250,8 @@ let printing_depth = ref 0
 let printing_cont = ref ([] : Env.iter_cont list)
 let printing_old = ref Env.empty
 let printing_pers = ref Concr.empty
-module PathMap = Map.Make (Path)
-let printing_map = ref PathMap.empty
+module Path_map = Map.Make (Path)
+let printing_map = ref Path_map.empty
 
 let same_type t t' = repr t == repr t'
 
@@ -322,7 +313,7 @@ let set_printing_env env =
     (* printf "Reset printing_map@."; *)
     printing_old := env;
     printing_pers := Env.used_persistent ();
-    printing_map := PathMap.empty;
+    printing_map := Path_map.empty;
     printing_depth := 0;
     (* printf "Recompute printing_map.@."; *)
     let cont =
@@ -332,13 +323,13 @@ let set_printing_env env =
           (* Format.eprintf "%a -> %a = %a@." path p path p' path p1 *)
           if s1 = Id then
             try
-              let r = PathMap.find p1 !printing_map in
+              let r = Path_map.find p1 !printing_map in
               match !r with
               | Paths l -> r := Paths (p :: l)
               | Best p' -> r := Paths [p; p']
               (* assert false *)
             with Not_found ->
-              printing_map := PathMap.add p1 (ref (Paths [p])) !printing_map)
+              printing_map := Path_map.add p1 (ref (Paths [p])) !printing_map)
         env
     in
     printing_cont := [cont])
@@ -387,7 +378,7 @@ let best_type_path p =
   if !Clflags.real_paths || !printing_env == Env.empty then (p, Id)
   else
     let p', s = normalize_type_path !printing_env p in
-    let get_path () = get_best_path (PathMap.find p' !printing_map) in
+    let get_path () = get_best_path (Path_map.find p' !printing_map) in
     while
       !printing_cont <> []
       &&
@@ -408,8 +399,8 @@ let name_counter = ref 0
 let named_vars = ref ([] : string list)
 
 let weak_counter = ref 1
-let weak_var_map = ref TypeMap.empty
-let named_weak_vars = ref StringSet.empty
+let weak_var_map = ref Type_map.empty
+let named_weak_vars = ref String_set.empty
 
 let reset_names () =
   names := [];
@@ -424,7 +415,7 @@ let add_named_var ty =
 let name_is_already_used name =
   List.mem name !named_vars
   || List.exists (fun (_, name') -> name = name') !names
-  || StringSet.mem name !named_weak_vars
+  || String_set.mem name !named_weak_vars
 
 let rec new_name () =
   let name =
@@ -441,8 +432,8 @@ let rec new_weak_name ty () =
   incr weak_counter;
   if name_is_already_used name then new_weak_name ty ()
   else (
-    named_weak_vars := StringSet.add name !named_weak_vars;
-    weak_var_map := TypeMap.add ty name !weak_var_map;
+    named_weak_vars := String_set.add name !named_weak_vars;
+    weak_var_map := Type_map.add ty name !weak_var_map;
     name)
 
 let name_of_type name_generator t =
@@ -450,7 +441,7 @@ let name_of_type name_generator t =
      of the union-find class. *)
   try List.assq t !names
   with Not_found -> (
-    try TypeMap.find t !weak_var_map
+    try Type_map.find t !weak_var_map
     with Not_found ->
       let name =
         match t.desc with
@@ -516,8 +507,8 @@ let rec mark_loops_rec visited ty =
     let visited = px :: visited in
     match ty.desc with
     | Tvar _ -> add_named_var ty
-    | Tarrow (arg, ret, _, _) ->
-      mark_loops_rec visited arg.typ;
+    | Tarrow (params, ret) ->
+      List.iter (fun (arg : Types.arg) -> mark_loops_rec visited arg.typ) params;
       mark_loops_rec visited ret
     | Ttuple tyl -> List.iter (mark_loops_rec visited) tyl
     | Tconstr (p, tyl, _) ->
@@ -621,18 +612,23 @@ let rec tree_of_typexp ?(printing_context : printing_context option) sch ty =
         let non_gen = is_non_gen sch ty in
         let name_gen = if non_gen then new_weak_name ty else new_name in
         Otyp_var (non_gen, name_of_type name_gen ty)
-      | Tarrow (arg, ret, _, arity) ->
-        let lab = string_of_label arg.lbl in
-        let t1 =
-          if is_optional arg.lbl then
-            match (repr arg.typ).desc with
-            | Tconstr (path, [ty], _) when Path.same path Predef.path_option ->
-              tree_of_typexp ?printing_context sch ty
-            | _ -> Otyp_stuff "<hidden>"
-          else tree_of_typexp ?printing_context sch arg.typ
+      | Tarrow (params, ret) ->
+        let args =
+          List.map
+            (fun (arg : Types.arg) ->
+              let t1 =
+                if is_optional arg.lbl then
+                  match (repr arg.typ).desc with
+                  | Tconstr (path, [ty], _)
+                    when Path.same path Predef.path_option ->
+                    tree_of_typexp ?printing_context sch ty
+                  | _ -> Otyp_stuff "<hidden>"
+                else tree_of_typexp ?printing_context sch arg.typ
+              in
+              (Asttypes.to_noloc arg.lbl, t1))
+            params
         in
-        (* should pass arity here? *)
-        Otyp_arrow (lab, t1, tree_of_typexp ?printing_context sch ret, arity)
+        Otyp_arrow (args, tree_of_typexp ?printing_context sch ret)
       | Ttuple tyl -> Otyp_tuple (tree_of_typlist ?printing_context sch tyl)
       | Tconstr (p, _tyl, _abbrev)
         when printing_context
@@ -969,11 +965,6 @@ and type_scheme ppf ty =
   typexp true ppf ty
 
 (* Maxence *)
-let type_scheme_max ?(b_reset_names = true) ppf ty =
-  if b_reset_names then reset_names ();
-  typexp true ppf ty
-(* End Maxence *)
-
 let tree_of_type_scheme ty =
   reset_and_mark_loops ty;
   tree_of_typexp true ty
@@ -1072,10 +1063,7 @@ let wrap_env fenv ftree arg =
   set_printing_env env;
   tree
 
-let filter_rem_sig item rem =
-  match (item, rem) with
-  | Sig_class_type _, tydecl1 :: tydecl2 :: rem -> ([tydecl1; tydecl2], rem)
-  | _ -> ([], rem)
+let filter_rem_sig _item rem = ([], rem)
 
 let dummy =
   {
@@ -1162,8 +1150,6 @@ and trees_of_sigitem = function
     in
     [tree_of_module id md.md_type rs ~ellipsis]
   | Sig_modtype (id, decl) -> [tree_of_modtype_declaration id decl]
-  | Sig_class () -> []
-  | Sig_class_type () -> []
 
 and tree_of_modtype_declaration id decl =
   let mty =
@@ -1185,11 +1171,12 @@ let modtype_declaration id ppf decl =
 (* Refresh weak variable map in the toplevel *)
 let refresh_weak () =
   let refresh t name (m, s) =
-    if is_non_gen true (repr t) then (TypeMap.add t name m, StringSet.add name s)
+    if is_non_gen true (repr t) then
+      (Type_map.add t name m, String_set.add name s)
     else (m, s)
   in
   let m, s =
-    TypeMap.fold refresh !weak_var_map (TypeMap.empty, StringSet.empty)
+    Type_map.fold refresh !weak_var_map (Type_map.empty, String_set.empty)
   in
   named_weak_vars := s;
   weak_var_map := m
@@ -1751,7 +1738,7 @@ let report_subtyping_error ppf env tr1 txt1 tr2 ctx =
       | Some ctx -> (
         fprintf ppf "@,@,@[<v 2>";
         match ctx with
-        | Generic {errorCode} -> fprintf ppf "Error: %s" errorCode
+        | Generic {error_code} -> fprintf ppf "Error: %s" error_code
         | Coercion_target_variant_not_unboxed {variant_name; primitive} ->
           fprintf ppf
             "@ The variant @{<info>%s@} is not unboxed, so it cannot be \

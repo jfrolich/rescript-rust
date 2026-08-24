@@ -83,7 +83,7 @@ val blk_record_inlined :
 val ref_tag_info : tag_info
 
 type field_dbg_info =
-  | Fld_record of {name: string; mutable_flag: Asttypes.mutable_flag}
+  | Fld_record of {name: string}
   | Fld_module of {name: string}
   | Fld_record_inline of {name: string}
   | Fld_record_extension of {name: string}
@@ -146,6 +146,7 @@ type primitive =
   | Pfield of int * field_dbg_info
   | Psetfield of int * set_field_dbg_info
   | Pduprecord
+  | Precord_rest of string list (* excluded runtime field names *)
   (* External call *)
   | Pccall of Primitive.description
   (* Exceptions *)
@@ -229,14 +230,14 @@ type primitive =
   | Pstringmax
   | Pstringadd
   (* Array operations *)
-  | Pmakearray of mutable_flag
+  | Pmakearray
   | Parraylength
   | Parrayrefu
   | Parraysetu
   | Parrayrefs
   | Parraysets
   (* List primitives *)
-  | Pmakelist of Asttypes.mutable_flag
+  | Pmakelist
   (* dict primitives *)
   | Pmakedict
   | Pdict_has
@@ -272,9 +273,8 @@ type primitive =
   | Pis_poly_var_block
   | Pjs_raw_expr
   | Pjs_raw_stmt
-  | Pjs_fn_make of int
-  | Pjs_fn_make_unit
   | Pjs_fn_method
+  | Ptagged_template
 
 and comparison = Ceq | Cneq | Clt | Cgt | Cle | Cge
 
@@ -390,8 +390,8 @@ val lambda_module_alias : lambda
 val name_lambda : let_kind -> lambda -> (Ident.t -> lambda) -> lambda
 
 val iter : (lambda -> unit) -> lambda -> unit
-module IdentSet : Set.S with type elt = Ident.t
-val free_variables : lambda -> IdentSet.t
+module Ident_set : Set.S with type elt = Ident.t
+val free_variables : lambda -> Ident_set.t
 
 val transl_normal_path : Path.t -> lambda (* Path.t is already normal *)
 

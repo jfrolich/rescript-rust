@@ -10,6 +10,7 @@ use crate::project_context::ProjectContext;
 use ahash::AHashSet;
 use anyhow::{Context, anyhow};
 use log::debug;
+use tracing::info_span;
 use rayon::prelude::*;
 use rescript_compiler::binary_ast::{
     Dependencies, extract_signature_deps, extract_structure_deps, ppx,
@@ -38,6 +39,26 @@ pub fn generate_asts(
     let use_rust_parser = build_state.use_rust_parser();
     let in_process = build_state.build_mode().is_in_process();
     let store_ast = use_rust_parser && (in_process || build_state.dump_typed_sexp());
+
+    // Count dirty modules for the span attribute only when a subscriber is
+    // listening. Otherwise iterating every module every parse phase is pure
+    // waste on the hot path.
+    let parse_span = if tracing::enabled!(tracing::Level::INFO) {
+        let dirty_modules = build_state
+            .modules
+            .values()
+            .filter(|m| match &m.source_type {
+                SourceType::SourceFile(sf) => {
+                    sf.implementation.parse_dirty || sf.interface.as_ref().is_some_and(|i| i.parse_dirty)
+                }
+                SourceType::MlMap(mlmap) => mlmap.parse_dirty,
+            })
+            .count();
+        info_span!("build.parse", dirty_modules = dirty_modules)
+    } else {
+        tracing::Span::none()
+    };
+    let _span = parse_span.enter();
 
     build_state
         .modules
@@ -80,6 +101,7 @@ pub fn generate_asts(
                             use_rust_parser,
                             store_ast,
                             in_process,
+                            &parse_span,
                         )
                         .map_err(|e| e.to_string());
 
@@ -93,6 +115,7 @@ pub fn generate_asts(
                                     use_rust_parser,
                                     store_ast,
                                     in_process,
+                                    &parse_span,
                                 ) {
                                     Ok(v) => Ok(Some(v)),
                                     Err(e) => Err(e.to_string()),
@@ -496,6 +519,46 @@ pub fn parser_args(
     ))
 }
 
+fn make_parse_file_span(
+    filename: &Path,
+    package: &Package,
+    parser_args: &[String],
+    build_state: &BuildState,
+    parent: &tracing::Span,
+) -> tracing::Span {
+    let module_name = helpers::file_path_to_module_name(filename, &package.namespace);
+    let mut ppx_names: Vec<String> = Vec::new();
+    let mut experimental: Vec<String> = Vec::new();
+    for pair in parser_args.windows(2) {
+        if pair[0] == "-ppx" {
+            // Use the PPX executable's file name so paths like
+            // `node_modules/foo/ppx.exe` reduce to `ppx.exe` cross-platform.
+            let name = Path::new(&pair[1])
+                .file_name()
+                .map(|s| s.to_string_lossy().into_owned())
+                .unwrap_or_else(|| pair[1].clone());
+            ppx_names.push(name);
+        } else if pair[0] == "-enable-experimental" {
+            experimental.push(pair[1].clone());
+        }
+    }
+    let ppx = ppx_names.join(",");
+    let experimental = experimental.join(",");
+    let root_config = build_state.get_root_config();
+    let jsx = root_config.get_jsx_args().get(1).cloned().unwrap_or_default();
+    let bsc_flags = config::flatten_flags(&package.config.compiler_flags).join(" ");
+    info_span!(
+        parent: parent,
+        "build.parse_file",
+        module = %module_name,
+        package = %package.name,
+        ppx = %ppx,
+        experimental = %experimental,
+        jsx = %jsx,
+        bsc_flags = %bsc_flags,
+    )
+}
+
 fn generate_ast(
     package: Package,
     filename: &Path,
@@ -504,6 +567,7 @@ fn generate_ast(
     use_rust_parser: bool,
     store_ast: bool,
     in_process: bool,
+    parent_span: &tracing::Span,
 ) -> anyhow::Result<GeneratedAst> {
     let file_path = PathBuf::from(&package.path).join(filename);
 
@@ -517,6 +581,27 @@ fn generate_ast(
     let jsx_version = rust_parser_effective_jsx_version(build_state.project_context.get_root_config());
     let let_unwrap_enabled =
         rust_parser_let_unwrap_enabled(build_state.project_context.get_root_config(), &package.config);
+
+    let parser_args = if use_rust_parser {
+        Vec::new()
+    } else {
+        let contents = helpers::read_file(&file_path).expect("Error reading file");
+        let (_expected_ast_path, parser_args) = parser_args(
+            &build_state.project_context,
+            &package.config,
+            filename,
+            &contents,
+            package.is_local_dep,
+            warn_error_override,
+        )?;
+        parser_args
+    };
+
+    let _parse_span = if tracing::enabled!(tracing::Level::INFO) {
+        make_parse_file_span(filename, &package, &parser_args, build_state, parent_span).entered()
+    } else {
+        tracing::Span::none().entered()
+    };
 
     // generate the dir of the ast_path (it mirrors the source file dir)
     if !in_process {
@@ -544,16 +629,6 @@ fn generate_ast(
             deps,
         })
     } else {
-        let contents = helpers::read_file(&file_path).expect("Error reading file");
-        let (_expected_ast_path, parser_args) = parser_args(
-            &build_state.project_context,
-            &package.config,
-            filename,
-            &contents,
-            package.is_local_dep,
-            warn_error_override,
-        )?;
-
         match Some(
             Command::new(&build_state.compiler_info.bsc_path)
                 .current_dir(&build_path_abs)
