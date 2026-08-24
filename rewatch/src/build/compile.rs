@@ -24,6 +24,7 @@ use rescript_compiler::parser::ast::{Signature, Structure};
 use rescript_compiler::types::path::Path as TypePath;
 use std::cmp::Ordering;
 use std::collections::BinaryHeap;
+use std::io::Read;
 use std::path::Path;
 use std::path::PathBuf;
 use std::process::Command;
@@ -3463,26 +3464,43 @@ fn compile_file(
             .spawn()
         {
             Ok(mut child) => {
+                // Drain piped stderr while the compiler is running. Waiting with try_wait while a
+                // full pipe blocks the child would otherwise turn ordinary diagnostics into a
+                // misleading timeout.
+                let stderr_reader = child.stderr.take().map(|mut stderr| {
+                    std::thread::spawn(move || {
+                        let mut bytes = Vec::new();
+                        stderr.read_to_end(&mut bytes).map(|_| bytes)
+                    })
+                });
                 let timeout = std::time::Duration::from_secs(30);
                 let start = std::time::Instant::now();
                 let mut timed_out = false;
-                let mut exit_status = None;
-                loop {
+                let mut wait_error = None;
+                let exit_status = loop {
                     match child.try_wait() {
-                        Ok(Some(status)) => {
-                            exit_status = Some(status);
-                            break;
-                        }
+                        Ok(Some(status)) => break Some(status),
                         Ok(None) if start.elapsed() > timeout => {
                             let _ = child.kill();
                             let _ = child.wait();
                             timed_out = true;
-                            break;
+                            break None;
                         }
                         Ok(None) => std::thread::sleep(std::time::Duration::from_millis(50)),
-                        Err(_) => break,
+                        Err(error) => {
+                            let _ = child.kill();
+                            let _ = child.wait();
+                            wait_error = Some(error);
+                            break None;
+                        }
                     }
-                }
+                };
+                let stderr = match stderr_reader {
+                    Some(reader) => reader
+                        .join()
+                        .map_err(|_| anyhow!("bsc stderr reader thread panicked"))??,
+                    None => Vec::new(),
+                };
 
                 if timed_out {
                     if dump_typed_sexp {
@@ -3496,8 +3514,33 @@ fn compile_file(
                     );
                     log::warn!("{}", msg);
                     return Ok(Some(msg));
-                } else if exit_status.is_some_and(|s| !s.success()) {
-                    log::warn!("bsc subprocess crashed for `{module_name}`");
+                }
+                if let Some(error) = wait_error {
+                    let msg = format!("bsc subprocess failed while waiting for `{module_name}`: {error}");
+                    log::warn!("{msg}");
+                    return Ok(Some(msg));
+                }
+                if let Some(status) = exit_status.filter(|status| !status.success()) {
+                    let diagnostics = if dump_typed_sexp {
+                        let sexp_path = ocaml_build_path_abs.join(format!("{basename}.sexp"));
+                        std::fs::read_to_string(&sexp_path).unwrap_or_default()
+                    } else {
+                        String::from_utf8_lossy(&stderr).into_owned()
+                    };
+
+                    // An exit without a code represents a crash (for example, termination by a
+                    // signal). Subprocess mode deliberately keeps crashes nonfatal.
+                    if status.code().is_none() {
+                        let msg = format!("bsc subprocess crashed for `{module_name}`: {diagnostics}");
+                        log::warn!("{msg}");
+                        return Ok(Some(msg));
+                    }
+
+                    return Err(anyhow!(if diagnostics.is_empty() {
+                        format!("bsc exited with {status} compiling `{module_name}`")
+                    } else {
+                        diagnostics
+                    }));
                 }
             }
             Err(e) => {
