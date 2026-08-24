@@ -142,8 +142,8 @@ let tag_info (info : Lambda.tag_info) =
 (* Field debug info *)
 let field_dbg_info (info : Lam_compat.field_dbg_info) =
   match info with
-  | Fld_record {name; mutable_flag} ->
-    Sexp.list [Sexp.atom "Fld_record"; string name; mutable_flag_sexp mutable_flag]
+  | Fld_record {name} ->
+    Sexp.list [Sexp.atom "Fld_record"; string name]
   | Fld_module {name} -> Sexp.list [Sexp.atom "Fld_module"; string name]
   | Fld_record_inline {name} -> Sexp.list [Sexp.atom "Fld_record_inline"; string name]
   | Fld_record_extension {name} -> Sexp.list [Sexp.atom "Fld_record_extension"; string name]
@@ -223,8 +223,6 @@ let primitive ~with_locs (prim : Lam_primitive.t) =
   | Pjs_unsafe_downgrade {name; setter} ->
     Sexp.list [Sexp.atom "Pjs_unsafe_downgrade"; string name; bool setter]
   | Pfn_arity -> Sexp.atom "Pfn_arity"
-  | Pjs_fn_make i -> Sexp.list [Sexp.atom "Pjs_fn_make"; int i]
-  | Pjs_fn_make_unit -> Sexp.atom "Pjs_fn_make_unit"
   | Pjs_fn_method -> Sexp.atom "Pjs_fn_method"
   | Pdebugger -> Sexp.atom "Pdebugger"
   | Praw_js_code {code; code_info = Exp _} ->
@@ -345,6 +343,9 @@ let primitive ~with_locs (prim : Lam_primitive.t) =
   | Pis_poly_var_block -> Sexp.atom "Pis_poly_var_block"
   | Pisout n -> Sexp.list [Sexp.atom "Pisout"; int n]
   | Pawait -> Sexp.atom "Pawait"
+  | Ptagged_template -> Sexp.atom "Ptagged_template"
+  | Precord_rest excluded ->
+    Sexp.list (Sexp.atom "Precord_rest" :: List.map string excluded)
   | Phash -> Sexp.atom "Phash"
   | Phash_mixint -> Sexp.atom "Phash_mixint"
   | Phash_mixstring -> Sexp.atom "Phash_mixstring"

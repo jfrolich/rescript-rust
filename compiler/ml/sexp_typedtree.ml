@@ -57,7 +57,6 @@ let rec longident l =
   match l with
   | Longident.Lident s -> Sexp.list [Sexp.atom "Lident"; string s]
   | Longident.Ldot (l, s) -> Sexp.list [Sexp.atom "Ldot"; longident l; string s]
-  | Longident.Lapply (l1, l2) -> Sexp.list [Sexp.atom "Lapply"; longident l1; longident l2]
 
 let longident_loc li = longident li.txt
 
@@ -201,16 +200,15 @@ and type_expr_body_inline state te =
      ordering. *)
   match te.Types.desc with
   | Tvar _ | Tunivar _ -> assert false
-  | Tarrow (arg, ret, _, arity) ->
-    let arg_sexp = type_expr_inline state arg.Types.typ in
+  | Tarrow (args, ret) ->
+    let args_sexp =
+      List.map
+        (fun arg ->
+          Sexp.list [sexp_arg_label arg.Types.lbl; type_expr_inline state arg.Types.typ])
+        args
+    in
     let ret_sexp = type_expr_inline state ret in
-    Sexp.list [
-      Sexp.atom "Tarrow";
-      sexp_arg_label arg.Types.lbl;
-      arg_sexp;
-      ret_sexp;
-      (match arity with Some a -> Sexp.list [Sexp.atom "Some"; Sexp.atom (string_of_int a)] | None -> Sexp.atom "None");
-    ]
+    Sexp.list (Sexp.atom "Tarrow" :: args_sexp @ [ret_sexp])
   | Ttuple l ->
     let items = List.map (type_expr_inline state) l in
     Sexp.list (Sexp.atom "Ttuple" :: items)
@@ -325,7 +323,7 @@ and pattern_desc ~with_locs desc =
   | Tpat_variant (label, arg, _) ->
     let arg_sexp = opt (pattern ~with_locs) arg in
     Sexp.list [Sexp.atom "Tpat_variant"; string label; arg_sexp]
-  | Tpat_record (fields, flag) ->
+  | Tpat_record (fields, flag, _rest) ->
     let fields_sexp = Sexp.list (List.map (fun (li, _, p, opt_flag) ->
       let p_sexp = pattern ~with_locs p in
       Sexp.list [longident_loc li; p_sexp; Sexp.atom (if opt_flag then "optional" else "required")]
@@ -366,8 +364,6 @@ and exp_extra ~with_locs extra loc attrs =
     Sexp.list ([Sexp.atom "Texp_coerce"; ct_sexp] @ loc_sexp @ [attrs_sexp])
   | Texp_open (flag, p, _, _) ->
     Sexp.list ([Sexp.atom "Texp_open"; override_flag flag; path p] @ loc_sexp @ [attrs_sexp])
-  | Texp_newtype s ->
-    Sexp.list ([Sexp.atom "Texp_newtype"; string s] @ loc_sexp @ [attrs_sexp])
 
 and expression_desc ~with_locs desc =
   match desc with
@@ -383,15 +379,23 @@ and expression_desc ~with_locs desc =
       vbs_sexp;
       e_sexp;
     ]
-  | Texp_function { arg_label; arity; param; case = c; partial = p; async } ->
-    let c_sexp = case ~with_locs c in
+  | Texp_function { params; body; async } ->
+    let params_sexp =
+      List.map
+        (fun (fp : function_param) ->
+          Sexp.list [
+            sexp_arg_label fp.fp_lbl;
+            ident fp.fp_param;
+            pattern ~with_locs fp.fp_pat;
+            partial fp.fp_partial;
+          ])
+        params
+    in
+    let body_sexp = expression ~with_locs body in
     Sexp.list [
       Sexp.atom "Texp_function";
-      sexp_arg_label arg_label;
-      opt (fun a -> Sexp.atom (string_of_int a)) arity;
-      ident param;
-      c_sexp;
-      partial p;
+      Sexp.list params_sexp;
+      body_sexp;
       Sexp.atom (if async then "async" else "sync");
     ]
   | Texp_apply { funct; args; partial = p; transformed_jsx } ->
@@ -546,18 +550,19 @@ and core_type_desc ~with_locs desc =
   match desc with
   | Ttyp_any -> Sexp.atom "Ttyp_any"
   | Ttyp_var s -> Sexp.list [Sexp.atom "Ttyp_var"; string s]
-  | Ttyp_arrow (arg, ret, arity) ->
-    let arg_attrs_sexp = attributes ~with_locs arg.attrs in
-    let arg_ct_sexp = core_type ~with_locs arg.typ in
+  | Ttyp_arrow (args, ret) ->
+    let args_sexp =
+      List.map
+        (fun (arg : Typedtree.arg) ->
+          Sexp.list [
+            sexp_arg_label arg.lbl;
+            attributes ~with_locs arg.attrs;
+            core_type ~with_locs arg.typ;
+          ])
+        args
+    in
     let ret_sexp = core_type ~with_locs ret in
-    Sexp.list [
-      Sexp.atom "Ttyp_arrow";
-      sexp_arg_label arg.lbl;
-      arg_attrs_sexp;
-      arg_ct_sexp;
-      ret_sexp;
-      opt (fun a -> Sexp.atom (string_of_int a)) arity;
-    ]
+    Sexp.list (Sexp.atom "Ttyp_arrow" :: args_sexp @ [ret_sexp])
   | Ttyp_tuple l ->
     let items = List.map (core_type ~with_locs) l in
     Sexp.list (Sexp.atom "Ttyp_tuple" :: items)
@@ -725,7 +730,6 @@ and type_extension ~with_locs te =
   Sexp.list [
     Sexp.atom "type_extension";
     path te.tyext_path;
-    longident_loc te.tyext_txt;
     params_sexp;
     constructors_sexp;
     private_flag te.tyext_private;
@@ -881,13 +885,11 @@ and module_type_declaration ~with_locs mtd =
   ])
 
 and open_description ~with_locs od =
-  let loc = if with_locs then [location ~with_locs od.open_loc] else [] in
   let attrs_sexp = attributes ~with_locs od.open_attributes in
   Sexp.list ([
     Sexp.atom "open_description";
     path od.open_path;
     longident_loc od.open_txt;
-  ] @ loc @ [
     override_flag od.open_override;
     attrs_sexp;
   ])
