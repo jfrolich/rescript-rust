@@ -2101,48 +2101,6 @@ fn register_sig_types_recursive<'a>(
     }
 }
 
-/// Load a module's signature for resolving module aliases during type registration.
-/// This is a lightweight version that doesn't use the persistent env cache.
-fn load_module_sig_for_alias<'a>(
-    name: &str,
-    ctx: &'a TypeContext,
-    load_path: &[PathBuf],
-) -> Option<Signature> {
-    let cmi_filename = format!("{}.cmi", name);
-
-    // Search load path for the CMI file
-    let full_path = find_in_path(load_path, &cmi_filename)?;
-
-    // Read and parse the CMI file
-    let cmi = cmi_format::read_cmi(&full_path).ok()?;
-
-    // Convert to Rust type structures
-    let mut sig_ctx = SigReadContext::new(ctx);
-    let signature = sig_ctx.read_signature(&cmi.cmi_sign);
-
-    Some(signature)
-}
-
-/// Search load paths for a file (case-insensitive on first character).
-fn find_in_path(load_path: &[PathBuf], filename: &str) -> Option<String> {
-    for dir in load_path {
-        let exact = dir.join(filename);
-        if exact.exists() {
-            return Some(exact.to_string_lossy().into_owned());
-        }
-        if let Some(first_char) = filename.chars().next() {
-            if first_char.is_ascii_uppercase() {
-                let uncap = format!("{}{}", first_char.to_ascii_lowercase(), &filename[1..]);
-                let uncap_path = dir.join(&uncap);
-                if uncap_path.exists() {
-                    return Some(uncap_path.to_string_lossy().into_owned());
-                }
-            }
-        }
-    }
-    None
-}
-
 #[cfg(test)]
 mod cmj_export_tests {
     use super::*;
