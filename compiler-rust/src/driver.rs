@@ -6516,7 +6516,6 @@ fn format_recursive_local_constraint_report(
 ) -> String {
     const INFO: &str = "\x1b[1;33m";
     const ERROR: &str = "\x1b[1;31m";
-    const RESET: &str = "\x1b[0m";
 
     let Some((actual, expected)) = trace.first().copied() else {
         return format_compiler_error_report(arena, source, filename, loc, "Type error.");
@@ -6544,7 +6543,6 @@ fn format_or_pattern_type_clash_report(
 ) -> String {
     const INFO: &str = "\x1b[1;33m";
     const ERROR: &str = "\x1b[1;31m";
-    const RESET: &str = "\x1b[0m";
 
     let Some((left, right)) = trace.first().copied() else {
         return format_compiler_error_report(arena, source, filename, loc, "Type error.");
