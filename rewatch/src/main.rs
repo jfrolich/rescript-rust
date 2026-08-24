@@ -12,7 +12,7 @@ static GLOBAL_ALLOCATOR: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 use rescript::{
     build, cli, cmd, format,
-    lock::{LockKind, drop_lock, get_lock_or_exit},
+    lock::{drop_lock, get_lock_or_exit, LockKind},
     telemetry, watcher,
 };
 
@@ -99,7 +99,7 @@ fn run_main(otel_enabled: bool) -> Result<()> {
                 Ok(build_state) => {
                     if let Some(args_after_build) = (*build_args.after_build).clone() {
                         drop(build_state);
-                        cmd::run(args_after_build);
+                        cmd::run(args_after_build)?;
                     } else {
                         // `rescript build` is a one-shot command and `main` exits
                         // immediately after this match. Dropping the full build graph

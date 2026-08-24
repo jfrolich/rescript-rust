@@ -425,8 +425,10 @@ async fn async_watch(
 
                 match result {
                     Ok(result) => {
-                        if let Some(a) = after_build.clone() {
-                            cmd::run(a)
+                        if let Some(a) = after_build.clone()
+                            && let Err(error) = cmd::run(a)
+                        {
+                            log::error!("After-build command failed: {error:#}");
                         }
                         let timing_total_elapsed = timing_total.elapsed();
                         if show_progress {
@@ -499,8 +501,10 @@ async fn async_watch(
                 );
                 match result {
                     Ok(result) => {
-                        if let Some(a) = after_build.clone() {
-                            cmd::run(a)
+                        if let Some(a) = after_build.clone()
+                            && let Err(error) = cmd::run(a)
+                        {
+                            log::error!("After-build command failed: {error:#}");
                         }
 
                         let timing_total_elapsed = timing_total.elapsed();
