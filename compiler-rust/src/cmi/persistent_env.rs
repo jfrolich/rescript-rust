@@ -74,14 +74,6 @@ fn resolve_first_char_case_key<'a, V>(map: &'a HashMap<String, V>, name: &str) -
     map.get_key_value(&variant).map(|(key, _)| key.as_str())
 }
 
-fn resolve_first_char_case_value<'a, V>(map: &'a HashMap<String, V>, name: &str) -> Option<&'a V> {
-    if let Some(value) = map.get(name) {
-        return Some(value);
-    }
-    let variant = first_char_case_variant(name)?;
-    map.get(&variant)
-}
-
 #[derive(Debug)]
 struct SharedRegistryMap<V> {
     inner: Arc<RwLock<HashMap<String, V>>>,
@@ -149,15 +141,6 @@ impl<V: Clone> SharedRegistryMap<V> {
 
     fn extend(&self, values: HashMap<String, V>) {
         self.inner.write().unwrap().extend(values);
-    }
-
-    fn iter_cloned(&self) -> Vec<(String, V)> {
-        self.inner
-            .read()
-            .unwrap()
-            .iter()
-            .map(|(key, value)| (key.clone(), value.clone()))
-            .collect()
     }
 
     fn clone_map(&self) -> HashMap<String, V> {
@@ -3241,13 +3224,6 @@ pub(crate) fn freshened_signature_bound_idents_from_kind(
         freshen_nested_signature_module_types(&mut copied, ctx);
     }
     copied
-}
-
-pub(crate) fn freshen_copied_signature_bound_idents(
-    sig_items: &mut [SignatureItem],
-    ctx: &TypeContext,
-) {
-    freshen_signature_bound_idents_with_maps(sig_items, &SubstMaps::default(), ctx);
 }
 
 pub(crate) fn freshen_module_type_bound_idents(module_type: &mut ModuleType, ctx: &TypeContext) {
