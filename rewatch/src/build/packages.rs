@@ -162,20 +162,27 @@ pub fn read_folders(
     let mut map: AHashMap<PathBuf, SourceFileMeta> = AHashMap::new();
     let path_buf = PathBuf::from(path);
     let meta = fs::metadata(package_dir.join(path));
-    let path_with_meta = meta.map(|meta| {
-        (
+    let path_with_meta = meta.and_then(|meta| {
+        Ok((
             path.to_owned(),
             SourceFileMeta {
-                modified: meta.modified().unwrap(),
+                modified: meta.modified()?,
                 is_type_dev,
             },
-        )
+        ))
     });
 
     for entry in fs::read_dir(package_dir.join(&path_buf))? {
         let entry_path_buf = entry.map(|entry| entry.path())?;
         let metadata = fs::metadata(&entry_path_buf)?;
-        let name = entry_path_buf.file_name().unwrap().to_str().unwrap().to_string();
+        let Some(name) = entry_path_buf
+            .file_name()
+            .and_then(|name| name.to_str())
+            .map(str::to_owned)
+        else {
+            log::warn!("Skipping source entry with a non-UTF-8 name: {}", entry_path_buf.display());
+            continue;
+        };
 
         let path_ext = entry_path_buf.extension().and_then(|x| x.to_str());
         let new_path = path_buf.join(&name);
@@ -194,7 +201,7 @@ pub fn read_folders(
                     map.insert(
                         path,
                         SourceFileMeta {
-                            modified: metadata.modified().unwrap(),
+                            modified: metadata.modified()?,
                             is_type_dev,
                         },
                     );

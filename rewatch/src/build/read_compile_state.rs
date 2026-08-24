@@ -44,32 +44,47 @@ pub fn read(build_state: &mut BuildCommandState) -> anyhow::Result<CompileAssets
     let compile_assets = build_state
         .packages
         .par_iter()
-        .map(|(_, package)| {
-            let read_dir = fs::read_dir(package.get_ocaml_build_path()).unwrap();
-            read_dir
-                .filter_map(|entry| match entry {
-                    Ok(entry) => {
-                        let path = entry.path();
-                        let extension = path.extension().and_then(|e| e.to_str());
-                        match extension {
-                            Some(ext) => match ext {
-                                "iast" | "ast" | "cmi" | "cmt" => Some((
-                                    path.to_owned(),
-                                    entry.metadata().unwrap().modified().unwrap(),
-                                    ext.to_owned(),
-                                    package.name.to_owned(),
-                                    package.namespace.to_owned(),
-                                    package.is_root,
-                                )),
-                                _ => None,
-                            },
-                            None => None,
+        .map(|(_, package)| -> anyhow::Result<Vec<_>> {
+            let build_path = package.get_ocaml_build_path();
+            let read_dir = fs::read_dir(&build_path).map_err(|error| {
+                anyhow::anyhow!("Could not read build directory {}: {error}", build_path.display())
+            })?;
+            Ok(read_dir
+                .filter_map(|entry| {
+                    let entry = match entry {
+                        Ok(entry) => entry,
+                        Err(error) => {
+                            log::warn!("Skipping unreadable build directory entry: {error}");
+                            return None;
                         }
+                    };
+                    let path = entry.path();
+                    let extension = path.extension().and_then(|e| e.to_str());
+                    match extension {
+                        Some(ext @ ("iast" | "ast" | "cmi" | "cmt")) => {
+                            let modified = match entry.metadata().and_then(|metadata| metadata.modified()) {
+                                Ok(modified) => modified,
+                                Err(error) => {
+                                    log::warn!("Skipping build asset {}: {error}", path.display());
+                                    return None;
+                                }
+                            };
+                            Some((
+                                path.to_owned(),
+                                modified,
+                                ext.to_owned(),
+                                package.name.to_owned(),
+                                package.namespace.to_owned(),
+                                package.is_root,
+                            ))
+                        }
+                        _ => None,
                     }
-                    Err(_) => None,
                 })
-                .collect::<Vec<(PathBuf, SystemTime, String, String, packages::Namespace, bool)>>()
+                .collect())
         })
+        .collect::<anyhow::Result<Vec<Vec<_>>>>()?
+        .into_iter()
         .flatten()
         .collect::<Vec<(PathBuf, SystemTime, String, String, packages::Namespace, bool)>>();
 
