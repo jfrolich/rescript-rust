@@ -478,6 +478,17 @@ pub(super) fn resolver_with_checked_in_cmj() -> ModulePathResolver {
             .join("lib")
             .join("ocaml"),
     );
+    // Belt moved into the separate @rescript/belt package (upstream #8554).
+    persistent_env.add_load_path(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("repo root")
+            .join("packages")
+            .join("@rescript")
+            .join("belt")
+            .join("lib")
+            .join("ocaml"),
+    );
     ModulePathResolver::from_compile_options(
         None,
         Some(std::path::Path::new("/tmp/Effect.mjs")),

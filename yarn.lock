@@ -342,6 +342,13 @@ __metadata:
   languageName: node
   linkType: hard
 
+"@jfrolich/ppx-spice@npm:0.3.6":
+  version: 0.3.6
+  resolution: "@jfrolich/ppx-spice@npm:0.3.6"
+  checksum: 10c0/17642cfcb9f13496c04ff92679fb3a36ce39b0d8c9187a43901eb49c834e9530e5b42d02a8a6c1a1d7b6f5438d9fcadcf9fcbdbbc07a387f74546fd55c34d1da
+  languageName: node
+  linkType: hard
+
 "@jridgewell/gen-mapping@npm:^0.3.12, @jridgewell/gen-mapping@npm:^0.3.5":
   version: 0.3.13
   resolution: "@jridgewell/gen-mapping@npm:0.3.13"
@@ -2805,6 +2812,7 @@ __metadata:
   resolution: "rescript@workspace:."
   dependencies:
     "@biomejs/biome": "npm:2.5.5"
+    "@jfrolich/ppx-spice": "npm:0.3.6"
     "@rescript/darwin-arm64": "workspace:packages/@rescript/darwin-arm64"
     "@rescript/darwin-x64": "workspace:packages/@rescript/darwin-x64"
     "@rescript/linux-arm64": "workspace:packages/@rescript/linux-arm64"

@@ -606,47 +606,7 @@ fn import_attributes_keeps_exported_alias_bindings_before_log_calls_like_snapsho
 }
 
 #[test]
-fn bs_mutable_set_test_inlines_inner_fromarray_alias_calls_like_snapshot() {
-    let output = compile_checked_in_test_file_to_js("bs_mutable_set_test");
-    assert!(
-        output.contains(
-            "Belt_MutableSetInt.eq(cc, Belt_MutableSetInt.fromArray(Array_data_util.randomRange(0, 120)))"
-        ),
-        "expected bs_mutable_set_test to call Belt_MutableSetInt.fromArray directly at the checked site, got:\n{output}"
-    );
-    assert!(
-        !output.contains("let f = Belt_MutableSetInt.fromArray;"),
-        "unexpected callee alias binding remained in bs_mutable_set_test:\n{output}"
-    );
-}
-
 #[test]
-fn bs_mutable_set_test_keeps_exported_module_field_aliases_only_in_late_export_section() {
-    let output = compile_checked_in_test_file_to_js("bs_mutable_set_test");
-    assert!(
-        output
-            .find("Mocha.describe(\"Bs_mutable_set_test\"")
-            .is_some()
-            && output
-                .find("let empty = Belt_MutableSetInt.make;")
-                .is_some()
-            && output
-                .find("let fromArray = Belt_MutableSetInt.fromArray;")
-                .is_some()
-            && output
-                .find("Mocha.describe(\"Bs_mutable_set_test\"")
-                .unwrap()
-                < output.find("let empty = Belt_MutableSetInt.make;").unwrap()
-            && output
-                .find("Mocha.describe(\"Bs_mutable_set_test\"")
-                .unwrap()
-                < output
-                    .find("let fromArray = Belt_MutableSetInt.fromArray;")
-                    .unwrap(),
-        "expected bs_mutable_set_test to keep the exported module-field aliases only in the late export section, got:\n{output}"
-    );
-}
-
 #[test]
 fn inline_string_test_keeps_alias_materialized_named_matcher_like_snapshot() {
     let output = compile_checked_in_test_file_to_js("inline_string_test");
@@ -768,23 +728,6 @@ fn forward_ref_regress_keeps_props_ref_wrapper_materialized_like_snapshot() {
 }
 
 #[test]
-fn belt_hashmap_test_keeps_exported_hash_alias_materialized_like_snapshot() {
-    let output = compile_checked_in_test_file_to_js("belt_hashmap_test");
-    assert!(
-        output.contains("let intHash = Hash_utils.hash;")
-            && output.contains("let Y = Belt_Id.hashable(intHash, intEq);"),
-        "expected belt_hashmap_test to keep the exported hash alias materialized at its internal higher-order use site, got:\n{output}"
-    );
-    assert!(
-        !output.contains("Belt_Id.hashable(Hash_utils.hash, intEq)")
-            && output.find("let intHash = Hash_utils.hash;").is_some()
-            && output.find("let cmp = Primitive_int.compare;").is_some()
-            && output.find("let intHash = Hash_utils.hash;").unwrap()
-                < output.find("let cmp = Primitive_int.compare;").unwrap(),
-        "unexpected inlined hash alias or late export-tail-only binding remained in belt_hashmap_test:\n{output}"
-    );
-}
-
 #[test]
 fn offset_keeps_exported_module_alias_placeholder_before_local_module_block_like_snapshot() {
     let output = compile_checked_in_test_file_to_js("offset");

@@ -502,7 +502,7 @@ pub fn read_cmt(cmt_file: &str) -> InputCmt<'static> {
             );
             panic!("Fatal error: exception Cmt_format.Error(_)")
         }
-        Ok(data) if data.starts_with(b"Caml1999I022") => {
+        Ok(data) if data.starts_with(b"Caml1999I023") => {
             panic!("Fatal error: exception Cmt_format.Error(_)")
         }
         _ => {

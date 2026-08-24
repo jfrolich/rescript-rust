@@ -570,17 +570,41 @@ impl<'a> SigReadContext<'a> {
                     TypeDesc::Tvar(name)
                 }
                 1 => {
-                    // Tarrow(arg, type_expr, commutable, arity)
-                    let arg = self.read_arg(&fields[0]);
-                    let ret = self.read_type_expr(&fields[1]);
-                    let commutable = read_commutable(&fields[2]);
-                    let arity = fields[3].as_option().map(|n| n.as_int() as i32);
-
+                    // Tarrow(arg list, type_expr) - n-ary since upstream removed
+                    // the separate commutable/arity fields (Caml1999I023).
+                    // Translate to nested unary Tarrows internally; labels and
+                    // order are preserved, so arity = nesting depth.
+                    let args: Vec<TypeArg> = fields[0]
+                        .as_list()
+                        .iter()
+                        .map(|arg| self.read_arg(arg))
+                        .collect();
+                    let mut ret = self.read_type_expr(&fields[1]);
+                    // Fold all arguments except the first into intermediate arrows
+                    // (innermost first); the first argument becomes the desc of the
+                    // cached placeholder type_expr.
+                    for i in (1..args.len()).rev() {
+                        let arrow = self.ctx.new_generic_var(None);
+                        self.ctx.set_desc(
+                            arrow,
+                            TypeDesc::Tarrow {
+                                arg: args[i].clone(),
+                                ret,
+                                commutable: Commutable::Cok,
+                                arity: None,
+                            },
+                        );
+                        ret = arrow;
+                    }
+                    if args.is_empty() {
+                        // Defensive: upstream keeps the invariant params <> []
+                        return TypeDesc::Tnil;
+                    }
                     TypeDesc::Tarrow {
-                        arg,
+                        arg: args[0].clone(),
                         ret,
-                        commutable,
-                        arity,
+                        commutable: Commutable::Cok,
+                        arity: None,
                     }
                 }
                 2 => {

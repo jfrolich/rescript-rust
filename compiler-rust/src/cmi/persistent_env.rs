@@ -2932,13 +2932,14 @@ mod tests {
     #[test]
     fn reads_belt_map_string_empty_as_closed_undefined_constant_from_cmj() {
         let mut env = PersistentEnv::new();
+        // Belt moved into the separate @rescript/belt package (upstream #8554).
         env.add_load_path(
             PathBuf::from(env!("CARGO_MANIFEST_DIR"))
                 .parent()
                 .expect("repo root")
                 .join("packages")
                 .join("@rescript")
-                .join("runtime")
+                .join("belt")
                 .join("lib")
                 .join("ocaml"),
         );
