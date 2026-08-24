@@ -1,7 +1,7 @@
 use anyhow::Result;
 use notify::{Config, Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use std::fs;
-use std::fs::File;
+use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::Path;
 use std::process;
@@ -173,40 +173,49 @@ pub fn get(kind: LockKind, folder: &str) -> Lock {
     let location = lib_dir.join(kind.file_name());
     let pid = process::id();
 
-    // When a lockfile already exists we parse its PID: if the process is still alive we refuse to
-    // proceed, otherwise we will overwrite the stale lock with our own PID.
+    if let Err(e) = fs::create_dir_all(&lib_dir) {
+        return Lock::Error(Error::WritingLockfile(e));
+    }
+
     loop {
+        match OpenOptions::new().write(true).create_new(true).open(&location) {
+            Ok(mut file) => {
+                return match file.write_all(pid.to_string().as_bytes()) {
+                    Ok(()) => Lock::Aquired(pid),
+                    Err(e) => {
+                        let _ = fs::remove_file(&location);
+                        Lock::Error(Error::WritingLockfile(e))
+                    }
+                };
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(e) => return Lock::Error(Error::WritingLockfile(e)),
+        }
+
+        // A stale lock must be unlinked before retrying create_new. Never overwrite an existing
+        // lock: another process may have acquired it since this iteration began.
         match fs::read_to_string(&location) {
             Ok(contents) => match contents.parse::<u32>() {
                 Ok(parsed_pid) if pid_matches_current_process(parsed_pid) => match kind {
                     LockKind::Build => {
                         println!("Waiting for other build to finish...");
                         match await_lock_deletion(&lib_dir, kind) {
-                            Ok(_) => continue,
+                            Ok(()) => continue,
                             Err(_) => return Lock::Error(Error::Locked(parsed_pid)),
-                        };
+                        }
                     }
                     LockKind::Watch => return Lock::Error(Error::Locked(parsed_pid)),
                 },
-                Ok(_) => break,
+                Ok(_) => match fs::remove_file(&location) {
+                    Ok(()) => continue,
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+                    Err(e) => return Lock::Error(Error::WritingLockfile(e)),
+                },
                 Err(e) => return Lock::Error(Error::ParsingLockfile(e)),
             },
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => break,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
             Err(e) => return Lock::Error(Error::ReadingLockfile(kind, e)),
         }
-    }
-
-    if let Err(e) = fs::create_dir_all(&lib_dir) {
-        return Lock::Error(Error::WritingLockfile(e));
-    }
-
-    // Rewrite the lockfile with our own PID.
-    match File::create(&location) {
-        Ok(mut file) => match file.write(pid.to_string().as_bytes()) {
-            Ok(_) => Lock::Aquired(pid),
-            Err(e) => Lock::Error(Error::WritingLockfile(e)),
-        },
-        Err(e) => Lock::Error(Error::WritingLockfile(e)),
     }
 }
 
@@ -230,7 +239,14 @@ pub fn drop_lock(kind: LockKind, folder: &str) -> Result<()> {
     let lib_dir = project_folder.join("lib");
     let location = lib_dir.join(kind.file_name());
 
-    fs::remove_file(&location)?;
+    match fs::read_to_string(&location) {
+        Ok(contents) if contents.trim() == process::id().to_string() => {
+            fs::remove_file(&location)?;
+        }
+        Ok(_) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(e.into()),
+    }
 
     Ok(())
 }
@@ -358,6 +374,57 @@ mod tests {
         assert_eq!(
             fs::read_to_string(build_lock_path).expect("build lock should be rewritten"),
             current_pid.to_string()
+        );
+    }
+
+    #[test]
+    fn concurrent_watch_lock_has_one_winner() {
+        let temp_dir = TempDir::new().expect("temp dir should be created");
+        let project_folder = temp_dir.path().join("project");
+        fs::create_dir(&project_folder).expect("project folder should be created");
+        let folder = project_folder.to_string_lossy().into_owned();
+        let barrier = Arc::new(std::sync::Barrier::new(3));
+
+        let contenders = (0..2)
+            .map(|_| {
+                let folder = folder.clone();
+                let barrier = barrier.clone();
+                thread::spawn(move || {
+                    barrier.wait();
+                    get(LockKind::Watch, &folder)
+                })
+            })
+            .collect::<Vec<_>>();
+        barrier.wait();
+
+        let acquired = contenders
+            .into_iter()
+            .map(|contender| contender.join().unwrap())
+            .filter(|result| matches!(result, Lock::Aquired(_)))
+            .count();
+        assert_eq!(acquired, 1);
+    }
+
+    #[test]
+    fn drop_lock_does_not_remove_another_process_lock() {
+        let temp_dir = TempDir::new().expect("temp dir should be created");
+        let project_folder = temp_dir.path().join("project");
+        let lib_dir = project_folder.join("lib");
+        let build_lock_path = lib_dir.join(LockKind::Build.file_name());
+        let other_pid = process::id().checked_add(1).expect("PID should not overflow");
+
+        fs::create_dir_all(&lib_dir).expect("lib directory should be created");
+        fs::write(&build_lock_path, other_pid.to_string()).expect("lockfile should be written");
+
+        drop_lock(
+            LockKind::Build,
+            project_folder.to_str().expect("path should be valid"),
+        )
+        .expect("dropping an unowned lock should be harmless");
+
+        assert_eq!(
+            fs::read_to_string(build_lock_path).unwrap(),
+            other_pid.to_string()
         );
     }
 
