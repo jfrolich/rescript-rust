@@ -9242,13 +9242,12 @@ fn super_trace_reports(
     for (idx, group) in groups.iter().copied().enumerate() {
         let actual_text = format_type_expr(type_ctx, group.actual);
         let expected_text = format_type_expr(type_ctx, group.expected);
-        let is_top_pair_expansion = (actual_text == top_actual_text
-            && expected_text == top_expected_text)
-            || (actual_text == top_expected_text && expected_text == top_actual_text)
-            || (actual_text == top_actual_text && expected_text != top_expected_text)
-            || (expected_text == top_expected_text && actual_text != top_actual_text)
-            || (actual_text == top_expected_text && expected_text != top_actual_text)
-            || (expected_text == top_actual_text && actual_text != top_expected_text);
+        // Semantically equivalent to the original six-term disjunction:
+        // (A∧B) ∨ (C∧D) ∨ (A∧¬B) ∨ (B∧¬A) ∨ (C∧¬D) ∨ (D∧¬C) ≡ A ∨ B ∨ C ∨ D
+        let is_top_pair_expansion = actual_text == top_actual_text
+            || expected_text == top_expected_text
+            || actual_text == top_expected_text
+            || expected_text == top_actual_text;
         if is_top_pair_expansion {
             continue;
         }

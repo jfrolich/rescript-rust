@@ -529,23 +529,6 @@ pub(crate) fn lookup_type_decl_for_path_pub(
     lookup_type_decl_for_path(ctx, env, path)
 }
 
-fn is_newtype_path(ctx: &TypeContext, env: &Env, path: &Path) -> bool {
-    lookup_type_decl_for_path(ctx, env, path).is_some_and(|decl| {
-        decl.type_newtype_level.is_some()
-            && matches!(decl.type_kind, super::TypeKind::TypeAbstract)
-            && matches!(decl.type_private, super::PrivateFlag::Public)
-    })
-}
-
-fn find_newtype_level_for_path(ctx: &TypeContext, env: &Env, path: &Path) -> (i32, i32) {
-    lookup_type_decl_for_path(ctx, env, path)
-        .and_then(|decl| decl.type_newtype_level)
-        .unwrap_or_else(|| {
-            let lev = path_binding_time(path);
-            (lev, lev)
-        })
-}
-
 fn get_level(ctx: &TypeContext, env: &Env, path: &Path) -> i32 {
     let mut pending_type_lookup_paths = None;
     get_level_with_lookup_capture(ctx, env, path, &mut pending_type_lookup_paths)
@@ -5473,33 +5456,9 @@ fn unify_types<'a>(
                 } else {
                     None
                 };
-                let are_both_nullary = args1.is_empty() && args2.is_empty();
-                let path1_for_newtype = path1.clone();
-                let path2_for_newtype = path2.clone();
 
                 drop(desc1);
                 drop(desc2);
-
-                // OCaml ctype.ml: when both sides are local newtypes, prefer
-                // one-step expansion by newtype level before general unify2.
-                if false && are_both_nullary {
-                    if let Some(env) = state.env() {
-                        if env.has_local_constraints()
-                            && is_newtype_path(ctx, env, &path1_for_newtype)
-                            && is_newtype_path(ctx, env, &path2_for_newtype)
-                        {
-                            let lev1 = find_newtype_level_for_path(ctx, env, &path1_for_newtype);
-                            let lev2 = find_newtype_level_for_path(ctx, env, &path2_for_newtype);
-                            if lev1 < lev2 {
-                                if let Some(expanded_t2) = expand_head_once(ctx, env, t2) {
-                                    return unify(ctx, state, t1, expanded_t2);
-                                }
-                            } else if let Some(expanded_t1) = expand_head_once(ctx, env, t1) {
-                                return unify(ctx, state, expanded_t1, t2);
-                            }
-                        }
-                    }
-                }
 
                 // GADT equation handling for Tconstr with different paths
                 if state.generate_equations {
