@@ -464,7 +464,7 @@ async fn async_watch(
                 }
 
                 let timing_total = Instant::now();
-                let mut next_build_state = build::initialize_build(
+                let mut next_build_state = match build::initialize_build(
                     None,
                     filter,
                     show_progress,
@@ -476,8 +476,14 @@ async fn async_watch(
                     build_state.dump_typed_sexp,
                     prod,
                     features.clone(),
-                )
-                .expect("Could not initialize build");
+                ) {
+                    Ok(build_state) => build_state,
+                    Err(error) => {
+                        log::error!("Could not reinitialize build after config change: {error:#}");
+                        needs_compile_type = CompileType::None;
+                        continue;
+                    }
+                };
 
                 // Full rebuilds can be triggered by editor atomic saves that surface as rename events.
                 // Preserve warning state for unchanged modules so their warnings are re-emitted after the
