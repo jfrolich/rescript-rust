@@ -845,6 +845,9 @@ mod tests {
                 false,
                 true,
                 None,
+                BuildMode::Default,
+                false,
+                false,
                 false,
                 None,
             );
