@@ -1680,15 +1680,6 @@ pub(crate) fn jsx_preserve_for_structure(
     options.jsx_preserve || structure_has_config_string(structure, "-bs-jsx-preserve", arena)
 }
 
-fn preprocess_signature_for_typecheck(
-    signature: Signature,
-    options: &CompilerOptions,
-    arena: &mut crate::parse_arena::ParseArena,
-) -> Result<Signature> {
-    preprocess_signature_for_typecheck_inner(signature, options, arena)
-        .map_err(|e| anyhow!("PPX rewrite failed: {e}"))
-}
-
 fn preprocess_signature_for_typecheck_with_source(
     signature: Signature,
     options: &CompilerOptions,
@@ -1708,24 +1699,6 @@ fn preprocess_signature_for_typecheck_with_source(
     } else {
         ppx::rewrite_signature(&signature, arena)
             .map_err(|e| ppx_error_to_anyhow(e, arena, source, filename))
-    }
-}
-
-fn preprocess_signature_for_typecheck_inner(
-    signature: Signature,
-    options: &CompilerOptions,
-    arena: &mut crate::parse_arena::ParseArena,
-) -> std::result::Result<Signature, ppx::PpxError> {
-    let signature = if let Some(jsx_version) = options.jsx_version {
-        jsx_ppx::transform_signature(signature, jsx_version, arena)
-    } else {
-        signature
-    };
-
-    if options.no_builtin_ppx {
-        Ok(signature)
-    } else {
-        ppx::rewrite_signature(&signature, arena)
     }
 }
 
