@@ -132,6 +132,28 @@ fn get_dep_modules_from_memory(
     )
 }
 
+fn rebuild_dependents(modules: &mut ahash::AHashMap<String, Module>) {
+    for module in modules.values_mut() {
+        module.dependents.clear();
+    }
+
+    let edges = modules
+        .iter()
+        .flat_map(|(module_name, module)| {
+            module
+                .deps
+                .iter()
+                .map(move |dependency| (dependency.clone(), module_name.clone()))
+        })
+        .collect::<Vec<_>>();
+
+    for (dependency, dependent) in edges {
+        if let Some(module) = modules.get_mut(&dependency) {
+            module.dependents.insert(dependent);
+        }
+    }
+}
+
 pub fn get_deps(build_state: &mut BuildCommandState, deleted_modules: &AHashSet<String>) {
     let all_mod = &build_state.module_names.union(deleted_modules).cloned().collect();
     let in_process_mode = build_state.build_mode().is_in_process();
@@ -234,14 +256,43 @@ pub fn get_deps(build_state: &mut BuildCommandState, deleted_modules: &AHashSet<
         .into_iter()
         .for_each(|(module_name, deps)| {
             if let Some(module) = build_state.modules.get_mut(&module_name) {
-                module.deps = deps.clone();
+                module.deps = deps;
                 module.deps_dirty = false;
             }
-            deps.iter().for_each(|dep_name| {
-                if let Some(module) = build_state.modules.get_mut(dep_name) {
-                    module.dependents.insert(module_name.to_string());
-                }
-            });
         });
+    rebuild_dependents(&mut build_state.modules);
     build_state.deps_initialized = true;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::SystemTime;
+
+    fn module(deps: &[&str], dependents: &[&str]) -> Module {
+        Module {
+            source_type: SourceType::MlMap(MlMap { parse_dirty: false }),
+            deps: deps.iter().map(|dep| (*dep).to_string()).collect(),
+            dependents: dependents.iter().map(|dep| (*dep).to_string()).collect(),
+            package_name: "test".to_string(),
+            compile_dirty: false,
+            last_compiled_cmi: None,
+            last_compiled_cmt: Some(SystemTime::UNIX_EPOCH),
+            deps_dirty: false,
+            is_type_dev: false,
+        }
+    }
+
+    #[test]
+    fn rebuilding_dependents_removes_stale_edges() {
+        let mut modules = ahash::AHashMap::new();
+        modules.insert("A".to_string(), module(&[], &["B"]));
+        modules.insert("B".to_string(), module(&["C"], &[]));
+        modules.insert("C".to_string(), module(&[], &[]));
+
+        rebuild_dependents(&mut modules);
+
+        assert!(modules["A"].dependents.is_empty());
+        assert_eq!(modules["C"].dependents, AHashSet::from(["B".to_string()]));
+    }
 }
