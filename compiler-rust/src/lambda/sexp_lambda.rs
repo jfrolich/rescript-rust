@@ -370,8 +370,6 @@ fn primitive(prim: &Primitive, _with_locs: bool) -> Sexp {
             bool_sexp(*setter),
         ]),
         Primitive::PfnArity => Sexp::atom("Pfn_arity"),
-        Primitive::PjsFnMake(i) => Sexp::list(vec![Sexp::atom("Pjs_fn_make"), int(*i)]),
-        Primitive::PjsFnMakeUnit => Sexp::atom("Pjs_fn_make_unit"),
         Primitive::PjsFnMethod => Sexp::atom("Pjs_fn_method"),
         Primitive::Pdebugger => Sexp::atom("Pdebugger"),
         Primitive::PrawJsCode(info) => {

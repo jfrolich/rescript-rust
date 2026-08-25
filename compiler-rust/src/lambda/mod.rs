@@ -1082,28 +1082,6 @@ fn eta_conversion_args(
         .zip(outer_args.iter())
         .map(|((param, inner_arg), outer_arg)| match inner_arg {
             Lambda::Lvar(id) if param.same(id) => Some(outer_arg.clone()),
-            Lambda::Lprim(PrimInfo {
-                primitive: Primitive::PjsFnMake(arity),
-                args,
-                loc,
-            }) if matches!(args.as_slice(), [Lambda::Lvar(id)] if param.same(id)) => {
-                Some(Lambda::Lprim(PrimInfo {
-                    primitive: Primitive::PjsFnMake(*arity),
-                    args: vec![outer_arg.clone()],
-                    loc: loc.clone(),
-                }))
-            }
-            Lambda::Lprim(PrimInfo {
-                primitive: Primitive::PjsFnMakeUnit,
-                args,
-                loc,
-            }) if matches!(args.as_slice(), [Lambda::Lvar(id)] if param.same(id)) => {
-                Some(Lambda::Lprim(PrimInfo {
-                    primitive: Primitive::PjsFnMakeUnit,
-                    args: vec![outer_arg.clone()],
-                    loc: loc.clone(),
-                }))
-            }
             _ => None,
         })
         .collect()

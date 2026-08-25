@@ -452,10 +452,6 @@ pub enum Primitive {
     PupdateMod,
     /// Raw JavaScript code
     PrawJsCode(JsRawInfo),
-    /// Make function with arity
-    PjsFnMake(i32),
-    /// Make unit function
-    PjsFnMakeUnit,
     /// Method
     PjsFnMethod,
     /// Null to option
@@ -623,7 +619,6 @@ impl Primitive {
             | Parraysetu
             | Parrayrefs
             | Parraysets
-            | PjsFnMakeUnit
             | PjsFnMethod
             | Phash
             | PhashMixstring
@@ -718,12 +713,7 @@ impl Primitive {
                 } => name == n1 && setter == s1,
                 _ => false,
             },
-            // lam_primitive.ml:297-300
-            PjsFnMake(i) => match other {
-                PjsFnMake(i1) => i == i1,
-                _ => false,
-            },
-            // lam_primitive.ml:301
+            // lam_primitive.ml:298
             PrawJsCode(_) => false,
         }
     }

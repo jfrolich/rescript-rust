@@ -140,8 +140,6 @@ pub fn format_primitive(p: &Primitive, f: &mut fmt::Formatter<'_>) -> fmt::Resul
             }
         }
         Primitive::PfnArity => write!(f, "fn.length"),
-        Primitive::PjsFnMake(i) => write!(f, "js_fn_make_{i}"),
-        Primitive::PjsFnMakeUnit => write!(f, "js_fn_make_unit"),
         Primitive::PjsFnMethod => write!(f, "js_fn_method"),
         Primitive::Pdebugger => write!(f, "debugger"),
         Primitive::PrawJsCode(_) => write!(f, "[raw]"),
@@ -631,8 +629,6 @@ fn format_raw_field_info(field_info: &FieldDbgInfo, f: &mut fmt::Formatter<'_>) 
 fn format_raw_primitive(p: &Primitive, f: &mut fmt::Formatter<'_>) -> fmt::Result {
     match p {
         Primitive::PjsCall { prim_name, .. } => write!(f, "{prim_name}"),
-        Primitive::PjsFnMake(arity) => write!(f, "#fn_mk({arity})"),
-        Primitive::PjsFnMakeUnit => write!(f, "#fn_mk_unit"),
         Primitive::PjsFnMethod => write!(f, "#fn_method"),
         Primitive::Pjscomp(cmp) => write!(f, "{}", format_comparison(*cmp)),
         Primitive::Pstringadd => write!(f, "string.concat"),

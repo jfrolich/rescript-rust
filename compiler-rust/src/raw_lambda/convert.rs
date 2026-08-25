@@ -2181,9 +2181,8 @@ impl<'a> RawLambdaConverter<'a> {
         }
     }
 
-    /// Apply inline attribute to a raw lambda expression, matching OCaml's
-    /// Translattribute.add_inline_attribute. Walks through Lprim wrappers
-    /// to find the inner Lfunction.
+    /// Apply an inline attribute to a raw function, matching OCaml's
+    /// `Translattribute.add_inline_attribute`.
     fn apply_inline_attribute_raw(
         &mut self,
         lam: RawLambda,
@@ -2205,20 +2204,6 @@ impl<'a> RawLambdaConverter<'a> {
                 }
                 func.attr.inline = inline;
                 RawLambda::Lfunction(func)
-            }
-            RawLambda::Lprim(mut prim)
-                if matches!(
-                    prim.primitive,
-                    Primitive::PjsFnMake(_) | Primitive::PjsFnMakeUnit
-                ) && prim.args.len() == 1 =>
-            {
-                let inner = prim
-                    .args
-                    .pop()
-                    .expect("checked single Pjs_fn_make argument");
-                prim.args
-                    .push(self.apply_inline_attribute_raw(inner, loc, inline));
-                RawLambda::Lprim(prim)
             }
             other => {
                 let name = match inline {
@@ -3647,24 +3632,7 @@ impl<'a> RawLambdaConverter<'a> {
                 }
                 RecordRepresentation::RecordFloatUnused => RawLambda::unit(),
                 RecordRepresentation::RecordUnboxed(_) => match elems.as_slice() {
-                    [value] => {
-                        // OCaml: uncurried encoding - if label starts with 'I',
-                        // extract arity and wrap with #fn_mk(arity)
-                        let first_lbl_name = &fields[0].1.lbl_name;
-                        if first_lbl_name.starts_with('I') {
-                            if let Ok(arity) = first_lbl_name[1..].parse::<i32>() {
-                                RawLambda::prim(
-                                    Primitive::PjsFnMake(arity),
-                                    vec![value.clone()],
-                                    loc,
-                                )
-                            } else {
-                                value.clone()
-                            }
-                        } else {
-                            value.clone()
-                        }
-                    }
+                    [value] => value.clone(),
                     _ => RawLambda::unit(),
                 },
                 RecordRepresentation::RecordInlined {

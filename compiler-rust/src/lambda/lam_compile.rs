@@ -1806,8 +1806,7 @@ impl LambdaCompiler {
                 }
             }
 
-            let recursive_functions =
-                recursive_function_bindings_in_group(&self.id_gen, bindings, &group);
+            let recursive_functions = recursive_function_bindings_in_group(bindings, &group);
             let recursive_function_tail_targets = direct_recursive_function_tail_targets_with_group(
                 bindings,
                 &group,
@@ -1853,7 +1852,7 @@ impl LambdaCompiler {
         recursive_functions: &HashMap<Ident, LFunction>,
         recursive_function_ids: &HashSet<Ident>,
     ) -> (Block, Block) {
-        if let Some(func) = recursive_function_binding_value(&self.id_gen, expr) {
+        if let Some(func) = recursive_function_binding_value(expr) {
             return (
                 vec![],
                 vec![Statement::variable(VariableDeclaration {
@@ -6239,24 +6238,9 @@ fn staticcatch_debug_kind(lam: &Lambda) -> &'static str {
     }
 }
 
-fn recursive_function_binding_value(id_gen: &IdGenerator, expr: &Lambda) -> Option<LFunction> {
+fn recursive_function_binding_value(expr: &Lambda) -> Option<LFunction> {
     match expr {
         Lambda::Lfunction(func) => Some(func.clone()),
-        Lambda::Lprim(info) => match (&info.primitive, info.args.as_slice()) {
-            (Primitive::PjsFnMake(arity), [Lambda::Lfunction(func)]) => Some(
-                adjust_recursive_js_fn_make_function(id_gen, func, *arity, &info.loc),
-            ),
-            (Primitive::PjsFnMakeUnit, [Lambda::Lfunction(func)]) => {
-                let mut func = func.clone();
-                if func.arity == 1
-                    && matches!(func.params.as_slice(), [param] if param.name() == "param")
-                {
-                    func.attr.one_unit_arg = true;
-                }
-                Some(func)
-            }
-            _ => None,
-        },
         _ => None,
     }
 }
@@ -6389,20 +6373,14 @@ fn recursive_binding_groups(
     }
 }
 
-fn recursive_function_bindings(
-    id_gen: &IdGenerator,
-    bindings: &[(Ident, Lambda)],
-) -> HashMap<Ident, LFunction> {
+fn recursive_function_bindings(bindings: &[(Ident, Lambda)]) -> HashMap<Ident, LFunction> {
     bindings
         .iter()
-        .filter_map(|(id, expr)| {
-            recursive_function_binding_value(id_gen, expr).map(|func| (id.clone(), func))
-        })
+        .filter_map(|(id, expr)| recursive_function_binding_value(expr).map(|func| (id.clone(), func)))
         .collect()
 }
 
 fn recursive_function_bindings_in_group(
-    id_gen: &IdGenerator,
     bindings: &[(Ident, Lambda)],
     group: &[usize],
 ) -> HashMap<Ident, LFunction> {
@@ -6410,7 +6388,7 @@ fn recursive_function_bindings_in_group(
         .iter()
         .filter_map(|&index| {
             let (id, expr) = &bindings[index];
-            recursive_function_binding_value(id_gen, expr).map(|func| (id.clone(), func))
+            recursive_function_binding_value(expr).map(|func| (id.clone(), func))
         })
         .collect()
 }
@@ -6427,101 +6405,8 @@ fn recursive_function_binding_alias_target(
 
     match expr {
         Lambda::Lvar(target) => lookup(target).map(|(function_id, _)| function_id.clone()),
-        Lambda::Lprim(info) => match (&info.primitive, info.args.as_slice()) {
-            (Primitive::PjsFnMake(arity), [Lambda::Lvar(target)]) => {
-                let (function_id, func) = lookup(target)?;
-                if func.attr.async_ || func.arity == *arity {
-                    Some(function_id.clone())
-                } else {
-                    None
-                }
-            }
-            (Primitive::PjsFnMakeUnit, [Lambda::Lvar(target)]) => {
-                lookup(target).map(|(function_id, _)| function_id.clone())
-            }
-            _ => None,
-        },
         _ => None,
     }
-}
-
-fn adjust_recursive_js_fn_make_function(
-    id_gen: &IdGenerator,
-    func: &LFunction,
-    to_: i32,
-    loc: &Location,
-) -> LFunction {
-    let from = func.arity;
-    if from == to_ || func.attr.async_ {
-        return func.clone();
-    }
-
-    if to_ == 0 {
-        let [param] = func.params.as_slice() else {
-            unreachable!("direct recursive js fn make adjustment should preserve a body")
-        };
-        let Lambda::Lfunction(adjusted) = Lambda::function_(
-            0,
-            vec![],
-            Lambda::let_(
-                LetKind::Alias,
-                param.clone(),
-                Lambda::unit(),
-                (*func.body).clone(),
-            ),
-            FunctionAttribute::default(),
-        ) else {
-            unreachable!("function constructor must return an Lfunction")
-        };
-        return adjusted;
-    }
-
-    if to_ > from {
-        let mut params = func.params.clone();
-        // This mirrors Lam_eta_conversion.unsafe_adjust_to_arity's fresh
-        // Ident.create params for `Pjs_fn_make` expansion
-        // (compiler/core/lam_pass_alpha_conversion.ml:67-74 and
-        // compiler/core/lam_eta_conversion.ml:159-175).
-        let extra_args = (0..(to_ - from))
-            .map(|_| id_gen.create("param"))
-            .collect::<Vec<_>>();
-        let mut body = (*func.body).clone();
-        for extra_arg in &extra_args {
-            body = Lambda::Lapply(Apply {
-                ap_func: Box::new(body),
-                ap_args: vec![Lambda::var(extra_arg.clone())],
-                ap_info: ApInfo {
-                    loc: loc.clone(),
-                    inlined: InlineAttribute::Default,
-                    status: ApplyStatus::Na,
-                },
-                ap_transformed_jsx: false,
-            });
-        }
-        params.extend(extra_args);
-        let Lambda::Lfunction(adjusted) =
-            Lambda::function_(to_, params, body, FunctionAttribute::default())
-        else {
-            unreachable!("function constructor must return an Lfunction")
-        };
-        return adjusted;
-    }
-
-    let outer_arity = to_ as usize;
-    let outer_params = func.params[..outer_arity].to_vec();
-    let inner_params = func.params[outer_arity..].to_vec();
-    let inner = Lambda::function_(
-        from - to_,
-        inner_params,
-        (*func.body).clone(),
-        FunctionAttribute::default(),
-    );
-    let Lambda::Lfunction(adjusted) =
-        Lambda::function_(to_, outer_params, inner, FunctionAttribute::default())
-    else {
-        unreachable!("function constructor must return an Lfunction")
-    };
-    adjusted
 }
 
 fn lower_ocaml_for_range_direction<'a>(
@@ -6685,15 +6570,7 @@ fn function_has_self_tailcall(tail_targets: &[Ident], lam: &Lambda) -> bool {
 fn direct_recursive_function_tail_targets(
     bindings: &[(Ident, Lambda)],
 ) -> HashMap<Ident, Vec<Ident>> {
-    let start_stamp = bindings
-        .iter()
-        .fold(Ident::current_local_stamp(), |max_stamp, (_, lam)| {
-            max_stamp.max(crate::lambda::lam_beta_reduce::max_ident_stamp_in_lambda(
-                lam,
-            ))
-        });
-    let id_gen = IdGenerator::with_start_stamp(start_stamp);
-    let recursive_functions = recursive_function_bindings(&id_gen, bindings);
+    let recursive_functions = recursive_function_bindings(bindings);
     direct_recursive_function_tail_targets_with_bindings(bindings, &recursive_functions)
 }
 

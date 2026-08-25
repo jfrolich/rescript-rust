@@ -1,18 +1,17 @@
 //! Direct port of `compiler/core/lam_pass_alpha_conversion.ml`.
 //!
-//! Visits applications and `Pjs_fn_make` primitives, consulting
-//! [`get_arity`] (`Lam_arity_analysis.get_arity`) to either tag the
-//! application with `App_infer_full` or eta-expand/eta-reduce via
-//! [`crate::lambda::lam_eta_conversion`].
+//! Visits applications, consulting [`get_arity`]
+//! (`Lam_arity_analysis.get_arity`) to tag applications with
+//! `App_infer_full` or transform under-application.
 //!
 //! Every line traces to a specific line in OCaml. No invented logic.
 
 use crate::lambda::lam_compile_context::LamStats;
-use crate::lambda::lam_eta_conversion::{transform_under_supply, unsafe_adjust_to_arity};
+use crate::lambda::lam_eta_conversion::transform_under_supply;
 use crate::lambda::lam_pass_collect::ExternalArityResolver;
 use crate::lambda::lam_primitive::Primitive;
 use crate::lambda::{
-    ApInfo, Apply, ApplyStatus, FunctionAttribute, Lambda, LambdaSwitch, PrimInfo,
+    ApInfo, Apply, ApplyStatus, Lambda, LambdaSwitch, PrimInfo,
 };
 
 /// Direct port of `Lam_pass_alpha_conversion.alpha_conversion`
@@ -225,53 +224,7 @@ impl<'a, 'r> Alpha<'a, 'r> {
             // lam_pass_alpha_conversion.ml:66
             Lambda::LglobalModule(_, _) => lam.clone(),
 
-            // lam_pass_alpha_conversion.ml:67-74 — `Pjs_fn_make len [arg]`:
-            // call `unsafe_adjust_to_arity` if we know the argument's arity.
-            Lambda::Lprim(PrimInfo {
-                primitive: primitive @ Primitive::PjsFnMake(len),
-                args,
-                loc,
-            }) if args.len() == 1 => {
-                let arg = &args[0];
-                match self.get_arity(arg).get_first_arity() {
-                    Some(x) => {
-                        let arg = self.simpl(arg);
-                        unsafe_adjust_to_arity(&self.meta.id_gen, loc.clone(), *len, Some(x), arg)
-                    }
-                    None => Lambda::prim(primitive.clone(), vec![self.simpl(arg)], loc.clone()),
-                }
-            }
-
-            // lam_pass_alpha_conversion.ml:75-85 — `Pjs_fn_make_unit [arg]`:
-            // mark the inner Lfunction as `one_unit_arg` if the param is the
-            // synthetic "param" placeholder, then recurse on the (possibly
-            // re-attributed) arg.
-            Lambda::Lprim(PrimInfo {
-                primitive: Primitive::PjsFnMakeUnit,
-                args,
-                loc: _,
-            }) if args.len() == 1 => {
-                let arg = &args[0];
-                let new_arg = match arg {
-                    Lambda::Lfunction(f)
-                        if f.arity == 1 && f.params.len() == 1 && f.params[0].name() == "param" =>
-                    {
-                        Lambda::function_(
-                            1,
-                            f.params.clone(),
-                            (*f.body).clone(),
-                            FunctionAttribute {
-                                one_unit_arg: true,
-                                ..f.attr.clone()
-                            },
-                        )
-                    }
-                    _ => arg.clone(),
-                };
-                self.simpl(&new_arg)
-            }
-
-            // lam_pass_alpha_conversion.ml:86-87 — fallback Lprim recurse.
+            // lam_pass_alpha_conversion.ml:67-68 — recurse through primitives.
             Lambda::Lprim(PrimInfo {
                 primitive,
                 args,
@@ -402,46 +355,6 @@ impl<'a, 'r> Alpha<'a, 'r> {
                     .map(|(id, e)| (id, self.simpl_owned(e)))
                     .collect();
                 Lambda::letrec(bindings, self.simpl_owned(*body))
-            }
-            Lambda::Lprim(PrimInfo {
-                primitive: Primitive::PjsFnMake(len),
-                mut args,
-                loc,
-            }) if args.len() == 1 => {
-                let arg = args.pop().expect("checked single PjsFnMake arg");
-                match self.get_arity(&arg).get_first_arity() {
-                    Some(x) => {
-                        let arg = self.simpl_owned(arg);
-                        unsafe_adjust_to_arity(&self.meta.id_gen, loc, len, Some(x), arg)
-                    }
-                    None => {
-                        Lambda::prim(Primitive::PjsFnMake(len), vec![self.simpl_owned(arg)], loc)
-                    }
-                }
-            }
-            Lambda::Lprim(PrimInfo {
-                primitive: Primitive::PjsFnMakeUnit,
-                mut args,
-                loc: _,
-            }) if args.len() == 1 => {
-                let arg = args.pop().expect("checked single PjsFnMakeUnit arg");
-                let new_arg = match arg {
-                    Lambda::Lfunction(f)
-                        if f.arity == 1 && f.params.len() == 1 && f.params[0].name() == "param" =>
-                    {
-                        Lambda::function_(
-                            1,
-                            f.params,
-                            *f.body,
-                            FunctionAttribute {
-                                one_unit_arg: true,
-                                ..f.attr
-                            },
-                        )
-                    }
-                    other => other,
-                };
-                self.simpl_owned(new_arg)
             }
             Lambda::Lprim(PrimInfo {
                 primitive,

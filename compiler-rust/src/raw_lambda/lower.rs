@@ -905,28 +905,6 @@ fn eta_conversion_args(
         .zip(outer_args.iter())
         .map(|((param, inner_arg), outer_arg)| match inner_arg {
             Lambda::Lvar(id) if param.same(id) => Some(outer_arg.clone()),
-            Lambda::Lprim(PrimInfo {
-                primitive: Primitive::PjsFnMake(arity),
-                args,
-                loc,
-            }) if matches!(args.as_slice(), [Lambda::Lvar(id)] if param.same(id)) => {
-                Some(Lambda::Lprim(PrimInfo {
-                    primitive: Primitive::PjsFnMake(*arity),
-                    args: vec![outer_arg.clone()],
-                    loc: loc.clone(),
-                }))
-            }
-            Lambda::Lprim(PrimInfo {
-                primitive: Primitive::PjsFnMakeUnit,
-                args,
-                loc,
-            }) if matches!(args.as_slice(), [Lambda::Lvar(id)] if param.same(id)) => {
-                Some(Lambda::Lprim(PrimInfo {
-                    primitive: Primitive::PjsFnMakeUnit,
-                    args: vec![outer_arg.clone()],
-                    loc: loc.clone(),
-                }))
-            }
             _ => None,
         })
         .collect()
@@ -2871,26 +2849,18 @@ mod tests {
         let beg_param = Ident::create_local("p");
 
         let function_attr = FunctionAttribute::default();
-        let find_end_binding = Lambda::prim(
-            Primitive::PjsFnMake(1),
-            vec![Lambda::function_(
+        let find_end_binding = Lambda::function_(
                 1,
                 vec![end_param],
                 Lambda::seq(Lambda::var(find_end.clone()), Lambda::var(find_beg.clone())),
                 function_attr.clone(),
-            )],
-            Location::none(),
-        );
-        let find_beg_binding = Lambda::prim(
-            Primitive::PjsFnMake(1),
-            vec![Lambda::function_(
+            );
+        let find_beg_binding = Lambda::function_(
                 1,
                 vec![beg_param],
                 Lambda::var(find_beg.clone()),
                 function_attr,
-            )],
-            Location::none(),
-        );
+            );
 
         let lowered = rebuild_recursive_bindings(
             vec![

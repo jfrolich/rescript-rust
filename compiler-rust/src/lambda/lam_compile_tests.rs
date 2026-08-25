@@ -1541,39 +1541,27 @@ fn compile_effectful_underscore_binding_from_nested_js_function_calls_survives_s
         LetKind::Strict,
         always_true,
         Lambda::true_(),
-        Lambda::prim(
-            Primitive::PjsFnMake(1),
-            vec![Lambda::function_(
+        Lambda::function_(
                 1,
                 vec![outer_fn_param.clone()],
                 Lambda::let_(
                     LetKind::Strict,
                     also_true,
-                    Lambda::prim(
-                        Primitive::PjsFnMake(1),
-                        vec![Lambda::function_(
+                    Lambda::function_(
                             1,
                             vec![inner_true_param],
                             Lambda::true_(),
                             FunctionAttribute::default(),
-                        )],
-                        loc.clone(),
-                    ),
-                    Lambda::prim(
-                        Primitive::PjsFnMake(1),
-                        vec![Lambda::function_(
+                        ),
+                    Lambda::function_(
                             1,
                             vec![inner_zero_param],
                             Lambda::const_(Constant::int(0)),
                             FunctionAttribute::default(),
-                        )],
-                        loc.clone(),
-                    ),
+                        ),
                 ),
                 FunctionAttribute::default(),
-            )],
-            loc.clone(),
-        ),
+            ),
     );
     let nested_call = Lambda::Lapply(Apply {
         ap_func: Box::new(Lambda::Lapply(Apply {
@@ -2114,9 +2102,7 @@ fn compile_deps_program_keeps_exported_call_result_before_rebound_constant_block
     let lam = Lambda::let_(
         LetKind::Strict,
         f.clone(),
-        Lambda::prim(
-            Primitive::PjsFnMake(1),
-            vec![Lambda::function_(
+        Lambda::function_(
                 1,
                 vec![param.clone()],
                 Lambda::prim(
@@ -2131,9 +2117,7 @@ fn compile_deps_program_keeps_exported_call_result_before_rebound_constant_block
                     Location::none(),
                 ),
                 FunctionAttribute::default(),
-            )],
-            Location::none(),
-        ),
+            ),
         Lambda::let_(
             LetKind::Strict,
             v.clone(),
@@ -2268,16 +2252,12 @@ fn compile_deps_program_rebinds_exported_constants_after_surviving_function_bind
             Lambda::let_(
                 LetKind::Strict,
                 foo.clone(),
-                Lambda::prim(
-                    Primitive::PjsFnMake(1),
-                    vec![Lambda::function_(
+                Lambda::function_(
                         1,
                         vec![param.clone()],
                         Lambda::var(param),
                         FunctionAttribute::default(),
-                    )],
-                    Location::none(),
-                ),
+                    ),
                 export_block,
             ),
         ),
@@ -2354,16 +2334,12 @@ fn compile_deps_program_rebinds_marshaled_string_exports_after_surviving_functio
     let lam = Lambda::let_(
         LetKind::Strict,
         foo.clone(),
-        Lambda::prim(
-            Primitive::PjsFnMake(1),
-            vec![Lambda::function_(
+        Lambda::function_(
                 1,
                 vec![foo_param.clone()],
                 Lambda::var(foo_param),
                 FunctionAttribute::default(),
-            )],
-            Location::none(),
-        ),
+            ),
         Lambda::let_(
             LetKind::Strict,
             s.clone(),
@@ -2374,16 +2350,12 @@ fn compile_deps_program_rebinds_marshaled_string_exports_after_surviving_functio
             Lambda::let_(
                 LetKind::Strict,
                 bar.clone(),
-                Lambda::prim(
-                    Primitive::PjsFnMake(1),
-                    vec![Lambda::function_(
+                Lambda::function_(
                         1,
                         vec![bar_param.clone()],
                         Lambda::var(bar_param),
                         FunctionAttribute::default(),
-                    )],
-                    Location::none(),
-                ),
+                    ),
                 export_block,
             ),
         ),
@@ -3632,9 +3604,7 @@ pub(super) fn gpr_1438_switch_cases(
 
 pub(super) fn gpr_1438_fallthrough_handler() -> Lambda {
     let param = Ident::create_local("param");
-    Lambda::prim(
-        Primitive::PjsFnMake(1),
-        vec![Lambda::function_(
+    Lambda::function_(
             1,
             vec![param],
             Lambda::const_(Constant::JsUndefined { is_unit: true }),
@@ -3642,9 +3612,7 @@ pub(super) fn gpr_1438_fallthrough_handler() -> Lambda {
                 return_unit: true,
                 ..FunctionAttribute::default()
             },
-        )],
-        Location::none(),
-    )
+        )
 }
 
 #[test]
@@ -3691,7 +3659,7 @@ fn compile_deps_program_keeps_gpr_1438_fallthrough_return_outside_switch() {
     let lam = Lambda::let_(
         LetKind::Strict,
         action_key.clone(),
-        Lambda::prim(Primitive::PjsFnMake(6), vec![function], Location::none()),
+        function,
         Lambda::prim(
             Primitive::Pmakeblock(
                 0,
@@ -5683,16 +5651,6 @@ fn extract_first_function_body(lam: &Lambda) -> &Lambda {
     };
     match value.as_ref() {
         Lambda::Lfunction(func) => &func.body,
-        Lambda::Lprim(crate::lambda::PrimInfo {
-            primitive: Primitive::PjsFnMake(_),
-            args,
-            ..
-        }) => {
-            let [Lambda::Lfunction(func)] = args.as_slice() else {
-                panic!("expected a single lowered function body in the JS function primitive");
-            };
-            &func.body
-        }
         other => {
             panic!("expected the top-level binding to stay function-shaped, got {other:?}")
         }
@@ -5996,9 +5954,7 @@ fn nested_app_na_calls_reassociate_through_lam_apply_for_ari_regress_shape() {
     let lam = Lambda::let_(
         LetKind::Alias,
         gg.clone(),
-        Lambda::prim(
-            Primitive::PjsFnMake(2),
-            vec![Lambda::function_(
+        Lambda::function_(
                 2,
                 vec![x.clone(), y.clone()],
                 Lambda::let_(
@@ -6009,9 +5965,7 @@ fn nested_app_na_calls_reassociate_through_lam_apply_for_ari_regress_shape() {
                         vec![Lambda::var(x), Lambda::var(y)],
                         loc.clone(),
                     ),
-                    Lambda::prim(
-                        Primitive::PjsFnMake(1),
-                        vec![Lambda::function_(
+                    Lambda::function_(
                             1,
                             vec![z.clone()],
                             Lambda::prim(
@@ -6020,14 +5974,10 @@ fn nested_app_na_calls_reassociate_through_lam_apply_for_ari_regress_shape() {
                                 loc.clone(),
                             ),
                             crate::lambda::FunctionAttribute::default(),
-                        )],
-                        loc.clone(),
-                    ),
+                        ),
                 ),
                 crate::lambda::FunctionAttribute::default(),
-            )],
-            loc.clone(),
-        ),
+            ),
         Lambda::let_(
             LetKind::Strict,
             result.clone(),
@@ -6090,9 +6040,7 @@ fn nested_app_na_calls_reassociate_multi_arg_returned_functions_for_test_demo_sh
     let lam = Lambda::let_(
         LetKind::Alias,
         g1.clone(),
-        Lambda::prim(
-            Primitive::PjsFnMake(2),
-            vec![Lambda::function_(
+        Lambda::function_(
                 2,
                 vec![x.clone(), y.clone()],
                 Lambda::let_(
@@ -6103,9 +6051,7 @@ fn nested_app_na_calls_reassociate_multi_arg_returned_functions_for_test_demo_sh
                         vec![Lambda::var(x), Lambda::var(y)],
                         loc.clone(),
                     ),
-                    Lambda::prim(
-                        Primitive::PjsFnMake(2),
-                        vec![Lambda::function_(
+                    Lambda::function_(
                             2,
                             vec![xx.clone(), yy.clone()],
                             Lambda::prim(
@@ -6121,14 +6067,10 @@ fn nested_app_na_calls_reassociate_multi_arg_returned_functions_for_test_demo_sh
                                 loc.clone(),
                             ),
                             crate::lambda::FunctionAttribute::default(),
-                        )],
-                        loc.clone(),
-                    ),
+                        ),
                 ),
                 crate::lambda::FunctionAttribute::default(),
-            )],
-            loc.clone(),
-        ),
+            ),
         Lambda::let_(
             LetKind::Strict,
             result.clone(),
@@ -9835,25 +9777,19 @@ fn recursive_singleton_nested_let_function_bindings_avoid_placeholder_assignment
             Lambda::let_(
                 LetKind::Strict,
                 make_internal.clone(),
-                Lambda::prim(
-                    Primitive::PjsFnMake(1),
-                    vec![Lambda::function_(
+                Lambda::function_(
                         1,
                         vec![param],
                         Lambda::var(make.clone()),
                         FunctionAttribute::default(),
-                    )],
-                    Location::none(),
-                ),
+                    ),
                 Lambda::let_(
                     LetKind::Strict,
                     make_alias.clone(),
                     Lambda::let_(
                         LetKind::Strict,
                         component.clone(),
-                        Lambda::prim(
-                            Primitive::PjsFnMake(1),
-                            vec![Lambda::function_(
+                        Lambda::function_(
                                 1,
                                 vec![props.clone()],
                                 Lambda::apply(
@@ -9867,9 +9803,7 @@ fn recursive_singleton_nested_let_function_bindings_avoid_placeholder_assignment
                                     false,
                                 ),
                                 FunctionAttribute::default(),
-                            )],
-                            Location::none(),
-                        ),
+                            ),
                         Lambda::var(component),
                     ),
                     Lambda::var(make_alias),
@@ -10473,7 +10407,7 @@ fn recursive_self_tailcalls_preserve_ocaml_loop_ordering() {
 }
 
 #[test]
-fn recursive_wrapped_js_fn_make_bindings_lower_to_looping_while_bodies() {
+fn recursive_function_bindings_lower_to_looping_while_bodies() {
     let mut compiler = LambdaCompiler::new();
     let loop_ = Ident::create_local("loop");
     let flag = Ident::create_local("flag");
@@ -10496,16 +10430,12 @@ fn recursive_wrapped_js_fn_make_bindings_lower_to_looping_while_bodies() {
     let lam = Lambda::letrec(
         vec![(
             loop_.clone(),
-            Lambda::prim(
-                Primitive::PjsFnMake(3),
-                vec![Lambda::function_(
+            Lambda::function_(
                     3,
                     vec![flag.clone(), acc.clone(), next],
                     Lambda::if_(Lambda::var(flag), tailcall, Lambda::var(acc)),
                     FunctionAttribute::default(),
-                )],
-                Location::none(),
-            ),
+                ),
         )],
         Lambda::var(loop_.clone()),
     );
@@ -10598,9 +10528,7 @@ fn recursive_function_aliases_reenter_the_same_tail_loop_like_a_scope_bug() {
         vec![
             (
                 odd.clone(),
-                Lambda::prim(
-                    Primitive::PjsFnMake(1),
-                    vec![Lambda::function_(
+                Lambda::function_(
                         1,
                         vec![z],
                         Lambda::Lapply(Apply {
@@ -10614,15 +10542,11 @@ fn recursive_function_aliases_reenter_the_same_tail_loop_like_a_scope_bug() {
                             ap_transformed_jsx: false,
                         }),
                         FunctionAttribute::default(),
-                    )],
-                    Location::none(),
-                ),
+                    ),
             ),
             (
                 even.clone(),
-                Lambda::prim(
-                    Primitive::PjsFnMake(1),
-                    vec![Lambda::function_(
+                Lambda::function_(
                         1,
                         vec![y.clone()],
                         Lambda::Lapply(Apply {
@@ -10636,9 +10560,7 @@ fn recursive_function_aliases_reenter_the_same_tail_loop_like_a_scope_bug() {
                             ap_transformed_jsx: false,
                         }),
                         FunctionAttribute::default(),
-                    )],
-                    Location::none(),
-                ),
+                    ),
             ),
         ],
         Lambda::var(odd.clone()),

@@ -158,15 +158,10 @@ pub(crate) fn runtime_member_for_eta_wrapped_primitive(
 
 pub(crate) fn eta_wrapped_args_match_params(params: &[Ident], args: &[Lambda]) -> bool {
     params.len() == args.len()
-        && params.iter().zip(args).all(|(param, arg)| match arg {
-            Lambda::Lvar(id) => id.same(param),
-            Lambda::Lprim(crate::lambda::PrimInfo {
-                primitive: Primitive::PjsFnMake(_) | Primitive::PjsFnMakeUnit,
-                args: inner_args,
-                ..
-            }) => matches!(inner_args.as_slice(), [Lambda::Lvar(id)] if id.same(param)),
-            _ => false,
-        })
+        && params
+            .iter()
+            .zip(args)
+            .all(|(param, arg)| matches!(arg, Lambda::Lvar(id) if id.same(param)))
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]

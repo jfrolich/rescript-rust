@@ -291,17 +291,13 @@ fn nested_wrapped_staticcatch_trywith_tail_loops_lower_like_gpr_1701() {
     let lam = Lambda::letrec(
         vec![(
             outer.clone(),
-            Lambda::prim(
-                Primitive::PjsFnMake(1),
-                vec![Lambda::function_(
+            Lambda::function_(
                     1,
                     vec![inc.clone()],
                     Lambda::letrec(
                         vec![(
                             loop_.clone(),
-                            Lambda::prim(
-                                Primitive::PjsFnMake(1),
-                                vec![Lambda::function_(
+                            Lambda::function_(
                                     1,
                                     vec![acc.clone()],
                                     Lambda::LstaticCatch(
@@ -391,9 +387,7 @@ fn nested_wrapped_staticcatch_trywith_tail_loops_lower_like_gpr_1701() {
                                         })),
                                     ),
                                     FunctionAttribute::default(),
-                                )],
-                                Location::none(),
-                            ),
+                                ),
                         )],
                         Lambda::Lapply(Apply {
                             ap_func: Box::new(Lambda::var(loop_.clone())),
@@ -407,9 +401,7 @@ fn nested_wrapped_staticcatch_trywith_tail_loops_lower_like_gpr_1701() {
                         }),
                     ),
                     FunctionAttribute::default(),
-                )],
-                Location::none(),
-            ),
+                ),
         )],
         Lambda::prim(
             Primitive::Pmakeblock(
@@ -1028,9 +1020,7 @@ fn nested_staticcatch_switch_forwarders_to_outer_handlers_avoid_exit_temps_like_
         Box::new(Lambda::let_(
             LetKind::Strict,
             int_func.clone(),
-            Lambda::prim(
-                Primitive::PjsFnMake(1),
-                vec![Lambda::function_(
+            Lambda::function_(
                     1,
                     vec![int_param.clone()],
                     Lambda::prim(
@@ -1039,9 +1029,7 @@ fn nested_staticcatch_switch_forwarders_to_outer_handlers_avoid_exit_temps_like_
                         Location::none(),
                     ),
                     FunctionAttribute::default(),
-                )],
-                Location::none(),
-            ),
+                ),
             Lambda::apply(
                 Lambda::var(int_func),
                 vec![Lambda::const_(Constant::int(0))],
@@ -1111,9 +1099,7 @@ fn nested_staticcatch_switch_forwarders_keep_collapsed_shared_return_like_gpr_36
         Box::new(Lambda::let_(
             LetKind::Strict,
             int_func.clone(),
-            Lambda::prim(
-                Primitive::PjsFnMake(1),
-                vec![Lambda::function_(
+            Lambda::function_(
                     1,
                     vec![int_param.clone()],
                     Lambda::prim(
@@ -1122,9 +1108,7 @@ fn nested_staticcatch_switch_forwarders_keep_collapsed_shared_return_like_gpr_36
                         Location::none(),
                     ),
                     FunctionAttribute::default(),
-                )],
-                Location::none(),
-            ),
+                ),
             Lambda::apply(
                 Lambda::var(int_func),
                 vec![Lambda::const_(Constant::int(0))],

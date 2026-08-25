@@ -578,10 +578,6 @@ impl LambdaCompiler {
             PjsObjectCreate(obj_params) => {
                 self.compile_js_object_create(obj_params, compiled_args, &mut prelude)
             }
-            PjsFnMake(_) | PjsFnMakeUnit => compiled_args
-                .first()
-                .cloned()
-                .unwrap_or_else(|| Expression::undefined(false)),
             PjsFnMethod => match compiled_args.first().cloned() {
                 Some(Expression {
                     desc:

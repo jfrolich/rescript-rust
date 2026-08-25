@@ -145,8 +145,6 @@ fn is_pure_primitive(prim: &Primitive, args: &[Lambda]) -> bool {
         | Primitive::PisNullUndefined
         | Primitive::PnullToOpt
         | Primitive::PnullUndefinedToOpt
-        | Primitive::PjsFnMake(_)
-        | Primitive::PjsFnMakeUnit
         | Primitive::PjsObjectCreate(_)
         | Primitive::Pimport
         | Primitive::Pnull
