@@ -69,6 +69,23 @@ use lam_constant::StringDelim;
 pub use lam_primitive::Primitive;
 pub use lam_tag_info::TagInfo;
 
+/// Source binding selected by `@res.hoistedFunction` for a flat JS export.
+/// Mirrors `Lambda.hoisted_function` in `compiler/ml/lambda.ml`.
+#[derive(Debug, Clone)]
+pub struct HoistedFunction {
+    pub binding: Ident,
+    pub path: Vec<String>,
+    pub loc: Location,
+    pub target_loc: Location,
+}
+
+/// CMJ lookup entry for a successfully materialized flat export.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HoistedExport {
+    pub path: Vec<String>,
+    pub export_name: String,
+}
+
 /// Application status for function calls
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ApplyStatus {

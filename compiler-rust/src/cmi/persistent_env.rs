@@ -195,6 +195,7 @@ pub enum CmjExportArity {
 pub struct CmjModuleMetadata {
     pub is_pure: bool,
     pub export_constants: HashMap<String, CmjExportConstant>,
+    pub hoisted_exports: Vec<crate::lambda::HoistedExport>,
     pub package_spec: CmjPackageSpec,
     pub file_case: CmjFileCase,
 }
@@ -253,6 +254,8 @@ pub struct InMemoryModuleInfo {
     pub cmj_export_constants: Arc<HashMap<String, CmjExportConstant>>,
     /// Arity metadata for exports (replaces `.cmj` arity lookup)
     pub cmj_export_arities: Arc<HashMap<String, CmjExportArity>>,
+    /// Flat hoisted-export path metadata (replaces `.cmj` lookup).
+    pub cmj_hoisted_exports: Arc<Vec<crate::lambda::HoistedExport>>,
     /// Whether this module belongs to `@rescript/runtime`
     pub is_runtime: bool,
     /// Package name used by JS import rebasing in `--in-process` builds.
@@ -275,6 +278,7 @@ impl InMemoryModuleInfo {
             is_pure,
             cmj_export_constants: Arc::new(cmj_export_constants),
             cmj_export_arities: Arc::new(HashMap::new()),
+            cmj_hoisted_exports: Arc::new(Vec::new()),
             is_runtime,
             package_name: None,
             package_root: None,
@@ -287,6 +291,14 @@ impl InMemoryModuleInfo {
         cmj_export_arities: HashMap<String, CmjExportArity>,
     ) -> Self {
         self.cmj_export_arities = Arc::new(cmj_export_arities);
+        self
+    }
+
+    pub fn with_cmj_hoisted_exports(
+        mut self,
+        hoisted_exports: Vec<crate::lambda::HoistedExport>,
+    ) -> Self {
+        self.cmj_hoisted_exports = Arc::new(hoisted_exports);
         self
     }
 
@@ -1388,6 +1400,26 @@ impl PersistentEnv {
         read_cmj_export_arities(&path).map(Arc::new)
     }
 
+    /// Resolve a nested source path to its flat hoisted JS export.
+    pub fn module_cmj_hoisted_export(&self, name: &str, path: &[String]) -> Option<String> {
+        if let Some(exports) =
+            self.in_memory_info_with(name, |info| info.cmj_hoisted_exports.clone())
+        {
+            return exports
+                .iter()
+                .find(|entry| entry.path == path)
+                .map(|entry| entry.export_name.clone());
+        }
+        if self.in_process_mode {
+            return None;
+        }
+        let cmj_path = self.resolve_module_cmj_path(name)?;
+        read_cmj_hoisted_exports(&cmj_path)?
+            .into_iter()
+            .find(|entry| entry.path == path)
+            .map(|entry| entry.export_name)
+    }
+
     /// Read closed lambda exports recorded in a module's `.cmj` metadata.
     ///
     /// This mirrors the `cross_module_inline = true` arm of OCaml
@@ -2136,6 +2168,7 @@ pub fn read_cmj_module_metadata(path: &FsPath) -> Option<CmjModuleMetadata> {
     Some(CmjModuleMetadata {
         is_pure: decode_cmj_pure(&value)?,
         export_constants: decode_cmj_export_constants(&value)?,
+        hoisted_exports: decode_cmj_hoisted_exports(&value)?,
         package_spec: decode_cmj_package_spec(&value)?,
         file_case: decode_cmj_file_case(&value)?,
     })
@@ -2148,7 +2181,27 @@ fn read_cmj_pure(path: &FsPath) -> Option<bool> {
 
 fn decode_cmj_pure(value: &OcamlValue) -> Option<bool> {
     let (_, fields) = value.as_block_opt()?;
-    fields.get(1).map(|field| field.as_bool())
+    fields.get(2).map(|field| field.as_bool())
+}
+
+fn read_cmj_hoisted_exports(path: &FsPath) -> Option<Vec<crate::lambda::HoistedExport>> {
+    let value = read_marshaled_cmj(path)?;
+    decode_cmj_hoisted_exports(&value)
+}
+
+fn decode_cmj_hoisted_exports(value: &OcamlValue) -> Option<Vec<crate::lambda::HoistedExport>> {
+    let (_, fields) = value.as_block_opt()?;
+    let (_, entries) = fields.get(1)?.as_block_opt()?;
+    entries
+        .iter()
+        .map(|entry| {
+            let (_, fields) = entry.as_block_opt()?;
+            Some(crate::lambda::HoistedExport {
+                path: decode_cmj_string_list(fields.first()?)?,
+                export_name: fields.get(1)?.as_string().to_string(),
+            })
+        })
+        .collect()
 }
 
 fn read_cmj_export_constants(path: &FsPath) -> Option<HashMap<String, CmjExportConstant>> {
@@ -2306,7 +2359,7 @@ fn decode_cmj_persistent_closed_lambda(value: &OcamlValue) -> Option<Lambda> {
 
 fn decode_cmj_package_spec(value: &OcamlValue) -> Option<CmjPackageSpec> {
     let (_, fields) = value.as_block_opt()?;
-    let package_field = fields.get(2)?;
+    let package_field = fields.get(3)?;
     let (_, package_fields) = package_field.as_block_opt()?;
     if package_fields.len() != 2 {
         return None;
@@ -2356,7 +2409,7 @@ fn decode_cmj_package_module_system(value: &OcamlValue) -> Option<CmjPackageModu
 
 fn decode_cmj_file_case(value: &OcamlValue) -> Option<CmjFileCase> {
     let (_, fields) = value.as_block_opt()?;
-    match fields.get(3)?.as_int() {
+    match fields.get(4)?.as_int() {
         // compiler/ext/ext_js_file_kind.ml:24: Upper | Little.
         0 => Some(CmjFileCase::Upper),
         1 => Some(CmjFileCase::Little),

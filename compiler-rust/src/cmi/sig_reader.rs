@@ -570,7 +570,7 @@ impl<'a> SigReadContext<'a> {
                     TypeDesc::Tvar(name)
                 }
                 1 => {
-                    // Caml1999I023 stores the complete parameter list directly;
+                    // Caml1999I024 stores the complete parameter list directly;
                     // keep that allocation shape rather than rebuilding unary nodes.
                     let args = fields[0]
                         .as_list()

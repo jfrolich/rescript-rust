@@ -5,7 +5,7 @@
 //! # File Format
 //!
 //! A CMI file consists of:
-//! 1. Magic number: "Caml1999I023" (12 bytes)
+//! 1. Magic number: "Caml1999I024" (12 bytes)
 //! 2. Marshal'd value: (cmi_name: string, cmi_sign: Types.signature_item list)
 //! 3. Marshal'd value: crcs: (string * Digest.t option) list
 //! 4. Marshal'd value: flags: pers_flags list
@@ -15,7 +15,7 @@ use std::io::{self, Cursor};
 use super::marshal_reader::{MarshalError, MarshalReader, OcamlValue};
 
 /// CMI magic number
-const CMI_MAGIC: &[u8; 12] = b"Caml1999I023";
+const CMI_MAGIC: &[u8; 12] = b"Caml1999I024";
 
 /// CMI file contents (generic, before type interpretation).
 #[derive(Debug)]
@@ -193,7 +193,7 @@ mod tests {
 
     #[test]
     fn test_magic_check() {
-        let data = b"Caml1999I023"; // too short, no marshal data
+        let data = b"Caml1999I024"; // too short, no marshal data
         let result = read_cmi_from_bytes(data, "test.cmi");
         // Should fail due to missing marshal data, but magic is valid
         assert!(result.is_err());
