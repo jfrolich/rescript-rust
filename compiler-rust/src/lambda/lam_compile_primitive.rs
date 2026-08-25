@@ -576,12 +576,7 @@ impl LambdaCompiler {
                 compiled_args,
                 MutableFlag::Mutable,
                 Box::new(Expression::number(Number::int(0))),
-                TagInfo::Constructor {
-                    name: "::".to_string(),
-                    num_nonconst: 1,
-                    tag: 0,
-                    attrs: Vec::new(),
-                },
+                TagInfo::constructor("::", 1, 0),
             )),
             PrawJsCode(info) => {
                 Expression::new(ExpressionDesc::RawJsCode(crate::js_ir::JsRawInfo {

@@ -579,6 +579,24 @@ impl Lambda {
     /// Create a switch using OCaml's `Lam.switch` smart constructor.
     pub fn switch(scrutinee: Lambda, switch: LambdaSwitch) -> Self {
         match scrutinee {
+            Lambda::Lconst(Constant::Constructor(tag)) => {
+                let action = switch.sw_names.as_ref().and_then(|names| {
+                    names.consts.iter().position(|candidate| {
+                        candidate.name == tag.name && match (&candidate.tag_type, &tag.tag_type) {
+                            (None, None) => true,
+                            (Some(SwitchCaseTag::String(a)), Some(crate::types::VariantTagType::String(b))) => a == b,
+                            (Some(SwitchCaseTag::Int(a)), Some(crate::types::VariantTagType::Int(b))) => *a == *b as i64,
+                            (Some(SwitchCaseTag::Bool(a)), Some(crate::types::VariantTagType::Bool(b))) => a == b,
+                            (Some(SwitchCaseTag::Null), Some(crate::types::VariantTagType::Null))
+                            | (Some(SwitchCaseTag::Undefined), Some(crate::types::VariantTagType::Undefined)) => true,
+                            _ => false,
+                        }
+                    }).and_then(|position| switch.sw_consts.iter().find(|(key, _)| *key == position as i32))
+                });
+                action.map(|(_, branch)| branch.clone())
+                    .or_else(|| switch.sw_failaction.as_deref().cloned())
+                    .unwrap_or_else(|| Lambda::Lswitch(Box::new(Lambda::Lconst(Constant::Constructor(tag))), switch))
+            }
             Lambda::Lconst(constant @ Constant::Int { i, .. }) => switch
                 .sw_consts
                 .iter()

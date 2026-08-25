@@ -57,6 +57,7 @@ pub fn format_constant(c: &Constant, f: &mut fmt::Formatter<'_>) -> fmt::Result 
         Constant::JsUndefined { .. } => write!(f, "#undefined"),
         Constant::Int { i, .. } => write!(f, "{i}"),
         Constant::NativeInt { i, .. } => write!(f, "{i}"),
+        Constant::Constructor(tag) => write!(f, "{}", tag.name),
         Constant::Char(c) => {
             if let Some(ch) = char::from_u32(*c as u32) {
                 write!(f, "'{ch}'")
@@ -680,6 +681,7 @@ fn format_raw_constant(c: &Constant, f: &mut fmt::Formatter<'_>) -> fmt::Result 
         Constant::JsNull => write!(f, "null"),
         Constant::Int { i, .. } => write!(f, "{i}"),
         Constant::NativeInt { i, .. } => write!(f, "{i}"),
+        Constant::Constructor(tag) => write!(f, "{}", tag.name),
         Constant::Char(c) => {
             if let Some(ch) = char::from_u32(*c as u32) {
                 write!(f, "'{ch}'")

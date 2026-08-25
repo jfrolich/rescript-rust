@@ -2143,12 +2143,12 @@ impl JsPrinter {
                     TagInfo::RecordInlined {
                         name,
                         fields,
-                        attrs,
+                        runtime,
                         ..
                     } if fields.len() == elements.len() => {
-                        let untagged = tag_info_has_untagged(attrs);
-                        let tag_name = tag_info_tag_name(attrs).unwrap_or("TAG");
-                        let tag_value = tag_info_runtime_tag(attrs)
+                        let untagged = runtime.untagged;
+                        let tag_name = runtime.tag_name.as_deref().unwrap_or("TAG");
+                        let tag_value = variant_tag_to_switch(&runtime.tag)
                             .unwrap_or_else(|| SwitchCaseTag::String(name.clone()));
                         self.print_object_literal(
                             level,
@@ -2201,8 +2201,7 @@ impl JsPrinter {
                     TagInfo::Constructor {
                         name,
                         num_nonconst: _,
-                        attrs,
-                        ..
+                        runtime,
                     } => {
                         if name == "::" {
                             self.print_object_literal(
@@ -2223,12 +2222,12 @@ impl JsPrinter {
                                 },
                             );
                         } else {
-                            let untagged = tag_info_has_untagged(attrs);
+                            let untagged = runtime.untagged;
                             if untagged && elements.len() == 1 {
                                 self.print_expression(&elements[0], level);
                             } else {
-                                let tag_name = tag_info_tag_name(attrs).unwrap_or("TAG");
-                                let tag_value = tag_info_runtime_tag(attrs)
+                                let tag_name = runtime.tag_name.as_deref().unwrap_or("TAG");
+                                let tag_value = variant_tag_to_switch(&runtime.tag)
                                     .unwrap_or_else(|| SwitchCaseTag::String(name.clone()));
                                 let include_tag = !untagged;
                                 let include_debug_name =
@@ -4123,52 +4122,17 @@ fn call_argument_needs_extra_group_indent(
     }
 }
 
-fn tag_info_has_untagged(attrs: &[crate::lambda::lam_tag_info::Attribute]) -> bool {
-    attrs.iter().any(|attr| attr.name == "unboxed")
-}
-
-fn tag_info_tag_name(attrs: &[crate::lambda::lam_tag_info::Attribute]) -> Option<&str> {
-    attrs.iter().find_map(|attr| {
-        if attr.name != "tag" {
-            return None;
-        }
-        match &attr.payload {
-            crate::lambda::lam_tag_info::AttributePayload::Str(value) => Some(value.as_str()),
-            _ => None,
-        }
-    })
-}
-
-fn tag_info_runtime_tag(attrs: &[crate::lambda::lam_tag_info::Attribute]) -> Option<SwitchCaseTag> {
-    attrs.iter().find_map(|attr| {
-        if attr.name != "as" {
-            return None;
-        }
-        match &attr.payload {
-            crate::lambda::lam_tag_info::AttributePayload::Str(value) => {
-                Some(SwitchCaseTag::String(value.clone()))
-            }
-            crate::lambda::lam_tag_info::AttributePayload::Int(value) => {
-                Some(SwitchCaseTag::Int(*value))
-            }
-            crate::lambda::lam_tag_info::AttributePayload::Float(value) => {
-                Some(SwitchCaseTag::Float(value.clone()))
-            }
-            crate::lambda::lam_tag_info::AttributePayload::BigInt(value) => {
-                Some(SwitchCaseTag::BigInt(value.clone()))
-            }
-            crate::lambda::lam_tag_info::AttributePayload::Bool(value) => {
-                Some(SwitchCaseTag::Bool(*value))
-            }
-            crate::lambda::lam_tag_info::AttributePayload::Ident(value) if value == "null" => {
-                Some(SwitchCaseTag::Null)
-            }
-            crate::lambda::lam_tag_info::AttributePayload::Ident(value) if value == "undefined" => {
-                Some(SwitchCaseTag::Undefined)
-            }
-            _ => None,
-        }
-    })
+fn variant_tag_to_switch(tag: &crate::types::VariantTag) -> Option<SwitchCaseTag> {
+    match tag.tag_type.as_ref()? {
+        crate::types::VariantTagType::String(value) => Some(SwitchCaseTag::String(value.clone())),
+        crate::types::VariantTagType::Int(value) => Some(SwitchCaseTag::Int(*value as i64)),
+        crate::types::VariantTagType::Float(value) => Some(SwitchCaseTag::Float(value.clone())),
+        crate::types::VariantTagType::BigInt(value) => Some(SwitchCaseTag::BigInt(value.clone())),
+        crate::types::VariantTagType::Bool(value) => Some(SwitchCaseTag::Bool(*value)),
+        crate::types::VariantTagType::Null => Some(SwitchCaseTag::Null),
+        crate::types::VariantTagType::Undefined => Some(SwitchCaseTag::Undefined),
+        crate::types::VariantTagType::Untagged(_) => None,
+    }
 }
 
 fn is_undefined_literal(expr: &Expression) -> bool {

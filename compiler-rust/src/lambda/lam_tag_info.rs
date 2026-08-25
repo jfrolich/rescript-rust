@@ -15,19 +15,17 @@ pub enum TagInfo {
     Constructor {
         name: String,
         num_nonconst: i32,
-        tag: i32,
-        attrs: Vec<Attribute>,
+        runtime: crate::types::BlockRuntime,
     },
 
     /// Inlined record (record inside a variant)
     RecordInlined {
         name: String,
         num_nonconst: i32,
-        tag: i32,
         fields: Vec<(String, bool)>, // (name, optional)
         logical_field_count: Option<usize>,
         mutable_flag: MutableFlag,
-        attrs: Vec<Attribute>,
+        runtime: crate::types::BlockRuntime,
     },
 
     /// Tuple
@@ -65,42 +63,7 @@ pub enum TagInfo {
     },
 }
 
-/// Lowered constructor attribute payload.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum AttributePayload {
-    Empty,
-    Str(String),
-    Int(i64),
-    Float(String),
-    BigInt(String),
-    Bool(bool),
-    Ident(String),
-}
-
-/// Constructor attribute metadata used by later JS lowering/printing.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Attribute {
-    pub name: String,
-    pub payload: AttributePayload,
-}
-
 impl TagInfo {
-    /// Get the tag value for this block type
-    pub fn tag(&self) -> i32 {
-        match self {
-            TagInfo::Constructor { tag, .. } | TagInfo::RecordInlined { tag, .. } => *tag,
-            TagInfo::Tuple
-            | TagInfo::PolyVar(_)
-            | TagInfo::Record { .. }
-            | TagInfo::Module(_)
-            | TagInfo::ModuleExport(_)
-            | TagInfo::Extension
-            | TagInfo::Some
-            | TagInfo::SomeNotNested
-            | TagInfo::RecordExt { .. } => 0,
-        }
-    }
-
     /// Get the mutable flag for this block type
     pub fn mutable_flag(&self) -> MutableFlag {
         match self {
@@ -128,12 +91,16 @@ impl TagInfo {
     }
 
     /// Create a constructor tag info
-    pub fn constructor(name: impl Into<String>, num_nonconst: i32, tag: i32) -> Self {
+    pub fn constructor(name: impl Into<String>, num_nonconst: i32, _tag: i32) -> Self {
+        let name = name.into();
         TagInfo::Constructor {
-            name: name.into(),
+            runtime: crate::types::BlockRuntime {
+                tag: crate::types::VariantTag { name: name.clone(), tag_type: None },
+                tag_name: None,
+                untagged: false,
+            },
+            name,
             num_nonconst,
-            tag,
-            attrs: vec![],
         }
     }
 
@@ -186,13 +153,13 @@ mod tests {
     #[test]
     fn test_tag_values() {
         let cons = TagInfo::constructor("Some", 1, 0);
-        assert_eq!(cons.tag(), 0);
+        assert!(matches!(cons, TagInfo::Constructor { .. }));
 
         let cons2 = TagInfo::constructor("Cons", 2, 1);
-        assert_eq!(cons2.tag(), 1);
+        assert!(matches!(cons2, TagInfo::Constructor { .. }));
 
         let tuple = TagInfo::tuple();
-        assert_eq!(tuple.tag(), 0);
+        assert!(matches!(tuple, TagInfo::Tuple));
     }
 
     #[test]

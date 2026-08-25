@@ -169,6 +169,7 @@ fn print_struct_const<W: Write>(f: &mut Formatter<W>, cst: &Constant) {
             _ => f.print(format_args!("{i}")),
         },
         Constant::NativeInt { i, .. } => f.print(format_args!("{i}")),
+        Constant::Constructor(tag) => f.string(&tag.name),
         Constant::Char(i) => {
             if let Some(ch) = char::from_u32(*i as u32) {
                 f.print(format_args!("{ch:?}"));

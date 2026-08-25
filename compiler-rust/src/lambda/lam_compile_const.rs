@@ -95,6 +95,18 @@ impl LambdaCompiler {
                 }
                 None => Expression::number(Number::int(*i)),
             },
+            Constant::Constructor(tag) => match &tag.tag_type {
+                Some(crate::types::VariantTagType::Int(value)) => Expression::number(Number::int(*value)),
+                Some(crate::types::VariantTagType::String(value)) => Expression::string(value.clone()),
+                Some(crate::types::VariantTagType::Float(value)) => Expression::number(Number::float(value.clone())),
+                Some(crate::types::VariantTagType::BigInt(value)) => Expression::number(Number::bigint(true, value.clone())),
+                Some(crate::types::VariantTagType::Bool(value)) => Expression::bool(*value),
+                Some(crate::types::VariantTagType::Null) => Expression::null(),
+                Some(crate::types::VariantTagType::Undefined) => Expression::undefined(false),
+                Some(crate::types::VariantTagType::Untagged(_)) => Expression::string(tag.name.clone()),
+                None if tag.name == "[]" => Expression::number(Number::int(0)),
+                None => Expression::string(tag.name.clone()),
+            },
             Constant::NativeInt { i, comment } => {
                 match pointer_info_comment_text(comment.as_ref()) {
                     Some(comment) => Expression::with_comment(

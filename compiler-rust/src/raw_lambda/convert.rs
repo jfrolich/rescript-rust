@@ -24,9 +24,7 @@ use crate::lambda::lam_primitive::{
     ExternalFfiKind, ExternalFfiSpec, ExternalModuleBindName, ExternalModuleName, ExternalObjLabel,
     ExternalObjSpec, ExternalReturnWrapper, ExternalSpec, ImportAttributes, Mutable,
 };
-use crate::lambda::lam_tag_info::{
-    Attribute as TagAttribute, AttributePayload as TagAttributePayload, TagInfo,
-};
+use crate::lambda::lam_tag_info::TagInfo;
 use crate::lambda::{
     ApInfo, Apply, ApplyStatus, Comparison, FieldDbgInfo, FunctionAttribute, InlineAttribute,
     Lambda, LambdaSwitch, Primitive, SetFieldDbgInfo,
@@ -95,10 +93,20 @@ fn recmodule_function_shape_constant() -> Constant {
     }
 }
 
-fn raw_constructor_constant(cstr: &crate::types::ConstructorDescription, tag: i32) -> Constant {
+fn raw_constructor_constant(
+    ctx: &crate::types::TypeContext,
+    cstr: &crate::types::ConstructorDescription,
+    tag: i32,
+) -> Constant {
     // OCaml compiler/ml/translcore.ml:800-816 emits Pt_shape_none
     // only when Datarepr.constructor_has_optional_shape marks the
     // constructor; an ordinary constructor named `None` stays Pt_constructor.
+    if !constructor_has_optional_shape(cstr)
+        && let Some(crate::types::ConstructorKind::Ordinary(reference)) = cstr.cstr_kind
+        && let crate::types::VariantConstructorCase::Constant(tag) = reference.representation(ctx)
+    {
+        return Constant::Constructor(tag);
+    }
     let comment = if constructor_has_optional_shape(cstr) {
         PointerInfo::ShapeNone
     } else {
@@ -494,43 +502,30 @@ fn constructor_runtime_tag(
     })
 }
 
-fn lower_tag_info_attributes(attrs: &[crate::types::decl::Attribute]) -> Vec<TagAttribute> {
-    attrs
-        .iter()
-        .map(|attr| TagAttribute {
-            name: attr.attr_name.txt.clone(),
-            payload: match &attr.attr_payload {
-                crate::types::decl::AttributePayload::Empty => TagAttributePayload::Empty,
-                crate::types::decl::AttributePayload::Str(value) => {
-                    TagAttributePayload::Str(value.clone())
-                }
-                crate::types::decl::AttributePayload::Int(value) => {
-                    TagAttributePayload::Int(*value)
-                }
-                crate::types::decl::AttributePayload::IntLiteral(value) => {
-                    crate::types::decl::parse_ocaml_int_literal(value)
-                        .map(TagAttributePayload::Int)
-                        .unwrap_or(TagAttributePayload::Empty)
-                }
-                crate::types::decl::AttributePayload::Float(value) => {
-                    TagAttributePayload::Float(value.clone())
-                }
-                crate::types::decl::AttributePayload::BigInt(value) => {
-                    TagAttributePayload::BigInt(value.clone())
-                }
-                crate::types::decl::AttributePayload::Bool(value) => {
-                    TagAttributePayload::Bool(*value)
-                }
-                crate::types::decl::AttributePayload::Ident(value) => {
-                    TagAttributePayload::Ident(value.clone())
-                }
-                crate::types::decl::AttributePayload::Deprecated { reason, .. } => {
-                    TagAttributePayload::Str(reason.clone())
-                }
-                crate::types::decl::AttributePayload::Structure(_) => TagAttributePayload::Empty,
-            },
-        })
-        .collect()
+fn block_runtime_from_attributes(
+    name: String,
+    attrs: &[crate::types::decl::Attribute],
+) -> crate::types::BlockRuntime {
+    let tag_type = constructor_runtime_tag(attrs).map(|tag| match tag {
+        ConstructorRuntimeTag::Int(value) => crate::types::VariantTagType::Int(value as i32),
+        ConstructorRuntimeTag::String(value) => crate::types::VariantTagType::String(value),
+        ConstructorRuntimeTag::Float(value) => crate::types::VariantTagType::Float(value),
+        ConstructorRuntimeTag::BigInt(value) => crate::types::VariantTagType::BigInt(value),
+        ConstructorRuntimeTag::Bool(value) => crate::types::VariantTagType::Bool(value),
+        ConstructorRuntimeTag::Null => crate::types::VariantTagType::Null,
+        ConstructorRuntimeTag::Undefined => crate::types::VariantTagType::Undefined,
+    });
+    let tag_name = attrs.iter().find_map(|attr| {
+        (attr.attr_name.txt == "tag").then(|| match &attr.attr_payload {
+            crate::types::decl::AttributePayload::Str(value) => Some(value.clone()),
+            _ => None,
+        }).flatten()
+    });
+    crate::types::BlockRuntime {
+        tag: crate::types::VariantTag { name, tag_type },
+        tag_name,
+        untagged: attrs.iter().any(|attr| attr.attr_name.txt == "unboxed"),
+    }
 }
 
 fn config_payload_flags_contains(
@@ -3533,18 +3528,28 @@ impl<'a> RawLambdaConverter<'a> {
                 }
                 _ => TagInfo::Some,
             },
-            ConstructorTag::CstrBlock(tag) => TagInfo::Constructor {
-                name: cstr.cstr_name.clone(),
-                num_nonconst: cstr.cstr_nonconsts,
-                tag: *tag,
-                attrs: lower_tag_info_attributes(&cstr.cstr_attributes),
-            },
-            _ => TagInfo::Constructor {
-                name: cstr.cstr_name.clone(),
-                num_nonconst: cstr.cstr_nonconsts,
-                tag: 0,
-                attrs: lower_tag_info_attributes(&cstr.cstr_attributes),
-            },
+            _ => {
+                let (runtime, num_nonconst) = match cstr.cstr_kind {
+                    Some(crate::types::ConstructorKind::Ordinary(reference)) => {
+                        let layout = self.type_ctx.variant_layout(reference.variant);
+                        let runtime = match &layout.constructors[reference.position] {
+                            crate::types::VariantConstructorCase::Block(block) => block.runtime.clone(),
+                            crate::types::VariantConstructorCase::Constant(_) => unreachable!("payload constructor has constant layout"),
+                        };
+                        (runtime, layout.num_blocks() as i32)
+                    }
+                    _ => (crate::types::BlockRuntime {
+                        tag: crate::types::VariantTag { name: cstr.cstr_name.clone(), tag_type: None },
+                        tag_name: None,
+                        untagged: matches!(cstr.cstr_tag, ConstructorTag::CstrUnboxed),
+                    }, cstr.cstr_nonconsts),
+                };
+                TagInfo::Constructor {
+                    name: cstr.cstr_name.clone(),
+                    num_nonconst,
+                    runtime,
+                }
+            }
         }
     }
 
@@ -3590,7 +3595,7 @@ impl<'a> RawLambdaConverter<'a> {
                     _ => self.convert_expr_raw(arg),
                 },
                 [] if matches!(cstr.cstr_tag, ConstructorTag::CstrUnboxed) => {
-                    RawLambda::const_(raw_constructor_constant(cstr, 0))
+                    RawLambda::const_(raw_constructor_constant(self.type_ctx, cstr, 0))
                 }
                 _ => RawLambda::unit(),
             };
@@ -3600,11 +3605,11 @@ impl<'a> RawLambdaConverter<'a> {
             ConstructorTag::CstrConstant(tag) => match cstr.cstr_name.as_str() {
                 "true" => RawLambda::const_(Constant::JsTrue),
                 "false" => RawLambda::const_(Constant::JsFalse),
-                _ => RawLambda::const_(raw_constructor_constant(cstr, *tag)),
+                _ => RawLambda::const_(raw_constructor_constant(self.type_ctx, cstr, *tag)),
             },
             ConstructorTag::CstrUnboxed => match args {
                 [arg] => self.convert_expr_raw(arg),
-                [] => RawLambda::const_(raw_constructor_constant(cstr, 0)),
+                [] => RawLambda::const_(raw_constructor_constant(self.type_ctx, cstr, 0)),
                 _ => RawLambda::unit(),
             },
             ConstructorTag::CstrBlock(tag) => {
@@ -3744,14 +3749,14 @@ impl<'a> RawLambdaConverter<'a> {
                     num_nonconsts,
                     attrs,
                 } => {
+                    let runtime = block_runtime_from_attributes(name.clone(), &attrs);
                     let tag_info = TagInfo::RecordInlined {
                         name,
                         num_nonconst: num_nonconsts,
-                        tag,
                         fields: fields_info,
                         logical_field_count,
                         mutable_flag,
-                        attrs: lower_tag_info_attributes(&attrs),
+                        runtime,
                     };
                     // OCaml: if mut = Mutable then raise Not_constant
                     if matches!(mutable_flag, ParserMutableFlag::Mutable) {
@@ -5598,12 +5603,7 @@ impl<'a> RawLambdaConverter<'a> {
                 // Module alias: constant value
                 Some(Constant::Block {
                     tag: 1, // value tag
-                    tag_info: TagInfo::Constructor {
-                        name: "value".to_string(),
-                        num_nonconst: 2,
-                        tag: 1,
-                        attrs: vec![],
-                    },
+                    tag_info: TagInfo::constructor("value", 2, 1),
                     elements: vec![Constant::ModuleAlias],
                 })
             }
@@ -5611,12 +5611,7 @@ impl<'a> RawLambdaConverter<'a> {
                 let struct_shape = self.init_shape_struct(env, sg)?;
                 Some(Constant::Block {
                     tag: 0, // Module tag
-                    tag_info: TagInfo::Constructor {
-                        name: "Module".to_string(),
-                        num_nonconst: 2,
-                        tag: 0,
-                        attrs: vec![],
-                    },
+                    tag_info: TagInfo::constructor("Module", 2, 0),
                     elements: vec![Constant::Block {
                         tag: 0,
                         tag_info: TagInfo::Tuple,

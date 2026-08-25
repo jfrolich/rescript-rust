@@ -424,6 +424,7 @@ fn size_inner(lam: &Lambda) -> Option<i32> {
 fn size_constant(c: &Constant) -> i32 {
     match c {
         Constant::Int { .. }
+        | Constant::Constructor(_)
         | Constant::NativeInt { .. }
         | Constant::Char(_)
         | Constant::Float(_)

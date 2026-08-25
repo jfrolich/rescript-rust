@@ -176,13 +176,12 @@ fn tag_info(info: &TagInfo) -> Sexp {
         TagInfo::Constructor {
             name,
             num_nonconst,
-            tag,
-            ..
+            runtime,
         } => Sexp::list(vec![
             Sexp::atom("Blk_constructor"),
             string(name),
             int(*num_nonconst),
-            int(*tag as i32),
+            variant_block_runtime(runtime),
         ]),
         TagInfo::Tuple => Sexp::atom("Blk_tuple"),
         TagInfo::PolyVar(s) => Sexp::list(vec![Sexp::atom("Blk_poly_var"), string(s)]),
@@ -198,17 +197,17 @@ fn tag_info(info: &TagInfo) -> Sexp {
         TagInfo::RecordInlined {
             name,
             num_nonconst,
-            tag,
             fields,
             mutable_flag,
+            runtime,
             ..
         } => Sexp::list(vec![
             Sexp::atom("Blk_record_inlined"),
             string(name),
             int(*num_nonconst),
-            int(*tag as i32),
             Sexp::list(fields.iter().map(|(name, _)| string(name)).collect()),
             mutable_flag_sexp(mutable_flag),
+            variant_block_runtime(runtime),
         ]),
         TagInfo::Module(fields) => {
             let mut items = vec![Sexp::atom("Blk_module")];
@@ -298,6 +297,43 @@ fn string_delim(delim: &Option<StringDelim>) -> Sexp {
     }
 }
 
+fn variant_tag_type(tag: &crate::types::VariantTagType) -> Sexp {
+    use crate::types::VariantTagType as T;
+    match tag {
+        T::String(value) => Sexp::list(vec![Sexp::atom("String"), string(value)]),
+        T::Int(value) => Sexp::list(vec![Sexp::atom("Int"), int(*value)]),
+        T::Float(value) => Sexp::list(vec![Sexp::atom("Float"), string(value)]),
+        T::BigInt(value) => Sexp::list(vec![Sexp::atom("BigInt"), string(value)]),
+        T::Bool(value) => Sexp::list(vec![Sexp::atom("Bool"), bool_sexp(*value)]),
+        T::Null => Sexp::atom("Null"),
+        T::Undefined => Sexp::atom("Undefined"),
+        T::Untagged(_) => Sexp::atom("Untagged"),
+    }
+}
+
+fn variant_block_runtime(runtime: &crate::types::BlockRuntime) -> Sexp {
+    Sexp::list(vec![
+        Sexp::atom("runtime"),
+        variant_tag(&runtime.tag),
+        runtime.tag_name.as_ref().map_or_else(
+            || Sexp::atom("None"),
+            |name| Sexp::list(vec![Sexp::atom("Some"), string(name)]),
+        ),
+        bool_sexp(runtime.untagged),
+    ])
+}
+
+fn variant_tag(tag: &crate::types::VariantTag) -> Sexp {
+    Sexp::list(vec![
+        Sexp::atom("tag"),
+        string(&tag.name),
+        tag.tag_type.as_ref().map_or_else(
+            || Sexp::atom("None"),
+            |tag| Sexp::list(vec![Sexp::atom("Some"), variant_tag_type(tag)]),
+        ),
+    ])
+}
+
 // Constant
 fn constant(c: &Constant) -> Sexp {
     match c {
@@ -317,6 +353,9 @@ fn constant(c: &Constant) -> Sexp {
             Sexp::atom(i.to_string()),
             pointer_info(comment),
         ]),
+        Constant::Constructor(tag) => {
+            Sexp::list(vec![Sexp::atom("Const_constructor"), variant_tag(tag)])
+        }
         Constant::Char(c) => Sexp::list(vec![Sexp::atom("Const_char"), int(*c)]),
         Constant::String { s, delim } => Sexp::list(vec![
             Sexp::atom("Const_string"),
