@@ -6172,6 +6172,10 @@ fn format_expr_type_clash_report(
         &*type_ctx.get_desc(type_ctx.repr(actual)),
         TypeDesc::Tarrow { .. }
     );
+    let expected_is_jsx_component = trace
+        .iter()
+        .any(|(_, expected)| type_is_jsx_component(type_ctx, *expected));
+    let plain_function_to_component = actual_is_function && expected_is_jsx_component;
     let missing_parameters = if actual_is_function {
         Vec::new()
     } else {
@@ -6432,8 +6436,17 @@ fn format_expr_type_clash_report(
         }
         append_type_clash_type(type_ctx, trace, false, INFO, expected, &mut message);
     } else {
-        message.push_str(&expected_text);
+        if plain_function_to_component {
+            message.push_str("But it's expected to have type:\n  ");
+        } else {
+            message.push_str(&expected_text);
+        }
         append_type_clash_type(type_ctx, trace, false, INFO, expected, &mut message);
+        if plain_function_to_component {
+            let inline = " \x1b[2m(defined as\x1b[0m \x1b[1;33mJsx.component";
+            let multiline = " \x1b[2m(defined as\x1b[0m\n  \x1b[1;33mJsx.component";
+            message = message.replace(inline, multiline);
+        }
     }
     append_extra_type_clash_help(type_ctx, arena, source, loc, context, trace, &mut message);
 
@@ -6461,7 +6474,9 @@ fn format_expr_type_clash_report(
         format_compiler_error_report_raw_message(arena, source, filename, loc, &message)
     } else if matches!(
         context,
-        Some(TypeClashContext::LetUnwrapReturn) | Some(TypeClashContext::SwitchExpression)
+        Some(TypeClashContext::LetUnwrapReturn)
+            | Some(TypeClashContext::SwitchExpression)
+            | Some(TypeClashContext::JsxComponent)
     ) {
         let message = format_type_clash_message_with_empty_blank_lines(&message);
         format_compiler_error_report_raw_message(arena, source, filename, loc, &message)
