@@ -829,29 +829,6 @@ impl LambdaCompiler {
                     return Expression::bool(true);
                 }
 
-                // Fold literal string!==string, mirroring OCaml's
-                // `string_comp Cneq` at `js_exp_make.ml:1355-1362`.
-                if let (
-                    ExpressionDesc::Str {
-                        txt: left_txt,
-                        delim: left_delim,
-                    },
-                    ExpressionDesc::Str {
-                        txt: right_txt,
-                        delim: right_delim,
-                    },
-                ) = (&left.desc, &right.desc)
-                {
-                    if let Some(equal) = crate::js_ir::fold_strict_string_equality_pub(
-                        left_txt,
-                        left_delim,
-                        right_txt,
-                        right_delim,
-                    ) {
-                        return Expression::bool(!equal);
-                    }
-                }
-
                 // OCaml's `Js_exp_make.int_comp` falls through to
                 // `bin NotEqEq e0 e1` for the non-special Cneq cases — and
                 // OCaml's `bin` has no NotEqEq case, so the construction is
