@@ -828,27 +828,32 @@ mod tests {
     fn test_propagate_beta_reduce_preserves_source_argument_order() {
         let x = Ident::create_local("x");
         let y = Ident::create_local("y");
-        let body = Lambda::prim(
-            Primitive::Paddint,
-            vec![Lambda::var(x.clone()), Lambda::var(y.clone())],
-            Location::none(),
-        );
-        let first = Lambda::prim(
-            Primitive::Paddint,
-            vec![
-                Lambda::const_(Constant::int(1)),
-                Lambda::const_(Constant::int(2)),
-            ],
-            Location::none(),
-        );
-        let second = Lambda::prim(
-            Primitive::Pmulint,
-            vec![
-                Lambda::const_(Constant::int(3)),
-                Lambda::const_(Constant::int(4)),
-            ],
-            Location::none(),
-        );
+        // A sequence is deliberately outside `simple_beta_reduce`'s
+        // primitive/application fast path, so both effectful arguments become
+        // explicit strict bindings whose nesting order is observable.
+        let body = Lambda::seq(Lambda::var(x.clone()), Lambda::var(y.clone()));
+        let call = |name: &str| {
+            Lambda::prim(
+                Primitive::PjsCall {
+                    prim_name: name.to_string(),
+                    arg_types: vec![],
+                    ffi: crate::lambda::lam_primitive::ExternalFfiSpec {
+                        kind: crate::lambda::lam_primitive::ExternalFfiKind::Default,
+                        spec: None,
+                        obj_params: None,
+                        return_wrapper:
+                            crate::lambda::lam_primitive::ExternalReturnWrapper::Identity,
+                        inline_constant: None,
+                    },
+                    dynamic_import: false,
+                    transformed_jsx: false,
+                },
+                vec![],
+                Location::none(),
+            )
+        };
+        let first = call("first");
+        let second = call("second");
 
         let reduced = propagate_beta_reduce(&[x, y], &body, &[first, second]);
         let Lambda::Llet(_, _, outer_value, inner) = reduced else {
@@ -857,9 +862,9 @@ mod tests {
         assert!(matches!(
             outer_value.as_ref(),
             Lambda::Lprim(PrimInfo {
-                primitive: Primitive::Paddint,
+                primitive: Primitive::PjsCall { prim_name, .. },
                 ..
-            })
+            }) if prim_name == "first"
         ));
         assert!(matches!(
             inner.as_ref(),
@@ -871,9 +876,9 @@ mod tests {
             ) if matches!(
                 inner_value.as_ref(),
                 Lambda::Lprim(PrimInfo {
-                    primitive: Primitive::Pmulint,
+                    primitive: Primitive::PjsCall { prim_name, .. },
                     ..
-                })
+                }) if prim_name == "second"
             )
         ));
     }
