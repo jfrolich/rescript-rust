@@ -3682,12 +3682,12 @@ fn type_mod_error_to_anyhow(
         .into(),
         TypeModError::CoreError(TypeCoreError::RecordRest { loc, error }) => {
             UserDiagnostic::new(
-                format_compiler_error_report(
+                format_compiler_error_report_with_unindented_continuation(
                     arena,
                     source,
                     filename,
                     *loc,
-                    &error.message(),
+                    &error.message(arena),
                 ),
                 2,
             )
@@ -4723,6 +4723,25 @@ fn format_builtin_extension_error_report(
     output
 }
 
+fn format_compiler_error_report_with_unindented_continuation(
+    arena: &ParseArena,
+    source: &str,
+    filename: &str,
+    loc: LocIdx,
+    message: &str,
+) -> String {
+    let mut output = String::new();
+
+    push_compiler_error_report_header(&mut output, arena, source, filename, loc);
+    output.push_str("  ");
+    output.push_str(message);
+    if !message.ends_with('\n') {
+        output.push('\n');
+    }
+    output.push('\n');
+    output
+}
+
 fn format_compiler_error_report_with_unindented_break(
     arena: &ParseArena,
     source: &str,
@@ -5533,6 +5552,7 @@ fn format_compiler_warning_report(
             crate::diagnostics::Warning::FragileMatch { .. } => idx == 0,
             crate::diagnostics::Warning::FragileLiteralPattern => idx == 0,
             crate::diagnostics::Warning::UnreachableCase => idx == 0,
+            crate::diagnostics::Warning::BsRecordRestOptionalOverlap { .. } => idx == 0,
             crate::diagnostics::Warning::UnusedConstructor { .. }
             | crate::diagnostics::Warning::UnusedExtension { .. } => idx == 0,
             crate::diagnostics::Warning::PartialMatch { .. } => {

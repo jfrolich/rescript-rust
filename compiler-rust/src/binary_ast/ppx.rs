@@ -14457,6 +14457,15 @@ fn validate_module_record_pattern_binding_error(
         return Ok(());
     }
 
+    // compiler/frontend/ast_tuple_pattern_flatten.ml rejects record-rest
+    // module destructuring before attempting to project any module fields.
+    if let Some(rest) = arena.record_pat_rest(pat.ppat_loc) {
+        return Err(PpxError::at_loc(
+            rest.rest_loc,
+            "Record rest patterns are not supported when destructuring modules. Bind the module fields explicitly.",
+        ));
+    }
+
     let (lid_pats, _) = &**record_inner;
     for field in lid_pats {
         if !matches!(arena.get_longident(field.lid.txt), Longident::Lident(_)) {

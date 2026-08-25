@@ -5618,7 +5618,21 @@ pub(crate) enum RecordRestError {
 
 impl RecordRestError {
     /// compiler/ml/typecore_record_rest.ml `report_error`.
-    pub fn message(&self) -> String {
+    pub fn message(&self, arena: &ParseArena) -> String {
+        let format_lid = |lid: &Longident| {
+            fn loop_(arena: &ParseArena, lid: &Longident) -> String {
+                match lid {
+                    Longident::Lident(name) => arena.get_string(*name).to_string(),
+                    Longident::Ldot(parent, name) => {
+                        format!("{}.{}", loop_(arena, parent), arena.get_string(*name))
+                    }
+                    Longident::Lapply(functor, argument) => {
+                        format!("{}({})", loop_(arena, functor), loop_(arena, argument))
+                    }
+                }
+            }
+            loop_(arena, lid)
+        };
         match self {
             RecordRestError::InvalidType => {
                 "Record rest pattern must have the form: ...Type.t as name".to_string()
@@ -5626,65 +5640,72 @@ impl RecordRestError {
             RecordRestError::RequiresTypeAnnotation(name) => format!(
                 "Record rest pattern `...{name}` requires a type annotation. Use `...Type.t as {name}`."
             ),
-            RecordRestError::NotRecord(_) => {
-                "Type is not a record type and cannot be used as a record rest pattern.".to_string()
-            }
-            RecordRestError::FieldNotOptional(fields, _) => {
+            RecordRestError::NotRecord(lid) => format!(
+                "Type {} is not a record type and cannot be used as a record rest pattern.",
+                format_lid(lid)
+            ),
+            RecordRestError::FieldNotOptional(fields, lid) => {
                 let field_list = fields
                     .iter()
                     .map(|field| format!("\n- {field}"))
                     .collect::<String>();
                 if fields.len() == 1 {
                     format!(
-                        "The following field appears in both the explicit pattern and the rest type:{}\n\n\
+                        "The following field appears in both the explicit pattern and the rest type `{}`:{}\n\n\
                          This is not type-safe because the field would always be absent from \
                          the rest value. Remove it from the rest type, or match it as optional \
                          if absence is intended.",
+                        format_lid(lid),
                         field_list
                     )
                 } else {
                     format!(
-                        "The following fields appear in both the explicit pattern and the rest type:{}\n\n\
+                        "The following fields appear in both the explicit pattern and the rest type `{}`:{}\n\n\
                          This is not type-safe because these fields would always be absent \
                          from the rest value. Remove them from the rest type, or match them as \
                          optional if absence is intended.",
+                        format_lid(lid),
                         field_list
                     )
                 }
             }
-            RecordRestError::FieldMissing(fields, _) => {
+            RecordRestError::FieldMissing(fields, lid) => {
                 let field_list = fields
                     .iter()
                     .map(|field| format!("\n- {field}"))
                     .collect::<String>();
                 if fields.len() == 1 {
                     format!(
-                        "The following field is not part of the rest type:{}\n\n\
+                        "The following field is not part of the rest type `{}`:{}\n\n\
                          List this field in the record pattern before the spread so it's not \
                          present in the rest record.",
+                        format_lid(lid),
                         field_list
                     )
                 } else {
                     format!(
-                        "The following fields are not part of the rest type:{}\n\n\
+                        "The following fields are not part of the rest type `{}`:{}\n\n\
                          List these fields in the record pattern before the spread so they're \
                          not present in the rest record.",
+                        format_lid(lid),
                         field_list
                     )
                 }
             }
-            RecordRestError::ExtraField(field, _) => format!(
-                "Field `{field}` in the rest type does not exist in the source record type."
+            RecordRestError::ExtraField(field, lid) => format!(
+                "Field `{field}` in the rest type `{}` does not exist in the source record type.",
+                format_lid(lid)
             ),
             RecordRestError::FieldRuntimeNameMismatch {
                 field,
                 source_runtime_name,
+                rest_type,
                 rest_runtime_name,
-                ..
             } => format!(
-                "Field `{field}` in the rest type has runtime representation `{rest_runtime_name}`, but \
+                "Field `{field}` in the rest type `{}` has runtime representation `{rest_runtime_name}`, but \
                  in the source record type it is `{source_runtime_name}`. Runtime representations must \
-                 match."
+                 match.",
+                format_lid(rest_type)
             ),
             RecordRestError::UnboxedRecord => {
                 "Record rest patterns cannot be used with unboxed record types.".to_string()
