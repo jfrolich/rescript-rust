@@ -5961,7 +5961,7 @@ fn format_unbound_module_report(
 
     let mut message = if name == "Str" {
         format!(
-            "{INFO}The module or file Str can't be found.{RESET}\nAre you trying to use the standard library's Str?\nIf you're compiling to JavaScript, use {INFO}Js.Re{RESET} instead.\nOtherwise, add str.cma to your ocamlc/ocamlopt command."
+            "{INFO}The module or file Str can't be found.{RESET}\nAre you trying to use the standard library's Str?\nIf you're compiling to JavaScript, use {INFO}RegExp{RESET} instead.\nOtherwise, add str.cma to your ocamlc/ocamlopt command."
         )
     } else {
         format!(
