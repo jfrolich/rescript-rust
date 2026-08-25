@@ -555,6 +555,7 @@ pub enum LamConstant {
     ConstJsTrue,
     ConstJsFalse,
     ConstInt { i: i32, comment: PointerInfo },
+    ConstConstructor(crate::types::VariantTag),
     ConstChar(i64),
     ConstString { s: String, delim: Option<Delim> },
     ConstFloat(String),
@@ -580,36 +581,40 @@ impl Marshal for LamConstant {
                 w.write_custom_int32(*i);
                 comment.marshal(w);
             }
-            LamConstant::ConstChar(c) => {
+            LamConstant::ConstConstructor(tag) => {
                 w.write_block_header(2, 1);
+                marshal_variant_tag(w, tag);
+            }
+            LamConstant::ConstChar(c) => {
+                w.write_block_header(3, 1);
                 w.write_int(*c);
             }
             LamConstant::ConstString { s, delim } => {
-                w.write_block_header(3, 2);
+                w.write_block_header(4, 2);
                 w.write_str(s);
                 marshal_option(w, delim, |w, d| d.marshal(w));
             }
             LamConstant::ConstFloat(f) => {
-                w.write_block_header(4, 1);
+                w.write_block_header(5, 1);
                 w.write_string(f.as_bytes());
             }
             LamConstant::ConstBigint(sign, s) => {
-                w.write_block_header(5, 2);
+                w.write_block_header(6, 2);
                 w.write_int(if *sign { 1 } else { 0 });
                 w.write_string(s.as_bytes());
             }
             LamConstant::ConstPointer(s) => {
-                w.write_block_header(6, 1);
+                w.write_block_header(7, 1);
                 w.write_string(s.as_bytes());
             }
             LamConstant::ConstBlock(tag, info, constants) => {
-                w.write_block_header(7, 3);
+                w.write_block_header(8, 3);
                 w.write_int(*tag);
                 info.marshal(w);
                 marshal_list(w, constants, |w, c| c.marshal(w));
             }
             LamConstant::ConstSome(c) => {
-                w.write_block_header(8, 1);
+                w.write_block_header(9, 1);
                 c.marshal(w);
             }
             LamConstant::ConstModuleAlias => w.write_int(3),
@@ -618,6 +623,65 @@ impl Marshal for LamConstant {
 }
 
 // ========== Helper functions ==========
+
+fn marshal_variant_tag(w: &mut MarshalWriter<'_>, tag: &crate::types::VariantTag) {
+    w.write_block_header(0, 2);
+    w.write_string(tag.name.as_bytes());
+    marshal_option(w, &tag.tag_type, marshal_variant_tag_type);
+}
+
+fn marshal_variant_tag_type(w: &mut MarshalWriter<'_>, tag: &crate::types::VariantTagType) {
+    use crate::types::VariantTagType;
+    match tag {
+        VariantTagType::String(value) => {
+            w.write_block_header(0, 1);
+            w.write_string(value.as_bytes());
+        }
+        VariantTagType::Int(value) => {
+            w.write_block_header(1, 1);
+            w.write_int(i64::from(*value));
+        }
+        VariantTagType::Float(value) => {
+            w.write_block_header(2, 1);
+            w.write_string(value.as_bytes());
+        }
+        VariantTagType::BigInt(value) => {
+            w.write_block_header(3, 1);
+            w.write_string(value.as_bytes());
+        }
+        VariantTagType::Bool(value) => {
+            w.write_block_header(4, 1);
+            w.write_int(i64::from(*value));
+        }
+        VariantTagType::Null => w.write_int(0),
+        VariantTagType::Undefined => w.write_int(1),
+        VariantTagType::Untagged(block_type) => {
+            w.write_block_header(5, 1);
+            marshal_variant_block_type(w, block_type);
+        }
+    }
+}
+
+fn marshal_variant_block_type(
+    w: &mut MarshalWriter<'_>,
+    block_type: &crate::types::VariantBlockType,
+) {
+    use crate::types::VariantBlockType;
+    match block_type {
+        VariantBlockType::Int => w.write_int(0),
+        VariantBlockType::String => w.write_int(1),
+        VariantBlockType::Float => w.write_int(2),
+        VariantBlockType::Bigint => w.write_int(3),
+        VariantBlockType::Boolean => w.write_int(4),
+        VariantBlockType::Instance(instance) => {
+            w.write_block_header(0, 1);
+            w.write_int(*instance as i64);
+        }
+        VariantBlockType::Function => w.write_int(5),
+        VariantBlockType::Object => w.write_int(6),
+        VariantBlockType::Unknown => w.write_int(7),
+    }
+}
 
 fn marshal_option<T>(
     w: &mut MarshalWriter<'_>,

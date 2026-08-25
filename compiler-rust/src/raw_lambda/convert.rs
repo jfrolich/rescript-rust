@@ -12048,26 +12048,115 @@ fn ffi_marshaled_constant(value: &OcamlValue) -> Option<Constant> {
             i: fields[0].as_int() as i32,
             comment: ffi_marshaled_pointer_info(&fields[1]),
         }),
-        OcamlValue::Block(2, fields) if fields.len() == 1 => {
+        OcamlValue::Block(2, fields) if fields.len() == 1 => Some(Constant::Constructor(
+            ffi_marshaled_variant_tag(&fields[0])?,
+        )),
+        OcamlValue::Block(3, fields) if fields.len() == 1 => {
             Some(Constant::Char(fields[0].as_int() as i32))
         }
-        OcamlValue::Block(3, fields) if fields.len() == 2 => Some(Constant::String {
+        OcamlValue::Block(4, fields) if fields.len() == 2 => Some(Constant::String {
             s: fields[0].as_string().to_string(),
             delim: ffi_marshaled_optional_delim(&fields[1]),
         }),
-        OcamlValue::Block(4, fields) if fields.len() == 1 => {
+        OcamlValue::Block(5, fields) if fields.len() == 1 => {
             Some(Constant::Float(fields[0].as_string().to_string()))
         }
-        OcamlValue::Block(5, fields) if fields.len() == 2 => Some(Constant::BigInt {
+        OcamlValue::Block(6, fields) if fields.len() == 2 => Some(Constant::BigInt {
             negative: fields[0].as_bool(),
             value: fields[1].as_string().to_string(),
         }),
-        OcamlValue::Block(6, fields) if fields.len() == 1 => {
+        OcamlValue::Block(7, fields) if fields.len() == 1 => {
             Some(Constant::Pointer(fields[0].as_string().to_string()))
         }
-        OcamlValue::Block(8, fields) if fields.len() == 1 => Some(Constant::Some(Box::new(
+        OcamlValue::Block(9, fields) if fields.len() == 1 => Some(Constant::Some(Box::new(
             ffi_marshaled_constant(&fields[0])?,
         ))),
+        _ => None,
+    }
+}
+
+fn ffi_marshaled_variant_tag(value: &OcamlValue) -> Option<crate::types::VariantTag> {
+    let (tag, fields) = value.as_block_opt()?;
+    if tag != 0 || fields.len() != 2 {
+        return None;
+    }
+    Some(crate::types::VariantTag {
+        name: fields[0].as_string().to_string(),
+        tag_type: match &fields[1] {
+            OcamlValue::Int(0) => None,
+            value => Some(ffi_marshaled_variant_tag_type(value.as_option()?)?),
+        },
+    })
+}
+
+fn ffi_marshaled_variant_tag_type(value: &OcamlValue) -> Option<crate::types::VariantTagType> {
+    use crate::types::VariantTagType;
+    match value {
+        OcamlValue::Int(0) => Some(VariantTagType::Null),
+        OcamlValue::Int(1) => Some(VariantTagType::Undefined),
+        OcamlValue::Block(0, fields) if fields.len() == 1 => {
+            Some(VariantTagType::String(fields[0].as_string().to_string()))
+        }
+        OcamlValue::Block(1, fields) if fields.len() == 1 => {
+            Some(VariantTagType::Int(fields[0].as_int() as i32))
+        }
+        OcamlValue::Block(2, fields) if fields.len() == 1 => {
+            Some(VariantTagType::Float(fields[0].as_string().to_string()))
+        }
+        OcamlValue::Block(3, fields) if fields.len() == 1 => {
+            Some(VariantTagType::BigInt(fields[0].as_string().to_string()))
+        }
+        OcamlValue::Block(4, fields) if fields.len() == 1 => {
+            Some(VariantTagType::Bool(fields[0].as_bool()))
+        }
+        OcamlValue::Block(5, fields) if fields.len() == 1 => Some(VariantTagType::Untagged(
+            ffi_marshaled_variant_block_type(&fields[0])?,
+        )),
+        _ => None,
+    }
+}
+
+fn ffi_marshaled_variant_block_type(
+    value: &OcamlValue,
+) -> Option<crate::types::VariantBlockType> {
+    use crate::types::{VariantBlockType, VariantInstance};
+    match value {
+        OcamlValue::Int(0) => Some(VariantBlockType::Int),
+        OcamlValue::Int(1) => Some(VariantBlockType::String),
+        OcamlValue::Int(2) => Some(VariantBlockType::Float),
+        OcamlValue::Int(3) => Some(VariantBlockType::Bigint),
+        OcamlValue::Int(4) => Some(VariantBlockType::Boolean),
+        OcamlValue::Int(5) => Some(VariantBlockType::Function),
+        OcamlValue::Int(6) => Some(VariantBlockType::Object),
+        OcamlValue::Int(7) => Some(VariantBlockType::Unknown),
+        OcamlValue::Block(0, fields) if fields.len() == 1 => Some(VariantBlockType::Instance(
+            match fields[0].as_int() {
+                0 => VariantInstance::Array,
+                1 => VariantInstance::ArrayBuffer,
+                2 => VariantInstance::BigInt64Array,
+                3 => VariantInstance::BigUint64Array,
+                4 => VariantInstance::Blob,
+                5 => VariantInstance::DataView,
+                6 => VariantInstance::Date,
+                7 => VariantInstance::File,
+                8 => VariantInstance::Float32Array,
+                9 => VariantInstance::Float64Array,
+                10 => VariantInstance::Int16Array,
+                11 => VariantInstance::Int32Array,
+                12 => VariantInstance::Int8Array,
+                13 => VariantInstance::Promise,
+                14 => VariantInstance::RegExp,
+                15 => VariantInstance::Uint16Array,
+                16 => VariantInstance::Uint32Array,
+                17 => VariantInstance::Uint8Array,
+                18 => VariantInstance::Uint8ClampedArray,
+                19 => VariantInstance::Set,
+                20 => VariantInstance::Map,
+                21 => VariantInstance::WeakSet,
+                22 => VariantInstance::WeakMap,
+                _ => return None,
+            },
+        )),
         _ => None,
     }
 }
@@ -12865,6 +12954,30 @@ external myJson: Js.Json.t = "default"
                 s: "hello".to_string(),
                 delim: Some(StringDelim::StarJ),
             })
+        );
+    }
+
+    #[test]
+    fn ffi_spec_reads_marshaled_inline_float_constant() {
+        let arena = ParseArena::new();
+        let id_gen = IdGenerator::new();
+        let ctx = TypeContext::new(std::sync::Arc::new(id_gen));
+        let env = initial_env(&ctx);
+        let converter = RawLambdaConverter::new(&arena, &ctx, &env);
+        let prim = crate::types::PrimitiveDescription {
+            prim_name: String::new(),
+            prim_arity: 0,
+            prim_native_name: encode_ffi_type(&FfiType::FfiInlineConst(LamConstant::ConstFloat(
+                "3e-6".to_string(),
+            ))),
+            prim_native_float: false,
+            prim_from_constructor: false,
+        };
+
+        let spec = converter.ffi_spec_for_primitive(&prim, false, false);
+        assert_eq!(
+            spec.inline_constant,
+            Some(Constant::Float("3e-6".to_string()))
         );
     }
 
