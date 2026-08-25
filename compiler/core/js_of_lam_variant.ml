@@ -40,7 +40,7 @@ let eval (arg : J.expression) (dispatches : (string * string) list) : E.t =
         [
           S.string_switch arg
             (Ext_list.map dispatches (fun (s, r) ->
-                 ( Ast_untagged_variants.String s,
+                 ( Variant_runtime.String s,
                    J.
                      {
                        switch_body = [S.return_stmt (E.str r)];
@@ -64,7 +64,7 @@ let eval (arg : J.expression) (dispatches : (string * string) list) : E.t =
 let eval_as_event (arg : J.expression)
     (dispatches : (string * string) list option) =
   match arg.expression_desc with
-  | Caml_block ([{expression_desc = Str {txt}}; cb], _, _, Blk_poly_var _)
+  | Caml_block ([{expression_desc = Str {txt}}; cb], _, Blk_poly_var _)
     when Js_analyzer.no_side_effect_expression cb ->
     let v =
       match dispatches with
@@ -81,7 +81,7 @@ let eval_as_event (arg : J.expression)
               S.string_switch
                 (E.poly_var_tag_access arg)
                 (Ext_list.map dispatches (fun (s, r) ->
-                     ( Ast_untagged_variants.String s,
+                     ( Variant_runtime.String s,
                        J.
                          {
                            switch_body = [S.return_stmt (E.str r)];
@@ -110,7 +110,7 @@ let eval_as_int (arg : J.expression) (dispatches : (string * int) list) : E.t =
         [
           S.string_switch arg
             (Ext_list.map dispatches (fun (s, r) ->
-                 ( Ast_untagged_variants.String s,
+                 ( Variant_runtime.String s,
                    J.
                      {
                        switch_body = [S.return_stmt (E.int (Int32.of_int r))];
@@ -123,5 +123,5 @@ let eval_as_int (arg : J.expression) (dispatches : (string * int) list) : E.t =
 
 let eval_as_unwrap (arg : J.expression) : E.t =
   match arg.expression_desc with
-  | Caml_block ([{expression_desc = Number _}; cb], _, _, _) -> cb
+  | Caml_block ([{expression_desc = Number _}; cb], _, _) -> cb
   | _ -> E.poly_var_value_access arg

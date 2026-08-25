@@ -19,6 +19,13 @@
 open Types
 
 val constructor_has_optional_shape : Types.constructor_description -> bool
+val constructor_case :
+  Types.constructor_description -> Variant_runtime.constructor_case
+val constructor_variant :
+  Types.constructor_description -> Variant_runtime.layout
+val constructor_position : Types.constructor_description -> int
+val constructor_payload_is_unboxed : Types.constructor_description -> bool
+val constructor_is_unboxed : Types.constructor_description -> bool
 
 val extension_descr : Path.t -> extension_constructor -> constructor_description
 

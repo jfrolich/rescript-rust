@@ -1,53 +1,4 @@
-module Instance = struct
-  type t =
-    | Array
-    | ArrayBuffer
-    | BigInt64Array
-    | BigUint64Array
-    | Blob
-    | DataView
-    | Date
-    | File
-    | Float32Array
-    | Float64Array
-    | Int16Array
-    | Int32Array
-    | Int8Array
-    | Promise
-    | RegExp
-    | Uint16Array
-    | Uint32Array
-    | Uint8Array
-    | Uint8ClampedArray
-    | Set
-    | Map
-    | WeakSet
-    | WeakMap
-  let to_string = function
-    | Array -> "Array"
-    | ArrayBuffer -> "ArrayBuffer"
-    | BigInt64Array -> "BigInt64Array"
-    | BigUint64Array -> "BigUint64Array"
-    | Blob -> "Blob"
-    | DataView -> "DataView"
-    | Date -> "Date"
-    | File -> "File"
-    | Float32Array -> "Float32Array"
-    | Float64Array -> "Float64Array"
-    | Int16Array -> "Int16Array"
-    | Int32Array -> "Int32Array"
-    | Int8Array -> "Int8Array"
-    | Promise -> "Promise"
-    | RegExp -> "RegExp"
-    | Uint16Array -> "Uint16Array"
-    | Uint32Array -> "Uint32Array"
-    | Uint8Array -> "Uint8Array"
-    | Uint8ClampedArray -> "Uint8ClampedArray"
-    | Set -> "Set"
-    | Map -> "Map"
-    | WeakSet -> "WeakSet"
-    | WeakMap -> "WeakMap"
-end
+open Variant_runtime
 
 type untagged_error =
   | OnlyOneUnknown of string
@@ -107,18 +58,6 @@ let report_error ppf =
        rename the field."
       constructor_name runtime_value field_name
 
-(* Type of the runtime representation of an untagged block (case with payoad) *)
-type block_type =
-  | IntType
-  | StringType
-  | FloatType
-  | BigintType
-  | BooleanType
-  | InstanceType of Instance.t
-  | FunctionType
-  | ObjectType
-  | UnknownType
-
 let block_type_to_user_visible_string = function
   | IntType -> "int"
   | StringType -> "string"
@@ -135,19 +74,6 @@ let block_type_to_user_visible_string = function
   Can be a literal (case with no payload), or a block (case with payload).
   In the case of block it can be tagged or untagged.
 *)
-type tag_type =
-  | String of string
-  | Int of int
-  | Float of string
-  | BigInt of string
-  | Bool of bool
-  | Null
-  | Undefined (* literal or tagged block *)
-  | Untagged of block_type (* untagged block *)
-type tag = {name: string; tag_type: tag_type option}
-type block = {tag: tag; tag_name: string option; block_type: block_type option}
-type switch_names = {consts: tag array; blocks: block array}
-
 let tag_type_to_user_visible_string = function
   | String _ -> "string"
   | Int _ -> "int"
@@ -183,13 +109,6 @@ let process_untagged (attrs : Parsetree.attributes) =
       | "unboxed" -> st := true
       | _ -> ());
   !st
-
-let extract_concrete_typedecl :
-    (Env.t -> Types.type_expr -> Path.t * Path.t * Types.type_declaration) ref =
-  ref (Obj.magic ())
-
-let expand_head : (Env.t -> Types.type_expr -> Types.type_expr) ref =
-  ref (Obj.magic ())
 
 let process_tag_type (attrs : Parsetree.attributes) =
   let st : tag_type option ref = ref None in
@@ -272,57 +191,6 @@ let type_to_instanceof_backed_obj (t : Types.type_expr) =
     | _ -> None)
   | _ -> None
 
-let get_block_type_from_typ ~env (t : Types.type_expr) : block_type option =
-  (* First check the original (unexpanded) type for typed arrays and other instance types *)
-  match type_to_instanceof_backed_obj t with
-  | Some instance_type -> Some (InstanceType instance_type)
-  | None -> (
-    (* If original type didn't match, expand and try standard checks *)
-    let expanded_t = !expand_head env t in
-    match expanded_t with
-    | {desc = Tconstr (path, _, _)} when Path.same path Predef.path_string ->
-      Some StringType
-    | {desc = Tconstr (path, _, _)} when Path.same path Predef.path_int ->
-      Some IntType
-    | {desc = Tconstr (path, _, _)} when Path.same path Predef.path_float ->
-      Some FloatType
-    | {desc = Tconstr (path, _, _)} when Path.same path Predef.path_bigint ->
-      Some BigintType
-    | {desc = Tconstr (path, _, _)} when Path.same path Predef.path_bool ->
-      Some BooleanType
-    | {desc = Tarrow _} -> Some FunctionType
-    | {desc = Tconstr _} as expanded_t when type_is_builtin_object expanded_t ->
-      Some ObjectType
-    | {desc = Tconstr _} as expanded_t
-      when type_to_instanceof_backed_obj expanded_t |> Option.is_some -> (
-      match type_to_instanceof_backed_obj expanded_t with
-      | None -> None
-      | Some instance_type -> Some (InstanceType instance_type))
-    | {desc = Ttuple _} -> Some (InstanceType Array)
-    | _ -> None)
-
-let get_block_type ~env (cstr : Types.constructor_declaration) :
-    block_type option =
-  match (process_untagged cstr.cd_attributes, cstr.cd_args) with
-  | false, _ -> None
-  | true, Cstr_tuple [t] when get_block_type_from_typ ~env t |> Option.is_some
-    ->
-    get_block_type_from_typ ~env t
-  | true, Cstr_tuple [ty] -> (
-    let default = Some UnknownType in
-    match !extract_concrete_typedecl env ty with
-    | _, _, {type_kind = Type_record (_, Record_unboxed _)} -> default
-    | _, _, {type_kind = Type_record (_, _)} -> Some ObjectType
-    | _ -> default
-    | exception _ -> default)
-  | true, Cstr_tuple (_ :: _ :: _) ->
-    (* C(_, _) with at least 2 args is an object *)
-    Some ObjectType
-  | true, Cstr_record _ ->
-    (* inline record is an object *)
-    Some ObjectType
-  | true, _ -> None (* TODO: add restrictions here *)
-
 let process_tag_name (attrs : Parsetree.attributes) =
   let st = ref None in
   Ext_list.iter attrs (fun ({txt; loc}, payload) ->
@@ -339,6 +207,15 @@ let process_tag_name (attrs : Parsetree.attributes) =
 
 let get_tag_name (cstr : Types.constructor_declaration) =
   process_tag_name cstr.cd_attributes
+
+let constructor_tag ~name attrs = {name; tag_type = process_tag_type attrs}
+
+let block_runtime ~name attrs =
+  {
+    tag = constructor_tag ~name attrs;
+    tag_name = process_tag_name attrs;
+    untagged = process_untagged attrs;
+  }
 
 let is_nullary_variant (x : Types.constructor_arguments) =
   match x with
@@ -438,49 +315,14 @@ let check_invariant ~is_untagged_def ~(consts : (Location.t * tag) list)
           | BigintType -> incr bigint_types
           | BooleanType -> incr boolean_types
           | StringType -> incr string_types);
-          invariant loc block.tag.name
+          invariant loc block.runtime.tag.name
         | None -> ())
   else
     Ext_list.rev_iter blocks (fun (loc, block) ->
-        check_literal ~is_const:false ~loc block.tag)
+        check_literal ~is_const:false ~loc block.runtime.tag)
 
 let get_cstr_loc_tag (cstr : Types.constructor_declaration) =
-  ( cstr.cd_loc,
-    {
-      name = Ident.name cstr.cd_id;
-      tag_type = process_tag_type cstr.cd_attributes;
-    } )
-
-let constructor_declaration_from_constructor_description ~env
-    (cd : Types.constructor_description) : Types.constructor_declaration option
-    =
-  match cd.cstr_res.desc with
-  | Tconstr (path, _, _) -> (
-    match Env.find_type path env with
-    | {type_kind = Type_variant cstrs} ->
-      Ext_list.find_opt cstrs (fun cstr ->
-          if cstr.cd_id.name = cd.cstr_name then Some cstr else None)
-    | _ -> None)
-  | _ -> None
-
-let names_from_type_variant ?(is_untagged_def = false) ~env
-    (cstrs : Types.constructor_declaration list) =
-  let get_block (cstr : Types.constructor_declaration) : block =
-    let tag = snd (get_cstr_loc_tag cstr) in
-    {tag; tag_name = get_tag_name cstr; block_type = get_block_type ~env cstr}
-  in
-  let consts, blocks =
-    Ext_list.fold_left cstrs ([], []) (fun (consts, blocks) cstr ->
-        if is_nullary_variant cstr.cd_args then
-          (get_cstr_loc_tag cstr :: consts, blocks)
-        else (consts, (cstr.cd_loc, get_block cstr) :: blocks))
-  in
-  check_invariant ~is_untagged_def ~consts ~blocks;
-  let blocks = blocks |> List.map snd in
-  let consts = consts |> List.map snd in
-  let consts = Ext_array.reverse_of_list consts in
-  let blocks = Ext_array.reverse_of_list blocks in
-  Some {consts; blocks}
+  (cstr.cd_loc, constructor_tag ~name:(Ident.name cstr.cd_id) cstr.cd_attributes)
 
 let check_tag_field_conflicts (cstrs : Types.constructor_declaration list) =
   List.iter
@@ -513,18 +355,7 @@ let check_tag_field_conflicts (cstrs : Types.constructor_declaration list) =
       | _ -> ())
     cstrs
 
-type well_formedness_check = {
-  is_untagged_def: bool;
-  cstrs: Types.constructor_declaration list;
-}
-
-let check_well_formed ~env {is_untagged_def; cstrs} =
-  check_tag_field_conflicts cstrs;
-  ignore (names_from_type_variant ~env ~is_untagged_def cstrs)
-
 let has_undefined_literal attrs = process_tag_type attrs = Some Undefined
-
-let block_is_object ~env attrs = get_block_type ~env attrs = Some ObjectType
 
 module Dynamic_checks = struct
   type op = EqEqEq | NotEqEq | Or | And
