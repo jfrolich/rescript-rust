@@ -11261,6 +11261,39 @@ fn simple_pattern_keys(arena: &ParseArena, pat: &Pattern) -> Option<Vec<SimplePa
     }
 }
 
+fn typed_pattern_contains_dict_pattern(arena: &ParseArena, pat: &Pattern) -> bool {
+    if pat
+        .pat_attributes
+        .iter()
+        .any(|attr| arena.get_string(attr.0.txt) == DICT_PATTERN_ATTRIBUTE)
+    {
+        return true;
+    }
+    match &pat.pat_desc {
+        PatternDesc::Tpat_alias(inner, _, _) => typed_pattern_contains_dict_pattern(arena, inner),
+        PatternDesc::Tpat_tuple(items) | PatternDesc::Tpat_array(items) => items
+            .iter()
+            .any(|item| typed_pattern_contains_dict_pattern(arena, item)),
+        PatternDesc::Tpat_construct(_, _, args) => args
+            .iter()
+            .any(|arg| typed_pattern_contains_dict_pattern(arena, arg)),
+        PatternDesc::Tpat_variant(_, Some(arg), _) => {
+            typed_pattern_contains_dict_pattern(arena, arg)
+        }
+        PatternDesc::Tpat_record(fields, _, _) => fields
+            .iter()
+            .any(|(_, _, field, _)| typed_pattern_contains_dict_pattern(arena, field)),
+        PatternDesc::Tpat_or(left, right, _) => {
+            typed_pattern_contains_dict_pattern(arena, left)
+                || typed_pattern_contains_dict_pattern(arena, right)
+        }
+        PatternDesc::Tpat_any
+        | PatternDesc::Tpat_var(_, _)
+        | PatternDesc::Tpat_constant(_)
+        | PatternDesc::Tpat_variant(_, None, _) => false,
+    }
+}
+
 fn pattern_is_simple_catch_all(pat: &Pattern) -> bool {
     match &pat.pat_desc {
         PatternDesc::Tpat_any | PatternDesc::Tpat_var(_, _) => true,
@@ -11521,6 +11554,34 @@ fn report_unused_match_cases<'case>(
     let mut covered_by_catch_all = false;
 
     for case in cases {
+        let has_dict_pattern = typed_pattern_contains_dict_pattern(tctx.arena, &case.c_lhs)
+            || previous_unguarded_cases
+                .iter()
+                .any(|previous| typed_pattern_contains_dict_pattern(tctx.arena, previous.lhs));
+        if has_dict_pattern && !previous_unguarded_cases.is_empty() {
+            // compiler/ml/parmatch.ml:2017-2035, 2211-2223: dict rows are
+            // opaque for warning-56 satisfiability. Exclude prior dict rows so
+            // record-field expansion cannot multiply the pattern matrix.
+            let non_dict_previous = previous_unguarded_cases
+                .iter()
+                .filter(|previous| !typed_pattern_contains_dict_pattern(tctx.arena, previous.lhs))
+                .cloned()
+                .collect::<Vec<_>>();
+            if !non_dict_previous.is_empty()
+                && check_partial_simple_rows(ctx, env, &non_dict_previous)
+                    == crate::types::typedtree::Partial::Total
+            {
+                tctx.report_warning(case.c_lhs.pat_loc, Warning::UnreachableCase);
+                if case.c_guard.is_none() {
+                    previous_unguarded_cases.push(PartialCheckCase {
+                        lhs: &case.c_lhs,
+                        has_guard: false,
+                    });
+                }
+                continue;
+            }
+        }
+
         let previous_cases_are_simple = previous_unguarded_cases.iter().all(|previous| {
             simple_pattern_keys(tctx.arena, previous.lhs).is_some()
                 || pattern_is_simple_catch_all(previous.lhs)
