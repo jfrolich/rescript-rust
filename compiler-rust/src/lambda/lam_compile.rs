@@ -532,7 +532,12 @@ impl LambdaCompiler {
         )
         .entered();
         self.external_module_ids.clear();
-        let simplified_result = crate::timing::measure(
+        // Rust carries generated hoisted aliases through its tree-shaped raw
+        // Lambda boundary. The OCaml reference inserts those Alias groups only
+        // after simplification, so remember their exact module projections and
+        // restore them after the shared simplify pipeline has propagated fields.
+        let hoisted_alias_projections = collect_exported_module_projection_bindings(&lam);
+        let mut simplified_result = crate::timing::measure(
             crate::timing::Phase::LambdaOptimization,
             || {
                 let _phase = info_span!("compiler.lambda_simplify").entered();
@@ -584,6 +589,10 @@ impl LambdaCompiler {
                     &mut external_arity,
                 )
             },
+        );
+        restore_top_level_binding_values(
+            &mut simplified_result.lambda,
+            &hoisted_alias_projections,
         );
         self.cmj_export_constants =
             collect_cmj_export_constants_from_simplified_lambda(&simplified_result.lambda);
@@ -6898,6 +6907,66 @@ pub(crate) fn collect_possible_required_modules_for_lambda(lam: &Lambda) -> AHas
     let mut seen = AHashSet::new();
     collect_modules_from_lambda(lam, &mut seen);
     seen
+}
+
+fn collect_exported_module_projection_bindings(lam: &Lambda) -> HashMap<String, Lambda> {
+    fn terminal_exports(lam: &Lambda) -> ahash::AHashSet<Ident> {
+        match lam {
+            Lambda::Llet(_, _, _, body) | Lambda::Lletrec(_, body) => terminal_exports(body),
+            Lambda::Lsequence(_, body) => terminal_exports(body),
+            Lambda::Lprim(PrimInfo {
+                primitive: Primitive::Pmakeblock(_, TagInfo::ModuleExport(ids), _),
+                ..
+            }) => ids.iter().cloned().collect(),
+            _ => ahash::AHashSet::new(),
+        }
+    }
+    fn is_module_projection(lam: &Lambda) -> bool {
+        matches!(
+            lam,
+            Lambda::Lprim(PrimInfo {
+                primitive: Primitive::Pfield(_, crate::lambda::FieldDbgInfo::Module { .. }),
+                ..
+            })
+        )
+    }
+    fn collect(
+        lam: &Lambda,
+        exports: &ahash::AHashSet<Ident>,
+        result: &mut HashMap<String, Lambda>,
+    ) {
+        match lam {
+            Lambda::Llet(_, id, value, body) => {
+                if exports.contains(id) && is_module_projection(value) {
+                    result.insert(id.name().to_string(), (**value).clone());
+                }
+                collect(body, exports, result);
+            }
+            Lambda::Lletrec(_, body) | Lambda::Lsequence(_, body) => {
+                collect(body, exports, result)
+            }
+            _ => {}
+        }
+    }
+    let exports = terminal_exports(lam);
+    let mut result = HashMap::new();
+    collect(lam, &exports, &mut result);
+    result
+}
+
+fn restore_top_level_binding_values(lam: &mut Lambda, values: &HashMap<String, Lambda>) {
+    match lam {
+        Lambda::Llet(_, id, value, body) => {
+            if let Some(original) = values.get(id.name()) {
+                **value = original.clone();
+            }
+            restore_top_level_binding_values(body, values);
+        }
+        Lambda::Lletrec(_, body) | Lambda::Lsequence(_, body) => {
+            restore_top_level_binding_values(body, values)
+        }
+        _ => {}
+    }
 }
 
 fn collect_cmj_export_constants_from_simplified_lambda(

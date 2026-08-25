@@ -890,6 +890,8 @@ pub struct RawLambdaConverter<'a> {
     warning_config: WarningConfig,
     suppress_inlined_attribute_check: usize,
     preserve_expanded_sparse_records: bool,
+    hoisted_functions: Vec<crate::lambda::HoistedFunction>,
+    hoisted_exports: Vec<crate::lambda::HoistedExport>,
 }
 
 impl<'a> RawLambdaConverter<'a> {
@@ -916,6 +918,8 @@ impl<'a> RawLambdaConverter<'a> {
             warning_config: WarningConfig::new(),
             suppress_inlined_attribute_check: 0,
             preserve_expanded_sparse_records: false,
+            hoisted_functions: Vec::new(),
+            hoisted_exports: Vec::new(),
         }
     }
 
@@ -943,6 +947,8 @@ impl<'a> RawLambdaConverter<'a> {
             warning_config: WarningConfig::new(),
             suppress_inlined_attribute_check: 0,
             preserve_expanded_sparse_records: false,
+            hoisted_functions: Vec::new(),
+            hoisted_exports: Vec::new(),
         }
     }
 
@@ -971,6 +977,8 @@ impl<'a> RawLambdaConverter<'a> {
             warning_config: WarningConfig::new(),
             suppress_inlined_attribute_check: 0,
             preserve_expanded_sparse_records: false,
+            hoisted_functions: Vec::new(),
+            hoisted_exports: Vec::new(),
         }
     }
 
@@ -1011,6 +1019,14 @@ impl<'a> RawLambdaConverter<'a> {
 
     pub fn take_warnings(&mut self) -> Vec<TypeCoreWarning> {
         std::mem::take(&mut self.warnings)
+    }
+
+    pub fn take_hoisted_functions(&mut self) -> Vec<crate::lambda::HoistedFunction> {
+        std::mem::take(&mut self.hoisted_functions)
+    }
+
+    pub fn take_hoisted_exports(&mut self) -> Vec<crate::lambda::HoistedExport> {
+        std::mem::take(&mut self.hoisted_exports)
     }
 
     fn report_unknown_builtin_primitive(&mut self, loc: Location, prim_name: &str) {
@@ -1595,6 +1611,101 @@ impl<'a> RawLambdaConverter<'a> {
         rootpath
             .as_ref()
             .map(|path| crate::types::Path::pdot(path.clone(), field.name().to_string()))
+    }
+
+    fn loc_idx_for_location(&self, loc: &Location) -> LocIdx {
+        (0..self.arena.location_count())
+            .map(|index| LocIdx(index as u32))
+            .find(|index| self.arena.to_location(*index) == *loc)
+            .unwrap_or_else(|| self.arena.none_loc())
+    }
+
+    /// Mirrors `Translcore.mark_js_hoisted_pattern` and
+    /// `Translmod.js_hoist_handler` from upstream 8bf91cb18.
+    fn mark_js_hoisted_pattern(
+        &mut self,
+        rootpath: &Option<crate::types::Path>,
+        attrs: &crate::parser::ast::Attributes,
+        pat: &Pattern,
+        lam: &RawLambda,
+        target_loc: LocIdx,
+    ) {
+        let Some((attr_name, payload)) = attrs.iter().find(|(name, _)| {
+            self.arena.get_string(name.txt) == "res.hoistedFunction"
+        }) else {
+            return;
+        };
+        let warning_loc = attr_name.loc;
+        if !matches!(payload, crate::parser::ast::Payload::PStr(items) if items.is_empty()) {
+            self.report_warning(
+                warning_loc,
+                Warning::AttributePayload {
+                    attr: "res.hoistedFunction".to_string(),
+                    message: "This attribute does not accept a payload".to_string(),
+                },
+            );
+            return;
+        }
+        let binding = match (&pat.pat_desc, lam) {
+            (PatternDesc::Tpat_var(id, _), RawLambda::Lfunction(_)) => id.clone(),
+            (PatternDesc::Tpat_alias(inner, id, _), RawLambda::Lfunction(_))
+                if matches!(inner.pat_desc, PatternDesc::Tpat_any) =>
+            {
+                id.clone()
+            }
+            _ => {
+                self.report_warning(
+                    warning_loc,
+                    Warning::MisplacedAttribute {
+                        name: "res.hoistedFunction".to_string(),
+                    },
+                );
+                return;
+            }
+        };
+        let Some(path) = rootpath.as_ref() else {
+            self.report_warning(
+                warning_loc,
+                Warning::MisplacedAttribute {
+                    name: "res.hoistedFunction".to_string(),
+                },
+            );
+            return;
+        };
+        let Ok((_head, segments)) = path.flatten() else {
+            self.report_warning(
+                warning_loc,
+                Warning::MisplacedAttribute {
+                    name: "res.hoistedFunction".to_string(),
+                },
+            );
+            return;
+        };
+        if segments.is_empty() {
+            self.report_warning(
+                warning_loc,
+                Warning::MisplacedAttribute {
+                    name: "res.hoistedFunction".to_string(),
+                },
+            );
+            return;
+        }
+        let mut segments = segments
+            .into_iter()
+            .map(str::to_string)
+            .collect::<Vec<_>>();
+        segments.push(binding.name().to_string());
+        // Structure translation visits the continuation first. Prepending keeps
+        // the same source order as OCaml's `js_hoisted := item :: !js_hoisted`.
+        self.hoisted_functions.insert(
+            0,
+            crate::lambda::HoistedFunction {
+                binding,
+                path: segments,
+                loc: self.loc(attr_name.loc),
+                target_loc: self.loc(target_loc),
+            },
+        );
     }
 
     /// Find an inline-style attribute, matching OCaml's
@@ -3905,6 +4016,252 @@ impl<'a> RawLambdaConverter<'a> {
         })
     }
 
+    fn materialize_hoisted_exports(&mut self, lam: RawLambda) -> RawLambda {
+        fn collect_groups(lam: &RawLambda, groups: &mut HashMap<Ident, RawLambda>) {
+            match lam {
+                RawLambda::Llet(_, id, value, body) => {
+                    groups.insert(id.clone(), (**value).clone());
+                    collect_groups(value, groups);
+                    collect_groups(body, groups);
+                }
+                RawLambda::Lletrec(bindings, body) => {
+                    groups.extend(bindings.iter().cloned());
+                    for (_, value) in bindings {
+                        collect_groups(value, groups);
+                    }
+                    collect_groups(body, groups);
+                }
+                RawLambda::Lsequence(left, body) => {
+                    collect_groups(left, groups);
+                    collect_groups(body, groups);
+                }
+                _ => {}
+            }
+        }
+        fn terminal_exports(lam: &RawLambda) -> Vec<Ident> {
+            match lam {
+                RawLambda::Llet(_, _, _, body) | RawLambda::Lletrec(_, body) => {
+                    terminal_exports(body)
+                }
+                RawLambda::Lsequence(_, body) => terminal_exports(body),
+                RawLambda::Lprim(RawPrimInfo {
+                    primitive: Primitive::Pmakeblock(_, TagInfo::ModuleExport(ids), _),
+                    ..
+                }) => ids.clone(),
+                _ => Vec::new(),
+            }
+        }
+        fn resolve_binding(
+            lam: &RawLambda,
+            groups: &HashMap<Ident, RawLambda>,
+            seen: &mut HashSet<Ident>,
+        ) -> (RawLambda, Option<Ident>) {
+            match lam {
+                RawLambda::Lvar(id) => {
+                    if !seen.insert(id.clone()) {
+                        return (lam.clone(), Some(id.clone()));
+                    }
+                    match groups.get(id) {
+                        Some(alias @ (RawLambda::Lvar(_) | RawLambda::Lprim(_))) => {
+                            resolve_binding(alias, groups, seen)
+                        }
+                        Some(resolved) => (resolved.clone(), Some(id.clone())),
+                        None => (lam.clone(), Some(id.clone())),
+                    }
+                }
+                RawLambda::Lprim(RawPrimInfo {
+                    primitive: Primitive::Pfield(pos, _),
+                    args,
+                    ..
+                }) if args.len() == 1 => {
+                    let (base, _) = resolve_binding(&args[0], groups, seen);
+                    if let RawLambda::Lprim(RawPrimInfo {
+                        primitive: Primitive::Pmakeblock(_, TagInfo::Module(_), _),
+                        args,
+                        ..
+                    }) = base
+                    {
+                        if let Some(field) = usize::try_from(*pos)
+                            .ok()
+                            .and_then(|pos| args.get(pos))
+                        {
+                            return resolve_binding(field, groups, seen);
+                        }
+                    }
+                    (lam.clone(), None)
+                }
+                _ => (lam.clone(), None),
+            }
+        }
+        fn find_path(
+            lam: &RawLambda,
+            fields: &[String],
+            groups: &HashMap<Ident, RawLambda>,
+            positions: &mut Vec<(i32, String)>,
+        ) -> Option<(Option<Ident>, RawLambda)> {
+            if fields.is_empty() {
+                let (target, id) = resolve_binding(lam, groups, &mut HashSet::new());
+                return Some((id, target));
+            }
+            let (mut resolved, _) = resolve_binding(lam, groups, &mut HashSet::new());
+            resolved = loop {
+                match resolved {
+                    RawLambda::Llet(_, _, _, body)
+                    | RawLambda::Lletrec(_, body)
+                    | RawLambda::Lsequence(_, body) => resolved = *body,
+                    other => break other,
+                }
+            };
+            let RawLambda::Lprim(RawPrimInfo {
+                primitive: Primitive::Pmakeblock(_, TagInfo::Module(names), _),
+                args,
+                ..
+            }) = resolved
+            else {
+                return None;
+            };
+            let pos = names.iter().position(|name| name == &fields[0])?;
+            let arg = args.get(pos)?;
+            positions.push((pos as i32, fields[0].clone()));
+            find_path(arg, &fields[1..], groups, positions)
+        }
+        fn unwrap_exotic(name: &str) -> &str {
+            if name.len() >= 3 && name.starts_with("\\\"") && name.ends_with('"') {
+                &name[2..name.len() - 1]
+            } else {
+                name
+            }
+        }
+        fn append_aliases(
+            lam: RawLambda,
+            aliases: &[(Ident, RawLambda)],
+        ) -> RawLambda {
+            match lam {
+                RawLambda::Llet(kind, id, value, body) => RawLambda::Llet(
+                    kind,
+                    id,
+                    value,
+                    Box::new(append_aliases(*body, aliases)),
+                ),
+                RawLambda::Lletrec(bindings, body) => RawLambda::Lletrec(
+                    bindings,
+                    Box::new(append_aliases(*body, aliases)),
+                ),
+                RawLambda::Lsequence(left, body) => RawLambda::Lsequence(
+                    left,
+                    Box::new(append_aliases(*body, aliases)),
+                ),
+                RawLambda::Lprim(RawPrimInfo {
+                    primitive: Primitive::Pmakeblock(tag, TagInfo::ModuleExport(mut ids), mutable_),
+                    mut args,
+                    loc,
+                }) => {
+                    ids.extend(aliases.iter().map(|(id, _)| id.clone()));
+                    args.extend(aliases.iter().map(|(id, _)| RawLambda::var(id.clone())));
+                    let mut result = RawLambda::prim(
+                        Primitive::Pmakeblock(tag, TagInfo::ModuleExport(ids), mutable_),
+                        args,
+                        loc,
+                    );
+                    for (id, value) in aliases.iter().rev() {
+                        result = RawLambda::let_(
+                            // Added before Rust's tree-shaped optimization pipeline;
+                            // keep the module access intact until JS lowering, matching
+                            // OCaml's post-simplification Alias group insertion.
+                            LetKind::Strict,
+                            id.clone(),
+                            value.clone(),
+                            result,
+                        );
+                    }
+                    result
+                }
+                other => other,
+            }
+        }
+
+        if self.hoisted_functions.is_empty() {
+            return lam;
+        }
+        let mut groups = HashMap::new();
+        collect_groups(&lam, &mut groups);
+        let exported_modules = terminal_exports(&lam)
+            .into_iter()
+            .map(|id| (id.name().to_string(), id))
+            .collect::<HashMap<_, _>>();
+        let mut occupied = groups
+            .keys()
+            .map(|id| crate::js_ir::printer::convert_ident_name(id.name()))
+            .collect::<HashSet<_>>();
+        let mut aliases: Vec<(Ident, RawLambda)> = Vec::new();
+        let hoisted_functions = self.hoisted_functions.clone();
+        for hoisted in hoisted_functions {
+            let Some((top, fields)) = hoisted.path.split_first() else {
+                continue;
+            };
+            let resolved = exported_modules.get(top).and_then(|top_id| {
+                let module = groups.get(top_id)?;
+                let mut positions = Vec::new();
+                let (target_id, _target) = find_path(module, fields, &groups, &mut positions)?;
+                Some((top_id.clone(), positions, target_id))
+            });
+            let Some((top_id, positions, Some(target_id))) = resolved else {
+                self.report_warning(
+                    self.loc_idx_for_location(&hoisted.loc),
+                    Warning::MisplacedAttribute {
+                        name: "res.hoistedFunction".to_string(),
+                    },
+                );
+                continue;
+            };
+            if !hoisted.binding.same(&target_id) {
+                self.report_warning(
+                    self.loc_idx_for_location(&hoisted.loc),
+                    Warning::MisplacedAttribute {
+                        name: "res.hoistedFunction".to_string(),
+                    },
+                );
+                continue;
+            }
+            let export_name = hoisted
+                .path
+                .iter()
+                .map(|part| unwrap_exotic(part))
+                .collect::<Vec<_>>()
+                .join("$");
+            let js_name = crate::js_ir::printer::convert_ident_name(&export_name);
+            if occupied.contains(&js_name) {
+                self.report_diagnostic(
+                    hoisted.target_loc.clone(),
+                    format!(
+                        "Cannot hoist this function as `{export_name}` because that name is already used by a top-level binding."
+                    ),
+                );
+                continue;
+            }
+            occupied.insert(js_name);
+            let alias_id = self.fresh_ident(&export_name);
+            let mut access = RawLambda::var(top_id);
+            for (pos, name) in positions {
+                access = RawLambda::prim(
+                    Primitive::Pfield(pos, FieldDbgInfo::Module { name }),
+                    vec![access],
+                    hoisted.loc.clone(),
+                );
+            }
+            // OCaml prepends each accepted alias, producing reverse source order.
+            aliases.insert(0, (alias_id, access));
+            self.hoisted_exports.insert(
+                0,
+                crate::lambda::HoistedExport {
+                    path: hoisted.path,
+                    export_name,
+                },
+            );
+        }
+        append_aliases(lam, &aliases)
+    }
+
     /// Convert a structure into raw lambda.
     pub fn convert_structure(&mut self, structure: &Structure) -> RawLambda {
         self.convert_structure_with_coercion(structure, &ModuleCoercion::Tcoerce_none)
@@ -3928,7 +4285,7 @@ impl<'a> RawLambdaConverter<'a> {
             cc,
             Location::none(),
         );
-        result
+        self.materialize_hoisted_exports(result)
     }
 
     fn pure_module(module_expr: &ModuleExpr) -> LetKind {
@@ -5670,7 +6027,10 @@ impl<'a> RawLambdaConverter<'a> {
                 let id = mb.mb_id.clone();
                 let loc = self.loc(mb.mb_expr.mod_loc);
                 let shape = self.init_shape(&mb.mb_expr);
-                let rhs = self.convert_module_expr_raw(&mb.mb_expr, &None);
+                let rhs = self.convert_module_expr_raw(
+                    &mb.mb_expr,
+                    &Self::field_path(rootpath, &mb.mb_id),
+                );
                 RecModuleBinding {
                     id,
                     loc,
@@ -5724,7 +6084,12 @@ impl<'a> RawLambdaConverter<'a> {
                         }
                     }
                 }
-                self.convert_let_with_body_raw(*rec_flag, bindings, body)
+                self.convert_let_with_body_raw_at_root(
+                    *rec_flag,
+                    bindings,
+                    body,
+                    rootpath,
+                )
             }
             StructureItemDesc::Tstr_module(binding) => {
                 let old_len = fields.len();
@@ -5815,7 +6180,7 @@ impl<'a> RawLambdaConverter<'a> {
                     self.convert_structure_items_raw(fields, rem, is_top_level, rootpath, cc, loc);
                 fields.truncate(old_len);
 
-                self.compile_recmodule(bindings, body)
+                self.compile_recmodule(bindings, body, rootpath)
             }
             StructureItemDesc::Tstr_primitive(_)
             | StructureItemDesc::Tstr_type(_, _)
@@ -10056,6 +10421,16 @@ impl<'a> RawLambdaConverter<'a> {
         bindings: &[ValueBinding],
         body: RawLambda,
     ) -> RawLambda {
+        self.convert_let_with_body_raw_at_root(rec_flag, bindings, body, &None)
+    }
+
+    fn convert_let_with_body_raw_at_root(
+        &mut self,
+        rec_flag: crate::parser::ast::RecFlag,
+        bindings: &[ValueBinding],
+        body: RawLambda,
+        rootpath: &Option<crate::types::Path>,
+    ) -> RawLambda {
         match rec_flag {
             crate::parser::ast::RecFlag::Nonrecursive => {
                 if bindings.iter().any(|binding| {
@@ -10071,6 +10446,13 @@ impl<'a> RawLambdaConverter<'a> {
                                 self.get_inline_attribute_from(&binding.vb_attributes);
                             value =
                                 self.apply_inline_attribute_raw(value, binding.vb_loc, inline_attr);
+                            self.mark_js_hoisted_pattern(
+                                rootpath,
+                                &binding.vb_attributes,
+                                &binding.vb_pat,
+                                &value,
+                                binding.vb_expr.exp_loc,
+                            );
                             (binding, value)
                         })
                         .collect::<Vec<_>>();
@@ -10148,6 +10530,13 @@ impl<'a> RawLambdaConverter<'a> {
                         // OCaml's transl_let applies inline attributes from vb_attributes
                         let inline_attr = self.get_inline_attribute_from(&binding.vb_attributes);
                         value = self.apply_inline_attribute_raw(value, binding.vb_loc, inline_attr);
+                        self.mark_js_hoisted_pattern(
+                            rootpath,
+                            &binding.vb_attributes,
+                            &binding.vb_pat,
+                            &value,
+                            binding.vb_expr.exp_loc,
+                        );
                         (binding, value)
                     })
                     .collect::<Vec<_>>();
@@ -10194,6 +10583,13 @@ impl<'a> RawLambdaConverter<'a> {
                                 self.get_inline_attribute_from(&binding.vb_attributes);
                             value =
                                 self.apply_inline_attribute_raw(value, binding.vb_loc, inline_attr);
+                            self.mark_js_hoisted_pattern(
+                                rootpath,
+                                &binding.vb_attributes,
+                                &binding.vb_pat,
+                                &value,
+                                binding.vb_expr.exp_loc,
+                            );
                             (
                                 simple_let_binding_id(binding).expect("checked above"),
                                 value,
@@ -10206,6 +10602,13 @@ impl<'a> RawLambdaConverter<'a> {
                         let mut value = self.convert_expr_raw(&binding.vb_expr);
                         let inline_attr = self.get_inline_attribute_from(&binding.vb_attributes);
                         value = self.apply_inline_attribute_raw(value, binding.vb_loc, inline_attr);
+                        self.mark_js_hoisted_pattern(
+                            rootpath,
+                            &binding.vb_attributes,
+                            &binding.vb_pat,
+                            &value,
+                            binding.vb_expr.exp_loc,
+                        );
                         full_matching::for_let(
                             self.type_ctx,
                             self.arena,
