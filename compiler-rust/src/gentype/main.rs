@@ -512,7 +512,7 @@ pub fn read_cmt(cmt_file: &str) -> InputCmt<'static> {
             );
             crate::gentype::log_::item("Try to clean and rebuild.\n\n");
             panic!(
-                "Fatal error: exception File \"compiler/gentype/GenTypeMain.ml\", line 91, characters 4-10: Assertion failed"
+                "Fatal error: exception File \"compiler/gentype/gentype_main.ml\", line 91, characters 4-10: Assertion failed"
             )
         }
     }

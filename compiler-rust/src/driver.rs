@@ -2701,7 +2701,20 @@ fn type_mod_error_to_anyhow(
                     source,
                     filename,
                     *loc,
-                    &format!("Variable {name} is bound several times in this matching"),
+                    &format!("Variable {name} is bound several times in this pattern"),
+                ),
+                2,
+            )
+            .into()
+        }
+        TypeModError::CoreError(TypeCoreError::IllegalValueName { loc, name }) => {
+            UserDiagnostic::new(
+                format_compiler_error_report(
+                    arena,
+                    source,
+                    filename,
+                    *loc,
+                    &format!("'{name}' is not a valid value identifier."),
                 ),
                 2,
             )
@@ -2809,7 +2822,7 @@ fn type_mod_error_to_anyhow(
                     source,
                     filename,
                     *loc,
-                    "Only variables are allowed as left-hand side of `let rec'",
+                    "Only variables are allowed as left-hand side of `let rec`",
                 ),
                 2,
             )
@@ -2822,7 +2835,7 @@ fn type_mod_error_to_anyhow(
                     source,
                     filename,
                     *loc,
-                    "This kind of expression is not allowed as right-hand side of `let rec'",
+                    "This kind of expression is not allowed as right-hand side of `let rec`",
                 ),
                 2,
             )
@@ -5158,7 +5171,9 @@ fn format_invalid_variable_name_report(
         source,
         filename,
         loc,
-        &format!("The type variable name {name} is not allowed in programs"),
+        &format!(
+            "The type variable name {name} is not allowed; type variable names cannot start with an underscore."
+        ),
     )
 }
 

@@ -494,6 +494,9 @@ pub enum TypeCoreError {
     /// Variable bound multiple times.
     MultiplyBoundVariable { loc: LocIdx, name: String },
 
+    /// A value identifier rejected by `Env.check_value_name`.
+    IllegalValueName { loc: LocIdx, name: String },
+
     /// Variables don't match in or-pattern.
     OrpatVars {
         loc: LocIdx,
@@ -15553,6 +15556,7 @@ fn type_function_nary_with_newtypes(
                     target_id: &Ident,
                     replacement_ty: TypeExprRef,
                     seen: &mut HashSet<TypeExprRef>,
+                    used: &mut bool,
                 ) {
                     let ty = ctx.repr(ty);
                     if !seen.insert(ty) {
@@ -15565,16 +15569,33 @@ fn type_function_nary_with_newtypes(
                             ..
                         } if id.same(target_id)
                     ) {
+                        *used = true;
                         crate::types::link_type(ctx, ty, replacement_ty);
                         return;
                     }
                     crate::types::iter_type_expr(ctx, ty, |child| {
-                        replace_newtype_path(ctx, child, target_id, replacement_ty, seen);
+                        replace_newtype_path(ctx, child, target_id, replacement_ty, seen, used);
                     });
                 }
 
                 let mut seen = HashSet::new();
-                replace_newtype_path(ctx, rewritten_ty, &newtype_id, replacement_ty, &mut seen);
+                let mut used = false;
+                replace_newtype_path(
+                    ctx,
+                    rewritten_ty,
+                    &newtype_id,
+                    replacement_ty,
+                    &mut seen,
+                    &mut used,
+                );
+                if !used {
+                    tctx.report_warning(
+                        loc,
+                        Warning::UnusedTypeDeclaration {
+                            name: name_str.clone(),
+                        },
+                    );
+                }
                 Ok(Expression {
                     exp_loc: loc,
                     exp_type: rewritten_ty,
@@ -19438,6 +19459,7 @@ fn type_newtype(
             target_id: &Ident,
             replacement_ty: TypeExprRef,
             seen: &mut HashSet<TypeExprRef>,
+            used: &mut bool,
         ) {
             let ty = ctx.repr(ty);
             if !seen.insert(ty) {
@@ -19453,17 +19475,34 @@ fn type_newtype(
             );
 
             if should_replace {
+                *used = true;
                 crate::types::link_type(ctx, ty, replacement_ty);
                 return;
             }
 
             crate::types::iter_type_expr(ctx, ty, |child| {
-                replace_newtype_path(ctx, child, target_id, replacement_ty, seen);
+                replace_newtype_path(ctx, child, target_id, replacement_ty, seen, used);
             });
         }
 
         let mut seen = HashSet::new();
-        replace_newtype_path(ctx, rewritten_ty, &newtype_id, replacement_ty, &mut seen);
+        let mut used = false;
+        replace_newtype_path(
+            ctx,
+            rewritten_ty,
+            &newtype_id,
+            replacement_ty,
+            &mut seen,
+            &mut used,
+        );
+        if !used {
+            tctx.report_warning(
+                loc,
+                Warning::UnusedTypeDeclaration {
+                    name: name_str.clone(),
+                },
+            );
+        }
 
         // OCaml: rue { ... exp_type = ety; ... }
         rue_unify(tctx, loc, rewritten_ty, expected_ty, None)?;
@@ -23586,6 +23625,20 @@ fn type_let_bindings(
             // Save pattern variables from this binding
             all_pattern_vars
                 .push(state.pattern_variables[binding_state.pattern_variables_len..].to_vec());
+        }
+
+        // OCaml `type_pattern_list` calls `add_pattern_variables` immediately
+        // after typing every pattern. `Env.add_value` validates each binder at
+        // that point, before recursive approximation and RHS typing.
+        for pvars in &all_pattern_vars {
+            for pv in pvars {
+                if crate::types::env::check_value_name(pv.id.name(), pv.loc.clone()).is_err() {
+                    return Err(TypeCoreError::IllegalValueName {
+                        loc: pv.loc_idx,
+                        name: pv.id.name().to_string(),
+                    });
+                }
+            }
         }
 
         // Match OCaml type_let/type_pattern_list: recursive RHS typing uses the

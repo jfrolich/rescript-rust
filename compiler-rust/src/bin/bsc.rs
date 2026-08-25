@@ -798,7 +798,7 @@ fn check_gentype_cmt_file(cmt_file: &Path) -> Result<()> {
     );
     let _ = io::stdout().flush();
     Err(UserDiagnostic::new(
-        "Fatal error: exception File \"compiler/gentype/GenTypeMain.ml\", line 91, characters 4-10: Assertion failed\n".to_string(),
+        "Fatal error: exception File \"compiler/gentype/gentype_main.ml\", line 91, characters 4-10: Assertion failed\n".to_string(),
         2,
     )
     .into())
