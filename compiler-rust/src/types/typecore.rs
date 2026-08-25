@@ -4342,10 +4342,10 @@ fn type_contains_tunivar(
         TypeDesc::Tlink(target) | TypeDesc::Tsubst(target) => {
             type_contains_tunivar(ctx, env, *target, seen)
         }
-        TypeDesc::Tarrow { arg, ret, .. } => {
-            type_contains_tunivar(ctx, env, arg.typ, seen)
-                || type_contains_tunivar(ctx, env, *ret, seen)
-        }
+        TypeDesc::Tarrow { args, ret } => args
+            .iter()
+            .any(|arg| type_contains_tunivar(ctx, env, arg.typ, seen))
+            || type_contains_tunivar(ctx, env, *ret, seen),
         TypeDesc::Ttuple(types) => types
             .iter()
             .copied()
@@ -8066,12 +8066,14 @@ fn force_lower_args_type_lookup_paths(
                     visit_manifest(tctx, env, arg, seen);
                 }
             }
-            TypeDesc::Tarrow { arg, ret, .. } => {
-                let arg_ty = arg.typ;
-                let ret_ty = *ret;
+            TypeDesc::Tarrow { args, ret } => {
+                let args = args.clone();
+                let ret = *ret;
                 drop(desc);
-                visit_manifest(tctx, env, arg_ty, seen);
-                visit_manifest(tctx, env, ret_ty, seen);
+                for arg in args {
+                    visit_manifest(tctx, env, arg.typ, seen);
+                }
+                visit_manifest(tctx, env, ret, seen);
             }
             TypeDesc::Ttuple(items) => {
                 let items = items.clone();
@@ -8600,9 +8602,7 @@ fn strip_arity_suffix(name: &str) -> String {
 
 fn function_arity_for_suggestion(ctx: &TypeContext, ty: TypeExprRef) -> usize {
     match &*ctx.get_desc(ctx.repr(ty)) {
-        TypeDesc::Tarrow {
-            arity: Some(arity), ..
-        } => *arity as usize,
+        TypeDesc::Tarrow { args, .. } => args.len(),
         _ => 0,
     }
 }
@@ -8987,8 +8987,8 @@ fn type_application(
             let expanded = crate::types::ctype::expand_head(ctx, env, ty);
             match &*ctx.get_desc(expanded) {
                 TypeDesc::Tvar(_) => return true,
-                TypeDesc::Tarrow { arg, ret, .. } => {
-                    if same_label_name(&arg.lbl, arena, label) {
+                TypeDesc::Tarrow { args, ret } => {
+                    if args.iter().any(|arg| same_label_name(&arg.lbl, arena, label)) {
                         return true;
                     }
                     ty = *ret;
@@ -9010,10 +9010,8 @@ fn type_application(
         // preserve the original arrow level and use a direct Cok commutable.
         ctx.alloc_type_at_level(
             TypeDesc::Tarrow {
-                arg: crate::types::TypeArg::new(label, arg_ty),
+                args: vec![crate::types::TypeArg::new(label, arg_ty)],
                 ret: ret_ty,
-                commutable: crate::types::Commutable::Cok,
-                arity,
             },
             level,
         )
@@ -9155,7 +9153,7 @@ fn type_application(
         Some(args.len() as i32)
     } else {
         match &*tctx.type_ctx.get_desc(expanded_funct_ty) {
-            TypeDesc::Tarrow { arity, .. } => *arity,
+            TypeDesc::Tarrow { args, .. } => Some(args.len() as i32),
             _ => None,
         }
     };
@@ -9750,31 +9748,8 @@ fn type_application(
                 arity_suggestion,
             });
         }
-        if remaining_arity > 0 {
-            let result_repr = ctx.repr(result_ty);
-            if let TypeDesc::Tarrow { arg, ret, .. } = &*ctx.get_desc(result_repr) {
-                // OCaml updates the arity on the existing arrow descriptor while
-                // preserving level/commutable fields. Mirror that shape here.
-                let level = ctx.get_level(result_repr);
-                let commutable = match &*ctx.get_desc(result_repr) {
-                    TypeDesc::Tarrow { commutable, .. } => commutable.clone(),
-                    _ => crate::types::Commutable::Cok,
-                };
-                let new_arrow = ctx.alloc_type_at_level(
-                    TypeDesc::Tarrow {
-                        arg: arg.clone(),
-                        ret: *ret,
-                        commutable,
-                        arity: Some(remaining_arity),
-                    },
-                    level,
-                );
-                // Record alias: new_arrow is the arity-updated version of result_repr.
-                // Sexp serializer will use result_repr's dedup key for both.
-                ctx.set_arity_alias(new_arrow, result_repr);
-                result_ty = new_arrow;
-            }
-        }
+        // Upstream n-ary Tarrow has no stored arity to patch here; the
+        // remaining parameter count is represented by the arrow's args list.
     }
 
     // Match OCaml typecore.ml Pexp_apply post-application side effect:
@@ -11058,24 +11033,20 @@ fn type_exprs_may_unify_without_alloc(
                     .all(|(left_item, right_item)| rec(ctx, env, seen, *left_item, *right_item))
             }
             (
-                TypeDesc::Tarrow {
-                    arg: left_arg,
-                    ret: left_ret,
-                    ..
-                },
-                TypeDesc::Tarrow {
-                    arg: right_arg,
-                    ret: right_ret,
-                    ..
-                },
-            ) if left_arg.lbl.same_label(&right_arg.lbl) => {
-                let left_arg_ty = left_arg.typ;
-                let right_arg_ty = right_arg.typ;
+                TypeDesc::Tarrow { args: left_args, ret: left_ret },
+                TypeDesc::Tarrow { args: right_args, ret: right_ret },
+            ) if left_args.len() == right_args.len()
+                && left_args.iter().zip(right_args).all(|(a, b)| a.lbl.same_label(&b.lbl)) => {
+                let left_args = left_args.clone();
+                let right_args = right_args.clone();
                 let left_ret = *left_ret;
                 let right_ret = *right_ret;
                 drop(left_desc);
                 drop(right_desc);
-                rec(ctx, env, seen, left_arg_ty, right_arg_ty)
+                left_args
+                    .iter()
+                    .zip(&right_args)
+                    .all(|(left, right)| rec(ctx, env, seen, left.typ, right.typ))
                     && rec(ctx, env, seen, left_ret, right_ret)
             }
             (TypeDesc::Tpoly { body, .. }, _) => {
@@ -14767,7 +14738,8 @@ fn type_function(
                 let expected_desc = ctx.get_desc(ctx.repr(expected_head));
                 let labels_mismatch = matches!(
                     &*expected_desc,
-                    TypeDesc::Tarrow { arg, .. } if !arg.lbl.same_label(&ctx_label)
+                    TypeDesc::Tarrow { args, .. }
+                        if args.first().is_some_and(|arg| !arg.lbl.same_label(&ctx_label))
                 );
                 drop(expected_desc);
                 if labels_mismatch {
@@ -14802,8 +14774,19 @@ fn type_function(
             let expanded_desc = ctx.get_desc(expanded_expected);
             let result = match &*expanded_desc {
                 TypeDesc::Tvar(_) => FilterArrow::LinkVar(ctx.get_level(expanded_expected)),
-                TypeDesc::Tarrow { arg, ret, .. } if arg.lbl.same_label(&ctx_label) => {
-                    FilterArrow::Arrow(arg.typ, *ret)
+                TypeDesc::Tarrow { args, ret }
+                    if args.first().is_some_and(|arg| arg.lbl.same_label(&ctx_label)) => {
+                    let return_ty = if args.len() == 1 {
+                        *ret
+                    } else {
+                        // compiler/ml/typecore.ml:4164-4167 keeps unapplied
+                        // parameters together in one n-ary arrow node.
+                        ctx.new_type(TypeDesc::Tarrow {
+                            args: args[1..].to_vec(),
+                            ret: *ret,
+                        })
+                    };
+                    FilterArrow::Arrow(args[0].typ, return_ty)
                 }
                 _ => FilterArrow::Mismatch,
             };
@@ -14817,10 +14800,8 @@ fn type_function(
                 let return_ty = ctx.alloc_type_at_level(TypeDesc::Tvar(None), level);
                 let arrow_ty = ctx.alloc_type_at_level(
                     TypeDesc::Tarrow {
-                        arg: TypeArg::new(ctx_label.clone(), param_ty),
+                        args: vec![TypeArg::new(ctx_label.clone(), param_ty)],
                         ret: return_ty,
-                        commutable: Commutable::Cok,
-                        arity: arity_opt,
                     },
                     level,
                 );
@@ -20392,10 +20373,9 @@ fn pack_type_contains_local_module_dependency(
                     pack_type_contains_local_module_dependency(ctx, env, pers_env, *arg, visited)
                 })
         }
-        TypeDesc::Tarrow { arg, ret, .. } => {
+        TypeDesc::Tarrow { args, ret } => args.iter().any(|arg| {
             pack_type_contains_local_module_dependency(ctx, env, pers_env, arg.typ, visited)
-                || pack_type_contains_local_module_dependency(ctx, env, pers_env, *ret, visited)
-        }
+        }) || pack_type_contains_local_module_dependency(ctx, env, pers_env, *ret, visited),
         TypeDesc::Ttuple(items) => items.iter().any(|item| {
             pack_type_contains_local_module_dependency(ctx, env, pers_env, *item, visited)
         }),
@@ -22965,10 +22945,14 @@ fn format_toplevel_return_type(ctx: &TypeContext, ty: TypeExprRef) -> String {
                     .join(", ");
                 format!("({items})")
             }
-            TypeDesc::Tarrow { arg, ret, .. } => {
-                let arg = go(ctx, arg.typ, seen);
+            TypeDesc::Tarrow { args, ret } => {
+                let args = args
+                    .iter()
+                    .map(|arg| go(ctx, arg.typ, seen))
+                    .collect::<Vec<_>>()
+                    .join(", ");
                 let ret = go(ctx, *ret, seen);
-                format!("{arg} => {ret}")
+                format!("({args}) => {ret}")
             }
             TypeDesc::Tlink(next) | TypeDesc::Tsubst(next) | TypeDesc::Tpoly { body: next, .. } => {
                 go(ctx, *next, seen)
@@ -23098,10 +23082,8 @@ where
     enum CopyTypeExprPlan {
         Tvar(Option<String>),
         Tarrow {
-            lbl: crate::types::asttypes::ArgLabel,
-            arg: TypeExprRef,
+            args: Vec<TypeArg>,
             ret: TypeExprRef,
-            arity: Option<i32>,
         },
         Ttuple(Vec<TypeExprRef>),
         Tconstr {
@@ -23170,13 +23152,9 @@ where
         let desc = ctx.borrow_desc(ty);
         match &*desc {
             TypeDesc::Tvar(name) => CopyTypeExprPlan::Tvar(name.clone()),
-            TypeDesc::Tarrow {
-                arg, ret, arity, ..
-            } => CopyTypeExprPlan::Tarrow {
-                lbl: arg.lbl.clone(),
-                arg: arg.typ,
+            TypeDesc::Tarrow { args, ret } => CopyTypeExprPlan::Tarrow {
+                args: args.clone(),
                 ret: *ret,
-                arity: *arity,
             },
             TypeDesc::Ttuple(types) => CopyTypeExprPlan::Ttuple(types.clone()),
             TypeDesc::Tconstr { path, args, .. } => CopyTypeExprPlan::Tconstr {
@@ -23245,22 +23223,20 @@ where
     let copied_desc = {
         match plan {
             CopyTypeExprPlan::Tvar(name) => TypeDesc::Tvar(name),
-            CopyTypeExprPlan::Tarrow {
-                lbl,
-                arg,
-                ret,
-                arity,
-            } => {
-                let copied_arg =
-                    copy_lookup_type_expr_with_paths(ctx, arg, cache, type_path, module_path);
-                let copied_ret =
-                    copy_lookup_type_expr_with_paths(ctx, ret, cache, type_path, module_path);
-                TypeDesc::Tarrow {
-                    arg: TypeArg::new(lbl, copied_arg),
-                    ret: copied_ret,
-                    commutable: Commutable::Clink(ctx.alloc_commutable(Commutable::Cok)),
-                    arity,
-                }
+            CopyTypeExprPlan::Tarrow { args, ret } => {
+                let args = args
+                    .into_iter()
+                    .map(|arg| TypeArg::new(
+                        arg.lbl,
+                        copy_lookup_type_expr_with_paths(
+                            ctx, arg.typ, cache, type_path, module_path,
+                        ),
+                    ))
+                    .collect();
+                let ret = copy_lookup_type_expr_with_paths(
+                    ctx, ret, cache, type_path, module_path,
+                );
+                TypeDesc::Tarrow { args, ret }
             }
             CopyTypeExprPlan::Ttuple(types) => {
                 let copied_items = types
@@ -26122,10 +26098,9 @@ fn type_contains_unresolved_local_path<'a>(
             args.iter()
                 .any(|arg| type_contains_unresolved_local_path(ctx, env, pers_env, *arg, visited))
         }
-        TypeDesc::Tarrow { arg, ret, .. } => {
+        TypeDesc::Tarrow { args, ret } => args.iter().any(|arg| {
             type_contains_unresolved_local_path(ctx, env, pers_env, arg.typ, visited)
-                || type_contains_unresolved_local_path(ctx, env, pers_env, *ret, visited)
-        }
+        }) || type_contains_unresolved_local_path(ctx, env, pers_env, *ret, visited),
         TypeDesc::Ttuple(items) => items
             .iter()
             .any(|item| type_contains_unresolved_local_path(ctx, env, pers_env, *item, visited)),
@@ -26220,10 +26195,10 @@ fn type_contains_path_prefix<'a>(
                     .iter()
                     .any(|arg| type_contains_path_prefix(ctx, *arg, prefix, visited))
         }
-        TypeDesc::Tarrow { arg, ret, .. } => {
-            type_contains_path_prefix(ctx, arg.typ, prefix, visited)
-                || type_contains_path_prefix(ctx, *ret, prefix, visited)
-        }
+        TypeDesc::Tarrow { args, ret } => args
+            .iter()
+            .any(|arg| type_contains_path_prefix(ctx, arg.typ, prefix, visited))
+            || type_contains_path_prefix(ctx, *ret, prefix, visited),
         TypeDesc::Ttuple(items) => items
             .iter()
             .any(|item| type_contains_path_prefix(ctx, *item, prefix, visited)),
@@ -26458,14 +26433,12 @@ fn qualify_label_description_paths<'a>(
                     );
                 }
             }
-            TypeDesc::Tarrow { arg, ret, .. } => {
-                rewrite_direct_root_type_family_in_place(
-                    ctx,
-                    arg.typ,
-                    old_root_path,
-                    new_root_path,
-                    visited,
-                );
+            TypeDesc::Tarrow { args, ret } => {
+                for arg in args {
+                    rewrite_direct_root_type_family_in_place(
+                        ctx, arg.typ, old_root_path, new_root_path, visited,
+                    );
+                }
                 rewrite_direct_root_type_family_in_place(
                     ctx,
                     ret,
@@ -27502,8 +27475,10 @@ fn force_type_paths_for_lookup_from_type<'a>(
                 force_type_paths_for_lookup_from_type(ctx, env, pers_env, arg, seen);
             }
         }
-        TypeDesc::Tarrow { arg, ret, .. } => {
-            force_type_paths_for_lookup_from_type(ctx, env, pers_env, arg.typ, seen);
+        TypeDesc::Tarrow { args, ret } => {
+            for arg in args {
+                force_type_paths_for_lookup_from_type(ctx, env, pers_env, arg.typ, seen);
+            }
             force_type_paths_for_lookup_from_type(ctx, env, pers_env, ret, seen);
         }
         TypeDesc::Ttuple(args) | TypeDesc::Tpackage { args, .. } => {
@@ -28112,16 +28087,13 @@ fn qualify_module_local_type_paths_with_alias_lookup_in_place<'a>(
                 );
             }
         }
-        TypeDesc::Tarrow { arg, ret, .. } => {
-            qualify_module_local_type_paths_with_alias_lookup_in_place(
-                ctx,
-                env,
-                pers_env,
-                arg.typ,
-                module_access_path,
-                alias_target_lookup,
-                visited,
-            );
+        TypeDesc::Tarrow { args, ret } => {
+            for arg in args {
+                qualify_module_local_type_paths_with_alias_lookup_in_place(
+                    ctx, env, pers_env, arg.typ, module_access_path,
+                    alias_target_lookup, visited,
+                );
+            }
             qualify_module_local_type_paths_with_alias_lookup_in_place(
                 ctx,
                 env,

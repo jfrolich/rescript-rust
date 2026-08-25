@@ -161,16 +161,15 @@ pub enum TypeDesc {
     /// Type variable: `'a` or `'_a`
     Tvar(Option<String>),
 
-    /// Arrow (function) type: `arg -> ret`
+    /// N-ary arrow (function) type: `(arg1, ..., argN) -> ret`.
+    ///
+    /// Mirrors `compiler/ml/types.ml`, where `Tarrow` stores the complete
+    /// parameter list in one node rather than a chain of unary arrows.
     Tarrow {
-        /// The argument with its label
-        arg: TypeArg,
-        /// The return type
+        /// Arguments in source order.
+        args: Vec<TypeArg>,
+        /// The return type.
         ret: TypeExprRef,
-        /// Commutability flag
-        commutable: Commutable,
-        /// Function arity
-        arity: Option<i32>,
     },
 
     /// Tuple type: `(t1, t2, ...)`

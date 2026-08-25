@@ -314,7 +314,12 @@ where
         let desc = ctx.borrow_desc(ty);
         match &*desc {
             TypeDesc::Tvar(_) => Children::None,
-            TypeDesc::Tarrow { arg, ret, .. } => Children::Two(arg.typ, *ret),
+            // compiler/ml/btype.ml:258-260 visits every n-ary parameter, then the return.
+            TypeDesc::Tarrow { args, ret } => {
+                let mut children = args.iter().map(|arg| arg.typ).collect::<Vec<_>>();
+                children.push(*ret);
+                Children::Many(children)
+            }
             TypeDesc::Ttuple(types) => Children::Many(types.clone()),
             TypeDesc::Tconstr { args, .. } => Children::Many(args.clone()),
             TypeDesc::Tobject { fields, name, .. } => {

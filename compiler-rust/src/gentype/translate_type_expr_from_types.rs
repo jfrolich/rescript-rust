@@ -481,70 +481,26 @@ pub fn translate_arrow_type(
             rev_args,
             &t,
         ),
-        TypeDesc::Tarrow {
-            arg, ret, arity, ..
-        } if matches!(arg.lbl, ArgLabel::Nolabel) && (arity.is_none() || rev_args.is_empty()) => {
-            let Translation {
-                dependencies,
-                type_,
-            } = translateTypeExprFromTypes_(ctx, config, type_vars_gen, type_env, &arg.typ);
-            let mut next_rev_deps = dependencies;
-            next_rev_deps.extend(rev_arg_deps);
-            let mut next_rev_args = vec![(Label::Nolabel, type_)];
-            next_rev_args.extend(rev_args);
-            translate_arrow_type(
-                ctx,
-                config,
-                type_vars_gen,
-                type_env,
-                next_rev_deps,
-                next_rev_args,
-                &ret,
-            )
-        }
-        TypeDesc::Tarrow {
-            arg, ret, arity, ..
-        } if !matches!(arg.lbl, ArgLabel::Nolabel) && (arity.is_none() || rev_args.is_empty()) => {
-            match remove_option(ctx, &arg.lbl, &arg.typ) {
-                None => {
-                    let Translation {
-                        dependencies,
-                        type_: type1,
-                    } = translateTypeExprFromTypes_(ctx, config, type_vars_gen, type_env, &arg.typ);
-                    let mut next_rev_deps = dependencies;
-                    next_rev_deps.extend(rev_arg_deps);
-                    let mut next_rev_args = vec![(Label::Label(label_name(&arg.lbl)), type1)];
-                    next_rev_args.extend(rev_args);
-                    translate_arrow_type(
-                        ctx,
-                        config,
-                        type_vars_gen,
-                        type_env,
-                        next_rev_deps,
-                        next_rev_args,
-                        &ret,
-                    )
-                }
-                Some((lbl, t1)) => {
-                    let Translation {
-                        dependencies,
-                        type_: type1,
-                    } = translateTypeExprFromTypes_(ctx, config, type_vars_gen, type_env, &t1);
-                    let mut next_rev_deps = dependencies;
-                    next_rev_deps.extend(rev_arg_deps);
-                    let mut next_rev_args = vec![(Label::OptLabel(lbl), type1)];
-                    next_rev_args.extend(rev_args);
-                    translate_arrow_type(
-                        ctx,
-                        config,
-                        type_vars_gen,
-                        type_env,
-                        next_rev_deps,
-                        next_rev_args,
-                        &ret,
-                    )
-                }
+        TypeDesc::Tarrow { args, ret } => {
+            let mut next_rev_deps = rev_arg_deps;
+            let mut next_rev_args = rev_args;
+            for arg in args {
+                let (label, typ) = match remove_option(ctx, &arg.lbl, &arg.typ) {
+                    Some((lbl, typ)) => (Label::OptLabel(lbl), typ),
+                    None if matches!(arg.lbl, ArgLabel::Nolabel) => (Label::Nolabel, arg.typ),
+                    None => (Label::Label(label_name(&arg.lbl)), arg.typ),
+                };
+                let Translation { dependencies, type_ } =
+                    translateTypeExprFromTypes_(ctx, config, type_vars_gen, type_env, &typ);
+                let mut deps = dependencies;
+                deps.extend(next_rev_deps);
+                next_rev_deps = deps;
+                next_rev_args.insert(0, (label, type_));
             }
+            translate_arrow_type(
+                ctx, config, type_vars_gen, type_env,
+                next_rev_deps, next_rev_args, &ret,
+            )
         }
         _ => {
             let Translation {

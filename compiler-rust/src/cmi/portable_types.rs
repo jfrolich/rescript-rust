@@ -59,10 +59,8 @@ pub struct PortableTypeEntry {
 pub enum PortableTypeDesc {
     Tvar(Option<String>),
     Tarrow {
-        arg_label: ArgLabel,
-        arg: usize,
+        args: Vec<(ArgLabel, usize)>,
         ret: usize,
-        arity: Option<i32>,
     },
     Ttuple(Vec<usize>),
     Tconstr {
@@ -248,16 +246,13 @@ fn hash_portable_desc(
     std::mem::discriminant(desc).hash(hasher);
     match desc {
         PortableTypeDesc::Tvar(name) => name.hash(hasher),
-        PortableTypeDesc::Tarrow {
-            arg_label,
-            arg,
-            ret,
-            arity,
-        } => {
-            arg_label.hash(hasher);
-            hash_type_ref(hasher, *arg, entries, visiting);
+        PortableTypeDesc::Tarrow { args, ret } => {
+            args.len().hash(hasher);
+            for (label, arg) in args {
+                label.hash(hasher);
+                hash_type_ref(hasher, *arg, entries, visiting);
+            }
             hash_type_ref(hasher, *ret, entries, visiting);
-            arity.hash(hasher);
         }
         PortableTypeDesc::Ttuple(elems) => hash_type_refs(hasher, elems, entries, visiting),
         PortableTypeDesc::Tconstr { path, args } => {
@@ -641,13 +636,12 @@ impl<'a> TypeGraphSerializer<'a> {
     fn serialize_desc(&mut self, desc: &TypeDesc) -> PortableTypeDesc {
         match desc {
             TypeDesc::Tvar(name) => PortableTypeDesc::Tvar(name.clone()),
-            TypeDesc::Tarrow {
-                arg, ret, arity, ..
-            } => PortableTypeDesc::Tarrow {
-                arg_label: arg.lbl.clone(),
-                arg: self.serialize_type(arg.typ),
+            TypeDesc::Tarrow { args, ret } => PortableTypeDesc::Tarrow {
+                args: args
+                    .iter()
+                    .map(|arg| (arg.lbl.clone(), self.serialize_type(arg.typ)))
+                    .collect(),
                 ret: self.serialize_type(*ret),
-                arity: *arity,
             },
             TypeDesc::Ttuple(types) => {
                 PortableTypeDesc::Ttuple(types.iter().map(|t| self.serialize_type(*t)).collect())
@@ -942,19 +936,15 @@ fn internalize_signature(
 fn internalize_desc(desc: &PortableTypeDesc, remap: &[TypeExprRef], ctx: &TypeContext) -> TypeDesc {
     match desc {
         PortableTypeDesc::Tvar(name) => TypeDesc::Tvar(name.clone()),
-        PortableTypeDesc::Tarrow {
-            arg_label,
-            arg,
-            ret,
-            arity,
-        } => TypeDesc::Tarrow {
-            arg: TypeArg {
-                lbl: arg_label.clone(),
-                typ: remap[*arg],
-            },
+        PortableTypeDesc::Tarrow { args, ret } => TypeDesc::Tarrow {
+            args: args
+                .iter()
+                .map(|(lbl, typ)| TypeArg {
+                    lbl: lbl.clone(),
+                    typ: remap[*typ],
+                })
+                .collect(),
             ret: remap[*ret],
-            commutable: Commutable::Cok,
-            arity: *arity,
         },
         PortableTypeDesc::Ttuple(types) => {
             TypeDesc::Ttuple(types.iter().map(|&i| remap[i]).collect())

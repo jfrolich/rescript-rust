@@ -359,19 +359,20 @@ pub fn build_type_info<'a>(
                 .collect(),
         },
 
-        TypeDesc::Tarrow { arg, ret, .. } => {
-            let mut args = vec![build_type_info(ctx, env, arg.typ, visited)];
+        TypeDesc::Tarrow { args, ret } => {
+            let mut args = args
+                .iter()
+                .map(|arg| build_type_info(ctx, env, arg.typ, visited))
+                .collect::<Vec<_>>();
             let mut current_ret = *ret;
             loop {
                 let ret_repr = ctx.repr(current_ret);
                 let ret_desc = ctx.get_desc(ret_repr);
                 match &*ret_desc {
-                    TypeDesc::Tarrow {
-                        arg: next_arg,
-                        ret: next_ret,
-                        ..
-                    } => {
-                        args.push(build_type_info(ctx, env, next_arg.typ, visited));
+                    TypeDesc::Tarrow { args: next_args, ret: next_ret } => {
+                        args.extend(next_args.iter().map(|arg| {
+                            build_type_info(ctx, env, arg.typ, visited)
+                        }));
                         current_ret = *next_ret;
                     }
                     _ => break,

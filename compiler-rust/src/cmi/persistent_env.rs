@@ -4111,8 +4111,8 @@ fn substitute_type_expr_path(
                     work_stack.push(arg);
                 }
             }
-            TypeDesc::Tarrow { arg, ret, .. } => {
-                work_stack.push(arg.typ);
+            TypeDesc::Tarrow { args, ret } => {
+                work_stack.extend(args.iter().map(|arg| arg.typ));
                 work_stack.push(*ret);
             }
             TypeDesc::Ttuple(types) => {
@@ -4441,8 +4441,10 @@ fn rewrite_type_expr_prefix(
                 rewrite_type_expr_prefix(arg, old_name, new_prefix, ctx, visited);
             }
         }
-        TypeDesc::Tarrow { arg, ret, .. } => {
-            rewrite_type_expr_prefix(arg.typ, old_name, new_prefix, ctx, visited);
+        TypeDesc::Tarrow { args, ret } => {
+            for arg in args {
+                rewrite_type_expr_prefix(arg.typ, old_name, new_prefix, ctx, visited);
+            }
             rewrite_type_expr_prefix(*ret, old_name, new_prefix, ctx, visited);
         }
         TypeDesc::Ttuple(types) => {
@@ -5100,8 +5102,10 @@ fn rewrite_type_expr_by_path_prefix(
                 rewrite_type_expr_by_path_prefix(arg, old_prefix, new_prefix, ctx, visited);
             }
         }
-        TypeDesc::Tarrow { arg, ret, .. } => {
-            rewrite_type_expr_by_path_prefix(arg.typ, old_prefix, new_prefix, ctx, visited);
+        TypeDesc::Tarrow { args, ret } => {
+            for arg in args {
+                rewrite_type_expr_by_path_prefix(arg.typ, old_prefix, new_prefix, ctx, visited);
+            }
             rewrite_type_expr_by_path_prefix(*ret, old_prefix, new_prefix, ctx, visited);
         }
         TypeDesc::Ttuple(types) => {
@@ -5212,8 +5216,10 @@ fn rewrite_type_expr_by_path_prefixes(
                 rewrite_type_expr_by_path_prefixes(arg, prefixes, ctx, visited);
             }
         }
-        TypeDesc::Tarrow { arg, ret, .. } => {
-            rewrite_type_expr_by_path_prefixes(arg.typ, prefixes, ctx, visited);
+        TypeDesc::Tarrow { args, ret } => {
+            for arg in args {
+                rewrite_type_expr_by_path_prefixes(arg.typ, prefixes, ctx, visited);
+            }
             rewrite_type_expr_by_path_prefixes(*ret, prefixes, ctx, visited);
         }
         TypeDesc::Ttuple(types) => {
@@ -5646,8 +5652,8 @@ fn add_signature_to_env_with_options(
                         work_stack.push(*arg);
                     }
                 }
-                TypeDesc::Tarrow { arg, ret, .. } => {
-                    work_stack.push(arg.typ);
+                TypeDesc::Tarrow { args, ret } => {
+                    work_stack.extend(args.iter().map(|arg| arg.typ));
                     work_stack.push(*ret);
                 }
                 TypeDesc::Ttuple(items) => {

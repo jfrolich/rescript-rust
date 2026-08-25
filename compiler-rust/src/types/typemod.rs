@@ -857,7 +857,7 @@ fn get_primitive_arity_from_type_depth(
     }
     let repr = ctx.repr(ty);
     match &*ctx.get_desc(repr) {
-        crate::types::TypeDesc::Tarrow { arity, .. } => *arity,
+        crate::types::TypeDesc::Tarrow { args, .. } => Some(args.len() as i32),
         crate::types::TypeDesc::Tlink(next) | crate::types::TypeDesc::Tsubst(next) => {
             get_primitive_arity_from_type_depth(ctx, env, *next, depth + 1)
         }
@@ -1276,17 +1276,13 @@ fn rewrite_included_type_paths_to_local(
                 );
             }
         }
-        TypeDesc::Tarrow { arg, ret, .. } => {
-            rewrite_included_type_paths_to_local(
-                ctx,
-                arg.typ,
-                include_root_path,
-                include_alias_heads,
-                local_type_ids,
-                local_module_ids,
-                local_modtype_ids,
-                visited,
-            );
+        TypeDesc::Tarrow { args, ret } => {
+            for arg in args {
+                rewrite_included_type_paths_to_local(
+                    ctx, arg.typ, include_root_path, include_alias_heads,
+                    local_type_ids, local_module_ids, local_modtype_ids, visited,
+                );
+            }
             rewrite_included_type_paths_to_local(
                 ctx,
                 *ret,
@@ -1823,8 +1819,10 @@ fn rewrite_module_prefix_in_type(
                 rewrite_module_prefix_in_type(arg, old_param, new_prefix, ctx, visited);
             }
         }
-        TypeDesc::Tarrow { arg, ret, .. } => {
-            rewrite_module_prefix_in_type(arg.typ, old_param, new_prefix, ctx, visited);
+        TypeDesc::Tarrow { args, ret } => {
+            for arg in args {
+                rewrite_module_prefix_in_type(arg.typ, old_param, new_prefix, ctx, visited);
+            }
             rewrite_module_prefix_in_type(*ret, old_param, new_prefix, ctx, visited);
         }
         TypeDesc::Ttuple(types) => {
@@ -2399,8 +2397,10 @@ fn rewrite_module_aliases_in_type(
                 rewrite_module_aliases_in_type(*arg, old_param, arg_aliases, ctx, visited);
             }
         }
-        TypeDesc::Tarrow { arg, ret, .. } => {
-            rewrite_module_aliases_in_type(arg.typ, old_param, arg_aliases, ctx, visited);
+        TypeDesc::Tarrow { args, ret } => {
+            for arg in args {
+                rewrite_module_aliases_in_type(arg.typ, old_param, arg_aliases, ctx, visited);
+            }
             rewrite_module_aliases_in_type(*ret, old_param, arg_aliases, ctx, visited);
         }
         TypeDesc::Ttuple(tys) => {
@@ -3012,18 +3012,24 @@ fn expand_record_spread_label(
                     ty
                 }
             }
-            crate::types::TypeDesc::Tarrow {
-                arg, ret, arity, ..
-            } => {
-                let new_arg = substitute_type_params(ctx, arg.typ, params, args, cache);
+            crate::types::TypeDesc::Tarrow { args: arrow_args, ret } => {
+                let new_args = arrow_args
+                    .iter()
+                    .map(|arg| crate::types::TypeArg::new(
+                        arg.lbl.clone(),
+                        substitute_type_params(ctx, arg.typ, params, args, cache),
+                    ))
+                    .collect::<Vec<_>>();
                 let new_ret = substitute_type_params(ctx, *ret, params, args, cache);
-                if new_arg == arg.typ && new_ret == *ret {
+                if new_args.iter().zip(arrow_args).all(|(a, b)| a.typ == b.typ)
+                    && new_ret == *ret
+                {
                     ty
                 } else {
                     with_original_level(
                         ctx,
                         ty,
-                        ctx.new_arrow(arg.lbl.clone(), new_arg, new_ret, *arity),
+                        ctx.new_type(TypeDesc::Tarrow { args: new_args, ret: new_ret }),
                     )
                 }
             }
@@ -6006,19 +6012,16 @@ fn type_exprs_equal_for_abbrev_recursion(
     let right_desc = (*ctx.get_desc(right)).clone();
     match (left_desc, right_desc) {
         (
-            TypeDesc::Tarrow {
-                arg: left_arg,
-                ret: left_ret,
-                ..
-            },
-            TypeDesc::Tarrow {
-                arg: right_arg,
-                ret: right_ret,
-                ..
-            },
+            TypeDesc::Tarrow { args: left_args, ret: left_ret },
+            TypeDesc::Tarrow { args: right_args, ret: right_ret },
         ) => {
-            arg_labels_equal_for_abbrev_recursion(&left_arg.lbl, &right_arg.lbl)
-                && type_exprs_equal_for_abbrev_recursion(ctx, left_arg.typ, right_arg.typ, seen)
+            left_args.len() == right_args.len()
+                && left_args.iter().zip(&right_args).all(|(left, right)| {
+                    arg_labels_equal_for_abbrev_recursion(&left.lbl, &right.lbl)
+                        && type_exprs_equal_for_abbrev_recursion(
+                            ctx, left.typ, right.typ, seen,
+                        )
+                })
                 && type_exprs_equal_for_abbrev_recursion(ctx, left_ret, right_ret, seen)
         }
         (TypeDesc::Ttuple(left_items), TypeDesc::Ttuple(right_items)) => {
@@ -7874,8 +7877,9 @@ fn type_expr_uses_path(
         }
 
         match &*ctx.get_desc(ty) {
-            TypeDesc::Tarrow { arg, ret, .. } => {
-                loop_(ctx, arg.typ, path_matches, seen) || loop_(ctx, *ret, path_matches, seen)
+            TypeDesc::Tarrow { args, ret } => {
+                args.iter().any(|arg| loop_(ctx, arg.typ, path_matches, seen))
+                    || loop_(ctx, *ret, path_matches, seen)
             }
             TypeDesc::Ttuple(items) => items
                 .iter()
@@ -11980,8 +11984,10 @@ fn rewrite_package_freshened_type_expr(
                 rewrite_package_freshened_type_expr(ctx, *arg, fresh_type_ids, visited);
             }
         }
-        TypeDesc::Tarrow { arg, ret, .. } => {
-            rewrite_package_freshened_type_expr(ctx, arg.typ, fresh_type_ids, visited);
+        TypeDesc::Tarrow { args, ret } => {
+            for arg in args {
+                rewrite_package_freshened_type_expr(ctx, arg.typ, fresh_type_ids, visited);
+            }
             rewrite_package_freshened_type_expr(ctx, *ret, fresh_type_ids, visited);
         }
         TypeDesc::Ttuple(types) => {
@@ -12557,8 +12563,10 @@ fn apply_with_type_constraints_to_module_type<'b>(
                     }
                 }
             }
-            TypeDesc::Tarrow { arg, ret, .. } => {
-                rewrite_type_with_substs(ctx, arg.typ, substs, cache, visited);
+            TypeDesc::Tarrow { args, ret } => {
+                for arg in args {
+                    rewrite_type_with_substs(ctx, arg.typ, substs, cache, visited);
+                }
                 rewrite_type_with_substs(ctx, ret, substs, cache, visited);
             }
             TypeDesc::Ttuple(types) | TypeDesc::Tpackage { args: types, .. } => {
@@ -14105,15 +14113,12 @@ fn rewrite_functor_param_type_paths_in_type(
                 }
             }
         }
-        TypeDesc::Tarrow { arg, ret, .. } => {
-            rewrite_functor_param_type_paths_in_type(
-                arg.typ,
-                param_name,
-                manifests,
-                ctx,
-                visited,
-                manifest_subst_cache,
-            );
+        TypeDesc::Tarrow { args, ret } => {
+            for arg in args {
+                rewrite_functor_param_type_paths_in_type(
+                    arg.typ, param_name, manifests, ctx, visited, manifest_subst_cache,
+                );
+            }
             rewrite_functor_param_type_paths_in_type(
                 ret,
                 param_name,
@@ -16775,8 +16780,10 @@ fn strip_self_module_prefix_in_sig(
                     );
                 }
             }
-            TypeDesc::Tarrow { arg, ret, .. } => {
-                rewrite_type(arg.typ, module_id, direct_items, type_ctx, visited);
+            TypeDesc::Tarrow { args, ret } => {
+                for arg in args {
+                    rewrite_type(arg.typ, module_id, direct_items, type_ctx, visited);
+                }
                 rewrite_type(*ret, module_id, direct_items, type_ctx, visited);
             }
             TypeDesc::Ttuple(items) => {
@@ -18015,10 +18022,10 @@ fn find_unbound_type_var_name(
         TypeDesc::Tvar(name) | TypeDesc::Tunivar(name) => {
             (!allowed.contains(&ty)).then(|| type_var_report_name(name))
         }
-        TypeDesc::Tarrow { arg, ret, .. } => {
-            find_unbound_type_var_name(ctx, arg.typ, allowed, visited)
-                .or_else(|| find_unbound_type_var_name(ctx, *ret, allowed, visited))
-        }
+        TypeDesc::Tarrow { args, ret } => args
+            .iter()
+            .find_map(|arg| find_unbound_type_var_name(ctx, arg.typ, allowed, visited))
+            .or_else(|| find_unbound_type_var_name(ctx, *ret, allowed, visited)),
         TypeDesc::Ttuple(types) => types
             .iter()
             .find_map(|ty| find_unbound_type_var_name(ctx, *ty, allowed, visited)),

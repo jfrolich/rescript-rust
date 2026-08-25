@@ -7694,10 +7694,10 @@ fn escaped_constructor_path_in_type(
             }
             None
         }
-        TypeDesc::Tarrow { arg, ret, .. } => {
-            escaped_constructor_path_in_type(type_ctx, arg.typ, var_level, seen)
-                .or_else(|| escaped_constructor_path_in_type(type_ctx, *ret, var_level, seen))
-        }
+        TypeDesc::Tarrow { args, ret } => args
+            .iter()
+            .find_map(|arg| escaped_constructor_path_in_type(type_ctx, arg.typ, var_level, seen))
+            .or_else(|| escaped_constructor_path_in_type(type_ctx, *ret, var_level, seen)),
         TypeDesc::Tlink(next) | TypeDesc::Tsubst(next) | TypeDesc::Tpoly { body: next, .. } => {
             escaped_constructor_path_in_type(type_ctx, *next, var_level, seen)
         }
@@ -9946,9 +9946,7 @@ fn expr_type_clash_uncurried_arity_mismatch(
 
 fn uncurried_arrow_arity(type_ctx: &TypeContext, ty: TypeExprRef) -> Option<i32> {
     match &*type_ctx.get_desc(type_ctx.repr(ty)) {
-        TypeDesc::Tarrow {
-            arity: Some(arity), ..
-        } => Some(*arity),
+        TypeDesc::Tarrow { args, .. } => Some(args.len() as i32),
         _ => None,
     }
 }
@@ -10326,8 +10324,8 @@ fn collect_expected_function_arguments(
         }
 
         match &*type_ctx.get_desc(repr) {
-            TypeDesc::Tarrow { arg, ret, .. } => {
-                args.push((arg.lbl.clone(), arg.typ));
+            TypeDesc::Tarrow { args: params, ret } => {
+                args.extend(params.iter().map(|arg| (arg.lbl.clone(), arg.typ)));
                 current = *ret;
             }
             TypeDesc::Tlink(next) | TypeDesc::Tsubst(next) => current = *next,
@@ -10611,8 +10609,8 @@ fn collect_function_arg_labels(
         }
 
         match &*type_ctx.get_desc(current) {
-            TypeDesc::Tarrow { arg, ret, .. } => {
-                labels.push(arg.lbl.clone());
+            TypeDesc::Tarrow { args, ret } => {
+                labels.extend(args.iter().map(|arg| arg.lbl.clone()));
                 current = *ret;
             }
             _ => break,
@@ -10930,13 +10928,11 @@ impl<'a> TypeExprPrinter<'a> {
             }
 
             match &*self.type_ctx.get_desc(repr) {
-                TypeDesc::Tarrow {
-                    arg, ret, arity, ..
-                } if arity.is_none() || args.is_empty() => {
-                    args.push((
+                TypeDesc::Tarrow { args: params, ret } => {
+                    args.extend(params.iter().map(|arg| (
                         self.format_arrow_arg(&arg.lbl, arg.typ),
                         !matches!(arg.lbl, TypeArgLabel::Nolabel),
-                    ));
+                    )));
                     current = *ret;
                 }
                 TypeDesc::Tlink(next) | TypeDesc::Tsubst(next) => current = *next,
@@ -12987,11 +12983,13 @@ fn dump_all_tvars(
             }
             return;
         }
-        TypeDesc::Tarrow { arg, ret, .. } => {
-            let (at, r) = (arg.typ, *ret);
+        TypeDesc::Tarrow { args, ret } => {
+            let (args, ret) = (args.clone(), *ret);
             drop(desc);
-            dump_all_tvars(ctx, at, debug, seen, depth + 1);
-            dump_all_tvars(ctx, r, debug, seen, depth + 1);
+            for arg in args {
+                dump_all_tvars(ctx, arg.typ, debug, seen, depth + 1);
+            }
+            dump_all_tvars(ctx, ret, debug, seen, depth + 1);
             return;
         }
         _ => {}
@@ -13161,19 +13159,16 @@ fn moregen_link_impl(
             }
         }
         (
-            TypeDesc::Tarrow {
-                arg: a1, ret: r1, ..
-            },
-            TypeDesc::Tarrow {
-                arg: a2, ret: r2, ..
-            },
-        ) => {
+            TypeDesc::Tarrow { args: a1, ret: r1 },
+            TypeDesc::Tarrow { args: a2, ret: r2 },
+        ) if a1.len() == a2.len() => {
             moregen_debug!(debug, "  Tarrow match");
-            let (a1t, r1) = (a1.typ, *r1);
-            let (a2t, r2) = (a2.typ, *r2);
+            let (a1, a2, r1, r2) = (a1.clone(), a2.clone(), *r1, *r2);
             drop(impl_desc);
             drop(iface_desc);
-            moregen_link_impl(ctx, a1t, a2t, visited, debug, false);
+            for (a1, a2) in a1.iter().zip(&a2) {
+                moregen_link_impl(ctx, a1.typ, a2.typ, visited, debug, false);
+            }
             moregen_link_impl(ctx, r1, r2, visited, debug, allow_generic_anonymous);
         }
         (TypeDesc::Ttuple(t1), TypeDesc::Ttuple(t2)) if t1.len() == t2.len() => {

@@ -1069,8 +1069,8 @@ impl<'a> TypeExprErrorPrinter<'a> {
             }
 
             match &*self.type_ctx.get_desc(repr) {
-                TypeDesc::Tarrow { arg, ret, .. } => {
-                    args.push(self.format_arrow_arg(&arg.lbl, arg.typ));
+                TypeDesc::Tarrow { args: params, ret } => {
+                    args.extend(params.iter().map(|arg| self.format_arrow_arg(&arg.lbl, arg.typ)));
                     current = *ret;
                 }
                 TypeDesc::Tlink(next) | TypeDesc::Tsubst(next) => current = *next,
@@ -2888,8 +2888,10 @@ fn rewrite_substituted_type_paths<'a>(
                 );
             }
         }
-        TypeDesc::Tarrow { arg, ret, .. } => {
-            rewrite_substituted_type_paths(type_ctx, arg.typ, subst, seen);
+        TypeDesc::Tarrow { args, ret } => {
+            for arg in args {
+                rewrite_substituted_type_paths(type_ctx, arg.typ, subst, seen);
+            }
             rewrite_substituted_type_paths(type_ctx, *ret, subst, seen);
         }
         TypeDesc::Ttuple(items) => {
@@ -3996,26 +3998,16 @@ fn type_exprs_equal_for_inclusion_inner(
         (TypeDesc::Tvar(impl_name), TypeDesc::Tvar(sig_name))
         | (TypeDesc::Tunivar(impl_name), TypeDesc::Tunivar(sig_name)) => impl_name == sig_name,
         (
-            TypeDesc::Tarrow {
-                arg: impl_arg,
-                ret: impl_ret,
-                ..
-            },
-            TypeDesc::Tarrow {
-                arg: sig_arg,
-                ret: sig_ret,
-                ..
-            },
+            TypeDesc::Tarrow { args: impl_args, ret: impl_ret },
+            TypeDesc::Tarrow { args: sig_args, ret: sig_ret },
         ) => {
-            arg_labels_equal(&impl_arg.lbl, &sig_arg.lbl)
-                && type_exprs_equal_for_inclusion_inner(
-                    type_ctx,
-                    env,
-                    param_map,
-                    impl_arg.typ,
-                    sig_arg.typ,
-                    seen,
-                )
+            impl_args.len() == sig_args.len()
+                && impl_args.iter().zip(sig_args).all(|(impl_arg, sig_arg)| {
+                    arg_labels_equal(&impl_arg.lbl, &sig_arg.lbl)
+                        && type_exprs_equal_for_inclusion_inner(
+                            type_ctx, env, param_map, impl_arg.typ, sig_arg.typ, seen,
+                        )
+                })
                 && type_exprs_equal_for_inclusion_inner(
                     type_ctx, env, param_map, *impl_ret, *sig_ret, seen,
                 )

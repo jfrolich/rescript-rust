@@ -1274,14 +1274,11 @@ impl TypeContext {
         ret_type: TypeExprRef,
         arity: Option<i32>,
     ) -> TypeExprRef {
-        let commutable = self.alloc_commutable(Commutable::Cok);
-        self.new_arrow_with_commutable(
-            arg_label,
-            arg_type,
-            ret_type,
-            Commutable::Clink(commutable),
-            arity,
-        )
+        let _ = arity;
+        self.new_type(TypeDesc::Tarrow {
+            args: vec![TypeArg::new(arg_label, arg_type)],
+            ret: ret_type,
+        })
     }
 
     pub(crate) fn new_arrow_with_commutable(
@@ -1289,15 +1286,10 @@ impl TypeContext {
         arg_label: ArgLabel,
         arg_type: TypeExprRef,
         ret_type: TypeExprRef,
-        commutable: Commutable,
+        _commutable: Commutable,
         arity: Option<i32>,
     ) -> TypeExprRef {
-        self.new_type(TypeDesc::Tarrow {
-            arg: TypeArg::new(arg_label, arg_type),
-            ret: ret_type,
-            commutable,
-            arity,
-        })
+        self.new_arrow(arg_label, arg_type, ret_type, arity)
     }
 
     /// Create an unlabeled arrow type.
@@ -1392,12 +1384,10 @@ impl TypeContext {
         ret_type: TypeExprRef,
         arity: Option<i32>,
     ) -> TypeExprRef {
-        let commutable = self.alloc_commutable(Commutable::Cok);
+        let _ = arity;
         self.new_generic_type(TypeDesc::Tarrow {
-            arg: TypeArg::new(arg_label, arg_type),
+            args: vec![TypeArg::new(arg_label, arg_type)],
             ret: ret_type,
-            commutable: Commutable::Clink(commutable),
-            arity,
         })
     }
 

@@ -570,42 +570,15 @@ impl<'a> SigReadContext<'a> {
                     TypeDesc::Tvar(name)
                 }
                 1 => {
-                    // Tarrow(arg list, type_expr) - n-ary since upstream removed
-                    // the separate commutable/arity fields (Caml1999I023).
-                    // Translate to nested unary Tarrows internally; labels and
-                    // order are preserved, so arity = nesting depth.
-                    let args: Vec<TypeArg> = fields[0]
+                    // Caml1999I023 stores the complete parameter list directly;
+                    // keep that allocation shape rather than rebuilding unary nodes.
+                    let args = fields[0]
                         .as_list()
                         .iter()
                         .map(|arg| self.read_arg(arg))
                         .collect();
-                    let mut ret = self.read_type_expr(&fields[1]);
-                    // Fold all arguments except the first into intermediate arrows
-                    // (innermost first); the first argument becomes the desc of the
-                    // cached placeholder type_expr.
-                    for i in (1..args.len()).rev() {
-                        let arrow = self.ctx.new_generic_var(None);
-                        self.ctx.set_desc(
-                            arrow,
-                            TypeDesc::Tarrow {
-                                arg: args[i].clone(),
-                                ret,
-                                commutable: Commutable::Cok,
-                                arity: None,
-                            },
-                        );
-                        ret = arrow;
-                    }
-                    if args.is_empty() {
-                        // Defensive: upstream keeps the invariant params <> []
-                        return TypeDesc::Tnil;
-                    }
-                    TypeDesc::Tarrow {
-                        arg: args[0].clone(),
-                        ret,
-                        commutable: Commutable::Cok,
-                        arity: None,
-                    }
+                    let ret = self.read_type_expr(&fields[1]);
+                    TypeDesc::Tarrow { args, ret }
                 }
                 2 => {
                     // Ttuple(type_expr list)
@@ -955,8 +928,10 @@ fn debug_loaded_type_refs(ctx: &TypeContext, ty: TypeExprRef) -> String {
         drop(desc);
 
         match &*ctx.get_desc(ty) {
-            TypeDesc::Tarrow { arg, ret, .. } => {
-                walk(ctx, arg.typ, out, seen);
+            TypeDesc::Tarrow { args, ret } => {
+                for arg in args {
+                    walk(ctx, arg.typ, out, seen);
+                }
                 walk(ctx, *ret, out, seen);
             }
             TypeDesc::Ttuple(items) => {

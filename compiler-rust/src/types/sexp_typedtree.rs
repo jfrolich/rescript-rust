@@ -524,21 +524,18 @@ fn sexp_type_expr_body_inline(
         TypeDesc::Tvar(_) | TypeDesc::Tunivar(_) => {
             unreachable!("variable nodes handled before body serialization")
         }
-        TypeDesc::Tarrow {
-            arg, ret, arity, ..
-        } => {
-            let arg_sexp = sexp_type_expr_inline(arena, ctx, state, arg.typ);
-            let ret_sexp = sexp_type_expr_inline(arena, ctx, state, *ret);
-            Sexp::list(vec![
-                Sexp::atom("Tarrow"),
-                sexp_type_arg_label(&arg.lbl),
-                arg_sexp,
-                ret_sexp,
-                match arity {
-                    Some(n) => Sexp::list(vec![Sexp::atom("Some"), Sexp::atom(&n.to_string())]),
-                    None => Sexp::atom("None"),
-                },
-            ])
+        TypeDesc::Tarrow { args, ret } => {
+            // compiler/ml/sexp_typedtree.ml emits each argument as
+            // [arg_label; typ], followed by the return type.
+            let mut items = vec![Sexp::atom("Tarrow")];
+            for arg in args {
+                items.push(Sexp::list(vec![
+                    sexp_type_arg_label(&arg.lbl),
+                    sexp_type_expr_inline(arena, ctx, state, arg.typ),
+                ]));
+            }
+            items.push(sexp_type_expr_inline(arena, ctx, state, *ret));
+            Sexp::list(items)
         }
         TypeDesc::Ttuple(types) => {
             let mut items = vec![Sexp::atom("Ttuple")];

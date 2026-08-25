@@ -2293,8 +2293,10 @@ impl<'a> RawLambdaConverter<'a> {
         env: &crate::types::env::Env,
     ) -> Option<(TypeExprRef, TypeExprRef)> {
         let ty = self.type_ctx.repr(ty);
+        if let Some(parts) = crate::types::ctype::split_arrow(self.type_ctx, ty) {
+            return Some(parts);
+        }
         match &*self.type_ctx.get_desc(ty) {
-            TypeDesc::Tarrow { arg, ret, .. } => Some((arg.typ, *ret)),
             TypeDesc::Tlink(next) | TypeDesc::Tsubst(next) => {
                 self.is_function_type_with_env(*next, env)
             }
@@ -2322,12 +2324,13 @@ impl<'a> RawLambdaConverter<'a> {
         env: &crate::types::env::Env,
     ) -> Option<(TypeExprRef, TypeExprRef)> {
         let ty = self.type_ctx.repr(ty);
+        if let Some((label, arg, ret)) =
+            crate::types::ctype::split_arrow_with_label(self.type_ctx, ty)
+        {
+            return matches!(label, crate::types::asttypes::ArgLabel::Nolabel)
+                .then_some((arg, ret));
+        }
         match &*self.type_ctx.get_desc(ty) {
-            TypeDesc::Tarrow { arg, ret, .. }
-                if matches!(arg.lbl, crate::types::asttypes::ArgLabel::Nolabel) =>
-            {
-                Some((arg.typ, *ret))
-            }
             TypeDesc::Tlink(next) | TypeDesc::Tsubst(next) => {
                 self.is_nolabel_function_type_with_env(*next, env)
             }
@@ -2350,7 +2353,7 @@ impl<'a> RawLambdaConverter<'a> {
     ) -> Option<i32> {
         let repr = self.type_ctx.repr(ty);
         match &*self.type_ctx.get_desc(repr) {
-            TypeDesc::Tarrow { arity, .. } => *arity,
+            TypeDesc::Tarrow { args, .. } => Some(args.len() as i32),
             TypeDesc::Tlink(next) | TypeDesc::Tsubst(next) => {
                 self.get_function_arity_from_type(env, *next)
             }
