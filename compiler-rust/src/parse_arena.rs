@@ -526,7 +526,7 @@ pub struct ParseArena {
     /// Pattern and expression contexts get separate Lidents to match OCaml's
     /// per-compilation-unit CSE behavior.
     static_list_lidents: StaticListLidents,
-    /// Pre-allocated static Longident indices for Array.set/get/Belt.Array.concatMany.
+    /// Pre-allocated static Longident indices for array access and spread lowering.
     static_array_lidents: StaticArrayLidents,
     /// Pre-allocated `Ldot(Lident "Stdlib_RegExp", "t")` for `%re` lowering.
     /// OCaml uses `Ast_literal.Lid.regexp_id` as a module-level constant.

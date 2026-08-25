@@ -3273,7 +3273,7 @@ fn parse_tuple_expr(p: &mut Parser<'_>, start_pos_idx: PosIdx, first: Expression
 
 /// Parse an array expression [e1, e2, ...].
 /// - `[a, b, c]` becomes `Pexp_array(Box::new([a, b, c]))`
-/// - `[...xs, a, b]` becomes `Belt.Array.concatMany([xs, [a, b]])`
+/// - `[...xs, a, b]` becomes `Primitive_array.spread([xs, [a, b]])`
 fn parse_array_expr(p: &mut Parser<'_>) -> Expression {
     let start_pos_idx = p.start_pos_idx();
     p.expect(Token::Lbracket);
@@ -3316,7 +3316,7 @@ fn parse_array_expr(p: &mut Parser<'_>) -> Expression {
         };
     }
 
-    // With spread: [...xs, a, b, ...ys, c] becomes Belt.Array.concatMany([xs, [a, b], ys, [c]])
+    // With spread: [...xs, a, b, ...ys, c] becomes Primitive_array.spread([xs, [a, b], ys, [c]])
     // Split into segments: each spread item becomes its own array element,
     // consecutive non-spread items become a single array
     let mut array_items: Vec<Expression> = vec![];
@@ -3350,7 +3350,7 @@ fn parse_array_expr(p: &mut Parser<'_>) -> Expression {
         });
     }
 
-    // Create Belt.Array.concatMany([...])
+    // Create Primitive_array.spread([...])
     let array_items_idx: Vec<ExprIdx> = array_items
         .into_iter()
         .map(|e| p.arena_mut().push_expr(e))
@@ -3361,7 +3361,7 @@ fn parse_array_expr(p: &mut Parser<'_>) -> Expression {
         pexp_attributes: Attributes::new(),
     };
 
-    // Use static pre-allocated Belt.Array.concatMany lident for sharing parity with OCaml
+    // Use static pre-allocated Primitive_array.spread lident for sharing parity with OCaml
     let lid_idx = p.arena().belt_array_concat_many_lid();
     let spread_idx = p.arena_mut().intern("res.spread");
     let concat_many = Expression {
@@ -3390,8 +3390,8 @@ fn parse_array_expr(p: &mut Parser<'_>) -> Expression {
 /// Parse a list expression list{e1, e2, ...} and lower to nested :: constructors.
 /// - `list{1, 2, 3}` becomes `1 :: (2 :: (3 :: []))`
 /// - `list{1, 2, ...rest}` becomes `1 :: (2 :: rest)`
-/// - `list{...xs, ...ys}` becomes `Belt.List.concatMany([xs, ys])`
-/// - `list{...xs, 1, ...ys}` becomes `Belt.List.concatMany([xs, 1 :: ys])`
+/// - `list{...xs, ...ys}` becomes `Primitive_list.spread([xs, ys])`
+/// - `list{...xs, 1, ...ys}` becomes `Primitive_list.spread([xs, 1 :: ys])`
 fn parse_list_expr(p: &mut Parser<'_>, start_pos_idx: PosIdx) -> Expression {
     // Token::List already consumed the opening '{'
     // Each item is (is_spread, expr, spread_start_pos)
@@ -3438,7 +3438,7 @@ fn parse_list_expr(p: &mut Parser<'_>, start_pos_idx: PosIdx) -> Expression {
             result
         }
         _ => {
-            // Multiple segments: use Belt.List.concatMany([...])
+            // Multiple segments: use Primitive_list.spread([...])
             // OCaml uses segment locations for sub-expressions
             let sub_exprs: Vec<ExprIdx> = segments
                 .into_iter()
@@ -3454,7 +3454,7 @@ fn parse_list_expr(p: &mut Parser<'_>, start_pos_idx: PosIdx) -> Expression {
                 pexp_attributes: Attributes::new(),
             };
 
-            // Use static pre-allocated Belt.List.concatMany lident for sharing parity with OCaml
+            // Use static pre-allocated Primitive_list.spread lident for sharing parity with OCaml
             let lid_idx = p.arena().belt_list_concat_many_lid();
             let spread_idx = p.arena_mut().intern("res.spread");
             let concat_many_ident = Expression {
