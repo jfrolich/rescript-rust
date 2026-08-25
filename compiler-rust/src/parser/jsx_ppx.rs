@@ -966,6 +966,15 @@ fn transform_react_component_binding(
         }
     };
 
+    // Match jsx_v4.ml: coerce generated non-forwardRef wrappers through the
+    // configured JSX module's component identity before restoring wrappers
+    // such as React.memo. ForwardRef already performs the component coercion.
+    let full_expression = if has_forward_ref {
+        full_expression
+    } else {
+        jsx_component_expr(arena, config, empty_loc(), full_expression)
+    };
+
     let final_full_expression = if let Some(wrapper_expr) = binding_wrapper_expr {
         let wrapper_idx = arena.push_expr(wrapper_expr);
         let full_expression_idx = arena.push_expr(full_expression);
@@ -1258,6 +1267,10 @@ fn transform_react_component_with_props_binding(
         pexp_loc: empty_loc(),
         pexp_attributes: Attributes::new(),
     };
+
+    // jsx_v4.ml's componentWithProps path applies the same component identity
+    // coercion to its generated wrapper.
+    let internal_expr = jsx_component_expr(arena, config, empty_loc(), internal_expr);
 
     // Create the new binding
     // OCaml's make_new_binding uses empty_loc for both pvb_loc and ppat_loc
@@ -3019,6 +3032,36 @@ fn module_access_name_with_idx(
 fn module_access_name(arena: &mut ParseArena, config: &JsxConfig, value: &str) -> LidentIdx {
     let val_str_idx = arena.intern_string(value);
     module_access_name_with_idx(arena, config, val_str_idx)
+}
+
+/// Coerce a generated component wrapper through the configured JSX module's
+/// component identity. Mirrors `Jsx_v4.jsx_component_expr`.
+fn jsx_component_expr(
+    arena: &mut ParseArena,
+    config: &JsxConfig,
+    loc: Location,
+    expr: Expression,
+) -> Expression {
+    let component_lid = module_access_name(arena, config, "component");
+    let component_expr = arena.push_expr(Expression {
+        pexp_desc: Box::new(ExpressionDesc::Pexp_ident(Loc {
+            txt: component_lid,
+            loc,
+        })),
+        pexp_loc: loc,
+        pexp_attributes: Attributes::new(),
+    });
+    let argument = arena.push_expr(expr);
+    Expression {
+        pexp_desc: Box::new(ExpressionDesc::Pexp_apply(Box::new(PexpApply {
+            funct: component_expr,
+            args: vec![(ArgLabel::Nolabel, argument)],
+            partial: false,
+            transformed_jsx: false,
+        }))),
+        pexp_loc: loc,
+        pexp_attributes: Attributes::new(),
+    }
 }
 
 /// Try to find the key prop in a list of JSX props
@@ -4872,7 +4915,7 @@ fn transform_jsx_container(
 #[cfg(test)]
 mod tests {
     use super::{JsxConfig, module_access_name, transform_structure};
-    use crate::parser::{Longident, Parser, module, sexp_locs};
+    use crate::parser::{ExpressionDesc, Longident, Parser, StructureItemDesc, module, sexp_locs};
 
     #[test]
     fn parses_dotted_custom_jsx_module_paths() {
@@ -4895,6 +4938,47 @@ mod tests {
             panic!("expected BaseUi to be the JSX module root");
         };
         assert_eq!(parser.arena().get_string(*base_ui_name), "BaseUi");
+    }
+
+    #[test]
+    fn wraps_generated_component_with_component_identity() {
+        let source = r#"
+@react.component
+let make = (~value: string) => React.null
+"#;
+
+        let mut parser = Parser::new("test.res".to_string(), source);
+        let structure = module::parse_structure(&mut parser);
+        assert!(!parser.has_errors());
+        let transformed = transform_structure(structure, 4, parser.arena_mut());
+
+        let StructureItemDesc::Pstr_value(value) = &*transformed
+            .last()
+            .expect("expected generated component binding")
+            .pstr_desc
+        else {
+            panic!("expected generated value binding");
+        };
+        let (_, bindings) = &**value;
+        let ExpressionDesc::Pexp_apply(apply) =
+            &*parser.arena().get_expr(bindings[0].pvb_expr).pexp_desc
+        else {
+            panic!("expected generated binding to apply React.component");
+        };
+        let ExpressionDesc::Pexp_ident(component) =
+            &*parser.arena().get_expr(apply.funct).pexp_desc
+        else {
+            panic!("expected component identity function");
+        };
+        let Longident::Ldot(module, component_name) = parser.arena().get_longident(component.txt)
+        else {
+            panic!("expected qualified component identity function");
+        };
+        let Longident::Lident(module_name) = module.as_ref() else {
+            panic!("expected React module");
+        };
+        assert_eq!(parser.arena().get_string(*module_name), "React");
+        assert_eq!(parser.arena().get_string(*component_name), "component");
     }
 
     #[test]
