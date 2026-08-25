@@ -592,6 +592,7 @@ fn collect_exported_idents(raw: &RawLambda, exports: &mut HashSet<Ident>) {
 
 fn lower_constant(constant: Constant) -> Constant {
     match constant {
+        Constant::Constructor(tag) if tag.name == "()" => Constant::JsUndefined { is_unit: true },
         Constant::Constructor(tag) => match tag.tag_type {
             Some(crate::types::VariantTagType::Int(value)) => Constant::Int {
                 i: value,
