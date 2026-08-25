@@ -79,6 +79,7 @@ pub struct ModulePathResolver {
     cmj_export_arities_cache:
         RefCell<AHashMap<String, Option<Arc<AHashMap<String, CmjExportArity>>>>>,
     cmj_export_lambdas_cache: RefCell<AHashMap<String, Option<Arc<AHashMap<String, Lambda>>>>>,
+    cmj_hoisted_exports_cache: RefCell<AHashMap<(String, Vec<String>), Option<String>>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -125,6 +126,7 @@ impl ModulePathResolver {
             cmj_export_constants_cache: RefCell::new(AHashMap::new()),
             cmj_export_arities_cache: RefCell::new(AHashMap::new()),
             cmj_export_lambdas_cache: RefCell::new(AHashMap::new()),
+            cmj_hoisted_exports_cache: RefCell::new(AHashMap::new()),
         }
     }
 
@@ -296,6 +298,22 @@ impl ModulePathResolver {
         self.cmj_export_arities_cache
             .borrow_mut()
             .insert(module_name.to_string(), resolved.clone());
+        resolved
+    }
+
+    /// Resolve a source-level nested field path through hoisted CMJ metadata.
+    pub fn module_cmj_hoisted_export(&self, module_name: &str, path: &[String]) -> Option<String> {
+        let key = (module_name.to_string(), path.to_vec());
+        if let Some(cached) = self.cmj_hoisted_exports_cache.borrow().get(&key) {
+            return cached.clone();
+        }
+        let resolved = self
+            .persistent_env
+            .as_ref()
+            .and_then(|env| env.module_cmj_hoisted_export(module_name, path));
+        self.cmj_hoisted_exports_cache
+            .borrow_mut()
+            .insert(key, resolved.clone());
         resolved
     }
 

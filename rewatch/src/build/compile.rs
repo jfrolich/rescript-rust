@@ -1964,10 +1964,12 @@ fn in_memory_module_info_for_package(
     is_pure: bool,
     cmj_export_constants: AHashMap<String, CmjExportConstant>,
     cmj_export_arities: AHashMap<String, CmjExportArity>,
+    hoisted_exports: Vec<rescript_compiler::lambda::HoistedExport>,
     is_runtime: bool,
 ) -> InMemoryModuleInfo {
     InMemoryModuleInfo::new(source_path, is_pure, cmj_export_constants, is_runtime)
         .with_cmj_export_arities(cmj_export_arities)
+        .with_cmj_hoisted_exports(hoisted_exports)
         .with_package(
             package.name.clone(),
             package.path.clone(),
@@ -1984,6 +1986,7 @@ fn js_metadata_registry_updates_for_package(
     is_pure: bool,
     cmj_export_constants: AHashMap<String, CmjExportConstant>,
     cmj_export_arities: AHashMap<String, CmjExportArity>,
+    hoisted_exports: Vec<rescript_compiler::lambda::HoistedExport>,
     is_runtime: bool,
     has_interface: bool,
     interface_registry_update: Option<PendingRegistryUpdate>,
@@ -1997,6 +2000,7 @@ fn js_metadata_registry_updates_for_package(
         is_pure,
         cmj_export_constants,
         cmj_export_arities,
+        hoisted_exports,
         is_runtime,
     );
 
@@ -2593,7 +2597,8 @@ fn compile_runtime_module_from_source(
         compile_result.cmj_export_constants,
         true,
     )
-    .with_cmj_export_arities(compile_result.cmj_export_arities);
+    .with_cmj_export_arities(compile_result.cmj_export_arities)
+    .with_cmj_hoisted_exports(compile_result.hoisted_exports);
 
     let mut shared_registry = build_state.module_registry.lock().unwrap();
     if has_runtime_interface {
@@ -3005,6 +3010,7 @@ fn compile_module_in_process_to_js_boundary(
         provisional_is_pure,
         AHashMap::new(),
         AHashMap::new(),
+        Vec::new(),
         is_runtime,
     );
 
@@ -3359,6 +3365,7 @@ fn finish_in_process_js_inner(
             metadata.is_pure,
             metadata.cmj_export_constants,
             metadata.cmj_export_arities,
+            metadata.hoisted_exports,
             is_runtime,
         );
         let registry_updates = vec![PendingRegistryUpdate {
@@ -3410,6 +3417,7 @@ fn finish_in_process_js_inner(
             compile_result.is_pure,
             compile_result.cmj_export_constants.clone(),
             compile_result.cmj_export_arities.clone(),
+            compile_result.hoisted_exports.clone(),
             is_runtime,
             has_interface,
             metadata_interface_registry_update,

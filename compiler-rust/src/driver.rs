@@ -14174,6 +14174,7 @@ pub struct InProcessCompileResult {
     pub is_pure: bool,
     pub cmj_export_constants: ahash::AHashMap<String, CmjExportConstant>,
     pub cmj_export_arities: ahash::AHashMap<String, CmjExportArity>,
+    pub hoisted_exports: Vec<crate::lambda::HoistedExport>,
     /// Intermediate-representation sexps, populated when
     /// `CompilerOptions::capture_intermediates` is true (for the playground).
     pub typed_tree_sexp: String,
@@ -14186,6 +14187,7 @@ pub struct InProcessCompileResult {
 pub struct InProcessPreJsCompileResult {
     pub lowered_lambda: crate::lambda::Lambda,
     pub possible_required_modules: AHashSet<ModuleId>,
+    pub hoisted_exports: Vec<crate::lambda::HoistedExport>,
     pub ident_stamp_at_js_boundary: i32,
     pub file_directives: Vec<String>,
     pub debug: bool,
@@ -14204,6 +14206,7 @@ pub struct InProcessJsMetadataReady {
     pub is_pure: bool,
     pub cmj_export_constants: ahash::AHashMap<String, CmjExportConstant>,
     pub cmj_export_arities: ahash::AHashMap<String, CmjExportArity>,
+    pub hoisted_exports: Vec<crate::lambda::HoistedExport>,
     pub pers_struct: Option<PortablePersStruct>,
     pub new_alias_rewrites: ahash::AHashMap<String, crate::types::path::Path>,
 }
@@ -14852,44 +14855,51 @@ pub fn compile_preprocessed_structure_in_process_until_js(
     let lambda_start_stamp = synchronize_lambda_start_stamp(&type_ctx);
 
     let unit_name = options.current_unit_name().unwrap_or_default();
-    let (raw_lambda, raw_diagnostic, raw_possible_required_modules, raw_lambda_current_stamp) =
-        crate::timing::measure(crate::timing::Phase::Lambda, || {
-            let _phase = info_span!("compiler.raw_lambda").entered();
-            let implementation_coercion = compute_raw_implementation_coercion(
-                &mut tctx,
+    let (
+        raw_lambda,
+        raw_diagnostic,
+        raw_possible_required_modules,
+        raw_lambda_current_stamp,
+        hoisted_exports,
+    ) = crate::timing::measure(crate::timing::Phase::Lambda, || {
+        let _phase = info_span!("compiler.raw_lambda").entered();
+        let implementation_coercion = compute_raw_implementation_coercion(
+            &mut tctx,
+            &type_ctx,
+            &env,
+            &typed_structure,
+            options,
+            Some(has_interface),
+        );
+        let mut raw_converter =
+            crate::raw_lambda::convert::RawLambdaConverter::with_start_stamp_and_unit_name(
+                arena,
                 &type_ctx,
                 &env,
-                &typed_structure,
-                options,
-                Some(has_interface),
+                lambda_start_stamp,
+                unit_name,
             );
-            let mut raw_converter =
-                crate::raw_lambda::convert::RawLambdaConverter::with_start_stamp_and_unit_name(
-                    arena,
-                    &type_ctx,
-                    &env,
-                    lambda_start_stamp,
-                    unit_name,
-                );
-            raw_converter.set_preserve_expanded_sparse_records(options.capture_intermediates);
-            raw_converter.set_no_assert_false(options.no_assert_false);
-            raw_converter.set_noassert(options.noassert);
-            raw_converter.set_warning_config(tctx.warning_config.clone());
-            if let Some(persistent_env) = tctx.persistent_env.clone() {
-                raw_converter.set_persistent_env(persistent_env);
-            }
-            let raw_lambda = raw_converter
-                .convert_structure_with_coercion(&typed_structure, &implementation_coercion);
-            let raw_diagnostic = raw_converter.take_diagnostic();
-            let possible_required_modules = raw_converter.take_possible_required_modules();
-            let raw_lambda_current_stamp = raw_converter.current_stamp();
-            (
-                raw_lambda,
-                raw_diagnostic,
-                possible_required_modules,
-                raw_lambda_current_stamp,
-            )
-        });
+        raw_converter.set_preserve_expanded_sparse_records(options.capture_intermediates);
+        raw_converter.set_no_assert_false(options.no_assert_false);
+        raw_converter.set_noassert(options.noassert);
+        raw_converter.set_warning_config(tctx.warning_config.clone());
+        if let Some(persistent_env) = tctx.persistent_env.clone() {
+            raw_converter.set_persistent_env(persistent_env);
+        }
+        let raw_lambda = raw_converter
+            .convert_structure_with_coercion(&typed_structure, &implementation_coercion);
+        let raw_diagnostic = raw_converter.take_diagnostic();
+        let possible_required_modules = raw_converter.take_possible_required_modules();
+        let raw_lambda_current_stamp = raw_converter.current_stamp();
+        let hoisted_exports = raw_converter.take_hoisted_exports();
+        (
+            raw_lambda,
+            raw_diagnostic,
+            possible_required_modules,
+            raw_lambda_current_stamp,
+            hoisted_exports,
+        )
+    });
     if let Some(diagnostic) = raw_diagnostic {
         return Err(anyhow!(diagnostic.message));
     }
@@ -14932,6 +14942,7 @@ pub fn compile_preprocessed_structure_in_process_until_js(
     Ok(InProcessPreJsCompileResult {
         lowered_lambda,
         possible_required_modules,
+        hoisted_exports,
         ident_stamp_at_js_boundary,
         file_directives,
         debug,
@@ -15035,6 +15046,7 @@ pub fn finish_preprocessed_structure_in_process_from_js_boundary_with_metadata_h
             is_pure,
             cmj_export_constants: std::mem::take(&mut cmj_export_constants),
             cmj_export_arities: std::mem::take(&mut cmj_export_arities),
+            hoisted_exports: pre_js.hoisted_exports.clone(),
             pers_struct: pre_js.pers_struct.take(),
             new_alias_rewrites: std::mem::take(&mut pre_js.new_alias_rewrites),
         })?;
@@ -15129,6 +15141,7 @@ pub fn finish_preprocessed_structure_in_process_from_js_boundary_with_metadata_h
         is_pure,
         cmj_export_constants,
         cmj_export_arities,
+        hoisted_exports: pre_js.hoisted_exports,
         typed_tree_sexp: pre_js.typed_tree_sexp,
         raw_lambda_sexp: pre_js.raw_lambda_sexp,
         lambda_sexp: pre_js.lambda_sexp,
