@@ -220,7 +220,8 @@ fn print_struct_const<W: Write>(f: &mut Formatter<W>, cst: &Constant) {
         }
         Constant::JsFalse => f.string("false"),
         Constant::JsTrue => f.string("true"),
-        Constant::JsUndefined { .. } => f.string("0a"),
+        Constant::JsUndefined { is_unit: true } => f.string("`()"),
+        Constant::JsUndefined { is_unit: false } => f.string("undefined"),
         Constant::JsNull => f.string("null"),
         Constant::Some(inner) => print_struct_const(f, inner),
         Constant::ModuleAlias => f.string("module_alias"),
