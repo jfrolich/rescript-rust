@@ -1525,6 +1525,7 @@ impl PersistentEnv {
             let signature =
                 crate::binary_ast::ppx::rewrite_signature(&signature, parser.arena_mut()).ok()?;
 
+            crate::types::typecore::prepare_typecheck_arena(parser.arena_mut());
             let mut tctx = TypeCheckContext::new(ctx, parser.arena());
             tctx.set_persistent_env(fallback_pers);
             let typed_signature =
@@ -1570,6 +1571,7 @@ impl PersistentEnv {
         let structure =
             crate::binary_ast::ppx::rewrite_structure(&structure, parser.arena_mut()).ok()?;
 
+        crate::types::typecore::prepare_typecheck_arena(parser.arena_mut());
         let mut tctx = TypeCheckContext::new(ctx, parser.arena());
         tctx.experimental_let_unwrap = experimental_let_unwrap;
         tctx.set_persistent_env(fallback_pers);

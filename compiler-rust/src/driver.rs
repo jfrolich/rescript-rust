@@ -11259,6 +11259,7 @@ pub fn compile_source_to_js_with_options(
     // at module initialization, consuming stamp 1000 before any compilation.
     let _ = id_gen.next_stamp();
     let type_ctx = TypeContext::new(std::sync::Arc::new(id_gen));
+    crate::types::typecore::prepare_typecheck_arena(parser.arena_mut());
     let mut tctx = TypeCheckContext::new(&type_ctx, parser.arena());
     tctx.experimental_let_unwrap = experimental_let_unwrap;
     tctx.transparent_modules = options.transparent_modules;
@@ -12145,6 +12146,7 @@ pub fn typecheck_interface_source(
     // at module initialization, consuming stamp 1000 before any compilation.
     let _ = id_gen.next_stamp();
     let type_ctx = TypeContext::new(std::sync::Arc::new(id_gen));
+    crate::types::typecore::prepare_typecheck_arena(parser.arena_mut());
     let mut tctx = TypeCheckContext::new(&type_ctx, parser.arena());
     tctx.experimental_let_unwrap = experimental_let_unwrap;
     tctx.transparent_modules = options.transparent_modules;
@@ -12521,6 +12523,7 @@ pub fn typecheck_and_dump_sexp<W: std::io::Write>(
         // at module initialization, consuming stamp 1000 before any compilation.
         let _ = id_gen.next_stamp();
         let type_ctx = TypeContext::new(std::sync::Arc::new(id_gen));
+        crate::types::typecore::prepare_typecheck_arena(parser.arena_mut());
         let mut tctx = TypeCheckContext::new(&type_ctx, parser.arena());
         tctx.experimental_let_unwrap = experimental_let_unwrap;
         tctx.transparent_modules = options.transparent_modules;
@@ -12637,6 +12640,7 @@ pub fn typecheck_and_dump_sexp<W: std::io::Write>(
         crate::ident::Ident::set_current_time(OCAML_NON_PREDEF_STAMP_START);
         let id_gen = IdGenerator::with_start_stamp(OCAML_NON_PREDEF_STAMP_START);
         let type_ctx = TypeContext::new(std::sync::Arc::new(id_gen));
+        crate::types::typecore::prepare_typecheck_arena(parser.arena_mut());
         let mut tctx = TypeCheckContext::new(&type_ctx, parser.arena());
         tctx.experimental_let_unwrap = experimental_let_unwrap;
         tctx.transparent_modules = options.transparent_modules;
@@ -13882,6 +13886,7 @@ pub fn typecheck_stored_structure_and_dump_sexp<W: std::io::Write>(
     // at module initialization, consuming stamp 1000 before any compilation.
     let _ = id_gen.next_stamp();
     let type_ctx = TypeContext::new(std::sync::Arc::new(id_gen));
+    crate::types::typecore::prepare_typecheck_arena(&mut arena);
     let mut tctx = TypeCheckContext::new(&type_ctx, &arena);
     tctx.experimental_let_unwrap = experimental_let_unwrap;
     tctx.transparent_modules = options.transparent_modules;
@@ -13919,7 +13924,7 @@ pub fn typecheck_stored_structure_and_dump_sexp<W: std::io::Write>(
 
 /// Typecheck a stored signature AST (from parse phase) and dump sexp.
 pub fn typecheck_stored_signature_and_dump_sexp<W: std::io::Write>(
-    arena: crate::parse_arena::ParseArena,
+    mut arena: crate::parse_arena::ParseArena,
     signature: Signature,
     options: &CompilerOptions,
     writer: &mut W,
@@ -13935,6 +13940,7 @@ pub fn typecheck_stored_signature_and_dump_sexp<W: std::io::Write>(
     // at module initialization, consuming stamp 1000 before any compilation.
     let _ = id_gen.next_stamp();
     let type_ctx = TypeContext::new(std::sync::Arc::new(id_gen));
+    crate::types::typecore::prepare_typecheck_arena(&mut arena);
     let mut tctx = TypeCheckContext::new(&type_ctx, &arena);
     tctx.experimental_let_unwrap = experimental_let_unwrap;
     tctx.transparent_modules = options.transparent_modules;
@@ -14415,6 +14421,7 @@ pub fn compile_source_in_process(
     let mut effective_options = options.clone();
     effective_options.experimental_let_unwrap = experimental_let_unwrap;
 
+    crate::types::typecore::prepare_typecheck_arena(parser.arena_mut());
     compile_preprocessed_structure_in_process(
         parser.arena(),
         &structure,
@@ -15321,6 +15328,7 @@ pub fn typecheck_interface_in_process(
     )?;
     parser.arena_mut().reserve_typecheck_synthetic_capacity();
 
+    crate::types::typecore::prepare_typecheck_arena(parser.arena_mut());
     typecheck_preprocessed_signature_in_process(
         parser.arena(),
         &signature,
@@ -15489,6 +15497,7 @@ pub fn typecheck_implementation_in_process(
     let id_gen = IdGenerator::with_start_stamp(OCAML_NON_PREDEF_STAMP_START);
     let _ = id_gen.next_stamp();
     let type_ctx = TypeContext::new(std::sync::Arc::new(id_gen));
+    crate::types::typecore::prepare_typecheck_arena(parser.arena_mut());
     let mut tctx = TypeCheckContext::new(&type_ctx, parser.arena());
     tctx.experimental_let_unwrap = options.experimental_let_unwrap || file_config.let_unwrap;
     tctx.transparent_modules = options.transparent_modules;
@@ -15688,6 +15697,19 @@ mod tests {
             normalized,
             PathBuf::from("/runtime/lib/ocaml/compiler-libs")
         );
+    }
+
+    #[test]
+    fn release_optional_default_lowering_compiles_without_arena_aliasing() {
+        let source = r#"
+let labelled = (~x, ~y=2, ()) => x
+let optional = (~x=?, ()) => x
+"#;
+
+        let output = super::compile_source_to_js(source, "core_patterns_optional_defaults.res")
+            .expect("optional-default functions should compile");
+        assert!(output.contains("function labelled"));
+        assert!(output.contains("function optional"));
     }
 
     #[test]

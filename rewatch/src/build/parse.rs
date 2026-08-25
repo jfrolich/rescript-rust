@@ -885,7 +885,7 @@ fn generate_ast_with_rust_parser(
 
             let stored = if store_ast {
                 let mut arena = parser.into_arena();
-                arena.reserve_typecheck_synthetic_capacity();
+                rescript_compiler::types::typecore::prepare_typecheck_arena(&mut arena);
                 Some(super::build_types::StoredAst::Signature(Arc::new(
                     super::build_types::StoredSignatureAst {
                         arena,
@@ -954,7 +954,7 @@ fn generate_ast_with_rust_parser(
 
             let stored = if store_ast {
                 let mut arena = parser.into_arena();
-                arena.reserve_typecheck_synthetic_capacity();
+                rescript_compiler::types::typecore::prepare_typecheck_arena(&mut arena);
                 Some(super::build_types::StoredAst::Structure(Arc::new(
                     super::build_types::StoredStructureAst {
                         arena,

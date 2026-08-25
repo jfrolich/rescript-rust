@@ -3283,32 +3283,22 @@ fn find_existing_lident_idx(arena: &ParseArena, name: &str) -> Option<LidentIdx>
 }
 
 fn push_synthetic_pat(arena: &ParseArena, pat: ParsedPattern) -> crate::parse_arena::PatIdx {
-    // Safety: Typecore appends compiler-synthesized AST nodes after parsing,
-    // matching OCaml typecore rewrites such as build_or_pat at
-    // compiler/ml/typecore.ml:556-620 and optional-default lowering at
-    // compiler/ml/typecore.ml:2431-2467. Existing typed code stores arena
-    // indices, not references to Vec slots, and callers must not hold arena
-    // element borrows across these append-only mutations.
-    unsafe { (*(arena as *const ParseArena as *mut ParseArena)).push_pat(pat) }
-}
-
-fn push_synthetic_expr(arena: &ParseArena, expr: ParsedExpression) -> crate::parse_arena::ExprIdx {
-    // Safety: see `push_synthetic_pat`.
-    unsafe { (*(arena as *const ParseArena as *mut ParseArena)).push_expr(expr) }
+    arena.push_typecheck_pattern(pat)
 }
 
 fn push_synthetic_longident(arena: &ParseArena, lid: Longident) -> LidentIdx {
-    // Safety: see `push_synthetic_pat`.
+    // Legacy shared-arena mutation. Pattern/default allocation no longer uses
+    // this path; longident storage needs the same reserved-slot migration.
     unsafe { (*(arena as *const ParseArena as *mut ParseArena)).push_longident(lid) }
 }
 
 fn push_synthetic_lident(arena: &ParseArena, name: &str) -> LidentIdx {
-    // Safety: see `push_synthetic_pat`.
+    // Legacy shared-arena mutation; see `push_synthetic_longident`.
     unsafe { (*(arena as *const ParseArena as *mut ParseArena)).push_lident(name) }
 }
 
 fn intern_synthetic_string(arena: &ParseArena, name: &str) -> StrIdx {
-    // Safety: see `push_synthetic_pat`.
+    // Legacy shared-arena mutation; see `push_synthetic_longident`.
     unsafe { (*(arena as *const ParseArena as *mut ParseArena)).intern_string(name) }
 }
 
@@ -7238,7 +7228,11 @@ fn type_expect_with_recarg_unscoped<'a>(
         }
 
         ED::Pexp_fun(inner) => {
-            let params = tctx.arena.nary_fun_params(inner).into_owned();
+            let params_bindings = tctx
+                .arena
+                .nary_fun_default_bindings(inner)
+                .expect("function defaults prepared before type checking")
+                .to_vec();
             let newtypes = tctx.arena.nary_fun_newtypes(inner).to_vec();
             let body = tctx.arena.nary_fun_body(inner);
             if newtypes.is_empty() {
@@ -7246,7 +7240,7 @@ fn type_expect_with_recarg_unscoped<'a>(
                     tctx,
                     env,
                     loc,
-                    &params,
+                    &params_bindings,
                     body,
                     inner.is_async,
                     expected_ty,
@@ -7258,7 +7252,7 @@ fn type_expect_with_recarg_unscoped<'a>(
                     env,
                     loc,
                     &newtypes,
-                    &params,
+                    &params_bindings,
                     body,
                     inner.is_async,
                     expected_ty,
@@ -15216,7 +15210,7 @@ fn type_try(
 }
 
 fn desugar_nary_function_defaults(
-    arena: &crate::parse_arena::ParseArena,
+    arena: &mut crate::parse_arena::ParseArena,
     loc: LocIdx,
     params: &[crate::parser::ast::FunParam],
 ) -> Vec<(
@@ -15242,112 +15236,91 @@ fn desugar_nary_function_defaults(
                 find_loc_idx_by_bounds(arena, sloc_start, sloc_end).unwrap_or(source_pat_loc);
 
             let label_name = arena.get_string(label.txt).to_owned();
-            let opt_name = intern_synthetic_string(arena, &format!("*opt_{label_name}*"));
-            let opt_lid = push_synthetic_longident(arena, Longident::Lident(opt_name));
-            let sth_name = intern_synthetic_string(arena, "*sth*");
-            let sth_lid = push_synthetic_longident(arena, Longident::Lident(sth_name));
-            let matched_pat = push_synthetic_pat(
-                arena,
-                ParsedPattern {
-                    ppat_desc: Box::new(PD::Ppat_var(Located {
-                        txt: sth_name,
+            let opt_name = arena.intern_string(&format!("*opt_{label_name}*"));
+            let opt_lid = arena.push_longident(Longident::Lident(opt_name));
+            let sth_name = arena.intern_string("*sth*");
+            let sth_lid = arena.push_longident(Longident::Lident(sth_name));
+            let matched_pat = arena.push_pat(ParsedPattern {
+                ppat_desc: Box::new(PD::Ppat_var(Located {
+                    txt: sth_name,
+                    loc: default_loc,
+                })),
+                ppat_loc: default_loc,
+                ppat_attributes: Attributes::new(),
+            });
+            let some_pat = arena.push_pat(ParsedPattern {
+                ppat_desc: Box::new(PD::Ppat_construct(
+                    Located {
+                        txt: arena.predef_some_lid(),
                         loc: default_loc,
-                    })),
-                    ppat_loc: default_loc,
-                    ppat_attributes: Attributes::new(),
-                },
-            );
-            let some_pat = push_synthetic_pat(
-                arena,
-                ParsedPattern {
-                    ppat_desc: Box::new(PD::Ppat_construct(
-                        Located {
-                            txt: arena.predef_some_lid(),
-                            loc: default_loc,
-                        },
-                        Some(matched_pat),
-                    )),
-                    ppat_loc: default_loc,
-                    ppat_attributes: Attributes::new(),
-                },
-            );
-            let none_pat = push_synthetic_pat(
-                arena,
-                ParsedPattern {
-                    ppat_desc: Box::new(PD::Ppat_construct(
-                        Located {
-                            txt: arena.predef_none_lid(),
-                            loc: default_loc,
-                        },
-                        None,
-                    )),
-                    ppat_loc: default_loc,
-                    ppat_attributes: Attributes::new(),
-                },
-            );
-            let some_rhs = push_synthetic_expr(
-                arena,
-                ParsedExpression {
-                    pexp_desc: Box::new(ED::Pexp_ident(Located {
-                        txt: sth_lid,
+                    },
+                    Some(matched_pat),
+                )),
+                ppat_loc: default_loc,
+                ppat_attributes: Attributes::new(),
+            });
+            let none_pat = arena.push_pat(ParsedPattern {
+                ppat_desc: Box::new(PD::Ppat_construct(
+                    Located {
+                        txt: arena.predef_none_lid(),
                         loc: default_loc,
-                    })),
-                    pexp_loc: default_loc,
-                    pexp_attributes: Attributes::new(),
-                },
-            );
-            let scrutinee = push_synthetic_expr(
-                arena,
-                ParsedExpression {
-                    pexp_desc: Box::new(ED::Pexp_ident(Located { txt: opt_lid, loc })),
-                    pexp_loc: loc,
-                    pexp_attributes: Attributes::new(),
-                },
-            );
-            let optional_default_attr = intern_synthetic_string(arena, "#optional_arg_default");
-            let match_expr = push_synthetic_expr(
-                arena,
-                ParsedExpression {
-                    pexp_desc: Box::new(ED::Pexp_match(Box::new((
-                        scrutinee,
-                        vec![
-                            crate::parser::ast::Case {
-                                pc_bar: None,
-                                pc_lhs: some_pat,
-                                pc_guard: None,
-                                pc_rhs: some_rhs,
-                            },
-                            crate::parser::ast::Case {
-                                pc_bar: None,
-                                pc_lhs: none_pat,
-                                pc_guard: None,
-                                pc_rhs: default_idx,
-                            },
-                        ],
-                    )))),
-                    pexp_loc: sloc,
-                    pexp_attributes: vec![(
-                        Located::mknoloc(optional_default_attr),
-                        crate::parser::ast::Payload::PStr(Box::new(vec![])),
-                    )]
-                    .into(),
-                },
-            );
+                    },
+                    None,
+                )),
+                ppat_loc: default_loc,
+                ppat_attributes: Attributes::new(),
+            });
+            let some_rhs = arena.push_expr(ParsedExpression {
+                pexp_desc: Box::new(ED::Pexp_ident(Located {
+                    txt: sth_lid,
+                    loc: default_loc,
+                })),
+                pexp_loc: default_loc,
+                pexp_attributes: Attributes::new(),
+            });
+            let scrutinee = arena.push_expr(ParsedExpression {
+                pexp_desc: Box::new(ED::Pexp_ident(Located { txt: opt_lid, loc })),
+                pexp_loc: loc,
+                pexp_attributes: Attributes::new(),
+            });
+            let optional_default_attr = arena.intern_string("#optional_arg_default");
+            let match_expr = arena.push_expr(ParsedExpression {
+                pexp_desc: Box::new(ED::Pexp_match(Box::new((
+                    scrutinee,
+                    vec![
+                        crate::parser::ast::Case {
+                            pc_bar: None,
+                            pc_lhs: some_pat,
+                            pc_guard: None,
+                            pc_rhs: some_rhs,
+                        },
+                        crate::parser::ast::Case {
+                            pc_bar: None,
+                            pc_lhs: none_pat,
+                            pc_guard: None,
+                            pc_rhs: default_idx,
+                        },
+                    ],
+                )))),
+                pexp_loc: sloc,
+                pexp_attributes: vec![(
+                    Located::mknoloc(optional_default_attr),
+                    crate::parser::ast::Payload::PStr(Box::new(vec![])),
+                )]
+                .into(),
+            });
             let rewritten = crate::parser::ast::FunParam {
                 p_attrs: param.p_attrs.clone(),
                 p_lbl: param.p_lbl,
                 p_default: None,
-                p_pat: push_synthetic_pat(
-                    arena,
-                    ParsedPattern {
-                        ppat_desc: Box::new(PD::Ppat_var(Located {
-                            txt: opt_name,
-                            loc: sloc,
-                        })),
-                        ppat_loc: sloc,
-                        ppat_attributes: Attributes::new(),
-                    },
-                ),
+                p_pat: arena.push_pat(ParsedPattern {
+                    ppat_desc: Box::new(PD::Ppat_var(Located {
+                        txt: opt_name,
+                        loc: sloc,
+                    })),
+                    ppat_loc: sloc,
+                    ppat_attributes: Attributes::new(),
+                }),
             };
             (
                 rewritten,
@@ -15360,6 +15333,27 @@ fn desugar_nary_function_defaults(
             )
         })
         .collect()
+}
+
+/// Prepare OCaml-shaped synthetic AST while the parse arena is exclusively borrowed.
+///
+/// Type checking only receives a shared arena reference, so every rewrite whose
+/// shape is already known must be allocated here. Environment-dependent pattern
+/// rewrites use the arena's reserved one-time slots.
+pub fn prepare_typecheck_arena(arena: &mut ParseArena) {
+    let functions = arena.nary_functions();
+    for (fun, loc) in functions {
+        if arena.nary_fun_default_bindings(&fun).is_some() {
+            continue;
+        }
+        let params = arena.nary_fun_params(&fun).into_owned();
+        let bindings = desugar_nary_function_defaults(arena, loc, &params);
+        arena.set_nary_fun_default_bindings(fun.lhs, bindings);
+    }
+    // Optional-default AST is allocated above while the arena is exclusive.
+    // Reserve stable one-time slots afterward for environment-dependent pattern
+    // rewrites performed during type checking (for example variant spreads).
+    arena.reserve_typecheck_synthetic_capacity();
 }
 
 /// Type an n-ary function with its locally abstract types in scope.
@@ -15377,7 +15371,10 @@ fn type_function_nary_with_newtypes(
         crate::parser::ast::StringLoc,
         crate::parser::ast::Attributes,
     )],
-    params: &[crate::parser::ast::FunParam],
+    params_bindings: &[(
+        crate::parser::ast::FunParam,
+        Option<crate::parser::ast::ValueBinding>,
+    )],
     body: crate::parse_arena::ExprIdx,
     is_async: bool,
     expected_ty: TypeExprRef,
@@ -15392,7 +15389,10 @@ fn type_function_nary_with_newtypes(
             crate::parser::ast::StringLoc,
             crate::parser::ast::Attributes,
         )],
-        params: &[crate::parser::ast::FunParam],
+        params_bindings: &[(
+            crate::parser::ast::FunParam,
+            Option<crate::parser::ast::ValueBinding>,
+        )],
         body: crate::parse_arena::ExprIdx,
         is_async: bool,
         attributes: &[crate::parser::ast::Attribute],
@@ -15403,7 +15403,7 @@ fn type_function_nary_with_newtypes(
                 tctx,
                 env,
                 loc,
-                params,
+                params_bindings,
                 body,
                 is_async,
                 fresh_expectation,
@@ -15443,7 +15443,14 @@ fn type_function_nary_with_newtypes(
                 ctx.init_def(ctx.current_stamp());
 
                 let typed_body = peel(
-                    tctx, &new_env, loc, rest, params, body, is_async, attributes,
+                    tctx,
+                    &new_env,
+                    loc,
+                    rest,
+                    params_bindings,
+                    body,
+                    is_async,
+                    attributes,
                 )?;
                 let rewritten_ty =
                     crate::types::ctype::subst_identity_copy(ctx, typed_body.exp_type);
@@ -15487,7 +15494,16 @@ fn type_function_nary_with_newtypes(
         })
     }
 
-    let typed = peel(tctx, env, loc, newtypes, params, body, is_async, attributes)?;
+    let typed = peel(
+        tctx,
+        env,
+        loc,
+        newtypes,
+        params_bindings,
+        body,
+        is_async,
+        attributes,
+    )?;
     rue_unify(tctx, loc, typed.exp_type, expected_ty, None)?;
     Ok(typed)
 }
@@ -15502,7 +15518,10 @@ fn type_function_nary(
     tctx: &mut TypeCheckContext<'_>,
     env: &Env,
     loc: LocIdx,
-    params: &[crate::parser::ast::FunParam],
+    params_bindings: &[(
+        crate::parser::ast::FunParam,
+        Option<crate::parser::ast::ValueBinding>,
+    )],
     body: crate::parse_arena::ExprIdx,
     is_async: bool,
     expected_ty: TypeExprRef,
@@ -15510,7 +15529,6 @@ fn type_function_nary(
 ) -> TypeCoreResult<Expression> {
     use crate::types::typedtree::{FunctionParam, Partial};
 
-    let params_bindings = desugar_nary_function_defaults(tctx.arena, loc, params);
     let params = params_bindings
         .iter()
         .map(|(param, _)| param)

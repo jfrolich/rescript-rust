@@ -27,6 +27,8 @@
 //! ```
 
 use std::collections::{HashMap, HashSet};
+use std::sync::OnceLock;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use serde::{Deserialize, Serialize};
 
@@ -480,6 +482,14 @@ pub struct ParseArena {
     /// authoritative `Pexp_fun.params` representation.
     nary_fun_params_by_first_pattern: HashMap<PatIdx, Box<[FunParam]>>,
     nary_fun_unknown_arity_by_first_pattern: HashMap<PatIdx, ArityIdx>,
+    /// Optional-default lowering prepared before type checking.
+    ///
+    /// Typecore must not append to the parse arena through a shared reference:
+    /// doing so invalidates Rust's aliasing guarantees and was miscompiled in
+    /// release builds. Keep the OCaml-shaped synthetic AST here, constructed
+    /// while the arena is still exclusively borrowed.
+    nary_fun_default_bindings_by_first_pattern:
+        HashMap<PatIdx, Box<[(FunParam, Option<crate::parser::ast::ValueBinding>)]>>,
     /// N-ary locally-abstract-type (`newtypes`) lists keyed by the function's
     /// first parameter pattern, mirroring `Pexp_fun.newtypes` in the current
     /// upstream parsetree. Each entry is `(name, attributes)`; the parser puts
@@ -512,6 +522,13 @@ pub struct ParseArena {
     /// Arena of patterns (returns PatIdx).
     /// Replaces `Box<Pattern>` for recursive AST references.
     patterns: Arena<Pattern, PatIdx>,
+    /// Slots exclusively reserved before type checking for OCaml-shaped
+    /// synthetic pattern rewrites. `OnceLock` permits one-time initialization
+    /// through the shared arena reference held by `TypeCheckContext` without
+    /// violating aliasing rules or moving parser-created patterns.
+    synthetic_patterns: Box<[OnceLock<Pattern>]>,
+    next_synthetic_pattern: AtomicUsize,
+    synthetic_pattern_base: u32,
     /// Arena of core types (returns CoreTypeIdx).
     /// Replaces `Box<CoreType>` for recursive AST references.
     core_types: Arena<CoreType, CoreTypeIdx>,
@@ -891,6 +908,7 @@ impl Default for ParseArena {
             expr_fun_defaults: Vec::new(),
             nary_fun_params_by_first_pattern: HashMap::new(),
             nary_fun_unknown_arity_by_first_pattern: HashMap::new(),
+            nary_fun_default_bindings_by_first_pattern: HashMap::new(),
             nary_fun_newtypes_by_first_pattern: HashMap::new(),
             nary_arrow_args_by_first_type: HashMap::new(),
             value_constraints_by_pattern: HashMap::new(),
@@ -902,6 +920,9 @@ impl Default for ParseArena {
             expr_if_else_branches: Vec::new(),
             expr_coerce_from_types: Vec::new(),
             patterns: Arena::default(),
+            synthetic_patterns: Box::new([]),
+            next_synthetic_pattern: AtomicUsize::new(0),
+            synthetic_pattern_base: 0,
             core_types,
             mod_exprs: Arena::default(),
             mod_types: Arena::default(),
@@ -1867,6 +1888,28 @@ impl ParseArena {
         self.patterns.reserve(64);
         self.longidents.reserve(128);
         self.strings.reserve(128);
+
+        self.synthetic_pattern_base = self.patterns.len() as u32;
+        let synthetic_pattern_capacity = self.longidents.len().saturating_mul(2).max(64);
+        self.synthetic_patterns = (0..synthetic_pattern_capacity)
+            .map(|_| OnceLock::new())
+            .collect();
+        self.next_synthetic_pattern.store(0, Ordering::Relaxed);
+    }
+
+    /// Append a typechecker-generated pattern to storage reserved before the
+    /// arena became shared. This is a safe, append-only equivalent of OCaml's
+    /// allocation during pattern rewrites.
+    pub fn push_typecheck_pattern(&self, pattern: Pattern) -> PatIdx {
+        let slot = self.next_synthetic_pattern.fetch_add(1, Ordering::Relaxed);
+        let storage = self
+            .synthetic_patterns
+            .get(slot)
+            .expect("typechecker synthetic pattern capacity exhausted");
+        storage
+            .set(pattern)
+            .unwrap_or_else(|_| panic!("typechecker synthetic pattern slot initialized twice"));
+        PatIdx::from_u32(self.synthetic_pattern_base + slot as u32)
     }
 
     /// Find the most recently inserted string index for the given content.
@@ -2227,6 +2270,39 @@ impl ParseArena {
         } else {
             std::borrow::Cow::Owned(vec![arg.clone()])
         }
+    }
+
+    /// Return snapshots of function nodes and their locations so typecore can
+    /// prepare synthetic optional-default AST under an exclusive arena borrow.
+    pub fn nary_functions(&self) -> Vec<(crate::parser::ast::PexpFun, LocIdx)> {
+        self.expressions
+            .as_slice()
+            .iter()
+            .filter_map(|expr| match &*expr.pexp_desc {
+                ExpressionDesc::Pexp_fun(fun) => Some(((**fun).clone(), expr.pexp_loc)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Store the optional-default lowering associated with a function's first pattern.
+    pub fn set_nary_fun_default_bindings(
+        &mut self,
+        first_pattern: PatIdx,
+        bindings: Vec<(FunParam, Option<crate::parser::ast::ValueBinding>)>,
+    ) {
+        self.nary_fun_default_bindings_by_first_pattern
+            .insert(first_pattern, bindings.into_boxed_slice());
+    }
+
+    /// Return optional-default lowering prepared before type checking.
+    pub fn nary_fun_default_bindings(
+        &self,
+        fun: &crate::parser::ast::PexpFun,
+    ) -> Option<&[(FunParam, Option<crate::parser::ast::ValueBinding>)]> {
+        self.nary_fun_default_bindings_by_first_pattern
+            .get(&fun.lhs)
+            .map(|bindings| &bindings[..])
     }
 
     /// Store the authoritative n-ary parameter list for a parser-created function.
@@ -2623,7 +2699,14 @@ impl ParseArena {
     /// Get a pattern by index.
     #[inline]
     pub fn get_pat(&self, idx: PatIdx) -> &Pattern {
-        self.patterns.get(idx)
+        let raw = idx.to_u32();
+        if raw < self.synthetic_pattern_base || self.synthetic_patterns.is_empty() {
+            self.patterns.get(idx)
+        } else {
+            self.synthetic_patterns[(raw - self.synthetic_pattern_base) as usize]
+                .get()
+                .expect("typechecker synthetic pattern read before initialization")
+        }
     }
 
     /// Get a mutable pattern by index.

@@ -2818,7 +2818,7 @@ fn parse_runtime_signature(path: &Path, source: &str) -> Result<(ParseArena, Sig
             .into_iter()
             .collect();
         let mut arena = parser.into_arena();
-        arena.reserve_typecheck_synthetic_capacity();
+        rescript_compiler::types::typecore::prepare_typecheck_arena(&mut arena);
         Ok((arena, signature, deps))
     })
 }
@@ -2848,7 +2848,7 @@ fn parse_runtime_structure(path: &Path, source: &str) -> Result<(ParseArena, Str
             .into_iter()
             .collect();
         let mut arena = parser.into_arena();
-        arena.reserve_typecheck_synthetic_capacity();
+        rescript_compiler::types::typecore::prepare_typecheck_arena(&mut arena);
         Ok((arena, structure, deps))
     })
 }

@@ -25446,13 +25446,14 @@ fn compile_generated_source<'a>(
         ))));
     }
 
-    let generated_arena = parser.into_arena();
+    let mut generated_arena = parser.into_arena();
 
     // Type-check each generated item in a sub-context
     let mut results = Vec::new();
     let mut current_env = env.clone();
 
     for item in &structure {
+        crate::types::typecore::prepare_typecheck_arena(&mut generated_arena);
         let mut gen_tctx =
             crate::types::typecore::TypeCheckContext::new(tctx.type_ctx, &generated_arena);
         gen_tctx.persistent_env = tctx.persistent_env.clone();
