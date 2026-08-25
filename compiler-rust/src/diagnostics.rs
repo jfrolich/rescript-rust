@@ -172,6 +172,8 @@ pub enum Warning {
     },
     /// Warning 110: Todo found.
     BsTodo { message: Option<String> },
+    /// Warning 111: Mutation of a private record field.
+    BsPrivateRecordMutation { field_name: String },
     /// Warning 112: record rest pattern overlaps an optional field.
     BsRecordRestOptionalOverlap { fields: Vec<String> },
 }
@@ -235,6 +237,7 @@ impl Warning {
             Warning::BsUninterpretedDelimiters { .. } => 108,
             Warning::BsToplevelExpressionUnit { .. } => 109,
             Warning::BsTodo { .. } => 110,
+            Warning::BsPrivateRecordMutation { .. } => 111,
             Warning::BsRecordRestOptionalOverlap { .. } => 112,
         }
     }
@@ -581,6 +584,9 @@ and may change in future versions. (See manual section 8.5)"
                     "\n\nThis code is not implemented yet and will crash at runtime. Make sure you implement this before running the code.",
                 );
                 text
+            }
+            Warning::BsPrivateRecordMutation { field_name } => {
+                format!("Mutation of private record field {:?}.", field_name)
             }
             Warning::BsRecordRestOptionalOverlap { fields } => {
                 // Match compiler/ext/warnings.ml:440-456.
@@ -1017,6 +1023,13 @@ mod tests {
             26
         );
         assert_eq!(Warning::BsTodo { message: None }.number(), 110);
+        assert_eq!(
+            Warning::BsPrivateRecordMutation {
+                field_name: "value".to_string()
+            }
+            .number(),
+            111
+        );
     }
 
     #[test]

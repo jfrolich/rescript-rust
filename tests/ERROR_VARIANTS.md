@@ -211,8 +211,7 @@ Source: [typecore.ml:27](../compiler/ml/typecore.ml).
 | `Wrong_name` | ✓ | `wrong_name_record_field.res`, `Cross_record_extra_field` (multi) | |
 | `Name_type_mismatch` | ✓ | `super_errors_multi/Cross_qualified_constructor_mismatch` | Cross-module constructor disambiguation. |
 | `Undefined_method` | ✓ | `super_errors_multi/Cross_module_alias_dot_access`, `undefined_method` | |
-| `Private_type` | ✓ | `private_type_construction.res` | |
-| `Private_label` | ✓ | `private_label.res` | |
+| `Private_type` | ✓ | `private_type_construction.res`, `private_record_construction.res`, `private_record_update.res` | |
 | `Not_subtype` | ✓ | `subtype_*.res`, `coercion_arity_mismatch.res`, `dict_show_no_coercion.res`, etc. | |
 | `Abstract_wrong_label` | ✓ | `abstract_wrong_label.res` | Multi-arg function literal where an inner argument label doesn't match the expected arrow's label (e.g. `let f: (~a, ~b) => int = (~a, ~c) => …`). |
 | `Scoping_let_module` | ✓ | `scoping_let_module.res` | |
@@ -590,6 +589,12 @@ so coverage gaps stay greppable.
 The warning constructors listed in **Removed in `jono/remove-dead-errors`**
 were deleted. Their numeric warning slots remain holes; no warning number
 was reused.
+
+### Covered warnings added after the audit
+
+| Number | Variant | Fixture |
+|---|---|---|
+| 111 | `Bs_private_record_mutation` | `private_label.res`, `private_record_mutation.res`, `private_record_mutation_warning_disabled.res` |
 
 ### Live but no fixture yet
 

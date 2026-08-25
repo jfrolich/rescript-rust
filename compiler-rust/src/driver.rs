@@ -3709,23 +3709,6 @@ fn type_mod_error_to_anyhow(
             )
             .into()
         }
-        TypeModError::CoreError(TypeCoreError::PrivateLabel { loc, lid, ty }) => {
-            UserDiagnostic::new(
-                format_compiler_error_report(
-                    arena,
-                    source,
-                    filename,
-                    *loc,
-                    &format!(
-                        "Cannot assign field {} of the private type {}",
-                        format_longident_for_report(arena, lid),
-                        format_type_expr(type_ctx, *ty)
-                    ),
-                ),
-                2,
-            )
-            .into()
-        }
         TypeModError::CoreError(TypeCoreError::LabelNotMutable { loc, lid }) => {
             UserDiagnostic::new(
                 format_compiler_error_report(

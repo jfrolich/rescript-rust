@@ -699,13 +699,6 @@ pub enum TypeCoreError {
     /// Invalid record-rest pattern.
     RecordRest { loc: LocIdx, error: RecordRestError },
 
-    /// Private label.
-    PrivateLabel {
-        loc: LocIdx,
-        lid: Longident,
-        ty: TypeExprRef,
-    },
-
     /// Too many arguments.
     TooManyArguments {
         loc: LocIdx,
@@ -18641,13 +18634,6 @@ fn type_setfield(
                     crate::types::generalize_structure(ctx, ctx.current_level(), field_ty);
                 }
                 label_result_unify?;
-                if env_label.lbl_private == crate::types::PrivateFlag::Private {
-                    return Err(TypeCoreError::PrivateLabel {
-                        loc: field_lid.loc,
-                        lid: resolved_lid.clone(),
-                        ty: ty_exp,
-                    });
-                }
 
                 (env_label, field_ty, poly_vars)
             } else {
@@ -18707,6 +18693,24 @@ fn type_setfield(
             loc,
             lid: resolved_lid,
         });
+    }
+    if label_desc.lbl_private == crate::types::PrivateFlag::Private
+        && extract_concrete_record_type_info(
+            label_desc.lbl_res,
+            env,
+            &mut tctx.persistent_env,
+            tctx.type_ctx,
+        )
+        .is_some_and(|(_, _, decl)| {
+            decl.type_private == crate::types::PrivateFlag::Private
+        })
+    {
+        tctx.report_warning(
+            field_lid.loc,
+            Warning::BsPrivateRecordMutation {
+                field_name: field_context_name.clone(),
+            },
+        );
     }
     if let Some(warning) = deprecated_mutable_warning_for_label(&field_context_name, &label_desc) {
         tctx.report_warning(field_lid.loc, warning);
