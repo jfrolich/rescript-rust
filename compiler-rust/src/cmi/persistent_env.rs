@@ -661,6 +661,11 @@ pub struct PersistentEnv {
 /// Errors reported by OCaml's `Env` persistent interface loader.
 #[derive(Debug, Clone)]
 pub enum PersistentEnvError {
+    /// A discovered compiled interface could not be decoded.
+    InterfaceRead {
+        /// User-facing CMI reader message, with the display path retained.
+        message: String,
+    },
     /// The file found for one module contains a different compiled unit.
     IllegalRenaming {
         /// Module name requested by the lookup.
@@ -1672,8 +1677,15 @@ impl PersistentEnv {
         if let Some((full_path, display_path)) = self.find_in_path_uncap_entry(&cmi_filename) {
             let cmi = match cmi_format::read_cmi(&full_path) {
                 Ok(cmi) => cmi,
-                Err(e) => {
-                    eprintln!("warning: failed to read CMI file {}: {}", full_path, e);
+                Err(error) => {
+                    // OCaml Env.find_pers_struct propagates Cmi_format.Error as
+                    // a fatal persistent-environment diagnostic. Preserve the
+                    // load-path spelling rather than leaking the canonical I/O
+                    // path used to open the file.
+                    let message = error
+                        .to_string()
+                        .replacen(&full_path, &display_path, 1);
+                    self.record_error(PersistentEnvError::InterfaceRead { message });
                     return None;
                 }
             };
@@ -1762,7 +1774,16 @@ impl PersistentEnv {
 
         let cmi_filename = format!("{}.cmi", name);
         let (full_path, display_path) = self.find_in_path_uncap_entry(&cmi_filename)?;
-        let cmi = cmi_format::read_cmi(&full_path).ok()?;
+        let cmi = match cmi_format::read_cmi(&full_path) {
+            Ok(cmi) => cmi,
+            Err(error) => {
+                let message = error
+                    .to_string()
+                    .replacen(&full_path, &display_path, 1);
+                self.record_error(PersistentEnvError::InterfaceRead { message });
+                return None;
+            }
+        };
         if !self.validate_cmi_name(name, &cmi.cmi_name, &display_path) {
             return None;
         }

@@ -4308,7 +4308,18 @@ fn type_mod_error_to_anyhow(
 }
 
 fn persistent_env_error_to_anyhow(error: PersistentEnvError, filename: &str) -> anyhow::Error {
+    if let PersistentEnvError::InterfaceRead { message } = error {
+        let mut output = String::new();
+        push_compiler_report_intro(&mut output, "We've found a bug for you!");
+        push_compiler_report_location(&mut output, filename);
+        output.push_str("  ");
+        output.push_str(&message);
+        output.push_str("\n\n");
+        return UserDiagnostic::new(output, 2).into();
+    }
+
     let message = match error {
+        PersistentEnvError::InterfaceRead { .. } => unreachable!(),
         PersistentEnvError::IllegalRenaming {
             expected, actual, ..
         } => format!(
