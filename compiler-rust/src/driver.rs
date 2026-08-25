@@ -7479,7 +7479,7 @@ fn append_extra_type_clash_help(
         message.push_str(INFO);
         message.push_str("React.component(...)");
         message.push_str(RESET);
-    } else if trace.first().is_some_and(|(actual, expected)| {
+    } else if trace.iter().any(|(actual, expected)| {
         matches!(
             &*type_ctx.get_desc(type_ctx.repr(*actual)),
             TypeDesc::Tarrow { .. }
@@ -8160,9 +8160,7 @@ fn type_is_jsx_component(type_ctx: &TypeContext, ty: TypeExprRef) -> bool {
                     crate::types::path::Path::Pident(id) if id.name() == "Jsx"
                 )
         }
-        TypeDesc::Tlink(next) | TypeDesc::Tsubst(next) => {
-            type_is_jsx_component(type_ctx, *next)
-        }
+        TypeDesc::Tlink(next) | TypeDesc::Tsubst(next) => type_is_jsx_component(type_ctx, *next),
         _ => false,
     }
 }
