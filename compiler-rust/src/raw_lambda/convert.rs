@@ -4567,6 +4567,24 @@ impl<'a> RawLambdaConverter<'a> {
         path
     }
 
+    fn force_persistent_normalized_prefix(
+        &mut self,
+        env: &crate::types::env::Env,
+        id: &Ident,
+    ) {
+        // Env.normalize_path's Pident branch calls find_module ~alias:true.
+        // When the identifier is not a local module binding, OCaml's
+        // persistent branch forces ps_sig and its Subst.signature freshening
+        // (env.ml:865-875, subst.ml:358-364).
+        if (id.is_persistent() || id.is_global())
+            && env.find_module(id.name()).is_err()
+            && let Some(pers) = self.persistent_env.as_mut()
+        {
+            let _ = pers.force_lazy_signature_rename(id.name(), self.type_ctx);
+            self.sync_local_stamp_generators();
+        }
+    }
+
     fn normalize_value_prefix_path_in_env(
         &mut self,
         env: &crate::types::env::Env,
@@ -4582,7 +4600,10 @@ impl<'a> RawLambdaConverter<'a> {
                 std::sync::Arc::new(self.normalize_value_prefix_path_in_env(env, left)),
                 std::sync::Arc::new(self.normalize_value_prefix_path_in_env(env, right)),
             ),
-            crate::types::Path::Pident(_) => path.clone(),
+            crate::types::Path::Pident(id) => {
+                self.force_persistent_normalized_prefix(env, id);
+                path.clone()
+            }
         };
 
         if matches!(&path, crate::types::Path::Pdot(..))
