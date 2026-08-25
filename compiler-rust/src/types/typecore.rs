@@ -879,6 +879,8 @@ pub enum TypeClashContext {
         optional: bool,
         name: Option<String>,
     },
+    /// In a JSX component position.
+    JsxComponent,
     /// In a statement that discards a function call result.
     StatementFunctionCall,
     /// In a comparison operator.
@@ -9581,8 +9583,11 @@ fn type_application(
             unify_expression_types(tctx, loc, ty_res, expected_inst, None)?;
         }
     }
-    let function_arg_context =
-        function_argument_type_clash_context(typed_funct_value_path.as_ref());
+    let function_arg_context = if transformed_jsx {
+        TypeClashContext::JsxComponent
+    } else {
+        function_argument_type_clash_context(typed_funct_value_path.as_ref())
+    };
 
     let lowered_ty = crate::types::instance(ctx, typed_funct.exp_type);
     ctx.end_def();
@@ -9821,7 +9826,18 @@ fn type_application(
             } else {
                 inst_param.typ
             };
-            let arg_context = if param.lbl.is_optional()
+            let arg_context = if matches!(function_arg_context, TypeClashContext::JsxComponent) {
+                if argument_thunks.is_empty() {
+                    TypeClashContext::JsxComponent
+                } else {
+                    type_clash_context_for_function_argument(
+                        &TypeClashContext::FunctionCall,
+                        call_label,
+                        tctx.arena,
+                        arg_expr,
+                    )
+                }
+            } else if param.lbl.is_optional()
                 && !call_is_optional
                 && matches!(function_arg_context, TypeClashContext::FunctionCall)
             {
@@ -21534,6 +21550,24 @@ fn is_nonexpansive_expression(tctx: &TypeCheckContext<'_>, exp: &Expression) -> 
             // itself is nonexpansive like an explicit lambda.
             if *partial {
                 return true;
+            }
+            // compiler/ml/typecore.ml:1840-1859: `%component_identity` is an
+            // abstract typed coercion and preserves the nonexpansiveness of
+            // the component function value supplied to it.
+            if matches!(
+                &funct.exp_desc,
+                ExpressionDesc::Texp_ident(_, _, desc)
+                    if matches!(
+                        &desc.val_kind,
+                        crate::types::ValueKind::ValPrim(prim)
+                            if prim.prim_name == "%component_identity"
+                    )
+            ) {
+                return args.iter().all(|arg| {
+                    arg.expression
+                        .as_ref()
+                        .map_or(true, |expr| is_nonexpansive_expression(tctx, expr))
+                });
             }
             if let Some((first_arg, rest_args)) = args.split_first() {
                 if first_arg.expression.is_none() {

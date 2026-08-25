@@ -6239,6 +6239,10 @@ fn format_expr_type_clash_report(
             Cow::Borrowed("This has type: "),
             Cow::Borrowed("But this function argument is expecting: "),
         ),
+        Some(TypeClashContext::JsxComponent) => (
+            Cow::Borrowed("This JSX tag has type: "),
+            Cow::Borrowed("But JSX component positions require: "),
+        ),
         Some(TypeClashContext::StatementFunctionCall) => (
             Cow::Borrowed("This function call returns: "),
             Cow::Borrowed("But it's expected to return: "),
@@ -7442,6 +7446,47 @@ fn append_extra_type_clash_help(
         message.push_str("You can only compare things of the same type.");
     }
 
+    if matches!(context, Some(TypeClashContext::JsxComponent)) {
+        message.push_str(
+            "\n\nJSX tags must be React components, not plain functions.\n\n\
+             Possible solutions:\n\
+             - If this function takes labeled props, annotate it with ",
+        );
+        message.push_str(INFO);
+        message.push_str("@react.component");
+        message.push_str(RESET);
+        message.push_str("\n- If this function takes a single props record, annotate it with ");
+        message.push_str(INFO);
+        message.push_str("@react.componentWithProps");
+        message.push_str(RESET);
+        message.push_str("\n- If this is already a valid component-like value, wrap it with ");
+        message.push_str(INFO);
+        message.push_str("React.component(...)");
+        message.push_str(RESET);
+    } else if trace.first().is_some_and(|(actual, expected)| {
+        matches!(
+            &*type_ctx.get_desc(type_ctx.repr(*actual)),
+            TypeDesc::Tarrow { .. }
+        ) && type_is_jsx_component(type_ctx, *expected)
+    }) {
+        message.push_str(
+            "\n\nA React component is expected here, but this expression is a plain function.\n\n\
+             Possible solutions:\n\
+             - Extract it to a component annotated with ",
+        );
+        message.push_str(INFO);
+        message.push_str("@react.component");
+        message.push_str(RESET);
+        message.push_str(" or ");
+        message.push_str(INFO);
+        message.push_str("@react.componentWithProps");
+        message.push_str(RESET);
+        message.push_str("\n- If this is already a valid component-like value, wrap it with ");
+        message.push_str(INFO);
+        message.push_str("React.component(...)");
+        message.push_str(RESET);
+    }
+
     if matches!(context, Some(TypeClashContext::IfCondition)) {
         message.push_str("\n\n");
         message.push_str("To fix this, change the highlighted code so it evaluates to a ");
@@ -8081,6 +8126,26 @@ fn type_is_predef_path(
         TypeDesc::Tconstr { path, .. } => path.same(expected_path),
         TypeDesc::Tlink(next) | TypeDesc::Tsubst(next) => {
             type_is_predef_path(type_ctx, *next, expected_path)
+        }
+        _ => false,
+    }
+}
+
+fn type_is_jsx_component(type_ctx: &TypeContext, ty: TypeExprRef) -> bool {
+    let repr = type_ctx.repr(ty);
+    match &*type_ctx.get_desc(repr) {
+        TypeDesc::Tconstr {
+            path: crate::types::path::Path::Pdot(parent, name, _),
+            ..
+        } => {
+            name == "component"
+                && matches!(
+                    parent.as_ref(),
+                    crate::types::path::Path::Pident(id) if id.name() == "Jsx"
+                )
+        }
+        TypeDesc::Tlink(next) | TypeDesc::Tsubst(next) => {
+            type_is_jsx_component(type_ctx, *next)
         }
         _ => false,
     }
