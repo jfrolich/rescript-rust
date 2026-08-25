@@ -831,13 +831,11 @@ fn parse_es6_arrow_expression_internal(
     p: &mut Parser<'_>,
     is_async: bool,
     arrow_start_pos_idx: Option<PosIdx>,
-    newtype_start_pos_idx: Option<PosIdx>, // For async, the position including 'async'
+    _newtype_start_pos_idx: Option<PosIdx>, // For async, the position including 'async'
     arrow_attrs: Attributes,
     context: ExprContext,
 ) -> Expression {
     let start_pos_idx = arrow_start_pos_idx.unwrap_or_else(|| p.start_pos_idx());
-    // For async functions, newtype_start_pos is set to the 'async' position
-    let newtype_start_idx = newtype_start_pos_idx.unwrap_or(start_pos_idx);
     p.leave_breadcrumb(Grammar::Es6ArrowExpr);
 
     // Parse parameters
@@ -882,15 +880,30 @@ fn parse_es6_arrow_expression_internal(
 
     // Build the function expression from parameters
     let (type_params, term_params) = super::core::extract_fundef_params(parameters);
+    let has_type_params = !type_params.is_empty();
+
+    // Build the authoritative `Pexp_fun.newtypes` list: each type-parameter
+    // group carries its attributes on its first newtype (mirrors upstream
+    // res_core.ml `newtypes` construction).
+    let mut newtypes: Vec<(StringLoc, Attributes)> = Vec::new();
+    for tp in &type_params {
+        let mut locs = tp.locs.iter();
+        if let Some(first) = locs.next() {
+            newtypes.push((first.clone(), tp.attrs.clone()));
+            for name in locs {
+                newtypes.push((name.clone(), Attributes::new()));
+            }
+        }
+    }
 
     // Fold the term parameters into nested functions
     // If there are type params but no term params, add an implicit unit param
     // We capture the Pexp_fun location for use in the final wrapper (for position sharing)
-    let (arrow_expr, pexp_fun_loc) = if term_params.is_empty() && type_params.is_some() {
+    let (arrow_expr, pexp_fun_loc) = if term_params.is_empty() && has_type_params {
         // Implicit unit parameter for type-only arrow
         // OCaml uses the location of the parenthesized type params group for the implicit unit PATTERN
         // but the Pexp_fun location spans from the paren start to the end of the body
-        let tp = type_params.as_ref().unwrap();
+        let tp = &type_params[0];
         let (unit_pat_loc, pexp_fun_loc) = match (tp.paren_start_pos_idx, tp.paren_end_pos_idx) {
             (Some(start_idx), Some(paren_end_idx)) => {
                 (
@@ -925,7 +938,7 @@ fn parse_es6_arrow_expression_internal(
                     is_async,
                 }))),
                 pexp_loc: pexp_fun_loc.clone(),
-                pexp_attributes: Attributes::new(),
+                pexp_attributes: arrow_attrs.clone(),
             },
             pexp_fun_loc,
         )
@@ -974,53 +987,19 @@ fn parse_es6_arrow_expression_internal(
                     is_async,
                 }))),
                 pexp_loc: wrapper_loc,
-                pexp_attributes: Attributes::new(),
+                pexp_attributes: arrow_attrs.clone(),
             },
             wrapper_loc,
         )
     };
 
-    // Handle newtype parameters
-    // OCaml's make_newtypes creates the chain without attrs, then adds attrs to outermost
-    // In OCaml, when there are type params, arrow_attrs is prepended to tp.attrs
-    // and all combined attrs go on the outermost Pexp_newtype (not on the outer wrapper)
-    // For async functions, OCaml uses the 'async' keyword position (newtype_start)
-    // For non-async, OCaml uses the 'type' keyword position (tp.start_pos_idx)
-    let arrow_expr = match type_params {
-        Some(tp) => {
-            let loc_start_idx = if is_async {
-                newtype_start_idx
-            } else {
-                tp.start_pos_idx
-            };
-            let loc = p.mk_loc_idx(loc_start_idx, end_pos_idx);
-            // OCaml prepends arrow_attrs to tp.attrs
-            let mut combined_attrs = arrow_attrs;
-            combined_attrs.extend(tp.attrs);
-            // Create the Pexp_newtype chain with combined attrs on outermost
-            let mut locs_iter = tp.locs.into_iter().rev().peekable();
-            let mut expr = arrow_expr;
-            while let Some(name) = locs_iter.next() {
-                let is_outermost = locs_iter.peek().is_none();
-                let expr_idx = p.arena_mut().push_expr(expr);
-                expr = Expression {
-                    pexp_desc: Box::new(ExpressionDesc::Pexp_newtype(Box::new((name, expr_idx)))),
-                    pexp_loc: loc.clone(),
-                    // Only outermost gets the combined attrs
-                    pexp_attributes: if is_outermost {
-                        combined_attrs.clone()
-                    } else {
-                        Attributes::new()
-                    },
-                };
-            }
-            expr
-        }
-        None => Expression {
-            pexp_attributes: arrow_attrs,
-            ..arrow_expr
-        },
-    };
+    // Register the authoritative `Pexp_fun.newtypes` list beside the parameter
+    // table, keyed by the function's first parameter pattern.
+    if !newtypes.is_empty()
+        && let ExpressionDesc::Pexp_fun(inner) = &*arrow_expr.pexp_desc
+    {
+        p.arena_mut().set_nary_fun_newtypes(inner.lhs, newtypes);
+    }
 
     // Update the location, preserving position sharing.
     // In OCaml (res_core.ml line 1807):

@@ -16,7 +16,7 @@ use crate::parse_arena::{LocIdx, StrIdx};
 use crate::parser::ast::{
     ArgLabel, Arity, Attribute, Attributes, Case, ClosedFlag, Constant, ConstructorArguments,
     ConstructorDeclaration, CoreType, CoreTypeDesc, DirectionFlag, Expression, ExpressionDesc,
-    ExpressionRecordField, Extension, ExtensionConstructor, ExtensionConstructorKind,
+    ExpressionRecordField, Extension, ExtensionConstructor, ExtensionConstructorKind, FunParam,
     IncludeDeclaration, IncludeDescription, LabelDeclaration, ModuleBinding, ModuleDeclaration,
     ModuleExpr, ModuleExprDesc, ModuleType, ModuleTypeDeclaration, ModuleTypeDesc, MutableFlag,
     ObjectField, OpenDescription, OverrideFlag, Pattern, PatternDesc, PatternRecordField, Payload,
@@ -888,6 +888,20 @@ impl Marshal for TypeArg {
     }
 }
 
+// ========== FunParam (fun_param record in current parsetree) ==========
+
+impl Marshal for FunParam {
+    fn marshal(&self, w: &mut MarshalWriter<'_>) {
+        // fun_param = { p_attrs: attributes; p_lbl: arg_label;
+        //               p_default: expression option; p_pat: pattern }
+        w.write_block_header(0, 4);
+        self.p_attrs.marshal(w);
+        self.p_lbl.marshal(w);
+        self.p_default.marshal(w);
+        self.p_pat.marshal(w);
+    }
+}
+
 // ========== Core Types ==========
 
 impl Marshal for CoreType {
@@ -991,13 +1005,13 @@ impl Marshal for CoreTypeDesc {
                 w.write_str(s);
             }
             CoreTypeDesc::Ptyp_arrow(inner) => {
-                let (ref arg, ref ret, ref arity) = **inner;
-                // Ptyp_arrow of { arg: arg; ret: core_type; arity: arity }
-                // Inline record is encoded as block with 3 fields
-                w.write_block_header(1, 3);
-                arg.marshal(w);
+                let (arg, ret, arity) = &**inner;
+                // Ptyp_arrow of { params: arg list; ret: core_type }
+                // Inline record is encoded as block with 2 fields
+                let params = w.get_arena().nary_arrow_args(arg, *arity).into_owned();
+                w.write_block_header(1, 2);
+                params.marshal(w);
                 ret.marshal(w);
-                arity.marshal(w);
             }
             CoreTypeDesc::Ptyp_tuple(types) => {
                 w.write_block_header(2, 1);
@@ -1409,19 +1423,31 @@ impl Marshal for ExpressionDesc {
                     ref arity,
                     ref is_async,
                 } = **inner;
-                let default_idx = w
-                    .current_expr_idx()
-                    .and_then(|owner| w.get_arena().fun_default(owner))
-                    .or(*default);
-                // Pexp_fun of { arg_label; default; lhs; rhs; arity; async }
-                // Inline record with 6 fields
-                w.write_block_header(3, 6);
-                arg_label.marshal(w);
-                default_idx.marshal(w);
-                lhs.marshal(w);
-                rhs.marshal(w);
-                arity.marshal(w);
+                let params = w.get_arena().nary_fun_params(inner).into_owned();
+                let newtypes = w.get_arena().nary_fun_newtypes(inner).to_vec();
+                let body = w.get_arena().nary_fun_body(inner);
+                // Pexp_fun of { newtypes; params; body; async }
+                // Inline record with 4 fields
+                w.write_block_header(3, 4);
+                // OCaml serializes each newtype as a tuple
+                // `(string loc * attributes)`; lists are cons cells.
+                if newtypes.is_empty() {
+                    w.write_int(0);
+                } else {
+                    for (i, (name, attrs)) in newtypes.iter().enumerate() {
+                        w.write_block_header(0, 2);
+                        w.write_block_header(0, 2);
+                        name.marshal(w);
+                        attrs.marshal(w);
+                        if i == newtypes.len() - 1 {
+                            w.write_int(0);
+                        }
+                    }
+                }
+                params.marshal(w);
+                body.marshal(w);
                 w.write_int(if *is_async { 1 } else { 0 });
+                let _ = (arg_label, lhs, rhs, default, arity);
             }
             ExpressionDesc::Pexp_apply(inner) => {
                 let PexpApply {

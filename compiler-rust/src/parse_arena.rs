@@ -35,7 +35,7 @@ use crate::intern::Interner;
 use crate::location::{Location, Position};
 use crate::parser::ast::{
     Attributes, CoreType, CoreTypeDesc, Expression, ExpressionDesc, FunParam, ModuleExpr,
-    ModuleExprDesc, ModuleType, ModuleTypeDesc, Pattern, PatternDesc,
+    ModuleExprDesc, ModuleType, ModuleTypeDesc, Pattern, PatternDesc, StringLoc,
 };
 use crate::parser::longident::Longident;
 
@@ -480,6 +480,11 @@ pub struct ParseArena {
     /// authoritative `Pexp_fun.params` representation.
     nary_fun_params_by_first_pattern: HashMap<PatIdx, Box<[FunParam]>>,
     nary_fun_unknown_arity_by_first_pattern: HashMap<PatIdx, ArityIdx>,
+    /// N-ary locally-abstract-type (`newtypes`) lists keyed by the function's
+    /// first parameter pattern, mirroring `Pexp_fun.newtypes` in the current
+    /// upstream parsetree. Each entry is `(name, attributes)`; the parser puts
+    /// the type-parameter group's attributes on the group's first newtype.
+    nary_fun_newtypes_by_first_pattern: HashMap<PatIdx, Box<[(StringLoc, Attributes)]>>,
     nary_arrow_args_by_first_type: HashMap<CoreTypeIdx, Box<[crate::parser::ast::TypeArg]>>,
     /// Sparse side table for case guards, keyed by owning match/try ExprIdx.
     /// Value is a case-indexed list of optional guard expressions.
@@ -889,6 +894,7 @@ impl Default for ParseArena {
             expr_fun_defaults: Vec::new(),
             nary_fun_params_by_first_pattern: HashMap::new(),
             nary_fun_unknown_arity_by_first_pattern: HashMap::new(),
+            nary_fun_newtypes_by_first_pattern: HashMap::new(),
             nary_arrow_args_by_first_type: HashMap::new(),
             expr_case_guards: Vec::new(),
             expr_construct_args: Vec::new(),
@@ -2256,6 +2262,27 @@ impl ParseArena {
         self.nary_fun_params_by_first_pattern
             .get(&fun.lhs)
             .map(|params| &params[..])
+    }
+
+    /// Store the authoritative `Pexp_fun.newtypes` list for a parser-created function.
+    pub fn set_nary_fun_newtypes(
+        &mut self,
+        first_pattern: PatIdx,
+        newtypes: Vec<(StringLoc, Attributes)>,
+    ) {
+        self.nary_fun_newtypes_by_first_pattern
+            .insert(first_pattern, newtypes.into_boxed_slice());
+    }
+
+    /// Return the authoritative n-ary newtypes list, or an empty slice.
+    pub fn nary_fun_newtypes(
+        &self,
+        fun: &crate::parser::ast::PexpFun,
+    ) -> &[(StringLoc, Attributes)] {
+        self.nary_fun_newtypes_by_first_pattern
+            .get(&fun.lhs)
+            .map(|v| &v[..])
+            .unwrap_or(&[])
     }
 
     pub fn nary_fun_params<'a>(

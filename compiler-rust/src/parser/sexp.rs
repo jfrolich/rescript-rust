@@ -767,7 +767,19 @@ fn expression(arena: &ParseArena, expr: &Expression) -> Sexp {
                 .collect();
             Sexp::list(vec![
                 Sexp::atom("Pexp_fun"),
-                Sexp::list(vec![]),
+                Sexp::list(
+                    arena
+                        .nary_fun_newtypes(inner)
+                        .iter()
+                        .map(|(name, attrs)| {
+                            Sexp::list(vec![
+                                Sexp::atom("newtype"),
+                                Sexp::atom(&quote_string(arena.get_string(name.txt))),
+                                attributes(arena, attrs),
+                            ])
+                        })
+                        .collect(),
+                ),
                 Sexp::list(params),
                 expression(arena, arena.get_expr(arena.nary_fun_body(inner))),
             ])
