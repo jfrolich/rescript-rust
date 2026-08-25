@@ -1126,33 +1126,35 @@ fn case(c: &Case, arena: &ParseArena) -> Sexp {
 }
 
 fn value_binding(vb: &ValueBinding, arena: &ParseArena) -> Sexp {
-    let constraint = arena.value_constraint(vb.pvb_pat).map(|constraint| {
-        Sexp::list(vec![
-            Sexp::atom("Some"),
-            Sexp::list(
-                constraint
-                    .pvc_newtypes
-                    .iter()
-                    .map(|name| {
-                        Sexp::list(vec![
-                            Sexp::atom(&quote_string(arena.get_string(name.txt))),
-                            location(name.loc, arena),
-                        ])
-                    })
-                    .collect(),
-            ),
-            core_type(arena.get_core_type(constraint.pvc_type), arena),
-        ])
-    });
-    let mut fields = vec![
+    let constraint = arena.value_constraint(vb.pvb_pat).map_or_else(
+        || Sexp::atom("None"),
+        |constraint| {
+            Sexp::list(vec![
+                Sexp::atom("Some"),
+                Sexp::list(
+                    constraint
+                        .pvc_newtypes
+                        .iter()
+                        .map(|name| {
+                            Sexp::list(vec![
+                                Sexp::atom(&quote_string(arena.get_string(name.txt))),
+                                location(name.loc, arena),
+                            ])
+                        })
+                        .collect(),
+                ),
+                core_type(arena.get_core_type(constraint.pvc_type), arena),
+            ])
+        },
+    );
+    Sexp::list(vec![
         Sexp::atom("value_binding"),
         location(vb.pvb_loc, arena),
         pattern(arena.get_pat(vb.pvb_pat), arena),
-    ];
-    fields.extend(constraint);
-    fields.push(expression(arena.get_expr(vb.pvb_expr), arena));
-    fields.push(attributes(&vb.pvb_attributes, arena));
-    Sexp::list(fields)
+        constraint,
+        expression(arena.get_expr(vb.pvb_expr), arena),
+        attributes(&vb.pvb_attributes, arena),
+    ])
 }
 
 // ============================================================================

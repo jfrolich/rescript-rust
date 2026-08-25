@@ -1141,27 +1141,29 @@ fn case(arena: &ParseArena, c: &Case) -> Sexp {
 }
 
 fn value_binding(arena: &ParseArena, vb: &ValueBinding) -> Sexp {
-    let constraint = arena.value_constraint(vb.pvb_pat).map(|constraint| {
-        Sexp::list(vec![
-            Sexp::atom("Some"),
-            Sexp::list(
-                constraint
-                    .pvc_newtypes
-                    .iter()
-                    .map(|name| Sexp::atom(&quote_string(arena.get_string(name.txt))))
-                    .collect(),
-            ),
-            core_type(arena, arena.get_core_type(constraint.pvc_type)),
-        ])
-    });
-    let mut fields = vec![
+    let constraint = arena.value_constraint(vb.pvb_pat).map_or_else(
+        || Sexp::atom("None"),
+        |constraint| {
+            Sexp::list(vec![
+                Sexp::atom("Some"),
+                Sexp::list(
+                    constraint
+                        .pvc_newtypes
+                        .iter()
+                        .map(|name| Sexp::atom(&quote_string(arena.get_string(name.txt))))
+                        .collect(),
+                ),
+                core_type(arena, arena.get_core_type(constraint.pvc_type)),
+            ])
+        },
+    );
+    Sexp::list(vec![
         Sexp::atom("value_binding"),
         pattern(arena, arena.get_pat(vb.pvb_pat)),
-    ];
-    fields.extend(constraint);
-    fields.push(expression(arena, arena.get_expr(vb.pvb_expr)));
-    fields.push(attributes(arena, &vb.pvb_attributes));
-    Sexp::list(fields)
+        constraint,
+        expression(arena, arena.get_expr(vb.pvb_expr)),
+        attributes(arena, &vb.pvb_attributes),
+    ])
 }
 
 // ============================================================================
