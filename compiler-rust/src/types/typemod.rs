@@ -14012,8 +14012,7 @@ fn with_constraint_has_non_signature_prefix(
     }) else {
         return false;
     };
-    let Some(child_sig) =
-        resolve_mod_type_to_sig(&module_decl.md_type, Some(env), pers_env, ctx)
+    let Some(child_sig) = resolve_mod_type_to_sig(&module_decl.md_type, Some(env), pers_env, ctx)
     else {
         return true;
     };
@@ -14047,13 +14046,9 @@ fn check_with_constraint_components<'a>(
             .into_iter()
             .map(|idx| arena.get_string(idx).to_string())
             .collect();
-        let base_sig = resolve_mod_type_to_sig(
-            base_mty,
-            Some(env),
-            &mut tctx.persistent_env,
-            tctx.type_ctx,
-        )
-        .expect("base module type was resolved above");
+        let base_sig =
+            resolve_mod_type_to_sig(base_mty, Some(env), &mut tctx.persistent_env, tctx.type_ctx)
+                .expect("base module type was resolved above");
         if with_constraint_has_non_signature_prefix(
             &components,
             &base_sig,

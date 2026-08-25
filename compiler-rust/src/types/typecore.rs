@@ -2823,10 +2823,8 @@ fn transl_type_inner(
                             }
                         } else {
                             if let Some(path) = inherit_name
-                                && (matches!(
-                                    &*ctx.get_desc(ctx.repr(expanded)),
-                                    TypeDesc::Tvar(_)
-                                ) || is_incomplete_type_constructor_path(ctx, env, &path))
+                                && (matches!(&*ctx.get_desc(ctx.repr(expanded)), TypeDesc::Tvar(_))
+                                    || is_incomplete_type_constructor_path(ctx, env, &path))
                             {
                                 return Err(TypeCoreError::UnboundTypeConstructorIncomplete {
                                     loc: inherit_ct.ptyp_loc,
@@ -3039,10 +3037,8 @@ fn transl_type_inner(
                         };
                         let Some(fields) = inherited_fields else {
                             if let Some((path, _)) = inherit_name
-                                && (matches!(
-                                    &*ctx.get_desc(ctx.repr(expanded)),
-                                    TypeDesc::Tvar(_)
-                                ) || is_incomplete_type_constructor_path(ctx, env, &path))
+                                && (matches!(&*ctx.get_desc(ctx.repr(expanded)), TypeDesc::Tvar(_))
+                                    || is_incomplete_type_constructor_path(ctx, env, &path))
                             {
                                 return Err(TypeCoreError::UnboundTypeConstructorIncomplete {
                                     loc: inherit_ct.ptyp_loc,
