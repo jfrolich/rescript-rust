@@ -3095,7 +3095,13 @@ fn extract_args_rec(
                     &*lhs_pat.ppat_desc,
                     PatternDesc::Ppat_construct(loc, _) if arena.is_lident(loc.txt, "()")
                 );
-                if is_unit_pattern || matches!(&*lhs_pat.ppat_desc, PatternDesc::Ppat_any) {
+                // OCaml jsx_v4.ml:267-330 handles labelled parameters before
+                // the nolabel unit/wildcard stop case. In particular,
+                // `~priority as _` is still a prop even though its pattern is
+                // `Ppat_any` after parsing.
+                if !(is_labelled(arg_label) || is_optional(arg_label))
+                    && (is_unit_pattern || matches!(&*lhs_pat.ppat_desc, PatternDesc::Ppat_any))
+                {
                     continue;
                 }
                 if is_labelled(arg_label) || is_optional(arg_label) {
@@ -4878,6 +4884,28 @@ let make = (~value: string) => React.null
         };
         assert_eq!(parser.arena().get_string(*module_name), "React");
         assert_eq!(parser.arena().get_string(*component_name), "component");
+    }
+
+    #[test]
+    fn keeps_labelled_wildcard_component_props() {
+        let source = r#"
+@react.component
+let make = (~priority as _, ~text="Test") => React.string(text)
+"#;
+
+        let mut parser = Parser::new("test.res".to_string(), source);
+        let structure = module::parse_structure(&mut parser);
+        assert!(!parser.has_errors());
+        let transformed = transform_structure(structure, 4, parser.arena_mut());
+
+        let mut output = Vec::new();
+        sexp_locs::print_structure(&transformed, parser.arena(), &mut output);
+        let output = String::from_utf8(output).expect("sexp should be valid utf8");
+        assert!(
+            output.contains("priority"),
+            "missing wildcard prop:\n{output}"
+        );
+        assert!(output.contains("text"), "missing defaulted prop:\n{output}");
     }
 
     #[test]

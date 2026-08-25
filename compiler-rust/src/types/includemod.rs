@@ -4575,6 +4575,13 @@ fn extension_constructors<'a>(
         return Err(mismatch());
     }
 
+    // OCaml compiler/ml/includecore.ml:470-473 creates an anonymous
+    // constructor identifier before comparing extension arguments. The
+    // comparison uses it for record-constructor diagnostics; preserve the
+    // allocation even when Rust's diagnostic representation does not need the
+    // identifier so subsequent binding stamps follow the same typing order.
+    let _constructor_id = type_ctx.create_ident("");
+
     if !constructor_arguments_equal_for_inclusion(
         type_ctx,
         env,
@@ -5032,6 +5039,37 @@ mod tests {
 
         let result = modtypes(&type_ctx, &env, &mty_impl, &mty_sig);
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn extension_inclusion_allocates_ocaml_constructor_id() {
+        let id_gen = std::sync::Arc::new(IdGenerator::new());
+        let type_ctx = TypeContext::new(id_gen.clone());
+        let env = initial_env(&type_ctx);
+        let extension = ExtensionConstructor {
+            ext_type_path: crate::types::predef::path_exn(),
+            ext_type_params: vec![],
+            ext_args: ConstructorArguments::CstrTuple(vec![]),
+            ext_ret_type: None,
+            ext_private: crate::types::PrivateFlag::Public,
+            ext_loc: Location::none(),
+            ext_attributes: vec![],
+            ext_is_exception: true,
+        };
+        let before = id_gen.current_stamp();
+
+        let result = extension_constructors(
+            &type_ctx,
+            &env,
+            Ident::create_persistent("Exit"),
+            &extension,
+            &extension,
+            &InclusionSubst::default(),
+            &mut Vec::new(),
+        );
+
+        assert!(result.is_ok());
+        assert_eq!(id_gen.current_stamp(), before + 1);
     }
 
     #[test]
