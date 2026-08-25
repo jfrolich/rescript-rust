@@ -181,7 +181,10 @@ pub fn read_folders(
             .and_then(|name| name.to_str())
             .map(str::to_owned)
         else {
-            log::warn!("Skipping source entry with a non-UTF-8 name: {}", entry_path_buf.display());
+            log::warn!(
+                "Skipping source entry with a non-UTF-8 name: {}",
+                entry_path_buf.display()
+            );
             continue;
         };
 

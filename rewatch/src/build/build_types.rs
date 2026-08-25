@@ -372,12 +372,7 @@ impl BuildCommandState {
     /// Only bumps the generation counter if the interface fingerprint actually
     /// changed (or if this is the first registration). Returns the generation
     /// number assigned (which may be the same as before if unchanged).
-    pub fn register_in_memory_interface(
-        &self,
-        module_name: String,
-        fingerprint: u64,
-        is_pure: bool,
-    ) -> u64 {
+    pub fn register_in_memory_interface(&self, module_name: String, fingerprint: u64, is_pure: bool) -> u64 {
         let mut interfaces = self.in_memory_interfaces.lock().unwrap();
         // Check if the existing interface has the same fingerprint
         if let Some(existing) = interfaces.get(&module_name) {

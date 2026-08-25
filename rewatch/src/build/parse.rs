@@ -10,7 +10,6 @@ use crate::project_context::ProjectContext;
 use ahash::AHashSet;
 use anyhow::{Context, anyhow};
 use log::debug;
-use tracing::info_span;
 use rayon::prelude::*;
 use rescript_compiler::binary_ast::{
     Dependencies, extract_signature_deps, extract_structure_deps, ppx,
@@ -22,6 +21,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Arc;
 use std::{env, io::IsTerminal};
+use tracing::info_span;
 
 struct GeneratedAst {
     path: PathBuf,

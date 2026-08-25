@@ -62,7 +62,10 @@ pub fn initialize(packages: &AHashMap<String, Package>) {
         }
         match File::create(&log_path) {
             Ok(file) => write_to_log_file(file, name, &format!("#Start({})\n", helpers::get_system_time())),
-            Err(error) => error!("Cannot create compiler log {} for package {name}: {error}", log_path.display()),
+            Err(error) => error!(
+                "Cannot create compiler log {} for package {name}: {error}",
+                log_path.display()
+            ),
         }
     })
 }
@@ -72,7 +75,10 @@ pub fn append(package: &packages::Package, str: &str) {
     if let Some(parent) = log_path.parent()
         && let Err(error) = fs::create_dir_all(parent)
     {
-        error!("Cannot create compiler log directory for package {}: {error}", package.name);
+        error!(
+            "Cannot create compiler log directory for package {}: {error}",
+            package.name
+        );
         return;
     }
     match File::options().append(true).create(true).open(&log_path) {
