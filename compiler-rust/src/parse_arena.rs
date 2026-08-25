@@ -337,19 +337,19 @@ impl Default for InternedLocation {
 pub struct StaticArrayLidents {
     /// `Lident "Array"` prefix shared by Array.get/set.
     pub array_lident: LidentIdx,
-    /// `Lident "Belt"` prefix shared by Belt.Array/List.
+    /// `Lident "Primitive_array"` used by array spread lowering.
     pub belt_lident: LidentIdx,
-    /// `Ldot(Lident "Belt", "Array")` prefix for Belt.Array.concatMany.
+    /// Alias of the `Primitive_array` prefix retained for marshal handling.
     pub belt_array: LidentIdx,
-    /// `Ldot(Lident "Belt", "List")` prefix for Belt.List.concatMany.
+    /// `Lident "Primitive_list"` used by list spread lowering.
     pub belt_list: LidentIdx,
     /// `Ldot(Lident "Array", "set")` for array assignment desugaring
     pub array_set: LidentIdx,
     /// `Ldot(Lident "Array", "get")` for array access desugaring
     pub array_get: LidentIdx,
-    /// `Ldot(Ldot(Lident "Belt", "Array"), "concatMany")` for spread array desugaring
+    /// `Ldot(Lident "Primitive_array", "spread")` for spread array desugaring.
     pub belt_array_concat_many: LidentIdx,
-    /// `Ldot(Ldot(Lident "Belt", "List"), "concatMany")` for spread list desugaring
+    /// `Ldot(Lident "Primitive_list", "spread")` for spread list desugaring.
     pub belt_list_concat_many: LidentIdx,
 }
 
@@ -752,7 +752,7 @@ impl Default for ParseArena {
             )),
             ppx_empty_field_str,
         ));
-        let ppx_js_oo_str = strings.intern("Js_OO");
+        let ppx_js_oo_str = strings.intern("Primitive_js_extern");
         let ppx_callback_str = strings.intern("Callback");
         let ppx_js_oo_lident = longidents.push(Longident::Lident(ppx_js_oo_str));
         lident_dedup.insert(ppx_js_oo_str, ppx_js_oo_lident);
@@ -782,8 +782,8 @@ impl Default for ParseArena {
         let array_str = strings.intern("Array");
         let set_str = strings.intern("set");
         let get_str = strings.intern("get");
-        let belt_str = strings.intern("Belt");
-        let concat_many_str = strings.intern("concatMany");
+        let belt_str = strings.intern("Primitive_array");
+        let concat_many_str = strings.intern("spread");
 
         let lident_array = longidents.push(Longident::Lident(array_str));
         let array_set = longidents.push(Longident::Ldot(
@@ -795,29 +795,16 @@ impl Default for ParseArena {
             get_str,
         ));
         let lident_belt = longidents.push(Longident::Lident(belt_str));
-        let belt_array = longidents.push(Longident::Ldot(
-            Box::new(Longident::Lident(belt_str)),
-            array_str,
-        ));
+        let belt_array = lident_belt;
         let belt_array_concat_many = longidents.push(Longident::Ldot(
-            Box::new(Longident::Ldot(
-                Box::new(Longident::Lident(belt_str)),
-                array_str,
-            )),
+            Box::new(Longident::Lident(belt_str)),
             concat_many_str,
         ));
-        // Pre-allocate Belt.List.concatMany for list spread desugaring
-        let list_str = strings.intern("List");
-        let _lident_list = longidents.push(Longident::Lident(list_str));
-        let belt_list = longidents.push(Longident::Ldot(
-            Box::new(Longident::Lident(belt_str)),
-            list_str,
-        ));
+        // Pre-allocate Primitive_list.spread for list spread desugaring.
+        let list_str = strings.intern("Primitive_list");
+        let belt_list = longidents.push(Longident::Lident(list_str));
         let belt_list_concat_many = longidents.push(Longident::Ldot(
-            Box::new(Longident::Ldot(
-                Box::new(Longident::Lident(belt_str)),
-                list_str,
-            )),
+            Box::new(Longident::Lident(list_str)),
             concat_many_str,
         ));
         let static_array_lidents = StaticArrayLidents {
@@ -1698,29 +1685,29 @@ impl ParseArena {
         self.static_array_lidents.array_lident
     }
 
-    /// Get the pre-allocated `Lident "Belt"` prefix.
+    /// Get the pre-allocated `Lident "Primitive_array"` prefix.
     pub fn belt_lident(&self) -> LidentIdx {
         self.static_array_lidents.belt_lident
     }
 
-    /// Get the pre-allocated `Ldot(Lident "Belt", "Array")` prefix.
+    /// Get the pre-allocated `Lident "Primitive_array"` prefix.
     pub fn belt_array_lident(&self) -> LidentIdx {
         self.static_array_lidents.belt_array
     }
 
-    /// Get the pre-allocated `Ldot(Lident "Belt", "List")` prefix.
+    /// Get the pre-allocated `Lident "Primitive_list"` prefix.
     pub fn belt_list_lident(&self) -> LidentIdx {
         self.static_array_lidents.belt_list
     }
 
-    /// Get the pre-allocated `Ldot(Ldot(Lident "Belt", "Array"), "concatMany")`.
-    /// Use in spread array desugaring: `[...a, ...b]` → `Belt.Array.concatMany(...)`.
+    /// Get the pre-allocated `Ldot(Lident "Primitive_array", "spread")`.
+    /// Use in spread array desugaring: `[...a, ...b]` → `Primitive_array.spread(...)`.
     pub fn belt_array_concat_many_lid(&self) -> LidentIdx {
         self.static_array_lidents.belt_array_concat_many
     }
 
-    /// Get the pre-allocated `Ldot(Ldot(Lident "Belt", "List"), "concatMany")`.
-    /// Use in spread list desugaring: `list{...a, ...b}` → `Belt.List.concatMany(...)`.
+    /// Get the pre-allocated `Ldot(Lident "Primitive_list", "spread")`.
+    /// Use in spread list desugaring: `list{...a, ...b}` → `Primitive_list.spread(...)`.
     pub fn belt_list_concat_many_lid(&self) -> LidentIdx {
         self.static_array_lidents.belt_list_concat_many
     }

@@ -1012,54 +1012,29 @@ pub fn pattern_has_spread_attr(arena: &ParseArena, attrs: &Attributes) -> bool {
     has_spread_attr(arena, attrs)
 }
 
-/// Check if expression is Belt.Array.concatMany with @res.spread attribute.
+/// Check if expression is `Primitive_array.spread` with @res.spread attribute.
 /// This is the desugared form of `[...xs, a, b]`.
 pub fn is_spread_belt_array_concat(arena: &ParseArena, expr: &Expression) -> bool {
-    match &*expr.pexp_desc {
-        ExpressionDesc::Pexp_ident(loc_idx) => {
-            // Belt.Array.concatMany: Ldot(Ldot(Lident("Belt"), "Array"), "concatMany")
-            if let Longident::Ldot(parent, name_idx) = arena.get_longident(loc_idx.txt) {
-                if arena.get_string(*name_idx) == "concatMany" {
-                    if let Longident::Ldot(grandparent, parent_name_idx) = parent.as_ref() {
-                        if arena.get_string(*parent_name_idx) == "Array" {
-                            if let Longident::Lident(base_idx) = grandparent.as_ref() {
-                                if arena.get_string(*base_idx) == "Belt" {
-                                    return has_spread_attr(arena, &expr.pexp_attributes);
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-            false
-        }
-        _ => false,
-    }
+    is_primitive_spread(arena, expr, "Primitive_array")
 }
 
-/// Check if expression is Belt.List.concatMany with @res.spread attribute.
+/// Check if expression is `Primitive_list.spread` with @res.spread attribute.
 /// This is the desugared form of `list{...xs, a, b}`.
 pub fn is_spread_belt_list_concat(arena: &ParseArena, expr: &Expression) -> bool {
-    match &*expr.pexp_desc {
-        ExpressionDesc::Pexp_ident(loc_idx) => {
-            // Belt.List.concatMany: Ldot(Ldot(Lident("Belt"), "List"), "concatMany")
-            if let Longident::Ldot(parent, name_idx) = arena.get_longident(loc_idx.txt) {
-                if arena.get_string(*name_idx) == "concatMany" {
-                    if let Longident::Ldot(grandparent, parent_name_idx) = parent.as_ref() {
-                        if arena.get_string(*parent_name_idx) == "List" {
-                            if let Longident::Lident(base_idx) = grandparent.as_ref() {
-                                if arena.get_string(*base_idx) == "Belt" {
-                                    return has_spread_attr(arena, &expr.pexp_attributes);
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-            false
-        }
-        _ => false,
-    }
+    is_primitive_spread(arena, expr, "Primitive_list")
+}
+
+fn is_primitive_spread(arena: &ParseArena, expr: &Expression, module_name: &str) -> bool {
+    let ExpressionDesc::Pexp_ident(loc_idx) = &*expr.pexp_desc else {
+        return false;
+    };
+    let Longident::Ldot(parent, name_idx) = arena.get_longident(loc_idx.txt) else {
+        return false;
+    };
+    matches!(parent.as_ref(), Longident::Lident(base_idx)
+        if arena.get_string(*base_idx) == module_name)
+        && arena.get_string(*name_idx) == "spread"
+        && has_spread_attr(arena, &expr.pexp_attributes)
 }
 
 /// Filter out parsing-only attributes (res.braces, res.ternary, res.await, etc.)

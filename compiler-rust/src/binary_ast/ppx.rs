@@ -3652,16 +3652,11 @@ fn get_opt_arg_type_unchecked(_nolabel: bool, typ: &CoreType, arena: &ParseArena
     }
 }
 
-/// Wrap a type in Js.undefined<T>.
-/// Mirrors OCaml's Ast_comb.to_undefined_type.
+/// Wrap a type in the predeclared `undefined<T>` constructor.
+/// Mirrors OCaml's `Ast_comb.to_undefined_type` and `Ast_literal.Lid.js_undefined`.
 fn to_undefined_type(typ: &CoreType, loc: LocIdx, arena: &mut ParseArena) -> CoreType {
-    // Build Js.undefined<typ>
-    let js_str = arena.push_string("Js".to_string());
     let undefined_str = arena.push_string("undefined".to_string());
-    let longident = arena.push_longident(Longident::Ldot(
-        Box::new(Longident::Lident(js_str)),
-        undefined_str,
-    ));
+    let longident = arena.push_longident(Longident::Lident(undefined_str));
 
     CoreType {
         ptyp_desc: Box::new(CoreTypeDesc::Ptyp_constr(Box::new((
@@ -7386,7 +7381,8 @@ fn rewrite_core_type_default(typ: &CoreType, arena: &mut ParseArena) -> CoreType
 }
 
 /// Rewrite core types with the same `@this` callback handling as OCaml's typ_mapper:
-/// `@this` on an uncurried arrow wraps the type in `Js_OO.Callback.arityN`.
+/// `@this` on an uncurried arrow wraps the type in
+/// `Primitive_js_extern.Callback.arityN`.
 fn rewrite_core_type(typ: &CoreType, arena: &mut ParseArena) -> CoreType {
     if let CoreTypeDesc::Ptyp_arrow(inner) = &*typ.ptyp_desc {
         let (_arg, _ret, arity) = &**inner;

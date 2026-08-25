@@ -2155,95 +2155,48 @@ fn walk_expression(
                 }
             }
 
-            // Special case for Belt.Array.concatMany (spread array syntax)
-            // Match OCaml: flatten all sub-array expressions and walk them together
-            if args.len() == 1 {
-                if let ExpressionDesc::Pexp_ident(ident) = &*funct_expr.pexp_desc {
-                    if let Longident::Ldot(parent, method_idx) = arena.get_longident(ident.txt) {
-                        if arena.get_string(*method_idx) == "concatMany" {
-                            if let Longident::Ldot(grandparent, parent_name) = parent.as_ref() {
-                                if arena.get_string(*parent_name) == "Array" {
-                                    if let Longident::Lident(base) = grandparent.as_ref() {
-                                        if arena.get_string(*base) == "Belt" {
-                                            // Found Belt.Array.concatMany
-                                            let (_, arg_idx) = &args[0];
-                                            let arg = arena.get_expr(*arg_idx);
-                                            if let ExpressionDesc::Pexp_array(sub_arrays) =
-                                                &*arg.pexp_desc
-                                            {
-                                                // Collect all ExprIdx from sub-arrays
-                                                let mut all_expr_idxs: Vec<ExprIdx> = Vec::new();
-                                                for sub_array_idx in sub_arrays.iter() {
-                                                    let sub_array = arena.get_expr(*sub_array_idx);
-                                                    if let ExpressionDesc::Pexp_array(exprs) =
-                                                        &*sub_array.pexp_desc
-                                                    {
-                                                        all_expr_idxs.extend(exprs.iter().copied());
-                                                    } else {
-                                                        // Spread expression
-                                                        all_expr_idxs.push(*sub_array_idx);
-                                                    }
-                                                }
-                                                // Walk all expressions together
-                                                let nodes: Vec<Node<'_>> = all_expr_idxs
-                                                    .into_iter()
-                                                    .map(|e| Node::ExpressionIdx(e))
-                                                    .collect();
-                                                walk_list(&nodes, t, comments, arena);
-                                                return;
-                                            }
-                                        }
-                                    }
-                                }
-                            }
+            // Special case for Primitive_array.spread (spread array syntax).
+            // Match OCaml: flatten all sub-array expressions and walk them together.
+            if args.len() == 1 && parsetree_viewer::is_spread_belt_array_concat(arena, &funct_expr)
+            {
+                let (_, arg_idx) = &args[0];
+                let arg = arena.get_expr(*arg_idx);
+                if let ExpressionDesc::Pexp_array(sub_arrays) = &*arg.pexp_desc {
+                    let mut all_expr_idxs: Vec<ExprIdx> = Vec::new();
+                    for sub_array_idx in sub_arrays.iter() {
+                        let sub_array = arena.get_expr(*sub_array_idx);
+                        if let ExpressionDesc::Pexp_array(exprs) = &*sub_array.pexp_desc {
+                            all_expr_idxs.extend(exprs.iter().copied());
+                        } else {
+                            all_expr_idxs.push(*sub_array_idx);
                         }
                     }
+                    let nodes: Vec<Node<'_>> =
+                        all_expr_idxs.into_iter().map(Node::ExpressionIdx).collect();
+                    walk_list(&nodes, t, comments, arena);
+                    return;
                 }
             }
 
-            // Special case for Belt.List.concatMany (spread list syntax)
-            // Match OCaml: flatten all sub-list expressions and walk them together
-            if args.len() == 1 {
-                if let ExpressionDesc::Pexp_ident(ident) = &*funct_expr.pexp_desc {
-                    if let Longident::Ldot(parent, method_idx) = arena.get_longident(ident.txt) {
-                        if arena.get_string(*method_idx) == "concatMany" {
-                            if let Longident::Ldot(grandparent, parent_name) = parent.as_ref() {
-                                if arena.get_string(*parent_name) == "List" {
-                                    if let Longident::Lident(base) = grandparent.as_ref() {
-                                        if arena.get_string(*base) == "Belt" {
-                                            // Found Belt.List.concatMany
-                                            let (_, arg_idx) = &args[0];
-                                            let arg = arena.get_expr(*arg_idx);
-                                            if let ExpressionDesc::Pexp_array(sub_lists) =
-                                                &*arg.pexp_desc
-                                            {
-                                                // Collect all expressions from sub-lists
-                                                let mut all_exprs: Vec<Expression> = Vec::new();
-                                                for sub_list_idx in sub_lists.iter() {
-                                                    let sub_list = arena.get_expr(*sub_list_idx);
-                                                    let (exprs, spread) =
-                                                        parsetree_viewer::collect_list_expressions(
-                                                            arena, sub_list,
-                                                        );
-                                                    all_exprs.extend(exprs.into_iter().cloned());
-                                                    if let Some(spread_expr) = spread {
-                                                        all_exprs.push(spread_expr.clone());
-                                                    }
-                                                }
-                                                // Walk all expressions together
-                                                let nodes: Vec<Node<'_>> = all_exprs
-                                                    .iter()
-                                                    .map(|e| Node::Expression(e))
-                                                    .collect();
-                                                walk_list(&nodes, t, comments, arena);
-                                                return;
-                                            }
-                                        }
-                                    }
-                                }
-                            }
+            // Special case for Primitive_list.spread (spread list syntax).
+            // Match OCaml: flatten all sub-list expressions and walk them together.
+            if args.len() == 1 && parsetree_viewer::is_spread_belt_list_concat(arena, &funct_expr) {
+                let (_, arg_idx) = &args[0];
+                let arg = arena.get_expr(*arg_idx);
+                if let ExpressionDesc::Pexp_array(sub_lists) = &*arg.pexp_desc {
+                    let mut all_exprs: Vec<Expression> = Vec::new();
+                    for sub_list_idx in sub_lists.iter() {
+                        let sub_list = arena.get_expr(*sub_list_idx);
+                        let (exprs, spread) =
+                            parsetree_viewer::collect_list_expressions(arena, sub_list);
+                        all_exprs.extend(exprs.into_iter().cloned());
+                        if let Some(spread_expr) = spread {
+                            all_exprs.push(spread_expr.clone());
                         }
                     }
+                    let nodes: Vec<Node<'_>> = all_exprs.iter().map(Node::Expression).collect();
+                    walk_list(&nodes, t, comments, arena);
+                    return;
                 }
             }
 
