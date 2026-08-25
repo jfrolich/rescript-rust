@@ -6898,6 +6898,7 @@ fn opened_names_for_open(env_before_open: &Env, env_after_open: &Env) -> OpenedN
 
 fn collect_open_use_check(
     open: &OpenDeclaration,
+    loc: LocIdx,
     item_index: usize,
     opened_names: OpenedNames,
     out: &mut Vec<OpenUseCheck>,
@@ -6906,7 +6907,7 @@ fn collect_open_use_check(
         name: open.open_path.name(),
         path: open.open_path.clone(),
         opened_modtypes: opened_names.modtypes,
-        loc: open.open_txt.loc,
+        loc,
         item_index,
         used: false,
     });
@@ -19532,7 +19533,7 @@ pub fn transl_signature<'a>(
         check_signature_item_names(&mut names, arena, item)?;
         let ctx = tctx.type_ctx;
         ctx.init_def(ctx.current_stamp());
-        let loc = item.psig_loc;
+        let mut loc = item.psig_loc;
         let env_before_item = sig_env.clone_preserve_id();
         let warnings_before_item = tctx.warnings.len();
         let item_index = typed_items.len();
@@ -19715,6 +19716,9 @@ pub fn transl_signature<'a>(
                 })
             }
             PSigDesc::Psig_open(od) => {
+                // Env.open_signature reports unused/shadow warnings at the
+                // open description location, not the module longident.
+                loc = od.popen_loc;
                 let longident = tctx.resolve_lid(od.popen_lid.txt).clone();
                 let open_lid = arena.get_longident(od.popen_lid.txt);
                 // Resolve the module and extend the environment with opened bindings.
@@ -19806,7 +19810,13 @@ pub fn transl_signature<'a>(
                 item_index,
                 &mut open_shadow_identifier_checks,
             );
-            collect_open_use_check(open, item_index, opened_names, &mut unused_open_checks);
+            collect_open_use_check(
+                open,
+                typed_item.sig_loc,
+                item_index,
+                opened_names,
+                &mut unused_open_checks,
+            );
         }
         mark_open_uses_for_signature_item(
             tctx.type_ctx,
@@ -19978,7 +19988,13 @@ pub fn type_structure<'a>(
                 item_index,
                 &mut open_shadow_label_constructor_checks,
             );
-            collect_open_use_check(open, item_index, opened_names, &mut unused_open_checks);
+            collect_open_use_check(
+                open,
+                typed_item.str_loc,
+                item_index,
+                opened_names,
+                &mut unused_open_checks,
+            );
         }
         mark_open_uses_for_item(
             tctx.type_ctx,
@@ -24059,7 +24075,9 @@ fn type_structure_item<'a>(
             Ok((
                 StructureItem {
                     str_desc: desc,
-                    str_loc: loc,
+                    // OCaml type_open receives `popen_loc` and retains that
+                    // complete `open M` span for Env warning callbacks.
+                    str_loc: open_desc.popen_loc,
                     str_env: EnvRef(0),
                 },
                 vec![],
