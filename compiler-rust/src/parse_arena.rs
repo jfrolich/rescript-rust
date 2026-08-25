@@ -457,6 +457,11 @@ pub struct ParseArena {
     locations: Arena<InternedLocation, LocIdx>,
     /// Arena of longidents (returns LidentIdx).
     longidents: Arena<Longident, LidentIdx>,
+    /// Slots reserved before type checking for environment-dependent synthetic
+    /// longidents, such as record-field qualification and omitted labels.
+    synthetic_longidents: Box<[OnceLock<Longident>]>,
+    next_synthetic_longident: AtomicUsize,
+    synthetic_longident_base: u32,
     /// Arena of arities (returns ArityIdx).
     /// Use `push_arity()` for computed paths (fresh indices).
     /// Use `static_arities` for literal paths (shared indices).
@@ -529,6 +534,11 @@ pub struct ParseArena {
     synthetic_patterns: Box<[OnceLock<Pattern>]>,
     next_synthetic_pattern: AtomicUsize,
     synthetic_pattern_base: u32,
+    /// Slots reserved before type checking for strings discovered only after
+    /// environment lookup (notably omitted record labels).
+    synthetic_strings: Box<[OnceLock<String>]>,
+    next_synthetic_string: AtomicUsize,
+    synthetic_string_base: u32,
     /// Arena of core types (returns CoreTypeIdx).
     /// Replaces `Box<CoreType>` for recursive AST references.
     core_types: Arena<CoreType, CoreTypeIdx>,
@@ -903,6 +913,9 @@ impl Default for ParseArena {
             positions: Arena::default(),
             locations: Arena::default(),
             longidents,
+            synthetic_longidents: Box::new([]),
+            next_synthetic_longident: AtomicUsize::new(0),
+            synthetic_longident_base: 0,
             arities,
             expressions: Arena::default(),
             expr_fun_defaults: Vec::new(),
@@ -923,6 +936,9 @@ impl Default for ParseArena {
             synthetic_patterns: Box::new([]),
             next_synthetic_pattern: AtomicUsize::new(0),
             synthetic_pattern_base: 0,
+            synthetic_strings: Box::new([]),
+            next_synthetic_string: AtomicUsize::new(0),
+            synthetic_string_base: 0,
             core_types,
             mod_exprs: Arena::default(),
             mod_types: Arena::default(),
@@ -1586,7 +1602,14 @@ impl ParseArena {
 
     /// Look up a longident by index.
     pub fn get_longident(&self, idx: LidentIdx) -> &Longident {
-        self.longidents.get(idx)
+        let raw = idx.to_u32();
+        if raw < self.synthetic_longident_base || self.synthetic_longidents.is_empty() {
+            self.longidents.get(idx)
+        } else {
+            self.synthetic_longidents[(raw - self.synthetic_longident_base) as usize]
+                .get()
+                .expect("typechecker synthetic longident read before initialization")
+        }
     }
 
     /// Get the parent prefix index for an `Ldot` created via `push_ldot*`.
@@ -1866,7 +1889,14 @@ impl ParseArena {
 
     /// Get the string content for a StrIdx.
     pub fn get_string(&self, idx: StrIdx) -> &str {
-        self.strings.get(idx)
+        let raw = idx.raw();
+        if raw < self.synthetic_string_base || self.synthetic_strings.is_empty() {
+            self.strings.get(idx)
+        } else {
+            self.synthetic_strings[(raw - self.synthetic_string_base) as usize]
+                .get()
+                .expect("typechecker synthetic string read before initialization")
+        }
     }
 
     /// Number of strings currently stored in the arena string table.
@@ -1895,6 +1925,60 @@ impl ParseArena {
             .map(|_| OnceLock::new())
             .collect();
         self.next_synthetic_pattern.store(0, Ordering::Relaxed);
+
+        // A single sparse JSX record can synthesize hundreds of omitted
+        // optional labels despite containing few source longidents. Keep a
+        // practical floor while scaling with source complexity.
+        let synthetic_longident_capacity = self.longidents.len().saturating_mul(2).max(1024);
+        self.synthetic_longident_base = self.longidents.len() as u32;
+        self.synthetic_longidents = (0..synthetic_longident_capacity)
+            .map(|_| OnceLock::new())
+            .collect();
+        self.next_synthetic_longident.store(0, Ordering::Relaxed);
+
+        let synthetic_string_capacity = synthetic_longident_capacity.max(self.strings.len());
+        self.synthetic_string_base = self.strings.len() as u32;
+        self.synthetic_strings = (0..synthetic_string_capacity)
+            .map(|_| OnceLock::new())
+            .collect();
+        self.next_synthetic_string.store(0, Ordering::Relaxed);
+    }
+
+    /// Append a typechecker-generated longident to storage reserved before the
+    /// arena became shared.
+    pub fn push_typecheck_longident(&self, longident: Longident) -> LidentIdx {
+        let slot = self
+            .next_synthetic_longident
+            .fetch_add(1, Ordering::Relaxed);
+        let storage = self
+            .synthetic_longidents
+            .get(slot)
+            .expect("typechecker synthetic longident capacity exhausted");
+        storage
+            .set(longident)
+            .unwrap_or_else(|_| panic!("typechecker synthetic longident slot initialized twice"));
+        LidentIdx::from_u32(self.synthetic_longident_base + slot as u32)
+    }
+
+    /// Append a typechecker-generated string to storage reserved before the
+    /// arena became shared.
+    pub fn push_typecheck_string(&self, string: String) -> StrIdx {
+        let slot = self.next_synthetic_string.fetch_add(1, Ordering::Relaxed);
+        let storage = self
+            .synthetic_strings
+            .get(slot)
+            .expect("typechecker synthetic string capacity exhausted");
+        storage
+            .set(string)
+            .unwrap_or_else(|_| panic!("typechecker synthetic string slot initialized twice"));
+        StrIdx::from_raw(self.synthetic_string_base + slot as u32)
+    }
+
+    /// Append a typechecker-generated simple identifier, allocating its string
+    /// in the matching reserved storage.
+    pub fn push_typecheck_lident(&self, name: &str) -> LidentIdx {
+        let name = self.push_typecheck_string(name.to_owned());
+        self.push_typecheck_longident(Longident::Lident(name))
     }
 
     /// Append a typechecker-generated pattern to storage reserved before the

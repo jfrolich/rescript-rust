@@ -15713,6 +15713,24 @@ let optional = (~x=?, ()) => x
     }
 
     #[test]
+    fn release_synthetic_record_labels_and_qualified_paths_are_stable() {
+        let source = r#"
+module M = {
+  type t = {x: int, y: int, optional?: string}
+  let value = {x: 1, y: 2}
+}
+
+let extract = ({M.x, y: _}: M.t) => x
+let value: M.t = {M.x: 3, y: 4}
+"#;
+
+        let output = super::compile_source_to_js(source, "synthetic_record_labels.res")
+            .expect("synthetic record labels and qualified paths should compile");
+        assert!(output.contains("function extract"));
+        assert!(output.contains("value"));
+    }
+
+    #[test]
     fn extract_file_directives_preserves_source_order() {
         let mut parser = Parser::new(
             "directives.res",

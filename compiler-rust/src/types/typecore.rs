@@ -3286,22 +3286,6 @@ fn push_synthetic_pat(arena: &ParseArena, pat: ParsedPattern) -> crate::parse_ar
     arena.push_typecheck_pattern(pat)
 }
 
-fn push_synthetic_longident(arena: &ParseArena, lid: Longident) -> LidentIdx {
-    // Legacy shared-arena mutation. Pattern/default allocation no longer uses
-    // this path; longident storage needs the same reserved-slot migration.
-    unsafe { (*(arena as *const ParseArena as *mut ParseArena)).push_longident(lid) }
-}
-
-fn push_synthetic_lident(arena: &ParseArena, name: &str) -> LidentIdx {
-    // Legacy shared-arena mutation; see `push_synthetic_longident`.
-    unsafe { (*(arena as *const ParseArena as *mut ParseArena)).push_lident(name) }
-}
-
-fn intern_synthetic_string(arena: &ParseArena, name: &str) -> StrIdx {
-    // Legacy shared-arena mutation; see `push_synthetic_longident`.
-    unsafe { (*(arena as *const ParseArena as *mut ParseArena)).intern_string(name) }
-}
-
 /// Build an or-pattern from a poly variant type definition.
 /// Matches OCaml typecore.ml:537-609 `build_or_pat`.
 ///
@@ -5242,7 +5226,7 @@ fn qualify_unqualified_pattern_record_fields(
         let mut field = field.clone();
         if let Longident::Lident(field_name) = tctx.arena.get_longident(field.lid.txt) {
             let qualified = Longident::Ldot(Box::new(module_qualifier.clone()), *field_name);
-            let qualified_idx = push_synthetic_longident(tctx.arena, qualified);
+            let qualified_idx = tctx.arena.push_typecheck_longident(qualified);
             field.lid = Located {
                 txt: qualified_idx,
                 loc: field.lid.loc,
@@ -15341,6 +15325,11 @@ fn desugar_nary_function_defaults(
 /// shape is already known must be allocated here. Environment-dependent pattern
 /// rewrites use the arena's reserved one-time slots.
 pub fn prepare_typecheck_arena(arena: &mut ParseArena) {
+    // `wrap_unpacks` may attach this internal attribute after environment-driven
+    // first-class-module discovery. Its spelling is known up front, so intern it
+    // while the arena is still exclusively borrowed.
+    arena.intern_string("#modulepat");
+
     let functions = arena.nary_functions();
     for (fun, loc) in functions {
         if arena.nary_fun_default_bindings(&fun).is_some() {
@@ -16859,7 +16848,7 @@ fn qualify_unqualified_record_fields<'a>(
         let mut field = field.clone();
         if let Longident::Lident(field_name) = tctx.arena.get_longident(field.lid.txt) {
             let qualified = Longident::Ldot(Box::new(module_qualifier.clone()), *field_name);
-            let qualified_idx = push_synthetic_longident(tctx.arena, qualified);
+            let qualified_idx = tctx.arena.push_typecheck_longident(qualified);
             field.lid = Located {
                 txt: qualified_idx,
                 loc: field.lid.loc,
@@ -17813,7 +17802,7 @@ fn type_record(
                         .get_synthesized_record_lident(&label_name)
                         .unwrap_or_else(|| {
                             let lid = find_existing_lident_idx(tctx.arena, &label_name)
-                                .unwrap_or_else(|| push_synthetic_lident(tctx.arena, &label_name));
+                                .unwrap_or_else(|| tctx.arena.push_typecheck_lident(&label_name));
                             ctx.cache_synthesized_record_lident(label_name.clone(), lid);
                             lid
                         });
@@ -17965,7 +17954,7 @@ fn type_record(
                     .get_synthesized_record_lident(&label_name)
                     .unwrap_or_else(|| {
                         let lid = find_existing_lident_idx(tctx.arena, &label_name)
-                            .unwrap_or_else(|| push_synthetic_lident(tctx.arena, &label_name));
+                            .unwrap_or_else(|| tctx.arena.push_typecheck_lident(&label_name));
                         ctx.cache_synthesized_record_lident(label_name.clone(), lid);
                         lid
                     });
@@ -21526,16 +21515,14 @@ fn type_expect_with_module_unpacks(
         if let Some(idx) = arena.find_string_idx(s) {
             return idx;
         }
-        // TypeCore runs after parsing and needs to synthesize a few internal
-        // attributes (`#modulepat`) exactly like OCaml typecore.
-        intern_synthetic_string(arena, s)
+        arena.push_typecheck_string(s.to_owned())
     }
 
     fn ensure_lident_idx(arena: &ParseArena, name: &str) -> LidentIdx {
         if let Some(idx) = find_existing_lident_idx(arena, name) {
             return idx;
         }
-        push_synthetic_lident(arena, name)
+        arena.push_typecheck_lident(name)
     }
 
     let Some((unpack, rest)) = unpacks.split_first() else {
