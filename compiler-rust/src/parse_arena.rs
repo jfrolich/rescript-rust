@@ -34,8 +34,8 @@ use crate::arena::{Arena, ArenaIdx};
 use crate::intern::Interner;
 use crate::location::{Location, Position};
 use crate::parser::ast::{
-    Attributes, CoreType, CoreTypeDesc, Expression, ExpressionDesc, ModuleExpr, ModuleExprDesc,
-    ModuleType, ModuleTypeDesc, Pattern, PatternDesc,
+    Attributes, CoreType, CoreTypeDesc, Expression, ExpressionDesc, FunParam, ModuleExpr,
+    ModuleExprDesc, ModuleType, ModuleTypeDesc, Pattern, PatternDesc,
 };
 use crate::parser::longident::Longident;
 
@@ -473,6 +473,14 @@ pub struct ParseArena {
     /// keeps the same AST behavior and comparable parser memory profile.
     /// Sparse side table for function default expressions, keyed by function ExprIdx.
     expr_fun_defaults: Vec<Option<ExprIdx>>,
+    /// N-ary source parameter lists keyed by the function body's arena index.
+    ///
+    /// `PexpFun` keeps only a compact first-parameter fallback for frozen-v0 PPX
+    /// conversion. Parser-created current parsetrees use this table as the
+    /// authoritative `Pexp_fun.params` representation.
+    nary_fun_params_by_arity: HashMap<ArityIdx, Box<[FunParam]>>,
+    nary_fun_unknown_arity_by_arity: HashMap<ArityIdx, ArityIdx>,
+    nary_arrow_args_by_arity: HashMap<ArityIdx, Box<[crate::parser::ast::TypeArg]>>,
     /// Sparse side table for case guards, keyed by owning match/try ExprIdx.
     /// Value is a case-indexed list of optional guard expressions.
     expr_case_guards: Vec<Option<Box<[Option<ExprIdx>]>>>,
@@ -879,6 +887,9 @@ impl Default for ParseArena {
             arities,
             expressions: Arena::default(),
             expr_fun_defaults: Vec::new(),
+            nary_fun_params_by_arity: HashMap::new(),
+            nary_fun_unknown_arity_by_arity: HashMap::new(),
+            nary_arrow_args_by_arity: HashMap::new(),
             expr_case_guards: Vec::new(),
             expr_construct_args: Vec::new(),
             expr_variant_args: Vec::new(),
@@ -2187,6 +2198,108 @@ impl ParseArena {
     /// Get the number of expressions in the arena.
     pub fn expr_count(&self) -> usize {
         self.expressions.len()
+    }
+
+    /// Store the authoritative n-ary argument list for a parser-created arrow.
+    pub fn set_nary_arrow_args(&mut self, arity: ArityIdx, args: Vec<crate::parser::ast::TypeArg>) {
+        self.nary_arrow_args_by_arity
+            .insert(arity, args.into_boxed_slice());
+    }
+
+    pub fn nary_arrow_args<'a>(
+        &'a self,
+        arg: &'a crate::parser::ast::TypeArg,
+        arity: ArityIdx,
+    ) -> std::borrow::Cow<'a, [crate::parser::ast::TypeArg]> {
+        if let Some(args) = self.nary_arrow_args_by_arity.get(&arity) {
+            std::borrow::Cow::Borrowed(&args[..])
+        } else {
+            std::borrow::Cow::Owned(vec![arg.clone()])
+        }
+    }
+
+    /// Store the authoritative n-ary parameter list for a parser-created function.
+    pub fn set_nary_fun_params(
+        &mut self,
+        arity: ArityIdx,
+        params: Vec<FunParam>,
+        unknown_arity: ArityIdx,
+    ) {
+        debug_assert!(!params.is_empty());
+        self.nary_fun_params_by_arity
+            .insert(arity, params.into_boxed_slice());
+        self.nary_fun_unknown_arity_by_arity
+            .insert(arity, unknown_arity);
+    }
+
+    pub fn nary_fun_unknown_arity(&self, fun: &crate::parser::ast::PexpFun) -> ArityIdx {
+        if self.get_arity(fun.arity).is_some() {
+            self.nary_fun_unknown_arity_by_arity
+                .get(&fun.arity)
+                .copied()
+                .or_else(|| match &*self.get_expr(fun.rhs).pexp_desc {
+                    ExpressionDesc::Pexp_fun(next) => Some(next.arity),
+                    _ => None,
+                })
+                .unwrap_or(fun.arity)
+        } else {
+            fun.arity
+        }
+    }
+
+    /// Return the authoritative n-ary parameters, or the compact fallback.
+    pub fn nary_fun_params<'a>(
+        &'a self,
+        fun: &'a crate::parser::ast::PexpFun,
+    ) -> std::borrow::Cow<'a, [FunParam]> {
+        if self.get_arity(fun.arity).is_some()
+            && let Some(params) = self.nary_fun_params_by_arity.get(&fun.arity)
+        {
+            std::borrow::Cow::Borrowed(params)
+        } else {
+            let mut params = vec![FunParam {
+                p_attrs: self.get_pat(fun.lhs).ppat_attributes.clone(),
+                p_lbl: fun.arg_label.clone(),
+                p_default: fun.default,
+                p_pat: fun.lhs,
+            }];
+            if let Some(arity) = self.get_arity(fun.arity) {
+                let mut body = fun.rhs;
+                while params.len() < arity.max(1) as usize {
+                    let ExpressionDesc::Pexp_fun(next) = &*self.get_expr(body).pexp_desc else {
+                        break;
+                    };
+                    params.push(FunParam {
+                        p_attrs: self.get_pat(next.lhs).ppat_attributes.clone(),
+                        p_lbl: next.arg_label.clone(),
+                        p_default: next.default,
+                        p_pat: next.lhs,
+                    });
+                    body = next.rhs;
+                }
+            }
+            std::borrow::Cow::Owned(params)
+        }
+    }
+
+    /// Return the body belonging to the n-ary parameter list.
+    pub fn nary_fun_body(&self, fun: &crate::parser::ast::PexpFun) -> ExprIdx {
+        if self.nary_fun_params_by_arity.contains_key(&fun.arity) {
+            return fun.rhs;
+        }
+        let Some(arity) = self.get_arity(fun.arity) else {
+            return fun.rhs;
+        };
+        let mut consumed = 1;
+        let mut body = fun.rhs;
+        while consumed < arity.max(1) as usize {
+            let ExpressionDesc::Pexp_fun(next) = &*self.get_expr(body).pexp_desc else {
+                break;
+            };
+            consumed += 1;
+            body = next.rhs;
+        }
+        body
     }
 
     /// Attach sparse function default data to an expression node.

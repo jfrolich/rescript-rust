@@ -572,7 +572,22 @@ pub struct Expression {
     pub pexp_attributes: Attributes,
 }
 
-/// Named struct for Pexp_fun variant (boxed for enum size optimization).
+/// A source-level function parameter. N-ary function nodes store their full
+/// parameter list in `ParseArena`'s sparse function-shape side table.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FunParam {
+    pub p_attrs: Attributes,
+    pub p_lbl: ArgLabel,
+    pub p_default: Option<ExprIdx>,
+    pub p_pat: PatIdx,
+}
+
+/// Compact inline payload for `Pexp_fun`.
+///
+/// Recursive expression data remains arena-indexed. The parser-facing n-ary
+/// shape (`newtypes`, `params`, `body`) is kept in a sparse side table keyed by
+/// the owning `ExprIdx`; these fields retain the first parameter as compact
+/// fallback data for ASTs read from the frozen v0 PPX format.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PexpFun {
     pub arg_label: ArgLabel,

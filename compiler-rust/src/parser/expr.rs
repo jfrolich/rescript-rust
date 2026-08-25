@@ -934,101 +934,50 @@ fn parse_es6_arrow_expression_internal(
         let loc = p.mk_loc_idx(end_pos_idx, end_pos_idx);
         (body, loc)
     } else {
-        // Compute arity for the outermost function
+        // Upstream parsetree stores all source parameters on one Pexp_fun.
+        // Keep that logical shape in the arena side table while retaining the
+        // compact first-parameter payload needed by frozen-v0 PPX conversion.
         let total_arity = term_params.len();
-        // Pre-create arity indices before the fold (arena access needs mutable borrow)
         let full_arity_idx = p.push_arity_full(total_arity);
         let unknown_arity_idx = p.push_arity_unknown();
-        // Build locations for Pexp_funs.
-        // In OCaml (res_core.ml:1792), each Pexp_fun's loc uses parameter.p_pos.
-        // parameter.p_pos is captured at the start of parse_parameter, which is:
-        // - For `x => x`: at `x` (same as pattern's loc_start)
-        // - For `(x, y)`: at `x` and `y` respectively (pattern's loc_start)
-        // - For `~name as pat`: at `~` (different from pattern's loc_start!)
-        //
-        // For the final wrapper (res_core.ml:1807), loc_start is overridden with
-        // start_pos captured at line 1726 (before parsing parameters).
-        //
-        // For position sharing:
-        // - In OCaml, for `x => x`, start_pos and parameter.p_pos are the same object
-        // - The pattern was already parsed and has a PosIdx for its loc_start
-        // - If start_pos matches the first param's start_pos (which for simple cases
-        //   equals pattern.loc_start), we reuse the pattern's existing PosIdx
         let outermost_param = &term_params[0];
-        // Check if start_pos_idx matches the first param's pattern loc_start PosIdx
-        // This enables sharing for simple cases like `x => x`
         let pattern_start_idx = p.loc_start_idx(outermost_param.pat.ppat_loc);
         let wrapper_start_idx = if start_pos_idx == pattern_start_idx {
-            // Same PosIdx - reuse the pattern's existing PosIdx for sharing
             pattern_start_idx
         } else {
-            // Different - use the arrow's start PosIdx
             start_pos_idx
         };
         let wrapper_loc = p.mk_loc_idx(wrapper_start_idx, end_pos_idx);
-        let arrow_expr = term_params
-            .into_iter()
-            .rev()
-            .enumerate()
-            .fold(body, |acc, (i, param)| {
-                // Use parameter.start_pos for the Pexp_fun loc_start
-                // This matches OCaml's parameter.p_pos
-                //
-                // For position sharing to match OCaml:
-                // - In OCaml, p_pos is captured from p.Parser.start_pos
-                // - For simple patterns, p_pos and pattern.ppat_loc.loc_start are the SAME object
-                // - We need to check if param.start_pos matches the pattern's loc_start
-                //   and if so, reuse the pattern's PosIdx
-                let pattern_start_idx = p.loc_start_idx(param.pat.ppat_loc);
-                let start_idx = if param.start_pos_idx == wrapper_start_idx {
-                    // First param case: same PosIdx as the wrapper
-                    wrapper_start_idx
-                } else if param.start_pos_idx == pattern_start_idx {
-                    // Same PosIdx as pattern's loc_start - reuse for sharing
-                    pattern_start_idx
-                } else {
-                    // Different (e.g., labeled param ~x as pat) - use param's stored PosIdx
-                    param.start_pos_idx
-                };
-                let loc = p.mk_loc_idx(start_idx, end_pos_idx);
-                // Apply parameter attributes to the pattern's ppat_attributes
-                // This is where attributes like @as("open") on parameters like (@as("open") ~_open)
-                // should end up, so the JSX PPX can access them via pattern.ppat_attributes
-                let mut pat = param.pat;
-                if !param.attrs.is_empty() {
-                    let mut attrs = param.attrs;
-                    attrs.extend(pat.ppat_attributes);
-                    pat.ppat_attributes = attrs;
-                }
-                // Only the outermost function (last in fold, first in original list) gets arity
-                // After reversing, index 0 in fold corresponds to the innermost function
-                // The last iteration (i == total_arity - 1) is the outermost function
-                let is_outermost = i == total_arity - 1;
-                let arity = if is_outermost {
-                    full_arity_idx
-                } else {
-                    unknown_arity_idx
-                };
-                // Only the outermost function gets is_async: true (OCaml behavior)
-                let fn_is_async = is_outermost && is_async;
-                let default_idx = param.expr.map(|e| p.arena_mut().push_expr(e));
-                let rhs_idx = p.arena_mut().push_expr(acc);
-                let pat_idx = p.arena_mut().push_pat(pat);
-                Expression {
-                    pexp_desc: Box::new(ExpressionDesc::Pexp_fun(Box::new(PexpFun {
-                        arg_label: param.label,
-                        default: default_idx,
-                        lhs: pat_idx,
-                        rhs: rhs_idx,
-                        arity,
-                        is_async: fn_is_async,
-                    }))),
-                    pexp_loc: loc,
-                    pexp_attributes: Attributes::new(),
-                }
+        let body_idx = p.arena_mut().push_expr(body);
+        let mut params = Vec::with_capacity(total_arity);
+        for param in term_params {
+            let default = param.expr.map(|expr| p.arena_mut().push_expr(expr));
+            let pat = p.arena_mut().push_pat(param.pat);
+            params.push(FunParam {
+                p_attrs: param.attrs,
+                p_lbl: param.label,
+                p_default: default,
+                p_pat: pat,
             });
-        // Return wrapper_loc for the final wrapper to use
-        (arrow_expr, wrapper_loc)
+        }
+        let first = params[0].clone();
+        p.arena_mut()
+            .set_nary_fun_params(full_arity_idx, params, unknown_arity_idx);
+        (
+            Expression {
+                pexp_desc: Box::new(ExpressionDesc::Pexp_fun(Box::new(PexpFun {
+                    arg_label: first.p_lbl,
+                    default: first.p_default,
+                    lhs: first.p_pat,
+                    rhs: body_idx,
+                    arity: full_arity_idx,
+                    is_async,
+                }))),
+                pexp_loc: wrapper_loc,
+                pexp_attributes: Attributes::new(),
+            },
+            wrapper_loc,
+        )
     };
 
     // Handle newtype parameters
