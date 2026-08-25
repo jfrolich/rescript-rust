@@ -131,7 +131,10 @@ impl LambdaCompiler {
                 self.val_from_option_expr(arg),
                 Expression::undefined(false),
             ),
-            _ => self.runtime_call_expr("Primitive_option", "toUndefined", vec![arg]),
+            // `Js_of_lam_option.get_default_undefined_from_optional`: a
+            // non-duplicable option is already represented so that the
+            // ordinary option unboxer yields `undefined` for `None`.
+            _ => self.runtime_call_expr("Primitive_option", "valFromOption", vec![arg]),
         }
     }
 
