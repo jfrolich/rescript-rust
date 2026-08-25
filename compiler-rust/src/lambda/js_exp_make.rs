@@ -268,35 +268,6 @@ pub(crate) fn compile_int_equality(left: Expression, right: Expression) -> Expre
             ExpressionDesc::Number(Number::Int { i: left_int, .. }),
             ExpressionDesc::Number(Number::Int { i: right_int, .. }),
         ) => Expression::bool(left_int == right_int),
-        // Pintcomp Ceq is also used for hash-collision polyvar switches that
-        // compare string tags via string equality. OCaml's string_comp folds
-        // literal-vs-literal cases at `js_exp_make.ml:1355-1362`, matching
-        // the raw `Bin EqEqEq` shape we want to emit otherwise. Fold Str,Str
-        // here to keep the polyvar switch chain collapsing to a single arm.
-        (
-            ExpressionDesc::Str {
-                txt: left_txt,
-                delim: left_delim,
-            },
-            ExpressionDesc::Str {
-                txt: right_txt,
-                delim: right_delim,
-            },
-        ) => {
-            match crate::js_ir::fold_strict_string_equality_pub(
-                left_txt,
-                left_delim,
-                right_txt,
-                right_delim,
-            ) {
-                Some(equal) => Expression::bool(equal),
-                None => crate::js_ir::raw_bin_expression(
-                    comparison_to_binop(Comparison::Eq),
-                    left,
-                    right,
-                ),
-            }
-        }
         // OCaml's `Js_exp_make.int_equal` (= float_equal) constructs a raw
         // `Bin (EqEqEq, e0, e1)` without going through `bin`/`triple_equal`,
         // so `3 === null` from `Pintcomp Ceq` stays as the literal comparison
