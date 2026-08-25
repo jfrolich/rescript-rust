@@ -5201,9 +5201,11 @@ impl AstUntaggedVariantError {
     pub fn message_text(&self) -> String {
         match self {
             AstUntaggedVariantError::InvalidVariantAsAnnotation => {
-                "A variant case annotation @as(...) must be a string or integer, boolean, null, undefined".to_string()
+                "A variant case annotation @as(...) must be a string, integer, boolean, null, or undefined.".to_string()
             }
-            AstUntaggedVariantError::DuplicatedBsAs => "duplicate @as ".to_string(),
+            AstUntaggedVariantError::DuplicatedBsAs => {
+                "Duplicate @as annotation; only one @as is allowed here.".to_string()
+            }
             AstUntaggedVariantError::InvalidVariantTagAnnotation => {
                 "A variant tag annotation @tag(...) must be a string".to_string()
             }
@@ -5444,16 +5446,20 @@ fn get_untagged_constructor_block_type(
     match &constructor.cd_args {
         crate::types::decl::ConstructorArguments::CstrTuple(args) => match args.as_slice() {
             [arg] => get_untagged_block_type_from_type(ctx, env, *arg).or_else(|| {
-                let decl = extract_concrete_untagged_type_decl(ctx, env, *arg)?;
-                match decl.type_kind {
-                    crate::types::decl::TypeKind::TypeRecord(
-                        _,
-                        crate::types::decl::RecordRepresentation::RecordUnboxed(_),
-                    ) => Some(UntaggedVariantBlockType::Unknown),
-                    crate::types::decl::TypeKind::TypeRecord(_, _) => {
-                        Some(UntaggedVariantBlockType::Object)
-                    }
-                    _ => Some(UntaggedVariantBlockType::Unknown),
+                match extract_concrete_untagged_type_decl(ctx, env, *arg) {
+                    Some(decl) => match decl.type_kind {
+                        crate::types::decl::TypeKind::TypeRecord(
+                            _,
+                            crate::types::decl::RecordRepresentation::RecordUnboxed(_),
+                        ) => Some(UntaggedVariantBlockType::Unknown),
+                        crate::types::decl::TypeKind::TypeRecord(_, _) => {
+                            Some(UntaggedVariantBlockType::Object)
+                        }
+                        _ => Some(UntaggedVariantBlockType::Unknown),
+                    },
+                    // OCaml ast_untagged_variants.ml:get_block_type classifies
+                    // failed concrete-declaration extraction as UnknownType.
+                    None => Some(UntaggedVariantBlockType::Unknown),
                 }
             }),
             [_, _, ..] => Some(UntaggedVariantBlockType::Object),
