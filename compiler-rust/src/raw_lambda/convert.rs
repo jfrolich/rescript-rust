@@ -49,9 +49,8 @@ use crate::types::type_expr::{TypeDesc, TypeExprRef};
 use crate::types::typecore::TypeCoreWarning;
 use crate::types::typedtree::{
     ApplyArg, Case, Constant as TConstant, EnvRef, Expression, ExpressionDesc, FunctionParam,
-    MethKind, ModuleCoercion, ModuleExpr, ModuleExprDesc, Partial, Pattern,
-    PatternDesc, RecordField, RecordLabelDefinition, Structure, StructureItem, StructureItemDesc,
-    ValueBinding,
+    MethKind, ModuleCoercion, ModuleExpr, ModuleExprDesc, Partial, Pattern, PatternDesc,
+    RecordField, RecordLabelDefinition, Structure, StructureItem, StructureItemDesc, ValueBinding,
 };
 
 const PREDEF_MATCH_FAILURE_STAMP: i32 = 17;
@@ -400,7 +399,10 @@ where
                 iter_bound_pattern_idents(pat, f);
             }
         }
-        PatternDesc::Tpat_record(fields, _, _) => {
+        PatternDesc::Tpat_record(fields, _, rest) => {
+            if let Some(rest) = rest {
+                f(&rest.rest_ident);
+            }
             for (_, _, pat, _) in fields {
                 iter_bound_pattern_idents(pat, f);
             }
@@ -1630,9 +1632,10 @@ impl<'a> RawLambdaConverter<'a> {
         lam: &RawLambda,
         target_loc: LocIdx,
     ) {
-        let Some((attr_name, payload)) = attrs.iter().find(|(name, _)| {
-            self.arena.get_string(name.txt) == "res.hoistedFunction"
-        }) else {
+        let Some((attr_name, payload)) = attrs
+            .iter()
+            .find(|(name, _)| self.arena.get_string(name.txt) == "res.hoistedFunction")
+        else {
             return;
         };
         let warning_loc = attr_name.loc;
@@ -1690,10 +1693,7 @@ impl<'a> RawLambdaConverter<'a> {
             );
             return;
         }
-        let mut segments = segments
-            .into_iter()
-            .map(str::to_string)
-            .collect::<Vec<_>>();
+        let mut segments = segments.into_iter().map(str::to_string).collect::<Vec<_>>();
         segments.push(binding.name().to_string());
         // Structure translation visits the continuation first. Prepending keeps
         // the same source order as OCaml's `js_hoisted := item :: !js_hoisted`.
@@ -4081,9 +4081,8 @@ impl<'a> RawLambdaConverter<'a> {
                         ..
                     }) = base
                     {
-                        if let Some(field) = usize::try_from(*pos)
-                            .ok()
-                            .and_then(|pos| args.get(pos))
+                        if let Some(field) =
+                            usize::try_from(*pos).ok().and_then(|pos| args.get(pos))
                         {
                             return resolve_binding(field, groups, seen);
                         }
@@ -4132,54 +4131,6 @@ impl<'a> RawLambdaConverter<'a> {
                 name
             }
         }
-        fn append_aliases(
-            lam: RawLambda,
-            aliases: &[(Ident, RawLambda)],
-        ) -> RawLambda {
-            match lam {
-                RawLambda::Llet(kind, id, value, body) => RawLambda::Llet(
-                    kind,
-                    id,
-                    value,
-                    Box::new(append_aliases(*body, aliases)),
-                ),
-                RawLambda::Lletrec(bindings, body) => RawLambda::Lletrec(
-                    bindings,
-                    Box::new(append_aliases(*body, aliases)),
-                ),
-                RawLambda::Lsequence(left, body) => RawLambda::Lsequence(
-                    left,
-                    Box::new(append_aliases(*body, aliases)),
-                ),
-                RawLambda::Lprim(RawPrimInfo {
-                    primitive: Primitive::Pmakeblock(tag, TagInfo::ModuleExport(mut ids), mutable_),
-                    mut args,
-                    loc,
-                }) => {
-                    ids.extend(aliases.iter().map(|(id, _)| id.clone()));
-                    args.extend(aliases.iter().map(|(id, _)| RawLambda::var(id.clone())));
-                    let mut result = RawLambda::prim(
-                        Primitive::Pmakeblock(tag, TagInfo::ModuleExport(ids), mutable_),
-                        args,
-                        loc,
-                    );
-                    for (id, value) in aliases.iter().rev() {
-                        result = RawLambda::let_(
-                            // Added before Rust's tree-shaped optimization pipeline;
-                            // keep the module access intact until JS lowering, matching
-                            // OCaml's post-simplification Alias group insertion.
-                            LetKind::Strict,
-                            id.clone(),
-                            value.clone(),
-                            result,
-                        );
-                    }
-                    result
-                }
-                other => other,
-            }
-        }
-
         if self.hoisted_functions.is_empty() {
             return lam;
         }
@@ -4193,7 +4144,7 @@ impl<'a> RawLambdaConverter<'a> {
             .keys()
             .map(|id| crate::js_ir::printer::convert_ident_name(id.name()))
             .collect::<HashSet<_>>();
-        let mut aliases: Vec<(Ident, RawLambda)> = Vec::new();
+        let mut validated = Vec::new();
         let hoisted_functions = self.hoisted_functions.clone();
         for hoisted in hoisted_functions {
             let Some((top, fields)) = hoisted.path.split_first() else {
@@ -4205,7 +4156,7 @@ impl<'a> RawLambdaConverter<'a> {
                 let (target_id, _target) = find_path(module, fields, &groups, &mut positions)?;
                 Some((top_id.clone(), positions, target_id))
             });
-            let Some((top_id, positions, Some(target_id))) = resolved else {
+            let Some((_top_id, _positions, Some(target_id))) = resolved else {
                 self.report_warning(
                     self.loc_idx_for_location(&hoisted.loc),
                     Warning::MisplacedAttribute {
@@ -4240,26 +4191,14 @@ impl<'a> RawLambdaConverter<'a> {
                 continue;
             }
             occupied.insert(js_name);
-            let alias_id = self.fresh_ident(&export_name);
-            let mut access = RawLambda::var(top_id);
-            for (pos, name) in positions {
-                access = RawLambda::prim(
-                    Primitive::Pfield(pos, FieldDbgInfo::Module { name }),
-                    vec![access],
-                    hoisted.loc.clone(),
-                );
-            }
-            // OCaml prepends each accepted alias, producing reverse source order.
-            aliases.insert(0, (alias_id, access));
-            self.hoisted_exports.insert(
-                0,
-                crate::lambda::HoistedExport {
-                    path: hoisted.path,
-                    export_name,
-                },
-            );
+            self.hoisted_exports.push(crate::lambda::HoistedExport {
+                path: hoisted.path.clone(),
+                export_name,
+            });
+            validated.push(hoisted);
         }
-        append_aliases(lam, &aliases)
+        self.hoisted_functions = validated;
+        lam
     }
 
     /// Convert a structure into raw lambda.
@@ -6019,6 +5958,7 @@ impl<'a> RawLambdaConverter<'a> {
         &mut self,
         bindings: &[crate::types::typedtree::ModuleBinding],
         cont: RawLambda,
+        rootpath: &Option<crate::types::Path>,
     ) -> RawLambda {
         // Collect (id, init_shape, rhs) for each binding
         let collected: Vec<RecModuleBinding> = bindings
@@ -6027,10 +5967,8 @@ impl<'a> RawLambdaConverter<'a> {
                 let id = mb.mb_id.clone();
                 let loc = self.loc(mb.mb_expr.mod_loc);
                 let shape = self.init_shape(&mb.mb_expr);
-                let rhs = self.convert_module_expr_raw(
-                    &mb.mb_expr,
-                    &Self::field_path(rootpath, &mb.mb_id),
-                );
+                let rhs = self
+                    .convert_module_expr_raw(&mb.mb_expr, &Self::field_path(rootpath, &mb.mb_id));
                 RecModuleBinding {
                     id,
                     loc,
@@ -6084,12 +6022,7 @@ impl<'a> RawLambdaConverter<'a> {
                         }
                     }
                 }
-                self.convert_let_with_body_raw_at_root(
-                    *rec_flag,
-                    bindings,
-                    body,
-                    rootpath,
-                )
+                self.convert_let_with_body_raw_at_root(*rec_flag, bindings, body, rootpath)
             }
             StructureItemDesc::Tstr_module(binding) => {
                 let old_len = fields.len();
@@ -6324,18 +6257,28 @@ impl<'a> RawLambdaConverter<'a> {
                 let body_lam = self.convert_expr_raw(body);
                 self.convert_let_with_body_raw(*rec_flag, bindings, body_lam)
             }
-            ExpressionDesc::Texp_function { params, body, async_ } => {
+            ExpressionDesc::Texp_function {
+                params,
+                body,
+                async_,
+            } => {
                 let directive =
                     Self::get_directive_attribute_from(&expr.exp_attributes, self.arena);
                 let inline = self.get_inline_attribute_from(&expr.exp_attributes);
                 self.convert_nary_function_raw(
-                    params, body, *async_, directive, inline, self.loc(expr.exp_loc),
+                    params,
+                    body,
+                    *async_,
+                    directive,
+                    inline,
+                    self.loc(expr.exp_loc),
                 )
             }
             ExpressionDesc::Texp_apply { funct, args, .. }
-                if expr.exp_attributes.iter().any(|attr| {
-                    self.arena.get_string(attr.0.txt) == "res.taggedTemplate"
-                }) =>
+                if expr
+                    .exp_attributes
+                    .iter()
+                    .any(|attr| self.arena.get_string(attr.0.txt) == "res.taggedTemplate") =>
             {
                 // Upstream compiler/ml/translcore.ml:642-663 lowers the
                 // parser-attributed application independently of the tag's
@@ -9367,9 +9310,21 @@ impl<'a> RawLambdaConverter<'a> {
                 }
                 Lambda::let_(LetKind::Alias, tmp, scrut, result)
             }
-            PatternDesc::Tpat_record(fields, _, _) => {
+            PatternDesc::Tpat_record(fields, _, rest) => {
                 let tmp = self.fresh_ident("match");
-                let mut result = body;
+                let mut result = match rest {
+                    Some(rest) => Lambda::let_(
+                        LetKind::Strict,
+                        rest.rest_ident.clone(),
+                        Lambda::prim(
+                            Primitive::PrecordRest(rest.excluded_runtime_labels.clone()),
+                            vec![Lambda::var(tmp.clone())],
+                            self.loc(pat.pat_loc),
+                        ),
+                        body,
+                    ),
+                    None => body,
+                };
                 for (lid, lbl, inner_pat, _) in fields.iter().rev() {
                     let field = Lambda::prim(
                         Primitive::Pfield(
@@ -9500,7 +9455,7 @@ impl<'a> RawLambdaConverter<'a> {
                     None => result,
                 }
             }
-            PatternDesc::Tpat_record(fields, _, _) => {
+            PatternDesc::Tpat_record(fields, _, rest) => {
                 let (tmp, wrap_tmp) = match scrut.clone() {
                     RawLambda::Lvar(id) => (id, None),
                     _ => {
@@ -9508,7 +9463,19 @@ impl<'a> RawLambdaConverter<'a> {
                         (tmp.clone(), Some((tmp, scrut)))
                     }
                 };
-                let mut result = body;
+                let mut result = match rest {
+                    Some(rest) => RawLambda::let_(
+                        LetKind::Strict,
+                        rest.rest_ident.clone(),
+                        RawLambda::prim(
+                            Primitive::PrecordRest(rest.excluded_runtime_labels.clone()),
+                            vec![RawLambda::var(tmp.clone())],
+                            self.loc(pat.pat_loc),
+                        ),
+                        body,
+                    ),
+                    None => body,
+                };
 
                 // OCaml's make_record_matching binds ALL fields (from lbl_all),
                 // not just the ones mentioned in the pattern.
@@ -10640,13 +10607,14 @@ impl<'a> RawLambdaConverter<'a> {
                 PatternDesc::Tpat_var(_, _) | PatternDesc::Tpat_alias(_, _, _) => true,
                 PatternDesc::Tpat_tuple(items)
                 | PatternDesc::Tpat_array(items)
-                | PatternDesc::Tpat_construct(_, _, items) => {
-                    items.iter().any(pattern_binds_value)
-                }
+                | PatternDesc::Tpat_construct(_, _, items) => items.iter().any(pattern_binds_value),
                 PatternDesc::Tpat_variant(_, Some(item), _) => pattern_binds_value(item),
-                PatternDesc::Tpat_record(fields, _, _) => fields
-                    .iter()
-                    .any(|(_, _, item, _)| pattern_binds_value(item)),
+                PatternDesc::Tpat_record(fields, _, rest) => {
+                    rest.is_some()
+                        || fields
+                            .iter()
+                            .any(|(_, _, item, _)| pattern_binds_value(item))
+                }
                 PatternDesc::Tpat_or(left, right, _) => {
                     pattern_binds_value(left) || pattern_binds_value(right)
                 }
@@ -10699,7 +10667,12 @@ impl<'a> RawLambdaConverter<'a> {
         loc: Location,
     ) -> Lambda {
         let raw = self.convert_nary_function_raw(
-            params, body, false, None, InlineAttribute::default(), loc,
+            params,
+            body,
+            false,
+            None,
+            InlineAttribute::default(),
+            loc,
         );
         let start_stamp = self.current_stamp();
         crate::raw_lambda::lower::lower_to_lambda_with_start_stamp(raw, start_stamp)

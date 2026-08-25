@@ -223,6 +223,9 @@ pub enum Primitive {
     /// Duplicate a record
     Pduprecord,
 
+    /// Copy an object while excluding the listed runtime field names.
+    PrecordRest(Vec<String>),
+
     /// Tagged template literal: `[tag, strings_array, values_array]`.
     PtaggedTemplate,
 
@@ -612,6 +615,7 @@ impl Primitive {
             | PinitMod
             | PupdateMod
             | Pduprecord
+            | PrecordRest(_)
             | PtaggedTemplate
             | Pmakearray
             | Parraylength

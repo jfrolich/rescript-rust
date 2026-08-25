@@ -630,15 +630,15 @@ fn apply_warning_attribute_with_ppwarning(
     }
 }
 
-fn with_warning_scope<'a, T, F>(
+pub(crate) fn with_warning_scope<'a, T, E, F>(
     tctx: &mut TypeCheckContext<'a>,
     arena: &ParseArena,
     attrs: &Attributes,
     ppwarning: bool,
     f: F,
-) -> TypeModResult<T>
+) -> Result<T, E>
 where
-    F: FnOnce(&mut TypeCheckContext<'a>) -> TypeModResult<T>,
+    F: FnOnce(&mut TypeCheckContext<'a>) -> Result<T, E>,
 {
     if attrs.is_empty() {
         return f(tctx);
@@ -1278,8 +1278,14 @@ fn rewrite_included_type_paths_to_local(
         TypeDesc::Tarrow { args, ret } => {
             for arg in args {
                 rewrite_included_type_paths_to_local(
-                    ctx, arg.typ, include_root_path, include_alias_heads,
-                    local_type_ids, local_module_ids, local_modtype_ids, visited,
+                    ctx,
+                    arg.typ,
+                    include_root_path,
+                    include_alias_heads,
+                    local_type_ids,
+                    local_module_ids,
+                    local_modtype_ids,
+                    visited,
                 );
             }
             rewrite_included_type_paths_to_local(
@@ -3011,24 +3017,30 @@ fn expand_record_spread_label(
                     ty
                 }
             }
-            crate::types::TypeDesc::Tarrow { args: arrow_args, ret } => {
+            crate::types::TypeDesc::Tarrow {
+                args: arrow_args,
+                ret,
+            } => {
                 let new_args = arrow_args
                     .iter()
-                    .map(|arg| crate::types::TypeArg::new(
-                        arg.lbl.clone(),
-                        substitute_type_params(ctx, arg.typ, params, args, cache),
-                    ))
+                    .map(|arg| {
+                        crate::types::TypeArg::new(
+                            arg.lbl.clone(),
+                            substitute_type_params(ctx, arg.typ, params, args, cache),
+                        )
+                    })
                     .collect::<Vec<_>>();
                 let new_ret = substitute_type_params(ctx, *ret, params, args, cache);
-                if new_args.iter().zip(arrow_args).all(|(a, b)| a.typ == b.typ)
-                    && new_ret == *ret
-                {
+                if new_args.iter().zip(arrow_args).all(|(a, b)| a.typ == b.typ) && new_ret == *ret {
                     ty
                 } else {
                     with_original_level(
                         ctx,
                         ty,
-                        ctx.new_type(TypeDesc::Tarrow { args: new_args, ret: new_ret }),
+                        ctx.new_type(TypeDesc::Tarrow {
+                            args: new_args,
+                            ret: new_ret,
+                        }),
                     )
                 }
             }
@@ -6011,15 +6023,19 @@ fn type_exprs_equal_for_abbrev_recursion(
     let right_desc = (*ctx.get_desc(right)).clone();
     match (left_desc, right_desc) {
         (
-            TypeDesc::Tarrow { args: left_args, ret: left_ret },
-            TypeDesc::Tarrow { args: right_args, ret: right_ret },
+            TypeDesc::Tarrow {
+                args: left_args,
+                ret: left_ret,
+            },
+            TypeDesc::Tarrow {
+                args: right_args,
+                ret: right_ret,
+            },
         ) => {
             left_args.len() == right_args.len()
                 && left_args.iter().zip(&right_args).all(|(left, right)| {
                     arg_labels_equal_for_abbrev_recursion(&left.lbl, &right.lbl)
-                        && type_exprs_equal_for_abbrev_recursion(
-                            ctx, left.typ, right.typ, seen,
-                        )
+                        && type_exprs_equal_for_abbrev_recursion(ctx, left.typ, right.typ, seen)
                 })
                 && type_exprs_equal_for_abbrev_recursion(ctx, left_ret, right_ret, seen)
         }
@@ -7534,7 +7550,10 @@ fn expression_uses_open_shadow_label_constructor(
         crate::types::typedtree::ExpressionDesc::Texp_function { params, body, .. } => {
             params.iter().any(|param| {
                 function_param_pattern_uses_open_shadow_label_constructor(
-                    ctx, env, &param.fp_pat, check,
+                    ctx,
+                    env,
+                    &param.fp_pat,
+                    check,
                 )
             }) || expression_uses_open_shadow_label_constructor(ctx, env, body, check)
         }
@@ -7860,7 +7879,8 @@ fn type_expr_uses_path(
 
         match &*ctx.get_desc(ty) {
             TypeDesc::Tarrow { args, ret } => {
-                args.iter().any(|arg| loop_(ctx, arg.typ, path_matches, seen))
+                args.iter()
+                    .any(|arg| loop_(ctx, arg.typ, path_matches, seen))
                     || loop_(ctx, *ret, path_matches, seen)
             }
             TypeDesc::Ttuple(items) => items
@@ -7920,10 +7940,11 @@ fn typed_core_type_uses_path(
     path_matches: &dyn Fn(&Path) -> bool,
 ) -> bool {
     let desc_uses = match &ctyp.ctyp_desc {
-        TypedCoreTypeDesc::Ttyp_arrow(args, ret) => args
-            .iter()
-            .any(|arg| typed_core_type_uses_path(ctx, &arg.typ, path_matches))
-            || typed_core_type_uses_path(ctx, ret, path_matches),
+        TypedCoreTypeDesc::Ttyp_arrow(args, ret) => {
+            args.iter()
+                .any(|arg| typed_core_type_uses_path(ctx, &arg.typ, path_matches))
+                || typed_core_type_uses_path(ctx, ret, path_matches)
+        }
         TypedCoreTypeDesc::Ttyp_tuple(items) => items
             .iter()
             .any(|item| typed_core_type_uses_path(ctx, item, path_matches)),
@@ -8205,9 +8226,10 @@ fn expression_uses_path(
             }) || expression_uses_path(ctx, body, path_matches)
         }
         crate::types::typedtree::ExpressionDesc::Texp_function { params, body, .. } => {
-            params.iter().any(|param| {
-                function_param_pattern_uses_path(ctx, &param.fp_pat, path_matches)
-            }) || expression_uses_path(ctx, body, path_matches)
+            params
+                .iter()
+                .any(|param| function_param_pattern_uses_path(ctx, &param.fp_pat, path_matches))
+                || expression_uses_path(ctx, body, path_matches)
         }
         crate::types::typedtree::ExpressionDesc::Texp_apply { funct, args, .. } => {
             expression_uses_path(ctx, funct, path_matches)
@@ -8959,10 +8981,11 @@ fn typed_core_type_uses_opened_path(
     open_path: &Path,
 ) -> bool {
     let desc_uses = match &ctyp.ctyp_desc {
-        TypedCoreTypeDesc::Ttyp_arrow(args, ret) => args
-            .iter()
-            .any(|arg| typed_core_type_uses_opened_path(arena, &arg.typ, open_path))
-            || typed_core_type_uses_opened_path(arena, ret, open_path),
+        TypedCoreTypeDesc::Ttyp_arrow(args, ret) => {
+            args.iter()
+                .any(|arg| typed_core_type_uses_opened_path(arena, &arg.typ, open_path))
+                || typed_core_type_uses_opened_path(arena, ret, open_path)
+        }
         TypedCoreTypeDesc::Ttyp_tuple(items) => items
             .iter()
             .any(|item| typed_core_type_uses_opened_path(arena, item, open_path)),
@@ -8992,7 +9015,10 @@ fn typed_core_type_uses_opened_path(
             }
         }),
         TypedCoreTypeDesc::Ttyp_package(package) => {
-            package.pack_path.name().starts_with(&format!("{}.", open_path.name()))
+            package
+                .pack_path
+                .name()
+                .starts_with(&format!("{}.", open_path.name()))
                 || package
                     .pack_fields
                     .iter()
@@ -9057,7 +9083,9 @@ fn type_extension_uses_opened_path(
     ext: &TypeExtension,
     open_path: &Path,
 ) -> bool {
-    ext.tyext_path.name().starts_with(&format!("{}.", open_path.name()))
+    ext.tyext_path
+        .name()
+        .starts_with(&format!("{}.", open_path.name()))
         || ext
             .tyext_params
             .iter()
@@ -9189,9 +9217,7 @@ pub(crate) fn expression_uses_opened_path(
         }
         crate::types::typedtree::ExpressionDesc::Texp_function { params, body, .. } => {
             params.iter().any(|param| {
-                function_param_pattern_uses_opened_path(
-                    ctx, arena, &param.fp_pat, open_path,
-                )
+                function_param_pattern_uses_opened_path(ctx, arena, &param.fp_pat, open_path)
             }) || expression_uses_opened_path(ctx, arena, body, open_path)
         }
         crate::types::typedtree::ExpressionDesc::Texp_apply { funct, args, .. } => {
@@ -9544,10 +9570,11 @@ fn typed_core_type_uses_opened_modtype_name(
     names: &HashSet<String>,
 ) -> bool {
     match &ctyp.ctyp_desc {
-        TypedCoreTypeDesc::Ttyp_arrow(args, ret) => args
-            .iter()
-            .any(|arg| typed_core_type_uses_opened_modtype_name(arena, &arg.typ, names))
-            || typed_core_type_uses_opened_modtype_name(arena, ret, names),
+        TypedCoreTypeDesc::Ttyp_arrow(args, ret) => {
+            args.iter()
+                .any(|arg| typed_core_type_uses_opened_modtype_name(arena, &arg.typ, names))
+                || typed_core_type_uses_opened_modtype_name(arena, ret, names)
+        }
         TypedCoreTypeDesc::Ttyp_tuple(items) => items
             .iter()
             .any(|item| typed_core_type_uses_opened_modtype_name(arena, item, names)),
@@ -10227,7 +10254,9 @@ fn expression_constructor_usage(
         ExpressionDesc::Texp_function { params, body, .. } => {
             for param in params {
                 usage.merge(function_param_pattern_constructor_usage(
-                    ctx, &param.fp_pat, matches_constructor,
+                    ctx,
+                    &param.fp_pat,
+                    matches_constructor,
                 ));
             }
             usage.merge(expression_constructor_usage(ctx, body, matches_constructor));
@@ -14003,7 +14032,12 @@ fn rewrite_functor_param_type_paths_in_type(
         TypeDesc::Tarrow { args, ret } => {
             for arg in args {
                 rewrite_functor_param_type_paths_in_type(
-                    arg.typ, param_name, manifests, ctx, visited, manifest_subst_cache,
+                    arg.typ,
+                    param_name,
+                    manifests,
+                    ctx,
+                    visited,
+                    manifest_subst_cache,
                 );
             }
             rewrite_functor_param_type_paths_in_type(
@@ -18238,9 +18272,7 @@ fn find_unbound_type_var_in_typed_core_type_before_closed_decl(
         TypedCoreTypeDesc::Ttyp_arrow(args, ret) => args
             .iter()
             .find_map(|arg| {
-                find_unbound_type_var_in_typed_core_type_before_closed_decl(
-                    ctx, &arg.typ, allowed,
-                )
+                find_unbound_type_var_in_typed_core_type_before_closed_decl(ctx, &arg.typ, allowed)
             })
             .or_else(|| {
                 find_unbound_type_var_in_typed_core_type_before_closed_decl(ctx, ret, allowed)
@@ -21046,7 +21078,8 @@ fn type_structure_item<'a>(
             let mut type_entry_ids: Vec<Ident> = Vec::with_capacity(type_entry_capacity);
             let mut type_entry_parser_indices: Vec<Option<usize>> =
                 Vec::with_capacity(type_entry_capacity);
-            let mut type_entry_is_synthetic_row: Vec<bool> = Vec::with_capacity(type_entry_capacity);
+            let mut type_entry_is_synthetic_row: Vec<bool> =
+                Vec::with_capacity(type_entry_capacity);
             let needs_placeholder = matches!(rec_flag, crate::parser::ast::RecFlag::Recursive);
             for row_id in &fixed_row_type_ids {
                 let placeholder_decl =
@@ -22339,7 +22372,9 @@ fn type_structure_item<'a>(
                             if is_fixed_type {
                                 let row_id =
                                     fixed_row_type_id_for_decl(&fixed_row_type_ids, decl_idx)
-                                        .expect("fixed private row type must have a synthetic row id");
+                                        .expect(
+                                            "fixed private row type must have a synthetic row id",
+                                        );
                                 let row_path = Path::pident(row_id.id.clone());
                                 set_fixed_row(
                                     ctx,
@@ -22609,12 +22644,15 @@ fn type_structure_item<'a>(
                         }
 
                         let type_name = if type_entry_is_synthetic_row[idx] {
-                            let parser_idx = type_entry_parser_indices[idx]
-                                .expect("synthetic row entries keep their source declaration index");
+                            let parser_idx = type_entry_parser_indices[idx].expect(
+                                "synthetic row entries keep their source declaration index",
+                            );
                             fixed_row_type_id_for_decl(&fixed_row_type_ids, parser_idx)
                                 .map(|row_id| row_id.name.clone())
                                 .unwrap_or_else(|| {
-                                    fixed_row_name(arena.get_string(decls[parser_idx].ptype_name.txt))
+                                    fixed_row_name(
+                                        arena.get_string(decls[parser_idx].ptype_name.txt),
+                                    )
                                 })
                         } else {
                             let parser_idx = type_entry_parser_indices[idx]
@@ -24403,8 +24441,7 @@ fn transl_sig_type_declarations_with_ids_and_originals<'a>(
     let mut temp_env = env.clone();
     let type_entry_capacity = decls.len() + fixed_row_type_ids.len();
     let mut type_entry_ids: Vec<Ident> = Vec::with_capacity(type_entry_capacity);
-    let mut type_entry_parser_indices: Vec<Option<usize>> =
-        Vec::with_capacity(type_entry_capacity);
+    let mut type_entry_parser_indices: Vec<Option<usize>> = Vec::with_capacity(type_entry_capacity);
     let mut type_entry_is_synthetic_row: Vec<bool> = Vec::with_capacity(type_entry_capacity);
     for decl in decls {
         check_nonrecursive_gadt_enter_type(rec_flag, decl)?;
@@ -25074,8 +25111,12 @@ fn transl_sig_type_declarations_with_ids_and_originals<'a>(
                     .collect()
             })
             .collect();
-        let resolved_variances =
-            compute_type_variance_fixpoint(ctx, &variance_env, &type_entry_ids, &required_variances);
+        let resolved_variances = compute_type_variance_fixpoint(
+            ctx,
+            &variance_env,
+            &type_entry_ids,
+            &required_variances,
+        );
         if resolved_variances.len() == type_entry_ids.len() {
             for (idx, variance_row) in resolved_variances.iter().enumerate() {
                 if !type_entry_is_synthetic_row[idx]

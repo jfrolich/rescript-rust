@@ -72,11 +72,16 @@ fn flatten_and_mark_dead_statement(
     substitution: &mut HashMap<Ident, Expression>,
     jsx_preserve: bool,
 ) -> Statement {
-    let Statement { desc, comment } = stmt;
+    let Statement {
+        source_loc,
+        desc,
+        comment,
+    } = stmt;
     match desc {
         StatementDesc::Variable(decl) => {
             if matches!(decl.ident_info.used_stats, UsedStats::DeadPure) {
                 return Statement {
+                    source_loc,
                     desc: StatementDesc::Block(vec![]),
                     comment,
                 };
@@ -85,10 +90,12 @@ fn flatten_and_mark_dead_statement(
             if matches!(decl.ident_info.used_stats, UsedStats::DeadNonPure) {
                 return match decl.value {
                     None => Statement {
+                        source_loc,
                         desc: StatementDesc::Block(vec![]),
                         comment,
                     },
                     Some(value) => Statement {
+                        source_loc,
                         desc: StatementDesc::Exp(value),
                         comment,
                     },
@@ -100,6 +107,7 @@ fn flatten_and_mark_dead_statement(
                 LetKind::Strict | LetKind::StrictOpt | LetKind::Alias
             ) {
                 if let Some(Expression {
+                    source_loc,
                     desc: ExpressionDesc::CamlBlock(items, MutableFlag::Immutable, tag, tag_info),
                     comment: value_comment,
                 }) = decl.value
@@ -134,6 +142,7 @@ fn flatten_and_mark_dead_statement(
                         }
 
                         let rewritten_value = Expression {
+                            source_loc,
                             desc: ExpressionDesc::CamlBlock(
                                 rewritten_items,
                                 MutableFlag::Immutable,
@@ -145,6 +154,7 @@ fn flatten_and_mark_dead_statement(
                         substitution.insert(decl.ident.clone(), rewritten_value.clone());
 
                         let original = Statement {
+                            source_loc,
                             desc: StatementDesc::Variable(VariableDeclaration {
                                 ident: decl.ident,
                                 value: Some(rewritten_value),
@@ -160,6 +170,7 @@ fn flatten_and_mark_dead_statement(
 
                         bindings.push(original);
                         return Statement {
+                            source_loc,
                             desc: StatementDesc::Block(bindings),
                             comment: None,
                         };
@@ -172,8 +183,10 @@ fn flatten_and_mark_dead_statement(
                     // object shape is already materialized before this pass in
                     // the OCaml backend.
                     return Statement {
+                        source_loc,
                         desc: {
                             let rewritten_value = Expression {
+                                source_loc,
                                 desc: ExpressionDesc::CamlBlock(
                                     items
                                         .into_iter()
@@ -210,6 +223,7 @@ fn flatten_and_mark_dead_statement(
             }
 
             Statement {
+                source_loc,
                 desc: StatementDesc::Variable(VariableDeclaration {
                     ident: decl.ident,
                     value: decl.value.map(|value| {
@@ -222,6 +236,7 @@ fn flatten_and_mark_dead_statement(
             }
         }
         StatementDesc::Block(block) => Statement {
+            source_loc,
             desc: StatementDesc::Block(flatten_and_mark_dead_block(
                 block,
                 id_gen,
@@ -231,6 +246,7 @@ fn flatten_and_mark_dead_statement(
             comment,
         },
         StatementDesc::Exp(expr) => Statement {
+            source_loc,
             desc: StatementDesc::Exp(flatten_and_mark_dead_expression(
                 expr,
                 id_gen,
@@ -240,6 +256,7 @@ fn flatten_and_mark_dead_statement(
             comment,
         },
         StatementDesc::Return(expr) => Statement {
+            source_loc,
             desc: StatementDesc::Return(flatten_and_mark_dead_expression(
                 expr,
                 id_gen,
@@ -249,6 +266,7 @@ fn flatten_and_mark_dead_statement(
             comment,
         },
         StatementDesc::If(cond, then_block, else_block) => Statement {
+            source_loc,
             desc: StatementDesc::If(
                 flatten_and_mark_dead_expression(cond, id_gen, substitution, jsx_preserve),
                 flatten_and_mark_dead_block(then_block, id_gen, substitution, jsx_preserve),
@@ -257,6 +275,7 @@ fn flatten_and_mark_dead_statement(
             comment,
         },
         StatementDesc::While(label, cond, body) => Statement {
+            source_loc,
             desc: StatementDesc::While(
                 label,
                 flatten_and_mark_dead_expression(cond, id_gen, substitution, jsx_preserve),
@@ -265,6 +284,7 @@ fn flatten_and_mark_dead_statement(
             comment,
         },
         StatementDesc::ForRange(label, start, finish, ident, direction, body) => Statement {
+            source_loc,
             desc: StatementDesc::ForRange(
                 label,
                 start.map(|expr| {
@@ -278,6 +298,7 @@ fn flatten_and_mark_dead_statement(
             comment,
         },
         StatementDesc::ForOf(label, ident, iterable, body) => Statement {
+            source_loc,
             desc: StatementDesc::ForOf(
                 label,
                 ident,
@@ -287,6 +308,7 @@ fn flatten_and_mark_dead_statement(
             comment,
         },
         StatementDesc::ForAwaitOf(label, ident, iterable, body) => Statement {
+            source_loc,
             desc: StatementDesc::ForAwaitOf(
                 label,
                 ident,
@@ -296,6 +318,7 @@ fn flatten_and_mark_dead_statement(
             comment,
         },
         StatementDesc::IntSwitch(test, clauses, default) => Statement {
+            source_loc,
             desc: StatementDesc::IntSwitch(
                 flatten_and_mark_dead_expression(test, id_gen, substitution, jsx_preserve),
                 clauses
@@ -304,6 +327,7 @@ fn flatten_and_mark_dead_statement(
                         (
                             tag,
                             CaseClause {
+                                source_loc: clause.source_loc,
                                 body: flatten_and_mark_dead_block(
                                     clause.body,
                                     id_gen,
@@ -323,6 +347,7 @@ fn flatten_and_mark_dead_statement(
             comment,
         },
         StatementDesc::StringSwitch(test, clauses, default) => Statement {
+            source_loc,
             desc: StatementDesc::StringSwitch(
                 flatten_and_mark_dead_expression(test, id_gen, substitution, jsx_preserve),
                 clauses
@@ -330,6 +355,7 @@ fn flatten_and_mark_dead_statement(
                     .map(|clause| crate::js_ir::StringClause {
                         tag_type: clause.tag_type,
                         clause: CaseClause {
+                            source_loc: clause.clause.source_loc,
                             body: flatten_and_mark_dead_block(
                                 clause.clause.body,
                                 id_gen,
@@ -348,6 +374,7 @@ fn flatten_and_mark_dead_statement(
             comment,
         },
         StatementDesc::Throw(expr) => Statement {
+            source_loc,
             desc: StatementDesc::Throw(flatten_and_mark_dead_expression(
                 expr,
                 id_gen,
@@ -357,6 +384,7 @@ fn flatten_and_mark_dead_statement(
             comment,
         },
         StatementDesc::Try(body, catch, finally) => Statement {
+            source_loc,
             desc: StatementDesc::Try(
                 flatten_and_mark_dead_block(body, id_gen, substitution, jsx_preserve),
                 catch.map(|(ident, block)| {
@@ -372,14 +400,17 @@ fn flatten_and_mark_dead_statement(
             comment,
         },
         StatementDesc::Debugger => Statement {
+            source_loc,
             desc: StatementDesc::Debugger,
             comment,
         },
         StatementDesc::Break(label) => Statement {
+            source_loc,
             desc: StatementDesc::Break(label),
             comment,
         },
         StatementDesc::Continue(label) => Statement {
+            source_loc,
             desc: StatementDesc::Continue(label),
             comment,
         },
@@ -396,7 +427,11 @@ fn flatten_and_mark_dead_expression(
         return rewritten;
     }
 
-    let Expression { desc, comment } = expr;
+    let Expression {
+        source_loc,
+        desc,
+        comment,
+    } = expr;
     let desc = match desc {
         ExpressionDesc::Length(inner, object) => ExpressionDesc::Length(
             Box::new(flatten_and_mark_dead_expression(
@@ -696,9 +731,22 @@ fn flatten_and_mark_dead_expression(
         ExpressionDesc::Spread(inner) => ExpressionDesc::Spread(Box::new(
             flatten_and_mark_dead_expression(*inner, id_gen, substitution, jsx_preserve),
         )),
+        ExpressionDesc::RecordRest(fields, source) => ExpressionDesc::RecordRest(
+            fields,
+            Box::new(flatten_and_mark_dead_expression(
+                *source,
+                id_gen,
+                substitution,
+                jsx_preserve,
+            )),
+        ),
     };
 
-    Expression { desc, comment }
+    Expression {
+        source_loc,
+        desc,
+        comment,
+    }
 }
 
 fn flatten_and_mark_dead_transformed_jsx_tag_expression(
@@ -707,11 +755,16 @@ fn flatten_and_mark_dead_transformed_jsx_tag_expression(
     substitution: &mut HashMap<Ident, Expression>,
     jsx_preserve: bool,
 ) -> Expression {
-    let Expression { desc, comment } = expr;
+    let Expression {
+        source_loc,
+        desc,
+        comment,
+    } = expr;
     match desc {
         // OCaml's js_pass_flatten_and_mark_dead preserves component `.make`
         // projections in JSX-preserve mode so the dumper can print `<Foo.make />`.
         ExpressionDesc::StaticIndex(target, field, Some(index)) if field == "make" => Expression {
+            source_loc,
             desc: ExpressionDesc::StaticIndex(
                 Box::new(flatten_and_mark_dead_expression(
                     *target,
@@ -726,6 +779,7 @@ fn flatten_and_mark_dead_transformed_jsx_tag_expression(
         },
         other => flatten_and_mark_dead_expression(
             Expression {
+                source_loc,
                 desc: other,
                 comment,
             },
@@ -874,7 +928,7 @@ fn block_substitution_name(ident: &Ident, tag_info: &TagInfo, index: usize) -> S
     format!("{}_{}", ident.name(), suffix)
 }
 
-fn max_ident_stamp_in_program(program: &Program) -> i32 {
+pub(crate) fn max_ident_stamp_in_program(program: &Program) -> i32 {
     program.exports.iter().fold(
         max_ident_stamp_in_block(&program.block),
         |max_stamp, export| max_stamp.max(export.stamp()),
@@ -1042,7 +1096,10 @@ fn collect_mark_dead_states_expression(
         | ExpressionDesc::CamlBlockTag(inner, _)
         | ExpressionDesc::OptionalBlock(inner, _)
         | ExpressionDesc::Await(inner)
-        | ExpressionDesc::Spread(inner) => collect_mark_dead_states_expression(inner, states),
+        | ExpressionDesc::Spread(inner)
+        | ExpressionDesc::RecordRest(_, inner) => {
+            collect_mark_dead_states_expression(inner, states)
+        }
         ExpressionDesc::StringAppend(left, right)
         | ExpressionDesc::In(left, right)
         | ExpressionDesc::Seq(left, right)
@@ -1214,7 +1271,8 @@ fn apply_mark_dead_states_expression(expr: &mut Expression, states: &HashMap<Ide
         | ExpressionDesc::CamlBlockTag(inner, _)
         | ExpressionDesc::OptionalBlock(inner, _)
         | ExpressionDesc::Await(inner)
-        | ExpressionDesc::Spread(inner) => apply_mark_dead_states_expression(inner, states),
+        | ExpressionDesc::Spread(inner)
+        | ExpressionDesc::RecordRest(_, inner) => apply_mark_dead_states_expression(inner, states),
         ExpressionDesc::StringAppend(left, right)
         | ExpressionDesc::In(left, right)
         | ExpressionDesc::Seq(left, right)
@@ -1318,11 +1376,16 @@ fn flatten_block(block: Block) -> Block {
 }
 
 fn flatten_statement(stmt: Statement) -> Statement {
-    let Statement { desc, comment } = stmt;
+    let Statement {
+        source_loc,
+        desc,
+        comment,
+    } = stmt;
 
     match desc {
         StatementDesc::Exp(expr) => {
             let Expression {
+                source_loc,
                 desc,
                 comment: expr_comment,
             } = expr;
@@ -1330,6 +1393,7 @@ fn flatten_statement(stmt: Statement) -> Statement {
             match desc {
                 ExpressionDesc::Seq(_, _) => {
                     let block = flatten_sequence_statements(Expression {
+                        source_loc,
                         desc,
                         comment: expr_comment,
                     });
@@ -1348,6 +1412,7 @@ fn flatten_statement(stmt: Statement) -> Statement {
                     Statement::block(block)
                 }
                 ExpressionDesc::Cond(test, consequent, alternate) => Statement {
+                    source_loc,
                     // OCaml keeps the conditional predicate untouched here;
                     // only the consequent/alternate are re-entered as
                     // statements (compiler/core/js_pass_flatten.ml:54-61).
@@ -1382,7 +1447,9 @@ fn flatten_statement(stmt: Statement) -> Statement {
                         Statement::block(block)
                     } else {
                         Statement {
+                            source_loc,
                             desc: StatementDesc::Exp(flatten_expression(Expression {
+                                source_loc,
                                 desc: ExpressionDesc::Bin(BinOp::Eq, target, value),
                                 comment: expr_comment,
                             })),
@@ -1391,7 +1458,9 @@ fn flatten_statement(stmt: Statement) -> Statement {
                     }
                 }
                 desc => Statement {
+                    source_loc,
                     desc: StatementDesc::Exp(flatten_expression(Expression {
+                        source_loc,
                         desc,
                         comment: expr_comment,
                     })),
@@ -1401,12 +1470,14 @@ fn flatten_statement(stmt: Statement) -> Statement {
         }
         StatementDesc::Return(expr) => {
             let Expression {
+                source_loc,
                 desc,
                 comment: expr_comment,
             } = expr;
 
             match desc {
                 ExpressionDesc::Cond(test, consequent, alternate) => Statement {
+                    source_loc,
                     // Same predicate preservation as OCaml's Return(Cond)
                     // flatten arm (compiler/core/js_pass_flatten.ml:79-86).
                     desc: StatementDesc::If(
@@ -1420,6 +1491,7 @@ fn flatten_statement(stmt: Statement) -> Statement {
                     let mut exprs = Vec::new();
                     flatten_sequence_expressions(
                         Expression {
+                            source_loc,
                             desc,
                             comment: expr_comment,
                         },
@@ -1439,7 +1511,9 @@ fn flatten_statement(stmt: Statement) -> Statement {
                     Statement::block(block)
                 }
                 desc => Statement {
+                    source_loc,
                     desc: StatementDesc::Return(flatten_expression(Expression {
+                        source_loc,
                         desc,
                         comment: expr_comment,
                     })),
@@ -1452,12 +1526,14 @@ fn flatten_statement(stmt: Statement) -> Statement {
                 flatten_statement(block.into_iter().next().expect("single-item block"))
             } else {
                 Statement {
+                    source_loc,
                     desc: StatementDesc::Block(flatten_block(block)),
                     comment,
                 }
             }
         }
         StatementDesc::Variable(decl) => Statement {
+            source_loc,
             desc: StatementDesc::Variable(VariableDeclaration {
                 ident: decl.ident,
                 value: decl.value.map(flatten_expression),
@@ -1467,6 +1543,7 @@ fn flatten_statement(stmt: Statement) -> Statement {
             comment,
         },
         StatementDesc::If(cond, then_block, else_block) => Statement {
+            source_loc,
             desc: StatementDesc::If(
                 flatten_expression(cond),
                 flatten_block(then_block),
@@ -1475,10 +1552,12 @@ fn flatten_statement(stmt: Statement) -> Statement {
             comment,
         },
         StatementDesc::While(label, cond, body) => Statement {
+            source_loc,
             desc: StatementDesc::While(label, flatten_expression(cond), flatten_block(body)),
             comment,
         },
         StatementDesc::ForRange(label, start, finish, ident, direction, body) => Statement {
+            source_loc,
             desc: StatementDesc::ForRange(
                 label,
                 start.map(flatten_expression),
@@ -1490,6 +1569,7 @@ fn flatten_statement(stmt: Statement) -> Statement {
             comment,
         },
         StatementDesc::ForOf(label, ident, iterable, body) => Statement {
+            source_loc,
             desc: StatementDesc::ForOf(
                 label,
                 ident,
@@ -1499,6 +1579,7 @@ fn flatten_statement(stmt: Statement) -> Statement {
             comment,
         },
         StatementDesc::ForAwaitOf(label, ident, iterable, body) => Statement {
+            source_loc,
             desc: StatementDesc::ForAwaitOf(
                 label,
                 ident,
@@ -1508,6 +1589,7 @@ fn flatten_statement(stmt: Statement) -> Statement {
             comment,
         },
         StatementDesc::IntSwitch(test, clauses, default) => Statement {
+            source_loc,
             desc: StatementDesc::IntSwitch(
                 flatten_expression(test),
                 clauses
@@ -1519,6 +1601,7 @@ fn flatten_statement(stmt: Statement) -> Statement {
             comment,
         },
         StatementDesc::StringSwitch(test, clauses, default) => Statement {
+            source_loc,
             desc: StatementDesc::StringSwitch(
                 flatten_expression(test),
                 clauses
@@ -1533,10 +1616,12 @@ fn flatten_statement(stmt: Statement) -> Statement {
             comment,
         },
         StatementDesc::Throw(expr) => Statement {
+            source_loc,
             desc: StatementDesc::Throw(flatten_expression(expr)),
             comment,
         },
         StatementDesc::Try(body, catch, finally) => Statement {
+            source_loc,
             desc: StatementDesc::Try(
                 flatten_block(body),
                 catch.map(|(id, block)| (id, flatten_block(block))),
@@ -1545,14 +1630,17 @@ fn flatten_statement(stmt: Statement) -> Statement {
             comment,
         },
         StatementDesc::Debugger => Statement {
+            source_loc,
             desc: StatementDesc::Debugger,
             comment,
         },
         StatementDesc::Break(label) => Statement {
+            source_loc,
             desc: StatementDesc::Break(label),
             comment,
         },
         StatementDesc::Continue(label) => Statement {
+            source_loc,
             desc: StatementDesc::Continue(label),
             comment,
         },
@@ -1561,6 +1649,7 @@ fn flatten_statement(stmt: Statement) -> Statement {
 
 fn flatten_case_clause(clause: CaseClause) -> CaseClause {
     CaseClause {
+        source_loc: clause.source_loc,
         body: flatten_block(clause.body),
         should_break: clause.should_break,
         comment: clause.comment,
@@ -1568,6 +1657,7 @@ fn flatten_case_clause(clause: CaseClause) -> CaseClause {
 }
 
 fn flatten_expression(expr: Expression) -> Expression {
+    let source_loc = expr.source_loc;
     let comment = expr.comment;
     let desc = match expr.desc {
         ExpressionDesc::Length(inner, object) => {
@@ -1685,9 +1775,16 @@ fn flatten_expression(expr: Expression) -> Expression {
         ExpressionDesc::Spread(inner) => {
             ExpressionDesc::Spread(Box::new(flatten_expression(*inner)))
         }
+        ExpressionDesc::RecordRest(fields, source) => {
+            ExpressionDesc::RecordRest(fields, Box::new(flatten_expression(*source)))
+        }
     };
 
-    Expression { desc, comment }
+    Expression {
+        source_loc,
+        desc,
+        comment,
+    }
 }
 
 fn flatten_sequence_statements(expr: Expression) -> Block {
@@ -1700,12 +1797,14 @@ fn flatten_sequence_statements(expr: Expression) -> Block {
 }
 
 fn flatten_sequence_expressions(expr: Expression, out: &mut Vec<Expression>) {
+    let source_loc = expr.source_loc;
     match expr.desc {
         ExpressionDesc::Seq(left, right) => {
             flatten_sequence_expressions(*left, out);
             flatten_sequence_expressions(*right, out);
         }
         desc => out.push(Expression {
+            source_loc,
             desc,
             comment: expr.comment,
         }),

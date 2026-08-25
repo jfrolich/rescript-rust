@@ -22,6 +22,7 @@ use crate::lambda::js_pass_external_shadow::apply_external_shadow_pass;
 use crate::lambda::js_pass_flatten_and_mark_dead::{
     apply_js_flatten_and_mark_dead_pass, apply_js_flatten_pass,
 };
+use crate::lambda::js_pass_record_rest::apply_js_record_rest_pass;
 use crate::lambda::js_pass_tailcall_inline::apply_js_tailcall_inline_pass;
 use crate::lambda::js_shake::{
     TailMoveInitializerKind, apply_js_shake_pass, keeps_declared_same_name_reusable_export_binding,
@@ -286,6 +287,7 @@ pub struct LambdaCompiler {
     pub(crate) jsx_preserve: bool,
     pub(crate) check_div_by_zero: bool,
     pub(crate) cross_module_inline: bool,
+    pub(crate) source_map_enabled: bool,
     /// Intentional Rust performance cache for repeated `.cmj` resolver reads.
     ///
     /// OCaml keeps this metadata in Lam_compile_env and queries it through
@@ -392,6 +394,7 @@ impl LambdaCompiler {
             jsx_preserve: false,
             check_div_by_zero: true,
             cross_module_inline: false,
+            source_map_enabled: false,
             cmj_constant_cache: HashMap::new(),
             cmj_arity_cache: HashMap::new(),
             cmj_lambda_cache: HashMap::new(),
@@ -436,6 +439,7 @@ impl LambdaCompiler {
             jsx_preserve,
             check_div_by_zero,
             cross_module_inline,
+            source_map_enabled: false,
             cmj_constant_cache: HashMap::new(),
             cmj_arity_cache: HashMap::new(),
             cmj_lambda_cache: HashMap::new(),
@@ -532,11 +536,6 @@ impl LambdaCompiler {
         )
         .entered();
         self.external_module_ids.clear();
-        // Rust carries generated hoisted aliases through its tree-shaped raw
-        // Lambda boundary. The OCaml reference inserts those Alias groups only
-        // after simplification, so remember their exact module projections and
-        // restore them after the shared simplify pipeline has propagated fields.
-        let hoisted_alias_projections = collect_exported_module_projection_bindings(&lam);
         let mut simplified_result = crate::timing::measure(
             crate::timing::Phase::LambdaOptimization,
             || {
@@ -590,10 +589,13 @@ impl LambdaCompiler {
                 )
             },
         );
-        restore_top_level_binding_values(
-            &mut simplified_result.lambda,
-            &hoisted_alias_projections,
-        );
+        if std::env::var_os("DEBUG_SIMPLIFIED_LAMBDA").is_some() {
+            std::fs::write(
+                "/tmp/simplified-lambda.log",
+                format!("SIMPLIFIED_LAMBDA {:#?}", simplified_result.lambda),
+            )
+            .ok();
+        }
         self.cmj_export_constants =
             collect_cmj_export_constants_from_simplified_lambda(&simplified_result.lambda);
         self.cmj_export_arities = collect_cmj_export_arities_from_simplified_lambda(
@@ -641,26 +643,48 @@ impl LambdaCompiler {
                 modules: vec![],
                 side_effect,
             };
+            if std::env::var_os("DEBUG_SIMPLIFIED_LAMBDA").is_some() {
+                std::fs::write("/tmp/deps-initial.log", format!("{:#?}", deps.program)).ok();
+            }
             deps = {
                 let _phase = info_span!("compiler.js_pass_flatten").entered();
                 apply_js_flatten_pass(deps)
             };
+            if std::env::var_os("DEBUG_SIMPLIFIED_LAMBDA").is_some() {
+                std::fs::write("/tmp/deps-flatten.log", format!("{:#?}", deps.program)).ok();
+            }
             deps = {
                 let _phase = info_span!("compiler.js_pass_external_shadow").entered();
                 apply_external_shadow_pass(deps)
             };
+            if std::env::var_os("DEBUG_SIMPLIFIED_LAMBDA").is_some() {
+                std::fs::write("/tmp/deps-shadow.log", format!("{:#?}", deps.program)).ok();
+            }
             deps = {
                 let _phase = info_span!("compiler.js_pass_tailcall_inline").entered();
                 apply_js_tailcall_inline_pass(deps)
+            };
+            if std::env::var_os("DEBUG_SIMPLIFIED_LAMBDA").is_some() {
+                std::fs::write("/tmp/deps-tail.log", format!("{:#?}", deps.program)).ok();
+            }
+            deps = {
+                let _phase = info_span!("compiler.js_pass_record_rest").entered();
+                apply_js_record_rest_pass(deps)
             };
             deps = {
                 let _phase = info_span!("compiler.js_pass_flatten_mark_dead").entered();
                 apply_js_flatten_and_mark_dead_pass(deps, self.jsx_preserve)
             };
+            if std::env::var_os("DEBUG_SIMPLIFIED_LAMBDA").is_some() {
+                std::fs::write("/tmp/deps-dead.log", format!("{:#?}", deps.program)).ok();
+            }
             deps = {
                 let _phase = info_span!("compiler.js_pass_shake").entered();
                 apply_js_shake_pass(deps)
             };
+            if std::env::var_os("DEBUG_SIMPLIFIED_LAMBDA").is_some() {
+                std::fs::write("/tmp/deps-final.log", format!("{:#?}", deps.program)).ok();
+            }
             {
                 let _phase = info_span!("compiler.js_required_modules").entered();
                 let mut required_modules = self.collect_required_module_set(&deps.program.block);
@@ -680,6 +704,53 @@ impl LambdaCompiler {
             }
             deps
         })
+    }
+
+    pub fn set_source_map_enabled(&mut self, enabled: bool) {
+        self.source_map_enabled = enabled;
+    }
+
+    pub(crate) fn source_loc(&self, loc: &Location) -> Option<Location> {
+        (self.source_map_enabled && !loc.loc_ghost && loc.loc_start.cnum >= 0).then_some(*loc)
+    }
+
+    pub(crate) fn source_loc_of_lam(&self, lam: &Lambda) -> Option<Location> {
+        if !self.source_map_enabled {
+            return None;
+        }
+        fn find(lam: &Lambda) -> Option<Location> {
+            match lam {
+                Lambda::Lapply(apply) => Some(apply.ap_info.loc),
+                Lambda::Lprim(info) => Some(info.loc),
+                Lambda::Lfunction(function) => find(&function.body),
+                Lambda::Llet(_, _, value, body) => find(value).or_else(|| find(body)),
+                Lambda::Lletrec(_, body) | Lambda::Lsequence(_, body) => find(body),
+                Lambda::LifThenElse(_, then_, _) => find(then_),
+                Lambda::LstaticCatch(body, _, _) | Lambda::LtryWith(body, _, _) => find(body),
+                Lambda::LstringSwitch(_, cases, default) => cases
+                    .first()
+                    .and_then(|(_, body)| find(body))
+                    .or_else(|| default.as_deref().and_then(find)),
+                Lambda::Lswitch(_, switch) => switch
+                    .sw_consts
+                    .first()
+                    .and_then(|(_, body)| find(body))
+                    .or_else(|| switch.sw_blocks.first().and_then(|(_, body)| find(body)))
+                    .or_else(|| switch.sw_failaction.as_deref().and_then(find)),
+                Lambda::LstaticRaise(_, args) => args.first().and_then(find),
+                Lambda::Lwhile(_, body)
+                | Lambda::Lfor(_, _, _, _, body)
+                | Lambda::Lfor_of(_, _, body)
+                | Lambda::Lfor_await_of(_, _, body)
+                | Lambda::Lassign(_, body) => find(body),
+                Lambda::Lvar(_)
+                | Lambda::LglobalModule(_, _)
+                | Lambda::Lconst(_)
+                | Lambda::Lbreak
+                | Lambda::Lcontinue => None,
+            }
+        }
+        find(lam).filter(|loc| !loc.loc_ghost && loc.loc_start.cnum >= 0)
     }
 
     pub(crate) fn take_cmj_export_constants(&mut self) -> AHashMap<String, CmjExportConstant> {
@@ -879,6 +950,14 @@ impl LambdaCompiler {
     }
 
     fn compile_apply_call(&mut self, apply: &Apply) -> Compiled {
+        let mut compiled = self.compile_apply_call_inner(apply);
+        if compiled.expr.source_loc.is_none() {
+            compiled.expr.source_loc = self.source_loc(&apply.ap_info.loc);
+        }
+        compiled
+    }
+
+    fn compile_apply_call_inner(&mut self, apply: &Apply) -> Compiled {
         if apply.ap_info.status == ApplyStatus::Na {
             if let Lambda::Lapply(inner) = apply.ap_func.as_ref() {
                 if inner.ap_info.status == ApplyStatus::Na {
@@ -1235,7 +1314,13 @@ impl LambdaCompiler {
                 prelude: vec![],
                 expr: Self::compile_constant(cst),
             },
-            Lambda::Lapply(apply) => self.compile_apply_call(apply),
+            Lambda::Lapply(apply) => {
+                let mut compiled = self.compile_apply_call(apply);
+                if compiled.expr.source_loc.is_none() {
+                    compiled.expr.source_loc = self.source_loc(&apply.ap_info.loc);
+                }
+                compiled
+            }
             Lambda::Lfunction(func) => {
                 if let Some(expr) = self.compile_eta_wrapped_runtime_alias(func) {
                     return Compiled {
@@ -2215,6 +2300,13 @@ impl LambdaCompiler {
                     return self.compile_short_circuit_binding_block(kind, id, op, lhs, rhs);
                 }
                 let value_compiled = self.compile_expr(value);
+                if std::env::var_os("DEBUG_SIMPLIFIED_LAMBDA").is_some() {
+                    std::fs::write(
+                        format!("/tmp/compiled-binding-{}.log", id.name()),
+                        format!("{value:#?}\n=>\n{value_compiled:#?}"),
+                    )
+                    .ok();
+                }
                 let mut block = value_compiled.prelude;
                 if block_terminates(&block) {
                     return block;
@@ -2252,7 +2344,14 @@ impl LambdaCompiler {
         // result doesn't hide its literal-last terminal from the outer
         // `block_last_is_return_throw_or_continue` check
         // (js_stmt_make.ml:186-193).
-        unnest_block(self.compile_effect_block_inner(lam))
+        let mut block = unnest_block(self.compile_effect_block_inner(lam));
+        let source_loc = self.source_loc_of_lam(lam);
+        if let Some(first) = block.first_mut()
+            && first.source_loc.is_none()
+        {
+            first.source_loc = source_loc;
+        }
+        block
     }
 
     fn compile_effect_block_inner(&mut self, lam: &Lambda) -> Block {
@@ -2576,7 +2675,9 @@ impl LambdaCompiler {
             Lambda::Lapply(apply) => {
                 let compiled = self.compile_apply_call(apply);
                 let mut block = compiled.prelude;
-                block.push(Statement::return_(compiled.expr));
+                let mut statement = Statement::return_(compiled.expr);
+                statement.source_loc = self.source_loc(&apply.ap_info.loc);
+                block.push(statement);
                 block
             }
             Lambda::LifThenElse(cond, then_, else_) => self
@@ -3225,6 +3326,7 @@ impl LambdaCompiler {
             clauses.push((
                 to_tag(grouped_cases[group_end].0.clone()),
                 CaseClause {
+                    source_loc: None,
                     body: compiled_body,
                     should_break,
                     comment: None,
@@ -3674,6 +3776,7 @@ impl LambdaCompiler {
             cases.push((
                 grouped_cases[group_end].0,
                 CaseClause {
+                    source_loc: None,
                     body: compiled_body,
                     should_break,
                     comment: None,
@@ -4707,6 +4810,7 @@ impl LambdaCompiler {
                     tag,
                     if is_last {
                         crate::js_ir::CaseClause {
+                            source_loc: None,
                             body: self.compile_switch_value_block(result, body),
                             should_break: false,
                             comment: None,
@@ -4775,6 +4879,7 @@ impl LambdaCompiler {
                 tag_type: SwitchCaseTag::String(tag),
                 clause: if is_last {
                     crate::js_ir::CaseClause {
+                        source_loc: None,
                         body: self.compile_switch_value_block(result, body),
                         should_break: false,
                         comment: None,
@@ -4857,6 +4962,7 @@ impl LambdaCompiler {
             cases.push((
                 grouped_cases[group_end].0,
                 crate::js_ir::CaseClause {
+                    source_loc: None,
                     body: compiled_body,
                     should_break,
                     comment: None,
@@ -4997,8 +5103,10 @@ impl LambdaCompiler {
             .into_iter()
             .map(|(tag, body, is_last)| {
                 let clause = if is_last {
+                    let source_loc = self.source_loc_of_lam(body);
                     let body = self.compile_effect_block(body);
                     crate::js_ir::CaseClause {
+                        source_loc,
                         should_break: !block_terminates(&body),
                         body,
                         comment: None,
@@ -5078,8 +5186,10 @@ impl LambdaCompiler {
             .into_iter()
             .map(|(tag, body, is_last)| {
                 let clause = if is_last {
+                    let source_loc = self.source_loc_of_lam(body);
                     let body = self.compile_effect_block(body);
                     crate::js_ir::CaseClause {
+                        source_loc,
                         should_break: !block_terminates(&body),
                         body,
                         comment: None,
@@ -6028,6 +6138,7 @@ impl LambdaCompiler {
                 (
                     first_code + i32::try_from(i).expect("exit handler index fits in i32"),
                     CaseClause {
+                        source_loc: None,
                         body,
                         should_break,
                         comment: None,
@@ -6202,6 +6313,7 @@ fn normalize_if_assignment_merge_order(
         ExpressionDesc::JsNot(inner) if !else_block.is_empty() => (*inner, else_block, then_block),
         other => (
             Expression {
+                source_loc: None,
                 desc: other,
                 comment: cond.comment,
             },
@@ -6385,7 +6497,9 @@ fn recursive_binding_groups(
 fn recursive_function_bindings(bindings: &[(Ident, Lambda)]) -> HashMap<Ident, LFunction> {
     bindings
         .iter()
-        .filter_map(|(id, expr)| recursive_function_binding_value(expr).map(|func| (id.clone(), func)))
+        .filter_map(|(id, expr)| {
+            recursive_function_binding_value(expr).map(|func| (id.clone(), func))
+        })
         .collect()
 }
 
@@ -6909,66 +7023,6 @@ pub(crate) fn collect_possible_required_modules_for_lambda(lam: &Lambda) -> AHas
     seen
 }
 
-fn collect_exported_module_projection_bindings(lam: &Lambda) -> HashMap<String, Lambda> {
-    fn terminal_exports(lam: &Lambda) -> ahash::AHashSet<Ident> {
-        match lam {
-            Lambda::Llet(_, _, _, body) | Lambda::Lletrec(_, body) => terminal_exports(body),
-            Lambda::Lsequence(_, body) => terminal_exports(body),
-            Lambda::Lprim(PrimInfo {
-                primitive: Primitive::Pmakeblock(_, TagInfo::ModuleExport(ids), _),
-                ..
-            }) => ids.iter().cloned().collect(),
-            _ => ahash::AHashSet::new(),
-        }
-    }
-    fn is_module_projection(lam: &Lambda) -> bool {
-        matches!(
-            lam,
-            Lambda::Lprim(PrimInfo {
-                primitive: Primitive::Pfield(_, crate::lambda::FieldDbgInfo::Module { .. }),
-                ..
-            })
-        )
-    }
-    fn collect(
-        lam: &Lambda,
-        exports: &ahash::AHashSet<Ident>,
-        result: &mut HashMap<String, Lambda>,
-    ) {
-        match lam {
-            Lambda::Llet(_, id, value, body) => {
-                if exports.contains(id) && is_module_projection(value) {
-                    result.insert(id.name().to_string(), (**value).clone());
-                }
-                collect(body, exports, result);
-            }
-            Lambda::Lletrec(_, body) | Lambda::Lsequence(_, body) => {
-                collect(body, exports, result)
-            }
-            _ => {}
-        }
-    }
-    let exports = terminal_exports(lam);
-    let mut result = HashMap::new();
-    collect(lam, &exports, &mut result);
-    result
-}
-
-fn restore_top_level_binding_values(lam: &mut Lambda, values: &HashMap<String, Lambda>) {
-    match lam {
-        Lambda::Llet(_, id, value, body) => {
-            if let Some(original) = values.get(id.name()) {
-                **value = original.clone();
-            }
-            restore_top_level_binding_values(body, values);
-        }
-        Lambda::Lletrec(_, body) | Lambda::Lsequence(_, body) => {
-            restore_top_level_binding_values(body, values)
-        }
-        _ => {}
-    }
-}
-
 fn collect_cmj_export_constants_from_simplified_lambda(
     lam: &Lambda,
 ) -> AHashMap<String, CmjExportConstant> {
@@ -7315,7 +7369,11 @@ fn required_module_side_effect_reason(
 pub(crate) fn compiled_from_effect_block(mut block: Block) -> Compiled {
     if block.len() == 1 {
         let stmt = block.pop().expect("single-item block");
-        let Statement { desc, comment } = stmt;
+        let Statement {
+            source_loc,
+            desc,
+            comment,
+        } = stmt;
         return match desc {
             StatementDesc::Exp(mut expr) => {
                 if expr.comment.is_none() {
@@ -7328,7 +7386,11 @@ pub(crate) fn compiled_from_effect_block(mut block: Block) -> Compiled {
             }
             StatementDesc::Block(inner) if comment.is_none() => compiled_from_effect_block(inner),
             desc => Compiled {
-                prelude: vec![Statement { desc, comment }],
+                prelude: vec![Statement {
+                    source_loc: None,
+                    desc,
+                    comment,
+                }],
                 expr: Expression::undefined(false),
             },
         };
@@ -8035,6 +8097,7 @@ fn collect_modules_from_expression(expr: &Expression, modules: &mut OcamlModuleS
         | ExpressionDesc::JsBnot(inner)
         | ExpressionDesc::Await(inner)
         | ExpressionDesc::Spread(inner)
+        | ExpressionDesc::RecordRest(_, inner)
         | ExpressionDesc::CamlBlockTag(inner, _) => collect_modules_from_expression(inner, modules),
         ExpressionDesc::OptionalBlock(inner, identity) => {
             if !identity {

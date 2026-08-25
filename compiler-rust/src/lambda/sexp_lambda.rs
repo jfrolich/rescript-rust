@@ -408,6 +408,11 @@ fn primitive(prim: &Primitive, _with_locs: bool) -> Sexp {
             set_field_dbg_info(info),
         ]),
         Primitive::Pduprecord => Sexp::atom("Pduprecord"),
+        Primitive::PrecordRest(excluded) => Sexp::list(
+            std::iter::once(Sexp::atom("Precord_rest"))
+                .chain(excluded.iter().map(|label| string(label)))
+                .collect(),
+        ),
         Primitive::PjsCall {
             prim_name,
             dynamic_import,

@@ -63,7 +63,8 @@ pub(crate) fn js_expr_no_side_effects(expr: &Expression) -> bool {
         | ExpressionDesc::New(_, _)
         | ExpressionDesc::RawJsCode(_)
         | ExpressionDesc::Await(_)
-        | ExpressionDesc::Spread(_) => false,
+        | ExpressionDesc::Spread(_)
+        | ExpressionDesc::RecordRest(_, _) => false,
     }
 }
 
@@ -624,13 +625,18 @@ pub(crate) fn int32_offset(expr: Expression, offset: i32) -> Expression {
 }
 
 pub(crate) fn ocaml_typeof_expr(expr: Expression) -> Expression {
-    let Expression { desc, comment } = expr;
+    let Expression {
+        source_loc,
+        desc,
+        comment,
+    } = expr;
     match desc {
         ExpressionDesc::Number(_) | ExpressionDesc::Length(_, _) => Expression::string("number"),
         ExpressionDesc::Str { .. } => Expression::string("string"),
         ExpressionDesc::Array(_, _) => Expression::string("object"),
         ExpressionDesc::Bool(_) => Expression::string("boolean"),
         desc => Expression::new(ExpressionDesc::Typeof(Box::new(Expression {
+            source_loc: None,
             desc,
             comment,
         }))),
@@ -770,6 +776,7 @@ pub(crate) fn string_switch_iife(
         .map(|(tag, value)| StringClause {
             tag_type: SwitchCaseTag::String(tag),
             clause: CaseClause {
+                source_loc: None,
                 body: vec![Statement::return_(value)],
                 should_break: false,
                 comment: None,

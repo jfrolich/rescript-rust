@@ -155,7 +155,8 @@ fn is_pure_primitive(prim: &Primitive, args: &[Lambda]) -> bool {
         | Primitive::Pfield(_, _)
         | Primitive::PvalFromOption
         | Primitive::PvalFromOptionNotNest
-        | Primitive::Pduprecord => true,
+        | Primitive::Pduprecord
+        | Primitive::PrecordRest(_) => true,
 
         // Object primitives
         Primitive::Pobjcomp(_)

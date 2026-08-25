@@ -522,6 +522,19 @@ impl LambdaCompiler {
                 )),
                 _ => Expression::undefined(false),
             },
+            PrecordRest(excluded) => match compiled_args.as_slice() {
+                [source] => Expression::new(ExpressionDesc::RecordRest(
+                    excluded
+                        .iter()
+                        .map(|label| crate::js_ir::RecordRestField {
+                            label: label.clone(),
+                            ident: None,
+                        })
+                        .collect(),
+                    Box::new(source.clone()),
+                )),
+                _ => Expression::undefined(false),
+            },
             Pstringadd => {
                 Expression::string_append(compiled_args[0].clone(), compiled_args[1].clone())
             }
@@ -578,7 +591,9 @@ impl LambdaCompiler {
                 }))
             }
             Pdebugger => {
-                prelude.push(Statement::debugger());
+                let mut statement = Statement::debugger();
+                statement.source_loc = self.source_loc(loc);
+                prelude.push(statement);
                 Expression::undefined(false)
             }
             Praise => {
@@ -586,7 +601,9 @@ impl LambdaCompiler {
                     .first()
                     .cloned()
                     .unwrap_or_else(|| Expression::undefined(false));
-                prelude.push(Statement::throw(expr));
+                let mut statement = Statement::throw(expr);
+                statement.source_loc = self.source_loc(loc);
+                prelude.push(statement);
                 Expression::undefined(false)
             }
             Pidentity => compiled_args
@@ -622,6 +639,7 @@ impl LambdaCompiler {
             }
             PjsFnMethod => match compiled_args.first().cloned() {
                 Some(Expression {
+                    source_loc,
                     desc:
                         ExpressionDesc::Fun {
                             params,
@@ -634,6 +652,7 @@ impl LambdaCompiler {
                         },
                     comment,
                 }) => Expression {
+                    source_loc: None,
                     desc: ExpressionDesc::Fun {
                         is_method: true,
                         params,

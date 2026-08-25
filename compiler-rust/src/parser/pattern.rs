@@ -1221,6 +1221,13 @@ fn parse_record_pattern(p: &mut Parser<'_>) -> Pattern {
     // parse_comma_delimited_reversed_list, then validates spreads after parsing.
     let mut raw_fields: Vec<(bool, Option<PatternRecordField>)> = vec![];
     let mut closed = ClosedFlag::Closed;
+    // OCaml res_core.ml parse_record_pattern_row: a `...` row may carry a
+    // record-rest binding (`...T as name` or `...name`). At most one rest is
+    // allowed; it does not participate in the field list.
+    let mut record_rest: Option<crate::parser::ast::RecordPatRest> = None;
+    // Fallback for old-style `{...foo}` rows: parse them as a spread field so
+    // the existing spread-error diagnostic path still fires.
+    let mut spread_fallback = false;
 
     while p.token != Token::Rbrace && p.token != Token::Eof {
         if p.token == Token::Underscore {
@@ -1231,14 +1238,91 @@ fn parse_record_pattern(p: &mut Parser<'_>) -> Pattern {
             continue;
         }
 
-        // Check for spread pattern - OCaml: DotDotDot case in parse_record_pattern_row
-        // Parse as a regular field with has_spread=true, validate after
-        let has_spread = if p.token == Token::DotDotDot {
+        if p.token == Token::DotDotDot {
+            // OCaml res_core.ml:1489-1545 DotDotDot case in parse_record_pattern_row
+            let rest_start_pos_idx = p.start_pos_idx();
             p.next();
-            true
-        } else {
-            false
-        };
+            let rest_name_start_pos_idx = p.start_pos_idx();
+            let has_type_annotation = p.lookahead(|p| {
+                let _ = super::typ::parse_atomic_typ_expr(p, Attributes::new(), true);
+                p.token == Token::As
+            });
+            if has_type_annotation {
+                // ...TypeAnnotation as name
+                let core_type = super::typ::parse_atomic_typ_expr(p, Attributes::new(), true);
+                let core_type_idx = p.arena_mut().push_core_type(core_type);
+                p.expect(Token::As);
+                let name_start_idx = p.start_pos_idx();
+                let name = match p.token.clone() {
+                    Token::Lident(ident) => {
+                        let name_idx = p.arena_mut().intern(&ident);
+                        p.next();
+                        with_loc(name_idx, p.mk_loc_idx_to_prev_end(name_start_idx))
+                    }
+                    _ => {
+                        let name_idx = p.arena_mut().intern("_");
+                        with_loc(name_idx, p.mk_loc_idx_to_prev_end(name_start_idx))
+                    }
+                };
+                if record_rest.is_some() {
+                    let rest_err_loc = p.mk_loc_idx_to_prev_end(rest_start_pos_idx);
+                    let err_loc_start = p.loc_start(rest_err_loc);
+                    p.err_at(
+                        err_loc_start,
+                        p.end_pos.clone(),
+                        DiagnosticCategory::Message(
+                            super::core::error_messages::RECORD_PATTERN_MULTIPLE_REST.to_string(),
+                        ),
+                    );
+                } else {
+                    let rest_loc = p.mk_loc_idx_to_prev_end(rest_start_pos_idx);
+                    record_rest = Some(crate::parser::ast::RecordPatRest {
+                        rest_loc,
+                        rest_name: name,
+                        rest_type: Some(core_type_idx),
+                    });
+                }
+            } else {
+                match p.token.clone() {
+                    Token::Lident(ident) => {
+                        // ...name (no type annotation)
+                        let name_idx = p.arena_mut().intern(&ident);
+                        p.next();
+                        let rest_loc = p.mk_loc_idx_to_prev_end(rest_start_pos_idx);
+                        let name_loc = p.mk_loc_idx_to_prev_end(rest_name_start_pos_idx);
+                        if record_rest.is_some() {
+                            let err_loc_start = p.loc_start(rest_loc);
+                            p.err_at(
+                                err_loc_start,
+                                p.end_pos.clone(),
+                                DiagnosticCategory::Message(
+                                    super::core::error_messages::RECORD_PATTERN_MULTIPLE_REST
+                                        .to_string(),
+                                ),
+                            );
+                        } else {
+                            record_rest = Some(crate::parser::ast::RecordPatRest {
+                                rest_loc,
+                                rest_name: with_loc(name_idx, name_loc),
+                                rest_type: None,
+                            });
+                        }
+                    }
+                    _ => {
+                        // Fallback: treat as old-style spread (error).
+                        // OCaml falls back to parse_record_pattern_row_field; the
+                        // existing spread-field error path below covers it.
+                        spread_fallback = true;
+                    }
+                }
+            }
+            if !spread_fallback {
+                if !p.optional(&Token::Comma) {
+                    break;
+                }
+                continue;
+            }
+        }
 
         let field_start_idx = p.start_pos_idx();
 
@@ -1378,7 +1462,7 @@ fn parse_record_pattern(p: &mut Parser<'_>) -> Pattern {
         };
 
         raw_fields.push((
-            has_spread,
+            spread_fallback,
             Some(PatternRecordField {
                 lid,
                 pat: pat_idx,
@@ -1393,6 +1477,10 @@ fn parse_record_pattern(p: &mut Parser<'_>) -> Pattern {
 
     p.expect(Token::Rbrace);
     let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
+
+    if let Some(record_rest) = record_rest {
+        p.arena_mut().set_record_pat_rest(loc, record_rest);
+    }
 
     // OCaml: process raw_fields in reverse order.
     // Last PatUnderscore becomes Open flag, spread fields emit errors.

@@ -25,7 +25,7 @@ use crate::diagnostics::WarningConfig;
 use crate::ident::Ident;
 use crate::js_ir::{
     DepsProgram, Kind, ModuleFormat, ModuleId, ModulePathResolutionError, ModulePathResolver,
-    print_deps_program_with_directives_and_options,
+    print_deps_program_with_directives_and_options, print_deps_program_with_source_map,
 };
 use crate::lambda::lam_compile::LambdaCompiler;
 use crate::location::Location;
@@ -138,13 +138,12 @@ pub fn max_lambda_input_stamp(typed_structure: &crate::types::typedtree::Structu
     use crate::types::path::Path as TypePath;
     use crate::types::typedtree::{
         Case, ConstructorArgument, ExpExtra, Expression, ExpressionDesc, ExtensionConstructor,
-        ExtensionConstructorKind, FunctionParam, IncludeDescription,
-        MethKind, ModuleBinding, ModuleCoercion, ModuleExpr, ModuleExprDesc, ModuleType,
-        ModuleTypeConstraint, ModuleTypeDeclaration, ModuleTypeDesc, OpenDeclaration, PatExtra,
-        Pattern, PatternDesc, RowFieldDesc, Structure, StructureItemDesc,
-        TypedConstructorArguments, TypedCoreType, TypedCoreTypeDesc, TypedSignature,
-        TypedSignatureItemDesc, TypedTypeDeclaration, TypedTypeKind, TypedValueDescription,
-        ValueBinding, WithConstraint,
+        ExtensionConstructorKind, FunctionParam, IncludeDescription, MethKind, ModuleBinding,
+        ModuleCoercion, ModuleExpr, ModuleExprDesc, ModuleType, ModuleTypeConstraint,
+        ModuleTypeDeclaration, ModuleTypeDesc, OpenDeclaration, PatExtra, Pattern, PatternDesc,
+        RowFieldDesc, Structure, StructureItemDesc, TypedConstructorArguments, TypedCoreType,
+        TypedCoreTypeDesc, TypedSignature, TypedSignatureItemDesc, TypedTypeDeclaration,
+        TypedTypeKind, TypedValueDescription, ValueBinding, WithConstraint,
     };
 
     fn visit_ident(max_stamp: &mut i32, id: &Ident) {
@@ -1242,6 +1241,8 @@ pub struct JsOutputTarget {
 pub struct JsOutput {
     pub path: PathBuf,
     pub code: String,
+    /// External source map contents for linked/hidden modes.
+    pub source_map: Option<String>,
 }
 
 /// Compiler options that can be passed to the driver.
@@ -1280,6 +1281,12 @@ pub struct CompilerOptions {
     /// Extra concrete JS outputs for in-process callers that need the same
     /// typed/lambda result rendered for multiple package specs.
     pub js_output_targets: Vec<JsOutputTarget>,
+    /// Source map output mode.
+    pub source_map: crate::js_ir::source_map::SourceMapMode,
+    /// Include original source text in generated source maps.
+    pub source_map_sources_content: bool,
+    /// Optional sourceRoot emitted in generated source maps.
+    pub source_map_root: String,
     /// JSX version from CLI `-bs-jsx` (e.g. 4). When set, enables JSX PPX rewrite.
     pub jsx_version: Option<i32>,
     /// Experimental LetUnwrap feature from `-enable-experimental LetUnwrap`.
@@ -1349,6 +1356,9 @@ impl Default for CompilerOptions {
             output_path: None,
             output_module_format: None,
             js_output_targets: Vec::new(),
+            source_map: crate::js_ir::source_map::SourceMapMode::None,
+            source_map_sources_content: false,
+            source_map_root: String::new(),
             jsx_version: None,
             experimental_let_unwrap: false,
             jsx_preserve: false,
@@ -3670,6 +3680,19 @@ fn type_mod_error_to_anyhow(
             2,
         )
         .into(),
+        TypeModError::CoreError(TypeCoreError::RecordRest { loc, error }) => {
+            UserDiagnostic::new(
+                format_compiler_error_report(
+                    arena,
+                    source,
+                    filename,
+                    *loc,
+                    &error.message(),
+                ),
+                2,
+            )
+            .into()
+        }
         TypeModError::CoreError(TypeCoreError::PrivateType { loc, ty }) => {
             UserDiagnostic::new(
                 format_compiler_error_report(
@@ -4507,7 +4530,10 @@ fn interface_source_name(source_file: &str) -> String {
     intf.to_string_lossy().into_owned()
 }
 
-fn parsed_signature_has_gentype_ignore_interface(arena: &ParseArena, signature: &Signature) -> bool {
+fn parsed_signature_has_gentype_ignore_interface(
+    arena: &ParseArena,
+    signature: &Signature,
+) -> bool {
     // OCaml compiler/gentype/GenTypeMain.ml:93-134 discovers
     // @@genType.ignoreInterface while scanning the interface CMT before
     // deciding whether the implementation artifact should own GenType output.
@@ -10958,10 +10984,12 @@ impl<'a> TypeExprPrinter<'a> {
 
             match &*self.type_ctx.get_desc(repr) {
                 TypeDesc::Tarrow { args: params, ret } => {
-                    args.extend(params.iter().map(|arg| (
-                        self.format_arrow_arg(&arg.lbl, arg.typ),
-                        !matches!(arg.lbl, TypeArgLabel::Nolabel),
-                    )));
+                    args.extend(params.iter().map(|arg| {
+                        (
+                            self.format_arrow_arg(&arg.lbl, arg.typ),
+                            !matches!(arg.lbl, TypeArgLabel::Nolabel),
+                        )
+                    }));
                     current = *ret;
                 }
                 TypeDesc::Tlink(next) | TypeDesc::Tsubst(next) => current = *next,
@@ -11345,23 +11373,20 @@ pub fn compile_source_to_js_with_options(
     }
 
     if options.gentype_config.is_some() && (!has_resi || gentype_ignore_interface) {
-        let module_name = current_unit_name.clone().unwrap_or_else(|| {
-            module_name_from_source_filename(source_file_for_interface)
-        });
-        if !has_resi
-            && let Some(simple_signature) = inferred_simple_signature.as_deref()
-        {
+        let module_name = current_unit_name
+            .clone()
+            .unwrap_or_else(|| module_name_from_source_filename(source_file_for_interface));
+        if !has_resi && let Some(simple_signature) = inferred_simple_signature.as_deref() {
             // OCaml saves the inferred signature before GenType consumes CMT
             // data in compiler/ml/typemod.ml:1779-1788 and
             // compiler/gentype/GenTypeMain.ml:136-175. The direct Rust CLI
             // path does not write/read a CMT, so expose the same pre-finalized
             // raw signature to GenType's alias scraping path.
-            let current_raw_sig = std::sync::Arc::new(
-                crate::types::typecore::copy_lookup_signature_for_subst(
+            let current_raw_sig =
+                std::sync::Arc::new(crate::types::typecore::copy_lookup_signature_for_subst(
                     simple_signature,
                     &type_ctx,
-                ),
-            );
+                ));
             type_ctx.register_gentype_raw_module_sig(&module_name, current_raw_sig.clone());
             type_ctx.register_raw_module_sig(&module_name, current_raw_sig);
         }
@@ -11526,6 +11551,9 @@ pub fn compile_source_to_js_with_options(
         options.check_div_by_zero,
         options.cross_module_inline,
     );
+    compiler.set_source_map_enabled(
+        options.source_map != crate::js_ir::source_map::SourceMapMode::None,
+    );
     let program = compiler.compile_deps_program_with_possible_required_modules(
         &lowered_lambda,
         &possible_required_modules,
@@ -11547,15 +11575,29 @@ pub fn compile_source_to_js_with_options(
         .expect("lambda compiler retained module path resolver");
     check_module_path_resolution_errors(&program, &module_path_resolver, filename)?;
 
-    // JS IR -> JS source
-    let js = print_deps_program_with_directives_and_options(
+    // JS IR -> JS source. File-based compilation writes the companion map
+    // here because its public return value remains the generated JS string;
+    // in-process compilation carries the map on `JsOutput` instead.
+    let (js, source_map) = render_js_program(
         &program,
-        Some(&module_path_resolver),
+        &module_path_resolver,
         &file_directives,
         debug,
         jsx_preserve,
-        !options.no_version_header,
+        options,
+        options.output_path.as_deref(),
     );
+    if let Some(output_path) = options.output_path.as_deref() {
+        let map_path = PathBuf::from(format!("{}.map", output_path.display()));
+        if let Some(source_map) = source_map {
+            if let Some(parent) = map_path.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            std::fs::write(map_path, source_map)?;
+        } else {
+            let _ = std::fs::remove_file(map_path);
+        }
+    }
 
     // The CLI compiler is a short-lived process. Skipping teardown for the
     // large typechecking arenas keeps snapshot runs inside the harness timeout
@@ -13187,10 +13229,9 @@ fn moregen_link_impl(
                 moregen_link_impl(ctx, *a, *b, visited, debug, allow_generic_anonymous);
             }
         }
-        (
-            TypeDesc::Tarrow { args: a1, ret: r1 },
-            TypeDesc::Tarrow { args: a2, ret: r2 },
-        ) if a1.len() == a2.len() => {
+        (TypeDesc::Tarrow { args: a1, ret: r1 }, TypeDesc::Tarrow { args: a2, ret: r2 })
+            if a1.len() == a2.len() =>
+        {
             moregen_debug!(debug, "  Tarrow match");
             let (a1, a2, r1, r2) = (a1.clone(), a2.clone(), *r1, *r2);
             drop(impl_desc);
@@ -14410,6 +14451,51 @@ fn effective_js_output_targets(options: &CompilerOptions) -> Vec<JsOutputTarget>
         .collect()
 }
 
+fn render_js_program(
+    program: &DepsProgram,
+    resolver: &ModulePathResolver,
+    file_directives: &[String],
+    debug: bool,
+    jsx_preserve: bool,
+    options: &CompilerOptions,
+    output_path: Option<&FsPath>,
+) -> (String, Option<String>) {
+    let source_path = options.source_filename.as_deref().map(FsPath::new);
+    let source_map_target = output_path.map(FsPath::to_path_buf).or_else(|| {
+        (options.source_map == crate::js_ir::source_map::SourceMapMode::Inline).then(|| {
+            let source = source_path.unwrap_or_else(|| FsPath::new("_none_.res"));
+            source.with_extension("js")
+        })
+    });
+    if let (Some(target), Some(source)) = (source_map_target.as_deref(), source_path) {
+        print_deps_program_with_source_map(
+            program,
+            Some(resolver),
+            file_directives,
+            debug,
+            jsx_preserve,
+            !options.no_version_header,
+            target,
+            source,
+            options.source_map,
+            options.source_map_sources_content,
+            &options.source_map_root,
+        )
+    } else {
+        (
+            print_deps_program_with_directives_and_options(
+                program,
+                Some(resolver),
+                file_directives,
+                debug,
+                jsx_preserve,
+                !options.no_version_header,
+            ),
+            None,
+        )
+    }
+}
+
 fn compile_js_program_for_output(
     lowered_lambda: &crate::lambda::Lambda,
     possible_required_modules: &AHashSet<ModuleId>,
@@ -14454,6 +14540,9 @@ fn compile_js_program_for_output(
         jsx_preserve,
         options.check_div_by_zero,
         options.cross_module_inline,
+    );
+    compiler.set_source_map_enabled(
+        options.source_map != crate::js_ir::source_map::SourceMapMode::None,
     );
     let program = compiler.compile_deps_program_with_possible_required_modules(
         lowered_lambda,
@@ -14550,6 +14639,9 @@ fn compile_js_program_for_output_owned_with_collected_modules(
         jsx_preserve,
         options.check_div_by_zero,
         options.cross_module_inline,
+    );
+    compiler.set_source_map_enabled(
+        options.source_map != crate::js_ir::source_map::SourceMapMode::None,
     );
     let program = compiler.compile_deps_program_with_collected_possible_required_modules_owned(
         lowered_lambda,
@@ -14770,10 +14862,7 @@ pub fn compile_preprocessed_structure_in_process_until_js(
         // signature that compiler/gentype/TranslateStructure.ml:174-183 reads
         // through Env.scrape_alias.
         let current_raw_sig = std::sync::Arc::new(
-            crate::types::typecore::copy_lookup_signature_for_subst(
-                &signature_for_save,
-                &type_ctx,
-            ),
+            crate::types::typecore::copy_lookup_signature_for_subst(&signature_for_save, &type_ctx),
         );
         internal_env.register_in_memory_signature(
             module_name,
@@ -15093,19 +15182,21 @@ pub fn finish_preprocessed_structure_in_process_from_js_boundary_with_metadata_h
             (String::new(), Vec::new())
         } else {
             let (primary_path, primary_program, primary_resolver) = rendered_programs.remove(0);
-            let mut primary_js = print_deps_program_with_directives_and_options(
+            let (mut primary_js, primary_source_map) = render_js_program(
                 &primary_program,
-                Some(&primary_resolver),
+                &primary_resolver,
                 &pre_js.file_directives,
                 pre_js.debug,
                 pre_js.jsx_preserve,
-                !options.no_version_header,
+                options,
+                primary_path.as_deref(),
             );
             let mut js_outputs = Vec::new();
             let js = if let Some(path) = primary_path {
                 js_outputs.push(JsOutput {
                     path,
                     code: std::mem::take(&mut primary_js),
+                    source_map: primary_source_map,
                 });
                 crate::js_ir::dispose_deps_program_nonrecursive(primary_program);
                 String::new()
@@ -15118,16 +15209,21 @@ pub fn finish_preprocessed_structure_in_process_from_js_boundary_with_metadata_h
                     crate::js_ir::dispose_deps_program_nonrecursive(program);
                     continue;
                 };
-                let code = print_deps_program_with_directives_and_options(
+                let (code, source_map) = render_js_program(
                     &program,
-                    Some(&module_path_resolver),
+                    &module_path_resolver,
                     &pre_js.file_directives,
                     pre_js.debug,
                     pre_js.jsx_preserve,
-                    !options.no_version_header,
+                    options,
+                    Some(&path),
                 );
                 crate::js_ir::dispose_deps_program_nonrecursive(program);
-                js_outputs.push(JsOutput { path, code });
+                js_outputs.push(JsOutput {
+                    path,
+                    code,
+                    source_map,
+                });
             }
             (js, js_outputs)
         }

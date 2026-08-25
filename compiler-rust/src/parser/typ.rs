@@ -916,7 +916,11 @@ fn parse_atomic_typ_expr_with_start(
 }
 
 /// Parse an atomic type expression (wrapper without outer start position).
-fn parse_atomic_typ_expr(p: &mut Parser<'_>, attrs: Attributes, es6_arrow: bool) -> CoreType {
+pub(crate) fn parse_atomic_typ_expr(
+    p: &mut Parser<'_>,
+    attrs: Attributes,
+    es6_arrow: bool,
+) -> CoreType {
     parse_atomic_typ_expr_with_start(p, attrs, es6_arrow, None)
 }
 

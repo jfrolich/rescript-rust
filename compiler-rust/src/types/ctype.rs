@@ -29,8 +29,8 @@ use super::decl::LabelDeclaration;
 use super::env::Env;
 use super::path::Path;
 use super::type_expr::{
-    AbbrevMemo, AbbrevMemoRef, FieldKind, GENERIC_LEVEL, RowDesc, RowField, TypeDesc,
-    TypeExprRef, TypeExprRefSet,
+    AbbrevMemo, AbbrevMemoRef, FieldKind, GENERIC_LEVEL, RowDesc, RowField, TypeDesc, TypeExprRef,
+    TypeExprRefSet,
 };
 use super::variance::{Variance, VarianceFlag};
 use crate::ident::Ident;
@@ -3685,10 +3685,20 @@ fn subtype_rec(
             unify(ctx, &mut unify_state, ty1, ty2).map_err(|_| subtype_error(trace))
         }
         (
-            TypeDesc::Tarrow { args: args1, ret: ret1 },
-            TypeDesc::Tarrow { args: args2, ret: ret2 },
+            TypeDesc::Tarrow {
+                args: args1,
+                ret: ret1,
+            },
+            TypeDesc::Tarrow {
+                args: args2,
+                ret: ret2,
+            },
         ) if args1.len() == args2.len()
-            && args1.iter().zip(args2).all(|(a1, a2)| a1.lbl.same_label(&a2.lbl)) => {
+            && args1
+                .iter()
+                .zip(args2)
+                .all(|(a1, a2)| a1.lbl.same_label(&a2.lbl)) =>
+        {
             for (arg1, arg2) in args1.iter().zip(args2) {
                 let mut arg_trace = trace.to_vec();
                 arg_trace.push((arg2.typ, arg1.typ));
@@ -4557,22 +4567,25 @@ fn subst_type(
                 ctx.new_constr(path, new_args)
             }
         }
-        TypeDesc::Tarrow { args: arrow_args, ret } => {
+        TypeDesc::Tarrow {
+            args: arrow_args,
+            ret,
+        } => {
             let new_args = arrow_args
                 .iter()
-                .map(|arg| super::TypeArg::new(
-                    arg.lbl.clone(),
-                    subst_type(ctx, params, args, arg.typ),
-                ))
+                .map(|arg| {
+                    super::TypeArg::new(arg.lbl.clone(), subst_type(ctx, params, args, arg.typ))
+                })
                 .collect::<Vec<_>>();
             let new_ret = subst_type(ctx, params, args, *ret);
-            if new_args.iter().zip(arrow_args).all(|(a, b)| a.typ == b.typ)
-                && new_ret == *ret
-            {
+            if new_args.iter().zip(arrow_args).all(|(a, b)| a.typ == b.typ) && new_ret == *ret {
                 ty
             } else {
                 drop(desc);
-                ctx.new_type(TypeDesc::Tarrow { args: new_args, ret: new_ret })
+                ctx.new_type(TypeDesc::Tarrow {
+                    args: new_args,
+                    ret: new_ret,
+                })
             }
         }
         TypeDesc::Ttuple(tl) => {
@@ -5230,14 +5243,21 @@ fn unify_types<'a>(
         // compiler/ml/ctype.ml:2204-2218: n-ary arrows unify only when
         // parameter counts agree and labels are pairwise compatible.
         (
-            TypeDesc::Tarrow { args: args1, ret: ret1 },
-            TypeDesc::Tarrow { args: args2, ret: ret2 },
+            TypeDesc::Tarrow {
+                args: args1,
+                ret: ret1,
+            },
+            TypeDesc::Tarrow {
+                args: args2,
+                ret: ret2,
+            },
         ) if args1.len() == args2.len()
             && args1.iter().zip(args2).all(|(a1, a2)| {
                 a1.lbl.same_label(&a2.lbl)
                     || (state.mode == UnifyMode::Pattern
                         && !(a1.lbl.is_optional() || a2.lbl.is_optional()))
-            }) => {
+            }) =>
+        {
             let original_desc1 = (*desc1).clone();
             let args1 = args1.clone();
             let args2 = args2.clone();
@@ -7014,10 +7034,20 @@ fn moregen(
         // `Asttypes.same_arg_label`, so source locations on labels do not
         // participate in the inclusion check.
         (
-            TypeDesc::Tarrow { args: args1, ret: ret1 },
-            TypeDesc::Tarrow { args: args2, ret: ret2 },
+            TypeDesc::Tarrow {
+                args: args1,
+                ret: ret1,
+            },
+            TypeDesc::Tarrow {
+                args: args2,
+                ret: ret2,
+            },
         ) if args1.len() == args2.len()
-            && args1.iter().zip(args2).all(|(a1, a2)| a1.lbl.same_label(&a2.lbl)) => {
+            && args1
+                .iter()
+                .zip(args2)
+                .all(|(a1, a2)| a1.lbl.same_label(&a2.lbl)) =>
+        {
             let args1 = args1.clone();
             let args2 = args2.clone();
             let ret1 = *ret1;
@@ -7656,9 +7686,17 @@ fn generalize_expansive_rec(
     }
 
     enum Action {
-        Constr { path: Path, args: Vec<TypeExprRef> },
-        Package { args: Vec<TypeExprRef> },
-        Arrow { args: Vec<TypeExprRef>, ret: TypeExprRef },
+        Constr {
+            path: Path,
+            args: Vec<TypeExprRef>,
+        },
+        Package {
+            args: Vec<TypeExprRef>,
+        },
+        Arrow {
+            args: Vec<TypeExprRef>,
+            ret: TypeExprRef,
+        },
         Recurse(Vec<TypeExprRef>),
     }
 
@@ -7979,10 +8017,20 @@ fn equal_type_exprs_without_renaming_rec(
     let right_desc = ctx.get_desc(right_expanded);
     match (&*left_desc, &*right_desc) {
         (
-            TypeDesc::Tarrow { args: left_args, ret: left_ret },
-            TypeDesc::Tarrow { args: right_args, ret: right_ret },
+            TypeDesc::Tarrow {
+                args: left_args,
+                ret: left_ret,
+            },
+            TypeDesc::Tarrow {
+                args: right_args,
+                ret: right_ret,
+            },
         ) if left_args.len() == right_args.len()
-            && left_args.iter().zip(right_args).all(|(a, b)| a.lbl.same_label(&b.lbl)) => {
+            && left_args
+                .iter()
+                .zip(right_args)
+                .all(|(a, b)| a.lbl.same_label(&b.lbl)) =>
+        {
             let left_args = left_args.clone();
             let right_args = right_args.clone();
             let left_ret = *left_ret;
@@ -7990,9 +8038,7 @@ fn equal_type_exprs_without_renaming_rec(
             drop(left_desc);
             drop(right_desc);
             for (left, right) in left_args.iter().zip(&right_args) {
-                equal_type_exprs_without_renaming_rec(
-                    ctx, env, type_pairs, left.typ, right.typ,
-                )?;
+                equal_type_exprs_without_renaming_rec(ctx, env, type_pairs, left.typ, right.typ)?;
             }
             equal_type_exprs_without_renaming_rec(ctx, env, type_pairs, left_ret, right_ret)
         }
@@ -8848,14 +8894,24 @@ fn copy_sep_inner(
                 .map(|arg| super::type_expr::TypeArg {
                     lbl: arg.lbl,
                     typ: copy_sep_inner(
-                        ctx, arg.typ, fixed, free_univars, bound,
-                        &visited_for_children, delayed_copy,
+                        ctx,
+                        arg.typ,
+                        fixed,
+                        free_univars,
+                        bound,
+                        &visited_for_children,
+                        delayed_copy,
                     ),
                 })
                 .collect(),
             ret: copy_sep_inner(
-                ctx, ret, fixed, free_univars, bound,
-                &visited_for_children, delayed_copy,
+                ctx,
+                ret,
+                fixed,
+                free_univars,
+                bound,
+                &visited_for_children,
+                delayed_copy,
             ),
         },
         TypeDesc::Ttuple(types) => TypeDesc::Ttuple(
@@ -9597,7 +9653,7 @@ pub fn copy_type_deep(
 }
 
 /// Cache for copy_type_cached: tracks node identity to preserve sharing.
-struct CopyCache {
+pub(crate) struct CopyCache {
     /// Node identity cache: maps original TypeExprRef → copied TypeExprRef.
     /// Ensures that if the same node is visited twice, we reuse the copy.
     nodes: HashMap<TypeExprRef, TypeExprRef>,
@@ -9617,7 +9673,7 @@ struct CopyPartial {
 }
 
 impl CopyCache {
-    fn new() -> Self {
+    pub(crate) fn new() -> Self {
         CopyCache {
             nodes: HashMap::new(),
             row_more_markers: HashMap::new(),
@@ -9662,10 +9718,11 @@ fn type_expr_contains_ident_stamp(
                     .copied()
                     .any(|arg| type_expr_contains_ident_stamp(ctx, arg, target_stamp, seen))
         }
-        TypeDesc::Tarrow { args, ret } => args
-            .iter()
-            .any(|arg| type_expr_contains_ident_stamp(ctx, arg.typ, target_stamp, seen))
-            || type_expr_contains_ident_stamp(ctx, *ret, target_stamp, seen),
+        TypeDesc::Tarrow { args, ret } => {
+            args.iter()
+                .any(|arg| type_expr_contains_ident_stamp(ctx, arg.typ, target_stamp, seen))
+                || type_expr_contains_ident_stamp(ctx, *ret, target_stamp, seen)
+        }
         TypeDesc::Ttuple(types) => types
             .iter()
             .copied()
@@ -9891,12 +9948,20 @@ fn subst_identity_copy_rec(
                         .map(|arg| crate::types::type_expr::TypeArg {
                             lbl: arg.lbl,
                             typ: subst_identity_copy_rec(
-                                ctx, arg.typ, reopen_closed_variant_rows, seen, row_more_markers,
+                                ctx,
+                                arg.typ,
+                                reopen_closed_variant_rows,
+                                seen,
+                                row_more_markers,
                             ),
                         })
                         .collect();
                     let ret = subst_identity_copy_rec(
-                        ctx, ret, reopen_closed_variant_rows, seen, row_more_markers,
+                        ctx,
+                        ret,
+                        reopen_closed_variant_rows,
+                        seen,
+                        row_more_markers,
                     );
                     TypeDesc::Tarrow { args, ret }
                 }
@@ -10244,7 +10309,11 @@ fn subst_identity_copy_rec(
 /// OCaml `Ctype.copy` only duplicates nodes at `generic_level` and returns
 /// non-generic nodes unchanged (`partial = None` case used by `instance`).
 /// For duplicated generic nodes, sharing is preserved across the copied graph.
-fn copy_type_cached(ctx: &TypeContext, ty: TypeExprRef, cache: &mut CopyCache) -> TypeExprRef {
+pub(crate) fn copy_type_cached(
+    ctx: &TypeContext,
+    ty: TypeExprRef,
+    cache: &mut CopyCache,
+) -> TypeExprRef {
     let ty = ctx.repr(ty);
 
     // OCaml Ctype.copy marker precedence:
@@ -10795,7 +10864,10 @@ pub fn split_arrow(ctx: &TypeContext, ty: TypeExprRef) -> Option<(TypeExprRef, T
     let remaining = if args.len() == 1 {
         ret
     } else {
-        ctx.new_type(TypeDesc::Tarrow { args: args[1..].to_vec(), ret })
+        ctx.new_type(TypeDesc::Tarrow {
+            args: args[1..].to_vec(),
+            ret,
+        })
     };
     Some((arg.typ, remaining))
 }
@@ -10816,7 +10888,10 @@ pub fn split_arrow_with_label(
     let remaining = if args.len() == 1 {
         ret
     } else {
-        ctx.new_type(TypeDesc::Tarrow { args: args[1..].to_vec(), ret })
+        ctx.new_type(TypeDesc::Tarrow {
+            args: args[1..].to_vec(),
+            ret,
+        })
     };
     Some((arg.lbl.clone(), arg.typ, remaining))
 }

@@ -2808,10 +2808,10 @@ fn simplify_or(ctx_ref: Option<&TypeContext>, p: &Pattern) -> Pattern {
                     })),
                 }
             }
-            PatternDesc::Tpat_record(lbls, closed, _) => {
+            PatternDesc::Tpat_record(lbls, closed, rest) => {
                 let all_lbls = all_record_args(ctx_ref, p.pat_type, p.pat_env, lbls);
                 Ok(Pattern {
-                    pat_desc: PatternDesc::Tpat_record(all_lbls, *closed, None),
+                    pat_desc: PatternDesc::Tpat_record(all_lbls, *closed, rest.clone()),
                     ..p.clone()
                 })
             }
@@ -2883,12 +2883,36 @@ pub fn simplify_cases(
                     // keeps that same order without shifting the whole Rust Vec.
                     pending.push_front((new_pats, new_action));
                 }
-                PatternDesc::Tpat_record(lbls, _, _) if lbls.is_empty() => {
+                PatternDesc::Tpat_record(lbls, _, rest) if lbls.is_empty() => {
+                    let action = match rest {
+                        Some(rest) => action.bind(
+                            LetKind::Strict,
+                            rest.rest_ident.clone(),
+                            RawLambda::prim(
+                                Primitive::PrecordRest(rest.excluded_runtime_labels.clone()),
+                                vec![arg.clone()],
+                                Location::none(),
+                            ),
+                        ),
+                        None => action,
+                    };
                     let mut row = vec![omega()];
                     row.extend(patl.iter().cloned());
                     result.push((row, action));
                 }
-                PatternDesc::Tpat_record(lbls, closed, _) => {
+                PatternDesc::Tpat_record(lbls, closed, rest) => {
+                    let action = match rest {
+                        Some(rest) => action.bind(
+                            LetKind::Strict,
+                            rest.rest_ident.clone(),
+                            RawLambda::prim(
+                                Primitive::PrecordRest(rest.excluded_runtime_labels.clone()),
+                                vec![arg.clone()],
+                                Location::none(),
+                            ),
+                        ),
+                        None => action,
+                    };
                     let all_lbls = all_record_args(ctx_ref, pat.pat_type, pat.pat_env, lbls);
                     let full_pat = Pattern {
                         pat_desc: PatternDesc::Tpat_record(all_lbls, *closed, None),
@@ -3023,7 +3047,11 @@ pub fn extract_vars(r: IdentSet, p: &Pattern) -> IdentSet {
             extract_vars(r, p)
         }
         PatternDesc::Tpat_tuple(pats) => pats.iter().fold(r, |r, p| extract_vars(r, p)),
-        PatternDesc::Tpat_record(lpats, _, _) => {
+        PatternDesc::Tpat_record(lpats, _, rest) => {
+            let mut r = r;
+            if let Some(rest) = rest {
+                r.insert(rest.rest_ident.clone());
+            }
             lpats.iter().fold(r, |r, (_, _, p, _)| extract_vars(r, p))
         }
         PatternDesc::Tpat_construct(_, _, pats) => pats.iter().fold(r, |r, p| extract_vars(r, p)),
@@ -3046,8 +3074,8 @@ fn pattern_binds_vars(p: &Pattern) -> bool {
         PatternDesc::Tpat_tuple(pats)
         | PatternDesc::Tpat_construct(_, _, pats)
         | PatternDesc::Tpat_array(pats) => pats.iter().any(pattern_binds_vars),
-        PatternDesc::Tpat_record(lpats, _, _) => {
-            lpats.iter().any(|(_, _, pat, _)| pattern_binds_vars(pat))
+        PatternDesc::Tpat_record(lpats, _, rest) => {
+            rest.is_some() || lpats.iter().any(|(_, _, pat, _)| pattern_binds_vars(pat))
         }
         PatternDesc::Tpat_variant(_, Some(p), _) | PatternDesc::Tpat_or(p, _, _) => {
             pattern_binds_vars(p)
@@ -3151,7 +3179,7 @@ fn alpha_pat(env: &[(Ident, Ident)], pat: &Pattern) -> Pattern {
             ),
             ..pat.clone()
         },
-        PatternDesc::Tpat_record(fields, closed, _) => Pattern {
+        PatternDesc::Tpat_record(fields, closed, rest) => Pattern {
             pat_desc: PatternDesc::Tpat_record(
                 fields
                     .iter()
@@ -3160,7 +3188,13 @@ fn alpha_pat(env: &[(Ident, Ident)], pat: &Pattern) -> Pattern {
                     })
                     .collect(),
                 *closed,
-                None,
+                rest.as_ref().map(|rest| {
+                    let mut rest = rest.clone();
+                    if let Some(new_id) = alpha_pat_id(env, &rest.rest_ident) {
+                        rest.rest_ident = new_id.clone();
+                    }
+                    rest
+                }),
             ),
             ..pat.clone()
         },
@@ -9406,7 +9440,9 @@ fn find_in_pat(pred: &dyn Fn(&PatternDesc) -> bool, p: &Pattern) -> bool {
         PatternDesc::Tpat_tuple(ps)
         | PatternDesc::Tpat_construct(_, _, ps)
         | PatternDesc::Tpat_array(ps) => ps.iter().any(|p| find_in_pat(pred, p)),
-        PatternDesc::Tpat_record(lpats, _, _) => lpats.iter().any(|(_, _, p, _)| find_in_pat(pred, p)),
+        PatternDesc::Tpat_record(lpats, _, _) => {
+            lpats.iter().any(|(_, _, p, _)| find_in_pat(pred, p))
+        }
         PatternDesc::Tpat_or(p, q, _) => find_in_pat(pred, p) || find_in_pat(pred, q),
         PatternDesc::Tpat_constant(_)
         | PatternDesc::Tpat_var(_, _)

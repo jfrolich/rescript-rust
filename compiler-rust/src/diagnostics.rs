@@ -172,6 +172,8 @@ pub enum Warning {
     },
     /// Warning 110: Todo found.
     BsTodo { message: Option<String> },
+    /// Warning 112: record rest pattern overlaps an optional field.
+    BsRecordRestOptionalOverlap { fields: Vec<String> },
 }
 
 impl Warning {
@@ -233,6 +235,7 @@ impl Warning {
             Warning::BsUninterpretedDelimiters { .. } => 108,
             Warning::BsToplevelExpressionUnit { .. } => 109,
             Warning::BsTodo { .. } => 110,
+            Warning::BsRecordRestOptionalOverlap { .. } => 112,
         }
     }
 
@@ -579,6 +582,22 @@ and may change in future versions. (See manual section 8.5)"
                 );
                 text
             }
+            Warning::BsRecordRestOptionalOverlap { fields } => {
+                // Match compiler/ext/warnings.ml:440-456.
+                let field_list = fields
+                    .iter()
+                    .map(|field| format!("\n- {}", field))
+                    .collect::<String>();
+                let header = match fields.len() {
+                    1 => "The following optional field appears in both the explicit pattern and the rest type:",
+                    _ => "The following optional fields appear in both the explicit pattern and the rest type:",
+                };
+                let footer = match fields.len() {
+                    1 => "\n\nIt will always be absent from the rest record.",
+                    _ => "\n\nThey will always be absent from the rest record.",
+                };
+                format!("{}{}{}", header, field_list, footer)
+            }
         }
     }
 }
@@ -602,7 +621,7 @@ pub struct WarningConfig {
     disabled: bool,
 }
 
-const MAX_WARNING_NUMBER: usize = 111;
+const MAX_WARNING_NUMBER: usize = 113;
 
 impl Default for WarningConfig {
     fn default() -> Self {

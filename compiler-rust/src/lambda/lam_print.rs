@@ -168,6 +168,9 @@ pub fn format_primitive(p: &Primitive, f: &mut fmt::Formatter<'_>) -> fmt::Resul
         }
         Primitive::Psetfield(n, _) => write!(f, "setfield {n}"),
         Primitive::Pduprecord => write!(f, "duprecord"),
+        Primitive::PrecordRest(excluded) => {
+            write!(f, "record_rest({})", excluded.join(", "))
+        }
         Primitive::PjsCall { prim_name, .. } => write!(f, "{prim_name}[js]"),
         Primitive::PjsObjectCreate(_) => write!(f, "[js.obj]"),
         Primitive::Praise => write!(f, "raise"),

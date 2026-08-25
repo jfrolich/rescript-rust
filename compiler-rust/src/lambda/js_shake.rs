@@ -913,6 +913,7 @@ fn expression_uses_ident_only_in_tail_move_safe_positions(
         | ExpressionDesc::JsNot(inner)
         | ExpressionDesc::JsBnot(inner)
         | ExpressionDesc::Spread(inner)
+        | ExpressionDesc::RecordRest(_, inner)
         | ExpressionDesc::Await(inner)
         | ExpressionDesc::OptionalBlock(inner, _)
         | ExpressionDesc::StaticIndex(inner, _, _)
@@ -1204,6 +1205,7 @@ fn expression_mentions_ident_outside_nested_functions(expr: &Expression, target:
         | ExpressionDesc::JsNot(inner)
         | ExpressionDesc::JsBnot(inner)
         | ExpressionDesc::Spread(inner)
+        | ExpressionDesc::RecordRest(_, inner)
         | ExpressionDesc::Await(inner)
         | ExpressionDesc::OptionalBlock(inner, _)
         | ExpressionDesc::StaticIndex(inner, _, _)
@@ -1391,6 +1393,7 @@ fn substitute_export_alias_use_in_expression(
         | ExpressionDesc::JsNot(inner)
         | ExpressionDesc::JsBnot(inner)
         | ExpressionDesc::Spread(inner)
+        | ExpressionDesc::RecordRest(_, inner)
         | ExpressionDesc::Await(inner)
         | ExpressionDesc::OptionalBlock(inner, _)
         | ExpressionDesc::StaticIndex(inner, _, _)
@@ -1571,6 +1574,7 @@ fn expression_mentions_ident_anywhere(expr: &Expression, target: &Ident) -> bool
         | ExpressionDesc::JsNot(inner)
         | ExpressionDesc::JsBnot(inner)
         | ExpressionDesc::Spread(inner)
+        | ExpressionDesc::RecordRest(_, inner)
         | ExpressionDesc::Await(inner)
         | ExpressionDesc::OptionalBlock(inner, _)
         | ExpressionDesc::StaticIndex(inner, _, _)
@@ -1689,7 +1693,11 @@ pub(crate) fn flatten_toplevel_block_refs(block: &Block) -> Vec<&Statement> {
 
 fn flatten_toplevel_block_owned_into(block: Block, flattened: &mut Block) {
     for stmt in block {
-        let Statement { desc, comment } = stmt;
+        let Statement {
+            source_loc,
+            desc,
+            comment,
+        } = stmt;
         match desc {
             StatementDesc::Variable(VariableDeclaration {
                 ident_info:
@@ -1707,7 +1715,11 @@ fn flatten_toplevel_block_owned_into(block: Block, flattened: &mut Block) {
                 ..
             }) => {}
             StatementDesc::Block(inner) => flatten_toplevel_block_owned_into(inner, flattened),
-            desc => flattened.push(Statement { desc, comment }),
+            desc => flattened.push(Statement {
+                source_loc,
+                desc,
+                comment,
+            }),
         }
     }
 }
@@ -1939,7 +1951,8 @@ fn collect_expression_idents(expr: &Expression, stats: &mut JsIdentStats) {
         | ExpressionDesc::CamlBlockTag(inner, _)
         | ExpressionDesc::OptionalBlock(inner, _)
         | ExpressionDesc::Await(inner)
-        | ExpressionDesc::Spread(inner) => collect_expression_idents(inner, stats),
+        | ExpressionDesc::Spread(inner)
+        | ExpressionDesc::RecordRest(_, inner) => collect_expression_idents(inner, stats),
         ExpressionDesc::StringAppend(left, right)
         | ExpressionDesc::In(left, right)
         | ExpressionDesc::Seq(left, right)

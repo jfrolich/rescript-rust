@@ -398,7 +398,8 @@ pub(crate) fn max_ident_stamp_in_expression(expr: &Expression) -> i32 {
         | ExpressionDesc::CamlBlockTag(inner, _)
         | ExpressionDesc::OptionalBlock(inner, _)
         | ExpressionDesc::Await(inner)
-        | ExpressionDesc::Spread(inner) => max_ident_stamp_in_expression(inner),
+        | ExpressionDesc::Spread(inner)
+        | ExpressionDesc::RecordRest(_, inner) => max_ident_stamp_in_expression(inner),
         ExpressionDesc::StringAppend(left, right)
         | ExpressionDesc::In(left, right)
         | ExpressionDesc::Seq(left, right)
@@ -499,7 +500,11 @@ pub(crate) fn extract_toplevel_exports(
     expr: Expression,
     block: &mut Block,
 ) -> Option<ExtractedExports> {
-    let Expression { desc, comment } = expr;
+    let Expression {
+        source_loc,
+        desc,
+        comment,
+    } = expr;
     match desc {
         ExpressionDesc::CamlBlock(values, _, _, TagInfo::ModuleExport(exports)) => {
             debug_assert_eq!(
@@ -520,6 +525,7 @@ pub(crate) fn extract_toplevel_exports(
                 push_effect_expression(
                     block,
                     Expression {
+                        source_loc,
                         desc: ExpressionDesc::Seq(left, right),
                         comment,
                     },
@@ -531,6 +537,7 @@ pub(crate) fn extract_toplevel_exports(
             push_effect_expression(
                 block,
                 Expression {
+                    source_loc,
                     desc: other,
                     comment,
                 },
@@ -679,6 +686,7 @@ pub(crate) fn push_effect_expression(block: &mut Block, expr: Expression) {
 /// strips every side-effect-free expression, which matches OCaml's
 /// `output_of_expression` (js_output.ml:42-52) but not `S.exp`.
 pub(crate) fn push_s_exp(block: &mut Block, expr: Expression) {
+    let source_loc = expr.source_loc;
     match expr.desc {
         ExpressionDesc::Number(_) | ExpressionDesc::Undefined { .. } => {}
         ExpressionDesc::Seq(left, right) => match (&left.desc, &right.desc) {
@@ -689,6 +697,7 @@ pub(crate) fn push_s_exp(block: &mut Block, expr: Expression) {
                 push_s_exp(block, *left);
             }
             _ => block.push(Statement::exp(Expression {
+                source_loc,
                 desc: ExpressionDesc::Seq(left, right),
                 comment: expr.comment,
             })),

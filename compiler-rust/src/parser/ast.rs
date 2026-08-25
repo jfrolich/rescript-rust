@@ -557,6 +557,19 @@ pub struct PatternRecordField {
     pub opt: bool,
 }
 
+/// Record-rest pattern binding (`...Type.t as name`), stored in a sparse
+/// arena side table keyed by the record pattern's location.
+/// Mirrors OCaml compiler/ml/parsetree.ml:164-168 `record_pat_rest`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RecordPatRest {
+    /// Location of the whole `...rest` row.
+    pub rest_loc: Location,
+    /// Name of the bound rest variable.
+    pub rest_name: StringLoc,
+    /// Type annotation from `...Type.t as name`.
+    pub rest_type: Option<CoreTypeIdx>,
+}
+
 // ============================================================================
 // Expressions
 // ============================================================================

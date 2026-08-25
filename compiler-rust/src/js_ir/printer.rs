@@ -13,6 +13,7 @@ use crate::binary_ast::ppx::{
     JsExpClassification, JsStmtClassification, classify_js_exp, classify_js_stmt,
 };
 use crate::ident::Ident;
+use crate::js_ir::source_map::SourceMapBuilder;
 use crate::lambda::SwitchCaseTag;
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
@@ -62,6 +63,11 @@ pub struct JsPrinter {
     /// Suppresses extra multiline call-argument grouping while printing the target
     /// of a dot-style member access like `foo(...).bar`.
     suppress_member_target_call_arg_group_indent: usize,
+    /// Active source map builder for this concrete output target.
+    source_map: Option<SourceMapBuilder>,
+    generated_line: usize,
+    generated_column: usize,
+    fallback_expression_source_loc: Option<crate::location::Location>,
 }
 
 impl Default for JsPrinter {
@@ -83,6 +89,10 @@ impl JsPrinter {
             debug: false,
             jsx_preserve: false,
             suppress_member_target_call_arg_group_indent: 0,
+            source_map: None,
+            generated_line: 0,
+            generated_column: 0,
+            fallback_expression_source_loc: None,
         }
     }
 
@@ -132,6 +142,31 @@ impl JsPrinter {
         printer
     }
 
+    pub(crate) fn set_source_map_builder(&mut self, builder: SourceMapBuilder) {
+        self.source_map = Some(builder);
+    }
+
+    pub(crate) fn take_source_map_builder(&mut self) -> Option<SourceMapBuilder> {
+        self.source_map.take()
+    }
+
+    fn mark_source_loc(&mut self, source_loc: Option<&crate::location::Location>) {
+        if let (Some(builder), Some(source_loc)) = (&mut self.source_map, source_loc) {
+            builder.add_mapping(self.generated_line, self.generated_column, source_loc);
+        }
+    }
+
+    fn advance_generated_position(&mut self, text: &str) {
+        for ch in text.chars() {
+            if ch == '\n' {
+                self.generated_line += 1;
+                self.generated_column = 0;
+            } else {
+                self.generated_column += ch.len_utf16();
+            }
+        }
+    }
+
     /// Get the generated JavaScript code
     pub fn into_output(self) -> String {
         self.output
@@ -145,6 +180,7 @@ impl JsPrinter {
     /// Write a string
     pub(super) fn write(&mut self, s: &str) {
         self.output.push_str(s);
+        self.advance_generated_position(s);
         self.last_new_line = false;
     }
 
@@ -160,6 +196,10 @@ impl JsPrinter {
             jsx_preserve: self.jsx_preserve,
             suppress_member_target_call_arg_group_indent: self
                 .suppress_member_target_call_arg_group_indent,
+            source_map: None,
+            generated_line: 0,
+            generated_column: 0,
+            fallback_expression_source_loc: None,
         };
         printer.print_expression(expr, level);
         printer.output
@@ -199,15 +239,26 @@ impl JsPrinter {
     /// Write a character
     pub(super) fn write_char(&mut self, c: char) {
         self.output.push(c);
+        if c == '\n' {
+            self.generated_line += 1;
+            self.generated_column = 0;
+        } else {
+            self.generated_column += c.len_utf16();
+        }
         self.last_new_line = false;
+    }
+
+    fn append_positioned(&mut self, text: &str) {
+        self.output.push_str(text);
+        self.advance_generated_position(text);
     }
 
     /// Write a newline with current indentation
     pub(super) fn newline(&mut self) {
         if !self.last_new_line {
-            self.output.push('\n');
+            self.append_positioned("\n");
             for _ in 0..self.indent {
-                self.output.push_str(self.indent_str);
+                self.append_positioned(self.indent_str);
             }
             self.last_new_line = true;
         }
@@ -216,32 +267,32 @@ impl JsPrinter {
     /// Match OCaml's Ext_pp.at_least_two_lines.
     pub(super) fn at_least_two_lines(&mut self) {
         if !self.last_new_line {
-            self.output.push('\n');
+            self.append_positioned("\n");
         }
-        self.output.push('\n');
+        self.append_positioned("\n");
         for _ in 0..self.indent {
-            self.output.push_str(self.indent_str);
+            self.append_positioned(self.indent_str);
         }
         self.last_new_line = true;
     }
 
     /// Match OCaml's Ext_pp.force_newline.
     fn force_newline(&mut self) {
-        self.output.push('\n');
+        self.append_positioned("\n");
         for _ in 0..self.indent {
-            self.output.push_str(self.indent_str);
+            self.append_positioned(self.indent_str);
         }
         self.last_new_line = true;
     }
 
     /// Write a space
     fn space(&mut self) {
-        self.output.push(' ');
+        self.append_positioned(" ");
     }
 
     /// Write a semicolon
     pub(super) fn semi(&mut self) {
-        self.output.push(';');
+        self.append_positioned(";");
         self.last_new_line = false;
     }
 
@@ -376,6 +427,8 @@ impl JsPrinter {
 
     /// Print a statement
     pub fn print_statement(&mut self, stmt: &Statement, top_level: bool) {
+        // OCaml js_dump.ml marks after the optional comment and immediately
+        // before printing the statement description.
         // Print comment if present
         if let Some(ref comment) = stmt.comment {
             self.write("/* ");
@@ -384,7 +437,10 @@ impl JsPrinter {
             self.newline();
         }
 
+        self.mark_source_loc(stmt.source_loc.as_ref());
+        self.fallback_expression_source_loc = stmt.source_loc;
         self.print_statement_desc(&stmt.desc, top_level);
+        self.fallback_expression_source_loc = None;
     }
 
     fn statement_prints_anything(&self, stmt: &Statement, top_level: bool) -> bool {
@@ -641,6 +697,10 @@ impl JsPrinter {
                 }
 
                 self.write("return ");
+                if expr.source_loc.is_none() {
+                    let fallback = self.fallback_expression_source_loc;
+                    self.mark_source_loc(fallback.as_ref());
+                }
                 self.print_expression(expr, 0);
                 self.semi();
             }
@@ -772,6 +832,37 @@ impl JsPrinter {
 
     /// Print a variable declaration
     fn print_variable_declaration(&mut self, decl: &VariableDeclaration) {
+        if let Some(Expression {
+            desc: ExpressionDesc::RecordRest(fields, source),
+            ..
+        }) = &decl.value
+        {
+            self.write("let {");
+            for (index, field) in fields.iter().enumerate() {
+                if index > 0 {
+                    self.write(", ");
+                }
+                self.print_literal_property_name(&field.label);
+                if let Some(ident) = &field.ident {
+                    let ident_name = self.ident_name(ident);
+                    if ident_name != field.label {
+                        self.write(": ");
+                        self.write(&ident_name);
+                    }
+                }
+            }
+            if !fields.is_empty() {
+                self.write(", ");
+            }
+            self.write("...");
+            let rest_name = self.ident_name(&decl.ident);
+            self.write(&rest_name);
+            self.write("} = ");
+            self.print_expression(source, 1);
+            self.semi();
+            return;
+        }
+
         // Eta-reduce `let f = function(x, y) { return g(x, y); }` to `let f = g;`
         // at print time, matching OCaml's pp_function
         // (compiler/core/js_dump.ml:299-344) for the `Name_non_top` fn_state.
@@ -828,6 +919,7 @@ impl JsPrinter {
                     ..
                 } = &value.desc
                 {
+                    self.mark_source_loc(value.source_loc.as_ref());
                     // OCaml reference: compiler/core/js_dump.ml:337-360 builds
                     // `set_env` including `Name_non_top id`, then
                     // compiler/core/js_dump.ml:411-414 prints the function in
@@ -1125,8 +1217,8 @@ impl JsPrinter {
     fn print_int_case(&mut self, value: i32, clause: &CaseClause) {
         self.newline();
         self.write("case ");
-        write!(self.output, "{}", value).unwrap();
-        self.last_new_line = false;
+        self.mark_source_loc(clause.source_loc.as_ref());
+        self.write(&value.to_string());
         self.write(" :");
 
         if !clause.body.is_empty() || clause.should_break {
@@ -1149,10 +1241,7 @@ impl JsPrinter {
     fn print_switch_case_tag(&mut self, tag: &SwitchCaseTag) {
         match tag {
             SwitchCaseTag::String(value) => self.print_string_with_delim(value, Delim::StarJ),
-            SwitchCaseTag::Int(value) => {
-                write!(self.output, "{value}").unwrap();
-                self.last_new_line = false;
-            }
+            SwitchCaseTag::Int(value) => self.write(&value.to_string()),
             SwitchCaseTag::Float(value) => self.write(value),
             SwitchCaseTag::BigInt(value) => {
                 self.write(value);
@@ -1168,6 +1257,7 @@ impl JsPrinter {
     fn print_string_case(&mut self, clause: &StringClause) {
         self.newline();
         self.write("case ");
+        self.mark_source_loc(clause.clause.source_loc.as_ref());
         self.print_switch_case_tag(&clause.tag_type);
         self.write(" :");
 
@@ -1563,6 +1653,7 @@ impl JsPrinter {
             self.write(" */");
         }
 
+        self.mark_source_loc(expr.source_loc.as_ref());
         self.print_expression_desc(&expr.desc, level);
     }
 
@@ -1943,6 +2034,31 @@ impl JsPrinter {
                 }
                 self.write("await ");
                 self.print_expression(e, 13);
+                if needs_paren {
+                    self.write_char(')');
+                }
+            }
+
+            ExpressionDesc::RecordRest(fields, source) => {
+                let needs_paren = level > 15;
+                if needs_paren {
+                    self.write_char('(');
+                }
+                self.write("(({");
+                for (index, field) in fields.iter().enumerate() {
+                    if index > 0 {
+                        self.write(", ");
+                    }
+                    self.print_literal_property_name(&field.label);
+                    self.write(": __unused");
+                    self.write(&index.to_string());
+                }
+                if !fields.is_empty() {
+                    self.write(", ");
+                }
+                self.write("...__rest}) => __rest)(");
+                self.print_expression(source, 0);
+                self.write_char(')');
                 if needs_paren {
                     self.write_char(')');
                 }
@@ -2748,6 +2864,7 @@ impl JsPrinter {
                     try_tail_nested_negative_guard_merge(then_).expect("checked above");
                 self.print_function_tail_statement(
                     &Statement {
+                        source_loc: None,
                         desc: StatementDesc::If(
                             Expression::bin(
                                 BinOp::And,
@@ -2769,6 +2886,7 @@ impl JsPrinter {
                     try_tail_nested_if_merge(then_, return_unit).expect("checked above");
                 self.print_function_tail_statement(
                     &Statement {
+                        source_loc: None,
                         desc: StatementDesc::If(
                             Expression::bin(BinOp::And, cond.clone(), inner_cond),
                             inner_then,
@@ -2788,6 +2906,7 @@ impl JsPrinter {
                         .expect("checked above");
                 self.print_function_tail_statement(
                     &Statement {
+                        source_loc: None,
                         desc: StatementDesc::If(
                             Expression::bin(BinOp::And, cond.clone(), inner_cond),
                             inner_then,
@@ -2801,6 +2920,7 @@ impl JsPrinter {
             StatementDesc::If(cond, then_, else_) if else_is_single_return_undefined(else_) => {
                 self.print_statement(
                     &Statement {
+                        source_loc: None,
                         desc: StatementDesc::If(cond.clone(), then_.clone(), vec![]),
                         comment: stmt.comment.clone(),
                     },
@@ -2814,6 +2934,7 @@ impl JsPrinter {
             StatementDesc::Return(expr) if return_unit => {
                 self.print_statement(
                     &Statement {
+                        source_loc: None,
                         desc: StatementDesc::Exp(expr.clone()),
                         comment: stmt.comment.clone(),
                     },
@@ -2957,6 +3078,7 @@ fn try_function_body_trailing_return_nested_if_merge(
                 return None;
             }
             Some(Statement {
+                source_loc: None,
                 desc: StatementDesc::If(
                     Expression::bin(BinOp::And, cond.clone(), inner_cond),
                     inner_then,
@@ -2994,6 +3116,7 @@ fn try_function_body_shared_tail_nested_if_merge(
     }
 
     Some(Statement {
+        source_loc: None,
         desc: StatementDesc::If(
             cond.clone(),
             vec![
@@ -3032,6 +3155,7 @@ fn try_function_body_shared_tail_outer_else_merge(
 
     match unwrap_single_block_stmt(&then_[0]).desc {
         StatementDesc::If(_, _, _) => Some(Statement {
+            source_loc: None,
             desc: StatementDesc::If(cond.clone(), then_.clone(), shared_tail),
             comment: stmt.comment.clone(),
         }),
@@ -3265,6 +3389,7 @@ fn try_function_body_shared_return_guard_chain_merge(stmts: &[Statement]) -> Opt
     let cond = guards.fold(cond, |acc, guard| Expression::bin(BinOp::And, acc, guard));
 
     Some(Statement {
+        source_loc: None,
         desc: StatementDesc::If(cond, success_block, vec![Statement::return_(fallback)]),
         comment: None,
     })
@@ -3315,6 +3440,7 @@ fn try_function_body_positive_strict_undefined_tail_if_rewrite(
     }
 
     Some(Statement {
+        source_loc: None,
         desc: StatementDesc::If(
             positive_test,
             vec![success_stmt.clone()],
@@ -3381,6 +3507,7 @@ fn try_function_body_shared_success_else_if_chain_suffix_rewrite(stmts: &Block) 
 
     let mut rewritten = prefix.to_vec();
     rewritten.push(Statement {
+        source_loc: None,
         desc: StatementDesc::If(cond, vec![Statement::return_(fallback)], vec![]),
         comment: last.comment.clone(),
     });
@@ -3407,6 +3534,7 @@ fn try_function_body_shared_success_disjunction_fallthrough_rewrite(
 
     let mut rewritten = prefix.to_vec();
     rewritten.push(Statement {
+        source_loc: None,
         desc: StatementDesc::If(cond, vec![Statement::return_(fallback.clone())], vec![]),
         comment: last.comment.clone(),
     });
@@ -3587,6 +3715,7 @@ fn try_function_body_drop_dead_undefined_binding_guard_prefix(stmts: &Block) -> 
     {
         let mut rewritten = Vec::with_capacity(stmts.len().saturating_sub(1));
         rewritten.push(Statement {
+            source_loc: None,
             desc: StatementDesc::If(
                 negate_tail_merge_condition(cond),
                 else_block.clone(),
@@ -3606,6 +3735,7 @@ fn try_function_body_drop_dead_undefined_binding_guard_prefix(stmts: &Block) -> 
     {
         let mut rewritten = Vec::with_capacity(stmts.len().saturating_sub(1));
         rewritten.push(Statement {
+            source_loc: None,
             desc: StatementDesc::If(cond.clone(), then_block.clone(), vec![]),
             comment: decl_stmt
                 .comment
@@ -3756,6 +3886,7 @@ fn expression_mentions_ident(expr: &Expression, ident: &Ident) -> bool {
         | ExpressionDesc::JsNot(inner)
         | ExpressionDesc::JsBnot(inner)
         | ExpressionDesc::Spread(inner)
+        | ExpressionDesc::RecordRest(_, inner)
         | ExpressionDesc::Await(inner)
         | ExpressionDesc::OptionalBlock(inner, _)
         | ExpressionDesc::StaticIndex(inner, _, _)
@@ -4518,6 +4649,13 @@ fn collect_statement_idents(stmt: &Statement, stats: &mut JsIdentStats) {
         StatementDesc::Variable(VariableDeclaration { ident, value, .. }) => {
             stats.add_defined_ident(ident);
             if let Some(value) = value {
+                if let ExpressionDesc::RecordRest(fields, _) = &value.desc {
+                    for field in fields {
+                        if let Some(field_ident) = &field.ident {
+                            stats.add_defined_ident(field_ident);
+                        }
+                    }
+                }
                 collect_expression_idents(value, stats);
             }
         }
@@ -4603,7 +4741,8 @@ fn collect_expression_idents(expr: &Expression, stats: &mut JsIdentStats) {
         | ExpressionDesc::CamlBlockTag(inner, _)
         | ExpressionDesc::OptionalBlock(inner, _)
         | ExpressionDesc::Await(inner)
-        | ExpressionDesc::Spread(inner) => collect_expression_idents(inner, stats),
+        | ExpressionDesc::Spread(inner)
+        | ExpressionDesc::RecordRest(_, inner) => collect_expression_idents(inner, stats),
         ExpressionDesc::StringAppend(left, right)
         | ExpressionDesc::In(left, right)
         | ExpressionDesc::Seq(left, right)
@@ -4699,7 +4838,7 @@ fn op_precedence(op: BinOp) -> (u8, u8, u8) {
 }
 
 /// Check if a string is a valid JavaScript identifier
-fn is_valid_js_ident(s: &str) -> bool {
+pub(crate) fn is_valid_js_ident(s: &str) -> bool {
     if s.is_empty() {
         return false;
     }
@@ -8680,6 +8819,7 @@ mod tests {
                 (
                     0,
                     CaseClause {
+                        source_loc: None,
                         body: vec![Statement::return_(Expression::number(Number::int(1)))],
                         should_break: false,
                         comment: None,
@@ -8688,6 +8828,7 @@ mod tests {
                 (
                     1,
                     CaseClause {
+                        source_loc: None,
                         body: vec![],
                         should_break: false,
                         comment: None,
@@ -8711,6 +8852,7 @@ mod tests {
                 (
                     0,
                     CaseClause {
+                        source_loc: None,
                         body: vec![],
                         should_break: false,
                         comment: None,
@@ -8719,6 +8861,7 @@ mod tests {
                 (
                     1,
                     CaseClause {
+                        source_loc: None,
                         body: vec![],
                         should_break: true,
                         comment: None,
@@ -8742,6 +8885,7 @@ mod tests {
                 StringClause {
                     tag_type: SwitchCaseTag::String("One".to_string()),
                     clause: CaseClause {
+                        source_loc: None,
                         body: vec![Statement::return_(Expression::number(Number::int(1)))],
                         should_break: false,
                         comment: None,
@@ -8750,6 +8894,7 @@ mod tests {
                 StringClause {
                     tag_type: SwitchCaseTag::String("Two".to_string()),
                     clause: CaseClause {
+                        source_loc: None,
                         body: vec![],
                         should_break: false,
                         comment: None,
@@ -8773,6 +8918,7 @@ mod tests {
                 StringClause {
                     tag_type: SwitchCaseTag::String("One".to_string()),
                     clause: CaseClause {
+                        source_loc: None,
                         body: vec![],
                         should_break: false,
                         comment: None,
@@ -8781,6 +8927,7 @@ mod tests {
                 StringClause {
                     tag_type: SwitchCaseTag::String("Two".to_string()),
                     clause: CaseClause {
+                        source_loc: None,
                         body: vec![],
                         should_break: true,
                         comment: None,
@@ -8803,6 +8950,7 @@ mod tests {
             vec![StringClause {
                 tag_type: SwitchCaseTag::String("One".to_string()),
                 clause: CaseClause {
+                    source_loc: None,
                     body: vec![Statement::exp(Expression::call(
                         Expression::qualified(
                             ModuleId {
@@ -8836,6 +8984,7 @@ mod tests {
                 StringClause {
                     tag_type: SwitchCaseTag::String("\\\"".to_string()),
                     clause: CaseClause {
+                        source_loc: None,
                         body: vec![Statement::return_(Expression::number(Number::int(1)))],
                         should_break: false,
                         comment: None,
@@ -8844,6 +8993,7 @@ mod tests {
                 StringClause {
                     tag_type: SwitchCaseTag::String("\\\\".to_string()),
                     clause: CaseClause {
+                        source_loc: None,
                         body: vec![Statement::return_(Expression::number(Number::int(2)))],
                         should_break: false,
                         comment: None,

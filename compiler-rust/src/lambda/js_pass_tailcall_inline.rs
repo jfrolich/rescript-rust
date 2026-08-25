@@ -120,9 +120,14 @@ impl TailcallInlineState {
     }
 
     fn transform_statement(&mut self, stmt: Statement) -> Vec<Statement> {
-        let Statement { desc, comment } = stmt;
+        let Statement {
+            source_loc,
+            desc,
+            comment,
+        } = stmt;
         match desc {
             StatementDesc::Block(block) => vec![Statement {
+                source_loc,
                 desc: StatementDesc::Block(self.transform_block(block)),
                 comment,
             }],
@@ -155,22 +160,26 @@ impl TailcallInlineState {
                         .value
                         .map(|value| {
                             vec![Statement {
+                                source_loc,
                                 desc: StatementDesc::Exp(value),
                                 comment,
                             }]
                         })
                         .unwrap_or_default(),
                     _ => vec![Statement {
+                        source_loc,
                         desc: StatementDesc::Variable(decl),
                         comment,
                     }],
                 }
             }
             StatementDesc::Exp(expr) => vec![Statement {
+                source_loc,
                 desc: StatementDesc::Exp(self.transform_expression(expr)),
                 comment,
             }],
             StatementDesc::If(cond, then_block, else_block) => vec![Statement {
+                source_loc,
                 desc: StatementDesc::If(
                     self.transform_expression(cond),
                     self.transform_block(then_block),
@@ -179,6 +188,7 @@ impl TailcallInlineState {
                 comment,
             }],
             StatementDesc::While(label, cond, body) => vec![Statement {
+                source_loc,
                 desc: StatementDesc::While(
                     label,
                     self.transform_expression(cond),
@@ -188,6 +198,7 @@ impl TailcallInlineState {
             }],
             StatementDesc::ForRange(label, start, finish, ident, direction, body) => {
                 vec![Statement {
+                    source_loc,
                     desc: StatementDesc::ForRange(
                         label,
                         start.map(|expr| self.transform_expression(expr)),
@@ -200,6 +211,7 @@ impl TailcallInlineState {
                 }]
             }
             StatementDesc::ForOf(label, ident, iterable, body) => vec![Statement {
+                source_loc,
                 desc: StatementDesc::ForOf(
                     label,
                     ident,
@@ -209,6 +221,7 @@ impl TailcallInlineState {
                 comment,
             }],
             StatementDesc::ForAwaitOf(label, ident, iterable, body) => vec![Statement {
+                source_loc,
                 desc: StatementDesc::ForAwaitOf(
                     label,
                     ident,
@@ -218,18 +231,22 @@ impl TailcallInlineState {
                 comment,
             }],
             StatementDesc::Continue(label) => vec![Statement {
+                source_loc,
                 desc: StatementDesc::Continue(label),
                 comment,
             }],
             StatementDesc::Break(label) => vec![Statement {
+                source_loc,
                 desc: StatementDesc::Break(label),
                 comment,
             }],
             StatementDesc::Return(expr) => vec![Statement {
+                source_loc,
                 desc: StatementDesc::Return(self.transform_expression(expr)),
                 comment,
             }],
             StatementDesc::IntSwitch(test, clauses, default) => vec![Statement {
+                source_loc,
                 desc: StatementDesc::IntSwitch(
                     self.transform_expression(test),
                     clauses
@@ -238,6 +255,7 @@ impl TailcallInlineState {
                             (
                                 value,
                                 CaseClause {
+                                    source_loc: None,
                                     body: self.transform_block(clause.body),
                                     should_break: clause.should_break,
                                     comment: clause.comment,
@@ -250,6 +268,7 @@ impl TailcallInlineState {
                 comment,
             }],
             StatementDesc::StringSwitch(test, clauses, default) => vec![Statement {
+                source_loc,
                 desc: StatementDesc::StringSwitch(
                     self.transform_expression(test),
                     clauses
@@ -257,6 +276,7 @@ impl TailcallInlineState {
                         .map(|clause| StringClause {
                             tag_type: clause.tag_type,
                             clause: CaseClause {
+                                source_loc: clause.clause.source_loc,
                                 body: self.transform_block(clause.clause.body),
                                 should_break: clause.clause.should_break,
                                 comment: clause.clause.comment,
@@ -268,10 +288,12 @@ impl TailcallInlineState {
                 comment,
             }],
             StatementDesc::Throw(expr) => vec![Statement {
+                source_loc,
                 desc: StatementDesc::Throw(self.transform_expression(expr)),
                 comment,
             }],
             StatementDesc::Try(body, catch, finally) => vec![Statement {
+                source_loc,
                 desc: StatementDesc::Try(
                     self.transform_block(body),
                     catch.map(|(ident, block)| (ident, self.transform_block(block))),
@@ -280,6 +302,7 @@ impl TailcallInlineState {
                 comment,
             }],
             StatementDesc::Debugger => vec![Statement {
+                source_loc,
                 desc: StatementDesc::Debugger,
                 comment,
             }],
@@ -287,7 +310,11 @@ impl TailcallInlineState {
     }
 
     fn transform_expression(&mut self, expr: Expression) -> Expression {
-        let Expression { desc, comment } = expr;
+        let Expression {
+            source_loc,
+            desc,
+            comment,
+        } = expr;
         let desc = match desc {
             ExpressionDesc::Length(inner, obj) => {
                 ExpressionDesc::Length(Box::new(self.transform_expression(*inner)), obj)
@@ -428,23 +455,41 @@ impl TailcallInlineState {
             ExpressionDesc::Spread(inner) => {
                 ExpressionDesc::Spread(Box::new(self.transform_expression(*inner)))
             }
+            ExpressionDesc::RecordRest(fields, source) => {
+                ExpressionDesc::RecordRest(fields, Box::new(self.transform_expression(*source)))
+            }
         };
 
-        Expression { desc, comment }
+        Expression {
+            source_loc,
+            desc,
+            comment,
+        }
     }
 
     fn try_inline_single_return_statement(&mut self, stmt: Statement) -> Result<Block, Statement> {
-        let Statement { desc, comment } = stmt;
+        let Statement {
+            source_loc,
+            desc,
+            comment,
+        } = stmt;
         let StatementDesc::Return(expr) = desc else {
-            return Err(Statement { desc, comment });
+            return Err(Statement {
+                source_loc,
+                desc,
+                comment,
+            });
         };
         let Expression {
+            source_loc,
             desc: expr_desc,
             comment: expr_comment,
         } = expr;
         let ExpressionDesc::Call(func, args, info) = expr_desc else {
             return Err(Statement {
+                source_loc,
                 desc: StatementDesc::Return(Expression {
+                    source_loc,
                     desc: expr_desc,
                     comment: expr_comment,
                 }),
@@ -453,6 +498,7 @@ impl TailcallInlineState {
         };
 
         let Expression {
+            source_loc,
             desc: func_desc,
             comment: func_comment,
         } = *func;
@@ -461,9 +507,12 @@ impl TailcallInlineState {
                 match self.inline_named_call_owned(&id, args) {
                     Ok(block) => Ok(block),
                     Err(args) => Err(Statement {
+                        source_loc,
                         desc: StatementDesc::Return(Expression {
+                            source_loc,
                             desc: ExpressionDesc::Call(
                                 Box::new(Expression {
+                                    source_loc,
                                     desc: ExpressionDesc::Var(crate::js_ir::VIdent::Id(id)),
                                     comment: func_comment,
                                 }),
@@ -488,9 +537,12 @@ impl TailcallInlineState {
                 Ok(self.inline_function_call_owned(params, body, args))
             }
             func_desc => Err(Statement {
+                source_loc,
                 desc: StatementDesc::Return(Expression {
+                    source_loc,
                     desc: ExpressionDesc::Call(
                         Box::new(Expression {
+                            source_loc,
                             desc: func_desc,
                             comment: func_comment,
                         }),
@@ -656,7 +708,8 @@ fn collect_tailcall_use_counts_expression(
         | ExpressionDesc::CamlBlockTag(inner, _)
         | ExpressionDesc::OptionalBlock(inner, _)
         | ExpressionDesc::Await(inner)
-        | ExpressionDesc::Spread(inner) => {
+        | ExpressionDesc::Spread(inner)
+        | ExpressionDesc::RecordRest(_, inner) => {
             collect_tailcall_use_counts_expression(inner, decls, counts)
         }
         ExpressionDesc::StringAppend(left, right)
@@ -860,6 +913,9 @@ fn collect_once_pure_inline_decls_expression(
         | ExpressionDesc::New(inner, None) => {
             collect_once_pure_inline_decls_expression(inner, statuses, inline_decls)
         }
+        ExpressionDesc::RecordRest(_, inner) => {
+            collect_once_pure_inline_decls_expression(inner, statuses, inline_decls)
+        }
         ExpressionDesc::StringAppend(left, right)
         | ExpressionDesc::In(left, right)
         | ExpressionDesc::Seq(left, right)
@@ -1014,7 +1070,8 @@ fn expression_assigns_ident(expr: &Expression, ident: &Ident) -> bool {
         | ExpressionDesc::CamlBlockTag(inner, _)
         | ExpressionDesc::OptionalBlock(inner, _)
         | ExpressionDesc::Await(inner)
-        | ExpressionDesc::Spread(inner) => expression_assigns_ident(inner, ident),
+        | ExpressionDesc::Spread(inner)
+        | ExpressionDesc::RecordRest(_, inner) => expression_assigns_ident(inner, ident),
         ExpressionDesc::StringAppend(left, right)
         | ExpressionDesc::In(left, right)
         | ExpressionDesc::Seq(left, right)
@@ -1129,7 +1186,11 @@ fn substitute_inline_block(block: Block, substitution: &HashMap<Ident, Ident>) -
 }
 
 fn substitute_inline_statement(stmt: Statement, substitution: &HashMap<Ident, Ident>) -> Statement {
-    let Statement { desc, comment } = stmt;
+    let Statement {
+        source_loc,
+        desc,
+        comment,
+    } = stmt;
     let desc = match desc {
         StatementDesc::Block(block) => {
             StatementDesc::Block(substitute_inline_block(block, substitution))
@@ -1195,6 +1256,7 @@ fn substitute_inline_statement(stmt: Statement, substitution: &HashMap<Ident, Id
                     (
                         value,
                         CaseClause {
+                            source_loc: clause.source_loc,
                             body: substitute_inline_block(clause.body, substitution),
                             should_break: clause.should_break,
                             comment: clause.comment,
@@ -1211,6 +1273,7 @@ fn substitute_inline_statement(stmt: Statement, substitution: &HashMap<Ident, Id
                 .map(|clause| StringClause {
                     tag_type: clause.tag_type,
                     clause: CaseClause {
+                        source_loc: None,
                         body: substitute_inline_block(clause.clause.body, substitution),
                         should_break: clause.clause.should_break,
                         comment: clause.clause.comment,
@@ -1233,14 +1296,22 @@ fn substitute_inline_statement(stmt: Statement, substitution: &HashMap<Ident, Id
         StatementDesc::Debugger => StatementDesc::Debugger,
     };
 
-    Statement { desc, comment }
+    Statement {
+        source_loc,
+        desc,
+        comment,
+    }
 }
 
 fn substitute_inline_expression(
     expr: Expression,
     substitution: &HashMap<Ident, Ident>,
 ) -> Expression {
-    let Expression { desc, comment } = expr;
+    let Expression {
+        source_loc,
+        desc,
+        comment,
+    } = expr;
     let desc = match desc {
         ExpressionDesc::Length(inner, obj) => ExpressionDesc::Length(
             Box::new(substitute_inline_expression(*inner, substitution)),
@@ -1393,9 +1464,17 @@ fn substitute_inline_expression(
         ExpressionDesc::Spread(inner) => {
             ExpressionDesc::Spread(Box::new(substitute_inline_expression(*inner, substitution)))
         }
+        ExpressionDesc::RecordRest(fields, source) => ExpressionDesc::RecordRest(
+            fields,
+            Box::new(substitute_inline_expression(*source, substitution)),
+        ),
     };
 
-    Expression { desc, comment }
+    Expression {
+        source_loc,
+        desc,
+        comment,
+    }
 }
 
 fn prune_inline_substitution<'a>(
@@ -1488,7 +1567,10 @@ fn apply_tailcall_used_stats_expression(
         | ExpressionDesc::CamlBlockTag(inner, _)
         | ExpressionDesc::OptionalBlock(inner, _)
         | ExpressionDesc::Await(inner)
-        | ExpressionDesc::Spread(inner) => apply_tailcall_used_stats_expression(inner, statuses),
+        | ExpressionDesc::Spread(inner)
+        | ExpressionDesc::RecordRest(_, inner) => {
+            apply_tailcall_used_stats_expression(inner, statuses)
+        }
         ExpressionDesc::StringAppend(left, right)
         | ExpressionDesc::In(left, right)
         | ExpressionDesc::Seq(left, right)
