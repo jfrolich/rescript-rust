@@ -477,7 +477,7 @@ fn build_type_info_from_constr<'a>(
     };
 
     if let Some(decl) = decl {
-        let is_unboxed = decl.type_unboxed.unboxed;
+        let is_unboxed = decl.type_representation == crate::types::TypeRepresentation::Unboxed;
         match &decl.type_kind {
             TypeKind::TypeRecord(labels, _) => {
                 let fields = labels
@@ -569,7 +569,7 @@ fn type_info_constructor_description<'a>(
     for cd in constrs {
         let is_constant =
             matches!(cd.cd_args, ConstructorArguments::CstrTuple(ref args) if args.is_empty());
-        let cstr_tag = if decl.type_unboxed.unboxed {
+        let cstr_tag = if decl.type_representation == crate::types::TypeRepresentation::Unboxed {
             ConstructorTag::CstrUnboxed
         } else if is_constant {
             let tag = ConstructorTag::CstrConstant(const_idx);

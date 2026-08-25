@@ -8757,7 +8757,7 @@ fn variant_constructors_for_type(
             path.clone(),
             constructors,
             decl.type_params,
-            decl.type_unboxed.unboxed,
+            decl.type_representation == crate::types::TypeRepresentation::Unboxed,
         )),
         _ => None,
     }

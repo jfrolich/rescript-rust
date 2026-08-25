@@ -81,8 +81,8 @@ pub struct TypeDeclaration {
     pub type_attributes: Vec<Attribute>,
     /// Is this type immediate (unboxed)?
     pub type_immediate: bool,
-    /// Unboxed status
-    pub type_unboxed: UnboxedStatus,
+    /// Runtime representation for single-payload unboxing.
+    pub type_representation: TypeRepresentation,
     /// Canonical runtime layout for a variant declaration. This is a stable
     /// forward reference completed after the recursive declaration group.
     pub type_variant_layout: Option<super::variant_runtime::LayoutRef>,
@@ -136,38 +136,11 @@ pub enum RecordRepresentation {
     RecordExtension,
 }
 
-/// Unboxed status for types.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct UnboxedStatus {
-    /// Is the type unboxed?
-    pub unboxed: bool,
-    /// Is this the default (unannotated)?
-    pub default: bool,
-}
-
-impl UnboxedStatus {
-    pub const FALSE_FALSE: UnboxedStatus = UnboxedStatus {
-        unboxed: false,
-        default: false,
-    };
-    pub const FALSE_TRUE: UnboxedStatus = UnboxedStatus {
-        unboxed: false,
-        default: true,
-    };
-    pub const TRUE_FALSE: UnboxedStatus = UnboxedStatus {
-        unboxed: true,
-        default: false,
-    };
-    pub const TRUE_TRUE: UnboxedStatus = UnboxedStatus {
-        unboxed: true,
-        default: true,
-    };
-}
-
-impl Default for UnboxedStatus {
-    fn default() -> Self {
-        Self::FALSE_TRUE
-    }
+/// Runtime representation for single-payload unboxing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum TypeRepresentation {
+    Boxed,
+    Unboxed,
 }
 
 /// A label (field) declaration in a record.
@@ -286,7 +259,9 @@ pub enum ConstructorKind {
 /// scrutinee type.
 pub fn same_constructor(c1: &ConstructorDescription, c2: &ConstructorDescription) -> bool {
     match (&c1.cstr_kind, &c2.cstr_kind) {
-        (Some(ConstructorKind::Ordinary(_)), Some(ConstructorKind::Ordinary(_))) => c1.cstr_name == c2.cstr_name,
+        (Some(ConstructorKind::Ordinary(_)), Some(ConstructorKind::Ordinary(_))) => {
+            c1.cstr_name == c2.cstr_name
+        }
         (Some(ConstructorKind::Extension(p1)), Some(ConstructorKind::Extension(p2))) => p1.same(p2),
         (Some(_), Some(_)) => false,
         _ => c1.cstr_tag.equal(&c2.cstr_tag),
@@ -296,7 +271,9 @@ pub fn same_constructor(c1: &ConstructorDescription, c2: &ConstructorDescription
 /// Conservative equality used while checking extension patterns.
 pub fn may_equal_constructor(c1: &ConstructorDescription, c2: &ConstructorDescription) -> bool {
     match (&c1.cstr_kind, &c2.cstr_kind) {
-        (Some(ConstructorKind::Extension(_)), Some(ConstructorKind::Extension(_))) => c1.cstr_arity == c2.cstr_arity,
+        (Some(ConstructorKind::Extension(_)), Some(ConstructorKind::Extension(_))) => {
+            c1.cstr_arity == c2.cstr_arity
+        }
         _ => same_constructor(c1, c2),
     }
 }
@@ -664,13 +641,6 @@ mod tests {
 
         assert!(t1.equal(&t2));
         assert!(!t1.equal(&t3));
-    }
-
-    #[test]
-    fn test_unboxed_status() {
-        let s = UnboxedStatus::default();
-        assert!(!s.unboxed);
-        assert!(s.default);
     }
 
     #[test]

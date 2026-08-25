@@ -19,9 +19,10 @@
 use super::asttypes::{MutableFlag, PrivateFlag};
 use super::context::TypeContext;
 use super::decl::{
-    ConstructorArguments, ConstructorDeclaration, ConstructorDescription, ConstructorKind, ConstructorTag,
-    LabelDeclaration, LabelDescription, ModtypeDeclaration, ModuleDeclaration, ModuleType,
-    RecordRepresentation, Signature, SignatureItem, TypeDeclaration, TypeKind, ValueDescription,
+    ConstructorArguments, ConstructorDeclaration, ConstructorDescription, ConstructorKind,
+    ConstructorTag, LabelDeclaration, LabelDescription, ModtypeDeclaration, ModuleDeclaration,
+    ModuleType, RecordRepresentation, Signature, SignatureItem, TypeDeclaration, TypeKind,
+    ValueDescription,
 };
 use super::path::Path;
 use super::type_expr::{TypeDesc, TypeExprRef};
@@ -1796,7 +1797,7 @@ pub fn initial_env(ctx: &TypeContext) -> Env {
         type_loc: Location::none(),
         type_attributes: vec![],
         type_immediate: immediate,
-        type_unboxed: super::decl::UnboxedStatus::default(),
+        type_representation: crate::types::TypeRepresentation::Boxed,
         type_variant_layout: None,
         type_inlined_types: vec![],
         type_path: None,
@@ -1843,17 +1844,18 @@ pub fn initial_env(ctx: &TypeContext) -> Env {
                 for (position, cd) in constrs.iter().enumerate() {
                     let is_constant = matches!(cd.cd_args, ConstructorArguments::CstrTuple(ref args) if args.is_empty());
 
-                    let cstr_tag = if decl.type_unboxed.unboxed {
-                        ConstructorTag::CstrUnboxed
-                    } else if is_constant {
-                        let tag = ConstructorTag::CstrConstant(const_idx);
-                        const_idx += 1;
-                        tag
-                    } else {
-                        let tag = ConstructorTag::CstrBlock(nonconst_idx);
-                        nonconst_idx += 1;
-                        tag
-                    };
+                    let cstr_tag =
+                        if decl.type_representation == crate::types::TypeRepresentation::Unboxed {
+                            ConstructorTag::CstrUnboxed
+                        } else if is_constant {
+                            let tag = ConstructorTag::CstrConstant(const_idx);
+                            const_idx += 1;
+                            tag
+                        } else {
+                            let tag = ConstructorTag::CstrBlock(nonconst_idx);
+                            nonconst_idx += 1;
+                            tag
+                        };
 
                     let (cstr_args, cstr_arity) = match &cd.cd_args {
                         ConstructorArguments::CstrTuple(args) => (args.clone(), args.len() as i32),
@@ -1879,7 +1881,10 @@ pub fn initial_env(ctx: &TypeContext) -> Env {
                         cstr_args,
                         cstr_arity,
                         cstr_kind: Some(ConstructorKind::Ordinary(
-                            crate::types::ConstructorReference { variant: layout_ref, position },
+                            crate::types::ConstructorReference {
+                                variant: layout_ref,
+                                position,
+                            },
                         )),
                         cstr_tag,
                         cstr_consts: num_consts,
@@ -2143,7 +2148,7 @@ pub fn initial_env(ctx: &TypeContext) -> Env {
                     cd_loc: Location::none(),
                     cd_attributes: vec![],
                 }]),
-                type_unboxed: super::decl::UnboxedStatus::TRUE_FALSE,
+                type_representation: super::decl::TypeRepresentation::Unboxed,
                 ..decl_abstr(0, false)
             },
             ctx,
@@ -2617,7 +2622,7 @@ mod tests {
             type_loc: Location::none(),
             type_attributes: vec![],
             type_immediate: false,
-            type_unboxed: super::super::decl::UnboxedStatus::default(),
+            type_representation: crate::types::TypeRepresentation::Boxed,
             type_variant_layout: None,
             type_inlined_types: vec![],
             type_path: None,

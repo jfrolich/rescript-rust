@@ -37,8 +37,9 @@ use crate::location::Location;
 use crate::parser::{Parser, jsx_ppx, module};
 use crate::types::context::TypeContext;
 use crate::types::decl::{
-    AliasPresence, ConstructorDescription, ConstructorKind, ConstructorTag, LabelDescription, ModtypeDeclaration,
-    ModuleDeclaration, ModuleType, RecStatus, Signature, SignatureItem, TypeKind,
+    AliasPresence, ConstructorDescription, ConstructorKind, ConstructorTag, LabelDescription,
+    ModtypeDeclaration, ModuleDeclaration, ModuleType, RecStatus, Signature, SignatureItem,
+    TypeKind,
 };
 use crate::types::env::{Env, initial_env};
 use crate::types::path::Path;
@@ -2605,9 +2606,9 @@ fn decode_cmj_lambda_constant(value: &OcamlValue) -> Option<LambdaConstant> {
             i: fields[0].as_int() as i32,
             comment: None,
         }),
-        OcamlValue::Block(2, fields) if fields.len() == 1 => {
-            Some(LambdaConstant::Constructor(decode_cmj_variant_tag(&fields[0])?))
-        }
+        OcamlValue::Block(2, fields) if fields.len() == 1 => Some(LambdaConstant::Constructor(
+            decode_cmj_variant_tag(&fields[0])?,
+        )),
         OcamlValue::Block(3, fields) if fields.len() == 1 => {
             Some(LambdaConstant::Char(fields[0].as_int() as i32))
         }
@@ -2638,7 +2639,10 @@ fn decode_cmj_variant_tag(value: &OcamlValue) -> Option<crate::types::VariantTag
     let (_, fields) = value.as_block_opt()?;
     Some(crate::types::VariantTag {
         name: fields.first()?.as_string().to_string(),
-        tag_type: fields.get(1)?.as_option().and_then(decode_cmj_variant_tag_type),
+        tag_type: fields
+            .get(1)?
+            .as_option()
+            .and_then(decode_cmj_variant_tag_type),
     })
 }
 
@@ -5963,7 +5967,8 @@ fn add_signature_to_env_with_options(
                                         type_loc: cd.cd_loc,
                                         type_attributes: vec![],
                                         type_immediate: false,
-                                        type_unboxed: crate::types::UnboxedStatus::default(),
+                                        type_representation:
+                                            crate::types::TypeRepresentation::Boxed,
                                         type_variant_layout: None,
                                         type_inlined_types: vec![],
                                         type_path: None,

@@ -330,8 +330,14 @@ fn const_compare(c1: &Constant, c2: &Constant) -> std::cmp::Ordering {
 /// Check if two constructor tags are equal.
 fn same_constructor(c1: &ConstructorDescription, c2: &ConstructorDescription) -> bool {
     match (&c1.cstr_kind, &c2.cstr_kind) {
-        (Some(crate::types::ConstructorKind::Ordinary(_)), Some(crate::types::ConstructorKind::Ordinary(_))) => c1.cstr_name == c2.cstr_name,
-        (Some(crate::types::ConstructorKind::Extension(p1)), Some(crate::types::ConstructorKind::Extension(p2))) => p1.same(p2),
+        (
+            Some(crate::types::ConstructorKind::Ordinary(_)),
+            Some(crate::types::ConstructorKind::Ordinary(_)),
+        ) => c1.cstr_name == c2.cstr_name,
+        (
+            Some(crate::types::ConstructorKind::Extension(p1)),
+            Some(crate::types::ConstructorKind::Extension(p2)),
+        ) => p1.same(p2),
         (Some(_), Some(_)) => false,
         _ => equal_tag(&c1.cstr_tag, &c2.cstr_tag),
     }
@@ -949,10 +955,15 @@ fn may_equal_constr(
     c2: &crate::types::ConstructorDescription,
 ) -> bool {
     match (&c1.cstr_kind, &c2.cstr_kind) {
-        (Some(crate::types::ConstructorKind::Extension(_)), Some(crate::types::ConstructorKind::Extension(_))) => c1.cstr_arity == c2.cstr_arity,
+        (
+            Some(crate::types::ConstructorKind::Extension(_)),
+            Some(crate::types::ConstructorKind::Extension(_)),
+        ) => c1.cstr_arity == c2.cstr_arity,
         (Some(_), Some(_)) => same_constructor(c1, c2),
         _ => match (&c1.cstr_tag, &c2.cstr_tag) {
-            (ConstructorTag::CstrExtension(_), ConstructorTag::CstrExtension(_)) => c1.cstr_arity == c2.cstr_arity,
+            (ConstructorTag::CstrExtension(_), ConstructorTag::CstrExtension(_)) => {
+                c1.cstr_arity == c2.cstr_arity
+            }
             (t1, t2) => equal_tag(t1, t2),
         },
     }

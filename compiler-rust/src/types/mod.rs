@@ -59,16 +59,10 @@ pub use asttypes::{
 pub use context::TypeContext;
 pub use decl::{
     AliasPresence, Attribute, AttributePayload, ConstructorArguments, ConstructorDeclaration,
-    ConstructorDescription, ConstructorKind, ConstructorTag, ExtStatus, ExtensionConstructor, LabelArrayRef,
-    LabelDeclaration, LabelDescription, ModtypeDeclaration, ModuleDeclaration, ModuleType,
-    PrimitiveDescription, RecStatus, RecordRepresentation, Signature, SignatureItem,
-    TypeDeclaration, TypeInlinedType, TypeKind, UnboxedStatus, ValueDescription, ValueKind,
-};
-pub use variant_runtime::{
-    Block as VariantBlock, BlockRuntime, BlockType as VariantBlockType, Configuration as VariantConfiguration,
-    ConstructorCase as VariantConstructorCase, ConstructorReference, Instance as VariantInstance,
-    Layout as VariantLayout, LayoutRef as VariantLayoutRef, MatchingFacts as VariantMatchingFacts,
-    Tag as VariantTag, TagType as VariantTagType,
+    ConstructorDescription, ConstructorKind, ConstructorTag, ExtStatus, ExtensionConstructor,
+    LabelArrayRef, LabelDeclaration, LabelDescription, ModtypeDeclaration, ModuleDeclaration,
+    ModuleType, PrimitiveDescription, RecStatus, RecordRepresentation, Signature, SignatureItem,
+    TypeDeclaration, TypeInlinedType, TypeKind, TypeRepresentation, ValueDescription, ValueKind,
 };
 pub use path::{NOPOS, Path, Typath};
 pub(crate) use type_expr::TypeExprRefMap;
@@ -78,6 +72,13 @@ pub use type_expr::{
     TypeExprRef,
 };
 pub use variance::{Variance, VarianceFlag};
+pub use variant_runtime::{
+    Block as VariantBlock, BlockRuntime, BlockType as VariantBlockType,
+    Configuration as VariantConfiguration, ConstructorCase as VariantConstructorCase,
+    ConstructorReference, Instance as VariantInstance, Layout as VariantLayout,
+    LayoutRef as VariantLayoutRef, MatchingFacts as VariantMatchingFacts, Tag as VariantTag,
+    TagType as VariantTagType,
+};
 
 // btype exports
 pub use btype::{

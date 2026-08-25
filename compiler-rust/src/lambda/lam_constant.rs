@@ -300,8 +300,14 @@ impl Constant {
                 Some(crate::types::VariantTagType::String(value)) => !value.is_empty(),
                 Some(crate::types::VariantTagType::Int(value)) => *value != 0,
                 Some(crate::types::VariantTagType::Bool(value)) => *value,
-                Some(crate::types::VariantTagType::Null | crate::types::VariantTagType::Undefined) => false,
-                Some(crate::types::VariantTagType::Float(_) | crate::types::VariantTagType::BigInt(_) | crate::types::VariantTagType::Untagged(_)) => true,
+                Some(
+                    crate::types::VariantTagType::Null | crate::types::VariantTagType::Undefined,
+                ) => false,
+                Some(
+                    crate::types::VariantTagType::Float(_)
+                    | crate::types::VariantTagType::BigInt(_)
+                    | crate::types::VariantTagType::Untagged(_),
+                ) => true,
             },
             Constant::Char(c) => *c != 0,
             Constant::JsFalse

@@ -15521,7 +15521,7 @@ fn type_function_nary_with_newtypes(
                         type_loc: convert_loc(loc, tctx.arena),
                         type_attributes: vec![],
                         type_immediate: false,
-                        type_unboxed: crate::types::decl::UnboxedStatus::FALSE_FALSE,
+                        type_representation: crate::types::decl::TypeRepresentation::Boxed,
                         type_variant_layout: None,
                         type_inlined_types: vec![],
                         type_path: None,
@@ -18608,16 +18608,17 @@ fn inline_record_decl_from_variant_type<'a>(
                 return None;
             };
             let inline_params = inline_record_type_params(ctx, &type_decl.type_params, labels);
-            let inline_repr = if type_decl.type_unboxed.unboxed {
-                crate::types::RecordRepresentation::RecordUnboxed(false)
-            } else {
-                crate::types::RecordRepresentation::RecordInlined {
-                    tag: block_tag,
-                    name: cstr_name.to_string(),
-                    num_nonconsts,
-                    attrs: cd.cd_attributes.clone(),
-                }
-            };
+            let inline_repr =
+                if type_decl.type_representation == crate::types::TypeRepresentation::Unboxed {
+                    crate::types::RecordRepresentation::RecordUnboxed(false)
+                } else {
+                    crate::types::RecordRepresentation::RecordInlined {
+                        tag: block_tag,
+                        name: cstr_name.to_string(),
+                        num_nonconsts,
+                        attrs: cd.cd_attributes.clone(),
+                    }
+                };
             return Some(crate::types::TypeDeclaration {
                 type_params: inline_params.clone(),
                 type_arity: inline_params.len() as i32,
@@ -18632,7 +18633,7 @@ fn inline_record_decl_from_variant_type<'a>(
                 type_loc: cd.cd_loc,
                 type_attributes: vec![],
                 type_immediate: false,
-                type_unboxed: crate::types::UnboxedStatus::default(),
+                type_representation: crate::types::TypeRepresentation::Boxed,
                 type_variant_layout: None,
                 type_inlined_types: vec![],
                 type_path: None,
@@ -19446,7 +19447,7 @@ fn type_newtype(
                 type_loc: convert_loc(loc, tctx.arena),
                 type_attributes: vec![],
                 type_immediate: false,
-                type_unboxed: crate::types::decl::UnboxedStatus::FALSE_FALSE,
+                type_representation: crate::types::decl::TypeRepresentation::Boxed,
                 type_variant_layout: None,
                 type_inlined_types: vec![],
                 type_path: None,
@@ -19872,7 +19873,7 @@ fn type_letexception(
                         type_loc: crate::location::Location::none(),
                         type_attributes: vec![],
                         type_immediate: false,
-                        type_unboxed: crate::types::UnboxedStatus::default(),
+                        type_representation: crate::types::TypeRepresentation::Boxed,
                         type_variant_layout: None,
                         type_inlined_types: vec![],
                         type_path: None,
@@ -24601,7 +24602,7 @@ where
         type_loc: decl.type_loc.clone(),
         type_attributes: decl.type_attributes.clone(),
         type_immediate: decl.type_immediate,
-        type_unboxed: decl.type_unboxed,
+        type_representation: decl.type_representation,
         type_variant_layout: decl.type_variant_layout,
         type_inlined_types: decl
             .type_inlined_types
@@ -29302,7 +29303,9 @@ fn lookup_constructor_by_expected_type<'b>(
             let is_constant = matches!(cd.cd_args, crate::types::ConstructorArguments::CstrTuple(ref args) if args.is_empty());
             if cd.cd_id.name() == cstr_name {
                 let mut inst_cache = HashMap::new();
-                let tag = if concrete_type_decl.type_unboxed.unboxed {
+                let tag = if concrete_type_decl.type_representation
+                    == crate::types::TypeRepresentation::Unboxed
+                {
                     crate::types::decl::ConstructorTag::CstrUnboxed
                 } else if is_constant {
                     crate::types::decl::ConstructorTag::CstrConstant(const_idx)
@@ -29394,7 +29397,9 @@ fn lookup_constructor_by_expected_type<'b>(
                             type_arity: inline_params.len() as i32,
                             type_kind: crate::types::TypeKind::TypeRecord(
                                 copied_labels,
-                                if concrete_type_decl.type_unboxed.unboxed {
+                                if concrete_type_decl.type_representation
+                                    == crate::types::TypeRepresentation::Unboxed
+                                {
                                     crate::types::RecordRepresentation::RecordUnboxed(false)
                                 } else {
                                     crate::types::RecordRepresentation::RecordInlined {
@@ -29415,7 +29420,7 @@ fn lookup_constructor_by_expected_type<'b>(
                             type_loc: cd.cd_loc,
                             type_attributes: vec![],
                             type_immediate: false,
-                            type_unboxed: crate::types::UnboxedStatus::default(),
+                            type_representation: crate::types::TypeRepresentation::Boxed,
                             type_variant_layout: None,
                             type_inlined_types: vec![],
                             type_path: None,
@@ -31947,7 +31952,9 @@ fn lookup_type_decl_for_path_with_cache_mode<'a>(
                                 type_arity: inline_params.len() as i32,
                                 type_kind: crate::types::TypeKind::TypeRecord(
                                     labels.clone(),
-                                    if parent_decl.type_unboxed.unboxed {
+                                    if parent_decl.type_representation
+                                        == crate::types::TypeRepresentation::Unboxed
+                                    {
                                         crate::types::RecordRepresentation::RecordUnboxed(false)
                                     } else {
                                         crate::types::RecordRepresentation::RecordInlined {
@@ -31968,7 +31975,7 @@ fn lookup_type_decl_for_path_with_cache_mode<'a>(
                                 type_loc: cd.cd_loc,
                                 type_attributes: vec![],
                                 type_immediate: false,
-                                type_unboxed: crate::types::UnboxedStatus::default(),
+                                type_representation: crate::types::TypeRepresentation::Boxed,
                                 type_variant_layout: None,
                                 type_inlined_types: vec![],
                                 type_path: None,

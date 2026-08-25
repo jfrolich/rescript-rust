@@ -418,8 +418,7 @@ fn hash_type_decl(hasher: &mut impl Hasher, td: &TypeDeclaration, entries: &[Por
     td.type_variance.hash(hasher);
     td.type_newtype_level.hash(hasher);
     td.type_immediate.hash(hasher);
-    td.type_unboxed.unboxed.hash(hasher);
-    td.type_unboxed.default.hash(hasher);
+    td.type_representation.hash(hasher);
     if let Some(path) = &td.type_path {
         true.hash(hasher);
         hash_path_by_name(hasher, path);
@@ -792,7 +791,8 @@ impl<'a> TypeGraphSerializer<'a> {
                 *index
             } else {
                 let index = self.variant_layouts.len();
-                self.variant_layouts.push(self.ctx.variant_layout(layout_ref));
+                self.variant_layouts
+                    .push(self.ctx.variant_layout(layout_ref));
                 self.variant_layout_cache.insert(layout_ref, index);
                 index
             };

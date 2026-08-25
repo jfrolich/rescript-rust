@@ -73,16 +73,24 @@ fn type_cannot_contain_undefined_rec(
                             let case = layout.as_ref().map(|layout| &layout.constructors[position]);
                             let has_undefined = matches!(
                                 case,
-                                Some(crate::types::VariantConstructorCase::Constant(crate::types::VariantTag {
-                                    tag_type: Some(crate::types::VariantTagType::Undefined), ..
-                                }))
-                            ) || case.is_none() && has_undefined_literal(&cd.cd_attributes);
+                                Some(crate::types::VariantConstructorCase::Constant(
+                                    crate::types::VariantTag {
+                                        tag_type: Some(crate::types::VariantTagType::Undefined),
+                                        ..
+                                    }
+                                ))
+                            ) || case.is_none()
+                                && has_undefined_literal(&cd.cd_attributes);
                             let untagged = matches!(
                                 case,
-                                Some(crate::types::VariantConstructorCase::Block(crate::types::VariantBlock {
-                                    runtime: crate::types::BlockRuntime { untagged: true, .. }, ..
-                                }))
-                            ) || case.is_none() && has_untagged(&decl.type_attributes);
+                                Some(crate::types::VariantConstructorCase::Block(
+                                    crate::types::VariantBlock {
+                                        runtime: crate::types::BlockRuntime { untagged: true, .. },
+                                        ..
+                                    }
+                                ))
+                            ) || case.is_none()
+                                && has_untagged(&decl.type_attributes);
                             if has_undefined {
                                 false
                             } else if untagged {
@@ -207,7 +215,7 @@ fn get_unboxed_repr_rec(
     match &*ctx.get_desc(ty) {
         TypeDesc::Tconstr { path, args, .. } => {
             let decl = find_type_decl(ctx, env, path)?;
-            if !decl.type_unboxed.unboxed {
+            if decl.type_representation != crate::types::TypeRepresentation::Unboxed {
                 return Some(ty);
             }
             match &decl.type_kind {
@@ -240,7 +248,7 @@ pub(crate) fn scrape_ty(ctx: &TypeContext, env: &Env, ty: TypeExprRef) -> TypeEx
     match &*ctx.get_desc(ty) {
         TypeDesc::Tconstr { path, .. } => {
             if let Some(decl) = find_type_decl(ctx, env, path) {
-                if decl.type_unboxed.unboxed {
+                if decl.type_representation == crate::types::TypeRepresentation::Unboxed {
                     // For unboxed types, try to get the representation type.
                     // If the type is recursive (representation returns None),
                     // return the original type without further expansion.
@@ -416,7 +424,7 @@ mod tests {
                 type_loc: Location::none(),
                 type_attributes: vec![],
                 type_immediate: false,
-                type_unboxed: crate::types::decl::UnboxedStatus::default(),
+                type_representation: crate::types::TypeRepresentation::Boxed,
                 type_variant_layout: None,
                 type_inlined_types: vec![],
                 type_path: None,

@@ -516,10 +516,12 @@ fn block_runtime_from_attributes(
         ConstructorRuntimeTag::Undefined => crate::types::VariantTagType::Undefined,
     });
     let tag_name = attrs.iter().find_map(|attr| {
-        (attr.attr_name.txt == "tag").then(|| match &attr.attr_payload {
-            crate::types::decl::AttributePayload::Str(value) => Some(value.clone()),
-            _ => None,
-        }).flatten()
+        (attr.attr_name.txt == "tag")
+            .then(|| match &attr.attr_payload {
+                crate::types::decl::AttributePayload::Str(value) => Some(value.clone()),
+                _ => None,
+            })
+            .flatten()
     });
     crate::types::BlockRuntime {
         tag: crate::types::VariantTag { name, tag_type },
@@ -3533,16 +3535,26 @@ impl<'a> RawLambdaConverter<'a> {
                     Some(crate::types::ConstructorKind::Ordinary(reference)) => {
                         let layout = self.type_ctx.variant_layout(reference.variant);
                         let runtime = match &layout.constructors[reference.position] {
-                            crate::types::VariantConstructorCase::Block(block) => block.runtime.clone(),
-                            crate::types::VariantConstructorCase::Constant(_) => unreachable!("payload constructor has constant layout"),
+                            crate::types::VariantConstructorCase::Block(block) => {
+                                block.runtime.clone()
+                            }
+                            crate::types::VariantConstructorCase::Constant(_) => {
+                                unreachable!("payload constructor has constant layout")
+                            }
                         };
                         (runtime, layout.num_blocks() as i32)
                     }
-                    _ => (crate::types::BlockRuntime {
-                        tag: crate::types::VariantTag { name: cstr.cstr_name.clone(), tag_type: None },
-                        tag_name: None,
-                        untagged: matches!(cstr.cstr_tag, ConstructorTag::CstrUnboxed),
-                    }, cstr.cstr_nonconsts),
+                    _ => (
+                        crate::types::BlockRuntime {
+                            tag: crate::types::VariantTag {
+                                name: cstr.cstr_name.clone(),
+                                tag_type: None,
+                            },
+                            tag_name: None,
+                            untagged: matches!(cstr.cstr_tag, ConstructorTag::CstrUnboxed),
+                        },
+                        cstr.cstr_nonconsts,
+                    ),
                 };
                 TagInfo::Constructor {
                     name: cstr.cstr_name.clone(),
@@ -12025,7 +12037,7 @@ mod tests {
                 type_loc: Location::none(),
                 type_attributes: vec![],
                 type_immediate: false,
-                type_unboxed: crate::types::decl::UnboxedStatus::default(),
+                type_representation: crate::types::TypeRepresentation::Boxed,
                 type_variant_layout: None,
                 type_inlined_types: vec![],
                 type_path: None,
@@ -12699,7 +12711,7 @@ external myJson: Js.Json.t = "default"
             type_loc: Location::none(),
             type_attributes: vec![],
             type_immediate: false,
-            type_unboxed: crate::types::decl::UnboxedStatus::default(),
+            type_representation: crate::types::TypeRepresentation::Boxed,
             type_variant_layout: None,
             type_inlined_types: vec![],
             type_path: None,

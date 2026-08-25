@@ -775,7 +775,9 @@ fn format_type_declaration_with_options_and_rec(
         &decl.type_variance,
         matches!(decl.type_kind, TypeKind::TypeAbstract),
     );
-    let prefix = if decl.type_unboxed.unboxed || type_decl_has_attr(decl, "unboxed") {
+    let prefix = if decl.type_representation == crate::types::TypeRepresentation::Unboxed
+        || type_decl_has_attr(decl, "unboxed")
+    {
         "@unboxed "
     } else if type_decl_has_attr(decl, "immediate") || type_decl_has_attr(decl, "ocaml.immediate") {
         "@immediate "
@@ -3221,7 +3223,7 @@ pub(crate) fn type_declarations<'a>(
     let canonical_unboxed = |decl: &TypeDeclaration| {
         decl.type_variant_layout
             .map(|layout_ref| type_ctx.variant_layout(layout_ref).unboxed)
-            .unwrap_or(decl.type_unboxed.unboxed)
+            .unwrap_or(decl.type_representation == crate::types::TypeRepresentation::Unboxed)
     };
     if !matches!(sig_decl.type_kind, TypeKind::TypeAbstract)
         && canonical_unboxed(impl_decl) != canonical_unboxed(sig_decl)
@@ -3288,8 +3290,12 @@ pub(crate) fn type_declarations<'a>(
                 &sig_decl.type_params,
                 impl_constructors,
                 sig_constructors,
-                impl_decl.type_variant_layout.map(|r| type_ctx.variant_layout(r)),
-                sig_decl.type_variant_layout.map(|r| type_ctx.variant_layout(r)),
+                impl_decl
+                    .type_variant_layout
+                    .map(|r| type_ctx.variant_layout(r)),
+                sig_decl
+                    .type_variant_layout
+                    .map(|r| type_ctx.variant_layout(r)),
                 warnings,
             ) {
                 return Err(type_decl_mismatch(id, impl_decl, sig_decl, detail));
@@ -3993,8 +3999,10 @@ fn compare_variant_declarations(
                     };
                     impl_tag != sig_tag
                 }
-                _ => constructor_as_payload(&impl_constructor.cd_attributes)
-                    != constructor_as_payload(&sig_constructor.cd_attributes),
+                _ => {
+                    constructor_as_payload(&impl_constructor.cd_attributes)
+                        != constructor_as_payload(&sig_constructor.cd_attributes)
+                }
             }
         {
             return Some(format!(
@@ -4886,7 +4894,7 @@ mod tests {
     use crate::location::Location;
     use crate::types::Path;
     use crate::types::decl::{
-        ModtypeDeclaration, ModuleDeclaration, ModuleType, RecStatus, TypeKind, UnboxedStatus,
+        ModtypeDeclaration, ModuleDeclaration, ModuleType, RecStatus, TypeKind, TypeRepresentation,
         ValueKind,
     };
     use crate::types::env::initial_env;
@@ -4903,7 +4911,7 @@ mod tests {
             type_loc: Location::none(),
             type_attributes: vec![],
             type_immediate: false,
-            type_unboxed: UnboxedStatus::FALSE_FALSE,
+            type_representation: TypeRepresentation::Boxed,
             type_variant_layout: None,
             type_inlined_types: vec![],
             type_path,
@@ -5186,7 +5194,7 @@ mod tests {
                     type_loc: Location::none(),
                     type_attributes: vec![],
                     type_immediate: false,
-                    type_unboxed: UnboxedStatus::FALSE_FALSE,
+                    type_representation: TypeRepresentation::Boxed,
                     type_variant_layout: None,
                     type_inlined_types: vec![],
                     type_path: None,

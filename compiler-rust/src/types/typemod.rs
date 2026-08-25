@@ -211,7 +211,7 @@ fn fixed_row_placeholder_decl(
         type_loc: arena.to_location(decl.ptype_loc),
         type_attributes: parser_attrs_to_decl_attrs(arena, &decl.ptype_attributes),
         type_immediate: false,
-        type_unboxed: crate::types::UnboxedStatus::default(),
+        type_representation: crate::types::TypeRepresentation::Boxed,
         type_variant_layout: None,
         type_inlined_types: vec![],
         type_path: Some(Path::pident(row_id.clone())),
@@ -244,7 +244,7 @@ fn translate_fixed_row_type_declaration<'a>(
         type_loc: arena.to_location(decl.ptype_loc),
         type_attributes,
         type_immediate: false,
-        type_unboxed: crate::types::UnboxedStatus::default(),
+        type_representation: crate::types::TypeRepresentation::Boxed,
         type_variant_layout: None,
         type_inlined_types: vec![],
         type_path,
@@ -755,7 +755,7 @@ fn compute_type_immediacy(
     type_kind: &crate::types::TypeKind,
     type_manifest: Option<TypeExprRef>,
     type_attributes: &[crate::types::decl::Attribute],
-    type_unboxed: &crate::types::UnboxedStatus,
+    type_representation: crate::types::TypeRepresentation,
 ) -> bool {
     // OCaml `compiler/ml/typedecl.ml:1324-1336` marks all-constant
     // variants immediate, marks abstract aliases immediate when their
@@ -764,7 +764,8 @@ fn compute_type_immediacy(
     // `compiler/ml/translcore.ml:407-415`.
     match (type_kind, type_manifest) {
         (crate::types::TypeKind::TypeVariant(cstrs), _)
-            if type_unboxed.unboxed && cstrs.len() == 1 =>
+            if type_representation == crate::types::TypeRepresentation::Unboxed
+                && cstrs.len() == 1 =>
         {
             match &cstrs[0].cd_args {
                 crate::types::decl::ConstructorArguments::CstrTuple(args) if args.len() == 1 => {
@@ -787,10 +788,14 @@ fn compute_type_immediacy(
                 }
             }
         }
-        (crate::types::TypeKind::TypeRecord(labels, _), _) if type_unboxed.unboxed => labels
-            .first()
-            .filter(|_| labels.len() == 1)
-            .is_some_and(|label| type_expr_is_immediate(ctx, env, label.ld_type)),
+        (crate::types::TypeKind::TypeRecord(labels, _), _)
+            if type_representation == crate::types::TypeRepresentation::Unboxed =>
+        {
+            labels
+                .first()
+                .filter(|_| labels.len() == 1)
+                .is_some_and(|label| type_expr_is_immediate(ctx, env, label.ld_type))
+        }
         (crate::types::TypeKind::TypeVariant(cstrs), _) => {
             !cstrs.is_empty()
                 && cstrs.iter().all(|cstr| {
@@ -4685,13 +4690,14 @@ fn coherence_definition_mismatch_detail(
     }
 
     if !matches!(actual.type_kind, crate::types::decl::TypeKind::TypeAbstract)
-        && expected.type_unboxed.unboxed != actual.type_unboxed.unboxed
+        && expected.type_representation != actual.type_representation
     {
-        let unboxed_decl = if actual.type_unboxed.unboxed {
-            "the second"
-        } else {
-            "the first"
-        };
+        let unboxed_decl =
+            if actual.type_representation == crate::types::TypeRepresentation::Unboxed {
+                "the second"
+            } else {
+                "the first"
+            };
         return Some(format!(
             "Their internal representations differ:\n{unboxed_decl} declaration uses unboxed representation."
         ));
@@ -5740,7 +5746,9 @@ fn canonical_variant_tag_type(tag: VariantRuntimeTag) -> crate::types::VariantTa
     }
 }
 
-fn canonical_variant_block_type(block_type: UntaggedVariantBlockType) -> crate::types::VariantBlockType {
+fn canonical_variant_block_type(
+    block_type: UntaggedVariantBlockType,
+) -> crate::types::VariantBlockType {
     use crate::types::{VariantBlockType as B, VariantInstance as I};
     match block_type {
         UntaggedVariantBlockType::Int => B::Int,
@@ -5752,14 +5760,29 @@ fn canonical_variant_block_type(block_type: UntaggedVariantBlockType) -> crate::
         UntaggedVariantBlockType::Object => B::Object,
         UntaggedVariantBlockType::Unknown => B::Unknown,
         UntaggedVariantBlockType::Instance(name) => B::Instance(match name.as_str() {
-            "Array" => I::Array, "ArrayBuffer" => I::ArrayBuffer, "BigInt64Array" => I::BigInt64Array,
-            "BigUint64Array" => I::BigUint64Array, "Blob" => I::Blob, "DataView" => I::DataView,
-            "Date" => I::Date, "File" => I::File, "Float32Array" => I::Float32Array,
-            "Float64Array" => I::Float64Array, "Int16Array" => I::Int16Array,
-            "Int32Array" => I::Int32Array, "Int8Array" => I::Int8Array, "Promise" => I::Promise,
-            "RegExp" => I::RegExp, "Uint16Array" => I::Uint16Array, "Uint32Array" => I::Uint32Array,
-            "Uint8Array" => I::Uint8Array, "Uint8ClampedArray" => I::Uint8ClampedArray,
-            "Set" => I::Set, "Map" => I::Map, "WeakSet" => I::WeakSet, "WeakMap" => I::WeakMap,
+            "Array" => I::Array,
+            "ArrayBuffer" => I::ArrayBuffer,
+            "BigInt64Array" => I::BigInt64Array,
+            "BigUint64Array" => I::BigUint64Array,
+            "Blob" => I::Blob,
+            "DataView" => I::DataView,
+            "Date" => I::Date,
+            "File" => I::File,
+            "Float32Array" => I::Float32Array,
+            "Float64Array" => I::Float64Array,
+            "Int16Array" => I::Int16Array,
+            "Int32Array" => I::Int32Array,
+            "Int8Array" => I::Int8Array,
+            "Promise" => I::Promise,
+            "RegExp" => I::RegExp,
+            "Uint16Array" => I::Uint16Array,
+            "Uint32Array" => I::Uint32Array,
+            "Uint8Array" => I::Uint8Array,
+            "Uint8ClampedArray" => I::Uint8ClampedArray,
+            "Set" => I::Set,
+            "Map" => I::Map,
+            "WeakSet" => I::WeakSet,
+            "WeakMap" => I::WeakMap,
             _ => unreachable!("instance classifier returned an unknown instance"),
         }),
     }
@@ -5779,18 +5802,21 @@ fn derive_variant_layout(
             tag_type: process_variant_as_attributes(&constructor.cd_attributes)?
                 .map(canonical_variant_tag_type),
         };
-        if matches!(&constructor.cd_args, crate::types::ConstructorArguments::CstrTuple(args) if args.is_empty()) {
+        if matches!(&constructor.cd_args, crate::types::ConstructorArguments::CstrTuple(args) if args.is_empty())
+        {
             cases.push(crate::types::VariantConstructorCase::Constant(tag));
         } else {
-            cases.push(crate::types::VariantConstructorCase::Block(crate::types::VariantBlock {
-                runtime: crate::types::BlockRuntime {
-                    tag,
-                    tag_name: process_variant_tag_name(&constructor.cd_attributes)?,
-                    untagged: has_decl_attr(&constructor.cd_attributes, "unboxed"),
+            cases.push(crate::types::VariantConstructorCase::Block(
+                crate::types::VariantBlock {
+                    runtime: crate::types::BlockRuntime {
+                        tag,
+                        tag_name: process_variant_tag_name(&constructor.cd_attributes)?,
+                        untagged: has_decl_attr(&constructor.cd_attributes, "unboxed"),
+                    },
+                    block_type: get_untagged_constructor_block_type(ctx, env, constructor)
+                        .map(canonical_variant_block_type),
                 },
-                block_type: get_untagged_constructor_block_type(ctx, env, constructor)
-                    .map(canonical_variant_block_type),
-            }));
+            ));
         }
     }
     Ok(crate::types::VariantLayout::new(
@@ -15647,7 +15673,7 @@ fn translate_module_type_to_decl_with_typed_hint<'a>(
                                 type_loc: crate::location::Location::none(),
                                 type_attributes: vec![],
                                 type_immediate: false,
-                                type_unboxed: crate::types::UnboxedStatus::default(),
+                                type_representation: crate::types::TypeRepresentation::Boxed,
                                 type_variant_layout: None,
                                 type_inlined_types: vec![],
                                 type_path: Some(Path::pident(type_id.clone())),
@@ -15885,20 +15911,20 @@ fn translate_module_type_to_decl_with_typed_hint<'a>(
                             check_untagged_variant_constructor_arities(arena, decl)?;
                             let typed_type_decl_hint =
                                 typed_type_decls.and_then(|typed_decls| typed_decls.get(decl_idx));
-                            let type_unboxed = typed_type_decl_hint
-                                .map(|typed_decl| typed_decl.typ_type.type_unboxed)
+                            let type_representation = typed_type_decl_hint
+                                .map(|typed_decl| typed_decl.typ_type.type_representation)
                                 .unwrap_or_else(|| match &type_kind {
                                     crate::types::TypeKind::TypeVariant(cstrs)
                                         if decl_has_unboxed_attr && cstrs.len() <= 1 =>
                                     {
-                                        crate::types::UnboxedStatus::TRUE_FALSE
+                                        crate::types::TypeRepresentation::Unboxed
                                     }
                                     crate::types::TypeKind::TypeRecord(labels, _)
                                         if decl_has_unboxed_attr && labels.len() == 1 =>
                                     {
-                                        crate::types::UnboxedStatus::TRUE_FALSE
+                                        crate::types::TypeRepresentation::Unboxed
                                     }
-                                    _ => crate::types::UnboxedStatus::default(),
+                                    _ => crate::types::TypeRepresentation::Boxed,
                                 });
                             // Keep module-type declaration conversion aligned with
                             // OCaml `compiler/ml/typedecl.ml:2005`; this path
@@ -15912,7 +15938,7 @@ fn translate_module_type_to_decl_with_typed_hint<'a>(
                                         &type_kind,
                                         type_manifest,
                                         &type_attributes,
-                                        &type_unboxed,
+                                        type_representation,
                                     )
                                 });
 
@@ -15949,7 +15975,7 @@ fn translate_module_type_to_decl_with_typed_hint<'a>(
                                 type_loc: arena.to_location(decl.ptype_loc),
                                 type_attributes,
                                 type_immediate,
-                                type_unboxed,
+                                type_representation,
                                 type_variant_layout: None,
                                 type_inlined_types: vec![],
                                 type_path: Some(Path::pident(type_id.clone())),
@@ -16369,7 +16395,7 @@ fn approx_abstract_type_decl(
         type_loc: crate::location::Location::none(),
         type_attributes: vec![],
         type_immediate: false,
-        type_unboxed: crate::types::decl::UnboxedStatus::default(),
+        type_representation: crate::types::TypeRepresentation::Boxed,
         type_variant_layout: None,
         type_inlined_types: vec![],
         type_path: None,
@@ -20299,7 +20325,7 @@ pub fn type_structure<'a>(
                     type_loc: crate::location::Location::none(),
                     type_attributes: vec![],
                     type_immediate: false,
-                    type_unboxed: crate::types::UnboxedStatus::default(),
+                    type_representation: crate::types::TypeRepresentation::Boxed,
                     type_variant_layout: None,
                     type_inlined_types: vec![],
                     type_path: Some(crate::types::Path::pident(type_id.clone())),
@@ -20832,7 +20858,7 @@ fn type_structure_item<'a>(
                             type_loc: crate::location::Location::none(),
                             type_attributes: vec![],
                             type_immediate: false,
-                            type_unboxed: crate::types::UnboxedStatus::default(),
+                            type_representation: crate::types::TypeRepresentation::Boxed,
                             type_variant_layout: None,
                             type_inlined_types: vec![],
                             type_path: Some(crate::types::Path::pident(type_id.clone())),
@@ -20968,7 +20994,7 @@ fn type_structure_item<'a>(
                             type_loc: crate::location::Location::none(),
                             type_attributes: vec![],
                             type_immediate: false,
-                            type_unboxed: crate::types::UnboxedStatus::default(),
+                            type_representation: crate::types::TypeRepresentation::Boxed,
                             type_variant_layout: None,
                             type_inlined_types: vec![],
                             type_path: Some(crate::types::Path::pident(type_id.clone())),
@@ -21370,7 +21396,7 @@ fn type_structure_item<'a>(
                         type_loc: arena.to_location(decl.ptype_loc),
                         type_attributes: vec![],
                         type_immediate: false,
-                        type_unboxed: crate::types::UnboxedStatus::default(),
+                        type_representation: crate::types::TypeRepresentation::Boxed,
                         type_variant_layout: None,
                         type_inlined_types: vec![],
                         type_path: Some(Path::pident(type_id.clone())),
@@ -21508,7 +21534,8 @@ fn type_structure_item<'a>(
                 let mut manifest_from_kind = None;
 
                 // Convert the type kind - create both internal and typed tree versions
-                let (internal_type_kind, typed_tree_kind, mut constructors) = match &decl.ptype_kind {
+                let (internal_type_kind, typed_tree_kind, mut constructors) = match &decl.ptype_kind
+                {
                     crate::parser::ast::TypeKind::Ptype_abstract => (
                         crate::types::TypeKind::TypeAbstract,
                         TypedTypeKind::Ttype_abstract,
@@ -21973,8 +22000,7 @@ fn type_structure_item<'a>(
                                                 type_loc: Location::none(),
                                                 type_attributes: vec![],
                                                 type_immediate: false,
-                                                type_unboxed:
-                                                    crate::types::UnboxedStatus::default(),
+                                                type_representation: crate::types::TypeRepresentation::Boxed,
                                                 type_variant_layout: None,
                                                 type_inlined_types: vec![],
                                                 type_path: None,
@@ -22312,7 +22338,8 @@ fn type_structure_item<'a>(
                                         type_loc: Location::none(),
                                         type_attributes: vec![],
                                         type_immediate: false,
-                                        type_unboxed: crate::types::UnboxedStatus::default(),
+                                        type_representation:
+                                            crate::types::TypeRepresentation::Boxed,
                                         type_variant_layout: None,
                                         type_inlined_types: vec![],
                                         type_path: None,
@@ -22666,10 +22693,10 @@ fn type_structure_item<'a>(
                 unify_type_declaration_constraints(tctx, &typ_cstrs)?;
 
                 let type_attributes = parser_attrs_to_decl_attrs(arena, &decl.ptype_attributes);
-                let type_unboxed = if decl_has_unboxed_attr && constructors.len() <= 1 {
-                    crate::types::UnboxedStatus::TRUE_FALSE
+                let type_representation = if decl_has_unboxed_attr && constructors.len() <= 1 {
+                    crate::types::TypeRepresentation::Unboxed
                 } else {
-                    crate::types::UnboxedStatus::default()
+                    crate::types::TypeRepresentation::Boxed
                 };
                 let type_immediate = compute_type_immediacy(
                     ctx,
@@ -22677,7 +22704,7 @@ fn type_structure_item<'a>(
                     &internal_type_kind,
                     manifest_type_ref,
                     &type_attributes,
-                    &type_unboxed,
+                    type_representation,
                 );
                 if decl_attrs_mark_immediate(&type_attributes) && !type_immediate {
                     return Err(TypeModError::BadImmediateAttribute {
@@ -22695,11 +22722,9 @@ fn type_structure_item<'a>(
                     crate::parser::ast::PrivateFlag::Private => crate::types::PrivateFlag::Private,
                 };
 
-                let type_variant_layout = matches!(
-                    &internal_type_kind,
-                    crate::types::TypeKind::TypeVariant(_)
-                )
-                .then(|| ctx.pending_variant_layout());
+                let type_variant_layout =
+                    matches!(&internal_type_kind, crate::types::TypeKind::TypeVariant(_))
+                        .then(|| ctx.pending_variant_layout());
 
                 // Create internal type declaration for the environment
                 let mut internal_decl = crate::types::TypeDeclaration {
@@ -22713,7 +22738,7 @@ fn type_structure_item<'a>(
                     type_loc: arena.to_location(decl.ptype_loc),
                     type_attributes,
                     type_immediate,
-                    type_unboxed,
+                    type_representation,
                     type_variant_layout,
                     type_inlined_types: vec![],
                     type_path: None,
@@ -22722,7 +22747,10 @@ fn type_structure_item<'a>(
                 if let Some(layout_ref) = type_variant_layout {
                     for (position, (_, description)) in constructors.iter_mut().enumerate() {
                         description.cstr_kind = Some(crate::types::ConstructorKind::Ordinary(
-                            crate::types::ConstructorReference { variant: layout_ref, position },
+                            crate::types::ConstructorReference {
+                                variant: layout_ref,
+                                position,
+                            },
                         ));
                     }
                 }
@@ -23277,7 +23305,7 @@ fn type_structure_item<'a>(
                                     type_loc: Location::none(),
                                     type_attributes: vec![],
                                     type_immediate: false,
-                                    type_unboxed: crate::types::UnboxedStatus::default(),
+                                    type_representation: crate::types::TypeRepresentation::Boxed,
                                     type_variant_layout: None,
                                     type_inlined_types: vec![],
                                     type_path: None,
@@ -23646,7 +23674,7 @@ fn type_structure_item<'a>(
                                 type_loc: Location::none(),
                                 type_attributes: vec![],
                                 type_immediate: false,
-                                type_unboxed: crate::types::UnboxedStatus::default(),
+                                type_representation: crate::types::TypeRepresentation::Boxed,
                                 type_variant_layout: None,
                                 type_inlined_types: vec![],
                                 type_path: None,
@@ -24765,7 +24793,7 @@ fn transl_sig_type_declarations_with_ids_and_originals<'a>(
                 type_loc: arena.to_location(decl.ptype_loc),
                 type_attributes: vec![],
                 type_immediate: false,
-                type_unboxed: crate::types::UnboxedStatus::default(),
+                type_representation: crate::types::TypeRepresentation::Boxed,
                 type_variant_layout: None,
                 type_inlined_types: vec![],
                 type_path: Some(Path::pident(type_id.clone())),
@@ -25254,18 +25282,18 @@ fn transl_sig_type_declarations_with_ids_and_originals<'a>(
             let typ_private = decl.ptype_private;
 
             let type_attributes = parser_attrs_to_decl_attrs(arena, &decl.ptype_attributes);
-            let type_unboxed = match &internal_type_kind {
+            let type_representation = match &internal_type_kind {
                 crate::types::TypeKind::TypeVariant(cstrs)
                     if decl_has_unboxed_attr && cstrs.len() <= 1 =>
                 {
-                    crate::types::UnboxedStatus::TRUE_FALSE
+                    crate::types::TypeRepresentation::Unboxed
                 }
                 crate::types::TypeKind::TypeRecord(labels, _)
                     if decl_has_unboxed_attr && labels.len() == 1 =>
                 {
-                    crate::types::UnboxedStatus::TRUE_FALSE
+                    crate::types::TypeRepresentation::Unboxed
                 }
-                _ => crate::types::UnboxedStatus::default(),
+                _ => crate::types::TypeRepresentation::Boxed,
             };
             // OCaml computes signature declaration immediacy after translating
             // the declaration body (`compiler/ml/typedecl.ml:2005`), using the
@@ -25276,7 +25304,7 @@ fn transl_sig_type_declarations_with_ids_and_originals<'a>(
                 &internal_type_kind,
                 manifest_type_ref,
                 &type_attributes,
-                &type_unboxed,
+                type_representation,
             );
             if decl_attrs_mark_immediate(&type_attributes) && !type_immediate {
                 return Err(TypeModError::BadImmediateAttribute {
@@ -25284,11 +25312,9 @@ fn transl_sig_type_declarations_with_ids_and_originals<'a>(
                 });
             }
 
-            let type_variant_layout = matches!(
-                &internal_type_kind,
-                crate::types::TypeKind::TypeVariant(_)
-            )
-            .then(|| ctx.pending_variant_layout());
+            let type_variant_layout =
+                matches!(&internal_type_kind, crate::types::TypeKind::TypeVariant(_))
+                    .then(|| ctx.pending_variant_layout());
 
             // Keep internal declaration shape aligned with parsed signature declaration.
             let internal_decl = crate::types::TypeDeclaration {
@@ -25305,7 +25331,7 @@ fn transl_sig_type_declarations_with_ids_and_originals<'a>(
                 type_loc: arena.to_location(decl.ptype_loc),
                 type_attributes,
                 type_immediate,
-                type_unboxed,
+                type_representation,
                 type_variant_layout,
                 type_inlined_types: vec![],
                 type_path: Some(type_path),
@@ -25667,7 +25693,8 @@ fn _process_comptime_derives_legacy<'a>(
                             crate::types::comptime::TypeInfo::Record {
                                 name: type_name.clone(),
                                 fields,
-                                unboxed: type_decl.type_unboxed.unboxed,
+                                unboxed: type_decl.type_representation
+                                    == crate::types::TypeRepresentation::Unboxed,
                             }
                         }
                         crate::types::decl::TypeKind::TypeVariant(ctors) => {
@@ -25712,7 +25739,8 @@ fn _process_comptime_derives_legacy<'a>(
                             crate::types::comptime::TypeInfo::Variant {
                                 name: type_name.clone(),
                                 constructors,
-                                unboxed: type_decl.type_unboxed.unboxed,
+                                unboxed: type_decl.type_representation
+                                    == crate::types::TypeRepresentation::Unboxed,
                             }
                         }
                         _ => continue,

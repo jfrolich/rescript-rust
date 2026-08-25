@@ -37,16 +37,28 @@ pub enum Instance {
 impl Instance {
     pub fn as_str(self) -> &'static str {
         match self {
-            Self::Array => "Array", Self::ArrayBuffer => "ArrayBuffer",
-            Self::BigInt64Array => "BigInt64Array", Self::BigUint64Array => "BigUint64Array",
-            Self::Blob => "Blob", Self::DataView => "DataView", Self::Date => "Date",
-            Self::File => "File", Self::Float32Array => "Float32Array",
-            Self::Float64Array => "Float64Array", Self::Int16Array => "Int16Array",
-            Self::Int32Array => "Int32Array", Self::Int8Array => "Int8Array",
-            Self::Promise => "Promise", Self::RegExp => "RegExp",
-            Self::Uint16Array => "Uint16Array", Self::Uint32Array => "Uint32Array",
-            Self::Uint8Array => "Uint8Array", Self::Uint8ClampedArray => "Uint8ClampedArray",
-            Self::Set => "Set", Self::Map => "Map", Self::WeakSet => "WeakSet",
+            Self::Array => "Array",
+            Self::ArrayBuffer => "ArrayBuffer",
+            Self::BigInt64Array => "BigInt64Array",
+            Self::BigUint64Array => "BigUint64Array",
+            Self::Blob => "Blob",
+            Self::DataView => "DataView",
+            Self::Date => "Date",
+            Self::File => "File",
+            Self::Float32Array => "Float32Array",
+            Self::Float64Array => "Float64Array",
+            Self::Int16Array => "Int16Array",
+            Self::Int32Array => "Int32Array",
+            Self::Int8Array => "Int8Array",
+            Self::Promise => "Promise",
+            Self::RegExp => "RegExp",
+            Self::Uint16Array => "Uint16Array",
+            Self::Uint32Array => "Uint32Array",
+            Self::Uint8Array => "Uint8Array",
+            Self::Uint8ClampedArray => "Uint8ClampedArray",
+            Self::Set => "Set",
+            Self::Map => "Map",
+            Self::WeakSet => "WeakSet",
             Self::WeakMap => "WeakMap",
         }
     }
@@ -54,12 +66,26 @@ impl Instance {
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum BlockType {
-    Int, String, Float, Bigint, Boolean, Instance(Instance), Function, Object, Unknown,
+    Int,
+    String,
+    Float,
+    Bigint,
+    Boolean,
+    Instance(Instance),
+    Function,
+    Object,
+    Unknown,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum TagType {
-    String(String), Int(i32), Float(String), BigInt(String), Bool(bool), Null, Undefined,
+    String(String),
+    Int(i32),
+    Float(String),
+    BigInt(String),
+    Bool(bool),
+    Null,
+    Undefined,
     Untagged(BlockType),
 }
 
@@ -83,7 +109,10 @@ pub struct Block {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub enum ConstructorCase { Constant(Tag), Block(Block) }
+pub enum ConstructorCase {
+    Constant(Tag),
+    Block(Block),
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Configuration {
@@ -109,7 +138,10 @@ pub struct Layout {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum LayoutState { Pending, Complete(Layout) }
+pub(crate) enum LayoutState {
+    Pending,
+    Complete(Layout),
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct LayoutRef(pub(crate) u32);
@@ -130,7 +162,10 @@ impl Layout {
         for case in &constructors {
             match case {
                 ConstructorCase::Constant(tag) => {
-                    let tag = tag.tag_type.clone().unwrap_or_else(|| TagType::String(tag.name.clone()));
+                    let tag = tag
+                        .tag_type
+                        .clone()
+                        .unwrap_or_else(|| TagType::String(tag.name.clone()));
                     match tag {
                         TagType::Null => has_null = true,
                         TagType::Undefined => has_undefined = true,
@@ -139,7 +174,9 @@ impl Layout {
                     literal_tags.insert(0, tag);
                 }
                 ConstructorCase::Block(block) => {
-                    if let Some(block_type) = &block.block_type { block_types.insert(0, block_type.clone()); }
+                    if let Some(block_type) = &block.block_type {
+                        block_types.insert(0, block_type.clone());
+                    }
                 }
             }
         }
@@ -147,17 +184,31 @@ impl Layout {
             unboxed: configuration.unboxed,
             constructors,
             matching_facts: MatchingFacts {
-                tag_name: configuration.tag_name, block_types, literal_tags,
-                has_null, has_undefined, has_other_literal,
+                tag_name: configuration.tag_name,
+                block_types,
+                literal_tags,
+                has_null,
+                has_undefined,
+                has_other_literal,
             },
         }
     }
 
     pub fn configuration(&self) -> Configuration {
-        Configuration { unboxed: self.unboxed, tag_name: self.matching_facts.tag_name.clone() }
+        Configuration {
+            unboxed: self.unboxed,
+            tag_name: self.matching_facts.tag_name.clone(),
+        }
     }
-    pub fn num_constants(&self) -> usize { self.constructors.iter().filter(|c| matches!(c, ConstructorCase::Constant(_))).count() }
-    pub fn num_blocks(&self) -> usize { self.constructors.len() - self.num_constants() }
+    pub fn num_constants(&self) -> usize {
+        self.constructors
+            .iter()
+            .filter(|c| matches!(c, ConstructorCase::Constant(_)))
+            .count()
+    }
+    pub fn num_blocks(&self) -> usize {
+        self.constructors.len() - self.num_constants()
+    }
 }
 
 impl ConstructorReference {
@@ -166,12 +217,36 @@ impl ConstructorReference {
     }
 }
 
-pub fn plain_layout(ctx: &TypeContext, cases: impl IntoIterator<Item = (String, bool)>) -> LayoutRef {
-    let constructors = cases.into_iter().map(|(name, has_payload)| {
-        let tag = Tag { name, tag_type: None };
-        if has_payload {
-            ConstructorCase::Block(Block { runtime: BlockRuntime { tag, tag_name: None, untagged: false }, block_type: None })
-        } else { ConstructorCase::Constant(tag) }
-    }).collect();
-    ctx.alloc_complete_variant_layout(Layout::new(Configuration { unboxed: false, tag_name: None }, constructors))
+pub fn plain_layout(
+    ctx: &TypeContext,
+    cases: impl IntoIterator<Item = (String, bool)>,
+) -> LayoutRef {
+    let constructors = cases
+        .into_iter()
+        .map(|(name, has_payload)| {
+            let tag = Tag {
+                name,
+                tag_type: None,
+            };
+            if has_payload {
+                ConstructorCase::Block(Block {
+                    runtime: BlockRuntime {
+                        tag,
+                        tag_name: None,
+                        untagged: false,
+                    },
+                    block_type: None,
+                })
+            } else {
+                ConstructorCase::Constant(tag)
+            }
+        })
+        .collect();
+    ctx.alloc_complete_variant_layout(Layout::new(
+        Configuration {
+            unboxed: false,
+            tag_name: None,
+        },
+        constructors,
+    ))
 }

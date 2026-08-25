@@ -16,7 +16,7 @@ use crate::types::decl::{
     AliasPresence, Attribute, AttributePayload, ConstructorArguments, ConstructorDeclaration,
     ExtStatus, ExtensionConstructor, LabelDeclaration, ModtypeDeclaration, ModuleDeclaration,
     ModuleType, PrimitiveDescription, RecStatus, RecordRepresentation, Signature, SignatureItem,
-    TypeDeclaration, TypeKind, UnboxedStatus, ValueDescription, ValueKind,
+    TypeDeclaration, TypeKind, TypeRepresentation, ValueDescription, ValueKind,
 };
 use crate::types::path::Path;
 use crate::types::type_expr::{
@@ -206,12 +206,10 @@ impl<'a> SigReadContext<'a> {
         let type_loc = read_location(self.ctx, &fields[7]);
         let type_attributes = read_attributes(self.ctx, &fields[8]);
         let type_immediate = fields[9].as_bool();
-        // I024 stores the semantic representation bit rather than the old
-        // `{unboxed; default}` annotation state. Keep the transitional field
-        // populated until all Rust consumers use the canonical layout.
-        let type_unboxed = UnboxedStatus {
-            unboxed: fields[10].as_int() == 1,
-            default: false,
+        let type_representation = if fields[10].as_int() == 1 {
+            TypeRepresentation::Unboxed
+        } else {
+            TypeRepresentation::Boxed
         };
         let type_inlined_types = self.read_type_inlined_types(&fields[11]);
         let type_variant_layout = match &type_kind {
@@ -230,7 +228,7 @@ impl<'a> SigReadContext<'a> {
             type_loc,
             type_attributes,
             type_immediate,
-            type_unboxed,
+            type_representation,
             type_variant_layout,
             type_inlined_types,
             type_path: None,
@@ -265,7 +263,9 @@ impl<'a> SigReadContext<'a> {
                     .iter()
                     .map(|cd| self.read_constructor_declaration(cd))
                     .collect();
-                self.last_type_kind_layout = fields.get(1).map(|value| self.read_variant_layout_ref(value));
+                self.last_type_kind_layout = fields
+                    .get(1)
+                    .map(|value| self.read_variant_layout_ref(value));
                 TypeKind::TypeVariant(constrs)
             }
             _ => TypeKind::TypeAbstract, // fallback
@@ -318,7 +318,10 @@ impl<'a> SigReadContext<'a> {
         layout_ref
     }
 
-    fn read_constructor_reference(&mut self, value: &OcamlValue) -> crate::types::ConstructorReference {
+    fn read_constructor_reference(
+        &mut self,
+        value: &OcamlValue,
+    ) -> crate::types::ConstructorReference {
         let (_, fields) = value.as_block();
         crate::types::ConstructorReference {
             variant: self.read_variant_layout_ref(&fields[0]),
@@ -328,7 +331,12 @@ impl<'a> SigReadContext<'a> {
 
     fn read_variant_layout(&mut self, value: &OcamlValue) -> crate::types::VariantLayout {
         let (_, fields) = value.as_block();
-        let constructors = fields[1].as_block().1.iter().map(|case| self.read_variant_case(case)).collect();
+        let constructors = fields[1]
+            .as_block()
+            .1
+            .iter()
+            .map(|case| self.read_variant_case(case))
+            .collect();
         crate::types::VariantLayout::new(
             crate::types::VariantConfiguration {
                 unboxed: fields[0].as_bool(),
@@ -351,7 +359,9 @@ impl<'a> SigReadContext<'a> {
                         tag_name: self.read_string_option(&runtime[1]),
                         untagged: runtime[2].as_bool(),
                     },
-                    block_type: block[1].as_option().map(|v| self.read_variant_block_type(v)),
+                    block_type: block[1]
+                        .as_option()
+                        .map(|v| self.read_variant_block_type(v)),
                 })
             }
             _ => panic!("invalid variant constructor case tag {tag}"),
@@ -396,13 +406,30 @@ impl<'a> SigReadContext<'a> {
             OcamlValue::Int(6) => B::Object,
             OcamlValue::Int(7) => B::Unknown,
             OcamlValue::Block(0, fields) => B::Instance(match fields[0].as_int() {
-                0 => I::Array, 1 => I::ArrayBuffer, 2 => I::BigInt64Array, 3 => I::BigUint64Array,
-                4 => I::Blob, 5 => I::DataView, 6 => I::Date, 7 => I::File,
-                8 => I::Float32Array, 9 => I::Float64Array, 10 => I::Int16Array,
-                11 => I::Int32Array, 12 => I::Int8Array, 13 => I::Promise, 14 => I::RegExp,
-                15 => I::Uint16Array, 16 => I::Uint32Array, 17 => I::Uint8Array,
-                18 => I::Uint8ClampedArray, 19 => I::Set, 20 => I::Map, 21 => I::WeakSet,
-                22 => I::WeakMap, n => panic!("invalid variant instance {n}"),
+                0 => I::Array,
+                1 => I::ArrayBuffer,
+                2 => I::BigInt64Array,
+                3 => I::BigUint64Array,
+                4 => I::Blob,
+                5 => I::DataView,
+                6 => I::Date,
+                7 => I::File,
+                8 => I::Float32Array,
+                9 => I::Float64Array,
+                10 => I::Int16Array,
+                11 => I::Int32Array,
+                12 => I::Int8Array,
+                13 => I::Promise,
+                14 => I::RegExp,
+                15 => I::Uint16Array,
+                16 => I::Uint32Array,
+                17 => I::Uint8Array,
+                18 => I::Uint8ClampedArray,
+                19 => I::Set,
+                20 => I::Map,
+                21 => I::WeakSet,
+                22 => I::WeakMap,
+                n => panic!("invalid variant instance {n}"),
             }),
             _ => panic!("invalid variant block type"),
         }
@@ -1512,19 +1539,6 @@ fn read_alias_presence(value: &OcamlValue) -> AliasPresence {
 fn read_field_kind(_value: &OcamlValue) -> FieldKind {
     // For CMI-loaded types, just use Fpresent.
     FieldKind::Fpresent
-}
-
-/// Read unboxed_status.
-///
-/// Record fields:
-/// 0: unboxed: bool
-/// 1: default: bool
-fn read_unboxed_status(value: &OcamlValue) -> UnboxedStatus {
-    let fields = &value.as_block().1;
-    UnboxedStatus {
-        unboxed: fields[0].as_bool(),
-        default: fields[1].as_bool(),
-    }
 }
 
 #[cfg(test)]

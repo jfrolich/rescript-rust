@@ -65,7 +65,7 @@ fn build_matching_type_constructors(
             cd.cd_args,
             super::decl::ConstructorArguments::CstrTuple(ref args) if args.is_empty()
         );
-        let tag = if decl.type_unboxed.unboxed {
+        let tag = if decl.type_representation == crate::types::TypeRepresentation::Unboxed {
             ConstructorTag::CstrUnboxed
         } else if is_constant {
             ConstructorTag::CstrConstant(const_idx)
@@ -96,7 +96,7 @@ fn build_matching_type_constructors(
                     type_arity: inline_params.len() as i32,
                     type_kind: super::decl::TypeKind::TypeRecord(
                         labels.clone(),
-                        if decl.type_unboxed.unboxed {
+                        if decl.type_representation == crate::types::TypeRepresentation::Unboxed {
                             super::decl::RecordRepresentation::RecordUnboxed(false)
                         } else {
                             super::decl::RecordRepresentation::RecordInlined {
@@ -117,7 +117,7 @@ fn build_matching_type_constructors(
                     type_loc: cd.cd_loc,
                     type_attributes: vec![],
                     type_immediate: false,
-                    type_unboxed: super::decl::UnboxedStatus::default(),
+                    type_representation: crate::types::TypeRepresentation::Boxed,
                     type_variant_layout: None,
                     type_inlined_types: vec![],
                     type_path: None,
@@ -296,7 +296,7 @@ fn build_constructors_for_name(
                             type_loc: ext.ext_loc,
                             type_attributes: vec![],
                             type_immediate: false,
-                            type_unboxed: super::decl::UnboxedStatus::default(),
+                            type_representation: crate::types::TypeRepresentation::Boxed,
                             type_variant_layout: None,
                             type_inlined_types: vec![],
                             type_path: None,

@@ -95,7 +95,10 @@ impl TagInfo {
         let name = name.into();
         TagInfo::Constructor {
             runtime: crate::types::BlockRuntime {
-                tag: crate::types::VariantTag { name: name.clone(), tag_type: None },
+                tag: crate::types::VariantTag {
+                    name: name.clone(),
+                    tag_type: None,
+                },
                 tag_name: None,
                 untagged: false,
             },
