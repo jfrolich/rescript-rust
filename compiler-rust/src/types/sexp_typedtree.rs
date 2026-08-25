@@ -861,7 +861,7 @@ fn sexp_pattern_desc(
             };
             Sexp::list(vec![Sexp::atom("Tpat_variant"), string(label), arg_sexp])
         }
-        PatternDesc::Tpat_record(fields, flag) => {
+        PatternDesc::Tpat_record(fields, flag, rest) => {
             let mut field_items = Vec::new();
             for (li, _, p, opt_flag) in fields.iter() {
                 field_items.push(Sexp::list(vec![
@@ -870,10 +870,21 @@ fn sexp_pattern_desc(
                     Sexp::atom(if *opt_flag { "optional" } else { "required" }),
                 ]));
             }
+            let rest = match rest {
+                None => Sexp::atom("None"),
+                Some(rest) => Sexp::list(vec![
+                    Sexp::atom("Some"),
+                    sexp_ident(&rest.rest_ident),
+                    string(&rest.rest_name.txt),
+                    sexp_type_expr(arena, ctx, dedup, rest.rest_type),
+                    Sexp::list(rest.excluded_runtime_labels.iter().map(|label| string(label)).collect()),
+                ]),
+            };
             Sexp::list(vec![
                 Sexp::atom("Tpat_record"),
                 Sexp::list(field_items),
                 sexp_closed_flag(flag),
+                rest,
             ])
         }
         PatternDesc::Tpat_array(pats) => {
@@ -2121,17 +2132,7 @@ fn sexp_type_extension(
     dedup: &mut TypeDedupTable,
     te: &TypeExtension,
 ) -> Sexp {
-    let loc_sexp = if with_locs {
-        vec![location_idx(arena, with_locs, te.tyext_loc)]
-    } else {
-        vec![]
-    };
-    let mut items = vec![
-        Sexp::atom("type_extension"),
-        sexp_path(&te.tyext_path),
-        sexp_longident_idx(arena, ctx, te.tyext_txt.txt),
-    ];
-    items.extend(loc_sexp);
+    let mut items = vec![Sexp::atom("type_extension"), sexp_path(&te.tyext_path)];
     let mut param_items = Vec::new();
     for (ct, v) in te.tyext_params.iter() {
         param_items.push(Sexp::list(vec![
@@ -2401,17 +2402,11 @@ fn sexp_open_declaration(
     dedup: &mut TypeDedupTable,
     od: &OpenDeclaration,
 ) -> Sexp {
-    let loc_sexp = if with_locs {
-        vec![location_idx(arena, with_locs, od.open_loc)]
-    } else {
-        vec![]
-    };
     let mut items = vec![
         Sexp::atom("open_description"),
         sexp_path(&od.open_path),
         sexp_longident_idx(arena, ctx, od.open_txt.txt),
     ];
-    items.extend(loc_sexp);
     items.push(sexp_override_flag(&od.open_override));
     items.push(sexp_attributes(arena, with_locs, &od.open_attributes));
     Sexp::list(items)
@@ -2768,17 +2763,11 @@ fn sexp_open_description(
     dedup: &mut TypeDedupTable,
     od: &OpenDeclaration,
 ) -> Sexp {
-    let loc_sexp = if with_locs {
-        vec![location_idx(arena, with_locs, od.open_loc)]
-    } else {
-        vec![]
-    };
     let mut items = vec![
         Sexp::atom("open_description"),
         sexp_path(&od.open_path),
         sexp_longident_idx(arena, ctx, od.open_txt.txt),
     ];
-    items.extend(loc_sexp);
     items.push(sexp_override_flag(&od.open_override));
     items.push(sexp_attributes(arena, with_locs, &od.open_attributes));
     Sexp::list(items)

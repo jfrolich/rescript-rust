@@ -1292,7 +1292,7 @@ fn match_case_pattern(
                     // Bind the constructor arguments if present
                     if args.len() == 1 {
                         // Single argument — match against the record of bindings
-                        if let typedtree::PatternDesc::Tpat_record(fields, _) = &args[0].pat_desc {
+                        if let typedtree::PatternDesc::Tpat_record(fields, _, _) = &args[0].pat_desc {
                             for (_field_lid, lbl_desc, field_pat, _optional) in fields {
                                 let field_name = &lbl_desc.lbl_name;
                                 if let Some(field_value) = bindings.remove(field_name.as_str()) {
@@ -1328,7 +1328,7 @@ fn match_case_pattern(
         }
 
         // Record pattern — destructure comptime record
-        typedtree::PatternDesc::Tpat_record(fields, _) => {
+        typedtree::PatternDesc::Tpat_record(fields, _, _) => {
             if let ComptimeValue::Record(entries) = value {
                 let mut bindings = HashMap::new();
                 for (_field_lid, lbl_desc, field_pat, _optional) in fields {

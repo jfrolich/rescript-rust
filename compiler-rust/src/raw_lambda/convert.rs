@@ -400,7 +400,7 @@ where
                 iter_bound_pattern_idents(pat, f);
             }
         }
-        PatternDesc::Tpat_record(fields, _) => {
+        PatternDesc::Tpat_record(fields, _, _) => {
             for (_, _, pat, _) in fields {
                 iter_bound_pattern_idents(pat, f);
             }
@@ -6527,7 +6527,7 @@ impl<'a> RawLambdaConverter<'a> {
             PatternDesc::Tpat_tuple(_) => "Tpat_tuple",
             PatternDesc::Tpat_construct(_, _, _) => "Tpat_construct",
             PatternDesc::Tpat_variant(_, _, _) => "Tpat_variant",
-            PatternDesc::Tpat_record(_, _) => "Tpat_record",
+            PatternDesc::Tpat_record(_, _, _) => "Tpat_record",
             PatternDesc::Tpat_array(_) => "Tpat_array",
             PatternDesc::Tpat_or(_, _, _) => "Tpat_or",
         }
@@ -9013,7 +9013,7 @@ impl<'a> RawLambdaConverter<'a> {
             PatternDesc::Tpat_tuple(items) | PatternDesc::Tpat_array(items) => {
                 items.iter().all(Self::is_irrefutable_pattern)
             }
-            PatternDesc::Tpat_record(fields, _) => fields
+            PatternDesc::Tpat_record(fields, _, _) => fields
                 .iter()
                 .all(|(_, _, pat, _)| Self::is_irrefutable_pattern(pat)),
             PatternDesc::Tpat_construct(_, cstr, args) => match cstr.cstr_tag {
@@ -9056,7 +9056,7 @@ impl<'a> RawLambdaConverter<'a> {
                 }
                 Lambda::let_(LetKind::Alias, tmp, scrut, result)
             }
-            PatternDesc::Tpat_record(fields, _) => {
+            PatternDesc::Tpat_record(fields, _, _) => {
                 let tmp = self.fresh_ident("match");
                 let mut result = body;
                 for (lid, lbl, inner_pat, _) in fields.iter().rev() {
@@ -9189,7 +9189,7 @@ impl<'a> RawLambdaConverter<'a> {
                     None => result,
                 }
             }
-            PatternDesc::Tpat_record(fields, _) => {
+            PatternDesc::Tpat_record(fields, _, _) => {
                 let (tmp, wrap_tmp) = match scrut.clone() {
                     RawLambda::Lvar(id) => (id, None),
                     _ => {
@@ -9490,7 +9490,7 @@ impl<'a> RawLambdaConverter<'a> {
             PatternDesc::Tpat_any => body,
             PatternDesc::Tpat_var(_, _)
             | PatternDesc::Tpat_tuple(_)
-            | PatternDesc::Tpat_record(_, _)
+            | PatternDesc::Tpat_record(_, _, _)
             | PatternDesc::Tpat_array(_)
             | PatternDesc::Tpat_variant(_, Some(_), _) => {
                 self.bind_irrefutable_pattern_raw(inner, scrut.clone(), body)
@@ -9973,7 +9973,7 @@ impl<'a> RawLambdaConverter<'a> {
             PatternDesc::Tpat_any => body,
             PatternDesc::Tpat_var(_, _)
             | PatternDesc::Tpat_tuple(_)
-            | PatternDesc::Tpat_record(_, _)
+            | PatternDesc::Tpat_record(_, _, _)
             | PatternDesc::Tpat_array(_)
             | PatternDesc::Tpat_variant(_, Some(_), _) => {
                 self.bind_irrefutable_pattern(inner, scrut.clone(), body)
@@ -10773,7 +10773,7 @@ impl<'a> RawLambdaConverter<'a> {
             PatternDesc::Tpat_alias(p, _, _) => Self::pattern_inactive(p),
             PatternDesc::Tpat_variant(_, None, _) => true,
             PatternDesc::Tpat_variant(_, Some(p), _) => Self::pattern_inactive(p),
-            PatternDesc::Tpat_record(fields, _) => fields.iter().all(|(_, lbl, p, _)| {
+            PatternDesc::Tpat_record(fields, _, _) => fields.iter().all(|(_, lbl, p, _)| {
                 lbl.lbl_mut == crate::types::asttypes::MutableFlag::Immutable
                     && Self::pattern_inactive(p)
             }),

@@ -6688,7 +6688,7 @@ where
                 iter_bound_pattern_idents(p, f);
             }
         }
-        PatternDesc::Tpat_record(fields, _) => {
+        PatternDesc::Tpat_record(fields, _, _) => {
             for (_, _, p, _) in fields {
                 iter_bound_pattern_idents(p, f);
             }
@@ -6882,7 +6882,7 @@ fn collect_open_use_check(
         name: open.open_path.name(),
         path: open.open_path.clone(),
         opened_modtypes: opened_names.modtypes,
-        loc: open.open_loc,
+        loc: open.open_txt.loc,
         item_index,
         used: false,
     });
@@ -6917,7 +6917,7 @@ fn collect_bound_pattern_idents_with_loc(
                 collect_bound_pattern_idents_with_loc(pat, out);
             }
         }
-        PatternDesc::Tpat_record(fields, _) => {
+        PatternDesc::Tpat_record(fields, _, _) => {
             for (_, _, pat, _) in fields {
                 collect_bound_pattern_idents_with_loc(pat, out);
             }
@@ -7475,7 +7475,7 @@ fn pattern_uses_open_shadow_label_constructor(
         crate::types::typedtree::PatternDesc::Tpat_variant(_, payload, _) => payload
             .as_deref()
             .is_some_and(|pat| pattern_uses_open_shadow_label_constructor(ctx, env, pat, check)),
-        crate::types::typedtree::PatternDesc::Tpat_record(fields, _) => {
+        crate::types::typedtree::PatternDesc::Tpat_record(fields, _, _) => {
             fields.iter().any(|(_, label, pat, _)| {
                 label_matches_open_shadow_label_constructor(ctx, env, label, check)
                     || pattern_uses_open_shadow_label_constructor(ctx, env, pat, check)
@@ -8159,7 +8159,7 @@ fn pattern_uses_path(
         crate::types::typedtree::PatternDesc::Tpat_variant(_, payload, _) => payload
             .as_deref()
             .is_some_and(|pat| pattern_uses_path(ctx, pat, path_matches)),
-        crate::types::typedtree::PatternDesc::Tpat_record(fields, _) => {
+        crate::types::typedtree::PatternDesc::Tpat_record(fields, _, _) => {
             fields.iter().any(|(_, label, pat, _)| {
                 type_expr_uses_path(ctx, label.lbl_res, path_matches)
                     || type_expr_uses_path(ctx, label.lbl_arg, path_matches)
@@ -8992,7 +8992,7 @@ fn typed_core_type_uses_opened_path(
             }
         }),
         TypedCoreTypeDesc::Ttyp_package(package) => {
-            lid_uses_opened_path(arena, &package.pack_txt, &package.pack_path, open_path)
+            package.pack_path.name().starts_with(&format!("{}.", open_path.name()))
                 || package
                     .pack_fields
                     .iter()
@@ -9057,7 +9057,7 @@ fn type_extension_uses_opened_path(
     ext: &TypeExtension,
     open_path: &Path,
 ) -> bool {
-    lid_uses_opened_path(arena, &ext.tyext_txt, &ext.tyext_path, open_path)
+    ext.tyext_path.name().starts_with(&format!("{}.", open_path.name()))
         || ext
             .tyext_params
             .iter()
@@ -9128,7 +9128,7 @@ fn pattern_uses_opened_path(
         crate::types::typedtree::PatternDesc::Tpat_variant(_, payload, _) => payload
             .as_deref()
             .is_some_and(|pat| pattern_uses_opened_path(ctx, arena, pat, open_path)),
-        crate::types::typedtree::PatternDesc::Tpat_record(fields, _) => {
+        crate::types::typedtree::PatternDesc::Tpat_record(fields, _, _) => {
             fields.iter().any(|(lid, label, pat, _)| {
                 typed_label_uses_opened_path(ctx, arena, lid, label, open_path)
                     || pattern_uses_opened_path(ctx, arena, pat, open_path)
@@ -9574,7 +9574,7 @@ fn typed_core_type_uses_opened_modtype_name(
             }
         }),
         TypedCoreTypeDesc::Ttyp_package(package) => {
-            lid_unqualified_name_in(arena, &package.pack_txt, names)
+            names.contains(package.pack_path.last())
                 || package
                     .pack_fields
                     .iter()
@@ -10145,7 +10145,7 @@ fn pattern_constructor_usage(
         PatternDesc::Tpat_variant(_, Some(inner), _) => {
             usage.merge(pattern_constructor_usage(ctx, inner, matches_constructor));
         }
-        PatternDesc::Tpat_record(fields, _) => {
+        PatternDesc::Tpat_record(fields, _, _) => {
             for (_, _, pat, _) in fields {
                 usage.merge(pattern_constructor_usage(ctx, pat, matches_constructor));
             }
@@ -10742,7 +10742,7 @@ fn push_sig_values_from_env_pattern(
                 push_sig_values_from_env_pattern(env, p, sig_items);
             }
         }
-        PatternDesc::Tpat_record(fields, _) => {
+        PatternDesc::Tpat_record(fields, _, _) => {
             for (_, _, p, _) in fields {
                 push_sig_values_from_env_pattern(env, p, sig_items);
             }
@@ -19727,7 +19727,6 @@ pub fn transl_signature<'a>(
                     open_txt: od.popen_lid.clone(),
                     open_override: od.popen_override,
                     open_attributes: od.popen_attributes.clone(),
-                    open_loc: od.popen_loc,
                 })
             }
             PSigDesc::Psig_attribute(attr) => {
@@ -23182,11 +23181,9 @@ fn type_structure_item<'a>(
                 .collect();
             let desc = StructureItemDesc::Tstr_typext(TypeExtension {
                 tyext_path: path,
-                tyext_txt: ext.ptyext_path.clone(),
                 tyext_params: typed_params,
                 tyext_constructors: typed_constructors,
                 tyext_private: ext.ptyext_private,
-                tyext_loc: loc,
                 tyext_attributes: ext.ptyext_attributes.clone(),
             });
             Ok((
@@ -23993,7 +23990,6 @@ fn type_structure_item<'a>(
                 open_path: path,
                 open_txt: open_desc.popen_lid.clone(),
                 open_override: open_desc.popen_override,
-                open_loc: open_desc.popen_loc,
                 open_attributes: open_desc.popen_attributes.clone(),
             });
             Ok((

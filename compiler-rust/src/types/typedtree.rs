@@ -231,6 +231,7 @@ pub enum PatternDesc {
     Tpat_record(
         Vec<(Loc<LidentIdx>, LabelDescription, Pattern, bool)>,
         ClosedFlag,
+        Option<RecordPatternRest>,
     ),
 
     /// Array: `[| P1, ..., Pn |]`.
@@ -239,6 +240,19 @@ pub enum PatternDesc {
     /// Or-pattern: `P1 | P2`.
     /// The RowDesc is Some when translating type patterns.
     Tpat_or(Box<Pattern>, Box<Pattern>, Option<RowDesc>),
+}
+
+/// Typed record-rest binding (compiler/ml/typedtree.ml:38-43).
+#[derive(Debug, Clone)]
+pub struct RecordPatternRest {
+    /// Identifier bound for the rest value.
+    pub rest_ident: Ident,
+    /// Source name of the rest binding.
+    pub rest_name: Loc<String>,
+    /// Inferred record-rest type.
+    pub rest_type: TypeExprRef,
+    /// Runtime labels excluded from the rest object.
+    pub excluded_runtime_labels: Vec<String>,
 }
 
 // ============================================================================
@@ -611,8 +625,6 @@ pub enum RowFieldDesc {
 pub struct PackageType {
     /// Module type path.
     pub pack_path: Path,
-    /// Module type identifier.
-    pub pack_txt: Loc<LidentIdx>,
     /// Type constraints.
     pub pack_fields: Vec<(Loc<LidentIdx>, TypedCoreType)>,
 }
@@ -946,16 +958,12 @@ pub struct TypedLabelDeclaration {
 pub struct TypeExtension {
     /// Extended type path.
     pub tyext_path: Path,
-    /// Extended type longident.
-    pub tyext_txt: Loc<LidentIdx>,
     /// Type parameters.
     pub tyext_params: Vec<(TypedCoreType, Variance)>,
     /// Extension constructors.
     pub tyext_constructors: Vec<ExtensionConstructor>,
     /// Private flag.
     pub tyext_private: PrivateFlag,
-    /// Location.
-    pub tyext_loc: LocIdx,
     /// Attributes.
     pub tyext_attributes: Attributes,
 }
@@ -1002,8 +1010,6 @@ pub struct OpenDeclaration {
     pub open_txt: Located<LidentIdx>,
     /// Open override flag.
     pub open_override: OverrideFlag,
-    /// Location.
-    pub open_loc: LocIdx,
     /// Attributes.
     pub open_attributes: Attributes,
 }

@@ -421,7 +421,7 @@ fn le_pat(p: &Pattern, q: &Pattern) -> bool {
         }
         (PatternDesc::Tpat_variant(..), PatternDesc::Tpat_variant(..)) => false,
         (PatternDesc::Tpat_tuple(ps), PatternDesc::Tpat_tuple(qs)) => le_pats(ps, qs),
-        (PatternDesc::Tpat_record(l1, _), PatternDesc::Tpat_record(l2, _)) => {
+        (PatternDesc::Tpat_record(l1, _, _), PatternDesc::Tpat_record(l2, _, _)) => {
             let (ps, qs) = records_args_for_le_pats(l1, l2);
             le_pats(&ps, &qs)
         }
@@ -513,10 +513,10 @@ fn lub(p: &Pattern, q: &Pattern) -> Result<Pattern, Empty> {
         {
             Ok(p.clone())
         }
-        (PatternDesc::Tpat_record(l1, closed), PatternDesc::Tpat_record(l2, _)) => {
+        (PatternDesc::Tpat_record(l1, closed, _), PatternDesc::Tpat_record(l2, _, _)) => {
             let rs = record_lubs(l1, l2)?;
             Ok(make_pat(
-                PatternDesc::Tpat_record(rs, *closed),
+                PatternDesc::Tpat_record(rs, *closed, None),
                 p.pat_type,
                 p.pat_env,
             ))
@@ -639,13 +639,14 @@ fn normalize_pat(q: &Pattern) -> Pattern {
             q.pat_type,
             q.pat_env,
         ),
-        PatternDesc::Tpat_record(largs, closed) => make_pat(
+        PatternDesc::Tpat_record(largs, closed, _) => make_pat(
             PatternDesc::Tpat_record(
                 largs
                     .iter()
                     .map(|(lid, lbl, _, opt)| (lid.clone(), lbl.clone(), omega(), *opt))
                     .collect(),
                 *closed,
+                None,
             ),
             q.pat_type,
             q.pat_env,
@@ -681,7 +682,7 @@ fn do_set_args(erase_mutable: bool, q: &Pattern, r: &[Pattern]) -> Vec<Pattern> 
             result.extend(rest);
             result
         }
-        PatternDesc::Tpat_record(fields, closed) => {
+        PatternDesc::Tpat_record(fields, closed, _) => {
             let (args, rest) = read_args(fields.as_slice(), r);
             let new_fields: Vec<_> = fields
                 .iter()
@@ -695,7 +696,7 @@ fn do_set_args(erase_mutable: bool, q: &Pattern, r: &[Pattern]) -> Vec<Pattern> 
                 })
                 .collect();
             let mut result = vec![make_pat(
-                PatternDesc::Tpat_record(new_fields, *closed),
+                PatternDesc::Tpat_record(new_fields, *closed, None),
                 q.pat_type,
                 q.pat_env,
             )];
@@ -974,7 +975,7 @@ fn may_compat(p: &Pattern, q: &Pattern) -> bool {
         (PatternDesc::Tpat_array(ps), PatternDesc::Tpat_array(qs)) => {
             ps.len() == qs.len() && may_compats(ps, qs)
         }
-        (PatternDesc::Tpat_record(l1, _), PatternDesc::Tpat_record(l2, _)) => {
+        (PatternDesc::Tpat_record(l1, _, _), PatternDesc::Tpat_record(l2, _, _)) => {
             // Check compatible fields only
             may_compats_record(l1, l2)
         }
@@ -1409,11 +1410,11 @@ pub fn ctx_matcher<'a>(
                 _ => Err(MatchError::NoMatch),
             })
         }
-        PatternDesc::Tpat_record(fields, _) if !fields.is_empty() => {
+        PatternDesc::Tpat_record(fields, _, _) if !fields.is_empty() => {
             let fields = fields.clone();
             let p = p.clone();
             Box::new(move |q: &Pattern, rem: &[Pattern]| match &q.pat_desc {
-                PatternDesc::Tpat_record(fields2, _) if !fields2.is_empty() => {
+                PatternDesc::Tpat_record(fields2, _, _) if !fields2.is_empty() => {
                     let expanded = all_record_args(ctx_ref, q.pat_type, q.pat_env, fields2);
                     let mut result: Vec<Pattern> =
                         expanded.iter().map(|(_, _, p, _)| p.clone()).collect();
@@ -2807,10 +2808,10 @@ fn simplify_or(ctx_ref: Option<&TypeContext>, p: &Pattern) -> Pattern {
                     })),
                 }
             }
-            PatternDesc::Tpat_record(lbls, closed) => {
+            PatternDesc::Tpat_record(lbls, closed, _) => {
                 let all_lbls = all_record_args(ctx_ref, p.pat_type, p.pat_env, lbls);
                 Ok(Pattern {
-                    pat_desc: PatternDesc::Tpat_record(all_lbls, *closed),
+                    pat_desc: PatternDesc::Tpat_record(all_lbls, *closed, None),
                     ..p.clone()
                 })
             }
@@ -2882,15 +2883,15 @@ pub fn simplify_cases(
                     // keeps that same order without shifting the whole Rust Vec.
                     pending.push_front((new_pats, new_action));
                 }
-                PatternDesc::Tpat_record(lbls, _) if lbls.is_empty() => {
+                PatternDesc::Tpat_record(lbls, _, _) if lbls.is_empty() => {
                     let mut row = vec![omega()];
                     row.extend(patl.iter().cloned());
                     result.push((row, action));
                 }
-                PatternDesc::Tpat_record(lbls, closed) => {
+                PatternDesc::Tpat_record(lbls, closed, _) => {
                     let all_lbls = all_record_args(ctx_ref, pat.pat_type, pat.pat_env, lbls);
                     let full_pat = Pattern {
-                        pat_desc: PatternDesc::Tpat_record(all_lbls, *closed),
+                        pat_desc: PatternDesc::Tpat_record(all_lbls, *closed, None),
                         ..pat.clone()
                     };
                     let mut row = vec![full_pat];
@@ -3022,7 +3023,7 @@ pub fn extract_vars(r: IdentSet, p: &Pattern) -> IdentSet {
             extract_vars(r, p)
         }
         PatternDesc::Tpat_tuple(pats) => pats.iter().fold(r, |r, p| extract_vars(r, p)),
-        PatternDesc::Tpat_record(lpats, _) => {
+        PatternDesc::Tpat_record(lpats, _, _) => {
             lpats.iter().fold(r, |r, (_, _, p, _)| extract_vars(r, p))
         }
         PatternDesc::Tpat_construct(_, _, pats) => pats.iter().fold(r, |r, p| extract_vars(r, p)),
@@ -3045,7 +3046,7 @@ fn pattern_binds_vars(p: &Pattern) -> bool {
         PatternDesc::Tpat_tuple(pats)
         | PatternDesc::Tpat_construct(_, _, pats)
         | PatternDesc::Tpat_array(pats) => pats.iter().any(pattern_binds_vars),
-        PatternDesc::Tpat_record(lpats, _) => {
+        PatternDesc::Tpat_record(lpats, _, _) => {
             lpats.iter().any(|(_, _, pat, _)| pattern_binds_vars(pat))
         }
         PatternDesc::Tpat_variant(_, Some(p), _) | PatternDesc::Tpat_or(p, _, _) => {
@@ -3150,7 +3151,7 @@ fn alpha_pat(env: &[(Ident, Ident)], pat: &Pattern) -> Pattern {
             ),
             ..pat.clone()
         },
-        PatternDesc::Tpat_record(fields, closed) => Pattern {
+        PatternDesc::Tpat_record(fields, closed, _) => Pattern {
             pat_desc: PatternDesc::Tpat_record(
                 fields
                     .iter()
@@ -3159,6 +3160,7 @@ fn alpha_pat(env: &[(Ident, Ident)], pat: &Pattern) -> Pattern {
                     })
                     .collect(),
                 *closed,
+                None,
             ),
             ..pat.clone()
         },
@@ -3448,7 +3450,7 @@ fn group_tuple(p: &Pattern) -> bool {
 fn group_record(p: &Pattern) -> bool {
     matches!(
         &p.pat_desc,
-        PatternDesc::Tpat_record(_, _) | PatternDesc::Tpat_any
+        PatternDesc::Tpat_record(_, _, _) | PatternDesc::Tpat_any
     )
 }
 
@@ -3466,7 +3468,7 @@ fn get_group(p: &Pattern) -> fn(&Pattern) -> bool {
         PatternDesc::Tpat_constant(_) => group_constant,
         PatternDesc::Tpat_construct(_, _, _) => group_constructor,
         PatternDesc::Tpat_tuple(_) => group_tuple,
-        PatternDesc::Tpat_record(_, _) => group_record,
+        PatternDesc::Tpat_record(_, _, _) => group_record,
         PatternDesc::Tpat_array(_) => group_array,
         PatternDesc::Tpat_variant(_, _, _) => group_variant,
         _ => panic!("Matching.get_group"),
@@ -5390,7 +5392,7 @@ fn get_args_record(num_fields: usize, p: &Pattern, rem: &[Pattern]) -> Vec<Patte
             result.extend(rem.iter().cloned());
             result
         }
-        PatternDesc::Tpat_record(lbl_pat_list, _) => {
+        PatternDesc::Tpat_record(lbl_pat_list, _, _) => {
             let mut result = record_matching_line_from_fields(num_fields, lbl_pat_list);
             result.extend(rem.iter().cloned());
             result
@@ -5413,10 +5415,10 @@ fn matcher_record(
             result.extend(rem.iter().cloned());
             Ok(result)
         }
-        PatternDesc::Tpat_record(fields, _) if fields.is_empty() && num_fields == 0 => {
+        PatternDesc::Tpat_record(fields, _, _) if fields.is_empty() && num_fields == 0 => {
             Ok(rem.to_vec())
         }
-        PatternDesc::Tpat_record(lbl_pat_list, _) => {
+        PatternDesc::Tpat_record(lbl_pat_list, _, _) => {
             // Check that the first label's lbl_all length matches num_fields.
             // In OCaml: Array.length lbl.lbl_all = num_fields
             // In Rust, lbl_all is a LabelArrayRef placeholder. We check using
@@ -8483,7 +8485,7 @@ fn do_compile_matching(
                         next_raise_count,
                     )
                 }
-                PatternDesc::Tpat_record(fields, _) if !fields.is_empty() => {
+                PatternDesc::Tpat_record(fields, _, _) if !fields.is_empty() => {
                     let all_labels = resolve_all_record_labels(ctx_ref, &pat, fields);
                     let norm_pat = normalize_pat(&pat);
                     compile_no_test(
@@ -9404,7 +9406,7 @@ fn find_in_pat(pred: &dyn Fn(&PatternDesc) -> bool, p: &Pattern) -> bool {
         PatternDesc::Tpat_tuple(ps)
         | PatternDesc::Tpat_construct(_, _, ps)
         | PatternDesc::Tpat_array(ps) => ps.iter().any(|p| find_in_pat(pred, p)),
-        PatternDesc::Tpat_record(lpats, _) => lpats.iter().any(|(_, _, p, _)| find_in_pat(pred, p)),
+        PatternDesc::Tpat_record(lpats, _, _) => lpats.iter().any(|(_, _, p, _)| find_in_pat(pred, p)),
         PatternDesc::Tpat_or(p, q, _) => find_in_pat(pred, p) || find_in_pat(pred, q),
         PatternDesc::Tpat_constant(_)
         | PatternDesc::Tpat_var(_, _)
@@ -9417,7 +9419,7 @@ fn find_in_pat(pred: &dyn Fn(&PatternDesc) -> bool, p: &Pattern) -> bool {
 /// Equivalent to OCaml's `have_mutable_field`.
 fn have_mutable_field(p: &PatternDesc) -> bool {
     match p {
-        PatternDesc::Tpat_record(lps, _) => lps
+        PatternDesc::Tpat_record(lps, _, _) => lps
             .iter()
             .any(|(_, lbl, _, _)| matches!(lbl.lbl_mut, MutableFlag::Mutable)),
         _ => false,

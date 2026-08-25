@@ -236,7 +236,7 @@ pub fn max_lambda_input_stamp(typed_structure: &crate::types::typedtree::Structu
                     visit_pattern(max_stamp, inner);
                 }
             }
-            PatternDesc::Tpat_record(fields, _) => {
+            PatternDesc::Tpat_record(fields, _, _) => {
                 for (_, _, pattern, _) in fields {
                     visit_pattern(max_stamp, pattern);
                 }
@@ -13926,7 +13926,7 @@ pub(crate) fn normalize_signature_types(
                     collect_bound_names(p, names);
                 }
             }
-            PatternDesc::Tpat_record(fields, _) => {
+            PatternDesc::Tpat_record(fields, _, _) => {
                 for (_, _, p, _) in fields {
                     collect_bound_names(p, names);
                 }

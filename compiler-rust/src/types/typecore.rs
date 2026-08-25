@@ -3291,7 +3291,6 @@ fn transl_type_inner(
             let ctyp = TypedCoreType {
                 ctyp_desc: TypedCoreTypeDesc::Ttyp_package(crate::types::typedtree::PackageType {
                     pack_path,
-                    pack_txt: mod_lid.clone(),
                     pack_fields: typed_fields,
                 }),
                 ctyp_type: package_ty,
@@ -4531,7 +4530,7 @@ fn build_as_type(
                 Ok(ty_res)
             }
         }
-        PatternDesc::Tpat_record(fields, _closed) => {
+        PatternDesc::Tpat_record(fields, _closed, _) => {
             let first_label = fields.first().map(|(_, lbl, _, _)| lbl);
             if first_label.is_some_and(|lbl| lbl.lbl_private == crate::types::PrivateFlag::Private)
             {
@@ -4790,7 +4789,7 @@ fn alpha_pattern(alpha_env: &[(Ident, Ident)], pat: &Pattern) -> Pattern {
             ),
             ..pat.clone()
         },
-        PatternDesc::Tpat_record(fields, closed) => Pattern {
+        PatternDesc::Tpat_record(fields, closed, _) => Pattern {
             pat_desc: PatternDesc::Tpat_record(
                 fields
                     .iter()
@@ -4804,6 +4803,7 @@ fn alpha_pattern(alpha_env: &[(Ident, Ident)], pat: &Pattern) -> Pattern {
                     })
                     .collect(),
                 *closed,
+                None,
             ),
             ..pat.clone()
         },
@@ -5622,7 +5622,7 @@ fn type_pattern_record(
     }
 
     Ok(Pattern::new(
-        PatternDesc::Tpat_record(typed_fields, closed_flag),
+        PatternDesc::Tpat_record(typed_fields, closed_flag, None),
         loc.clone(),
         expected_ty,
         tctx.type_ctx.store_typed_env(env),
@@ -9912,7 +9912,7 @@ fn check_partial_simple_rows(
             PatternDesc::Tpat_var(_, _) => true,
             PatternDesc::Tpat_alias(inner, _, _) => is_catch_all(inner),
             PatternDesc::Tpat_or(p1, p2, _) => is_catch_all(p1) || is_catch_all(p2),
-            PatternDesc::Tpat_record(fields, _) => {
+            PatternDesc::Tpat_record(fields, _, _) => {
                 fields
                     .iter()
                     .all(|(_, label_desc, field_pat, optional_attr)| {
@@ -9991,7 +9991,7 @@ fn check_partial_simple_rows(
             let Some(ExhaustPat::Pat(pat)) = row.first() else {
                 continue;
             };
-            let PatternDesc::Tpat_record(fields, _) = &pat.pat_desc else {
+            let PatternDesc::Tpat_record(fields, _, _) = &pat.pat_desc else {
                 continue;
             };
             for (_, label, _, _) in fields {
@@ -10071,7 +10071,7 @@ fn check_partial_simple_rows(
                     out.push(specialized);
                 }
                 Some(ExhaustPat::Pat(pat)) => {
-                    if let PatternDesc::Tpat_record(fields, _) = &pat.pat_desc {
+                    if let PatternDesc::Tpat_record(fields, _, _) = &pat.pat_desc {
                         let mut specialized = labels
                             .iter()
                             .map(|label| {
@@ -10520,7 +10520,7 @@ fn collect_fragile_match_paths(ctx: &TypeContext, env: &Env, pat: &Pattern, path
                 collect_fragile_match_paths(ctx, env, item, paths);
             }
         }
-        PatternDesc::Tpat_record(fields, _) => {
+        PatternDesc::Tpat_record(fields, _, _) => {
             for (_, _, field_pat, _) in fields {
                 collect_fragile_match_paths(ctx, env, field_pat, paths);
             }
@@ -10549,7 +10549,7 @@ fn pattern_has_catch_all_branch(pat: &Pattern) -> bool {
         PatternDesc::Tpat_tuple(items) | PatternDesc::Tpat_array(items) => {
             items.iter().all(pattern_has_catch_all_branch)
         }
-        PatternDesc::Tpat_record(fields, _) => fields
+        PatternDesc::Tpat_record(fields, _, _) => fields
             .iter()
             .all(|(_, _, field_pat, _)| pattern_has_catch_all_branch(field_pat)),
         _ => false,
@@ -10654,7 +10654,7 @@ fn collect_optional_record_missing_examples_single_case(
                 )
             })
         }
-        PatternDesc::Tpat_record(fields, _) => {
+        PatternDesc::Tpat_record(fields, _, _) => {
             for (_, label_desc, field_pat, optional_attr) in fields {
                 if label_desc.lbl_optional && !*optional_attr {
                     let present_pat = some_constructor_arg(field_pat).unwrap_or(field_pat);
@@ -10784,7 +10784,7 @@ fn collect_optional_record_field_coverage(
                 );
             }
         }
-        PatternDesc::Tpat_record(fields, _) => {
+        PatternDesc::Tpat_record(fields, _, _) => {
             for (_, label_desc, field_pat, optional_attr) in fields {
                 if label_desc.lbl_optional {
                     let key = (constructor_path.clone(), label_desc.lbl_name.clone());
@@ -11019,7 +11019,7 @@ fn typed_pattern_contains_generalized_constructor(pat: &Pattern) -> bool {
         PatternDesc::Tpat_tuple(items) | PatternDesc::Tpat_array(items) => items
             .iter()
             .any(typed_pattern_contains_generalized_constructor),
-        PatternDesc::Tpat_record(fields, _) => fields
+        PatternDesc::Tpat_record(fields, _, _) => fields
             .iter()
             .any(|(_, _, pat, _)| typed_pattern_contains_generalized_constructor(pat)),
         PatternDesc::Tpat_variant(_, Some(arg), _) => {
@@ -11347,7 +11347,7 @@ fn pattern_variable_paths(pat: &Pattern) -> HashMap<String, Vec<Vec<usize>>> {
                 collect(arg, path, vars);
                 path.pop();
             }
-            PatternDesc::Tpat_record(fields, _) => {
+            PatternDesc::Tpat_record(fields, _, _) => {
                 for (idx, (_, _, field_pat, _)) in fields.iter().enumerate() {
                     path.push(idx);
                     collect(field_pat, path, vars);
@@ -11386,7 +11386,7 @@ fn collect_pattern_bound_idents(pat: &Pattern, vars: &mut Vec<Ident>) {
         PatternDesc::Tpat_variant(_, Some(arg), _) => {
             collect_pattern_bound_idents(arg, vars);
         }
-        PatternDesc::Tpat_record(fields, _) => {
+        PatternDesc::Tpat_record(fields, _, _) => {
             for (_, _, field_pat, _) in fields {
                 collect_pattern_bound_idents(field_pat, vars);
             }
@@ -11634,7 +11634,7 @@ fn collect_ambiguous_or_pattern_vars(pat: &Pattern, vars: &mut HashSet<String>) 
         PatternDesc::Tpat_variant(_, Some(arg), _) => {
             collect_ambiguous_or_pattern_vars(arg, vars);
         }
-        PatternDesc::Tpat_record(fields, _) => {
+        PatternDesc::Tpat_record(fields, _, _) => {
             for (_, _, field_pat, _) in fields {
                 collect_ambiguous_or_pattern_vars(field_pat, vars);
             }
@@ -11788,7 +11788,7 @@ fn missing_examples_for_pattern(
         PatternDesc::Tpat_construct(_, cstr, args) => {
             missing_construct_examples(tctx, env, pat, cstr, args)
         }
-        PatternDesc::Tpat_record(fields, _) => {
+        PatternDesc::Tpat_record(fields, _, _) => {
             for (_, label_desc, field_pat, _) in fields {
                 let field_examples = missing_examples_for_pattern(tctx, env, field_pat);
                 if !field_examples.is_empty() {
@@ -12064,7 +12064,7 @@ fn render_pattern_example(pat: &Pattern) -> String {
             Some(arg) => format!("#{label}({})", render_pattern_example(arg)),
             None => format!("#{label}"),
         },
-        PatternDesc::Tpat_record(fields, _) => {
+        PatternDesc::Tpat_record(fields, _, _) => {
             let fields = fields
                 .iter()
                 .map(|(_, label, field_pat, _)| {
@@ -12285,7 +12285,7 @@ fn pressure_matrix_normalize_pat(pat: &Pattern) -> Pattern {
             normalized.pat_desc = PatternDesc::Tpat_array(pressure_matrix_omega_list(items.len()));
             normalized
         }
-        PatternDesc::Tpat_record(fields, closed) => {
+        PatternDesc::Tpat_record(fields, closed, _) => {
             let mut normalized = pat.clone();
             normalized.pat_desc = PatternDesc::Tpat_record(
                 fields
@@ -12295,6 +12295,7 @@ fn pressure_matrix_normalize_pat(pat: &Pattern) -> Pattern {
                     })
                     .collect(),
                 *closed,
+                None,
             );
             normalized
         }
@@ -12309,7 +12310,7 @@ fn pressure_matrix_simple_match(left: &Pattern, right: &Pattern) -> bool {
         }
         (PatternDesc::Tpat_variant(l1, _, _), PatternDesc::Tpat_variant(l2, _, _)) => l1 == l2,
         (PatternDesc::Tpat_constant(c1), PatternDesc::Tpat_constant(c2)) => constants_equal(c1, c2),
-        (PatternDesc::Tpat_record(_, _), PatternDesc::Tpat_record(_, _)) => true,
+        (PatternDesc::Tpat_record(_, _, _), PatternDesc::Tpat_record(_, _, _)) => true,
         (PatternDesc::Tpat_tuple(a), PatternDesc::Tpat_tuple(b))
         | (PatternDesc::Tpat_array(a), PatternDesc::Tpat_array(b)) => a.len() == b.len(),
         (_, PatternDesc::Tpat_any | PatternDesc::Tpat_var(_, _)) => true,
@@ -12327,7 +12328,7 @@ type PressureRecordField = (
 fn pressure_matrix_record_arg(pat: &Pattern) -> Vec<PressureRecordField> {
     match &pat.pat_desc {
         PatternDesc::Tpat_any => vec![],
-        PatternDesc::Tpat_record(fields, _) => fields.clone(),
+        PatternDesc::Tpat_record(fields, _, _) => fields.clone(),
         _ => panic!("Parmatch.record_arg"),
     }
 }
@@ -12353,7 +12354,7 @@ fn pressure_matrix_simple_match_args(left: &Pattern, right: &Pattern) -> Vec<Pat
         PatternDesc::Tpat_construct(_, _, args) => args.clone(),
         PatternDesc::Tpat_variant(_, Some(arg), _) => vec![(*arg.clone())],
         PatternDesc::Tpat_tuple(args) => args.clone(),
-        PatternDesc::Tpat_record(args, _) => {
+        PatternDesc::Tpat_record(args, _, _) => {
             pressure_matrix_extract_fields(&pressure_matrix_record_arg(left), args)
         }
         PatternDesc::Tpat_array(args) => args.clone(),
@@ -12362,7 +12363,7 @@ fn pressure_matrix_simple_match_args(left: &Pattern, right: &Pattern) -> Vec<Pat
             | PatternDesc::Tpat_tuple(args)
             | PatternDesc::Tpat_array(args) => pressure_matrix_omega_list(args.len()),
             PatternDesc::Tpat_variant(_, Some(_), _) => vec![pressure_matrix_omega_pat()],
-            PatternDesc::Tpat_record(args, _) => pressure_matrix_omega_list(args.len()),
+            PatternDesc::Tpat_record(args, _, _) => pressure_matrix_omega_list(args.len()),
             _ => vec![],
         },
         _ => vec![],
@@ -12463,7 +12464,7 @@ fn pressure_matrix_coherent_heads(left: &Pattern, right: &Pattern) -> bool {
             pressure_matrix_constant_kind(c1) == pressure_matrix_constant_kind(c2)
         }
         (PatternDesc::Tpat_tuple(a), PatternDesc::Tpat_tuple(b)) => a.len() == b.len(),
-        (PatternDesc::Tpat_record(a, _), PatternDesc::Tpat_record(b, _)) => {
+        (PatternDesc::Tpat_record(a, _, _), PatternDesc::Tpat_record(b, _, _)) => {
             a.is_empty() || b.is_empty() || a.len() == b.len()
         }
         (PatternDesc::Tpat_any, _)
@@ -12509,7 +12510,7 @@ fn pressure_matrix_discr_pat(q: &Pattern, rows: &[Vec<Pattern>]) -> Pattern {
                 }
                 PatternDesc::Tpat_any | PatternDesc::Tpat_var(_, _) => {}
                 PatternDesc::Tpat_tuple(_) => return pressure_matrix_normalize_pat(head),
-                PatternDesc::Tpat_record(fields, closed) => {
+                PatternDesc::Tpat_record(fields, closed, _) => {
                     let existing = pressure_matrix_record_arg(&acc);
                     let mut merged = existing.clone();
                     for (lid, lbl, _, opt) in fields.iter().rev() {
@@ -12524,7 +12525,7 @@ fn pressure_matrix_discr_pat(q: &Pattern, rows: &[Vec<Pattern>]) -> Pattern {
                         }
                     }
                     let mut updated = head.clone();
-                    updated.pat_desc = PatternDesc::Tpat_record(merged, *closed);
+                    updated.pat_desc = PatternDesc::Tpat_record(merged, *closed, None);
                     acc = updated;
                 }
                 _ => {}
@@ -12535,7 +12536,7 @@ fn pressure_matrix_discr_pat(q: &Pattern, rows: &[Vec<Pattern>]) -> Pattern {
 
     let normalized = pressure_matrix_normalize_pat(q);
     match normalized.pat_desc {
-        PatternDesc::Tpat_any | PatternDesc::Tpat_record(_, _) => acc_pat(normalized, rows),
+        PatternDesc::Tpat_any | PatternDesc::Tpat_record(_, _, _) => acc_pat(normalized, rows),
         _ => normalized,
     }
 }
@@ -12622,7 +12623,7 @@ fn pressure_matrix_filter_all(
     }
 
     let mut env = match pat0.pat_desc {
-        PatternDesc::Tpat_record(_, _) | PatternDesc::Tpat_tuple(_) => vec![(pat0.clone(), vec![])],
+        PatternDesc::Tpat_record(_, _, _) | PatternDesc::Tpat_tuple(_) => vec![(pat0.clone(), vec![])],
         _ => vec![],
     };
 
@@ -12826,7 +12827,7 @@ fn pressure_matrix_full_match(
             }
         }
         PatternDesc::Tpat_constant(_) => false,
-        PatternDesc::Tpat_tuple(_) | PatternDesc::Tpat_record(_, _) => true,
+        PatternDesc::Tpat_tuple(_) | PatternDesc::Tpat_record(_, _, _) => true,
         PatternDesc::Tpat_array(_) => false,
         PatternDesc::Tpat_any
         | PatternDesc::Tpat_var(_, _)
@@ -12946,7 +12947,7 @@ fn typed_pattern_has_variant(pat: &Pattern) -> bool {
             items.iter().any(typed_pattern_has_variant)
         }
         PatternDesc::Tpat_construct(_, _, args) => args.iter().any(typed_pattern_has_variant),
-        PatternDesc::Tpat_record(fields, _) => fields
+        PatternDesc::Tpat_record(fields, _, _) => fields
             .iter()
             .any(|(_, _, field_pat, _)| typed_pattern_has_variant(field_pat)),
         PatternDesc::Tpat_any | PatternDesc::Tpat_var(_, _) | PatternDesc::Tpat_constant(_) => {
@@ -13154,7 +13155,7 @@ fn collect_variant_path_alternatives_in_pattern(
             }
             alts
         }
-        PatternDesc::Tpat_record(fields, _) => {
+        PatternDesc::Tpat_record(fields, _, _) => {
             let mut alts = vec![base];
             for (_, label_desc, field_pat, _) in fields {
                 let mut child_path = path.to_vec();
@@ -13915,7 +13916,7 @@ fn finalize_variant_in_pattern(
                 finalize_variant_in_pattern(tctx, env, arg, convert_closed_reither);
             }
         }
-        PatternDesc::Tpat_record(fields, _) => {
+        PatternDesc::Tpat_record(fields, _, _) => {
             for (_, _, field_pat, _) in fields {
                 finalize_variant_in_pattern(tctx, env, field_pat, convert_closed_reither);
             }
@@ -13966,7 +13967,7 @@ fn pressure_variant_rows_in_let_pattern(
                 pressure_variant_rows_in_let_pattern(tctx, env, arg);
             }
         }
-        PatternDesc::Tpat_record(fields, _) => {
+        PatternDesc::Tpat_record(fields, _, _) => {
             for (_, _, field_pat, _) in fields {
                 pressure_variant_rows_in_let_pattern(tctx, env, field_pat);
             }
@@ -19632,7 +19633,7 @@ fn letmodule_local_escape_pattern_site(
         | PatternDesc::Tpat_construct(_, _, items) => items
             .iter()
             .find_map(|item| letmodule_local_escape_pattern_site(ctx, item, module_id)),
-        PatternDesc::Tpat_record(fields, _) => fields.iter().find_map(|(_, _, field_pat, _)| {
+        PatternDesc::Tpat_record(fields, _, _) => fields.iter().find_map(|(_, _, field_pat, _)| {
             letmodule_local_escape_pattern_site(ctx, field_pat, module_id)
         }),
         PatternDesc::Tpat_any
@@ -21501,7 +21502,7 @@ fn iter_typed_pattern<F: FnMut(&Pattern)>(pat: &Pattern, f: &mut F) {
                 iter_typed_pattern(arg, f);
             }
         }
-        PatternDesc::Tpat_record(fields, _) => {
+        PatternDesc::Tpat_record(fields, _, _) => {
             for (_, _, field_pat, _) in fields {
                 iter_typed_pattern(field_pat, f);
             }
@@ -21537,7 +21538,7 @@ fn collect_typed_pattern_idents<'a>(pat: &'a Pattern, out: &mut Vec<(&'a Ident, 
         PatternDesc::Tpat_variant(_, Some(arg), _) => {
             collect_typed_pattern_idents(arg, out);
         }
-        PatternDesc::Tpat_record(fields, _) => {
+        PatternDesc::Tpat_record(fields, _, _) => {
             for (_, _, field_pat, _) in fields {
                 collect_typed_pattern_idents(field_pat, out);
             }
@@ -22112,7 +22113,7 @@ fn rec_pattern_variables(pat: &Pattern) -> Vec<Ident> {
                 }
             }
             PatternDesc::Tpat_variant(_, Some(arg), _) => collect(arg, f),
-            PatternDesc::Tpat_record(fields, _) => {
+            PatternDesc::Tpat_record(fields, _, _) => {
                 for (_, _, field_pat, _) in fields {
                     collect(field_pat, f);
                 }
@@ -22138,7 +22139,7 @@ fn rec_pattern_is_destructuring(pat: &Pattern) -> bool {
         | PatternDesc::Tpat_tuple(_)
         | PatternDesc::Tpat_construct(_, _, _)
         | PatternDesc::Tpat_variant(_, _, _)
-        | PatternDesc::Tpat_record(_, _)
+        | PatternDesc::Tpat_record(_, _, _)
         | PatternDesc::Tpat_array(_) => true,
         PatternDesc::Tpat_or(left, right, _) => {
             rec_pattern_is_destructuring(left) || rec_pattern_is_destructuring(right)
