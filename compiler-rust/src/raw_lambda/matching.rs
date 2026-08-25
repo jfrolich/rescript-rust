@@ -9600,11 +9600,7 @@ pub fn partial_function(_ctx_ref: &TypeContext, loc: Location) -> RawLambda {
     // when this is called from convert.rs which has arena access.
     let fname = String::new();
 
-    let match_failure_ident = Ident::new(
-        "Match_failure",
-        17, // PREDEF_MATCH_FAILURE_STAMP
-        IdentFlags::PREDEF_EXN.with_global(),
-    );
+    let match_failure_ident = crate::types::predef::ident_match_failure();
     let exn = RawLambda::LglobalModule(match_failure_ident, false);
     let payload = RawLambda::Lconst(crate::lambda::Constant::Block {
         tag: 0,

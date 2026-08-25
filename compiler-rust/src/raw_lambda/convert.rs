@@ -53,8 +53,10 @@ use crate::types::typedtree::{
     RecordField, RecordLabelDefinition, Structure, StructureItem, StructureItemDesc, ValueBinding,
 };
 
-const PREDEF_MATCH_FAILURE_STAMP: i32 = 17;
-const PREDEF_ASSERT_FAILURE_STAMP: i32 = 27;
+// Keep these aligned with compiler/ml/predef.ml's allocation order. The
+// iterable, asyncIterable, and taggedTemplate predefs precede exceptions.
+const PREDEF_MATCH_FAILURE_STAMP: i32 = 20;
+const PREDEF_ASSERT_FAILURE_STAMP: i32 = 30;
 const REC_MODULE_FUNCTION_CSTR_CONST: i32 = 3;
 const REC_MODULE_FUNCTION_CSTR_NON_CONST: i32 = 2;
 

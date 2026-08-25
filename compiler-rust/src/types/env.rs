@@ -41,23 +41,18 @@ fn free_vars(ctx: &TypeContext, ty: TypeExprRef) -> HashSet<TypeExprRef> {
 }
 
 fn predef_exception_ident(name: &str) -> Option<Ident> {
-    let stamp = match name {
-        "Match_failure" => 17,
-        "Invalid_argument" => 18,
-        "Failure" => 19,
-        "JsExn" => 23,
-        "Not_found" => 24,
-        "End_of_file" => 25,
-        "Division_by_zero" => 26,
-        "Assert_failure" => 27,
-        "Undefined_recursive_module" => 28,
+    Some(match name {
+        "Match_failure" => super::predef::ident_match_failure(),
+        "Invalid_argument" => super::predef::ident_invalid_argument(),
+        "Failure" => super::predef::ident_failure(),
+        "JsExn" => super::predef::ident_js_exn(),
+        "Not_found" => super::predef::ident_not_found(),
+        "End_of_file" => super::predef::ident_end_of_file(),
+        "Division_by_zero" => super::predef::ident_division_by_zero(),
+        "Assert_failure" => super::predef::ident_assert_failure(),
+        "Undefined_recursive_module" => super::predef::ident_undefined_recursive_module(),
         _ => return None,
-    };
-    Some(Ident::new(
-        name,
-        stamp,
-        IdentFlags::PREDEF_EXN.with_global(),
-    ))
+    })
 }
 
 fn free_vars_rec(
