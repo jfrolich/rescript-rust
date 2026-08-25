@@ -32,7 +32,7 @@ use crate::location::Location;
 use crate::parse_arena::{LidentIdx, LocIdx, Located, ParseArena, PosIdx, StrIdx};
 use crate::parser::ast::{
     ArgLabel, Attributes, Constant as ParsedConstant, Expression as ParsedExpression,
-    Pattern as ParsedPattern, PexpApply, PexpFun, RecFlag,
+    Pattern as ParsedPattern, PexpApply, RecFlag,
 };
 use crate::parser::longident::Longident;
 use crate::types::type_expr::TypeExprRefSet;
@@ -8705,17 +8705,14 @@ fn filter_arrow_for_lowered_apply(
     arity: usize,
 ) -> Option<(TypeExprRef, TypeExprRef)> {
     let ctx = tctx.type_ctx;
-    let mut current = funct_ty;
-    let mut first_arg: Option<TypeExprRef> = None;
-    for _ in 0..arity {
-        let expanded = crate::types::ctype::expand_head(ctx, env, current);
-        let (arg_ty, ret_ty) = crate::types::ctype::split_arrow(ctx, expanded)?;
-        if first_arg.is_none() {
-            first_arg = Some(arg_ty);
+    let expanded = crate::types::ctype::expand_head(ctx, env, funct_ty);
+    let desc = ctx.get_desc(expanded);
+    match &*desc {
+        TypeDesc::Tarrow { args, ret } if args.len() == arity => {
+            Some((args.first()?.typ, *ret))
         }
-        current = ret_ty;
+        _ => None,
     }
-    Some((first_arg?, current))
 }
 
 fn type_application(
@@ -8732,7 +8729,7 @@ fn type_application(
 ) -> TypeCoreResult<Expression> {
     use crate::types::typedtree::ApplyArg;
 
-    enum PendingApplyArg<'a> {
+    enum ApplyArgThunk<'a> {
         Provided {
             label: crate::types::ArgLabel,
             expr: &'a ParsedExpression,
@@ -8986,467 +8983,215 @@ fn type_application(
         unify_expression_types(tctx, loc, uncommitted_funct_ty, arrow, None)?;
     }
 
-    // Match OCaml's use of expand_head when deciding application behavior.
-    let mut current_ty = typed_funct.exp_type;
-    // OCaml typecore.ml:
-    //   type_args ... ~ty_fun:funct.exp_type (instance env funct.exp_type)
-    let mut current_ty0 = crate::types::instance(ctx, typed_funct.exp_type);
-    let expanded_funct_ty = crate::types::ctype::expand_head(ctx, env, current_ty);
-
-    // force_tvar only applies to total applications in OCaml.
-    let force_tvar = total_app
-        && matches!(
-            &*tctx.type_ctx.get_desc(expanded_funct_ty),
-            TypeDesc::Tvar(_)
-        );
-    let function_arity: Option<i32> = if force_tvar {
-        Some(args.len() as i32)
-    } else {
-        match &*tctx.type_ctx.get_desc(expanded_funct_ty) {
-            TypeDesc::Tarrow { args, .. } => Some(args.len() as i32),
-            _ => None,
+    // compiler/ml/typecore.ml:4087-4190 scans the declared n-ary parameter
+    // list directly. Labeled source arguments commute, while typed argument
+    // thunks are retained and forced in declaration order.
+    let expanded_funct_ty = crate::types::ctype::expand_head(ctx, env, typed_funct.exp_type);
+    let function_level = ctx.get_level(ctx.repr(expanded_funct_ty));
+    let (declared_params, declared_ret) = match &*ctx.get_desc(expanded_funct_ty) {
+        TypeDesc::Tarrow { args, ret } => (args.clone(), *ret),
+        TypeDesc::Tvar(_) => {
+            return Err(TypeCoreError::ApplyNonFunction {
+                loc: funct.pexp_loc,
+                typ: expanded_funct_ty,
+            });
+        }
+        _ => {
+            return Err(TypeCoreError::ApplyNonFunction {
+                loc: funct.pexp_loc,
+                typ: expanded_funct_ty,
+            });
         }
     };
-    if !force_tvar
-        && !matches!(
-            &*tctx.type_ctx.get_desc(expanded_funct_ty),
-            TypeDesc::Tarrow { .. }
-        )
-    {
-        return Err(TypeCoreError::ApplyNonFunction {
-            loc: funct.pexp_loc,
-            typ: expanded_funct_ty,
-        });
-    }
-    if total_app
-        && let Some(arity) = function_arity
-        && args.len() as i32 > arity
-    {
+    let expanded_inst_ty = crate::types::ctype::expand_head(
+        ctx,
+        env,
+        crate::types::instance(ctx, typed_funct.exp_type),
+    );
+    let (inst_params, inst_ret) = match &*ctx.get_desc(expanded_inst_ty) {
+        TypeDesc::Tarrow { args, ret } if args.len() == declared_params.len() => {
+            (args.clone(), *ret)
+        }
+        _ => unreachable!("instancing a declared n-ary arrow preserves its shape"),
+    };
+    let function_arity = declared_params.len();
+    if total_app && args.len() > function_arity {
         let arity_suggestion =
             find_arity_suggestion_for_expression(tctx, env, &typed_funct, args.len());
         return Err(TypeCoreError::UncurriedArityMismatch {
             loc: funct.pexp_loc,
             function_type: typed_funct.exp_type,
-            expected_arity: arity as usize,
+            expected_arity: function_arity,
             provided_arity: args.len(),
-            provided_args: args.iter().map(|(label, _)| label.clone()).collect(),
+            provided_args: args.iter().map(|(label, _)| *label).collect(),
             function_name: None,
             arity_suggestion,
         });
     }
-    let max_arity = function_arity.unwrap_or(i32::MAX);
-    let mut top_arity: Option<i32> = function_arity;
 
-    // OCaml special case for ignore: skip post-unify (type_argument's unify_exp)
-    // so that Pexp_tuple/etc. result types stay as fresh nodes.
-    // OCaml typecore.ml:3756 handles ignore via type_expect only (no type_argument).
     let is_ignore_fn = matches!(
         &typed_funct.exp_desc,
         ExpressionDesc::Texp_ident(_, _, desc)
             if matches!(&desc.val_kind, crate::types::ValueKind::ValPrim(prim) if prim.prim_name == "%ignore")
     );
-    let is_identity_fn = matches!(
-        &typed_funct.exp_desc,
-        ExpressionDesc::Texp_ident(_, _, desc)
-            if matches!(&desc.val_kind, crate::types::ValueKind::ValPrim(prim) if prim.prim_name == "%identity")
-    );
-
-    // Fast path for the overwhelmingly common non-labelled single-argument
-    // application. This preserves OCaml's typecore.ml:4133-4197 staging by
-    // first selecting the function arrow from `ty_fun`/`ty_fun0`, then typing
-    // the argument before the final Pexp_apply unifications at
-    // typecore.ml:4220-4240. Labelled, optional, arity-tracked, polymorphic
-    // tvar, and `%ignore` cases keep using the full matcher below.
-    if args.len() == 1
-        && function_arity.is_none()
-        && !force_tvar
-        && !is_ignore_fn
-        && matches!(args[0].0, ArgLabel::Nolabel)
-    {
-        let expanded_current_ty0 = if ctx.repr(current_ty0) == ctx.repr(current_ty) {
-            expanded_funct_ty
-        } else {
-            crate::types::ctype::expand_head(ctx, env, current_ty0)
-        };
-        if let (Some((fn_label, arg_ty, _ret_ty)), Some((fn_label0, arg_ty0, ret_ty0))) = (
-            crate::types::ctype::split_arrow_with_label(ctx, expanded_funct_ty),
-            crate::types::ctype::split_arrow_with_label(ctx, expanded_current_ty0),
-        ) {
-            if matches!(fn_label, crate::types::ArgLabel::Nolabel)
-                && matches!(fn_label0, crate::types::ArgLabel::Nolabel)
-            {
-                let arg_expr = tctx.arena.get_expr(args[0].1);
-                let arg_context = type_clash_context_for_function_argument(
-                    &function_arg_context,
-                    &args[0].0,
-                    tctx.arena,
-                    arg_expr,
-                );
-                let previous_force_fresh_local_float = tctx.force_fresh_local_float;
-                tctx.force_fresh_local_float = false;
-                let saved_unify_env = tctx
-                    .unify_state
-                    .env()
-                    .filter(|saved_env| saved_env.id() != env.id())
-                    .map(crate::types::env::Env::clone_preserve_id);
-                let typed_arg_result =
-                    type_expect(tctx, env, arg_expr, arg_ty, Some(arg_context.clone()));
-                tctx.force_fresh_local_float = previous_force_fresh_local_float;
-
-                let typed_arg = typed_arg_result?;
-                if let Some(saved_env) = saved_unify_env {
-                    tctx.unify_state.set_env(&saved_env);
-                } else {
-                    tctx.set_unify_env(env);
-                }
-                // OCaml compiler/ml/typecore.ml:3771-3773 `type_argument`
-                // runs `type_expect` followed by `unify_exp`; do not skip this
-                // post-typing unification for flattened aliases.
-                unify_expression_types(
-                    tctx,
-                    typed_arg.exp_loc,
-                    typed_arg.exp_type,
-                    arg_ty0,
-                    Some(arg_context.clone()),
-                )?;
-
-                ctx.end_def();
-                unify_expression_types(tctx, loc, ctx.new_var(None), typed_funct.exp_type, None)?;
-                rue_unify(tctx, loc, ret_ty0, expected_ty, context)?;
-
-                return Ok(Expression::new(
-                    ExpressionDesc::Texp_apply {
-                        funct: Box::new(typed_funct),
-                        args: vec![ApplyArg {
-                            label: crate::types::ArgLabel::Nolabel,
-                            expression: Some(typed_arg),
-                        }],
-                        partial,
-                        transformed_jsx,
-                    },
-                    loc.clone(),
-                    ret_ty0,
-                    EnvRef(0),
-                    attributes.to_vec().into(),
-                ));
-            }
-        }
-    }
-
-    // Match labels by name (OCaml's extract_label) instead of consuming call args strictly
-    // left-to-right.
-    // OCaml's `extract_label` returns the remaining syntax-arg list without
-    // copying argument payloads (`compiler/ml/typecore.ml:4155-4164`). Keep the
-    // same logical list here as indices into `args` so each application avoids
-    // cloning parser labels.
     let mut remaining_args: Vec<usize> = (0..args.len()).collect();
-    let mut remaining_start = 0usize;
-    let mut pending_args: Vec<PendingApplyArg<'_>> = Vec::new();
+    let mut argument_thunks: Vec<ApplyArgThunk<'_>> = Vec::with_capacity(function_arity);
     let mut omitted: Vec<OmittedArrow> = Vec::new();
     let mut ignored: Vec<OmittedArrow> = Vec::new();
-    let mut consumed_optional_count = 0usize;
-    let mut synthesized_optional_count = 0usize;
 
-    while remaining_start < remaining_args.len() {
-        let remaining = &remaining_args[remaining_start..];
-        let expanded_current_ty = crate::types::ctype::expand_head(ctx, env, current_ty);
-        let expanded_current_ty0 = if ctx.repr(current_ty0) == ctx.repr(current_ty) {
-            expanded_current_ty
-        } else {
-            crate::types::ctype::expand_head(ctx, env, current_ty0)
-        };
-        if (pending_args.len() as i32) < max_arity
-            && let (Some((fn_label, arg_ty, ret_ty)), Some((_fn_label0, arg_ty0, ret_ty0))) = (
-                crate::types::ctype::split_arrow_with_label(ctx, expanded_current_ty),
-                crate::types::ctype::split_arrow_with_label(ctx, expanded_current_ty0),
-            )
+    for (param, inst_param) in declared_params.iter().zip(&inst_params) {
+        let label_name = param.lbl.label_name().unwrap_or("");
+        if let Some(match_index) =
+            extract_label_index(args, &remaining_args, label_name, tctx.arena)
         {
-            // OCaml special case for optional-only applications:
-            // after consuming omitted optional labels, a trailing `()` in call
-            // position is just the optional-arg sentinel and must not be
-            // consumed by the next positional parameter.
-            if consumed_optional_count > 0
-                && omitted.is_empty()
-                && remaining.len() == 1
-                && pending_args.len() == synthesized_optional_count
-                && matches!(fn_label, crate::types::ArgLabel::Nolabel)
-            {
-                let param_is_unit = {
-                    let arg_repr = ctx.repr(arg_ty0);
-                    let arg_desc = ctx.get_desc(arg_repr);
-                    matches!(
-                        &*arg_desc,
-                        TypeDesc::Tconstr { path, args, .. }
-                            if path.name() == "unit" && args.is_empty()
-                    )
-                };
-                if !param_is_unit {
-                    let arg_index = remaining[0];
-                    if let (ArgLabel::Nolabel, arg_expr_idx) = &args[arg_index] {
-                        let arg_expr = tctx.arena.get_expr(*arg_expr_idx);
-                        if let crate::parser::ast::ExpressionDesc::Pexp_construct(lid, None) =
-                            &*arg_expr.pexp_desc
-                        {
-                            if tctx.arena.is_lident(lid.txt, "()") {
-                                break;
-                            }
-                        }
-                    }
-                }
-            }
-
-            let fn_label_name = fn_label.label_name().unwrap_or("");
-            if let Some(match_idx) = extract_label_index(args, remaining, fn_label_name, tctx.arena)
-            {
-                let absolute_match_idx = remaining_start + match_idx;
-                let arg_index = remaining_args[absolute_match_idx];
-                if match_idx == 0 {
-                    remaining_start += 1;
-                } else {
-                    remaining_args.remove(absolute_match_idx);
-                }
-                let (call_label, arg_expr_idx) = &args[arg_index];
-                let arg_expr = tctx.arena.get_expr(*arg_expr_idx);
-                let call_is_optional = call_label.is_optional();
-                if !fn_label.is_optional() && call_is_optional {
-                    tctx.report_warning(
-                        arg_expr.pexp_loc,
-                        Warning::NonoptionalLabel {
-                            name: fn_label_name.to_string(),
-                        },
-                    );
-                }
-                let effective_arg_ty = if fn_label.is_optional() && !call_is_optional {
-                    crate::types::ctype::extract_option_type(ctx, arg_ty).unwrap_or(arg_ty)
-                } else {
-                    arg_ty
-                };
-                let effective_arg_ty0 = if fn_label.is_optional() && !call_is_optional {
-                    crate::types::ctype::extract_option_type(ctx, arg_ty0).unwrap_or(arg_ty0)
-                } else {
-                    arg_ty0
-                };
-                let arg_context = if fn_label.is_optional()
-                    && !call_is_optional
-                    && matches!(function_arg_context, TypeClashContext::FunctionCall)
-                {
-                    TypeClashContext::FunctionArgument {
-                        optional: true,
-                        name: match call_label {
-                            ArgLabel::Nolabel => None,
-                            ArgLabel::Labelled(loc) | ArgLabel::Optional(loc) => {
-                                Some(tctx.arena.get_string(loc.txt).to_string())
-                            }
-                        },
-                    }
-                } else {
-                    type_clash_context_for_function_argument(
-                        &function_arg_context,
-                        call_label,
-                        tctx.arena,
-                        arg_expr,
-                    )
-                };
-                pending_args.push(PendingApplyArg::Provided {
-                    label: apply_arg_label_for_param(&fn_label, call_label, tctx.arena),
-                    expr: arg_expr,
-                    expected_ty: effective_arg_ty,
-                    unify_ty: effective_arg_ty0,
-                    context: arg_context,
-                    enforce_optional: fn_label.is_optional() && !call_is_optional,
-                    skip_post_unify: is_ignore_fn,
-                });
-                current_ty = ret_ty;
-                current_ty0 = ret_ty0;
-                continue;
-            }
-
-            if fn_label.is_optional() && (total_app || has_nolabel_arg(args, remaining)) {
-                consumed_optional_count += 1;
-                ignored.insert(
-                    0,
-                    OmittedArrow {
-                        label: fn_label.clone(),
-                        arg_ty,
-                        level: ctx.get_level(ctx.repr(expanded_current_ty)),
+            let arg_index = remaining_args.remove(match_index);
+            let (call_label, arg_expr_idx) = &args[arg_index];
+            let arg_expr = tctx.arena.get_expr(*arg_expr_idx);
+            let call_is_optional = call_label.is_optional();
+            if !param.lbl.is_optional() && call_is_optional {
+                tctx.report_warning(
+                    arg_expr.pexp_loc,
+                    Warning::NonoptionalLabel {
+                        name: label_name.to_string(),
                     },
                 );
-                let option_ty = crate::types::instance(ctx, arg_ty);
-                // OCaml type_application: consumed omitted optional labels still appear
-                // in Texp_apply as explicit None arguments at Location.none.
-                pending_args.push(PendingApplyArg::SynthOptionalNone {
-                    label: fn_label.clone(),
-                    option_ty,
-                });
-                synthesized_optional_count += 1;
-                current_ty = ret_ty;
-                current_ty0 = ret_ty0;
-                continue;
             }
-
-            pending_args.push(PendingApplyArg::Omitted {
-                label: fn_label.clone(),
-            });
-            omitted.push(OmittedArrow {
-                label: fn_label,
-                arg_ty,
-                level: ctx.get_level(ctx.repr(expanded_current_ty)),
-            });
-            current_ty = ret_ty;
-            current_ty0 = ret_ty0;
-            continue;
-        }
-
-        let arg_index = remaining_args[remaining_start];
-        remaining_start += 1;
-        let (label, arg_expr_idx) = &args[arg_index];
-        let arg_expr = tctx.arena.get_expr(*arg_expr_idx);
-
-        // OCaml special case: if all supplied args were optional defaults and
-        // the final argument is `()`, treat it as an empty application.
-        if consumed_optional_count > 0
-            && omitted.is_empty()
-            && remaining_start == remaining_args.len()
-            && label.is_nolabel()
-            && pending_args.len() == synthesized_optional_count
-        {
-            if let crate::parser::ast::ExpressionDesc::Pexp_construct(lid, None) =
-                &*arg_expr.pexp_desc
+            let expected_arg_ty = if param.lbl.is_optional() && !call_is_optional {
+                crate::types::ctype::extract_option_type(ctx, param.typ).unwrap_or(param.typ)
+            } else {
+                param.typ
+            };
+            let unify_arg_ty = if param.lbl.is_optional() && !call_is_optional {
+                crate::types::ctype::extract_option_type(ctx, inst_param.typ)
+                    .unwrap_or(inst_param.typ)
+            } else {
+                inst_param.typ
+            };
+            let arg_context = if param.lbl.is_optional()
+                && !call_is_optional
+                && matches!(function_arg_context, TypeClashContext::FunctionCall)
             {
-                if tctx.arena.is_lident(lid.txt, "()") {
-                    break;
+                TypeClashContext::FunctionArgument {
+                    optional: true,
+                    name: match call_label {
+                        ArgLabel::Nolabel => None,
+                        ArgLabel::Labelled(loc) | ArgLabel::Optional(loc) => {
+                            Some(tctx.arena.get_string(loc.txt).to_string())
+                        }
+                    },
                 }
-            }
-        }
-
-        let ctx_label = convert_arg_label_for_ctx(label, tctx.arena);
-        // OCaml type_unknown_args still consumes matching arrows in source
-        // order after type_args rejects label reordering for non-Cok arrows.
-        if (pending_args.len() as i32) < max_arity
-            && let Some((fn_label, arg_ty, ret_ty)) =
-                crate::types::ctype::split_arrow_with_label(ctx, expanded_current_ty0)
-            && fn_label.same_label(&ctx_label)
-        {
-            pending_args.push(PendingApplyArg::Provided {
-                label: ctx_label,
-                expr: arg_expr,
-                expected_ty: arg_ty,
-                unify_ty: arg_ty,
-                context: type_clash_context_for_function_argument(
+            } else {
+                type_clash_context_for_function_argument(
                     &function_arg_context,
-                    label,
+                    call_label,
                     tctx.arena,
                     arg_expr,
-                ),
-                enforce_optional: label.is_optional(),
-                skip_post_unify: true,
-            });
-            current_ty = ret_ty;
-            current_ty0 = ret_ty;
-            continue;
-        }
-
-        // type_unknown_args fallback: build an arrow from call-site label if needed.
-        let result_ty_with_omitted =
-            result_type_from_omitted(ctx, &omitted, &ignored, expanded_current_ty);
-        if matches!(
-            &*ctx.get_desc(ctx.repr(result_ty_with_omitted)),
-            TypeDesc::Tarrow { .. }
-        ) {
-            if pending_args.len() >= max_arity as usize {
-                return Err(TypeCoreError::ApplyWrongLabel {
-                    loc: arg_expr.pexp_loc,
-                    label: *label,
-                    ty: typed_funct.exp_type,
-                });
-            }
-            if !type_has_label(ctx, env, tctx.arena, label, expanded_current_ty) {
-                return Err(TypeCoreError::ApplyWrongLabel {
-                    loc: arg_expr.pexp_loc,
-                    label: *label,
-                    ty: result_ty_with_omitted,
-                });
-            }
-            return Err(TypeCoreError::IncoherentLabelOrder {
-                loc: funct.pexp_loc,
-            });
-        }
-
-        let arg_ty = ctx.new_var(None);
-        let ret_ty = ctx.new_var(None);
-        if force_tvar
-            && matches!(&*ctx.get_desc(expanded_current_ty), TypeDesc::Tvar(_))
-            && ctx.get_level(ctx.repr(expanded_current_ty)) >= ctx.get_level(ctx.repr(arg_ty))
-            && !is_identity_fn
-        {
-            tctx.report_warning(arg_expr.pexp_loc, Warning::UnusedArgument);
-        }
-        let arrow_ty = ctx.new_arrow(ctx_label, arg_ty, ret_ty, top_arity);
-        unify_expression_types(tctx, loc, expanded_current_ty, arrow_ty, None)?;
-        top_arity = None;
-
-        pending_args.push(PendingApplyArg::Provided {
-            label: convert_arg_label_for_ctx(label, tctx.arena),
-            expr: arg_expr,
-            expected_ty: arg_ty,
-            unify_ty: arg_ty,
-            context: type_clash_context_for_function_argument(
-                &function_arg_context,
-                label,
-                tctx.arena,
-                arg_expr,
-            ),
-            enforce_optional: label.is_optional(),
-            skip_post_unify: true,
-        });
-        current_ty = ret_ty;
-        current_ty0 = ret_ty;
-    }
-
-    if total_app {
-        // Match OCaml `type_unknown_args []`: for total applications, trailing
-        // optional arrows are materialized as explicit `None` arguments.
-        let mut applied_count = pending_args.len();
-        while (applied_count as i32) < max_arity {
-            let expanded_current_ty = crate::types::ctype::expand_head(ctx, env, current_ty);
-            let expanded_current_ty0 = if ctx.repr(current_ty0) == ctx.repr(current_ty) {
-                expanded_current_ty
-            } else {
-                crate::types::ctype::expand_head(ctx, env, current_ty0)
+                )
             };
-            if let (Some((fn_label, arg_ty, ret_ty)), Some((_fn_label0, _arg_ty0, ret_ty0))) = (
-                crate::types::ctype::split_arrow_with_label(ctx, expanded_current_ty),
-                crate::types::ctype::split_arrow_with_label(ctx, expanded_current_ty0),
-            ) {
-                if fn_label.is_optional() {
-                    consumed_optional_count += 1;
-                    ignored.insert(
-                        0,
-                        OmittedArrow {
-                            label: fn_label.clone(),
-                            arg_ty,
-                            level: ctx.get_level(ctx.repr(expanded_current_ty)),
-                        },
-                    );
-                    let option_ty = crate::types::instance(ctx, arg_ty);
-                    pending_args.push(PendingApplyArg::SynthOptionalNone {
-                        label: fn_label.clone(),
-                        option_ty,
-                    });
-                    current_ty = ret_ty;
-                    current_ty0 = ret_ty0;
-                    applied_count += 1;
-                    continue;
-                }
+            argument_thunks.push(ApplyArgThunk::Provided {
+                label: apply_arg_label_for_param(&param.lbl, call_label, tctx.arena),
+                expr: arg_expr,
+                expected_ty: expected_arg_ty,
+                unify_ty: unify_arg_ty,
+                context: arg_context,
+                enforce_optional: param.lbl.is_optional() && !call_is_optional,
+                skip_post_unify: is_ignore_fn,
+            });
+        } else if param.lbl.is_optional()
+            && (total_app || has_nolabel_arg(args, &remaining_args))
+        {
+            ignored.push(OmittedArrow {
+                label: param.lbl.clone(),
+                arg_ty: param.typ,
+                level: function_level,
+            });
+            argument_thunks.push(ApplyArgThunk::SynthOptionalNone {
+                label: param.lbl.clone(),
+                option_ty: crate::types::instance(ctx, param.typ),
+            });
+        } else {
+            omitted.push(OmittedArrow {
+                label: param.lbl.clone(),
+                arg_ty: param.typ,
+                level: function_level,
+            });
+            if !remaining_args.is_empty() {
+                argument_thunks.push(ApplyArgThunk::Omitted {
+                    label: param.lbl.clone(),
+                });
             }
-            break;
         }
     }
 
-    let mut typed_args = Vec::with_capacity(pending_args.len());
-    for pending_arg in pending_args.into_iter() {
+    if !remaining_args.is_empty() {
+        let all_ignored_optional = total_app
+            && omitted.is_empty()
+            && !argument_thunks.is_empty()
+            && argument_thunks.len() == ignored.len();
+        let unit_sentinel = remaining_args.len() == 1
+            && matches!(args[remaining_args[0]].0, ArgLabel::Nolabel)
+            && matches!(
+                &*tctx.arena.get_expr(args[remaining_args[0]].1).pexp_desc,
+                crate::parser::ast::ExpressionDesc::Pexp_construct(lid, None)
+                    if tctx.arena.is_lident(lid.txt, "()")
+            );
+        if !(all_ignored_optional && unit_sentinel) {
+            let (label, arg_idx) = &args[remaining_args[0]];
+            let arg_expr = tctx.arena.get_expr(*arg_idx);
+            let result_ty = if omitted.is_empty() && ignored.is_empty() {
+                declared_ret
+            } else {
+                let params = omitted
+                    .iter()
+                    .chain(&ignored)
+                    .map(|arg| TypeArg::new(arg.label.clone(), arg.arg_ty))
+                    .collect();
+                ctx.alloc_type_at_level(
+                    TypeDesc::Tarrow {
+                        args: params,
+                        ret: declared_ret,
+                    },
+                    function_level,
+                )
+            };
+            if matches!(&*ctx.get_desc(ctx.repr(result_ty)), TypeDesc::Tarrow { .. }) {
+                return Err(TypeCoreError::ApplyWrongLabel {
+                    loc: arg_expr.pexp_loc,
+                    label: *label,
+                    ty: if argument_thunks.len() >= function_arity {
+                        typed_funct.exp_type
+                    } else {
+                        result_ty
+                    },
+                });
+            }
+            return Err(TypeCoreError::ApplyNonFunction {
+                loc: funct.pexp_loc,
+                typ: expanded_funct_ty,
+            });
+        }
+    }
+
+    let provided = ignored.len() + args.len();
+    let fully_applied = provided >= function_arity;
+    if total_app && !fully_applied {
+        let arity_suggestion =
+            find_arity_suggestion_for_expression(tctx, env, &typed_funct, args.len());
+        return Err(TypeCoreError::UncurriedArityMismatch {
+            loc: funct.pexp_loc,
+            function_type: typed_funct.exp_type,
+            expected_arity: args.len() + function_arity - provided,
+            provided_arity: args.len(),
+            provided_args: args.iter().map(|(label, _)| *label).collect(),
+            function_name: None,
+            arity_suggestion,
+        });
+    }
+    let current_ty0 = inst_ret;
+    let mut typed_args = Vec::with_capacity(argument_thunks.len());
+    for pending_arg in argument_thunks.into_iter() {
         match pending_arg {
-            PendingApplyArg::Provided {
+            ApplyArgThunk::Provided {
                 label,
                 expr,
                 expected_ty,
@@ -9516,7 +9261,7 @@ fn type_application(
                     expression: Some(typed_arg),
                 });
             }
-            PendingApplyArg::SynthOptionalNone { label, option_ty } => {
+            ApplyArgThunk::SynthOptionalNone { label, option_ty } => {
                 let none_loc = tctx.arena.none_loc();
                 let none_expr = Expression::new(
                     ExpressionDesc::Texp_construct(
@@ -9537,7 +9282,7 @@ fn type_application(
                     expression: Some(none_expr),
                 });
             }
-            PendingApplyArg::Omitted { label } => {
+            ApplyArgThunk::Omitted { label } => {
                 typed_args.push(ApplyArg {
                     label,
                     expression: None,
@@ -9547,53 +9292,21 @@ fn type_application(
     }
 
     // compiler/ml/typecore.ml:4191-4200: a partial application returns one
-    // n-ary arrow containing exactly the omitted parameters, in declaration
-    // order (rather than rebuilding a nested unary chain).
-    let mut result_ty = current_ty0;
-    if !omitted.is_empty() {
-        let level = omitted[0].level;
-        let params = omitted
-            .iter()
-            .map(|arg| crate::types::TypeArg::new(arg.label.clone(), arg.arg_ty))
-            .collect();
-        result_ty = ctx.alloc_type_at_level(
+    // n-ary arrow containing exactly the omitted parameters, in declaration order.
+    let result_ty = if fully_applied && omitted.is_empty() {
+        current_ty0
+    } else {
+        ctx.alloc_type_at_level(
             TypeDesc::Tarrow {
-                args: params,
-                ret: result_ty,
+                args: omitted
+                    .iter()
+                    .map(|arg| TypeArg::new(arg.label.clone(), arg.arg_ty))
+                    .collect(),
+                ret: current_ty0,
             },
-            level,
-        );
-    }
-
-    // OCaml update_uncurried_arity: preserve remaining uncurried arity on
-    // partially applied results.
-    // OCaml uses `{new_t with desc = Tarrow(arg, ret, c, Some newarity)}` which
-    // creates a new record sharing the same `id` as the original. In Rust we
-    // create a separate new arrow and record an arity alias so the sexp
-    // serializer deduplicates them (matching OCaml's id-based dedup).
-    if let Some(arity) = function_arity {
-        // OCaml update_uncurried_arity receives nargs = ignored optional
-        // arguments + syntactic arguments, but reports provided_arity from the
-        // syntactic arguments only.
-        let syntactic_args = args.len() as i32;
-        let applied_args = syntactic_args + consumed_optional_count as i32;
-        let remaining_arity = arity - applied_args;
-        if total_app && remaining_arity > 0 {
-            let arity_suggestion =
-                find_arity_suggestion_for_expression(tctx, env, &typed_funct, args.len());
-            return Err(TypeCoreError::UncurriedArityMismatch {
-                loc: funct.pexp_loc,
-                function_type: typed_funct.exp_type,
-                expected_arity: (syntactic_args + remaining_arity) as usize,
-                provided_arity: syntactic_args as usize,
-                provided_args: args.iter().map(|(label, _)| label.clone()).collect(),
-                function_name: None,
-                arity_suggestion,
-            });
-        }
-        // Upstream n-ary Tarrow has no stored arity to patch here; the
-        // remaining parameter count is represented by the arrow's args list.
-    }
+            function_level,
+        )
+    };
 
     // Match OCaml typecore.ml Pexp_apply post-application side effect:
     //   unify_var env (newvar ()) funct.exp_type
@@ -14895,452 +14608,6 @@ fn type_function_nary(
     ))
 }
 
-/// Type check function expression.
-#[allow(clippy::too_many_arguments)]
-fn type_function(
-    tctx: &mut TypeCheckContext<'_>,
-    env: &Env,
-    loc: LocIdx,
-    arg_label: &ArgLabel,
-    default: Option<&ParsedExpression>,
-    param: &ParsedPattern,
-    body: &ParsedExpression,
-    arity: crate::parser::ast::Arity,
-    is_async: bool,
-    expected_ty: TypeExprRef,
-    attributes: &[crate::parser::ast::Attribute],
-) -> TypeCoreResult<Expression> {
-    use crate::types::typedtree::{Case, FunctionParam, Partial};
-
-    let ctx = tctx.type_ctx;
-
-    // Clone (not take) type_variables so inner functions can SEE outer scope
-    // variables (enabling cross-scope sharing like 'self in @this callbacks)
-    // but additions inside the function don't leak back to the outer scope.
-    let saved_type_variables = tctx.type_variables.clone();
-    let saved_loop_depth = tctx.loop_depth;
-    tctx.loop_depth = 0;
-    let result = (|| -> TypeCoreResult<Expression> {
-        // Convert arity to Option<i32> for the arrow type
-        // Arity is now ArityIdx, look up from arena
-        let arity_opt = tctx.arena.get_arity(arity);
-
-        let ctx_label = convert_arg_label_for_ctx(arg_label, tctx.arena);
-
-        // Match OCaml's type_function arity handling (typecore.ml:3270-3288).
-        // When arity is Some, OCaml creates a MINIMAL fresh arrow with Tvars
-        // and unifies with ty_expected_, consuming the generic type through
-        // unification (linking Tvars to components without copying). This avoids
-        // creating a full instance of the generic type, matching OCaml's node
-        // allocation pattern. When arity is None, OCaml instances ty_expected.
-        let expected_ty = match arity_opt {
-            Some(_) => {
-                // OCaml: let fun_t = newty (Tarrow({lbl=l; typ=newvar()}, newvar(), Cok, Some arity))
-                //        unify_exp_types loc env fun_t ty_expected_
-                //        fun_t
-                // The legacy parser still delivers `(x, y) => ...` as one
-                // tuple pattern plus arity metadata. Upstream typecore.ml:
-                // 3529-3823 receives separate fun_params and commits one
-                // n-ary arrow, so construct that same arrow here.
-                let parameter_count = arity_opt.unwrap_or(1).max(1) as usize;
-                let mut labels = vec![ctx_label.clone()];
-                let mut nested_body = body;
-                while labels.len() < parameter_count {
-                    match &*nested_body.pexp_desc {
-                        crate::parser::ast::ExpressionDesc::Pexp_fun(nested) => {
-                            labels.push(convert_arg_label_for_ctx(&nested.arg_label, tctx.arena));
-                            nested_body = tctx.arena.get_expr(nested.rhs);
-                        }
-                        // Optional defaults are rewritten just above into a
-                        // synthetic let whose body is the next source param.
-                        crate::parser::ast::ExpressionDesc::Pexp_let(binding) => {
-                            nested_body = tctx.arena.get_expr(binding.2);
-                        }
-                        _ => break,
-                    }
-                }
-                let params = labels
-                    .into_iter()
-                    .chain(std::iter::repeat(ctx_label.clone()))
-                    .take(parameter_count)
-                    .map(|label| TypeArg::new(label, ctx.new_var(None)))
-                    .collect();
-                let fun_t = ctx.new_type(TypeDesc::Tarrow {
-                    args: params,
-                    ret: ctx.new_var(None),
-                });
-                let expected_head = crate::types::ctype::expand_head_unif(ctx, env, expected_ty);
-                let expected_desc = ctx.get_desc(ctx.repr(expected_head));
-                let labels_mismatch = matches!(
-                    &*expected_desc,
-                    TypeDesc::Tarrow { args, .. }
-                        if args.first().is_some_and(|arg| !arg.lbl.same_label(&ctx_label))
-                );
-                drop(expected_desc);
-                if labels_mismatch {
-                    return Err(TypeCoreError::ExprTypeClash {
-                        loc,
-                        trace: vec![(fun_t, expected_ty)],
-                        context: None,
-                    });
-                }
-                unify_expression_types(tctx, loc, fun_t, expected_ty, None)?;
-                fun_t
-            }
-            None => {
-                // OCaml keeps ty_expected_ unchanged and instances where needed.
-                expected_ty
-            }
-        };
-
-        // Match OCaml's filter_arrow path: compiler/ml/typecore.ml:3601-3609.
-        // For a type variable, filter_arrow links it to a fresh arrow. For an
-        // arrow, the label must match exactly. If it is an arrow with the wrong
-        // label, type_function raises Abstract_wrong_label instead of trying to
-        // unify a synthetic arrow through the mismatch.
-        let expected_inst = crate::types::instance(ctx, expected_ty);
-        let expanded_expected = crate::types::ctype::expand_head_unif(ctx, env, expected_inst);
-        enum FilterArrow {
-            Arrow(TypeExprRef, TypeExprRef),
-            LinkVar(i32),
-            Mismatch,
-        }
-        let filter_arrow = {
-            let expanded_desc = ctx.get_desc(expanded_expected);
-            let result = match &*expanded_desc {
-                TypeDesc::Tvar(_) => FilterArrow::LinkVar(ctx.get_level(expanded_expected)),
-                TypeDesc::Tarrow { args, ret }
-                    if args
-                        .first()
-                        .is_some_and(|arg| arg.lbl.same_label(&ctx_label)) =>
-                {
-                    let return_ty = if args.len() == 1 {
-                        *ret
-                    } else {
-                        ctx.new_type(TypeDesc::Tarrow {
-                            args: args[1..].to_vec(),
-                            ret: *ret,
-                        })
-                    };
-                    FilterArrow::Arrow(args[0].typ, return_ty)
-                }
-                _ => FilterArrow::Mismatch,
-            };
-            drop(expanded_desc);
-            result
-        };
-        let expected_arrow = match filter_arrow {
-            FilterArrow::Arrow(param_ty, return_ty) => Some((param_ty, return_ty)),
-            FilterArrow::LinkVar(level) => {
-                let param_ty = ctx.alloc_type_at_level(TypeDesc::Tvar(None), level);
-                let return_ty = ctx.alloc_type_at_level(TypeDesc::Tvar(None), level);
-                let arrow_ty = ctx.alloc_type_at_level(
-                    TypeDesc::Tarrow {
-                        args: vec![TypeArg::new(ctx_label.clone(), param_ty)],
-                        ret: return_ty,
-                    },
-                    level,
-                );
-                crate::types::ctype::link_type(ctx, expanded_expected, arrow_ty);
-                Some((param_ty, return_ty))
-            }
-            FilterArrow::Mismatch => None,
-        };
-        let (mut param_ty, return_ty) = match expected_arrow {
-            Some((param_ty, return_ty)) => (param_ty, return_ty),
-            _ => {
-                let expanded_original =
-                    crate::types::ctype::expand_head(tctx.type_ctx, env, expected_ty);
-                let original_desc = tctx.type_ctx.get_desc(expanded_original);
-                let is_arrow = matches!(&*original_desc, TypeDesc::Tarrow { .. });
-                drop(original_desc);
-                if is_arrow {
-                    return Err(TypeCoreError::AbstractWrongLabel {
-                        loc,
-                        label: ctx_label.clone(),
-                        ty: expanded_original,
-                    });
-                }
-                return Err(TypeCoreError::TooManyArguments {
-                    loc,
-                    in_function: false,
-                    ty: crate::types::instance(tctx.type_ctx, expected_ty),
-                });
-            }
-        };
-
-        // OCaml typecore.ml:3297-3302: ALWAYS wrap optional params in option.
-        // For optional params with defaults, the pattern and default are typed
-        // against the INNER type (before option wrapping), while the Tarrow arg
-        // gets the option-wrapped type.
-        // NOTE: OCaml calls type_option(tv) TWICE — once for unification (linked
-        // to the existing ty_arg Tvar) and once for the returned ty_arg. This
-        // creates two physically distinct option nodes: the first gets generalized
-        // through the pattern type chain, the second stays non-generic for the
-        // function body. Matching this behavior avoids over-sharing in sexp output.
-        let inner_ty = if arg_label.is_optional() {
-            let tv = ctx.new_var(None);
-            let option_ty_for_unify = env.type_option(ctx, tv);
-            unify_expression_types(tctx, loc, param_ty, option_ty_for_unify, None)?;
-            // Create a SECOND option node (matching OCaml's second type_option call)
-            let option_ty = env.type_option(ctx, tv);
-            param_ty = option_ty;
-            tv
-        } else {
-            param_ty
-        };
-
-        // Type check default expression if present (against inner type, before option)
-        let typed_default = if let Some(default_expr) = default {
-            Some(Box::new(type_expect(
-                tctx,
-                env,
-                default_expr,
-                inner_ty,
-                None,
-            )?))
-        } else {
-            None
-        };
-
-        // Match OCaml type_cases propagation logic (typecore.ml:3947-3999):
-        // propagate = has_gadts || ty_arg at GENERIC_LEVEL || !is_var
-        // For type_function (single case), propagate only if pattern is complex
-        // or ty_arg is generic. Simple variable patterns skip begin_def/generalize,
-        // preserving non-generic identity for body lookups via Pexp_ident.
-        let is_simple_param = is_simple_variable_pattern(tctx.arena, param);
-        // For optional params with defaults, the pattern sees the inner type
-        let pattern_ty = if default.is_some() && arg_label.is_optional() {
-            inner_ty
-        } else {
-            param_ty
-        };
-        let param_ty_is_generic =
-            ctx.get_level(ctx.repr(pattern_ty)) == crate::types::GENERIC_LEVEL;
-        let propagate = param_ty_is_generic || !is_simple_param;
-
-        let mut state = PatternState::new();
-        state.reset(true);
-        let param_pat_ty = crate::types::instance(ctx, pattern_ty);
-        if propagate {
-            ctx.begin_def();
-        }
-        let typed_param_result = type_pattern(
-            tctx,
-            env,
-            param,
-            param_pat_ty,
-            PatternMode::Normal,
-            &mut state,
-        );
-        if propagate {
-            ctx.end_def();
-        }
-        let typed_param = typed_param_result?;
-        if propagate {
-            iter_typed_pattern(&typed_param, &mut |pat| {
-                crate::types::generalize(ctx, pat.pat_type);
-            });
-        }
-
-        // Match OCaml add_pattern_variables/type_cases: extend with pattern-bound
-        // values using the types from type_pattern directly.
-        // Match OCaml add_pattern_variables: when the pattern binds nothing,
-        // the body keeps the original env identity instead of branching to
-        // a fresh env value.
-        let mut body_env = if state.pattern_variables.is_empty() {
-            env.clone_preserve_id()
-        } else {
-            env.clone()
-        };
-        let mut unpacks: Vec<PatternVariable> = Vec::new();
-        for pv in &state.pattern_variables {
-            add_pattern_variable_value(tctx, &mut body_env, pv);
-
-            if pv.is_module {
-                // OCaml records unpack vars in reverse insertion order
-                // (`module_variables := x :: module_variables`).
-                unpacks.insert(0, pv.clone());
-            }
-        }
-
-        // Type check body.
-        // When the surrounding expected type came from a generic constraint on the
-        // whole function, rebase that marker onto the function return type. OCaml
-        // continues typing the body against the shared generic return node, not an
-        // instantiated copy, after decomposing the outer arrow.
-        let saved_generic_constraint = tctx.generic_constraint_body_ty;
-        tctx.generic_constraint_body_ty = saved_generic_constraint.map(|_| return_ty);
-        let typed_body =
-            type_expect_with_module_unpacks(tctx, &body_env, body, return_ty, &unpacks, None)?;
-        tctx.generic_constraint_body_ty = saved_generic_constraint;
-        let typed_body = Expression {
-            exp_type: crate::types::instance(ctx, return_ty),
-            ..typed_body
-        };
-
-        fn id_of_pattern(ctx: &TypeContext, pat: &Pattern) -> Option<Ident> {
-            match &pat.pat_desc {
-                PatternDesc::Tpat_var(id, _) => Some(id.clone()),
-                PatternDesc::Tpat_alias(_, id, _) => Some(id.clone()),
-                PatternDesc::Tpat_construct(_, _, args) if args.len() == 1 => {
-                    match &args[0].pat_desc {
-                        PatternDesc::Tpat_var(id, _) | PatternDesc::Tpat_alias(_, id, _) => {
-                            Some(ctx.rename_ident(id))
-                        }
-                        _ => None,
-                    }
-                }
-                _ => None,
-            }
-        }
-
-        fn name_pattern(ctx: &TypeContext, default: &str, cases: &[Case]) -> Ident {
-            for case in cases {
-                if let Some(id) = id_of_pattern(ctx, &case.c_lhs) {
-                    return id;
-                }
-            }
-            ctx.create_ident(default)
-        }
-
-        // Build function parameter
-        let exp_param_ty = typed_param.pat_type;
-        let cases = vec![Case {
-            c_lhs: typed_param.clone(),
-            c_guard: None,
-            c_rhs: typed_body,
-        }];
-        let needs_exhaust_check = !is_simple_param;
-        let partial = if needs_exhaust_check {
-            // Match OCaml type_cases exhaustiveness setup before returning to
-            // type_function's `name_pattern "param"`:
-            // compiler/ml/typecore.ml:4511-4535 runs init_env/end_def, and
-            // compiler/ml/typecore.ml:3631 creates the param ident afterward.
-            ctx.begin_def();
-            ctx.set_current_time(ctx.current_level());
-            let lev = ctx.current_stamp();
-            ctx.init_def(lev + 1000);
-            let partial = check_partial_simple(ctx, env, &cases);
-            report_all_clauses_guarded_if_needed(tctx, loc, &cases, partial);
-            report_fragile_match_if_needed(tctx, ctx, env, loc, &cases, partial);
-            ctx.end_def();
-            let return_inst = crate::types::instance(ctx, return_ty);
-            unify_expression_types(tctx, loc, return_inst, ctx.new_var(None), None)?;
-            partial
-        } else {
-            let partial = check_partial_simple(ctx, env, &cases);
-            report_all_clauses_guarded_if_needed(tctx, loc, &cases, partial);
-            report_fragile_match_if_needed(tctx, ctx, env, loc, &cases, partial);
-            partial
-        };
-        let param_id = name_pattern(ctx, "param", &cases);
-        // Compatibility bridge while the Rust parser still represents an
-        // uncurried `(x, y) => body` as one tuple pattern plus arity metadata.
-        // Upstream Parsetree already supplies these as separate fun_params.
-        let mut current_params = match &typed_param.pat_desc {
-            PatternDesc::Tpat_tuple(items) => items
-                .iter()
-                .map(|pat| FunctionParam {
-                    fp_lbl: crate::types::ArgLabel::Nolabel,
-                    fp_param: id_of_pattern(ctx, pat).unwrap_or_else(|| ctx.create_ident("param")),
-                    fp_pat: pat.clone(),
-                    fp_partial: if matches!(
-                        pat.pat_desc,
-                        PatternDesc::Tpat_any | PatternDesc::Tpat_var(_, _)
-                    ) {
-                        Partial::Total
-                    } else {
-                        partial
-                    },
-                })
-                .collect::<Vec<_>>(),
-            _ => Vec::new(),
-        };
-        if current_params.is_empty() {
-            current_params.push(FunctionParam {
-                fp_lbl: ctx_label.clone(),
-                fp_param: param_id,
-                fp_pat: typed_param,
-                fp_partial: partial,
-            });
-        }
-        // Defaults are represented by `#default` lets in the function body in
-        // upstream Typedtree. The parser/type-parameter port will construct
-        // those lets directly; do not retain the deleted per-param field.
-        let _ = typed_default;
-
-        // Match OCaml typecore.ml:
-        //   exp_type = instance env (newgenty (Tarrow (...)))
-        // Instantiating the freshly built generic arrow preserves OCaml's
-        // node-sharing behavior in typedtree output.
-        let mut function_args = current_params
-            .iter()
-            .map(|param| TypeArg::new(param.fp_lbl.clone(), param.fp_pat.pat_type))
-            .collect::<Vec<_>>();
-        let final_return_ty = if arity_opt.unwrap_or(1) > 1 {
-            let return_desc = ctx.get_desc(ctx.repr(return_ty));
-            match &*return_desc {
-                TypeDesc::Tarrow { args, ret } => {
-                    function_args.extend(args.iter().cloned());
-                    *ret
-                }
-                _ => return_ty,
-            }
-        } else {
-            return_ty
-        };
-        let exp_type = crate::types::instance(
-            ctx,
-            ctx.new_generic_type(TypeDesc::Tarrow {
-                args: function_args,
-                ret: final_return_ty,
-            }),
-        );
-
-        let mut params = current_params;
-        let mut function_body = cases
-            .into_iter()
-            .next()
-            .expect("single function case")
-            .c_rhs;
-        if let ExpressionDesc::Texp_function {
-            params: nested_params,
-            body: nested_body,
-            async_: nested_async,
-        } = function_body.exp_desc
-        {
-            if arity_opt.unwrap_or(1) > 1 && nested_async == is_async {
-                params.extend(nested_params);
-                function_body = *nested_body;
-            } else {
-                function_body.exp_desc = ExpressionDesc::Texp_function {
-                    params: nested_params,
-                    body: nested_body,
-                    async_: nested_async,
-                };
-            }
-        }
-
-        Ok(Expression::new(
-            ExpressionDesc::Texp_function {
-                params,
-                body: Box::new(function_body),
-                async_: is_async,
-            },
-            loc.clone(),
-            exp_type,
-            EnvRef(0),
-            attributes.to_vec().into(),
-        ))
-    })();
-    tctx.loop_depth = saved_loop_depth;
-    tctx.type_variables = saved_type_variables;
-    result
-}
-
-/// Type check for loop.
-#[allow(clippy::too_many_arguments)]
 fn type_for(
     tctx: &mut TypeCheckContext<'_>,
     env: &Env,
