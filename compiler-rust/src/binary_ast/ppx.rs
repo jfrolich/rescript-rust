@@ -24,7 +24,8 @@ use crate::parse_arena::{
 use crate::parser::ast::{
     self as current, ArgLabel, Attribute, Attributes, Case, Constant, ConstructorArguments,
     ConstructorDeclaration, CoreType, CoreTypeDesc, Expression, ExpressionDesc,
-    ExpressionRecordField, ExtensionConstructor, ExtensionConstructorKind, IncludeDeclaration,
+    ExpressionRecordField, ExtensionConstructor, ExtensionConstructorKind, FunParam,
+    IncludeDeclaration,
     JsxContainerElement, JsxElement, JsxFragment, JsxProp, JsxUnaryElement, LabelDeclaration,
     ModuleExpr, ModuleExprDesc, ModuleType, ModuleTypeDesc, ObjectField, Pattern, PatternDesc,
     PatternRecordField, Payload, PexpApply, PexpFun, PrivateFlag, RecFlag, RowField, SignatureItem,
@@ -3208,26 +3209,16 @@ fn is_user_option_type(typ: &CoreType, arena: &ParseArena) -> bool {
 /// - Always descend for the first arrow (acc is empty)
 /// - For subsequent arrows, only descend if arity is None
 fn list_of_arrow(typ: &CoreType, arena: &ParseArena) -> (Vec<TypeArg>, CoreType) {
-    let mut args = Vec::new();
-    let mut current = typ.clone();
-    loop {
-        match &*current.ptyp_desc {
-            CoreTypeDesc::Ptyp_arrow(inner) => {
-                let (ref arg, ref ret, ref arity) = **inner;
-                let arity_val = arena.get_arity(*arity);
-                // OCaml: arity = None || acc = []
-                if arity_val.is_none() || args.is_empty() {
-                    args.push(arg.as_ref().clone());
-                    current = arena.get_core_type(*ret).clone();
-                } else {
-                    // Has arity (Some n) and not the first arg → stop
-                    break;
-                }
-            }
-            _ => break,
+    match &*typ.ptyp_desc {
+        CoreTypeDesc::Ptyp_arrow(inner) => {
+            let (arg, ret, arity) = &**inner;
+            (
+                arena.nary_arrow_args(arg, *arity).into_owned(),
+                arena.get_core_type(*ret).clone(),
+            )
         }
+        _ => (Vec::new(), typ.clone()),
     }
-    (args, current)
 }
 
 /// Reconstruct an arrow type with a new location, matching OCaml's `Ast_helper.Typ.arrows ~loc`.
@@ -3296,30 +3287,19 @@ fn reconstruct_arrow_type_with_loc(
         };
     }
 
-    // Rebuild the arrow chain from right to left, like OCaml's Typ.arrows
-    let arity_count = filtered_args.len();
-    let outermost_arity = arena.push_arity(Some(arity_count as i32));
-
-    // Build from the last arg backwards
-    let mut current = result.clone();
-    for (i, arg) in filtered_args.iter().enumerate().rev() {
-        let arity = if i == 0 {
-            outermost_arity
-        } else {
-            // Inner arrows get arity = None (fresh push like OCaml)
-            arena.push_arity(None)
-        };
-        current = CoreType {
-            ptyp_desc: Box::new(CoreTypeDesc::Ptyp_arrow(Box::new((
-                Box::new((*arg).clone()),
-                arena.push_core_type(current),
-                arity,
-            )))),
-            ptyp_loc: loc,
-            ptyp_attributes: Attributes::new(),
-        };
+    let args = filtered_args.into_iter().cloned().collect::<Vec<_>>();
+    let arity = arena.push_arity(Some(args.len() as i32));
+    let first = args[0].clone();
+    arena.set_nary_arrow_args(arity, args);
+    CoreType {
+        ptyp_desc: Box::new(CoreTypeDesc::Ptyp_arrow(Box::new((
+            Box::new(first),
+            arena.push_core_type(result),
+            arity,
+        )))),
+        ptyp_loc: loc,
+        ptyp_attributes: Attributes::new(),
     }
-    current
 }
 
 /// Process an @obj external declaration, transforming the type.
@@ -7299,24 +7279,25 @@ fn rewrite_core_type_default(typ: &CoreType, arena: &mut ParseArena) -> CoreType
             CoreTypeDesc::Ptyp_extension(Box::new((name.clone(), rewrite_payload(payload, arena))))
         }
         CoreTypeDesc::Ptyp_arrow(inner) => {
-            let (ref arg, ref ret, ref arity) = **inner;
-            // Note: OCaml's default_mapper.typ for Ptyp_arrow does NOT process arg.attrs
-            // through self.attributes - it only maps arg.typ. So we clone arg.attrs as-is.
-            let arg_ct = arena.get_core_type(arg.typ).clone();
+            let (arg, ret, arity) = &**inner;
+            // Current Parsetree maps every n-ary argument in source order.
+            let source_args = arena.nary_arrow_args(arg, *arity).into_owned();
+            let mut rewritten_args = Vec::with_capacity(source_args.len());
+            for source_arg in source_args {
+                let source_type = arena.get_core_type(source_arg.typ).clone();
+                let rewritten_type = rewrite_core_type(&source_type, arena);
+                rewritten_args.push(TypeArg {
+                    attrs: source_arg.attrs,
+                    lbl: source_arg.lbl,
+                    typ: arena.push_core_type(rewritten_type),
+                });
+            }
             let ret_ct = arena.get_core_type(*ret).clone();
-            let rw_arg_typ = rewrite_core_type(&arg_ct, arena);
             let rw_ret = rewrite_core_type(&ret_ct, arena);
-            let arg_idx = arena.push_core_type(rw_arg_typ);
             let ret_idx = arena.push_core_type(rw_ret);
-            CoreTypeDesc::Ptyp_arrow(Box::new((
-                Box::new(TypeArg {
-                    attrs: arg.attrs.clone(),
-                    lbl: arg.lbl.clone(),
-                    typ: arg_idx,
-                }),
-                ret_idx,
-                *arity,
-            )))
+            let first = rewritten_args[0].clone();
+            arena.set_nary_arrow_args(*arity, rewritten_args);
+            CoreTypeDesc::Ptyp_arrow(Box::new((Box::new(first), ret_idx, *arity)))
         }
         CoreTypeDesc::Ptyp_tuple(types) => {
             let mut rewritten_types = Vec::with_capacity(types.len());
@@ -8702,25 +8683,40 @@ fn rewrite_expression_generic(expr: &Expression, arena: &mut ParseArena) -> Expr
                     arena,
                 );
             }
-            // First, recursively rewrite the function components
-            let rewritten_default = default.map(|e| {
-                let de = arena.get_expr(e).clone();
-                let rw = rewrite_expression(&de, arena);
-                arena.push_expr(rw)
-            });
-            let lhs_pat = arena.get_pat(*lhs).clone();
-            let rewritten_lhs = rewrite_pattern(&lhs_pat, arena);
-            let rewritten_pattern_loc = async_lhs_loc(&rewritten_lhs, arena);
-            let rhs_expr = arena.get_expr(*rhs).clone();
+            // First, recursively rewrite the complete n-ary function shape.
+            let source_params = arena.nary_fun_params(inner).into_owned();
+            let mut rewritten_params = Vec::with_capacity(source_params.len());
+            for source in source_params {
+                let rewritten_default = source.p_default.map(|e| {
+                    let de = arena.get_expr(e).clone();
+                    let rw = rewrite_expression(&de, arena);
+                    arena.push_expr(rw)
+                });
+                let source_pattern = arena.get_pat(source.p_pat).clone();
+                let rewritten_pattern = rewrite_pattern(&source_pattern, arena);
+                rewritten_params.push(FunParam {
+                    p_attrs: source.p_attrs,
+                    p_lbl: source.p_lbl,
+                    p_default: rewritten_default,
+                    p_pat: arena.push_pat(rewritten_pattern),
+                });
+            }
+            let rewritten_pattern_loc =
+                async_lhs_loc(arena.get_pat(rewritten_params[0].p_pat), arena);
+            let body = arena.nary_fun_body(inner);
+            let rhs_expr = arena.get_expr(body).clone();
             let rw_rhs = rewrite_expression(&rhs_expr, arena);
             let rewritten_rhs = arena.push_expr(rw_rhs);
+            let first = rewritten_params[0].clone();
+            let unknown_arity = arena.nary_fun_unknown_arity(inner);
+            arena.set_nary_fun_params(*arity, rewritten_params, unknown_arity);
 
             // Create the rewritten fun expression
             let mut rewritten_fun = Expression {
                 pexp_desc: Box::new(ExpressionDesc::Pexp_fun(Box::new(PexpFun {
-                    arg_label: arg_label.clone(),
-                    default: rewritten_default,
-                    lhs: arena.push_pat(rewritten_lhs),
+                    arg_label: first.p_lbl,
+                    default: first.p_default,
+                    lhs: first.p_pat,
                     rhs: rewritten_rhs,
                     arity: *arity,
                     is_async: *is_async,

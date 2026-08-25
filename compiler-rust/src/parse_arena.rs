@@ -478,9 +478,9 @@ pub struct ParseArena {
     /// `PexpFun` keeps only a compact first-parameter fallback for frozen-v0 PPX
     /// conversion. Parser-created current parsetrees use this table as the
     /// authoritative `Pexp_fun.params` representation.
-    nary_fun_params_by_arity: HashMap<ArityIdx, Box<[FunParam]>>,
-    nary_fun_unknown_arity_by_arity: HashMap<ArityIdx, ArityIdx>,
-    nary_arrow_args_by_arity: HashMap<ArityIdx, Box<[crate::parser::ast::TypeArg]>>,
+    nary_fun_params_by_first_pattern: HashMap<PatIdx, Box<[FunParam]>>,
+    nary_fun_unknown_arity_by_first_pattern: HashMap<PatIdx, ArityIdx>,
+    nary_arrow_args_by_first_type: HashMap<CoreTypeIdx, Box<[crate::parser::ast::TypeArg]>>,
     /// Sparse side table for case guards, keyed by owning match/try ExprIdx.
     /// Value is a case-indexed list of optional guard expressions.
     expr_case_guards: Vec<Option<Box<[Option<ExprIdx>]>>>,
@@ -887,9 +887,9 @@ impl Default for ParseArena {
             arities,
             expressions: Arena::default(),
             expr_fun_defaults: Vec::new(),
-            nary_fun_params_by_arity: HashMap::new(),
-            nary_fun_unknown_arity_by_arity: HashMap::new(),
-            nary_arrow_args_by_arity: HashMap::new(),
+            nary_fun_params_by_first_pattern: HashMap::new(),
+            nary_fun_unknown_arity_by_first_pattern: HashMap::new(),
+            nary_arrow_args_by_first_type: HashMap::new(),
             expr_case_guards: Vec::new(),
             expr_construct_args: Vec::new(),
             expr_variant_args: Vec::new(),
@@ -2201,9 +2201,10 @@ impl ParseArena {
     }
 
     /// Store the authoritative n-ary argument list for a parser-created arrow.
-    pub fn set_nary_arrow_args(&mut self, arity: ArityIdx, args: Vec<crate::parser::ast::TypeArg>) {
-        self.nary_arrow_args_by_arity
-            .insert(arity, args.into_boxed_slice());
+    pub fn set_nary_arrow_args(&mut self, _arity: ArityIdx, args: Vec<crate::parser::ast::TypeArg>) {
+        let first_type = args.first().expect("Ptyp_arrow has arguments").typ;
+        self.nary_arrow_args_by_first_type
+            .insert(first_type, args.into_boxed_slice());
     }
 
     pub fn nary_arrow_args<'a>(
@@ -2211,7 +2212,8 @@ impl ParseArena {
         arg: &'a crate::parser::ast::TypeArg,
         arity: ArityIdx,
     ) -> std::borrow::Cow<'a, [crate::parser::ast::TypeArg]> {
-        if let Some(args) = self.nary_arrow_args_by_arity.get(&arity) {
+        let _ = arity;
+        if let Some(args) = self.nary_arrow_args_by_first_type.get(&arg.typ) {
             std::borrow::Cow::Borrowed(&args[..])
         } else {
             std::borrow::Cow::Owned(vec![arg.clone()])
@@ -2226,16 +2228,18 @@ impl ParseArena {
         unknown_arity: ArityIdx,
     ) {
         debug_assert!(!params.is_empty());
-        self.nary_fun_params_by_arity
-            .insert(arity, params.into_boxed_slice());
-        self.nary_fun_unknown_arity_by_arity
-            .insert(arity, unknown_arity);
+        let first_pattern = params[0].p_pat;
+        self.nary_fun_params_by_first_pattern
+            .insert(first_pattern, params.into_boxed_slice());
+        self.nary_fun_unknown_arity_by_first_pattern
+            .insert(first_pattern, unknown_arity);
+        let _ = arity;
     }
 
     pub fn nary_fun_unknown_arity(&self, fun: &crate::parser::ast::PexpFun) -> ArityIdx {
         if self.get_arity(fun.arity).is_some() {
-            self.nary_fun_unknown_arity_by_arity
-                .get(&fun.arity)
+            self.nary_fun_unknown_arity_by_first_pattern
+                .get(&fun.lhs)
                 .copied()
                 .or_else(|| match &*self.get_expr(fun.rhs).pexp_desc {
                     ExpressionDesc::Pexp_fun(next) => Some(next.arity),
@@ -2249,8 +2253,8 @@ impl ParseArena {
 
     /// Return the authoritative n-ary parameters, or the compact fallback.
     pub fn stored_nary_fun_params(&self, fun: &crate::parser::ast::PexpFun) -> Option<&[FunParam]> {
-        self.nary_fun_params_by_arity
-            .get(&fun.arity)
+        self.nary_fun_params_by_first_pattern
+            .get(&fun.lhs)
             .map(|params| &params[..])
     }
 
@@ -2259,7 +2263,7 @@ impl ParseArena {
         fun: &'a crate::parser::ast::PexpFun,
     ) -> std::borrow::Cow<'a, [FunParam]> {
         if self.get_arity(fun.arity).is_some()
-            && let Some(params) = self.nary_fun_params_by_arity.get(&fun.arity)
+            && let Some(params) = self.nary_fun_params_by_first_pattern.get(&fun.lhs)
         {
             std::borrow::Cow::Borrowed(params)
         } else {
@@ -2290,7 +2294,7 @@ impl ParseArena {
 
     /// Return the body belonging to the n-ary parameter list.
     pub fn nary_fun_body(&self, fun: &crate::parser::ast::PexpFun) -> ExprIdx {
-        if self.nary_fun_params_by_arity.contains_key(&fun.arity) {
+        if self.nary_fun_params_by_first_pattern.contains_key(&fun.lhs) {
             return fun.rhs;
         }
         let Some(arity) = self.get_arity(fun.arity) else {
