@@ -6707,6 +6707,24 @@ fn type_expect_with_recarg<'a>(
     context: Option<TypeClashContext>,
     recarg: RecArg,
 ) -> TypeCoreResult<Expression> {
+    let arena = tctx.arena;
+    crate::types::typemod::with_warning_scope(
+        tctx,
+        arena,
+        &expr.pexp_attributes,
+        true,
+        |tctx| type_expect_with_recarg_unscoped(tctx, env, expr, expected_ty, context, recarg),
+    )
+}
+
+fn type_expect_with_recarg_unscoped<'a>(
+    tctx: &mut TypeCheckContext<'a>,
+    env: &Env,
+    expr: &ParsedExpression,
+    expected_ty: TypeExprRef,
+    context: Option<TypeClashContext>,
+    recarg: RecArg,
+) -> TypeCoreResult<Expression> {
     use crate::parser::ast::ExpressionDesc as ED;
 
     let loc = expr.pexp_loc.clone();

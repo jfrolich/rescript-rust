@@ -6224,7 +6224,65 @@ impl<'a> RawLambdaConverter<'a> {
         }
     }
 
+    fn warning_attribute_spec(
+        &self,
+        attr: &crate::parser::ast::Attribute,
+    ) -> Option<(bool, String)> {
+        let name = self.arena.get_string(attr.0.txt);
+        let is_error = matches!(name, "warnerror" | "ocaml.warnerror");
+        if !is_error && !matches!(name, "warning" | "ocaml.warning") {
+            return None;
+        }
+        let crate::parser::ast::Payload::PStr(items) = &attr.1 else {
+            return None;
+        };
+        let [item] = items.as_slice() else {
+            return None;
+        };
+        let crate::parser::ast::StructureItemDesc::Pstr_eval(eval) = item.pstr_desc.as_ref() else {
+            return None;
+        };
+        let expr = self.arena.get_expr(eval.0);
+        let crate::parser::ast::ExpressionDesc::Pexp_constant(constant) = expr.pexp_desc.as_ref()
+        else {
+            return None;
+        };
+        let crate::parser::ast::Constant::String(spec, _) = constant.as_ref() else {
+            return None;
+        };
+        Some((is_error, spec.to_string()))
+    }
+
+    fn with_warning_scope<T>(
+        &mut self,
+        attrs: &crate::parser::ast::Attributes,
+        f: impl FnOnce(&mut Self) -> T,
+    ) -> T {
+        if attrs.is_empty() {
+            return f(self);
+        }
+        let previous = self.warning_config.clone();
+        for attr in attrs.iter().rev() {
+            if let Some((is_error, spec)) = self.warning_attribute_spec(attr) {
+                if is_error {
+                    let _ = self.warning_config.parse_as_error(&spec);
+                } else {
+                    let _ = self.warning_config.parse(&spec);
+                }
+            }
+        }
+        let result = f(self);
+        self.warning_config = previous;
+        result
+    }
+
     fn convert_expr_raw(&mut self, expr: &Expression) -> RawLambda {
+        self.with_warning_scope(&expr.exp_attributes, |this| {
+            this.convert_expr_raw_unscoped(expr)
+        })
+    }
+
+    fn convert_expr_raw_unscoped(&mut self, expr: &Expression) -> RawLambda {
         self.check_expr_attribute(expr);
         match &expr.exp_desc {
             ExpressionDesc::Texp_ident(path, _, desc) => match &desc.val_kind {
@@ -10408,7 +10466,10 @@ impl<'a> RawLambdaConverter<'a> {
                     let converted_bindings = bindings
                         .iter()
                         .map(|binding| {
-                            let mut value = self.convert_expr_raw(&binding.vb_expr);
+                            let mut value = self.with_warning_scope(
+                            &binding.vb_attributes,
+                            |this| this.convert_expr_raw(&binding.vb_expr),
+                        );
                             let inline_attr =
                                 self.get_inline_attribute_from(&binding.vb_attributes);
                             value =
@@ -10493,7 +10554,10 @@ impl<'a> RawLambdaConverter<'a> {
                 let converted_bindings = bindings
                     .iter()
                     .map(|binding| {
-                        let mut value = self.convert_expr_raw(&binding.vb_expr);
+                        let mut value = self.with_warning_scope(
+                            &binding.vb_attributes,
+                            |this| this.convert_expr_raw(&binding.vb_expr),
+                        );
                         // OCaml's transl_let applies inline attributes from vb_attributes
                         let inline_attr = self.get_inline_attribute_from(&binding.vb_attributes);
                         value = self.apply_inline_attribute_raw(value, binding.vb_loc, inline_attr);
@@ -10545,7 +10609,10 @@ impl<'a> RawLambdaConverter<'a> {
                     let lam_bindings = bindings
                         .iter()
                         .map(|binding| {
-                            let mut value = self.convert_expr_raw(&binding.vb_expr);
+                            let mut value = self.with_warning_scope(
+                            &binding.vb_attributes,
+                            |this| this.convert_expr_raw(&binding.vb_expr),
+                        );
                             let inline_attr =
                                 self.get_inline_attribute_from(&binding.vb_attributes);
                             value =
@@ -10566,7 +10633,10 @@ impl<'a> RawLambdaConverter<'a> {
                     RawLambda::letrec(lam_bindings, body)
                 } else {
                     bindings.iter().rev().fold(body, |acc, binding| {
-                        let mut value = self.convert_expr_raw(&binding.vb_expr);
+                        let mut value = self.with_warning_scope(
+                            &binding.vb_attributes,
+                            |this| this.convert_expr_raw(&binding.vb_expr),
+                        );
                         let inline_attr = self.get_inline_attribute_from(&binding.vb_attributes);
                         value = self.apply_inline_attribute_raw(value, binding.vb_loc, inline_attr);
                         self.mark_js_hoisted_pattern(
