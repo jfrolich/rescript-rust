@@ -165,8 +165,10 @@ pub fn max_lambda_input_stamp(typed_structure: &crate::types::typedtree::Structu
     fn visit_typed_core_type(max_stamp: &mut i32, core_type: &TypedCoreType) {
         match &core_type.ctyp_desc {
             TypedCoreTypeDesc::Ttyp_var(_) => {}
-            TypedCoreTypeDesc::Ttyp_arrow(arg, ret, _) => {
-                visit_typed_core_type(max_stamp, &arg.typ);
+            TypedCoreTypeDesc::Ttyp_arrow(args, ret) => {
+                for arg in args {
+                    visit_typed_core_type(max_stamp, &arg.typ);
+                }
                 visit_typed_core_type(max_stamp, ret);
             }
             TypedCoreTypeDesc::Ttyp_tuple(items) => {

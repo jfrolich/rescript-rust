@@ -559,9 +559,9 @@ pub struct ArrowArg {
 pub enum TypedCoreTypeDesc {
     /// Type variable: `'a`.
     Ttyp_var(Option<String>),
-    /// Arrow type: `T1 -> T2` with optional arity.
-    /// Structure: (arg, ret, arity) where arg contains (attrs, lbl, typ).
-    Ttyp_arrow(ArrowArg, Box<TypedCoreType>, Option<i32>),
+    /// N-ary arrow type. Mirrors `compiler/ml/typedtree.ml`:
+    /// `Ttyp_arrow of Parsetree.arg list * core_type`.
+    Ttyp_arrow(Vec<ArrowArg>, Box<TypedCoreType>),
     /// Tuple type: `(T1, ..., Tn)`.
     Ttyp_tuple(Vec<TypedCoreType>),
     /// Type constructor: `t`, `M.t`, `('a, 'b) t`.

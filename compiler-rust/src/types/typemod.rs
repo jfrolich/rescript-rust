@@ -914,9 +914,8 @@ fn primitive_description_from_value_decl(
 
 fn primitive_arity_from_typed_core_type(ty: &crate::types::typedtree::TypedCoreType) -> i32 {
     match &ty.ctyp_desc {
-        crate::types::typedtree::TypedCoreTypeDesc::Ttyp_arrow(_, ret, Some(arity)) => *arity,
-        crate::types::typedtree::TypedCoreTypeDesc::Ttyp_arrow(_, ret, None) => {
-            1 + primitive_arity_from_typed_core_type(ret)
+        crate::types::typedtree::TypedCoreTypeDesc::Ttyp_arrow(args, ret) => {
+            args.len() as i32 + primitive_arity_from_typed_core_type(ret)
         }
         crate::types::typedtree::TypedCoreTypeDesc::Ttyp_poly(_, inner)
         | crate::types::typedtree::TypedCoreTypeDesc::Ttyp_alias(inner, _) => {
@@ -7938,10 +7937,10 @@ fn typed_core_type_uses_path(
     path_matches: &dyn Fn(&Path) -> bool,
 ) -> bool {
     let desc_uses = match &ctyp.ctyp_desc {
-        TypedCoreTypeDesc::Ttyp_arrow(arg, ret, _) => {
-            typed_core_type_uses_path(ctx, &arg.typ, path_matches)
-                || typed_core_type_uses_path(ctx, ret, path_matches)
-        }
+        TypedCoreTypeDesc::Ttyp_arrow(args, ret) => args
+            .iter()
+            .any(|arg| typed_core_type_uses_path(ctx, &arg.typ, path_matches))
+            || typed_core_type_uses_path(ctx, ret, path_matches),
         TypedCoreTypeDesc::Ttyp_tuple(items) => items
             .iter()
             .any(|item| typed_core_type_uses_path(ctx, item, path_matches)),
@@ -9012,10 +9011,10 @@ fn typed_core_type_uses_opened_path(
     open_path: &Path,
 ) -> bool {
     let desc_uses = match &ctyp.ctyp_desc {
-        TypedCoreTypeDesc::Ttyp_arrow(arg, ret, _) => {
-            typed_core_type_uses_opened_path(arena, &arg.typ, open_path)
-                || typed_core_type_uses_opened_path(arena, ret, open_path)
-        }
+        TypedCoreTypeDesc::Ttyp_arrow(args, ret) => args
+            .iter()
+            .any(|arg| typed_core_type_uses_opened_path(arena, &arg.typ, open_path))
+            || typed_core_type_uses_opened_path(arena, ret, open_path),
         TypedCoreTypeDesc::Ttyp_tuple(items) => items
             .iter()
             .any(|item| typed_core_type_uses_opened_path(arena, item, open_path)),
@@ -9614,10 +9613,10 @@ fn typed_core_type_uses_opened_modtype_name(
     names: &HashSet<String>,
 ) -> bool {
     match &ctyp.ctyp_desc {
-        TypedCoreTypeDesc::Ttyp_arrow(arg, ret, _) => {
-            typed_core_type_uses_opened_modtype_name(arena, &arg.typ, names)
-                || typed_core_type_uses_opened_modtype_name(arena, ret, names)
-        }
+        TypedCoreTypeDesc::Ttyp_arrow(args, ret) => args
+            .iter()
+            .any(|arg| typed_core_type_uses_opened_modtype_name(arena, &arg.typ, names))
+            || typed_core_type_uses_opened_modtype_name(arena, ret, names),
         TypedCoreTypeDesc::Ttyp_tuple(items) => items
             .iter()
             .any(|item| typed_core_type_uses_opened_modtype_name(arena, item, names)),
@@ -18348,12 +18347,16 @@ fn find_unbound_type_var_in_typed_core_type_before_closed_decl(
                 _ => None,
             }
         }
-        TypedCoreTypeDesc::Ttyp_arrow(arg, ret, _) => {
-            find_unbound_type_var_in_typed_core_type_before_closed_decl(ctx, &arg.typ, allowed)
-                .or_else(|| {
-                    find_unbound_type_var_in_typed_core_type_before_closed_decl(ctx, ret, allowed)
-                })
-        }
+        TypedCoreTypeDesc::Ttyp_arrow(args, ret) => args
+            .iter()
+            .find_map(|arg| {
+                find_unbound_type_var_in_typed_core_type_before_closed_decl(
+                    ctx, &arg.typ, allowed,
+                )
+            })
+            .or_else(|| {
+                find_unbound_type_var_in_typed_core_type_before_closed_decl(ctx, ret, allowed)
+            }),
         TypedCoreTypeDesc::Ttyp_tuple(types) | TypedCoreTypeDesc::Ttyp_constr(_, _, types) => {
             types.iter().find_map(|ctyp| {
                 find_unbound_type_var_in_typed_core_type_before_closed_decl(ctx, ctyp, allowed)
@@ -18390,10 +18393,10 @@ fn find_unbound_type_var_in_typed_core_type(
                 _ => None,
             }
         }
-        TypedCoreTypeDesc::Ttyp_arrow(arg, ret, _) => {
-            find_unbound_type_var_in_typed_core_type(ctx, &arg.typ, allowed)
-                .or_else(|| find_unbound_type_var_in_typed_core_type(ctx, ret, allowed))
-        }
+        TypedCoreTypeDesc::Ttyp_arrow(args, ret) => args
+            .iter()
+            .find_map(|arg| find_unbound_type_var_in_typed_core_type(ctx, &arg.typ, allowed))
+            .or_else(|| find_unbound_type_var_in_typed_core_type(ctx, ret, allowed)),
         TypedCoreTypeDesc::Ttyp_tuple(types) | TypedCoreTypeDesc::Ttyp_constr(_, _, types) => types
             .iter()
             .find_map(|ctyp| find_unbound_type_var_in_typed_core_type(ctx, ctyp, allowed)),

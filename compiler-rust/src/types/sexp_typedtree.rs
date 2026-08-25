@@ -1549,14 +1549,20 @@ fn sexp_core_type_desc(
             None => Sexp::atom("Ttyp_any"),
             Some(s) => Sexp::list(vec![Sexp::atom("Ttyp_var"), string(s)]),
         },
-        TypedCoreTypeDesc::Ttyp_arrow(arg, ret, arity) => Sexp::list(vec![
-            Sexp::atom("Ttyp_arrow"),
-            sexp_type_arg_label(&arg.lbl),
-            sexp_attributes(arena, with_locs, &arg.attrs),
-            sexp_core_type(arena, ctx, with_locs, dedup, &*arg.typ),
-            sexp_core_type(arena, ctx, with_locs, dedup, ret),
-            opt(|a: &i32| Sexp::atom(&a.to_string()), arity),
-        ]),
+        TypedCoreTypeDesc::Ttyp_arrow(args, ret) => {
+            // compiler/ml/sexp_typedtree.ml emits each Parsetree.arg as
+            // [label; attrs; core_type], followed by the return core type.
+            let mut items = vec![Sexp::atom("Ttyp_arrow")];
+            for arg in args {
+                items.push(Sexp::list(vec![
+                    sexp_type_arg_label(&arg.lbl),
+                    sexp_attributes(arena, with_locs, &arg.attrs),
+                    sexp_core_type(arena, ctx, with_locs, dedup, &arg.typ),
+                ]));
+            }
+            items.push(sexp_core_type(arena, ctx, with_locs, dedup, ret));
+            Sexp::list(items)
+        }
         TypedCoreTypeDesc::Ttyp_tuple(types) => {
             let mut items = vec![Sexp::atom("Ttyp_tuple")];
             for t in types.iter() {

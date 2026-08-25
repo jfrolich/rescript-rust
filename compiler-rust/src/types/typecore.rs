@@ -1720,8 +1720,10 @@ fn collect_named_type_vars_from_core_type(
             out.entry(name.clone()).or_insert(ctyp.ctyp_type);
         }
         TypedCoreTypeDesc::Ttyp_var(None) => {}
-        TypedCoreTypeDesc::Ttyp_arrow(arg, ret, _) => {
-            collect_named_type_vars_from_core_type(&arg.typ, out);
+        TypedCoreTypeDesc::Ttyp_arrow(args, ret) => {
+            for arg in args {
+                collect_named_type_vars_from_core_type(&arg.typ, out);
+            }
             collect_named_type_vars_from_core_type(ret, out);
         }
         TypedCoreTypeDesc::Ttyp_tuple(items) | TypedCoreTypeDesc::Ttyp_constr(_, _, items) => {
@@ -2322,9 +2324,9 @@ fn transl_type_inner(
             let ret = tctx.arena.get_core_type(*ret_idx);
             let (ret_ctyp, ret_ty) = transl_type_inner(tctx, env, ret)?;
 
-            // Convert Arity to Option<i32> for typed tree (matches OCaml's arity option)
-            // Arity is now ArityIdx, look up the value from the arena
-            let arity_opt = tctx.arena.get_arity(*arity);
+            // The current parser bridge still carries the legacy arity slot;
+            // upstream Types/Typedtree no longer store it.
+            let _ = tctx.arena.get_arity(*arity);
 
             // Like OCaml: wrap optional argument types in option
             let arg_ty = if arg.lbl.is_optional() {
@@ -2333,19 +2335,37 @@ fn transl_type_inner(
                 arg_ty
             };
 
-            // Convert parser ArgLabel to types ArgLabel for TypeContext
+            // Convert parser ArgLabel to types ArgLabel for TypeContext.
             let ctx_lbl = convert_arg_label_for_ctx(&arg.lbl, tctx.arena);
-            let arrow_ty = ctx.new_arrow(ctx_lbl.clone(), arg_ty, ret_ty, arity_opt);
+            let mut type_args = vec![TypeArg::new(ctx_lbl.clone(), arg_ty)];
+            let final_ret_ty = {
+                let ret_desc = ctx.get_desc(ctx.repr(ret_ty));
+                match &*ret_desc {
+                    TypeDesc::Tarrow { args, ret } => {
+                        type_args.extend(args.iter().cloned());
+                        *ret
+                    }
+                    _ => ret_ty,
+                }
+            };
+            let arrow_ty = ctx.new_type(TypeDesc::Tarrow {
+                args: type_args,
+                ret: final_ret_ty,
+            });
 
-            // Create ArrowArg structure matching OCaml's
             let arrow_arg = ArrowArg {
                 attrs: arg.attrs.clone(),
                 lbl: ctx_lbl,
                 typ: Box::new(arg_ctyp),
             };
+            let (mut typed_args, typed_ret) = match ret_ctyp.ctyp_desc {
+                TypedCoreTypeDesc::Ttyp_arrow(args, ret) => (args, ret),
+                _ => (Vec::new(), Box::new(ret_ctyp)),
+            };
+            typed_args.insert(0, arrow_arg);
 
             let ctyp = TypedCoreType {
-                ctyp_desc: TypedCoreTypeDesc::Ttyp_arrow(arrow_arg, Box::new(ret_ctyp), arity_opt),
+                ctyp_desc: TypedCoreTypeDesc::Ttyp_arrow(typed_args, typed_ret),
                 ctyp_type: arrow_ty,
                 ctyp_env: EnvRef(0),
                 ctyp_loc: loc,
