@@ -2248,6 +2248,12 @@ impl ParseArena {
     }
 
     /// Return the authoritative n-ary parameters, or the compact fallback.
+    pub fn stored_nary_fun_params(&self, fun: &crate::parser::ast::PexpFun) -> Option<&[FunParam]> {
+        self.nary_fun_params_by_arity
+            .get(&fun.arity)
+            .map(|params| &params[..])
+    }
+
     pub fn nary_fun_params<'a>(
         &'a self,
         fun: &'a crate::parser::ast::PexpFun,

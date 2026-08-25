@@ -913,6 +913,21 @@ pub fn fun_expr<'a>(
     loop {
         match &*current.pexp_desc {
             ExpressionDesc::Pexp_fun(inner) => {
+                if let Some(source_params) = arena.stored_nary_fun_params(inner) {
+                    if !found_first_pexp_fun {
+                        is_async = is_async || inner.is_async;
+                    }
+                    for source in source_params {
+                        params.push(FunParam::Parameter {
+                            attrs: &source.p_attrs,
+                            label: &source.p_lbl,
+                            default_expr: source.p_default.map(|idx| arena.get_expr(idx)),
+                            pat: arena.get_pat(source.p_pat),
+                        });
+                    }
+                    current = arena.get_expr(inner.rhs);
+                    break;
+                }
                 let PexpFun {
                     arg_label,
                     default,
