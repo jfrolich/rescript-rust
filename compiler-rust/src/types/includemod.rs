@@ -3218,10 +3218,15 @@ pub(crate) fn type_declarations<'a>(
         }
     }
 
+    let canonical_unboxed = |decl: &TypeDeclaration| {
+        decl.type_variant_layout
+            .map(|layout_ref| type_ctx.variant_layout(layout_ref).unboxed)
+            .unwrap_or(decl.type_unboxed.unboxed)
+    };
     if !matches!(sig_decl.type_kind, TypeKind::TypeAbstract)
-        && impl_decl.type_unboxed.unboxed != sig_decl.type_unboxed.unboxed
+        && canonical_unboxed(impl_decl) != canonical_unboxed(sig_decl)
     {
-        let unboxed_decl = if sig_decl.type_unboxed.unboxed {
+        let unboxed_decl = if canonical_unboxed(sig_decl) {
             "the second"
         } else {
             "the first"
@@ -3236,7 +3241,7 @@ pub(crate) fn type_declarations<'a>(
         ));
     }
 
-    if type_decl_tag_name(impl_decl) != type_decl_tag_name(sig_decl) {
+    if type_decl_tag_name(type_ctx, impl_decl) != type_decl_tag_name(type_ctx, sig_decl) {
         return Err(type_decl_mismatch(
             id,
             impl_decl,
@@ -3283,6 +3288,8 @@ pub(crate) fn type_declarations<'a>(
                 &sig_decl.type_params,
                 impl_constructors,
                 sig_constructors,
+                impl_decl.type_variant_layout.map(|r| type_ctx.variant_layout(r)),
+                sig_decl.type_variant_layout.map(|r| type_ctx.variant_layout(r)),
                 warnings,
             ) {
                 return Err(type_decl_mismatch(id, impl_decl, sig_decl, detail));
@@ -3495,16 +3502,9 @@ fn type_decl_has_attr(decl: &TypeDeclaration, name: &str) -> bool {
         .any(|attr| attr.attr_name.txt == name)
 }
 
-fn type_decl_tag_name(decl: &TypeDeclaration) -> Option<&str> {
-    decl.type_attributes.iter().find_map(|attr| {
-        if attr.attr_name.txt == "tag"
-            && let AttributePayload::Str(value) = &attr.attr_payload
-        {
-            Some(value.as_str())
-        } else {
-            None
-        }
-    })
+fn type_decl_tag_name(type_ctx: &TypeContext, decl: &TypeDeclaration) -> Option<String> {
+    decl.type_variant_layout
+        .and_then(|layout_ref| type_ctx.variant_layout(layout_ref).matching_facts.tag_name)
 }
 
 fn private_flags(impl_decl: &TypeDeclaration, sig_decl: &TypeDeclaration) -> bool {
@@ -3872,6 +3872,8 @@ fn compare_variant_declarations(
     sig_params: &[TypeExprRef],
     impl_constructors: &[ConstructorDeclaration],
     sig_constructors: &[ConstructorDeclaration],
+    impl_layout: Option<crate::types::VariantLayout>,
+    sig_layout: Option<crate::types::VariantLayout>,
     warnings: &mut Vec<Warning>,
 ) -> Option<String> {
     let param_map = build_type_param_map(type_ctx, impl_params, sig_params);
@@ -3979,8 +3981,21 @@ fn compare_variant_declarations(
         }
 
         if constructor_is_nullary(impl_constructor)
-            && constructor_as_payload(&impl_constructor.cd_attributes)
-                != constructor_as_payload(&sig_constructor.cd_attributes)
+            && match (&impl_layout, &sig_layout) {
+                (Some(impl_layout), Some(sig_layout)) => {
+                    let impl_tag = match &impl_layout.constructors[index] {
+                        crate::types::VariantConstructorCase::Constant(tag) => &tag.tag_type,
+                        crate::types::VariantConstructorCase::Block(_) => unreachable!(),
+                    };
+                    let sig_tag = match &sig_layout.constructors[index] {
+                        crate::types::VariantConstructorCase::Constant(tag) => &tag.tag_type,
+                        crate::types::VariantConstructorCase::Block(_) => unreachable!(),
+                    };
+                    impl_tag != sig_tag
+                }
+                _ => constructor_as_payload(&impl_constructor.cd_attributes)
+                    != constructor_as_payload(&sig_constructor.cd_attributes),
+            }
         {
             return Some(format!(
                 "The internal representations for case {} are not equal.",
