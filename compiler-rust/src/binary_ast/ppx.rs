@@ -15642,29 +15642,19 @@ fn make_arrows_type_with_loc(
         return ret.clone();
     }
 
-    let total_arity = args.len();
-    // Build from right to left
-    let mut result = ret.clone();
-    for (i, arg) in args.iter().enumerate().rev() {
-        // OCaml: outermost (i == 0) has arity = Some(total_arity), inner has arity = None
-        let current_arity = if i == 0 {
-            arena.push_arity(Some(total_arity as i32))
-        } else {
-            // OCaml passes None for inner arrows in build_arrows
-            arena.static_arity_none()
-        };
-
-        result = CoreType {
-            ptyp_desc: Box::new(CoreTypeDesc::Ptyp_arrow(Box::new((
-                Box::new(arg.clone()),
-                arena.push_core_type(result),
-                current_arity,
-            )))),
-            ptyp_loc, // OCaml uses same loc for all arrows
-            ptyp_attributes: Attributes::new(),
-        };
+    let args = args.to_vec();
+    let arity = arena.push_arity(Some(args.len() as i32));
+    let first = args[0].clone();
+    arena.set_nary_arrow_args(arity, args);
+    CoreType {
+        ptyp_desc: Box::new(CoreTypeDesc::Ptyp_arrow(Box::new((
+            Box::new(first),
+            arena.push_core_type(ret.clone()),
+            arity,
+        )))),
+        ptyp_loc,
+        ptyp_attributes: Attributes::new(),
     }
-    result
 }
 
 /// Make @get attribute
@@ -16152,32 +16142,39 @@ fn generate_variant_accessors_and_sigs(
                 pexp_attributes: Attributes::new(),
             };
 
-            // Wrap with function parameters (fold right)
-            let body = params
+            let body = arena.push_expr(ctor_expr);
+            let arity_id = arena.push_arity(Some(arity as i32));
+            let unknown_arity = arena.push_arity(None);
+            let fun_params = params
                 .iter()
-                .rev()
-                .fold(ctor_expr, |acc, &param| Expression {
-                    pexp_desc: Box::new(ExpressionDesc::Pexp_fun(Box::new(PexpFun {
-                        arg_label: ArgLabel::Nolabel,
-                        default: None,
-                        lhs: arena.push_pat(Pattern {
-                            ppat_desc: Box::new(PatternDesc::Ppat_var(Located {
-                                txt: param,
-                                loc: ctor_loc,
-                            })),
-                            ppat_loc: none_loc,
-                            ppat_attributes: Attributes::new(),
-                        }),
-                        rhs: arena.push_expr(acc),
-                        is_async: false,
-                        arity: arena.push_arity(None),
-                    }))),
-                    pexp_loc: none_loc,
-                    pexp_attributes: Attributes::new(),
-                });
-
-            // Set outermost arity
-            let final_expr = set_outermost_arity(body, arity as i32, arena);
+                .map(|&param| FunParam {
+                    p_attrs: Attributes::new(),
+                    p_lbl: ArgLabel::Nolabel,
+                    p_default: None,
+                    p_pat: arena.push_pat(Pattern {
+                        ppat_desc: Box::new(PatternDesc::Ppat_var(Located {
+                            txt: param,
+                            loc: ctor_loc,
+                        })),
+                        ppat_loc: none_loc,
+                        ppat_attributes: Attributes::new(),
+                    }),
+                })
+                .collect::<Vec<_>>();
+            let first = fun_params[0].clone();
+            arena.set_nary_fun_params(arity_id, fun_params, unknown_arity);
+            let final_expr = Expression {
+                pexp_desc: Box::new(ExpressionDesc::Pexp_fun(Box::new(PexpFun {
+                    arg_label: first.p_lbl,
+                    default: None,
+                    lhs: first.p_pat,
+                    rhs: body,
+                    is_async: false,
+                    arity: arity_id,
+                }))),
+                pexp_loc: none_loc,
+                pexp_attributes: Attributes::new(),
+            };
 
             let binding = ValueBinding {
                 pvb_pat: arena.push_pat(Pattern {
@@ -16245,32 +16242,18 @@ fn make_arrows(args: Vec<TypeArg>, ret: CoreType, loc: LocIdx, arena: &mut Parse
         return ret;
     }
 
-    // OCaml's Typ.arrows: outermost arrow gets Some(list_length), inner arrows get None
-    let full_arity = arena.push_arity(Some(args.len() as i32));
-    let none_arity = arena.push_arity(None);
-
-    // Build right-to-left (fold_right pattern)
-    // The first arg processed (rightmost) gets None, the last (outermost) gets full_arity
-    let mut result = ret;
-    let num_args = args.len();
-    for (i, arg) in args.into_iter().rev().enumerate() {
-        // i=0 is the last (rightmost) arg, i=num_args-1 is the first (outermost) arg
-        let arity = if i == num_args - 1 {
-            full_arity
-        } else {
-            none_arity
-        };
-        result = CoreType {
-            ptyp_desc: Box::new(CoreTypeDesc::Ptyp_arrow(Box::new((
-                Box::new(arg),
-                arena.push_core_type(result),
-                arity,
-            )))),
-            ptyp_loc: loc,
-            ptyp_attributes: Attributes::new(),
-        };
+    let arity = arena.push_arity(Some(args.len() as i32));
+    let first = args[0].clone();
+    arena.set_nary_arrow_args(arity, args);
+    CoreType {
+        ptyp_desc: Box::new(CoreTypeDesc::Ptyp_arrow(Box::new((
+            Box::new(first),
+            arena.push_core_type(ret),
+            arity,
+        )))),
+        ptyp_loc: loc,
+        ptyp_attributes: Attributes::new(),
     }
-    result
 }
 
 /// Generate a core type with attributes (including @deriving)
