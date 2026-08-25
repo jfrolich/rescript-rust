@@ -572,8 +572,18 @@ fn transform_react_component_binding(
         .collect();
 
     // Extract labeled arguments from the function (use inner expression to handle forwardRef)
-    let (args, newtypes, _, jsx_warnings, key_error_loc) =
+    let (args, mut newtypes, _, jsx_warnings, key_error_loc) =
         recursively_extract_named_args(arena, &inner_expr);
+    if let Some(constraint) = arena.value_constraint(binding.pvb_pat) {
+        let mut constrained_newtypes = constraint
+            .pvc_newtypes
+            .iter()
+            .cloned()
+            .map(|name| (name, Attributes::new()))
+            .collect::<Vec<_>>();
+        constrained_newtypes.append(&mut newtypes);
+        newtypes = constrained_newtypes;
+    }
     warnings.extend(jsx_warnings);
     if let Some(loc) = key_error_loc {
         set_fatal_error(config, loc, COMPONENT_KEY_PROP_MSG);
