@@ -1414,6 +1414,7 @@ fn substitute_export_alias_use_in_expression(
             }
         }
         ExpressionDesc::TaggedTemplate(tag, strings, values) => {
+            substitute_export_alias_use_in_expression(tag, target, replacement);
             for string in strings {
                 substitute_export_alias_use_in_expression(string, target, replacement);
             }
@@ -1961,6 +1962,7 @@ fn collect_expression_idents(expr: &Expression, stats: &mut JsIdentStats) {
             }
         }
         ExpressionDesc::TaggedTemplate(tag, strings, values) => {
+            collect_expression_idents(tag, stats);
             for string in strings {
                 collect_expression_idents(string, stats);
             }

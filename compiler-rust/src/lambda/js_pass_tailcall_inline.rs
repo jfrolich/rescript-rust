@@ -733,6 +733,7 @@ fn collect_tailcall_use_counts_expression(
             }
         }
         ExpressionDesc::TaggedTemplate(tag, strings, values) => {
+            collect_tailcall_use_counts_expression(tag, decls, counts);
             for string in strings {
                 collect_tailcall_use_counts_expression(string, decls, counts);
             }
@@ -935,6 +936,7 @@ fn collect_once_pure_inline_decls_expression(
             }
         }
         ExpressionDesc::TaggedTemplate(tag, strings, values) => {
+            collect_once_pure_inline_decls_expression(tag, statuses, inline_decls);
             for string in strings {
                 collect_once_pure_inline_decls_expression(string, statuses, inline_decls);
             }
@@ -1584,6 +1586,7 @@ fn apply_tailcall_used_stats_expression(
             }
         }
         ExpressionDesc::TaggedTemplate(tag, strings, values) => {
+            apply_tailcall_used_stats_expression(tag, statuses);
             for string in strings {
                 apply_tailcall_used_stats_expression(string, statuses);
             }

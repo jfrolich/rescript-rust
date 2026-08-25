@@ -8093,6 +8093,7 @@ fn collect_modules_from_expression(expr: &Expression, modules: &mut OcamlModuleS
             }
         }
         ExpressionDesc::TaggedTemplate(tag, strings, values) => {
+            collect_modules_from_expression(tag, modules);
             for string in strings {
                 collect_modules_from_expression(string, modules);
             }

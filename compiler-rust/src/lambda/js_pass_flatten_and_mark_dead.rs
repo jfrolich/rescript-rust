@@ -1106,6 +1106,7 @@ fn collect_mark_dead_states_expression(
             }
         }
         ExpressionDesc::TaggedTemplate(tag, strings, values) => {
+            collect_mark_dead_states_expression(tag, states);
             for string in strings {
                 collect_mark_dead_states_expression(string, states);
             }
@@ -1277,6 +1278,7 @@ fn apply_mark_dead_states_expression(expr: &mut Expression, states: &HashMap<Ide
             }
         }
         ExpressionDesc::TaggedTemplate(tag, strings, values) => {
+            apply_mark_dead_states_expression(tag, states);
             for string in strings {
                 apply_mark_dead_states_expression(string, states);
             }
