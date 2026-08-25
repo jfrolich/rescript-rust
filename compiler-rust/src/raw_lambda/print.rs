@@ -476,7 +476,9 @@ fn lam<W: Write>(f: &mut Formatter<W>, lam0: &RawLambda, reraise_exn: Option<&Id
             } else {
                 f.string("(switch*");
             }
-            f.space();
+            // OCaml lam_print.ml keeps the operator and scrutinee on the
+            // same line; only the break before the cases is conditional.
+            f.string(" ");
             lam(f, arg, reraise_exn);
             f.space();
             f.open_vbox(0);
@@ -487,8 +489,7 @@ fn lam<W: Write>(f: &mut Formatter<W>, lam0: &RawLambda, reraise_exn: Option<&Id
         }
         RawLambda::LstringSwitch(arg, cases, default) => {
             f.open_box(BoxKind::Box, 1);
-            f.string("(stringswitch");
-            f.space();
+            f.string("(stringswitch ");
             lam(f, arg, reraise_exn);
             f.space();
             f.open_vbox(0);
