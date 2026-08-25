@@ -1797,6 +1797,7 @@ pub fn initial_env(ctx: &TypeContext) -> Env {
         type_attributes: vec![],
         type_immediate: immediate,
         type_unboxed: super::decl::UnboxedStatus::default(),
+        type_variant_layout: None,
         type_inlined_types: vec![],
         type_path: None,
     };
@@ -2603,6 +2604,7 @@ mod tests {
             type_attributes: vec![],
             type_immediate: false,
             type_unboxed: super::super::decl::UnboxedStatus::default(),
+            type_variant_layout: None,
             type_inlined_types: vec![],
             type_path: None,
         };

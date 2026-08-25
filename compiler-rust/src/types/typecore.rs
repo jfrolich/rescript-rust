@@ -15522,6 +15522,7 @@ fn type_function_nary_with_newtypes(
                         type_attributes: vec![],
                         type_immediate: false,
                         type_unboxed: crate::types::decl::UnboxedStatus::FALSE_FALSE,
+                        type_variant_layout: None,
                         type_inlined_types: vec![],
                         type_path: None,
                     },
@@ -18630,6 +18631,7 @@ fn inline_record_decl_from_variant_type<'a>(
                 type_attributes: vec![],
                 type_immediate: false,
                 type_unboxed: crate::types::UnboxedStatus::default(),
+                type_variant_layout: None,
                 type_inlined_types: vec![],
                 type_path: None,
             });
@@ -19443,6 +19445,7 @@ fn type_newtype(
                 type_attributes: vec![],
                 type_immediate: false,
                 type_unboxed: crate::types::decl::UnboxedStatus::FALSE_FALSE,
+                type_variant_layout: None,
                 type_inlined_types: vec![],
                 type_path: None,
             },
@@ -19868,6 +19871,7 @@ fn type_letexception(
                         type_attributes: vec![],
                         type_immediate: false,
                         type_unboxed: crate::types::UnboxedStatus::default(),
+                        type_variant_layout: None,
                         type_inlined_types: vec![],
                         type_path: None,
                     };
@@ -24595,6 +24599,7 @@ where
         type_attributes: decl.type_attributes.clone(),
         type_immediate: decl.type_immediate,
         type_unboxed: decl.type_unboxed,
+        type_variant_layout: None,
         type_inlined_types: decl
             .type_inlined_types
             .iter()
@@ -29407,6 +29412,7 @@ fn lookup_constructor_by_expected_type<'b>(
                             type_attributes: vec![],
                             type_immediate: false,
                             type_unboxed: crate::types::UnboxedStatus::default(),
+                            type_variant_layout: None,
                             type_inlined_types: vec![],
                             type_path: None,
                         };
@@ -31958,6 +31964,7 @@ fn lookup_type_decl_for_path_with_cache_mode<'a>(
                                 type_attributes: vec![],
                                 type_immediate: false,
                                 type_unboxed: crate::types::UnboxedStatus::default(),
+                                type_variant_layout: None,
                                 type_inlined_types: vec![],
                                 type_path: None,
                             }));

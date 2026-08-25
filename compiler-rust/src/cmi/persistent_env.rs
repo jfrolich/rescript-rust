@@ -5928,6 +5928,7 @@ fn add_signature_to_env_with_options(
                                         type_attributes: vec![],
                                         type_immediate: false,
                                         type_unboxed: crate::types::UnboxedStatus::default(),
+                                        type_variant_layout: None,
                                         type_inlined_types: vec![],
                                         type_path: None,
                                     };

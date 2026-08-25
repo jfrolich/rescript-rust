@@ -83,6 +83,9 @@ pub struct TypeDeclaration {
     pub type_immediate: bool,
     /// Unboxed status
     pub type_unboxed: UnboxedStatus,
+    /// Canonical runtime layout for a variant declaration. This is a stable
+    /// forward reference completed after the recursive declaration group.
+    pub type_variant_layout: Option<super::variant_runtime::LayoutRef>,
     /// Inlined types (for record printing)
     pub type_inlined_types: Vec<TypeInlinedType>,
     /// Qualified path for this type (e.g., Pdot(Pident "Pervasives") "ref").

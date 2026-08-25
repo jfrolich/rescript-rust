@@ -288,6 +288,11 @@ pub struct TypeContext {
     /// last cleanup. Mirrors OCaml btype.ml `memo` list used by cleanup_abbrev.
     memoized_abbrev_refs: RefCell<Vec<AbbrevMemoRef>>,
 
+    /// Stable forward references for canonical variant layouts. Entries are
+    /// allocated before translating a recursive declaration group and completed
+    /// exactly once after the group is available in the environment.
+    variant_layouts: RefCell<Vec<RefCell<super::variant_runtime::LayoutState>>>,
+
     /// Row field storage
     row_fields: RefCell<Vec<RefCell<Option<RowField>>>>,
 
@@ -538,6 +543,7 @@ impl TypeContext {
                 RefCell::new(AbbrevMemo::Mnil),
             ]),
             memoized_abbrev_refs: RefCell::new(Vec::new()),
+            variant_layouts: RefCell::new(Vec::new()),
             row_fields: RefCell::new(Vec::new()),
             field_kinds: RefCell::new(Vec::new()),
             type_decl_store: RefCell::new(ahash::AHashMap::new()),
@@ -585,6 +591,58 @@ impl TypeContext {
             synthesized_record_lidents: RefCell::new(ahash::AHashMap::new()),
             typed_envs: RefCell::new(Vec::new()),
             typed_envs_by_id: RefCell::new(ahash::AHashMap::new()),
+        }
+    }
+
+    pub fn pending_variant_layout(&self) -> super::variant_runtime::LayoutRef {
+        let mut layouts = self.variant_layouts.borrow_mut();
+        let layout_ref = super::variant_runtime::LayoutRef(layouts.len() as u32);
+        layouts.push(RefCell::new(super::variant_runtime::LayoutState::Pending));
+        layout_ref
+    }
+
+    pub fn alloc_complete_variant_layout(
+        &self,
+        layout: super::variant_runtime::Layout,
+    ) -> super::variant_runtime::LayoutRef {
+        let layout_ref = self.pending_variant_layout();
+        self.complete_variant_layout(layout_ref, layout);
+        layout_ref
+    }
+
+    pub fn complete_variant_layout(
+        &self,
+        layout_ref: super::variant_runtime::LayoutRef,
+        layout: super::variant_runtime::Layout,
+    ) {
+        let layouts = self.variant_layouts.borrow();
+        let Some(state) = layouts.get(layout_ref.0 as usize) else {
+            panic!("variant layout reference belongs to another TypeContext")
+        };
+        let mut state = state.borrow_mut();
+        match &*state {
+            super::variant_runtime::LayoutState::Pending => {
+                *state = super::variant_runtime::LayoutState::Complete(layout)
+            }
+            super::variant_runtime::LayoutState::Complete(_) => {
+                panic!("variant layout completed twice")
+            }
+        }
+    }
+
+    pub fn variant_layout(
+        &self,
+        layout_ref: super::variant_runtime::LayoutRef,
+    ) -> super::variant_runtime::Layout {
+        let layouts = self.variant_layouts.borrow();
+        let Some(state) = layouts.get(layout_ref.0 as usize) else {
+            panic!("variant layout reference belongs to another TypeContext")
+        };
+        match &*state.borrow() {
+            super::variant_runtime::LayoutState::Complete(layout) => layout.clone(),
+            super::variant_runtime::LayoutState::Pending => {
+                panic!("variant layout accessed before declaration completion")
+            }
         }
     }
 

@@ -49,6 +49,7 @@ pub mod typecore;
 pub mod typedtree;
 pub mod typemod;
 pub mod variance;
+pub mod variant_runtime;
 
 // Re-exports for convenience
 pub use asttypes::{
@@ -62,6 +63,12 @@ pub use decl::{
     LabelDeclaration, LabelDescription, ModtypeDeclaration, ModuleDeclaration, ModuleType,
     PrimitiveDescription, RecStatus, RecordRepresentation, Signature, SignatureItem,
     TypeDeclaration, TypeInlinedType, TypeKind, UnboxedStatus, ValueDescription, ValueKind,
+};
+pub use variant_runtime::{
+    Block as VariantBlock, BlockRuntime, BlockType as VariantBlockType, Configuration as VariantConfiguration,
+    ConstructorCase as VariantConstructorCase, ConstructorReference, Instance as VariantInstance,
+    Layout as VariantLayout, LayoutRef as VariantLayoutRef, MatchingFacts as VariantMatchingFacts,
+    Tag as VariantTag, TagType as VariantTagType,
 };
 pub use path::{NOPOS, Path, Typath};
 pub(crate) use type_expr::TypeExprRefMap;

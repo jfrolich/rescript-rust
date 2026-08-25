@@ -118,6 +118,7 @@ fn build_matching_type_constructors(
                     type_attributes: vec![],
                     type_immediate: false,
                     type_unboxed: super::decl::UnboxedStatus::default(),
+                    type_variant_layout: None,
                     type_inlined_types: vec![],
                     type_path: None,
                 };
@@ -290,6 +291,7 @@ fn build_constructors_for_name(
                             type_attributes: vec![],
                             type_immediate: false,
                             type_unboxed: super::decl::UnboxedStatus::default(),
+                            type_variant_layout: None,
                             type_inlined_types: vec![],
                             type_path: None,
                         };

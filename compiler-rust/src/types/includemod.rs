@@ -4889,6 +4889,7 @@ mod tests {
             type_attributes: vec![],
             type_immediate: false,
             type_unboxed: UnboxedStatus::FALSE_FALSE,
+            type_variant_layout: None,
             type_inlined_types: vec![],
             type_path,
         }
@@ -5171,6 +5172,7 @@ mod tests {
                     type_attributes: vec![],
                     type_immediate: false,
                     type_unboxed: UnboxedStatus::FALSE_FALSE,
+                    type_variant_layout: None,
                     type_inlined_types: vec![],
                     type_path: None,
                 },

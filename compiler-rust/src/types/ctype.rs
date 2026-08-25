@@ -725,6 +725,7 @@ fn add_gadt_equation(
         type_attributes: vec![],
         type_immediate: false,
         type_unboxed: super::UnboxedStatus::FALSE_FALSE,
+        type_variant_layout: None,
         type_inlined_types: vec![],
         type_path: None,
     };
@@ -753,6 +754,7 @@ fn reified_type_decl(newtype_level: i32) -> super::TypeDeclaration {
         type_attributes: vec![],
         type_immediate: false,
         type_unboxed: super::UnboxedStatus::FALSE_FALSE,
+        type_variant_layout: None,
         type_inlined_types: vec![],
         type_path: None,
     }
@@ -9229,6 +9231,7 @@ pub fn instance_constructor_in_pattern(
                 unboxed: false,
                 default: false,
             },
+            type_variant_layout: None,
             type_inlined_types: vec![],
             type_path: None,
         };
@@ -11451,6 +11454,7 @@ pub fn nondep_type_decl<'a>(
         type_immediate: decl.type_immediate,
         type_unboxed: decl.type_unboxed.clone(),
         type_path: decl.type_path.clone(),
+        type_variant_layout: None,
         type_inlined_types: decl.type_inlined_types.clone(),
     })
 }
@@ -11542,6 +11546,7 @@ mod tests {
             type_attributes: vec![],
             type_immediate: false,
             type_unboxed: crate::types::decl::UnboxedStatus::default(),
+            type_variant_layout: None,
             type_inlined_types: vec![],
             type_path,
         }
@@ -11750,6 +11755,7 @@ mod tests {
             type_attributes: vec![],
             type_immediate: false,
             type_unboxed: crate::types::decl::UnboxedStatus::default(),
+            type_variant_layout: None,
             type_inlined_types: vec![],
             type_path: None,
         };
@@ -11767,6 +11773,7 @@ mod tests {
             type_attributes: vec![],
             type_immediate: false,
             type_unboxed: crate::types::decl::UnboxedStatus::default(),
+            type_variant_layout: None,
             type_inlined_types: vec![],
             type_path: None,
         };

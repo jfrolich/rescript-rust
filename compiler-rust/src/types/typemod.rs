@@ -212,6 +212,7 @@ fn fixed_row_placeholder_decl(
         type_attributes: parser_attrs_to_decl_attrs(arena, &decl.ptype_attributes),
         type_immediate: false,
         type_unboxed: crate::types::UnboxedStatus::default(),
+        type_variant_layout: None,
         type_inlined_types: vec![],
         type_path: Some(Path::pident(row_id.clone())),
     }
@@ -244,6 +245,7 @@ fn translate_fixed_row_type_declaration<'a>(
         type_attributes,
         type_immediate: false,
         type_unboxed: crate::types::UnboxedStatus::default(),
+        type_variant_layout: None,
         type_inlined_types: vec![],
         type_path,
     };
@@ -15567,6 +15569,7 @@ fn translate_module_type_to_decl_with_typed_hint<'a>(
                                 type_attributes: vec![],
                                 type_immediate: false,
                                 type_unboxed: crate::types::UnboxedStatus::default(),
+                                type_variant_layout: None,
                                 type_inlined_types: vec![],
                                 type_path: Some(Path::pident(type_id.clone())),
                             };
@@ -15868,6 +15871,7 @@ fn translate_module_type_to_decl_with_typed_hint<'a>(
                                 type_attributes,
                                 type_immediate,
                                 type_unboxed,
+                                type_variant_layout: None,
                                 type_inlined_types: vec![],
                                 type_path: Some(Path::pident(type_id.clone())),
                             };
@@ -16287,6 +16291,7 @@ fn approx_abstract_type_decl(
         type_attributes: vec![],
         type_immediate: false,
         type_unboxed: crate::types::decl::UnboxedStatus::default(),
+        type_variant_layout: None,
         type_inlined_types: vec![],
         type_path: None,
     }
@@ -20216,6 +20221,7 @@ pub fn type_structure<'a>(
                     type_attributes: vec![],
                     type_immediate: false,
                     type_unboxed: crate::types::UnboxedStatus::default(),
+                    type_variant_layout: None,
                     type_inlined_types: vec![],
                     type_path: Some(crate::types::Path::pident(type_id.clone())),
                 };
@@ -20747,6 +20753,7 @@ fn type_structure_item<'a>(
                             type_attributes: vec![],
                             type_immediate: false,
                             type_unboxed: crate::types::UnboxedStatus::default(),
+                            type_variant_layout: None,
                             type_inlined_types: vec![],
                             type_path: Some(crate::types::Path::pident(type_id.clone())),
                         };
@@ -20881,6 +20888,7 @@ fn type_structure_item<'a>(
                             type_attributes: vec![],
                             type_immediate: false,
                             type_unboxed: crate::types::UnboxedStatus::default(),
+                            type_variant_layout: None,
                             type_inlined_types: vec![],
                             type_path: Some(crate::types::Path::pident(type_id.clone())),
                         };
@@ -21282,6 +21290,7 @@ fn type_structure_item<'a>(
                         type_attributes: vec![],
                         type_immediate: false,
                         type_unboxed: crate::types::UnboxedStatus::default(),
+                        type_variant_layout: None,
                         type_inlined_types: vec![],
                         type_path: Some(Path::pident(type_id.clone())),
                     };
@@ -21885,6 +21894,7 @@ fn type_structure_item<'a>(
                                                 type_immediate: false,
                                                 type_unboxed:
                                                     crate::types::UnboxedStatus::default(),
+                                                type_variant_layout: None,
                                                 type_inlined_types: vec![],
                                                 type_path: None,
                                             };
@@ -22221,6 +22231,7 @@ fn type_structure_item<'a>(
                                         type_attributes: vec![],
                                         type_immediate: false,
                                         type_unboxed: crate::types::UnboxedStatus::default(),
+                                        type_variant_layout: None,
                                         type_inlined_types: vec![],
                                         type_path: None,
                                     };
@@ -22614,6 +22625,7 @@ fn type_structure_item<'a>(
                     type_attributes,
                     type_immediate,
                     type_unboxed,
+                    type_variant_layout: None,
                     type_inlined_types: vec![],
                     type_path: None,
                 };
@@ -23169,6 +23181,7 @@ fn type_structure_item<'a>(
                                     type_attributes: vec![],
                                     type_immediate: false,
                                     type_unboxed: crate::types::UnboxedStatus::default(),
+                                    type_variant_layout: None,
                                     type_inlined_types: vec![],
                                     type_path: None,
                                 };
@@ -23536,6 +23549,7 @@ fn type_structure_item<'a>(
                                 type_attributes: vec![],
                                 type_immediate: false,
                                 type_unboxed: crate::types::UnboxedStatus::default(),
+                                type_variant_layout: None,
                                 type_inlined_types: vec![],
                                 type_path: None,
                             };
@@ -24648,6 +24662,7 @@ fn transl_sig_type_declarations_with_ids_and_originals<'a>(
                 type_attributes: vec![],
                 type_immediate: false,
                 type_unboxed: crate::types::UnboxedStatus::default(),
+                type_variant_layout: None,
                 type_inlined_types: vec![],
                 type_path: Some(Path::pident(type_id.clone())),
             };
@@ -25181,6 +25196,7 @@ fn transl_sig_type_declarations_with_ids_and_originals<'a>(
                 type_attributes,
                 type_immediate,
                 type_unboxed,
+                type_variant_layout: None,
                 type_inlined_types: vec![],
                 type_path: Some(type_path),
             };
