@@ -1567,25 +1567,9 @@ impl Marshal for ExpressionDesc {
                 dir.marshal(w);
                 e3.marshal(w);
             }
-            // Upstream #7887: Pexp_for_of / Pexp_for_await_of inserted between
-            // Pexp_for and Pexp_constraint, shifting all subsequent tags by 2.
-            ExpressionDesc::Pexp_for_of(inner) => {
-                let (ref pat, ref iterable, ref body) = **inner;
-                w.write_block_header(18, 3);
-                pat.marshal(w);
-                iterable.marshal(w);
-                body.marshal(w);
-            }
-            ExpressionDesc::Pexp_for_await_of(inner) => {
-                let (ref pat, ref iterable, ref body) = **inner;
-                w.write_block_header(19, 3);
-                pat.marshal(w);
-                iterable.marshal(w);
-                body.marshal(w);
-            }
             ExpressionDesc::Pexp_constraint(inner) => {
                 let (ref e, ref t) = **inner;
-                w.write_block_header(20, 2);
+                w.write_block_header(18, 2);
                 e.marshal(w);
                 t.marshal(w);
             }
@@ -1596,20 +1580,20 @@ impl Marshal for ExpressionDesc {
                     .and_then(|owner| w.get_arena().coerce_from_type(owner));
                 // Pexp_coerce of expression * unit * core_type
                 // The middle field in Rust is Option<CoreType> but OCaml uses unit
-                w.write_block_header(21, 3);
+                w.write_block_header(19, 3);
                 e.marshal(w);
                 w.write_int(0); // unit = ()
                 t.marshal(w);
             }
             ExpressionDesc::Pexp_send(inner) => {
                 let (ref e, ref label) = **inner;
-                w.write_block_header(22, 2);
+                w.write_block_header(20, 2);
                 e.marshal(w);
                 label.marshal(w);
             }
             ExpressionDesc::Pexp_letmodule(inner) => {
                 let (ref name, ref me, ref body) = **inner;
-                w.write_block_header(23, 3);
+                w.write_block_header(21, 3);
                 name.marshal(w);
                 w.enter_letmodule_expr();
                 me.marshal(w);
@@ -1618,44 +1602,55 @@ impl Marshal for ExpressionDesc {
             }
             ExpressionDesc::Pexp_letexception(inner) => {
                 let (ref ec, ref body) = **inner;
-                w.write_block_header(24, 2);
+                w.write_block_header(22, 2);
                 ec.marshal(w);
                 body.marshal(w);
             }
             ExpressionDesc::Pexp_assert(e) => {
-                w.write_block_header(25, 1);
+                w.write_block_header(23, 1);
                 e.marshal(w);
             }
-            ExpressionDesc::Pexp_newtype(inner) => {
-                let (ref name, ref e) = **inner;
-                w.write_block_header(26, 2);
-                name.marshal(w);
-                e.marshal(w);
+            ExpressionDesc::Pexp_newtype(_) => {
+                unreachable!("Pexp_newtype is eliminated from the current n-ary parsetree")
             }
             ExpressionDesc::Pexp_pack(me) => {
-                w.write_block_header(27, 1);
+                w.write_block_header(24, 1);
                 w.enter_pack();
                 me.marshal(w);
                 w.exit_pack();
             }
             ExpressionDesc::Pexp_open(inner) => {
                 let (ref flag, ref lid, ref e) = **inner;
-                w.write_block_header(28, 3);
+                w.write_block_header(25, 3);
                 flag.marshal(w);
                 w.write_lident_loc_shared(lid.txt, lid.loc);
                 e.marshal(w);
             }
             ExpressionDesc::Pexp_extension(ext) => {
-                w.write_block_header(29, 1);
+                w.write_block_header(26, 1);
                 marshal_extension(ext, w, Some(EmptyPayloadShareKind::ParserAttr));
             }
             ExpressionDesc::Pexp_await(e) => {
-                w.write_block_header(30, 1);
+                w.write_block_header(27, 1);
                 e.marshal(w);
             }
             ExpressionDesc::Pexp_jsx_element(jsx) => {
-                w.write_block_header(31, 1);
+                w.write_block_header(28, 1);
                 jsx.marshal(w);
+            }
+            ExpressionDesc::Pexp_for_of(inner) => {
+                let (ref pat, ref iterable, ref body) = **inner;
+                w.write_block_header(29, 3);
+                pat.marshal(w);
+                iterable.marshal(w);
+                body.marshal(w);
+            }
+            ExpressionDesc::Pexp_for_await_of(inner) => {
+                let (ref pat, ref iterable, ref body) = **inner;
+                w.write_block_header(30, 3);
+                pat.marshal(w);
+                iterable.marshal(w);
+                body.marshal(w);
             }
             ExpressionDesc::Pexp_inline_for(_)
             | ExpressionDesc::Pexp_comptime_typeinfo(_)
@@ -1695,10 +1690,14 @@ impl Marshal for Case {
 
 impl Marshal for ValueBinding {
     fn marshal(&self, w: &mut MarshalWriter<'_>) {
-        // value_binding = { pvb_pat; pvb_expr; pvb_attributes; pvb_loc }
-        w.write_block_header(0, 4);
+        // value_binding = { pvb_pat; pvb_expr; pvb_constraint;
+        //                   pvb_attributes; pvb_loc }
+        w.write_block_header(0, 5);
         self.pvb_pat.marshal(w);
         self.pvb_expr.marshal(w);
+        // The compact Rust parsetree does not yet retain value constraints.
+        // Parser-produced ordinary bindings have no constraint on the wire.
+        w.write_int(0);
         let share_empty_pstr = if has_braces_attr(&self.pvb_attributes, w)
             || has_ternary_attr(&self.pvb_attributes, w)
         {

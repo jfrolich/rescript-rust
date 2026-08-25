@@ -8676,6 +8676,7 @@ fn rewrite_expression_generic(expr: &Expression, arena: &mut ParseArena) -> Expr
             }
             // First, recursively rewrite the complete n-ary function shape.
             let source_params = arena.nary_fun_params(inner).into_owned();
+            let source_newtypes = arena.nary_fun_newtypes(inner).to_vec();
             let mut rewritten_params = Vec::with_capacity(source_params.len());
             for source in source_params {
                 let rewritten_default = source.p_default.map(|e| {
@@ -8701,6 +8702,13 @@ fn rewrite_expression_generic(expr: &Expression, arena: &mut ParseArena) -> Expr
             let first = rewritten_params[0].clone();
             let unknown_arity = arena.nary_fun_unknown_arity(inner);
             arena.set_nary_fun_params(*arity, rewritten_params, unknown_arity);
+            if !source_newtypes.is_empty() {
+                let rewritten_newtypes = source_newtypes
+                    .into_iter()
+                    .map(|(name, attrs)| (name, rewrite_attributes(&attrs, arena).into()))
+                    .collect();
+                arena.set_nary_fun_newtypes(first.p_pat, rewritten_newtypes);
+            }
 
             // Create the rewritten fun expression
             let mut rewritten_fun = Expression {
