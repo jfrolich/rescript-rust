@@ -6,6 +6,7 @@ syntax_tests/data/api/resiSyntax.resi
 syntax_tests/data/ast-mapping/ForAwaitOfExpressions.res
 syntax_tests/data/ast-mapping/ForOfExpressions.res
 syntax_tests/data/ast-mapping/FunWithAttribute.res
+syntax_tests/data/ast-mapping/FunctionsAndArrows.res
 syntax_tests/data/ast-mapping/JSXElements.res
 syntax_tests/data/ast-mapping/JSXFragments.res
 syntax_tests/data/conversion/reason/attributes.res
