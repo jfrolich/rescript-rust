@@ -82,15 +82,10 @@ fn predef_exception_ident(name: &str, stamp: i32) -> Ident {
 }
 
 fn recmodule_function_shape_constant() -> Constant {
-    Constant::Int {
-        i: 0,
-        comment: Some(PointerInfo::Constructor(PointerConstructorTag {
-            name: "Function".to_string(),
-            const_: REC_MODULE_FUNCTION_CSTR_CONST,
-            non_const: REC_MODULE_FUNCTION_CSTR_NON_CONST,
-            runtime_tag: None,
-        })),
-    }
+    Constant::Constructor(crate::types::VariantTag {
+        name: "Function".to_string(),
+        tag_type: None,
+    })
 }
 
 fn raw_constructor_constant(
