@@ -408,9 +408,7 @@ pub fn type_is_builtin_path_but_option(p: &Path) -> Option<bool> {
     match p {
         Path::Pident(id) if id.stamp() == STAMP_OPTION => Some(false),
         Path::Pident(id) if id.stamp() == STAMP_UNIT => Some(false),
-        Path::Pident(id)
-            if id.stamp() >= STAMP_INT && id.stamp() <= STAMP_TAGGED_TEMPLATE =>
-        {
+        Path::Pident(id) if id.stamp() >= STAMP_INT && id.stamp() <= STAMP_TAGGED_TEMPLATE => {
             Some(true)
         }
         _ => None,

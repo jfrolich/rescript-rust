@@ -10066,8 +10066,10 @@ fn format_tagged_template_non_tag_report(
     loc: LocIdx,
     typ: TypeExprRef,
 ) -> String {
+    const INFO: &str = "\x1b[1;33m";
+    const RESET: &str = "\x1b[0m";
     let message = format!(
-        "This value is used with tagged template (backtick) syntax, but it has type {} which is not a taggedTemplate.\n\nTagged template syntax now requires a value of type taggedTemplate<'param, 'output>:\n\n  - To bind a JavaScript tag function, annotate the external with taggedTemplate<...> instead of using the removed @taggedTemplate decorator.\n  - To use a ReScript function as a tag, lift it with TaggedTemplate.make.",
+        "This value is used with tagged template (backtick) syntax, but it has type\n{INFO}{}{RESET}\nwhich is not a {INFO}taggedTemplate{RESET}.\n\nTagged template syntax now requires a value of type {INFO}taggedTemplate<'param, 'output>{RESET}:\n\n  - To bind a JavaScript tag function, annotate the {INFO}external{RESET} with {INFO}taggedTemplate<...>{RESET} instead of using the removed {INFO}@taggedTemplate{RESET} decorator.\n  - To use a ReScript function as a tag, lift it with {INFO}TaggedTemplate.make{RESET}.",
         format_type_expr(type_ctx, typ)
     );
     format_compiler_error_report(arena, source, filename, loc, &message)

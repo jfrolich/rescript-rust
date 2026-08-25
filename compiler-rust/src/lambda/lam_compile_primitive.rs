@@ -52,13 +52,21 @@ impl LambdaCompiler {
             Parraylength => Expression::length(compiled_args[0].clone(), LengthObject::Array),
             // Upstream compiler/core/lam_compile_primitive.ml:91-101.
             PtaggedTemplate => match compiled_args.as_slice() {
-                [tag, Expression { desc: ExpressionDesc::Array(strings, _), .. }, Expression { desc: ExpressionDesc::Array(values, _), .. }] => {
-                    Expression::new(ExpressionDesc::TaggedTemplate(
-                        Box::new(tag.clone()),
-                        strings.clone(),
-                        values.clone(),
-                    ))
-                }
+                [
+                    tag,
+                    Expression {
+                        desc: ExpressionDesc::Array(strings, _),
+                        ..
+                    },
+                    Expression {
+                        desc: ExpressionDesc::Array(values, _),
+                        ..
+                    },
+                ] => Expression::new(ExpressionDesc::TaggedTemplate(
+                    Box::new(tag.clone()),
+                    strings.clone(),
+                    values.clone(),
+                )),
                 _ => unreachable!("tagged-template primitive operands are two arrays"),
             },
             // OCaml lam_compile_primitive.ml:87-90 lowers Pjs_apply to a

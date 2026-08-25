@@ -2189,7 +2189,7 @@ fn validate_external_attribute_payload_errors(
                 // Upstream compiler/frontend/ast_external_process.ml:354-362.
                 return Err(PpxError::at_loc(
                     attr_name.loc,
-                    "The @taggedTemplate decorator has been removed. Bind the external with the builtin taggedTemplate<'param, 'output> type instead, e.g. `@module(\"x\") external sql: taggedTemplate<'a, 'b> = \"sql\"`.",
+                    "The @taggedTemplate decorator has been removed. Bind the external with the builtin taggedTemplate<'param, 'output> type instead, e.g. `@module(\"x\") external sql: taggedTemplate<'a, string> = \"sql\"`. The tag can then be used with backtick syntax across module boundaries and as a first-class value.",
                 ));
             }
             "val" | "send" | "set" | "get" | "new" => {

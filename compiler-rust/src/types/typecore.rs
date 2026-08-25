@@ -8972,7 +8972,11 @@ fn type_application(
             });
         }
 
-        let [(ArgLabel::Nolabel, strings_idx), (ArgLabel::Nolabel, values_idx)] = args else {
+        let [
+            (ArgLabel::Nolabel, strings_idx),
+            (ArgLabel::Nolabel, values_idx),
+        ] = args
+        else {
             unreachable!("the parser always emits two unlabeled tagged-template arguments")
         };
         let strings = tctx.arena.get_expr(*strings_idx);
