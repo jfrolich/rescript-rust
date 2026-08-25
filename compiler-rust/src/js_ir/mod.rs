@@ -1395,6 +1395,18 @@ fn fold_strict_equality(left: &Expression, right: &Expression) -> Option<bool> {
         ) => {
             return Some(left_int == right_int);
         }
+        (
+            ExpressionDesc::Str {
+                txt: left_txt,
+                delim: left_delim,
+            },
+            ExpressionDesc::Str {
+                txt: right_txt,
+                delim: right_delim,
+            },
+        ) => {
+            return fold_strict_string_equality(left_txt, left_delim, right_txt, right_delim);
+        }
         _ => {}
     }
 
