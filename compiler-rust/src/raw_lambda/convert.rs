@@ -2306,15 +2306,13 @@ impl<'a> RawLambdaConverter<'a> {
                 RawLambda::Lfunction(func)
             }
             other => {
-                let name = match inline {
-                    InlineAttribute::Always => "inline1",
-                    InlineAttribute::Never => "inline2",
-                    InlineAttribute::Default => return other,
-                };
+                if matches!(inline, InlineAttribute::Default) {
+                    return other;
+                }
                 self.report_warning(
                     loc,
                     Warning::MisplacedAttribute {
-                        name: name.to_string(),
+                        name: "inline".to_string(),
                     },
                 );
                 other

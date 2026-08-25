@@ -450,11 +450,7 @@ The first one was selected. Disambiguate if this is wrong.",
                 )
             }
             Warning::AttributePayload { attr, message } => {
-                if attr == "res.hoistedFunction" {
-                    format!("illegal payload for attribute @{attr}.\n{message}")
-                } else {
-                    format!("illegal payload for attribute '{}'.\n{}", attr, message)
-                }
+                format!("illegal payload for attribute @{attr}.\n{message}")
             }
             Warning::EliminatedOptionalArguments { args } => {
                 let plural = if args.len() == 1 { "" } else { "s" };
@@ -476,17 +472,10 @@ this constructor's arguments. They are only for information\n\
 and may change in future versions. (See manual section 8.5)"
                 .to_string(),
             Warning::MisplacedAttribute { name } => {
-                if name == "res.hoistedFunction" {
-                    "the @res.hoistedFunction attribute cannot appear in this context".to_string()
-                } else {
-                    format!("the \"{}\" attribute cannot appear in this context", name)
-                }
+                format!("the @{name} attribute cannot appear in this context")
             }
             Warning::DuplicatedAttribute { name } => {
-                format!(
-                    "the \"{}\" attribute is used more than once on this expression",
-                    name
-                )
+                format!("the @{name} attribute is used more than once on this expression")
             }
             Warning::UnreachableCase => {
                 "this match case is unreachable.\nConsider replacing it with a refutation case '<pat> -> .'"
