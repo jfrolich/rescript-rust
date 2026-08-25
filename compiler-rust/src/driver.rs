@@ -14331,10 +14331,7 @@ pub(crate) fn normalize_signature_types(
     norm_structure(type_ctx, final_env, typed_structure, false);
 }
 
-fn rename_saved_module_type_idents(
-    type_ctx: &TypeContext,
-    mty: &crate::types::decl::ModuleType,
-) {
+fn rename_saved_module_type_idents(type_ctx: &TypeContext, mty: &crate::types::decl::ModuleType) {
     use crate::types::decl::ModuleType;
 
     match mty {
