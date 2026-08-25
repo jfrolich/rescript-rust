@@ -870,21 +870,13 @@ fn sexp_pattern_desc(
                     Sexp::atom(if *opt_flag { "optional" } else { "required" }),
                 ]));
             }
-            let rest = match rest {
-                None => Sexp::atom("None"),
-                Some(rest) => Sexp::list(vec![
-                    Sexp::atom("Some"),
-                    sexp_ident(&rest.rest_ident),
-                    string(&rest.rest_name.txt),
-                    sexp_type_expr(arena, ctx, dedup, rest.rest_type),
-                    Sexp::list(rest.excluded_runtime_labels.iter().map(|label| string(label)).collect()),
-                ]),
-            };
+            // Match compiler/ml/sexp_typedtree.ml: the rest component is
+            // intentionally not serialized (pattern `Tpat_record (fields, flag, _rest)`).
+            let _ = rest;
             Sexp::list(vec![
                 Sexp::atom("Tpat_record"),
                 Sexp::list(field_items),
                 sexp_closed_flag(flag),
-                rest,
             ])
         }
         PatternDesc::Tpat_array(pats) => {
