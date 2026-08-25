@@ -439,7 +439,7 @@ fn transform_value_bindings(
     if !new_bindings.is_empty() {
         result.push(StructureItem {
             pstr_desc: Box::new(StructureItemDesc::Pstr_value(Box::new((
-                rec_flag,
+                RecFlag::Nonrecursive,
                 new_bindings,
             )))),
             pstr_loc: empty_loc(),
@@ -877,19 +877,13 @@ fn transform_react_component_binding(
         }
     };
 
-    // Wrap the ENTIRE function with newtypes (type a, type b, etc)
-    let mut func_expr = inner_func_expr;
-    for newtype in newtypes.into_iter().rev() {
-        let loc = func_expr.pexp_loc.clone();
-        let func_expr_idx = arena.push_expr(func_expr);
-        func_expr = Expression {
-            pexp_desc: Box::new(ExpressionDesc::Pexp_newtype(Box::new((
-                newtype,
-                func_expr_idx,
-            )))),
-            pexp_loc: loc,
-            pexp_attributes: Attributes::new(),
-        };
+    // Current Parsetree stores locally abstract types directly on the n-ary
+    // function rather than as nested Pexp_newtype wrappers.
+    let func_expr = inner_func_expr;
+    if let ExpressionDesc::Pexp_fun(fun) = &*func_expr.pexp_desc
+        && !newtypes.is_empty()
+    {
+        arena.set_nary_fun_newtypes(fun.lhs, newtypes);
     }
 
     // Create the full module name for the component
@@ -993,142 +987,42 @@ fn transform_react_component_binding(
         full_expression
     };
 
-    // Handle recursive vs nonrecursive differently
-    // OCaml's jsx_v4.ml lines 788-806
-    let (transformed_binding, new_binding) = match rec_flag {
-        RecFlag::Recursive => {
-            // For recursive: create a nested let structure
-            // let rec make = {
-            //   let "make$Internal" = func_expr in
-            //   let make = full_expression in
-            //   make
-            // }
-            let internal_fn_name = format!("{}$Internal", fn_name);
-            let internal_fn_name_idx = arena.push_string(internal_fn_name);
+    // jsx_v4.ml keeps the implementation and public component wrapper as
+    // separate bindings for both recursive and nonrecursive declarations. A
+    // recursive self-reference therefore continues to denote the implementation
+    // function while the following binding shadows it with the component value.
+    let fn_name_idx = arena.push_interned_string(&fn_name);
+    let transformed_binding = ValueBinding {
+        pvb_pat: arena.push_pat(Pattern {
+            ppat_desc: Box::new(PatternDesc::Ppat_var(Loc {
+                txt: fn_name_idx,
+                loc: empty_loc(),
+            })),
+            ppat_loc: empty_loc(),
+            ppat_attributes: Attributes::new(),
+        }),
+        pvb_expr: arena.push_expr(func_expr),
+        pvb_attributes: filtered_attrs.clone(),
+        pvb_loc: empty_loc(),
+    };
 
-            // Inner let: let "make$Internal" = func_expr
-            let internal_binding = ValueBinding {
-                pvb_pat: arena.push_pat(Pattern {
-                    ppat_desc: Box::new(PatternDesc::Ppat_var(Loc {
-                        txt: internal_fn_name_idx,
-                        loc: empty_loc(),
-                    })),
-                    ppat_loc: empty_loc(),
-                    ppat_attributes: Attributes::new(),
-                }),
-                pvb_expr: arena.push_expr(func_expr),
-                pvb_attributes: Attributes::new(),
-                pvb_loc: empty_loc(),
-            };
-
-            // Middle let: let make = full_expression
-            let fn_name_idx_wrapper = arena.push_interned_string(&fn_name);
-            let wrapper_binding = ValueBinding {
-                pvb_pat: arena.push_pat(Pattern {
-                    ppat_desc: Box::new(PatternDesc::Ppat_var(Loc {
-                        txt: fn_name_idx_wrapper,
-                        loc: empty_loc(),
-                    })),
-                    ppat_loc: empty_loc(),
-                    ppat_attributes: Attributes::new(),
-                }),
-                pvb_expr: arena.push_expr(final_full_expression),
-                pvb_attributes: Attributes::new(),
-                pvb_loc: empty_loc(),
-            };
-
-            // Final identifier: make
-            let fn_str_idx = arena.push_interned_string(&fn_name);
-            let fn_lid_idx = arena.push_longident(Longident::Lident(fn_str_idx));
-            let final_ident = Expression {
-                pexp_desc: Box::new(ExpressionDesc::Pexp_ident(Loc {
-                    txt: fn_lid_idx,
-                    loc: empty_loc(),
+    let new_binding = if !full_module_name.is_empty() {
+        let fn_name_idx = arena.push_interned_string(&fn_name);
+        Some(ValueBinding {
+            pvb_pat: arena.push_pat(Pattern {
+                ppat_desc: Box::new(PatternDesc::Ppat_var(Loc {
+                    txt: fn_name_idx,
+                    loc: fn_name_loc,
                 })),
-                pexp_loc: empty_loc(),
-                pexp_attributes: Attributes::new(),
-            };
-
-            // Build nested let: let "make$Internal" = ... in (let make = ... in make)
-            let final_ident_idx = arena.push_expr(final_ident);
-            let inner_let = Expression {
-                pexp_desc: Box::new(ExpressionDesc::Pexp_let(Box::new((
-                    RecFlag::Nonrecursive,
-                    vec![wrapper_binding],
-                    final_ident_idx,
-                )))),
-                pexp_loc: empty_loc(),
-                pexp_attributes: Attributes::new(),
-            };
-
-            let inner_let_idx = arena.push_expr(inner_let);
-            let outer_let = Expression {
-                pexp_desc: Box::new(ExpressionDesc::Pexp_let(Box::new((
-                    RecFlag::Nonrecursive,
-                    vec![internal_binding],
-                    inner_let_idx,
-                )))),
-                pexp_loc: empty_loc(),
-                pexp_attributes: Attributes::new(),
-            };
-
-            // Create the transformed binding with nested let as expression
-            let fn_name_idx_binding = arena.push_interned_string(&fn_name);
-            let binding = ValueBinding {
-                pvb_pat: arena.push_pat(Pattern {
-                    ppat_desc: Box::new(PatternDesc::Ppat_var(Loc {
-                        txt: fn_name_idx_binding,
-                        loc: fn_name_loc.clone(),
-                    })),
-                    ppat_loc: fn_name_loc,
-                    ppat_attributes: Attributes::new(),
-                }),
-                pvb_expr: arena.push_expr(outer_let),
-                pvb_attributes: filtered_attrs,
-                pvb_loc: pstr_loc.clone(),
-            };
-
-            (binding, None)
-        }
-        RecFlag::Nonrecursive => {
-            // For nonrecursive: create two separate bindings
-            let fn_name_idx_nonrec = arena.push_interned_string(&fn_name);
-            let transformed_binding = ValueBinding {
-                pvb_pat: arena.push_pat(Pattern {
-                    ppat_desc: Box::new(PatternDesc::Ppat_var(Loc {
-                        txt: fn_name_idx_nonrec,
-                        loc: empty_loc(),
-                    })),
-                    ppat_loc: empty_loc(),
-                    ppat_attributes: Attributes::new(),
-                }),
-                pvb_expr: arena.push_expr(func_expr),
-                pvb_attributes: filtered_attrs.clone(),
-                pvb_loc: empty_loc(),
-            };
-
-            // Create new binding with wrapper if module name is non-empty
-            let new_binding = if !full_module_name.is_empty() {
-                let fn_name_idx_new = arena.push_interned_string(&fn_name);
-                Some(ValueBinding {
-                    pvb_pat: arena.push_pat(Pattern {
-                        ppat_desc: Box::new(PatternDesc::Ppat_var(Loc {
-                            txt: fn_name_idx_new,
-                            loc: fn_name_loc.clone(),
-                        })),
-                        ppat_loc: fn_name_loc,
-                        ppat_attributes: Attributes::new(),
-                    }),
-                    pvb_expr: arena.push_expr(final_full_expression),
-                    pvb_attributes: filtered_attrs.clone(),
-                    pvb_loc: pstr_loc.clone(),
-                })
-            } else {
-                None
-            };
-
-            (transformed_binding, new_binding)
-        }
+                ppat_loc: fn_name_loc,
+                ppat_attributes: Attributes::new(),
+            }),
+            pvb_expr: arena.push_expr(final_full_expression),
+            pvb_attributes: filtered_attrs,
+            pvb_loc: *pstr_loc,
+        })
+    } else {
+        None
     };
 
     (Some(props_type), transformed_binding, new_binding)
@@ -1591,12 +1485,10 @@ fn make_props_wrapper_expr_with_ref(
         ));
     }
 
-    // For recursive components, call fn_name$Internal; otherwise call fn_name
-    let called_fn_name = match rec_flag {
-        RecFlag::Recursive => format!("{}$Internal", fn_name),
-        RecFlag::Nonrecursive => fn_name.to_string(),
-    };
-    let fn_str_idx2 = arena.push_interned_string(&called_fn_name);
+    // The implementation binding keeps `fn_name` for recursive components too;
+    // the following public wrapper binding shadows it.
+    let _ = rec_flag;
+    let fn_str_idx2 = arena.push_interned_string(fn_name);
     let fn_lid = arena.push_longident(Longident::Lident(fn_str_idx2));
     let funct_idx = arena.push_expr(Expression {
         pexp_desc: Box::new(ExpressionDesc::Pexp_ident(Loc {
@@ -2397,21 +2289,27 @@ fn collect_prop_types_rec(
     types: &mut Vec<(ArgLabel, Attributes, Location, CoreTypeIdx)>,
 ) {
     if let CoreTypeDesc::Ptyp_arrow(ptyp_inner) = &*typ.ptyp_desc {
-        let (ref arg, ref ret_idx, ref _arity) = **ptyp_inner;
-        let ret: &CoreType = arena.get_core_type(*ret_idx);
-        let label = &arg.lbl;
-        if is_labelled(label) || is_optional(label) {
-            // OCaml uses different locations based on whether return is another arrow:
-            // - If ret is arrow: use typ.ptyp_loc (the enclosing arrow's location)
-            // - If ret is not arrow (last arg): use ret.ptyp_loc (return type's location)
-            let loc = if matches!(*ret.ptyp_desc, CoreTypeDesc::Ptyp_arrow(_)) {
-                typ.ptyp_loc.clone()
-            } else {
-                ret.ptyp_loc.clone()
-            };
-            types.push((label.clone(), arg.attrs.clone(), loc, arg.typ));
+        let (ref first_arg, ref ret_idx, ref arity) = **ptyp_inner;
+        let ret = arena.get_core_type(*ret_idx);
+        let ret_is_arrow = matches!(*ret.ptyp_desc, CoreTypeDesc::Ptyp_arrow(_));
+        let args = arena.nary_arrow_args(first_arg, *arity);
+        let last = args.len().saturating_sub(1);
+        for (index, arg) in args.iter().enumerate() {
+            if is_labelled(&arg.lbl) || is_optional(&arg.lbl) {
+                // jsx_v4.ml uses the final return location only for the last
+                // argument of the final arrow group; all other arguments keep
+                // their own type location.
+                let loc = if index == last && !ret_is_arrow {
+                    ret.ptyp_loc
+                } else {
+                    arena.get_core_type(arg.typ).ptyp_loc
+                };
+                types.push((arg.lbl, arg.attrs.clone(), loc, arg.typ));
+            }
         }
-        collect_prop_types_rec(arena, ret, types);
+        if ret_is_arrow {
+            collect_prop_types_rec(arena, ret, types);
+        }
     }
 }
 
@@ -3150,7 +3048,7 @@ fn recursively_extract_named_args(
     expr: &Expression,
 ) -> (
     Vec<ExtractedArg>,
-    Vec<StringLoc>,
+    Vec<(StringLoc, Attributes)>,
     Option<CoreType>,
     Vec<JsxPreprocessorWarning>,
     Option<Location>,
@@ -3174,12 +3072,13 @@ fn extract_args_rec(
     arena: &ParseArena,
     expr: &Expression,
     args: &mut Vec<ExtractedArg>,
-    newtypes: &mut Vec<StringLoc>,
+    newtypes: &mut Vec<(StringLoc, Attributes)>,
     warnings: &mut Vec<JsxPreprocessorWarning>,
     key_error_loc: &mut Option<Location>,
 ) {
     match &*expr.pexp_desc {
         ExpressionDesc::Pexp_fun(inner) => {
+            newtypes.extend(arena.nary_fun_newtypes(inner).iter().cloned());
             let params = arena.nary_fun_params(inner);
             for param in params.iter() {
                 let arg_label = &param.p_lbl;
@@ -3237,7 +3136,7 @@ fn extract_args_rec(
         }
         ExpressionDesc::Pexp_newtype(inner) => {
             let (ref name, ref body_idx) = **inner;
-            newtypes.push(name.clone());
+            newtypes.push((name.clone(), Attributes::new()));
             let body: &Expression = arena.get_expr(*body_idx);
             extract_args_rec(arena, body, args, newtypes, warnings, key_error_loc);
         }
