@@ -24,9 +24,8 @@ use crate::js_ir::{
 use crate::lambda::lam_compat::LetKind;
 use crate::lambda::lam_constant::Constant;
 use crate::lambda::lam_exit_code::has_exit_code;
-use crate::lambda::{
-    Lambda, LambdaSwitch, SwitchBlockType, SwitchCaseTag, SwitchDispatch, SwitchKey,
-};
+use crate::lambda::{Lambda, LambdaSwitch, SwitchCaseTag, SwitchDispatch, SwitchKey};
+use crate::types::VariantBlockType;
 
 pub(crate) fn empty_switch_case_clause() -> CaseClause {
     CaseClause {
@@ -368,7 +367,7 @@ impl LambdaCompiler {
             .unwrap_or_else(|| SwitchCaseTag::String(tag.name.clone()))
     }
 
-    fn block_type_value(block: &crate::types::VariantBlockType) -> SwitchBlockType {
+    fn block_type_value(block: &crate::types::VariantBlockType) -> VariantBlockType {
         block.clone()
     }
 
@@ -386,7 +385,7 @@ impl LambdaCompiler {
         )
     }
 
-    fn untagged_block_types(&self, switch: &LambdaSwitch) -> Option<Vec<SwitchBlockType>> {
+    fn untagged_block_types(&self, switch: &LambdaSwitch) -> Option<Vec<VariantBlockType>> {
         let SwitchDispatch::Variant(facts) = &switch.sw_dispatch else {
             return None;
         };
@@ -400,17 +399,17 @@ impl LambdaCompiler {
         )
     }
 
-    fn block_type_switch_tag(block_type: &SwitchBlockType) -> Option<SwitchCaseTag> {
+    fn block_type_switch_tag(block_type: &VariantBlockType) -> Option<SwitchCaseTag> {
         match block_type {
-            SwitchBlockType::String => Some(SwitchCaseTag::String("string".to_string())),
-            SwitchBlockType::Int | SwitchBlockType::Float => {
+            VariantBlockType::String => Some(SwitchCaseTag::String("string".to_string())),
+            VariantBlockType::Int | VariantBlockType::Float => {
                 Some(SwitchCaseTag::String("number".to_string()))
             }
-            SwitchBlockType::Bigint => Some(SwitchCaseTag::String("bigint".to_string())),
-            SwitchBlockType::Boolean => Some(SwitchCaseTag::String("boolean".to_string())),
-            SwitchBlockType::Function => Some(SwitchCaseTag::String("function".to_string())),
-            SwitchBlockType::Object => Some(SwitchCaseTag::String("object".to_string())),
-            SwitchBlockType::Instance(_) | SwitchBlockType::Unknown => None,
+            VariantBlockType::Bigint => Some(SwitchCaseTag::String("bigint".to_string())),
+            VariantBlockType::Boolean => Some(SwitchCaseTag::String("boolean".to_string())),
+            VariantBlockType::Function => Some(SwitchCaseTag::String("function".to_string())),
+            VariantBlockType::Object => Some(SwitchCaseTag::String("object".to_string())),
+            VariantBlockType::Instance(_) | VariantBlockType::Unknown => None,
         }
     }
 
@@ -503,33 +502,37 @@ impl LambdaCompiler {
             )
         };
 
-        let is_not_block_case = |block_type: &SwitchBlockType| -> (Expression, usize) {
+        let is_not_block_case = |block_type: &VariantBlockType| -> (Expression, usize) {
             match block_type {
-                SwitchBlockType::String if !literals_overlap_with_string => typeof_neq("string"),
-                SwitchBlockType::Int | SwitchBlockType::Float if !literals_overlap_with_number => {
+                VariantBlockType::String if !literals_overlap_with_string => typeof_neq("string"),
+                VariantBlockType::Int | VariantBlockType::Float
+                    if !literals_overlap_with_number =>
+                {
                     typeof_neq("number")
                 }
-                SwitchBlockType::Bigint if !literals_overlap_with_bigint => typeof_neq("bigint"),
-                SwitchBlockType::Boolean if !literals_overlap_with_boolean => typeof_neq("boolean"),
-                SwitchBlockType::Function => typeof_neq("function"),
-                SwitchBlockType::Instance(name) => {
+                VariantBlockType::Bigint if !literals_overlap_with_bigint => typeof_neq("bigint"),
+                VariantBlockType::Boolean if !literals_overlap_with_boolean => {
+                    typeof_neq("boolean")
+                }
+                VariantBlockType::Function => typeof_neq("function"),
+                VariantBlockType::Instance(name) => {
                     let instance_test = self
                         .builtin_untagged_instance_test(expr.clone(), name.as_str())
                         .expect("instance-backed block types stay supported");
                     (Expression::not(instance_test), 3usize)
                 }
-                SwitchBlockType::Object if !literals_overlap_with_object => typeof_neq("object"),
-                SwitchBlockType::Object => bin(
+                VariantBlockType::Object if !literals_overlap_with_object => typeof_neq("object"),
+                VariantBlockType::Object => bin(
                     BinOp::Or,
                     literal_case(&SwitchCaseTag::Null),
                     typeof_neq("object"),
                 ),
-                SwitchBlockType::String
-                | SwitchBlockType::Int
-                | SwitchBlockType::Float
-                | SwitchBlockType::Bigint
-                | SwitchBlockType::Boolean
-                | SwitchBlockType::Unknown => overlap_literal_disjunction(),
+                VariantBlockType::String
+                | VariantBlockType::Int
+                | VariantBlockType::Float
+                | VariantBlockType::Bigint
+                | VariantBlockType::Boolean
+                | VariantBlockType::Unknown => overlap_literal_disjunction(),
             }
         };
 
@@ -679,21 +682,21 @@ impl LambdaCompiler {
         &self,
         expr: Expression,
         case: &crate::types::VariantBlock,
-        all_block_types: &[SwitchBlockType],
+        all_block_types: &[VariantBlockType],
         has_null_case: bool,
     ) -> Option<Expression> {
         let test = match case.block_type.as_ref()? {
-            SwitchBlockType::String => self.builtin_untagged_typeof_test(expr, "string"),
-            SwitchBlockType::Int | SwitchBlockType::Float => {
+            VariantBlockType::String => self.builtin_untagged_typeof_test(expr, "string"),
+            VariantBlockType::Int | VariantBlockType::Float => {
                 self.builtin_untagged_typeof_test(expr, "number")
             }
-            SwitchBlockType::Bigint => self.builtin_untagged_typeof_test(expr, "bigint"),
-            SwitchBlockType::Boolean => self.builtin_untagged_typeof_test(expr, "boolean"),
-            SwitchBlockType::Function => self.builtin_untagged_typeof_test(expr, "function"),
-            SwitchBlockType::Instance(name) => {
+            VariantBlockType::Bigint => self.builtin_untagged_typeof_test(expr, "bigint"),
+            VariantBlockType::Boolean => self.builtin_untagged_typeof_test(expr, "boolean"),
+            VariantBlockType::Function => self.builtin_untagged_typeof_test(expr, "function"),
+            VariantBlockType::Instance(name) => {
                 self.builtin_untagged_instance_test(expr, name.as_str())?
             }
-            SwitchBlockType::Object => {
+            VariantBlockType::Object => {
                 let mut test = self.builtin_untagged_typeof_test(expr.clone(), "object");
                 if has_null_case {
                     test = Expression::bin(
@@ -703,7 +706,7 @@ impl LambdaCompiler {
                     );
                 }
                 for other in all_block_types {
-                    let SwitchBlockType::Instance(name) = other else {
+                    let VariantBlockType::Instance(name) = other else {
                         continue;
                     };
                     if let Some(instance_test) =
@@ -714,7 +717,7 @@ impl LambdaCompiler {
                 }
                 test
             }
-            SwitchBlockType::Unknown => return None,
+            VariantBlockType::Unknown => return None,
         };
         Some(test)
     }
@@ -724,7 +727,7 @@ impl LambdaCompiler {
     /// PRs ebed19abd / fbe7a7391 / ccdec51fc — #8251).
     ///
     /// When a typeof switch has an `"object"` case (because some variant arm
-    /// is `SwitchBlockType::Object`), null and arrays would otherwise match
+    /// is `VariantBlockType::Object`), null and arrays would otherwise match
     /// that case too (`typeof null === typeof [] === "object"`). Returns a
     /// guard expression that should be wrapped around the typeof switch to
     /// route null / array values to the default body instead.
@@ -733,7 +736,7 @@ impl LambdaCompiler {
         scrut: &Expression,
         typeof_cases: &[(SwitchCaseTag, &Lambda)],
         runtime_test_cases: &[(&crate::types::VariantBlock, &Lambda)],
-        all_block_types: &[SwitchBlockType],
+        all_block_types: &[VariantBlockType],
         has_null_case: bool,
     ) -> Option<Expression> {
         let has_object_typeof = typeof_cases
@@ -743,11 +746,11 @@ impl LambdaCompiler {
             return None;
         }
         let clauses_have_array_case = runtime_test_cases.iter().any(|(case, _)| {
-            matches!(&case.block_type, Some(SwitchBlockType::Instance(name)) if name.as_str() == "Array")
+            matches!(&case.block_type, Some(VariantBlockType::Instance(name)) if name.as_str() == "Array")
         });
         let type_has_array_case = all_block_types
             .iter()
-            .any(|t| matches!(t, SwitchBlockType::Instance(name) if name.as_str() == "Array"));
+            .any(|t| matches!(t, VariantBlockType::Instance(name) if name.as_str() == "Array"));
         let needs_null_guard = has_null_case;
         let needs_array_guard = type_has_array_case && !clauses_have_array_case;
 
@@ -786,7 +789,7 @@ impl LambdaCompiler {
             && self.block_switch_complete(switch)
             && block_cases.len() == 1
             && default_block.is_empty()
-            && matches!(block_cases[0].0.block_type, Some(SwitchBlockType::Unknown))
+            && matches!(block_cases[0].0.block_type, Some(VariantBlockType::Unknown))
         {
             return Some(build_body(self, block_cases[0].1));
         }
@@ -797,7 +800,7 @@ impl LambdaCompiler {
         let mut current_else = default_block;
         for (case, body) in block_cases.iter().rev() {
             let body_block = build_body(self, body);
-            if matches!(case.block_type, Some(SwitchBlockType::Unknown)) {
+            if matches!(case.block_type, Some(VariantBlockType::Unknown)) {
                 current_else = body_block;
                 continue;
             }
@@ -923,7 +926,7 @@ impl LambdaCompiler {
         let all_block_types = self.untagged_block_types(switch).unwrap_or_default();
         if let Some((_, body)) = block_cases
             .iter()
-            .find(|(case, _)| matches!(case.block_type, Some(SwitchBlockType::Unknown)))
+            .find(|(case, _)| matches!(case.block_type, Some(VariantBlockType::Unknown)))
         {
             return self.compile_assign_to_target_block(result, body);
         }
@@ -933,14 +936,14 @@ impl LambdaCompiler {
 
         let has_unfiltered_runtime_test_cases = block_cases
             .iter()
-            .any(|(case, _)| matches!(case.block_type, Some(SwitchBlockType::Instance(_))));
+            .any(|(case, _)| matches!(case.block_type, Some(VariantBlockType::Instance(_))));
         let filtered_block_cases =
             self.filtered_switch_case_refs(&block_cases, self.block_switch_default(switch));
         let mut runtime_test_cases = Vec::new();
         let mut typeof_cases = Vec::new();
         for (case, body) in filtered_block_cases {
             match case.block_type.as_ref() {
-                Some(SwitchBlockType::Instance(_)) => runtime_test_cases.push((case, body)),
+                Some(VariantBlockType::Instance(_)) => runtime_test_cases.push((case, body)),
                 Some(block_type) => {
                     if let Some(tag) = Self::block_type_switch_tag(block_type) {
                         typeof_cases.push((tag, body));
@@ -1080,7 +1083,7 @@ impl LambdaCompiler {
         let all_block_types = self.untagged_block_types(switch).unwrap_or_default();
         if let Some((_, body)) = block_cases
             .iter()
-            .find(|(case, _)| matches!(case.block_type, Some(SwitchBlockType::Unknown)))
+            .find(|(case, _)| matches!(case.block_type, Some(VariantBlockType::Unknown)))
         {
             return self.compile_return_block(body);
         }
@@ -1090,14 +1093,14 @@ impl LambdaCompiler {
 
         let has_unfiltered_runtime_test_cases = block_cases
             .iter()
-            .any(|(case, _)| matches!(case.block_type, Some(SwitchBlockType::Instance(_))));
+            .any(|(case, _)| matches!(case.block_type, Some(VariantBlockType::Instance(_))));
         let filtered_block_cases =
             self.filtered_switch_case_refs(&block_cases, self.block_switch_default(switch));
         let mut runtime_test_cases = Vec::new();
         let mut typeof_cases = Vec::new();
         for (case, body) in filtered_block_cases {
             match case.block_type.as_ref() {
-                Some(SwitchBlockType::Instance(_)) => runtime_test_cases.push((case, body)),
+                Some(VariantBlockType::Instance(_)) => runtime_test_cases.push((case, body)),
                 Some(block_type) => {
                     if let Some(tag) = Self::block_type_switch_tag(block_type) {
                         typeof_cases.push((tag, body));
@@ -1255,7 +1258,7 @@ impl LambdaCompiler {
         let all_block_types = self.untagged_block_types(switch).unwrap_or_default();
         if let Some((_, body)) = block_cases
             .iter()
-            .find(|(case, _)| matches!(case.block_type, Some(SwitchBlockType::Unknown)))
+            .find(|(case, _)| matches!(case.block_type, Some(VariantBlockType::Unknown)))
         {
             return self.compile_effect_block(body);
         }
@@ -1273,14 +1276,14 @@ impl LambdaCompiler {
 
         let has_unfiltered_runtime_test_cases = block_cases
             .iter()
-            .any(|(case, _)| matches!(case.block_type, Some(SwitchBlockType::Instance(_))));
+            .any(|(case, _)| matches!(case.block_type, Some(VariantBlockType::Instance(_))));
         let filtered_block_cases =
             self.filtered_switch_case_refs(&block_cases, self.block_switch_default(switch));
         let mut runtime_test_cases = Vec::new();
         let mut typeof_cases = Vec::new();
         for (case, body) in filtered_block_cases {
             match case.block_type.as_ref() {
-                Some(SwitchBlockType::Instance(_)) => runtime_test_cases.push((case, body)),
+                Some(VariantBlockType::Instance(_)) => runtime_test_cases.push((case, body)),
                 Some(block_type) => {
                     if let Some(tag) = Self::block_type_switch_tag(block_type) {
                         typeof_cases.push((tag, body));

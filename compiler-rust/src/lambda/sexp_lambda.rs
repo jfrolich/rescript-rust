@@ -830,44 +830,39 @@ fn lambda_switch(sw: &LambdaSwitch, with_locs: bool) -> Sexp {
     ])
 }
 
-fn switch_names_sexp(names: &Option<crate::lambda::SwitchNames>) -> Sexp {
-    match names {
-        None => Sexp::atom("None"),
-        Some(n) => Sexp::list(vec![
-            Sexp::atom("Some"),
-            Sexp::list({
-                let mut items = vec![Sexp::atom("consts")];
-                items.extend(n.consts.iter().map(|tag| string(&tag.name)));
-                items
-            }),
-            Sexp::list({
-                let mut items = vec![Sexp::atom("blocks")];
-                items.extend(n.blocks.iter().map(|block| string(&block.tag.name)));
-                items
-            }),
-        ]),
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{constant, escape_ocaml_string, switch_names_sexp};
+    use super::{constant, escape_ocaml_string, switch_key};
     use crate::lambda::lam_constant::{Constant, StringDelim};
-    use crate::lambda::{SwitchBlock, SwitchNames, SwitchTag};
 
     #[test]
-    fn prints_switch_names_consts_and_blocks() {
-        let names = Some(SwitchNames {
-            consts: vec![SwitchTag::named("Null")],
-            blocks: vec![SwitchBlock::named("Boolean"), SwitchBlock::named("String")],
-        });
+    fn prints_semantic_constructor_switch_keys() {
+        let constant_key = crate::lambda::SwitchKey::Constructor(
+            crate::types::VariantConstructorCase::Constant(crate::types::VariantTag {
+                name: "Null".to_string(),
+                tag_type: None,
+            }),
+        );
+        let block_key = crate::lambda::SwitchKey::Constructor(
+            crate::types::VariantConstructorCase::Block(crate::types::VariantBlock {
+                runtime: crate::types::BlockRuntime {
+                    tag: crate::types::VariantTag {
+                        name: "Boolean".to_string(),
+                        tag_type: None,
+                    },
+                    tag_name: None,
+                    untagged: false,
+                },
+                block_type: None,
+            }),
+        );
 
-        let printed = switch_names_sexp(&names).to_string();
-        assert!(printed.contains("(consts"));
-        assert!(printed.contains("\"Null\""));
-        assert!(printed.contains("(blocks"));
-        assert!(printed.contains("\"Boolean\""));
-        assert!(printed.contains("\"String\""));
+        let constant_printed = switch_key(&constant_key).to_string();
+        let block_printed = switch_key(&block_key).to_string();
+        assert!(constant_printed.contains("Switch_constructor"));
+        assert!(constant_printed.contains("\"Null\""));
+        assert!(block_printed.contains("Switch_constructor"));
+        assert!(block_printed.contains("\"Boolean\""));
     }
 
     #[test]

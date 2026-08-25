@@ -472,8 +472,8 @@ fn deriving_accessors_curried_rewrites_alias_initializers_through_exported_bindi
     let compose_idx = output.find("function compose").unwrap();
     let no_param_idx = output.find("let noParam = \"NoParam\";").unwrap();
     assert!(
-        compose_idx < no_param_idx,
-        "expected compose to remain before the rebound literal export in DerivingAccessorsCurried, got:\n{output}"
+        no_param_idx < compose_idx,
+        "expected the rebound literal export to retain source order before compose in DerivingAccessorsCurried, got:\n{output}"
     );
 }
 
@@ -498,8 +498,8 @@ fn deriving_accessors_uncurried_rewrites_alias_initializers_through_exported_bin
     let compose_idx = output.find("function compose").unwrap();
     let no_param_idx = output.find("let noParam = \"NoParam\";").unwrap();
     assert!(
-        compose_idx < no_param_idx,
-        "expected compose to remain before the rebound literal export in DerivingAccessorsUncurried, got:\n{output}"
+        no_param_idx < compose_idx,
+        "expected the rebound literal export to retain source order before compose in DerivingAccessorsUncurried, got:\n{output}"
     );
 }
 

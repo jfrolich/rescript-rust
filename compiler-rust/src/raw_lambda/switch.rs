@@ -13,7 +13,7 @@
 
 use std::collections::HashMap;
 
-use crate::lambda::{Comparison, Constant, LetKind, Primitive, SwitchNames};
+use crate::lambda::{Comparison, Constant, LetKind, Primitive};
 use crate::location::Location;
 use crate::raw_lambda::{RawLambda, RawLambdaSwitch, RawPrimInfo};
 
@@ -264,7 +264,7 @@ fn build_lswitch(
     tbl: &[usize],
     acts: Vec<RawLambda>,
     offset: i32,
-    sw_dispatch: Option<SwitchNames>,
+    sw_dispatch: Option<crate::lambda::SwitchDispatch>,
 ) -> RawLambda {
     let cases_for_counts: Vec<(i32, i32, usize)> = tbl
         .iter()
@@ -878,7 +878,7 @@ fn build_clustered_test(
     cases: &[(i32, i32, usize)],
     actions: &[RawLambda],
     arg: &RawLambda,
-    sw_dispatch: &Option<SwitchNames>,
+    sw_dispatch: &Option<crate::lambda::SwitchDispatch>,
 ) -> RawLambda {
     let (n_clusters, k) = compiler.comp_clusters(cases);
     let len = cases.len();
@@ -899,7 +899,7 @@ fn build_clustered_test(
         cases: &[(i32, i32, usize)],
         actions: &[RawLambda],
         k: &[usize],
-        sw_dispatch: &Option<SwitchNames>,
+        sw_dispatch: &Option<crate::lambda::SwitchDispatch>,
         cluster_cases: &mut [(i32, i32, usize)],
         cluster_actions: &mut Vec<RawLambda>,
         single_act_map: &mut HashMap<usize, usize>,
@@ -1106,7 +1106,7 @@ pub fn zyva(
     arg: RawLambda,
     cases: &[(i32, i32, usize)],
     store: ActionStore,
-    sw_dispatch: Option<SwitchNames>,
+    sw_dispatch: Option<crate::lambda::SwitchDispatch>,
     next_raise: &mut dyn FnMut() -> i32,
 ) -> RawLambda {
     assert!(!cases.is_empty());
@@ -1133,7 +1133,7 @@ pub fn zyva_with_shared_actions(
     arg: RawLambda,
     cases: &[(i32, i32, usize)],
     shared_actions: Vec<Shared<RawLambda>>,
-    sw_dispatch: Option<SwitchNames>,
+    sw_dispatch: Option<crate::lambda::SwitchDispatch>,
     next_raise: &mut dyn FnMut() -> i32,
 ) -> RawLambda {
     assert!(!cases.is_empty());
@@ -1338,7 +1338,7 @@ pub fn call_switcher(
     low: i32,
     high: i32,
     int_lambda_list: &[(i32, RawLambda)],
-    sw_dispatch: Option<SwitchNames>,
+    sw_dispatch: Option<crate::lambda::SwitchDispatch>,
     next_raise: &mut dyn FnMut() -> i32,
 ) -> RawLambda {
     let mut sorted = int_lambda_list.to_vec();

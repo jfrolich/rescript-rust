@@ -17,10 +17,7 @@ use crate::ident::{Ident, IdentFlags};
 use crate::lambda::LetKind;
 use crate::lambda::lam_constant::PointerInfo;
 use crate::lambda::lam_primitive::Mutable;
-use crate::lambda::{
-    Comparison, FieldDbgInfo, Primitive, SwitchBlock, SwitchBlockType, SwitchCaseTag, SwitchNames,
-    SwitchTag, TagInfo,
-};
+use crate::lambda::{Comparison, FieldDbgInfo, Primitive, TagInfo};
 use crate::location::Location;
 use crate::parse_arena::{LocIdx, ParseArena};
 use crate::parser::ast::Attributes;
@@ -6286,7 +6283,7 @@ fn sarg_make_switch(
     cases: &[usize],
     acts: &[RawLambda],
     offset: i32,
-    sw_dispatch: Option<SwitchNames>,
+    sw_dispatch: Option<crate::lambda::SwitchDispatch>,
 ) -> RawLambda {
     let mut l: Vec<(i32, RawLambda)> = Vec::new();
     for i in (0..cases.len()).rev() {
@@ -6688,7 +6685,7 @@ pub fn call_switcher(
     low: i32,
     high: i32,
     int_lambda_list: Vec<(i32, RawLambda)>,
-    sw_dispatch: Option<SwitchNames>,
+    sw_dispatch: Option<crate::lambda::SwitchDispatch>,
     next_raise_count: &mut i32,
 ) -> RawLambda {
     let (edges, (cases, store)) = as_interval(fail, low, high, int_lambda_list);
@@ -7113,7 +7110,7 @@ fn share_actions_tree_string(
 /// Combine constant matching results.
 /// Equivalent to OCaml's `combine_constant`.
 fn combine_constant(
-    names: Option<SwitchNames>,
+    names: Option<crate::lambda::SwitchDispatch>,
     loc: Location,
     arg: RawLambda,
     cst: &Constant,
@@ -7726,7 +7723,7 @@ fn call_switcher_variant_constant(
     fail: Option<RawLambda>,
     arg: RawLambda,
     int_lambda_list: &[(i32, (String, RawLambda))],
-    _names: Option<SwitchNames>,
+    _names: Option<crate::lambda::SwitchDispatch>,
     _next_raise_count: &mut i32,
 ) -> RawLambda {
     polyvar_if_chain(fail, &arg, int_lambda_list)
@@ -7740,7 +7737,7 @@ fn call_switcher_variant_constr(
     fail: Option<RawLambda>,
     arg: RawLambda,
     int_lambda_list: &[(i32, (String, RawLambda))],
-    names: Option<SwitchNames>,
+    names: Option<crate::lambda::SwitchDispatch>,
     next_raise_count: &mut i32,
 ) -> RawLambda {
     let v = ctx_ref.create_ident("variant");
@@ -7767,7 +7764,7 @@ fn call_switcher_variant_constr(
 /// Equivalent to OCaml's `combine_variant`.
 fn combine_variant(
     ctx_ref: &TypeContext,
-    names: Option<SwitchNames>,
+    names: Option<crate::lambda::SwitchDispatch>,
     loc: Location,
     row: &RowDesc,
     arg: RawLambda,
@@ -7880,7 +7877,7 @@ fn combine_variant(
 /// Equivalent to OCaml's `combine_array`.
 fn combine_array(
     ctx_ref: &TypeContext,
-    names: Option<SwitchNames>,
+    names: Option<crate::lambda::SwitchDispatch>,
     loc: Location,
     arg: RawLambda,
     partial: &Partial,
@@ -8463,7 +8460,7 @@ fn do_compile_matching(
                     )
                 }
                 PatternDesc::Tpat_constant(cst) => {
-                    let names: Option<SwitchNames> = None;
+                    let names: Option<crate::lambda::SwitchDispatch> = None;
                     let loc = arena.to_location(pat.pat_loc);
                     let arg_clone = arg.clone();
                     let cst_clone = cst.clone();
@@ -8520,7 +8517,7 @@ fn do_compile_matching(
                     )
                 }
                 PatternDesc::Tpat_array(_) => {
-                    let names: Option<SwitchNames> = None;
+                    let names: Option<crate::lambda::SwitchDispatch> = None;
                     let loc = arena.to_location(pat.pat_loc);
                     let arg_clone = arg.clone();
                     compile_test_wrapper(
@@ -8547,7 +8544,7 @@ fn do_compile_matching(
                     )
                 }
                 PatternDesc::Tpat_variant(_, _, _row_ref) => {
-                    let names: Option<SwitchNames> = None;
+                    let names: Option<crate::lambda::SwitchDispatch> = None;
                     let loc = arena.to_location(pat.pat_loc);
                     let arg_clone = arg.clone();
                     let row_desc =
@@ -9074,266 +9071,6 @@ fn extract_row_from_type(ctx_ref: &TypeContext, ty: TypeExprRef) -> RowDesc {
         row_fixed: false,
         row_name: None,
     }
-}
-
-/// Placeholder for names_from_construct_pattern.
-/// Matches `compiler/core/matching_polyfill.ml`.
-fn names_from_construct_pattern(ctx_ref: &TypeContext, pat: &Pattern) -> Option<SwitchNames> {
-    fn process_tag_type(attrs: &[crate::types::decl::Attribute]) -> Option<SwitchCaseTag> {
-        attrs.iter().find_map(|attr| {
-            if attr.attr_name.txt != "as" {
-                return None;
-            }
-            match &attr.attr_payload {
-                crate::types::decl::AttributePayload::Str(value) => {
-                    Some(SwitchCaseTag::String(value.clone()))
-                }
-                crate::types::decl::AttributePayload::Int(value) => {
-                    Some(SwitchCaseTag::Int(*value))
-                }
-                crate::types::decl::AttributePayload::IntLiteral(value) => {
-                    crate::types::decl::parse_ocaml_int_literal(value).map(SwitchCaseTag::Int)
-                }
-                crate::types::decl::AttributePayload::Float(value) => {
-                    Some(SwitchCaseTag::Float(value.clone()))
-                }
-                crate::types::decl::AttributePayload::BigInt(value) => {
-                    Some(SwitchCaseTag::BigInt(value.clone()))
-                }
-                crate::types::decl::AttributePayload::Bool(value) => {
-                    Some(SwitchCaseTag::Bool(*value))
-                }
-                crate::types::decl::AttributePayload::Ident(value) if value == "null" => {
-                    Some(SwitchCaseTag::Null)
-                }
-                crate::types::decl::AttributePayload::Ident(value) if value == "undefined" => {
-                    Some(SwitchCaseTag::Undefined)
-                }
-                _ => None,
-            }
-        })
-    }
-
-    fn process_tag_name(attrs: &[crate::types::decl::Attribute]) -> Option<String> {
-        attrs.iter().find_map(|attr| {
-            if attr.attr_name.txt != "tag" {
-                return None;
-            }
-            match &attr.attr_payload {
-                crate::types::decl::AttributePayload::Str(value) => Some(value.clone()),
-                _ => None,
-            }
-        })
-    }
-
-    fn type_to_instanceof_backed_obj(path: &Path) -> Option<SwitchBlockType> {
-        let full = path.name();
-        if matches!(path, Path::Pident(id) if id.name() == "array") {
-            return Some(SwitchBlockType::Instance(
-                crate::types::VariantInstance::Array,
-            ));
-        }
-        if matches!(path, Path::Pident(id) if id.name() == "promise")
-            || matches!(full.as_str(), "Js.Promise.t" | "Stdlib.Promise.t")
-        {
-            return Some(SwitchBlockType::Instance(
-                crate::types::VariantInstance::Promise,
-            ));
-        }
-        // Keep this table in lockstep with
-        // `Ast_untagged_variants.type_to_instanceof_backed_obj`.
-        use crate::types::VariantInstance as I;
-        let instance = match full.as_str() {
-            "Stdlib_ArrayBuffer.t" => I::ArrayBuffer,
-            "Stdlib.BigInt64Array.t" => I::BigInt64Array,
-            "Stdlib.BigUint64Array.t" => I::BigUint64Array,
-            "Stdlib.DataView.t" => I::DataView,
-            "Stdlib_Date.t" => I::Date,
-            "Stdlib.Float32Array.t" => I::Float32Array,
-            "Stdlib.Float64Array.t" => I::Float64Array,
-            "Stdlib.Int16Array.t" => I::Int16Array,
-            "Stdlib.Int32Array.t" => I::Int32Array,
-            "Stdlib.Int8Array.t" => I::Int8Array,
-            "Stdlib_RegExp.t" => I::RegExp,
-            "Stdlib.Uint16Array.t" => I::Uint16Array,
-            "Stdlib.Uint32Array.t" => I::Uint32Array,
-            "Stdlib.Uint8Array.t" => I::Uint8Array,
-            "Stdlib.Uint8ClampedArray.t" => I::Uint8ClampedArray,
-            "Stdlib_File.t" => I::File,
-            "Stdlib_Blob.t" => I::Blob,
-            "Stdlib.Set.t" => I::Set,
-            "Stdlib.Map.t" => I::Map,
-            "Stdlib.WeakSet.t" => I::WeakSet,
-            "Stdlib.WeakMap.t" => I::WeakMap,
-            _ => return None,
-        };
-        Some(SwitchBlockType::Instance(instance))
-    }
-
-    fn get_block_type_from_typ(
-        ctx_ref: &TypeContext,
-        env: &Env,
-        ty: TypeExprRef,
-    ) -> Option<SwitchBlockType> {
-        if let TypeDesc::Tconstr { path, .. } = &*ctx_ref.get_desc(ty) {
-            if let Some(instance) = type_to_instanceof_backed_obj(path) {
-                return Some(instance);
-            }
-        }
-
-        let expanded = crate::types::ctype::expand_head(ctx_ref, env, ty);
-        match &*ctx_ref.get_desc(expanded) {
-            TypeDesc::Tconstr { path, .. } => {
-                if let Some(instance) = type_to_instanceof_backed_obj(path) {
-                    Some(instance)
-                } else {
-                    match path.head_name() {
-                        "string" => Some(SwitchBlockType::String),
-                        "int" => Some(SwitchBlockType::Int),
-                        "float" => Some(SwitchBlockType::Float),
-                        "bigint" => Some(SwitchBlockType::Bigint),
-                        "bool" => Some(SwitchBlockType::Boolean),
-                        _ if type_is_builtin_object(ctx_ref, env, expanded) => {
-                            Some(SwitchBlockType::Object)
-                        }
-                        _ => None,
-                    }
-                }
-            }
-            TypeDesc::Tarrow { .. } => Some(SwitchBlockType::Function),
-            TypeDesc::Ttuple(_) => Some(SwitchBlockType::Instance(
-                crate::types::VariantInstance::Array,
-            )),
-            _ => None,
-        }
-    }
-
-    fn extract_concrete_type_decl(
-        ctx_ref: &TypeContext,
-        env: &Env,
-        ty: TypeExprRef,
-    ) -> Option<crate::types::decl::TypeDeclaration> {
-        let mut current = ctx_ref.repr(ty);
-        for _ in 0..20 {
-            let TypeDesc::Tconstr { path, .. } = &*ctx_ref.get_desc(current) else {
-                return None;
-            };
-            let decl = find_type_decl_pub(ctx_ref, env, path)?;
-            if !matches!(decl.type_kind, TypeKind::TypeAbstract) {
-                return Some(decl);
-            }
-            current = crate::types::ctype::expand_head_once(ctx_ref, env, current)?;
-        }
-        None
-    }
-
-    fn get_untagged_payload_block_type(
-        ctx_ref: &TypeContext,
-        env: &Env,
-        cstr: &crate::types::decl::ConstructorDeclaration,
-    ) -> Option<SwitchBlockType> {
-        match &cstr.cd_args {
-            ConstructorArguments::CstrTuple(args) => match args.as_slice() {
-                [arg] => get_block_type_from_typ(ctx_ref, env, *arg).or_else(|| {
-                    let Some(decl) = extract_concrete_type_decl(ctx_ref, env, *arg) else {
-                        return Some(SwitchBlockType::Unknown);
-                    };
-                    match decl.type_kind {
-                        TypeKind::TypeRecord(_, RecordRepresentation::RecordUnboxed(_)) => {
-                            Some(SwitchBlockType::Unknown)
-                        }
-                        TypeKind::TypeRecord(_, _) => Some(SwitchBlockType::Object),
-                        _ => Some(SwitchBlockType::Unknown),
-                    }
-                }),
-                [_, _, ..] => Some(SwitchBlockType::Object),
-                [] => None,
-            },
-            ConstructorArguments::CstrRecord(_) => Some(SwitchBlockType::Object),
-        }
-    }
-
-    fn get_block_type(
-        ctx_ref: &TypeContext,
-        env: &Env,
-        cstr: &crate::types::decl::ConstructorDeclaration,
-    ) -> Option<SwitchBlockType> {
-        if !has_untagged(&cstr.cd_attributes) {
-            return None;
-        }
-        get_untagged_payload_block_type(ctx_ref, env, cstr)
-    }
-
-    fn switch_names_from_variant(
-        ctx_ref: &TypeContext,
-        env: &Env,
-        cstrs: &[crate::types::decl::ConstructorDeclaration],
-    ) -> SwitchNames {
-        let mut consts = Vec::new();
-        let mut blocks = Vec::new();
-        for cstr in cstrs {
-            let tag = SwitchTag {
-                name: cstr.cd_id.name().to_string(),
-                tag_type: process_tag_type(&cstr.cd_attributes),
-            };
-            match &cstr.cd_args {
-                ConstructorArguments::CstrTuple(args) if args.is_empty() => {
-                    consts.push(tag);
-                }
-                ConstructorArguments::CstrTuple(_) | ConstructorArguments::CstrRecord(_) => {
-                    blocks.push(SwitchBlock {
-                        tag,
-                        tag_name: process_tag_name(&cstr.cd_attributes),
-                        block_type: get_block_type(ctx_ref, env, cstr),
-                    });
-                }
-            }
-        }
-        SwitchNames { consts, blocks }
-    }
-
-    fn resolve_type(
-        ctx_ref: &TypeContext,
-        ty: TypeExprRef,
-        env: &Env,
-        seen: &mut BTreeSet<String>,
-    ) -> Option<SwitchNames> {
-        match &*ctx_ref.get_desc(ctx_ref.repr(ty)) {
-            TypeDesc::Tconstr { path, .. } => resolve_path(ctx_ref, path, env, seen),
-            TypeDesc::Tlink(next) | TypeDesc::Tsubst(next) => {
-                resolve_type(ctx_ref, *next, env, seen)
-            }
-            _ => None,
-        }
-    }
-
-    fn resolve_path(
-        ctx_ref: &TypeContext,
-        path: &Path,
-        env: &Env,
-        seen: &mut BTreeSet<String>,
-    ) -> Option<SwitchNames> {
-        if !seen.insert(path.name()) {
-            return None;
-        }
-        // OCaml compiler/core/matching_polyfill.ml:31-35 uses Env.find_type
-        // here. Rust's local Env may not hold every persistent/dotted type
-        // that Env.find_type can force, so use the same non-codegen type
-        // lookup helper used by typeopt; in in-process mode its cmi path is
-        // guarded by ctype's no-disk invariant.
-        let decl = find_type_decl_pub(ctx_ref, env, path)?;
-        match &decl.type_kind {
-            TypeKind::TypeVariant(cstrs, _) => Some(switch_names_from_variant(ctx_ref, env, cstrs)),
-            TypeKind::TypeAbstract => decl
-                .type_manifest
-                .and_then(|manifest| resolve_type(ctx_ref, manifest, env, seen)),
-            TypeKind::TypeOpen | TypeKind::TypeRecord(_, _) => None,
-        }
-    }
-
-    let env = ctx_ref.get_typed_env(pat.pat_env)?;
-    let mut seen = BTreeSet::new();
-    resolve_type(ctx_ref, pat.pat_type, env.as_ref(), &mut seen)
 }
 
 // ============================================================================
@@ -10049,7 +9786,7 @@ mod tests {
     use crate::types::predef;
 
     #[test]
-    fn constructor_switch_names_use_pattern_env() {
+    fn constructor_cases_use_pattern_env_layout() {
         let id_gen = IdGenerator::new();
         let ctx = TypeContext::new(std::sync::Arc::new(id_gen));
         let env = initial_env(&ctx);
@@ -10060,15 +9797,32 @@ mod tests {
         );
         let pat = make_pat(PatternDesc::Tpat_any, pat_type, env_ref);
 
-        let names = names_from_construct_pattern(&ctx, &pat).expect("result switch names");
+        let pat_env = ctx.get_typed_env(pat.pat_env).expect("pattern environment");
+        let TypeDesc::Tconstr { path, .. } = &*ctx.get_desc(ctx.repr(pat.pat_type)) else {
+            panic!("expected result constructor");
+        };
+        let decl = find_type_decl_pub(&ctx, pat_env.as_ref(), path).expect("result declaration");
+        let TypeKind::TypeVariant(_, layout_ref) = decl.type_kind else {
+            panic!("expected result variant layout");
+        };
+        let layout = ctx.variant_layout(layout_ref);
+        let names: Vec<_> = layout
+            .constructors
+            .iter()
+            .map(|case| match case {
+                crate::types::VariantConstructorCase::Block(block) => {
+                    block.runtime.tag.name.as_str()
+                }
+                crate::types::VariantConstructorCase::Constant(tag) => tag.name.as_str(),
+            })
+            .collect();
 
-        assert!(names.consts.is_empty());
-        assert_eq!(
-            names.blocks,
-            vec![
-                crate::lambda::SwitchBlock::named("Ok"),
-                crate::lambda::SwitchBlock::named("Error"),
-            ]
+        assert_eq!(names, vec!["Ok", "Error"]);
+        assert!(
+            layout
+                .constructors
+                .iter()
+                .all(|case| matches!(case, crate::types::VariantConstructorCase::Block(_)))
         );
     }
 

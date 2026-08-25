@@ -55,8 +55,6 @@ use crate::types::typedtree::{
 // iterable, asyncIterable, and taggedTemplate predefs precede exceptions.
 const PREDEF_MATCH_FAILURE_STAMP: i32 = 20;
 const PREDEF_ASSERT_FAILURE_STAMP: i32 = 30;
-const REC_MODULE_FUNCTION_CSTR_CONST: i32 = 3;
-const REC_MODULE_FUNCTION_CSTR_NON_CONST: i32 = 2;
 
 #[derive(Clone)]
 enum RawFunctionBinding {
@@ -13681,17 +13679,10 @@ external myJson: Js.Json.t = "default"
         assert!(matches!(delim, Some(StringDelim::Plain)));
         assert!(matches!(
             init_v,
-            Constant::Int {
-                i: 0,
-                comment: Some(PointerInfo::Constructor(PointerConstructorTag {
-                    name,
-                    const_,
-                    non_const,
-                    runtime_tag: None,
-                })),
-            } if name == "Function"
-                && *const_ == REC_MODULE_FUNCTION_CSTR_CONST
-                && *non_const == REC_MODULE_FUNCTION_CSTR_NON_CONST
+            Constant::Constructor(crate::types::VariantTag {
+                name,
+                tag_type: None,
+            }) if name == "Function"
         ));
     }
 }

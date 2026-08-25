@@ -2507,17 +2507,30 @@ mod tests {
                 sw_numconsts: 1,
                 sw_consts_full: false,
                 sw_consts: vec![(
-                    crate::lambda::SwitchKey::Int(0),
+                    crate::lambda::SwitchKey::Constructor(
+                        crate::types::VariantConstructorCase::Constant(crate::types::VariantTag {
+                            name: "A".to_string(),
+                            tag_type: None,
+                        }),
+                    ),
                     RawLambda::const_(Constant::int(0)),
                 )],
                 sw_numblocks: 0,
                 sw_blocks_full: false,
                 sw_blocks: Vec::new(),
                 sw_failaction: None,
-                sw_dispatch: crate::lambda::switch_dispatch_for_test(crate::lambda::SwitchNames {
-                    consts: vec![crate::lambda::SwitchTag::named("A")],
-                    blocks: Vec::new(),
-                }),
+                sw_dispatch: crate::lambda::SwitchDispatch::Variant(
+                    crate::types::VariantMatchingFacts {
+                        tag_name: None,
+                        block_types: vec![],
+                        literal_tags: vec![crate::types::VariantTagType::String(
+                            "A".to_string().clone(),
+                        )],
+                        has_null: false,
+                        has_undefined: false,
+                        has_other_literal: true,
+                    },
+                ),
             },
             Location::none(),
         ));
@@ -2733,11 +2746,25 @@ mod tests {
                 sw_consts_full: true,
                 sw_consts: vec![
                     (
-                        crate::lambda::SwitchKey::Int(0),
+                        crate::lambda::SwitchKey::Constructor(
+                            crate::types::VariantConstructorCase::Constant(
+                                crate::types::VariantTag {
+                                    name: "A".to_string(),
+                                    tag_type: None,
+                                },
+                            ),
+                        ),
                         RawLambda::const_(Constant::int(0)),
                     ),
                     (
-                        crate::lambda::SwitchKey::Int(1),
+                        crate::lambda::SwitchKey::Constructor(
+                            crate::types::VariantConstructorCase::Constant(
+                                crate::types::VariantTag {
+                                    name: "B".to_string(),
+                                    tag_type: None,
+                                },
+                            ),
+                        ),
                         RawLambda::const_(Constant::int(1)),
                     ),
                 ],
@@ -2745,13 +2772,19 @@ mod tests {
                 sw_blocks_full: false,
                 sw_blocks: Vec::new(),
                 sw_failaction: None,
-                sw_dispatch: crate::lambda::switch_dispatch_for_test(crate::lambda::SwitchNames {
-                    consts: vec![
-                        crate::lambda::SwitchTag::named("A"),
-                        crate::lambda::SwitchTag::named("B"),
-                    ],
-                    blocks: Vec::new(),
-                }),
+                sw_dispatch: crate::lambda::SwitchDispatch::Variant(
+                    crate::types::VariantMatchingFacts {
+                        tag_name: None,
+                        block_types: vec![],
+                        literal_tags: vec![
+                            crate::types::VariantTagType::String("B".to_string().clone()),
+                            crate::types::VariantTagType::String("A".to_string().clone()),
+                        ],
+                        has_null: false,
+                        has_undefined: false,
+                        has_other_literal: true,
+                    },
+                ),
             },
             Location::none(),
         ));
