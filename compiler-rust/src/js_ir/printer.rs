@@ -4693,7 +4693,7 @@ fn op_precedence(op: BinOp) -> (u8, u8, u8) {
         BinOp::Lsl | BinOp::Lsr | BinOp::Asr => (10, 10, 11),
         BinOp::Plus | BinOp::Minus => (11, 11, 12),
         BinOp::Mul | BinOp::Div | BinOp::Mod => (12, 12, 13),
-        BinOp::Pow => (13, 14, 12), // Right-associative
+        BinOp::Pow => (13, 14, 13), // Right-associative
         BinOp::Bnot => (13, 13, 13),
     }
 }
@@ -4967,6 +4967,20 @@ mod tests {
 
         let expr = Expression::number(Number::char('文'));
         assert_eq!(print_expression(&expr), "/* '文' */25991");
+    }
+
+    #[test]
+    fn test_exponentiation_parenthesizes_compound_right_operand() {
+        let expr = Expression::bin(
+            BinOp::Pow,
+            Expression::var(Ident::create_local("base")),
+            Expression::bin(
+                BinOp::Div,
+                Expression::var(Ident::create_local("numerator")),
+                Expression::var(Ident::create_local("denominator")),
+            ),
+        );
+        assert_eq!(print_expression(&expr), "base ** (numerator / denominator)");
     }
 
     #[test]
