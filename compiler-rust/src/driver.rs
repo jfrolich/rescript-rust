@@ -3285,6 +3285,15 @@ fn type_mod_error_to_anyhow(
             )
             .into()
         }
+        TypeModError::CoreError(TypeCoreError::TaggedTemplateNonTag { loc, typ }) => {
+            UserDiagnostic::new(
+                format_tagged_template_non_tag_report(
+                    type_ctx, arena, source, filename, *loc, *typ,
+                ),
+                2,
+            )
+            .into()
+        }
         TypeModError::CoreError(TypeCoreError::TooManyArguments {
             loc,
             in_function,
@@ -6208,6 +6217,10 @@ fn format_expr_type_clash_report(
         Some(TypeClashContext::ArrayLiteral) => (
             Cow::Borrowed("This array item has type: "),
             Cow::Borrowed("But this array is expected to have items of type: "),
+        ),
+        Some(TypeClashContext::TaggedTemplateValue) => (
+            Cow::Borrowed("This interpolated value has type: "),
+            Cow::Borrowed("But this tag expects interpolations of type: "),
         ),
         Some(TypeClashContext::FunctionCall) => (
             Cow::Borrowed("This has type: "),
@@ -10026,6 +10039,15 @@ fn format_apply_non_function_report(
             message.push_str(if count == 1 { "argument" } else { "arguments" });
             message.push_str("; here, it's called with more.");
         }
+        TypeDesc::Tconstr { path, .. }
+            if path.same(&crate::types::predef::path_tagged_template()) =>
+        {
+            message.push_str("This is a tagged-template tag of type ");
+            message.push_str(INFO);
+            message.push_str(&format_type_expr(type_ctx, typ));
+            message.push_str(RESET);
+            message.push_str("\nIt can't be called like a function. Use it with backtick syntax instead, e.g. tag`SELECT ${id}`.");
+        }
         _ => {
             message.push_str("This can't be called, it's not a function.\n");
             message.push_str("The function has type: ");
@@ -10033,6 +10055,21 @@ fn format_apply_non_function_report(
         }
     }
 
+    format_compiler_error_report(arena, source, filename, loc, &message)
+}
+
+fn format_tagged_template_non_tag_report(
+    type_ctx: &TypeContext,
+    arena: &ParseArena,
+    source: &str,
+    filename: &str,
+    loc: LocIdx,
+    typ: TypeExprRef,
+) -> String {
+    let message = format!(
+        "This value is used with tagged template (backtick) syntax, but it has type {} which is not a taggedTemplate.\n\nTagged template syntax now requires a value of type taggedTemplate<'param, 'output>:\n\n  - To bind a JavaScript tag function, annotate the external with taggedTemplate<...> instead of using the removed @taggedTemplate decorator.\n  - To use a ReScript function as a tag, lift it with TaggedTemplate.make.",
+        format_type_expr(type_ctx, typ)
+    );
     format_compiler_error_report(arena, source, filename, loc, &message)
 }
 

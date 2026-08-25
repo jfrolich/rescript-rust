@@ -518,6 +518,9 @@ pub enum TypeCoreError {
     /// Applying non-function.
     ApplyNonFunction { loc: LocIdx, typ: TypeExprRef },
 
+    /// Backtick tagged-template syntax used with a non-tag value.
+    TaggedTemplateNonTag { loc: LocIdx, typ: TypeExprRef },
+
     /// Wrong label in application.
     ApplyWrongLabel {
         loc: LocIdx,
@@ -906,6 +909,8 @@ pub enum TypeClashContext {
     SetRecordField { field_name: String },
     /// In an array literal.
     ArrayLiteral,
+    /// In a `${...}` interpolation of a tagged-template literal.
+    TaggedTemplateValue,
     /// In a tuple.
     Tuple,
     /// In an if condition.
@@ -8938,6 +8943,94 @@ fn type_application(
     );
 
     ctx.begin_def();
+
+    let is_tagged_template = attributes
+        .iter()
+        .any(|attr| tctx.arena.get_string(attr.0.txt) == "res.taggedTemplate");
+    if is_tagged_template {
+        // Upstream compiler/ml/typecore.ml:2519-2569. The parser represents
+        // `tag`...${value}...`` as an attributed application whose two
+        // arguments are the literal strings and interpolation arrays.
+        let param_ty = ctx.new_var(None);
+        let output_ty = ctx.new_var(None);
+        let tag_ty = ctx.new_constr(
+            crate::types::predef::path_tagged_template(),
+            vec![param_ty, output_ty],
+        );
+        tctx.set_unify_env(env);
+        if crate::types::ctype::unify(
+            ctx,
+            &mut tctx.unify_state,
+            crate::types::instance(ctx, typed_funct.exp_type),
+            tag_ty,
+        )
+        .is_err()
+        {
+            return Err(TypeCoreError::TaggedTemplateNonTag {
+                loc: typed_funct.exp_loc,
+                typ: typed_funct.exp_type,
+            });
+        }
+
+        let [(ArgLabel::Nolabel, strings_idx), (ArgLabel::Nolabel, values_idx)] = args else {
+            unreachable!("the parser always emits two unlabeled tagged-template arguments")
+        };
+        let strings = tctx.arena.get_expr(*strings_idx);
+        let values = tctx.arena.get_expr(*values_idx);
+        let strings_ty = ctx.new_constr(
+            crate::types::predef::path_array(),
+            vec![env.type_string(ctx)],
+        );
+        let typed_strings = type_expect(tctx, env, strings, strings_ty, None)?;
+        let crate::parser::ast::ExpressionDesc::Pexp_array(interpolation_indices) =
+            &*values.pexp_desc
+        else {
+            unreachable!("the parser always emits a tagged-template interpolation array")
+        };
+        let mut typed_interpolations = Vec::with_capacity(interpolation_indices.len());
+        for interpolation_idx in interpolation_indices.iter() {
+            typed_interpolations.push(type_expect(
+                tctx,
+                env,
+                tctx.arena.get_expr(*interpolation_idx),
+                param_ty,
+                Some(TypeClashContext::TaggedTemplateValue),
+            )?);
+        }
+        let typed_values = Expression::new(
+            ExpressionDesc::Texp_array(typed_interpolations),
+            values.pexp_loc,
+            ctx.new_constr(crate::types::predef::path_array(), vec![param_ty]),
+            EnvRef(0),
+            values.pexp_attributes.clone(),
+        );
+        let typed_args = vec![
+            ApplyArg {
+                label: crate::types::ArgLabel::Nolabel,
+                expression: Some(typed_strings),
+            },
+            ApplyArg {
+                label: crate::types::ArgLabel::Nolabel,
+                expression: Some(typed_values),
+            },
+        ];
+
+        ctx.end_def();
+        unify_expression_types(tctx, loc, ctx.new_var(None), typed_funct.exp_type, None)?;
+        rue_unify(tctx, loc, output_ty, expected_ty, context)?;
+        return Ok(Expression::new(
+            ExpressionDesc::Texp_apply {
+                funct: Box::new(typed_funct),
+                args: typed_args,
+                partial,
+                transformed_jsx,
+            },
+            loc,
+            output_ty,
+            EnvRef(0),
+            attributes.to_vec().into(),
+        ));
+    }
 
     // Try unified ops dispatch first (matching OCaml's translate_unified_ops)
     if let Some(result) = translate_unified_ops(
