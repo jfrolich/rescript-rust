@@ -412,10 +412,7 @@ fn format_include_error(
                 + actual_text.len()
                 + " is not included in ".len()
                 + expected_text.len();
-            if !actual_text.contains('\n')
-                && !expected_text.contains('\n')
-                && inline_width <= 80
-            {
+            if !actual_text.contains('\n') && !expected_text.contains('\n') && inline_width <= 80 {
                 output.push_str("  Values do not match: ");
                 output.push_str(&actual_text);
                 output.push_str(" is not included in ");

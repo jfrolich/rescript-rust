@@ -1682,9 +1682,7 @@ impl PersistentEnv {
                     // a fatal persistent-environment diagnostic. Preserve the
                     // load-path spelling rather than leaking the canonical I/O
                     // path used to open the file.
-                    let message = error
-                        .to_string()
-                        .replacen(&full_path, &display_path, 1);
+                    let message = error.to_string().replacen(&full_path, &display_path, 1);
                     self.record_error(PersistentEnvError::InterfaceRead { message });
                     return None;
                 }
@@ -1777,9 +1775,7 @@ impl PersistentEnv {
         let cmi = match cmi_format::read_cmi(&full_path) {
             Ok(cmi) => cmi,
             Err(error) => {
-                let message = error
-                    .to_string()
-                    .replacen(&full_path, &display_path, 1);
+                let message = error.to_string().replacen(&full_path, &display_path, 1);
                 self.record_error(PersistentEnvError::InterfaceRead { message });
                 return None;
             }
