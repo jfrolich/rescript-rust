@@ -13721,11 +13721,17 @@ fn type_match(
     attributes: &[crate::parser::ast::Attribute],
 ) -> TypeCoreResult<Expression> {
     let ctx = tctx.type_ctx;
-    let body_context = if attributes
-        .iter()
-        .any(|attr| tctx.arena.get_string(attr.0.txt) == "let.unwrap")
-    {
+    let has_attribute = |name| {
+        attributes
+            .iter()
+            .any(|attr| tctx.arena.get_string(attr.0.txt) == name)
+    };
+    let body_context = if has_attribute("let.unwrap") {
         Some(TypeClashContext::LetUnwrapReturn)
+    } else if has_attribute("#optional_arg_default") {
+        // compiler/ml/typecore.ml:2626-2634: this synthesized match is part of
+        // function typing, so its branches use function-style diagnostics.
+        None
     } else {
         Some(TypeClashContext::SwitchExpression)
     };
