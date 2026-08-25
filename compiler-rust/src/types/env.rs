@@ -19,7 +19,7 @@
 use super::asttypes::{MutableFlag, PrivateFlag};
 use super::context::TypeContext;
 use super::decl::{
-    ConstructorArguments, ConstructorDeclaration, ConstructorDescription, ConstructorTag,
+    ConstructorArguments, ConstructorDeclaration, ConstructorDescription, ConstructorKind, ConstructorTag,
     LabelDeclaration, LabelDescription, ModtypeDeclaration, ModuleDeclaration, ModuleType,
     RecordRepresentation, Signature, SignatureItem, TypeDeclaration, TypeKind, ValueDescription,
 };
@@ -1830,7 +1830,17 @@ pub fn initial_env(ctx: &TypeContext) -> Env {
                 let mut const_idx = 0i32;
                 let mut nonconst_idx = 0i32;
 
-                for cd in constrs {
+                let layout_ref = decl.type_variant_layout.unwrap_or_else(|| {
+                    crate::types::variant_runtime::plain_layout(
+                        ctx,
+                        constrs.iter().map(|cd| (
+                            cd.cd_id.name().to_string(),
+                            !matches!(&cd.cd_args, ConstructorArguments::CstrTuple(args) if args.is_empty()),
+                        )),
+                    )
+                });
+
+                for (position, cd) in constrs.iter().enumerate() {
                     let is_constant = matches!(cd.cd_args, ConstructorArguments::CstrTuple(ref args) if args.is_empty());
 
                     let cstr_tag = if decl.type_unboxed.unboxed {
@@ -1868,6 +1878,9 @@ pub fn initial_env(ctx: &TypeContext) -> Env {
                         cstr_existentials,
                         cstr_args,
                         cstr_arity,
+                        cstr_kind: Some(ConstructorKind::Ordinary(
+                            crate::types::ConstructorReference { variant: layout_ref, position },
+                        )),
                         cstr_tag,
                         cstr_consts: num_consts,
                         cstr_nonconsts: num_nonconsts,
@@ -2456,6 +2469,7 @@ pub fn initial_env(ctx: &TypeContext) -> Env {
                     cstr_existentials: vec![],
                     cstr_arity: args.len() as i32,
                     cstr_args: args,
+                    cstr_kind: Some(ConstructorKind::Extension(path.clone())),
                     cstr_tag: ConstructorTag::CstrExtension(path),
                     cstr_consts: -1,
                     cstr_nonconsts: -1,

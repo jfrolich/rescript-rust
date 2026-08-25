@@ -2999,6 +2999,7 @@ impl<'a> RawLambdaConverter<'a> {
             ExpressionDesc::Texp_construct(
                 _,
                 crate::types::ConstructorDescription {
+                    cstr_kind: None,
                     cstr_tag: ConstructorTag::CstrConstant(_),
                     ..
                 },
@@ -11951,6 +11952,7 @@ mod tests {
             cstr_existentials: Vec::new(),
             cstr_args: Vec::new(),
             cstr_arity: 0,
+            cstr_kind: None,
             cstr_tag: crate::types::ConstructorTag::CstrUnboxed,
             cstr_consts: 1,
             cstr_nonconsts: 0,
@@ -12001,6 +12003,7 @@ mod tests {
             cstr_existentials: Vec::new(),
             cstr_args: Vec::new(),
             cstr_arity: 1,
+            cstr_kind: None,
             cstr_tag: crate::types::ConstructorTag::CstrBlock(0),
             cstr_consts: 1,
             cstr_nonconsts: 1,
@@ -12091,6 +12094,7 @@ mod tests {
             cstr_existentials: Vec::new(),
             cstr_args: Vec::new(),
             cstr_arity: 0,
+            cstr_kind: None,
             cstr_tag: crate::types::ConstructorTag::CstrExtension(path),
             cstr_consts: -1,
             cstr_nonconsts: -1,

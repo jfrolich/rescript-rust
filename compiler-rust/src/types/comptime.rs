@@ -603,6 +603,7 @@ fn type_info_constructor_description<'a>(
             cstr_existentials,
             cstr_args,
             cstr_arity,
+            cstr_kind: None,
             cstr_tag,
             cstr_consts: num_consts,
             cstr_nonconsts: num_nonconsts,

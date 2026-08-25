@@ -37,7 +37,7 @@ use crate::location::Location;
 use crate::parser::{Parser, jsx_ppx, module};
 use crate::types::context::TypeContext;
 use crate::types::decl::{
-    AliasPresence, ConstructorDescription, ConstructorTag, LabelDescription, ModtypeDeclaration,
+    AliasPresence, ConstructorDescription, ConstructorKind, ConstructorTag, LabelDescription, ModtypeDeclaration,
     ModuleDeclaration, ModuleType, RecStatus, Signature, SignatureItem, TypeKind,
 };
 use crate::types::env::{Env, initial_env};
@@ -5882,7 +5882,7 @@ fn add_signature_to_env_with_options(
                         let mut const_idx = 0i32;
                         let mut nonconst_idx = 0i32;
 
-                        for cd in constrs {
+                        for (position, cd) in constrs.iter().enumerate() {
                             let is_constant = matches!(cd.cd_args, crate::types::decl::ConstructorArguments::CstrTuple(ref args) if args.is_empty());
 
                             let cstr_tag = if is_constant {
@@ -5976,6 +5976,12 @@ fn add_signature_to_env_with_options(
                                 cstr_existentials: vec![],
                                 cstr_args,
                                 cstr_arity,
+                                cstr_kind: decl.type_variant_layout.map(|variant| {
+                                    ConstructorKind::Ordinary(crate::types::ConstructorReference {
+                                        variant,
+                                        position,
+                                    })
+                                }),
                                 cstr_tag,
                                 cstr_consts: num_consts,
                                 cstr_nonconsts: num_nonconsts,
@@ -6221,6 +6227,7 @@ fn add_signature_to_env_with_options(
                             labels.len() as i32
                         }
                     },
+                    cstr_kind: Some(ConstructorKind::Extension(slot_path(id.name(), ext_slot))),
                     cstr_tag: ConstructorTag::CstrExtension(slot_path(id.name(), ext_slot)),
                     cstr_consts: -1,
                     cstr_nonconsts: -1,

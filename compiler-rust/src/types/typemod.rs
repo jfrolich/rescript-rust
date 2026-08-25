@@ -20322,6 +20322,7 @@ pub fn type_structure<'a>(
                         cstr_existentials: vec![],
                         cstr_args: vec![],
                         cstr_arity: 0,
+                        cstr_kind: None,
                         cstr_tag: crate::types::decl::ConstructorTag::CstrConstant(i as i32),
                         cstr_consts: num_consts,
                         cstr_nonconsts: 0,
@@ -20853,6 +20854,7 @@ fn type_structure_item<'a>(
                                 cstr_existentials: vec![],
                                 cstr_args: vec![],
                                 cstr_arity: 0,
+                                cstr_kind: None,
                                 cstr_tag: crate::types::decl::ConstructorTag::CstrConstant(
                                     i as i32,
                                 ),
@@ -21506,7 +21508,7 @@ fn type_structure_item<'a>(
                 let mut manifest_from_kind = None;
 
                 // Convert the type kind - create both internal and typed tree versions
-                let (internal_type_kind, typed_tree_kind, constructors) = match &decl.ptype_kind {
+                let (internal_type_kind, typed_tree_kind, mut constructors) = match &decl.ptype_kind {
                     crate::parser::ast::TypeKind::Ptype_abstract => (
                         crate::types::TypeKind::TypeAbstract,
                         TypedTypeKind::Ttype_abstract,
@@ -22001,6 +22003,7 @@ fn type_structure_item<'a>(
                                             cstr_existentials: sc_existentials,
                                             cstr_args: sc_desc_args,
                                             cstr_arity: sc_desc_arity,
+                                            cstr_kind: None,
                                             cstr_tag: sc_tag,
                                             cstr_consts: num_consts,
                                             cstr_nonconsts: num_nonconsts,
@@ -22371,6 +22374,7 @@ fn type_structure_item<'a>(
                                     cstr_existentials,
                                     cstr_args,
                                     cstr_arity,
+                                    cstr_kind: None,
                                     cstr_tag: tag,
                                     cstr_consts: num_consts,
                                     cstr_nonconsts: num_nonconsts,
@@ -22714,6 +22718,14 @@ fn type_structure_item<'a>(
                     type_inlined_types: vec![],
                     type_path: None,
                 };
+
+                if let Some(layout_ref) = type_variant_layout {
+                    for (position, (_, description)) in constructors.iter_mut().enumerate() {
+                        description.cstr_kind = Some(crate::types::ConstructorKind::Ordinary(
+                            crate::types::ConstructorReference { variant: layout_ref, position },
+                        ));
+                    }
+                }
 
                 // Save for generalization after the loop
                 internal_decls_for_generalize.push(internal_decl.clone());
@@ -23385,6 +23397,7 @@ fn type_structure_item<'a>(
                     cstr_existentials,
                     cstr_args: cstr_args.clone(),
                     cstr_arity: cstr_args.len() as i32,
+                    cstr_kind: None,
                     cstr_tag: crate::types::decl::ConstructorTag::CstrExtension(ext_path),
                     cstr_consts: -1,
                     cstr_nonconsts: -1,
@@ -23776,6 +23789,7 @@ fn type_structure_item<'a>(
                 cstr_existentials,
                 cstr_args: cstr_args.clone(),
                 cstr_arity: cstr_args.len() as i32,
+                cstr_kind: None,
                 cstr_tag: crate::types::decl::ConstructorTag::CstrExtension(exn_path),
                 cstr_consts: -1,
                 cstr_nonconsts: -1,
@@ -24432,7 +24446,7 @@ fn type_structure_item<'a>(
                                 let mut const_idx = 0i32;
                                 let mut nonconst_idx = 0i32;
 
-                                for cd in constructors {
+                                for (position, cd) in constructors.iter().enumerate() {
                                     let is_constant = matches!(
                                         cd.cd_args,
                                         crate::types::decl::ConstructorArguments::CstrTuple(
@@ -24495,6 +24509,11 @@ fn type_structure_item<'a>(
                                         cstr_existentials,
                                         cstr_args,
                                         cstr_arity,
+                                        cstr_kind: decl.type_variant_layout.map(|variant| {
+                                            crate::types::ConstructorKind::Ordinary(
+                                                crate::types::ConstructorReference { variant, position },
+                                            )
+                                        }),
                                         cstr_tag,
                                         cstr_consts: num_consts,
                                         cstr_nonconsts: num_nonconsts,

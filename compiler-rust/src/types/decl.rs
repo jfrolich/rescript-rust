@@ -253,7 +253,9 @@ pub struct ConstructorDescription {
     pub cstr_args: Vec<TypeExprRef>,
     /// Number of arguments
     pub cstr_arity: i32,
-    /// Constructor tag
+    /// Semantic constructor kind and canonical runtime representation.
+    pub cstr_kind: Option<ConstructorKind>,
+    /// Transitional positional tag used by lowering until switch migration.
     pub cstr_tag: ConstructorTag,
     /// Number of constant constructors in the type
     pub cstr_consts: i32,
@@ -269,6 +271,34 @@ pub struct ConstructorDescription {
     pub cstr_attributes: Vec<Attribute>,
     /// Inlined record declaration (if any)
     pub cstr_inlined: Option<Box<TypeDeclaration>>,
+}
+
+/// Semantic constructor identity.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ConstructorKind {
+    /// Constructor declared by an ordinary variant.
+    Ordinary(super::variant_runtime::ConstructorReference),
+    /// Extensible constructor, identified by its extension path.
+    Extension(Path),
+}
+
+/// Whether two descriptions denote the same constructor for a common
+/// scrutinee type.
+pub fn same_constructor(c1: &ConstructorDescription, c2: &ConstructorDescription) -> bool {
+    match (&c1.cstr_kind, &c2.cstr_kind) {
+        (Some(ConstructorKind::Ordinary(_)), Some(ConstructorKind::Ordinary(_))) => c1.cstr_name == c2.cstr_name,
+        (Some(ConstructorKind::Extension(p1)), Some(ConstructorKind::Extension(p2))) => p1.same(p2),
+        (Some(_), Some(_)) => false,
+        _ => c1.cstr_tag.equal(&c2.cstr_tag),
+    }
+}
+
+/// Conservative equality used while checking extension patterns.
+pub fn may_equal_constructor(c1: &ConstructorDescription, c2: &ConstructorDescription) -> bool {
+    match (&c1.cstr_kind, &c2.cstr_kind) {
+        (Some(ConstructorKind::Extension(_)), Some(ConstructorKind::Extension(_))) => c1.cstr_arity == c2.cstr_arity,
+        _ => same_constructor(c1, c2),
+    }
 }
 
 /// Constructor tag for heap blocks.

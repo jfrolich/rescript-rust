@@ -13,7 +13,7 @@ use std::sync::Arc;
 use crate::ident::Ident;
 
 use super::decl::{
-    ConstructorDescription, ConstructorTag, LabelDescription, ModtypeDeclaration,
+    ConstructorDescription, ConstructorKind, ConstructorTag, LabelDescription, ModtypeDeclaration,
     ModuleDeclaration, ModuleType, Signature, SignatureItem, TypeDeclaration, ValueDescription,
     ValueKind,
 };
@@ -60,7 +60,7 @@ fn build_matching_type_constructors(
     let mut const_idx = 0i32;
     let mut block_idx = 0i32;
 
-    for cd in cstrs {
+    for (position, cd) in cstrs.iter().enumerate() {
         let is_constant = matches!(
             cd.cd_args,
             super::decl::ConstructorArguments::CstrTuple(ref args) if args.is_empty()
@@ -171,6 +171,12 @@ fn build_matching_type_constructors(
                 cstr_existentials: vec![],
                 cstr_args,
                 cstr_arity,
+                cstr_kind: decl.type_variant_layout.map(|variant| {
+                    ConstructorKind::Ordinary(super::variant_runtime::ConstructorReference {
+                        variant,
+                        position,
+                    })
+                }),
                 cstr_tag: tag,
                 cstr_consts: num_consts,
                 cstr_nonconsts: num_nonconsts,
@@ -312,6 +318,7 @@ fn build_constructors_for_name(
                         cstr_existentials: vec![],
                         cstr_args,
                         cstr_arity,
+                        cstr_kind: Some(ConstructorKind::Extension(ext_path.clone())),
                         cstr_tag: ConstructorTag::CstrExtension(ext_path),
                         cstr_consts: -1,
                         cstr_nonconsts: -1,

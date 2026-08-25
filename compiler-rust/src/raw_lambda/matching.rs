@@ -328,6 +328,15 @@ fn const_compare(c1: &Constant, c2: &Constant) -> std::cmp::Ordering {
 }
 
 /// Check if two constructor tags are equal.
+fn same_constructor(c1: &ConstructorDescription, c2: &ConstructorDescription) -> bool {
+    match (&c1.cstr_kind, &c2.cstr_kind) {
+        (Some(crate::types::ConstructorKind::Ordinary(_)), Some(crate::types::ConstructorKind::Ordinary(_))) => c1.cstr_name == c2.cstr_name,
+        (Some(crate::types::ConstructorKind::Extension(p1)), Some(crate::types::ConstructorKind::Extension(p2))) => p1.same(p2),
+        (Some(_), Some(_)) => false,
+        _ => equal_tag(&c1.cstr_tag, &c2.cstr_tag),
+    }
+}
+
 fn equal_tag(t1: &ConstructorTag, t2: &ConstructorTag) -> bool {
     match (t1, t2) {
         (ConstructorTag::CstrConstant(i1), ConstructorTag::CstrConstant(i2)) => i1 == i2,
@@ -410,7 +419,7 @@ fn le_pat(p: &Pattern, q: &Pattern) -> bool {
             const_compare(c1, c2) == std::cmp::Ordering::Equal
         }
         (PatternDesc::Tpat_construct(_, c1, ps), PatternDesc::Tpat_construct(_, c2, qs)) => {
-            equal_tag(&c1.cstr_tag, &c2.cstr_tag) && le_pats(ps, qs)
+            same_constructor(c1, c2) && le_pats(ps, qs)
         }
         (
             PatternDesc::Tpat_variant(l1, Some(p1), _),
@@ -488,7 +497,7 @@ fn lub(p: &Pattern, q: &Pattern) -> Result<Pattern, Empty> {
             Ok(make_pat(PatternDesc::Tpat_tuple(rs), p.pat_type, p.pat_env))
         }
         (PatternDesc::Tpat_construct(lid, c1, ps1), PatternDesc::Tpat_construct(_, c2, ps2))
-            if equal_tag(&c1.cstr_tag, &c2.cstr_tag) =>
+            if same_constructor(c1, c2) =>
         {
             let rs = lubs(ps1, ps2)?;
             Ok(make_pat(
@@ -939,11 +948,13 @@ fn may_equal_constr(
     c1: &crate::types::ConstructorDescription,
     c2: &crate::types::ConstructorDescription,
 ) -> bool {
-    match (&c1.cstr_tag, &c2.cstr_tag) {
-        (ConstructorTag::CstrExtension(_), ConstructorTag::CstrExtension(_)) => {
-            c1.cstr_arity == c2.cstr_arity
-        }
-        (t1, t2) => equal_tag(t1, t2),
+    match (&c1.cstr_kind, &c2.cstr_kind) {
+        (Some(crate::types::ConstructorKind::Extension(_)), Some(crate::types::ConstructorKind::Extension(_))) => c1.cstr_arity == c2.cstr_arity,
+        (Some(_), Some(_)) => same_constructor(c1, c2),
+        _ => match (&c1.cstr_tag, &c2.cstr_tag) {
+            (ConstructorTag::CstrExtension(_), ConstructorTag::CstrExtension(_)) => c1.cstr_arity == c2.cstr_arity,
+            (t1, t2) => equal_tag(t1, t2),
+        },
     }
 }
 
@@ -3900,7 +3911,7 @@ fn split_exc(
         Some((cl, rem)) => match cl.0.first() {
             Some(p) if group_constructor(p) => {
                 let cstr = pat_as_constr(p);
-                if equal_tag(&cstr.cstr_tag, &cstr0.cstr_tag) {
+                if same_constructor(cstr, cstr0) {
                     let mut new_yes = yes;
                     new_yes.insert(0, cl.clone());
                     split_exc(cstr0, new_yes, rem, args, def, k, next_raise)
@@ -6845,6 +6856,7 @@ fn complete_pats_constrs(ctx_ref: &TypeContext, pats: &[Pattern]) -> Vec<Pattern
                     if (i as usize) < seen_const.len() && !seen_const[i as usize] {
                         let synth_cstr = ConstructorDescription {
                             cstr_name: String::new(),
+                            cstr_kind: None,
                             cstr_tag: ConstructorTag::CstrConstant(i),
                             cstr_arity: 0,
                             cstr_consts: cstr.cstr_consts,
@@ -6861,6 +6873,7 @@ fn complete_pats_constrs(ctx_ref: &TypeContext, pats: &[Pattern]) -> Vec<Pattern
                         // the pattern to be recognized as non-constant)
                         let synth_cstr = ConstructorDescription {
                             cstr_name: String::new(),
+                            cstr_kind: None,
                             cstr_tag: ConstructorTag::CstrBlock(i),
                             cstr_arity: 1,
                             cstr_consts: cstr.cstr_consts,
@@ -6940,6 +6953,7 @@ fn get_variant_constructors_from_env(
                     cstr_existentials: Vec::new(),
                     cstr_args: args_vec,
                     cstr_arity: arity,
+                    cstr_kind: None,
                     cstr_tag: tag,
                     cstr_consts: nconsts,
                     cstr_nonconsts: nnonconsts,

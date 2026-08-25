@@ -59,7 +59,7 @@ pub use asttypes::{
 pub use context::TypeContext;
 pub use decl::{
     AliasPresence, Attribute, AttributePayload, ConstructorArguments, ConstructorDeclaration,
-    ConstructorDescription, ConstructorTag, ExtStatus, ExtensionConstructor, LabelArrayRef,
+    ConstructorDescription, ConstructorKind, ConstructorTag, ExtStatus, ExtensionConstructor, LabelArrayRef,
     LabelDeclaration, LabelDescription, ModtypeDeclaration, ModuleDeclaration, ModuleType,
     PrimitiveDescription, RecStatus, RecordRepresentation, Signature, SignatureItem,
     TypeDeclaration, TypeInlinedType, TypeKind, UnboxedStatus, ValueDescription, ValueKind,
