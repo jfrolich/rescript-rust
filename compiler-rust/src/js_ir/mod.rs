@@ -845,7 +845,7 @@ pub enum ExpressionDesc {
     OptionalBlock(Box<Expression>, bool),
 
     /// Caml block (variant, record, tuple)
-    CamlBlock(Vec<Expression>, MutableFlag, Box<Expression>, TagInfo),
+    CamlBlock(Vec<Expression>, MutableFlag, TagInfo),
 
     /// Block tag access
     CamlBlockTag(Box<Expression>, String),
@@ -1067,7 +1067,7 @@ impl Expression {
     pub fn length(target: Expression, object: LengthObject) -> Self {
         match (&target.desc, object) {
             (
-                ExpressionDesc::Array(items, _) | ExpressionDesc::CamlBlock(items, _, _, _),
+                ExpressionDesc::Array(items, _) | ExpressionDesc::CamlBlock(items, _, _),
                 LengthObject::Array,
             ) if expression_has_no_side_effects(&target) => {
                 Expression::number(Number::int(items.len() as i32))
@@ -1098,7 +1098,7 @@ impl Expression {
             ExpressionDesc::Null | ExpressionDesc::Undefined { .. } => Expression::bool(true),
             ExpressionDesc::Number(_)
             | ExpressionDesc::Array(_, _)
-            | ExpressionDesc::CamlBlock(_, _, _, _) => Expression::bool(false),
+            | ExpressionDesc::CamlBlock(_, _, _) => Expression::bool(false),
             _ => Self::new(ExpressionDesc::IsNullOrUndefined(Box::new(target))),
         }
     }
@@ -1161,7 +1161,7 @@ impl Expression {
             ExpressionDesc::Bool(true) => return consequent,
             ExpressionDesc::Number(_)
             | ExpressionDesc::Array(_, _)
-            | ExpressionDesc::CamlBlock(_, _, _, _)
+            | ExpressionDesc::CamlBlock(_, _, _)
                 if expression_has_no_side_effects(&test) =>
             {
                 return consequent;
@@ -1506,7 +1506,7 @@ fn is_nullish_eq_impossible_non_null_expr(expr: &Expression) -> bool {
             | ExpressionDesc::Typeof(_)
             | ExpressionDesc::Fun { .. }
             | ExpressionDesc::Array(_, _)
-            | ExpressionDesc::CamlBlock(_, _, _, _)
+            | ExpressionDesc::CamlBlock(_, _, _)
     ) && expression_has_no_side_effects(expr)
 }
 
@@ -1535,9 +1535,7 @@ pub(crate) fn expression_has_no_side_effects(expr: &Expression) -> bool {
         | ExpressionDesc::CamlBlockTag(inner, _)
         | ExpressionDesc::OptionalBlock(inner, _) => expression_has_no_side_effects(inner),
         ExpressionDesc::Array(items, _) => items.iter().all(expression_has_no_side_effects),
-        ExpressionDesc::CamlBlock(items, _, _, _) => {
-            items.iter().all(expression_has_no_side_effects)
-        }
+        ExpressionDesc::CamlBlock(items, _, _) => items.iter().all(expression_has_no_side_effects),
         ExpressionDesc::Object(dup, props) => {
             dup.as_deref().is_none_or(expression_has_no_side_effects)
                 && props
@@ -2499,9 +2497,7 @@ fn expression_contains_await(expr: &Expression) -> bool {
                     .iter()
                     .any(|(_, value)| expression_contains_await(value))
         }
-        ExpressionDesc::CamlBlock(items, _, tag, _) => {
-            items.iter().any(expression_contains_await) || expression_contains_await(tag)
-        }
+        ExpressionDesc::CamlBlock(items, _, _) => items.iter().any(expression_contains_await),
         ExpressionDesc::Fun { .. }
         | ExpressionDesc::Var(_)
         | ExpressionDesc::Str { .. }
@@ -3214,8 +3210,8 @@ pub(crate) fn ocaml_eq_expression(left: &Expression, right: &Expression) -> bool
             ExpressionDesc::OptionalBlock(right_inner, right_identity),
         ) => left_identity == right_identity && ocaml_eq_expression(left_inner, right_inner),
         (
-            ExpressionDesc::CamlBlock(left_items, left_mutable, left_tag, _),
-            ExpressionDesc::CamlBlock(right_items, right_mutable, right_tag, _),
+            ExpressionDesc::CamlBlock(left_items, left_mutable, left_info),
+            ExpressionDesc::CamlBlock(right_items, right_mutable, right_info),
         ) => {
             left_mutable == right_mutable
                 && left_items.len() == right_items.len()
@@ -3223,7 +3219,7 @@ pub(crate) fn ocaml_eq_expression(left: &Expression, right: &Expression) -> bool
                     .iter()
                     .zip(right_items)
                     .all(|(left_item, right_item)| ocaml_eq_expression(left_item, right_item))
-                && ocaml_eq_expression(left_tag, right_tag)
+                && left_info == right_info
         }
         _ => false,
     }
@@ -3515,7 +3511,6 @@ fn dispose_expression_nonrecursive(expression: Expression, stack: &mut Vec<Dispo
             push_expression_vec(args, stack);
         }
         ExpressionDesc::TaggedTemplate(tag, quasi, expressions) => {
-            stack.push(DisposeItem::Expression(*tag));
             push_expression_vec(quasi, stack);
             push_expression_vec(expressions, stack);
         }
@@ -3531,9 +3526,8 @@ fn dispose_expression_nonrecursive(expression: Expression, stack: &mut Vec<Dispo
             stack.push(DisposeItem::Block(body));
         }
         ExpressionDesc::Array(expressions, _) => push_expression_vec(expressions, stack),
-        ExpressionDesc::CamlBlock(expressions, _, tag, _) => {
+        ExpressionDesc::CamlBlock(expressions, _, _) => {
             push_expression_vec(expressions, stack);
-            stack.push(DisposeItem::Expression(*tag));
         }
         ExpressionDesc::Object(proto, properties) => {
             if let Some(proto) = proto {

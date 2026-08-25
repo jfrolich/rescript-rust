@@ -108,7 +108,7 @@ fn flatten_and_mark_dead_statement(
             ) {
                 if let Some(Expression {
                     source_loc,
-                    desc: ExpressionDesc::CamlBlock(items, MutableFlag::Immutable, tag, tag_info),
+                    desc: ExpressionDesc::CamlBlock(items, MutableFlag::Immutable, tag_info),
                     comment: value_comment,
                 }) = decl.value
                 {
@@ -146,7 +146,6 @@ fn flatten_and_mark_dead_statement(
                             desc: ExpressionDesc::CamlBlock(
                                 rewritten_items,
                                 MutableFlag::Immutable,
-                                tag,
                                 tag_info,
                             ),
                             comment: value_comment,
@@ -200,12 +199,6 @@ fn flatten_and_mark_dead_statement(
                                         })
                                         .collect(),
                                     MutableFlag::Immutable,
-                                    Box::new(flatten_and_mark_dead_expression(
-                                        *tag,
-                                        id_gen,
-                                        substitution,
-                                        jsx_preserve,
-                                    )),
                                     tag_info,
                                 ),
                                 comment: value_comment,
@@ -678,7 +671,7 @@ fn flatten_and_mark_dead_expression(
             )),
             flag,
         ),
-        ExpressionDesc::CamlBlock(items, mutable_flag, tag, tag_info) => ExpressionDesc::CamlBlock(
+        ExpressionDesc::CamlBlock(items, mutable_flag, tag_info) => ExpressionDesc::CamlBlock(
             items
                 .into_iter()
                 .map(|item| {
@@ -686,12 +679,6 @@ fn flatten_and_mark_dead_expression(
                 })
                 .collect(),
             mutable_flag,
-            Box::new(flatten_and_mark_dead_expression(
-                *tag,
-                id_gen,
-                substitution,
-                jsx_preserve,
-            )),
             tag_info,
         ),
         ExpressionDesc::CamlBlockTag(inner, tag) => ExpressionDesc::CamlBlockTag(
@@ -821,7 +808,7 @@ fn substituted_caml_block_item(
     index: i32,
 ) -> Option<Expression> {
     let expression = substitution.get(id)?;
-    let ExpressionDesc::CamlBlock(items, MutableFlag::Immutable, _, tag_info) = &expression.desc
+    let ExpressionDesc::CamlBlock(items, MutableFlag::Immutable, tag_info) = &expression.desc
     else {
         return None;
     };
@@ -871,7 +858,7 @@ fn is_deep_constant_block_binding_item(expr: &Expression) -> bool {
         | ExpressionDesc::Bool(_)
         | ExpressionDesc::Undefined { .. } => true,
         ExpressionDesc::OptionalBlock(inner, _) => is_deep_constant_block_binding_item(inner),
-        ExpressionDesc::CamlBlock(items, MutableFlag::Immutable, _, _) => {
+        ExpressionDesc::CamlBlock(items, MutableFlag::Immutable, _) => {
             items.iter().all(is_deep_constant_block_binding_item)
         }
         _ => false,
@@ -903,12 +890,9 @@ fn is_simple_substituted_index_value(expr: &Expression) -> bool {
         | ExpressionDesc::Number(_)
         | ExpressionDesc::Str { .. }
         | ExpressionDesc::Undefined { .. } => true,
-        ExpressionDesc::CamlBlock(
-            items,
-            MutableFlag::Immutable,
-            _,
-            TagInfo::Constructor { .. },
-        ) => items.iter().all(is_simple_substituted_index_value),
+        ExpressionDesc::CamlBlock(items, MutableFlag::Immutable, TagInfo::Constructor { .. }) => {
+            items.iter().all(is_simple_substituted_index_value)
+        }
         _ => false,
     }
 }
@@ -1122,7 +1106,6 @@ fn collect_mark_dead_states_expression(
             }
         }
         ExpressionDesc::TaggedTemplate(tag, strings, values) => {
-            collect_mark_dead_states_expression(tag, states);
             for string in strings {
                 collect_mark_dead_states_expression(string, states);
             }
@@ -1151,11 +1134,10 @@ fn collect_mark_dead_states_expression(
                 collect_mark_dead_states_expression(item, states);
             }
         }
-        ExpressionDesc::CamlBlock(items, _, tag, _) => {
+        ExpressionDesc::CamlBlock(items, _, _) => {
             for item in items {
                 collect_mark_dead_states_expression(item, states);
             }
-            collect_mark_dead_states_expression(tag, states);
         }
         ExpressionDesc::Object(dup, props) => {
             if let Some(dup) = dup {
@@ -1295,7 +1277,6 @@ fn apply_mark_dead_states_expression(expr: &mut Expression, states: &HashMap<Ide
             }
         }
         ExpressionDesc::TaggedTemplate(tag, strings, values) => {
-            apply_mark_dead_states_expression(tag, states);
             for string in strings {
                 apply_mark_dead_states_expression(string, states);
             }
@@ -1320,11 +1301,10 @@ fn apply_mark_dead_states_expression(expr: &mut Expression, states: &HashMap<Ide
                 apply_mark_dead_states_expression(item, states);
             }
         }
-        ExpressionDesc::CamlBlock(items, _, tag, _) => {
+        ExpressionDesc::CamlBlock(items, _, _) => {
             for item in items {
                 apply_mark_dead_states_expression(item, states);
             }
-            apply_mark_dead_states_expression(tag, states);
         }
         ExpressionDesc::Object(dup, props) => {
             if let Some(dup) = dup {
@@ -1402,7 +1382,7 @@ fn flatten_statement(stmt: Statement) -> Statement {
                     // empty flattened effect is normalized before printing.
                     Statement::block(block)
                 }
-                ExpressionDesc::CamlBlock(args, _, _, _) => {
+                ExpressionDesc::CamlBlock(args, _, _) => {
                     let block = args
                         .into_iter()
                         .map(|arg| flatten_statement(Statement::exp(arg)))
@@ -1752,10 +1732,9 @@ fn flatten_expression(expr: Expression) -> Expression {
         ExpressionDesc::OptionalBlock(inner, flag) => {
             ExpressionDesc::OptionalBlock(Box::new(flatten_expression(*inner)), flag)
         }
-        ExpressionDesc::CamlBlock(items, mutable_flag, tag, tag_info) => ExpressionDesc::CamlBlock(
+        ExpressionDesc::CamlBlock(items, mutable_flag, tag_info) => ExpressionDesc::CamlBlock(
             items.into_iter().map(flatten_expression).collect(),
             mutable_flag,
-            Box::new(flatten_expression(*tag)),
             tag_info,
         ),
         ExpressionDesc::CamlBlockTag(inner, tag) => {

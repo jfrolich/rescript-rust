@@ -677,7 +677,6 @@ fn lowers_external_polyvar_payload_args_to_two_js_args_like_ocaml() {
             transformed_jsx: false,
         },
         vec![Lambda::const_(Constant::Block {
-            tag: 0,
             tag_info: TagInfo::PolyVar("b".to_string()),
             elements: vec![Constant::Pointer("b".to_string()), Constant::int(2)],
         })],
@@ -1438,7 +1437,7 @@ fn compile_deps_program_keeps_exported_dict_initializer_object_literals() {
         vec![Lambda::prim(
             Primitive::Pmakearray,
             vec![Lambda::prim(
-                Primitive::Pmakeblock(0, TagInfo::Tuple, Mutable::Immutable),
+                Primitive::Pmakeblock(TagInfo::Tuple, Mutable::Immutable),
                 vec![
                     Lambda::const_(Constant::string("first")),
                     Lambda::const_(Constant::string("hello")),
@@ -1455,7 +1454,6 @@ fn compile_deps_program_keeps_exported_dict_initializer_object_literals() {
         dict_value,
         Lambda::prim(
             Primitive::Pmakeblock(
-                0,
                 TagInfo::ModuleExport(vec![dict_ident.clone()]),
                 Mutable::Immutable,
             ),

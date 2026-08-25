@@ -621,7 +621,7 @@ impl Lambda {
                 },
                 _ => default(primitive, args, loc),
             },
-            // lam.ml:549-582 — `Pmakeblock(_, Blk_module fields, _)` arm of
+            // lam.ml:549-582 — `Pmakeblock( Blk_module fields, _)` arm of
             // `Lam.prim`. When every argument `args.[i]` is
             // `Pfield(i, Fld_module {name = fields.[i]}) [Lglobal_module v | Lvar v]`
             // referencing the SAME source module `v`, the makeblock collapses
@@ -660,13 +660,31 @@ impl Lambda {
                 .map(|(_, branch)| branch.clone())
                 .or_else(|| switch.sw_failaction.as_deref().cloned())
                 .unwrap_or_else(|| Lambda::Lswitch(Box::new(Lambda::Lconst(constant)), switch)),
-            Lambda::Lconst(constant @ Constant::Block { tag, .. }) => switch
-                .sw_blocks
-                .iter()
-                .find(|(key, _)| matches!(key, SwitchKey::Int(value) if *value == tag))
-                .map(|(_, branch)| branch.clone())
-                .or_else(|| switch.sw_failaction.as_deref().cloned())
-                .unwrap_or_else(|| Lambda::Lswitch(Box::new(Lambda::Lconst(constant)), switch)),
+            Lambda::Lconst(Constant::Block { tag_info, elements }) => {
+                let runtime = match &tag_info {
+                    TagInfo::Constructor { runtime, .. }
+                    | TagInfo::RecordInlined { runtime, .. } => Some(runtime.clone()),
+                    _ => None,
+                };
+                switch
+                    .sw_blocks
+                    .iter()
+                    .find(|(key, _)| matches!(
+                        (key, runtime.as_ref()),
+                        (
+                            SwitchKey::Constructor(crate::types::VariantConstructorCase::Block(candidate)),
+                            Some(runtime)
+                        ) if &candidate.runtime == runtime
+                    ))
+                    .map(|(_, branch)| branch.clone())
+                    .or_else(|| switch.sw_failaction.as_deref().cloned())
+                    .unwrap_or_else(|| {
+                        Lambda::Lswitch(
+                            Box::new(Lambda::Lconst(Constant::Block { tag_info, elements })),
+                            switch,
+                        )
+                    })
+            }
             other => Lambda::Lswitch(Box::new(other), switch),
         }
     }
@@ -748,7 +766,7 @@ impl Lambda {
     pub fn seq(first: Lambda, second: Lambda) -> Self {
         match first {
             Lambda::Lprim(PrimInfo {
-                primitive: primitive @ Primitive::Pmakeblock(_, _, _),
+                primitive: primitive @ Primitive::Pmakeblock(_, _),
                 args,
                 loc,
             }) => {
@@ -1209,13 +1227,13 @@ fn is_assertfalse(lam: &Lambda) -> bool {
 
 /// Direct port of OCaml's `Lam.prim` Blk_module collapse arm (lam.ml:551-575).
 ///
-/// Recognises `Pmakeblock(_, Blk_module fields, _) [arg0; arg1; …]` where
+/// Recognises `Pmakeblock( Blk_module fields, _) [arg0; arg1; …]` where
 /// every `argi` has the shape `Pfield(i, Fld_module {name = fields.[i]}) [src]`
 /// and every `src` is the SAME `Lglobal_module v` or `Lvar v`. Returns that
 /// module reference — the makeblock is reconstructing the source module
 /// exactly, so the alias can be expressed as a single variable.
 fn fold_makeblock_module_alias(primitive: &Primitive, args: &[Lambda]) -> Option<Lambda> {
-    let Primitive::Pmakeblock(_, TagInfo::Module(fields), _) = primitive else {
+    let Primitive::Pmakeblock(TagInfo::Module(fields), _) = primitive else {
         return None;
     };
 

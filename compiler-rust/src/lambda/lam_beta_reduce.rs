@@ -389,7 +389,7 @@ pub fn propagate_beta_reduce_with_map_and_meta_and_id_gen(
 fn register_bound_param_kind(ident_tbl: &mut IdentTable, param: &Ident, arg: &Lambda) {
     match arg {
         Lambda::Lprim(PrimInfo {
-            primitive: Primitive::Pmakeblock(_, _, Mutable::Immutable),
+            primitive: Primitive::Pmakeblock(_, Mutable::Immutable),
             args,
             ..
         }) => {

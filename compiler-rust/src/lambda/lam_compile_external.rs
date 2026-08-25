@@ -172,7 +172,7 @@ impl LambdaCompiler {
         dispatches: Option<&[(String, String)]>,
     ) -> Vec<Expression> {
         match &arg.desc {
-            ExpressionDesc::CamlBlock(items, _, _, TagInfo::PolyVar(_))
+            ExpressionDesc::CamlBlock(items, _, TagInfo::PolyVar(_))
                 if matches!(
                     items.as_slice(),
                     [
@@ -236,7 +236,7 @@ impl LambdaCompiler {
 
     pub(crate) fn external_polyvar_unwrap_expr(&self, arg: Expression) -> Expression {
         match &arg.desc {
-            ExpressionDesc::CamlBlock(items, _, _, _)
+            ExpressionDesc::CamlBlock(items, _, _)
                 if matches!(
                     items.as_slice(),
                     [
@@ -348,7 +348,7 @@ impl LambdaCompiler {
                     cursor = body.as_ref();
                 }
                 Lambda::Lprim(info) => {
-                    let Primitive::Pmakeblock(_, TagInfo::Module(fields), Mutable::Immutable) =
+                    let Primitive::Pmakeblock(TagInfo::Module(fields), Mutable::Immutable) =
                         &info.primitive
                     else {
                         return None;
@@ -541,7 +541,7 @@ impl LambdaCompiler {
             ExpressionDesc::Null
                 | ExpressionDesc::Object(_, _)
                 | ExpressionDesc::Number(_)
-                | ExpressionDesc::CamlBlock(_, _, _, _)
+                | ExpressionDesc::CamlBlock(_, _, _)
                 | ExpressionDesc::Array(_, _)
                 | ExpressionDesc::Str { .. }
         );

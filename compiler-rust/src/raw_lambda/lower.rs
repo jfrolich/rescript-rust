@@ -355,23 +355,21 @@ impl LoweringContext {
                 );
                 wrap_ffi_result(call, return_wrapper, loc)
             }
-            Primitive::Pmakeblock(tag, TagInfo::PolyVar(name), mutable_flag) => {
-                match args.as_slice() {
-                    [_, value] => Lambda::prim(
-                        Primitive::Pmakeblock(tag, TagInfo::PolyVar(name.clone()), mutable_flag),
-                        vec![
-                            Lambda::const_(polyvar_block_tag_constant(&name)),
-                            value.clone(),
-                        ],
-                        loc,
-                    ),
-                    _ => unreachable!("polyvariant blocks expect tag and payload"),
-                }
-            }
-            Primitive::Pmakeblock(_, TagInfo::SomeNotNested, _) => {
+            Primitive::Pmakeblock(TagInfo::PolyVar(name), mutable_flag) => match args.as_slice() {
+                [_, value] => Lambda::prim(
+                    Primitive::Pmakeblock(TagInfo::PolyVar(name.clone()), mutable_flag),
+                    vec![
+                        Lambda::const_(polyvar_block_tag_constant(&name)),
+                        value.clone(),
+                    ],
+                    loc,
+                ),
+                _ => unreachable!("polyvariant blocks expect tag and payload"),
+            },
+            Primitive::Pmakeblock(TagInfo::SomeNotNested, _) => {
                 Lambda::prim(Primitive::PsomeNotNest, args, loc)
             }
-            Primitive::Pmakeblock(_, TagInfo::Some, _) => Lambda::prim(Primitive::Psome, args, loc),
+            Primitive::Pmakeblock(TagInfo::Some, _) => Lambda::prim(Primitive::Psome, args, loc),
             Primitive::Pisout(range) => match args.as_slice() {
                 [Lambda::Lprim(inner)]
                     if inner.args.len() == 1
@@ -529,7 +527,7 @@ fn collect_exported_idents(raw: &RawLambda, exports: &mut HashSet<Ident>) {
             collect_exported_idents(body, exports);
         }
         RawLambda::Lprim(info) => {
-            if let Primitive::Pmakeblock(_, TagInfo::ModuleExport(ids), _) = &info.primitive {
+            if let Primitive::Pmakeblock(TagInfo::ModuleExport(ids), _) = &info.primitive {
                 exports.extend(ids.iter().cloned());
             }
             for arg in &info.args {
@@ -649,11 +647,7 @@ fn lower_constant(constant: Constant) -> Constant {
                 .unwrap_or(Constant::Pointer(name)),
             None => Constant::Pointer(name),
         },
-        Constant::Block {
-            tag,
-            tag_info,
-            elements,
-        } => {
+        Constant::Block { tag_info, elements } => {
             let mut elements = elements.into_iter().map(lower_constant).collect::<Vec<_>>();
             match tag_info {
                 TagInfo::Some | TagInfo::SomeNotNested if elements.len() == 1 => {
@@ -663,19 +657,16 @@ fn lower_constant(constant: Constant) -> Constant {
                     2 => {
                         let value = elements.pop().expect("polyvariant block payload");
                         Constant::Block {
-                            tag,
                             tag_info: TagInfo::PolyVar(name.clone()),
                             elements: vec![polyvar_block_tag_constant(&name), value],
                         }
                     }
                     _ => Constant::Block {
-                        tag,
                         tag_info: TagInfo::PolyVar(name),
                         elements,
                     },
                 },
                 other => Constant::Block {
-                    tag,
                     tag_info: other,
                     elements,
                 },
@@ -1115,7 +1106,7 @@ fn lower_primitive_default(primitive: Primitive, args: Vec<Lambda>, loc: Locatio
         _ => {}
     }
 
-    if let Primitive::Pmakeblock(_, TagInfo::Module(fields), _) = &primitive {
+    if let Primitive::Pmakeblock(TagInfo::Module(fields), _) = &primitive {
         if let Some(module_alias) = collapse_module_alias(fields, &args) {
             return module_alias;
         }
@@ -1127,10 +1118,10 @@ fn lower_primitive_default(primitive: Primitive, args: Vec<Lambda>, loc: Locatio
 fn is_empty_module_shape_constant(lam: &Lambda) -> bool {
     matches!(
         lam,
-        Lambda::Lconst(Constant::Block { tag: 0, elements, .. })
+        Lambda::Lconst(Constant::Block { elements, .. })
             if matches!(
                 elements.as_slice(),
-                [Constant::Block { tag: 0, elements: inner, .. }] if inner.is_empty()
+                [Constant::Block { elements: inner, .. }] if inner.is_empty()
             )
     )
 }
@@ -1713,7 +1704,7 @@ fn max_ident_stamp(raw: &RawLambda) -> i32 {
                 visit_raw(max_stamp, body);
             }
             RawLambda::Lprim(info) => {
-                if let Primitive::Pmakeblock(_, TagInfo::ModuleExport(ids), _) = &info.primitive {
+                if let Primitive::Pmakeblock(TagInfo::ModuleExport(ids), _) = &info.primitive {
                     for id in ids {
                         visit_ident(max_stamp, id);
                     }
@@ -2314,7 +2305,6 @@ mod tests {
             RawLambda::var(source.clone()),
             RawLambda::prim(
                 Primitive::Pmakeblock(
-                    0,
                     TagInfo::ModuleExport(vec![alias.clone()]),
                     Mutable::Immutable,
                 ),
@@ -2389,7 +2379,7 @@ mod tests {
     #[test]
     fn lowers_polyvariant_block_payload_tag_from_name() {
         let lowered = lower_to_lambda(RawLambda::prim(
-            Primitive::Pmakeblock(0, TagInfo::PolyVar("V".to_string()), Mutable::Immutable),
+            Primitive::Pmakeblock(TagInfo::PolyVar("V".to_string()), Mutable::Immutable),
             vec![
                 RawLambda::const_(Constant::Int {
                     i: crate::types::btype::hash_variant("V"),
@@ -2415,7 +2405,6 @@ mod tests {
     #[test]
     fn lowers_constant_polyvariant_block_payload_tag_from_name() {
         let lowered = lower_to_lambda(RawLambda::const_(Constant::Block {
-            tag: 0,
             tag_info: TagInfo::PolyVar("Pair".to_string()),
             elements: vec![
                 Constant::Int {
@@ -2446,7 +2435,7 @@ mod tests {
                     elements.as_slice(),
                     [
                         Constant::String { s, delim: None },
-                        Constant::Block { tag: 0, tag_info: TagInfo::Tuple, elements }
+                        Constant::Block { tag_info: TagInfo::Tuple, elements }
                     ] if s == "Pair"
                         && matches!(
                             elements.as_slice(),
@@ -2847,7 +2836,6 @@ mod tests {
                     fake_y.clone(),
                     RawLambda::prim(
                         Primitive::Pmakeblock(
-                            0,
                             TagInfo::Tuple,
                             crate::lambda::lam_primitive::Mutable::Immutable,
                         ),
@@ -2859,7 +2847,6 @@ mod tests {
                     fake_z.clone(),
                     RawLambda::prim(
                         Primitive::Pmakeblock(
-                            0,
                             TagInfo::Tuple,
                             crate::lambda::lam_primitive::Mutable::Immutable,
                         ),
@@ -3026,7 +3013,6 @@ mod tests {
         let module_id = Ident::create_local("A");
         let lowered = lower_to_lambda(RawLambda::prim(
             Primitive::Pmakeblock(
-                0,
                 TagInfo::Module(vec!["presentLight".to_string()]),
                 Mutable::Immutable,
             ),
@@ -3048,7 +3034,7 @@ mod tests {
         };
         assert!(matches!(
             block.primitive,
-            Primitive::Pmakeblock(0, TagInfo::Module(_), Mutable::Immutable)
+            Primitive::Pmakeblock(TagInfo::Module(_), Mutable::Immutable)
         ));
         let [Lambda::Lprim(field)] = block.args.as_slice() else {
             panic!("expected module field access to stay under makeblock");

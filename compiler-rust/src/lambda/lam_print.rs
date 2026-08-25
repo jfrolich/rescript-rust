@@ -80,7 +80,8 @@ pub fn format_constant(c: &Constant, f: &mut fmt::Formatter<'_>) -> fmt::Result 
             write!(f, "[some-c]")?;
             format_constant(inner, f)
         }
-        Constant::Block { tag, elements, .. } => {
+        Constant::Block { tag_info, elements } => {
+            let tag = tag_info.tag_label();
             if elements.is_empty() {
                 write!(f, "[{tag}]")
             } else {
@@ -158,8 +159,12 @@ pub fn format_primitive(p: &Primitive, f: &mut fmt::Formatter<'_>) -> fmt::Resul
         Primitive::Pnull => write!(f, "null"),
         Primitive::Pundefined => write!(f, "undefined"),
         Primitive::Pimport => write!(f, "import"),
-        Primitive::Pmakeblock(tag, _, Mutable::Immutable) => write!(f, "makeblock {tag}"),
-        Primitive::Pmakeblock(tag, _, Mutable::Mutable) => write!(f, "makemutable {tag}"),
+        Primitive::Pmakeblock(tag_info, Mutable::Immutable) => {
+            write!(f, "makeblock {}", tag_info.tag_label())
+        }
+        Primitive::Pmakeblock(tag_info, Mutable::Mutable) => {
+            write!(f, "makemutable {}", tag_info.tag_label())
+        }
         Primitive::Pfield(n, field_info) => {
             if let Some(name) = field_info.name() {
                 write!(f, "field {name}/{n}")
@@ -656,11 +661,11 @@ fn format_raw_primitive(p: &Primitive, f: &mut fmt::Formatter<'_>) -> fmt::Resul
                 write!(f, "#raw_expr")
             }
         }
-        Primitive::Pmakeblock(_, tag_info, Mutable::Immutable) => {
+        Primitive::Pmakeblock(tag_info, Mutable::Immutable) => {
             write!(f, "makeblock ")?;
             format_raw_tag_info(tag_info, f)
         }
-        Primitive::Pmakeblock(_, tag_info, Mutable::Mutable) => {
+        Primitive::Pmakeblock(tag_info, Mutable::Mutable) => {
             write!(f, "makemutable ")?;
             format_raw_tag_info(tag_info, f)
         }
@@ -700,7 +705,8 @@ fn format_raw_constant(c: &Constant, f: &mut fmt::Formatter<'_>) -> fmt::Result 
             }
         }
         Constant::Pointer(name) => write!(f, "{name}"),
-        Constant::Block { tag, elements, .. } => {
+        Constant::Block { tag_info, elements } => {
+            let tag = tag_info.tag_label();
             if elements.is_empty() {
                 write!(f, "[{tag}]")
             } else {
@@ -1020,7 +1026,6 @@ fn rebuild_top_level_structure(lam: &Lambda) -> Option<Lambda> {
 
     let export_block = Lambda::prim(
         Primitive::Pmakeblock(
-            0,
             TagInfo::ModuleExport(export_ids.clone()),
             Mutable::Immutable,
         ),

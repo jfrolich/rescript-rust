@@ -498,7 +498,7 @@ fn primitive(prim: &Primitive, _with_locs: bool) -> Sexp {
         Primitive::Pnull => Sexp::atom("Pnull"),
         Primitive::Pundefined => Sexp::atom("Pundefined"),
         Primitive::Pimport => Sexp::atom("Pimport"),
-        Primitive::Pmakeblock(_, info, m) => Sexp::list(vec![
+        Primitive::Pmakeblock(info, m) => Sexp::list(vec![
             Sexp::atom("Pmakeblock"),
             tag_info(info),
             mutable_sexp(m),

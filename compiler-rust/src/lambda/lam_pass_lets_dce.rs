@@ -76,7 +76,7 @@ fn lets_helper(state: &mut LetsState<'_>, lam: &Lambda) -> Lambda {
             lets_helper(state, l2)
         }
 
-        // `Llet (Strict, v, Pmakeblock(0, _, Mutable) [linit], lbody)`
+        // `Llet (Strict, v, Pmakeblock( _, Mutable) [linit], lbody)`
         // (lam_pass_lets_dce.ml:24-43): try `eliminate_ref` to reify the
         // ref-cell into a plain mutable variable. On success use Variable
         // kind; on failure fall back to refine_let with the original kind.
@@ -84,7 +84,7 @@ fn lets_helper(state: &mut LetsState<'_>, lam: &Lambda) -> Lambda {
             if matches!(
                 value.as_ref(),
                 Lambda::Lprim(PrimInfo {
-                    primitive: Primitive::Pmakeblock(0, _, Mutable::Mutable),
+                    primitive: Primitive::Pmakeblock( _, Mutable::Mutable),
                     args,
                     ..
                 }) if args.len() == 1
@@ -185,23 +185,13 @@ fn lets_helper(state: &mut LetsState<'_>, lam: &Lambda) -> Lambda {
 
             // ref-cell special case (lam_pass_lets_dce.ml:95-111).
             if let Lambda::Lprim(PrimInfo {
-                primitive: Primitive::Pmakeblock(0, _, Mutable::Mutable),
+                primitive: Primitive::Pmakeblock(info, Mutable::Mutable),
                 args,
                 loc,
             }) = l1.as_ref()
             {
                 if args.len() == 1 {
-                    let primitive = Primitive::Pmakeblock(
-                        0,
-                        match l1.as_ref() {
-                            Lambda::Lprim(p) => match &p.primitive {
-                                Primitive::Pmakeblock(_, info, _) => info.clone(),
-                                _ => unreachable!(),
-                            },
-                            _ => unreachable!(),
-                        },
-                        Mutable::Mutable,
-                    );
+                    let primitive = Primitive::Pmakeblock(info.clone(), Mutable::Mutable);
                     let linit = args[0].clone();
                     let loc = loc.clone();
                     let slinit = lets_helper(state, &linit);
@@ -488,7 +478,7 @@ fn lets_helper_owned(state: &mut LetsState<'_>, lam: Lambda) -> Lambda {
             if matches!(
                 value.as_ref(),
                 Lambda::Lprim(PrimInfo {
-                    primitive: Primitive::Pmakeblock(0, _, Mutable::Mutable),
+                    primitive: Primitive::Pmakeblock( _, Mutable::Mutable),
                     args,
                     ..
                 }) if args.len() == 1
@@ -576,7 +566,7 @@ fn lets_helper_owned(state: &mut LetsState<'_>, lam: Lambda) -> Lambda {
             if matches!(
                 l1.as_ref(),
                 Lambda::Lprim(PrimInfo {
-                    primitive: Primitive::Pmakeblock(0, _, Mutable::Mutable),
+                    primitive: Primitive::Pmakeblock( _, Mutable::Mutable),
                     args,
                     ..
                 }) if args.len() == 1

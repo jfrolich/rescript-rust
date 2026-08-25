@@ -427,13 +427,12 @@ impl TailcallInlineState {
             ExpressionDesc::OptionalBlock(inner, flag) => {
                 ExpressionDesc::OptionalBlock(Box::new(self.transform_expression(*inner)), flag)
             }
-            ExpressionDesc::CamlBlock(items, mutable_flag, tag, info) => ExpressionDesc::CamlBlock(
+            ExpressionDesc::CamlBlock(items, mutable_flag, info) => ExpressionDesc::CamlBlock(
                 items
                     .into_iter()
                     .map(|item| self.transform_expression(item))
                     .collect(),
                 mutable_flag,
-                Box::new(self.transform_expression(*tag)),
                 info,
             ),
             ExpressionDesc::CamlBlockTag(inner, field) => {
@@ -734,7 +733,6 @@ fn collect_tailcall_use_counts_expression(
             }
         }
         ExpressionDesc::TaggedTemplate(tag, strings, values) => {
-            collect_tailcall_use_counts_expression(tag, decls, counts);
             for string in strings {
                 collect_tailcall_use_counts_expression(string, decls, counts);
             }
@@ -759,11 +757,10 @@ fn collect_tailcall_use_counts_expression(
                 collect_tailcall_use_counts_expression(item, decls, counts);
             }
         }
-        ExpressionDesc::CamlBlock(items, _, tag, _) => {
+        ExpressionDesc::CamlBlock(items, _, _) => {
             for item in items {
                 collect_tailcall_use_counts_expression(item, decls, counts);
             }
-            collect_tailcall_use_counts_expression(tag, decls, counts);
         }
         ExpressionDesc::Object(dup, props) => {
             if let Some(dup) = dup {
@@ -938,7 +935,6 @@ fn collect_once_pure_inline_decls_expression(
             }
         }
         ExpressionDesc::TaggedTemplate(tag, strings, values) => {
-            collect_once_pure_inline_decls_expression(tag, statuses, inline_decls);
             for string in strings {
                 collect_once_pure_inline_decls_expression(string, statuses, inline_decls);
             }
@@ -960,11 +956,10 @@ fn collect_once_pure_inline_decls_expression(
                 collect_once_pure_inline_decls_expression(item, statuses, inline_decls);
             }
         }
-        ExpressionDesc::CamlBlock(items, _, tag, _) => {
+        ExpressionDesc::CamlBlock(items, _, _) => {
             for item in items {
                 collect_once_pure_inline_decls_expression(item, statuses, inline_decls);
             }
-            collect_once_pure_inline_decls_expression(tag, statuses, inline_decls);
         }
         ExpressionDesc::Object(dup, props) => {
             if let Some(dup) = dup {
@@ -1110,12 +1105,9 @@ fn expression_assigns_ident(expr: &Expression, ident: &Ident) -> bool {
         ExpressionDesc::Array(items, _) => items
             .iter()
             .any(|item| expression_assigns_ident(item, ident)),
-        ExpressionDesc::CamlBlock(items, _, tag, _) => {
-            items
-                .iter()
-                .any(|item| expression_assigns_ident(item, ident))
-                || expression_assigns_ident(tag, ident)
-        }
+        ExpressionDesc::CamlBlock(items, _, _) => items
+            .iter()
+            .any(|item| expression_assigns_ident(item, ident)),
         ExpressionDesc::Object(dup, props) => {
             dup.as_ref()
                 .is_some_and(|expr| expression_assigns_ident(expr, ident))
@@ -1435,13 +1427,12 @@ fn substitute_inline_expression(
             Box::new(substitute_inline_expression(*inner, substitution)),
             flag,
         ),
-        ExpressionDesc::CamlBlock(items, mutable_flag, tag, info) => ExpressionDesc::CamlBlock(
+        ExpressionDesc::CamlBlock(items, mutable_flag, info) => ExpressionDesc::CamlBlock(
             items
                 .into_iter()
                 .map(|item| substitute_inline_expression(item, substitution))
                 .collect(),
             mutable_flag,
-            Box::new(substitute_inline_expression(*tag, substitution)),
             info,
         ),
         ExpressionDesc::CamlBlockTag(inner, field) => ExpressionDesc::CamlBlockTag(
@@ -1593,7 +1584,6 @@ fn apply_tailcall_used_stats_expression(
             }
         }
         ExpressionDesc::TaggedTemplate(tag, strings, values) => {
-            apply_tailcall_used_stats_expression(tag, statuses);
             for string in strings {
                 apply_tailcall_used_stats_expression(string, statuses);
             }
@@ -1618,11 +1608,10 @@ fn apply_tailcall_used_stats_expression(
                 apply_tailcall_used_stats_expression(item, statuses);
             }
         }
-        ExpressionDesc::CamlBlock(items, _, tag, _) => {
+        ExpressionDesc::CamlBlock(items, _, _) => {
             for item in items {
                 apply_tailcall_used_stats_expression(item, statuses);
             }
-            apply_tailcall_used_stats_expression(tag, statuses);
         }
         ExpressionDesc::Object(dup, props) => {
             if let Some(dup) = dup {

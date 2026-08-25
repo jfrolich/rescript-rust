@@ -150,11 +150,7 @@ impl LambdaCompiler {
                 Expression::number(Number::bigint(!negative, value.clone()))
             }
             Constant::Pointer(name) => Expression::string(name.clone()),
-            Constant::Block {
-                tag,
-                tag_info,
-                elements,
-            } => {
+            Constant::Block { tag_info, elements } => {
                 let elems = elements.iter().map(Self::compile_constant).collect();
                 // OCaml's `Lam_compile_const.translate` (lam_compile_const.ml:67-69)
                 // calls `Js_of_lam_block.make_block NA tag_info ...` — `NA`, not
@@ -169,7 +165,6 @@ impl LambdaCompiler {
                 Expression::new(ExpressionDesc::CamlBlock(
                     elems,
                     MutableFlag::NA,
-                    Box::new(Expression::number(Number::int(*tag))),
                     tag_info.clone(),
                 ))
             }
@@ -305,7 +300,7 @@ impl LambdaCompiler {
         if js_expr_no_side_effects(target)
             && matches!(
                 target.desc,
-                ExpressionDesc::Array(_, _) | ExpressionDesc::CamlBlock(_, _, _, _)
+                ExpressionDesc::Array(_, _) | ExpressionDesc::CamlBlock(_, _, _)
             )
         {
             return value.clone();

@@ -191,27 +191,19 @@ fn print_struct_const<W: Write>(f: &mut Formatter<W>, cst: &Constant) {
             }
         }
         Constant::Pointer(name) => f.string(name),
-        Constant::Block {
-            tag,
-            tag_info,
-            elements,
-        } if elements.is_empty() => match tag_info {
+        Constant::Block { tag_info, elements } if elements.is_empty() => match tag_info {
             TagInfo::Constructor { name, .. } | TagInfo::RecordInlined { name, .. } => {
                 f.print(format_args!("[{name}]"))
             }
-            _ => f.print(format_args!("[{tag}]")),
+            _ => f.print(format_args!("[{}]", tag_info.tag_label())),
         },
-        Constant::Block {
-            tag,
-            tag_info,
-            elements,
-        } => {
+        Constant::Block { tag_info, elements } => {
             f.open_box(BoxKind::Box, 1);
             match tag_info {
                 TagInfo::Constructor { name, .. } | TagInfo::RecordInlined { name, .. } => {
                     f.print(format_args!("[{name}:"))
                 }
-                _ => f.print(format_args!("[{tag}:")),
+                _ => f.print(format_args!("[{}:", tag_info.tag_label())),
             }
             f.space();
             f.open_box(BoxKind::HOV, 0);
@@ -247,8 +239,8 @@ fn print_primitive<W: Write>(f: &mut Formatter<W>, prim: &Primitive) {
         }
         Primitive::PjsFnMethod => f.string("#fn_method"),
         Primitive::PcreateExtension(name) => f.print(format_args!("extension[{name}]")),
-        Primitive::Pmakeblock(_, tag_info, Mutable::Immutable)
-        | Primitive::Pmakeblock(_, tag_info, Mutable::Mutable) => {
+        Primitive::Pmakeblock(tag_info, Mutable::Immutable)
+        | Primitive::Pmakeblock(tag_info, Mutable::Mutable) => {
             f.string("makeblock ");
             print_tag_info(f, tag_info);
         }

@@ -1375,7 +1375,7 @@ impl LambdaCompiler {
                         | Lambda::Lletrec(..)
                         | Lambda::Lsequence(..)
                         | Lambda::Lprim(crate::lambda::PrimInfo {
-                            primitive: Primitive::Pmakeblock(_, TagInfo::ModuleExport(_), _,),
+                            primitive: Primitive::Pmakeblock(TagInfo::ModuleExport(_), _,),
                             ..
                         })
                 );
@@ -1408,7 +1408,7 @@ impl LambdaCompiler {
                         | Lambda::Lletrec(..)
                         | Lambda::Lsequence(..)
                         | Lambda::Lprim(crate::lambda::PrimInfo {
-                            primitive: Primitive::Pmakeblock(_, TagInfo::ModuleExport(_), _,),
+                            primitive: Primitive::Pmakeblock(TagInfo::ModuleExport(_), _,),
                             ..
                         })
                 );
@@ -1552,7 +1552,7 @@ impl LambdaCompiler {
                         | Lambda::Lletrec(..)
                         | Lambda::Lsequence(..)
                         | Lambda::Lprim(crate::lambda::PrimInfo {
-                            primitive: Primitive::Pmakeblock(_, TagInfo::ModuleExport(_), _,),
+                            primitive: Primitive::Pmakeblock(TagInfo::ModuleExport(_), _,),
                             ..
                         })
                 );
@@ -1981,7 +1981,7 @@ impl LambdaCompiler {
 
         match expr {
             Lambda::Lprim(info)
-                if matches!(info.primitive, Primitive::Pmakeblock(_, _, _))
+                if matches!(info.primitive, Primitive::Pmakeblock(_, _))
                     && info
                         .args
                         .iter()
@@ -1999,7 +1999,7 @@ impl LambdaCompiler {
                 }
                 (vec![], effects)
             }
-            Lambda::Lprim(info) if matches!(info.primitive, Primitive::Pmakeblock(_, _, _)) => {
+            Lambda::Lprim(info) if matches!(info.primitive, Primitive::Pmakeblock(_, _)) => {
                 if let Some(effects) =
                     self.compile_recursive_self_binding_makeblock(id, info, all_bindings, group)
                 {
@@ -2007,7 +2007,7 @@ impl LambdaCompiler {
                 }
 
                 let tag_info = match &info.primitive {
-                    Primitive::Pmakeblock(_, tag_info, _) => tag_info,
+                    Primitive::Pmakeblock(tag_info, _) => tag_info,
                     _ => unreachable!("guard must preserve Pmakeblock"),
                 };
                 let compiled = self.compile_expr(expr);
@@ -2083,7 +2083,7 @@ impl LambdaCompiler {
         group: &[usize],
     ) -> Option<Block> {
         let tag_info = match &info.primitive {
-            Primitive::Pmakeblock(_, tag_info, _) => tag_info,
+            Primitive::Pmakeblock(tag_info, _) => tag_info,
             _ => return None,
         };
 
@@ -7056,7 +7056,7 @@ fn collect_cmj_export_arities_from_simplified_lambda(
                 };
                 if let Lambda::Lprim(PrimInfo {
                     primitive:
-                        Primitive::Pmakeblock(_, _, crate::lambda::lam_primitive::Mutable::Immutable),
+                        Primitive::Pmakeblock(_, crate::lambda::lam_primitive::Mutable::Immutable),
                     args,
                     ..
                 }) = value
@@ -7093,7 +7093,7 @@ fn collect_toplevel_export_bindings<'a>(
         }
         Lambda::Lsequence(_, right) => collect_toplevel_export_bindings(right, bindings),
         Lambda::Lprim(PrimInfo {
-            primitive: Primitive::Pmakeblock(_, TagInfo::ModuleExport(exports), _),
+            primitive: Primitive::Pmakeblock(TagInfo::ModuleExport(exports), _),
             args,
             ..
         }) => Some((exports, args)),
@@ -8093,7 +8093,6 @@ fn collect_modules_from_expression(expr: &Expression, modules: &mut OcamlModuleS
             }
         }
         ExpressionDesc::TaggedTemplate(tag, strings, values) => {
-            collect_modules_from_expression(tag, modules);
             for string in strings {
                 collect_modules_from_expression(string, modules);
             }
@@ -8118,11 +8117,10 @@ fn collect_modules_from_expression(expr: &Expression, modules: &mut OcamlModuleS
                 collect_modules_from_expression(item, modules);
             }
         }
-        ExpressionDesc::CamlBlock(items, _, tag, _) => {
+        ExpressionDesc::CamlBlock(items, _, _) => {
             for item in items {
                 collect_modules_from_expression(item, modules);
             }
-            collect_modules_from_expression(tag, modules);
         }
         ExpressionDesc::Object(dup, props) => {
             if let Some(dup) = dup {

@@ -1292,7 +1292,7 @@ impl JsPrinter {
         match &expr.desc {
             ExpressionDesc::Fun { .. } | ExpressionDesc::Object(_, _) => true,
             ExpressionDesc::RawJsCode(info) => !info.is_stmt,
-            ExpressionDesc::CamlBlock(_, _, _, tag_info) => matches!(
+            ExpressionDesc::CamlBlock(_, _, tag_info) => matches!(
                 tag_info,
                 crate::lambda::TagInfo::Record { .. }
                     | crate::lambda::TagInfo::Module(_)
@@ -1409,7 +1409,6 @@ impl JsPrinter {
             )),
             ExpressionDesc::CamlBlock(
                 elements,
-                _,
                 _,
                 crate::lambda::TagInfo::Record { fields, .. },
             ) => Some((
@@ -2106,7 +2105,7 @@ impl JsPrinter {
                 }
             }
 
-            ExpressionDesc::CamlBlock(elements, _mutable, _tag, tag_info) => {
+            ExpressionDesc::CamlBlock(elements, _mutable, tag_info) => {
                 use crate::lambda::TagInfo;
 
                 if matches!(tag_info, TagInfo::Extension | TagInfo::RecordExt { .. }) {
@@ -2324,7 +2323,7 @@ impl JsPrinter {
         include_stack: bool,
     ) -> bool {
         match &expr.desc {
-            ExpressionDesc::CamlBlock(elements, _, _, tag_info)
+            ExpressionDesc::CamlBlock(elements, _, tag_info)
                 if matches!(
                     tag_info,
                     crate::lambda::TagInfo::Extension | crate::lambda::TagInfo::RecordExt { .. }
@@ -3917,12 +3916,9 @@ fn expression_mentions_ident(expr: &Expression, ident: &Ident) -> bool {
         ExpressionDesc::Array(items, _) => items
             .iter()
             .any(|item| expression_mentions_ident(item, ident)),
-        ExpressionDesc::CamlBlock(items, _, tag, _) => {
-            expression_mentions_ident(tag, ident)
-                || items
-                    .iter()
-                    .any(|item| expression_mentions_ident(item, ident))
-        }
+        ExpressionDesc::CamlBlock(items, _, _) => items
+            .iter()
+            .any(|item| expression_mentions_ident(item, ident)),
         ExpressionDesc::Object(dup, props) => {
             dup.as_deref()
                 .is_some_and(|dup| expression_mentions_ident(dup, ident))
@@ -4729,7 +4725,6 @@ fn collect_expression_idents(expr: &Expression, stats: &mut JsIdentStats) {
             }
         }
         ExpressionDesc::TaggedTemplate(tag, strings, values) => {
-            collect_expression_idents(tag, stats);
             for string in strings {
                 collect_expression_idents(string, stats);
             }
@@ -4757,11 +4752,10 @@ fn collect_expression_idents(expr: &Expression, stats: &mut JsIdentStats) {
                 collect_expression_idents(item, stats);
             }
         }
-        ExpressionDesc::CamlBlock(items, _, tag, _) => {
+        ExpressionDesc::CamlBlock(items, _, _) => {
             for item in items {
                 collect_expression_idents(item, stats);
             }
-            collect_expression_idents(tag, stats);
         }
         ExpressionDesc::Object(dup, props) => {
             if let Some(dup) = dup {
@@ -5629,7 +5623,6 @@ mod tests {
                 Expression::new(ExpressionDesc::CamlBlock(
                     vec![],
                     MutableFlag::Immutable,
-                    Box::new(Expression::number(Number::int(0))),
                     TagInfo::record(vec![], crate::parser::ast::MutableFlag::Immutable),
                 )),
             ],
@@ -5651,7 +5644,6 @@ mod tests {
                         ),
                     ],
                     MutableFlag::Immutable,
-                    Box::new(Expression::number(Number::int(0))),
                     TagInfo::record(
                         vec![
                             ("className".to_string(), true),
@@ -6427,7 +6419,6 @@ mod tests {
                 ExpressionDesc::CamlBlock(
                     vec![Expression::number(Number::int(1))],
                     MutableFlag::Immutable,
-                    Box::new(Expression::number(Number::int(0))),
                     TagInfo::constructor("Some", 1, 0),
                 ),
             ))],
@@ -8616,7 +8607,6 @@ mod tests {
                 Expression::number(Number::int(0)),
             ],
             MutableFlag::Immutable,
-            Box::new(Expression::number(Number::int(0))),
             TagInfo::constructor("::", 1, 0),
         ));
 
@@ -8628,7 +8618,6 @@ mod tests {
         let expr = Expression::new(ExpressionDesc::CamlBlock(
             vec![Expression::number(Number::int(1))],
             MutableFlag::Immutable,
-            Box::new(Expression::number(Number::int(0))),
             TagInfo::constructor("Some", 1, 0),
         ));
 
@@ -8643,7 +8632,6 @@ mod tests {
                 Expression::number(Number::int(2)),
             ],
             MutableFlag::Immutable,
-            Box::new(Expression::number(Number::int(0))),
             TagInfo::constructor("A", 2, 0),
         ));
 
@@ -8665,7 +8653,6 @@ mod tests {
                 Expression::undefined(false),
             ],
             MutableFlag::Immutable,
-            Box::new(Expression::number(Number::int(0))),
             TagInfo::record(
                 vec![("x".to_string(), false), ("i".to_string(), true)],
                 crate::parser::ast::MutableFlag::Immutable,
@@ -8680,7 +8667,6 @@ mod tests {
         let expr = Expression::new(ExpressionDesc::CamlBlock(
             vec![Expression::string("hello")],
             MutableFlag::Immutable,
-            Box::new(Expression::number(Number::int(0))),
             TagInfo::RecordInlined {
                 name: "One".to_string(),
                 num_nonconst: 1,
@@ -8712,7 +8698,6 @@ mod tests {
                 Expression::number(Number::int(2)),
             ],
             MutableFlag::Immutable,
-            Box::new(Expression::number(Number::int(0))),
             TagInfo::record(
                 vec![("0".to_string(), false), ("1".to_string(), false)],
                 crate::parser::ast::MutableFlag::Immutable,
@@ -8727,7 +8712,6 @@ mod tests {
         let expr = Expression::new(ExpressionDesc::CamlBlock(
             vec![Expression::number(Number::int(1))],
             MutableFlag::Immutable,
-            Box::new(Expression::number(Number::int(0))),
             TagInfo::Module(vec!["value".to_string()]),
         ));
 
@@ -8739,7 +8723,6 @@ mod tests {
         let expr = Expression::new(ExpressionDesc::CamlBlock(
             vec![Expression::string("Not_found")],
             MutableFlag::Immutable,
-            Box::new(Expression::number(Number::int(0))),
             TagInfo::Extension,
         ));
 
@@ -8754,7 +8737,6 @@ mod tests {
                 Expression::number(Number::int(3)),
             ],
             MutableFlag::Immutable,
-            Box::new(Expression::number(Number::int(0))),
             TagInfo::RecordExt {
                 fields: vec!["value".to_string()],
                 mutable_flag: crate::parser::ast::MutableFlag::Immutable,
@@ -8770,7 +8752,6 @@ mod tests {
             ExpressionDesc::CamlBlock(
                 vec![Expression::string("Not_found")],
                 MutableFlag::Immutable,
-                Box::new(Expression::number(Number::int(0))),
                 TagInfo::Extension,
             ),
         ))]);

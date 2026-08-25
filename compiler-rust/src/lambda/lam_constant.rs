@@ -131,8 +131,6 @@ pub enum Constant {
 
     /// Block constant (for variants, records, tuples)
     Block {
-        /// Block tag
-        tag: i32,
         /// Tag info for debugging/codegen
         tag_info: TagInfo,
         /// Block elements
@@ -270,14 +268,12 @@ impl Constant {
             (Constant::Pointer(a), Constant::Pointer(b)) => a == b,
             (
                 Constant::Block {
-                    tag: ta,
+                    tag_info: ta,
                     elements: ea,
-                    ..
                 },
                 Constant::Block {
-                    tag: tb,
+                    tag_info: tb,
                     elements: eb,
-                    ..
                 },
             ) => {
                 ta == tb
@@ -392,7 +388,6 @@ mod tests {
         assert!(!Constant::Some(Box::new(Constant::int(42))).is_allocating());
         assert!(
             Constant::Some(Box::new(Constant::Block {
-                tag: 0,
                 tag_info: TagInfo::Tuple,
                 elements: vec![Constant::int(1)],
             }))
@@ -400,7 +395,6 @@ mod tests {
         );
         assert!(
             Constant::Block {
-                tag: 0,
                 tag_info: TagInfo::Tuple,
                 elements: vec![Constant::int(1), Constant::int(2)],
             }

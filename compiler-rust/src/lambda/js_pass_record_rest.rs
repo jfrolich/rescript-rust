@@ -325,10 +325,9 @@ fn rewrite_expression(mut expression: Expression) -> Expression {
                 .map(|(name, value)| (name, rewrite_expression(value)))
                 .collect(),
         ),
-        ExpressionDesc::CamlBlock(items, mutable, tag, info) => ExpressionDesc::CamlBlock(
+        ExpressionDesc::CamlBlock(items, mutable, info) => ExpressionDesc::CamlBlock(
             items.into_iter().map(rewrite_expression).collect(),
             mutable,
-            Box::new(rewrite_expression(*tag)),
             info,
         ),
         ExpressionDesc::Fun {
@@ -396,10 +395,9 @@ fn map_statement(statement: Statement, f: &mut impl FnMut(Expression) -> Express
             ExpressionDesc::OptionalBlock(inner, flag) => {
                 ExpressionDesc::OptionalBlock(Box::new(map_expr(*inner, f)), flag)
             }
-            ExpressionDesc::CamlBlock(items, mutable, tag, info) => ExpressionDesc::CamlBlock(
+            ExpressionDesc::CamlBlock(items, mutable, info) => ExpressionDesc::CamlBlock(
                 items.into_iter().map(|item| map_expr(item, f)).collect(),
                 mutable,
-                Box::new(map_expr(*tag, f)),
                 info,
             ),
             desc => desc,

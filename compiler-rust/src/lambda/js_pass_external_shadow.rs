@@ -314,14 +314,11 @@ fn rewrite_expr_children(
         ExpressionDesc::OptionalBlock(value, flag) => {
             ExpressionDesc::OptionalBlock(Box::new(rewrite(*value)), flag)
         }
-        ExpressionDesc::CamlBlock(values, mutable_flag, tag, tag_info) => {
-            ExpressionDesc::CamlBlock(
-                values.into_iter().map(&mut *rewrite).collect(),
-                mutable_flag,
-                Box::new(rewrite(*tag)),
-                tag_info,
-            )
-        }
+        ExpressionDesc::CamlBlock(values, mutable_flag, tag_info) => ExpressionDesc::CamlBlock(
+            values.into_iter().map(&mut *rewrite).collect(),
+            mutable_flag,
+            tag_info,
+        ),
         ExpressionDesc::CamlBlockTag(value, tag) => {
             ExpressionDesc::CamlBlockTag(Box::new(rewrite(*value)), tag)
         }

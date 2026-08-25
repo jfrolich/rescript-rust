@@ -380,7 +380,6 @@ pub(super) fn import_attributes_lowered_lambda() -> Lambda {
         include_json.clone(),
         Lambda::prim(
             Primitive::Pmakeblock(
-                0,
                 TagInfo::Module(vec!["myJson".to_string()]),
                 Mutable::Immutable,
             ),
@@ -407,7 +406,6 @@ pub(super) fn import_attributes_lowered_lambda() -> Lambda {
                     include_css.clone(),
                     Lambda::prim(
                         Primitive::Pmakeblock(
-                            0,
                             TagInfo::Module(vec!["buttonCss".to_string()]),
                             Mutable::Immutable,
                         ),
@@ -431,7 +429,6 @@ pub(super) fn import_attributes_lowered_lambda() -> Lambda {
                             console_log_effect(Lambda::var(button_css.clone())),
                             Lambda::prim(
                                 Primitive::Pmakeblock(
-                                    0,
                                     TagInfo::ModuleExport(vec![
                                         my_json.clone(),
                                         button_css.clone(),
@@ -1940,7 +1937,6 @@ fn compile_deps_program_reuses_same_name_export_targets() {
             Lambda::var(source.clone()),
             Lambda::prim(
                 Primitive::Pmakeblock(
-                    0,
                     TagInfo::ModuleExport(vec![rebound_export]),
                     Mutable::Immutable,
                 ),
@@ -1989,7 +1985,6 @@ fn compile_deps_program_preserves_toplevel_binding_order_during_shake() {
             Lambda::const_(Constant::int(4)),
             Lambda::prim(
                 Primitive::Pmakeblock(
-                    0,
                     TagInfo::ModuleExport(vec![first.clone(), second.clone()]),
                     Mutable::Immutable,
                 ),
@@ -2055,7 +2050,6 @@ fn compile_deps_program_keeps_exported_constant_binding_before_exported_alias_of
             Lambda::var(fib.clone()),
             Lambda::prim(
                 Primitive::Pmakeblock(
-                    0,
                     TagInfo::ModuleExport(vec![fib.clone(), u.clone()]),
                     Mutable::Immutable,
                 ),
@@ -2123,7 +2117,6 @@ fn compile_deps_program_keeps_exported_call_result_before_rebound_constant_block
     let param = Ident::create_local("v");
     let export_block = Lambda::prim(
         Primitive::Pmakeblock(
-            0,
             TagInfo::ModuleExport(vec![v.clone(), res.clone()]),
             Mutable::Immutable,
         ),
@@ -2152,7 +2145,6 @@ fn compile_deps_program_keeps_exported_call_result_before_rebound_constant_block
             LetKind::Strict,
             v.clone(),
             Lambda::const_(Constant::Block {
-                tag: 0,
                 tag_info: TagInfo::record(
                     vec![
                         ("x".to_string(), false),
@@ -2205,7 +2197,6 @@ fn compile_deps_program_rebinds_different_name_exports_after_effects() {
     let original_export = Ident::create_local("MyURL");
     let export_block = Lambda::prim(
         Primitive::Pmakeblock(
-            0,
             TagInfo::ModuleExport(vec![original_export.clone()]),
             Mutable::Immutable,
         ),
@@ -2260,7 +2251,6 @@ fn compile_deps_program_rebinds_exported_constants_after_surviving_function_bind
     let param = Ident::create_local("x");
     let export_block = Lambda::prim(
         Primitive::Pmakeblock(
-            0,
             TagInfo::ModuleExport(vec![x.clone(), xx.clone(), foo.clone()]),
             Mutable::Immutable,
         ),
@@ -2350,7 +2340,6 @@ fn compile_deps_program_rebinds_marshaled_string_exports_after_surviving_functio
     let bar_param = Ident::create_local("x");
     let export_block = Lambda::prim(
         Primitive::Pmakeblock(
-            0,
             TagInfo::ModuleExport(vec![foo.clone(), s.clone(), bar.clone()]),
             Mutable::Immutable,
         ),
@@ -2421,7 +2410,6 @@ fn compile_deps_program_keeps_same_name_export_aliases_for_unbound_globals() {
         Lambda::var(global.clone()),
         Lambda::prim(
             Primitive::Pmakeblock(
-                0,
                 TagInfo::ModuleExport(vec![rebound_export.clone()]),
                 Mutable::Immutable,
             ),
@@ -2551,7 +2539,6 @@ fn compile_deps_program_keeps_exports_after_trailing_effect_sequence() {
     let exported = Ident::create_local("foo");
     let export_block = Lambda::prim(
         Primitive::Pmakeblock(
-            0,
             TagInfo::ModuleExport(vec![exported.clone()]),
             Mutable::Immutable,
         ),
@@ -2609,7 +2596,6 @@ fn compile_deps_program_skips_unreachable_throwing_export_binding_declaration() 
     let exported = Ident::create_local("u");
     let export_block = Lambda::prim(
         Primitive::Pmakeblock(
-            0,
             TagInfo::ModuleExport(vec![exported.clone()]),
             Mutable::Immutable,
         ),
@@ -2655,7 +2641,6 @@ fn compile_deps_program_skips_unreachable_nested_throwing_export_binding_declara
     let nested = Ident::create_local("u");
     let export_block = Lambda::prim(
         Primitive::Pmakeblock(
-            0,
             TagInfo::ModuleExport(vec![exported.clone()]),
             Mutable::Immutable,
         ),
@@ -2675,7 +2660,6 @@ fn compile_deps_program_skips_unreachable_nested_throwing_export_binding_declara
             ),
             Lambda::prim(
                 Primitive::Pmakeblock(
-                    0,
                     TagInfo::record(
                         vec![(nested.name().to_string(), false)],
                         crate::parser::ast::MutableFlag::Immutable,
@@ -3720,7 +3704,6 @@ fn compile_deps_program_keeps_gpr_1438_fallthrough_return_outside_switch() {
         function,
         Lambda::prim(
             Primitive::Pmakeblock(
-                0,
                 TagInfo::ModuleExport(vec![action_key.clone()]),
                 Mutable::Immutable,
             ),
@@ -4268,11 +4251,7 @@ fn unit_return_function_keeps_positive_effect_guard_through_js_pipeline() {
             },
         ),
         Lambda::prim(
-            Primitive::Pmakeblock(
-                0,
-                TagInfo::ModuleExport(vec![run.clone()]),
-                Mutable::Immutable,
-            ),
+            Primitive::Pmakeblock(TagInfo::ModuleExport(vec![run.clone()]), Mutable::Immutable),
             vec![Lambda::var(run.clone())],
             Location::none(),
         ),
@@ -4328,11 +4307,7 @@ fn unit_return_function_with_for_loop_tail_keeps_negative_guard() {
             },
         ),
         Lambda::prim(
-            Primitive::Pmakeblock(
-                0,
-                TagInfo::ModuleExport(vec![run.clone()]),
-                Mutable::Immutable,
-            ),
+            Primitive::Pmakeblock(TagInfo::ModuleExport(vec![run.clone()]), Mutable::Immutable),
             vec![Lambda::var(run.clone())],
             Location::none(),
         ),
@@ -4380,11 +4355,7 @@ fn unit_return_function_with_else_for_loop_tail_keeps_negative_guard() {
             },
         ),
         Lambda::prim(
-            Primitive::Pmakeblock(
-                0,
-                TagInfo::ModuleExport(vec![run.clone()]),
-                Mutable::Immutable,
-            ),
+            Primitive::Pmakeblock(TagInfo::ModuleExport(vec![run.clone()]), Mutable::Immutable),
             vec![Lambda::var(run.clone())],
             Location::none(),
         ),
@@ -4439,11 +4410,7 @@ fn unit_return_function_with_local_while_tail_keeps_negative_guard() {
             },
         ),
         Lambda::prim(
-            Primitive::Pmakeblock(
-                0,
-                TagInfo::ModuleExport(vec![run.clone()]),
-                Mutable::Immutable,
-            ),
+            Primitive::Pmakeblock(TagInfo::ModuleExport(vec![run.clone()]), Mutable::Immutable),
             vec![Lambda::var(run.clone())],
             Location::none(),
         ),
@@ -4970,7 +4937,6 @@ fn effect_blocks_keep_allocating_branches_inside_conditional_expressions_like_oc
     let cond = Ident::create_local("cond");
     let effect = Ident::create_local("effect");
     let allocating_block = Lambda::const_(Constant::Block {
-        tag: 0,
         tag_info: TagInfo::tuple(),
         elements: vec![Constant::int(1), Constant::int(2)],
     });
@@ -5019,7 +4985,7 @@ fn effect_blocks_keep_allocating_branches_inside_conditional_expressions_like_oc
             (&left.as_ref().desc, &right.as_ref().desc),
             (
                 ExpressionDesc::Call(func, args, _),
-                ExpressionDesc::CamlBlock(_, _, _, _)
+                ExpressionDesc::CamlBlock(_, _, _)
             ) if matches!(
                 func.as_ref(),
                 Expression {
@@ -5033,7 +4999,7 @@ fn effect_blocks_keep_allocating_branches_inside_conditional_expressions_like_oc
     assert!(matches!(
         else_expr.as_ref(),
         Expression {
-            desc: ExpressionDesc::CamlBlock(_, _, _, _),
+            desc: ExpressionDesc::CamlBlock(_, _, _),
             ..
         }
     ));
@@ -7042,11 +7008,7 @@ fn function_return_blocks_collapse_identity_module_wrapper_to_parameter() {
                 loc.clone(),
             ),
             Lambda::prim(
-                Primitive::Pmakeblock(
-                    0,
-                    TagInfo::Module(vec!["x".to_string()]),
-                    Mutable::Immutable,
-                ),
+                Primitive::Pmakeblock(TagInfo::Module(vec!["x".to_string()]), Mutable::Immutable),
                 vec![Lambda::var(field_alias)],
                 loc,
             ),
@@ -7084,11 +7046,7 @@ fn function_return_blocks_collapse_inlined_identity_module_wrapper_to_parameter(
         arity: 1,
         params: vec![module_param.clone()],
         body: Box::new(Lambda::prim(
-            Primitive::Pmakeblock(
-                0,
-                TagInfo::Module(vec!["x".to_string()]),
-                Mutable::Immutable,
-            ),
+            Primitive::Pmakeblock(TagInfo::Module(vec!["x".to_string()]), Mutable::Immutable),
             vec![Lambda::prim(
                 Primitive::Pfield(
                     0,
@@ -7164,7 +7122,6 @@ fn function_return_blocks_keep_non_identity_module_wrapper() {
                 ),
                 Lambda::prim(
                     Primitive::Pmakeblock(
-                        0,
                         TagInfo::Module(vec!["x".to_string(), "y".to_string()]),
                         Mutable::Immutable,
                     ),
@@ -7280,7 +7237,6 @@ fn js_flatten_and_mark_dead_substitutes_immutable_caml_block_index_reads() {
                                 Expression::number(Number::int(3)),
                             ],
                             MutableFlag::Immutable,
-                            Box::new(Expression::number(Number::int(0))),
                             TagInfo::tuple(),
                         ))),
                         property: LetKind::Strict,
@@ -7342,7 +7298,7 @@ fn js_flatten_and_mark_dead_substitutes_immutable_caml_block_index_reads() {
             ident,
             value:
                 Some(Expression {
-                    desc: ExpressionDesc::CamlBlock(items, MutableFlag::Immutable, _, _),
+                    desc: ExpressionDesc::CamlBlock(items, MutableFlag::Immutable, _),
                     ..
                 }),
             ..
@@ -7480,7 +7436,6 @@ fn js_flatten_and_mark_dead_keeps_pure_nested_immutable_caml_blocks_inline() {
                             )),
                         ],
                         MutableFlag::Immutable,
-                        Box::new(Expression::number(Number::int(0))),
                         TagInfo::Constructor {
                             name: "::".to_string(),
                             num_nonconst: 1,
@@ -7513,7 +7468,7 @@ fn js_flatten_and_mark_dead_keeps_pure_nested_immutable_caml_blocks_inline() {
         ident,
         value:
             Some(Expression {
-                desc: ExpressionDesc::CamlBlock(items, MutableFlag::Immutable, _, _),
+                desc: ExpressionDesc::CamlBlock(items, MutableFlag::Immutable, _),
                 ..
             }),
         ..
@@ -7530,7 +7485,7 @@ fn js_flatten_and_mark_dead_keeps_pure_nested_immutable_caml_blocks_inline() {
                 ..
             },
             Expression {
-                desc: ExpressionDesc::CamlBlock(inner, MutableFlag::Immutable, _, _),
+                desc: ExpressionDesc::CamlBlock(inner, MutableFlag::Immutable, _),
                 ..
             }
         ] if matches!(
@@ -7563,7 +7518,6 @@ fn js_flatten_and_mark_dead_keeps_single_field_module_reads_materialized_like_oc
                         value: Some(Expression::new(ExpressionDesc::CamlBlock(
                             vec![Expression::var(eq.clone())],
                             MutableFlag::Immutable,
-                            Box::new(Expression::number(Number::int(0))),
                             TagInfo::Module(vec!["Eq".to_string()]),
                         ))),
                         property: LetKind::Strict,
@@ -7596,7 +7550,7 @@ fn js_flatten_and_mark_dead_keeps_single_field_module_reads_materialized_like_oc
             ident,
             value:
                 Some(Expression {
-                    desc: ExpressionDesc::CamlBlock(items, MutableFlag::Immutable, _, _),
+                    desc: ExpressionDesc::CamlBlock(items, MutableFlag::Immutable, _),
                     ..
                 }),
             ..
@@ -7647,7 +7601,6 @@ fn js_flatten_and_mark_dead_preserves_transformed_jsx_component_make_reads() {
                             value: Some(Expression::new(ExpressionDesc::CamlBlock(
                                 vec![Expression::var(component.clone())],
                                 MutableFlag::Immutable,
-                                Box::new(Expression::number(Number::int(0))),
                                 TagInfo::Module(vec!["make".to_string()]),
                             ))),
                             property: LetKind::Strict,
@@ -7675,7 +7628,6 @@ fn js_flatten_and_mark_dead_preserves_transformed_jsx_component_make_reads() {
                                 Expression::new(ExpressionDesc::CamlBlock(
                                     vec![],
                                     MutableFlag::Immutable,
-                                    Box::new(Expression::number(Number::int(0))),
                                     TagInfo::record(
                                         vec![],
                                         crate::parser::ast::MutableFlag::Immutable,
@@ -7726,7 +7678,6 @@ fn js_flatten_and_mark_dead_keeps_single_field_component_make_reads_without_jsx_
                             value: Some(Expression::new(ExpressionDesc::CamlBlock(
                                 vec![Expression::var(component.clone())],
                                 MutableFlag::Immutable,
-                                Box::new(Expression::number(Number::int(0))),
                                 TagInfo::Module(vec!["make".to_string()]),
                             ))),
                             property: LetKind::Strict,
@@ -7754,7 +7705,6 @@ fn js_flatten_and_mark_dead_keeps_single_field_component_make_reads_without_jsx_
                                 Expression::new(ExpressionDesc::CamlBlock(
                                     vec![],
                                     MutableFlag::Immutable,
-                                    Box::new(Expression::number(Number::int(0))),
                                     TagInfo::record(
                                         vec![],
                                         crate::parser::ast::MutableFlag::Immutable,
@@ -7823,7 +7773,6 @@ fn js_flatten_and_mark_dead_keeps_async_component_make_aliases_materialized() {
                             value: Some(Expression::new(ExpressionDesc::CamlBlock(
                                 vec![Expression::var(component.clone())],
                                 MutableFlag::Immutable,
-                                Box::new(Expression::number(Number::int(0))),
                                 TagInfo::Module(vec!["make".to_string()]),
                             ))),
                             property: LetKind::Strict,
@@ -7878,7 +7827,6 @@ fn js_flatten_and_mark_dead_materializes_strictopt_identity_optional_record_fiel
                             Expression::undefined(false),
                         ],
                         MutableFlag::Immutable,
-                        Box::new(Expression::number(Number::int(0))),
                         TagInfo::Record {
                             fields: vec![
                                 ("id".to_string(), true),
@@ -7940,7 +7888,7 @@ fn js_flatten_and_mark_dead_materializes_strictopt_identity_optional_record_fiel
                     ident,
                     value:
                         Some(Expression {
-                            desc: ExpressionDesc::CamlBlock(items, MutableFlag::Immutable, _, _),
+                            desc: ExpressionDesc::CamlBlock(items, MutableFlag::Immutable, _),
                             ..
                         }),
                     ..
@@ -8006,7 +7954,6 @@ fn js_flatten_and_mark_dead_materializes_strict_identity_optional_record_fields_
                             )),
                         ],
                         MutableFlag::Immutable,
-                        Box::new(Expression::number(Number::int(0))),
                         TagInfo::Record {
                             fields: vec![
                                 ("pk".to_string(), false),
@@ -8065,7 +8012,7 @@ fn js_flatten_and_mark_dead_materializes_strict_identity_optional_record_fields_
                     ident,
                     value:
                         Some(Expression {
-                            desc: ExpressionDesc::CamlBlock(items, MutableFlag::Immutable, _, _),
+                            desc: ExpressionDesc::CamlBlock(items, MutableFlag::Immutable, _),
                             ..
                         }),
                     ..
@@ -8131,7 +8078,6 @@ fn js_flatten_and_mark_dead_keeps_alias_bound_deep_constant_records_inline_like_
                             )),
                         ],
                         MutableFlag::Immutable,
-                        Box::new(Expression::number(Number::int(0))),
                         TagInfo::Record {
                             fields: vec![("a".to_string(), false), ("b".to_string(), false)],
                             logical_field_count: None,
@@ -8157,7 +8103,7 @@ fn js_flatten_and_mark_dead_keeps_alias_bound_deep_constant_records_inline_like_
             ident,
             value:
                 Some(Expression {
-                    desc: ExpressionDesc::CamlBlock(items, MutableFlag::Immutable, _, _),
+                    desc: ExpressionDesc::CamlBlock(items, MutableFlag::Immutable, _),
                     ..
                 }),
             property,
@@ -8173,7 +8119,7 @@ fn js_flatten_and_mark_dead_keeps_alias_bound_deep_constant_records_inline_like_
                         ..
                     },
                     Expression {
-                        desc: ExpressionDesc::CamlBlock(inner, MutableFlag::Immutable, _, _),
+                        desc: ExpressionDesc::CamlBlock(inner, MutableFlag::Immutable, _),
                         ..
                     }
                 ] if matches!(
@@ -8285,7 +8231,6 @@ fn top_level_record_field_assignments_on_pure_fresh_literals_collapse_to_rhs_eff
             vec![
                 Lambda::prim(
                     Primitive::Pmakeblock(
-                        0,
                         TagInfo::Record {
                             fields: vec![("x".to_string(), false)],
                             logical_field_count: None,
@@ -9065,7 +9010,6 @@ fn compile_deps_program_imports_primitive_option_for_non_identity_optional_block
         ),
         Lambda::prim(
             Primitive::Pmakeblock(
-                0,
                 TagInfo::ModuleExport(vec![exported.clone()]),
                 Mutable::Immutable,
             ),
@@ -9256,7 +9200,6 @@ fn lowers_module_pfield_from_pure_caml_block_directly_like_ocaml() {
         &Expression::new(ExpressionDesc::CamlBlock(
             vec![Expression::var(eq.clone())],
             MutableFlag::Immutable,
-            Box::new(Expression::number(Number::int(0))),
             TagInfo::Module(vec!["Eq".to_string()]),
         )),
     );
@@ -9283,7 +9226,6 @@ fn lowers_record_pfield_from_pure_caml_block_directly_like_ocaml() {
         &Expression::new(ExpressionDesc::CamlBlock(
             vec![Expression::var(value.clone())],
             MutableFlag::Immutable,
-            Box::new(Expression::number(Number::int(0))),
             TagInfo::Record {
                 fields: vec![("d".to_string(), false)],
                 logical_field_count: None,
@@ -9313,7 +9255,6 @@ fn lowers_cons_pfield_from_pure_caml_block_directly_like_ocaml() {
         &Expression::new(ExpressionDesc::CamlBlock(
             vec![Expression::var(head.clone()), Expression::var(tail.clone())],
             MutableFlag::Immutable,
-            Box::new(Expression::number(Number::int(0))),
             TagInfo::Constructor {
                 name: "::".to_string(),
                 num_nonconst: 1,
@@ -9334,7 +9275,6 @@ fn lowers_cons_pfield_from_pure_caml_block_directly_like_ocaml() {
         &Expression::new(ExpressionDesc::CamlBlock(
             vec![Expression::var(head.clone()), Expression::var(tail.clone())],
             MutableFlag::Immutable,
-            Box::new(Expression::number(Number::int(0))),
             TagInfo::Constructor {
                 name: "::".to_string(),
                 num_nonconst: 1,
@@ -9379,7 +9319,6 @@ fn lowers_extension_pfield_from_pure_caml_block_directly_like_ocaml() {
                 Expression::var(payload.clone()),
             ],
             MutableFlag::Immutable,
-            Box::new(Expression::number(Number::int(0))),
             TagInfo::Extension,
         )),
     );
@@ -9452,7 +9391,6 @@ fn lowers_polyvar_pfield_from_pure_caml_block_directly_like_ocaml() {
     let block = Expression::new(ExpressionDesc::CamlBlock(
         vec![Expression::string("Tag"), Expression::var(payload.clone())],
         MutableFlag::Immutable,
-        Box::new(Expression::number(Number::int(0))),
         TagInfo::PolyVar("Tag".to_string()),
     ));
     let tag = compiler.compile_field_access(0, &FieldDbgInfo::PolyVarTag, &block);
@@ -9929,7 +9867,6 @@ fn recursive_self_referential_record_bindings_lower_to_dummy_object_updates_like
             xx.clone(),
             Lambda::prim(
                 Primitive::Pmakeblock(
-                    0,
                     TagInfo::record(
                         vec![("xx".to_string(), false)],
                         crate::parser::ast::MutableFlag::Immutable,
@@ -10007,7 +9944,6 @@ fn acyclic_letrec_singletons_lower_like_lam_scc_plain_lets() {
                 a.clone(),
                 Lambda::prim(
                     Primitive::Pmakeblock(
-                        0,
                         TagInfo::record(
                             vec![("inner".to_string(), false)],
                             crate::parser::ast::MutableFlag::Immutable,
@@ -10016,7 +9952,6 @@ fn acyclic_letrec_singletons_lower_like_lam_scc_plain_lets() {
                     ),
                     vec![Lambda::prim(
                         Primitive::Pmakeblock(
-                            0,
                             TagInfo::record(
                                 vec![("value".to_string(), false)],
                                 crate::parser::ast::MutableFlag::Immutable,
@@ -10033,7 +9968,6 @@ fn acyclic_letrec_singletons_lower_like_lam_scc_plain_lets() {
                 b.clone(),
                 Lambda::prim(
                     Primitive::Pmakeblock(
-                        0,
                         TagInfo::record(
                             vec![("next".to_string(), false)],
                             crate::parser::ast::MutableFlag::Immutable,
@@ -10079,7 +10013,6 @@ fn mutually_recursive_record_bindings_lower_to_runtime_update_dummy_calls() {
                 a.clone(),
                 Lambda::prim(
                     Primitive::Pmakeblock(
-                        0,
                         TagInfo::record(
                             vec![("b".to_string(), false)],
                             crate::parser::ast::MutableFlag::Immutable,
@@ -10094,7 +10027,6 @@ fn mutually_recursive_record_bindings_lower_to_runtime_update_dummy_calls() {
                 b.clone(),
                 Lambda::prim(
                     Primitive::Pmakeblock(
-                        0,
                         TagInfo::record(
                             vec![("a".to_string(), false)],
                             crate::parser::ast::MutableFlag::Immutable,

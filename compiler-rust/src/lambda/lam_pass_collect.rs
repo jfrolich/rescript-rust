@@ -447,7 +447,7 @@ fn collect_bind_with_external(
         }
         // lam_pass_collect.ml:61-63 — Pmakeblock immutable: ImmutableBlock + recurse.
         Lambda::Lprim(PrimInfo {
-            primitive: Primitive::Pmakeblock(_, _, Mutable::Immutable),
+            primitive: Primitive::Pmakeblock(_, Mutable::Immutable),
             args,
             ..
         }) => {

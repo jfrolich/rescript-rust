@@ -1021,19 +1021,13 @@ fn expression_uses_ident_only_in_tail_move_safe_positions(
                 TailMoveUseContext::Other,
             )
         }),
-        ExpressionDesc::CamlBlock(items, _, tag, _) => {
+        ExpressionDesc::CamlBlock(items, _, _) => items.iter().all(|item| {
             expression_uses_ident_only_in_tail_move_safe_positions(
-                tag,
+                item,
                 target,
                 TailMoveUseContext::Other,
-            ) && items.iter().all(|item| {
-                expression_uses_ident_only_in_tail_move_safe_positions(
-                    item,
-                    target,
-                    TailMoveUseContext::Other,
-                )
-            })
-        }
+            )
+        }),
         ExpressionDesc::Object(dup, props) => {
             dup.as_ref().is_none_or(|expr| {
                 expression_uses_ident_only_in_tail_move_safe_positions(
@@ -1253,12 +1247,9 @@ fn expression_mentions_ident_outside_nested_functions(expr: &Expression, target:
         ExpressionDesc::Array(items, _) => items
             .iter()
             .any(|item| expression_mentions_ident_outside_nested_functions(item, target)),
-        ExpressionDesc::CamlBlock(items, _, tag, _) => {
-            expression_mentions_ident_outside_nested_functions(tag, target)
-                || items
-                    .iter()
-                    .any(|item| expression_mentions_ident_outside_nested_functions(item, target))
-        }
+        ExpressionDesc::CamlBlock(items, _, _) => items
+            .iter()
+            .any(|item| expression_mentions_ident_outside_nested_functions(item, target)),
         ExpressionDesc::Object(dup, props) => {
             dup.as_deref()
                 .is_some_and(|dup| expression_mentions_ident_outside_nested_functions(dup, target))
@@ -1423,7 +1414,6 @@ fn substitute_export_alias_use_in_expression(
             }
         }
         ExpressionDesc::TaggedTemplate(tag, strings, values) => {
-            substitute_export_alias_use_in_expression(tag, target, replacement);
             for string in strings {
                 substitute_export_alias_use_in_expression(string, target, replacement);
             }
@@ -1449,11 +1439,10 @@ fn substitute_export_alias_use_in_expression(
                 substitute_export_alias_use_in_expression(item, target, replacement);
             }
         }
-        ExpressionDesc::CamlBlock(items, _, tag, _) => {
+        ExpressionDesc::CamlBlock(items, _, _) => {
             for item in items {
                 substitute_export_alias_use_in_expression(item, target, replacement);
             }
-            substitute_export_alias_use_in_expression(tag, target, replacement);
         }
         ExpressionDesc::Object(dup, props) => {
             if let Some(dup) = dup {
@@ -1625,12 +1614,9 @@ fn expression_mentions_ident_anywhere(expr: &Expression, target: &Ident) -> bool
         ExpressionDesc::Array(items, _) => items
             .iter()
             .any(|item| expression_mentions_ident_anywhere(item, target)),
-        ExpressionDesc::CamlBlock(items, _, tag, _) => {
-            expression_mentions_ident_anywhere(tag, target)
-                || items
-                    .iter()
-                    .any(|item| expression_mentions_ident_anywhere(item, target))
-        }
+        ExpressionDesc::CamlBlock(items, _, _) => items
+            .iter()
+            .any(|item| expression_mentions_ident_anywhere(item, target)),
         ExpressionDesc::Object(dup, props) => {
             dup.as_deref()
                 .is_some_and(|dup| expression_mentions_ident_anywhere(dup, target))
@@ -1975,7 +1961,6 @@ fn collect_expression_idents(expr: &Expression, stats: &mut JsIdentStats) {
             }
         }
         ExpressionDesc::TaggedTemplate(tag, strings, values) => {
-            collect_expression_idents(tag, stats);
             for string in strings {
                 collect_expression_idents(string, stats);
             }
@@ -2003,11 +1988,10 @@ fn collect_expression_idents(expr: &Expression, stats: &mut JsIdentStats) {
                 collect_expression_idents(item, stats);
             }
         }
-        ExpressionDesc::CamlBlock(items, _, tag, _) => {
+        ExpressionDesc::CamlBlock(items, _, _) => {
             for item in items {
                 collect_expression_idents(item, stats);
             }
-            collect_expression_idents(tag, stats);
         }
         ExpressionDesc::Object(dup, props) => {
             if let Some(dup) = dup {

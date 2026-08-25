@@ -60,7 +60,7 @@ pub fn add_hoisted_function_aliases(
             Lambda::Llet(_, _, _, body) | Lambda::Lletrec(_, body) => terminal_exports(body),
             Lambda::Lsequence(_, body) => terminal_exports(body),
             Lambda::Lprim(PrimInfo {
-                primitive: Primitive::Pmakeblock(_, TagInfo::ModuleExport(ids), _),
+                primitive: Primitive::Pmakeblock(TagInfo::ModuleExport(ids), _),
                 ..
             }) => ids.clone(),
             _ => Vec::new(),
@@ -91,7 +91,7 @@ pub fn add_hoisted_function_aliases(
             }) if args.len() == 1 => {
                 let (base, _) = resolve_binding(&args[0], groups, seen);
                 if let Lambda::Lprim(PrimInfo {
-                    primitive: Primitive::Pmakeblock(_, TagInfo::Module(_), _),
+                    primitive: Primitive::Pmakeblock(TagInfo::Module(_), _),
                     args,
                     ..
                 }) = base
@@ -115,7 +115,7 @@ pub fn add_hoisted_function_aliases(
         }
         let (resolved, _) = resolve_binding(lam, groups, &mut HashSet::new());
         let Lambda::Lprim(PrimInfo {
-            primitive: Primitive::Pmakeblock(_, TagInfo::Module(names), _),
+            primitive: Primitive::Pmakeblock(TagInfo::Module(names), _),
             args,
             ..
         }) = resolved
@@ -138,14 +138,14 @@ pub fn add_hoisted_function_aliases(
                 Lambda::Lsequence(left, Box::new(append_aliases(*body, aliases)))
             }
             Lambda::Lprim(PrimInfo {
-                primitive: Primitive::Pmakeblock(tag, TagInfo::ModuleExport(mut ids), mutable_),
+                primitive: Primitive::Pmakeblock(TagInfo::ModuleExport(mut ids), mutable_),
                 mut args,
                 loc,
             }) => {
                 ids.extend(aliases.iter().map(|(id, _)| id.clone()));
                 args.extend(aliases.iter().map(|(id, _)| Lambda::var(id.clone())));
                 let mut result = Lambda::prim(
-                    Primitive::Pmakeblock(tag, TagInfo::ModuleExport(ids), mutable_),
+                    Primitive::Pmakeblock(TagInfo::ModuleExport(ids), mutable_),
                     args,
                     loc,
                 );
@@ -275,7 +275,7 @@ pub fn simplify_for_js_backend_with_external_inline_and_meta_owned(
     // `~export_idents` and `~export_ident_sets` from the Lam_compile_main.compile
     // entry point. The exports come from `Translmod.transl_implementation`. In
     // Rust, the lowered Lambda still carries them in the top-level
-    // `Pmakeblock(_, TagInfo::ModuleExport(ids), _)`, so we recover the same
+    // `Pmakeblock( TagInfo::ModuleExport(ids), _)`, so we recover the same
     // list here. This drives the `Set_ident.mem meta.export_idents` arm in
     // `Lam_pass_collect.collect_info` (lam_pass_collect.ml:92-93) and the
     // `is_export_id` guard in `Lam_pass_remove_alias.simplify_alias`
@@ -362,7 +362,7 @@ pub fn simplify_for_js_backend_with_external_inline_and_meta_owned(
     // lam_compile_main.ml:212 — Lam_coercion.coerce_and_group_big_lambda
     // (lam_coercion.ml:196). The OCaml flow flattens the lambda into a list
     // of `Lam_group.t` and runs `handle_exports` on the trailing
-    // `Pmakeblock(_, ModuleExport _, args)`. Each non-`Lvar` arg gets
+    // `Pmakeblock( ModuleExport _, args)`. Each non-`Lvar` arg gets
     // hoisted into a fresh `Single (Strict, newid, lam)` group; the
     // makeblock's arg list becomes `Lvar newid`. In Rust the JS compile
     // walks one Lambda tree, so we re-emit the equivalent shape: rename
@@ -397,7 +397,7 @@ fn rewrite_export_makeblock(meta: &mut LamStats, lam: Lambda) -> Lambda {
             Lambda::Lsequence(left, Box::new(new_right))
         }
         Lambda::Lprim(PrimInfo {
-            primitive: Primitive::Pmakeblock(tag, TagInfo::ModuleExport(export_ids), mutable_),
+            primitive: Primitive::Pmakeblock(TagInfo::ModuleExport(export_ids), mutable_),
             args,
             loc,
         }) => {
@@ -456,11 +456,7 @@ fn rewrite_export_makeblock(meta: &mut LamStats, lam: Lambda) -> Lambda {
             meta.export_idents = new_export_ids.iter().cloned().collect();
 
             let mut result = Lambda::Lprim(PrimInfo {
-                primitive: Primitive::Pmakeblock(
-                    tag,
-                    TagInfo::ModuleExport(new_export_ids),
-                    mutable_,
-                ),
+                primitive: Primitive::Pmakeblock(TagInfo::ModuleExport(new_export_ids), mutable_),
                 args: new_args,
                 loc,
             });
@@ -480,7 +476,7 @@ fn rewrite_export_makeblock(meta: &mut LamStats, lam: Lambda) -> Lambda {
 
 /// Walks the same top-level spine as `Lam_coercion.flatten`
 /// (`compiler/core/lam_coercion.ml:179-199`) and returns the idents carried in
-/// the final `Pmakeblock(_, TagInfo::ModuleExport(ids), _)`. These mirror the
+/// the final `Pmakeblock( TagInfo::ModuleExport(ids), _)`. These mirror the
 /// `exports` list `Translmod.transl_implementation` returns to
 /// `Lam_compile_main.compile` (`compiler/core/js_implementation.ml:158-163`).
 /// Do not walk nested module values: OCaml's `meta.exports` contains the
@@ -491,7 +487,7 @@ fn extract_export_idents(lam: &Lambda) -> Vec<Ident> {
         Lambda::Llet(_, _, _, body) | Lambda::Lletrec(_, body) => extract_export_idents(body),
         Lambda::Lsequence(_, right) => extract_export_idents(right),
         Lambda::Lprim(PrimInfo {
-            primitive: Primitive::Pmakeblock(_, TagInfo::ModuleExport(ids), _),
+            primitive: Primitive::Pmakeblock(TagInfo::ModuleExport(ids), _),
             ..
         }) => ids.clone(),
         _ => Vec::new(),

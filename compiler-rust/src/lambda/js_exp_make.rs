@@ -38,7 +38,7 @@ pub(crate) fn js_expr_no_side_effects(expr: &Expression) -> bool {
         | ExpressionDesc::CamlBlockTag(inner, _)
         | ExpressionDesc::OptionalBlock(inner, _) => js_expr_no_side_effects(inner),
         ExpressionDesc::Array(items, _) => items.iter().all(js_expr_no_side_effects),
-        ExpressionDesc::CamlBlock(items, _, _, _) => items.iter().all(js_expr_no_side_effects),
+        ExpressionDesc::CamlBlock(items, _, _) => items.iter().all(js_expr_no_side_effects),
         ExpressionDesc::Object(dup, props) => {
             dup.as_deref().is_none_or(js_expr_no_side_effects)
                 && props
@@ -187,7 +187,7 @@ pub(crate) fn is_nullish_eq_impossible_non_null_expr(expr: &Expression) -> bool 
             | ExpressionDesc::Typeof(_)
             | ExpressionDesc::Fun { .. }
             | ExpressionDesc::Array(_, _)
-            | ExpressionDesc::CamlBlock(_, _, _, _)
+            | ExpressionDesc::CamlBlock(_, _, _)
     ) && js_expr_no_side_effects(expr)
 }
 
@@ -629,7 +629,7 @@ pub(crate) fn pure_indexed_block_item(target: &Expression, idx: i32) -> Option<E
 
     let index = usize::try_from(idx).ok()?;
     match &target.desc {
-        ExpressionDesc::Array(items, _) | ExpressionDesc::CamlBlock(items, _, _, _) => {
+        ExpressionDesc::Array(items, _) | ExpressionDesc::CamlBlock(items, _, _) => {
             items.get(index).cloned()
         }
         _ => None,
@@ -646,8 +646,8 @@ pub(crate) fn pure_record_field_item(
     }
 
     match &target.desc {
-        ExpressionDesc::CamlBlock(items, _, _, TagInfo::Record { fields, .. })
-        | ExpressionDesc::CamlBlock(items, _, _, TagInfo::RecordInlined { fields, .. }) => {
+        ExpressionDesc::CamlBlock(items, _, TagInfo::Record { fields, .. })
+        | ExpressionDesc::CamlBlock(items, _, TagInfo::RecordInlined { fields, .. }) => {
             for (item, (field_name, _)) in items.iter().zip(fields.iter()) {
                 if field_name == field {
                     return Some(item.clone());
@@ -669,8 +669,8 @@ pub(crate) fn direct_projection_from_pure_literal(
     }
 
     match &target.desc {
-        ExpressionDesc::CamlBlock(items, _, _, TagInfo::Record { fields, .. })
-        | ExpressionDesc::CamlBlock(items, _, _, TagInfo::RecordInlined { fields, .. }) => {
+        ExpressionDesc::CamlBlock(items, _, TagInfo::Record { fields, .. })
+        | ExpressionDesc::CamlBlock(items, _, TagInfo::RecordInlined { fields, .. }) => {
             if let Some(field) = field {
                 for (item, (field_name, _)) in items.iter().zip(fields.iter()) {
                     if field_name == field {
@@ -683,7 +683,7 @@ pub(crate) fn direct_projection_from_pure_literal(
                 items.get(index).cloned()
             }
         }
-        ExpressionDesc::Array(items, _) | ExpressionDesc::CamlBlock(items, _, _, _) => {
+        ExpressionDesc::Array(items, _) | ExpressionDesc::CamlBlock(items, _, _) => {
             let index = usize::try_from(index?).ok()?;
             items.get(index).cloned()
         }
@@ -693,7 +693,7 @@ pub(crate) fn direct_projection_from_pure_literal(
 
 pub(crate) fn poly_var_tag_access(target: &Expression) -> Expression {
     match &target.desc {
-        ExpressionDesc::CamlBlock(items, _, _, _) if js_expr_no_side_effects(target) => items
+        ExpressionDesc::CamlBlock(items, _, _) if js_expr_no_side_effects(target) => items
             .first()
             .cloned()
             .expect("polyvariant tag access expects a tag element"),
@@ -707,7 +707,7 @@ pub(crate) fn poly_var_tag_access(target: &Expression) -> Expression {
 
 pub(crate) fn poly_var_value_access(target: &Expression) -> Expression {
     match &target.desc {
-        ExpressionDesc::CamlBlock(items, _, _, _) if js_expr_no_side_effects(target) => items
+        ExpressionDesc::CamlBlock(items, _, _) if js_expr_no_side_effects(target) => items
             .get(1)
             .cloned()
             .expect("polyvariant value access expects a payload element"),

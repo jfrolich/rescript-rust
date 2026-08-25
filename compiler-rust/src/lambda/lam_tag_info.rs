@@ -64,6 +64,14 @@ pub enum TagInfo {
 }
 
 impl TagInfo {
+    /// Label used by Lambda printers now that blocks carry no numeric tag.
+    pub fn tag_label(&self) -> &str {
+        match self {
+            TagInfo::Constructor { name, .. } | TagInfo::RecordInlined { name, .. } => name,
+            _ => "0",
+        }
+    }
+
     /// Get the mutable flag for this block type
     pub fn mutable_flag(&self) -> MutableFlag {
         match self {
@@ -91,7 +99,7 @@ impl TagInfo {
     }
 
     /// Create a constructor tag info
-    pub fn constructor(name: impl Into<String>, num_nonconst: i32, _tag: i32) -> Self {
+    pub fn constructor(name: impl Into<String>, num_nonconst: i32) -> Self {
         let name = name.into();
         TagInfo::Constructor {
             runtime: crate::types::BlockRuntime {
@@ -155,10 +163,10 @@ mod tests {
 
     #[test]
     fn test_tag_values() {
-        let cons = TagInfo::constructor("Some", 1, 0);
+        let cons = TagInfo::constructor("Some", 1);
         assert!(matches!(cons, TagInfo::Constructor { .. }));
 
-        let cons2 = TagInfo::constructor("Cons", 2, 1);
+        let cons2 = TagInfo::constructor("Cons", 2);
         assert!(matches!(cons2, TagInfo::Constructor { .. }));
 
         let tuple = TagInfo::tuple();

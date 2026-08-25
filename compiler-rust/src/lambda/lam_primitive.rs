@@ -212,7 +212,7 @@ pub enum ExternalReturnWrapper {
 pub enum Primitive {
     // ==================== Block Operations ====================
     /// Make a block (tuple, record, variant)
-    Pmakeblock(i32, TagInfo, Mutable),
+    Pmakeblock(TagInfo, Mutable),
 
     /// Get a field from a block
     Pfield(i32, FieldDbgInfo),
@@ -657,8 +657,8 @@ impl Primitive {
                 _ => false,
             },
             // lam_primitive.ml:250-254
-            Pmakeblock(i0, info0, flag0) => match other {
-                Pmakeblock(i1, info1, flag1) => i0 == i1 && flag0 == flag1 && info0 == info1,
+            Pmakeblock(info0, flag0) => match other {
+                Pmakeblock(info1, flag1) => flag0 == flag1 && info0 == info1,
                 _ => false,
             },
             // lam_primitive.ml:255-260: Pjs_call only checks

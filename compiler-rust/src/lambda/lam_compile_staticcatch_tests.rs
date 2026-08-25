@@ -275,7 +275,6 @@ fn nested_wrapped_staticcatch_trywith_tail_loops_lower_like_gpr_1701() {
     let eof = Ident::create_local("End_of_file");
     let cons = Lambda::prim(
         Primitive::Pmakeblock(
-            0,
             TagInfo::Constructor {
                 name: "::".to_string(),
                 num_nonconst: 1,
@@ -410,7 +409,6 @@ fn nested_wrapped_staticcatch_trywith_tail_loops_lower_like_gpr_1701() {
         )],
         Lambda::prim(
             Primitive::Pmakeblock(
-                0,
                 TagInfo::ModuleExport(vec![outer.clone()]),
                 Mutable::Immutable,
             ),
@@ -1574,11 +1572,7 @@ fn js_pipeline_keeps_single_case_staticcatch_unit_handler_as_fallthrough_guard()
             },
         ),
         Lambda::prim(
-            Primitive::Pmakeblock(
-                0,
-                TagInfo::ModuleExport(vec![run.clone()]),
-                Mutable::Immutable,
-            ),
+            Primitive::Pmakeblock(TagInfo::ModuleExport(vec![run.clone()]), Mutable::Immutable),
             vec![Lambda::var(run.clone())],
             Location::none(),
         ),

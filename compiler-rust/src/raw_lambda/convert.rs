@@ -2579,7 +2579,6 @@ impl<'a> RawLambdaConverter<'a> {
                 "File {file:?}, line {line}, characters {start_col}-{end_col}"
             ))),
             RawLocKind::Pos => RawLambda::const_(Constant::Block {
-                tag: 0,
                 tag_info: TagInfo::Tuple,
                 elements: vec![
                     Constant::ImmString(file),
@@ -2618,7 +2617,6 @@ impl<'a> RawLambdaConverter<'a> {
 
     fn failure_payload(&self, loc: Location) -> Constant {
         Constant::Block {
-            tag: 0,
             tag_info: TagInfo::Tuple,
             elements: vec![
                 Constant::string_with_delim(self.basename_for_loc(loc), StringDelim::Plain),
@@ -2632,7 +2630,7 @@ impl<'a> RawLambdaConverter<'a> {
         let exn = Lambda::global_module(predef_exception_ident(name, stamp), false);
         let payload = Lambda::const_(self.failure_payload(loc));
         let block = Lambda::prim(
-            Primitive::Pmakeblock(0, TagInfo::Extension, Mutable::Immutable),
+            Primitive::Pmakeblock(TagInfo::Extension, Mutable::Immutable),
             vec![exn, payload],
             loc,
         );
@@ -3016,11 +3014,7 @@ impl<'a> RawLambdaConverter<'a> {
 
     fn find_raw_primitive(&self, prim_name: &str) -> Option<Primitive> {
         match prim_name {
-            "%makeref" => Some(Primitive::Pmakeblock(
-                0,
-                TagInfo::ref_tag(),
-                Mutable::Mutable,
-            )),
+            "%makeref" => Some(Primitive::Pmakeblock(TagInfo::ref_tag(), Mutable::Mutable)),
             "%refset" => Some(Primitive::Psetfield(
                 0,
                 crate::lambda::lam_compat::SetFieldDbgInfo::RecordSet("contents".to_string()),
@@ -3498,13 +3492,12 @@ impl<'a> RawLambdaConverter<'a> {
             .collect::<Option<Vec<_>>>()
         {
             RawLambda::const_(Constant::Block {
-                tag,
                 tag_info,
                 elements: constants,
             })
         } else {
             RawLambda::prim(
-                Primitive::Pmakeblock(tag, tag_info, Mutable::Immutable),
+                Primitive::Pmakeblock(tag_info, Mutable::Immutable),
                 elems,
                 loc,
             )
@@ -3660,7 +3653,7 @@ impl<'a> RawLambdaConverter<'a> {
                 args_lam.push(self.translate_extension_path_raw(path, loc));
                 args_lam.extend(args.iter().map(|arg| self.convert_expr_raw(arg)));
                 RawLambda::prim(
-                    Primitive::Pmakeblock(0, TagInfo::Extension, Mutable::Immutable),
+                    Primitive::Pmakeblock(TagInfo::Extension, Mutable::Immutable),
                     args_lam,
                     loc,
                 )
@@ -3752,7 +3745,6 @@ impl<'a> RawLambdaConverter<'a> {
                     if matches!(mutable_flag, ParserMutableFlag::Mutable) {
                         RawLambda::prim(
                             Primitive::Pmakeblock(
-                                0,
                                 TagInfo::Record {
                                     fields: fields_info,
                                     logical_field_count,
@@ -3802,7 +3794,7 @@ impl<'a> RawLambdaConverter<'a> {
                     // OCaml: if mut = Mutable then raise Not_constant
                     if matches!(mutable_flag, ParserMutableFlag::Mutable) {
                         RawLambda::prim(
-                            Primitive::Pmakeblock(tag, tag_info, Mutable::Mutable),
+                            Primitive::Pmakeblock(tag_info, Mutable::Mutable),
                             elems,
                             loc,
                         )
@@ -3823,7 +3815,6 @@ impl<'a> RawLambdaConverter<'a> {
                     args.extend(elems);
                     RawLambda::prim(
                         Primitive::Pmakeblock(
-                            0,
                             TagInfo::RecordExt {
                                 fields: fields
                                     .iter()
@@ -4081,7 +4072,7 @@ impl<'a> RawLambdaConverter<'a> {
                 }
                 RawLambda::Lsequence(_, body) => terminal_exports(body),
                 RawLambda::Lprim(RawPrimInfo {
-                    primitive: Primitive::Pmakeblock(_, TagInfo::ModuleExport(ids), _),
+                    primitive: Primitive::Pmakeblock(TagInfo::ModuleExport(ids), _),
                     ..
                 }) => ids.clone(),
                 _ => Vec::new(),
@@ -4112,7 +4103,7 @@ impl<'a> RawLambdaConverter<'a> {
                 }) if args.len() == 1 => {
                     let (base, _) = resolve_binding(&args[0], groups, seen);
                     if let RawLambda::Lprim(RawPrimInfo {
-                        primitive: Primitive::Pmakeblock(_, TagInfo::Module(_), _),
+                        primitive: Primitive::Pmakeblock(TagInfo::Module(_), _),
                         args,
                         ..
                     }) = base
@@ -4148,7 +4139,7 @@ impl<'a> RawLambdaConverter<'a> {
                 }
             };
             let RawLambda::Lprim(RawPrimInfo {
-                primitive: Primitive::Pmakeblock(_, TagInfo::Module(names), _),
+                primitive: Primitive::Pmakeblock(TagInfo::Module(names), _),
                 args,
                 ..
             }) = resolved
@@ -5058,7 +5049,6 @@ impl<'a> RawLambdaConverter<'a> {
                     let named = RawLambda::var(id.clone());
                     let lam = RawLambda::prim(
                         Primitive::Pmakeblock(
-                            0,
                             TagInfo::Module(runtime_fields.clone()),
                             Mutable::Immutable,
                         ),
@@ -5173,7 +5163,7 @@ impl<'a> RawLambdaConverter<'a> {
                     )
                 };
                 RawLambda::prim(
-                    Primitive::Pmakeblock(0, tag, Mutable::Immutable),
+                    Primitive::Pmakeblock(tag, Mutable::Immutable),
                     block_fields,
                     loc,
                 )
@@ -5243,7 +5233,7 @@ impl<'a> RawLambdaConverter<'a> {
                     TagInfo::Module(runtime_fields.clone())
                 };
                 let lam = RawLambda::prim(
-                    Primitive::Pmakeblock(0, tag, Mutable::Immutable),
+                    Primitive::Pmakeblock(tag, Mutable::Immutable),
                     block_fields,
                     loc.clone(),
                 );
@@ -5281,7 +5271,7 @@ impl<'a> RawLambdaConverter<'a> {
                     TagInfo::Module(fields.iter().map(|id| id.name().to_string()).collect())
                 };
                 RawLambda::prim(
-                    Primitive::Pmakeblock(0, tag, Mutable::Immutable),
+                    Primitive::Pmakeblock(tag, Mutable::Immutable),
                     block_fields,
                     loc,
                 )
@@ -5535,7 +5525,6 @@ impl<'a> RawLambdaConverter<'a> {
         let loc = self.loc(loc_idx);
         let fname = self.basename_for_loc(loc);
         RawLambda::Lconst(Constant::Block {
-            tag: 0,
             tag_info: TagInfo::Tuple,
             elements: vec![
                 Constant::string_with_delim(fname, StringDelim::Plain),
@@ -5643,18 +5632,17 @@ impl<'a> RawLambdaConverter<'a> {
             ModuleType::MtyAlias(_, _) => {
                 // Module alias: constant value
                 Some(Constant::Block {
-                    tag: 1, // value tag
-                    tag_info: TagInfo::constructor("value", 2, 1),
+                    // value tag
+                    tag_info: TagInfo::constructor("value", 2),
                     elements: vec![Constant::ModuleAlias],
                 })
             }
             ModuleType::MtySignature(sg) => {
                 let struct_shape = self.init_shape_struct(env, sg)?;
                 Some(Constant::Block {
-                    tag: 0, // Module tag
-                    tag_info: TagInfo::constructor("Module", 2, 0),
+                    // Module tag
+                    tag_info: TagInfo::constructor("Module", 2),
                     elements: vec![Constant::Block {
-                        tag: 0,
                         tag_info: TagInfo::Tuple,
                         elements: struct_shape,
                     }],
@@ -5701,7 +5689,6 @@ impl<'a> RawLambdaConverter<'a> {
                             let init_v = recmodule_function_shape_constant();
                             // add_name: wrap with (shape, name) tuple
                             result.push(Constant::Block {
-                                tag: 0,
                                 tag_info: TagInfo::Tuple,
                                 elements: vec![
                                     init_v,
@@ -5721,7 +5708,6 @@ impl<'a> RawLambdaConverter<'a> {
                     let sub_shape = self.init_shape_mod(&env, &md.md_type)?;
                     // add_name: wrap with (shape, name) tuple
                     result.push(Constant::Block {
-                        tag: 0,
                         tag_info: TagInfo::Tuple,
                         elements: vec![
                             sub_shape,
@@ -5778,7 +5764,7 @@ impl<'a> RawLambdaConverter<'a> {
     /// Mirrors OCaml's `Transl_recmodule.is_function_or_const_block`.
     fn is_function_or_const_block(lam: &RawLambda, acc: &HashSet<Ident>) -> bool {
         match lam {
-            RawLambda::Lprim(info) if matches!(info.primitive, Primitive::Pmakeblock(_, _, _)) => {
+            RawLambda::Lprim(info) if matches!(info.primitive, Primitive::Pmakeblock(_, _)) => {
                 info.args.iter().all(|arg| match arg {
                     RawLambda::Lvar(id) => acc.contains(id),
                     RawLambda::Lfunction(_) | RawLambda::Lconst(_) => true,
@@ -6220,7 +6206,7 @@ impl<'a> RawLambdaConverter<'a> {
                 TagInfo::Module(fields.iter().map(|id| id.name().to_string()).collect())
             };
             return Lambda::prim(
-                Primitive::Pmakeblock(0, tag, Mutable::Immutable),
+                Primitive::Pmakeblock(tag, Mutable::Immutable),
                 block_fields,
                 Location::none(),
             );
@@ -6710,7 +6696,7 @@ impl<'a> RawLambdaConverter<'a> {
             ExpressionDesc::Texp_tuple(items) => {
                 let elems = items.iter().map(|e| self.convert_expr(e)).collect();
                 Lambda::prim(
-                    Primitive::Pmakeblock(0, TagInfo::Tuple, Mutable::Immutable),
+                    Primitive::Pmakeblock(TagInfo::Tuple, Mutable::Immutable),
                     elems,
                     self.loc(expr.exp_loc),
                 )
@@ -7353,7 +7339,6 @@ impl<'a> RawLambdaConverter<'a> {
                 predef_exception_ident("Match_failure", PREDEF_MATCH_FAILURE_STAMP);
             let exn = RawLambda::LglobalModule(match_failure_ident, false);
             let payload = RawLambda::Lconst(Constant::Block {
-                tag: 0,
                 tag_info: TagInfo::Tuple,
                 elements: vec![
                     Constant::string_with_delim(fname.clone(), StringDelim::Plain),
@@ -7364,7 +7349,7 @@ impl<'a> RawLambdaConverter<'a> {
             RawLambda::Lprim(RawPrimInfo {
                 primitive: Primitive::Praise,
                 args: vec![RawLambda::Lprim(RawPrimInfo {
-                    primitive: Primitive::Pmakeblock(0, TagInfo::Extension, Mutable::Immutable),
+                    primitive: Primitive::Pmakeblock(TagInfo::Extension, Mutable::Immutable),
                     args: vec![exn, payload],
                     loc: loc_for_handler.clone(),
                 })],
@@ -7419,7 +7404,6 @@ impl<'a> RawLambdaConverter<'a> {
                     predef_exception_ident("Match_failure", PREDEF_MATCH_FAILURE_STAMP);
                 let exn = RawLambda::LglobalModule(match_failure_ident, false);
                 let payload = RawLambda::Lconst(Constant::Block {
-                    tag: 0,
                     tag_info: TagInfo::Tuple,
                     elements: vec![
                         Constant::string_with_delim(fname.clone(), StringDelim::Plain),
@@ -7430,7 +7414,7 @@ impl<'a> RawLambdaConverter<'a> {
                 RawLambda::Lprim(RawPrimInfo {
                     primitive: Primitive::Praise,
                     args: vec![RawLambda::Lprim(RawPrimInfo {
-                        primitive: Primitive::Pmakeblock(0, TagInfo::Extension, Mutable::Immutable),
+                        primitive: Primitive::Pmakeblock(TagInfo::Extension, Mutable::Immutable),
                         args: vec![exn, payload],
                         loc: loc_for_handler.clone(),
                     })],
@@ -10580,7 +10564,7 @@ impl<'a> RawLambdaConverter<'a> {
             Some(expr) => {
                 let arg_lam = self.convert_expr(expr);
                 Lambda::prim(
-                    Primitive::Pmakeblock(0, TagInfo::PolyVar(tag.to_string()), Mutable::Immutable),
+                    Primitive::Pmakeblock(TagInfo::PolyVar(tag.to_string()), Mutable::Immutable),
                     vec![Lambda::const_(Constant::Pointer(tag.to_string())), arg_lam],
                     self.loc(expr.exp_loc),
                 )
@@ -10652,7 +10636,7 @@ impl<'a> RawLambdaConverter<'a> {
         };
 
         Lambda::prim(
-            Primitive::Pmakeblock(0, tag_info, Mutable::Immutable),
+            Primitive::Pmakeblock(tag_info, Mutable::Immutable),
             elements,
             loc,
         )
@@ -10757,7 +10741,6 @@ impl<'a> RawLambdaConverter<'a> {
                                 );
                                 let exn = RawLambda::LglobalModule(match_failure_ident, false);
                                 let payload = RawLambda::Lconst(Constant::Block {
-                                    tag: 0,
                                     tag_info: TagInfo::Tuple,
                                     elements: vec![
                                         Constant::string_with_delim(
@@ -10772,7 +10755,6 @@ impl<'a> RawLambdaConverter<'a> {
                                     primitive: Primitive::Praise,
                                     args: vec![RawLambda::Lprim(RawPrimInfo {
                                         primitive: Primitive::Pmakeblock(
-                                            0,
                                             TagInfo::Extension,
                                             Mutable::Immutable,
                                         ),
@@ -11018,7 +11000,7 @@ impl<'a> RawLambdaConverter<'a> {
                             [arg] => {
                                 let expr = arg.expression.as_ref().expect("checked above");
                                 RawLambda::prim(
-                                    Primitive::Pmakeblock(0, TagInfo::Tuple, Mutable::Immutable),
+                                    Primitive::Pmakeblock(TagInfo::Tuple, Mutable::Immutable),
                                     vec![
                                         self.raw_loc_constant(kind, self.loc(expr.exp_loc)),
                                         self.convert_expr_raw(expr),
@@ -11579,7 +11561,7 @@ impl<'a> RawLambdaConverter<'a> {
                         1,
                         vec![param.clone()],
                         RawLambda::prim(
-                            Primitive::Pmakeblock(0, TagInfo::Tuple, Mutable::Immutable),
+                            Primitive::Pmakeblock(TagInfo::Tuple, Mutable::Immutable),
                             vec![lam, RawLambda::var(param)],
                             loc,
                         ),
@@ -12271,7 +12253,6 @@ mod tests {
         assert!(matches!(
             lowered,
             RawLambda::Lconst(Constant::Block {
-                tag: 0,
                 tag_info:
                     TagInfo::RecordInlined {
                         name,

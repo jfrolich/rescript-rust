@@ -190,7 +190,7 @@ pub fn deep_flatten_owned_with_id_gen(lam: Lambda, id_gen: &IdGenerator) -> Lamb
                 if matches!(
                     value.as_ref(),
                     Lambda::Lprim(PrimInfo {
-                        primitive: Primitive::Pmakeblock(_, _, Mutable::Immutable),
+                        primitive: Primitive::Pmakeblock(_, Mutable::Immutable),
                         ..
                     }) | Lambda::Lvar(_)
                 ) =>
@@ -268,7 +268,7 @@ pub fn deep_flatten_owned_with_id_gen(lam: Lambda, id_gen: &IdGenerator) -> Lamb
                         "match" | "include" | "param",
                         LetKind::Alias | LetKind::Strict | LetKind::StrictOpt,
                         Lambda::Lprim(PrimInfo {
-                            primitive: Primitive::Pmakeblock(_, _, Mutable::Immutable),
+                            primitive: Primitive::Pmakeblock(_, Mutable::Immutable),
                             ..
                         })
                     )
@@ -445,7 +445,7 @@ mod tests {
 
     fn tuple(args: Vec<Lambda>) -> Lambda {
         Lambda::prim(
-            Primitive::Pmakeblock(0, TagInfo::Tuple, Mutable::Immutable),
+            Primitive::Pmakeblock(TagInfo::Tuple, Mutable::Immutable),
             args,
             Location::none(),
         )

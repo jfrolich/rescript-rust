@@ -445,11 +445,9 @@ pub(crate) fn max_ident_stamp_in_expression(expr: &Expression) -> i32 {
         ExpressionDesc::Array(items, _) => items.iter().fold(0, |max_stamp, item| {
             max_stamp.max(max_ident_stamp_in_expression(item))
         }),
-        ExpressionDesc::CamlBlock(items, _, tag, _) => items
-            .iter()
-            .fold(max_ident_stamp_in_expression(tag), |max_stamp, item| {
-                max_stamp.max(max_ident_stamp_in_expression(item))
-            }),
+        ExpressionDesc::CamlBlock(items, _, _) => items.iter().fold(0, |max_stamp, item| {
+            max_stamp.max(max_ident_stamp_in_expression(item))
+        }),
         ExpressionDesc::Object(dup, props) => {
             let mut max_stamp = dup
                 .as_ref()
@@ -506,7 +504,7 @@ pub(crate) fn extract_toplevel_exports(
         comment,
     } = expr;
     match desc {
-        ExpressionDesc::CamlBlock(values, _, _, TagInfo::ModuleExport(exports)) => {
+        ExpressionDesc::CamlBlock(values, _, TagInfo::ModuleExport(exports)) => {
             debug_assert_eq!(
                 exports.len(),
                 values.len(),

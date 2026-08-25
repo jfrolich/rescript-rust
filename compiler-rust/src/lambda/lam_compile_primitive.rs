@@ -470,7 +470,7 @@ impl LambdaCompiler {
                     let props = items
                         .iter()
                         .filter_map(|item| match &item.desc {
-                            ExpressionDesc::CamlBlock(fields, _, _, _)
+                            ExpressionDesc::CamlBlock(fields, _, _)
                                 if matches!(
                                     fields.as_slice(),
                                     [
@@ -558,7 +558,7 @@ impl LambdaCompiler {
                     Box::new(Expression::undefined(false)),
                 ))
             }
-            Pmakeblock(tag, tag_info, mutable_flag) => {
+            Pmakeblock(tag_info, mutable_flag) => {
                 let js_mutable = match mutable_flag {
                     Mutable::Mutable => MutableFlag::Mutable,
                     Mutable::Immutable => MutableFlag::Immutable,
@@ -566,7 +566,6 @@ impl LambdaCompiler {
                 Expression::new(ExpressionDesc::CamlBlock(
                     compiled_args,
                     js_mutable,
-                    Box::new(Expression::number(Number::int(*tag))),
                     tag_info.clone(),
                 ))
             }
@@ -575,8 +574,7 @@ impl LambdaCompiler {
             Pmakelist => Expression::new(ExpressionDesc::CamlBlock(
                 compiled_args,
                 MutableFlag::Mutable,
-                Box::new(Expression::number(Number::int(0))),
-                TagInfo::constructor("::", 1, 0),
+                TagInfo::constructor("::", 1),
             )),
             PrawJsCode(info) => {
                 Expression::new(ExpressionDesc::RawJsCode(crate::js_ir::JsRawInfo {
@@ -813,10 +811,10 @@ impl LambdaCompiler {
                     && matches!(&right.desc, ExpressionDesc::Undefined { .. }))
                     || (matches!(&left.desc, ExpressionDesc::Undefined { .. })
                         && is_optional_block(&right))
-                    || (matches!(&left.desc, ExpressionDesc::CamlBlock(_, _, _, _))
+                    || (matches!(&left.desc, ExpressionDesc::CamlBlock(_, _, _))
                         && matches!(&right.desc, ExpressionDesc::Number(_)))
                     || (matches!(&left.desc, ExpressionDesc::Number(_))
-                        && matches!(&right.desc, ExpressionDesc::CamlBlock(_, _, _, _))))
+                        && matches!(&right.desc, ExpressionDesc::CamlBlock(_, _, _))))
                     && js_expr_no_side_effects(&left)
                     && js_expr_no_side_effects(&right)
                 {

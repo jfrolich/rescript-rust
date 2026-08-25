@@ -1800,7 +1800,6 @@ fn charge_logical_record_fields(
     actual_arg_count: usize,
 ) -> Option<()> {
     let Primitive::Pmakeblock(
-        _,
         tag_info @ (TagInfo::Record { .. } | TagInfo::RecordInlined { .. }),
         _,
     ) = primitive
@@ -9525,7 +9524,6 @@ pub fn partial_function(_ctx_ref: &TypeContext, loc: Location) -> RawLambda {
     let match_failure_ident = crate::types::predef::ident_match_failure();
     let exn = RawLambda::LglobalModule(match_failure_ident, false);
     let payload = RawLambda::Lconst(crate::lambda::Constant::Block {
-        tag: 0,
         tag_info: TagInfo::Tuple,
         elements: vec![
             crate::lambda::Constant::string(fname),
@@ -9537,7 +9535,7 @@ pub fn partial_function(_ctx_ref: &TypeContext, loc: Location) -> RawLambda {
     RawLambda::Lprim(RawPrimInfo {
         primitive: Primitive::Praise,
         args: vec![RawLambda::Lprim(RawPrimInfo {
-            primitive: Primitive::Pmakeblock(0, TagInfo::Extension, Mutable::Immutable),
+            primitive: Primitive::Pmakeblock(TagInfo::Extension, Mutable::Immutable),
             args: vec![exn, payload],
             loc: loc.clone(),
         })],
@@ -9871,7 +9869,7 @@ pub fn do_for_multiple_match(
         .map(|(pat, act)| (vec![pat], MatchAction::new(act)))
         .collect();
     let tuple_arg = RawLambda::Lprim(RawPrimInfo {
-        primitive: Primitive::Pmakeblock(0, TagInfo::Tuple, Mutable::Immutable),
+        primitive: Primitive::Pmakeblock(TagInfo::Tuple, Mutable::Immutable),
         args: paraml.clone(),
         loc: loc.clone(),
     });

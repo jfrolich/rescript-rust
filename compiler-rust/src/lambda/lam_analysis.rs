@@ -151,7 +151,7 @@ fn is_pure_primitive(prim: &Primitive, args: &[Lambda]) -> bool {
         | Primitive::Pundefined => true,
 
         // Block operations
-        Primitive::Pmakeblock(_, _, _)
+        Primitive::Pmakeblock(_, _)
         | Primitive::Pfield(_, _)
         | Primitive::PvalFromOption
         | Primitive::PvalFromOptionNotNest
@@ -343,7 +343,6 @@ fn size_inner(lam: &Lambda) -> Option<i32> {
                     }
                 }
                 Primitive::Pmakeblock(
-                    _,
                     tag_info @ (TagInfo::Record { .. } | TagInfo::RecordInlined { .. }),
                     _,
                 ) => {
@@ -818,7 +817,6 @@ mod tests {
         // Block sums up fields
         assert_eq!(
             size_constant(&Constant::Block {
-                tag: 0,
                 tag_info: crate::lambda::lam_tag_info::TagInfo::Tuple,
                 elements: vec![Constant::int(1), Constant::int(2), Constant::int(3)],
             }),
@@ -827,7 +825,6 @@ mod tests {
 
         assert_eq!(
             size_constant(&Constant::Block {
-                tag: 0,
                 tag_info: TagInfo::Record {
                     fields: vec![("className".to_string(), true)],
                     logical_field_count: Some(4),
