@@ -350,35 +350,22 @@ fn core_type(typ: &CoreType, arena: &ParseArena) -> Sexp {
             Sexp::list(vec![Sexp::atom("Ptyp_var"), Sexp::atom(&quote_string(var))])
         }
         CoreTypeDesc::Ptyp_arrow(inner) => {
-            let (ref arg, ref ret, ref ar) = **inner;
-            // OCaml's attribute placement depends on whether there's a label:
-            // - For Nolabel: attributes go on the type
-            // - For Labelled/Optional: attributes stay in the arrow slot
-            let is_labeled = !matches!(arg.lbl, ArgLabel::Nolabel);
-            let arg_typ = arena.get_core_type(arg.typ);
-            let (arrow_attrs, arg_typ_sexp) = if arg.attrs.is_empty() {
-                (attributes(&[], arena), core_type(arg_typ, arena))
-            } else if is_labeled {
-                // Labeled: attributes stay in arrow slot
-                (attributes(&arg.attrs, arena), core_type(arg_typ, arena))
-            } else {
-                // Nolabel: merge attributes onto the type
-                let mut merged_attrs = arg.attrs.clone();
-                merged_attrs.extend(arg_typ.ptyp_attributes.clone());
-                let merged_typ = CoreType {
-                    ptyp_desc: arg_typ.ptyp_desc.clone(),
-                    ptyp_loc: arg_typ.ptyp_loc,
-                    ptyp_attributes: merged_attrs,
-                };
-                (attributes(&[], arena), core_type(&merged_typ, arena))
-            };
+            let (arg, ret, arity) = &**inner;
+            let params = arena
+                .nary_arrow_args(arg, *arity)
+                .iter()
+                .map(|param| {
+                    Sexp::list(vec![
+                        arg_label(&param.lbl, arena),
+                        attributes(&param.attrs, arena),
+                        core_type(arena.get_core_type(param.typ), arena),
+                    ])
+                })
+                .collect();
             Sexp::list(vec![
                 Sexp::atom("Ptyp_arrow"),
-                arg_label(&arg.lbl, arena),
-                arrow_attrs,
-                arg_typ_sexp,
+                Sexp::list(params),
                 core_type(arena.get_core_type(*ret), arena),
-                arity(ar, arena),
             ])
         }
         CoreTypeDesc::Ptyp_tuple(types) => Sexp::list(vec![
@@ -701,29 +688,30 @@ fn expression(expr: &Expression, arena: &ParseArena) -> Sexp {
             ])
         }
         ExpressionDesc::Pexp_fun(inner) => {
-            let PexpFun {
-                arg_label: ref lbl,
-                default: ref opt_default,
-                ref lhs,
-                ref rhs,
-                arity: ref ar,
-                is_async: ref is_async_flag,
-                ..
-            } = **inner;
+            let params = arena
+                .nary_fun_params(inner)
+                .iter()
+                .map(|param| {
+                    Sexp::list(vec![
+                        attributes(&param.p_attrs, arena),
+                        arg_label(&param.p_lbl, arena),
+                        match param.p_default {
+                            None => Sexp::atom("None"),
+                            Some(default) => Sexp::list(vec![
+                                Sexp::atom("Some"),
+                                expression(arena.get_expr(default), arena),
+                            ]),
+                        },
+                        pattern(arena.get_pat(param.p_pat), arena),
+                    ])
+                })
+                .collect();
             Sexp::list(vec![
                 Sexp::atom("Pexp_fun"),
-                arg_label(lbl, arena),
-                match opt_default {
-                    None => Sexp::atom("None"),
-                    Some(e) => Sexp::list(vec![
-                        Sexp::atom("Some"),
-                        expression(arena.get_expr(*e), arena),
-                    ]),
-                },
-                pattern(arena.get_pat(*lhs), arena),
-                expression(arena.get_expr(*rhs), arena),
-                arity(ar, arena),
-                Sexp::atom(if *is_async_flag { "true" } else { "false" }),
+                Sexp::list(vec![]),
+                Sexp::list(params),
+                expression(arena.get_expr(arena.nary_fun_body(inner)), arena),
+                Sexp::atom(if inner.is_async { "true" } else { "false" }),
             ])
         }
         ExpressionDesc::Pexp_apply(inner) => {
