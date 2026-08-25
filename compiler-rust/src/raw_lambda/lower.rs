@@ -2412,7 +2412,6 @@ mod tests {
                     comment: Some(PointerInfo::PolyVariant("Pair".to_string())),
                 },
                 Constant::Block {
-                    tag: 0,
                     tag_info: TagInfo::Tuple,
                     elements: vec![
                         Constant::Int {

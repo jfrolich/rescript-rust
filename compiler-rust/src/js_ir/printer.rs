@@ -6419,7 +6419,7 @@ mod tests {
                 ExpressionDesc::CamlBlock(
                     vec![Expression::number(Number::int(1))],
                     MutableFlag::Immutable,
-                    TagInfo::constructor("Some", 1, 0),
+                    TagInfo::constructor("Some", 1),
                 ),
             ))],
             env: Default::default(),
@@ -8607,7 +8607,7 @@ mod tests {
                 Expression::number(Number::int(0)),
             ],
             MutableFlag::Immutable,
-            TagInfo::constructor("::", 1, 0),
+            TagInfo::constructor("::", 1),
         ));
 
         assert_eq!(print_expression(&expr), "{\n  hd: 1,\n  tl: 0\n}");
@@ -8618,7 +8618,7 @@ mod tests {
         let expr = Expression::new(ExpressionDesc::CamlBlock(
             vec![Expression::number(Number::int(1))],
             MutableFlag::Immutable,
-            TagInfo::constructor("Some", 1, 0),
+            TagInfo::constructor("Some", 1),
         ));
 
         assert_eq!(print_expression(&expr), "{\n  TAG: \"Some\",\n  _0: 1\n}");
@@ -8632,7 +8632,7 @@ mod tests {
                 Expression::number(Number::int(2)),
             ],
             MutableFlag::Immutable,
-            TagInfo::constructor("A", 2, 0),
+            TagInfo::constructor("A", 2),
         ));
 
         assert_eq!(

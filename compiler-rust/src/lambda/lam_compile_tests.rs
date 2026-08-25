@@ -7420,7 +7420,6 @@ fn js_flatten_and_mark_dead_keeps_pure_nested_immutable_caml_blocks_inline() {
                                     Expression::number(Number::int(0)),
                                 ],
                                 MutableFlag::Immutable,
-                                Box::new(Expression::number(Number::int(0))),
                                 TagInfo::Constructor {
                                     name: "::".to_string(),
                                     num_nonconst: 1,
@@ -8066,7 +8065,6 @@ fn js_flatten_and_mark_dead_keeps_alias_bound_deep_constant_records_inline_like_
                                     Expression::number(Number::int(3)),
                                 ],
                                 MutableFlag::Immutable,
-                                Box::new(Expression::number(Number::int(0))),
                                 TagInfo::Record {
                                     fields: vec![
                                         ("xx".to_string(), false),
