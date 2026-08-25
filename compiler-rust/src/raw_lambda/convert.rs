@@ -10286,10 +10286,32 @@ impl<'a> RawLambdaConverter<'a> {
         inline: InlineAttribute,
         _loc: Location,
     ) -> RawLambda {
+        fn pattern_binds_value(pattern: &Pattern) -> bool {
+            match &pattern.pat_desc {
+                PatternDesc::Tpat_var(_, _) | PatternDesc::Tpat_alias(_, _, _) => true,
+                PatternDesc::Tpat_tuple(items)
+                | PatternDesc::Tpat_array(items)
+                | PatternDesc::Tpat_construct(_, _, items) => {
+                    items.iter().any(pattern_binds_value)
+                }
+                PatternDesc::Tpat_variant(_, Some(item), _) => pattern_binds_value(item),
+                PatternDesc::Tpat_record(fields, _, _) => fields
+                    .iter()
+                    .any(|(_, _, item, _)| pattern_binds_value(item)),
+                PatternDesc::Tpat_or(left, right, _) => {
+                    pattern_binds_value(left) || pattern_binds_value(right)
+                }
+                _ => false,
+            }
+        }
+
         let param_ids = params
             .iter()
             .map(|param| param.fp_param.clone())
             .collect::<Vec<_>>();
+        let one_unit_arg = matches!(params, [param]
+            if !pattern_binds_value(&param.fp_pat)
+                && self.is_base_type(param.fp_pat.pat_type, "unit"));
         let return_unit = self.is_base_type(body.exp_type, "unit");
         let mut lambda_body = self.convert_expr_raw(body);
         for param in params.iter().rev() {
@@ -10318,7 +10340,8 @@ impl<'a> RawLambdaConverter<'a> {
                 async_,
                 directive,
                 inline,
-                ..FunctionAttribute::default()
+                one_unit_arg,
+                is_a_functor: false,
             },
         )
     }
