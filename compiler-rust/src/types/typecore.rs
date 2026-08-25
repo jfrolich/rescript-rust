@@ -11557,12 +11557,26 @@ fn generalized_tuple_space_is_covered(
         return false;
     }
 
-    let mut constructor_sets = Vec::with_capacity(current_items.len());
-    for item in current_items {
+    // Only constructor dimensions with GADT result types participate in the
+    // correlated space. Ordinary tuple dimensions (such as the JSON payload)
+    // remain opaque, exactly like Parmatch's rewritten dict subpattern.
+    let mut selected_indices = Vec::new();
+    let mut constructor_sets = Vec::new();
+    for (index, item) in current_items.iter().enumerate() {
         let Some(constructors) = variant_constructors_for_type(tctx, env, item.pat_type) else {
-            return false;
+            continue;
         };
-        constructor_sets.push(constructors);
+        if !constructors.is_empty()
+            && constructors
+                .iter()
+                .all(|constructor| constructor.cd_res.is_some())
+        {
+            selected_indices.push(index);
+            constructor_sets.push(constructors);
+        }
+    }
+    if selected_indices.len() < 2 {
+        return false;
     }
 
     let mut covered = HashSet::default();
@@ -11570,9 +11584,9 @@ fn generalized_tuple_space_is_covered(
         let PatternDesc::Tpat_tuple(items) = &row.lhs.pat_desc else {
             continue;
         };
-        let names = items
+        let names = selected_indices
             .iter()
-            .map(|item| match &item.pat_desc {
+            .map(|index| match &items[*index].pat_desc {
                 PatternDesc::Tpat_construct(_, cstr, _) => Some(cstr.cstr_name.clone()),
                 _ => None,
             })
