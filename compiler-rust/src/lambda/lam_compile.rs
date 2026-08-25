@@ -308,6 +308,7 @@ pub struct LambdaCompiler {
     pub(crate) cmj_lambda_cache: HashMap<String, Option<Arc<AHashMap<String, Lambda>>>>,
     pub(crate) cmj_export_constants: AHashMap<String, CmjExportConstant>,
     pub(crate) cmj_export_arities: AHashMap<String, CmjExportArity>,
+    hoisted_functions: Vec<crate::lambda::HoistedFunction>,
     pub(crate) external_module_ids: HashMap<ExternalModuleCacheKey, Ident>,
     pub(crate) static_handlers: Vec<StaticHandler>,
     pub(crate) static_jump_handlers: Vec<StaticJumpHandler>,
@@ -400,6 +401,7 @@ impl LambdaCompiler {
             cmj_lambda_cache: HashMap::new(),
             cmj_export_constants: AHashMap::new(),
             cmj_export_arities: AHashMap::new(),
+            hoisted_functions: Vec::new(),
             external_module_ids: HashMap::new(),
             static_handlers: Vec::new(),
             static_jump_handlers: Vec::new(),
@@ -445,6 +447,7 @@ impl LambdaCompiler {
             cmj_lambda_cache: HashMap::new(),
             cmj_export_constants: AHashMap::new(),
             cmj_export_arities: AHashMap::new(),
+            hoisted_functions: Vec::new(),
             external_module_ids: HashMap::new(),
             static_handlers: Vec::new(),
             static_jump_handlers: Vec::new(),
@@ -456,6 +459,10 @@ impl LambdaCompiler {
             loop_label_counter: std::rc::Rc::new(std::cell::Cell::new(0)),
             diagnostic: None,
         }
+    }
+
+    pub fn set_hoisted_functions(&mut self, hoisted: Vec<crate::lambda::HoistedFunction>) {
+        self.hoisted_functions = hoisted;
     }
 
     /// Compile a Lambda expression into a JS IR program.
@@ -536,7 +543,7 @@ impl LambdaCompiler {
         )
         .entered();
         self.external_module_ids.clear();
-        let mut simplified_result = crate::timing::measure(
+        let simplified_result = crate::timing::measure(
             crate::timing::Phase::LambdaOptimization,
             || {
                 let _phase = info_span!("compiler.lambda_simplify").entered();
@@ -589,13 +596,10 @@ impl LambdaCompiler {
                 )
             },
         );
-        if std::env::var_os("DEBUG_SIMPLIFIED_LAMBDA").is_some() {
-            std::fs::write(
-                "/tmp/simplified-lambda.log",
-                format!("SIMPLIFIED_LAMBDA {:#?}", simplified_result.lambda),
-            )
-            .ok();
-        }
+        let simplified_result = crate::lambda::lam_compile_main::add_hoisted_function_aliases(
+            simplified_result,
+            &self.hoisted_functions,
+        );
         self.cmj_export_constants =
             collect_cmj_export_constants_from_simplified_lambda(&simplified_result.lambda);
         self.cmj_export_arities = collect_cmj_export_arities_from_simplified_lambda(
@@ -643,30 +647,18 @@ impl LambdaCompiler {
                 modules: vec![],
                 side_effect,
             };
-            if std::env::var_os("DEBUG_SIMPLIFIED_LAMBDA").is_some() {
-                std::fs::write("/tmp/deps-initial.log", format!("{:#?}", deps.program)).ok();
-            }
             deps = {
                 let _phase = info_span!("compiler.js_pass_flatten").entered();
                 apply_js_flatten_pass(deps)
             };
-            if std::env::var_os("DEBUG_SIMPLIFIED_LAMBDA").is_some() {
-                std::fs::write("/tmp/deps-flatten.log", format!("{:#?}", deps.program)).ok();
-            }
             deps = {
                 let _phase = info_span!("compiler.js_pass_external_shadow").entered();
                 apply_external_shadow_pass(deps)
             };
-            if std::env::var_os("DEBUG_SIMPLIFIED_LAMBDA").is_some() {
-                std::fs::write("/tmp/deps-shadow.log", format!("{:#?}", deps.program)).ok();
-            }
             deps = {
                 let _phase = info_span!("compiler.js_pass_tailcall_inline").entered();
                 apply_js_tailcall_inline_pass(deps)
             };
-            if std::env::var_os("DEBUG_SIMPLIFIED_LAMBDA").is_some() {
-                std::fs::write("/tmp/deps-tail.log", format!("{:#?}", deps.program)).ok();
-            }
             deps = {
                 let _phase = info_span!("compiler.js_pass_record_rest").entered();
                 apply_js_record_rest_pass(deps)
@@ -675,16 +667,10 @@ impl LambdaCompiler {
                 let _phase = info_span!("compiler.js_pass_flatten_mark_dead").entered();
                 apply_js_flatten_and_mark_dead_pass(deps, self.jsx_preserve)
             };
-            if std::env::var_os("DEBUG_SIMPLIFIED_LAMBDA").is_some() {
-                std::fs::write("/tmp/deps-dead.log", format!("{:#?}", deps.program)).ok();
-            }
             deps = {
                 let _phase = info_span!("compiler.js_pass_shake").entered();
                 apply_js_shake_pass(deps)
             };
-            if std::env::var_os("DEBUG_SIMPLIFIED_LAMBDA").is_some() {
-                std::fs::write("/tmp/deps-final.log", format!("{:#?}", deps.program)).ok();
-            }
             {
                 let _phase = info_span!("compiler.js_required_modules").entered();
                 let mut required_modules = self.collect_required_module_set(&deps.program.block);
@@ -2300,13 +2286,6 @@ impl LambdaCompiler {
                     return self.compile_short_circuit_binding_block(kind, id, op, lhs, rhs);
                 }
                 let value_compiled = self.compile_expr(value);
-                if std::env::var_os("DEBUG_SIMPLIFIED_LAMBDA").is_some() {
-                    std::fs::write(
-                        format!("/tmp/compiled-binding-{}.log", id.name()),
-                        format!("{value:#?}\n=>\n{value_compiled:#?}"),
-                    )
-                    .ok();
-                }
                 let mut block = value_compiled.prelude;
                 if block_terminates(&block) {
                     return block;

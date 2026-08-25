@@ -182,8 +182,34 @@ pub fn deep_flatten_owned_with_id_gen(lam: Lambda, id_gen: &IdGenerator) -> Lamb
         }
     }
 
+    // The shape `let x = <immutable block> in ... in apply f args` is the
+    // residue left by beta reduction of an immediately applied function.
+    fn rhs_is_beta_residue(lam: &Lambda) -> bool {
+        match lam {
+            Lambda::Llet(LetKind::Alias | LetKind::Strict | LetKind::StrictOpt, _, value, rest)
+                if matches!(
+                    value.as_ref(),
+                    Lambda::Lprim(PrimInfo {
+                        primitive: Primitive::Pmakeblock(_, _, Mutable::Immutable),
+                        ..
+                    }) | Lambda::Lvar(_)
+                ) =>
+            {
+                rhs_is_beta_residue(rest)
+            }
+            Lambda::Lapply(_) => true,
+            _ => false,
+        }
+    }
+
     fn flatten(acc: &mut Vec<FlattenGroup>, lam: Lambda, id_gen: &IdGenerator) -> Lambda {
         match lam {
+            Lambda::Llet(kind, id, value, body) if rhs_is_beta_residue(&value) => {
+                // Keep beta-reduction residue local so `Lam_pass_lets_dce`
+                // can substitute its single-use arguments back into the call.
+                acc.push(FlattenGroup::Single(kind, id, aux(*value, id_gen)));
+                flatten(acc, *body, id_gen)
+            }
             Lambda::Llet(kind, id, value, body) => {
                 let value = match *value {
                     Lambda::Lprim(PrimInfo {
