@@ -518,6 +518,9 @@ pub enum TypeCoreError {
     /// Applying non-function.
     ApplyNonFunction { loc: LocIdx, typ: TypeExprRef },
 
+    /// A labeled argument was used where frontend operator syntax forbids it.
+    MisplacedLabelSyntax { loc: LocIdx },
+
     /// Backtick tagged-template syntax used with a non-tag value.
     TaggedTemplateNonTag { loc: LocIdx, typ: TypeExprRef },
 
@@ -708,7 +711,7 @@ pub enum TypeCoreError {
 
     /// Abstract wrong label.
     AbstractWrongLabel {
-        loc: LocIdx,
+        loc: Location,
         label: crate::types::ArgLabel,
         ty: TypeExprRef,
     },
@@ -9406,6 +9409,21 @@ fn type_application(
 ) -> TypeCoreResult<Expression> {
     use crate::types::typedtree::ApplyArg;
 
+    // compiler/frontend/ast_exp_apply.ml:47-50 validates all arguments to
+    // special infix applications before rewriting them. Keep that boundary
+    // ahead of function lookup so a malformed pipe reports the label itself,
+    // rather than an unbound synthetic `->` value.
+    if let crate::parser::ast::ExpressionDesc::Pexp_ident(lid) = &*funct.pexp_desc
+        && tctx.arena.is_lident(lid.txt, "->")
+        && let Some((_, arg_idx)) = args
+            .iter()
+            .find(|(label, _)| !matches!(label, ArgLabel::Nolabel))
+    {
+        return Err(TypeCoreError::MisplacedLabelSyntax {
+            loc: tctx.arena.get_expr(*arg_idx).pexp_loc,
+        });
+    }
+
     enum ApplyArgThunk<'a> {
         Provided {
             label: crate::types::ArgLabel,
@@ -15612,6 +15630,33 @@ fn type_function_nary(
         .iter()
         .map(|param| convert_arg_label_for_ctx(&param.p_lbl, tctx.arena))
         .collect::<Vec<_>>();
+
+    // compiler/ml/typecore.ml:3594-3613 checks labels against an existing
+    // expected arrow before committing the source function shape. This keeps
+    // label mismatches on the dedicated Abstract_wrong_label diagnostic path.
+    let expanded_expected = crate::types::ctype::expand_head(ctx, env, expected_ty);
+    let expected_arrow = match &*ctx.get_desc(expanded_expected) {
+        TypeDesc::Tarrow { args, ret } if args.len() == labels.len() => Some((args.clone(), *ret)),
+        _ => None,
+    };
+    if let Some((expected_args, expected_ret)) = expected_arrow {
+        for (index, (param, label)) in params.iter().zip(&labels).enumerate() {
+            if !label.same_label(&expected_args[index].lbl) {
+                let remainder = ctx.new_type(TypeDesc::Tarrow {
+                    args: expected_args[index..].to_vec(),
+                    ret: expected_ret,
+                });
+                let param_loc = tctx.arena.get_pat(param.p_pat).ppat_loc;
+                let mut error_loc = tctx.arena.to_location(loc);
+                error_loc.loc_start = tctx.arena.to_location(param_loc).loc_start;
+                return Err(TypeCoreError::AbstractWrongLabel {
+                    loc: error_loc,
+                    label: label.clone(),
+                    ty: remainder,
+                });
+            }
+        }
+    }
 
     let fun_args = labels
         .iter()

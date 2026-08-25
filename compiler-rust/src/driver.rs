@@ -3305,6 +3305,17 @@ fn type_mod_error_to_anyhow(
             )
             .into()
         }
+        TypeModError::CoreError(TypeCoreError::MisplacedLabelSyntax { loc }) => UserDiagnostic::new(
+            format_compiler_error_report(
+                arena,
+                source,
+                filename,
+                *loc,
+                "Label syntax is not supported in this position",
+            ),
+            2,
+        )
+        .into(),
         TypeModError::CoreError(TypeCoreError::TaggedTemplateNonTag { loc, typ }) => {
             UserDiagnostic::new(
                 format_tagged_template_non_tag_report(
@@ -3334,7 +3345,7 @@ fn type_mod_error_to_anyhow(
         TypeModError::CoreError(TypeCoreError::AbstractWrongLabel { loc, label, ty }) => {
             UserDiagnostic::new(
                 format_abstract_wrong_label_report(
-                    type_ctx, arena, source, filename, *loc, label, *ty,
+                    type_ctx, source, filename, loc, label, *ty,
                 ),
                 2,
             )
@@ -5888,6 +5899,18 @@ fn push_ocaml_multiline_type_application(
     output.push('\n');
 }
 
+fn compilation_unit_name(filename: &str) -> String {
+    let stem = std::path::Path::new(filename)
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .unwrap_or(filename);
+    let mut chars = stem.chars();
+    match chars.next() {
+        Some(first) => first.to_uppercase().chain(chars).collect(),
+        None => stem.to_string(),
+    }
+}
+
 fn format_unbound_value_report(
     arena: &ParseArena,
     source: &str,
@@ -5955,6 +5978,20 @@ fn format_unbound_value_report(
         message.push_str(RESET);
     }
 
+    // Generated JSX component lookups use Location.none. OCaml's diagnostic
+    // header reads Location.input_name in that case, which the compiler driver
+    // has set to the compilation-unit name rather than the source path.
+    let report_filename;
+    let filename = if qualifier.is_some()
+        && arena.loc_ghost(loc)
+        && arena.loc_start(loc).cnum < 0
+        && arena.loc_end(loc).cnum < 0
+    {
+        report_filename = compilation_unit_name(filename);
+        &report_filename
+    } else {
+        filename
+    };
     format_compiler_error_report(arena, source, filename, loc, &message)
 }
 
@@ -6223,10 +6260,12 @@ fn format_expr_type_clash_report(
         return format_compiler_error_report(arena, source, filename, loc, "Type error.");
     };
 
-    let actual_is_function = matches!(
-        &*type_ctx.get_desc(type_ctx.repr(actual)),
-        TypeDesc::Tarrow { .. }
-    );
+    let actual_is_function = trace.iter().any(|(actual, _)| {
+        let actual = type_alias_full_expansion(type_ctx, *actual)
+            .or_else(|| rendered_alias_expansion(type_ctx, *actual, trace, true))
+            .unwrap_or_else(|| type_ctx.repr(*actual));
+        matches!(&*type_ctx.get_desc(actual), TypeDesc::Tarrow { .. })
+    });
     let expected_is_jsx_component = trace
         .iter()
         .any(|(_, expected)| type_is_jsx_component(type_ctx, *expected));
@@ -6387,6 +6426,8 @@ fn format_expr_type_clash_report(
             | Some(TypeClashContext::AssertCondition)
     );
 
+    let mut shared_type_printer =
+        plain_function_to_component.then(|| TypeExprPrinter::new(type_ctx));
     message.push_str(&error_text);
     if suppress_alias_expansion {
         append_type_clash_type_without_alias_expansion(
@@ -6396,6 +6437,16 @@ fn format_expr_type_clash_report(
             ERROR,
             actual,
             &mut message,
+        );
+    } else if let Some(printer) = shared_type_printer.as_mut() {
+        append_type_clash_type_with_printer(
+            type_ctx,
+            trace,
+            true,
+            ERROR,
+            actual,
+            &mut message,
+            printer,
         );
     } else {
         append_type_clash_type(type_ctx, trace, true, ERROR, actual, &mut message);
@@ -6453,6 +6504,9 @@ fn format_expr_type_clash_report(
             message.push_str(RESET);
         }
         message.push_str(" is expecting:");
+        if plain_function_to_component {
+            message.push_str("\n  ");
+        }
         if type_is_object(type_ctx, expected) {
             message.push_str("\n  ");
             if let Some((field_name, expected_field_ty)) =
@@ -6488,17 +6542,41 @@ fn format_expr_type_clash_report(
 
                 return format_compiler_error_report(arena, source, filename, loc, &message);
             }
-        } else {
+        } else if !plain_function_to_component {
             message.push(' ');
         }
-        append_type_clash_type(type_ctx, trace, false, INFO, expected, &mut message);
+        if let Some(printer) = shared_type_printer.as_mut() {
+            append_type_clash_type_with_printer(
+                type_ctx,
+                trace,
+                false,
+                INFO,
+                expected,
+                &mut message,
+                printer,
+            );
+        } else {
+            append_type_clash_type(type_ctx, trace, false, INFO, expected, &mut message);
+        }
     } else {
         if plain_function_to_component {
             message.push_str("But it's expected to have type:\n  ");
         } else {
             message.push_str(&expected_text);
         }
-        append_type_clash_type(type_ctx, trace, false, INFO, expected, &mut message);
+        if let Some(printer) = shared_type_printer.as_mut() {
+            append_type_clash_type_with_printer(
+                type_ctx,
+                trace,
+                false,
+                INFO,
+                expected,
+                &mut message,
+                printer,
+            );
+        } else {
+            append_type_clash_type(type_ctx, trace, false, INFO, expected, &mut message);
+        }
         if plain_function_to_component {
             let inline = " \x1b[2m(defined as\x1b[0m \x1b[1;33mJsx.component";
             let multiline = " \x1b[2m(defined as\x1b[0m\n    \x1b[1;33mJsx.component";
@@ -6771,12 +6849,32 @@ fn append_type_clash_type(
     ty: TypeExprRef,
     message: &mut String,
 ) {
+    append_type_clash_type_with_printer(
+        type_ctx,
+        trace,
+        actual_side,
+        color,
+        ty,
+        message,
+        &mut TypeExprPrinter::new(type_ctx),
+    );
+}
+
+fn append_type_clash_type_with_printer(
+    type_ctx: &TypeContext,
+    trace: &[(TypeExprRef, TypeExprRef)],
+    actual_side: bool,
+    color: &str,
+    ty: TypeExprRef,
+    message: &mut String,
+    printer: &mut TypeExprPrinter<'_>,
+) {
     const DIM: &str = "\x1b[2m";
     const RESET: &str = "\x1b[0m";
 
     let original_ty = ty;
     let ty = type_clash_display_type(type_ctx, trace, actual_side, ty);
-    let ty_text = format_type_expr(type_ctx, ty);
+    let ty_text = printer.format(ty);
     message.push_str(color);
     message.push_str(&ty_text);
     message.push_str(RESET);
@@ -6784,7 +6882,7 @@ fn append_type_clash_type(
     if ty == original_ty
         && let Some(expansion) = rendered_alias_expansion(type_ctx, ty, trace, actual_side)
         && {
-            let expansion_text = format_type_expr(type_ctx, expansion);
+            let expansion_text = printer.format(expansion);
             expansion_text != ty_text || !type_is_polyvariant(type_ctx, expansion)
         }
     {
@@ -6794,7 +6892,7 @@ fn append_type_clash_type(
         message.push_str(RESET);
         message.push(' ');
         message.push_str(color);
-        message.push_str(&format_type_expr(type_ctx, expansion));
+        message.push_str(&printer.format(expansion));
         message.push_str(RESET);
         message.push_str(DIM);
         message.push(')');
@@ -10143,8 +10241,8 @@ fn count_arrow_args(type_ctx: &TypeContext, ty: TypeExprRef, mut count: usize) -
         }
 
         match &*type_ctx.get_desc(repr) {
-            TypeDesc::Tarrow { ret, .. } => {
-                count += 1;
+            TypeDesc::Tarrow { args, ret } => {
+                count += args.len();
                 current = *ret;
             }
             TypeDesc::Tlink(next) | TypeDesc::Tsubst(next) => {
@@ -10169,8 +10267,8 @@ fn format_apply_non_function_report(
     let repr = type_ctx.repr(typ);
     let mut message = String::new();
     match &*type_ctx.get_desc(repr) {
-        TypeDesc::Tarrow { ret, .. } => {
-            let count = count_arrow_args(type_ctx, *ret, 1);
+        TypeDesc::Tarrow { args, ret } => {
+            let count = count_arrow_args(type_ctx, *ret, args.len());
             message.push_str("This function has type ");
             message.push_str(INFO);
             message.push_str(&format_type_expr(type_ctx, typ));
@@ -10189,11 +10287,17 @@ fn format_apply_non_function_report(
             message.push_str(INFO);
             message.push_str(&format_type_expr(type_ctx, typ));
             message.push_str(RESET);
-            message.push_str("\nIt can't be called like a function. Use it with backtick syntax instead, e.g. tag`SELECT ${id}`.");
+            message.push_str(
+                "\nIt can't be called like a function. Use it with backtick syntax instead, e.g. ",
+            );
+            message.push_str(INFO);
+            message.push_str("tag`SELECT ${id}`");
+            message.push_str(RESET);
+            message.push('.');
         }
         _ => {
             message.push_str("This can't be called, it's not a function.\n");
-            message.push_str("The function has type: ");
+            message.push_str("It has type: ");
             message.push_str(&format_type_expr(type_ctx, typ));
         }
     }
@@ -10243,10 +10347,9 @@ fn format_too_many_arguments_report(
 
 fn format_abstract_wrong_label_report(
     type_ctx: &TypeContext,
-    arena: &ParseArena,
     source: &str,
     filename: &str,
-    loc: LocIdx,
+    loc: &Location,
     label: &TypeArgLabel,
     ty: TypeExprRef,
 ) -> String {
@@ -10264,7 +10367,7 @@ fn format_abstract_wrong_label_report(
         format_type_expr(type_ctx, ty),
         label_mark
     );
-    format_compiler_error_report(arena, source, filename, loc, &message)
+    format_compiler_error_report_from_location(source, filename, loc, &message)
 }
 
 fn format_apply_wrong_label_report(
@@ -10789,7 +10892,6 @@ fn collect_function_arg_labels(
         }
     }
 
-    labels.reverse();
     labels
 }
 

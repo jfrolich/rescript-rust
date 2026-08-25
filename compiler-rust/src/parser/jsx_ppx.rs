@@ -2543,7 +2543,13 @@ fn component_call_needs_function_error_loc(
 fn component_ref_plain_args_error_loc(arena: &ParseArena, expr_idx: ExprIdx) -> Option<Location> {
     let expr = arena.get_expr(expr_idx);
     match &*expr.pexp_desc {
-        ExpressionDesc::Pexp_fun(_) => component_ref_plain_args_error_loc_in_fun(arena, expr_idx),
+        ExpressionDesc::Pexp_fun(fun) => {
+            if let Some(params) = arena.stored_nary_fun_params(fun) {
+                component_ref_plain_args_error_loc_in_params(arena, params)
+            } else {
+                component_ref_plain_args_error_loc_in_fun(arena, expr_idx)
+            }
+        }
         ExpressionDesc::Pexp_newtype(inner) => {
             let (_, body_idx) = &**inner;
             component_ref_plain_args_error_loc(arena, *body_idx)
@@ -2566,6 +2572,24 @@ fn component_ref_plain_args_error_loc(arena: &ParseArena, expr_idx: ExprIdx) -> 
         }
         _ => None,
     }
+}
+
+fn component_ref_plain_args_error_loc_in_params(
+    arena: &ParseArena,
+    params: &[crate::parser::ast::FunParam],
+) -> Option<Location> {
+    for param in params {
+        if matches!(param.p_lbl, ArgLabel::Labelled(_) | ArgLabel::Optional(_)) {
+            continue;
+        }
+        let pattern = arena.get_pat(param.p_pat);
+        if !pattern_is_unit_or_any(arena, pattern)
+            && !pattern_is_plain_name_or_constraint(pattern, arena)
+        {
+            return Some(pattern.ppat_loc);
+        }
+    }
+    None
 }
 
 fn component_ref_plain_args_error_loc_in_fun(
