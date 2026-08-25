@@ -11375,12 +11375,23 @@ pub fn compile_source_to_js_with_options(
         return Err(persistent_env_error_to_anyhow(error, filename));
     }
 
-    // OCaml's type_implementation_more calls normalize_signature ONLY when there
-    // is no .resi file (Mli_exists branch skips it). Match this behavior:
-    // normalize sorts Tvariant row fields and Tobject field chains alphabetically.
-    let inferred_simple_signature = if !has_resi {
+    // OCaml's no-interface path runs inferred-signature inclusion before
+    // checking non-generalizable schemes and normalizing the signature
+    // (compiler/ml/typemod.ml:1766-1771). Besides producing the export
+    // coercion, the real Includemod traversal performs substitution and Ident
+    // allocations that must precede Lambda identifier allocation.
+    let (inferred_simple_signature, inferred_implementation_coercion) = if !has_resi {
         let simple_signature =
             crate::types::includemod::simplify_signature(&typed_structure.str_type);
+        let implementation_coercion = crate::types::includemod::compunit(
+            &type_ctx,
+            &env,
+            source_file_for_interface,
+            &typed_structure.str_type,
+            "(inferred signature)",
+            &simple_signature,
+        )
+        .map_err(|e| anyhow!("Inferred signature inclusion failed: {e:?}"))?;
         if let Err(e) =
             crate::types::typemod::check_nongen_schemes(&type_ctx, &final_env, &simple_signature)
         {
@@ -11394,9 +11405,9 @@ pub fn compile_source_to_js_with_options(
             ));
         }
         normalize_signature_types(&type_ctx, &typed_structure, &final_env);
-        Some(simple_signature)
+        (Some(simple_signature), Some(implementation_coercion))
     } else {
-        None
+        (None, None)
     };
 
     // OCaml compiler/ml/typemod.ml:1769-1776 forces delayed checks before
@@ -11479,14 +11490,16 @@ pub fn compile_source_to_js_with_options(
         eprintln!("[drawlambda-stage] start");
     }
     let unit_name = options.current_unit_name().unwrap_or_default();
-    let implementation_coercion = compute_raw_implementation_coercion(
-        &mut tctx,
-        &type_ctx,
-        &env,
-        &typed_structure,
-        options,
-        Some(has_resi),
-    );
+    let implementation_coercion = inferred_implementation_coercion.unwrap_or_else(|| {
+        compute_raw_implementation_coercion(
+            &mut tctx,
+            &type_ctx,
+            &env,
+            &typed_structure,
+            options,
+            Some(has_resi),
+        )
+    });
     let mut raw_converter =
         crate::raw_lambda::convert::RawLambdaConverter::with_start_stamp_and_unit_name(
             parser.arena(),
@@ -11863,86 +11876,6 @@ fn build_name_based_coercion(
     }
 }
 
-fn build_inferred_signature_coercion(
-    impl_sig: &crate::types::decl::Signature,
-) -> crate::types::typedtree::ModuleCoercion {
-    use crate::types::decl::{SignatureItem, ValueKind};
-    use crate::types::includemod::is_runtime_component;
-    use crate::types::typedtree::ModuleCoercion;
-
-    let mut seen_values = std::collections::HashSet::new();
-    let mut keep = vec![true; impl_sig.len()];
-    // OCaml's inferred-signature path uses Typemod.simplify_signature before
-    // Includemod.compunit; simplify_signature only drops earlier duplicate
-    // values by name. See compiler/ml/typemod.ml:650-663 and 1768-1770.
-    for (idx, item) in impl_sig.iter().enumerate().rev() {
-        if let SignatureItem::SigValue(id, _) = item {
-            keep[idx] = seen_values.insert(id.name().to_string());
-        }
-    }
-
-    let mut runtime_pos = 0usize;
-    let mut len_impl = 0usize;
-    let mut coercions = Vec::new();
-    let mut runtime_fields = Vec::new();
-    let mut id_pos_list = Vec::new();
-
-    for (idx, item) in impl_sig.iter().enumerate() {
-        let current_runtime_pos = runtime_pos;
-        if let SignatureItem::SigModule(id, _, _) = item {
-            // OCaml builds id_pos_list by consing during a left fold, so the
-            // final list is reverse module order. See compiler/ml/includemod.ml:288-293.
-            id_pos_list.push((
-                id.clone(),
-                current_runtime_pos,
-                ModuleCoercion::Tcoerce_none,
-            ));
-        }
-        if is_runtime_component(item) {
-            runtime_pos += 1;
-            len_impl += 1;
-        }
-        if !keep[idx] {
-            continue;
-        }
-        match item {
-            SignatureItem::SigValue(id, desc)
-                if !matches!(desc.val_kind, ValueKind::ValPrim(_)) =>
-            {
-                coercions.push((current_runtime_pos, ModuleCoercion::Tcoerce_none));
-                runtime_fields.push(id.name().to_string());
-            }
-            SignatureItem::SigTypext(id, _, _) | SignatureItem::SigModule(id, _, _) => {
-                coercions.push((current_runtime_pos, ModuleCoercion::Tcoerce_none));
-                runtime_fields.push(id.name().to_string());
-            }
-            SignatureItem::SigClass => {
-                coercions.push((current_runtime_pos, ModuleCoercion::Tcoerce_none));
-            }
-            _ => {}
-        }
-    }
-
-    id_pos_list.reverse();
-
-    // Matches Includemod.signatures: it returns Tcoerce_structure when the
-    // runtime lengths differ, otherwise simplify_structure_coercion can erase
-    // identity coercions. See compiler/ml/includemod.ml:329-342 and 181-188.
-    let is_identity = len_impl == coercions.len()
-        && coercions
-            .iter()
-            .enumerate()
-            .all(|(expected_pos, (actual_pos, coercion))| {
-                *actual_pos == expected_pos && matches!(coercion, ModuleCoercion::Tcoerce_none)
-            });
-
-    if is_identity {
-        ModuleCoercion::Tcoerce_none
-    } else {
-        ModuleCoercion::Tcoerce_structure(coercions, id_pos_list, runtime_fields)
-    }
-}
-
 fn report_compunit_inclusion_warnings(
     tctx: &mut TypeCheckContext<'_>,
     warnings: Vec<crate::diagnostics::Warning>,
@@ -12088,7 +12021,9 @@ fn compute_raw_implementation_coercion(
     let has_resi = known_has_interface
         .unwrap_or_else(|| std::path::Path::new(&format!("{source_file}i")).exists());
     if !has_resi {
-        return build_inferred_signature_coercion(impl_sig);
+        // The no-interface coercion is computed at the Typemod boundary before
+        // signature normalization and passed through to Lambda translation.
+        return crate::types::typedtree::ModuleCoercion::Tcoerce_none;
     }
 
     let module_name = module_name_from_source_filename(source_file);
@@ -14862,6 +14797,7 @@ pub fn compile_preprocessed_structure_in_process_until_js(
                 .map_err(|e| anyhow!("Type checking failed: {e:?}"))
         })?;
 
+    let mut inferred_implementation_coercion = None;
     let mut published_signature = {
         let _phase = info_span!("compiler.signature_prepare").entered();
         if has_interface {
@@ -14877,6 +14813,17 @@ pub fn compile_preprocessed_structure_in_process_until_js(
         let simple_signature =
             crate::types::includemod::simplify_signature(&typed_structure.str_type);
         if !has_interface {
+            inferred_implementation_coercion = Some(
+                crate::types::includemod::compunit(
+                    &type_ctx,
+                    &env,
+                    filename,
+                    &typed_structure.str_type,
+                    "(inferred signature)",
+                    &simple_signature,
+                )
+                .map_err(|e| anyhow!("Inferred signature inclusion failed: {e:?}"))?,
+            );
             if let Err(e) = crate::types::typemod::check_nongen_schemes(
                 &type_ctx,
                 &final_env,
@@ -15024,14 +14971,16 @@ pub fn compile_preprocessed_structure_in_process_until_js(
         hoisted_exports,
     ) = crate::timing::measure(crate::timing::Phase::Lambda, || {
         let _phase = info_span!("compiler.raw_lambda").entered();
-        let implementation_coercion = compute_raw_implementation_coercion(
-            &mut tctx,
-            &type_ctx,
-            &env,
-            &typed_structure,
-            options,
-            Some(has_interface),
-        );
+        let implementation_coercion = inferred_implementation_coercion.unwrap_or_else(|| {
+            compute_raw_implementation_coercion(
+                &mut tctx,
+                &type_ctx,
+                &env,
+                &typed_structure,
+                options,
+                Some(has_interface),
+            )
+        });
         let mut raw_converter =
             crate::raw_lambda::convert::RawLambdaConverter::with_start_stamp_and_unit_name(
                 arena,
