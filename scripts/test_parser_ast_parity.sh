@@ -463,6 +463,13 @@ test_single_file() {
         local ocaml_iast_file="$file_temp/ocaml.iast"
         local rust_iast_file="$file_temp/rust.iast"
         local ocaml_bsc_cmd=("$OCAML_BSC")
+        local rust_bsc_cmd=("$RUST_BSC")
+        if [[ -n "$TELLA_DIR" && "$file" == "$TELLA_DIR/"* ]]; then
+            # The Tella project enables LetUnwrap in rescript.json. These direct
+            # bsc invocations bypass rewatch's config-to-CLI argument plumbing.
+            ocaml_bsc_cmd+=(-enable-experimental LetUnwrap)
+            rust_bsc_cmd+=(-enable-experimental LetUnwrap)
+        fi
         if $use_spice_ppx; then
             ocaml_bsc_cmd+=(-ppx "$SPICE_PPX")
         fi
@@ -472,7 +479,7 @@ test_single_file() {
             local rust_spice_sexp="$file_temp/rust.sexp-with-locs-ppx-and-spice"
 
             if timeout "$TIMEOUT_SECONDS" "${ocaml_bsc_cmd[@]}" -bs-ast -dparsetree-sexp-locs "$file" -o "$ocaml_ast_file" > /dev/null 2> "$ocaml_spice_sexp" && \
-               timeout "$TIMEOUT_SECONDS" "$RUST_BSC" -bs-ast -dparsetree-sexp-locs "$file" -o "$rust_ast_file" > /dev/null 2> "$rust_spice_sexp"; then
+               timeout "$TIMEOUT_SECONDS" "${rust_bsc_cmd[@]}" -bs-ast -dparsetree-sexp-locs "$file" -o "$rust_ast_file" > /dev/null 2> "$rust_spice_sexp"; then
                 if ! diff -q "$ocaml_spice_sexp" "$rust_spice_sexp" > /dev/null 2>&1; then
                     sexp_locs_ppx_spice_diff=1
                     {
@@ -495,7 +502,7 @@ test_single_file() {
                 } > "$TEMP_DIR/sexp_locs_ppx_spice_diffs/$safe_name.diff" 2>&1
             fi
         elif timeout "$TIMEOUT_SECONDS" "${ocaml_bsc_cmd[@]}" -bs-ast "$file" -o "$ocaml_ast_file" 2>/dev/null && \
-             timeout "$TIMEOUT_SECONDS" "$RUST_BSC" -bs-ast "$file" -o "$rust_ast_file" 2>/dev/null; then
+             timeout "$TIMEOUT_SECONDS" "${rust_bsc_cmd[@]}" -bs-ast "$file" -o "$rust_ast_file" 2>/dev/null; then
             # Both compilers create .iast for .resi files (regardless of -o), so check for that.
             if [[ -f "$ocaml_iast_file" && ! -f "$ocaml_ast_file" ]]; then
                 ocaml_ast_file="$ocaml_iast_file"
