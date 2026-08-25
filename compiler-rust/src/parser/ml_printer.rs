@@ -862,14 +862,27 @@ fn print_value_binding<W: Write>(
                 f.string("async ");
             }
 
-            // Print arity annotation (Arity is now ArityIdx, look up from arena)
             if let Some(n) = arena.get_arity(*arity) {
                 f.string(&format!("[arity:{}]", n));
             }
 
-            print_inline_param(f, arena, arg_label, default, arena.get_pat(*lhs));
-            f.space(); // @ between param and next
-            let body = print_remaining_inline_params(f, arena, arena.get_expr(*rhs));
+            let body = if let Some(params) = arena.stored_nary_fun_params(inner) {
+                for param in params {
+                    print_inline_param(
+                        f,
+                        arena,
+                        &param.p_lbl,
+                        &param.p_default,
+                        arena.get_pat(param.p_pat),
+                    );
+                    f.space();
+                }
+                arena.get_expr(*rhs)
+            } else {
+                print_inline_param(f, arena, arg_label, default, arena.get_pat(*lhs));
+                f.space(); // @ between param and next
+                print_remaining_inline_params(f, arena, arena.get_expr(*rhs))
+            };
 
             // OCaml: pp f "=@;%a" (expression ctxt) x
             f.string("=");
@@ -1497,10 +1510,7 @@ fn print_expression_inner<W: Write>(
             } = **inner;
             // OCaml: arity is only printed when explicitly set, not computed
             // Look up arity from arena (Arity is now ArityIdx)
-            let arity_value = match arena.get_arity(*arity) {
-                Some(n) => Some(n as usize),
-                None => None,
-            };
+            let arity_value = arena.get_arity(*arity).map(|n| n as usize);
             if use_parens {
                 f.string("(");
             }
@@ -1514,8 +1524,20 @@ fn print_expression_inner<W: Write>(
             if let Some(n) = arity_value {
                 f.string(&format!("[arity:{}]", n));
             }
-            // OCaml's label_exp prints param + trailing break/space
-            print_label_exp_with_break(f, arena, arg_label, default, arena.get_pat(*lhs));
+            // OCaml's label_exp prints each param + trailing break/space.
+            if let Some(params) = arena.stored_nary_fun_params(inner) {
+                for param in params {
+                    print_label_exp_with_break(
+                        f,
+                        arena,
+                        &param.p_lbl,
+                        &param.p_default,
+                        arena.get_pat(param.p_pat),
+                    );
+                }
+            } else {
+                print_label_exp_with_break(f, arena, arg_label, default, arena.get_pat(*lhs));
+            }
             f.string("->");
             f.space();
             print_expression(f, arena, arena.get_expr(*rhs));
@@ -2798,28 +2820,30 @@ fn print_core_type_inner<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, typ
             // OCaml: pp f "@[<2>%a@;->@;%a%s@]"
             // Structural box with indent 2, break hints around ->
             f.open_box(BoxKind::Box, 2);
-            print_arg_label(f, arena, &arg.lbl);
-            // Arrow and alias types as args need parentheses (OCaml's core_type1
-            // wraps them via the `| _ -> paren true (core_type ctxt) f x` fallthrough)
-            let arg_typ = arena.get_core_type(arg.typ);
-            let arg_needs_parens = matches!(
-                *arg_typ.ptyp_desc,
-                CoreTypeDesc::Ptyp_arrow(_) | CoreTypeDesc::Ptyp_alias(..)
-            );
-            if arg_needs_parens {
-                f.string("(");
+            let args = arena.nary_arrow_args(arg, *arity);
+            for arg in args.iter() {
+                print_arg_label(f, arena, &arg.lbl);
+                // Arrow and alias types as args need parentheses (OCaml's core_type1
+                // wraps them via the `| _ -> paren true (core_type ctxt) f x` fallthrough)
+                let arg_typ = arena.get_core_type(arg.typ);
+                let arg_needs_parens = matches!(
+                    *arg_typ.ptyp_desc,
+                    CoreTypeDesc::Ptyp_arrow(_) | CoreTypeDesc::Ptyp_alias(..)
+                );
+                if arg_needs_parens {
+                    f.string("(");
+                }
+                print_core_type(f, arena, arg_typ);
+                if arg_needs_parens {
+                    f.string(")");
+                }
+                // Print attributes on the argument (after the type)
+                print_attributes(f, arena, &arg.attrs);
+                f.space(); // Break hint before ->
+                f.string("->");
+                f.space(); // Break hint after ->
             }
-            print_core_type(f, arena, arg_typ);
-            if arg_needs_parens {
-                f.string(")");
-            }
-            // Print attributes on the argument (after the type)
-            print_attributes(f, arena, &arg.attrs);
-            f.space(); // Break hint before ->
-            f.string("->");
-            f.space(); // Break hint after ->
             print_core_type(f, arena, arena.get_core_type(*ret));
-            // Look up arity from arena (Arity is now ArityIdx)
             if let Some(n) = arena.get_arity(*arity) {
                 f.string(&format!(" (a:{})", n));
             }
