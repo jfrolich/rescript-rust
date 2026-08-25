@@ -14919,12 +14919,17 @@ fn validate_expression_idx_this_errors(expr_idx: ExprIdx, arena: &mut ParseArena
 
 fn validate_method_callback_this_errors(
     expr: &Expression,
-    arg_label: &ArgLabel,
-    lhs: PatIdx,
-    rhs: ExprIdx,
+    fun: &PexpFun,
     arena: &mut ParseArena,
 ) -> PpxResult<()> {
-    let self_pat = arena.get_pat(lhs).clone();
+    // Parser-created functions keep the current Parsetree's n-ary params and
+    // newtypes in side tables; the inline Pexp_fun fields only describe the
+    // compact first-parameter representation.
+    let params = arena.nary_fun_params(fun).into_owned();
+    let _newtypes = arena.nary_fun_newtypes(fun);
+    let body = arena.nary_fun_body(fun);
+
+    let self_pat = arena.get_pat(params[0].p_pat).clone();
     if single_var_pattern_name_conservative(&self_pat, arena).is_none() {
         return Err(PpxError::at_loc(
             self_pat.ppat_loc,
@@ -14932,49 +14937,34 @@ fn validate_method_callback_this_errors(
         ));
     }
 
-    if matches!(arg_label, ArgLabel::Optional(_)) {
+    if params
+        .iter()
+        .any(|param| matches!(param.p_lbl, ArgLabel::Optional(_)))
+    {
         return Err(PpxError::at_loc(
             expr.pexp_loc,
             "Uncurried function doesn't support optional arguments yet",
         ));
     }
 
-    let mut current_body = arena.get_expr(rhs).clone();
-    loop {
-        if has_this_attr(&current_body.pexp_attributes, arena) {
-            return validate_expression_this_errors(&current_body, arena);
-        }
-        match &*current_body.pexp_desc {
-            ExpressionDesc::Pexp_fun(inner) => {
-                if matches!(inner.arg_label, ArgLabel::Optional(_)) {
-                    return Err(PpxError::at_loc(
-                        expr.pexp_loc,
-                        "Uncurried function doesn't support optional arguments yet",
-                    ));
-                }
-                current_body = arena.get_expr(inner.rhs).clone();
-            }
-            _ => return validate_expression_this_errors(&current_body, arena),
-        }
-    }
+    validate_expression_idx_this_errors(body, arena)
 }
 
 fn validate_expression_this_errors(expr: &Expression, arena: &mut ParseArena) -> PpxResult<()> {
     match &*expr.pexp_desc {
         ExpressionDesc::Pexp_fun(inner) if has_this_attr(&expr.pexp_attributes, arena) => {
-            validate_method_callback_this_errors(
-                expr,
-                &inner.arg_label,
-                inner.lhs,
-                inner.rhs,
-                arena,
-            )
+            validate_method_callback_this_errors(expr, inner, arena)
         }
         ExpressionDesc::Pexp_fun(inner) => {
-            if let Some(default) = inner.default {
-                validate_expression_idx_this_errors(default, arena)?;
+            let params = arena.nary_fun_params(inner).into_owned();
+            let _newtypes = arena.nary_fun_newtypes(inner);
+            let body = arena.nary_fun_body(inner);
+            for param in params {
+                if let Some(default) = param.p_default {
+                    validate_expression_idx_this_errors(default, arena)?;
+                }
             }
-            validate_expression_idx_this_errors(inner.rhs, arena)
+            validate_expression_idx_this_errors(body, arena)
         }
         ExpressionDesc::Pexp_let(inner) => {
             let (_rec_flag, bindings, body) = &**inner;
