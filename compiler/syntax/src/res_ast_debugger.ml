@@ -1415,6 +1415,19 @@ module SexpAstWithLocs = struct
         Sexp.atom "value_binding";
         location vb.pvb_loc;
         pattern vb.pvb_pat;
+        (match vb.pvb_constraint with
+        | None -> Sexp.atom "None"
+        | Some {pvc_newtypes; pvc_type} ->
+          Sexp.list
+            [
+              Sexp.atom "Some";
+              Sexp.list
+                (map_empty
+                   ~f:(fun ({txt; loc} : string Asttypes.loc) ->
+                     Sexp.list [string txt; location loc])
+                   pvc_newtypes);
+              core_type pvc_type;
+            ]);
         expression vb.pvb_expr;
         attributes vb.pvb_attributes;
       ]
@@ -2433,6 +2446,19 @@ module SexpAst0WithLocs = struct
         Sexp.atom "value_binding";
         location vb.pvb_loc;
         pattern vb.pvb_pat;
+        (match vb.pvb_constraint with
+        | None -> Sexp.atom "None"
+        | Some {pvc_newtypes; pvc_type} ->
+          Sexp.list
+            [
+              Sexp.atom "Some";
+              Sexp.list
+                (map_empty
+                   ~f:(fun ({txt; loc} : string Asttypes.loc) ->
+                     Sexp.list [string txt; location loc])
+                   pvc_newtypes);
+              core_type pvc_type;
+            ]);
         expression vb.pvb_expr;
         attributes vb.pvb_attributes;
       ]
