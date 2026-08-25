@@ -2261,8 +2261,10 @@ fn validate_external_attribute_payload_errors(
                 validate_return_wrapper_config_shape(payload, arena)?;
                 let config_warning = return_wrapper_config_warning(payload, arena, attr_name.loc);
                 let Some(wrapper) = get_return_wrapper_config(payload, arena) else {
-                    let mut error =
-                        PpxError::at_loc(attr_name.loc, "Not supported return directive");
+                    let mut error = PpxError::at_loc(
+                        attr_name.loc,
+                        "Unsupported @return directive. Supported directives are `null_to_opt`, `null_undefined_to_opt` (or `nullable`), and `identity`.",
+                    );
                     if let Some((loc, message)) = config_warning {
                         error = error.with_warning(
                             loc,
@@ -2278,7 +2280,7 @@ fn validate_external_attribute_payload_errors(
                     _ => {
                         return Err(PpxError::at_loc(
                             attr_name.loc,
-                            "Not supported return directive",
+                            "Unsupported @return directive. Supported directives are `null_to_opt`, `null_undefined_to_opt` (or `nullable`), and `identity`.",
                         ));
                     }
                 }
@@ -2302,7 +2304,7 @@ fn validate_return_wrapper_result_type(
     {
         return Err(PpxError::at_loc(
             external_loc,
-            "%@return directive *_to_opt expect return type to be \nsyntax wise `_ option` for safety",
+            "This @return directive requires the external's return type to be an option, e.g. `option<int>`.",
         ));
     }
     Ok(())
@@ -2457,14 +2459,14 @@ fn validate_external_attribute_errors(
     if desc.set_index && !external_desc_is_plain_set_index(&desc) {
         return Err(PpxError::at_loc(
             vd.pval_loc,
-            "Conflicting attributes: Attribute found that conflicts with %@set_index",
+            "Conflicting attributes: Attribute found that conflicts with @set_index",
         ));
     }
 
     if desc.get_index && !external_desc_is_plain_get_index(&desc) {
         return Err(PpxError::at_loc(
             vd.pval_loc,
-            "Conflicting attributes: Attribute found that conflicts with %@get_index",
+            "Conflicting attributes: Attribute found that conflicts with @get_index",
         ));
     }
 
@@ -2497,14 +2499,14 @@ fn validate_external_attribute_errors(
         if desc.call_name.is_some() && !external_desc_is_plain_call(&desc) {
             return Err(PpxError::at_loc(
                 vd.pval_loc,
-                "Conflicting attributes: Attribute found that conflicts with %@val",
+                "Conflicting attributes: Attribute found that conflicts with @val",
             ));
         }
 
         if desc.val_name.is_some() && !desc.module_as_val && !external_desc_is_plain_val(&desc) {
             return Err(PpxError::at_loc(
                 vd.pval_loc,
-                "Conflicting attributes: Attribute found that conflicts with %@val",
+                "Conflicting attributes: Attribute found that conflicts with @val",
             ));
         }
 
@@ -2535,7 +2537,7 @@ fn validate_external_attribute_errors(
         {
             return Err(PpxError::at_loc(
                 vd.pval_loc,
-                "Conflicting attributes: Attribute found that conflicts with %@new",
+                "Conflicting attributes: Attribute found that conflicts with @new",
             ));
         }
 
@@ -2626,7 +2628,7 @@ fn check_type_ffi_attrs(typ: &CoreType, arena: &ParseArena) -> Option<&'static s
 }
 
 fn external_type_ffi_attr(typ: &CoreType, arena: &ParseArena) -> PpxResult<Option<&'static str>> {
-    let mut found = None;
+    let mut found = Vec::new();
     for (attr_name, _) in &typ.ptyp_attributes {
         let name = arena.get_string(attr_name.txt);
         let attr = match name {
@@ -2636,12 +2638,20 @@ fn external_type_ffi_attr(typ: &CoreType, arena: &ParseArena) -> PpxResult<Optio
             "unwrap" => "unwrap",
             _ => continue,
         };
-        if found.is_some() {
-            return Err(PpxError::at_loc(attr_name.loc, "conflicting attributes "));
-        }
-        found = Some(attr);
+        found.push((attr, attr_name.loc));
     }
-    Ok(found)
+    if found.len() > 1 {
+        let names = found
+            .iter()
+            .map(|(name, _)| format!("@{name}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        return Err(PpxError::at_loc(
+            found[0].1,
+            format!("Conflicting attributes: {names} cannot be combined; use only one."),
+        ));
+    }
+    Ok(found.first().map(|(name, _)| *name))
 }
 
 fn payload_str_items(payload: &Payload) -> Option<&[StructureItem]> {
@@ -2851,10 +2861,16 @@ fn validate_string_as_attrs(attrs: &[Attribute], arena: &ParseArena) -> PpxResul
             continue;
         }
         if seen_as {
-            return Err(PpxError::at_loc(attr_name.loc, "duplicate @as "));
+            return Err(PpxError::at_loc(
+                attr_name.loc,
+                "Duplicate @as annotation; only one @as is allowed here.",
+            ));
         }
         if get_payload_string(payload, arena).is_none() {
-            return Err(PpxError::at_loc(attr_name.loc, "expect string literal "));
+            return Err(PpxError::at_loc(
+                attr_name.loc,
+                "Expected a string literal.",
+            ));
         }
         seen_as = true;
     }
@@ -2868,10 +2884,16 @@ fn validate_int_as_attrs(attrs: &[Attribute], arena: &ParseArena) -> PpxResult<(
             continue;
         }
         if seen_as {
-            return Err(PpxError::at_loc(attr_name.loc, "duplicate @as "));
+            return Err(PpxError::at_loc(
+                attr_name.loc,
+                "Duplicate @as annotation; only one @as is allowed here.",
+            ));
         }
         if get_payload_int_result(payload, arena)?.is_none() {
-            return Err(PpxError::at_loc(attr_name.loc, "expect int literal "));
+            return Err(PpxError::at_loc(
+                attr_name.loc,
+                "The @as payload on an @int variant must be an integer literal, e.g. @as(42).",
+            ));
         }
         seen_as = true;
     }
@@ -2885,7 +2907,10 @@ fn validate_string_or_int_as_attrs(attrs: &[Attribute], arena: &mut ParseArena) 
             continue;
         }
         if seen_as {
-            return Err(PpxError::at_loc(attr_name.loc, "duplicate @as "));
+            return Err(PpxError::at_loc(
+                attr_name.loc,
+                "Duplicate @as annotation; only one @as is allowed here.",
+            ));
         }
         if get_payload_int_result(payload, arena)?.is_some() {
             seen_as = true;
@@ -2896,7 +2921,7 @@ fn validate_string_or_int_as_attrs(attrs: &[Attribute], arena: &mut ParseArena) 
         else {
             return Err(PpxError::at_loc(
                 attr_name.loc,
-                "expect int, string literal or json literal {json|text here|json} ",
+                "The @as payload must be an integer, string, or JSON literal.",
             ));
         };
         if matches!(delim, Delim::DNoQuotes)
@@ -2928,14 +2953,14 @@ fn validate_bs_string_type(typ: &CoreType, arena: &ParseArena) -> PpxResult<()> 
     let CoreTypeDesc::Ptyp_variant(variant_inner) = &*typ.ptyp_desc else {
         return Err(PpxError::at_loc(
             typ.ptyp_loc,
-            "Not a valid type for %@string",
+            "Not a valid type for @string",
         ));
     };
     let (row_fields, closed, labels) = &**variant_inner;
     if !matches!(closed, current::ClosedFlag::Closed) || labels.is_some() || row_fields.is_empty() {
         return Err(PpxError::at_loc(
             typ.ptyp_loc,
-            "Not a valid type for %@string",
+            "Not a valid type for @string",
         ));
     }
 
@@ -2963,7 +2988,7 @@ fn validate_bs_string_type(typ: &CoreType, arena: &ParseArena) -> PpxResult<()> 
             _ => {
                 return Err(PpxError::at_loc(
                     typ.ptyp_loc,
-                    "Not a valid type for %@string",
+                    "Not a valid type for @string",
                 ));
             }
         }
@@ -2974,19 +2999,19 @@ fn validate_bs_string_type(typ: &CoreType, arena: &ParseArena) -> PpxResult<()> 
 
 fn validate_bs_int_type(typ: &CoreType, arena: &ParseArena) -> PpxResult<()> {
     let CoreTypeDesc::Ptyp_variant(variant_inner) = &*typ.ptyp_desc else {
-        return Err(PpxError::at_loc(typ.ptyp_loc, "Not a valid type for %@int"));
+        return Err(PpxError::at_loc(typ.ptyp_loc, "Not a valid type for @int"));
     };
     let (row_fields, closed, labels) = &**variant_inner;
     if !matches!(closed, current::ClosedFlag::Closed) || labels.is_some() || row_fields.is_empty() {
-        return Err(PpxError::at_loc(typ.ptyp_loc, "Not a valid type for %@int"));
+        return Err(PpxError::at_loc(typ.ptyp_loc, "Not a valid type for @int"));
     }
 
     for row in row_fields {
         let RowField::Rtag(_, attrs, true, types) = row else {
-            return Err(PpxError::at_loc(typ.ptyp_loc, "Not a valid type for %@int"));
+            return Err(PpxError::at_loc(typ.ptyp_loc, "Not a valid type for @int"));
         };
         if !types.is_empty() {
-            return Err(PpxError::at_loc(typ.ptyp_loc, "Not a valid type for %@int"));
+            return Err(PpxError::at_loc(typ.ptyp_loc, "Not a valid type for @int"));
         }
         validate_int_as_attrs(attrs, arena)?;
     }
@@ -2998,7 +3023,7 @@ fn validate_bs_unwrap_type(typ: &CoreType) -> PpxResult<()> {
     let CoreTypeDesc::Ptyp_variant(variant_inner) = &*typ.ptyp_desc else {
         return Err(PpxError::at_loc(
             typ.ptyp_loc,
-            "Not a valid type for %@unwrap. Type must be an inline variant (closed), and\neach constructor must have an argument.",
+            "Not a valid type for @unwrap. Type must be an inline variant (closed), and\neach constructor must have an argument.",
         ));
     };
     let (row_fields, closed, labels) = &**variant_inner;
@@ -3009,7 +3034,7 @@ fn validate_bs_unwrap_type(typ: &CoreType) -> PpxResult<()> {
     {
         return Err(PpxError::at_loc(
             typ.ptyp_loc,
-            "Not a valid type for %@unwrap. Type must be an inline variant (closed), and\neach constructor must have an argument.",
+            "Not a valid type for @unwrap. Type must be an inline variant (closed), and\neach constructor must have an argument.",
         ));
     }
     Ok(())
@@ -11706,7 +11731,7 @@ fn validate_deriving_accessors_for_tdcls(
                 if seen_deriving {
                     return Err(PpxError::at_loc(
                         attr_name.loc,
-                        "duplicate @deriving attribute",
+                        "Duplicate @deriving attribute; a type can only have one.",
                     ));
                 }
                 seen_deriving = true;
@@ -12456,7 +12481,7 @@ fn validate_object_field_method_attrs(attrs: &[Attribute], arena: &ParseArena) -
                         "null" | "undefined" | "nullable" => {
                             validate_method_attribute_bool_payload(opt_expr, arena)
                         }
-                        _ => Err(PpxError::at_loc(loc, "unsupported predicates")),
+                        _ => Err(PpxError::at_loc(loc, "Unsupported predicates")),
                     }
                 })?;
             }
@@ -12464,7 +12489,7 @@ fn validate_object_field_method_attrs(attrs: &[Attribute], arena: &ParseArena) -
                 validate_method_attribute_config_names(payload, arena, |name, loc, opt_expr| {
                     match name {
                         "no_get" => validate_method_attribute_bool_payload(opt_expr, arena),
-                        _ => Err(PpxError::at_loc(loc, "unsupported predicates")),
+                        _ => Err(PpxError::at_loc(loc, "Unsupported predicates")),
                     }
                 })?;
             }
@@ -14903,7 +14928,7 @@ fn validate_method_callback_this_errors(
     if single_var_pattern_name_conservative(&self_pat, arena).is_none() {
         return Err(PpxError::at_loc(
             self_pat.ppat_loc,
-            "%@this expect its pattern variable to be simple form",
+            "@this expects its first parameter to be a simple variable (or `_`).",
         ));
     }
 
