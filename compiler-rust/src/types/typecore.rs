@@ -9934,19 +9934,6 @@ fn type_application(
 
     let provided = ignored.len() + args.len();
     let fully_applied = provided >= function_arity;
-    if total_app && !fully_applied {
-        let arity_suggestion =
-            find_arity_suggestion_for_expression(tctx, env, &typed_funct, args.len());
-        return Err(TypeCoreError::UncurriedArityMismatch {
-            loc: funct.pexp_loc,
-            function_type: typed_funct.exp_type,
-            expected_arity: args.len() + function_arity - provided,
-            provided_arity: args.len(),
-            provided_args: args.iter().map(|(label, _)| *label).collect(),
-            function_name: None,
-            arity_suggestion,
-        });
-    }
     let current_ty0 = inst_ret;
     let mut typed_args = Vec::with_capacity(argument_thunks.len());
     for pending_arg in argument_thunks.into_iter() {
@@ -10049,6 +10036,24 @@ fn type_application(
                 });
             }
         }
+    }
+
+    // compiler/ml/typecore.ml:4179-4190 forces argument thunks before reporting
+    // a total application's missing arguments. Besides preserving diagnostic
+    // precedence, this lets argument typing refine the function type printed in
+    // the arity error.
+    if total_app && !fully_applied {
+        let arity_suggestion =
+            find_arity_suggestion_for_expression(tctx, env, &typed_funct, args.len());
+        return Err(TypeCoreError::UncurriedArityMismatch {
+            loc: funct.pexp_loc,
+            function_type: typed_funct.exp_type,
+            expected_arity: args.len() + function_arity - provided,
+            provided_arity: args.len(),
+            provided_args: args.iter().map(|(label, _)| *label).collect(),
+            function_name: None,
+            arity_suggestion,
+        });
     }
 
     // compiler/ml/typecore.ml:4191-4200: a partial application returns one
