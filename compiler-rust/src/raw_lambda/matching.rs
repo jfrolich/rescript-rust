@@ -9226,14 +9226,10 @@ fn names_from_construct_pattern(ctx_ref: &TypeContext, pat: &Pattern) -> Option<
         {
             return Some(SwitchBlockType::Instance("Promise".to_string()));
         }
-        // OCaml compiler/ml/ast_untagged_variants.ml:276-297 retries after
-        // `expand_head`, whose ctype.ml:1367-1372 normalization fallback goes
-        // through env.ml:865-882 and can observe these aliases as their backing
-        // persistent module paths. Rust may still carry the selected component
-        // access path at this point, so classify both spellings as the same
-        // OCaml instance-backed object.
+        // Keep this table in lockstep with
+        // `Ast_untagged_variants.type_to_instanceof_backed_obj`.
         let instance = match full.as_str() {
-            "Stdlib_ArrayBuffer.t" | "Stdlib.ArrayBuffer.t" => "ArrayBuffer",
+            "Stdlib_ArrayBuffer.t" => "ArrayBuffer",
             "Stdlib.BigInt64Array.t" => "BigInt64Array",
             "Stdlib.BigUint64Array.t" => "BigUint64Array",
             "Stdlib.DataView.t" => "DataView",
@@ -9248,8 +9244,8 @@ fn names_from_construct_pattern(ctx_ref: &TypeContext, pat: &Pattern) -> Option<
             "Stdlib.Uint32Array.t" => "Uint32Array",
             "Stdlib.Uint8Array.t" => "Uint8Array",
             "Stdlib.Uint8ClampedArray.t" => "Uint8ClampedArray",
-            "Js_file.t" | "Js.File.t" => "File",
-            "Js_blob.t" | "Js.Blob.t" => "Blob",
+            "Stdlib_File.t" => "File",
+            "Stdlib_Blob.t" => "Blob",
             "Stdlib.Set.t" => "Set",
             "Stdlib.Map.t" => "Map",
             "Stdlib.WeakSet.t" => "WeakSet",
