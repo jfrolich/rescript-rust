@@ -14838,7 +14838,12 @@ fn type_function_nary(
             ctx.end_def();
         }
         let typed = typed?;
+        // typecore.ml:3662-3663 allocates a fresh pattern result and unifies
+        // the typed parameter with it before extending the environment.
+        unify_pattern_types(tctx, typed.pat_loc, typed.pat_type, ctx.new_var(None))?;
         if propagate {
+            let parameter_instance = crate::types::instance(ctx, typ);
+            unify_pattern_types(tctx, typed.pat_loc, typed.pat_type, parameter_instance)?;
             iter_typed_pattern(&typed, &mut |pat| {
                 crate::types::generalize(ctx, pat.pat_type)
             });
