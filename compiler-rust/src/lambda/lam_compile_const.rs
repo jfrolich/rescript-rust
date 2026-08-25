@@ -114,7 +114,10 @@ impl LambdaCompiler {
                 Some(crate::types::VariantTagType::Untagged(_)) => {
                     Expression::string(tag.name.clone())
                 }
-                None if tag.name == "[]" => Expression::number(Number::int(0)),
+                None if tag.name == "[]" => Expression::with_comment(
+                    ExpressionDesc::Number(Number::int(0)),
+                    tag.name.clone(),
+                ),
                 None => Expression::string(tag.name.clone()),
             },
             Constant::NativeInt { i, comment } => {
