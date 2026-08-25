@@ -16,6 +16,7 @@
 pub mod op;
 pub mod printer;
 pub mod program_printer;
+pub mod source_map;
 
 use ahash::AHashMap;
 use std::cell::RefCell;
