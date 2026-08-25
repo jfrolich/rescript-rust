@@ -6361,13 +6361,19 @@ impl<'a> RawLambdaConverter<'a> {
                 *transformed_jsx,
             ),
             ExpressionDesc::Texp_match(scrut, cases, exn_cases, partial) => {
+                // OCaml transl_match allocates the exception binder before it
+                // translates either case list, even when exn_pat_expr_list is
+                // empty (compiler/ml/translcore.ml:1215-1218). Keep that shared
+                // Ident allocation order; ordinary matches intentionally do
+                // not retain this binder in the resulting lambda.
+                let exn_id = self.name_pattern_ident("exn", exn_cases);
                 if !exn_cases.is_empty() {
                     // Match with exception cases: wrap in try-with + static catch.
                     // Matches OCaml's transl_match logic from translcore.ml.
                     let loc = self.loc(expr.exp_loc);
                     let partial = *partial;
                     self.compile_match_with_exceptions_raw(
-                        loc, scrut, cases, exn_cases, partial, expr,
+                        loc, scrut, cases, exn_cases, partial, expr, exn_id,
                     )
                 } else {
                     // For single-case matches with unboxed constructor patterns,
@@ -7285,8 +7291,8 @@ impl<'a> RawLambdaConverter<'a> {
         exn_cases: &[Case],
         partial: Partial,
         expr: &Expression,
+        exn_id: Ident,
     ) -> RawLambda {
-        let exn_id = self.name_pattern_ident("exn", exn_cases);
         let val_id = self.name_pattern_ident("val", cases);
 
         // Compile the exception handler: matching on the exception
