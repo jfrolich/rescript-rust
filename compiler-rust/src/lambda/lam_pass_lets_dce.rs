@@ -129,6 +129,7 @@ fn lets_helper(state: &mut LetsState<'_>, lam: &Lambda) -> Lambda {
                 l1.as_ref(),
                 Lambda::Lconst(
                     Constant::Int { .. }
+                        | Constant::Constructor(_)
                         | Constant::NativeInt { .. }
                         | Constant::Char(_)
                         | Constant::Float(_)
@@ -516,6 +517,7 @@ fn lets_helper_owned(state: &mut LetsState<'_>, lam: Lambda) -> Lambda {
                 l1.as_ref(),
                 Lambda::Lconst(
                     Constant::Int { .. }
+                        | Constant::Constructor(_)
                         | Constant::NativeInt { .. }
                         | Constant::Char(_)
                         | Constant::Float(_)
