@@ -38,6 +38,48 @@ impl LambdaCompiler {
             return self.compile_import_primitive(loc, args);
         }
 
+        // compiler/core/lam_compile.ml:293-325: nested module field reads may
+        // name a flat root export recorded in the dependency CMJ.
+        fn external_field_path<'a>(
+            prim: &'a Primitive,
+            args: &'a [Lambda],
+            segments: &mut Vec<String>,
+        ) -> Option<(&'a Ident, bool)> {
+            let Primitive::Pfield(_, FieldDbgInfo::Module { name }) = prim else {
+                return None;
+            };
+            segments.push(name.clone());
+            match args {
+                [Lambda::LglobalModule(id, dynamic_import)] => Some((id, *dynamic_import)),
+                [Lambda::Lprim(info)] => external_field_path(&info.primitive, &info.args, segments),
+                _ => None,
+            }
+        }
+        if matches!(prim, Primitive::Pfield(_, FieldDbgInfo::Module { .. })) {
+            let mut reversed = Vec::new();
+            if let Some((id, dynamic_import)) = external_field_path(prim, args, &mut reversed) {
+                reversed.reverse();
+                if reversed.len() >= 2
+                    && let Some(export_name) =
+                        self.module_path_resolver.as_ref().and_then(|resolver| {
+                            resolver.module_cmj_hoisted_export(id.name(), &reversed)
+                        })
+                {
+                    return Compiled {
+                        prelude: Vec::new(),
+                        expr: Expression::qualified(
+                            crate::js_ir::ModuleId {
+                                id: id.clone(),
+                                kind: crate::js_ir::Kind::Ml,
+                                dynamic_import,
+                            },
+                            Some(export_name),
+                        ),
+                    };
+                }
+            }
+        }
+
         use Primitive::*;
         let mut prelude = vec![];
         let mut compiled_args = Vec::new();

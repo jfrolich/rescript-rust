@@ -1036,6 +1036,9 @@ fn collect_raw_js_warnings_from_structure_item(
         }
         StructureItemDesc::Pstr_type(inner) => {
             let (_rec_flag, tdcls) = &**inner;
+            for declaration in tdcls {
+                collect_unused_bs_attributes(&declaration.ptype_attributes, arena, warnings);
+            }
             collect_deriving_not_applicable_warnings(
                 tdcls,
                 arena,
@@ -1227,7 +1230,14 @@ fn attr_named(attrs: &[Attribute], name: &str, arena: &ParseArena) -> bool {
 fn is_bs_unused_attribute_candidate(name: &str) -> bool {
     matches!(
         name,
-        "as" | "config" | "ignore" | "int" | "optional" | "string" | "unwrap"
+        "as"
+            | "config"
+            | "ignore"
+            | "int"
+            | "optional"
+            | "res.hoistedFunction"
+            | "string"
+            | "unwrap"
     )
 }
 
@@ -1402,7 +1412,14 @@ fn collect_raw_js_warnings_from_value_binding(
     arena: &mut ParseArena,
     warnings: &mut Vec<PpxWarning>,
 ) {
-    collect_unused_bs_attributes(&binding.pvb_attributes, arena, warnings);
+    // `Bs_builtin_ppx.mark_hoisted_function_attributes` marks this attribute
+    // used on every value binding before the unused-attribute invariant runs.
+    // Keep all other attributes on the existing warning path.
+    for attr in &binding.pvb_attributes {
+        if arena.get_string(attr.0.txt) != "res.hoistedFunction" {
+            collect_unused_bs_attributes_from_slice(std::slice::from_ref(attr), arena, warnings);
+        }
+    }
     collect_unused_bs_attributes_from_pat_idx(binding.pvb_pat, arena, warnings);
     collect_raw_js_warnings_from_expr_idx(binding.pvb_expr, arena, warnings);
 }
