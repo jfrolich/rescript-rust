@@ -20,7 +20,7 @@ use crate::types::decl::{
 };
 use crate::types::path::Path;
 use crate::types::type_expr::{
-    Commutable, FieldKind, GENERIC_LEVEL, RowDesc, RowField, TypeArg, TypeDesc, TypeExprRef,
+    FieldKind, GENERIC_LEVEL, RowDesc, RowField, TypeArg, TypeDesc, TypeExprRef,
 };
 use crate::types::variance::Variance;
 
@@ -1376,13 +1376,6 @@ fn read_alias_presence(value: &OcamlValue) -> AliasPresence {
         1 => AliasPresence::MtaAbsent,
         _ => AliasPresence::MtaPresent,
     }
-}
-
-/// Read commutable.
-fn read_commutable(_value: &OcamlValue) -> Commutable {
-    // For CMI-loaded types, commutability doesn't matter.
-    // Just use Cok.
-    Commutable::Cok
 }
 
 /// Read field_kind.

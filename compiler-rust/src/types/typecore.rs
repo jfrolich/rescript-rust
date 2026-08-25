@@ -43,7 +43,7 @@ use crate::types::typedtree::{
     TypedSignatureItem, TypedSignatureItemDesc, ValueBinding,
 };
 use crate::types::{
-    Commutable, Env, Path, RowField, TypeArg, TypeContext, TypeDesc, TypeError, TypeExprRef,
+    Env, Path, RowField, TypeArg, TypeContext, TypeDesc, TypeError, TypeExprRef,
     TypeExprRefMap, UnifyState, ValueDescription,
 };
 use ahash::{AHashMap as HashMap, AHashSet as HashSet};
@@ -9327,16 +9327,12 @@ fn type_application(
         };
         if (pending_args.len() as i32) < max_arity
             && let (
-                Some((fn_label, arg_ty, ret_ty, commutable)),
+                Some((fn_label, arg_ty, ret_ty)),
                 Some((_fn_label0, arg_ty0, ret_ty0)),
             ) = (
-                crate::types::ctype::split_arrow_with_label_and_commutable(
-                    ctx,
-                    expanded_current_ty,
-                ),
+                crate::types::ctype::split_arrow_with_label(ctx, expanded_current_ty),
                 crate::types::ctype::split_arrow_with_label(ctx, expanded_current_ty0),
             )
-            && matches!(ctx.commutable_repr(&commutable), Commutable::Cok)
         {
             // OCaml special case for optional-only applications:
             // after consuming omitted optional labels, a trailing `()` in call
@@ -9558,13 +9554,7 @@ fn type_application(
         {
             tctx.report_warning(arg_expr.pexp_loc, Warning::UnusedArgument);
         }
-        let arrow_ty = ctx.new_arrow_with_commutable(
-            ctx_label,
-            arg_ty,
-            ret_ty,
-            Commutable::Clink(ctx.alloc_commutable(Commutable::Cunknown)),
-            top_arity,
-        );
+        let arrow_ty = ctx.new_arrow(ctx_label, arg_ty, ret_ty, top_arity);
         unify_expression_types(tctx, loc, expanded_current_ty, arrow_ty, None)?;
         top_arity = None;
 

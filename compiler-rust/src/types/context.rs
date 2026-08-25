@@ -22,7 +22,7 @@ use super::asttypes::{ArgLabel, PrivateFlag};
 use super::env::Env;
 use super::path::Path;
 use super::type_expr::{
-    AbbrevMemo, AbbrevMemoRef, Commutable, CommutableRef, FieldKind, FieldKindRef, GENERIC_LEVEL,
+    AbbrevMemo, AbbrevMemoRef, FieldKind, FieldKindRef, GENERIC_LEVEL,
     RowDesc, RowField, RowFieldRef, TypeArg, TypeDesc, TypeExpr, TypeExprRef,
 };
 use super::typedtree::EnvRef;
@@ -291,9 +291,6 @@ pub struct TypeContext {
     /// Row field storage
     row_fields: RefCell<Vec<RefCell<Option<RowField>>>>,
 
-    /// Commutable storage
-    commutables: RefCell<Vec<RefCell<Commutable>>>,
-
     /// Field kind storage
     field_kinds: RefCell<Vec<RefCell<Option<FieldKind>>>>,
 
@@ -542,7 +539,6 @@ impl TypeContext {
             ]),
             memoized_abbrev_refs: RefCell::new(Vec::new()),
             row_fields: RefCell::new(Vec::new()),
-            commutables: RefCell::new(Vec::new()),
             field_kinds: RefCell::new(Vec::new()),
             type_decl_store: RefCell::new(ahash::AHashMap::new()),
             type_decl_by_stamp: RefCell::new(ahash::AHashMap::new()),
@@ -1281,17 +1277,6 @@ impl TypeContext {
         })
     }
 
-    pub(crate) fn new_arrow_with_commutable(
-        &self,
-        arg_label: ArgLabel,
-        arg_type: TypeExprRef,
-        ret_type: TypeExprRef,
-        _commutable: Commutable,
-        arity: Option<i32>,
-    ) -> TypeExprRef {
-        self.new_arrow(arg_label, arg_type, ret_type, arity)
-    }
-
     /// Create an unlabeled arrow type.
     pub fn new_arrow_simple(&self, arg: TypeExprRef, ret: TypeExprRef) -> TypeExprRef {
         self.new_arrow(ArgLabel::Nolabel, arg, ret, None)
@@ -2002,46 +1987,6 @@ impl TypeContext {
         let row_fields = self.row_fields.borrow();
         if let Some(cell) = row_fields.get(rf.index()) {
             *cell.borrow_mut() = None;
-        }
-    }
-
-    // ========================================================================
-    // Commutables
-    // ========================================================================
-
-    /// Allocate a commutable reference.
-    pub(crate) fn alloc_commutable(&self, c: Commutable) -> CommutableRef {
-        let mut commutables = self.commutables.borrow_mut();
-        let idx = commutables.len();
-        commutables.push(RefCell::new(c));
-        CommutableRef::from_usize(idx)
-    }
-
-    pub(crate) fn get_commutable(&self, c: CommutableRef) -> Commutable {
-        let commutables = self.commutables.borrow();
-        commutables
-            .get(c.index())
-            .map(|cell| cell.borrow().clone())
-            .unwrap_or(Commutable::Cunknown)
-    }
-
-    pub(crate) fn set_commutable(&self, c: CommutableRef, value: Commutable) {
-        let commutables = self.commutables.borrow();
-        if let Some(cell) = commutables.get(c.index()) {
-            *cell.borrow_mut() = value;
-        }
-    }
-
-    pub(crate) fn commutable_repr(&self, c: &Commutable) -> Commutable {
-        match c {
-            Commutable::Clink(link) => {
-                let linked = self.get_commutable(*link);
-                match linked {
-                    Commutable::Cunknown => c.clone(),
-                    _ => self.commutable_repr(&linked),
-                }
-            }
-            _ => c.clone(),
         }
     }
 

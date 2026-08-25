@@ -29,7 +29,7 @@ use super::decl::LabelDeclaration;
 use super::env::Env;
 use super::path::Path;
 use super::type_expr::{
-    AbbrevMemo, AbbrevMemoRef, Commutable, FieldKind, GENERIC_LEVEL, RowDesc, RowField, TypeDesc,
+    AbbrevMemo, AbbrevMemoRef, FieldKind, GENERIC_LEVEL, RowDesc, RowField, TypeDesc,
     TypeExprRef, TypeExprRefSet,
 };
 use super::variance::{Variance, VarianceFlag};
@@ -8604,14 +8604,6 @@ fn bound_conflicts(
     bound.iter().any(|ty| free_univars.contains(&ctx.repr(*ty)))
 }
 
-fn copy_commutable(ctx: &TypeContext, commutable: &Commutable) -> Commutable {
-    if matches!(ctx.commutable_repr(commutable), Commutable::Cok) {
-        Commutable::Cok
-    } else {
-        Commutable::Clink(ctx.alloc_commutable(Commutable::Cunknown))
-    }
-}
-
 fn build_inverse_type_graph(
     ctx: &TypeContext,
     parent: Option<TypeExprRef>,
@@ -10827,16 +10819,6 @@ pub fn split_arrow_with_label(
         ctx.new_type(TypeDesc::Tarrow { args: args[1..].to_vec(), ret })
     };
     Some((arg.lbl.clone(), arg.typ, remaining))
-}
-
-/// Extract the argument type, label, return type, and commutability from an arrow type.
-pub fn split_arrow_with_label_and_commutable(
-    ctx: &TypeContext,
-    ty: TypeExprRef,
-) -> Option<(super::ArgLabel, TypeExprRef, TypeExprRef, Commutable)> {
-    let ty = ctx.repr(ty);
-    split_arrow_with_label(ctx, ty)
-        .map(|(label, arg, ret)| (label, arg, ret, Commutable::Cok))
 }
 
 /// Extract the inner type from option<T>, returning T.

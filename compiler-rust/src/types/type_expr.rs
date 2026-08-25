@@ -411,35 +411,6 @@ impl TypeArg {
     }
 }
 
-/// Commutability flag for arrow types.
-///
-/// This tracks whether argument order matters in function application.
-#[derive(Debug, Clone)]
-pub enum Commutable {
-    /// Order is known to be OK
-    Cok,
-    /// Order is unknown
-    Cunknown,
-    /// Linked to another commutable
-    Clink(CommutableRef),
-}
-
-/// Reference to a commutable flag.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct CommutableRef(pub u32);
-
-impl CommutableRef {
-    #[inline]
-    pub(crate) fn from_usize(idx: usize) -> Self {
-        Self(u32::try_from(idx).expect("commutable arena index exceeds u32::MAX"))
-    }
-
-    #[inline]
-    pub(crate) fn index(self) -> usize {
-        self.0 as usize
-    }
-}
-
 /// Abbreviation memo for type expansion caching.
 #[derive(Debug, Clone)]
 pub enum AbbrevMemo {
