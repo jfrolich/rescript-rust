@@ -13,17 +13,21 @@ use crate::parser::longident::Longident;
 use crate::types::asttypes::MutableFlag;
 use crate::types::decl::{
     Attribute as DeclAttribute, ConstructorArguments, ConstructorDeclaration, LabelDeclaration,
-    TypeKind,
+    RecordRepresentation, TypeKind, TypeRepresentation,
 };
 use crate::types::type_expr::TypeExprRef;
 use crate::types::typedtree::{TypedCoreType, TypedTypeDeclaration};
 
 #[derive(Debug, Clone)]
 pub enum DeclarationKind {
-    RecordDeclarationFromTypes(Vec<LabelDeclaration>),
+    RecordDeclarationFromTypes(Vec<LabelDeclaration>, RecordRepresentation),
     GeneralDeclaration(Option<TypedCoreType>),
     GeneralDeclarationFromTypes(Option<TypeExprRef>),
-    VariantDeclarationFromTypes(Vec<ConstructorDeclaration>),
+    VariantDeclarationFromTypes(
+        Vec<ConstructorDeclaration>,
+        crate::types::VariantLayout,
+        TypeRepresentation,
+    ),
     NoDeclaration,
 }
 
@@ -33,8 +37,6 @@ struct DeclarationAttributeInfo {
     opaque: Option<bool>,
     import_string_opt: Option<String>,
     name_as: Option<String>,
-    unboxed_annotation: bool,
-    tag_annotation: Option<String>,
 }
 
 pub fn create_export_type_from_type_declaration(
@@ -107,20 +109,18 @@ pub fn create_case(
     VariantCase { label_js }
 }
 
-pub fn create_case_from_decl_attributes(
-    label: &str,
-    attributes: &[DeclAttribute],
-    poly: bool,
-) -> VariantCase {
-    // Mirrors compiler/gentype/TranslateTypeDeclarations.ml:23-37 for
-    // Types.signature attributes, following Annotation.ml payload semantics
-    // after Rust typemod has converted parser payloads to decl payloads.
-    let label_js = match crate::gentype::annotation::get_decl_as_label_js(attributes) {
-        Some(label_js) => label_js,
-        None if poly && crate::gentype::gen_type_common::is_number(label) => {
-            LabelJs::IntLabel(label.to_string())
+fn create_variant_case(label: &str, tag: &Option<crate::types::VariantTagType>) -> VariantCase {
+    let label_js = match tag {
+        Some(crate::types::VariantTagType::String(value)) => LabelJs::StringLabel(value.clone()),
+        Some(crate::types::VariantTagType::Int(value)) => LabelJs::IntLabel(value.to_string()),
+        Some(crate::types::VariantTagType::Float(value)) => LabelJs::FloatLabel(value.clone()),
+        Some(crate::types::VariantTagType::BigInt(value)) => LabelJs::IntLabel(value.clone()),
+        Some(crate::types::VariantTagType::Bool(value)) => LabelJs::BoolLabel(*value),
+        Some(crate::types::VariantTagType::Null) => LabelJs::NullLabel,
+        Some(crate::types::VariantTagType::Undefined) => LabelJs::UndefinedLabel,
+        Some(crate::types::VariantTagType::Untagged(_)) | None => {
+            LabelJs::StringLabel(label.to_string())
         }
-        None => LabelJs::StringLabel(label.to_string()),
     };
     VariantCase { label_js }
 }
@@ -192,21 +192,12 @@ pub fn traslate_declaration_kind(
     };
     let (import_string_opt, name_as) =
         crate::gentype::annotation::get_attribute_import_renaming(arena, type_attributes);
-    let unboxed_annotation = crate::gentype::annotation::has_attribute(
-        arena,
-        crate::gentype::annotation::tag_is_unboxed,
-        type_attributes,
-    );
-    let tag_annotation = crate::gentype::annotation::get_tag(arena, type_attributes);
-
     let attribute_info = DeclarationAttributeInfo {
         doc_string,
         annotation,
         opaque,
         import_string_opt,
         name_as,
-        unboxed_annotation,
-        tag_annotation,
     };
     traslate_declaration_kind_with_attribute_info(
         ctx,
@@ -251,20 +242,12 @@ pub fn traslate_declaration_kind_from_decl_attributes(
     };
     let (import_string_opt, name_as) =
         crate::gentype::annotation::get_decl_attribute_import_renaming(type_attributes);
-    let unboxed_annotation = crate::gentype::annotation::has_decl_attribute(
-        crate::gentype::annotation::tag_is_unboxed,
-        type_attributes,
-    );
-    let tag_annotation = crate::gentype::annotation::get_decl_tag(type_attributes);
-
     let attribute_info = DeclarationAttributeInfo {
         doc_string,
         annotation,
         opaque,
         import_string_opt,
         name_as,
-        unboxed_annotation,
-        tag_annotation,
     };
     traslate_declaration_kind_with_attribute_info(
         ctx,
@@ -300,8 +283,6 @@ fn traslate_declaration_kind_with_attribute_info(
         opaque,
         import_string_opt,
         name_as,
-        unboxed_annotation,
-        tag_annotation,
     } = attribute_info;
 
     let return_type_declaration =
@@ -438,14 +419,15 @@ fn traslate_declaration_kind_with_attribute_info(
                 },
             ))
         }
-        (DeclarationKind::RecordDeclarationFromTypes(label_declarations), None) => {
+        (DeclarationKind::RecordDeclarationFromTypes(label_declarations, representation), None) => {
+            let unboxed = matches!(representation, RecordRepresentation::RecordUnboxed(_));
             let translation = translate_label_declarations(
                 ctx,
                 arena,
                 config,
                 type_env,
                 false,
-                unboxed_annotation,
+                unboxed,
                 &label_declarations,
             );
             let import_types = crate::gentype::translation::translate_dependencies(
@@ -469,11 +451,27 @@ fn traslate_declaration_kind_with_attribute_info(
                 ),
             })
         }
-        (DeclarationKind::VariantDeclarationFromTypes(constructor_declarations), None) => {
+        (
+            DeclarationKind::VariantDeclarationFromTypes(
+                constructor_declarations,
+                layout,
+                type_representation,
+            ),
+            None,
+        ) => {
+            let tag_annotation = layout.matching_facts.tag_name.clone();
             let variants = constructor_declarations
                 .iter()
-                .map(|constructor_declaration| {
-                    let attributes = constructor_declaration.cd_attributes.clone();
+                .enumerate()
+                .map(|(position, constructor_declaration)| {
+                    let case = &layout.constructors[position];
+                    let tag = match case {
+                        crate::types::VariantConstructorCase::Constant(tag) => &tag.tag_type,
+                        crate::types::VariantConstructorCase::Block(block) => {
+                            &block.runtime.tag.tag_type
+                        }
+                    };
+                    let tag = tag.clone();
                     let name = constructor_declaration.cd_id.name().to_string();
                     let args_translation = match &constructor_declaration.cd_args {
                         ConstructorArguments::CstrTuple(type_exprs) => {
@@ -491,7 +489,12 @@ fn traslate_declaration_kind_with_attribute_info(
                                 config,
                                 type_env,
                                 true,
-                                unboxed_annotation,
+                                type_representation == TypeRepresentation::Unboxed
+                                    || matches!(
+                                        case,
+                                        crate::types::VariantConstructorCase::Block(block)
+                                            if block.runtime.untagged
+                                    ),
                                 label_declarations,
                             ),
                         ],
@@ -509,27 +512,25 @@ fn traslate_declaration_kind_with_attribute_info(
                             .flat_map(|translation| translation.dependencies.clone())
                             .collect::<Vec<_>>(),
                     );
-                    (name, attributes, arg_types, import_types)
+                    (name, tag, arg_types, import_types)
                 })
                 .collect::<Vec<_>>();
 
             let no_payloads = variants
                 .iter()
                 .filter(|(_, _, arg_types, _)| arg_types.is_empty())
-                .map(|(name, attributes, _, _)| {
-                    create_case_from_decl_attributes(name, attributes, false)
-                })
+                .map(|(name, tag, _, _)| create_variant_case(name, tag))
                 .collect::<Vec<_>>();
             let payloads = variants
                 .iter()
                 .filter(|(_, _, arg_types, _)| !arg_types.is_empty())
-                .map(|(name, attributes, arg_types, _)| {
+                .map(|(name, tag, arg_types, _)| {
                     let type_ = match arg_types.as_slice() {
                         [type_] => type_.clone(),
                         _ => Type::Tuple(arg_types.clone()),
                     };
                     Payload {
-                        case: create_case_from_decl_attributes(name, attributes, false),
+                        case: create_variant_case(name, tag),
                         t: type_,
                     }
                 })
@@ -540,7 +541,8 @@ fn traslate_declaration_kind_with_attribute_info(
                 payloads,
                 false,
                 tag_annotation,
-                unboxed_annotation,
+                type_representation == TypeRepresentation::Unboxed
+                    || layout.configuration().unboxed,
             );
             let resolved_type_name =
                 crate::gentype::type_env::add_module_path(type_env, &sanitize_type_name(type_name));
@@ -600,11 +602,18 @@ pub fn translate_type_declaration(
         .collect::<Vec<_>>();
     let type_vars = crate::gentype::type_vars::extract_from_core_type(&type_params);
     let declaration_kind = match &type_declaration.typ_type.type_kind {
-        TypeKind::TypeRecord(label_declarations, _) => {
-            DeclarationKind::RecordDeclarationFromTypes(label_declarations.clone())
+        TypeKind::TypeRecord(label_declarations, representation) => {
+            DeclarationKind::RecordDeclarationFromTypes(
+                label_declarations.clone(),
+                representation.clone(),
+            )
         }
-        TypeKind::TypeVariant(constructor_declarations, _) => {
-            DeclarationKind::VariantDeclarationFromTypes(constructor_declarations.clone())
+        TypeKind::TypeVariant(constructor_declarations, layout_ref) => {
+            DeclarationKind::VariantDeclarationFromTypes(
+                constructor_declarations.clone(),
+                ctx.variant_layout(*layout_ref),
+                type_declaration.typ_type.type_representation,
+            )
         }
         TypeKind::TypeAbstract => {
             DeclarationKind::GeneralDeclaration(type_declaration.typ_manifest.clone())

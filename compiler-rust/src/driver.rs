@@ -8696,7 +8696,7 @@ fn runtime_variant_to_primitive_coercion_compatible(
     let Some(expected_path) = primitive_coercion_target_path(type_ctx, expected) else {
         return false;
     };
-    let Some((actual_path, constructors, type_params, unboxed)) =
+    let Some((actual_path, constructors, type_params, layout, unboxed)) =
         variant_constructors_for_type(type_ctx, actual)
     else {
         return false;
@@ -8705,14 +8705,18 @@ fn runtime_variant_to_primitive_coercion_compatible(
         return false;
     }
 
-    constructors.iter().all(|constructor| {
-        variant_constructor_runtime_matches_primitive(
-            type_ctx,
-            constructor,
-            unboxed,
-            &expected_path,
-        )
-    })
+    constructors
+        .iter()
+        .enumerate()
+        .all(|(position, constructor)| {
+            variant_constructor_runtime_matches_primitive(
+                type_ctx,
+                constructor,
+                &layout.constructors[position],
+                unboxed,
+                &expected_path,
+            )
+        })
 }
 
 fn primitive_coercion_target_path(
@@ -8744,6 +8748,7 @@ fn variant_constructors_for_type(
     crate::types::Path,
     Vec<crate::types::decl::ConstructorDeclaration>,
     Vec<TypeExprRef>,
+    crate::types::VariantLayout,
     bool,
 )> {
     let repr = type_ctx.repr(ty);
@@ -8753,12 +8758,18 @@ fn variant_constructors_for_type(
     };
     let decl = type_decl_for_path(type_ctx, path)?;
     match decl.type_kind {
-        crate::types::decl::TypeKind::TypeVariant(constructors, _) => Some((
-            path.clone(),
-            constructors,
-            decl.type_params,
-            decl.type_representation == crate::types::TypeRepresentation::Unboxed,
-        )),
+        crate::types::decl::TypeKind::TypeVariant(constructors, layout_ref) => {
+            let layout = type_ctx.variant_layout(layout_ref);
+            let unboxed = decl.type_representation == crate::types::TypeRepresentation::Unboxed
+                || layout.configuration().unboxed;
+            Some((
+                path.clone(),
+                constructors,
+                decl.type_params,
+                layout,
+                unboxed,
+            ))
+        }
         _ => None,
     }
 }
@@ -8766,12 +8777,17 @@ fn variant_constructors_for_type(
 fn variant_constructor_runtime_matches_primitive(
     type_ctx: &TypeContext,
     constructor: &crate::types::decl::ConstructorDeclaration,
+    case: &crate::types::VariantConstructorCase,
     unboxed: bool,
     target_path: &crate::types::Path,
 ) -> bool {
     match &constructor.cd_args {
         crate::types::decl::ConstructorArguments::CstrTuple(args) if args.is_empty() => {
-            match variant_constructor_as_payload(&constructor.cd_attributes) {
+            let tag = match case {
+                crate::types::VariantConstructorCase::Constant(tag) => &tag.tag_type,
+                crate::types::VariantConstructorCase::Block(_) => unreachable!(),
+            };
+            match variant_constructor_as_payload(tag) {
                 None | Some(VariantConstructorAsPayload::String) => {
                     target_path.same(&crate::types::predef::path_string())
                 }
@@ -8811,37 +8827,17 @@ enum VariantConstructorAsPayload {
 }
 
 fn variant_constructor_as_payload(
-    attrs: &[crate::types::decl::Attribute],
+    tag: &Option<crate::types::VariantTagType>,
 ) -> Option<VariantConstructorAsPayload> {
-    attrs.iter().find_map(|attr| {
-        if attr.attr_name.txt != "as" {
-            return None;
-        }
-        match &attr.attr_payload {
-            crate::types::decl::AttributePayload::Str(_) => {
-                Some(VariantConstructorAsPayload::String)
-            }
-            crate::types::decl::AttributePayload::Int(_)
-            | crate::types::decl::AttributePayload::IntLiteral(_) => {
-                Some(VariantConstructorAsPayload::Int)
-            }
-            crate::types::decl::AttributePayload::Float(_) => {
-                Some(VariantConstructorAsPayload::Float)
-            }
-            crate::types::decl::AttributePayload::BigInt(_) => {
-                Some(VariantConstructorAsPayload::BigInt)
-            }
-            crate::types::decl::AttributePayload::Bool(_) => {
-                Some(VariantConstructorAsPayload::Bool)
-            }
-            crate::types::decl::AttributePayload::Ident(value) if value == "null" => {
-                Some(VariantConstructorAsPayload::Null)
-            }
-            crate::types::decl::AttributePayload::Ident(value) if value == "undefined" => {
-                Some(VariantConstructorAsPayload::Undefined)
-            }
-            _ => None,
-        }
+    tag.as_ref().map(|tag| match tag {
+        crate::types::VariantTagType::String(_) => VariantConstructorAsPayload::String,
+        crate::types::VariantTagType::Int(_) => VariantConstructorAsPayload::Int,
+        crate::types::VariantTagType::Float(_) => VariantConstructorAsPayload::Float,
+        crate::types::VariantTagType::BigInt(_) => VariantConstructorAsPayload::BigInt,
+        crate::types::VariantTagType::Bool(_) => VariantConstructorAsPayload::Bool,
+        crate::types::VariantTagType::Null => VariantConstructorAsPayload::Null,
+        crate::types::VariantTagType::Undefined => VariantConstructorAsPayload::Undefined,
+        crate::types::VariantTagType::Untagged(_) => unreachable!(),
     })
 }
 
@@ -8922,7 +8918,7 @@ fn append_string_to_variant_help(
     const INFO: &str = "\x1b[1;33m";
     const RESET: &str = "\x1b[0m";
 
-    let Some(constructors) = trace.iter().copied().find_map(|(actual, expected)| {
+    let Some((constructors, layout)) = trace.iter().copied().find_map(|(actual, expected)| {
         (simple_type_constr_name(type_ctx, actual).as_deref() == Some("string"))
             .then(|| concrete_variant_constructors(type_ctx, expected))
             .flatten()
@@ -8935,10 +8931,18 @@ fn append_string_to_variant_help(
     let Some(string_value) = simple_string_literal_value(&source_literal) else {
         return false;
     };
-    let Some(constructor_name) = constructors.iter().find_map(|constructor| {
-        let runtime_repr = variant_constructor_string_runtime_repr(constructor)?;
-        (runtime_repr == string_value).then(|| constructor.cd_id.name().to_string())
-    }) else {
+    let Some(constructor_name) =
+        constructors
+            .iter()
+            .enumerate()
+            .find_map(|(position, constructor)| {
+                let runtime_repr = variant_constructor_string_runtime_repr(
+                    constructor,
+                    &layout.constructors[position],
+                )?;
+                (runtime_repr == string_value).then(|| constructor.cd_id.name().to_string())
+            })
+    else {
         return false;
     };
 
@@ -8957,7 +8961,10 @@ fn append_string_to_variant_help(
 fn concrete_variant_constructors(
     type_ctx: &TypeContext,
     ty: TypeExprRef,
-) -> Option<Vec<crate::types::decl::ConstructorDeclaration>> {
+) -> Option<(
+    Vec<crate::types::decl::ConstructorDeclaration>,
+    crate::types::VariantLayout,
+)> {
     let mut current = type_ctx.repr(ty);
     let mut seen = Vec::new();
 
@@ -8972,8 +8979,8 @@ fn concrete_variant_constructors(
             TypeDesc::Tconstr { path, .. } => {
                 let decl = type_decl_for_path(type_ctx, path)?;
                 match decl.type_kind {
-                    crate::types::decl::TypeKind::TypeVariant(constructors, _) => {
-                        return Some(constructors);
+                    crate::types::decl::TypeKind::TypeVariant(constructors, layout_ref) => {
+                        return Some((constructors, type_ctx.variant_layout(layout_ref)));
                     }
                     crate::types::decl::TypeKind::TypeAbstract => {
                         current = type_ctx.repr(decl.type_manifest?);
@@ -9011,18 +9018,17 @@ fn type_decl_for_path(
 
 fn variant_constructor_string_runtime_repr(
     constructor: &crate::types::decl::ConstructorDeclaration,
+    case: &crate::types::VariantConstructorCase,
 ) -> Option<String> {
-    for attr in &constructor.cd_attributes {
-        if attr.attr_name.txt != "as" {
-            continue;
-        }
-        return match &attr.attr_payload {
-            crate::types::decl::AttributePayload::Str(value) => Some(value.clone()),
-            _ => None,
-        };
+    let tag = match case {
+        crate::types::VariantConstructorCase::Constant(tag) => &tag.tag_type,
+        crate::types::VariantConstructorCase::Block(block) => &block.runtime.tag.tag_type,
+    };
+    match tag {
+        Some(crate::types::VariantTagType::String(value)) => Some(value.clone()),
+        Some(_) => None,
+        None => Some(constructor.cd_id.name().to_string()),
     }
-
-    Some(constructor.cd_id.name().to_string())
 }
 
 fn type_clash_string_to_polyvariant(

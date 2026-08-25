@@ -4471,6 +4471,8 @@ fn compare_definition_constructors(
     actual_params: &[TypeExprRef],
     expected: &[crate::types::decl::ConstructorDeclaration],
     actual: &[crate::types::decl::ConstructorDeclaration],
+    expected_layout: &crate::types::VariantLayout,
+    actual_layout: &crate::types::VariantLayout,
 ) -> Option<String> {
     let len = expected.len().min(actual.len());
     for idx in 0..len {
@@ -4534,6 +4536,25 @@ fn compare_definition_constructors(
                 ));
             }
         }
+        if matches!(
+            expected_constructor.cd_args,
+            crate::types::decl::ConstructorArguments::CstrTuple(ref args) if args.is_empty()
+        ) {
+            let expected_tag = match &expected_layout.constructors[idx] {
+                crate::types::VariantConstructorCase::Constant(tag) => &tag.tag_type,
+                crate::types::VariantConstructorCase::Block(_) => unreachable!(),
+            };
+            let actual_tag = match &actual_layout.constructors[idx] {
+                crate::types::VariantConstructorCase::Constant(tag) => &tag.tag_type,
+                crate::types::VariantConstructorCase::Block(_) => unreachable!(),
+            };
+            if expected_tag != actual_tag {
+                return Some(format!(
+                    "The internal representations for case {} are not equal.",
+                    expected_constructor.cd_id.name()
+                ));
+            }
+        }
     }
 
     if let Some(constructor) = expected.get(len) {
@@ -4569,14 +4590,16 @@ fn definition_mismatch_detail(
             actual_labels,
         ),
         (
-            crate::types::decl::TypeKind::TypeVariant(expected_constructors, _),
-            crate::types::decl::TypeKind::TypeVariant(actual_constructors, _),
+            crate::types::decl::TypeKind::TypeVariant(expected_constructors, expected_layout),
+            crate::types::decl::TypeKind::TypeVariant(actual_constructors, actual_layout),
         ) => compare_definition_constructors(
             ctx,
             &expected.type_params,
             &actual.type_params,
             expected_constructors,
             actual_constructors,
+            &ctx.variant_layout(*expected_layout),
+            &ctx.variant_layout(*actual_layout),
         ),
         _ => None,
     }
@@ -4611,16 +4634,19 @@ fn coherence_private_flags(
     }
 }
 
-fn type_decl_tag_name(decl: &crate::types::decl::TypeDeclaration) -> Option<&str> {
-    decl.type_attributes.iter().find_map(|attr| {
-        if attr.attr_name.txt == "tag"
-            && let crate::types::decl::AttributePayload::Str(value) = &attr.attr_payload
-        {
-            Some(value.as_str())
-        } else {
-            None
-        }
-    })
+fn type_decl_variant_configuration(
+    ctx: &crate::types::context::TypeContext,
+    decl: &crate::types::decl::TypeDeclaration,
+) -> crate::types::VariantConfiguration {
+    let mut configuration = decl
+        .variant_layout_ref()
+        .map(|layout_ref| ctx.variant_layout(layout_ref).configuration())
+        .unwrap_or(crate::types::VariantConfiguration {
+            unboxed: false,
+            tag_name: None,
+        });
+    configuration.unboxed |= decl.type_representation == crate::types::TypeRepresentation::Unboxed;
+    configuration
 }
 
 fn coherence_variance_detail(
@@ -4692,21 +4718,22 @@ fn coherence_definition_mismatch_detail(
         return Some("A private type would be revealed.".to_string());
     }
 
+    let expected_configuration = type_decl_variant_configuration(ctx, expected);
+    let actual_configuration = type_decl_variant_configuration(ctx, actual);
     if !matches!(actual.type_kind, crate::types::decl::TypeKind::TypeAbstract)
-        && expected.type_representation != actual.type_representation
+        && expected_configuration.unboxed != actual_configuration.unboxed
     {
-        let unboxed_decl =
-            if actual.type_representation == crate::types::TypeRepresentation::Unboxed {
-                "the second"
-            } else {
-                "the first"
-            };
+        let unboxed_decl = if actual_configuration.unboxed {
+            "the second"
+        } else {
+            "the first"
+        };
         return Some(format!(
             "Their internal representations differ:\n{unboxed_decl} declaration uses unboxed representation."
         ));
     }
 
-    if type_decl_tag_name(expected) != type_decl_tag_name(actual) {
+    if expected_configuration.tag_name != actual_configuration.tag_name {
         return Some("Their @tag annotations differ.".to_string());
     }
 

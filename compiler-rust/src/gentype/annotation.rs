@@ -62,14 +62,6 @@ pub fn tag_is_string(s: &str) -> bool {
     s == "string"
 }
 
-pub fn tag_is_tag(s: &str) -> bool {
-    s == "tag"
-}
-
-pub fn tag_is_unboxed(s: &str) -> bool {
-    s == "unboxed" || s == "ocaml.unboxed"
-}
-
 pub fn tag_is_gentype_import(s: &str) -> bool {
     s == "genType.import" || s == "gentype.import"
 }
@@ -224,13 +216,6 @@ pub fn get_attribute_import_renaming(
             _ => (None, gentype_as_renaming),
         },
         _ => (None, gentype_as_renaming),
-    }
-}
-
-pub fn get_tag(arena: &ParseArena, attributes: &Attributes) -> Option<String> {
-    match get_attribute_payload(arena, tag_is_tag, attributes) {
-        Some((_, AttributePayload::StringPayload(s))) => Some(s),
-        _ => None,
     }
 }
 
@@ -565,39 +550,6 @@ pub fn get_decl_as_string(attributes: &[crate::types::decl::Attribute]) -> Optio
 
 pub fn get_decl_as_int(attributes: &[crate::types::decl::Attribute]) -> Option<i32> {
     get_decl_attribute_payload(tag_is_as, attributes).and_then(decl_attribute_payload_as_int)
-}
-
-pub fn get_decl_as_label_js(
-    attributes: &[crate::types::decl::Attribute],
-) -> Option<crate::gentype::gen_type_common::LabelJs> {
-    match get_decl_attribute_payload(tag_is_as, attributes)? {
-        crate::types::decl::AttributePayload::Ident(s) if s == "null" => {
-            Some(crate::gentype::gen_type_common::LabelJs::NullLabel)
-        }
-        crate::types::decl::AttributePayload::Ident(s) if s == "undefined" => {
-            Some(crate::gentype::gen_type_common::LabelJs::UndefinedLabel)
-        }
-        crate::types::decl::AttributePayload::Bool(b) => {
-            Some(crate::gentype::gen_type_common::LabelJs::BoolLabel(*b))
-        }
-        crate::types::decl::AttributePayload::Float(s) => Some(
-            crate::gentype::gen_type_common::LabelJs::FloatLabel(s.clone()),
-        ),
-        crate::types::decl::AttributePayload::Int(n) => Some(
-            crate::gentype::gen_type_common::LabelJs::IntLabel(n.to_string()),
-        ),
-        crate::types::decl::AttributePayload::IntLiteral(s) => Some(
-            crate::gentype::gen_type_common::LabelJs::IntLabel(s.clone()),
-        ),
-        crate::types::decl::AttributePayload::Str(s) => Some(
-            crate::gentype::gen_type_common::LabelJs::StringLabel(s.clone()),
-        ),
-        _ => None,
-    }
-}
-
-pub fn get_decl_tag(attributes: &[crate::types::decl::Attribute]) -> Option<String> {
-    get_decl_attribute_payload(tag_is_tag, attributes).and_then(decl_attribute_payload_as_string)
 }
 
 pub fn get_decl_doc_payload(attributes: &[crate::types::decl::Attribute]) -> Option<String> {

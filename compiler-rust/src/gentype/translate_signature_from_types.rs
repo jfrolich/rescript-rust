@@ -23,18 +23,21 @@ pub fn translate_type_declaration_from_types(
         crate::gentype::log_::item(&format!("Translate Types.type_declaration {type_name}\n"));
     }
     let declaration_kind = match &type_declaration.type_kind {
-        TypeKind::TypeRecord(label_declarations, _) => {
+        TypeKind::TypeRecord(label_declarations, representation) => {
             crate::gentype::translate_type_declarations::DeclarationKind::RecordDeclarationFromTypes(
                 label_declarations.clone(),
+                representation.clone(),
             )
         }
-        TypeKind::TypeVariant(constructor_declarations, _)
+        TypeKind::TypeVariant(constructor_declarations, layout_ref)
             if !crate::gentype::translate_type_declarations::has_some_gadt_leaf(
                 constructor_declarations,
             ) =>
         {
             crate::gentype::translate_type_declarations::DeclarationKind::VariantDeclarationFromTypes(
                 constructor_declarations.clone(),
+                ctx.variant_layout(*layout_ref),
+                type_declaration.type_representation,
             )
         }
         TypeKind::TypeAbstract => {

@@ -109,11 +109,24 @@ fn raw_constructor_constant(
             }
             crate::types::ConstructorKind::Extension(_) => unreachable!(),
         };
+        let runtime_tag = match cstr.cstr_kind {
+            crate::types::ConstructorKind::Ordinary(reference) => {
+                match reference.representation(ctx) {
+                    crate::types::VariantConstructorCase::Constant(tag) => {
+                        constructor_runtime_tag(&tag.tag_type)
+                    }
+                    crate::types::VariantConstructorCase::Block(block) => {
+                        constructor_runtime_tag(&block.runtime.tag.tag_type)
+                    }
+                }
+            }
+            crate::types::ConstructorKind::Extension(_) => unreachable!(),
+        };
         PointerInfo::Constructor(PointerConstructorTag {
             name: cstr.cstr_name.clone(),
             const_: layout.num_constants() as i32,
             non_const: layout.num_blocks() as i32,
-            runtime_tag: constructor_runtime_tag(&cstr.cstr_attributes),
+            runtime_tag,
         })
     };
     Constant::Int {
@@ -465,68 +478,24 @@ fn label_runtime_name(lbl: &LabelDescription) -> String {
 }
 
 fn constructor_runtime_tag(
-    attrs: &[crate::types::decl::Attribute],
+    tag: &Option<crate::types::VariantTagType>,
 ) -> Option<ConstructorRuntimeTag> {
-    attrs.iter().find_map(|attr| {
-        if attr.attr_name.txt != "as" {
-            return None;
+    tag.as_ref().and_then(|tag| match tag {
+        crate::types::VariantTagType::Int(value) => Some(ConstructorRuntimeTag::Int(*value as i64)),
+        crate::types::VariantTagType::String(value) => {
+            Some(ConstructorRuntimeTag::String(value.clone()))
         }
-        match &attr.attr_payload {
-            crate::types::decl::AttributePayload::Int(value) => {
-                Some(ConstructorRuntimeTag::Int(*value))
-            }
-            crate::types::decl::AttributePayload::IntLiteral(value) => {
-                crate::types::decl::parse_ocaml_int_literal(value).map(ConstructorRuntimeTag::Int)
-            }
-            crate::types::decl::AttributePayload::Str(value) => {
-                Some(ConstructorRuntimeTag::String(value.clone()))
-            }
-            crate::types::decl::AttributePayload::Float(value) => {
-                Some(ConstructorRuntimeTag::Float(value.clone()))
-            }
-            crate::types::decl::AttributePayload::BigInt(value) => {
-                Some(ConstructorRuntimeTag::BigInt(value.clone()))
-            }
-            crate::types::decl::AttributePayload::Bool(value) => {
-                Some(ConstructorRuntimeTag::Bool(*value))
-            }
-            crate::types::decl::AttributePayload::Ident(value) if value == "null" => {
-                Some(ConstructorRuntimeTag::Null)
-            }
-            crate::types::decl::AttributePayload::Ident(value) if value == "undefined" => {
-                Some(ConstructorRuntimeTag::Undefined)
-            }
-            _ => None,
+        crate::types::VariantTagType::Float(value) => {
+            Some(ConstructorRuntimeTag::Float(value.clone()))
         }
+        crate::types::VariantTagType::BigInt(value) => {
+            Some(ConstructorRuntimeTag::BigInt(value.clone()))
+        }
+        crate::types::VariantTagType::Bool(value) => Some(ConstructorRuntimeTag::Bool(*value)),
+        crate::types::VariantTagType::Null => Some(ConstructorRuntimeTag::Null),
+        crate::types::VariantTagType::Undefined => Some(ConstructorRuntimeTag::Undefined),
+        crate::types::VariantTagType::Untagged(_) => None,
     })
-}
-
-fn block_runtime_from_attributes(
-    name: String,
-    attrs: &[crate::types::decl::Attribute],
-) -> crate::types::BlockRuntime {
-    let tag_type = constructor_runtime_tag(attrs).map(|tag| match tag {
-        ConstructorRuntimeTag::Int(value) => crate::types::VariantTagType::Int(value as i32),
-        ConstructorRuntimeTag::String(value) => crate::types::VariantTagType::String(value),
-        ConstructorRuntimeTag::Float(value) => crate::types::VariantTagType::Float(value),
-        ConstructorRuntimeTag::BigInt(value) => crate::types::VariantTagType::BigInt(value),
-        ConstructorRuntimeTag::Bool(value) => crate::types::VariantTagType::Bool(value),
-        ConstructorRuntimeTag::Null => crate::types::VariantTagType::Null,
-        ConstructorRuntimeTag::Undefined => crate::types::VariantTagType::Undefined,
-    });
-    let tag_name = attrs.iter().find_map(|attr| {
-        (attr.attr_name.txt == "tag")
-            .then(|| match &attr.attr_payload {
-                crate::types::decl::AttributePayload::Str(value) => Some(value.clone()),
-                _ => None,
-            })
-            .flatten()
-    });
-    crate::types::BlockRuntime {
-        tag: crate::types::VariantTag { name, tag_type },
-        tag_name,
-        untagged: attrs.iter().any(|attr| attr.attr_name.txt == "unboxed"),
-    }
 }
 
 fn config_payload_flags_contains(

@@ -775,9 +775,14 @@ fn format_type_declaration_with_options_and_rec(
         &decl.type_variance,
         matches!(decl.type_kind, TypeKind::TypeAbstract),
     );
-    let prefix = if decl.type_representation == crate::types::TypeRepresentation::Unboxed
-        || type_decl_has_attr(decl, "unboxed")
-    {
+    let unboxed = decl
+        .variant_layout_ref()
+        .map(|layout_ref| {
+            decl.type_representation == crate::types::TypeRepresentation::Unboxed
+                || type_ctx.variant_layout(layout_ref).configuration().unboxed
+        })
+        .unwrap_or(decl.type_representation == crate::types::TypeRepresentation::Unboxed);
+    let prefix = if unboxed {
         "@unboxed "
     } else if type_decl_has_attr(decl, "immediate") || type_decl_has_attr(decl, "ocaml.immediate") {
         "@immediate "
@@ -804,14 +809,18 @@ fn format_type_declaration_with_options_and_rec(
             let fields = fields.join(", ");
             format!("{head} = {{{fields}}}")
         }
-        TypeKind::TypeVariant(constructors, _) => {
+        TypeKind::TypeVariant(constructors, layout_ref) => {
             if constructors.is_empty() {
                 format!("{head} = |")
             } else {
+                let layout = type_ctx.variant_layout(*layout_ref);
                 let mut formatted_constructors = Vec::with_capacity(constructors.len());
-                for constructor in constructors {
-                    formatted_constructors
-                        .push(format_constructor_declaration(&mut printer, constructor));
+                for (position, constructor) in constructors.iter().enumerate() {
+                    formatted_constructors.push(format_constructor_declaration(
+                        &mut printer,
+                        constructor,
+                        Some(&layout.constructors[position]),
+                    ));
                 }
                 let constructors = formatted_constructors.join(" | ");
                 format!("{head} = {constructors}")
@@ -891,8 +900,9 @@ fn format_type_extension(
 fn format_constructor_declaration(
     printer: &mut TypeExprErrorPrinter<'_>,
     constructor: &ConstructorDeclaration,
+    representation: Option<&crate::types::VariantConstructorCase>,
 ) -> String {
-    let constructor_prefix = format_constructor_attributes(&constructor.cd_attributes);
+    let constructor_prefix = format_constructor_representation(constructor, representation);
     let rendered_constructor = match &constructor.cd_args {
         ConstructorArguments::CstrTuple(args) if args.is_empty() => {
             format!("{constructor_prefix}{}", constructor.cd_id.name())
@@ -923,27 +933,30 @@ fn format_constructor_declaration(
     }
 }
 
-fn format_constructor_attributes(attrs: &[Attribute]) -> String {
-    attrs
-        .iter()
-        .filter_map(|attr| {
-            if attr.attr_name.txt != "as" {
-                return None;
-            }
-            let payload = match &attr.attr_payload {
-                AttributePayload::Ident(value) => value.clone(),
-                AttributePayload::Str(value) => format!("\"{value}\""),
-                AttributePayload::Int(value) => value.to_string(),
-                AttributePayload::IntLiteral(value) => value.clone(),
-                AttributePayload::Float(value) | AttributePayload::BigInt(value) => value.clone(),
-                AttributePayload::Bool(true) => "true".to_string(),
-                AttributePayload::Bool(false) => "false".to_string(),
-                AttributePayload::Deprecated { reason, .. } => format!("\"{reason}\""),
-                AttributePayload::Empty | AttributePayload::Structure(_) => return None,
-            };
-            Some(format!("@as({payload}) "))
-        })
-        .collect::<String>()
+fn format_constructor_representation(
+    constructor: &ConstructorDeclaration,
+    representation: Option<&crate::types::VariantConstructorCase>,
+) -> String {
+    if !constructor_is_nullary(constructor) {
+        return String::new();
+    }
+    let Some(crate::types::VariantConstructorCase::Constant(tag)) = representation else {
+        return String::new();
+    };
+    let Some(tag) = &tag.tag_type else {
+        return String::new();
+    };
+    let payload = match tag {
+        crate::types::VariantTagType::String(value) => format!("\"{value}\""),
+        crate::types::VariantTagType::Int(value) => value.to_string(),
+        crate::types::VariantTagType::Float(value) => value.clone(),
+        crate::types::VariantTagType::BigInt(value) => format!("{value}n"),
+        crate::types::VariantTagType::Bool(value) => value.to_string(),
+        crate::types::VariantTagType::Null => "null".to_string(),
+        crate::types::VariantTagType::Undefined => "undefined".to_string(),
+        crate::types::VariantTagType::Untagged(_) => return String::new(),
+    };
+    format!("@as({payload}) ")
 }
 
 fn format_type_params(
@@ -3223,9 +3236,10 @@ pub(crate) fn type_declarations<'a>(
     }
 
     let canonical_unboxed = |decl: &TypeDeclaration| {
-        decl.variant_layout_ref()
-            .map(|layout_ref| type_ctx.variant_layout(layout_ref).unboxed)
-            .unwrap_or(decl.type_representation == crate::types::TypeRepresentation::Unboxed)
+        decl.type_representation == crate::types::TypeRepresentation::Unboxed
+            || decl.variant_layout_ref().is_some_and(|layout_ref| {
+                type_ctx.variant_layout(layout_ref).configuration().unboxed
+            })
     };
     if !matches!(sig_decl.type_kind, TypeKind::TypeAbstract)
         && canonical_unboxed(impl_decl) != canonical_unboxed(sig_decl)
@@ -3295,12 +3309,16 @@ pub(crate) fn type_declarations<'a>(
                 &sig_decl.type_params,
                 impl_constructors,
                 sig_constructors,
-                impl_decl
-                    .variant_layout_ref()
-                    .map(|r| type_ctx.variant_layout(r)),
-                sig_decl
-                    .variant_layout_ref()
-                    .map(|r| type_ctx.variant_layout(r)),
+                type_ctx.variant_layout(
+                    impl_decl
+                        .variant_layout_ref()
+                        .expect("variant declaration layout"),
+                ),
+                type_ctx.variant_layout(
+                    sig_decl
+                        .variant_layout_ref()
+                        .expect("variant declaration layout"),
+                ),
                 warnings,
             ) {
                 return Err(type_decl_mismatch(id, impl_decl, sig_decl, detail));
@@ -3883,8 +3901,8 @@ fn compare_variant_declarations(
     sig_params: &[TypeExprRef],
     impl_constructors: &[ConstructorDeclaration],
     sig_constructors: &[ConstructorDeclaration],
-    impl_layout: Option<crate::types::VariantLayout>,
-    sig_layout: Option<crate::types::VariantLayout>,
+    impl_layout: crate::types::VariantLayout,
+    sig_layout: crate::types::VariantLayout,
     warnings: &mut Vec<Warning>,
 ) -> Option<String> {
     let param_map = build_type_param_map(type_ctx, impl_params, sig_params);
@@ -3991,25 +4009,17 @@ fn compare_variant_declarations(
             }
         }
 
-        if constructor_is_nullary(impl_constructor)
-            && match (&impl_layout, &sig_layout) {
-                (Some(impl_layout), Some(sig_layout)) => {
-                    let impl_tag = match &impl_layout.constructors[index] {
-                        crate::types::VariantConstructorCase::Constant(tag) => &tag.tag_type,
-                        crate::types::VariantConstructorCase::Block(_) => unreachable!(),
-                    };
-                    let sig_tag = match &sig_layout.constructors[index] {
-                        crate::types::VariantConstructorCase::Constant(tag) => &tag.tag_type,
-                        crate::types::VariantConstructorCase::Block(_) => unreachable!(),
-                    };
-                    impl_tag != sig_tag
-                }
-                _ => {
-                    constructor_as_payload(&impl_constructor.cd_attributes)
-                        != constructor_as_payload(&sig_constructor.cd_attributes)
-                }
-            }
-        {
+        if constructor_is_nullary(impl_constructor) && {
+            let impl_tag = match &impl_layout.constructors[index] {
+                crate::types::VariantConstructorCase::Constant(tag) => &tag.tag_type,
+                crate::types::VariantConstructorCase::Block(_) => unreachable!(),
+            };
+            let sig_tag = match &sig_layout.constructors[index] {
+                crate::types::VariantConstructorCase::Constant(tag) => &tag.tag_type,
+                crate::types::VariantConstructorCase::Block(_) => unreachable!(),
+            };
+            impl_tag != sig_tag
+        } {
             return Some(format!(
                 "The internal representations for case {} are not equal.",
                 impl_constructor.cd_id.name()
@@ -4056,13 +4066,6 @@ fn constructor_is_nullary(constructor: &ConstructorDeclaration) -> bool {
         &constructor.cd_args,
         ConstructorArguments::CstrTuple(args) if args.is_empty()
     )
-}
-
-fn constructor_as_payload(attrs: &[Attribute]) -> Option<&AttributePayload> {
-    attrs
-        .iter()
-        .find(|attr| attr.attr_name.txt == "as")
-        .map(|attr| &attr.attr_payload)
 }
 
 fn build_type_param_map(

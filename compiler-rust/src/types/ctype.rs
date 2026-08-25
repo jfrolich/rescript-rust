@@ -3345,30 +3345,30 @@ fn can_try_coerce_variant_to_primitive(path: &Path, decl: &crate::types::TypeDec
         && !path.same(&crate::types::predef::path_bool())
 }
 
-fn variant_coercion_has_unboxed_attr(decl: &crate::types::TypeDeclaration) -> bool {
-    decl.type_attributes
-        .iter()
-        .any(|attr| attr.attr_name.txt == "unboxed")
-}
-
-fn variant_coercion_tag_name(decl: &crate::types::TypeDeclaration) -> Option<String> {
-    decl.type_attributes.iter().find_map(|attr| {
-        if attr.attr_name.txt == "tag"
-            && let crate::types::decl::AttributePayload::Str(value) = &attr.attr_payload
-        {
-            Some(value.clone())
-        } else {
-            None
-        }
-    })
+fn variant_runtime_configuration(
+    ctx: &TypeContext,
+    decl: &crate::types::TypeDeclaration,
+) -> crate::types::VariantConfiguration {
+    let mut configuration = decl
+        .variant_layout_ref()
+        .map(|layout_ref| ctx.variant_layout(layout_ref).configuration())
+        .unwrap_or(crate::types::VariantConfiguration {
+            unboxed: false,
+            tag_name: None,
+        });
+    configuration.unboxed |= decl.type_representation == crate::types::TypeRepresentation::Unboxed;
+    configuration
 }
 
 fn variant_configuration_issue(
+    ctx: &TypeContext,
     decl1: &crate::types::TypeDeclaration,
     decl2: &crate::types::TypeDeclaration,
 ) -> Option<VariantConfigurationIssue> {
-    let left_unboxed = variant_coercion_has_unboxed_attr(decl1);
-    let right_unboxed = variant_coercion_has_unboxed_attr(decl2);
+    let left = variant_runtime_configuration(ctx, decl1);
+    let right = variant_runtime_configuration(ctx, decl2);
+    let left_unboxed = left.unboxed;
+    let right_unboxed = right.unboxed;
     if left_unboxed != right_unboxed {
         return Some(VariantConfigurationIssue::UnboxedConfigNotMatching {
             left_unboxed,
@@ -3376,8 +3376,8 @@ fn variant_configuration_issue(
         });
     }
 
-    let left_tag = variant_coercion_tag_name(decl1);
-    let right_tag = variant_coercion_tag_name(decl2);
+    let left_tag = left.tag_name;
+    let right_tag = right.tag_name;
     if left_tag != right_tag {
         return Some(VariantConfigurationIssue::TagNameNotMatching {
             left_tag,
@@ -3415,50 +3415,30 @@ fn type_expr_path_same(ctx: &TypeContext, ty: TypeExprRef, target_path: &Path) -
 }
 
 fn variant_constructor_as_payload(
-    attrs: &[crate::types::decl::Attribute],
+    tag: &Option<crate::types::VariantTagType>,
 ) -> Option<VariantConstructorAsPayload> {
-    attrs.iter().find_map(|attr| {
-        if attr.attr_name.txt != "as" {
-            return None;
-        }
-        match &attr.attr_payload {
-            crate::types::decl::AttributePayload::Str(_) => {
-                Some(VariantConstructorAsPayload::String)
-            }
-            crate::types::decl::AttributePayload::Int(_)
-            | crate::types::decl::AttributePayload::IntLiteral(_) => {
-                Some(VariantConstructorAsPayload::Int)
-            }
-            crate::types::decl::AttributePayload::Float(_) => {
-                Some(VariantConstructorAsPayload::Float)
-            }
-            crate::types::decl::AttributePayload::BigInt(_) => {
-                Some(VariantConstructorAsPayload::BigInt)
-            }
-            crate::types::decl::AttributePayload::Bool(_) => {
-                Some(VariantConstructorAsPayload::Bool)
-            }
-            crate::types::decl::AttributePayload::Ident(value) if value == "null" => {
-                Some(VariantConstructorAsPayload::Null)
-            }
-            crate::types::decl::AttributePayload::Ident(value) if value == "undefined" => {
-                Some(VariantConstructorAsPayload::Undefined)
-            }
-            _ => None,
+    tag.as_ref().map(|tag| match tag {
+        crate::types::VariantTagType::String(_) => VariantConstructorAsPayload::String,
+        crate::types::VariantTagType::Int(_) => VariantConstructorAsPayload::Int,
+        crate::types::VariantTagType::Float(_) => VariantConstructorAsPayload::Float,
+        crate::types::VariantTagType::BigInt(_) => VariantConstructorAsPayload::BigInt,
+        crate::types::VariantTagType::Bool(_) => VariantConstructorAsPayload::Bool,
+        crate::types::VariantTagType::Null => VariantConstructorAsPayload::Null,
+        crate::types::VariantTagType::Undefined => VariantConstructorAsPayload::Undefined,
+        crate::types::VariantTagType::Untagged(_) => {
+            unreachable!("constructor tags are never untagged")
         }
     })
 }
 
-fn variant_constructor_as_string_payload(attrs: &[crate::types::decl::Attribute]) -> Option<&str> {
-    attrs.iter().find_map(|attr| {
-        if attr.attr_name.txt == "as"
-            && let crate::types::decl::AttributePayload::Str(value) = &attr.attr_payload
-        {
-            Some(value.as_str())
-        } else {
-            None
-        }
-    })
+fn variant_constructor_tag(
+    layout: &crate::types::VariantLayout,
+    position: usize,
+) -> &Option<crate::types::VariantTagType> {
+    match &layout.constructors[position] {
+        crate::types::VariantConstructorCase::Constant(tag) => &tag.tag_type,
+        crate::types::VariantConstructorCase::Block(block) => &block.runtime.tag.tag_type,
+    }
 }
 
 fn variant_constructor_covers_primitive(
@@ -3474,27 +3454,17 @@ fn variant_constructor_covers_primitive(
     }
 }
 
-fn variant_representation_matches(
-    left_attrs: &[crate::types::decl::Attribute],
-    right_attrs: &[crate::types::decl::Attribute],
-) -> bool {
-    // OCaml compiler/ml/variant_coercion.ml:152-160 compares the processed
-    // constructor tag type, not the whole attribute list. Distinct source
-    // locations on otherwise equal `@as` attributes must not make variant
-    // subtyping fail.
-    variant_constructor_as_payload(left_attrs) == variant_constructor_as_payload(right_attrs)
-}
-
 fn variant_constructor_matches_polyvariant_label(
     ctx: &TypeContext,
     constructor: &crate::types::decl::ConstructorDeclaration,
+    tag: &Option<crate::types::VariantTagType>,
     label: &str,
     unboxed: bool,
 ) -> bool {
-    if let Some(as_string) = variant_constructor_as_string_payload(&constructor.cd_attributes) {
+    if let Some(crate::types::VariantTagType::String(as_string)) = tag {
         return as_string == label;
     }
-    if variant_constructor_as_payload(&constructor.cd_attributes).is_some() {
+    if tag.is_some() {
         return false;
     }
     if unboxed
@@ -3511,19 +3481,26 @@ fn can_coerce_polyvariant_to_variant(
     ctx: &TypeContext,
     row: &RowDesc,
     constructors: &[crate::types::decl::ConstructorDeclaration],
-    type_attributes: &[crate::types::decl::Attribute],
+    layout: &crate::types::VariantLayout,
+    unboxed: bool,
 ) -> bool {
     // OCaml compiler/ml/variant_coercion.ml:246-286 accepts only closed
     // payload-free polymorphic variant rows, then compares each row label with
     // the target variant constructor runtime representation.
-    let unboxed = type_attributes
-        .iter()
-        .any(|attr| attr.attr_name.txt == "unboxed");
     row.row_fields.iter().all(|(label, field)| {
         matches!(btype::row_field_repr(ctx, field), RowField::Rpresent(None))
-            && constructors.iter().any(|constructor| {
-                variant_constructor_matches_polyvariant_label(ctx, constructor, label, unboxed)
-            })
+            && constructors
+                .iter()
+                .enumerate()
+                .any(|(position, constructor)| {
+                    variant_constructor_matches_polyvariant_label(
+                        ctx,
+                        constructor,
+                        variant_constructor_tag(layout, position),
+                        label,
+                        unboxed,
+                    )
+                })
     })
 }
 
@@ -3575,12 +3552,14 @@ fn variant_row_is_subtype_of_primitive(
 fn variant_runtime_representation_issues(
     ctx: &TypeContext,
     constructors: &[crate::types::decl::ConstructorDeclaration],
+    layout: &crate::types::VariantLayout,
     target_path: &Path,
     unboxed: bool,
 ) -> Vec<VariantRuntimeRepresentationIssue> {
     constructors
         .iter()
-        .filter_map(|constructor| {
+        .enumerate()
+        .filter_map(|(position, constructor)| {
             let constructor_name = constructor.cd_id.name().to_string();
             match &constructor.cd_args {
                 crate::types::decl::ConstructorArguments::CstrTuple(args)
@@ -3603,7 +3582,8 @@ fn variant_runtime_representation_issues(
                     }
                 }
                 crate::types::decl::ConstructorArguments::CstrTuple(args) if args.is_empty() => {
-                    let as_payload = variant_constructor_as_payload(&constructor.cd_attributes);
+                    let as_payload =
+                        variant_constructor_as_payload(variant_constructor_tag(layout, position));
                     let matches_as_payload = match as_payload {
                         None | Some(VariantConstructorAsPayload::String) => {
                             target_path.same(&crate::types::predef::path_string())
@@ -3779,9 +3759,10 @@ fn subtype_rec(
                 && primitive_coercion_path(path1)
                 && let Some(decl2) = lookup_type_decl_for_path(ctx, env, path2)
                 && can_try_coerce_variant_to_primitive(path2, &decl2)
-                && let crate::types::TypeKind::TypeVariant(constructors, _) = &decl2.type_kind
+                && let crate::types::TypeKind::TypeVariant(constructors, layout_ref) =
+                    &decl2.type_kind
             {
-                if !variant_coercion_has_unboxed_attr(&decl2) {
+                if !variant_runtime_configuration(ctx, &decl2).unboxed {
                     return Err(subtype_error_with_context(
                         trace,
                         SubtypeContext::CoercionTargetVariantNotUnboxed {
@@ -3809,13 +3790,16 @@ fn subtype_rec(
                 && primitive_coercion_path(path2)
                 && let Some(decl1) = lookup_type_decl_for_path(ctx, env, path1)
                 && can_try_coerce_variant_to_primitive(path1, &decl1)
-                && let crate::types::TypeKind::TypeVariant(constructors, _) = &decl1.type_kind
+                && let crate::types::TypeKind::TypeVariant(constructors, layout_ref) =
+                    &decl1.type_kind
             {
+                let layout = ctx.variant_layout(*layout_ref);
                 let issues = variant_runtime_representation_issues(
                     ctx,
                     constructors,
+                    &layout,
                     path2,
-                    variant_coercion_has_unboxed_attr(&decl1),
+                    variant_runtime_configuration(ctx, &decl1).unboxed,
                 );
                 if issues.is_empty() {
                     return Ok(());
@@ -3875,12 +3859,14 @@ fn subtype_rec(
                 }
                 if row.row_closed
                     && let Some(decl2) = lookup_type_decl_for_path(ctx, env, path)
-                    && let crate::types::TypeKind::TypeVariant(constructors, _) = &decl2.type_kind
+                    && let crate::types::TypeKind::TypeVariant(constructors, layout_ref) =
+                        &decl2.type_kind
                     && can_coerce_polyvariant_to_variant(
                         ctx,
                         &row,
                         constructors,
-                        &decl2.type_attributes,
+                        &ctx.variant_layout(*layout_ref),
+                        variant_runtime_configuration(ctx, &decl2).unboxed,
                     )
                 {
                     // OCaml compiler/ml/ctype.ml:3974-3988 handles closed
@@ -4077,8 +4063,10 @@ fn subtype_constructor_arguments(
     trace: &[(TypeExprRef, TypeExprRef)],
     left: &crate::types::decl::ConstructorDeclaration,
     right: &crate::types::decl::ConstructorDeclaration,
+    left_tag: &Option<crate::types::VariantTagType>,
+    right_tag: &Option<crate::types::VariantTagType>,
 ) -> TypeResult<()> {
-    if !variant_representation_matches(&left.cd_attributes, &right.cd_attributes) {
+    if left_tag != right_tag {
         return Err(subtype_error(trace));
     }
     match (&left.cd_args, &right.cd_args) {
@@ -4119,10 +4107,13 @@ fn subtype_variant_constructors(
     path2: &Path,
     cstrs1: &[crate::types::decl::ConstructorDeclaration],
     cstrs2: &[crate::types::decl::ConstructorDeclaration],
+    layout1: &crate::types::VariantLayout,
+    layout2: &crate::types::VariantLayout,
 ) -> TypeResult<()> {
     let cstrs2_by_name = cstrs2
         .iter()
-        .map(|cstr| (cstr.cd_id.name().to_string(), cstr))
+        .enumerate()
+        .map(|(position, cstr)| (cstr.cd_id.name().to_string(), (position, cstr)))
         .collect::<HashMap<_, _>>();
     // OCaml compiler/ml/ctype.ml:3805-3827 only attaches
     // Incompatible_constructor_count when the source variant has more
@@ -4149,11 +4140,22 @@ fn subtype_variant_constructors(
     // OCaml compiler/ml/ctype.ml:3828-3904 builds a constructor map from the
     // target variant, then checks each source constructor's representation and
     // payload fields with subtype_list/Record_coercion.check_record_fields.
-    for left in cstrs1 {
-        let Some(right) = cstrs2_by_name.get(left.cd_id.name()) else {
+    for (left_position, left) in cstrs1.iter().enumerate() {
+        let Some((right_position, right)) = cstrs2_by_name.get(left.cd_id.name()) else {
             return Err(subtype_error(trace));
         };
-        if subtype_constructor_arguments(ctx, env, visited, trace, left, right).is_err() {
+        if subtype_constructor_arguments(
+            ctx,
+            env,
+            visited,
+            trace,
+            left,
+            right,
+            variant_constructor_tag(layout1, left_position),
+            variant_constructor_tag(layout2, *right_position),
+        )
+        .is_err()
+        {
             // OCaml compiler/ml/ctype.ml:3863-3905 treats constructor payload
             // subtyping as a boolean while checking variant-to-variant
             // coercion, then records the root variant subtype failure with no
@@ -4184,8 +4186,11 @@ fn subtype_concrete_type_declarations(
         } else {
             Err(subtype_error(trace))
         }),
-        (super::TypeKind::TypeVariant(cstrs1, _), super::TypeKind::TypeVariant(cstrs2, _)) => Some(
-            if let Some(issue) = variant_configuration_issue(&decl1, &decl2) {
+        (
+            super::TypeKind::TypeVariant(cstrs1, layout_ref1),
+            super::TypeKind::TypeVariant(cstrs2, layout_ref2),
+        ) => Some(
+            if let Some(issue) = variant_configuration_issue(ctx, &decl1, &decl2) {
                 Err(subtype_error_with_context(
                     trace,
                     SubtypeContext::VariantConfigurationsMismatch {
@@ -4195,7 +4200,18 @@ fn subtype_concrete_type_declarations(
                     },
                 ))
             } else {
-                subtype_variant_constructors(ctx, env, visited, trace, path1, path2, cstrs1, cstrs2)
+                subtype_variant_constructors(
+                    ctx,
+                    env,
+                    visited,
+                    trace,
+                    path1,
+                    path2,
+                    cstrs1,
+                    cstrs2,
+                    &ctx.variant_layout(*layout_ref1),
+                    &ctx.variant_layout(*layout_ref2),
+                )
             },
         ),
         (super::TypeKind::TypeAbstract, super::TypeKind::TypeAbstract)
