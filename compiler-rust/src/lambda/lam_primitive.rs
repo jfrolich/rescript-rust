@@ -7,21 +7,6 @@
 use super::lam_compat::{Comparison, FieldDbgInfo, SetFieldDbgInfo};
 use super::lam_tag_info::TagInfo;
 
-/// Record representation for optimization purposes
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum RecordRepresentation {
-    /// Regular record
-    Regular,
-    /// Inlined record (variant payload)
-    Inlined {
-        tag: i32,
-        name: String,
-        num_nonconsts: i32,
-    },
-    /// Extension record
-    Extension,
-}
-
 /// Raw JavaScript code info
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct JsRawInfo {
