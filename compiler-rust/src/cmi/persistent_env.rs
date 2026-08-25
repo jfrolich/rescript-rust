@@ -496,6 +496,7 @@ impl ModuleRegistry {
             cmi_longident_names: Vec::new(),
             type_graph: portable_types::PortableTypeGraph {
                 entries: Vec::new(),
+                variant_layouts: Vec::new(),
             },
             raw_type_graph: None,
             fingerprint,

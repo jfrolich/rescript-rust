@@ -44,6 +44,8 @@ pub struct PortableTypeGraph {
     /// Type entries indexed by position. TypeExprRef values in the associated
     /// signature are indices into this vec.
     pub entries: Vec<PortableTypeEntry>,
+    /// Canonical variant layouts referenced by declarations in the signature.
+    pub variant_layouts: Vec<crate::types::VariantLayout>,
 }
 
 /// One type expression in portable form.
@@ -591,11 +593,14 @@ fn serialize_signature(
         arena,
         entries: Vec::new(),
         cache: HashMap::new(),
+        variant_layouts: Vec::new(),
+        variant_layout_cache: HashMap::new(),
     };
     let mut sig = sig.clone();
     ser.remap_signature(&mut sig);
     let type_graph = PortableTypeGraph {
         entries: ser.entries,
+        variant_layouts: ser.variant_layouts,
     };
     (sig, type_graph)
 }
@@ -605,6 +610,8 @@ struct TypeGraphSerializer<'a> {
     arena: Option<&'a ParseArena>,
     entries: Vec<PortableTypeEntry>,
     cache: HashMap<TypeExprRef, usize>,
+    variant_layouts: Vec<crate::types::VariantLayout>,
+    variant_layout_cache: HashMap<crate::types::VariantLayoutRef, usize>,
 }
 
 impl<'a> TypeGraphSerializer<'a> {
@@ -780,6 +787,17 @@ impl<'a> TypeGraphSerializer<'a> {
     }
 
     fn remap_type_decl(&mut self, td: &mut TypeDeclaration) {
+        if let Some(layout_ref) = td.type_variant_layout {
+            let index = if let Some(index) = self.variant_layout_cache.get(&layout_ref) {
+                *index
+            } else {
+                let index = self.variant_layouts.len();
+                self.variant_layouts.push(self.ctx.variant_layout(layout_ref));
+                self.variant_layout_cache.insert(layout_ref, index);
+                index
+            };
+            td.type_variant_layout = Some(crate::types::VariantLayoutRef(index as u32));
+        }
         for p in td.type_params.iter_mut() {
             *p = TypeExprRef::from_usize(self.serialize_type(*p));
         }
@@ -926,9 +944,16 @@ fn internalize_signature(
         ctx.set_desc(remap[i], desc);
     }
 
+    let layout_remap: Vec<_> = graph
+        .variant_layouts
+        .iter()
+        .cloned()
+        .map(|layout| ctx.alloc_complete_variant_layout(layout))
+        .collect();
+
     // Phase 3: clone and remap the signature.
     let mut sig = portable_sig.clone();
-    remap_signature_refs(&mut sig, &remap);
+    remap_signature_refs(&mut sig, &remap, &layout_remap);
     sig
 }
 
@@ -1052,19 +1077,27 @@ fn internalize_row_field(
 // Signature ref remapping (portable index -> real TypeExprRef)
 // ============================================================================
 
-fn remap_signature_refs(sig: &mut Signature, remap: &[TypeExprRef]) {
+fn remap_signature_refs(
+    sig: &mut Signature,
+    remap: &[TypeExprRef],
+    layout_remap: &[crate::types::VariantLayoutRef],
+) {
     for item in sig.iter_mut() {
-        remap_sig_item_refs(item, remap);
+        remap_sig_item_refs(item, remap, layout_remap);
     }
 }
 
-fn remap_sig_item_refs(item: &mut SignatureItem, remap: &[TypeExprRef]) {
+fn remap_sig_item_refs(
+    item: &mut SignatureItem,
+    remap: &[TypeExprRef],
+    layout_remap: &[crate::types::VariantLayoutRef],
+) {
     match item {
         SignatureItem::SigValue(_, vd) => remap_value_desc_refs(vd, remap),
-        SignatureItem::SigType(_, td, _) => remap_type_decl_refs(td, remap),
+        SignatureItem::SigType(_, td, _) => remap_type_decl_refs(td, remap, layout_remap),
         SignatureItem::SigTypext(_, ec, _) => remap_ext_ctor_refs(ec, remap),
-        SignatureItem::SigModule(_, md, _) => remap_module_decl_refs(md, remap),
-        SignatureItem::SigModtype(_, mtd) => remap_modtype_decl_refs(mtd, remap),
+        SignatureItem::SigModule(_, md, _) => remap_module_decl_refs(md, remap, layout_remap),
+        SignatureItem::SigModtype(_, mtd) => remap_modtype_decl_refs(mtd, remap, layout_remap),
         SignatureItem::SigClass | SignatureItem::SigClassType => {}
     }
 }
@@ -1073,7 +1106,14 @@ fn remap_value_desc_refs(vd: &mut ValueDescription, remap: &[TypeExprRef]) {
     vd.val_type = remap[vd.val_type.index()];
 }
 
-fn remap_type_decl_refs(td: &mut TypeDeclaration, remap: &[TypeExprRef]) {
+fn remap_type_decl_refs(
+    td: &mut TypeDeclaration,
+    remap: &[TypeExprRef],
+    layout_remap: &[crate::types::VariantLayoutRef],
+) {
+    if let Some(layout_ref) = td.type_variant_layout {
+        td.type_variant_layout = Some(layout_remap[layout_ref.0 as usize]);
+    }
     for p in td.type_params.iter_mut() {
         *p = remap[p.index()];
     }
@@ -1147,26 +1187,38 @@ fn remap_ext_ctor_refs(ec: &mut ExtensionConstructor, remap: &[TypeExprRef]) {
     }
 }
 
-fn remap_module_decl_refs(md: &mut ModuleDeclaration, remap: &[TypeExprRef]) {
-    remap_module_type_refs(&mut md.md_type, remap);
+fn remap_module_decl_refs(
+    md: &mut ModuleDeclaration,
+    remap: &[TypeExprRef],
+    layout_remap: &[crate::types::VariantLayoutRef],
+) {
+    remap_module_type_refs(&mut md.md_type, remap, layout_remap);
 }
 
-fn remap_modtype_decl_refs(mtd: &mut ModtypeDeclaration, remap: &[TypeExprRef]) {
+fn remap_modtype_decl_refs(
+    mtd: &mut ModtypeDeclaration,
+    remap: &[TypeExprRef],
+    layout_remap: &[crate::types::VariantLayoutRef],
+) {
     if let Some(ref mut mt) = mtd.mtd_type {
-        remap_module_type_refs(mt, remap);
+        remap_module_type_refs(mt, remap, layout_remap);
     }
 }
 
-fn remap_module_type_refs(mt: &mut ModuleType, remap: &[TypeExprRef]) {
+fn remap_module_type_refs(
+    mt: &mut ModuleType,
+    remap: &[TypeExprRef],
+    layout_remap: &[crate::types::VariantLayoutRef],
+) {
     match mt {
-        ModuleType::MtySignature(sig) => remap_signature_refs(sig, remap),
+        ModuleType::MtySignature(sig) => remap_signature_refs(sig, remap, layout_remap),
         ModuleType::MtyFunctor {
             param_type, result, ..
         } => {
             if let Some(pt) = param_type.as_mut() {
-                remap_module_type_refs(pt, remap);
+                remap_module_type_refs(pt, remap, layout_remap);
             }
-            remap_module_type_refs(result, remap);
+            remap_module_type_refs(result, remap, layout_remap);
         }
         ModuleType::MtyIdent(_) | ModuleType::MtyAlias(_, _) => {}
     }
