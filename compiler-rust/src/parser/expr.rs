@@ -1414,7 +1414,7 @@ fn parse_parameter(p: &mut Parser<'_>) -> Option<super::core::FundefParameter> {
         // For function parameters like `(x: int => int)`, we want to parse
         // the full arrow type, but `parse_constrained_pattern` uses
         // `parse_typ_expr_no_arrow` which is correct for switch cases but not here.
-        let pat = if p.token == Token::Colon {
+        let mut pat = if p.token == Token::Colon {
             p.next();
             let typ = super::typ::parse_typ_expr(p);
             let loc = p.mk_loc_spanning(pat.ppat_loc, typ.ptyp_loc);
@@ -1428,6 +1428,9 @@ fn parse_parameter(p: &mut Parser<'_>) -> Option<super::core::FundefParameter> {
         } else {
             pat
         };
+        let mut pattern_attrs = attrs;
+        pattern_attrs.extend(pat.ppat_attributes);
+        pat.ppat_attributes = pattern_attrs;
 
         // Check for default value (= expr) - this means it's a labeled param missing the ~
         if p.token == Token::Equal {
@@ -1470,7 +1473,7 @@ fn parse_parameter(p: &mut Parser<'_>) -> Option<super::core::FundefParameter> {
 
             return Some(super::core::FundefParameter::Term(
                 super::core::FundefTermParam {
-                    attrs,
+                    attrs: Attributes::new(),
                     label,
                     expr: default,
                     pat,
@@ -1482,7 +1485,7 @@ fn parse_parameter(p: &mut Parser<'_>) -> Option<super::core::FundefParameter> {
 
         return Some(super::core::FundefParameter::Term(
             super::core::FundefTermParam {
-                attrs,
+                attrs: Attributes::new(),
                 label: ArgLabel::Nolabel,
                 expr: None,
                 pat,
