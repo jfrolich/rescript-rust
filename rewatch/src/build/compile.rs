@@ -1880,6 +1880,72 @@ fn build_compiler_options(
         None
     };
 
+    let (source_map, source_map_sources_content, source_map_root) =
+        match root_config.effective_source_map_mode(build_state.source_map_command) {
+            Some(config::SourceMapMode::Linked) => (
+                rescript_compiler::js_ir::source_map::SourceMapMode::Linked,
+                root_config
+                    .source_map
+                    .as_ref()
+                    .and_then(|value| match value {
+                        config::SourceMapConfig::Options(options) => options.sources_content,
+                        config::SourceMapConfig::Disabled => None,
+                    })
+                    .unwrap_or(false),
+                root_config
+                    .source_map
+                    .as_ref()
+                    .and_then(|value| match value {
+                        config::SourceMapConfig::Options(options) => options.source_root.clone(),
+                        config::SourceMapConfig::Disabled => None,
+                    })
+                    .unwrap_or_default(),
+            ),
+            Some(config::SourceMapMode::Inline) => (
+                rescript_compiler::js_ir::source_map::SourceMapMode::Inline,
+                root_config
+                    .source_map
+                    .as_ref()
+                    .and_then(|value| match value {
+                        config::SourceMapConfig::Options(options) => options.sources_content,
+                        config::SourceMapConfig::Disabled => None,
+                    })
+                    .unwrap_or(false),
+                root_config
+                    .source_map
+                    .as_ref()
+                    .and_then(|value| match value {
+                        config::SourceMapConfig::Options(options) => options.source_root.clone(),
+                        config::SourceMapConfig::Disabled => None,
+                    })
+                    .unwrap_or_default(),
+            ),
+            Some(config::SourceMapMode::Hidden) => (
+                rescript_compiler::js_ir::source_map::SourceMapMode::Hidden,
+                root_config
+                    .source_map
+                    .as_ref()
+                    .and_then(|value| match value {
+                        config::SourceMapConfig::Options(options) => options.sources_content,
+                        config::SourceMapConfig::Disabled => None,
+                    })
+                    .unwrap_or(false),
+                root_config
+                    .source_map
+                    .as_ref()
+                    .and_then(|value| match value {
+                        config::SourceMapConfig::Options(options) => options.source_root.clone(),
+                        config::SourceMapConfig::Disabled => None,
+                    })
+                    .unwrap_or_default(),
+            ),
+            None => (
+                rescript_compiler::js_ir::source_map::SourceMapMode::None,
+                false,
+                String::new(),
+            ),
+        };
+
     Ok(rescript_compiler::driver::CompilerOptions {
         include_paths,
         runtime_path,
@@ -1890,6 +1956,9 @@ fn build_compiler_options(
         output_path,
         output_module_format,
         js_output_targets,
+        source_map,
+        source_map_sources_content,
+        source_map_root,
         jsx_version,
         experimental_let_unwrap,
         jsx_preserve: parsed_flags.jsx_preserve,
@@ -2100,6 +2169,12 @@ fn write_compiled_js_outputs(
 
     for output in js_outputs {
         write_file_creating_parent_on_missing(&output.path, &output.code)?;
+        let map_path = PathBuf::from(format!("{}.map", output.path.display()));
+        if let Some(source_map) = output.source_map.as_deref() {
+            write_file_creating_parent_on_missing(&map_path, source_map)?;
+        } else {
+            let _ = std::fs::remove_file(map_path);
+        }
     }
     Ok(())
 }

@@ -28,6 +28,7 @@ use crate::lambda::{Lambda, LambdaSwitch, SwitchBlock, SwitchBlockType, SwitchCa
 
 pub(crate) fn empty_switch_case_clause() -> CaseClause {
     CaseClause {
+        source_loc: None,
         body: vec![],
         should_break: false,
         comment: None,
@@ -192,6 +193,7 @@ impl LambdaCompiler {
                     tag,
                     if is_last {
                         crate::js_ir::CaseClause {
+                            source_loc: None,
                             body: self.compile_switch_value_block(&tmp, body),
                             should_break: false,
                             comment: None,
@@ -299,6 +301,7 @@ impl LambdaCompiler {
                 tag_type: SwitchCaseTag::String(tag),
                 clause: if is_last {
                     crate::js_ir::CaseClause {
+                        source_loc: None,
                         body: self.compile_switch_value_block(&tmp, body),
                         should_break: false,
                         comment: None,
@@ -1943,6 +1946,7 @@ impl LambdaCompiler {
                 tag_type: tag,
                 clause: if is_last {
                     CaseClause {
+                        source_loc: None,
                         body: self.compile_switch_value_block(result, body),
                         should_break: false,
                         comment: None,
@@ -2094,6 +2098,7 @@ impl LambdaCompiler {
                     clause: if hoist_shared_tail {
                         shared_tail = Some(compiled_body);
                         CaseClause {
+                            source_loc: None,
                             body: vec![],
                             should_break: true,
                             comment: None,
@@ -2107,6 +2112,7 @@ impl LambdaCompiler {
                         let should_break =
                             return_switch_case_needs_break_like_ocaml(body, &compiled_body);
                         CaseClause {
+                            source_loc: None,
                             body: compiled_body,
                             should_break,
                             comment: None,
@@ -2217,6 +2223,7 @@ impl LambdaCompiler {
             clauses.push((
                 to_tag(grouped_cases[group_end].0.clone()),
                 CaseClause {
+                    source_loc: None,
                     body: compiled_body,
                     should_break,
                     comment: None,
@@ -2304,6 +2311,7 @@ impl LambdaCompiler {
                 let clause = if is_last {
                     let body = self.compile_effect_block(body);
                     CaseClause {
+                        source_loc: None,
                         should_break: !block_terminates(&body),
                         body,
                         comment: None,

@@ -6,12 +6,14 @@
 
 use super::op::Kind;
 use super::printer::{JsPrinter, convert_ident_name};
+use super::source_map::{SourceMapBuilder, SourceMapMode, inline_comment, linked_comment};
 use super::{
     Block, DepsProgram, Expression, ExpressionDesc, ModuleFormat, ModulePathResolver, Program,
     Statement, StatementDesc,
 };
 use crate::binary_ast::ppx::{JsStmtClassification, classify_js_stmt};
 use crate::ident::Ident;
+use std::path::Path;
 
 impl JsPrinter {
     /// Print a program
@@ -357,6 +359,64 @@ pub fn print_deps_program_with_directives_and_options(
     );
     printer.print_deps_program_with_directives_and_options(program, directives, emit_header);
     printer.into_output()
+}
+
+/// Print one concrete output target and collect mappings from JS IR source
+/// locations. This is the Rust counterpart of
+/// `Lam_compile_main.dump_deps_program_with_source_map`.
+pub fn print_deps_program_with_source_map(
+    program: &DepsProgram,
+    module_path_resolver: Option<&ModulePathResolver>,
+    directives: &[String],
+    debug: bool,
+    jsx_preserve: bool,
+    emit_header: bool,
+    target_file: &Path,
+    source_file: &Path,
+    mode: SourceMapMode,
+    sources_content: bool,
+    source_root: &str,
+) -> (String, Option<String>) {
+    let capacity = estimated_block_output_capacity(
+        program.program.block.len(),
+        program.program.exports.len(),
+        program.modules.len(),
+        directives.iter().map(String::len).sum(),
+        emit_header,
+    );
+    let mut printer = JsPrinter::with_module_path_resolver_options_and_capacity(
+        module_path_resolver,
+        debug,
+        jsx_preserve,
+        capacity,
+    );
+    printer.set_source_map_builder(SourceMapBuilder::new(
+        target_file,
+        source_file,
+        source_root.to_string(),
+        sources_content,
+    ));
+    printer.print_deps_program_with_directives_and_options(program, directives, emit_header);
+    let json = printer
+        .take_source_map_builder()
+        .expect("source map builder installed")
+        .json();
+    let mut output = printer.into_output();
+    match mode {
+        SourceMapMode::Linked => {
+            output.push_str(&linked_comment(&Path::new(&format!(
+                "{}.map",
+                target_file.display()
+            ))));
+            (output, Some(json))
+        }
+        SourceMapMode::Hidden => (output, Some(json)),
+        SourceMapMode::Inline => {
+            output.push_str(&inline_comment(&json));
+            (output, None)
+        }
+        SourceMapMode::None => (output, None),
+    }
 }
 
 #[cfg(test)]
