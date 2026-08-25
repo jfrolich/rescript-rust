@@ -11496,6 +11496,7 @@ pub fn compile_source_to_js_with_options(
     let raw_lambda =
         raw_converter.convert_structure_with_coercion(&typed_structure, &implementation_coercion);
     let raw_warnings = raw_converter.take_warnings();
+    let hoisted_functions = raw_converter.take_hoisted_functions();
     if let Some(diagnostic) = raw_converter.take_diagnostic() {
         emit_type_warnings(parser.arena(), source, filename, &raw_warnings);
         if type_warnings_have_errors(&raw_warnings) {
@@ -11602,6 +11603,7 @@ pub fn compile_source_to_js_with_options(
     compiler.set_source_map_enabled(
         options.source_map != crate::js_ir::source_map::SourceMapMode::None,
     );
+    compiler.set_hoisted_functions(hoisted_functions);
     let program = compiler.compile_deps_program_with_possible_required_modules(
         &lowered_lambda,
         &possible_required_modules,
@@ -14276,6 +14278,7 @@ pub struct InProcessCompileResult {
 pub struct InProcessPreJsCompileResult {
     pub lowered_lambda: crate::lambda::Lambda,
     pub possible_required_modules: AHashSet<ModuleId>,
+    pub hoisted_functions: Vec<crate::lambda::HoistedFunction>,
     pub hoisted_exports: Vec<crate::lambda::HoistedExport>,
     pub ident_stamp_at_js_boundary: i32,
     pub file_directives: Vec<String>,
@@ -14546,6 +14549,7 @@ fn render_js_program(
 
 fn compile_js_program_for_output(
     lowered_lambda: &crate::lambda::Lambda,
+    hoisted_functions: &[crate::lambda::HoistedFunction],
     possible_required_modules: &AHashSet<ModuleId>,
     options: &CompilerOptions,
     output_path: Option<&FsPath>,
@@ -14592,6 +14596,7 @@ fn compile_js_program_for_output(
     compiler.set_source_map_enabled(
         options.source_map != crate::js_ir::source_map::SourceMapMode::None,
     );
+    compiler.set_hoisted_functions(hoisted_functions.to_vec());
     let program = compiler.compile_deps_program_with_possible_required_modules(
         lowered_lambda,
         possible_required_modules,
@@ -14612,6 +14617,7 @@ fn compile_js_program_for_output(
 
 fn compile_js_program_for_output_owned(
     lowered_lambda: crate::lambda::Lambda,
+    hoisted_functions: &[crate::lambda::HoistedFunction],
     possible_required_modules: &AHashSet<ModuleId>,
     options: &CompilerOptions,
     output_path: Option<&FsPath>,
@@ -14633,6 +14639,7 @@ fn compile_js_program_for_output_owned(
     collected_possible_required_modules.extend(possible_required_modules.iter().cloned());
     compile_js_program_for_output_owned_with_collected_modules(
         lowered_lambda,
+        hoisted_functions,
         collected_possible_required_modules,
         options,
         output_path,
@@ -14644,6 +14651,7 @@ fn compile_js_program_for_output_owned(
 
 fn compile_js_program_for_output_owned_with_collected_modules(
     lowered_lambda: crate::lambda::Lambda,
+    hoisted_functions: &[crate::lambda::HoistedFunction],
     possible_required_modules: AHashSet<ModuleId>,
     options: &CompilerOptions,
     output_path: Option<&FsPath>,
@@ -14691,6 +14699,7 @@ fn compile_js_program_for_output_owned_with_collected_modules(
     compiler.set_source_map_enabled(
         options.source_map != crate::js_ir::source_map::SourceMapMode::None,
     );
+    compiler.set_hoisted_functions(hoisted_functions.to_vec());
     let program = compiler.compile_deps_program_with_collected_possible_required_modules_owned(
         lowered_lambda,
         possible_required_modules,
@@ -14997,6 +15006,7 @@ pub fn compile_preprocessed_structure_in_process_until_js(
         raw_diagnostic,
         raw_possible_required_modules,
         raw_lambda_current_stamp,
+        hoisted_functions,
         hoisted_exports,
     ) = crate::timing::measure(crate::timing::Phase::Lambda, || {
         let _phase = info_span!("compiler.raw_lambda").entered();
@@ -15028,12 +15038,14 @@ pub fn compile_preprocessed_structure_in_process_until_js(
         let raw_diagnostic = raw_converter.take_diagnostic();
         let possible_required_modules = raw_converter.take_possible_required_modules();
         let raw_lambda_current_stamp = raw_converter.current_stamp();
+        let hoisted_functions = raw_converter.take_hoisted_functions();
         let hoisted_exports = raw_converter.take_hoisted_exports();
         (
             raw_lambda,
             raw_diagnostic,
             possible_required_modules,
             raw_lambda_current_stamp,
+            hoisted_functions,
             hoisted_exports,
         )
     });
@@ -15079,6 +15091,7 @@ pub fn compile_preprocessed_structure_in_process_until_js(
     Ok(InProcessPreJsCompileResult {
         lowered_lambda,
         possible_required_modules,
+        hoisted_functions,
         hoisted_exports,
         ident_stamp_at_js_boundary,
         file_directives,
@@ -15149,6 +15162,7 @@ pub fn finish_preprocessed_structure_in_process_from_js_boundary_with_metadata_h
                 lowered_lambda
                     .as_ref()
                     .expect("lowered lambda retained for multiple JS targets"),
+                &pre_js.hoisted_functions,
                 &pre_js.possible_required_modules,
                 options,
                 primary_output_path,
@@ -15161,6 +15175,7 @@ pub fn finish_preprocessed_structure_in_process_from_js_boundary_with_metadata_h
                 lowered_lambda
                     .take()
                     .expect("lowered lambda consumed by single JS target"),
+                &pre_js.hoisted_functions,
                 &pre_js.possible_required_modules,
                 options,
                 primary_output_path,
@@ -15202,6 +15217,7 @@ pub fn finish_preprocessed_structure_in_process_from_js_boundary_with_metadata_h
                 lowered_lambda
                     .as_ref()
                     .expect("lowered lambda retained for secondary JS targets"),
+                &pre_js.hoisted_functions,
                 &pre_js.possible_required_modules,
                 options,
                 Some(&target.path),
