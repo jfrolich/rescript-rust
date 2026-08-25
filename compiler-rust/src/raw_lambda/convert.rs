@@ -3667,9 +3667,7 @@ impl<'a> RawLambdaConverter<'a> {
             // The binder is emitted only when a base exists, but its allocation
             // still orders later Translcore/Translmod identifiers.
             let init_id = self.fresh_ident("init");
-            let init_var = base_lam
-                .as_ref()
-                .map(|_| RawLambda::var(init_id.clone()));
+            let init_var = base_lam.as_ref().map(|_| RawLambda::var(init_id.clone()));
 
             let mut elems = Vec::with_capacity(fields.len());
             let mut fields_info = Vec::with_capacity(fields.len());
@@ -3801,9 +3799,7 @@ impl<'a> RawLambdaConverter<'a> {
             };
             // Wrap with let init = base_expr when there's a base expression
             return match base_lam {
-                Some(base_expr) => {
-                    RawLambda::let_(LetKind::Strict, init_id, base_expr, result)
-                }
+                Some(base_expr) => RawLambda::let_(LetKind::Strict, init_id, base_expr, result),
                 None => result,
             };
         }
@@ -4570,11 +4566,7 @@ impl<'a> RawLambdaConverter<'a> {
         path
     }
 
-    fn force_persistent_normalized_prefix(
-        &mut self,
-        env: &crate::types::env::Env,
-        id: &Ident,
-    ) {
+    fn force_persistent_normalized_prefix(&mut self, env: &crate::types::env::Env, id: &Ident) {
         // Env.normalize_path's Pident branch calls find_module ~alias:true.
         // When the identifier is not a local module binding, OCaml's
         // persistent branch forces ps_sig and its Subst.signature freshening

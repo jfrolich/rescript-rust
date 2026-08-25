@@ -3395,8 +3395,7 @@ fn fix_spread_first_object_manifest(
                 .collect::<Vec<_>>();
             let first = fixed_args[0].clone();
             if fixed_args.len() > 1 {
-                p.arena_mut()
-                    .set_nary_arrow_args(arity, fixed_args.clone());
+                p.arena_mut().set_nary_arrow_args(arity, fixed_args.clone());
             }
             let fixed = CoreType {
                 ptyp_desc: Box::new(CoreTypeDesc::Ptyp_arrow(Box::new((
@@ -3458,8 +3457,7 @@ fn fix_type_manifest_location(p: &mut Parser<'_>, typ_idx: CoreTypeIdx) -> CoreT
                 .collect::<Vec<_>>();
             let first = fixed_args[0].clone();
             if fixed_args.len() > 1 {
-                p.arena_mut()
-                    .set_nary_arrow_args(arity, fixed_args.clone());
+                p.arena_mut().set_nary_arrow_args(arity, fixed_args.clone());
             }
             let fixed = CoreType {
                 ptyp_desc: Box::new(CoreTypeDesc::Ptyp_arrow(Box::new((
