@@ -12097,23 +12097,18 @@ mod tests {
         let expr = Expression::new(
             ExpressionDesc::Texp_function {
                 params: vec![FunctionParam {
-                    param_id: param_id.clone(),
-                    label: crate::parser::ast::ArgLabel::Nolabel,
-                    default: None,
-                    pat: FunctionParamPattern::Simple(param_pat.clone()),
+                    fp_lbl: crate::types::ArgLabel::Nolabel,
+                    fp_param: param_id,
+                    fp_pat: param_pat,
+                    fp_partial: Partial::Total,
                 }],
-                body: vec![Case::simple(
-                    param_pat,
-                    Expression::new(
-                        ExpressionDesc::Texp_constant(TConstant::Int(1)),
-                        LocIdx::none(),
-                        crate::types::TypeExprRef(0),
-                        EnvRef(0),
-                        Attributes::new(),
-                    ),
-                )],
-                partial: Partial::Total,
-                arity: arena.push_arity(None),
+                body: Box::new(Expression::new(
+                    ExpressionDesc::Texp_constant(TConstant::Int(1)),
+                    LocIdx::none(),
+                    crate::types::TypeExprRef(0),
+                    EnvRef(0),
+                    Attributes::new(),
+                )),
                 async_: false,
             },
             LocIdx::none(),

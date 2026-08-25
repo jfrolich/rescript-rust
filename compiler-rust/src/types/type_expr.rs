@@ -548,10 +548,8 @@ impl RowFieldRef {
 pub enum TypeDescSer {
     Tvar(Option<String>),
     Tarrow {
-        arg_label: ArgLabel,
-        arg_type: usize,
+        args: Vec<(ArgLabel, usize)>,
         ret_type: usize,
-        arity: Option<i32>,
     },
     Ttuple(Vec<usize>),
     Tconstr {

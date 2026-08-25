@@ -2324,9 +2324,9 @@ fn transl_type_inner(
             let ret = tctx.arena.get_core_type(*ret_idx);
             let (ret_ctyp, ret_ty) = transl_type_inner(tctx, env, ret)?;
 
-            // The current parser bridge still carries the legacy arity slot;
-            // upstream Types/Typedtree no longer store it.
-            let _ = tctx.arena.get_arity(*arity);
+            // Compatibility bridge for the legacy Rust Parsetree tuple+arity
+            // encoding. Upstream Parsetree supplies one arg record per item.
+            let parser_arity = tctx.arena.get_arity(*arity);
 
             // Like OCaml: wrap optional argument types in option
             let arg_ty = if arg.lbl.is_optional() {
@@ -2337,7 +2337,36 @@ fn transl_type_inner(
 
             // Convert parser ArgLabel to types ArgLabel for TypeContext.
             let ctx_lbl = convert_arg_label_for_ctx(&arg.lbl, tctx.arena);
-            let mut type_args = vec![TypeArg::new(ctx_lbl.clone(), arg_ty)];
+            let tuple_items = match &arg_ctyp.ctyp_desc {
+                TypedCoreTypeDesc::Ttyp_tuple(items) if items.len() > 1 => {
+                    Some(items.clone())
+                }
+                _ => None,
+            };
+            let (mut type_args, mut typed_args) = if let Some(items) = tuple_items {
+                let type_args = items
+                    .iter()
+                    .map(|item| TypeArg::new(crate::types::ArgLabel::Nolabel, item.ctyp_type))
+                    .collect();
+                let typed_args = items
+                    .into_iter()
+                    .map(|item| ArrowArg {
+                        attrs: crate::parser::ast::Attributes::new(),
+                        lbl: crate::types::ArgLabel::Nolabel,
+                        typ: Box::new(item),
+                    })
+                    .collect();
+                (type_args, typed_args)
+            } else {
+                (
+                    vec![TypeArg::new(ctx_lbl.clone(), arg_ty)],
+                    vec![ArrowArg {
+                        attrs: arg.attrs.clone(),
+                        lbl: ctx_lbl,
+                        typ: Box::new(arg_ctyp),
+                    }],
+                )
+            };
             let final_ret_ty = {
                 let ret_desc = ctx.get_desc(ctx.repr(ret_ty));
                 match &*ret_desc {
@@ -2353,16 +2382,13 @@ fn transl_type_inner(
                 ret: final_ret_ty,
             });
 
-            let arrow_arg = ArrowArg {
-                attrs: arg.attrs.clone(),
-                lbl: ctx_lbl,
-                typ: Box::new(arg_ctyp),
+            let typed_ret = match ret_ctyp.ctyp_desc {
+                TypedCoreTypeDesc::Ttyp_arrow(args, ret) => {
+                    typed_args.extend(args);
+                    ret
+                }
+                _ => Box::new(ret_ctyp),
             };
-            let (mut typed_args, typed_ret) = match ret_ctyp.ctyp_desc {
-                TypedCoreTypeDesc::Ttyp_arrow(args, ret) => (args, ret),
-                _ => (Vec::new(), Box::new(ret_ctyp)),
-            };
-            typed_args.insert(0, arrow_arg);
 
             let ctyp = TypedCoreType {
                 ctyp_desc: TypedCoreTypeDesc::Ttyp_arrow(typed_args, typed_ret),
@@ -14705,7 +14731,7 @@ fn type_function(
     expected_ty: TypeExprRef,
     attributes: &[crate::parser::ast::Attribute],
 ) -> TypeCoreResult<Expression> {
-    use crate::types::typedtree::{Case, FunctionParam};
+    use crate::types::typedtree::{Case, FunctionParam, Partial};
 
     let ctx = tctx.type_ctx;
 
@@ -15004,12 +15030,37 @@ fn type_function(
             partial
         };
         let param_id = name_pattern(ctx, "param", &cases);
-        let fp = FunctionParam {
-            fp_lbl: ctx_label.clone(),
-            fp_param: param_id,
-            fp_pat: typed_param,
-            fp_partial: partial,
+        // Compatibility bridge while the Rust parser still represents an
+        // uncurried `(x, y) => body` as one tuple pattern plus arity metadata.
+        // Upstream Parsetree already supplies these as separate fun_params.
+        let mut current_params = match &typed_param.pat_desc {
+                PatternDesc::Tpat_tuple(items) => items
+                    .iter()
+                    .map(|pat| FunctionParam {
+                        fp_lbl: crate::types::ArgLabel::Nolabel,
+                        fp_param: id_of_pattern(ctx, pat)
+                            .unwrap_or_else(|| ctx.create_ident("param")),
+                        fp_pat: pat.clone(),
+                        fp_partial: if matches!(
+                            pat.pat_desc,
+                            PatternDesc::Tpat_any | PatternDesc::Tpat_var(_, _)
+                        ) {
+                            Partial::Total
+                        } else {
+                            partial
+                        },
+                    })
+                    .collect::<Vec<_>>(),
+            _ => Vec::new(),
         };
+        if current_params.is_empty() {
+            current_params.push(FunctionParam {
+                fp_lbl: ctx_label.clone(),
+                fp_param: param_id,
+                fp_pat: typed_param,
+                fp_partial: partial,
+            });
+        }
         // Defaults are represented by `#default` lets in the function body in
         // upstream Typedtree. The parser/type-parameter port will construct
         // those lets directly; do not retain the deleted per-param field.
@@ -15019,12 +15070,29 @@ fn type_function(
         //   exp_type = instance env (newgenty (Tarrow (...)))
         // Instantiating the freshly built generic arrow preserves OCaml's
         // node-sharing behavior in typedtree output.
+        let mut function_args = current_params
+            .iter()
+            .map(|param| TypeArg::new(param.fp_lbl.clone(), param.fp_pat.pat_type))
+            .collect::<Vec<_>>();
+        let final_return_ty = {
+            let return_desc = ctx.get_desc(ctx.repr(return_ty));
+            match &*return_desc {
+                TypeDesc::Tarrow { args, ret } => {
+                    function_args.extend(args.iter().cloned());
+                    *ret
+                }
+                _ => return_ty,
+            }
+        };
         let exp_type = crate::types::instance(
             ctx,
-            ctx.new_generic_arrow(ctx_label, exp_param_ty, return_ty, arity_opt),
+            ctx.new_generic_type(TypeDesc::Tarrow {
+                args: function_args,
+                ret: final_return_ty,
+            }),
         );
 
-        let mut params = vec![fp];
+        let mut params = current_params;
         let mut function_body = cases.into_iter().next().expect("single function case").c_rhs;
         if let ExpressionDesc::Texp_function {
             params: nested_params,
