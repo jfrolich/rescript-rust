@@ -3384,15 +3384,23 @@ fn fix_spread_first_object_manifest(
         }
         CoreTypeDesc::Ptyp_arrow(arrow_inner) => {
             let (arg, ret_idx, arity) = *arrow_inner;
-            // Recurse into arg ONLY if this is the direct manifest level
-            let (fixed_arg_typ_idx, _) = fix_spread_first_object_manifest(p, arg.typ, true);
-            let fixed_arg = TypeArg {
-                typ: fixed_arg_typ_idx,
-                ..*arg
-            };
+            let args = p.arena().nary_arrow_args(&arg, arity).into_owned();
+            // Recurse into every argument when this is the direct manifest level.
+            let mut fixed_args = args
+                .into_iter()
+                .map(|arg| {
+                    let (typ, _) = fix_spread_first_object_manifest(p, arg.typ, true);
+                    TypeArg { typ, ..arg }
+                })
+                .collect::<Vec<_>>();
+            let first = fixed_args[0].clone();
+            if fixed_args.len() > 1 {
+                p.arena_mut()
+                    .set_nary_arrow_args(arity, fixed_args.clone());
+            }
             let fixed = CoreType {
                 ptyp_desc: Box::new(CoreTypeDesc::Ptyp_arrow(Box::new((
-                    Box::new(fixed_arg),
+                    Box::new(first),
                     ret_idx,
                     arity,
                 )))),
@@ -3437,19 +3445,27 @@ fn fix_type_manifest_location(p: &mut Parser<'_>, typ_idx: CoreTypeIdx) -> CoreT
             }
         }
         CoreTypeDesc::Ptyp_arrow(inner) => {
-            let (ref arg, ref ret_idx, ref arity) = **inner;
-            // Also adjust Ldot types in arrow parameter positions
-            // But NOT in return types - OCaml keeps type args in return type ptyp_loc
-            let fixed_arg = TypeArg {
-                typ: fix_type_manifest_location(p, arg.typ),
-                ..arg.as_ref().clone()
-            };
-            // Return type is NOT fixed - OCaml includes type args for return types
+            let (ref arg, ret_idx, arity) = **inner;
+            let args = p.arena().nary_arrow_args(arg, arity).into_owned();
+            // Also adjust Ldot types in every arrow parameter position, but not
+            // in the return type: OCaml keeps type arguments in return locations.
+            let fixed_args = args
+                .into_iter()
+                .map(|arg| TypeArg {
+                    typ: fix_type_manifest_location(p, arg.typ),
+                    ..arg
+                })
+                .collect::<Vec<_>>();
+            let first = fixed_args[0].clone();
+            if fixed_args.len() > 1 {
+                p.arena_mut()
+                    .set_nary_arrow_args(arity, fixed_args.clone());
+            }
             let fixed = CoreType {
                 ptyp_desc: Box::new(CoreTypeDesc::Ptyp_arrow(Box::new((
-                    Box::new(fixed_arg),
-                    *ret_idx,
-                    *arity,
+                    Box::new(first),
+                    ret_idx,
+                    arity,
                 )))),
                 ..typ
             };
