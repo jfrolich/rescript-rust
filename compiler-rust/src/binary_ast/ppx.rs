@@ -7623,12 +7623,28 @@ fn rewrite_value_binding_without_flattening(
 ) -> ValueBinding {
     let vb_pat = arena.get_pat(vb.pvb_pat).clone();
     let vb_expr = arena.get_expr(vb.pvb_expr).clone();
+    let value_constraint = arena.value_constraint(vb.pvb_pat).cloned();
     let pvb_pat = rewrite_pattern(&vb_pat, arena);
     let pvb_expr = rewrite_expression(&vb_expr, arena);
     let pvb_attributes = rewrite_attributes(&vb.pvb_attributes, arena);
+    let pvb_pat = arena.push_pat(pvb_pat);
+    let pvb_expr = arena.push_expr(pvb_expr);
+    if let Some(constraint) = value_constraint {
+        let pvc_type = arena.get_core_type(constraint.pvc_type).clone();
+        let pvc_type = rewrite_core_type(&pvc_type, arena);
+        let constraint = crate::parser::ast::ValueConstraint {
+            pvc_newtypes: constraint.pvc_newtypes,
+            pvc_type: arena.push_core_type(pvc_type),
+            pvc_pattern: None,
+            pvc_expression: None,
+        };
+        arena
+            .set_value_constraint(pvb_pat, constraint, pvb_expr, vb.pvb_loc)
+            .expect("mapped value constraint remains well formed");
+    }
     ValueBinding {
-        pvb_pat: arena.push_pat(pvb_pat),
-        pvb_expr: arena.push_expr(pvb_expr),
+        pvb_pat,
+        pvb_expr,
         pvb_attributes: pvb_attributes.into(),
         pvb_loc: vb.pvb_loc,
     }
@@ -7648,6 +7664,9 @@ fn rewrite_value_bindings_without_flattening(
 /// If the binding is a tuple pattern matched against a tuple expression
 /// (possibly wrapped in open expressions), desugar into individual bindings.
 fn flatten_value_binding(vb: &ValueBinding, arena: &mut ParseArena) -> Vec<ValueBinding> {
+    if arena.value_constraint(vb.pvb_pat).is_some() {
+        return vec![rewrite_value_binding_without_flattening(vb, arena)];
+    }
     let vb_pat = arena.get_pat(vb.pvb_pat).clone();
     let vb_expr = arena.get_expr(vb.pvb_expr).clone();
     let pvb_pat = rewrite_pattern(&vb_pat, arena);
@@ -16829,8 +16848,13 @@ fn rewrite_structure_item_no_spice(
         // Also handle @inline transformation
         StructureItemDesc::Pstr_value(inner) => {
             let (ref rec_flag, ref bindings) = **inner;
-            // Check for @inline on a single non-recursive let binding
-            if *rec_flag == RecFlag::Nonrecursive && bindings.len() == 1 {
+            // Check for @inline on a single non-recursive let binding.
+            // Value constraints must go through the mapper that preserves their
+            // current-Parsetree side-table payload.
+            if *rec_flag == RecFlag::Nonrecursive
+                && bindings.len() == 1
+                && arena.value_constraint(bindings[0].pvb_pat).is_none()
+            {
                 let vb = &bindings[0];
                 let maybe_pval_name = match &*arena.get_pat(vb.pvb_pat).ppat_desc {
                     PatternDesc::Ppat_var(pval_name) => Some(pval_name.clone()),

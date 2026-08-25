@@ -747,6 +747,19 @@ pub struct Case {
     pub pc_rhs: ExprIdx,
 }
 
+/// A locally abstract value-binding constraint: `: type a. t`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ValueConstraint {
+    /// Locally abstract type names, in source order.
+    pub pvc_newtypes: Vec<StringLoc>,
+    /// The constrained expression type.
+    pub pvc_type: CoreTypeIdx,
+    /// Rust-side cached polymorphic pattern used by typecore; not part of the wire record.
+    pub(crate) pvc_pattern: Option<PatIdx>,
+    /// Rust-side cached legacy wrapper used to reuse the existing newtype typer.
+    pub(crate) pvc_expression: Option<ExprIdx>,
+}
+
 /// A value binding: `let P = E`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ValueBinding {

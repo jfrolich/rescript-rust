@@ -19232,6 +19232,25 @@ fn type_open(
     ))
 }
 
+fn type_value_binding_expression(
+    tctx: &mut TypeCheckContext<'_>,
+    env: &Env,
+    binding: &crate::parser::ast::ValueBinding,
+    expected_ty: TypeExprRef,
+) -> TypeCoreResult<Expression> {
+    if let Some(expression) = tctx
+        .arena
+        .value_constraint(binding.pvb_pat)
+        .and_then(|constraint| constraint.pvc_expression)
+    {
+        let expression = tctx.arena.get_expr(expression).clone();
+        type_expect(tctx, env, &expression, expected_ty, None)
+    } else {
+        let expression = tctx.arena.get_expr(binding.pvb_expr).clone();
+        type_expect(tctx, env, &expression, expected_ty, None)
+    }
+}
+
 /// Type check newtype expression.
 fn type_newtype(
     tctx: &mut TypeCheckContext<'_>,
@@ -19240,7 +19259,7 @@ fn type_newtype(
     name: &Located<StrIdx>,
     body: &ParsedExpression,
     expected_ty: TypeExprRef,
-    attributes: &[crate::parser::ast::Attribute],
+    _attributes: &[crate::parser::ast::Attribute],
 ) -> TypeCoreResult<Expression> {
     let ctx = tctx.type_ctx;
     let name_str = tctx.arena.get_string(name.txt).to_string();
@@ -19327,15 +19346,11 @@ fn type_newtype(
         // OCaml: rue { ... exp_type = ety; ... }
         rue_unify(tctx, loc, rewritten_ty, expected_ty, None)?;
 
-        let mut result = prepend_exp_extra(
-            typed_body,
-            crate::types::typedtree::ExpExtra::Texp_newtype(name_str),
-            loc,
-            attributes.to_vec().into(),
-        );
-        result.exp_loc = loc;
-        result.exp_type = rewritten_ty;
-        Ok(result)
+        Ok(Expression {
+            exp_loc: loc,
+            exp_type: rewritten_ty,
+            ..typed_body
+        })
     })();
     ctx.end_def();
     result
@@ -23388,6 +23403,19 @@ fn type_let_bindings(
         // Create type variables for all bindings
         let binding_types: Vec<TypeExprRef> = bindings.iter().map(|_| ctx.new_var(None)).collect();
 
+        // OCaml typecore.ml:4503-4514 turns `pvb_constraint` into a
+        // polymorphic pattern constraint before typing the let patterns. The
+        // immutable typechecker arena reads the equivalent parser-side cache.
+        let binding_patterns = bindings
+            .iter()
+            .map(|binding| {
+                tctx.arena
+                    .value_constraint(binding.pvb_pat)
+                    .and_then(|constraint| constraint.pvc_pattern)
+                    .unwrap_or(binding.pvb_pat)
+            })
+            .collect::<Vec<_>>();
+
         // Match OCaml type_let: pattern typing always starts in the original
         // environment. Recursive RHS typing switches to the environment built
         // from the actual pattern-bound identifiers, not placeholder copies.
@@ -23406,7 +23434,11 @@ fn type_let_bindings(
         state.reset(allow_modules);
         let mut all_pattern_vars: Vec<Vec<PatternVariable>> = Vec::new();
 
-        for (binding, ty) in bindings.iter().zip(binding_types.iter()) {
+        for ((binding, pattern), ty) in bindings
+            .iter()
+            .zip(binding_patterns.iter())
+            .zip(binding_types.iter())
+        {
             let binding_state = state.checkpoint();
 
             // OCaml typecore.ml:1809-1811 scopes each binding's warning
@@ -23421,7 +23453,7 @@ fn type_let_bindings(
                     type_pattern_without_existentials(
                         tctx,
                         &typing_env,
-                        arena.get_pat(binding.pvb_pat),
+                        arena.get_pat(*pattern),
                         *ty,
                         PatternMode::Normal,
                         &mut state,
@@ -23515,13 +23547,8 @@ fn type_let_bindings(
                         ctx.begin_def();
                         let (inst_vars, inst_ty) =
                             crate::types::ctype::instance_poly(ctx, true, true, &vars, body);
-                        let exp = type_expect(
-                            tctx,
-                            &typing_env,
-                            tctx.arena.get_expr(binding.pvb_expr),
-                            inst_ty,
-                            None,
-                        )?;
+                        let exp =
+                            type_value_binding_expression(tctx, &typing_env, binding, inst_ty)?;
                         ctx.end_def();
                         // OCaml: check_univars env true "definition" exp pat.pat_type vars
                         check_univars_or_less_general(
@@ -23543,13 +23570,7 @@ fn type_let_bindings(
                     _ => {
                         drop(pat_desc);
                         // OCaml: type_expect ~context exp_env sexp pat.pat_type
-                        type_expect(
-                            tctx,
-                            &typing_env,
-                            arena.get_expr(binding.pvb_expr),
-                            pat_ty,
-                            None,
-                        )
+                        type_value_binding_expression(tctx, &typing_env, binding, pat_ty)
                     }
                 },
             )?;

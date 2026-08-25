@@ -22,7 +22,7 @@ use crate::parser::ast::{
     ObjectField, OpenDescription, OverrideFlag, Pattern, PatternDesc, PatternRecordField, Payload,
     PexpApply, PexpFun, PrivateFlag, RecFlag, RowField, SignatureItem, SignatureItemDesc,
     StringLoc, StructureItem, StructureItemDesc, TypeArg, TypeDeclaration, TypeExtension, TypeKind,
-    ValueBinding, ValueDescription, Variance, WithConstraint,
+    ValueBinding, ValueConstraint, ValueDescription, Variance, WithConstraint,
 };
 use crate::parser::longident::Longident;
 
@@ -1688,6 +1688,15 @@ impl Marshal for Case {
 
 // ========== Value Binding ==========
 
+impl Marshal for ValueConstraint {
+    fn marshal(&self, w: &mut MarshalWriter<'_>) {
+        // value_constraint = { pvc_newtypes; pvc_type }
+        w.write_block_header(0, 2);
+        self.pvc_newtypes.marshal(w);
+        self.pvc_type.marshal(w);
+    }
+}
+
 impl Marshal for ValueBinding {
     fn marshal(&self, w: &mut MarshalWriter<'_>) {
         // value_binding = { pvb_pat; pvb_expr; pvb_constraint;
@@ -1695,9 +1704,10 @@ impl Marshal for ValueBinding {
         w.write_block_header(0, 5);
         self.pvb_pat.marshal(w);
         self.pvb_expr.marshal(w);
-        // The compact Rust parsetree does not yet retain value constraints.
-        // Parser-produced ordinary bindings have no constraint on the wire.
-        w.write_int(0);
+        w.get_arena()
+            .value_constraint(self.pvb_pat)
+            .cloned()
+            .marshal(w);
         let share_empty_pstr = if has_braces_attr(&self.pvb_attributes, w)
             || has_ternary_attr(&self.pvb_attributes, w)
         {

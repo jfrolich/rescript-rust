@@ -1496,7 +1496,7 @@ fn parse_parameter(p: &mut Parser<'_>) -> Option<super::core::FundefParameter> {
 }
 
 /// Parse a list of lowercase identifiers.
-fn parse_lident_list(p: &mut Parser<'_>) -> Vec<StringLoc> {
+pub(crate) fn parse_lident_list(p: &mut Parser<'_>) -> Vec<StringLoc> {
     let mut lidents = vec![];
     while let Token::Lident(name) = &p.token {
         let name = name.clone();
@@ -4815,158 +4815,46 @@ fn parse_let_in_block_with_continuation_and_attrs(
     let mut bindings = vec![];
     let first_pat = super::pattern::parse_pattern(p);
 
-    // Handle optional type annotation: let x: int = ...
-    // Also track locally abstract types for Pexp_newtype wrapping
-    let (first_pat, newtype_info, is_locally_abstract) = if p.token == Token::Colon {
+    // Parse an ordinary pattern constraint or the current-Parsetree value
+    // constraint used by `let x: type a. t = expr`.
+    let (first_pat, first_constraint) = if p.token == Token::Colon {
         p.next();
-
-        // Check if this is `type a.` syntax (locally abstract types)
-        let is_locally_abstract = p.token == Token::Typ;
-
-        let typ = if is_locally_abstract {
-            super::typ::parse_locally_abstract_type(p)
+        if p.token == Token::Typ {
+            p.next();
+            let pvc_newtypes = parse_lident_list(p);
+            p.expect(Token::Dot);
+            let pvc_type = super::typ::parse_typ_expr(p);
+            let pvc_type = p.arena_mut().push_core_type(pvc_type);
+            (
+                first_pat,
+                Some(crate::parser::ast::ValueConstraint {
+                    pvc_newtypes,
+                    pvc_type,
+                    pvc_pattern: None,
+                    pvc_expression: None,
+                }),
+            )
         } else {
-            super::typ::parse_poly_type_expr(p)
-        };
-
-        // Extract type variables and inner type if this is a Ptyp_poly from `type a.` syntax
-        let (final_typ, newtype_info) = match *typ.ptyp_desc {
-            CoreTypeDesc::Ptyp_poly(inner) if is_locally_abstract => {
-                let (ref vars, ref inner_idx) = *inner;
-                // Build the set of variable names for substitution
-                let var_set: std::collections::HashSet<String> = vars
-                    .iter()
-                    .map(|v| p.arena().get_string(v.txt).to_string())
-                    .collect();
-
-                // The inner type (with Ptyp_constr) is used for Pexp_constraint
-                let inner_for_constraint = p.arena().get_core_type(*inner_idx).clone();
-
-                // Substitute Ptyp_constr -> Ptyp_var for the Ptyp_poly body
-                let inner_ct = p.arena().get_core_type(*inner_idx).clone();
-                let substituted_inner = match super::typ::substitute_type_vars(
-                    p.arena_mut(),
-                    inner_ct.clone(),
-                    &var_set,
-                ) {
-                    Ok(substituted_inner) => substituted_inner,
-                    Err(loc) => {
-                        p.err_at(
-                            p.loc_start(loc),
-                            p.loc_end(loc),
-                            DiagnosticCategory::FatalSyntaxerr,
-                        );
-                        inner_ct
-                    }
-                };
-
-                // Rebuild the Ptyp_poly with the substituted body
-                let substituted_inner_idx = p.arena_mut().push_core_type(substituted_inner);
-                let substituted_typ = CoreType {
-                    ptyp_desc: Box::new(CoreTypeDesc::Ptyp_poly(Box::new((
-                        vars.clone(),
-                        substituted_inner_idx,
-                    )))),
-                    ptyp_loc: typ.ptyp_loc.clone(),
-                    ptyp_attributes: typ.ptyp_attributes.clone(),
-                };
-
-                (substituted_typ, Some((vars.clone(), inner_for_constraint)))
-            }
-            _ => (typ, None),
-        };
-
-        // Create a constraint pattern
-        let loc = p.mk_loc_spanning(first_pat.ppat_loc, final_typ.ptyp_loc);
-        let pat_idx = p.arena_mut().push_pat(first_pat);
-        let typ_idx = p.arena_mut().push_core_type(final_typ);
-        let pat = Pattern {
-            ppat_desc: Box::new(PatternDesc::Ppat_constraint(Box::new((pat_idx, typ_idx)))),
-            ppat_loc: loc,
-            ppat_attributes: Attributes::new(),
-        };
-        (pat, newtype_info, is_locally_abstract)
+            let typ = super::typ::parse_poly_type_expr(p);
+            let loc = p.mk_loc_spanning(first_pat.ppat_loc, typ.ptyp_loc);
+            let pat_idx = p.arena_mut().push_pat(first_pat);
+            let typ_idx = p.arena_mut().push_core_type(typ);
+            (
+                Pattern {
+                    ppat_desc: Box::new(PatternDesc::Ppat_constraint(Box::new((pat_idx, typ_idx)))),
+                    ppat_loc: loc,
+                    ppat_attributes: Attributes::new(),
+                },
+                None,
+            )
+        }
     } else {
-        (first_pat, None, false)
+        (first_pat, None)
     };
 
     p.expect(Token::Equal);
-    let mut first_value = parse_expr(p);
-
-    // OCaml allocates a wrapper location and then allocates a fresh Vb.mk
-    // location with the same span. Keep those allocations distinct.
-    let wrapper_loc = if is_locally_abstract {
-        Some(p.mk_loc_idx_to_prev_end(binding_start_pos_idx))
-    } else {
-        None
-    };
+    let first_value = parse_expr(p);
     let first_loc = p.mk_loc_idx_to_prev_end(binding_start_pos_idx);
-
-    // For locally abstract types, OCaml uses the binding location for the pattern constraint and Ptyp_poly
-    let first_pat = if is_locally_abstract {
-        let wrapper_loc =
-            wrapper_loc.expect("locally abstract let-binding should have wrapper loc");
-        // Update Ppat_constraint and inner Ptyp_poly locations to use the binding location
-        if let PatternDesc::Ppat_constraint(inner) = *first_pat.ppat_desc {
-            let (inner_pat, typ_idx) = *inner;
-            // Update the Ptyp_poly location to use binding location
-            let typ = p.arena_mut().get_core_type(typ_idx).clone();
-            let updated_typ = match *typ.ptyp_desc {
-                CoreTypeDesc::Ptyp_poly(inner) => {
-                    let (vars, ct) = *inner;
-                    CoreType {
-                        ptyp_desc: Box::new(CoreTypeDesc::Ptyp_poly(Box::new((vars, ct)))),
-                        ptyp_loc: wrapper_loc,
-                        ptyp_attributes: typ.ptyp_attributes,
-                    }
-                }
-                _ => typ,
-            };
-            let updated_typ_idx = p.arena_mut().push_core_type(updated_typ);
-            Pattern {
-                ppat_desc: Box::new(PatternDesc::Ppat_constraint(Box::new((
-                    inner_pat,
-                    updated_typ_idx,
-                )))),
-                ppat_loc: wrapper_loc,
-                ppat_attributes: first_pat.ppat_attributes,
-            }
-        } else {
-            first_pat
-        }
-    } else {
-        first_pat
-    };
-
-    // Wrap expression in Pexp_newtype for locally abstract types
-    // OCaml uses the full binding location for all these wrappers
-    if let Some((newtype_vars, inner_type)) = newtype_info {
-        let wrapper_loc = wrapper_loc.expect("locally abstract wrappers should have wrapper loc");
-        // First wrap the expression in Pexp_constraint with the inner type
-        // OCaml uses the binding location for this Pexp_constraint
-        let fv_idx = p.arena_mut().push_expr(first_value);
-        let inner_type_idx = p.arena_mut().push_core_type(inner_type);
-        first_value = Expression {
-            pexp_desc: Box::new(ExpressionDesc::Pexp_constraint(Box::new((
-                fv_idx,
-                inner_type_idx,
-            )))),
-            pexp_loc: wrapper_loc,
-            pexp_attributes: Attributes::new(),
-        };
-
-        // Then wrap in Pexp_newtype for each type variable
-        // Fold in reverse order so that the outermost newtype is the first variable
-        // OCaml uses the binding location for all Pexp_newtype wrappers
-        for var in newtype_vars.into_iter().rev() {
-            let fv_idx = p.arena_mut().push_expr(first_value);
-            first_value = Expression {
-                pexp_desc: Box::new(ExpressionDesc::Pexp_newtype(Box::new((var, fv_idx)))),
-                pexp_loc: wrapper_loc,
-                pexp_attributes: Attributes::new(),
-            };
-        }
-    }
 
     // Combine leading_attrs with let.unwrap attribute if this is let?
     let first_attrs = if unwrap {
@@ -4984,6 +4872,20 @@ fn parse_let_in_block_with_continuation_and_attrs(
 
     let first_pat_idx = p.arena_mut().push_pat(first_pat);
     let first_value_idx = p.arena_mut().push_expr(first_value);
+    if let Some(first_constraint) = first_constraint
+        && let Err(loc) = p.arena_mut().set_value_constraint(
+            first_pat_idx,
+            first_constraint,
+            first_value_idx,
+            first_loc,
+        )
+    {
+        p.err_at(
+            p.loc_start(loc),
+            p.loc_end(loc),
+            DiagnosticCategory::FatalSyntaxerr,
+        );
+    }
     bindings.push(ValueBinding {
         pvb_pat: first_pat_idx,
         pvb_expr: first_value_idx,
@@ -4998,20 +4900,41 @@ fn parse_let_in_block_with_continuation_and_attrs(
         p.next();
         let pat = super::pattern::parse_pattern(p);
 
-        // Handle optional type annotation
-        let pat = if p.token == Token::Colon {
+        let (pat, value_constraint) = if p.token == Token::Colon {
             p.next();
-            let typ = super::typ::parse_poly_type_expr(p);
-            let loc = p.mk_loc_spanning(pat.ppat_loc, typ.ptyp_loc);
-            let pat_idx = p.arena_mut().push_pat(pat);
-            let typ_idx = p.arena_mut().push_core_type(typ);
-            Pattern {
-                ppat_desc: Box::new(PatternDesc::Ppat_constraint(Box::new((pat_idx, typ_idx)))),
-                ppat_loc: loc,
-                ppat_attributes: Attributes::new(),
+            if p.token == Token::Typ {
+                p.next();
+                let pvc_newtypes = parse_lident_list(p);
+                p.expect(Token::Dot);
+                let pvc_type = super::typ::parse_typ_expr(p);
+                let pvc_type = p.arena_mut().push_core_type(pvc_type);
+                (
+                    pat,
+                    Some(crate::parser::ast::ValueConstraint {
+                        pvc_newtypes,
+                        pvc_type,
+                        pvc_pattern: None,
+                        pvc_expression: None,
+                    }),
+                )
+            } else {
+                let typ = super::typ::parse_poly_type_expr(p);
+                let loc = p.mk_loc_spanning(pat.ppat_loc, typ.ptyp_loc);
+                let pat_idx = p.arena_mut().push_pat(pat);
+                let typ_idx = p.arena_mut().push_core_type(typ);
+                (
+                    Pattern {
+                        ppat_desc: Box::new(PatternDesc::Ppat_constraint(Box::new((
+                            pat_idx, typ_idx,
+                        )))),
+                        ppat_loc: loc,
+                        ppat_attributes: Attributes::new(),
+                    },
+                    None,
+                )
             }
         } else {
-            pat
+            (pat, None)
         };
 
         p.expect(Token::Equal);
@@ -5019,6 +4942,20 @@ fn parse_let_in_block_with_continuation_and_attrs(
         let binding_loc = p.mk_loc_idx_to_prev_end(binding_start_idx);
         let pat_idx = p.arena_mut().push_pat(pat);
         let value_idx = p.arena_mut().push_expr(value);
+        if let Some(value_constraint) = value_constraint
+            && let Err(loc) = p.arena_mut().set_value_constraint(
+                pat_idx,
+                value_constraint,
+                value_idx,
+                binding_loc,
+            )
+        {
+            p.err_at(
+                p.loc_start(loc),
+                p.loc_end(loc),
+                DiagnosticCategory::FatalSyntaxerr,
+            );
+        }
         bindings.push(ValueBinding {
             pvb_pat: pat_idx,
             pvb_expr: value_idx,
@@ -5863,21 +5800,39 @@ fn parse_let_in_switch_case(p: &mut Parser<'_>) -> Expression {
     let mut bindings = vec![];
     let first_pat = super::pattern::parse_pattern(p);
 
-    // Handle optional type annotation: let x: int = ...
-    let first_pat = if p.token == Token::Colon {
+    let (first_pat, first_constraint) = if p.token == Token::Colon {
         p.next();
-        let typ = super::typ::parse_poly_type_expr(p);
-        // Create a constraint pattern
-        let loc = p.mk_loc_spanning(first_pat.ppat_loc, typ.ptyp_loc);
-        let pat_idx = p.arena_mut().push_pat(first_pat);
-        let typ_idx = p.arena_mut().push_core_type(typ);
-        Pattern {
-            ppat_desc: Box::new(PatternDesc::Ppat_constraint(Box::new((pat_idx, typ_idx)))),
-            ppat_loc: loc,
-            ppat_attributes: Attributes::new(),
+        if p.token == Token::Typ {
+            p.next();
+            let pvc_newtypes = parse_lident_list(p);
+            p.expect(Token::Dot);
+            let pvc_type = super::typ::parse_typ_expr(p);
+            let pvc_type = p.arena_mut().push_core_type(pvc_type);
+            (
+                first_pat,
+                Some(crate::parser::ast::ValueConstraint {
+                    pvc_newtypes,
+                    pvc_type,
+                    pvc_pattern: None,
+                    pvc_expression: None,
+                }),
+            )
+        } else {
+            let typ = super::typ::parse_poly_type_expr(p);
+            let loc = p.mk_loc_spanning(first_pat.ppat_loc, typ.ptyp_loc);
+            let pat_idx = p.arena_mut().push_pat(first_pat);
+            let typ_idx = p.arena_mut().push_core_type(typ);
+            (
+                Pattern {
+                    ppat_desc: Box::new(PatternDesc::Ppat_constraint(Box::new((pat_idx, typ_idx)))),
+                    ppat_loc: loc,
+                    ppat_attributes: Attributes::new(),
+                },
+                None,
+            )
         }
     } else {
-        first_pat
+        (first_pat, None)
     };
 
     p.expect(Token::Equal);
@@ -5898,6 +5853,20 @@ fn parse_let_in_switch_case(p: &mut Parser<'_>) -> Expression {
 
     let first_pat_idx = p.arena_mut().push_pat(first_pat);
     let first_value_idx = p.arena_mut().push_expr(first_value);
+    if let Some(first_constraint) = first_constraint
+        && let Err(loc) = p.arena_mut().set_value_constraint(
+            first_pat_idx,
+            first_constraint,
+            first_value_idx,
+            first_loc,
+        )
+    {
+        p.err_at(
+            p.loc_start(loc),
+            p.loc_end(loc),
+            DiagnosticCategory::FatalSyntaxerr,
+        );
+    }
     bindings.push(ValueBinding {
         pvb_pat: first_pat_idx,
         pvb_expr: first_value_idx,
@@ -5912,20 +5881,41 @@ fn parse_let_in_switch_case(p: &mut Parser<'_>) -> Expression {
         p.next();
         let pat = super::pattern::parse_pattern(p);
 
-        // Handle optional type annotation
-        let pat = if p.token == Token::Colon {
+        let (pat, value_constraint) = if p.token == Token::Colon {
             p.next();
-            let typ = super::typ::parse_poly_type_expr(p);
-            let loc = p.mk_loc_spanning(pat.ppat_loc, typ.ptyp_loc);
-            let pat_idx = p.arena_mut().push_pat(pat);
-            let typ_idx = p.arena_mut().push_core_type(typ);
-            Pattern {
-                ppat_desc: Box::new(PatternDesc::Ppat_constraint(Box::new((pat_idx, typ_idx)))),
-                ppat_loc: loc,
-                ppat_attributes: Attributes::new(),
+            if p.token == Token::Typ {
+                p.next();
+                let pvc_newtypes = parse_lident_list(p);
+                p.expect(Token::Dot);
+                let pvc_type = super::typ::parse_typ_expr(p);
+                let pvc_type = p.arena_mut().push_core_type(pvc_type);
+                (
+                    pat,
+                    Some(crate::parser::ast::ValueConstraint {
+                        pvc_newtypes,
+                        pvc_type,
+                        pvc_pattern: None,
+                        pvc_expression: None,
+                    }),
+                )
+            } else {
+                let typ = super::typ::parse_poly_type_expr(p);
+                let loc = p.mk_loc_spanning(pat.ppat_loc, typ.ptyp_loc);
+                let pat_idx = p.arena_mut().push_pat(pat);
+                let typ_idx = p.arena_mut().push_core_type(typ);
+                (
+                    Pattern {
+                        ppat_desc: Box::new(PatternDesc::Ppat_constraint(Box::new((
+                            pat_idx, typ_idx,
+                        )))),
+                        ppat_loc: loc,
+                        ppat_attributes: Attributes::new(),
+                    },
+                    None,
+                )
             }
         } else {
-            pat
+            (pat, None)
         };
 
         p.expect(Token::Equal);
@@ -5933,6 +5923,20 @@ fn parse_let_in_switch_case(p: &mut Parser<'_>) -> Expression {
         let binding_loc = p.mk_loc_idx_to_prev_end(binding_start_idx);
         let pat_idx = p.arena_mut().push_pat(pat);
         let value_idx = p.arena_mut().push_expr(value);
+        if let Some(value_constraint) = value_constraint
+            && let Err(loc) = p.arena_mut().set_value_constraint(
+                pat_idx,
+                value_constraint,
+                value_idx,
+                binding_loc,
+            )
+        {
+            p.err_at(
+                p.loc_start(loc),
+                p.loc_end(loc),
+                DiagnosticCategory::FatalSyntaxerr,
+            );
+        }
         bindings.push(ValueBinding {
             pvb_pat: pat_idx,
             pvb_expr: value_idx,

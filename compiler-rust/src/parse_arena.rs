@@ -35,7 +35,7 @@ use crate::intern::Interner;
 use crate::location::{Location, Position};
 use crate::parser::ast::{
     Attributes, CoreType, CoreTypeDesc, Expression, ExpressionDesc, FunParam, ModuleExpr,
-    ModuleExprDesc, ModuleType, ModuleTypeDesc, Pattern, PatternDesc, StringLoc,
+    ModuleExprDesc, ModuleType, ModuleTypeDesc, Pattern, PatternDesc, StringLoc, ValueConstraint,
 };
 use crate::parser::longident::Longident;
 
@@ -486,6 +486,8 @@ pub struct ParseArena {
     /// the type-parameter group's attributes on the group's first newtype.
     nary_fun_newtypes_by_first_pattern: HashMap<PatIdx, Box<[(StringLoc, Attributes)]>>,
     nary_arrow_args_by_first_type: HashMap<CoreTypeIdx, Box<[crate::parser::ast::TypeArg]>>,
+    /// Sparse current-Parsetree value constraints keyed by the binding pattern.
+    value_constraints_by_pattern: HashMap<PatIdx, ValueConstraint>,
     /// Sparse side table for case guards, keyed by owning match/try ExprIdx.
     /// Value is a case-indexed list of optional guard expressions.
     expr_case_guards: Vec<Option<Box<[Option<ExprIdx>]>>>,
@@ -891,6 +893,7 @@ impl Default for ParseArena {
             nary_fun_unknown_arity_by_first_pattern: HashMap::new(),
             nary_fun_newtypes_by_first_pattern: HashMap::new(),
             nary_arrow_args_by_first_type: HashMap::new(),
+            value_constraints_by_pattern: HashMap::new(),
             expr_case_guards: Vec::new(),
             expr_construct_args: Vec::new(),
             expr_variant_args: Vec::new(),
@@ -2255,6 +2258,66 @@ impl ParseArena {
         } else {
             fun.arity
         }
+    }
+
+    /// Attach a current-Parsetree locally abstract constraint to a value binding.
+    /// Also cache the polymorphic pattern that OCaml typecore synthesizes before
+    /// typing let patterns (`typecore.ml:4503-4514`).
+    pub fn set_value_constraint(
+        &mut self,
+        pattern: PatIdx,
+        mut constraint: ValueConstraint,
+        expression: ExprIdx,
+        loc: LocIdx,
+    ) -> Result<(), LocIdx> {
+        let names = constraint
+            .pvc_newtypes
+            .iter()
+            .map(|name| self.get_string(name.txt).to_string())
+            .collect::<std::collections::HashSet<_>>();
+        let source = self.get_core_type(constraint.pvc_type).clone();
+        let body = crate::parser::typ::substitute_type_vars(self, source, &names)?;
+        let body = self.push_core_type(body);
+        let poly = self.push_core_type(CoreType {
+            ptyp_desc: Box::new(CoreTypeDesc::Ptyp_poly(Box::new((
+                constraint.pvc_newtypes.clone(),
+                body,
+            )))),
+            ptyp_loc: loc,
+            ptyp_attributes: Attributes::new(),
+        });
+        constraint.pvc_pattern = Some(self.push_pat(Pattern {
+            ppat_desc: Box::new(PatternDesc::Ppat_constraint(Box::new((pattern, poly)))),
+            ppat_loc: loc,
+            ppat_attributes: Attributes::new(),
+        }));
+        let mut wrapped = self.push_expr(Expression {
+            pexp_desc: Box::new(ExpressionDesc::Pexp_constraint(Box::new((
+                expression,
+                constraint.pvc_type,
+            )))),
+            pexp_loc: loc,
+            pexp_attributes: Attributes::new(),
+        });
+        for name in constraint.pvc_newtypes.iter().rev() {
+            wrapped = self.push_expr(Expression {
+                pexp_desc: Box::new(ExpressionDesc::Pexp_newtype(Box::new((
+                    name.clone(),
+                    wrapped,
+                )))),
+                pexp_loc: loc,
+                pexp_attributes: Attributes::new(),
+            });
+        }
+        constraint.pvc_expression = Some(wrapped);
+        self.value_constraints_by_pattern
+            .insert(pattern, constraint);
+        Ok(())
+    }
+
+    /// Return a value binding's locally abstract constraint, when present.
+    pub fn value_constraint(&self, pattern: PatIdx) -> Option<&ValueConstraint> {
+        self.value_constraints_by_pattern.get(&pattern)
     }
 
     /// Return the authoritative n-ary parameters, or the compact fallback.
