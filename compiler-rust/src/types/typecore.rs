@@ -33958,36 +33958,47 @@ fn extract_function_params_and_body<'a>(
     loop {
         match &*current.pexp_desc {
             crate::parser::ast::ExpressionDesc::Pexp_fun(inner) => {
-                // Extract parameter name from pattern
-                let pat = arena.get_pat(inner.lhs);
-                let name = match &*pat.ppat_desc {
-                    crate::parser::ast::PatternDesc::Ppat_var(name_loc) => {
-                        Some(arena.get_string(name_loc.txt).to_string())
-                    }
-                    crate::parser::ast::PatternDesc::Ppat_constraint(inner_box) => {
-                        let (inner_pat_idx, _) = &**inner_box;
-                        let inner_pat = arena.get_pat(*inner_pat_idx);
-                        if let crate::parser::ast::PatternDesc::Ppat_var(name_loc) =
-                            &*inner_pat.ppat_desc
-                        {
-                            Some(arena.get_string(name_loc.txt).to_string())
-                        } else {
-                            None
-                        }
-                    }
-                    _ => None,
-                };
-                if let Some(name) = name {
+                // Current Parsetree stores locally abstract types and the full
+                // source parameter list on the n-ary function node. This is
+                // the same binder order consumed by type_function_nary_with_newtypes.
+                for (name_loc, _) in arena.nary_fun_newtypes(inner) {
                     params.push(crate::types::comptime::ComptimeParam {
-                        name,
-                        is_comptime: false,
-                        is_type: false,
+                        name: arena.get_string(name_loc.txt).to_string(),
+                        is_comptime: true,
+                        is_type: true,
                     });
                 }
-                current = arena.get_expr(inner.rhs);
+                for param in arena.nary_fun_params(inner).iter() {
+                    let pat = arena.get_pat(param.p_pat);
+                    let name = match &*pat.ppat_desc {
+                        crate::parser::ast::PatternDesc::Ppat_var(name_loc) => {
+                            Some(arena.get_string(name_loc.txt).to_string())
+                        }
+                        crate::parser::ast::PatternDesc::Ppat_constraint(inner_box) => {
+                            let (inner_pat_idx, _) = &**inner_box;
+                            let inner_pat = arena.get_pat(*inner_pat_idx);
+                            if let crate::parser::ast::PatternDesc::Ppat_var(name_loc) =
+                                &*inner_pat.ppat_desc
+                            {
+                                Some(arena.get_string(name_loc.txt).to_string())
+                            } else {
+                                None
+                            }
+                        }
+                        _ => None,
+                    };
+                    if let Some(name) = name {
+                        params.push(crate::types::comptime::ComptimeParam {
+                            name,
+                            is_comptime: false,
+                            is_type: false,
+                        });
+                    }
+                }
+                current = arena.get_expr(arena.nary_fun_body(inner));
             }
             crate::parser::ast::ExpressionDesc::Pexp_newtype(inner) => {
-                // (type t) => body — this is a comptime type parameter
+                // Frozen-v0 PPX trees retain nested Pexp_newtype wrappers.
                 let (ref name_loc, ref body_idx) = **inner;
                 let name = arena.get_string(name_loc.txt).to_string();
                 params.push(crate::types::comptime::ComptimeParam {
