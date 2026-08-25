@@ -6266,39 +6266,27 @@ fn wrap_with_unsafe_async(inner: Expression, loc: LocIdx, arena: &mut ParseArena
     }
 }
 
-/// Recursively find the innermost body of nested Pexp_fun and wrap it with unsafe_async.
+/// Wrap the result of one n-ary function with `unsafe_async`.
 /// OCaml: ast_async.ml add_promise_to_result
 fn add_promise_to_fun_body(expr: &Expression, loc: LocIdx, arena: &mut ParseArena) -> Expression {
     match &*expr.pexp_desc {
         ExpressionDesc::Pexp_fun(inner) => {
-            let PexpFun {
-                ref arg_label,
-                ref default,
-                ref lhs,
-                ref rhs,
-                ref arity,
-                ref is_async,
-            } = **inner;
-            // Recurse into rhs to find innermost body
-            let rhs_expr = arena.get_expr(*rhs).clone();
-            let new_rhs = add_promise_to_fun_body(&rhs_expr, loc, arena);
+            let body = arena.get_expr(arena.nary_fun_body(inner)).clone();
+            let wrapped_body = wrap_with_unsafe_async(body, loc, arena);
             Expression {
                 pexp_desc: Box::new(ExpressionDesc::Pexp_fun(Box::new(PexpFun {
-                    arg_label: arg_label.clone(),
-                    default: default.clone(),
-                    lhs: lhs.clone(),
-                    rhs: arena.push_expr(new_rhs),
-                    arity: *arity,
-                    is_async: *is_async,
+                    arg_label: inner.arg_label.clone(),
+                    default: inner.default,
+                    lhs: inner.lhs,
+                    rhs: arena.push_expr(wrapped_body),
+                    arity: inner.arity,
+                    is_async: inner.is_async,
                 }))),
                 pexp_loc: expr.pexp_loc,
                 pexp_attributes: expr.pexp_attributes.clone(),
             }
         }
-        _ => {
-            // This is the innermost body - wrap with unsafe_async
-            wrap_with_unsafe_async(expr.clone(), loc, arena)
-        }
+        _ => wrap_with_unsafe_async(expr.clone(), loc, arena),
     }
 }
 
