@@ -14788,12 +14788,37 @@ fn type_function(
                 // OCaml: let fun_t = newty (Tarrow({lbl=l; typ=newvar()}, newvar(), Cok, Some arity))
                 //        unify_exp_types loc env fun_t ty_expected_
                 //        fun_t
-                let fun_t = ctx.new_arrow(
-                    ctx_label.clone(),
-                    ctx.new_var(None),
-                    ctx.new_var(None),
-                    arity_opt,
-                );
+                // The legacy parser still delivers `(x, y) => ...` as one
+                // tuple pattern plus arity metadata. Upstream typecore.ml:
+                // 3529-3823 receives separate fun_params and commits one
+                // n-ary arrow, so construct that same arrow here.
+                let parameter_count = arity_opt.unwrap_or(1).max(1) as usize;
+                let mut labels = vec![ctx_label.clone()];
+                let mut nested_body = body;
+                while labels.len() < parameter_count {
+                    match &*nested_body.pexp_desc {
+                        crate::parser::ast::ExpressionDesc::Pexp_fun(nested) => {
+                            labels.push(convert_arg_label_for_ctx(&nested.arg_label, tctx.arena));
+                            nested_body = tctx.arena.get_expr(nested.rhs);
+                        }
+                        // Optional defaults are rewritten just above into a
+                        // synthetic let whose body is the next source param.
+                        crate::parser::ast::ExpressionDesc::Pexp_let(binding) => {
+                            nested_body = tctx.arena.get_expr(binding.2);
+                        }
+                        _ => break,
+                    }
+                }
+                let params = labels
+                    .into_iter()
+                    .chain(std::iter::repeat(ctx_label.clone()))
+                    .take(parameter_count)
+                    .map(|label| TypeArg::new(label, ctx.new_var(None)))
+                    .collect();
+                let fun_t = ctx.new_type(TypeDesc::Tarrow {
+                    args: params,
+                    ret: ctx.new_var(None),
+                });
                 let expected_head = crate::types::ctype::expand_head_unif(ctx, env, expected_ty);
                 let expected_desc = ctx.get_desc(ctx.repr(expected_head));
                 let labels_mismatch = matches!(
@@ -14839,8 +14864,6 @@ fn type_function(
                     let return_ty = if args.len() == 1 {
                         *ret
                     } else {
-                        // compiler/ml/typecore.ml:4164-4167 keeps unapplied
-                        // parameters together in one n-ary arrow node.
                         ctx.new_type(TypeDesc::Tarrow {
                             args: args[1..].to_vec(),
                             ret: *ret,
@@ -15103,7 +15126,7 @@ fn type_function(
             .iter()
             .map(|param| TypeArg::new(param.fp_lbl.clone(), param.fp_pat.pat_type))
             .collect::<Vec<_>>();
-        let final_return_ty = {
+        let final_return_ty = if arity_opt.unwrap_or(1) > 1 {
             let return_desc = ctx.get_desc(ctx.repr(return_ty));
             match &*return_desc {
                 TypeDesc::Tarrow { args, ret } => {
@@ -15112,6 +15135,8 @@ fn type_function(
                 }
                 _ => return_ty,
             }
+        } else {
+            return_ty
         };
         let exp_type = crate::types::instance(
             ctx,
@@ -15129,7 +15154,7 @@ fn type_function(
             async_: nested_async,
         } = function_body.exp_desc
         {
-            if nested_async == is_async {
+            if arity_opt.unwrap_or(1) > 1 && nested_async == is_async {
                 params.extend(nested_params);
                 function_body = *nested_body;
             } else {
