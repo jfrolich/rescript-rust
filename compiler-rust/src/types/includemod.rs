@@ -1420,6 +1420,16 @@ fn modtypes_inner<'a>(
         env: &Env,
         path: &Path,
     ) -> IncludeModResult<Path> {
+        // OCaml compiler/ml/env.ml:903-914 follows only Mty_alias while
+        // normalizing a module path. A selected module whose declaration is
+        // Mty_ident names a module type; it exists at the selected path and is
+        // not an alias to that module-type path.
+        if env
+            .lookup_module(path)
+            .is_ok_and(|md| matches!(md.md_type, ModuleType::MtyIdent(_)))
+        {
+            return Ok(path.clone());
+        }
         ctype::normalize_path_full_strict(type_ctx, env, path)
             .map_err(|path| IncludeModError::UnboundModulePath { path })
     }
@@ -1677,9 +1687,8 @@ fn modtypes_inner<'a>(
         }
 
         (ModuleType::MtyIdent(path), mty_sig) => {
-            // Match compiler/ml/includemod.ml:242-244: implementation-side
-            // `Mty_ident` expands before OCaml reaches the same-identifier
-            // check in `try_modtypes2` at compiler/ml/includemod.ml:269-280.
+            // compiler/ml/includemod.ml:235-236 expands an implementation-side
+            // identifier only when Env says that module type path is manifest.
             if let Some(result) = with_local_pident_module_type(env, path, |expanded| {
                 modtypes_inner(
                     type_ctx,
@@ -1705,17 +1714,60 @@ fn modtypes_inner<'a>(
                     aliasable,
                     warnings,
                 )
+            } else if let ModuleType::MtyIdent(sig_path) = mty_sig {
+                // try_modtypes2 receives `Subst.modtype subst mty2`. For an
+                // identifier this first applies Subst.modtype_path; if neither
+                // side can expand, only normalized prefix identity succeeds.
+                let sig_path = substitute_modtype_path(sig_path, subst);
+                if env
+                    .normalize_path_prefix(path)
+                    .same(&env.normalize_path_prefix(&sig_path))
+                {
+                    Ok(ModuleCoercion::Tcoerce_none)
+                } else if let Some(expanded) = expand_module_type_in_env(type_ctx, env, &sig_path) {
+                    let identity = InclusionSubst::default();
+                    modtypes_inner(
+                        type_ctx,
+                        env,
+                        &identity,
+                        mty_impl,
+                        &expanded,
+                        sig_access_path,
+                        aliasable,
+                        warnings,
+                    )
+                } else {
+                    Err(IncludeModError::ModuleTypeMismatch {
+                        name: Ident::create_local("module"),
+                        reason: "incompatible module types".to_string(),
+                    })
+                }
             } else {
-                Ok(ModuleCoercion::Tcoerce_none)
+                Err(IncludeModError::ModuleTypeMismatch {
+                    name: Ident::create_local("module"),
+                    reason: "incompatible module types".to_string(),
+                })
             }
         }
 
         (mty_impl, ModuleType::MtyIdent(path)) => {
-            if let Some(result) = with_local_pident_module_type(env, path, |expanded| {
+            // compiler/ml/includemod.ml:237 and 262-273 substitute the expected
+            // module type before testing/expanding its identifier, and restart
+            // expansion with Subst.identity.
+            let path = substitute_modtype_path(path, subst);
+            if let ModuleType::MtyIdent(impl_path) = mty_impl
+                && env
+                    .normalize_path_prefix(impl_path)
+                    .same(&env.normalize_path_prefix(&path))
+            {
+                return Ok(ModuleCoercion::Tcoerce_none);
+            }
+            let identity = InclusionSubst::default();
+            if let Some(result) = with_local_pident_module_type(env, &path, |expanded| {
                 modtypes_inner(
                     type_ctx,
                     env,
-                    subst,
+                    &identity,
                     mty_impl,
                     expanded,
                     sig_access_path,
@@ -1725,11 +1777,11 @@ fn modtypes_inner<'a>(
             }) {
                 return result;
             }
-            if let Some(expanded) = expand_module_type_in_env(type_ctx, env, path) {
+            if let Some(expanded) = expand_module_type_in_env(type_ctx, env, &path) {
                 modtypes_inner(
                     type_ctx,
                     env,
-                    subst,
+                    &identity,
                     mty_impl,
                     &expanded,
                     sig_access_path,
@@ -1737,7 +1789,10 @@ fn modtypes_inner<'a>(
                     warnings,
                 )
             } else {
-                Ok(ModuleCoercion::Tcoerce_none)
+                Err(IncludeModError::ModuleTypeMismatch {
+                    name: Ident::create_local("module"),
+                    reason: "incompatible module types".to_string(),
+                })
             }
         }
 
@@ -1936,6 +1991,10 @@ fn register_paired_signature_substitution(
             }
         }
         (SignatureItem::SigModtype(impl_id, _), SignatureItem::SigModtype(sig_id, _)) => {
+            // OCaml compiler/ml/includemod.ml:353-354 records
+            // `Subst.add_modtype id2 (Mty_ident (Pident id1))`. Dotted module
+            // type paths are handled by Subst.modtype_path through their module
+            // prefix (compiler/ml/subst.ml:77-86), not by a dotted modtype map.
             subst
                 .modtype_paths
                 .insert(Path::pident(sig_id.clone()), Path::pident(impl_id.clone()));
@@ -3788,7 +3847,11 @@ fn type_manifest_for_inclusion(
     let mut current = impl_expanded;
     let mut seen = HashSet::new();
     while seen.insert(current) {
-        let Some(next) = crate::types::ctype::expand_head_once(type_ctx, env, current) else {
+        // compiler/ml/includecore.ml:157 calls Ctype.try_expand_once_opt,
+        // whose ctype.ml:1269-1275 path uses Private expansion. This is what
+        // allows inclusion against a private manifest to walk through the
+        // implementation's strengthened self constructor.
+        let Some(next) = crate::types::ctype::expand_abbrev_opt_once(type_ctx, env, current) else {
             break;
         };
         current = type_ctx.repr(next);
@@ -4043,16 +4106,21 @@ fn type_exprs_equal_for_inclusion_inner(
             ..
         },
     ) = (&*type_ctx.get_desc(impl_ty), &*type_ctx.get_desc(sig_ty))
-        && impl_args.is_empty()
-        && sig_args.is_empty()
         && impl_path.same(sig_path)
+        && impl_args.len() == sig_args.len()
     {
-        // OCaml compiler/ml/ctype.ml:3165 handles equal nullary Tconstr
-        // paths before `expand_head_rigid`; Includecore reaches this through
-        // compiler/ml/includecore.ml:216-228 and :229-271 when comparing
-        // constructor arguments. Do not force persistent module normalization
-        // for already-equal nullary field types.
-        return true;
+        // OCaml compiler/ml/ctype.ml:3165 handles equal Tconstr paths before
+        // `expand_head_rigid`, then compares their arguments recursively. Do
+        // not repeatedly expand a strengthened constructor such as `Make.t<'a>`
+        // back through the same local signature path.
+        return impl_args
+            .iter()
+            .zip(sig_args.iter())
+            .all(|(impl_arg, sig_arg)| {
+                type_exprs_equal_for_inclusion_inner(
+                    type_ctx, env, param_map, *impl_arg, *sig_arg, seen,
+                )
+            });
     }
 
     if let Some(env) = env {
