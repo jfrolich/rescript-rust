@@ -11655,12 +11655,7 @@ pub fn compile_source_to_js_with_options(
     }
 
     if let Some(simple_signature) = inferred_simple_signature.as_deref() {
-        prepare_inferred_signature_for_saving(
-            &type_ctx,
-            simple_signature,
-            options.source_filename.as_deref(),
-            has_resi,
-        );
+        prepare_inferred_signature_for_saving(&type_ctx, simple_signature, has_resi);
     }
 
     if options.gentype_config.is_some() && (!has_resi || gentype_ignore_interface) {
@@ -12193,6 +12188,10 @@ fn check_compunit_inclusion_for_errors(
     let Some(target_sig) = pers.read_raw_sig_shared(&module_name, type_ctx) else {
         return Ok(());
     };
+    // Env.read_signature forces ps_sig, whose Subst.signature identity copy
+    // renames every bound interface identifier before compunit inclusion
+    // (compiler/ml/env.ml:1867-1869, compiler/ml/subst.ml:322-354).
+    rename_saved_signature_idents(type_ctx, target_sig.as_ref());
 
     let mut inclusion_warnings = Vec::new();
     match crate::types::includemod::compunit_with_warnings(
@@ -14332,38 +14331,49 @@ pub(crate) fn normalize_signature_types(
     norm_structure(type_ctx, final_env, typed_structure, false);
 }
 
-fn count_module_type_save_signature_renames(mty: &crate::types::decl::ModuleType) -> i32 {
+fn rename_saved_module_type_idents(
+    type_ctx: &TypeContext,
+    mty: &crate::types::decl::ModuleType,
+) {
     use crate::types::decl::ModuleType;
 
     match mty {
-        ModuleType::MtyIdent(_) | ModuleType::MtyAlias(_, _) => 0,
-        ModuleType::MtySignature(sig) => count_signature_save_renames(sig),
+        ModuleType::MtyIdent(_) | ModuleType::MtyAlias(_, _) => {}
+        ModuleType::MtySignature(sig) => rename_saved_signature_idents(type_ctx, sig),
         ModuleType::MtyFunctor {
-            param: _,
+            param,
             param_type,
             result,
         } => {
-            let param_type_count = param_type
-                .as_deref()
-                .map_or(0, count_module_type_save_signature_renames);
-            1 + param_type_count + count_module_type_save_signature_renames(result)
+            // Subst.modtype renames the functor binder before traversing its
+            // argument and result module types (compiler/ml/subst.ml:345-348).
+            drop(type_ctx.rename_ident(param));
+            if let Some(param_type) = param_type {
+                rename_saved_module_type_idents(type_ctx, param_type);
+            }
+            rename_saved_module_type_idents(type_ctx, result);
         }
     }
 }
 
-fn count_signature_save_renames(sig: &[crate::types::decl::SignatureItem]) -> i32 {
+fn rename_saved_signature_idents(
+    type_ctx: &TypeContext,
+    sig: &[crate::types::decl::SignatureItem],
+) {
     use crate::types::decl::SignatureItem;
 
-    let mut count = 0;
-
+    // Subst.signature first runs rename_bound_idents over the complete
+    // signature, then traverses each renamed component in source order
+    // (compiler/ml/subst.ml:322-354). Preserve both allocation passes even
+    // though the direct Rust CMI writer does not need the copied identifiers.
     for item in sig {
         match item {
-            SignatureItem::SigType(_, _, _)
-            | SignatureItem::SigModule(_, _, _)
-            | SignatureItem::SigModtype(_, _)
-            | SignatureItem::SigValue(_, _)
-            | SignatureItem::SigTypext(_, _, _) => {
-                count += 1;
+            SignatureItem::SigType(id, _, _)
+            | SignatureItem::SigModule(id, _, _)
+            | SignatureItem::SigModtype(id, _)
+            | SignatureItem::SigValue(id, _)
+            | SignatureItem::SigTypext(id, _, _) => {
+                drop(type_ctx.rename_ident(id));
             }
             SignatureItem::SigClass | SignatureItem::SigClassType => {}
         }
@@ -14372,13 +14382,12 @@ fn count_signature_save_renames(sig: &[crate::types::decl::SignatureItem]) -> i3
     for item in sig {
         match item {
             SignatureItem::SigModule(_, md, _) => {
-                count += count_module_type_save_signature_renames(&md.md_type);
+                rename_saved_module_type_idents(type_ctx, &md.md_type);
             }
             SignatureItem::SigModtype(_, mtd) => {
-                count += mtd
-                    .mtd_type
-                    .as_ref()
-                    .map_or(0, count_module_type_save_signature_renames);
+                if let Some(mty) = &mtd.mtd_type {
+                    rename_saved_module_type_idents(type_ctx, mty);
+                }
             }
             SignatureItem::SigValue(_, _)
             | SignatureItem::SigType(_, _, _)
@@ -14387,31 +14396,18 @@ fn count_signature_save_renames(sig: &[crate::types::decl::SignatureItem]) -> i3
             | SignatureItem::SigClassType => {}
         }
     }
-
-    count
-}
-
-fn consume_signature_save_renames(
-    type_ctx: &TypeContext,
-    sig: &[crate::types::decl::SignatureItem],
-) {
-    type_ctx.consume_ident_stamps(count_signature_save_renames(sig));
 }
 
 fn prepare_inferred_signature_for_saving(
     type_ctx: &TypeContext,
     simple_sig: &[crate::types::decl::SignatureItem],
-    source_filename: Option<&str>,
     has_resi: bool,
 ) {
-    let Some(source_filename) = source_filename else {
-        return;
-    };
-    if has_resi || !source_filename.ends_with(".res") {
+    if has_resi {
         return;
     }
 
-    consume_signature_save_renames(type_ctx, simple_sig);
+    rename_saved_signature_idents(type_ctx, simple_sig);
 }
 
 fn synchronize_lambda_start_stamp(type_ctx: &TypeContext) -> i32 {
@@ -15058,12 +15054,7 @@ pub fn compile_preprocessed_structure_in_process_until_js(
             normalize_signature_types(&type_ctx, &typed_structure, &final_env);
         }
 
-        prepare_inferred_signature_for_saving(
-            &type_ctx,
-            &simple_signature,
-            options.source_filename.as_deref(),
-            has_interface,
-        );
+        prepare_inferred_signature_for_saving(&type_ctx, &simple_signature, has_interface);
 
         simple_signature
     };
