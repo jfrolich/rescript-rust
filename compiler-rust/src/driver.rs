@@ -2125,7 +2125,13 @@ fn directive_payload_error_to_anyhow(
     filename: &str,
 ) -> anyhow::Error {
     UserDiagnostic::new(
-        format_compiler_error_report(arena, source, filename, err.loc, "expect string literal "),
+        format_compiler_error_report(
+            arena,
+            source,
+            filename,
+            err.loc,
+            "Expected a string literal.",
+        ),
         2,
     )
     .into()
@@ -13640,7 +13646,7 @@ struct ConfigPayloadError {
 
 impl std::fmt::Display for DirectivePayloadError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("expect string literal ")
+        f.write_str("Expected a string literal.")
     }
 }
 
