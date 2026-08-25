@@ -68,9 +68,22 @@ fn type_cannot_contain_undefined_rec(
                         false
                     }
                     TypeKind::TypeVariant(cdecls) => {
-                        let untagged = has_untagged(&decl.type_attributes);
-                        cdecls.iter().all(|cd| {
-                            if has_undefined_literal(&cd.cd_attributes) {
+                        let layout = decl.type_variant_layout.map(|r| ctx.variant_layout(r));
+                        cdecls.iter().enumerate().all(|(position, cd)| {
+                            let case = layout.as_ref().map(|layout| &layout.constructors[position]);
+                            let has_undefined = matches!(
+                                case,
+                                Some(crate::types::VariantConstructorCase::Constant(crate::types::VariantTag {
+                                    tag_type: Some(crate::types::VariantTagType::Undefined), ..
+                                }))
+                            ) || case.is_none() && has_undefined_literal(&cd.cd_attributes);
+                            let untagged = matches!(
+                                case,
+                                Some(crate::types::VariantConstructorCase::Block(crate::types::VariantBlock {
+                                    runtime: crate::types::BlockRuntime { untagged: true, .. }, ..
+                                }))
+                            ) || case.is_none() && has_untagged(&decl.type_attributes);
+                            if has_undefined {
                                 false
                             } else if untagged {
                                 match &cd.cd_args {
