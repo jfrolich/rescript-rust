@@ -137,7 +137,7 @@ pub enum IncludeModError {
         name: Ident,
         actual: TypeDeclaration,
         expected: TypeDeclaration,
-        detail: String,
+        detail: TypeDeclarationMismatchDetail,
     },
     /// Extension constructor mismatch.
     ExtensionConstructorMismatch {
@@ -191,6 +191,41 @@ pub enum IncludeModError {
     SignatureMismatch(Vec<IncludeModError>),
 }
 
+/// Structured counterpart of `Includecore.type_mismatch`.
+///
+/// Most inclusion checks still produce a pre-rendered detail while they are
+/// ported, but semantic mismatches must remain distinguishable from their
+/// diagnostic text. In particular, `TagName` originates from the canonical
+/// variant layout rather than from a formatted declaration.
+#[derive(Debug, Clone)]
+pub enum TypeDeclarationMismatchDetail {
+    TagName,
+    Variance,
+    Rendered(String),
+}
+
+impl TypeDeclarationMismatchDetail {
+    fn message(&self) -> &str {
+        match self {
+            Self::TagName => "Their @tag annotations differ.",
+            Self::Variance => "Their variances do not agree.",
+            Self::Rendered(message) => message,
+        }
+    }
+}
+
+impl From<String> for TypeDeclarationMismatchDetail {
+    fn from(value: String) -> Self {
+        Self::Rendered(value)
+    }
+}
+
+impl From<&str> for TypeDeclarationMismatchDetail {
+    fn from(value: &str) -> Self {
+        Self::Rendered(value.to_string())
+    }
+}
+
 pub fn format_error(type_ctx: &TypeContext, filename: &str, error: &IncludeModError) -> String {
     let mut output = String::new();
     output.push_str("  Signature mismatch:\n");
@@ -225,38 +260,42 @@ fn format_include_error(
             expected,
             error,
         } => {
-            let actual = format_module_type(type_ctx, actual);
-            let expected = format_module_type(type_ctx, expected);
-            if should_elide_module_mismatch(&actual, &expected)
-                || should_elide_type_declaration_module_mismatch(error, &actual, &expected)
+            let actual_text = format_module_type(type_ctx, actual);
+            let expected_text = format_module_type(type_ctx, expected);
+            if should_elide_module_mismatch(&actual_text, &expected_text)
+                || should_elide_type_declaration_module_mismatch(
+                    error,
+                    &actual_text,
+                    &expected_text,
+                )
             {
                 output.push_str("  ...\n");
             } else if is_compact_type_declaration_mismatch(error) {
                 output.push_str("  Modules do not match: ");
-                output.push_str(&actual);
+                output.push_str(&actual_text);
                 output.push_str(" is not included in ");
-                output.push_str(&expected);
+                output.push_str(&expected_text);
                 output.push('\n');
-            } else if !(actual.contains('\n') && expected.contains('\n'))
+            } else if !(actual_text.contains('\n') && expected_text.contains('\n'))
                 && "  Modules do not match: ".len()
-                    + actual.len()
+                    + actual_text.len()
                     + " is not included in ".len()
-                    + expected.len()
+                    + expected_text.len()
                     <= 80
             {
                 output.push_str("  Modules do not match: ");
-                output.push_str(&actual);
+                output.push_str(&actual_text);
                 output.push_str(" is not included in ");
-                output.push_str(&expected);
+                output.push_str(&expected_text);
                 output.push('\n');
             } else {
                 output.push_str("  Modules do not match:\n");
                 output.push_str("    ");
-                output.push_str(&actual);
+                output.push_str(&actual_text);
                 output.push('\n');
                 output.push_str("  is not included in\n");
                 output.push_str("    ");
-                output.push_str(&expected);
+                output.push_str(&expected_text);
                 output.push('\n');
             }
             format_include_error(type_ctx, filename, error, output);
@@ -317,7 +356,7 @@ fn format_include_error(
             expected,
             detail,
         } => {
-            if detail == "Their variances do not agree." {
+            if matches!(detail, TypeDeclarationMismatchDetail::Variance) {
                 output.push_str("  Type declarations do not match: ");
                 output.push_str(&format_type_declaration(type_ctx, name, actual));
                 output.push_str(" is not included in ");
@@ -349,7 +388,7 @@ fn format_include_error(
             ));
             output.push_str(":\n");
             output.push_str("    Actual declaration\n");
-            for line in detail.lines() {
+            for line in detail.message().lines() {
                 output.push_str("  ");
                 output.push_str(line);
                 output.push('\n');
@@ -504,8 +543,10 @@ fn format_include_error(
 fn is_compact_type_declaration_mismatch(error: &IncludeModError) -> bool {
     matches!(
         error,
-        IncludeModError::TypeDeclarationMismatch { detail, .. }
-            if detail == "Their variances do not agree."
+        IncludeModError::TypeDeclarationMismatch {
+            detail: TypeDeclarationMismatchDetail::Variance,
+            ..
+        }
     )
 }
 
@@ -561,9 +602,20 @@ fn should_elide_type_declaration_module_mismatch(
     actual: &str,
     expected: &str,
 ) -> bool {
+    // OCaml includemod.ml:637-655 bounds the structured `Module_types`
+    // symptom, whose declarations still carry @tag attributes even though
+    // Printtyp omits them. Preserve that distinction after the semantic
+    // layout migration rather than inferring it from rendered text.
+    let has_hidden_tag_layout = matches!(
+        error,
+        IncludeModError::TypeDeclarationMismatch {
+            detail: TypeDeclarationMismatchDetail::TagName,
+            ..
+        }
+    );
     matches!(error, IncludeModError::TypeDeclarationMismatch { .. })
         && !is_compact_type_declaration_mismatch(error)
-        && actual.len() + expected.len() > 80
+        && (has_hidden_tag_layout || actual.len() + expected.len() > 80)
 }
 
 pub(crate) fn format_module_type(type_ctx: &TypeContext, mty: &ModuleType) -> String {
@@ -3264,7 +3316,7 @@ pub(crate) fn type_declarations<'a>(
             id,
             impl_decl,
             sig_decl,
-            "Their @tag annotations differ.",
+            TypeDeclarationMismatchDetail::TagName,
         ));
     }
 
@@ -3396,7 +3448,7 @@ pub(crate) fn type_declarations<'a>(
                     id,
                     impl_decl,
                     sig_decl,
-                    "Their variances do not agree.",
+                    TypeDeclarationMismatchDetail::Variance,
                 ));
             }
         }
@@ -3515,7 +3567,7 @@ fn type_decl_mismatch(
     name: Ident,
     actual: &TypeDeclaration,
     expected: &TypeDeclaration,
-    detail: impl Into<String>,
+    detail: impl Into<TypeDeclarationMismatchDetail>,
 ) -> IncludeModError {
     IncludeModError::TypeDeclarationMismatch {
         name,
