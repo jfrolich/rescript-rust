@@ -4,7 +4,7 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use crate::gentype::gen_type_common::{dep_to_resolved_name, dep_to_string, Dep, StringMap, Type};
+use crate::gentype::gen_type_common::{Dep, StringMap, Type, dep_to_resolved_name, dep_to_string};
 use crate::types::path::Path;
 use crate::types::typedtree::TypedSignature;
 

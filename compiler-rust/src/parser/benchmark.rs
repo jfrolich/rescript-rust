@@ -532,10 +532,7 @@ mod tests {
 
         let files = discover_test_files();
         let total = files.len();
-        println!(
-            "\nDiscovered {} .res files\n",
-            total
-        );
+        println!("\nDiscovered {} .res files\n", total);
 
         println!("{:-<110}", "");
         println!(

@@ -20,11 +20,11 @@ use crate::types::path::Path;
 use crate::types::type_expr::{FieldKind, RowDesc, RowField, TypeDesc, TypeExprRef};
 use crate::types::typedtree::{
     Case, Constant, Expression, ExpressionDesc, ExtensionConstructor, ExtensionConstructorKind,
-    FunctionParam, Loc, ModuleBinding, ModuleExpr, ModuleExprDesc,
-    ModuleTypeConstraint, OpenDeclaration, Partial, Pattern, PatternDesc, RecordField,
-    RecordLabelDefinition, Structure, StructureItem, StructureItemDesc, TypeExtension,
-    TypedConstructorArguments, TypedConstructorDeclaration, TypedCoreType, TypedCoreTypeDesc,
-    TypedLabelDeclaration, TypedTypeDeclaration, TypedTypeKind, ValueBinding,
+    FunctionParam, Loc, ModuleBinding, ModuleExpr, ModuleExprDesc, ModuleTypeConstraint,
+    OpenDeclaration, Partial, Pattern, PatternDesc, RecordField, RecordLabelDefinition, Structure,
+    StructureItem, StructureItemDesc, TypeExtension, TypedConstructorArguments,
+    TypedConstructorDeclaration, TypedCoreType, TypedCoreTypeDesc, TypedLabelDeclaration,
+    TypedTypeDeclaration, TypedTypeKind, ValueBinding,
 };
 use crate::types::variance::Variance;
 use std::collections::HashMap;
@@ -1134,7 +1134,11 @@ fn sexp_expression_desc(
                 sexp_expression(arena, ctx, with_locs, dedup, body),
             ])
         }
-        ExpressionDesc::Texp_function { params, body, async_ } => {
+        ExpressionDesc::Texp_function {
+            params,
+            body,
+            async_,
+        } => {
             // compiler/ml/sexp_typedtree.ml:382-400.
             let params = params
                 .iter()

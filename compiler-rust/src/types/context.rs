@@ -22,8 +22,8 @@ use super::asttypes::{ArgLabel, PrivateFlag};
 use super::env::Env;
 use super::path::Path;
 use super::type_expr::{
-    AbbrevMemo, AbbrevMemoRef, FieldKind, FieldKindRef, GENERIC_LEVEL,
-    RowDesc, RowField, RowFieldRef, TypeArg, TypeDesc, TypeExpr, TypeExprRef,
+    AbbrevMemo, AbbrevMemoRef, FieldKind, FieldKindRef, GENERIC_LEVEL, RowDesc, RowField,
+    RowFieldRef, TypeArg, TypeDesc, TypeExpr, TypeExprRef,
 };
 use super::typedtree::EnvRef;
 use crate::context::IdGenerator;
@@ -1278,7 +1278,10 @@ impl TypeContext {
         let ret = {
             let desc = self.get_desc(self.repr(ret_type));
             match &*desc {
-                TypeDesc::Tarrow { args: ret_args, ret } => {
+                TypeDesc::Tarrow {
+                    args: ret_args,
+                    ret,
+                } => {
                     args.extend(ret_args.iter().cloned());
                     *ret
                 }
@@ -1385,7 +1388,10 @@ impl TypeContext {
         let ret = {
             let desc = self.get_desc(self.repr(ret_type));
             match &*desc {
-                TypeDesc::Tarrow { args: ret_args, ret } => {
+                TypeDesc::Tarrow {
+                    args: ret_args,
+                    ret,
+                } => {
                     args.extend(ret_args.iter().cloned());
                     *ret
                 }
@@ -1584,10 +1590,7 @@ impl TypeContext {
             Vec<super::decl::Attribute>,
         )>,
     > {
-        self.record_labels_cache
-            .borrow()
-            .get(type_path)
-            .cloned()
+        self.record_labels_cache.borrow().get(type_path).cloned()
     }
 
     /// Cache reconstructed record label descriptions for a type path.

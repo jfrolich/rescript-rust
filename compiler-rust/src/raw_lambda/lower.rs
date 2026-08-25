@@ -2850,17 +2850,17 @@ mod tests {
 
         let function_attr = FunctionAttribute::default();
         let find_end_binding = Lambda::function_(
-                1,
-                vec![end_param],
-                Lambda::seq(Lambda::var(find_end.clone()), Lambda::var(find_beg.clone())),
-                function_attr.clone(),
-            );
+            1,
+            vec![end_param],
+            Lambda::seq(Lambda::var(find_end.clone()), Lambda::var(find_beg.clone())),
+            function_attr.clone(),
+        );
         let find_beg_binding = Lambda::function_(
-                1,
-                vec![beg_param],
-                Lambda::var(find_beg.clone()),
-                function_attr,
-            );
+            1,
+            vec![beg_param],
+            Lambda::var(find_beg.clone()),
+            function_attr,
+        );
 
         let lowered = rebuild_recursive_bindings(
             vec![

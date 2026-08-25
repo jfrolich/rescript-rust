@@ -57,15 +57,8 @@ fn compile_source_in_process_on_test_stack(
         .name(format!("compile_source_in_process:{module_name}"))
         .stack_size(32 * 1024 * 1024)
         .spawn(move || {
-            compile_source_in_process(
-                &source,
-                &filename,
-                &module_name,
-                &options,
-                &registry,
-                false,
-            )
-            .map_err(|e| format!("{e:?}"))
+            compile_source_in_process(&source, &filename, &module_name, &options, &registry, false)
+                .map_err(|e| format!("{e:?}"))
         })
         .map_err(|e| format!("spawn compiler test thread: {e}"))?
         .join()

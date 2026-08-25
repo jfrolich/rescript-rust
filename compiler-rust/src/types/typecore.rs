@@ -6708,13 +6708,9 @@ fn type_expect_with_recarg<'a>(
     recarg: RecArg,
 ) -> TypeCoreResult<Expression> {
     let arena = tctx.arena;
-    crate::types::typemod::with_warning_scope(
-        tctx,
-        arena,
-        &expr.pexp_attributes,
-        true,
-        |tctx| type_expect_with_recarg_unscoped(tctx, env, expr, expected_ty, context, recarg),
-    )
+    crate::types::typemod::with_warning_scope(tctx, arena, &expr.pexp_attributes, true, |tctx| {
+        type_expect_with_recarg_unscoped(tctx, env, expr, expected_ty, context, recarg)
+    })
 }
 
 fn type_expect_with_recarg_unscoped<'a>(
@@ -11622,16 +11618,7 @@ fn generalized_tuple_space_is_covered(
             }
             names.push(constructor.cd_id.name().to_string());
             results.push(result);
-            let is_covered = visit(
-                ctx,
-                env,
-                sets,
-                index + 1,
-                names,
-                results,
-                covered,
-                checked,
-            );
+            let is_covered = visit(ctx, env, sets, index + 1, names, results, covered, checked);
             results.pop();
             names.pop();
             if !is_covered {
@@ -18919,9 +18906,7 @@ fn type_setfield(
             &mut tctx.persistent_env,
             tctx.type_ctx,
         )
-        .is_some_and(|(_, _, decl)| {
-            decl.type_private == crate::types::PrivateFlag::Private
-        })
+        .is_some_and(|(_, _, decl)| decl.type_private == crate::types::PrivateFlag::Private)
     {
         tctx.report_warning(
             field_lid.loc,

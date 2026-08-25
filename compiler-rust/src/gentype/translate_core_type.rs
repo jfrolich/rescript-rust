@@ -92,7 +92,8 @@ pub fn translate_arrow_type(
     match &core_type.ctyp_desc {
         TypedCoreTypeDesc::Ttyp_arrow(args, core_type2) => {
             let as_label = crate::gentype::annotation::get_gentype_as_renaming(
-                arena, &core_type.ctyp_attributes,
+                arena,
+                &core_type.ctyp_attributes,
             )
             .unwrap_or_default();
             let mut next_rev_deps = rev_arg_deps;
@@ -112,17 +113,23 @@ pub fn translate_arrow_type(
                         (Label::Label(label), (*arg.typ).clone())
                     }
                 };
-                let translation = translateCoreType_(
-                    ctx, arena, config, type_vars_gen, false, type_env, &typ,
-                );
+                let translation =
+                    translateCoreType_(ctx, arena, config, type_vars_gen, false, type_env, &typ);
                 let mut deps = translation.dependencies;
                 deps.extend(next_rev_deps);
                 next_rev_deps = deps;
                 next_rev_args.insert(0, (label, translation.type_));
             }
             translate_arrow_type(
-                ctx, arena, config, type_vars_gen, no_function_return_dependencies,
-                type_env, next_rev_deps, next_rev_args, core_type2,
+                ctx,
+                arena,
+                config,
+                type_vars_gen,
+                no_function_return_dependencies,
+                type_env,
+                next_rev_deps,
+                next_rev_args,
+                core_type2,
             )
         }
         _ => {

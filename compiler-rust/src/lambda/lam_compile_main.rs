@@ -95,9 +95,7 @@ pub fn add_hoisted_function_aliases(
                     args,
                     ..
                 }) = base
-                    && let Some(field) = usize::try_from(*pos)
-                        .ok()
-                        .and_then(|pos| args.get(pos))
+                    && let Some(field) = usize::try_from(*pos).ok().and_then(|pos| args.get(pos))
                 {
                     return resolve_binding(field, groups, seen);
                 }
@@ -130,12 +128,9 @@ pub fn add_hoisted_function_aliases(
     }
     fn append_aliases(lam: Lambda, aliases: &[(Ident, Lambda)]) -> Lambda {
         match lam {
-            Lambda::Llet(kind, id, value, body) => Lambda::Llet(
-                kind,
-                id,
-                value,
-                Box::new(append_aliases(*body, aliases)),
-            ),
+            Lambda::Llet(kind, id, value, body) => {
+                Lambda::Llet(kind, id, value, Box::new(append_aliases(*body, aliases)))
+            }
             Lambda::Lletrec(bindings, body) => {
                 Lambda::Lletrec(bindings, Box::new(append_aliases(*body, aliases)))
             }
@@ -155,12 +150,7 @@ pub fn add_hoisted_function_aliases(
                     loc,
                 );
                 for (id, value) in aliases.iter().rev() {
-                    result = Lambda::let_(
-                        LetKind::Alias,
-                        id.clone(),
-                        value.clone(),
-                        result,
-                    );
+                    result = Lambda::let_(LetKind::Alias, id.clone(), value.clone(), result);
                 }
                 result
             }

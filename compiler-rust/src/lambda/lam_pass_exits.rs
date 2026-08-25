@@ -513,7 +513,10 @@ mod tests {
         let handler = Lambda::true_();
         let lam = Lambda::LstaticCatch(Box::new(body.clone()), (1, vec![]), Box::new(handler));
         let simplified = simplify_exits_standalone(&lam);
-        assert!(simplified.is_unit(), "expected unit body, got {simplified:?}");
+        assert!(
+            simplified.is_unit(),
+            "expected unit body, got {simplified:?}"
+        );
     }
 
     #[test]

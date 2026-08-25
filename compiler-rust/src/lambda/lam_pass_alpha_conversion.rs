@@ -10,9 +10,7 @@ use crate::lambda::lam_compile_context::LamStats;
 use crate::lambda::lam_eta_conversion::transform_under_supply;
 use crate::lambda::lam_pass_collect::ExternalArityResolver;
 use crate::lambda::lam_primitive::Primitive;
-use crate::lambda::{
-    ApInfo, Apply, ApplyStatus, Lambda, LambdaSwitch, PrimInfo,
-};
+use crate::lambda::{ApInfo, Apply, ApplyStatus, Lambda, LambdaSwitch, PrimInfo};
 
 /// Direct port of `Lam_pass_alpha_conversion.alpha_conversion`
 /// (lam_pass_alpha_conversion.ml:25-129).

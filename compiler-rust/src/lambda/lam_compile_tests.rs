@@ -980,8 +980,14 @@ fn compile_integer_inequality_preserves_typeof_string_comparison_like_ocaml() {
     ));
 
     assert!(compiled.prelude.is_empty());
-    assert!(matches!(compiled.expr.desc, ExpressionDesc::Bin(BinOp::NotEqEq, _, _)));
-    assert_eq!(print_expression(&compiled.expr), "\"number\" !== \"number\"");
+    assert!(matches!(
+        compiled.expr.desc,
+        ExpressionDesc::Bin(BinOp::NotEqEq, _, _)
+    ));
+    assert_eq!(
+        print_expression(&compiled.expr),
+        "\"number\" !== \"number\""
+    );
 }
 
 #[test]

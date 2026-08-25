@@ -1021,15 +1021,15 @@ fn nested_staticcatch_switch_forwarders_to_outer_handlers_avoid_exit_temps_like_
             LetKind::Strict,
             int_func.clone(),
             Lambda::function_(
-                    1,
-                    vec![int_param.clone()],
-                    Lambda::prim(
-                        Primitive::Paddint,
-                        vec![Lambda::var(int_param), Lambda::var(int_value.clone())],
-                        Location::none(),
-                    ),
-                    FunctionAttribute::default(),
+                1,
+                vec![int_param.clone()],
+                Lambda::prim(
+                    Primitive::Paddint,
+                    vec![Lambda::var(int_param), Lambda::var(int_value.clone())],
+                    Location::none(),
                 ),
+                FunctionAttribute::default(),
+            ),
             Lambda::apply(
                 Lambda::var(int_func),
                 vec![Lambda::const_(Constant::int(0))],
@@ -1100,15 +1100,15 @@ fn nested_staticcatch_switch_forwarders_keep_collapsed_shared_return_like_gpr_36
             LetKind::Strict,
             int_func.clone(),
             Lambda::function_(
-                    1,
-                    vec![int_param.clone()],
-                    Lambda::prim(
-                        Primitive::Paddint,
-                        vec![Lambda::var(int_param), Lambda::var(int_value.clone())],
-                        Location::none(),
-                    ),
-                    FunctionAttribute::default(),
+                1,
+                vec![int_param.clone()],
+                Lambda::prim(
+                    Primitive::Paddint,
+                    vec![Lambda::var(int_param), Lambda::var(int_value.clone())],
+                    Location::none(),
                 ),
+                FunctionAttribute::default(),
+            ),
             Lambda::apply(
                 Lambda::var(int_func),
                 vec![Lambda::const_(Constant::int(0))],

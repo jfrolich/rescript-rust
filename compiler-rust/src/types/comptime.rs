@@ -369,10 +369,15 @@ pub fn build_type_info<'a>(
                 let ret_repr = ctx.repr(current_ret);
                 let ret_desc = ctx.get_desc(ret_repr);
                 match &*ret_desc {
-                    TypeDesc::Tarrow { args: next_args, ret: next_ret } => {
-                        args.extend(next_args.iter().map(|arg| {
-                            build_type_info(ctx, env, arg.typ, visited)
-                        }));
+                    TypeDesc::Tarrow {
+                        args: next_args,
+                        ret: next_ret,
+                    } => {
+                        args.extend(
+                            next_args
+                                .iter()
+                                .map(|arg| build_type_info(ctx, env, arg.typ, visited)),
+                        );
                         current_ret = *next_ret;
                     }
                     _ => break,
@@ -1292,7 +1297,8 @@ fn match_case_pattern(
                     // Bind the constructor arguments if present
                     if args.len() == 1 {
                         // Single argument — match against the record of bindings
-                        if let typedtree::PatternDesc::Tpat_record(fields, _, _) = &args[0].pat_desc {
+                        if let typedtree::PatternDesc::Tpat_record(fields, _, _) = &args[0].pat_desc
+                        {
                             for (_field_lid, lbl_desc, field_pat, _optional) in fields {
                                 let field_name = &lbl_desc.lbl_name;
                                 if let Some(field_value) = bindings.remove(field_name.as_str()) {

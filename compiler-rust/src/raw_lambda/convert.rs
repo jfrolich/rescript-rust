@@ -10466,10 +10466,10 @@ impl<'a> RawLambdaConverter<'a> {
                     let converted_bindings = bindings
                         .iter()
                         .map(|binding| {
-                            let mut value = self.with_warning_scope(
-                            &binding.vb_attributes,
-                            |this| this.convert_expr_raw(&binding.vb_expr),
-                        );
+                            let mut value = self
+                                .with_warning_scope(&binding.vb_attributes, |this| {
+                                    this.convert_expr_raw(&binding.vb_expr)
+                                });
                             let inline_attr =
                                 self.get_inline_attribute_from(&binding.vb_attributes);
                             value =
@@ -10554,10 +10554,9 @@ impl<'a> RawLambdaConverter<'a> {
                 let converted_bindings = bindings
                     .iter()
                     .map(|binding| {
-                        let mut value = self.with_warning_scope(
-                            &binding.vb_attributes,
-                            |this| this.convert_expr_raw(&binding.vb_expr),
-                        );
+                        let mut value = self.with_warning_scope(&binding.vb_attributes, |this| {
+                            this.convert_expr_raw(&binding.vb_expr)
+                        });
                         // OCaml's transl_let applies inline attributes from vb_attributes
                         let inline_attr = self.get_inline_attribute_from(&binding.vb_attributes);
                         value = self.apply_inline_attribute_raw(value, binding.vb_loc, inline_attr);
@@ -10609,10 +10608,10 @@ impl<'a> RawLambdaConverter<'a> {
                     let lam_bindings = bindings
                         .iter()
                         .map(|binding| {
-                            let mut value = self.with_warning_scope(
-                            &binding.vb_attributes,
-                            |this| this.convert_expr_raw(&binding.vb_expr),
-                        );
+                            let mut value = self
+                                .with_warning_scope(&binding.vb_attributes, |this| {
+                                    this.convert_expr_raw(&binding.vb_expr)
+                                });
                             let inline_attr =
                                 self.get_inline_attribute_from(&binding.vb_attributes);
                             value =
@@ -10633,10 +10632,9 @@ impl<'a> RawLambdaConverter<'a> {
                     RawLambda::letrec(lam_bindings, body)
                 } else {
                     bindings.iter().rev().fold(body, |acc, binding| {
-                        let mut value = self.with_warning_scope(
-                            &binding.vb_attributes,
-                            |this| this.convert_expr_raw(&binding.vb_expr),
-                        );
+                        let mut value = self.with_warning_scope(&binding.vb_attributes, |this| {
+                            this.convert_expr_raw(&binding.vb_expr)
+                        });
                         let inline_attr = self.get_inline_attribute_from(&binding.vb_attributes);
                         value = self.apply_inline_attribute_raw(value, binding.vb_loc, inline_attr);
                         self.mark_js_hoisted_pattern(

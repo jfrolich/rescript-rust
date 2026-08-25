@@ -66,9 +66,9 @@ pub use decl::{
 pub use path::{NOPOS, Path, Typath};
 pub(crate) use type_expr::TypeExprRefMap;
 pub use type_expr::{
-    AbbrevMemo, AbbrevMemoRef, FieldKind, FieldKindRef, GENERIC_LEVEL,
-    LOWEST_LEVEL, ObjectName, PIVOT_LEVEL, RowDesc, RowField, RowFieldRef, TypeArg, TypeDesc,
-    TypeDescSer, TypeExpr, TypeExprRef,
+    AbbrevMemo, AbbrevMemoRef, FieldKind, FieldKindRef, GENERIC_LEVEL, LOWEST_LEVEL, ObjectName,
+    PIVOT_LEVEL, RowDesc, RowField, RowFieldRef, TypeArg, TypeDesc, TypeDescSer, TypeExpr,
+    TypeExprRef,
 };
 pub use variance::{Variance, VarianceFlag};
 

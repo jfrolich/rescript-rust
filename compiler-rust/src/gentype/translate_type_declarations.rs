@@ -3,8 +3,8 @@
 
 use crate::gentype::code_item;
 use crate::gentype::gen_type_common::{
-    create_variant, ident_with, sanitize_type_name, unknown, Case as VariantCase, ClosedFlag,
-    Field, LabelJs, Mutable, Optional, Payload, Type,
+    Case as VariantCase, ClosedFlag, Field, LabelJs, Mutable, Optional, Payload, Type,
+    create_variant, ident_with, sanitize_type_name, unknown,
 };
 use crate::location::Location;
 use crate::parse_arena::{LocIdx, ParseArena};

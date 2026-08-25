@@ -1086,7 +1086,11 @@ impl<'a> TypeExprErrorPrinter<'a> {
 
             match &*self.type_ctx.get_desc(repr) {
                 TypeDesc::Tarrow { args: params, ret } => {
-                    args.extend(params.iter().map(|arg| self.format_arrow_arg(&arg.lbl, arg.typ)));
+                    args.extend(
+                        params
+                            .iter()
+                            .map(|arg| self.format_arrow_arg(&arg.lbl, arg.typ)),
+                    );
                     current = *ret;
                 }
                 TypeDesc::Tlink(next) | TypeDesc::Tsubst(next) => current = *next,
@@ -2343,8 +2347,14 @@ fn find_arity_mismatch(
         let (impl_args, impl_ret, sig_args, sig_ret) =
             match (&*type_ctx.get_desc(impl_ty), &*type_ctx.get_desc(sig_ty)) {
                 (
-                    TypeDesc::Tarrow { args: impl_args, ret: impl_ret },
-                    TypeDesc::Tarrow { args: sig_args, ret: sig_ret },
+                    TypeDesc::Tarrow {
+                        args: impl_args,
+                        ret: impl_ret,
+                    },
+                    TypeDesc::Tarrow {
+                        args: sig_args,
+                        ret: sig_ret,
+                    },
                 ) => (impl_args.clone(), *impl_ret, sig_args.clone(), *sig_ret),
                 _ => return None,
             };
@@ -2401,8 +2411,7 @@ fn value_descriptions<'a>(
     if !moregeneral {
         let mut expected_desc = sig_desc.clone();
         expected_desc.val_type = expected_ty;
-        let arity_mismatch =
-            find_arity_mismatch(type_ctx, env, impl_desc.val_type, expected_ty);
+        let arity_mismatch = find_arity_mismatch(type_ctx, env, impl_desc.val_type, expected_ty);
         return Err(IncludeModError::ValueTypeMismatch {
             name: id,
             actual: impl_desc.clone(),
@@ -3478,13 +3487,7 @@ fn type_expr_lists_equal_for_inclusion(
             .iter()
             .zip(sig_types.iter())
             .all(|(impl_ty, sig_ty)| {
-                type_exprs_equal_for_inclusion(
-                    type_ctx,
-                    Some(env),
-                    param_map,
-                    *impl_ty,
-                    *sig_ty,
-                )
+                type_exprs_equal_for_inclusion(type_ctx, Some(env), param_map, *impl_ty, *sig_ty)
             })
 }
 
@@ -3492,7 +3495,13 @@ fn type_manifest_is_absrow(type_ctx: &TypeContext, env: &Env, ty: TypeExprRef) -
     let ty = type_ctx.repr(ty);
     let is_pident_constr = {
         let desc = type_ctx.get_desc(ty);
-        matches!(&*desc, TypeDesc::Tconstr { path: Path::Pident(_), .. })
+        matches!(
+            &*desc,
+            TypeDesc::Tconstr {
+                path: Path::Pident(_),
+                ..
+            }
+        )
     };
     if !is_pident_constr {
         return false;
@@ -3718,8 +3727,11 @@ fn type_manifest_for_inclusion(
         env,
         impl_manifest,
     ));
-    let sig_expanded =
-        type_ctx.repr(crate::types::ctype::expand_head(type_ctx, env, sig_manifest));
+    let sig_expanded = type_ctx.repr(crate::types::ctype::expand_head(
+        type_ctx,
+        env,
+        sig_manifest,
+    ));
     let impl_desc = type_ctx.get_desc(impl_expanded).clone();
     let sig_desc = type_ctx.get_desc(sig_expanded).clone();
 
@@ -3765,13 +3777,7 @@ fn type_manifest_for_inclusion(
         _ => {}
     }
 
-    if type_exprs_equal_for_inclusion(
-        type_ctx,
-        Some(env),
-        param_map,
-        impl_manifest,
-        sig_manifest,
-    ) {
+    if type_exprs_equal_for_inclusion(type_ctx, Some(env), param_map, impl_manifest, sig_manifest) {
         return true;
     }
 
@@ -4068,14 +4074,25 @@ fn type_exprs_equal_for_inclusion_inner(
         (TypeDesc::Tvar(impl_name), TypeDesc::Tvar(sig_name))
         | (TypeDesc::Tunivar(impl_name), TypeDesc::Tunivar(sig_name)) => impl_name == sig_name,
         (
-            TypeDesc::Tarrow { args: impl_args, ret: impl_ret },
-            TypeDesc::Tarrow { args: sig_args, ret: sig_ret },
+            TypeDesc::Tarrow {
+                args: impl_args,
+                ret: impl_ret,
+            },
+            TypeDesc::Tarrow {
+                args: sig_args,
+                ret: sig_ret,
+            },
         ) => {
             impl_args.len() == sig_args.len()
                 && impl_args.iter().zip(sig_args).all(|(impl_arg, sig_arg)| {
                     arg_labels_equal(&impl_arg.lbl, &sig_arg.lbl)
                         && type_exprs_equal_for_inclusion_inner(
-                            type_ctx, env, param_map, impl_arg.typ, sig_arg.typ, seen,
+                            type_ctx,
+                            env,
+                            param_map,
+                            impl_arg.typ,
+                            sig_arg.typ,
+                            seen,
                         )
                 })
                 && type_exprs_equal_for_inclusion_inner(

@@ -25,12 +25,11 @@ use crate::parser::ast::{
     self as current, ArgLabel, Attribute, Attributes, Case, Constant, ConstructorArguments,
     ConstructorDeclaration, CoreType, CoreTypeDesc, Expression, ExpressionDesc,
     ExpressionRecordField, ExtensionConstructor, ExtensionConstructorKind, FunParam,
-    IncludeDeclaration,
-    JsxContainerElement, JsxElement, JsxFragment, JsxProp, JsxUnaryElement, LabelDeclaration,
-    ModuleExpr, ModuleExprDesc, ModuleType, ModuleTypeDesc, ObjectField, Pattern, PatternDesc,
-    PatternRecordField, Payload, PexpApply, PexpFun, PrivateFlag, RecFlag, RowField, SignatureItem,
-    SignatureItemDesc, StructureItem, StructureItemDesc, TypeArg, TypeDeclaration, TypeExtension,
-    TypeKind, ValueBinding, ValueDescription, WithConstraint,
+    IncludeDeclaration, JsxContainerElement, JsxElement, JsxFragment, JsxProp, JsxUnaryElement,
+    LabelDeclaration, ModuleExpr, ModuleExprDesc, ModuleType, ModuleTypeDesc, ObjectField, Pattern,
+    PatternDesc, PatternRecordField, Payload, PexpApply, PexpFun, PrivateFlag, RecFlag, RowField,
+    SignatureItem, SignatureItemDesc, StructureItem, StructureItemDesc, TypeArg, TypeDeclaration,
+    TypeExtension, TypeKind, ValueBinding, ValueDescription, WithConstraint,
 };
 use crate::parser::longident::Longident;
 
@@ -1230,8 +1229,7 @@ fn attr_named(attrs: &[Attribute], name: &str, arena: &ParseArena) -> bool {
 fn is_bs_unused_attribute_candidate(name: &str) -> bool {
     matches!(
         name,
-        "as"
-            | "config"
+        "as" | "config"
             | "ignore"
             | "int"
             | "optional"
@@ -15542,7 +15540,6 @@ fn make_setter_type_with_loc(
         },
     ];
     make_arrows_type_with_loc(&args, &unit_type, Some(outer_loc), arena)
-
 }
 
 /// Create unit type
