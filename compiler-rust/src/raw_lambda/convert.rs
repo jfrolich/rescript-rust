@@ -1235,6 +1235,27 @@ impl<'a> RawLambdaConverter<'a> {
         lambda
     }
 
+    fn for_function_with_synced_stamps(
+        &mut self,
+        loc: Location,
+        param: RawLambda,
+        pat_act_list: Vec<(Pattern, RawLambda)>,
+        partial: Partial,
+    ) -> RawLambda {
+        self.sync_matching_stamps();
+        let lambda = full_matching::for_function(
+            self.type_ctx,
+            self.arena,
+            loc,
+            param,
+            pat_act_list,
+            partial,
+            &mut self.next_static_raise,
+        );
+        self.sync_matching_stamps();
+        lambda
+    }
+
     fn for_trywith_with_synced_stamps(
         &mut self,
         param: RawLambda,
@@ -10320,14 +10341,11 @@ impl<'a> RawLambdaConverter<'a> {
             lambda_body = match &pat.pat_desc {
                 PatternDesc::Tpat_any => lambda_body,
                 PatternDesc::Tpat_var(bound, _) if bound.same(id) => lambda_body,
-                _ => full_matching::for_function(
-                    self.type_ctx,
-                    self.arena,
+                _ => self.for_function_with_synced_stamps(
                     self.loc(pat.pat_loc),
                     RawLambda::var(id.clone()),
                     vec![(pat, lambda_body)],
                     param.fp_partial,
-                    &mut self.next_static_raise,
                 ),
             };
         }
