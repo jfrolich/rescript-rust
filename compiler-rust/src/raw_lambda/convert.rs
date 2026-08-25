@@ -442,13 +442,6 @@ fn nonrecursive_alias_any_binding(binding: &ValueBinding) -> bool {
     )
 }
 
-fn to_parser_mutable(flag: TypeMutableFlag) -> ParserMutableFlag {
-    match flag {
-        TypeMutableFlag::Mutable => ParserMutableFlag::Mutable,
-        TypeMutableFlag::Immutable => ParserMutableFlag::Immutable,
-    }
-}
-
 /// OCaml's Lambda.find_name: check for @as attribute to get the JS runtime name.
 /// Falls back to the label's declared name.
 fn label_runtime_name(lbl: &LabelDescription) -> String {
@@ -611,15 +604,9 @@ fn raw_polyvariant_compare(scrutinee: RawLambda, tag: &str, loc: Location) -> Ra
 fn raw_record_field_access(lbl: &LabelDescription) -> Option<(i32, FieldDbgInfo)> {
     let name = label_runtime_name(lbl);
     let info = match &lbl.lbl_repres {
-        RecordRepresentation::RecordRegular => FieldDbgInfo::Record {
-            name,
-            mutable_flag: to_parser_mutable(lbl.lbl_mut),
-        },
+        RecordRepresentation::RecordRegular => FieldDbgInfo::Record { name },
         RecordRepresentation::RecordFloatUnused => return None,
-        RecordRepresentation::RecordUnboxed(_) => FieldDbgInfo::Record {
-            name,
-            mutable_flag: to_parser_mutable(lbl.lbl_mut),
-        },
+        RecordRepresentation::RecordUnboxed(_) => FieldDbgInfo::Record { name },
         RecordRepresentation::RecordInlined { .. } => FieldDbgInfo::RecordInline { name },
         RecordRepresentation::RecordExtension => FieldDbgInfo::RecordExtension { name },
     };
@@ -3035,7 +3022,6 @@ impl<'a> RawLambdaConverter<'a> {
                 0,
                 FieldDbgInfo::Record {
                     name: "contents".to_string(),
-                    mutable_flag: ParserMutableFlag::Mutable,
                 },
             )),
             "%incr" => Some(Primitive::Poffsetref(1)),
@@ -6706,7 +6692,6 @@ impl<'a> RawLambdaConverter<'a> {
                     lbl.lbl_pos,
                     FieldDbgInfo::Record {
                         name: label_runtime_name(lbl),
-                        mutable_flag: to_parser_mutable(lbl.lbl_mut),
                     },
                 );
                 Lambda::prim(primitive, vec![rec_lam], self.loc(expr.exp_loc))
@@ -9389,7 +9374,6 @@ impl<'a> RawLambdaConverter<'a> {
                             lbl.lbl_pos,
                             FieldDbgInfo::Record {
                                 name: label_runtime_name(lbl),
-                                mutable_flag: to_parser_mutable(lbl.lbl_mut),
                             },
                         ),
                         vec![Lambda::var(tmp.clone())],
@@ -9624,14 +9608,9 @@ impl<'a> RawLambdaConverter<'a> {
                                 _ => *pos,
                             };
                             let info = match repr {
-                                RecordRepresentation::RecordRegular => FieldDbgInfo::Record {
-                                    name: name.clone(),
-                                    mutable_flag: if matches!(mutflag, TypeMutableFlag::Mutable) {
-                                        crate::parser::ast::MutableFlag::Mutable
-                                    } else {
-                                        crate::parser::ast::MutableFlag::Immutable
-                                    },
-                                },
+                                RecordRepresentation::RecordRegular => {
+                                    FieldDbgInfo::Record { name: name.clone() }
+                                }
                                 RecordRepresentation::RecordFloatUnused => continue,
                                 RecordRepresentation::RecordInlined { .. } => {
                                     FieldDbgInfo::RecordInline { name: name.clone() }
@@ -10375,7 +10354,6 @@ impl<'a> RawLambdaConverter<'a> {
                                 field_pos,
                                 FieldDbgInfo::Record {
                                     name: label_runtime_name(lbl),
-                                    mutable_flag: to_parser_mutable(lbl.lbl_mut),
                                 },
                             ),
                             vec![base_expr.clone()],

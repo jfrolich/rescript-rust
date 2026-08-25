@@ -153,7 +153,7 @@ pub fn field_flatten_get(
             elements,
             ..
         })) => match info {
-            FieldDbgInfo::Record { name, .. } => {
+            FieldDbgInfo::Record { name } => {
                 let mut found: Option<&Constant> = None;
                 for (idx, (field_name, _)) in fields.iter().enumerate() {
                     if field_name == name {

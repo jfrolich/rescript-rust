@@ -212,7 +212,7 @@ impl LambdaCompiler {
                     ))
                 }),
             },
-            FieldDbgInfo::Record { name, .. }
+            FieldDbgInfo::Record { name }
             | FieldDbgInfo::RecordInline { name }
             | FieldDbgInfo::RecordExtension { name } => pure_record_field_item(target, name, idx)
                 .unwrap_or_else(|| {

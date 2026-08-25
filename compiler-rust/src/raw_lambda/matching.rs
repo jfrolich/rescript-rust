@@ -4895,10 +4895,6 @@ fn label_runtime_name_matching(lbl: &LabelDescription) -> String {
 fn fld_record(lbl: &LabelDescription) -> FieldDbgInfo {
     FieldDbgInfo::Record {
         name: label_runtime_name_matching(lbl),
-        mutable_flag: match lbl.lbl_mut {
-            MutableFlag::Mutable => crate::parser::ast::MutableFlag::Mutable,
-            MutableFlag::Immutable => crate::parser::ast::MutableFlag::Immutable,
-        },
     }
 }
 

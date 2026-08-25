@@ -2141,7 +2141,6 @@ fn compile_deps_program_keeps_exported_call_result_before_rebound_constant_block
                     0,
                     crate::lambda::lam_compat::FieldDbgInfo::Record {
                         name: "x".to_string(),
-                        mutable_flag: crate::parser::ast::MutableFlag::Immutable,
                     },
                 ),
                 vec![Lambda::var(param)],
@@ -9151,7 +9150,6 @@ fn lowers_record_pfield_to_positioned_static_access_like_ocaml() {
         2,
         &FieldDbgInfo::Record {
             name: "field".to_string(),
-            mutable_flag: crate::parser::ast::MutableFlag::Immutable,
         },
         &Expression::var(record.clone()),
     );
@@ -9236,7 +9234,6 @@ fn lowers_record_pfield_from_pure_caml_block_directly_like_ocaml() {
         0,
         &FieldDbgInfo::Record {
             name: "d".to_string(),
-            mutable_flag: crate::parser::ast::MutableFlag::Immutable,
         },
         &Expression::new(ExpressionDesc::CamlBlock(
             vec![Expression::var(value.clone())],

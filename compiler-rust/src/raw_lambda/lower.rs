@@ -14,7 +14,6 @@ use crate::lambda::lam_primitive::{ExternalFfiSpec, ExternalReturnWrapper, Primi
 use crate::lambda::lam_tag_info::TagInfo;
 use crate::lambda::{ApInfo, Apply, ApplyStatus, LFunction, Lambda, LambdaSwitch, PrimInfo};
 use crate::location::Location;
-use crate::parser::ast::MutableFlag;
 use crate::raw_lambda::{RawApply, RawLambda, RawLambdaSwitch};
 
 const SETTER_SUFFIX: &str = "#=";
@@ -302,7 +301,6 @@ impl LoweringContext {
                                 0,
                                 FieldDbgInfo::Record {
                                     name: EXCEPTION_ID_FIELD.to_string(),
-                                    mutable_flag: MutableFlag::Immutable,
                                 },
                             ),
                             vec![lhs.clone()],
@@ -2077,10 +2075,7 @@ mod tests {
             field.primitive,
             Primitive::Pfield(
                 0,
-                FieldDbgInfo::Record {
-                    ref name,
-                    mutable_flag: MutableFlag::Immutable,
-                }
+                FieldDbgInfo::Record { ref name }
             ) if name == EXCEPTION_ID_FIELD
         ));
         let [Lambda::Lvar(field_exn)] = field.args.as_slice() else {

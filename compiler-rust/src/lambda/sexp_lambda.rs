@@ -233,11 +233,7 @@ fn tag_info(info: &TagInfo) -> Sexp {
 // Field debug info
 fn field_dbg_info(info: &FieldDbgInfo) -> Sexp {
     match info {
-        FieldDbgInfo::Record { name, mutable_flag } => Sexp::list(vec![
-            Sexp::atom("Fld_record"),
-            string(name),
-            mutable_flag_sexp(mutable_flag),
-        ]),
+        FieldDbgInfo::Record { name } => Sexp::list(vec![Sexp::atom("Fld_record"), string(name)]),
         FieldDbgInfo::Module { name } => Sexp::list(vec![Sexp::atom("Fld_module"), string(name)]),
         FieldDbgInfo::RecordInline { name } => {
             Sexp::list(vec![Sexp::atom("Fld_record_inline"), string(name)])

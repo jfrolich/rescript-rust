@@ -109,7 +109,7 @@ fn let_kind_suffix(kind: LetKind) -> &'static str {
 
 fn print_field_info<W: Write>(f: &mut Formatter<W>, field: &FieldDbgInfo) {
     match field {
-        FieldDbgInfo::Record { name, .. }
+        FieldDbgInfo::Record { name }
         | FieldDbgInfo::Module { name }
         | FieldDbgInfo::RecordInline { name }
         | FieldDbgInfo::RecordExtension { name } => f.string(name),

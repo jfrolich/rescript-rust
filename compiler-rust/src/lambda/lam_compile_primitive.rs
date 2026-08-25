@@ -441,7 +441,6 @@ impl LambdaCompiler {
                     0,
                     &FieldDbgInfo::Record {
                         name: "contents".to_string(),
-                        mutable_flag: crate::parser::ast::MutableFlag::Mutable,
                     },
                     &compiled_args[0],
                 );

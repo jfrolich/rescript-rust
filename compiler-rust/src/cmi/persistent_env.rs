@@ -2686,23 +2686,14 @@ fn decode_cmj_comparison(value: &OcamlValue) -> Option<Comparison> {
 fn decode_cmj_field_dbg_info(value: &OcamlValue) -> Option<FieldDbgInfo> {
     match value {
         // compiler/core/lam_compat.ml:65-75.
-        OcamlValue::Block(0, fields) if fields.len() >= 2 => Some(FieldDbgInfo::Record {
+        OcamlValue::Block(0, fields) if fields.len() == 1 => Some(FieldDbgInfo::Record {
             name: fields[0].as_string().to_string(),
-            mutable_flag: decode_cmj_ast_mutable_flag(&fields[1])?,
         }),
         OcamlValue::Block(1, fields) if fields.len() == 1 => Some(FieldDbgInfo::Module {
             name: fields[0].as_string().to_string(),
         }),
         OcamlValue::Int(0) => Some(FieldDbgInfo::Tuple),
         OcamlValue::Int(5) => Some(FieldDbgInfo::Cons),
-        _ => None,
-    }
-}
-
-fn decode_cmj_ast_mutable_flag(value: &OcamlValue) -> Option<crate::parser::ast::MutableFlag> {
-    match value.as_int() {
-        0 => Some(crate::parser::ast::MutableFlag::Immutable),
-        1 => Some(crate::parser::ast::MutableFlag::Mutable),
         _ => None,
     }
 }

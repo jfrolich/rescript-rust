@@ -338,7 +338,6 @@ fn nested_wrapped_staticcatch_trywith_tail_loops_lower_like_gpr_1701() {
                                                                         0,
                                                                         crate::lambda::lam_compat::FieldDbgInfo::Record {
                                                                             name: "RE_EXN_ID".to_string(),
-                                                                            mutable_flag: crate::parser::ast::MutableFlag::Immutable,
                                                                         },
                                                                     ),
                                                                     vec![Lambda::var(exn.clone())],

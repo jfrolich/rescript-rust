@@ -615,7 +615,7 @@ fn format_raw_tag_info(tag_info: &TagInfo, f: &mut fmt::Formatter<'_>) -> fmt::R
 
 fn format_raw_field_info(field_info: &FieldDbgInfo, f: &mut fmt::Formatter<'_>) -> fmt::Result {
     match field_info {
-        FieldDbgInfo::Record { name, .. }
+        FieldDbgInfo::Record { name }
         | FieldDbgInfo::Module { name }
         | FieldDbgInfo::RecordInline { name }
         | FieldDbgInfo::RecordExtension { name } => write!(f, "{name}"),
