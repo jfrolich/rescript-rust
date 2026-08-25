@@ -2023,6 +2023,26 @@ pub fn initial_env(ctx: &TypeContext) -> Env {
             ctx,
         );
     }
+    {
+        // Upstream compiler/ml/predef.ml:367-376: first-class tags are an
+        // abstract, invariant two-parameter builtin type.
+        let param = ctx.new_generic_var(None);
+        let output = ctx.new_generic_var(None);
+        add_type_with_constrs(
+            &mut env,
+            predef::ident_tagged_template(),
+            TypeDeclaration {
+                type_params: vec![param, output],
+                type_arity: 2,
+                type_variance: vec![
+                    crate::types::variance::Variance::full(),
+                    crate::types::variance::Variance::full(),
+                ],
+                ..decl_abstr(2, false)
+            },
+            ctx,
+        );
+    }
     add_type_with_constrs(
         &mut env,
         predef::ident_array(),
