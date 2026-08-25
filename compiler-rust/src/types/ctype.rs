@@ -11454,7 +11454,7 @@ pub fn nondep_type_decl<'a>(
         type_immediate: decl.type_immediate,
         type_unboxed: decl.type_unboxed.clone(),
         type_path: decl.type_path.clone(),
-        type_variant_layout: None,
+        type_variant_layout: decl.type_variant_layout,
         type_inlined_types: decl.type_inlined_types.clone(),
     })
 }

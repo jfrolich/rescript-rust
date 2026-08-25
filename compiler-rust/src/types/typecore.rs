@@ -24599,7 +24599,7 @@ where
         type_attributes: decl.type_attributes.clone(),
         type_immediate: decl.type_immediate,
         type_unboxed: decl.type_unboxed,
-        type_variant_layout: None,
+        type_variant_layout: decl.type_variant_layout,
         type_inlined_types: decl
             .type_inlined_types
             .iter()

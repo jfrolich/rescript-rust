@@ -5728,6 +5728,80 @@ fn check_variant_well_formed(
     Ok(())
 }
 
+fn canonical_variant_tag_type(tag: VariantRuntimeTag) -> crate::types::VariantTagType {
+    match tag {
+        VariantRuntimeTag::String(value) => crate::types::VariantTagType::String(value),
+        VariantRuntimeTag::Int(value) => crate::types::VariantTagType::Int(value as i32),
+        VariantRuntimeTag::Float(value) => crate::types::VariantTagType::Float(value),
+        VariantRuntimeTag::BigInt(value) => crate::types::VariantTagType::BigInt(value),
+        VariantRuntimeTag::Bool(value) => crate::types::VariantTagType::Bool(value),
+        VariantRuntimeTag::Null => crate::types::VariantTagType::Null,
+        VariantRuntimeTag::Undefined => crate::types::VariantTagType::Undefined,
+    }
+}
+
+fn canonical_variant_block_type(block_type: UntaggedVariantBlockType) -> crate::types::VariantBlockType {
+    use crate::types::{VariantBlockType as B, VariantInstance as I};
+    match block_type {
+        UntaggedVariantBlockType::Int => B::Int,
+        UntaggedVariantBlockType::String => B::String,
+        UntaggedVariantBlockType::Float => B::Float,
+        UntaggedVariantBlockType::Bigint => B::Bigint,
+        UntaggedVariantBlockType::Boolean => B::Boolean,
+        UntaggedVariantBlockType::Function => B::Function,
+        UntaggedVariantBlockType::Object => B::Object,
+        UntaggedVariantBlockType::Unknown => B::Unknown,
+        UntaggedVariantBlockType::Instance(name) => B::Instance(match name.as_str() {
+            "Array" => I::Array, "ArrayBuffer" => I::ArrayBuffer, "BigInt64Array" => I::BigInt64Array,
+            "BigUint64Array" => I::BigUint64Array, "Blob" => I::Blob, "DataView" => I::DataView,
+            "Date" => I::Date, "File" => I::File, "Float32Array" => I::Float32Array,
+            "Float64Array" => I::Float64Array, "Int16Array" => I::Int16Array,
+            "Int32Array" => I::Int32Array, "Int8Array" => I::Int8Array, "Promise" => I::Promise,
+            "RegExp" => I::RegExp, "Uint16Array" => I::Uint16Array, "Uint32Array" => I::Uint32Array,
+            "Uint8Array" => I::Uint8Array, "Uint8ClampedArray" => I::Uint8ClampedArray,
+            "Set" => I::Set, "Map" => I::Map, "WeakSet" => I::WeakSet, "WeakMap" => I::WeakMap,
+            _ => unreachable!("instance classifier returned an unknown instance"),
+        }),
+    }
+}
+
+fn derive_variant_layout(
+    ctx: &crate::types::context::TypeContext,
+    env: &Env,
+    decl: &crate::types::decl::TypeDeclaration,
+    constructors: &[crate::types::decl::ConstructorDeclaration],
+) -> TypeModResult<crate::types::VariantLayout> {
+    let mut cases = Vec::with_capacity(constructors.len());
+    for constructor in constructors {
+        let name = constructor.cd_id.name().to_string();
+        let tag = crate::types::VariantTag {
+            name,
+            tag_type: process_variant_as_attributes(&constructor.cd_attributes)?
+                .map(canonical_variant_tag_type),
+        };
+        if matches!(&constructor.cd_args, crate::types::ConstructorArguments::CstrTuple(args) if args.is_empty()) {
+            cases.push(crate::types::VariantConstructorCase::Constant(tag));
+        } else {
+            cases.push(crate::types::VariantConstructorCase::Block(crate::types::VariantBlock {
+                runtime: crate::types::BlockRuntime {
+                    tag,
+                    tag_name: process_variant_tag_name(&constructor.cd_attributes)?,
+                    untagged: has_decl_attr(&constructor.cd_attributes, "unboxed"),
+                },
+                block_type: get_untagged_constructor_block_type(ctx, env, constructor)
+                    .map(canonical_variant_block_type),
+            }));
+        }
+    }
+    Ok(crate::types::VariantLayout::new(
+        crate::types::VariantConfiguration {
+            unboxed: has_decl_attr(&decl.type_attributes, "unboxed"),
+            tag_name: process_variant_tag_name(&decl.type_attributes)?,
+        },
+        cases,
+    ))
+}
+
 fn check_variant_declaration_well_formed(
     ctx: &crate::types::context::TypeContext,
     env: &Env,
@@ -5742,7 +5816,12 @@ fn check_variant_declaration_well_formed(
         env,
         constructors,
         has_decl_attr(&decl.type_attributes, "unboxed"),
-    )
+    )?;
+    if let Some(layout_ref) = decl.type_variant_layout {
+        let layout = derive_variant_layout(ctx, env, decl, constructors)?;
+        ctx.complete_variant_layout(layout_ref, layout);
+    }
+    Ok(())
 }
 
 fn path_is_t_of_persistent_module(path: &Path, module_name: &str) -> bool {
@@ -22612,6 +22691,12 @@ fn type_structure_item<'a>(
                     crate::parser::ast::PrivateFlag::Private => crate::types::PrivateFlag::Private,
                 };
 
+                let type_variant_layout = matches!(
+                    &internal_type_kind,
+                    crate::types::TypeKind::TypeVariant(_)
+                )
+                .then(|| ctx.pending_variant_layout());
+
                 // Create internal type declaration for the environment
                 let mut internal_decl = crate::types::TypeDeclaration {
                     type_params: internal_type_params,
@@ -22625,7 +22710,7 @@ fn type_structure_item<'a>(
                     type_attributes,
                     type_immediate,
                     type_unboxed,
-                    type_variant_layout: None,
+                    type_variant_layout,
                     type_inlined_types: vec![],
                     type_path: None,
                 };
@@ -25180,6 +25265,12 @@ fn transl_sig_type_declarations_with_ids_and_originals<'a>(
                 });
             }
 
+            let type_variant_layout = matches!(
+                &internal_type_kind,
+                crate::types::TypeKind::TypeVariant(_)
+            )
+            .then(|| ctx.pending_variant_layout());
+
             // Keep internal declaration shape aligned with parsed signature declaration.
             let internal_decl = crate::types::TypeDeclaration {
                 type_params: internal_type_params,
@@ -25196,7 +25287,7 @@ fn transl_sig_type_declarations_with_ids_and_originals<'a>(
                 type_attributes,
                 type_immediate,
                 type_unboxed,
-                type_variant_layout: None,
+                type_variant_layout,
                 type_inlined_types: vec![],
                 type_path: Some(type_path),
             };
