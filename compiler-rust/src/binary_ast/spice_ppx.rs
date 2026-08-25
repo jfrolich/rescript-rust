@@ -3898,21 +3898,13 @@ impl<'a> LocCloner<'a> {
         self.payload(&mut attr.1);
     }
 
-    fn ensure_res_async_attr(&mut self, attrs: &mut Attributes) {
-        if attrs
+    fn remove_res_async_attr(&mut self, attrs: &mut Attributes) {
+        *attrs = attrs
             .iter()
-            .any(|attr| self.arena.get_string(attr.0.txt) == "res.async")
-        {
-            return;
-        }
-        let name_idx = self.arena.intern_string("res.async");
-        attrs.insert(
-            0,
-            (
-                Located::new(name_idx, self.arena.none_loc()),
-                Payload::PStr(Box::new(vec![])),
-            ),
-        );
+            .filter(|attr| self.arena.get_string(attr.0.txt) != "res.async")
+            .cloned()
+            .collect::<Vec<_>>()
+            .into();
     }
 
     fn normalize_jsx_fragment_expr_loc(&mut self, expr: &mut Expression) {
@@ -4017,9 +4009,16 @@ impl<'a> LocCloner<'a> {
         match desc {
             CoreTypeDesc::Ptyp_any | CoreTypeDesc::Ptyp_var(_) => {}
             CoreTypeDesc::Ptyp_arrow(inner) => {
-                let (ref mut arg, ref mut ret, ..) = **inner;
-                self.type_arg(arg);
+                let (ref mut arg, ref mut ret, arity) = **inner;
+                let mut args = self.arena.nary_arrow_args(arg, arity).into_owned();
+                for arg in &mut args {
+                    self.type_arg(arg);
+                }
                 self.core_type_idx(ret);
+                if args.len() > 1 {
+                    self.arena.set_nary_arrow_args(arity, args.clone());
+                }
+                *arg = Box::new(args.remove(0));
             }
             CoreTypeDesc::Ptyp_tuple(types) => {
                 for typ in types.iter_mut() {
@@ -4070,9 +4069,18 @@ impl<'a> LocCloner<'a> {
     }
 
     fn pattern(&mut self, pat: &mut Pattern) {
+        let record_rest = self.arena.record_pat_rest(pat.ppat_loc).cloned();
         self.loc(&mut pat.ppat_loc);
         self.attributes(&mut pat.ppat_attributes);
         self.pattern_desc(&mut pat.ppat_desc);
+        if let Some(mut rest) = record_rest {
+            self.loc(&mut rest.rest_loc);
+            self.located(&mut rest.rest_name);
+            if let Some(typ) = &mut rest.rest_type {
+                self.core_type_idx(typ);
+            }
+            self.arena.set_record_pat_rest(pat.ppat_loc, rest);
+        }
     }
 
     fn pattern_desc(&mut self, desc: &mut PatternDesc) {
@@ -4144,10 +4152,20 @@ impl<'a> LocCloner<'a> {
     }
 
     fn value_binding(&mut self, vb: &mut ValueBinding) {
+        let value_constraint = self.arena.value_constraint(vb.pvb_pat).cloned();
         self.pattern_idx(&mut vb.pvb_pat);
         self.expression_idx(&mut vb.pvb_expr);
         self.attributes(&mut vb.pvb_attributes);
         self.loc(&mut vb.pvb_loc);
+        if let Some(mut constraint) = value_constraint {
+            for newtype in &mut constraint.pvc_newtypes {
+                self.located(newtype);
+            }
+            self.core_type_idx(&mut constraint.pvc_type);
+            self.arena
+                .set_value_constraint(vb.pvb_pat, constraint, vb.pvb_expr, vb.pvb_loc)
+                .expect("cloning a valid value constraint must remain valid");
+        }
     }
 
     fn value_description(&mut self, vd: &mut ValueDescription) {
@@ -4240,7 +4258,7 @@ impl<'a> LocCloner<'a> {
             ExpressionDesc::Pexp_fun(inner) if inner.is_async
         );
         if is_async_fun {
-            self.ensure_res_async_attr(&mut expr.pexp_attributes);
+            self.remove_res_async_attr(&mut expr.pexp_attributes);
         }
     }
 
@@ -4257,19 +4275,36 @@ impl<'a> LocCloner<'a> {
                 self.expression_idx(body);
             }
             ExpressionDesc::Pexp_fun(inner) => {
-                let PexpFun {
-                    ref mut arg_label,
-                    ref mut default,
-                    ref mut lhs,
-                    ref mut rhs,
-                    ..
-                } = **inner;
-                self.arg_label(arg_label);
-                if let Some(expr) = default {
-                    self.expression_idx(expr);
+                let mut params = self.arena.nary_fun_params(inner).into_owned();
+                let mut newtypes = self.arena.nary_fun_newtypes(inner).to_vec();
+                let unknown_arity = self.arena.nary_fun_unknown_arity(inner);
+                for (newtype, attrs) in &mut newtypes {
+                    self.located(newtype);
+                    self.attributes(attrs);
                 }
-                self.pattern_idx(lhs);
-                self.expression_idx(rhs);
+                for param in &mut params {
+                    self.attributes(&mut param.p_attrs);
+                    self.arg_label(&mut param.p_lbl);
+                    if let Some(default) = &mut param.p_default {
+                        self.expression_idx(default);
+                    }
+                    self.pattern_idx(&mut param.p_pat);
+                }
+                self.expression_idx(&mut inner.rhs);
+                let first = params
+                    .first()
+                    .expect("Pexp_fun must contain at least one parameter")
+                    .clone();
+                inner.arg_label = first.p_lbl;
+                inner.default = first.p_default;
+                inner.lhs = first.p_pat;
+                if params.len() > 1 {
+                    self.arena
+                        .set_nary_fun_params(inner.arity, params, unknown_arity);
+                }
+                if !newtypes.is_empty() {
+                    self.arena.set_nary_fun_newtypes(inner.lhs, newtypes);
+                }
             }
             ExpressionDesc::Pexp_apply(inner) => {
                 let PexpApply {
