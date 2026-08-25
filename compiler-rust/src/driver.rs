@@ -7468,10 +7468,10 @@ fn append_extra_type_clash_help(
         ) && type_is_jsx_component(type_ctx, *expected)
     }) {
         message.push_str(
-            "\n\nA React component is expected here, but this expression is a plain function.\n\n\
-             Possible solutions:\n\
-             - Extract it to a component annotated with ",
+            "\n\nA React component is expected here, but this expression is a plain function.\n\n",
         );
+        message.push_str("Possible solutions:\n");
+        message.push_str("- Extract it to a component annotated with ");
         message.push_str(INFO);
         message.push_str("@react.component");
         message.push_str(RESET);
