@@ -476,6 +476,7 @@ pub enum TypeCoreError {
         loc: LocIdx,
         lid: Longident,
         trace: Vec<(TypeExprRef, TypeExprRef)>,
+        record_literal: bool,
     },
 
     /// Pattern type clash.
@@ -1788,35 +1789,22 @@ fn alias_type_mismatch_trace(
     }
 }
 
-fn incomplete_type_constructor_path(
-    ctx: &TypeContext,
-    env: &Env,
-    original_ty: TypeExprRef,
-) -> Option<Path> {
-    let original = ctx.repr(original_ty);
-    let original_desc = ctx.get_desc(original);
-    let path = match &*original_desc {
-        TypeDesc::Tconstr { path, .. } => Some(path.clone()),
-        _ => None,
-    };
-    drop(original_desc);
-
-    let path = path?;
-    let Path::Pident(id) = &path else {
-        return None;
+fn is_incomplete_type_constructor_path(ctx: &TypeContext, env: &Env, path: &Path) -> bool {
+    let Path::Pident(id) = path else {
+        return false;
     };
     if id.stamp() == 0 || id.is_persistent() || ctx.find_type_decl_by_stamp(id.stamp()).is_some() {
-        return None;
+        return false;
     }
-    let env_decl = env.find_type_by_ident(id).ok()?;
-    let is_incomplete_placeholder =
-        matches!(env_decl.type_kind, crate::types::TypeKind::TypeAbstract)
-            && env_decl.type_manifest.is_none()
-            && env_decl
-                .type_path
-                .as_ref()
-                .is_some_and(|decl_path| decl_path.same(&path));
-    is_incomplete_placeholder.then_some(path)
+    let Ok(env_decl) = env.find_type_by_ident(id) else {
+        return false;
+    };
+    matches!(env_decl.type_kind, crate::types::TypeKind::TypeAbstract)
+        && env_decl.type_manifest.is_none()
+        && env_decl
+            .type_path
+            .as_ref()
+            .is_some_and(|decl_path| decl_path.same(path))
 }
 
 fn object_row(ctx: &TypeContext, ty: TypeExprRef) -> TypeExprRef {
@@ -2834,8 +2822,11 @@ fn transl_type_inner(
                                 }
                             }
                         } else {
-                            if let Some(path) =
-                                incomplete_type_constructor_path(ctx, env, inherit_ty)
+                            if let Some(path) = inherit_name
+                                && (matches!(
+                                    &*ctx.get_desc(ctx.repr(expanded)),
+                                    TypeDesc::Tvar(_)
+                                ) || is_incomplete_type_constructor_path(ctx, env, &path))
                             {
                                 return Err(TypeCoreError::UnboundTypeConstructorIncomplete {
                                     loc: inherit_ct.ptyp_loc,
@@ -3029,7 +3020,7 @@ fn transl_type_inner(
                             _ => None,
                         };
                         if row_field_map.is_empty() {
-                            row_name = inherit_name;
+                            row_name = inherit_name.clone();
                         } else {
                             row_name = None;
                         }
@@ -3047,8 +3038,11 @@ fn transl_type_inner(
                             }
                         };
                         let Some(fields) = inherited_fields else {
-                            if let Some(path) =
-                                incomplete_type_constructor_path(ctx, env, inherit_ty)
+                            if let Some((path, _)) = inherit_name
+                                && (matches!(
+                                    &*ctx.get_desc(ctx.repr(expanded)),
+                                    TypeDesc::Tvar(_)
+                                ) || is_incomplete_type_constructor_path(ctx, env, &path))
                             {
                                 return Err(TypeCoreError::UnboundTypeConstructorIncomplete {
                                     loc: inherit_ct.ptyp_loc,
@@ -5379,6 +5373,7 @@ fn type_pattern_record(
                         loc: field.lid.loc,
                         lid: field_lid_for_error,
                         trace,
+                        record_literal: false,
                     },
                     err => err,
                 });
@@ -16442,6 +16437,10 @@ fn type_construct(
         }
     };
 
+    if cstr_desc.cstr_private == crate::types::PrivateFlag::Private {
+        return Err(TypeCoreError::PrivateType { loc, ty: result_ty });
+    }
+
     Ok(Expression::new(
         ExpressionDesc::Texp_construct(lid.clone(), cstr_desc, typed_args),
         loc.clone(),
@@ -17502,8 +17501,20 @@ fn type_record(
                     //   let ty_arg = instance_def ty_arg
                     let ty_res = crate::types::ctype::instance(ctx, ty_res0);
                     let expected_record_ty = crate::types::ctype::instance(ctx, expected_ty);
-                    let _ =
-                        crate::types::unify(ctx, &mut tctx.unify_state, ty_res, expected_record_ty);
+                    if let Err(err) =
+                        crate::types::unify(ctx, &mut tctx.unify_state, ty_res, expected_record_ty)
+                    {
+                        let trace = match err {
+                            TypeError::Unify(trace) => trace,
+                            _ => vec![(ty_res, expected_record_ty)],
+                        };
+                        return Err(TypeCoreError::LabelMismatch {
+                            loc: field.lid.loc,
+                            lid: tctx.arena.get_longident(field.lid.txt).clone(),
+                            trace,
+                            record_literal: true,
+                        });
+                    }
                     let ty_arg = crate::types::ctype::instance(ctx, ty_arg0);
 
                     if separate {

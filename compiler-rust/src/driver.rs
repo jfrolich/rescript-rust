@@ -2874,7 +2874,7 @@ fn type_mod_error_to_anyhow(
                     source,
                     filename,
                     *loc,
-                    "None of the patterns in this 'match' expression match values.",
+                    "None of the patterns in this switch match values.",
                 ),
                 2,
             )
@@ -3080,7 +3080,7 @@ fn type_mod_error_to_anyhow(
                 source,
                 filename,
                 *loc,
-                "The type of this packed module contains variables:",
+                "The type of this first-class module still contains type variables:",
                 &format_package_type_expr_for_error(type_ctx, arena, *ty),
             ),
             2,
@@ -3242,9 +3242,23 @@ fn type_mod_error_to_anyhow(
             )
             .into()
         }
-        TypeModError::CoreError(TypeCoreError::LabelMismatch { loc, lid, trace }) => {
+        TypeModError::CoreError(TypeCoreError::LabelMismatch {
+            loc,
+            lid,
+            trace,
+            record_literal,
+        }) => {
             UserDiagnostic::new(
-                format_label_mismatch_report(type_ctx, arena, source, filename, *loc, lid, trace),
+                format_label_mismatch_report(
+                    type_ctx,
+                    arena,
+                    source,
+                    filename,
+                    *loc,
+                    lid,
+                    trace,
+                    *record_literal,
+                ),
                 2,
             )
             .into()
@@ -3812,15 +3826,24 @@ fn type_mod_error_to_anyhow(
         )
         .into(),
         TypeModError::CoreError(TypeCoreError::OpenedObject { loc, path }) => {
-            let message = match path {
-                Some(path) => format!("Illegal open object type {}", path.name()),
-                None => "Illegal open object type".to_string(),
+            let report = match path {
+                Some(path) => format_compiler_error_report_with_unindented_break(
+                    arena,
+                    source,
+                    filename,
+                    *loc,
+                    "Illegal open object type",
+                    &path.name(),
+                ),
+                None => format_compiler_error_report(
+                    arena,
+                    source,
+                    filename,
+                    *loc,
+                    "Illegal open object type",
+                ),
             };
-            UserDiagnostic::new(
-                format_compiler_error_report(arena, source, filename, *loc, &message),
-                2,
-            )
-            .into()
+            UserDiagnostic::new(report, 2).into()
         }
         TypeModError::SignatureMismatch { loc, error } => UserDiagnostic::new(
             format_compiler_error_report_raw_message(
@@ -4876,7 +4899,12 @@ fn format_structure_expected_report(
     push_compiler_error_report_header(&mut output, arena, source, filename, loc);
 
     let rendered_module_type = format_typemod_module_type(type_ctx, mty);
-    output.push_str("  This module is not a structure; it has type ");
+    output.push_str("  This module is not a structure; it has type");
+    if rendered_module_type.contains('\n') {
+        output.push_str("\n  ");
+    } else {
+        output.push(' ');
+    }
     output.push_str(&rendered_module_type);
     output.push_str("\n\n");
     output
@@ -4898,7 +4926,16 @@ fn format_typemod_module_type(
                 .map(|mty| format_typemod_module_type(type_ctx, mty))
                 .unwrap_or_else(|| "_".to_string());
             let result = format_typemod_module_type(type_ctx, result);
-            format!("({}: {}) => {}", param.name(), param_type, result)
+            if param_type.contains('\n') {
+                format!(
+                    "(\n  {}: {},\n) => {}",
+                    param.name(),
+                    param_type.replace('\n', "\n  "),
+                    result
+                )
+            } else {
+                format!("({}: {}) => {}", param.name(), param_type, result)
+            }
         }
         _ => crate::types::includemod::format_module_type(type_ctx, mty),
     }
@@ -4990,7 +5027,7 @@ fn format_type_params_not_supported_report(
         filename,
         loc,
         &format!("The type {}", format_longident_for_report(arena, lid)),
-        "has type parameters, but type parameters is not supported here.",
+        "has type parameters, but type parameters are not supported here.",
     )
 }
 
@@ -6784,17 +6821,30 @@ fn format_label_mismatch_report(
     loc: LocIdx,
     lid: &Longident,
     trace: &[(TypeExprRef, TypeExprRef)],
+    record_literal: bool,
 ) -> String {
     let Some((actual, expected)) = trace.first().copied() else {
         return format_compiler_error_report(arena, source, filename, loc, "Type error.");
     };
 
-    let message = format!(
-        "The field {} belongs to the record type {}\nbut a field was expected belonging to the record type {}",
-        format_longident_for_report(arena, lid),
-        format_type_expr(type_ctx, actual),
-        format_type_expr(type_ctx, expected)
-    );
+    let message = if record_literal {
+        const ERROR: &str = "\x1b[1;31m";
+        const INFO: &str = "\x1b[1;33m";
+        const RESET: &str = "\x1b[0m";
+        format!(
+            "The record field {} belongs to the type {ERROR}{}{RESET}\nbut is mixed here with fields of type {INFO}{}{RESET}",
+            format_longident_for_report(arena, lid),
+            format_type_expr(type_ctx, actual),
+            format_type_expr(type_ctx, expected)
+        )
+    } else {
+        format!(
+            "The field {} belongs to the record type {}\nbut a field was expected belonging to the record type {}",
+            format_longident_for_report(arena, lid),
+            format_type_expr(type_ctx, actual),
+            format_type_expr(type_ctx, expected)
+        )
+    };
     format_compiler_error_report(arena, source, filename, loc, &message)
 }
 
@@ -10118,6 +10168,7 @@ fn simple_conversion_candidate(
     trace: &[(TypeExprRef, TypeExprRef)],
 ) -> Option<(String, String, &'static str)> {
     let candidates = [
+        trace.last().copied(),
         bottom_type_clash_aliases(trace),
         nested_type_clash_pair(type_ctx, trace),
         trace.first().copied(),

@@ -11191,6 +11191,11 @@ fn lookup_modtype_path_or_error<'b>(
     pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
     ctx: &'b crate::types::context::TypeContext,
 ) -> TypeModResult<Path> {
+    if module_lid_references_recursive_placeholder(lid, arena, env) {
+        return Err(TypeModError::CoreError(
+            TypeCoreError::IllegalReferenceToRecursiveModule { loc },
+        ));
+    }
     lookup_modtype_path_by_lid(lid, arena, env, pers_env, ctx).ok_or_else(|| {
         let alternatives = unbound_modtype_alternatives(lid, arena, env, pers_env, ctx);
         TypeModError::UnboundModtype {
@@ -13986,6 +13991,35 @@ fn transl_with_constraints<'a>(
     Ok(typed_constraints)
 }
 
+fn with_constraint_has_non_signature_prefix(
+    components: &[String],
+    sig_items: &[crate::types::decl::SignatureItem],
+    env: &Env,
+    pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
+    ctx: &crate::types::context::TypeContext,
+) -> bool {
+    use crate::types::decl::SignatureItem;
+
+    let Some((head, tail)) = components.split_first() else {
+        return false;
+    };
+    if tail.is_empty() {
+        return false;
+    }
+    let Some(module_decl) = sig_items.iter().find_map(|item| match item {
+        SignatureItem::SigModule(id, md, _) if id.name() == head => Some(md),
+        _ => None,
+    }) else {
+        return false;
+    };
+    let Some(child_sig) =
+        resolve_mod_type_to_sig(&module_decl.md_type, Some(env), pers_env, ctx)
+    else {
+        return true;
+    };
+    with_constraint_has_non_signature_prefix(tail, &child_sig, env, pers_env, ctx)
+}
+
 fn check_with_constraint_components<'a>(
     tctx: &mut TypeCheckContext<'a>,
     env: &Env,
@@ -14008,6 +14042,29 @@ fn check_with_constraint_components<'a>(
             | crate::parser::ast::WithConstraint::Pwith_modsubst(lid, _) => (lid, false),
         };
         let longident = tctx.resolve_lid(lid.txt).clone();
+        let components: Vec<String> = longident
+            .flatten_idx()
+            .into_iter()
+            .map(|idx| arena.get_string(idx).to_string())
+            .collect();
+        let base_sig = resolve_mod_type_to_sig(
+            base_mty,
+            Some(env),
+            &mut tctx.persistent_env,
+            tctx.type_ctx,
+        )
+        .expect("base module type was resolved above");
+        if with_constraint_has_non_signature_prefix(
+            &components,
+            &base_sig,
+            env,
+            &mut tctx.persistent_env,
+            tctx.type_ctx,
+        ) {
+            return Err(TypeModError::CoreError(TypeCoreError::SignatureExpected {
+                loc,
+            }));
+        }
         let target = resolve_with_constraint_target(tctx, env, arena, Some(base_mty), &longident);
         let found = matches!(
             (target, needs_type),
