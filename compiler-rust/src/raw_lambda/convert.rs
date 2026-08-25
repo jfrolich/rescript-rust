@@ -2944,7 +2944,7 @@ impl<'a> RawLambdaConverter<'a> {
             )),
             "%incr" => Some(Primitive::Poffsetref(1)),
             "%decr" => Some(Primitive::Poffsetref(-1)),
-            "%identity" => Some(Primitive::Pidentity),
+            "%identity" | "%component_identity" => Some(Primitive::Pidentity),
             "%ignore" => Some(Primitive::Pignore),
             // Direct bigint primitives (used by Js.BigInt externals)
             "%negbigint" => Some(Primitive::Pnegbigint),
@@ -11254,17 +11254,15 @@ fn decode_external_spec(value: &OcamlValue) -> Option<ExternalSpec> {
         (3, [external_module_name]) => Some(ExternalSpec::JsModuleAsClass(
             decode_external_module_name(external_module_name)?,
         )),
-        (4, [name, external_module_name, splice, scopes, tagged_template]) => {
-            Some(ExternalSpec::JsCall {
-                name: name.as_string().to_string(),
-                external_module_name: external_module_name
-                    .as_option()
-                    .and_then(decode_external_module_name),
-                splice: splice.as_bool(),
-                scopes: decode_string_list(scopes),
-                tagged_template: tagged_template.as_bool(),
-            })
-        }
+        (4, [name, external_module_name, splice, scopes]) => Some(ExternalSpec::JsCall {
+            name: name.as_string().to_string(),
+            external_module_name: external_module_name
+                .as_option()
+                .and_then(decode_external_module_name),
+            splice: splice.as_bool(),
+            scopes: decode_string_list(scopes),
+            tagged_template: false,
+        }),
         (5, [name, splice, scopes]) => Some(ExternalSpec::JsSend {
             name: name.as_string().to_string(),
             splice: splice.as_bool(),

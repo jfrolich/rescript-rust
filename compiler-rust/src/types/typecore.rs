@@ -23840,14 +23840,8 @@ impl Env {
         match lid {
             Longident::Lident(idx) => {
                 let name = arena.get_string(*idx);
-                match self.find_value_with_id(name) {
-                    Ok((id, desc)) => {
-                        let path = desc
-                            .val_path
-                            .clone()
-                            .unwrap_or_else(|| Path::pident(id.clone()));
-                        Ok((path, desc.clone()))
-                    }
+                match self.find_value_with_path(name) {
+                    Ok((access_path, desc)) => Ok((access_path, desc.clone())),
                     Err(_) => Err(TypeCoreError::UndefinedMethod {
                         loc: None,
                         ty: TypeExprRef(0),

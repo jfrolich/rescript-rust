@@ -2735,12 +2735,12 @@ fn decode_cmj_external_ffi_spec(value: &OcamlValue) -> Option<ExternalFfiSpec> {
 fn decode_cmj_external_spec(value: &OcamlValue) -> Option<ExternalSpec> {
     // compiler/frontend/external_ffi_types.ml:45-75.
     match value {
-        OcamlValue::Block(4, fields) if fields.len() >= 5 => Some(ExternalSpec::JsCall {
+        OcamlValue::Block(4, fields) if fields.len() >= 4 => Some(ExternalSpec::JsCall {
             name: fields[0].as_string().to_string(),
             external_module_name: decode_cmj_external_module_name_option(&fields[1])?,
             splice: fields[2].as_bool(),
             scopes: decode_cmj_string_list(&fields[3])?,
-            tagged_template: fields[4].as_bool(),
+            tagged_template: false,
         }),
         OcamlValue::Block(6, fields) if fields.len() >= 4 => Some(ExternalSpec::JsNew {
             name: fields[0].as_string().to_string(),
