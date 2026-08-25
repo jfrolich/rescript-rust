@@ -3813,6 +3813,17 @@ fn type_mod_error_to_anyhow(
             2,
         )
         .into(),
+        TypeModError::NullArityExternal { loc } => UserDiagnostic::new(
+            format_compiler_error_report(
+                arena,
+                source,
+                filename,
+                *loc,
+                "External identifiers must be functions",
+            ),
+            2,
+        )
+        .into(),
         TypeModError::FatalError { message } => UserDiagnostic::new(message.clone(), 2).into(),
         TypeModError::ConstraintFailed {
             loc,

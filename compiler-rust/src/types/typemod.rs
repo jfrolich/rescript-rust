@@ -3430,6 +3430,8 @@ pub enum TypeModError {
         loc: LocIdx,
         trace: Vec<(TypeExprRef, TypeExprRef)>,
     },
+    /// An ordinary external declaration has no function arguments.
+    NullArityExternal { loc: LocIdx },
     /// Raw fatal compiler exception message.
     FatalError { message: String },
     /// A recursive abbreviation expansion does not satisfy its constraints.
@@ -20986,6 +20988,24 @@ fn type_structure_item<'a>(
                 vd.pval_type,
                 val_ty,
             );
+            // compiler/ml/typedecl.ml:1894-1904 permits nullary compiler
+            // primitives and the internal magic native-name marker, but rejects
+            // an ordinary external whose translated type has no arguments.
+            let internal_native_name = prim_desc.prim_native_name.chars().count() >= 20
+                && prim_desc.prim_native_name.starts_with("\u{84}\u{95}");
+            let compiler_primitive = prim_desc
+                .prim_name
+                .as_bytes()
+                .first()
+                .is_some_and(|first| matches!(first, b'%' | b'#'));
+            if prim_desc.prim_arity == 0
+                && !internal_native_name
+                && (prim_desc.prim_name.is_empty() || !compiler_primitive)
+            {
+                return Err(TypeModError::NullArityExternal {
+                    loc: arena.get_core_type(vd.pval_type).ptyp_loc,
+                });
+            }
 
             // PPX has already encoded the FFI attributes into pval_prim,
             // so just resolve StrIdx -> String for the typed tree
