@@ -3190,11 +3190,21 @@ fn type_mod_error_to_anyhow(
             loc,
             trace,
             context,
-        }) => UserDiagnostic::new(
-            format_expr_type_clash_report(type_ctx, arena, source, filename, *loc, trace, context),
-            2,
-        )
-        .into(),
+        }) => {
+            let mut report =
+                format_expr_type_clash_report(type_ctx, arena, source, filename, *loc, trace, context);
+            // OCaml's warning printer leaves the formatter with styles disabled
+            // before a following type error (for example warning 41 followed by
+            // a coercion suggestion). Mirror that ordering rather than emitting
+            // embedded style escapes after an already-printed warning.
+            if suppress_info_style {
+                report = report
+                    .replace("\x1b[1;31m", "")
+                    .replace("\x1b[1;33m", "")
+                    .replace("\x1b[0m", "");
+            }
+            UserDiagnostic::new(report, 2).into()
+        }
         TypeModError::CoreError(TypeCoreError::PatternTypeClash {
             loc: Some(loc),
             trace,
@@ -3252,7 +3262,7 @@ fn type_mod_error_to_anyhow(
                     filename,
                     *loc,
                     &format!(
-                        "The GADT constructor {} of type {} must be qualified in this pattern.",
+                        "The GADT constructor {} of type {}\nmust be written with its module prefix in this pattern.",
                         name,
                         format_type_path_for_report(tpath)
                     ),
@@ -3268,7 +3278,7 @@ fn type_mod_error_to_anyhow(
                     source,
                     filename,
                     *loc,
-                    "Unexpected existential",
+                    "This pattern introduces an existential type from a GADT constructor, which is not allowed here. Match on it inside a switch instead.",
                 ),
                 2,
             )

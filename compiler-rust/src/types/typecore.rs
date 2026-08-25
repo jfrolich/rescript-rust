@@ -11261,6 +11261,58 @@ fn simple_pattern_keys(arena: &ParseArena, pat: &Pattern) -> Option<Vec<SimplePa
     }
 }
 
+fn collect_redundant_nested_or_patterns(
+    arena: &ParseArena,
+    pat: &Pattern,
+    redundant: &mut Vec<LocIdx>,
+) {
+    match &pat.pat_desc {
+        PatternDesc::Tpat_or(left, right, _) => {
+            if !arena.loc_ghost(left.pat_loc)
+                && !arena.loc_ghost(right.pat_loc)
+                && !pattern_from_variant_spread_attr(arena, pat)
+            {
+                let left_keys = simple_pattern_keys(arena, left);
+                let right_keys = simple_pattern_keys(arena, right);
+                if let (Some(left_keys), Some(right_keys)) = (left_keys, right_keys)
+                    && left_keys.len() == 1
+                    && right_keys.len() == 1
+                    && left_keys[0].key == right_keys[0].key
+                {
+                    redundant.push(right.pat_loc);
+                }
+            }
+            collect_redundant_nested_or_patterns(arena, left, redundant);
+            collect_redundant_nested_or_patterns(arena, right, redundant);
+        }
+        PatternDesc::Tpat_alias(inner, _, _) => {
+            collect_redundant_nested_or_patterns(arena, inner, redundant)
+        }
+        PatternDesc::Tpat_tuple(items) | PatternDesc::Tpat_array(items) => {
+            for item in items {
+                collect_redundant_nested_or_patterns(arena, item, redundant);
+            }
+        }
+        PatternDesc::Tpat_construct(_, _, args) => {
+            for arg in args {
+                collect_redundant_nested_or_patterns(arena, arg, redundant);
+            }
+        }
+        PatternDesc::Tpat_variant(_, Some(arg), _) => {
+            collect_redundant_nested_or_patterns(arena, arg, redundant)
+        }
+        PatternDesc::Tpat_record(fields, _, _) => {
+            for (_, _, field_pat, _) in fields {
+                collect_redundant_nested_or_patterns(arena, field_pat, redundant);
+            }
+        }
+        PatternDesc::Tpat_any
+        | PatternDesc::Tpat_var(_, _)
+        | PatternDesc::Tpat_constant(_)
+        | PatternDesc::Tpat_variant(_, None, _) => {}
+    }
+}
+
 fn typed_pattern_contains_dict_pattern(arena: &ParseArena, pat: &Pattern) -> bool {
     if pat
         .pat_attributes
@@ -11730,6 +11782,13 @@ fn report_unused_match_cases<'case>(
         }
 
         let pattern_keys = simple_pattern_keys(tctx.arena, &case.c_lhs);
+        if pattern_keys.is_none() {
+            let mut redundant = Vec::new();
+            collect_redundant_nested_or_patterns(tctx.arena, &case.c_lhs, &mut redundant);
+            for loc in redundant {
+                tctx.report_warning(loc, Warning::UnusedPat);
+            }
+        }
         let mut keys_in_case: HashSet<String> = HashSet::default();
         let mut unused_subpatterns = Vec::new();
         if let Some(keys) = &pattern_keys {

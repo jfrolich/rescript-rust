@@ -469,7 +469,7 @@ The first one was selected. Disambiguate if this is wrong.",
             },
             Warning::FragileLiteralPattern => "Code should not depend on the actual values of\n\
 this constructor's arguments. They are only for information\n\
-and may change in future versions. (See manual section 8.5)"
+and may change in future versions."
                 .to_string(),
             Warning::MisplacedAttribute { name } => {
                 format!("the @{name} attribute cannot appear in this context")
@@ -485,11 +485,11 @@ and may change in future versions. (See manual section 8.5)"
                 let msg = if vars.len() == 1 {
                     format!("variable {}", vars[0])
                 } else {
-                    format!("variables {}", vars.join(","))
+                    format!("variables {}", vars.join(", "))
                 };
                 format!(
                     "Ambiguous or-pattern variables under guard;\n\
-                     {} may match different arguments. (See manual section 8.5)",
+                     {} may match different arguments.",
                     msg
                 )
             }

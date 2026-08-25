@@ -4295,6 +4295,80 @@ fn check_type_decl_variance_requirements(
     typed_decl: &TypedTypeDeclaration,
     variance_row: &[TypesVariance],
 ) -> TypeModResult<()> {
+    if !parsed_decl.ptype_cstrs.is_empty()
+        && let crate::types::decl::TypeKind::TypeVariant(constructors) =
+            &typed_decl.typ_type.type_kind
+        && let TypedTypeKind::Ttype_variant(typed_constructors) = &typed_decl.typ_kind
+    {
+        let expected = ctx.new_constr(
+            Path::pident(typed_decl.typ_id.clone()),
+            typed_decl.typ_type.type_params.clone(),
+        );
+        for (constructor, typed_constructor) in constructors.iter().zip(typed_constructors) {
+            let (Some(actual), Some(typed_result)) =
+                (constructor.cd_res, typed_constructor.cd_res.as_ref())
+            else {
+                continue;
+            };
+            let mut unify_state = crate::types::ctype::UnifyState::new();
+            unify_state.set_env(env);
+            if crate::types::ctype::unify(ctx, &mut unify_state, actual, expected).is_err() {
+                return Err(TypeModError::ConstraintFailed {
+                    loc: typed_result.ctyp_loc,
+                    actual,
+                    expected,
+                });
+            }
+        }
+    }
+
+    // compiler/ml/typedecl.ml:1244-1270 checks each explicit GADT
+    // result before computing ordinary declaration variance. An annotated
+    // parameter cannot be checked when its result argument is constrained
+    // (non-variable, or shared with another result argument).
+    if let crate::types::decl::TypeKind::TypeVariant(constructors) = &typed_decl.typ_type.type_kind
+    {
+        for constructor in constructors {
+            let Some(result) = constructor.cd_res else {
+                continue;
+            };
+            let result = ctx.repr(result);
+            let crate::types::type_expr::TypeDesc::Tconstr { args, .. } = &*ctx.get_desc(result)
+            else {
+                continue;
+            };
+            let free_vars_by_arg: Vec<HashSet<TypeExprRef>> = args
+                .iter()
+                .map(|arg| {
+                    let mut free_vars = HashSet::default();
+                    let mut visited = HashSet::default();
+                    collect_free_type_variables(ctx, *arg, &mut free_vars, &mut visited);
+                    free_vars
+                })
+                .collect();
+            for (idx, arg) in args.iter().copied().enumerate() {
+                let Some((_, parser_variance)) = parsed_decl.ptype_params.get(idx) else {
+                    continue;
+                };
+                let (co, contra, _) = parser_variance_requirement(*parser_variance);
+                if !co && !contra {
+                    continue;
+                }
+                let arg = ctx.repr(arg);
+                let constrained = !matches!(&*ctx.get_desc(arg), TypeDesc::Tvar(_))
+                    || free_vars_by_arg
+                        .iter()
+                        .enumerate()
+                        .any(|(other_idx, vars)| other_idx != idx && vars.contains(&arg));
+                if constrained {
+                    return Err(TypeModError::VaryingAnonymous {
+                        loc: parsed_decl.ptype_loc,
+                    });
+                }
+            }
+        }
+    }
+
     for (idx, ((typed_param, _), (_, parser_variance))) in typed_decl
         .typ_params
         .iter()
@@ -10615,6 +10689,23 @@ fn report_unused_items_hidden_by_module_constraint(
             .skip(start_index)
             .any(|item| structure_item_uses_module_ident(ctx, item, &check.id));
         if !used {
+            // A module hidden by the enclosing constraint is not an exported
+            // use of its own structure items. OCaml's delayed Env usage
+            // callbacks therefore report those items before warning 60 for the
+            // module itself.
+            if let Some(StructureItem {
+                str_desc: StructureItemDesc::Tstr_module(binding),
+                ..
+            }) = structure.str_items.get(check.item_index)
+            {
+                report_unused_items_hidden_by_module_constraint(
+                    tctx,
+                    env,
+                    arena,
+                    &binding.mb_expr,
+                    &crate::types::decl::ModuleType::MtySignature(Vec::new()),
+                );
+            }
             hidden_warnings.push(DelayedWarning {
                 item_index: check.item_index,
                 order: 0,
@@ -19990,6 +20081,17 @@ pub fn type_structure<'a>(
             &typed_item,
             &mut unused_open_checks,
         );
+        // Both helpers insert before diagnostics produced while typing this item.
+        // Run label/constructor checks first so the later identifier insertion
+        // appears first, matching Env's identifier-before-constructor callbacks.
+        report_open_shadow_label_constructor_warnings_for_item(
+            tctx,
+            &current_env,
+            item_index,
+            &typed_item,
+            &mut open_shadow_label_constructor_checks,
+            warnings_before_item,
+        );
         report_open_shadow_identifier_warnings_for_item(
             tctx,
             arena,
@@ -19997,14 +20099,6 @@ pub fn type_structure<'a>(
             &typed_item,
             &mut open_shadow_identifier_checks,
             &mut unused_open_checks,
-            warnings_before_item,
-        );
-        report_open_shadow_label_constructor_warnings_for_item(
-            tctx,
-            &current_env,
-            item_index,
-            &typed_item,
-            &mut open_shadow_label_constructor_checks,
             warnings_before_item,
         );
         if !rescript_hide_structure_item(&typed_item.str_desc, arena) {

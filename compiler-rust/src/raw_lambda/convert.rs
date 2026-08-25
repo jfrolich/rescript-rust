@@ -6021,7 +6021,7 @@ impl<'a> RawLambdaConverter<'a> {
                             _ if !Self::is_irrefutable_pattern(&binding.vb_pat) => {
                                 self.report_diagnostic(
                                     self.loc(binding.vb_pat.pat_loc),
-                                    "Such fragile pattern not allowed in the toplevel".to_string(),
+                                    "This pattern can fail to match, so it is not allowed in a top-level `let` binding.".to_string(),
                                 );
                             }
                             _ => {}
