@@ -164,9 +164,8 @@ fn print_struct_const<W: Write>(f: &mut Formatter<W>, cst: &Constant) {
     match cst {
         Constant::Int { i, comment } => match comment {
             Some(PointerInfo::ShapeNone) => f.string("shape_none"),
-            Some(PointerInfo::Constructor(_)) | Some(PointerInfo::PolyVariant(_)) => {
-                f.print(format_args!("{i}a"));
-            }
+            Some(PointerInfo::Constructor(tag)) => f.print(format_args!("`{}", tag.name)),
+            Some(PointerInfo::PolyVariant(name)) => f.print(format_args!("`{name}")),
             _ => f.print(format_args!("{i}")),
         },
         Constant::NativeInt { i, .. } => f.print(format_args!("{i}")),
@@ -224,7 +223,7 @@ fn print_struct_const<W: Write>(f: &mut Formatter<W>, cst: &Constant) {
         Constant::JsUndefined { .. } => f.string("0a"),
         Constant::JsNull => f.string("null"),
         Constant::Some(inner) => print_struct_const(f, inner),
-        Constant::ModuleAlias => f.string("0a"),
+        Constant::ModuleAlias => f.string("module_alias"),
     }
 }
 
