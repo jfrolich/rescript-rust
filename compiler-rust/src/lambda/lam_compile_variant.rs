@@ -379,7 +379,6 @@ impl LambdaCompiler {
             facts
                 .literal_tags
                 .iter()
-                .rev()
                 .map(Self::tag_type_value)
                 .collect(),
         )
@@ -393,7 +392,6 @@ impl LambdaCompiler {
             facts
                 .block_types
                 .iter()
-                .rev()
                 .map(Self::block_type_value)
                 .collect(),
         )
