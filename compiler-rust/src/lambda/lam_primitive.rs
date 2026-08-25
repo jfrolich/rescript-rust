@@ -224,6 +224,9 @@ pub enum Primitive {
     /// Duplicate a record
     Pduprecord,
 
+    /// Tagged template literal: `[tag, strings_array, values_array]`.
+    PtaggedTemplate,
+
     // ==================== External Call ====================
     /// JavaScript FFI call
     PjsCall {
@@ -614,6 +617,7 @@ impl Primitive {
             | PinitMod
             | PupdateMod
             | Pduprecord
+            | PtaggedTemplate
             | Pmakearray
             | Parraylength
             | Parrayrefu

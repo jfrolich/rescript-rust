@@ -262,7 +262,8 @@ fn is_pure_primitive(prim: &Primitive, args: &[Lambda]) -> bool {
         Primitive::PrawJsCode(info) => raw_js_is_pure(info),
 
         // Impure primitives
-        Primitive::PjsApply
+        Primitive::PtaggedTemplate
+        | Primitive::PjsApply
         | Primitive::PjsRuntimeApply
         | Primitive::PjsCall { .. }
         | Primitive::PinitMod

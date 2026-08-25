@@ -508,6 +508,7 @@ fn primitive(prim: &Primitive, _with_locs: bool) -> Sexp {
         Primitive::PisPolyVarBlock => Sexp::atom("Pis_poly_var_block"),
         Primitive::Pisout(n) => Sexp::list(vec![Sexp::atom("Pisout"), int(*n)]),
         Primitive::Pawait => Sexp::atom("Pawait"),
+        Primitive::PtaggedTemplate => Sexp::atom("Ptagged_template"),
         Primitive::Phash => Sexp::atom("Phash"),
         Primitive::PhashMixint => Sexp::atom("Phash_mixint"),
         Primitive::PhashMixstring => Sexp::atom("Phash_mixstring"),

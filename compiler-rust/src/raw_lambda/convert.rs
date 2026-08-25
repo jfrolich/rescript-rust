@@ -5999,6 +5999,32 @@ impl<'a> RawLambdaConverter<'a> {
                     params, body, *async_, directive, inline, self.loc(expr.exp_loc),
                 )
             }
+            ExpressionDesc::Texp_apply { funct, args, .. }
+                if expr.exp_attributes.iter().any(|attr| {
+                    self.arena.get_string(attr.0.txt) == "res.taggedTemplate"
+                }) =>
+            {
+                // Upstream compiler/ml/translcore.ml:642-663 lowers the
+                // parser-attributed application independently of the tag's
+                // origin; typecore has already validated its two array args.
+                let [strings, values] = args.as_slice() else {
+                    unreachable!("typed tagged-template applications always have two arguments")
+                };
+                let (Some(strings), Some(values)) =
+                    (strings.expression.as_ref(), values.expression.as_ref())
+                else {
+                    unreachable!("tagged-template arguments are never omitted")
+                };
+                RawLambda::prim(
+                    Primitive::PtaggedTemplate,
+                    vec![
+                        self.convert_expr_raw(funct),
+                        self.convert_expr_raw(strings),
+                        self.convert_expr_raw(values),
+                    ],
+                    self.loc(expr.exp_loc),
+                )
+            }
             ExpressionDesc::Texp_apply {
                 funct,
                 args,
