@@ -591,9 +591,9 @@ fn lam<W: Write>(f: &mut Formatter<W>, lam0: &RawLambda, reraise_exn: Option<&Id
         }
         RawLambda::Lfor_of(param, iterable, body) => {
             f.open_box(BoxKind::Box, 2);
-            f.string("(for ");
+            f.string("(for_of ");
             print_ident(f, param);
-            f.string(" of ");
+            f.space();
             lam(f, iterable, reraise_exn);
             f.space();
             lam(f, body, reraise_exn);
@@ -602,9 +602,9 @@ fn lam<W: Write>(f: &mut Formatter<W>, lam0: &RawLambda, reraise_exn: Option<&Id
         }
         RawLambda::Lfor_await_of(param, iterable, body) => {
             f.open_box(BoxKind::Box, 2);
-            f.string("(for await ");
+            f.string("(for_await_of ");
             print_ident(f, param);
-            f.string(" of ");
+            f.space();
             lam(f, iterable, reraise_exn);
             f.space();
             lam(f, body, reraise_exn);
