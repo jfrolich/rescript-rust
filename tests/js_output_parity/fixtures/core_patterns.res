@@ -22,7 +22,7 @@ let arrayValue = [1, 2, 3]
 let recordValue = {x: 1, y: 2, label: "origin"}
 let recordUpdate = {...recordValue, x: recordValue.x + 1}
 let objectValue = {"x": recordValue.x, "label": recordValue.label}
-let dictValue = Js.Dict.fromArray([("one", 1), ("two", 2)])
+let dictValue = Dict.fromArray([("one", 1), ("two", 2)])
 
 let labelled = (~x, ~y=2, ()) => x + y
 let optional = (~x=?, ()) =>

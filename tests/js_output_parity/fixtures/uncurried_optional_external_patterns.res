@@ -3,14 +3,14 @@
 type dateFormatOptions = {someOption?: bool}
 
 @module("SomeModule")
-external formatDate: (Js.Date.t, ~options: dateFormatOptions=?, ~done: bool=?) => string =
+external formatDate: (Date.t, ~options: dateFormatOptions=?, ~done: bool=?) => string =
   "formatDate"
 
 @send external floatToString: (float, ~radix: int=?) => string = "toString"
 
-@new external regExpFromString: (string, ~flags: string=?) => Js.Re.t = "RegExp"
+@new external regExpFromString: (string, ~flags: string=?) => RegExp.t = "RegExp"
 
-let dateValue = Js.Date.make()
+let dateValue = Date.make()
 
 let formatValues = (
   formatDate(dateValue),

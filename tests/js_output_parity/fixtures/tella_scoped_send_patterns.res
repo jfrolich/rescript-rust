@@ -88,7 +88,7 @@ module BillingPortal = {
 
 module NotionPages = {
   @send @scope("pages")
-  external create: (client, Js.Json.t) => Js.Json.t = "create"
+  external create: (client, JSON.t) => JSON.t = "create"
 }
 
 let localClient = makeLocalClient()
@@ -124,7 +124,7 @@ let createdSession =
 let notionPayload =
   NotionPages.create(
     importedClient,
-    Js.Json.object_(Js.Dict.fromArray([("id", Js.Json.string("page"))])),
+    JSON.Encode.object(Dict.fromArray([("id", JSON.Encode.string("page"))])),
   )
 
 let allValues = (createdCustomer, updatedCustomer, createdSession, notionPayload)

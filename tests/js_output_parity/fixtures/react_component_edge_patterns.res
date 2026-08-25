@@ -1,8 +1,10 @@
 module React = {
   type element = Jsx.element
+  type componentLike<'props, 'return> = Jsx.componentLike<'props, 'return>
   type component<'props> = Jsx.component<'props>
   type ref<'a>
 
+  external component: componentLike<'props, element> => component<'props> = "%component_identity"
   let null: element = %raw("null")
   external string: string => element = "%identity"
   external int: int => element = "%identity"
@@ -24,7 +26,7 @@ module React = {
 
   @module("react") external memo: component<'props> => component<'props> = "memo"
   @module("react")
-  external forwardRef: (('props, Js.Nullable.t<ref<'a>>) => element) => component<'props> =
+  external forwardRef: (('props, Nullable.t<ref<'a>>) => element) => component<'props> =
     "forwardRef"
   @module("react") external cloneElement: (element, 'props) => element = "cloneElement"
   @module("react") external useState: (unit => 'state) => ('state, 'state => unit) = "useState"

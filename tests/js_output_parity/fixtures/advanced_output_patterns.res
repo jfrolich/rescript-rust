@@ -32,7 +32,7 @@ type box
 @val external optionalHost: (~name: string=?, int) => int = "outputParityOptional"
 @module("./math-tools.mjs") external importedAdd: (int, int) => int = "add"
 @module({from: "./settings.json", with: {type_: "json", \"some-identifier": "ok"}})
-external importedSettings: Js.Json.t = "default"
+external importedSettings: JSON.t = "default"
 
 @val
 external logUnwrapped: @unwrap
@@ -107,7 +107,7 @@ let exceptionValue = value =>
 external ignorePromise: promise<'a> => unit = "%identity"
 
 let asyncValue = async value => {
-  let resolved = await Js.Promise.resolve(value + 1)
+  let resolved = await Promise.resolve(value + 1)
   resolved * 2
 }
 

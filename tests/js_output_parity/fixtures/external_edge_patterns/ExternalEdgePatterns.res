@@ -32,8 +32,8 @@ function outputParityTagged(strings, ...values) {
   return strings.join("|") + "::" + values.join("|")
 }
 
-function outputParityCallWithThis(callback) {
-  return callback.call({base: 5}, 3)
+function outputParityCallWithReceiver(callback) {
+  return callback({base: 5}, 3)
 }
 `)
 
@@ -66,15 +66,17 @@ external marshalInt: @int
   | @as(5) #five
 ] => int = "outputParityInt"
 
-@val @taggedTemplate
-external tagged: (array<string>, array<int>) => string = "outputParityTagged"
+@val external tagged: taggedTemplate<int, string> = "outputParityTagged"
+external asTaggedTemplate: ((array<string>, array<int>) => string) => taggedTemplate<int, string> =
+  "%identity"
 
 @val
-external callWithThis: (@this ({"base": int}, int) => int) => int = "outputParityCallWithThis"
+external callWithReceiver: (({"base": int}, int) => int) => int =
+  "outputParityCallWithReceiver"
 
 let taggedValue = tagged`left ${1} middle ${2} right`
 
-let localTagged = (strings, values) => {
+let localTagged = asTaggedTemplate((strings, values) => {
   let result = ref("")
   let valueCount = values->Array.length
   for index in 0 to valueCount - 1 {
@@ -84,14 +86,14 @@ let localTagged = (strings, values) => {
       values->Array.getUnsafe(index)->Int.toString
   }
   result.contents ++ strings->Array.getUnsafe(valueCount)
-}
+})
 
 let localTaggedValue = localTagged`a${1}b${2}c`
 
-let thisReader: @this ({"length": int, "offset": int}, int, int) => int =
-  @this (receiver, left, right) => receiver["length"] + receiver["offset"] + left + right
+let receiverReader = (receiver: {"length": int, "offset": int}, left, right) =>
+  receiver["length"] + receiver["offset"] + left + right
 
-let thisCallbackValue = callWithThis(@this (receiver, amount) => receiver["base"] + amount)
+let receiverCallbackValue = callWithReceiver((receiver, amount) => receiver["base"] + amount)
 
 type box = {
   mutable value: int,
@@ -108,16 +110,16 @@ let boxOps = box => {
   }
 }
 
-module type BeltList = module type of Belt.List
+module type RuntimeCollectionsType = module type of RuntimeCollections
 
 let dynamicForEach = async values => {
-  let forEach = await Js.import(Belt.Array.forEach)
+  let forEach = await import(RuntimeCollections.forEach)
   values->forEach(value => Console.log(value))
 }
 
 let dynamicModuleLength = async () => {
-  module List = await (Belt.List: BeltList)
-  List.length(list{1, 2, 3})
+  module Collections = await (RuntimeCollections: RuntimeCollectionsType)
+  Collections.length(list{1, 2, 3})
 }
 
 let allValues = (
@@ -131,8 +133,8 @@ let allValues = (
   marshalInt(#three),
   taggedValue,
   localTaggedValue,
-  thisReader,
-  thisCallbackValue,
+  receiverReader,
+  receiverCallbackValue,
   boxOps({value: 10}),
   dynamicForEach([1, 2, 3]),
   dynamicModuleLength(),
