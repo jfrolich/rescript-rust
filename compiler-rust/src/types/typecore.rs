@@ -14527,7 +14527,7 @@ fn type_function_nary_with_newtypes(
         is_async: bool,
         attributes: &[crate::parser::ast::Attribute],
     ) -> TypeCoreResult<Expression> {
-        let Some(((name, _newtype_attributes), rest)) = newtypes.split_first() else {
+        let Some(((name, newtype_attributes), rest)) = newtypes.split_first() else {
             let fresh_expectation = tctx.type_ctx.new_var(None);
             return type_function_nary(
                 tctx,
@@ -14541,76 +14541,80 @@ fn type_function_nary_with_newtypes(
             );
         };
 
-        let ctx = tctx.type_ctx;
-        let name_str = tctx.arena.get_string(name.txt).to_string();
-        let replacement_ty = ctx.new_var(None);
-        ctx.begin_def();
-        let result = (|| -> TypeCoreResult<Expression> {
-            let level = ctx.current_level();
-            let mut new_env = env.clone();
-            ctx.set_current_time(ctx.get_level(replacement_ty));
-            let newtype_id = ctx.create_ident(&name_str);
-            new_env.add_type(
-                newtype_id.clone(),
-                crate::types::decl::TypeDeclaration {
-                    type_params: vec![],
-                    type_arity: 0,
-                    type_kind: crate::types::decl::TypeKind::TypeAbstract,
-                    type_private: crate::types::asttypes::PrivateFlag::Public,
-                    type_manifest: None,
-                    type_variance: vec![],
-                    type_newtype_level: Some((level, level)),
-                    type_loc: convert_loc(loc, tctx.arena),
-                    type_attributes: vec![],
-                    type_immediate: false,
-                    type_unboxed: crate::types::decl::UnboxedStatus::FALSE_FALSE,
-                    type_inlined_types: vec![],
-                    type_path: None,
-                },
-            );
-            ctx.init_def(ctx.current_stamp());
+        let arena = tctx.arena;
+        crate::types::typemod::with_warning_scope(tctx, arena, newtype_attributes, false, |tctx| {
+            let ctx = tctx.type_ctx;
+            let name_str = tctx.arena.get_string(name.txt).to_string();
+            let replacement_ty = ctx.new_var(None);
+            ctx.begin_def();
+            let result = (|| -> TypeCoreResult<Expression> {
+                let level = ctx.current_level();
+                let mut new_env = env.clone();
+                ctx.set_current_time(ctx.get_level(replacement_ty));
+                let newtype_id = ctx.create_ident(&name_str);
+                new_env.add_type(
+                    newtype_id.clone(),
+                    crate::types::decl::TypeDeclaration {
+                        type_params: vec![],
+                        type_arity: 0,
+                        type_kind: crate::types::decl::TypeKind::TypeAbstract,
+                        type_private: crate::types::asttypes::PrivateFlag::Public,
+                        type_manifest: None,
+                        type_variance: vec![],
+                        type_newtype_level: Some((level, level)),
+                        type_loc: convert_loc(loc, tctx.arena),
+                        type_attributes: vec![],
+                        type_immediate: false,
+                        type_unboxed: crate::types::decl::UnboxedStatus::FALSE_FALSE,
+                        type_inlined_types: vec![],
+                        type_path: None,
+                    },
+                );
+                ctx.init_def(ctx.current_stamp());
 
-            let typed_body = peel(
-                tctx, &new_env, loc, rest, params, body, is_async, attributes,
-            )?;
-            let rewritten_ty = crate::types::ctype::subst_identity_copy(ctx, typed_body.exp_type);
+                let typed_body = peel(
+                    tctx, &new_env, loc, rest, params, body, is_async, attributes,
+                )?;
+                let rewritten_ty =
+                    crate::types::ctype::subst_identity_copy(ctx, typed_body.exp_type);
 
-            fn replace_newtype_path(
-                ctx: &TypeContext,
-                ty: TypeExprRef,
-                target_id: &Ident,
-                replacement_ty: TypeExprRef,
-                seen: &mut HashSet<TypeExprRef>,
-            ) {
-                let ty = ctx.repr(ty);
-                if !seen.insert(ty) {
-                    return;
-                }
-                if matches!(
-                    &*ctx.get_desc(ty),
-                    TypeDesc::Tconstr {
-                        path: Path::Pident(id),
-                        ..
-                    } if id.same(target_id)
+                fn replace_newtype_path(
+                    ctx: &TypeContext,
+                    ty: TypeExprRef,
+                    target_id: &Ident,
+                    replacement_ty: TypeExprRef,
+                    seen: &mut HashSet<TypeExprRef>,
                 ) {
-                    crate::types::link_type(ctx, ty, replacement_ty);
-                    return;
+                    let ty = ctx.repr(ty);
+                    if !seen.insert(ty) {
+                        return;
+                    }
+                    if matches!(
+                        &*ctx.get_desc(ty),
+                        TypeDesc::Tconstr {
+                            path: Path::Pident(id),
+                            ..
+                        } if id.same(target_id)
+                    ) {
+                        crate::types::link_type(ctx, ty, replacement_ty);
+                        return;
+                    }
+                    crate::types::iter_type_expr(ctx, ty, |child| {
+                        replace_newtype_path(ctx, child, target_id, replacement_ty, seen);
+                    });
                 }
-                crate::types::iter_type_expr(ctx, ty, |child| {
-                    replace_newtype_path(ctx, child, target_id, replacement_ty, seen);
-                });
-            }
 
-            let mut seen = HashSet::new();
-            replace_newtype_path(ctx, rewritten_ty, &newtype_id, replacement_ty, &mut seen);
-            Ok(Expression {
-                exp_loc: loc,
-                exp_type: rewritten_ty,
-                ..typed_body
-            })
-        })();
-        ctx.end_def();
-        result
+                let mut seen = HashSet::new();
+                replace_newtype_path(ctx, rewritten_ty, &newtype_id, replacement_ty, &mut seen);
+                Ok(Expression {
+                    exp_loc: loc,
+                    exp_type: rewritten_ty,
+                    ..typed_body
+                })
+            })();
+            ctx.end_def();
+            result
+        })
     }
 
     let typed = peel(tctx, env, loc, newtypes, params, body, is_async, attributes)?;
