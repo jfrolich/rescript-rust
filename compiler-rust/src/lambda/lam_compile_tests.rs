@@ -58,6 +58,12 @@ fn compile_checked_in_test_file_to_js_inner(module_name: &str) -> String {
                 .join("tests")
                 .join("lib")
                 .join("ocaml"),
+            repo_root
+                .join("tests")
+                .join("dependencies")
+                .join("rescript-react")
+                .join("lib")
+                .join("ocaml"),
         ],
         runtime_path: Some(
             repo_root
@@ -95,6 +101,12 @@ fn compile_test_source_to_js_inner(source: &str, filename: &str) -> anyhow::Resu
             repo_root
                 .join("tests")
                 .join("tests")
+                .join("lib")
+                .join("ocaml"),
+            repo_root
+                .join("tests")
+                .join("dependencies")
+                .join("rescript-react")
                 .join("lib")
                 .join("ocaml"),
         ],

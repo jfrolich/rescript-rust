@@ -655,7 +655,7 @@ fn transform_react_component_binding(
                             });
                         }
                         _ => {
-                            // Strip explicit Js.Nullable.t in case of forwardRef
+                            // Strip explicit Stdlib.Nullable.t in case of forwardRef
                             return strip_js_nullable(arena, &nt.interior_type);
                         }
                     }
@@ -724,7 +724,7 @@ fn transform_react_component_binding(
             ppat_attributes: Attributes::new(),
         };
 
-        // OCaml (line 749-751): only add Js.Nullable.t<'ref> constraint when the pattern is just
+        // OCaml (line 749-751): only add Stdlib.Nullable.t<'ref> constraint when the pattern is just
         // Ppat_var {txt} (i.e., no existing constraint). If the original pattern already has a
         // type constraint, preserve it.
         let ref_pattern = if let Some(arg) = ref_arg {
@@ -733,14 +733,14 @@ fn transform_react_component_binding(
                 // Preserve the original pattern with its type annotation
                 arg.pattern.clone()
             } else if !ref_alias.starts_with('_') {
-                // No existing constraint, and not unused - add Js.Nullable.t<'ref>
+                // No existing constraint, and not unused - add Stdlib.Nullable.t<'ref>
                 // OCaml calls ref_type Location.none, so inner Ptyp_var uses ghost location
                 let ref_type_var = CoreType {
                     ptyp_desc: Box::new(CoreTypeDesc::Ptyp_var(Box::new(Cow::Borrowed("ref")))),
                     ptyp_loc: empty_loc(),
                     ptyp_attributes: Attributes::new(),
                 };
-                let js_idx = arena.intern_string("Js");
+                let js_idx = arena.intern_string("Stdlib");
                 let nullable_idx = arena.intern_string("Nullable");
                 let t_idx = arena.intern_string("t");
                 let js_nullable_t_lid = arena.push_longident(Longident::Ldot(
@@ -778,13 +778,13 @@ fn transform_react_component_binding(
                 base_ref_pattern
             }
         } else if !ref_alias.starts_with('_') {
-            // No ref_arg found but alias doesn't start with "_" - add Js.Nullable.t<'ref>
+            // No ref_arg found but alias doesn't start with "_" - add Stdlib.Nullable.t<'ref>
             let ref_type_var = CoreType {
                 ptyp_desc: Box::new(CoreTypeDesc::Ptyp_var(Box::new(Cow::Borrowed("ref")))),
                 ptyp_loc: empty_loc(),
                 ptyp_attributes: Attributes::new(),
             };
-            let js_idx = arena.intern_string("Js");
+            let js_idx = arena.intern_string("Stdlib");
             let nullable_idx = arena.intern_string("Nullable");
             let t_idx = arena.intern_string("t");
             let js_nullable_t_lid = arena.push_longident(Longident::Ldot(
@@ -820,38 +820,39 @@ fn transform_react_component_binding(
             base_ref_pattern
         };
 
-        // Inner function with ref parameter
+        // Forward-ref components are one direct n-ary function over props and ref.
         let expression_idx = arena.push_expr(expression);
-        let ref_pattern_idx = arena.push_pat(ref_pattern);
-        let inner_with_ref = Expression {
-            pexp_desc: Box::new(ExpressionDesc::Pexp_fun(Box::new(PexpFun {
-                arg_label: ArgLabel::Nolabel,
-                default: None,
-                lhs: ref_pattern_idx,
-                rhs: expression_idx,
-                arity: arena.push_arity(None),
-                is_async: false,
-            }))),
-            pexp_loc: empty_loc(),
-            pexp_attributes: Attributes::new(),
-        };
-
-        // Outer function with props parameter
-        // OCaml: Exp.fun_ ~arity:(Some total_arity) ~async:is_async Nolabel None
-        // Note: OCaml line 765 does NOT pass ~attrs, so this inner expression has no attributes
-        // The outer wrapper (line 632) is the one that gets ~attrs:binding.pvb_expr.pexp_attributes
-        let inner_with_ref_idx = arena.push_expr(inner_with_ref);
         let constrained_pattern_idx = arena.push_pat(constrained_pattern);
+        let ref_pattern_idx = arena.push_pat(ref_pattern);
+        let arity = arena.push_arity(Some(total_arity as i32));
+        let unknown_arity = arena.push_arity(None);
+        arena.set_nary_fun_params(
+            arity,
+            vec![
+                crate::parser::ast::FunParam {
+                    p_attrs: Attributes::new(),
+                    p_lbl: ArgLabel::Nolabel,
+                    p_default: None,
+                    p_pat: constrained_pattern_idx,
+                },
+                crate::parser::ast::FunParam {
+                    p_attrs: Attributes::new(),
+                    p_lbl: ArgLabel::Nolabel,
+                    p_default: None,
+                    p_pat: ref_pattern_idx,
+                },
+            ],
+            unknown_arity,
+        );
         Expression {
             pexp_desc: Box::new(ExpressionDesc::Pexp_fun(Box::new(PexpFun {
                 arg_label: ArgLabel::Nolabel,
                 default: None,
                 lhs: constrained_pattern_idx,
-                rhs: inner_with_ref_idx,
-                arity: arena.push_arity(Some(total_arity as i32)),
+                rhs: expression_idx,
+                arity,
                 is_async,
             }))),
-            // OCaml uses ghost location for the inner Pexp_fun
             pexp_loc: empty_loc(),
             pexp_attributes: Attributes::new(),
         }
@@ -1903,9 +1904,8 @@ fn add_default_value_matches(
 fn get_function_body(arena: &ParseArena, expr: &Expression) -> Expression {
     match &*expr.pexp_desc {
         ExpressionDesc::Pexp_fun(inner) => {
-            let PexpFun { ref rhs, .. } = **inner;
-            let rhs_expr: &Expression = arena.get_expr(*rhs);
-            get_function_body(arena, rhs_expr)
+            let body = arena.nary_fun_body(inner);
+            get_function_body(arena, arena.get_expr(body))
         }
         ExpressionDesc::Pexp_newtype(inner) => {
             let (_, ref body_idx) = **inner;
@@ -2823,12 +2823,12 @@ fn strip_option(arena: &ParseArena, core_type: &CoreType) -> Option<CoreType> {
     }
 }
 
-/// Strip `Js.Nullable.t<T>` wrapper from a type, returning just `T`
+/// Strip `Stdlib.Nullable.t<T>` wrapper from a type, returning just `T`
 fn strip_js_nullable(arena: &ParseArena, core_type: &CoreType) -> Option<CoreType> {
     match &*core_type.ptyp_desc {
         CoreTypeDesc::Ptyp_constr(inner) if inner.1.len() == 1 => {
             let (ref lid, ref args) = **inner;
-            // Check for Js.Nullable.t
+            // Check for Stdlib.Nullable.t
             if let Longident::Ldot(outer, inner_idx) = arena.get_longident(lid.txt) {
                 let inner = arena.get_string(*inner_idx);
                 if inner == "t" {
@@ -3137,82 +3137,60 @@ fn extract_args_rec(
 ) {
     match &*expr.pexp_desc {
         ExpressionDesc::Pexp_fun(inner) => {
-            let PexpFun {
-                ref arg_label,
-                ref default,
-                ref lhs,
-                ref rhs,
-                ..
-            } = **inner;
-            let lhs_pat = arena.get_pat(*lhs);
-            // Check for key argument - this is an error (OCaml: raise_error)
-            // Key cannot be accessed inside of a component
-            let label_name = get_label(arena, arg_label);
-            if label_name == "key" {
-                if key_error_loc.is_none() {
-                    *key_error_loc = Some(expr.pexp_loc);
-                }
-                return;
-            }
-
-            // Skip unit argument or Ppat_any, but continue extracting from body
-            let is_unit_pattern = if let PatternDesc::Ppat_construct(loc, _) = &*lhs_pat.ppat_desc {
-                arena.is_lident(loc.txt, "()")
-            } else {
-                false
-            };
-            if is_unit_pattern || matches!(&*lhs_pat.ppat_desc, PatternDesc::Ppat_any) {
-                if matches!(arg_label, ArgLabel::Nolabel) {
-                    // Continue extracting from body even for skipped args (e.g., forwardRef (_, _ref) => ...)
-                    let rhs_expr: &Expression = arena.get_expr(*rhs);
-                    extract_args_rec(arena, rhs_expr, args, newtypes, warnings, key_error_loc);
+            let params = arena.nary_fun_params(inner);
+            for param in params.iter() {
+                let arg_label = &param.p_lbl;
+                let default = &param.p_default;
+                let lhs_pat = arena.get_pat(param.p_pat);
+                let label_name = get_label(arena, arg_label);
+                if label_name == "key" {
+                    if key_error_loc.is_none() {
+                        *key_error_loc = Some(expr.pexp_loc);
+                    }
                     return;
                 }
-            }
-
-            if is_labelled(arg_label) || is_optional(arg_label) {
-                if let Some(message) =
-                    optional_argument_annotation_warning(arena, arg_label, default, lhs_pat)
-                {
-                    let loc = lhs_pat.ppat_loc;
-                    warnings.push(JsxPreprocessorWarning {
-                        start_pos: *arena.loc_start(loc),
-                        end_pos: *arena.loc_end(loc),
-                        message,
-                    });
+                let is_unit_pattern = matches!(
+                    &*lhs_pat.ppat_desc,
+                    PatternDesc::Ppat_construct(loc, _) if arena.is_lident(loc.txt, "()")
+                );
+                if is_unit_pattern || matches!(&*lhs_pat.ppat_desc, PatternDesc::Ppat_any) {
+                    continue;
                 }
-                let alias = get_alias_from_pattern(arena, lhs_pat, arg_label);
-                let type_ = get_type_from_pattern(arena, lhs_pat);
-
-                args.push(ExtractedArg {
-                    label: arg_label.clone(),
-                    default: default.as_ref().map(|d| arena.get_expr(*d).clone()),
-                    pattern: lhs_pat.clone(),
-                    alias,
-                    loc: lhs_pat.ppat_loc,
-                    type_,
-                });
-
-                let rhs_expr: &Expression = arena.get_expr(*rhs);
-                extract_args_rec(arena, rhs_expr, args, newtypes, warnings, key_error_loc);
-            } else if matches!(arg_label, ArgLabel::Nolabel) {
-                // For forwardRef, capture unlabeled 'ref' or '_ref' argument
-                let alias = get_alias_from_pattern(arena, lhs_pat, arg_label);
-                if alias == "ref" || alias == "_ref" {
-                    let type_ = get_type_from_pattern(arena, lhs_pat);
+                if is_labelled(arg_label) || is_optional(arg_label) {
+                    if let Some(message) =
+                        optional_argument_annotation_warning(arena, arg_label, default, lhs_pat)
+                    {
+                        let loc = lhs_pat.ppat_loc;
+                        warnings.push(JsxPreprocessorWarning {
+                            start_pos: *arena.loc_start(loc),
+                            end_pos: *arena.loc_end(loc),
+                            message,
+                        });
+                    }
                     args.push(ExtractedArg {
-                        label: arg_label.clone(),
-                        default: None,
+                        label: *arg_label,
+                        default: default.map(|idx| arena.get_expr(idx).clone()),
                         pattern: lhs_pat.clone(),
-                        alias,
+                        alias: get_alias_from_pattern(arena, lhs_pat, arg_label),
                         loc: lhs_pat.ppat_loc,
-                        type_,
+                        type_: get_type_from_pattern(arena, lhs_pat),
                     });
+                } else {
+                    let alias = get_alias_from_pattern(arena, lhs_pat, arg_label);
+                    if alias == "ref" || alias == "_ref" {
+                        args.push(ExtractedArg {
+                            label: *arg_label,
+                            default: None,
+                            pattern: lhs_pat.clone(),
+                            alias,
+                            loc: lhs_pat.ppat_loc,
+                            type_: get_type_from_pattern(arena, lhs_pat),
+                        });
+                    }
                 }
-                // Continue extracting from body even for ref
-                let rhs_expr: &Expression = arena.get_expr(*rhs);
-                extract_args_rec(arena, rhs_expr, args, newtypes, warnings, key_error_loc);
             }
+            let body = arena.get_expr(arena.nary_fun_body(inner));
+            extract_args_rec(arena, body, args, newtypes, warnings, key_error_loc);
         }
         ExpressionDesc::Pexp_newtype(inner) => {
             let (ref name, ref body_idx) = **inner;

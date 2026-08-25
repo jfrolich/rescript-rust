@@ -5342,36 +5342,19 @@ fn build_arrows(
     if args.is_empty() {
         return result;
     }
-
-    let total_arity = args.len() as i32;
-
-    // Build right-to-left: last arg wraps result first
-    let mut current = result;
-    for (i, arg) in args
-        .into_iter()
-        .enumerate()
-        .collect::<Vec<_>>()
-        .into_iter()
-        .rev()
-    {
-        let arity = if i == 0 {
-            // Outermost arrow gets Some(total_arity)
-            arena.push_arity(Some(total_arity))
-        } else {
-            // Inner arrows get None
-            arena.push_arity(None)
-        };
-        current = CoreType {
-            ptyp_desc: Box::new(CoreTypeDesc::Ptyp_arrow(Box::new((
-                Box::new(arg),
-                arena.push_core_type(current),
-                arity,
-            )))),
-            ptyp_loc: loc,
-            ptyp_attributes: Attributes::new(),
-        };
+    let arity = arena.push_arity(Some(args.len() as i32));
+    let first = args[0].clone();
+    let ret = arena.push_core_type(result);
+    arena.set_nary_arrow_args(arity, args);
+    CoreType {
+        ptyp_desc: Box::new(CoreTypeDesc::Ptyp_arrow(Box::new((
+            Box::new(first),
+            ret,
+            arity,
+        )))),
+        ptyp_loc: loc,
+        ptyp_attributes: Attributes::new(),
     }
-    current
 }
 
 /// Handle %debugger extension by transforming it into local_external_apply pattern.
@@ -10096,42 +10079,25 @@ fn create_unsafe_index_get_str(arena: &mut ParseArena) -> StructureItem {
     let none_loc = arena.none_loc();
     let index_name = arena.intern_string("_index");
 
-    // Type: 'a => 'b => 'c
+    // Type: ('a, 'b) => 'c
     let any_type = CoreType {
         ptyp_desc: Box::new(CoreTypeDesc::Ptyp_any),
         ptyp_loc: none_loc,
         ptyp_attributes: Attributes::new(),
     };
-
-    // Inner arrow: 'b => 'c
-    let inner_arrow = CoreType {
-        ptyp_desc: Box::new(CoreTypeDesc::Ptyp_arrow(Box::new((
-            Box::new(TypeArg {
-                attrs: Attributes::new(),
-                lbl: ArgLabel::Nolabel,
-                typ: arena.push_core_type(any_type.clone()),
-            }),
-            arena.push_core_type(any_type.clone()),
-            arena.push_arity(None),
-        )))),
-        ptyp_loc: none_loc,
-        ptyp_attributes: Attributes::new(),
-    };
-
-    // Outer arrow: 'a => ('b => 'c)
-    let arrow_type = CoreType {
-        ptyp_desc: Box::new(CoreTypeDesc::Ptyp_arrow(Box::new((
-            Box::new(TypeArg {
-                attrs: Attributes::new(),
-                lbl: ArgLabel::Nolabel,
-                typ: arena.push_core_type(any_type),
-            }),
-            arena.push_core_type(inner_arrow),
-            arena.push_arity(Some(2)),
-        )))),
-        ptyp_loc: none_loc,
-        ptyp_attributes: Attributes::new(),
-    };
+    let args = vec![
+        TypeArg {
+            attrs: Attributes::new(),
+            lbl: ArgLabel::Nolabel,
+            typ: arena.push_core_type(any_type.clone()),
+        },
+        TypeArg {
+            attrs: Attributes::new(),
+            lbl: ArgLabel::Nolabel,
+            typ: arena.push_core_type(any_type.clone()),
+        },
+    ];
+    let arrow_type = make_arrows_type(&args, &any_type, arena);
 
     // Encode the FFI with @get_index
     // OCaml uses Param_number when all params are (Nothing, Arg_empty)
@@ -15554,37 +15520,20 @@ fn make_setter_type_with_loc(
     let outer_loc = loc.unwrap_or(none_loc);
     let unit_type = make_unit_type(arena);
 
-    // Inner arrow: field_type -> unit
-    // OCaml's Typ.arrows passes the same ~loc for ALL arrows (including inner ones)
-    let inner = CoreType {
-        ptyp_desc: Box::new(CoreTypeDesc::Ptyp_arrow(Box::new((
-            Box::new(TypeArg {
-                attrs: Attributes::new(),
-                lbl: ArgLabel::Nolabel,
-                typ: arena.push_core_type(field_type.clone()),
-            }),
-            arena.push_core_type(unit_type),
-            arena.push_arity(None),
-        )))),
-        // OCaml's Typ.arrows passes the same ~loc for all arrows, including inner ones.
-        ptyp_loc: outer_loc,
-        ptyp_attributes: Attributes::new(),
-    };
+    let args = vec![
+        TypeArg {
+            attrs: Attributes::new(),
+            lbl: ArgLabel::Nolabel,
+            typ: arena.push_core_type(record_type.clone()),
+        },
+        TypeArg {
+            attrs: Attributes::new(),
+            lbl: ArgLabel::Nolabel,
+            typ: arena.push_core_type(field_type.clone()),
+        },
+    ];
+    make_arrows_type_with_loc(&args, &unit_type, Some(outer_loc), arena)
 
-    // Outer arrow: t -> (field_type -> unit) (uses provided location)
-    CoreType {
-        ptyp_desc: Box::new(CoreTypeDesc::Ptyp_arrow(Box::new((
-            Box::new(TypeArg {
-                attrs: Attributes::new(),
-                lbl: ArgLabel::Nolabel,
-                typ: arena.push_core_type(record_type.clone()),
-            }),
-            arena.push_core_type(inner),
-            arena.push_arity(Some(2)),
-        )))),
-        ptyp_loc: outer_loc,
-        ptyp_attributes: Attributes::new(),
-    }
 }
 
 /// Create unit type
