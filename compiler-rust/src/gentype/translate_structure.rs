@@ -22,14 +22,12 @@ pub fn addAnnotationsToTypes_(
         (
             ExpressionDesc::Texp_function { params, body, .. },
             Some((ArgType { a_type, .. }, next_types)),
-        ) if !params.is_empty() && !body.is_empty() => {
-            let next_types1 = addAnnotationsToTypes_(arena, config, &body[0].c_rhs, next_types);
-            let a_name = function_param_name(arena, &params[0]);
+        ) if !params.is_empty() => {
             let mut out = vec![ArgType {
-                a_name,
+                a_name: function_param_name(arena, &params[0]),
                 a_type: a_type.clone(),
             }];
-            out.extend(next_types1);
+            out.extend(addAnnotationsToTypes_(arena, config, body, next_types));
             out
         }
         (ExpressionDesc::Texp_apply { funct, args, .. }, _)
@@ -85,11 +83,9 @@ pub fn add_annotations_to_fields(
             vec![],
             add_annotations_to_types(arena, config, expr, arg_types),
         ),
-        (ExpressionDesc::Texp_function { body, .. }, Some((field, next_fields)))
-            if !body.is_empty() =>
-        {
+        (ExpressionDesc::Texp_function { body, .. }, Some((field, next_fields))) => {
             let (next_fields1, types1) =
-                add_annotations_to_fields(arena, config, &body[0].c_rhs, next_fields, arg_types);
+                add_annotations_to_fields(arena, config, body, next_fields, arg_types);
             let mut field = field.clone();
             field.name_js = crate::gentype::translate_type_declarations::rename_record_field(
                 arena,
@@ -718,12 +714,9 @@ fn value_binding_id(pattern: &Pattern) -> Option<&crate::ident::Ident> {
 }
 
 fn function_param_name(arena: &ParseArena, param: &FunctionParam) -> String {
-    let a_name = param.param_id.name();
+    let a_name = param.fp_param.name();
     if a_name == "*opt*" {
-        match &param.label {
-            crate::parser::ast::ArgLabel::Optional(loc) => arena.get_string(loc.txt).to_string(),
-            _ => String::new(),
-        }
+        param.fp_lbl.label_name().unwrap_or_default().to_string()
     } else {
         a_name.to_string()
     }

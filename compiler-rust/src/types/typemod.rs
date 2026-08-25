@@ -7494,23 +7494,10 @@ fn pattern_uses_open_shadow_label_constructor(
 fn function_param_pattern_uses_open_shadow_label_constructor(
     ctx: &crate::types::TypeContext,
     env: &Env,
-    pat: &crate::types::typedtree::FunctionParamPattern,
+    pat: &crate::types::typedtree::Pattern,
     check: &OpenShadowLabelConstructorUseCheck,
 ) -> bool {
-    match pat {
-        crate::types::typedtree::FunctionParamPattern::Simple(pat) => {
-            pattern_uses_open_shadow_label_constructor(ctx, env, pat, check)
-        }
-        crate::types::typedtree::FunctionParamPattern::Nested(params) => {
-            params.iter().any(|param| {
-                param.default.as_deref().is_some_and(|expr| {
-                    expression_uses_open_shadow_label_constructor(ctx, env, expr, check)
-                }) || function_param_pattern_uses_open_shadow_label_constructor(
-                    ctx, env, &param.pat, check,
-                )
-            })
-        }
-    }
+    pattern_uses_open_shadow_label_constructor(ctx, env, pat, check)
 }
 
 fn typed_case_uses_open_shadow_label_constructor(
@@ -7546,14 +7533,10 @@ fn expression_uses_open_shadow_label_constructor(
         }
         crate::types::typedtree::ExpressionDesc::Texp_function { params, body, .. } => {
             params.iter().any(|param| {
-                param.default.as_deref().is_some_and(|expr| {
-                    expression_uses_open_shadow_label_constructor(ctx, env, expr, check)
-                }) || function_param_pattern_uses_open_shadow_label_constructor(
-                    ctx, env, &param.pat, check,
+                function_param_pattern_uses_open_shadow_label_constructor(
+                    ctx, env, &param.fp_pat, check,
                 )
-            }) || body
-                .iter()
-                .any(|case| typed_case_uses_open_shadow_label_constructor(ctx, env, case, check))
+            }) || expression_uses_open_shadow_label_constructor(ctx, env, body, check)
         }
         crate::types::typedtree::ExpressionDesc::Texp_apply { funct, args, .. } => {
             expression_uses_open_shadow_label_constructor(ctx, env, funct, check)
@@ -8223,14 +8206,8 @@ fn expression_uses_path(
         }
         crate::types::typedtree::ExpressionDesc::Texp_function { params, body, .. } => {
             params.iter().any(|param| {
-                param
-                    .default
-                    .as_deref()
-                    .is_some_and(|expr| expression_uses_path(ctx, expr, path_matches))
-                    || function_param_pattern_uses_path(ctx, &param.pat, path_matches)
-            }) || body
-                .iter()
-                .any(|case| typed_case_uses_path(ctx, case, path_matches))
+                function_param_pattern_uses_path(ctx, &param.fp_pat, path_matches)
+            }) || expression_uses_path(ctx, body, path_matches)
         }
         crate::types::typedtree::ExpressionDesc::Texp_apply { funct, args, .. } => {
             expression_uses_path(ctx, funct, path_matches)
@@ -8363,23 +8340,10 @@ fn expression_uses_path(
 
 fn function_param_pattern_uses_path(
     ctx: &crate::types::TypeContext,
-    pat: &crate::types::typedtree::FunctionParamPattern,
+    pat: &crate::types::typedtree::Pattern,
     path_matches: &dyn Fn(&Path) -> bool,
 ) -> bool {
-    match pat {
-        crate::types::typedtree::FunctionParamPattern::Simple(pat) => {
-            pattern_uses_path(ctx, pat, path_matches)
-        }
-        crate::types::typedtree::FunctionParamPattern::Nested(params) => {
-            params.iter().any(|param| {
-                param
-                    .default
-                    .as_deref()
-                    .is_some_and(|expr| expression_uses_path(ctx, expr, path_matches))
-                    || function_param_pattern_uses_path(ctx, &param.pat, path_matches)
-            })
-        }
-    }
+    pattern_uses_path(ctx, pat, path_matches)
 }
 
 fn typed_case_uses_path(
@@ -8628,16 +8592,8 @@ fn expression_uses_unqualified_value_path(
                 expression_uses_unqualified_value_path(arena, &binding.vb_expr, name, target)
             }) || expression_uses_unqualified_value_path(arena, body, name, target)
         }
-        crate::types::typedtree::ExpressionDesc::Texp_function { params, body, .. } => {
-            params.iter().any(|param| {
-                param.default.as_deref().is_some_and(|expr| {
-                    expression_uses_unqualified_value_path(arena, expr, name, target)
-                })
-            }) || body.iter().any(|case| {
-                case.c_guard.as_ref().is_some_and(|guard| {
-                    expression_uses_unqualified_value_path(arena, guard, name, target)
-                }) || expression_uses_unqualified_value_path(arena, &case.c_rhs, name, target)
-            })
+        crate::types::typedtree::ExpressionDesc::Texp_function { body, .. } => {
+            expression_uses_unqualified_value_path(arena, body, name, target)
         }
         crate::types::typedtree::ExpressionDesc::Texp_apply { funct, args, .. } => {
             expression_uses_unqualified_value_path(arena, funct, name, target)
@@ -8825,16 +8781,8 @@ fn expression_uses_unqualified_module_path(
                 expression_uses_unqualified_module_path(arena, &binding.vb_expr, name, target)
             }) || expression_uses_unqualified_module_path(arena, body, name, target)
         }
-        crate::types::typedtree::ExpressionDesc::Texp_function { params, body, .. } => {
-            params.iter().any(|param| {
-                param.default.as_deref().is_some_and(|expr| {
-                    expression_uses_unqualified_module_path(arena, expr, name, target)
-                })
-            }) || body.iter().any(|case| {
-                case.c_guard.as_ref().is_some_and(|guard| {
-                    expression_uses_unqualified_module_path(arena, guard, name, target)
-                }) || expression_uses_unqualified_module_path(arena, &case.c_rhs, name, target)
-            })
+        crate::types::typedtree::ExpressionDesc::Texp_function { body, .. } => {
+            expression_uses_unqualified_module_path(arena, body, name, target)
         }
         crate::types::typedtree::ExpressionDesc::Texp_apply { funct, args, .. } => {
             expression_uses_unqualified_module_path(arena, funct, name, target)
@@ -9241,14 +9189,10 @@ pub(crate) fn expression_uses_opened_path(
         }
         crate::types::typedtree::ExpressionDesc::Texp_function { params, body, .. } => {
             params.iter().any(|param| {
-                param
-                    .default
-                    .as_deref()
-                    .is_some_and(|expr| expression_uses_opened_path(ctx, arena, expr, open_path))
-                    || function_param_pattern_uses_opened_path(ctx, arena, &param.pat, open_path)
-            }) || body
-                .iter()
-                .any(|case| typed_case_uses_opened_path(ctx, arena, case, open_path))
+                function_param_pattern_uses_opened_path(
+                    ctx, arena, &param.fp_pat, open_path,
+                )
+            }) || expression_uses_opened_path(ctx, arena, body, open_path)
         }
         crate::types::typedtree::ExpressionDesc::Texp_apply { funct, args, .. } => {
             expression_uses_opened_path(ctx, arena, funct, open_path)
@@ -9373,23 +9317,10 @@ pub(crate) fn expression_uses_opened_path(
 fn function_param_pattern_uses_opened_path(
     ctx: &crate::types::TypeContext,
     arena: &ParseArena,
-    pat: &crate::types::typedtree::FunctionParamPattern,
+    pat: &crate::types::typedtree::Pattern,
     open_path: &Path,
 ) -> bool {
-    match pat {
-        crate::types::typedtree::FunctionParamPattern::Simple(pat) => {
-            pattern_uses_opened_path(ctx, arena, pat, open_path)
-        }
-        crate::types::typedtree::FunctionParamPattern::Nested(params) => {
-            params.iter().any(|param| {
-                param
-                    .default
-                    .as_deref()
-                    .is_some_and(|expr| expression_uses_opened_path(ctx, arena, expr, open_path))
-                    || function_param_pattern_uses_opened_path(ctx, arena, &param.pat, open_path)
-            })
-        }
-    }
+    pattern_uses_opened_path(ctx, arena, pat, open_path)
 }
 
 fn typed_extension_constructor_uses_opened_path(
@@ -9752,18 +9683,8 @@ fn expression_uses_opened_modtype_name(
                 .any(|binding| expression_uses_opened_modtype_name(arena, &binding.vb_expr, names))
                 || expression_uses_opened_modtype_name(arena, body, names)
         }
-        crate::types::typedtree::ExpressionDesc::Texp_function { params, body, .. } => {
-            params.iter().any(|param| {
-                param
-                    .default
-                    .as_deref()
-                    .is_some_and(|expr| expression_uses_opened_modtype_name(arena, expr, names))
-            }) || body.iter().any(|case| {
-                case.c_guard
-                    .as_ref()
-                    .is_some_and(|guard| expression_uses_opened_modtype_name(arena, guard, names))
-                    || expression_uses_opened_modtype_name(arena, &case.c_rhs, names)
-            })
+        crate::types::typedtree::ExpressionDesc::Texp_function { body, .. } => {
+            expression_uses_opened_modtype_name(arena, body, names)
         }
         crate::types::typedtree::ExpressionDesc::Texp_apply { funct, args, .. } => {
             expression_uses_opened_modtype_name(arena, funct, names)
@@ -10243,35 +10164,13 @@ fn pattern_constructor_usage(
 
 fn function_param_pattern_constructor_usage(
     ctx: &crate::types::TypeContext,
-    pat: &crate::types::typedtree::FunctionParamPattern,
+    pat: &crate::types::typedtree::Pattern,
     matches_constructor: &dyn Fn(
         &crate::types::TypeContext,
         &crate::types::decl::ConstructorDescription,
     ) -> bool,
 ) -> ConstructorUseFlags {
-    let mut usage = ConstructorUseFlags::default();
-    match pat {
-        crate::types::typedtree::FunctionParamPattern::Simple(pat) => {
-            usage.merge(pattern_constructor_usage(ctx, pat, matches_constructor));
-        }
-        crate::types::typedtree::FunctionParamPattern::Nested(params) => {
-            for param in params {
-                if let Some(default) = &param.default {
-                    usage.merge(expression_constructor_usage(
-                        ctx,
-                        default,
-                        matches_constructor,
-                    ));
-                }
-                usage.merge(function_param_pattern_constructor_usage(
-                    ctx,
-                    &param.pat,
-                    matches_constructor,
-                ));
-            }
-        }
-    }
-    usage
+    pattern_constructor_usage(ctx, pat, matches_constructor)
 }
 
 fn case_constructor_usage(
@@ -10327,22 +10226,11 @@ fn expression_constructor_usage(
         }
         ExpressionDesc::Texp_function { params, body, .. } => {
             for param in params {
-                if let Some(default) = &param.default {
-                    usage.merge(expression_constructor_usage(
-                        ctx,
-                        default,
-                        matches_constructor,
-                    ));
-                }
                 usage.merge(function_param_pattern_constructor_usage(
-                    ctx,
-                    &param.pat,
-                    matches_constructor,
+                    ctx, &param.fp_pat, matches_constructor,
                 ));
             }
-            for case in body {
-                usage.merge(case_constructor_usage(ctx, case, matches_constructor));
-            }
+            usage.merge(expression_constructor_usage(ctx, body, matches_constructor));
         }
         ExpressionDesc::Texp_apply { funct, args, .. } => {
             usage.merge(expression_constructor_usage(
@@ -20286,22 +20174,16 @@ pub fn type_structure<'a>(
             pat_attributes: crate::parser::ast::Attributes::new(),
         };
 
-        // Function body: (value) => specialized_body
-        // Use static_arity_1 — no mutable arena needed
-        let body_case = crate::types::typedtree::Case::simple(param_pat, gen_fn.body);
+        // Function body: (value) => specialized_body.
         let func_expr = crate::types::typedtree::Expression::new(
             crate::types::typedtree::ExpressionDesc::Texp_function {
                 params: vec![crate::types::typedtree::FunctionParam {
-                    param_id: param_ident,
-                    label: crate::parser::ast::ArgLabel::Nolabel,
-                    default: None,
-                    pat: crate::types::typedtree::FunctionParamPattern::Simple(
-                        body_case.c_lhs.clone(),
-                    ),
+                    fp_lbl: crate::types::ArgLabel::Nolabel,
+                    fp_param: param_ident,
+                    fp_pat: param_pat,
+                    fp_partial: crate::types::typedtree::Partial::Total,
                 }],
-                body: vec![body_case],
-                partial: crate::types::typedtree::Partial::Total,
-                arity: arena.static_arity_1(),
+                body: Box::new(gen_fn.body),
                 async_: false,
             },
             LocIdx(0),

@@ -138,7 +138,7 @@ pub fn max_lambda_input_stamp(typed_structure: &crate::types::typedtree::Structu
     use crate::types::path::Path as TypePath;
     use crate::types::typedtree::{
         Case, ConstructorArgument, ExpExtra, Expression, ExpressionDesc, ExtensionConstructor,
-        ExtensionConstructorKind, FunctionParam, FunctionParamPattern, IncludeDescription,
+        ExtensionConstructorKind, FunctionParam, IncludeDescription,
         MethKind, ModuleBinding, ModuleCoercion, ModuleExpr, ModuleExprDesc, ModuleType,
         ModuleTypeConstraint, ModuleTypeDeclaration, ModuleTypeDesc, OpenDeclaration, PatExtra,
         Pattern, PatternDesc, RowFieldDesc, Structure, StructureItemDesc,
@@ -269,18 +269,8 @@ pub fn max_lambda_input_stamp(typed_structure: &crate::types::typedtree::Structu
     }
 
     fn visit_function_param(max_stamp: &mut i32, param: &FunctionParam) {
-        visit_ident(max_stamp, &param.param_id);
-        if let Some(default) = &param.default {
-            visit_expression(max_stamp, default);
-        }
-        match &param.pat {
-            FunctionParamPattern::Simple(pattern) => visit_pattern(max_stamp, pattern),
-            FunctionParamPattern::Nested(params) => {
-                for nested in params {
-                    visit_function_param(max_stamp, nested);
-                }
-            }
-        }
+        visit_ident(max_stamp, &param.fp_param);
+        visit_pattern(max_stamp, &param.fp_pat);
     }
 
     fn visit_expression(max_stamp: &mut i32, expr: &Expression) {
@@ -299,9 +289,7 @@ pub fn max_lambda_input_stamp(typed_structure: &crate::types::typedtree::Structu
                 for param in params {
                     visit_function_param(max_stamp, param);
                 }
-                for case in body {
-                    visit_case(max_stamp, case);
-                }
+                visit_expression(max_stamp, body);
             }
             ExpressionDesc::Texp_apply { funct, args, .. } => {
                 visit_expression(max_stamp, funct);

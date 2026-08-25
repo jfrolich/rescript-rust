@@ -49,7 +49,7 @@ use crate::types::type_expr::{TypeDesc, TypeExprRef};
 use crate::types::typecore::TypeCoreWarning;
 use crate::types::typedtree::{
     ApplyArg, Case, Constant as TConstant, EnvRef, Expression, ExpressionDesc, FunctionParam,
-    FunctionParamPattern, MethKind, ModuleCoercion, ModuleExpr, ModuleExprDesc, Partial, Pattern,
+    MethKind, ModuleCoercion, ModuleExpr, ModuleExprDesc, Partial, Pattern,
     PatternDesc, RecordField, RecordLabelDefinition, Structure, StructureItem, StructureItemDesc,
     ValueBinding,
 };
@@ -2660,6 +2660,7 @@ impl<'a> RawLambdaConverter<'a> {
         body
     }
 
+    #[cfg(any())]
     fn push_defaults_case(&self, bindings: Vec<RawFunctionBinding>, case: &Case) -> Case {
         if case.c_guard.is_none() {
             match &case.c_rhs.exp_desc {
@@ -6038,45 +6039,12 @@ impl<'a> RawLambdaConverter<'a> {
                 let body_lam = self.convert_expr_raw(body);
                 self.convert_let_with_body_raw(*rec_flag, bindings, body_lam)
             }
-            ExpressionDesc::Texp_function {
-                params,
-                body,
-                partial,
-                arity,
-                async_,
-            } => {
+            ExpressionDesc::Texp_function { params, body, async_ } => {
                 let directive =
                     Self::get_directive_attribute_from(&expr.exp_attributes, self.arena);
                 let inline = self.get_inline_attribute_from(&expr.exp_attributes);
-                if body.len() == 1 {
-                    if let Some(lambda) = self.convert_single_case_function_raw_borrowed(
-                        params,
-                        &body[0],
-                        *partial,
-                        *arity,
-                        expr.exp_type,
-                        *async_,
-                        directive.clone(),
-                        inline,
-                        self.loc(expr.exp_loc),
-                    ) {
-                        return lambda;
-                    }
-                }
-                let pushed_body = body
-                    .iter()
-                    .map(|case| self.push_defaults_case(Vec::new(), case))
-                    .collect::<Vec<_>>();
-                self.convert_function_raw(
-                    params,
-                    &pushed_body,
-                    *partial,
-                    *arity,
-                    expr.exp_type,
-                    *async_,
-                    directive,
-                    inline,
-                    self.loc(expr.exp_loc),
+                self.convert_nary_function_raw(
+                    params, body, *async_, directive, inline, self.loc(expr.exp_loc),
                 )
             }
             ExpressionDesc::Texp_apply {
@@ -6324,14 +6292,8 @@ impl<'a> RawLambdaConverter<'a> {
                 let body_lam = self.convert_expr(body);
                 self.convert_let_with_body(*rec_flag, bindings, body_lam)
             }
-            ExpressionDesc::Texp_function {
-                params,
-                body,
-                partial,
-                arity,
-                ..
-            } if body.len() == 1 && body[0].c_guard.is_none() => {
-                self.convert_function(params, body, *partial, *arity, self.loc(expr.exp_loc))
+            ExpressionDesc::Texp_function { params, body, .. } => {
+                self.convert_nary_function(params, body, self.loc(expr.exp_loc))
             }
             ExpressionDesc::Texp_apply {
                 funct,
@@ -10313,6 +10275,68 @@ impl<'a> RawLambdaConverter<'a> {
         }
     }
 
+    /// Mirrors compiler/ml/translcore.ml:615-637 and `transl_function` for the
+    /// upstream n-ary Typedtree representation.
+    fn convert_nary_function_raw(
+        &mut self,
+        params: &[FunctionParam],
+        body: &Expression,
+        async_: bool,
+        directive: Option<String>,
+        inline: InlineAttribute,
+        _loc: Location,
+    ) -> RawLambda {
+        let param_ids = params
+            .iter()
+            .map(|param| param.fp_param.clone())
+            .collect::<Vec<_>>();
+        let return_unit = self.is_base_type(body.exp_type, "unit");
+        let mut lambda_body = self.convert_expr_raw(body);
+        for param in params.iter().rev() {
+            let pat = param.fp_pat.clone();
+            let id = &param.fp_param;
+            lambda_body = match &pat.pat_desc {
+                PatternDesc::Tpat_any => lambda_body,
+                PatternDesc::Tpat_var(bound, _) if bound.same(id) => lambda_body,
+                _ => full_matching::for_function(
+                    self.type_ctx,
+                    self.arena,
+                    self.loc(pat.pat_loc),
+                    RawLambda::var(id.clone()),
+                    vec![(pat, lambda_body)],
+                    param.fp_partial,
+                    &mut self.next_static_raise,
+                ),
+            };
+        }
+        RawLambda::function_(
+            param_ids.len() as i32,
+            param_ids,
+            lambda_body,
+            FunctionAttribute {
+                return_unit,
+                async_,
+                directive,
+                inline,
+                ..FunctionAttribute::default()
+            },
+        )
+    }
+
+    fn convert_nary_function(
+        &mut self,
+        params: &[FunctionParam],
+        body: &Expression,
+        loc: Location,
+    ) -> Lambda {
+        let raw = self.convert_nary_function_raw(
+            params, body, false, None, InlineAttribute::default(), loc,
+        );
+        let start_stamp = self.current_stamp();
+        crate::raw_lambda::lower::lower_to_lambda_with_start_stamp(raw, start_stamp)
+    }
+
+    #[cfg(any())]
     fn convert_function_raw(
         &mut self,
         params: &[FunctionParam],
@@ -10330,7 +10354,7 @@ impl<'a> RawLambdaConverter<'a> {
 
         let mut param_ids = Vec::new();
         for param in all_params.iter() {
-            param_ids.push(param.param_id.clone());
+            param_ids.push(param.fp_param.clone());
         }
 
         let return_unit = final_body
@@ -10395,6 +10419,7 @@ impl<'a> RawLambdaConverter<'a> {
         }
     }
 
+    #[cfg(any())]
     fn convert_single_case_function_raw_borrowed(
         &mut self,
         params: &[FunctionParam],
@@ -10475,7 +10500,7 @@ impl<'a> RawLambdaConverter<'a> {
 
         let mut param_ids = Vec::with_capacity(all_params.len());
         for param in all_params.iter() {
-            param_ids.push(param.param_id.clone());
+            param_ids.push(param.fp_param.clone());
         }
 
         let return_unit = self.is_base_type(final_body.exp_type, "unit");
@@ -10690,6 +10715,7 @@ impl<'a> RawLambdaConverter<'a> {
         }
     }
 
+    #[cfg(any())]
     fn convert_function(
         &mut self,
         params: &[FunctionParam],
@@ -10756,6 +10782,7 @@ impl<'a> RawLambdaConverter<'a> {
         }
     }
 
+    #[cfg(any())]
     fn flatten_function_by_arity<'b>(
         &self,
         params: &'b [FunctionParam],
@@ -10815,23 +10842,7 @@ impl<'a> RawLambdaConverter<'a> {
     }
 
     fn param_pattern(param: &FunctionParam) -> Pattern {
-        match &param.pat {
-            FunctionParamPattern::Simple(pat) => pat.clone(),
-            FunctionParamPattern::Nested(nested) => {
-                let patterns = nested.iter().map(Self::param_pattern).collect::<Vec<_>>();
-                if patterns.len() == 1 {
-                    patterns.into_iter().next().unwrap()
-                } else {
-                    Pattern::new(
-                        PatternDesc::Tpat_tuple(patterns),
-                        LocIdx::none(),
-                        crate::types::TypeExprRef(0),
-                        crate::types::typedtree::EnvRef(0),
-                        crate::parser::ast::Attributes::new(),
-                    )
-                }
-            }
-        }
+        param.fp_pat.clone()
     }
 
     fn convert_apply(

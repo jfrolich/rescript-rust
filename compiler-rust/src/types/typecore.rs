@@ -38,7 +38,7 @@ use crate::parser::longident::Longident;
 use crate::types::type_expr::TypeExprRefSet;
 use crate::types::typedtree::{
     ApplyArg, ArrowArg, Constant, EnvRef, ExpExtra, Expression, ExpressionDesc, FunctionParam,
-    FunctionParamPattern, ModuleExpr, ModuleExprDesc, ModuleType, ModuleTypeConstraint,
+    ModuleExpr, ModuleExprDesc, ModuleType, ModuleTypeConstraint,
     ModuleTypeDesc, PatExtra, Pattern, PatternDesc, StructureItem, StructureItemDesc,
     TypedSignatureItem, TypedSignatureItemDesc, ValueBinding,
 };
@@ -11368,13 +11368,8 @@ fn collect_expression_ident_heads(exp: &Expression, ids: &mut Vec<Ident>) {
             }
             collect_expression_ident_heads(body, ids);
         }
-        ExpressionDesc::Texp_function { params, body, .. } => {
-            for param in params {
-                if let Some(default) = &param.default {
-                    collect_expression_ident_heads(default, ids);
-                }
-            }
-            collect_case_expression_ident_heads(body, ids);
+        ExpressionDesc::Texp_function { body, .. } => {
+            collect_expression_ident_heads(body, ids);
         }
         ExpressionDesc::Texp_apply { funct, args, .. } => {
             collect_expression_ident_heads(funct, ids);
@@ -14720,7 +14715,7 @@ fn type_function(
     expected_ty: TypeExprRef,
     attributes: &[crate::parser::ast::Attribute],
 ) -> TypeCoreResult<Expression> {
-    use crate::types::typedtree::{Case, FunctionParam, FunctionParamPattern};
+    use crate::types::typedtree::{Case, FunctionParam};
 
     let ctx = tctx.type_ctx;
 
@@ -15020,11 +15015,15 @@ fn type_function(
         };
         let param_id = name_pattern(ctx, "param", &cases);
         let fp = FunctionParam {
-            param_id,
-            label: arg_label.clone(),
-            default: typed_default,
-            pat: FunctionParamPattern::Simple(typed_param),
+            fp_lbl: ctx_label.clone(),
+            fp_param: param_id,
+            fp_pat: typed_param,
+            fp_partial: partial,
         };
+        // Defaults are represented by `#default` lets in the function body in
+        // upstream Typedtree. The parser/type-parameter port will construct
+        // those lets directly; do not retain the deleted per-param field.
+        let _ = typed_default;
 
         // Match OCaml typecore.ml:
         //   exp_type = instance env (newgenty (Tarrow (...)))
@@ -15035,12 +15034,30 @@ fn type_function(
             ctx.new_generic_arrow(ctx_label, exp_param_ty, return_ty, arity_opt),
         );
 
+        let mut params = vec![fp];
+        let mut function_body = cases.into_iter().next().expect("single function case").c_rhs;
+        if let ExpressionDesc::Texp_function {
+            params: nested_params,
+            body: nested_body,
+            async_: nested_async,
+        } = function_body.exp_desc
+        {
+            if nested_async == is_async {
+                params.extend(nested_params);
+                function_body = *nested_body;
+            } else {
+                function_body.exp_desc = ExpressionDesc::Texp_function {
+                    params: nested_params,
+                    body: nested_body,
+                    async_: nested_async,
+                };
+            }
+        }
+
         Ok(Expression::new(
             ExpressionDesc::Texp_function {
-                params: vec![fp],
-                body: cases,
-                partial,
-                arity,
+                params,
+                body: Box::new(function_body),
                 async_: is_async,
             },
             loc.clone(),
@@ -19544,14 +19561,7 @@ fn letmodule_local_escape_function_param_site(
     param: &FunctionParam,
     module_id: &Ident,
 ) -> Option<(LocIdx, TypeExprRef)> {
-    match &param.pat {
-        FunctionParamPattern::Simple(pat) => {
-            letmodule_local_escape_pattern_site(ctx, pat, module_id)
-        }
-        FunctionParamPattern::Nested(params) => params
-            .iter()
-            .find_map(|param| letmodule_local_escape_function_param_site(ctx, param, module_id)),
-    }
+    letmodule_local_escape_pattern_site(ctx, &param.fp_pat, module_id)
 }
 
 fn letmodule_local_escape_expression_site(
@@ -19592,17 +19602,7 @@ fn letmodule_local_escape_expression_site(
                 letmodule_local_escape_function_param_site(ctx, param, module_id)
                     .map(|(loc, ty)| LetModuleLocalEscapeSite::Pattern { loc, ty })
             })
-            .or_else(|| {
-                body.iter().find_map(|case| {
-                    letmodule_local_escape_pattern_site(ctx, &case.c_lhs, module_id)
-                        .map(|(loc, ty)| LetModuleLocalEscapeSite::Pattern { loc, ty })
-                })
-            })
-            .or_else(|| {
-                body.iter().find_map(|case| {
-                    letmodule_local_escape_expression_site(ctx, &case.c_rhs, module_id)
-                })
-            })
+            .or_else(|| letmodule_local_escape_expression_site(ctx, body, module_id))
             .or_else(own_escape),
         ExpressionDesc::Texp_ifthenelse(_, ifso, ifnot) => {
             letmodule_local_escape_expression_site(ctx, ifso, module_id)
@@ -21483,13 +21483,8 @@ pub(crate) fn typed_expression_uses_ident(expr: &Expression, target: &Ident) -> 
                 .any(|binding| typed_expression_uses_ident(&binding.vb_expr, target))
                 || typed_expression_uses_ident(body, target)
         }
-        ExpressionDesc::Texp_function { params, body, .. } => {
-            params.iter().any(|param| {
-                param
-                    .default
-                    .as_deref()
-                    .is_some_and(|expr| typed_expression_uses_ident(expr, target))
-            }) || body.iter().any(|case| typed_case_uses_ident(case, target))
+        ExpressionDesc::Texp_function { body, .. } => {
+            typed_expression_uses_ident(body, target)
         }
         ExpressionDesc::Texp_apply { funct, args, .. } => {
             typed_expression_uses_ident(funct, target)
@@ -21675,13 +21670,8 @@ fn collect_typed_expression_pident_uses(expr: &Expression, used: &mut HashSet<Id
             }
             collect_typed_expression_pident_uses(body, used);
         }
-        ExpressionDesc::Texp_function { params, body, .. } => {
-            for param in params {
-                if let Some(default) = &param.default {
-                    collect_typed_expression_pident_uses(default, used);
-                }
-            }
-            collect_typed_case_pident_uses(body, used);
+        ExpressionDesc::Texp_function { body, .. } => {
+            collect_typed_expression_pident_uses(body, used);
         }
         ExpressionDesc::Texp_apply { funct, args, .. } => {
             collect_typed_expression_pident_uses(funct, used);
@@ -22440,9 +22430,7 @@ fn rec_expression(env: &RecEnv, expr: &Expression) -> RecUse {
             rec_use_join(rec_expression(env, body), cases_use)
         }
         ExpressionDesc::Texp_function { body, .. } => {
-            rec_use_delay(body.iter().fold(RecUse::default(), |use_, case| {
-                rec_use_join(use_, rec_case(env, case, RecUse::default()))
-            }))
+            rec_use_delay(rec_expression(env, body))
         }
     }
 }

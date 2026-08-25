@@ -287,13 +287,10 @@ pub enum ExpressionDesc {
     /// Let binding: `let P = E in E'`.
     Texp_let(RecFlag, Vec<ValueBinding>, Box<Expression>),
 
-    /// Function: `fun P -> E`.
-    /// Uses the new multi-parameter representation with FunctionParam.
+    /// Function expression. Mirrors `compiler/ml/typedtree.ml`.
     Texp_function {
         params: Vec<FunctionParam>,
-        body: Vec<Case>,
-        partial: Partial,
-        arity: Arity,
+        body: Box<Expression>,
         /// Whether this is an async function.
         async_: bool,
     },
@@ -473,26 +470,17 @@ pub struct ApplyArg {
     pub expression: Option<Expression>,
 }
 
-/// A function parameter.
+/// A function parameter. Mirrors `compiler/ml/typedtree.ml`.
 #[derive(Debug, Clone)]
 pub struct FunctionParam {
-    /// Identifier OCaml uses to name this parameter during lambda translation.
-    pub param_id: Ident,
-    /// Parameter label.
-    pub label: ParserArgLabel,
-    /// Default value for optional parameter.
-    pub default: Option<Box<Expression>>,
-    /// Parameter pattern.
-    pub pat: FunctionParamPattern,
-}
-
-/// Pattern for a function parameter.
-#[derive(Debug, Clone)]
-pub enum FunctionParamPattern {
-    /// Simple pattern binding.
-    Simple(Pattern),
-    /// Nested function parameter.
-    Nested(Vec<FunctionParam>),
+    /// Source argument label.
+    pub fp_lbl: TypeArgLabel,
+    /// Identifier bound by generated Lambda.
+    pub fp_param: Ident,
+    /// Typed source pattern.
+    pub fp_pat: Pattern,
+    /// Whether the parameter pattern is exhaustive.
+    pub fp_partial: Partial,
 }
 
 // ============================================================================

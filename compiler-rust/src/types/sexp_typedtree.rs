@@ -20,7 +20,7 @@ use crate::types::path::Path;
 use crate::types::type_expr::{FieldKind, RowDesc, RowField, TypeDesc, TypeExprRef};
 use crate::types::typedtree::{
     Case, Constant, Expression, ExpressionDesc, ExtensionConstructor, ExtensionConstructorKind,
-    FunctionParam, FunctionParamPattern, Loc, ModuleBinding, ModuleExpr, ModuleExprDesc,
+    FunctionParam, Loc, ModuleBinding, ModuleExpr, ModuleExprDesc,
     ModuleTypeConstraint, OpenDeclaration, Partial, Pattern, PatternDesc, RecordField,
     RecordLabelDefinition, Structure, StructureItem, StructureItemDesc, TypeExtension,
     TypedConstructorArguments, TypedConstructorDeclaration, TypedCoreType, TypedCoreTypeDesc,
@@ -1131,61 +1131,25 @@ fn sexp_expression_desc(
                 sexp_expression(arena, ctx, with_locs, dedup, body),
             ])
         }
-        ExpressionDesc::Texp_function {
-            params,
-            body,
-            partial,
-            arity,
-            async_,
-        } => {
-            // OCaml Texp_function has: arg_label, arity (Option<int>), param (Ident), case, partial, async
-            // Rust has: params (Vec), body (Vec<Case>), partial, arity, async_
-            // For parity, we need to output in OCaml's format
-
-            // Handle single-param single-case (common case)
-            if params.len() == 1 && body.len() == 1 {
-                let param = &params[0];
-                let case = &body[0];
-
-                Sexp::list(vec![
-                    Sexp::atom("Texp_function"),
-                    sexp_arg_label(arena, &param.label),
-                    sexp_arity(arena, arity),
-                    sexp_ident(&param.param_id),
-                    sexp_case(arena, ctx, with_locs, dedup, case),
-                    sexp_partial(partial),
-                    Sexp::atom(if *async_ { "async" } else { "sync" }),
-                ])
-            } else {
-                // Fallback for complex cases - output in a way that shows the structure
-                // This won't match OCaml for multi-param functions, but provides debugging info
-                let mut param_items = Vec::new();
-                for p in params.iter() {
-                    let default_sexp = match &p.default {
-                        None => Sexp::atom("None"),
-                        Some(e) => Sexp::list(vec![
-                            Sexp::atom("Some"),
-                            sexp_expression(arena, ctx, with_locs, dedup, e),
-                        ]),
-                    };
-                    param_items.push(Sexp::list(vec![
-                        sexp_arg_label(arena, &p.label),
-                        default_sexp,
-                    ]));
-                }
-                let mut body_items = Vec::new();
-                for c in body.iter() {
-                    body_items.push(sexp_case(arena, ctx, with_locs, dedup, c));
-                }
-                Sexp::list(vec![
-                    Sexp::atom("Texp_function"),
-                    Sexp::list(param_items),
-                    Sexp::list(body_items),
-                    sexp_partial(partial),
-                    sexp_arity(arena, arity),
-                    Sexp::atom(if *async_ { "async" } else { "sync" }),
-                ])
-            }
+        ExpressionDesc::Texp_function { params, body, async_ } => {
+            // compiler/ml/sexp_typedtree.ml:382-400.
+            let params = params
+                .iter()
+                .map(|param| {
+                    Sexp::list(vec![
+                        sexp_type_arg_label(&param.fp_lbl),
+                        sexp_ident(&param.fp_param),
+                        sexp_pattern(arena, ctx, with_locs, dedup, &param.fp_pat),
+                        sexp_partial(&param.fp_partial),
+                    ])
+                })
+                .collect();
+            Sexp::list(vec![
+                Sexp::atom("Texp_function"),
+                Sexp::list(params),
+                sexp_expression(arena, ctx, with_locs, dedup, body),
+                Sexp::atom(if *async_ { "async" } else { "sync" }),
+            ])
         }
         ExpressionDesc::Texp_apply {
             funct,
