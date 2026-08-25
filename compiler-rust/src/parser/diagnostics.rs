@@ -188,7 +188,7 @@ impl ParserDiagnostic {
                 t if t.is_keyword() => {
                     format!("`{}` is a reserved keyword.", t)
                 }
-                _ => "At this point, I'm looking for an uppercased name like `Belt` or `Array`"
+                _ => "At this point, I'm looking for an uppercased name like `Array` or `Math`"
                     .to_string(),
             },
             DiagnosticCategory::Lident(current_token) => match current_token {
