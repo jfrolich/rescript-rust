@@ -3659,10 +3659,14 @@ impl<'a> RawLambdaConverter<'a> {
             || (fields.len() < 20 && !has_optional);
 
         if build_direct {
-            // OCaml wraps the init expression in a let binding when there's a
-            // base expression, so field accesses use Lvar(init_id) not the expr.
-            let init_id = base_lam.as_ref().map(|_| self.fresh_ident("init"));
-            let init_var = init_id.as_ref().map(|id| RawLambda::var(id.clone()));
+            // OCaml allocates init_id before inspecting opt_init_expr, even
+            // for a record literal with no base (translcore.ml:1087-1114).
+            // The binder is emitted only when a base exists, but its allocation
+            // still orders later Translcore/Translmod identifiers.
+            let init_id = self.fresh_ident("init");
+            let init_var = base_lam
+                .as_ref()
+                .map(|_| RawLambda::var(init_id.clone()));
 
             let mut elems = Vec::with_capacity(fields.len());
             let mut fields_info = Vec::with_capacity(fields.len());
@@ -3793,11 +3797,11 @@ impl<'a> RawLambdaConverter<'a> {
                 }
             };
             // Wrap with let init = base_expr when there's a base expression
-            return match (init_id, base_lam) {
-                (Some(id), Some(base_expr)) => {
-                    RawLambda::let_(LetKind::Strict, id, base_expr, result)
+            return match base_lam {
+                Some(base_expr) => {
+                    RawLambda::let_(LetKind::Strict, init_id, base_expr, result)
                 }
-                _ => result,
+                None => result,
             };
         }
 
