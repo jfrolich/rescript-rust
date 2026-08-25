@@ -675,12 +675,16 @@ fn parse_es6_arrow_type(p: &mut Parser<'_>, attrs: Attributes) -> CoreType {
         };
 
         let ret_idx = p.arena_mut().push_core_type(return_type);
+        // A bare labeled arrow is the same complete one-parameter arrow as
+        // its parenthesized spelling (res_core.ml:4973-4980).
+        let full_arity = p.push_arity_full(1);
+        p.arena_mut()
+            .set_nary_arrow_args(full_arity, vec![arg.clone()]);
         CoreType {
             ptyp_desc: Box::new(CoreTypeDesc::Ptyp_arrow(Box::new((
                 Box::new(arg),
                 ret_idx,
-                // OCaml uses ~arity:None for parsed type expressions
-                p.push_arity_unknown(),
+                full_arity,
             )))),
             ptyp_loc: loc,
             ptyp_attributes: Attributes::new(),

@@ -2502,7 +2502,7 @@ pub fn over_parse_constrained_or_coerced_or_arrow_expression(
                     let arrow_loc = p.mk_loc_spanning(expr.pexp_loc, body.pexp_loc);
 
                     // Interpretation 1: (param) => (body : type)
-                    let unknown_arity = p.arena_mut().push_arity(None);
+                    let full_arity = p.push_arity_full(1);
                     let body_idx = p.arena_mut().push_expr(body.clone());
                     let typ_idx = p.arena_mut().push_core_type(typ.clone());
                     let constrained_body = Expression {
@@ -2516,7 +2516,7 @@ pub fn over_parse_constrained_or_coerced_or_arrow_expression(
                     let pat1_idx = p.arena_mut().push_pat(pat.clone());
                     let arrow1 = Expression {
                         pexp_desc: Box::new(ExpressionDesc::Pexp_fun(Box::new(PexpFun {
-                            arity: unknown_arity,
+                            arity: full_arity,
                             arg_label: ArgLabel::Nolabel,
                             default: None,
                             lhs: pat1_idx,
@@ -2531,7 +2531,7 @@ pub fn over_parse_constrained_or_coerced_or_arrow_expression(
                         arrow1
                     } else {
                         // Interpretation 2: (param: type) => body
-                        let unknown_arity2 = p.arena_mut().push_arity(None);
+                        let full_arity2 = p.push_arity_full(1);
                         let pat_idx = p.arena_mut().push_pat(pat);
                         let typ_idx2 = p.arena_mut().push_core_type(typ.clone());
                         let body_idx2 = p.arena_mut().push_expr(body.clone());
@@ -2545,7 +2545,7 @@ pub fn over_parse_constrained_or_coerced_or_arrow_expression(
                         let constraint_pat_idx = p.arena_mut().push_pat(constraint_pat);
                         let arrow2 = Expression {
                             pexp_desc: Box::new(ExpressionDesc::Pexp_fun(Box::new(PexpFun {
-                                arity: unknown_arity2,
+                                arity: full_arity2,
                                 arg_label: ArgLabel::Nolabel,
                                 default: None,
                                 lhs: constraint_pat_idx,
