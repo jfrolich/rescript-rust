@@ -6175,7 +6175,9 @@ fn format_expr_type_clash_report(
     let expected_is_jsx_component = trace
         .iter()
         .any(|(_, expected)| type_is_jsx_component(type_ctx, *expected));
-    let plain_function_to_component = actual_is_function && expected_is_jsx_component;
+    let plain_function_to_component = actual_is_function
+        && expected_is_jsx_component
+        && !matches!(context, Some(TypeClashContext::JsxComponent));
     let missing_parameters = if actual_is_function {
         Vec::new()
     } else {
@@ -6444,7 +6446,7 @@ fn format_expr_type_clash_report(
         append_type_clash_type(type_ctx, trace, false, INFO, expected, &mut message);
         if plain_function_to_component {
             let inline = " \x1b[2m(defined as\x1b[0m \x1b[1;33mJsx.component";
-            let multiline = " \x1b[2m(defined as\x1b[0m\n  \x1b[1;33mJsx.component";
+            let multiline = " \x1b[2m(defined as\x1b[0m\n    \x1b[1;33mJsx.component";
             message = message.replace(inline, multiline);
         }
     }
@@ -6477,7 +6479,8 @@ fn format_expr_type_clash_report(
         Some(TypeClashContext::LetUnwrapReturn)
             | Some(TypeClashContext::SwitchExpression)
             | Some(TypeClashContext::JsxComponent)
-    ) {
+    ) || plain_function_to_component
+    {
         let message = format_type_clash_message_with_empty_blank_lines(&message);
         format_compiler_error_report_raw_message(arena, source, filename, loc, &message)
     } else if type_clash_string_to_polyvariant(type_ctx, trace)
