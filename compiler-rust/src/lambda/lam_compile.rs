@@ -12,7 +12,7 @@ use std::sync::Arc;
 use crate::cmi::persistent_env::{CmjExportArity, CmjExportConstant};
 use crate::context::IdGenerator;
 use crate::ident::Ident;
-use crate::js_ir::op::{IdentInfo, Kind, MutableFlag, Number, UsedStats};
+use crate::js_ir::op::{IdentInfo, Kind, MutableFlag, Number, PropertyName, UsedStats};
 use crate::js_ir::{
     BinOp, Block, CallArity, CallInfo, CallKind, CaseClause, Delim, DepsProgram, Expression,
     ExpressionDesc, ForDirection, ModuleId, ModulePathResolver, Program, Statement, StatementDesc,
@@ -1136,6 +1136,75 @@ impl LambdaCompiler {
         Statement::new(StatementDesc::Try(body, Some((exn.clone(), handler)), None))
     }
 
+    fn collect_record_spread_overrides<'a>(
+        copy_id: &Ident,
+        lam: &'a Lambda,
+        overrides: &mut Vec<(&'a SetFieldDbgInfo, &'a Lambda)>,
+    ) -> bool {
+        match lam {
+            Lambda::Lsequence(set, rest) => match set.as_ref() {
+                Lambda::Lprim(PrimInfo {
+                    primitive: Primitive::Psetfield(_, field_info),
+                    args,
+                    ..
+                }) if matches!(args.as_slice(), [Lambda::Lvar(id), _] if id == copy_id) => {
+                    overrides.push((field_info, &args[1]));
+                    Self::collect_record_spread_overrides(copy_id, rest, overrides)
+                }
+                _ => false,
+            },
+            Lambda::Lvar(id) => id == copy_id,
+            _ => false,
+        }
+    }
+
+    /// Port of `try_compile_record_spread` from
+    /// `compiler/core/lam_compile.ml`: collapse a duplicated record followed
+    /// by mutations of that copy into one spread object literal. Compiling the
+    /// initializer and overrides from left to right preserves source effects.
+    fn try_compile_record_spread(
+        &mut self,
+        copy_id: &Ident,
+        value: &Lambda,
+        body: &Lambda,
+    ) -> Option<Compiled> {
+        let Lambda::Lprim(PrimInfo {
+            primitive: Primitive::Pduprecord,
+            args,
+            ..
+        }) = value
+        else {
+            return None;
+        };
+        let [init] = args.as_slice() else {
+            return None;
+        };
+
+        let mut overrides = Vec::new();
+        if !Self::collect_record_spread_overrides(copy_id, body, &mut overrides) {
+            return None;
+        }
+
+        let Compiled {
+            mut prelude,
+            expr: init_expr,
+        } = self.compile_expr(init);
+        let mut props = Vec::with_capacity(overrides.len());
+        for (field_info, override_lam) in overrides {
+            let compiled = self.compile_expr(override_lam);
+            prelude.extend(compiled.prelude);
+            props.push((
+                PropertyName::Lit(field_info.name().to_string()),
+                compiled.expr,
+            ));
+        }
+
+        Some(Compiled {
+            prelude,
+            expr: Expression::new(ExpressionDesc::Object(Some(Box::new(init_expr)), props)),
+        })
+    }
+
     pub(crate) fn compile_expr(&mut self, lam: &Lambda) -> Compiled {
         match lam {
             Lambda::Lvar(id) => Compiled {
@@ -1197,6 +1266,10 @@ impl LambdaCompiler {
                 }
             }
             Lambda::Llet(kind, id, value, body) => {
+                if let Some(compiled) = self.try_compile_record_spread(id, value, body) {
+                    return compiled;
+                }
+
                 // Mirror OCaml's per-Single counter reset
                 // (`lam_compile_main.ml`): each top-level binding compiles
                 // its RHS with `loop_label_counter = ref 0`. Inner Llets
@@ -2177,6 +2250,12 @@ impl LambdaCompiler {
     fn compile_effect_block_inner(&mut self, lam: &Lambda) -> Block {
         match lam {
             Lambda::Llet(kind, id, value, body) => {
+                if let Some(compiled) = self.try_compile_record_spread(id, value, body) {
+                    let mut block = compiled.prelude;
+                    push_effect_expression(&mut block, compiled.expr);
+                    return block;
+                }
+
                 let mut block = self.compile_let_binding(*kind, id, value);
                 // Mirror OCaml's output_finished:True from Lbreak/Lcontinue:
                 // if the binding's RHS is an unconditional exit, the body is
@@ -2455,6 +2534,12 @@ impl LambdaCompiler {
     fn compile_return_block_inner(&mut self, lam: &Lambda) -> Block {
         match lam {
             Lambda::Llet(kind, id, value, body) => {
+                if let Some(compiled) = self.try_compile_record_spread(id, value, body) {
+                    let mut block = compiled.prelude;
+                    block.push(Statement::return_(compiled.expr));
+                    return block;
+                }
+
                 let mut block = self.compile_let_binding(*kind, id, value);
                 if block_finishes_output(&block) {
                     return block;
@@ -3729,6 +3814,10 @@ impl LambdaCompiler {
     fn compile_effect_output(&mut self, lam: &Lambda) -> Compiled {
         match lam {
             Lambda::Llet(kind, id, value, body) => {
+                if let Some(compiled) = self.try_compile_record_spread(id, value, body) {
+                    return compiled;
+                }
+
                 let mut prelude = self.compile_let_binding(*kind, id, value);
                 if block_terminates(&prelude) {
                     return Compiled {
@@ -4452,6 +4541,16 @@ impl LambdaCompiler {
     pub(crate) fn compile_assign_to_target_block(&mut self, result: &Ident, lam: &Lambda) -> Block {
         match lam {
             Lambda::Llet(kind, id, value, body) => {
+                if let Some(compiled) = self.try_compile_record_spread(id, value, body) {
+                    let mut block = compiled.prelude;
+                    block.push(Statement::exp(Expression::bin(
+                        BinOp::Eq,
+                        Expression::var(result.clone()),
+                        compiled.expr,
+                    )));
+                    return block;
+                }
+
                 let mut block = self.compile_let_binding(*kind, id, value);
                 block.extend(self.compile_assign_to_target_block(result, body));
                 block
