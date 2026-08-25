@@ -1224,7 +1224,7 @@ fn parse_record_pattern(p: &mut Parser<'_>) -> Pattern {
     // OCaml res_core.ml parse_record_pattern_row: a `...` row may carry a
     // record-rest binding (`...T as name` or `...name`). At most one rest is
     // allowed; it does not participate in the field list.
-    let mut record_rest: Option<crate::parser::ast::RecordPatRest> = None;
+    let mut record_rests: Vec<crate::parser::ast::RecordPatRest> = vec![];
     // Fallback for old-style `{...foo}` rows: parse them as a spread field so
     // the existing spread-error diagnostic path still fires.
     let mut spread_fallback = false;
@@ -1264,24 +1264,12 @@ fn parse_record_pattern(p: &mut Parser<'_>) -> Pattern {
                         with_loc(name_idx, p.mk_loc_idx_to_prev_end(name_start_idx))
                     }
                 };
-                if record_rest.is_some() {
-                    let rest_err_loc = p.mk_loc_idx_to_prev_end(rest_start_pos_idx);
-                    let err_loc_start = p.loc_start(rest_err_loc);
-                    p.err_at(
-                        err_loc_start,
-                        p.end_pos.clone(),
-                        DiagnosticCategory::Message(
-                            super::core::error_messages::RECORD_PATTERN_MULTIPLE_REST.to_string(),
-                        ),
-                    );
-                } else {
-                    let rest_loc = p.mk_loc_idx_to_prev_end(rest_start_pos_idx);
-                    record_rest = Some(crate::parser::ast::RecordPatRest {
-                        rest_loc,
-                        rest_name: name,
-                        rest_type: Some(core_type_idx),
-                    });
-                }
+                let rest_loc = p.mk_loc_idx_to_prev_end(rest_start_pos_idx);
+                record_rests.push(crate::parser::ast::RecordPatRest {
+                    rest_loc,
+                    rest_name: name,
+                    rest_type: Some(core_type_idx),
+                });
             } else {
                 match p.token.clone() {
                     Token::Lident(ident) => {
@@ -1290,23 +1278,11 @@ fn parse_record_pattern(p: &mut Parser<'_>) -> Pattern {
                         p.next();
                         let rest_loc = p.mk_loc_idx_to_prev_end(rest_start_pos_idx);
                         let name_loc = p.mk_loc_idx_to_prev_end(rest_name_start_pos_idx);
-                        if record_rest.is_some() {
-                            let err_loc_start = p.loc_start(rest_loc);
-                            p.err_at(
-                                err_loc_start,
-                                p.end_pos.clone(),
-                                DiagnosticCategory::Message(
-                                    super::core::error_messages::RECORD_PATTERN_MULTIPLE_REST
-                                        .to_string(),
-                                ),
-                            );
-                        } else {
-                            record_rest = Some(crate::parser::ast::RecordPatRest {
-                                rest_loc,
-                                rest_name: with_loc(name_idx, name_loc),
-                                rest_type: None,
-                            });
-                        }
+                        record_rests.push(crate::parser::ast::RecordPatRest {
+                            rest_loc,
+                            rest_name: with_loc(name_idx, name_loc),
+                            rest_type: None,
+                        });
                     }
                     _ => {
                         // Fallback: treat as old-style spread (error).
@@ -1478,8 +1454,20 @@ fn parse_record_pattern(p: &mut Parser<'_>) -> Pattern {
     p.expect(Token::Rbrace);
     let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
 
-    if let Some(record_rest) = record_rest {
+    // OCaml folds the reversed row list: the last rest in source wins, and
+    // earlier rests report errors from their own start through the current token.
+    let mut record_rests = record_rests.into_iter().rev();
+    if let Some(record_rest) = record_rests.next() {
         p.arena_mut().set_record_pat_rest(loc, record_rest);
+    }
+    for duplicate in record_rests {
+        p.err_at(
+            p.loc_start(duplicate.rest_loc),
+            p.end_pos.clone(),
+            DiagnosticCategory::Message(
+                super::core::error_messages::RECORD_PATTERN_MULTIPLE_REST.to_string(),
+            ),
+        );
     }
 
     // OCaml: process raw_fields in reverse order.

@@ -2657,7 +2657,20 @@ fn print_pattern_inner<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, pat: 
                     f.close_box();
                 }
             }
-            if matches!(closed, ClosedFlag::Open) {
+            if let Some(rest) = arena.record_pat_rest(pat.ppat_loc) {
+                if !fields.is_empty() {
+                    f.string(";");
+                    f.space();
+                }
+                f.string("...");
+                if let Some(rest_type) = rest.rest_type {
+                    print_core_type(f, arena, arena.get_core_type(rest_type));
+                    f.string(" as ");
+                }
+                f.string(arena.get_string(rest.rest_name.txt));
+                f.space();
+                f.string("}");
+            } else if matches!(closed, ClosedFlag::Open) {
                 f.string(";_}");
             } else {
                 f.space(); // @; before }
