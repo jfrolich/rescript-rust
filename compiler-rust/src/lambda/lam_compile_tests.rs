@@ -961,6 +961,30 @@ fn compile_wrap_exn_uses_primitive_exceptions_internal_to_exception() {
 }
 
 #[test]
+fn compile_integer_inequality_preserves_typeof_string_comparison_like_ocaml() {
+    let mut compiler = LambdaCompiler::new();
+    let compiled = compiler.compile_expr(&Lambda::prim(
+        Primitive::Pintcomp(Comparison::Neq),
+        vec![
+            Lambda::prim(
+                Primitive::Ptypeof,
+                vec![Lambda::const_(Constant::int(3))],
+                Location::none(),
+            ),
+            Lambda::const_(Constant::String {
+                s: "number".to_string(),
+                delim: Some(StringDelim::StarJ),
+            }),
+        ],
+        Location::none(),
+    ));
+
+    assert!(compiled.prelude.is_empty());
+    assert!(matches!(compiled.expr.desc, ExpressionDesc::Bin(BinOp::NotEqEq, _, _)));
+    assert_eq!(print_expression(&compiled.expr), "\"number\" !== \"number\"");
+}
+
+#[test]
 fn compile_module_primitives_lower_to_primitive_module_runtime_calls_like_ocaml() {
     let mut compiler = LambdaCompiler::new();
     let loc = Location::none();
