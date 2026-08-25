@@ -264,16 +264,12 @@ pub fn propagate_beta_reduce_with_meta_and_id_gen(
     }
 
     let new_body = rewrite_bounded_vars(&mut substitution, body, id_gen);
-    // OCaml's `propagate_beta_reduce` (lam_beta_reduce.ml:66) builds
-    // `rest_bindings` via `fold_left2` with prepending (`(p, arg) :: rest_bindings`),
-    // so the list ends up in REVERSE param-order, then walks it with
-    // `Ext_list.fold_right` to wrap the body. The Rust loop above appends
-    // (push) instead of prepending, so iterating rest_bindings forward here
-    // is equivalent to OCaml's prepend-then-fold-right shape. Each iteration
-    // wraps the current result in a new outer Llet, so the LAST element
-    // becomes the outermost binding (matching OCaml).
+    // OCaml builds `rest_bindings` in reverse parameter order and folds it
+    // left, making the first source argument's strict binding outermost. Rust
+    // appends in parameter order, so walk that vector in reverse to preserve
+    // the same left-to-right argument evaluation order.
     let mut result = new_body;
-    for (param, arg) in rest_bindings.into_iter() {
+    for (param, arg) in rest_bindings.into_iter().rev() {
         register_bound_param_kind(ident_tbl, &param, &arg);
         result = refine_let(LetKind::Strict, param, arg, result);
     }
@@ -373,13 +369,11 @@ pub fn propagate_beta_reduce_with_map_and_meta_and_id_gen(
     // Apply substitution to body
     let new_body = rewrite_bounded_vars(&mut substitution, body, id_gen);
 
-    // See `propagate_beta_reduce_with_meta_and_id_gen` above for why we
-    // iterate forward here despite the OCaml source using `fold_right`:
-    // OCaml prepends to `rest_bindings` (reversing param-order), then
-    // `fold_right` rebuilds the wrap from the right, equivalent to walking a
-    // push-built list forward and wrapping outward at each step.
+    // See `propagate_beta_reduce_with_meta_and_id_gen`: Rust stores bindings
+    // in parameter order, so reverse iteration makes the first source
+    // argument's binding outermost, matching OCaml's reverse-list fold-left.
     let mut result = new_body;
-    for (param, arg) in rest_bindings.into_iter() {
+    for (param, arg) in rest_bindings.into_iter().rev() {
         register_bound_param_kind(ident_tbl, &param, &arg);
         result = refine_let(LetKind::Strict, param, arg, result);
     }
@@ -828,6 +822,60 @@ mod tests {
             Lambda::Llet(_, _, _, _) => {}
             _ => panic!("Expected Llet, got {result:?}"),
         }
+    }
+
+    #[test]
+    fn test_propagate_beta_reduce_preserves_source_argument_order() {
+        let x = Ident::create_local("x");
+        let y = Ident::create_local("y");
+        let body = Lambda::prim(
+            Primitive::Paddint,
+            vec![Lambda::var(x.clone()), Lambda::var(y.clone())],
+            Location::none(),
+        );
+        let first = Lambda::prim(
+            Primitive::Paddint,
+            vec![
+                Lambda::const_(Constant::int(1)),
+                Lambda::const_(Constant::int(2)),
+            ],
+            Location::none(),
+        );
+        let second = Lambda::prim(
+            Primitive::Pmulint,
+            vec![
+                Lambda::const_(Constant::int(3)),
+                Lambda::const_(Constant::int(4)),
+            ],
+            Location::none(),
+        );
+
+        let reduced = propagate_beta_reduce(&[x, y], &body, &[first, second]);
+        let Lambda::Llet(_, _, outer_value, inner) = reduced else {
+            panic!("expected first argument binding to be outermost");
+        };
+        assert!(matches!(
+            outer_value.as_ref(),
+            Lambda::Lprim(PrimInfo {
+                primitive: Primitive::Paddint,
+                ..
+            })
+        ));
+        assert!(matches!(
+            inner.as_ref(),
+            Lambda::Llet(
+                _,
+                _,
+                inner_value,
+                _
+            ) if matches!(
+                inner_value.as_ref(),
+                Lambda::Lprim(PrimInfo {
+                    primitive: Primitive::Pmulint,
+                    ..
+                })
+            )
+        ));
     }
 
     #[test]
