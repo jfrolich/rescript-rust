@@ -3548,27 +3548,20 @@ fn process_obj_type(
         return final_result;
     }
 
-    let arity_count = filtered_args.len();
-    let outermost_arity = arena.push_arity(Some(arity_count as i32));
-
-    let mut current = final_result;
-    for (i, arg) in filtered_args.iter().enumerate().rev() {
-        let arity = if i == 0 {
-            outermost_arity
-        } else {
-            arena.push_arity(None)
-        };
-        current = CoreType {
-            ptyp_desc: Box::new(CoreTypeDesc::Ptyp_arrow(Box::new((
-                Box::new((*arg).clone()),
-                arena.push_core_type(current),
-                arity,
-            )))),
-            ptyp_loc: loc,
-            ptyp_attributes: Attributes::new(),
-        };
+    let args = filtered_args.into_iter().cloned().collect::<Vec<_>>();
+    let arity = arena.push_arity(Some(args.len() as i32));
+    let first = args[0].clone();
+    let ret = arena.push_core_type(final_result);
+    arena.set_nary_arrow_args(arity, args);
+    CoreType {
+        ptyp_desc: Box::new(CoreTypeDesc::Ptyp_arrow(Box::new((
+            Box::new(first),
+            ret,
+            arity,
+        )))),
+        ptyp_loc: loc,
+        ptyp_attributes: Attributes::new(),
     }
-    current
 }
 
 /// Get optional arg type (for Optional labels).
