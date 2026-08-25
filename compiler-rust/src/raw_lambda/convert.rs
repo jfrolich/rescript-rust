@@ -3634,7 +3634,15 @@ impl<'a> RawLambdaConverter<'a> {
                         )),
                     }
                 }
-                crate::types::VariantConstructorCase::Block(block) if block.runtime.untagged => {
+                crate::types::VariantConstructorCase::Block(block)
+                    if block.runtime.untagged
+                        && self
+                            .type_ctx
+                            .variant_layout(reference.variant)
+                            .constructors
+                            .len()
+                            == 1 =>
+                {
                     match args {
                         [arg] => self.convert_expr_raw(arg),
                         [] => RawLambda::const_(raw_constructor_constant(self.type_ctx, cstr, 0)),
@@ -11226,7 +11234,11 @@ impl<'a> RawLambdaConverter<'a> {
                     _ => Lambda::const_(Constant::Constructor(tag)),
                 }
             }
-            Some(crate::types::VariantConstructorCase::Block(block)) if block.runtime.untagged => {
+            Some(crate::types::VariantConstructorCase::Block(block))
+                if block.runtime.untagged
+                    && matches!(cstr.cstr_kind, crate::types::ConstructorKind::Ordinary(reference)
+                        if self.type_ctx.variant_layout(reference.variant).constructors.len() == 1) =>
+            {
                 args.first()
                     .map_or_else(Lambda::unit, |arg| self.convert_expr(arg))
             }
@@ -12171,6 +12183,8 @@ mod tests {
         let ctx = TypeContext::new(std::sync::Arc::new(id_gen));
         let env = initial_env(&ctx);
         let mut converter = RawLambdaConverter::new(&arena, &ctx, &env);
+        let layout =
+            crate::types::variant_runtime::plain_layout(&ctx, [("OnlyOne".to_string(), false)]);
 
         let cstr = crate::types::ConstructorDescription {
             cstr_name: "OnlyOne".to_string(),
@@ -12178,7 +12192,12 @@ mod tests {
             cstr_existentials: Vec::new(),
             cstr_args: Vec::new(),
             cstr_arity: 0,
-            cstr_kind: None,
+            cstr_kind: crate::types::ConstructorKind::Ordinary(
+                crate::types::ConstructorReference {
+                    variant: layout,
+                    position: 0,
+                },
+            ),
             cstr_generalized: false,
             cstr_private: crate::types::asttypes::PrivateFlag::Public,
             cstr_loc: Location::none(),
@@ -12190,15 +12209,8 @@ mod tests {
 
         assert!(matches!(
             lowered,
-            RawLambda::Lconst(Constant::Int {
-                i: 0,
-                comment: Some(PointerInfo::Constructor(PointerConstructorTag {
-                    name,
-                    const_,
-                    non_const,
-                    runtime_tag: None,
-                })),
-            }) if name == "OnlyOne" && const_ == 1 && non_const == 0
+            RawLambda::Lconst(Constant::Constructor(crate::types::VariantTag { name, .. }))
+                if name == "OnlyOne"
         ));
     }
 
@@ -12209,6 +12221,11 @@ mod tests {
         let ctx = TypeContext::new(std::sync::Arc::new(id_gen));
         let env = initial_env(&ctx);
         let mut converter = RawLambdaConverter::new(&arena, &ctx, &env);
+        let layout = crate::types::variant_runtime::plain_layout(&ctx, [("B".to_string(), true)]);
+        let representation = crate::types::ConstructorReference {
+            variant: layout,
+            position: 0,
+        };
 
         let arg = Expression::new(
             ExpressionDesc::Texp_record {
@@ -12226,7 +12243,7 @@ mod tests {
             cstr_existentials: Vec::new(),
             cstr_args: Vec::new(),
             cstr_arity: 1,
-            cstr_kind: None,
+            cstr_kind: crate::types::ConstructorKind::Ordinary(representation),
             cstr_generalized: false,
             cstr_private: crate::types::asttypes::PrivateFlag::Public,
             cstr_loc: Location::none(),
@@ -12237,10 +12254,8 @@ mod tests {
                 type_kind: crate::types::decl::TypeKind::TypeRecord(
                     vec![],
                     crate::types::decl::RecordRepresentation::RecordInlined {
-                        tag: 0,
                         name: "B".to_string(),
-                        num_nonconsts: 1,
-                        attrs: vec![],
+                        representation,
                     },
                 ),
                 type_private: crate::types::asttypes::PrivateFlag::Public,
@@ -12266,7 +12281,6 @@ mod tests {
                     TagInfo::RecordInlined {
                         name,
                         num_nonconst,
-                        tag: 0,
                         fields,
                         mutable_flag: ParserMutableFlag::Immutable,
                         ..
@@ -12313,7 +12327,7 @@ mod tests {
             cstr_existentials: Vec::new(),
             cstr_args: Vec::new(),
             cstr_arity: 0,
-            cstr_kind: None,
+            cstr_kind: crate::types::ConstructorKind::Extension(path.clone()),
             cstr_generalized: false,
             cstr_private: crate::types::asttypes::PrivateFlag::Public,
             cstr_loc: Location::none(),

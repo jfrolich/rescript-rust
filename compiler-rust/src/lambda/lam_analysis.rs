@@ -850,8 +850,14 @@ mod tests {
                 LambdaSwitch {
                     sw_consts_full: true,
                     sw_consts: vec![
-                        (0, Lambda::const_(Constant::JsFalse)),
-                        (1, Lambda::const_(Constant::JsTrue)),
+                        (
+                            crate::lambda::SwitchKey::Int(0),
+                            Lambda::const_(Constant::JsFalse),
+                        ),
+                        (
+                            crate::lambda::SwitchKey::Int(1),
+                            Lambda::const_(Constant::JsTrue),
+                        ),
                     ],
                     sw_blocks_full: true,
                     sw_blocks: vec![],

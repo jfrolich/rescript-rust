@@ -14,7 +14,7 @@ fn untagged_object_return_switches_keep_outer_plain_handler_inside_the_switch() 
                 sw_consts: vec![],
                 sw_blocks_full: false,
                 sw_blocks: vec![(
-                    0,
+                    crate::lambda::SwitchKey::Int(0),
                     Lambda::LstaticCatch(
                         Box::new(Lambda::static_raise(2, Vec::new())),
                         (2, vec![]),
@@ -27,7 +27,7 @@ fn untagged_object_return_switches_keep_outer_plain_handler_inside_the_switch() 
                     ),
                 )],
                 sw_failaction: Some(Box::new(Lambda::static_raise(1, Vec::new()))),
-                sw_names: Some(SwitchNames {
+                sw_dispatch: crate::lambda::switch_dispatch_for_test(SwitchNames {
                     consts: vec![
                         crate::lambda::SwitchTag {
                             name: "Null".to_string(),
@@ -50,7 +50,7 @@ fn untagged_object_return_switches_keep_outer_plain_handler_inside_the_switch() 
                             tag: crate::lambda::SwitchTag::named("Array"),
                             tag_name: None,
                             block_type: Some(crate::lambda::SwitchBlockType::Instance(
-                                "Array".to_string(),
+                                crate::types::VariantInstance::Array,
                             )),
                         },
                     ],
@@ -85,11 +85,17 @@ fn named_variant_switch_expressions_split_const_and_block_dispatch() {
         Box::new(Lambda::var(scrutinee.clone())),
         LambdaSwitch {
             sw_consts_full: false,
-            sw_consts: vec![(0, Lambda::const_(Constant::int(1)))],
+            sw_consts: vec![(
+                crate::lambda::SwitchKey::Int(0),
+                Lambda::const_(Constant::int(1)),
+            )],
             sw_blocks_full: false,
-            sw_blocks: vec![(0, Lambda::const_(Constant::int(2)))],
+            sw_blocks: vec![(
+                crate::lambda::SwitchKey::Int(0),
+                Lambda::const_(Constant::int(2)),
+            )],
             sw_failaction: Some(Box::new(Lambda::const_(Constant::int(3)))),
-            sw_names: Some(SwitchNames {
+            sw_dispatch: crate::lambda::switch_dispatch_for_test(SwitchNames {
                 consts: vec![crate::lambda::SwitchTag::named("A")],
                 blocks: vec![crate::lambda::SwitchBlock::named("B")],
             }),
@@ -126,13 +132,19 @@ fn named_variant_constant_return_switch_skips_redundant_match_temp() {
         LambdaSwitch {
             sw_consts_full: true,
             sw_consts: vec![
-                (0, Lambda::const_(Constant::string("a"))),
-                (1, Lambda::const_(Constant::string("b"))),
+                (
+                    crate::lambda::SwitchKey::Int(0),
+                    Lambda::const_(Constant::string("a")),
+                ),
+                (
+                    crate::lambda::SwitchKey::Int(1),
+                    Lambda::const_(Constant::string("b")),
+                ),
             ],
             sw_blocks_full: true,
             sw_blocks: vec![],
             sw_failaction: None,
-            sw_names: Some(SwitchNames {
+            sw_dispatch: crate::lambda::switch_dispatch_for_test(SwitchNames {
                 consts: vec![
                     crate::lambda::SwitchTag {
                         name: "A".to_string(),
@@ -182,14 +194,14 @@ fn named_variant_effect_switches_keep_payload_cases() {
         Box::new(Lambda::var(action.clone())),
         LambdaSwitch {
             sw_consts_full: false,
-            sw_consts: vec![(0, Lambda::unit())],
+            sw_consts: vec![(crate::lambda::SwitchKey::Int(0), Lambda::unit())],
             sw_blocks_full: false,
             sw_blocks: vec![(
-                0,
+                crate::lambda::SwitchKey::Int(0),
                 Lambda::Lassign(captured.clone(), Box::new(Lambda::const_(Constant::int(1)))),
             )],
             sw_failaction: Some(Box::new(Lambda::unit())),
-            sw_names: Some(SwitchNames {
+            sw_dispatch: crate::lambda::switch_dispatch_for_test(SwitchNames {
                 consts: vec![crate::lambda::SwitchTag::named("WithoutPayload")],
                 blocks: vec![crate::lambda::SwitchBlock::named("WithPayload")],
             }),
@@ -218,11 +230,17 @@ fn named_variant_return_switches_with_only_payload_cases_skip_object_split() {
             sw_consts: vec![],
             sw_blocks_full: true,
             sw_blocks: vec![
-                (0, Lambda::const_(Constant::int(1))),
-                (1, Lambda::const_(Constant::int(2))),
+                (
+                    crate::lambda::SwitchKey::Int(0),
+                    Lambda::const_(Constant::int(1)),
+                ),
+                (
+                    crate::lambda::SwitchKey::Int(1),
+                    Lambda::const_(Constant::int(2)),
+                ),
             ],
             sw_failaction: None,
-            sw_names: Some(SwitchNames {
+            sw_dispatch: crate::lambda::switch_dispatch_for_test(SwitchNames {
                 consts: vec![],
                 blocks: vec![
                     crate::lambda::SwitchBlock::named("Ok"),
@@ -260,11 +278,17 @@ fn named_variant_mixed_const_and_identical_payload_return_cases_drop_redundant_t
         Box::new(Lambda::var(state.clone())),
         LambdaSwitch {
             sw_consts_full: true,
-            sw_consts: vec![(0, Lambda::const_(Constant::int(0)))],
+            sw_consts: vec![(
+                crate::lambda::SwitchKey::Int(0),
+                Lambda::const_(Constant::int(0)),
+            )],
             sw_blocks_full: true,
-            sw_blocks: vec![(0, payload.clone()), (1, payload)],
+            sw_blocks: vec![
+                (crate::lambda::SwitchKey::Int(0), payload.clone()),
+                (crate::lambda::SwitchKey::Int(1), payload),
+            ],
             sw_failaction: None,
-            sw_names: Some(SwitchNames {
+            sw_dispatch: crate::lambda::switch_dispatch_for_test(SwitchNames {
                 consts: vec![crate::lambda::SwitchTag::named("Empty")],
                 blocks: vec![
                     crate::lambda::SwitchBlock::named("Int1"),
@@ -290,9 +314,12 @@ fn named_variant_incomplete_payload_only_return_switches_keep_default_as_negated
             sw_consts_full: false,
             sw_consts: vec![],
             sw_blocks_full: false,
-            sw_blocks: vec![(1, Lambda::const_(Constant::int(7)))],
+            sw_blocks: vec![(
+                crate::lambda::SwitchKey::Int(1),
+                Lambda::const_(Constant::int(7)),
+            )],
             sw_failaction: Some(Box::new(Lambda::const_(Constant::int(42)))),
-            sw_names: Some(SwitchNames {
+            sw_dispatch: crate::lambda::switch_dispatch_for_test(SwitchNames {
                 consts: vec![
                     crate::lambda::SwitchTag::named("A1"),
                     crate::lambda::SwitchTag::named("A2"),
@@ -321,11 +348,14 @@ fn named_variant_incomplete_const_only_return_switches_keep_literal_guard() {
         Box::new(Lambda::var(action.clone())),
         LambdaSwitch {
             sw_consts_full: false,
-            sw_consts: vec![(0, Lambda::const_(Constant::int(1)))],
+            sw_consts: vec![(
+                crate::lambda::SwitchKey::Int(0),
+                Lambda::const_(Constant::int(1)),
+            )],
             sw_blocks_full: false,
             sw_blocks: vec![],
             sw_failaction: Some(Box::new(Lambda::const_(Constant::int(42)))),
-            sw_names: Some(SwitchNames {
+            sw_dispatch: crate::lambda::switch_dispatch_for_test(SwitchNames {
                 consts: vec![
                     crate::lambda::SwitchTag::named("A1"),
                     crate::lambda::SwitchTag::named("A2"),
@@ -351,18 +381,36 @@ fn named_variant_return_switches_keep_default_only_const_side_inside_outer_else_
         &LambdaSwitch {
             sw_consts_full: false,
             sw_consts: vec![
-                (0, Lambda::const_(Constant::int(0))),
-                (1, Lambda::const_(Constant::int(0))),
-                (2, Lambda::const_(Constant::int(0))),
+                (
+                    crate::lambda::SwitchKey::Int(0),
+                    Lambda::const_(Constant::int(0)),
+                ),
+                (
+                    crate::lambda::SwitchKey::Int(1),
+                    Lambda::const_(Constant::int(0)),
+                ),
+                (
+                    crate::lambda::SwitchKey::Int(2),
+                    Lambda::const_(Constant::int(0)),
+                ),
             ],
             sw_blocks_full: false,
             sw_blocks: vec![
-                (0, Lambda::const_(Constant::int(1))),
-                (1, Lambda::const_(Constant::int(2))),
-                (2, Lambda::const_(Constant::int(3))),
+                (
+                    crate::lambda::SwitchKey::Int(0),
+                    Lambda::const_(Constant::int(1)),
+                ),
+                (
+                    crate::lambda::SwitchKey::Int(1),
+                    Lambda::const_(Constant::int(2)),
+                ),
+                (
+                    crate::lambda::SwitchKey::Int(2),
+                    Lambda::const_(Constant::int(3)),
+                ),
             ],
             sw_failaction: Some(Box::new(Lambda::const_(Constant::int(0)))),
-            sw_names: Some(SwitchNames {
+            sw_dispatch: crate::lambda::switch_dispatch_for_test(SwitchNames {
                 consts: vec![
                     crate::lambda::SwitchTag::named("A"),
                     crate::lambda::SwitchTag::named("B"),
@@ -494,12 +542,21 @@ fn named_variant_return_switches_keep_shared_final_groups_inside_the_switch_with
             sw_consts: vec![],
             sw_blocks_full: true,
             sw_blocks: vec![
-                (0, Lambda::const_(Constant::int(1))),
-                (1, Lambda::const_(Constant::int(2))),
-                (2, Lambda::const_(Constant::int(2))),
+                (
+                    crate::lambda::SwitchKey::Int(0),
+                    Lambda::const_(Constant::int(1)),
+                ),
+                (
+                    crate::lambda::SwitchKey::Int(1),
+                    Lambda::const_(Constant::int(2)),
+                ),
+                (
+                    crate::lambda::SwitchKey::Int(2),
+                    Lambda::const_(Constant::int(2)),
+                ),
             ],
             sw_failaction: None,
-            sw_names: Some(SwitchNames {
+            sw_dispatch: crate::lambda::switch_dispatch_for_test(SwitchNames {
                 consts: vec![],
                 blocks: vec![
                     crate::lambda::SwitchBlock::named("A"),
@@ -556,13 +613,25 @@ fn nested_named_variant_complete_return_switches_keep_plain_handlers_inside_swit
                     sw_consts: vec![],
                     sw_blocks_full: true,
                     sw_blocks: vec![
-                        (0, Lambda::static_raise(1, Vec::new())),
-                        (1, Lambda::static_raise(2, Vec::new())),
-                        (2, Lambda::static_raise(1, Vec::new())),
-                        (3, Lambda::static_raise(2, Vec::new())),
+                        (
+                            crate::lambda::SwitchKey::Int(0),
+                            Lambda::static_raise(1, Vec::new()),
+                        ),
+                        (
+                            crate::lambda::SwitchKey::Int(1),
+                            Lambda::static_raise(2, Vec::new()),
+                        ),
+                        (
+                            crate::lambda::SwitchKey::Int(2),
+                            Lambda::static_raise(1, Vec::new()),
+                        ),
+                        (
+                            crate::lambda::SwitchKey::Int(3),
+                            Lambda::static_raise(2, Vec::new()),
+                        ),
                     ],
                     sw_failaction: None,
-                    sw_names: Some(SwitchNames {
+                    sw_dispatch: crate::lambda::switch_dispatch_for_test(SwitchNames {
                         consts: vec![],
                         blocks: vec![
                             crate::lambda::SwitchBlock::named("A"),
@@ -625,14 +694,23 @@ fn named_variant_return_switches_inline_resolved_static_handler_values_inside_th
             LambdaSwitch {
                 sw_consts_full: true,
                 sw_consts: vec![
-                    (0, Lambda::const_(Constant::int(1))),
-                    (1, Lambda::static_raise(7, Vec::new())),
-                    (2, Lambda::static_raise(7, Vec::new())),
+                    (
+                        crate::lambda::SwitchKey::Int(0),
+                        Lambda::const_(Constant::int(1)),
+                    ),
+                    (
+                        crate::lambda::SwitchKey::Int(1),
+                        Lambda::static_raise(7, Vec::new()),
+                    ),
+                    (
+                        crate::lambda::SwitchKey::Int(2),
+                        Lambda::static_raise(7, Vec::new()),
+                    ),
                 ],
                 sw_blocks_full: true,
                 sw_blocks: vec![],
                 sw_failaction: None,
-                sw_names: Some(SwitchNames {
+                sw_dispatch: crate::lambda::switch_dispatch_for_test(SwitchNames {
                     consts: vec![
                         crate::lambda::SwitchTag::named("A"),
                         crate::lambda::SwitchTag::named("B"),
@@ -682,18 +760,36 @@ fn nested_named_variant_return_switches_keep_complete_payload_handlers_inline() 
                 LambdaSwitch {
                     sw_consts_full: true,
                     sw_consts: vec![
-                        (0, Lambda::const_(Constant::int(1))),
-                        (1, Lambda::const_(Constant::int(3))),
-                        (2, Lambda::const_(Constant::int(4))),
+                        (
+                            crate::lambda::SwitchKey::Int(0),
+                            Lambda::const_(Constant::int(1)),
+                        ),
+                        (
+                            crate::lambda::SwitchKey::Int(1),
+                            Lambda::const_(Constant::int(3)),
+                        ),
+                        (
+                            crate::lambda::SwitchKey::Int(2),
+                            Lambda::const_(Constant::int(4)),
+                        ),
                     ],
                     sw_blocks_full: true,
                     sw_blocks: vec![
-                        (0, Lambda::static_raise(18, Vec::new())),
-                        (1, Lambda::static_raise(18, Vec::new())),
-                        (2, Lambda::static_raise(19, Vec::new())),
+                        (
+                            crate::lambda::SwitchKey::Int(0),
+                            Lambda::static_raise(18, Vec::new()),
+                        ),
+                        (
+                            crate::lambda::SwitchKey::Int(1),
+                            Lambda::static_raise(18, Vec::new()),
+                        ),
+                        (
+                            crate::lambda::SwitchKey::Int(2),
+                            Lambda::static_raise(19, Vec::new()),
+                        ),
                     ],
                     sw_failaction: None,
-                    sw_names: Some(SwitchNames {
+                    sw_dispatch: crate::lambda::switch_dispatch_for_test(SwitchNames {
                         consts: vec![
                             crate::lambda::SwitchTag::named("A"),
                             crate::lambda::SwitchTag::named("B"),
@@ -750,14 +846,23 @@ fn named_variant_return_switches_preserve_binding_temps_in_hoisted_shared_tails(
                 LambdaSwitch {
                     sw_consts_full: true,
                     sw_consts: vec![
-                        (0, Lambda::const_(Constant::int(1))),
-                        (1, Lambda::static_raise(3, Vec::new())),
-                        (2, Lambda::static_raise(3, Vec::new())),
+                        (
+                            crate::lambda::SwitchKey::Int(0),
+                            Lambda::const_(Constant::int(1)),
+                        ),
+                        (
+                            crate::lambda::SwitchKey::Int(1),
+                            Lambda::static_raise(3, Vec::new()),
+                        ),
+                        (
+                            crate::lambda::SwitchKey::Int(2),
+                            Lambda::static_raise(3, Vec::new()),
+                        ),
                     ],
                     sw_blocks_full: true,
                     sw_blocks: vec![],
                     sw_failaction: None,
-                    sw_names: Some(SwitchNames {
+                    sw_dispatch: crate::lambda::switch_dispatch_for_test(SwitchNames {
                         consts: vec![
                             crate::lambda::SwitchTag::named("A"),
                             crate::lambda::SwitchTag::named("B"),
@@ -810,7 +915,7 @@ fn builtin_untagged_block_switch_expressions_dispatch_on_object_runtime_shape() 
             sw_consts: vec![],
             sw_blocks_full: false,
             sw_blocks: vec![(
-                0,
+                crate::lambda::SwitchKey::Int(0),
                 Lambda::let_(
                     LetKind::Strict,
                     body_id.clone(),
@@ -819,7 +924,7 @@ fn builtin_untagged_block_switch_expressions_dispatch_on_object_runtime_shape() 
                 ),
             )],
             sw_failaction: Some(Box::new(Lambda::const_(Constant::int(0)))),
-            sw_names: Some(SwitchNames {
+            sw_dispatch: crate::lambda::switch_dispatch_for_test(SwitchNames {
                 consts: vec![],
                 blocks: vec![crate::lambda::SwitchBlock {
                     tag: crate::lambda::SwitchTag::named("Object"),
@@ -897,14 +1002,14 @@ fn builtin_untagged_object_switches_use_plain_object_check_after_array_split() {
             sw_blocks_full: false,
             sw_blocks: vec![
                 (
-                    0,
+                    crate::lambda::SwitchKey::Int(0),
                     Lambda::Lassign(
                         array_seen.clone(),
                         Box::new(Lambda::const_(Constant::int(1))),
                     ),
                 ),
                 (
-                    1,
+                    crate::lambda::SwitchKey::Int(1),
                     Lambda::Lassign(
                         object_seen.clone(),
                         Box::new(Lambda::const_(Constant::int(2))),
@@ -912,14 +1017,14 @@ fn builtin_untagged_object_switches_use_plain_object_check_after_array_split() {
                 ),
             ],
             sw_failaction: Some(Box::new(Lambda::unit())),
-            sw_names: Some(SwitchNames {
+            sw_dispatch: crate::lambda::switch_dispatch_for_test(SwitchNames {
                 consts: vec![],
                 blocks: vec![
                     crate::lambda::SwitchBlock {
                         tag: crate::lambda::SwitchTag::named("Array"),
                         tag_name: None,
                         block_type: Some(crate::lambda::SwitchBlockType::Instance(
-                            "Array".to_string(),
+                            crate::types::VariantInstance::Array,
                         )),
                     },
                     crate::lambda::SwitchBlock {
@@ -960,13 +1065,25 @@ fn object_and_array_untagged_return_switches_keep_object_inside_typeof_switch_li
             sw_consts: vec![],
             sw_blocks_full: true,
             sw_blocks: vec![
-                (0, Lambda::const_(Constant::int(1))),
-                (1, Lambda::const_(Constant::int(2))),
-                (2, Lambda::const_(Constant::int(3))),
-                (3, Lambda::const_(Constant::int(4))),
+                (
+                    crate::lambda::SwitchKey::Int(0),
+                    Lambda::const_(Constant::int(1)),
+                ),
+                (
+                    crate::lambda::SwitchKey::Int(1),
+                    Lambda::const_(Constant::int(2)),
+                ),
+                (
+                    crate::lambda::SwitchKey::Int(2),
+                    Lambda::const_(Constant::int(3)),
+                ),
+                (
+                    crate::lambda::SwitchKey::Int(3),
+                    Lambda::const_(Constant::int(4)),
+                ),
             ],
             sw_failaction: None,
-            sw_names: Some(SwitchNames {
+            sw_dispatch: crate::lambda::switch_dispatch_for_test(SwitchNames {
                 consts: vec![],
                 blocks: vec![
                     crate::lambda::SwitchBlock {
@@ -988,7 +1105,7 @@ fn object_and_array_untagged_return_switches_keep_object_inside_typeof_switch_li
                         tag: crate::lambda::SwitchTag::named("Array"),
                         tag_name: None,
                         block_type: Some(crate::lambda::SwitchBlockType::Instance(
-                            "Array".to_string(),
+                            crate::types::VariantInstance::Array,
                         )),
                     },
                 ],
@@ -1056,19 +1173,28 @@ fn mixed_array_object_function_untagged_return_switches_keep_typeof_tail_as_swit
             sw_consts: vec![],
             sw_blocks_full: true,
             sw_blocks: vec![
-                (0, Lambda::const_(Constant::int(1))),
-                (1, Lambda::const_(Constant::int(2))),
-                (2, Lambda::const_(Constant::int(3))),
+                (
+                    crate::lambda::SwitchKey::Int(0),
+                    Lambda::const_(Constant::int(1)),
+                ),
+                (
+                    crate::lambda::SwitchKey::Int(1),
+                    Lambda::const_(Constant::int(2)),
+                ),
+                (
+                    crate::lambda::SwitchKey::Int(2),
+                    Lambda::const_(Constant::int(3)),
+                ),
             ],
             sw_failaction: None,
-            sw_names: Some(SwitchNames {
+            sw_dispatch: crate::lambda::switch_dispatch_for_test(SwitchNames {
                 consts: vec![],
                 blocks: vec![
                     crate::lambda::SwitchBlock {
                         tag: crate::lambda::SwitchTag::named("Array"),
                         tag_name: None,
                         block_type: Some(crate::lambda::SwitchBlockType::Instance(
-                            "Array".to_string(),
+                            crate::types::VariantInstance::Array,
                         )),
                     },
                     crate::lambda::SwitchBlock {
@@ -1153,11 +1279,17 @@ fn mixed_literal_and_block_untagged_return_dispatch_keeps_outer_else_block() {
         Expression::var(value.clone()),
         &LambdaSwitch {
             sw_consts_full: true,
-            sw_consts: vec![(0, mark(&string_seen, 1)), (1, mark(&int_seen, 2))],
+            sw_consts: vec![
+                (crate::lambda::SwitchKey::Int(0), mark(&string_seen, 1)),
+                (crate::lambda::SwitchKey::Int(1), mark(&int_seen, 2)),
+            ],
             sw_blocks_full: true,
-            sw_blocks: vec![(0, mark(&array_seen, 3)), (1, mark(&object_seen, 4))],
+            sw_blocks: vec![
+                (crate::lambda::SwitchKey::Int(0), mark(&array_seen, 3)),
+                (crate::lambda::SwitchKey::Int(1), mark(&object_seen, 4)),
+            ],
             sw_failaction: None,
-            sw_names: Some(SwitchNames {
+            sw_dispatch: crate::lambda::switch_dispatch_for_test(SwitchNames {
                 consts: vec![
                     crate::lambda::SwitchTag {
                         name: "test".to_string(),
@@ -1173,7 +1305,7 @@ fn mixed_literal_and_block_untagged_return_dispatch_keeps_outer_else_block() {
                         tag: crate::lambda::SwitchTag::named("Array"),
                         tag_name: None,
                         block_type: Some(crate::lambda::SwitchBlockType::Instance(
-                            "Array".to_string(),
+                            crate::types::VariantInstance::Array,
                         )),
                     },
                     crate::lambda::SwitchBlock {
@@ -1225,21 +1357,21 @@ fn mixed_array_object_function_untagged_effect_switches_keep_typeof_tail_as_swit
             sw_blocks_full: true,
             sw_blocks: vec![
                 (
-                    0,
+                    crate::lambda::SwitchKey::Int(0),
                     Lambda::Lassign(
                         array_seen.clone(),
                         Box::new(Lambda::const_(Constant::int(1))),
                     ),
                 ),
                 (
-                    1,
+                    crate::lambda::SwitchKey::Int(1),
                     Lambda::Lassign(
                         object_seen.clone(),
                         Box::new(Lambda::const_(Constant::int(2))),
                     ),
                 ),
                 (
-                    2,
+                    crate::lambda::SwitchKey::Int(2),
                     Lambda::Lassign(
                         function_seen.clone(),
                         Box::new(Lambda::const_(Constant::int(3))),
@@ -1247,14 +1379,14 @@ fn mixed_array_object_function_untagged_effect_switches_keep_typeof_tail_as_swit
                 ),
             ],
             sw_failaction: None,
-            sw_names: Some(SwitchNames {
+            sw_dispatch: crate::lambda::switch_dispatch_for_test(SwitchNames {
                 consts: vec![],
                 blocks: vec![
                     crate::lambda::SwitchBlock {
                         tag: crate::lambda::SwitchTag::named("Array"),
                         tag_name: None,
                         block_type: Some(crate::lambda::SwitchBlockType::Instance(
-                            "Array".to_string(),
+                            crate::types::VariantInstance::Array,
                         )),
                     },
                     crate::lambda::SwitchBlock {
@@ -1344,14 +1476,26 @@ fn untagged_literal_dispatch_keeps_ocaml_case_order() {
         &LambdaSwitch {
             sw_consts_full: true,
             sw_consts: vec![
-                (0, Lambda::const_(Constant::int(1))),
-                (1, Lambda::const_(Constant::int(2))),
-                (2, Lambda::const_(Constant::int(3))),
+                (
+                    crate::lambda::SwitchKey::Int(0),
+                    Lambda::const_(Constant::int(1)),
+                ),
+                (
+                    crate::lambda::SwitchKey::Int(1),
+                    Lambda::const_(Constant::int(2)),
+                ),
+                (
+                    crate::lambda::SwitchKey::Int(2),
+                    Lambda::const_(Constant::int(3)),
+                ),
             ],
             sw_blocks_full: true,
-            sw_blocks: vec![(0, Lambda::const_(Constant::int(4)))],
+            sw_blocks: vec![(
+                crate::lambda::SwitchKey::Int(0),
+                Lambda::const_(Constant::int(4)),
+            )],
             sw_failaction: None,
-            sw_names: Some(SwitchNames {
+            sw_dispatch: crate::lambda::switch_dispatch_for_test(SwitchNames {
                 consts: vec![
                     crate::lambda::SwitchTag::named("One"),
                     crate::lambda::SwitchTag::named("Two"),
@@ -1382,19 +1526,40 @@ fn mixed_untagged_literal_dispatch_keeps_ocaml_block_overlap_order() {
         &LambdaSwitch {
             sw_consts_full: true,
             sw_consts: vec![
-                (0, Lambda::const_(Constant::int(1))),
-                (1, Lambda::const_(Constant::int(2))),
-                (2, Lambda::const_(Constant::int(3))),
-                (3, Lambda::const_(Constant::int(4))),
+                (
+                    crate::lambda::SwitchKey::Int(0),
+                    Lambda::const_(Constant::int(1)),
+                ),
+                (
+                    crate::lambda::SwitchKey::Int(1),
+                    Lambda::const_(Constant::int(2)),
+                ),
+                (
+                    crate::lambda::SwitchKey::Int(2),
+                    Lambda::const_(Constant::int(3)),
+                ),
+                (
+                    crate::lambda::SwitchKey::Int(3),
+                    Lambda::const_(Constant::int(4)),
+                ),
             ],
             sw_blocks_full: true,
             sw_blocks: vec![
-                (0, Lambda::const_(Constant::int(5))),
-                (1, Lambda::const_(Constant::int(6))),
-                (2, Lambda::const_(Constant::int(7))),
+                (
+                    crate::lambda::SwitchKey::Int(0),
+                    Lambda::const_(Constant::int(5)),
+                ),
+                (
+                    crate::lambda::SwitchKey::Int(1),
+                    Lambda::const_(Constant::int(6)),
+                ),
+                (
+                    crate::lambda::SwitchKey::Int(2),
+                    Lambda::const_(Constant::int(7)),
+                ),
             ],
             sw_failaction: None,
-            sw_names: Some(SwitchNames {
+            sw_dispatch: crate::lambda::switch_dispatch_for_test(SwitchNames {
                 consts: vec![
                     crate::lambda::SwitchTag::named("A"),
                     crate::lambda::SwitchTag::named("B"),
@@ -1526,9 +1691,12 @@ fn small_untagged_object_value_switches_keep_ocaml_runtime_guards() {
             sw_consts_full: false,
             sw_consts: vec![],
             sw_blocks_full: false,
-            sw_blocks: vec![(0, Lambda::const_(Constant::int(1)))],
+            sw_blocks: vec![(
+                crate::lambda::SwitchKey::Int(0),
+                Lambda::const_(Constant::int(1)),
+            )],
             sw_failaction: Some(Box::new(Lambda::const_(Constant::int(0)))),
-            sw_names: Some(SwitchNames {
+            sw_dispatch: crate::lambda::switch_dispatch_for_test(SwitchNames {
                 consts: vec![crate::lambda::SwitchTag {
                     name: "Null".to_string(),
                     tag_type: Some(crate::lambda::SwitchCaseTag::Null),
@@ -1543,7 +1711,7 @@ fn small_untagged_object_value_switches_keep_ocaml_runtime_guards() {
                         tag: crate::lambda::SwitchTag::named("Array"),
                         tag_name: None,
                         block_type: Some(crate::lambda::SwitchBlockType::Instance(
-                            "Array".to_string(),
+                            crate::types::VariantInstance::Array,
                         )),
                     },
                 ],
@@ -1569,11 +1737,17 @@ fn complete_object_then_array_untagged_return_switches_preserve_case_order() {
             sw_consts: vec![],
             sw_blocks_full: true,
             sw_blocks: vec![
-                (0, Lambda::const_(Constant::int(1))),
-                (1, Lambda::const_(Constant::int(2))),
+                (
+                    crate::lambda::SwitchKey::Int(0),
+                    Lambda::const_(Constant::int(1)),
+                ),
+                (
+                    crate::lambda::SwitchKey::Int(1),
+                    Lambda::const_(Constant::int(2)),
+                ),
             ],
             sw_failaction: None,
-            sw_names: Some(SwitchNames {
+            sw_dispatch: crate::lambda::switch_dispatch_for_test(SwitchNames {
                 consts: vec![],
                 blocks: vec![
                     crate::lambda::SwitchBlock {
@@ -1585,7 +1759,7 @@ fn complete_object_then_array_untagged_return_switches_preserve_case_order() {
                         tag: crate::lambda::SwitchTag::named("Array"),
                         tag_name: None,
                         block_type: Some(crate::lambda::SwitchBlockType::Instance(
-                            "Array".to_string(),
+                            crate::types::VariantInstance::Array,
                         )),
                     },
                 ],
@@ -1783,7 +1957,7 @@ fn default_only_untagged_object_return_keeps_literal_default_branch_outside_obje
             sw_consts: vec![],
             sw_blocks_full: false,
             sw_blocks: vec![(
-                0,
+                crate::lambda::SwitchKey::Int(0),
                 Lambda::let_(
                     LetKind::Strict,
                     body_id.clone(),
@@ -1792,7 +1966,7 @@ fn default_only_untagged_object_return_keeps_literal_default_branch_outside_obje
                 ),
             )],
             sw_failaction: Some(Box::new(Lambda::const_(Constant::int(0)))),
-            sw_names: Some(SwitchNames {
+            sw_dispatch: crate::lambda::switch_dispatch_for_test(SwitchNames {
                 consts: vec![
                     crate::lambda::SwitchTag {
                         name: "Null".to_string(),
@@ -1813,7 +1987,7 @@ fn default_only_untagged_object_return_keeps_literal_default_branch_outside_obje
                         tag: crate::lambda::SwitchTag::named("Array"),
                         tag_name: None,
                         block_type: Some(crate::lambda::SwitchBlockType::Instance(
-                            "Array".to_string(),
+                            crate::types::VariantInstance::Array,
                         )),
                     },
                 ],

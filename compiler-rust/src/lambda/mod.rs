@@ -233,6 +233,54 @@ pub struct SwitchBlock {
     pub block_type: Option<SwitchBlockType>,
 }
 
+#[cfg(test)]
+pub(crate) fn switch_dispatch_for_test(names: SwitchNames) -> SwitchDispatch {
+    let tag_name = names.blocks.iter().find_map(|block| block.tag_name.clone());
+    let block_types = names
+        .blocks
+        .iter()
+        .rev()
+        .filter_map(|block| block.block_type.clone())
+        .collect();
+    let literal_tags: Vec<crate::types::VariantTagType> = names
+        .consts
+        .iter()
+        .rev()
+        .map(|tag| {
+            match tag
+                .tag_type
+                .as_ref()
+                .unwrap_or(&SwitchCaseTag::String(tag.name.clone()))
+            {
+                SwitchCaseTag::String(value) => crate::types::VariantTagType::String(value.clone()),
+                SwitchCaseTag::Int(value) => crate::types::VariantTagType::Int(*value as i32),
+                SwitchCaseTag::Float(value) => crate::types::VariantTagType::Float(value.clone()),
+                SwitchCaseTag::BigInt(value) => crate::types::VariantTagType::BigInt(value.clone()),
+                SwitchCaseTag::Bool(value) => crate::types::VariantTagType::Bool(*value),
+                SwitchCaseTag::Null => crate::types::VariantTagType::Null,
+                SwitchCaseTag::Undefined => crate::types::VariantTagType::Undefined,
+            }
+        })
+        .collect();
+    SwitchDispatch::Variant(crate::types::VariantMatchingFacts {
+        tag_name,
+        block_types,
+        has_null: literal_tags
+            .iter()
+            .any(|tag| matches!(tag, crate::types::VariantTagType::Null)),
+        has_undefined: literal_tags
+            .iter()
+            .any(|tag| matches!(tag, crate::types::VariantTagType::Undefined)),
+        has_other_literal: literal_tags.iter().any(|tag| {
+            !matches!(
+                tag,
+                crate::types::VariantTagType::Null | crate::types::VariantTagType::Undefined
+            )
+        }),
+        literal_tags,
+    })
+}
+
 impl SwitchBlock {
     pub fn named(name: impl Into<String>) -> Self {
         Self {

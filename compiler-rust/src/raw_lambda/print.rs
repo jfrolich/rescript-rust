@@ -169,7 +169,7 @@ fn print_struct_const<W: Write>(f: &mut Formatter<W>, cst: &Constant) {
             _ => f.print(format_args!("{i}")),
         },
         Constant::NativeInt { i, .. } => f.print(format_args!("{i}")),
-        Constant::Constructor(tag) => f.string(&tag.name),
+        Constant::Constructor(tag) => f.print(format_args!("`{}", tag.name)),
         Constant::Char(i) => {
             if let Some(ch) = char::from_u32(*i as u32) {
                 f.print(format_args!("{ch:?}"));
@@ -191,12 +191,28 @@ fn print_struct_const<W: Write>(f: &mut Formatter<W>, cst: &Constant) {
             }
         }
         Constant::Pointer(name) => f.string(name),
-        Constant::Block { tag, elements, .. } if elements.is_empty() => {
-            f.print(format_args!("[{tag}]"));
-        }
-        Constant::Block { tag, elements, .. } => {
+        Constant::Block {
+            tag,
+            tag_info,
+            elements,
+        } if elements.is_empty() => match tag_info {
+            TagInfo::Constructor { name, .. } | TagInfo::RecordInlined { name, .. } => {
+                f.print(format_args!("[{name}]"))
+            }
+            _ => f.print(format_args!("[{tag}]")),
+        },
+        Constant::Block {
+            tag,
+            tag_info,
+            elements,
+        } => {
             f.open_box(BoxKind::Box, 1);
-            f.print(format_args!("[{tag}:"));
+            match tag_info {
+                TagInfo::Constructor { name, .. } | TagInfo::RecordInlined { name, .. } => {
+                    f.print(format_args!("[{name}:"))
+                }
+                _ => f.print(format_args!("[{tag}:")),
+            }
             f.space();
             f.open_box(BoxKind::HOV, 0);
             if let Some((first, rest)) = elements.split_first() {
@@ -313,7 +329,15 @@ fn print_switch_cases_with_exn<W: Write>(
             f.space();
         }
         f.open_box(BoxKind::HV, 1);
-        f.print(format_args!("case int {n}:"));
+        match n {
+            crate::lambda::SwitchKey::Int(value) => f.print(format_args!("case int {value}:")),
+            crate::lambda::SwitchKey::Constructor(
+                crate::types::VariantConstructorCase::Constant(tag),
+            ) => f.print(format_args!("case constructor {:?}:", tag.name)),
+            crate::lambda::SwitchKey::Constructor(crate::types::VariantConstructorCase::Block(
+                _,
+            )) => unreachable!("block key in constant cases"),
+        }
         f.space();
         lam(f, l, reraise_exn);
         f.close_box();
@@ -324,7 +348,18 @@ fn print_switch_cases_with_exn<W: Write>(
             f.space();
         }
         f.open_box(BoxKind::HV, 1);
-        f.print(format_args!("case tag {n}:"));
+        match n {
+            crate::lambda::SwitchKey::Int(value) => f.print(format_args!("case tag {value}:")),
+            crate::lambda::SwitchKey::Constructor(crate::types::VariantConstructorCase::Block(
+                block,
+            )) => f.print(format_args!(
+                "case constructor {:?}:",
+                block.runtime.tag.name
+            )),
+            crate::lambda::SwitchKey::Constructor(
+                crate::types::VariantConstructorCase::Constant(_),
+            ) => unreachable!("constant key in block cases"),
+        }
         f.space();
         lam(f, l, reraise_exn);
         f.close_box();

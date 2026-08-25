@@ -2510,12 +2510,15 @@ mod tests {
             RawLambdaSwitch {
                 sw_numconsts: 1,
                 sw_consts_full: false,
-                sw_consts: vec![(0, RawLambda::const_(Constant::int(0)))],
+                sw_consts: vec![(
+                    crate::lambda::SwitchKey::Int(0),
+                    RawLambda::const_(Constant::int(0)),
+                )],
                 sw_numblocks: 0,
                 sw_blocks_full: false,
                 sw_blocks: Vec::new(),
                 sw_failaction: None,
-                sw_dispatch: Some(crate::lambda::SwitchNames {
+                sw_dispatch: crate::lambda::switch_dispatch_for_test(crate::lambda::SwitchNames {
                     consts: vec![crate::lambda::SwitchTag::named("A")],
                     blocks: Vec::new(),
                 }),
@@ -2538,8 +2541,14 @@ mod tests {
                 sw_numconsts: 3,
                 sw_consts_full: false,
                 sw_consts: vec![
-                    (0, RawLambda::const_(Constant::int(7))),
-                    (1, RawLambda::const_(Constant::int(9))),
+                    (
+                        crate::lambda::SwitchKey::Int(0),
+                        RawLambda::const_(Constant::int(7)),
+                    ),
+                    (
+                        crate::lambda::SwitchKey::Int(1),
+                        RawLambda::const_(Constant::int(9)),
+                    ),
                 ],
                 sw_numblocks: 0,
                 sw_blocks_full: false,
@@ -2662,7 +2671,10 @@ mod tests {
             RawLambdaSwitch {
                 sw_numconsts: 1,
                 sw_consts_full: true,
-                sw_consts: vec![(0, RawLambda::LstaticRaise(7, Vec::new()))],
+                sw_consts: vec![(
+                    crate::lambda::SwitchKey::Int(0),
+                    RawLambda::LstaticRaise(7, Vec::new()),
+                )],
                 sw_numblocks: 0,
                 sw_blocks_full: false,
                 sw_blocks: Vec::new(),
@@ -2681,7 +2693,7 @@ mod tests {
         ));
         assert!(matches!(
             switch.sw_consts.as_slice(),
-            [(0, Lambda::LstaticRaise(7, args))] if args.is_empty()
+            [(crate::lambda::SwitchKey::Int(0), Lambda::LstaticRaise(7, args))] if args.is_empty()
         ));
     }
 
@@ -2724,14 +2736,20 @@ mod tests {
                 sw_numconsts: 2,
                 sw_consts_full: true,
                 sw_consts: vec![
-                    (0, RawLambda::const_(Constant::int(0))),
-                    (1, RawLambda::const_(Constant::int(1))),
+                    (
+                        crate::lambda::SwitchKey::Int(0),
+                        RawLambda::const_(Constant::int(0)),
+                    ),
+                    (
+                        crate::lambda::SwitchKey::Int(1),
+                        RawLambda::const_(Constant::int(1)),
+                    ),
                 ],
                 sw_numblocks: 0,
                 sw_blocks_full: false,
                 sw_blocks: Vec::new(),
                 sw_failaction: None,
-                sw_dispatch: Some(crate::lambda::SwitchNames {
+                sw_dispatch: crate::lambda::switch_dispatch_for_test(crate::lambda::SwitchNames {
                     consts: vec![
                         crate::lambda::SwitchTag::named("A"),
                         crate::lambda::SwitchTag::named("B"),
@@ -2774,9 +2792,18 @@ mod tests {
                     sw_numconsts: 3,
                     sw_consts_full: false,
                     sw_consts: vec![
-                        (1, RawLambda::const_(Constant::Char(97))),
-                        (2, RawLambda::const_(Constant::Char(98))),
-                        (3, RawLambda::const_(Constant::Char(99))),
+                        (
+                            crate::lambda::SwitchKey::Int(1),
+                            RawLambda::const_(Constant::Char(97)),
+                        ),
+                        (
+                            crate::lambda::SwitchKey::Int(2),
+                            RawLambda::const_(Constant::Char(98)),
+                        ),
+                        (
+                            crate::lambda::SwitchKey::Int(3),
+                            RawLambda::const_(Constant::Char(99)),
+                        ),
                     ],
                     sw_numblocks: 0,
                     sw_blocks_full: false,
