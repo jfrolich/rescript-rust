@@ -3253,9 +3253,12 @@ impl<'a> RawLambdaConverter<'a> {
         let params: Vec<Ident> = if prim_arity == 1 {
             vec![self.fresh_ident("prim")]
         } else {
-            (0..prim_arity)
-                .map(|i| self.fresh_ident(&format!("prim{}", i)))
-                .collect()
+            let mut params = (0..prim_arity)
+                .rev()
+                .map(|i| self.fresh_ident(&format!("prim{i}")))
+                .collect::<Vec<_>>();
+            params.reverse();
+            params
         };
 
         let args: Vec<RawLambda> = params.iter().map(|id| RawLambda::var(id.clone())).collect();
