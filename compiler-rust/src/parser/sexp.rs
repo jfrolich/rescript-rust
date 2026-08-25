@@ -683,6 +683,22 @@ fn pattern(arena: &ParseArena, p: &Pattern) -> Sexp {
                         pattern(arena, arena.get_pat(f.pat)),
                     ])
                 })),
+                match arena.record_pat_rest(p.ppat_loc) {
+                    None => Sexp::atom("None"),
+                    Some(rest) => Sexp::list(vec![
+                        Sexp::atom("Some"),
+                        Sexp::list(vec![
+                            Sexp::atom(arena.get_string(rest.rest_name.txt)),
+                            match rest.rest_type {
+                                None => Sexp::atom("None"),
+                                Some(ty) => Sexp::list(vec![
+                                    Sexp::atom("Some"),
+                                    core_type(arena, arena.get_core_type(ty)),
+                                ]),
+                            },
+                        ]),
+                    ]),
+                },
             ])
         }
         PatternDesc::Ppat_array(pats) => Sexp::list(vec![

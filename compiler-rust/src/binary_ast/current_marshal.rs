@@ -20,9 +20,10 @@ use crate::parser::ast::{
     IncludeDeclaration, IncludeDescription, LabelDeclaration, ModuleBinding, ModuleDeclaration,
     ModuleExpr, ModuleExprDesc, ModuleType, ModuleTypeDeclaration, ModuleTypeDesc, MutableFlag,
     ObjectField, OpenDescription, OverrideFlag, Pattern, PatternDesc, PatternRecordField, Payload,
-    PexpApply, PexpFun, PrivateFlag, RecFlag, RowField, SignatureItem, SignatureItemDesc,
-    StringLoc, StructureItem, StructureItemDesc, TypeArg, TypeDeclaration, TypeExtension, TypeKind,
-    ValueBinding, ValueConstraint, ValueDescription, Variance, WithConstraint,
+    PexpApply, PexpFun, PrivateFlag, RecFlag, RecordPatRest, RowField, SignatureItem,
+    SignatureItemDesc, StringLoc, StructureItem, StructureItemDesc, TypeArg, TypeDeclaration,
+    TypeExtension, TypeKind, ValueBinding, ValueConstraint, ValueDescription, Variance,
+    WithConstraint,
 };
 use crate::parser::longident::Longident;
 
@@ -1119,7 +1120,16 @@ impl Marshal for ObjectField {
 impl Marshal for Pattern {
     fn marshal(&self, w: &mut MarshalWriter<'_>) {
         w.write_block_header(0, 3);
-        self.ppat_desc.marshal(w);
+        if let PatternDesc::Ppat_record(inner) = &*self.ppat_desc {
+            let (fields, flag) = &**inner;
+            let rest = w.get_arena().record_pat_rest(self.ppat_loc).cloned();
+            w.write_block_header(7, 3);
+            fields.marshal(w);
+            flag.marshal(w);
+            rest.marshal(w);
+        } else {
+            self.ppat_desc.marshal(w);
+        }
         let mut wrote_shared_ppat_loc = false;
         if let PatternDesc::Ppat_var(name) = &*self.ppat_desc {
             if name.loc != self.ppat_loc {
@@ -1244,6 +1254,16 @@ impl Marshal for PatternDesc {
 }
 
 // ========== Record Field Types ==========
+
+impl Marshal for RecordPatRest {
+    fn marshal(&self, w: &mut MarshalWriter<'_>) {
+        // record_pat_rest = {rest_loc; rest_name; rest_type}
+        w.write_block_header(0, 3);
+        self.rest_loc.marshal(w);
+        self.rest_name.marshal(w);
+        self.rest_type.marshal(w);
+    }
+}
 
 impl Marshal for PatternRecordField {
     fn marshal(&self, w: &mut MarshalWriter<'_>) {
