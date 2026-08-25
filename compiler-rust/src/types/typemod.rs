@@ -5692,20 +5692,6 @@ fn path_is_t_of_stdlib_child(path: &Path, child_name: &str) -> bool {
     )
 }
 
-fn path_is_t_of_js_child(path: &Path, child_name: &str) -> bool {
-    matches!(
-        path,
-        Path::Pdot(parent, type_name, _)
-            if type_name == "t"
-                && matches!(
-                    parent.as_ref(),
-                    Path::Pdot(root, module_name, _)
-                        if module_name == child_name
-                            && matches!(root.as_ref(), Path::Pident(id) if id.name() == "Js")
-                )
-    )
-}
-
 fn type_to_instanceof_backed_obj_name(path: &Path) -> Option<&'static str> {
     if matches!(path, Path::Pident(id) if id.name() == "array" || id.name() == "promise") {
         if matches!(path, Path::Pident(id) if id.name() == "array") {
@@ -5713,11 +5699,10 @@ fn type_to_instanceof_backed_obj_name(path: &Path) -> Option<&'static str> {
         }
         return Some("Promise");
     }
-    // OCaml compiler/ml/ast_untagged_variants.ml:243-266 recognizes
-    // `Js_file.t` and `Js_blob.t` after component lookup. Rust can still hold
-    // the selected `Js.File.t`/`Js.Blob.t` access path here; treating those as
-    // the same instance-backed object avoids forcing `Js.ps_sig` earlier than
-    // OCaml's env.ml:1000-1007 component-table lookup does.
+    // OCaml compiler/ml/ast_untagged_variants.ml:243-266 recognizes the
+    // flattened `Stdlib_File.t` and `Stdlib_Blob.t` paths after expansion.
+    // Rust can still hold the selected `Stdlib.File.t` / `Stdlib.Blob.t`
+    // component paths before expansion, so recognize both representations.
     if path_is_t_of_persistent_module(path, "Stdlib_ArrayBuffer")
         || path_is_t_of_stdlib_child(path, "ArrayBuffer")
     {
@@ -5750,10 +5735,12 @@ fn type_to_instanceof_backed_obj_name(path: &Path) -> Option<&'static str> {
         Some("Uint8Array")
     } else if path_is_t_of_stdlib_child(path, "Uint8ClampedArray") {
         Some("Uint8ClampedArray")
-    } else if path_is_t_of_persistent_module(path, "Js_file") || path_is_t_of_js_child(path, "File")
+    } else if path_is_t_of_persistent_module(path, "Stdlib_File")
+        || path_is_t_of_stdlib_child(path, "File")
     {
         Some("File")
-    } else if path_is_t_of_persistent_module(path, "Js_blob") || path_is_t_of_js_child(path, "Blob")
+    } else if path_is_t_of_persistent_module(path, "Stdlib_Blob")
+        || path_is_t_of_stdlib_child(path, "Blob")
     {
         Some("Blob")
     } else if path_is_t_of_stdlib_child(path, "Set") {
