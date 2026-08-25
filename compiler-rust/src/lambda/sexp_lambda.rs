@@ -205,9 +205,9 @@ fn tag_info(info: &TagInfo) -> Sexp {
             Sexp::atom("Blk_record_inlined"),
             string(name),
             int(*num_nonconst),
+            variant_block_runtime(runtime),
             Sexp::list(fields.iter().map(|(name, _)| string(name)).collect()),
             mutable_flag_sexp(mutable_flag),
-            variant_block_runtime(runtime),
         ]),
         TagInfo::Module(fields) => {
             let mut items = vec![Sexp::atom("Blk_module")];
@@ -442,12 +442,11 @@ fn constant(c: &Constant) -> Sexp {
         ]),
         Constant::Pointer(s) => Sexp::list(vec![Sexp::atom("Const_pointer"), string(s)]),
         Constant::Block {
-            tag,
             tag_info: info,
             elements,
+            ..
         } => Sexp::list(vec![
             Sexp::atom("Const_block"),
-            int(*tag),
             tag_info(info),
             Sexp::list(elements.iter().map(constant).collect()),
         ]),
@@ -499,9 +498,8 @@ fn primitive(prim: &Primitive, _with_locs: bool) -> Sexp {
         Primitive::Pnull => Sexp::atom("Pnull"),
         Primitive::Pundefined => Sexp::atom("Pundefined"),
         Primitive::Pimport => Sexp::atom("Pimport"),
-        Primitive::Pmakeblock(tag, info, m) => Sexp::list(vec![
+        Primitive::Pmakeblock(_, info, m) => Sexp::list(vec![
             Sexp::atom("Pmakeblock"),
-            int(*tag),
             tag_info(info),
             mutable_sexp(m),
         ]),

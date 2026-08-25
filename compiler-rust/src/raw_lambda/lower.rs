@@ -592,6 +592,13 @@ fn collect_exported_idents(raw: &RawLambda, exports: &mut HashSet<Ident>) {
 
 fn lower_constant(constant: Constant) -> Constant {
     match constant {
+        Constant::Constructor(tag) => match tag.tag_type {
+            Some(crate::types::VariantTagType::Int(value)) => Constant::Int {
+                i: value,
+                comment: None,
+            },
+            _ => Constant::Constructor(tag),
+        },
         Constant::NativeInt { i, comment } => Constant::Int {
             // OCaml's lam_constant_convert.ml truncates source ints here with Int32.of_int.
             i: i as i32,
