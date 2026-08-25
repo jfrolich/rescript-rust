@@ -69,19 +69,19 @@ fn test_primitive_keeps_positive_effectful_if_else_return_shape() {
 }
 
 #[test]
-fn pr6726_keeps_local_module_wrapper_call_materialized_like_ocaml() {
+fn pr6726_inlines_local_module_wrapper_call_like_ocaml() {
     let output = compile_checked_in_test_file_to_js("pr6726");
     assert!(
-        output.contains("let v = test_endian_string(1);"),
-        "expected pr6726 to keep the local module wrapper call materialized, got:\n{output}"
+        output.contains("let v = 33;"),
+        "expected pr6726 to match the OCaml snapshot by fully inlining the wrapper call, got:\n{output}"
     );
     assert!(
         output.contains("v: v"),
         "expected the local module block to reference the call-result binding, got:\n{output}"
     );
     assert!(
-        output.contains("/* v Not a pure module */"),
-        "expected pr6726 to preserve OCaml's module-side-effect reason, got:\n{output}"
+        output.contains("/* No side effect */"),
+        "expected pr6726 to match OCaml's pure-module classification after inlining, got:\n{output}"
     );
     assert!(
         !output.contains("v: 33"),
@@ -654,7 +654,7 @@ fn string_set_reuses_same_name_export_aliases_for_module_fields_like_snapshot() 
     assert!(
         output.contains("return Set_gen.empty;")
             && output.contains("return Set_gen.singleton(x0);")
-            && output.contains("return Set_gen.of_sorted_list(Belt_List.sort(l, compare_elt));"),
+            && output.contains("return Set_gen.of_sorted_list(Stdlib_List.sort(l, (a, b) => Primitive_string.compare(a, b) | 0));"),
         "expected string_set to inline exported module-field aliases at ordinary internal call sites like OCaml, got:\n{output}"
     );
     assert!(
@@ -835,15 +835,15 @@ fn gpr_4924_inlines_local_variant_matcher_calls_to_constants_like_ocaml() {
 fn uncurried_cast_keeps_local_module_field_alias_binding_materialized_like_ocaml() {
     let output = compile_checked_in_test_file_to_js("uncurried_cast");
     assert!(
-        output.contains("let map = Belt_List.map;\n\nlet List = {\n  map: map\n};"),
+        output.contains("let map = Stdlib_List.map;\n\nlet List = {\n  map: map\n};"),
         "expected uncurried_cast to keep the eta-reduced module field alias materialized in List, got:\n{output}"
     );
     assert!(
-        output.contains("let l = Belt_List.map({")
-            && output.contains("function partial(x) {\n  return Belt_List.map({")
-            && output.contains("let l$1 = Belt_List.map({")
-            && output.contains("function partial$1(extra) {\n  return Belt_List.map({"),
-        "expected uncurried_cast to rewrite map call sites back to Belt_List.map like OCaml, got:\n{output}"
+        output.contains("let l = Stdlib_List.map({")
+            && output.contains("function partial(x) {\n  return Stdlib_List.map({")
+            && output.contains("let l$1 = Stdlib_List.map({")
+            && output.contains("function partial$1(extra) {\n  return Stdlib_List.map({"),
+        "expected uncurried_cast to rewrite map call sites back to Stdlib_List.map like OCaml, got:\n{output}"
     );
     assert!(
         !output.contains("let List = {\n  map: Belt_List.map\n};"),
