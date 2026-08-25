@@ -297,6 +297,24 @@ fn string_delim(delim: &Option<StringDelim>) -> Sexp {
     }
 }
 
+fn variant_block_type(block: &crate::types::VariantBlockType) -> Sexp {
+    use crate::types::VariantBlockType as B;
+    match block {
+        B::Int => Sexp::atom("IntType"),
+        B::String => Sexp::atom("StringType"),
+        B::Float => Sexp::atom("FloatType"),
+        B::Bigint => Sexp::atom("BigintType"),
+        B::Boolean => Sexp::atom("BooleanType"),
+        B::Instance(instance) => Sexp::list(vec![
+            Sexp::atom("InstanceType"),
+            Sexp::atom(instance.as_str()),
+        ]),
+        B::Function => Sexp::atom("FunctionType"),
+        B::Object => Sexp::atom("ObjectType"),
+        B::Unknown => Sexp::atom("UnknownType"),
+    }
+}
+
 fn variant_tag_type(tag: &crate::types::VariantTagType) -> Sexp {
     use crate::types::VariantTagType as T;
     match tag {
@@ -307,7 +325,7 @@ fn variant_tag_type(tag: &crate::types::VariantTagType) -> Sexp {
         T::Bool(value) => Sexp::list(vec![Sexp::atom("Bool"), bool_sexp(*value)]),
         T::Null => Sexp::atom("Null"),
         T::Undefined => Sexp::atom("Undefined"),
-        T::Untagged(_) => Sexp::atom("Untagged"),
+        T::Untagged(block) => Sexp::list(vec![Sexp::atom("Untagged"), variant_block_type(block)]),
     }
 }
 
@@ -332,6 +350,59 @@ fn variant_tag(tag: &crate::types::VariantTag) -> Sexp {
             |tag| Sexp::list(vec![Sexp::atom("Some"), variant_tag_type(tag)]),
         ),
     ])
+}
+
+fn variant_constructor_case(case: &crate::types::VariantConstructorCase) -> Sexp {
+    match case {
+        crate::types::VariantConstructorCase::Constant(tag) => {
+            Sexp::list(vec![Sexp::atom("Constant"), variant_tag(tag)])
+        }
+        crate::types::VariantConstructorCase::Block(block) => Sexp::list(vec![
+            Sexp::atom("Block"),
+            variant_block_runtime(&block.runtime),
+            block.block_type.as_ref().map_or_else(
+                || Sexp::atom("None"),
+                |ty| Sexp::list(vec![Sexp::atom("Some"), variant_block_type(ty)]),
+            ),
+        ]),
+    }
+}
+
+fn variant_matching_facts(facts: &crate::types::VariantMatchingFacts) -> Sexp {
+    Sexp::list(vec![
+        Sexp::atom("matching_facts"),
+        facts.tag_name.as_ref().map_or_else(
+            || Sexp::atom("None"),
+            |name| Sexp::list(vec![Sexp::atom("Some"), string(name)]),
+        ),
+        Sexp::list(facts.block_types.iter().map(variant_block_type).collect()),
+        Sexp::list(facts.literal_tags.iter().map(variant_tag_type).collect()),
+        bool_sexp(facts.has_null),
+        bool_sexp(facts.has_undefined),
+        bool_sexp(facts.has_other_literal),
+    ])
+}
+
+fn switch_key(key: &crate::lambda::SwitchKey) -> Sexp {
+    match key {
+        crate::lambda::SwitchKey::Int(value) => {
+            Sexp::list(vec![Sexp::atom("Switch_int"), int(*value)])
+        }
+        crate::lambda::SwitchKey::Constructor(case) => Sexp::list(vec![
+            Sexp::atom("Switch_constructor"),
+            variant_constructor_case(case),
+        ]),
+    }
+}
+
+fn switch_dispatch(dispatch: &crate::lambda::SwitchDispatch) -> Sexp {
+    match dispatch {
+        crate::lambda::SwitchDispatch::Direct => Sexp::atom("Switch_direct"),
+        crate::lambda::SwitchDispatch::Variant(facts) => Sexp::list(vec![
+            Sexp::atom("Switch_variant"),
+            variant_matching_facts(facts),
+        ]),
+    }
 }
 
 // Constant
@@ -730,7 +801,7 @@ fn lambda_switch(sw: &LambdaSwitch, with_locs: bool) -> Sexp {
             Sexp::list(
                 sw.sw_consts
                     .iter()
-                    .map(|(tag, lam)| Sexp::list(vec![int(*tag), lambda(lam, with_locs)]))
+                    .map(|(tag, lam)| Sexp::list(vec![switch_key(tag), lambda(lam, with_locs)]))
                     .collect(),
             ),
         ]),
@@ -743,7 +814,7 @@ fn lambda_switch(sw: &LambdaSwitch, with_locs: bool) -> Sexp {
             Sexp::list(
                 sw.sw_blocks
                     .iter()
-                    .map(|(tag, lam)| Sexp::list(vec![int(*tag), lambda(lam, with_locs)]))
+                    .map(|(tag, lam)| Sexp::list(vec![switch_key(tag), lambda(lam, with_locs)]))
                     .collect(),
             ),
         ]),
@@ -755,8 +826,8 @@ fn lambda_switch(sw: &LambdaSwitch, with_locs: bool) -> Sexp {
             ),
         ]),
         Sexp::list(vec![
-            Sexp::atom("sw_names"),
-            switch_names_sexp(&sw.sw_names),
+            Sexp::atom("sw_dispatch"),
+            switch_dispatch(&sw.sw_dispatch),
         ]),
     ])
 }

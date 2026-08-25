@@ -151,21 +151,43 @@ impl Default for FunctionAttribute {
     }
 }
 
-/// Switch construct for pattern matching
+/// Key selected by a Lambda switch branch.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum SwitchKey {
+    Int(i32),
+    Constructor(crate::types::VariantConstructorCase),
+}
+
+impl std::fmt::Display for SwitchKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Int(value) => value.fmt(f),
+            Self::Constructor(crate::types::VariantConstructorCase::Constant(tag)) => {
+                write!(f, "constructor {:?}", tag.name)
+            }
+            Self::Constructor(crate::types::VariantConstructorCase::Block(block)) => {
+                write!(f, "constructor {:?}", block.runtime.tag.name)
+            }
+        }
+    }
+}
+
+/// Runtime dispatch semantics for a Lambda switch.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SwitchDispatch {
+    Direct,
+    Variant(crate::types::VariantMatchingFacts),
+}
+
+/// Switch construct for pattern matching.
 #[derive(Debug, Clone)]
 pub struct LambdaSwitch {
-    /// Are all constant cases covered?
     pub sw_consts_full: bool,
-    /// Constant case branches (tag -> lambda)
-    pub sw_consts: Vec<(i32, Lambda)>,
-    /// Are all block cases covered?
+    pub sw_consts: Vec<(SwitchKey, Lambda)>,
     pub sw_blocks_full: bool,
-    /// Block case branches (tag -> lambda)
-    pub sw_blocks: Vec<(i32, Lambda)>,
-    /// Fallback action if no case matches
+    pub sw_blocks: Vec<(SwitchKey, Lambda)>,
     pub sw_failaction: Option<Box<Lambda>>,
-    /// Names for switch cases (for untagged variants)
-    pub sw_names: Option<SwitchNames>,
+    pub sw_dispatch: SwitchDispatch,
 }
 
 /// Runtime literal carried by an OCaml/ReScript variant tag.
@@ -180,19 +202,7 @@ pub enum SwitchCaseTag {
     Undefined,
 }
 
-/// Runtime kind used for ReScript's untagged payload cases.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum SwitchBlockType {
-    Int,
-    String,
-    Float,
-    BigInt,
-    Boolean,
-    Instance(String),
-    Function,
-    Object,
-    Unknown,
-}
+pub type SwitchBlockType = crate::types::VariantBlockType;
 
 /// Runtime tag metadata for one constructor case.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -580,44 +590,11 @@ impl Lambda {
     pub fn switch(scrutinee: Lambda, switch: LambdaSwitch) -> Self {
         match scrutinee {
             Lambda::Lconst(Constant::Constructor(tag)) => {
-                let action = switch.sw_names.as_ref().and_then(|names| {
-                    names
-                        .consts
-                        .iter()
-                        .position(|candidate| {
-                            candidate.name == tag.name
-                                && match (&candidate.tag_type, &tag.tag_type) {
-                                    (None, None) => true,
-                                    (
-                                        Some(SwitchCaseTag::String(a)),
-                                        Some(crate::types::VariantTagType::String(b)),
-                                    ) => a == b,
-                                    (
-                                        Some(SwitchCaseTag::Int(a)),
-                                        Some(crate::types::VariantTagType::Int(b)),
-                                    ) => *a == *b as i64,
-                                    (
-                                        Some(SwitchCaseTag::Bool(a)),
-                                        Some(crate::types::VariantTagType::Bool(b)),
-                                    ) => a == b,
-                                    (
-                                        Some(SwitchCaseTag::Null),
-                                        Some(crate::types::VariantTagType::Null),
-                                    )
-                                    | (
-                                        Some(SwitchCaseTag::Undefined),
-                                        Some(crate::types::VariantTagType::Undefined),
-                                    ) => true,
-                                    _ => false,
-                                }
-                        })
-                        .and_then(|position| {
-                            switch
-                                .sw_consts
-                                .iter()
-                                .find(|(key, _)| *key == position as i32)
-                        })
-                });
+                let action = switch.sw_consts.iter().find(|(key, _)| matches!(
+                    key,
+                    SwitchKey::Constructor(crate::types::VariantConstructorCase::Constant(candidate))
+                        if candidate == &tag
+                ));
                 action
                     .map(|(_, branch)| branch.clone())
                     .or_else(|| switch.sw_failaction.as_deref().cloned())
@@ -631,14 +608,14 @@ impl Lambda {
             Lambda::Lconst(constant @ Constant::Int { i, .. }) => switch
                 .sw_consts
                 .iter()
-                .find(|(tag, _)| *tag == i)
+                .find(|(key, _)| matches!(key, SwitchKey::Int(value) if *value == i))
                 .map(|(_, branch)| branch.clone())
                 .or_else(|| switch.sw_failaction.as_deref().cloned())
                 .unwrap_or_else(|| Lambda::Lswitch(Box::new(Lambda::Lconst(constant)), switch)),
             Lambda::Lconst(constant @ Constant::Block { tag, .. }) => switch
                 .sw_blocks
                 .iter()
-                .find(|(block_tag, _)| *block_tag == tag)
+                .find(|(key, _)| matches!(key, SwitchKey::Int(value) if *value == tag))
                 .map(|(_, branch)| branch.clone())
                 .or_else(|| switch.sw_failaction.as_deref().cloned())
                 .unwrap_or_else(|| Lambda::Lswitch(Box::new(Lambda::Lconst(constant)), switch)),
@@ -1291,12 +1268,13 @@ fn has_boolean_type(lam: &Lambda) -> Option<Location> {
     }
 }
 
-fn complete_range(sw_consts: &[(i32, Lambda)], start: i32, finish: i32) -> bool {
+fn complete_range(sw_consts: &[(SwitchKey, Lambda)], start: i32, finish: i32) -> bool {
     match sw_consts.split_first() {
         None => finish < start,
-        Some(((i, _), rest)) => {
-            start <= finish && *i == start && complete_range(rest, start + 1, finish)
+        Some(((SwitchKey::Int(value), _), rest)) => {
+            start <= finish && *value == start && complete_range(rest, start + 1, finish)
         }
+        Some(((SwitchKey::Constructor(_), _), _)) => false,
     }
 }
 

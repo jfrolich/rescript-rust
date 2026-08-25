@@ -444,6 +444,7 @@ pub struct TypeContext {
     predef_bigint: Cell<Option<TypeExprRef>>,
     predef_option_inner: Cell<Option<TypeExprRef>>,
     predef_option_type: Cell<Option<TypeExprRef>>,
+    predef_option_layout: Cell<Option<super::variant_runtime::LayoutRef>>,
 
     /// Arity update aliases: maps arity-updated TypeExprRef → original TypeExprRef.
     /// OCaml's `{t with desc = Tarrow(..., Some newarity)}` creates a new record
@@ -582,6 +583,7 @@ impl TypeContext {
             predef_bigint: Cell::new(None),
             predef_option_inner: Cell::new(None),
             predef_option_type: Cell::new(None),
+            predef_option_layout: Cell::new(None),
             arity_aliases: RefCell::new(ahash::AHashMap::new()),
             record_labels_cache: RefCell::new(ahash::AHashMap::new()),
             record_label_descriptions_cache: RefCell::new(ahash::AHashMap::new()),
@@ -1417,6 +1419,19 @@ impl TypeContext {
 
     /// Get the cached generic option constructor scheme types.
     /// Returns (`'a`, `option('a)`), both allocated once at generic level.
+    pub fn predef_option_layout(&self) -> super::variant_runtime::LayoutRef {
+        if let Some(layout) = self.predef_option_layout.get() {
+            layout
+        } else {
+            let layout = super::variant_runtime::plain_layout(
+                self,
+                [("None".to_string(), false), ("Some".to_string(), true)],
+            );
+            self.predef_option_layout.set(Some(layout));
+            layout
+        }
+    }
+
     pub fn predef_option_scheme(&self) -> (TypeExprRef, TypeExprRef) {
         match (
             self.predef_option_inner.get(),

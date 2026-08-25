@@ -33,7 +33,7 @@ use crate::types::asttypes::MutableFlag;
 use crate::types::btype;
 use crate::types::context::TypeContext;
 use crate::types::decl::{
-    ConstructorArguments, ConstructorDescription, ConstructorTag, LabelDescription,
+    ConstructorArguments, ConstructorDescription, ConstructorKind, LabelDescription,
     RecordRepresentation, TypeKind,
 };
 use crate::types::env::Env;
@@ -327,30 +327,8 @@ fn const_compare(c1: &Constant, c2: &Constant) -> std::cmp::Ordering {
     }
 }
 
-/// Check if two constructor tags are equal.
 fn same_constructor(c1: &ConstructorDescription, c2: &ConstructorDescription) -> bool {
-    match (&c1.cstr_kind, &c2.cstr_kind) {
-        (
-            Some(crate::types::ConstructorKind::Ordinary(_)),
-            Some(crate::types::ConstructorKind::Ordinary(_)),
-        ) => c1.cstr_name == c2.cstr_name,
-        (
-            Some(crate::types::ConstructorKind::Extension(p1)),
-            Some(crate::types::ConstructorKind::Extension(p2)),
-        ) => p1.same(p2),
-        (Some(_), Some(_)) => false,
-        _ => equal_tag(&c1.cstr_tag, &c2.cstr_tag),
-    }
-}
-
-fn equal_tag(t1: &ConstructorTag, t2: &ConstructorTag) -> bool {
-    match (t1, t2) {
-        (ConstructorTag::CstrConstant(i1), ConstructorTag::CstrConstant(i2)) => i1 == i2,
-        (ConstructorTag::CstrBlock(i1), ConstructorTag::CstrBlock(i2)) => i1 == i2,
-        (ConstructorTag::CstrUnboxed, ConstructorTag::CstrUnboxed) => true,
-        (ConstructorTag::CstrExtension(p1), ConstructorTag::CstrExtension(p2)) => p1.same(p2),
-        _ => false,
-    }
+    crate::types::same_constructor(c1, c2)
 }
 
 type RecordPatternField = (
@@ -954,19 +932,7 @@ fn may_equal_constr(
     c1: &crate::types::ConstructorDescription,
     c2: &crate::types::ConstructorDescription,
 ) -> bool {
-    match (&c1.cstr_kind, &c2.cstr_kind) {
-        (
-            Some(crate::types::ConstructorKind::Extension(_)),
-            Some(crate::types::ConstructorKind::Extension(_)),
-        ) => c1.cstr_arity == c2.cstr_arity,
-        (Some(_), Some(_)) => same_constructor(c1, c2),
-        _ => match (&c1.cstr_tag, &c2.cstr_tag) {
-            (ConstructorTag::CstrExtension(_), ConstructorTag::CstrExtension(_)) => {
-                c1.cstr_arity == c2.cstr_arity
-            }
-            (t1, t2) => equal_tag(t1, t2),
-        },
-    }
+    crate::types::may_equal_constructor(c1, c2)
 }
 
 /// Compatibility predicate: may_compat p q returns false when p and q
@@ -2042,11 +2008,11 @@ fn make_key(e: &RawLambda) -> Option<RawLambda> {
     ) -> Option<RawLambdaSwitch> {
         let mut consts = Vec::new();
         for (tag, act) in &sw.sw_consts {
-            consts.push((*tag, tr_rec(env, act, count, next_id)?));
+            consts.push((tag.clone(), tr_rec(env, act, count, next_id)?));
         }
         let mut blocks = Vec::new();
         for (tag, act) in &sw.sw_blocks {
-            blocks.push((*tag, tr_rec(env, act, count, next_id)?));
+            blocks.push((tag.clone(), tr_rec(env, act, count, next_id)?));
         }
         let fail = tr_opt(env, sw.sw_failaction.as_deref(), count, next_id)?;
         Some(RawLambdaSwitch {
@@ -2057,7 +2023,7 @@ fn make_key(e: &RawLambda) -> Option<RawLambda> {
             sw_blocks_full: sw.sw_blocks_full,
             sw_blocks: blocks,
             sw_failaction: fail.map(Box::new),
-            sw_names: sw.sw_names.clone(),
+            sw_dispatch: sw.sw_dispatch.clone(),
         })
     }
 
@@ -2234,7 +2200,7 @@ impl MakeKeyWriter {
                 }
                 out.push_str("],fail=");
                 self.write_raw_opt(sw.sw_failaction.as_deref(), out)?;
-                write!(out, ",names={:?},loc={loc:?})", sw.sw_names).ok()?;
+                write!(out, ",names={:?},loc={loc:?})", sw.sw_dispatch).ok()?;
                 Some(())
             }
             RawLambda::LstringSwitch(scrut, cases, default) => {
@@ -4058,7 +4024,7 @@ fn split_constr(
     match &ex_pat.pat_desc {
         PatternDesc::Tpat_any => precompile_var(args, cls.to_vec(), def, k, next_raise),
         PatternDesc::Tpat_construct(_, cstr, _)
-            if matches!(&cstr.cstr_tag, ConstructorTag::CstrExtension(_)) =>
+            if matches!(&cstr.cstr_kind, crate::types::ConstructorKind::Extension(_)) =>
         {
             split_naive(cls, args, def, k, next_raise)
         }
@@ -4764,11 +4730,11 @@ fn make_field_args(
     result
 }
 
-/// Get the key (tag) from a constructor pattern.
+/// Get the declared constructor from a constructor pattern.
 /// Equivalent to OCaml's `get_key_constr`.
-fn get_key_constr(p: &Pattern) -> ConstructorTag {
+fn get_key_constr(p: &Pattern) -> ConstructorDescription {
     match &p.pat_desc {
-        PatternDesc::Tpat_construct(_, cstr, _) => cstr.cstr_tag.clone(),
+        PatternDesc::Tpat_construct(_, cstr, _) => cstr.clone(),
         _ => panic!("get_key_constr: not a construct pattern"),
     }
 }
@@ -4955,11 +4921,12 @@ fn make_constr_matching(
                 result.extend(argl.iter().cloned());
                 result
             } else {
-                match &cstr.cstr_tag {
-                    // OCaml compiler/ml/matching.ml:1257-1277 only unwraps
-                    // option-shaped constructors when Datarepr marks the
-                    // constructor with internal.optional.
-                    ConstructorTag::CstrBlock(_) if constructor_has_optional_shape(cstr) => {
+                match &cstr.cstr_kind {
+                    // OCaml compiler/ml/matching.ml only unwraps option-shaped
+                    // ordinary constructors marked with internal.optional.
+                    crate::types::ConstructorKind::Ordinary(_)
+                        if !cstr.cstr_args.is_empty() && constructor_has_optional_shape(cstr) =>
+                    {
                         let from_option = match &p.pat_desc {
                             PatternDesc::Tpat_construct(_, _, args_inner)
                                 if args_inner.len() == 1 =>
@@ -5000,7 +4967,7 @@ fn make_constr_matching(
                         result.extend(argl.iter().cloned());
                         result
                     }
-                    ConstructorTag::CstrConstant(_) | ConstructorTag::CstrBlock(_) => {
+                    crate::types::ConstructorKind::Ordinary(_) => {
                         let fld_info = if cstr.cstr_name == "::" {
                             FieldDbgInfo::Cons
                         } else {
@@ -5016,12 +4983,7 @@ fn make_constr_matching(
                             &argl,
                         )
                     }
-                    ConstructorTag::CstrUnboxed => {
-                        let mut result = vec![(arg.clone(), LetKind::Alias)];
-                        result.extend(argl.iter().cloned());
-                        result
-                    }
-                    ConstructorTag::CstrExtension(_) => make_field_args(
+                    crate::types::ConstructorKind::Extension(_) => make_field_args(
                         FieldDbgInfo::Extension,
                         Location::none(),
                         LetKind::Alias,
@@ -5052,10 +5014,10 @@ fn divide_constructor(
     ctx_ref: &TypeContext,
     ctx: &[Ctx],
     pm: &PatternMatching,
-) -> Vec<(ConstructorTag, MatchCell)> {
+) -> Vec<(ConstructorDescription, MatchCell)> {
     divide(
         |p, def, ctx_inner, args| make_constr_matching(ctx_ref, p, def, ctx_inner, args),
-        |a, b| equal_tag(a, b),
+        same_constructor,
         get_key_constr,
         get_args_constr,
         ctx,
@@ -5183,7 +5145,7 @@ fn divide_variant(
     row: &RowDesc,
     ctx: &[Ctx],
     pm: &PatternMatching,
-) -> Vec<((String, ConstructorTag), MatchCell)> {
+) -> Vec<((String, bool), MatchCell)> {
     let row = btype::row_repr(ctx_ref, row);
 
     fn divide_rec(
@@ -5193,7 +5155,7 @@ fn divide_variant(
         def: &DefaultEnv,
         ctx: &[Ctx],
         al: &MatchArgs,
-    ) -> Vec<((String, ConstructorTag), MatchCell)> {
+    ) -> Vec<((String, bool), MatchCell)> {
         match cases.split_first() {
             Some(((patl, action), rem)) => {
                 match patl.split_first() {
@@ -5218,16 +5180,11 @@ fn divide_variant(
                                     return variants;
                                 }
 
-                                let tag = btype::hash_variant(lab);
-                                let eq_key = |a: &(String, ConstructorTag),
-                                              b: &(String, ConstructorTag)|
-                                 -> bool {
-                                    a.0 == b.0 && equal_tag(&a.1, &b.1)
-                                };
+                                let eq_key = |a: &(String, bool), b: &(String, bool)| a == b;
 
                                 match pato {
                                     None => {
-                                        let key = (lab.clone(), ConstructorTag::CstrConstant(tag));
+                                        let key = (lab.clone(), true);
                                         add(
                                             |a| make_variant_matching_constant(p, lab, def, ctx, a),
                                             variants,
@@ -5238,7 +5195,7 @@ fn divide_variant(
                                         )
                                     }
                                     Some(pat_inner) => {
-                                        let key = (lab.clone(), ConstructorTag::CstrBlock(tag));
+                                        let key = (lab.clone(), false);
                                         let mut new_patl = vec![(**pat_inner).clone()];
                                         new_patl.extend(rest_patl.iter().cloned());
                                         add(
@@ -6330,7 +6287,7 @@ fn sarg_make_switch(
     cases: &[usize],
     acts: &[RawLambda],
     offset: i32,
-    sw_names: Option<SwitchNames>,
+    sw_dispatch: Option<SwitchNames>,
 ) -> RawLambda {
     let mut l: Vec<(i32, RawLambda)> = Vec::new();
     for i in (0..cases.len()).rev() {
@@ -6342,12 +6299,15 @@ fn sarg_make_switch(
         RawLambdaSwitch {
             sw_numconsts: cases.len(),
             sw_consts_full: false,
-            sw_consts: l,
+            sw_consts: l
+                .into_iter()
+                .map(|(key, action)| (crate::lambda::SwitchKey::Int(key), action))
+                .collect(),
             sw_numblocks: 0,
             sw_blocks_full: false,
             sw_blocks: Vec::new(),
             sw_failaction: None,
-            sw_names,
+            sw_dispatch: crate::lambda::SwitchDispatch::Direct,
         },
         _loc,
     )
@@ -6374,17 +6334,17 @@ pub fn share_actions_sw(
         sw_blocks_full,
         sw_blocks,
         sw_failaction,
-        sw_names,
+        sw_dispatch,
     } = sw;
 
     let fail_idx = sw_failaction.map(|fail| store.act_store_shared(*fail));
 
     // Store const and block actions
-    let consts: Vec<(i32, usize)> = sw_consts
+    let consts: Vec<(crate::lambda::SwitchKey, usize)> = sw_consts
         .into_iter()
         .map(|(i, e)| (i, store.act_store(e)))
         .collect();
-    let blocks: Vec<(i32, usize)> = sw_blocks
+    let blocks: Vec<(crate::lambda::SwitchKey, usize)> = sw_blocks
         .into_iter()
         .map(|(i, e)| (i, store.act_store(e)))
         .collect();
@@ -6464,7 +6424,7 @@ pub fn share_actions_sw(
             })
             .collect(),
         sw_failaction: fail,
-        sw_names,
+        sw_dispatch,
     };
 
     (handlers, new_sw)
@@ -6505,23 +6465,23 @@ pub fn reintroduce_fail(sw: RawLambdaSwitch) -> RawLambdaSwitch {
 
     if max >= 3 {
         let default = i_max;
-        let remove = |ls: Vec<(i32, RawLambda)>| -> Vec<(i32, RawLambda)> {
+        fn remove<K>(ls: Vec<(K, RawLambda)>, default: i32) -> Vec<(K, RawLambda)> {
             ls.into_iter()
                 .filter(|(_, lam)| match as_simple_exit(lam) {
                     Some(j) => j != default,
                     None => true,
                 })
                 .collect()
-        };
+        }
         RawLambdaSwitch {
             sw_numconsts: sw.sw_numconsts,
             sw_consts_full: sw.sw_consts_full,
-            sw_consts: remove(sw.sw_consts),
+            sw_consts: remove(sw.sw_consts, default),
             sw_numblocks: sw.sw_numblocks,
             sw_blocks_full: sw.sw_blocks_full,
-            sw_blocks: remove(sw.sw_blocks),
+            sw_blocks: remove(sw.sw_blocks, default),
             sw_failaction: Some(Box::new(make_exit(default))),
-            sw_names: sw.sw_names,
+            sw_dispatch: sw.sw_dispatch,
         }
     } else {
         sw
@@ -6729,7 +6689,7 @@ pub fn call_switcher(
     low: i32,
     high: i32,
     int_lambda_list: Vec<(i32, RawLambda)>,
-    sw_names: Option<SwitchNames>,
+    sw_dispatch: Option<SwitchNames>,
     next_raise_count: &mut i32,
 ) -> RawLambda {
     let (edges, (cases, store)) = as_interval(fail, low, high, int_lambda_list);
@@ -6751,7 +6711,7 @@ pub fn call_switcher(
         arg,
         &cases,
         acts,
-        sw_names,
+        sw_dispatch,
         &mut || bump_raise_count(next_raise_count, "matching::call_switcher"),
     )
 }
@@ -6789,31 +6749,11 @@ fn complete_pats_constrs(ctx_ref: &TypeContext, pats: &[Pattern]) -> Vec<Pattern
         Some(p) => {
             let cstr = pat_as_constr(p);
 
-            // Extension types (cstr_consts < 0) are open — can't enumerate all constructors
-            if cstr.cstr_consts < 0 {
+            if matches!(cstr.cstr_kind, crate::types::ConstructorKind::Extension(_)) {
                 return Vec::new();
             }
-
-            let all_tags: Vec<ConstructorTag> = pats.iter().map(|p| get_key_constr(p)).collect();
-
-            // Build a set of seen tags
-            let mut seen_const = vec![false; cstr.cstr_consts as usize];
-            let mut seen_nonconst = vec![false; cstr.cstr_nonconsts as usize];
-            for tag in &all_tags {
-                match tag {
-                    ConstructorTag::CstrConstant(i) => {
-                        if (*i as usize) < seen_const.len() {
-                            seen_const[*i as usize] = true;
-                        }
-                    }
-                    ConstructorTag::CstrBlock(i) => {
-                        if (*i as usize) < seen_nonconst.len() {
-                            seen_nonconst[*i as usize] = true;
-                        }
-                    }
-                    _ => {}
-                }
-            }
+            let seen_constrs: Vec<ConstructorDescription> =
+                pats.iter().map(get_key_constr).collect();
 
             // Get all constructors of the type from the environment
             let env_opt = ctx_ref.get_typed_env(p.pat_env);
@@ -6829,73 +6769,16 @@ fn complete_pats_constrs(ctx_ref: &TypeContext, pats: &[Pattern]) -> Vec<Pattern
                 Vec::new()
             };
 
-            if !all_constrs.is_empty() {
-                // Filter to unseen constructors, preserving const before nonconst order
-                let mut const_others = Vec::new();
-                let mut nonconst_others = Vec::new();
-                for cnstr in &all_constrs {
-                    let is_unseen = match &cnstr.cstr_tag {
-                        ConstructorTag::CstrConstant(i) => {
-                            (*i as usize) < seen_const.len() && !seen_const[*i as usize]
-                        }
-                        ConstructorTag::CstrBlock(i) => {
-                            (*i as usize) < seen_nonconst.len() && !seen_nonconst[*i as usize]
-                        }
-                        _ => false,
-                    };
-                    if is_unseen {
-                        if cnstr.cstr_arity == 0 {
-                            const_others.push(cnstr);
-                        } else {
-                            nonconst_others.push(cnstr);
-                        }
-                    }
-                }
-
-                // Build patterns: pat_of_constr for each unseen constructor
-                let mut result = Vec::new();
-                for cnstr in const_others.iter().chain(nonconst_others.iter()) {
-                    result.push(pat_of_constr(p, cnstr));
-                }
-                result
-            } else {
-                // Type lookup failed — synthesize unseen constructors from the
-                // cstr_consts/cstr_nonconsts counts and the seen tags.
-                // This handles external module types (e.g., list from stdlib).
-                let mut result = Vec::new();
-                for i in 0..cstr.cstr_consts {
-                    if (i as usize) < seen_const.len() && !seen_const[i as usize] {
-                        let synth_cstr = ConstructorDescription {
-                            cstr_name: String::new(),
-                            cstr_kind: None,
-                            cstr_tag: ConstructorTag::CstrConstant(i),
-                            cstr_arity: 0,
-                            cstr_consts: cstr.cstr_consts,
-                            cstr_nonconsts: cstr.cstr_nonconsts,
-                            ..cstr.clone()
-                        };
-                        result.push(pat_of_constr(p, &synth_cstr));
-                    }
-                }
-                for i in 0..cstr.cstr_nonconsts {
-                    if (i as usize) < seen_nonconst.len() && !seen_nonconst[i as usize] {
-                        // Synthesize a non-constant constructor with arity 1
-                        // (we don't know the real arity, but 1 is sufficient for
-                        // the pattern to be recognized as non-constant)
-                        let synth_cstr = ConstructorDescription {
-                            cstr_name: String::new(),
-                            cstr_kind: None,
-                            cstr_tag: ConstructorTag::CstrBlock(i),
-                            cstr_arity: 1,
-                            cstr_consts: cstr.cstr_consts,
-                            cstr_nonconsts: cstr.cstr_nonconsts,
-                            ..cstr.clone()
-                        };
-                        result.push(pat_of_constr(p, &synth_cstr));
-                    }
-                }
-                result
-            }
+            let mut others: Vec<_> = all_constrs
+                .into_iter()
+                .filter(|cnstr| {
+                    !seen_constrs
+                        .iter()
+                        .any(|seen| same_constructor(cnstr, seen))
+                })
+                .collect();
+            others.sort_by_key(|cnstr| cnstr.cstr_arity != 0);
+            others.iter().map(|cnstr| pat_of_constr(p, cnstr)).collect()
         }
     }
 }
@@ -6935,25 +6818,15 @@ fn get_variant_constructors_from_env(
     }
 
     fn build_descriptions(
+        decl: &crate::types::TypeDeclaration,
         cds: &[ConstructorDeclaration],
         result_type: TypeExprRef,
     ) -> Vec<ConstructorDescription> {
-        let nconsts = cds.iter().filter(|cd| cstr_arity(&cd.cd_args) == 0).count() as i32;
-        let nnonconsts = cds.len() as i32 - nconsts;
-        let mut const_idx = 0i32;
-        let mut nonconst_idx = 0i32;
+        let layout = decl.variant_layout_ref().expect("variant layout");
         cds.iter()
-            .map(|cd| {
+            .enumerate()
+            .map(|(position, cd)| {
                 let arity = cstr_arity(&cd.cd_args);
-                let tag = if arity == 0 {
-                    let t = ConstructorTag::CstrConstant(const_idx);
-                    const_idx += 1;
-                    t
-                } else {
-                    let t = ConstructorTag::CstrBlock(nonconst_idx);
-                    nonconst_idx += 1;
-                    t
-                };
                 let args_vec = match &cd.cd_args {
                     ConstructorArguments::CstrTuple(v) => v.clone(),
                     ConstructorArguments::CstrRecord(v) => v.iter().map(|ld| ld.ld_type).collect(),
@@ -6964,10 +6837,12 @@ fn get_variant_constructors_from_env(
                     cstr_existentials: Vec::new(),
                     cstr_args: args_vec,
                     cstr_arity: arity,
-                    cstr_kind: None,
-                    cstr_tag: tag,
-                    cstr_consts: nconsts,
-                    cstr_nonconsts: nnonconsts,
+                    cstr_kind: crate::types::ConstructorKind::Ordinary(
+                        crate::types::ConstructorReference {
+                            variant: layout,
+                            position,
+                        },
+                    ),
                     cstr_generalized: false,
                     cstr_private: crate::types::asttypes::PrivateFlag::Public,
                     cstr_loc: Location::none(),
@@ -7005,7 +6880,9 @@ fn get_variant_constructors_from_env(
 
         if let Some(decl) = env_decl {
             match &decl.type_kind {
-                TypeKind::TypeVariant(cds, _) => return build_descriptions(cds, result_type),
+                TypeKind::TypeVariant(cds, _) => {
+                    return build_descriptions(&decl, cds, result_type);
+                }
                 TypeKind::TypeAbstract => {
                     if let Some(manifest) = decl.type_manifest {
                         let manifest = ctx_ref.repr(manifest);
@@ -7019,7 +6896,9 @@ fn get_variant_constructors_from_env(
             }
         } else if let Some(decl) = fallback_decl {
             match &decl.type_kind {
-                TypeKind::TypeVariant(cds, _) => return build_descriptions(cds, result_type),
+                TypeKind::TypeVariant(cds, _) => {
+                    return build_descriptions(&decl, cds, result_type);
+                }
                 TypeKind::TypeAbstract => {
                     if let Some(manifest) = decl.type_manifest {
                         let manifest = ctx_ref.repr(manifest);
@@ -7084,7 +6963,11 @@ fn mk_failaction_pos(
     seen: &[Pattern],
     ctx: &[Ctx],
     defs: &DefaultEnv,
-) -> (Option<RawLambda>, Vec<(ConstructorTag, RawLambda)>, Jumps) {
+) -> (
+    Option<RawLambda>,
+    Vec<(ConstructorDescription, RawLambda)>,
+    Jumps,
+) {
     let fail_pats = complete_pats_constrs(ctx_ref, seen);
     if fail_pats.len() < 32 {
         let to_test: Vec<(Pattern, Vec<Ctx>)> = fail_pats
@@ -7109,14 +6992,14 @@ fn scan_def(
     env: Vec<(Vec<Pattern>, i32)>,
     to_test: Vec<(Pattern, Vec<Ctx>)>,
     defs: &[(Matrix, i32)],
-) -> (Vec<(ConstructorTag, RawLambda)>, Jumps) {
+) -> (Vec<(ConstructorDescription, RawLambda)>, Jumps) {
     if to_test.is_empty() || defs.is_empty() {
         // Fold env to build (klist, jumps)
-        let mut klist: Vec<(ConstructorTag, RawLambda)> = Vec::new();
+        let mut klist: Vec<(ConstructorDescription, RawLambda)> = Vec::new();
         let mut jumps = jumps_empty();
         for (pats, i) in &env {
             let action = RawLambda::LstaticRaise(*i, Vec::new());
-            let mut new_klist: Vec<(ConstructorTag, RawLambda)> = pats
+            let mut new_klist: Vec<(ConstructorDescription, RawLambda)> = pats
                 .iter()
                 .map(|pat| (get_key_constr(pat), action.clone()))
                 .collect();
@@ -7323,43 +7206,45 @@ fn combine_constant(
 /// Split case list into constant and non-constant constructor cases.
 /// Equivalent to OCaml's `split_cases`.
 fn split_cases(
-    tag_lambda_list: Vec<(ConstructorTag, RawLambda)>,
-) -> (Vec<(i32, RawLambda)>, Vec<(i32, RawLambda)>) {
-    let mut consts = Vec::new();
-    let mut nonconsts = Vec::new();
-    for (cstr, act) in tag_lambda_list {
-        match cstr {
-            ConstructorTag::CstrConstant(n) => consts.push((n, act)),
-            ConstructorTag::CstrBlock(n) => nonconsts.push((n, act)),
-            ConstructorTag::CstrUnboxed => nonconsts.push((0, act)),
-            ConstructorTag::CstrExtension(_) => {
-                // Extension constructors are handled by get_extension_cases,
-                // not split_cases. If we reach here, skip them.
-                continue;
-            }
-        }
-    }
-    consts.sort_by_key(|(i, _)| *i);
-    nonconsts.sort_by_key(|(i, _)| *i);
+    tag_lambda_list: Vec<(ConstructorDescription, RawLambda)>,
+) -> (
+    Vec<(ConstructorDescription, RawLambda)>,
+    Vec<(ConstructorDescription, RawLambda)>,
+) {
+    let (mut consts, mut nonconsts): (Vec<_>, Vec<_>) =
+        tag_lambda_list
+            .into_iter()
+            .partition(|(cstr, _)| match cstr.cstr_kind {
+                crate::types::ConstructorKind::Ordinary(_) => cstr.cstr_args.is_empty(),
+                crate::types::ConstructorKind::Extension(_) => {
+                    unreachable!("extension in split_cases")
+                }
+            });
+    let position = |cstr: &ConstructorDescription| match cstr.cstr_kind {
+        crate::types::ConstructorKind::Ordinary(reference) => reference.position,
+        crate::types::ConstructorKind::Extension(_) => unreachable!("extension in split_cases"),
+    };
+    consts.sort_by_key(|(cstr, _)| position(cstr));
+    nonconsts.sort_by_key(|(cstr, _)| position(cstr));
     (consts, nonconsts)
 }
 
 /// Split variant case list into constant and non-constant.
 /// Equivalent to OCaml's `split_variant_cases`.
 fn split_variant_cases(
-    tag_lambda_list: Vec<((String, ConstructorTag), RawLambda)>,
+    tag_lambda_list: Vec<((String, bool), RawLambda)>,
 ) -> (
     Vec<(i32, (String, RawLambda))>,
     Vec<(i32, (String, RawLambda))>,
 ) {
     let mut consts = Vec::new();
     let mut nonconsts = Vec::new();
-    for ((name, cstr), act) in tag_lambda_list {
-        match cstr {
-            ConstructorTag::CstrConstant(n) => consts.push((n, (name, act))),
-            ConstructorTag::CstrBlock(n) => nonconsts.push((n, (name, act))),
-            ConstructorTag::CstrUnboxed => panic!("split_variant_cases: unboxed"),
-            ConstructorTag::CstrExtension(_) => panic!("split_variant_cases: extension"),
+    for ((name, is_const), act) in tag_lambda_list {
+        let hash = btype::hash_variant(&name);
+        if is_const {
+            consts.push((hash, (name, act)));
+        } else {
+            nonconsts.push((hash, (name, act)));
         }
     }
     consts.sort_by_key(|(i, _)| *i);
@@ -7370,13 +7255,13 @@ fn split_variant_cases(
 /// Get extension constructor cases.
 /// Equivalent to OCaml's `get_extension_cases`.
 fn get_extension_cases(
-    tag_lambda_list: Vec<(ConstructorTag, RawLambda)>,
+    tag_lambda_list: Vec<(ConstructorDescription, RawLambda)>,
 ) -> Vec<(crate::types::path::Path, RawLambda)> {
     tag_lambda_list
         .into_iter()
-        .map(|(cstr, act)| match cstr {
-            ConstructorTag::CstrExtension(path) => (path, act),
-            _ => panic!("get_extension_cases: not an extension constructor"),
+        .map(|(cstr, act)| match cstr.cstr_kind {
+            crate::types::ConstructorKind::Extension(path) => (path, act),
+            crate::types::ConstructorKind::Ordinary(_) => unreachable!("ordinary extension case"),
         })
         .collect()
 }
@@ -7519,7 +7404,6 @@ fn normalize_module_path_via_ctx(
 /// Equivalent to OCaml's `combine_constructor`.
 fn combine_constructor(
     ctx_ref: &TypeContext,
-    sw_names: Option<SwitchNames>,
     loc: Location,
     arg: RawLambda,
     ex_pat: &Pattern,
@@ -7527,12 +7411,16 @@ fn combine_constructor(
     partial: &Partial,
     ctx: &[Ctx],
     def: &DefaultEnv,
-    c_div: (Vec<(ConstructorTag, RawLambda)>, Jumps, Vec<Pattern>),
+    c_div: (
+        Vec<(ConstructorDescription, RawLambda)>,
+        Jumps,
+        Vec<Pattern>,
+    ),
     next_raise_count: &mut i32,
 ) -> (RawLambda, Jumps) {
     let (tag_lambda_list, total1, pats) = c_div;
 
-    if cstr.cstr_consts < 0 {
+    if matches!(cstr.cstr_kind, crate::types::ConstructorKind::Extension(_)) {
         // Special cases for extensions
         let (fail, local_jumps) = mk_failaction_neg(partial, ctx, def);
         let lambda1 = {
@@ -7576,9 +7464,14 @@ fn combine_constructor(
         (lambda1, jumps_union(&local_jumps, &total1))
     } else {
         // Regular concrete type
-        let ncases = tag_lambda_list.len() as i32;
-        let nconstrs = cstr.cstr_consts + cstr.cstr_nonconsts;
-        let sig_complete = ncases == nconstrs;
+        let reference = match cstr.cstr_kind {
+            crate::types::ConstructorKind::Ordinary(reference) => reference,
+            crate::types::ConstructorKind::Extension(_) => unreachable!(),
+        };
+        let layout = ctx_ref.variant_layout(reference.variant);
+        let num_consts = layout.num_constants();
+        let num_nonconsts = layout.num_blocks();
+        let sig_complete = tag_lambda_list.len() == layout.constructors.len();
         let (fail_opt, fails, local_jumps) = if sig_complete {
             (None, Vec::new(), jumps_empty())
         } else {
@@ -7605,12 +7498,10 @@ fn combine_constructor(
         } else {
             let (mut consts, mut nonconsts) = split_cases(actions);
             let is_option = constructor_has_optional_shape(cstr);
-            if cstr.cstr_consts == 1
-                && cstr.cstr_nonconsts == 1
+            if num_consts == 1
+                && num_nonconsts == 1
                 && consts.len() == 1
                 && nonconsts.len() == 1
-                && consts[0].0 == 0
-                && nonconsts[0].0 == 0
                 && (cstr.cstr_name == "::" || cstr.cstr_name == "[]" || is_option)
             {
                 // OCaml compiler/ml/matching.ml:2156-2173 emits a two-way test
@@ -7633,22 +7524,23 @@ fn combine_constructor(
                     })
                 };
                 RawLambda::LifThenElse(Box::new(test_arg), Box::new(act2), Box::new(act1))
-            } else if cstr.cstr_consts == 2
-                && cstr.cstr_nonconsts == 0
+            } else if num_consts == 2
+                && num_nonconsts == 0
                 && consts.len() == 2
                 && nonconsts.is_empty()
                 && (cstr.cstr_name == "true" || cstr.cstr_name == "false")
             {
-                // OCaml compiler/ml/matching.ml:2174-2178 emits direct bool
-                // conditionals. Consume the owned action list instead of
-                // cloning the branch lambdas.
-                let (_, act2) = consts.pop().expect("second bool constructor case");
-                let (i1, act1) = consts.pop().expect("first bool constructor case");
-                if i1 == 0 {
-                    RawLambda::LifThenElse(Box::new(arg), Box::new(act2), Box::new(act1))
-                } else {
-                    RawLambda::LifThenElse(Box::new(arg), Box::new(act1), Box::new(act2))
-                }
+                let find_action = |name: &str| {
+                    consts
+                        .iter()
+                        .find_map(|(cstr, action)| (cstr.cstr_name == name).then(|| action.clone()))
+                        .expect("boolean constructor action")
+                };
+                RawLambda::LifThenElse(
+                    Box::new(arg),
+                    Box::new(find_action("true")),
+                    Box::new(find_action("false")),
+                )
             } else {
                 // Emit a switch. OCaml computes `act0` at
                 // compiler/ml/matching.ml:2179-2189, but the only arm
@@ -7656,15 +7548,34 @@ fn combine_constructor(
                 // matching.ml:2190. Skipping that pure computation
                 // avoids normalizing/cloning switch actions without
                 // changing the emitted lambda.
+                let switch_cases = |cases: Vec<(ConstructorDescription, RawLambda)>| {
+                    cases
+                        .into_iter()
+                        .map(|(cstr, action)| {
+                            let reference = match cstr.cstr_kind {
+                                crate::types::ConstructorKind::Ordinary(reference) => reference,
+                                crate::types::ConstructorKind::Extension(_) => unreachable!(),
+                            };
+                            (
+                                crate::lambda::SwitchKey::Constructor(
+                                    reference.representation(ctx_ref),
+                                ),
+                                action,
+                            )
+                        })
+                        .collect()
+                };
                 let sw = RawLambdaSwitch {
-                    sw_numconsts: cstr.cstr_consts as usize,
-                    sw_consts_full: false,
-                    sw_consts: consts,
-                    sw_numblocks: cstr.cstr_nonconsts as usize,
-                    sw_blocks_full: false,
-                    sw_blocks: nonconsts,
+                    sw_numconsts: num_consts,
+                    sw_consts_full: consts.len() >= num_consts,
+                    sw_consts: switch_cases(consts),
+                    sw_numblocks: num_nonconsts,
+                    sw_blocks_full: nonconsts.len() >= num_nonconsts,
+                    sw_blocks: switch_cases(nonconsts),
                     sw_failaction: fail_opt.map(Box::new),
-                    sw_names,
+                    sw_dispatch: crate::lambda::SwitchDispatch::Variant(
+                        layout.matching_facts.clone(),
+                    ),
                 };
                 let (handlers, sw) = share_actions_sw(sw, next_raise_count);
                 let sw = reintroduce_fail(sw);
@@ -7864,11 +7775,7 @@ fn combine_variant(
     partial: &Partial,
     ctx: &[Ctx],
     def: &DefaultEnv,
-    c_div: (
-        Vec<((String, ConstructorTag), RawLambda)>,
-        Jumps,
-        Vec<Pattern>,
-    ),
+    c_div: (Vec<((String, bool), RawLambda)>, Jumps, Vec<Pattern>),
     next_raise_count: &mut i32,
 ) -> (RawLambda, Jumps) {
     let (tag_lambda_list, total1, _pats) = c_div;
@@ -8585,7 +8492,6 @@ fn do_compile_matching(
                     )
                 }
                 PatternDesc::Tpat_construct(_, cstr, _) => {
-                    let sw_names = names_from_construct_pattern(ctx_ref, &pat);
                     let loc = arena.to_location(pat.pat_loc);
                     let arg_clone = arg.clone();
                     let ex_pat = pat.clone();
@@ -8598,7 +8504,6 @@ fn do_compile_matching(
                         &|ctx, def, c_div, nrc| {
                             combine_constructor(
                                 ctx_ref,
-                                sw_names.clone(),
                                 loc.clone(),
                                 arg_clone.clone(),
                                 &ex_pat,
@@ -8983,9 +8888,9 @@ fn resolve_labels_from_type(
     // (for example `A0`) rather than a parent-type `Pdot`, so reconstruct
     // their full label set from the constructor's synthetic inline record.
     for cstr in env.find_all_constructors(&path.last()).iter().rev() {
-        let matches_inline_record_path = match &cstr.cstr_tag {
-            crate::types::ConstructorTag::CstrExtension(ext_path) => ext_path.same(&path),
-            _ => false,
+        let matches_inline_record_path = match &cstr.cstr_kind {
+            crate::types::ConstructorKind::Extension(ext_path) => ext_path.same(&path),
+            crate::types::ConstructorKind::Ordinary(_) => false,
         };
         if !matches_inline_record_path {
             continue;
@@ -9225,40 +9130,45 @@ fn names_from_construct_pattern(ctx_ref: &TypeContext, pat: &Pattern) -> Option<
     fn type_to_instanceof_backed_obj(path: &Path) -> Option<SwitchBlockType> {
         let full = path.name();
         if matches!(path, Path::Pident(id) if id.name() == "array") {
-            return Some(SwitchBlockType::Instance("Array".to_string()));
+            return Some(SwitchBlockType::Instance(
+                crate::types::VariantInstance::Array,
+            ));
         }
         if matches!(path, Path::Pident(id) if id.name() == "promise")
             || matches!(full.as_str(), "Js.Promise.t" | "Stdlib.Promise.t")
         {
-            return Some(SwitchBlockType::Instance("Promise".to_string()));
+            return Some(SwitchBlockType::Instance(
+                crate::types::VariantInstance::Promise,
+            ));
         }
         // Keep this table in lockstep with
         // `Ast_untagged_variants.type_to_instanceof_backed_obj`.
+        use crate::types::VariantInstance as I;
         let instance = match full.as_str() {
-            "Stdlib_ArrayBuffer.t" => "ArrayBuffer",
-            "Stdlib.BigInt64Array.t" => "BigInt64Array",
-            "Stdlib.BigUint64Array.t" => "BigUint64Array",
-            "Stdlib.DataView.t" => "DataView",
-            "Stdlib_Date.t" => "Date",
-            "Stdlib.Float32Array.t" => "Float32Array",
-            "Stdlib.Float64Array.t" => "Float64Array",
-            "Stdlib.Int16Array.t" => "Int16Array",
-            "Stdlib.Int32Array.t" => "Int32Array",
-            "Stdlib.Int8Array.t" => "Int8Array",
-            "Stdlib_RegExp.t" => "RegExp",
-            "Stdlib.Uint16Array.t" => "Uint16Array",
-            "Stdlib.Uint32Array.t" => "Uint32Array",
-            "Stdlib.Uint8Array.t" => "Uint8Array",
-            "Stdlib.Uint8ClampedArray.t" => "Uint8ClampedArray",
-            "Stdlib_File.t" => "File",
-            "Stdlib_Blob.t" => "Blob",
-            "Stdlib.Set.t" => "Set",
-            "Stdlib.Map.t" => "Map",
-            "Stdlib.WeakSet.t" => "WeakSet",
-            "Stdlib.WeakMap.t" => "WeakMap",
+            "Stdlib_ArrayBuffer.t" => I::ArrayBuffer,
+            "Stdlib.BigInt64Array.t" => I::BigInt64Array,
+            "Stdlib.BigUint64Array.t" => I::BigUint64Array,
+            "Stdlib.DataView.t" => I::DataView,
+            "Stdlib_Date.t" => I::Date,
+            "Stdlib.Float32Array.t" => I::Float32Array,
+            "Stdlib.Float64Array.t" => I::Float64Array,
+            "Stdlib.Int16Array.t" => I::Int16Array,
+            "Stdlib.Int32Array.t" => I::Int32Array,
+            "Stdlib.Int8Array.t" => I::Int8Array,
+            "Stdlib_RegExp.t" => I::RegExp,
+            "Stdlib.Uint16Array.t" => I::Uint16Array,
+            "Stdlib.Uint32Array.t" => I::Uint32Array,
+            "Stdlib.Uint8Array.t" => I::Uint8Array,
+            "Stdlib.Uint8ClampedArray.t" => I::Uint8ClampedArray,
+            "Stdlib_File.t" => I::File,
+            "Stdlib_Blob.t" => I::Blob,
+            "Stdlib.Set.t" => I::Set,
+            "Stdlib.Map.t" => I::Map,
+            "Stdlib.WeakSet.t" => I::WeakSet,
+            "Stdlib.WeakMap.t" => I::WeakMap,
             _ => return None,
         };
-        Some(SwitchBlockType::Instance(instance.to_string()))
+        Some(SwitchBlockType::Instance(instance))
     }
 
     fn get_block_type_from_typ(
@@ -9282,7 +9192,7 @@ fn names_from_construct_pattern(ctx_ref: &TypeContext, pat: &Pattern) -> Option<
                         "string" => Some(SwitchBlockType::String),
                         "int" => Some(SwitchBlockType::Int),
                         "float" => Some(SwitchBlockType::Float),
-                        "bigint" => Some(SwitchBlockType::BigInt),
+                        "bigint" => Some(SwitchBlockType::Bigint),
                         "bool" => Some(SwitchBlockType::Boolean),
                         _ if type_is_builtin_object(ctx_ref, env, expanded) => {
                             Some(SwitchBlockType::Object)
@@ -9292,7 +9202,9 @@ fn names_from_construct_pattern(ctx_ref: &TypeContext, pat: &Pattern) -> Option<
                 }
             }
             TypeDesc::Tarrow { .. } => Some(SwitchBlockType::Function),
-            TypeDesc::Ttuple(_) => Some(SwitchBlockType::Instance("Array".to_string())),
+            TypeDesc::Ttuple(_) => Some(SwitchBlockType::Instance(
+                crate::types::VariantInstance::Array,
+            )),
             _ => None,
         }
     }

@@ -398,7 +398,7 @@ fn subst_helper_owned(
                 sw_failaction: sw
                     .sw_failaction
                     .map(|a| Box::new(subst_helper_owned(subst, counts, id_gen, *a))),
-                sw_names: sw.sw_names,
+                sw_dispatch: sw.sw_dispatch,
             },
         ),
         // lam_pass_exits.ml:227-230

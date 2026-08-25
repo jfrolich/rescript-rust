@@ -24,7 +24,9 @@ use crate::js_ir::{
 use crate::lambda::lam_compat::LetKind;
 use crate::lambda::lam_constant::Constant;
 use crate::lambda::lam_exit_code::has_exit_code;
-use crate::lambda::{Lambda, LambdaSwitch, SwitchBlock, SwitchBlockType, SwitchCaseTag, SwitchTag};
+use crate::lambda::{
+    Lambda, LambdaSwitch, SwitchBlockType, SwitchCaseTag, SwitchDispatch, SwitchKey,
+};
 
 pub(crate) fn empty_switch_case_clause() -> CaseClause {
     CaseClause {
@@ -188,9 +190,14 @@ impl LambdaCompiler {
                 |_, _| true,
             )
             .into_iter()
-            .map(|(tag, body, is_last)| {
+            .map(|(key, body, is_last)| {
                 (
-                    tag,
+                    match key {
+                        SwitchKey::Int(value) => value,
+                        SwitchKey::Constructor(_) => {
+                            unreachable!("constructor with direct dispatch")
+                        }
+                    },
                     if is_last {
                         crate::js_ir::CaseClause {
                             source_loc: None,
@@ -333,48 +340,62 @@ impl LambdaCompiler {
     }
 
     pub(crate) fn uses_untagged_variant_switch(&self, switch: &LambdaSwitch) -> bool {
-        switch
-            .sw_names
-            .as_ref()
-            .is_some_and(|names| names.blocks.iter().any(|block| block.block_type.is_some()))
+        matches!(&switch.sw_dispatch, SwitchDispatch::Variant(facts) if !facts.block_types.is_empty())
     }
 
     pub(crate) fn uses_named_variant_switch(&self, switch: &LambdaSwitch) -> bool {
-        if self.uses_untagged_variant_switch(switch) {
-            return false;
-        }
-        let Some(names) = switch.sw_names.as_ref() else {
-            return false;
-        };
-        !(names.consts.is_empty() && names.blocks.is_empty())
+        matches!(switch.sw_dispatch, SwitchDispatch::Variant(_))
+            && !self.uses_untagged_variant_switch(switch)
     }
 
-    fn switch_tag_value(tag: &crate::lambda::SwitchTag) -> SwitchCaseTag {
+    fn tag_type_value(tag: &crate::types::VariantTagType) -> SwitchCaseTag {
+        match tag {
+            crate::types::VariantTagType::String(value) => SwitchCaseTag::String(value.clone()),
+            crate::types::VariantTagType::Int(value) => SwitchCaseTag::Int(*value as i64),
+            crate::types::VariantTagType::Float(value) => SwitchCaseTag::Float(value.clone()),
+            crate::types::VariantTagType::BigInt(value) => SwitchCaseTag::BigInt(value.clone()),
+            crate::types::VariantTagType::Bool(value) => SwitchCaseTag::Bool(*value),
+            crate::types::VariantTagType::Null => SwitchCaseTag::Null,
+            crate::types::VariantTagType::Undefined => SwitchCaseTag::Undefined,
+            crate::types::VariantTagType::Untagged(_) => unreachable!("literal tag is untagged"),
+        }
+    }
+
+    fn switch_tag_value(tag: &crate::types::VariantTag) -> SwitchCaseTag {
         tag.tag_type
-            .clone()
+            .as_ref()
+            .map(Self::tag_type_value)
             .unwrap_or_else(|| SwitchCaseTag::String(tag.name.clone()))
     }
 
+    fn block_type_value(block: &crate::types::VariantBlockType) -> SwitchBlockType {
+        block.clone()
+    }
+
     fn literal_cases(&self, switch: &LambdaSwitch) -> Option<Vec<SwitchCaseTag>> {
-        let names = switch.sw_names.as_ref()?;
+        let SwitchDispatch::Variant(facts) = &switch.sw_dispatch else {
+            return None;
+        };
         Some(
-            names
-                .consts
+            facts
+                .literal_tags
                 .iter()
                 .rev()
-                .map(Self::switch_tag_value)
+                .map(Self::tag_type_value)
                 .collect(),
         )
     }
 
     fn untagged_block_types(&self, switch: &LambdaSwitch) -> Option<Vec<SwitchBlockType>> {
-        let names = switch.sw_names.as_ref()?;
+        let SwitchDispatch::Variant(facts) = &switch.sw_dispatch else {
+            return None;
+        };
         Some(
-            names
-                .blocks
+            facts
+                .block_types
                 .iter()
                 .rev()
-                .filter_map(|block| block.block_type.clone())
+                .map(Self::block_type_value)
                 .collect(),
         )
     }
@@ -385,7 +406,7 @@ impl LambdaCompiler {
             SwitchBlockType::Int | SwitchBlockType::Float => {
                 Some(SwitchCaseTag::String("number".to_string()))
             }
-            SwitchBlockType::BigInt => Some(SwitchCaseTag::String("bigint".to_string())),
+            SwitchBlockType::Bigint => Some(SwitchCaseTag::String("bigint".to_string())),
             SwitchBlockType::Boolean => Some(SwitchCaseTag::String("boolean".to_string())),
             SwitchBlockType::Function => Some(SwitchCaseTag::String("function".to_string())),
             SwitchBlockType::Object => Some(SwitchCaseTag::String("object".to_string())),
@@ -488,12 +509,12 @@ impl LambdaCompiler {
                 SwitchBlockType::Int | SwitchBlockType::Float if !literals_overlap_with_number => {
                     typeof_neq("number")
                 }
-                SwitchBlockType::BigInt if !literals_overlap_with_bigint => typeof_neq("bigint"),
+                SwitchBlockType::Bigint if !literals_overlap_with_bigint => typeof_neq("bigint"),
                 SwitchBlockType::Boolean if !literals_overlap_with_boolean => typeof_neq("boolean"),
                 SwitchBlockType::Function => typeof_neq("function"),
                 SwitchBlockType::Instance(name) => {
                     let instance_test = self
-                        .builtin_untagged_instance_test(expr.clone(), name)
+                        .builtin_untagged_instance_test(expr.clone(), name.as_str())
                         .expect("instance-backed block types stay supported");
                     (Expression::not(instance_test), 3usize)
                 }
@@ -506,7 +527,7 @@ impl LambdaCompiler {
                 SwitchBlockType::String
                 | SwitchBlockType::Int
                 | SwitchBlockType::Float
-                | SwitchBlockType::BigInt
+                | SwitchBlockType::Bigint
                 | SwitchBlockType::Boolean
                 | SwitchBlockType::Unknown => overlap_literal_disjunction(),
             }
@@ -532,13 +553,14 @@ impl LambdaCompiler {
         &self,
         switch: &'a LambdaSwitch,
     ) -> Option<Vec<(SwitchCaseTag, &'a Lambda)>> {
-        let names = switch.sw_names.as_ref()?;
         switch
             .sw_consts
             .iter()
-            .map(|(tag, body)| {
-                let index = usize::try_from(*tag).ok()?;
-                Some((Self::switch_tag_value(names.consts.get(index)?), body))
+            .map(|(key, body)| match key {
+                SwitchKey::Constructor(crate::types::VariantConstructorCase::Constant(tag)) => {
+                    Some((Self::switch_tag_value(tag), body))
+                }
+                SwitchKey::Int(_) | SwitchKey::Constructor(_) => None,
             })
             .collect()
     }
@@ -547,13 +569,14 @@ impl LambdaCompiler {
         &self,
         switch: &'a LambdaSwitch,
     ) -> Option<Vec<(SwitchCaseTag, &'a Lambda)>> {
-        let names = switch.sw_names.as_ref()?;
         switch
             .sw_blocks
             .iter()
-            .map(|(tag, body)| {
-                let index = usize::try_from(*tag).ok()?;
-                Some((Self::switch_tag_value(&names.blocks.get(index)?.tag), body))
+            .map(|(key, body)| match key {
+                SwitchKey::Constructor(crate::types::VariantConstructorCase::Block(block)) => {
+                    Some((Self::switch_tag_value(&block.runtime.tag), body))
+                }
+                SwitchKey::Int(_) | SwitchKey::Constructor(_) => None,
             })
             .collect()
     }
@@ -561,14 +584,15 @@ impl LambdaCompiler {
     fn untagged_block_cases<'a>(
         &self,
         switch: &'a LambdaSwitch,
-    ) -> Option<Vec<(&'a SwitchBlock, &'a Lambda)>> {
-        let names = switch.sw_names.as_ref()?;
+    ) -> Option<Vec<(&'a crate::types::VariantBlock, &'a Lambda)>> {
         switch
             .sw_blocks
             .iter()
-            .map(|(tag, body)| {
-                let index = usize::try_from(*tag).ok()?;
-                Some((names.blocks.get(index)?, body))
+            .map(|(key, body)| match key {
+                SwitchKey::Constructor(crate::types::VariantConstructorCase::Block(block)) => {
+                    Some((block, body))
+                }
+                SwitchKey::Int(_) | SwitchKey::Constructor(_) => None,
             })
             .collect()
     }
@@ -612,16 +636,11 @@ impl LambdaCompiler {
     }
 
     fn variant_tag_name(&self, switch: &LambdaSwitch) -> String {
-        switch
-            .sw_names
-            .as_ref()
-            .and_then(|names| {
-                names
-                    .blocks
-                    .iter()
-                    .find_map(|block| block.tag_name.as_ref().cloned())
-            })
-            .unwrap_or_else(|| "TAG".to_string())
+        match &switch.sw_dispatch {
+            SwitchDispatch::Variant(facts) => facts.tag_name.clone(),
+            SwitchDispatch::Direct => None,
+        }
+        .unwrap_or_else(|| "TAG".to_string())
     }
 
     fn builtin_untagged_typeof_test(&self, expr: Expression, type_name: &str) -> Expression {
@@ -659,7 +678,7 @@ impl LambdaCompiler {
     fn builtin_untagged_block_test(
         &self,
         expr: Expression,
-        case: &SwitchBlock,
+        case: &crate::types::VariantBlock,
         all_block_types: &[SwitchBlockType],
         has_null_case: bool,
     ) -> Option<Expression> {
@@ -668,10 +687,12 @@ impl LambdaCompiler {
             SwitchBlockType::Int | SwitchBlockType::Float => {
                 self.builtin_untagged_typeof_test(expr, "number")
             }
-            SwitchBlockType::BigInt => self.builtin_untagged_typeof_test(expr, "bigint"),
+            SwitchBlockType::Bigint => self.builtin_untagged_typeof_test(expr, "bigint"),
             SwitchBlockType::Boolean => self.builtin_untagged_typeof_test(expr, "boolean"),
             SwitchBlockType::Function => self.builtin_untagged_typeof_test(expr, "function"),
-            SwitchBlockType::Instance(name) => self.builtin_untagged_instance_test(expr, name)?,
+            SwitchBlockType::Instance(name) => {
+                self.builtin_untagged_instance_test(expr, name.as_str())?
+            }
             SwitchBlockType::Object => {
                 let mut test = self.builtin_untagged_typeof_test(expr.clone(), "object");
                 if has_null_case {
@@ -686,7 +707,7 @@ impl LambdaCompiler {
                         continue;
                     };
                     if let Some(instance_test) =
-                        self.builtin_untagged_instance_test(expr.clone(), name)
+                        self.builtin_untagged_instance_test(expr.clone(), name.as_str())
                     {
                         test = Expression::bin(BinOp::And, test, Expression::not(instance_test));
                     }
@@ -711,7 +732,7 @@ impl LambdaCompiler {
         &self,
         scrut: &Expression,
         typeof_cases: &[(SwitchCaseTag, &Lambda)],
-        runtime_test_cases: &[(&SwitchBlock, &Lambda)],
+        runtime_test_cases: &[(&crate::types::VariantBlock, &Lambda)],
         all_block_types: &[SwitchBlockType],
         has_null_case: bool,
     ) -> Option<Expression> {
@@ -722,11 +743,11 @@ impl LambdaCompiler {
             return None;
         }
         let clauses_have_array_case = runtime_test_cases.iter().any(|(case, _)| {
-            matches!(&case.block_type, Some(SwitchBlockType::Instance(name)) if name == "Array")
+            matches!(&case.block_type, Some(SwitchBlockType::Instance(name)) if name.as_str() == "Array")
         });
         let type_has_array_case = all_block_types
             .iter()
-            .any(|t| matches!(t, SwitchBlockType::Instance(name) if name == "Array"));
+            .any(|t| matches!(t, SwitchBlockType::Instance(name) if name.as_str() == "Array"));
         let needs_null_guard = has_null_case;
         let needs_array_guard = type_has_array_case && !clauses_have_array_case;
 
@@ -748,7 +769,7 @@ impl LambdaCompiler {
         &mut self,
         scrut_expr: Expression,
         switch: &LambdaSwitch,
-        block_cases: &[(&SwitchBlock, &Lambda)],
+        block_cases: &[(&crate::types::VariantBlock, &Lambda)],
         default_block: Block,
         mut build_body: F,
     ) -> Option<Block>
@@ -987,7 +1008,7 @@ impl LambdaCompiler {
         result: &Ident,
         scrut_expr: Expression,
         switch: &LambdaSwitch,
-        block_cases: &[(&SwitchBlock, &Lambda)],
+        block_cases: &[(&crate::types::VariantBlock, &Lambda)],
         has_null_case: bool,
     ) -> Option<Block> {
         let all_block_types = self.untagged_block_types(switch).unwrap_or_default();
@@ -1170,7 +1191,7 @@ impl LambdaCompiler {
         &mut self,
         scrut_expr: Expression,
         switch: &LambdaSwitch,
-        block_cases: &[(&SwitchBlock, &Lambda)],
+        block_cases: &[(&crate::types::VariantBlock, &Lambda)],
         has_null_case: bool,
     ) -> Option<Block> {
         let all_block_types = self.untagged_block_types(switch).unwrap_or_default();
@@ -1329,7 +1350,7 @@ impl LambdaCompiler {
         &mut self,
         scrut_expr: Expression,
         switch: &LambdaSwitch,
-        block_cases: &[(&SwitchBlock, &Lambda)],
+        block_cases: &[(&crate::types::VariantBlock, &Lambda)],
         has_null_case: bool,
     ) -> Option<Block> {
         let all_block_types = self.untagged_block_types(switch).unwrap_or_default();

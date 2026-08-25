@@ -26,18 +26,18 @@ pub struct RawLambdaSwitch {
     pub sw_numconsts: usize,
     /// Are all constant cases covered?
     pub sw_consts_full: bool,
-    /// Constant case branches (tag -> lambda).
-    pub sw_consts: Vec<(i32, RawLambda)>,
+    /// Constant case branches.
+    pub sw_consts: Vec<(crate::lambda::SwitchKey, RawLambda)>,
     /// Number of block-tag cases in the source switch table.
     pub sw_numblocks: usize,
     /// Are all block cases covered?
     pub sw_blocks_full: bool,
-    /// Block case branches (tag -> lambda).
-    pub sw_blocks: Vec<(i32, RawLambda)>,
+    /// Block case branches.
+    pub sw_blocks: Vec<(crate::lambda::SwitchKey, RawLambda)>,
     /// Fallback action if no case matches.
     pub sw_failaction: Option<Box<RawLambda>>,
-    /// Optional switch case names.
-    pub sw_names: Option<crate::lambda::SwitchNames>,
+    /// Runtime dispatch semantics.
+    pub sw_dispatch: crate::lambda::SwitchDispatch,
 }
 
 /// Raw-lambda function definition.
@@ -268,7 +268,7 @@ impl RawLambda {
                     sw_failaction: sw
                         .sw_failaction
                         .map(|lam| Box::new(RawLambda::from_lowered(*lam))),
-                    sw_names: sw.sw_names,
+                    sw_dispatch: sw.sw_dispatch,
                 },
                 Location::none(),
             ),
@@ -389,7 +389,7 @@ impl RawLambda {
                         .map(|(tag, lam)| (tag, lam.into_lowered()))
                         .collect(),
                     sw_failaction: sw.sw_failaction.map(|lam| Box::new(lam.into_lowered())),
-                    sw_names: sw.sw_names,
+                    sw_dispatch: sw.sw_dispatch,
                 },
             ),
             RawLambda::LstringSwitch(arg, cases, default) => Lambda::LstringSwitch(

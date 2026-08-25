@@ -10384,6 +10384,7 @@ fn check_partial_simple_rows(
     }
 
     fn constructor_signature_from_first_column(
+        ctx: &TypeContext,
         rows: &[Vec<ExhaustPat<'_>>],
     ) -> Option<Vec<ExhaustConstructor>> {
         let mut constructors = Vec::new();
@@ -10394,13 +10395,11 @@ fn check_partial_simple_rows(
             let PatternDesc::Tpat_construct(_, cstr, args) = &pat.pat_desc else {
                 continue;
             };
-            if cstr.cstr_consts < 0
-                || matches!(
-                    cstr.cstr_tag,
-                    crate::types::decl::ConstructorTag::CstrExtension(_)
-                )
-                || cstr.cstr_generalized
-            {
+            let reference = match cstr.cstr_kind {
+                crate::types::ConstructorKind::Ordinary(reference) => reference,
+                crate::types::ConstructorKind::Extension(_) => return None,
+            };
+            if cstr.cstr_generalized {
                 return None;
             }
             if !constructors
@@ -10410,7 +10409,7 @@ fn check_partial_simple_rows(
                 constructors.push(ExhaustConstructor {
                     name: cstr.cstr_name.clone(),
                     arity: args.len(),
-                    total: cstr.cstr_consts + cstr.cstr_nonconsts,
+                    total: ctx.variant_layout(reference.variant).constructors.len() as i32,
                 });
             }
         }
@@ -10579,7 +10578,7 @@ fn check_partial_simple_rows(
             );
         }
 
-        if let Some(constructors) = constructor_signature_from_first_column(&rows) {
+        if let Some(constructors) = constructor_signature_from_first_column(ctx, &rows) {
             let total = constructors.first().map(|c| c.total).unwrap_or(0);
             let full_signature = total > 0
                 && constructors.len() as i32 == total
@@ -10673,6 +10672,7 @@ fn check_partial_simple_rows(
 
     for case in cases {
         collect_top_constructs(
+            ctx,
             case.lhs,
             &mut construct_names,
             &mut total_constructors,
@@ -10792,8 +10792,8 @@ fn collect_fragile_match_paths(ctx: &TypeContext, env: &Env, pat: &Pattern, path
     match &pat.pat_desc {
         PatternDesc::Tpat_construct(_, cstr_desc, args) => {
             if !matches!(
-                cstr_desc.cstr_tag,
-                crate::types::decl::ConstructorTag::CstrExtension(_)
+                cstr_desc.cstr_kind,
+                crate::types::ConstructorKind::Extension(_)
             ) && let Some(path) = pattern_type_path(ctx, env, pat)
                 && extendable_fragile_match_path(&path)
             {
@@ -12661,6 +12661,7 @@ fn render_open_list_example(items: &[String]) -> String {
 
 /// Collect construct names from top-level patterns, handling or-patterns
 fn collect_top_constructs(
+    ctx: &TypeContext,
     pat: &Pattern,
     names: &mut HashSet<String>,
     total: &mut Option<i32>,
@@ -12669,15 +12670,16 @@ fn collect_top_constructs(
     match &pat.pat_desc {
         PatternDesc::Tpat_construct(_, cstr_desc, _) => {
             names.insert(cstr_desc.cstr_name.clone());
-            let cstr_total = cstr_desc.cstr_consts + cstr_desc.cstr_nonconsts;
-            *total = Some(cstr_total);
+            if let crate::types::ConstructorKind::Ordinary(reference) = cstr_desc.cstr_kind {
+                *total = Some(ctx.variant_layout(reference.variant).constructors.len() as i32);
+            }
         }
         PatternDesc::Tpat_or(p1, p2, _) => {
-            collect_top_constructs(p1, names, total, has_non_construct);
-            collect_top_constructs(p2, names, total, has_non_construct);
+            collect_top_constructs(ctx, p1, names, total, has_non_construct);
+            collect_top_constructs(ctx, p2, names, total, has_non_construct);
         }
         PatternDesc::Tpat_alias(inner, _, _) => {
-            collect_top_constructs(inner, names, total, has_non_construct);
+            collect_top_constructs(ctx, inner, names, total, has_non_construct);
         }
         _ => {
             *has_non_construct = true;
@@ -12841,7 +12843,7 @@ fn pressure_matrix_normalize_pat(pat: &Pattern) -> Pattern {
 fn pressure_matrix_simple_match(left: &Pattern, right: &Pattern) -> bool {
     match (&left.pat_desc, &right.pat_desc) {
         (PatternDesc::Tpat_construct(_, c1, _), PatternDesc::Tpat_construct(_, c2, _)) => {
-            c1.cstr_tag == c2.cstr_tag
+            crate::types::same_constructor(c1, c2)
         }
         (PatternDesc::Tpat_variant(l1, _, _), PatternDesc::Tpat_variant(l2, _, _)) => l1 == l2,
         (PatternDesc::Tpat_constant(c1), PatternDesc::Tpat_constant(c2)) => constants_equal(c1, c2),
@@ -12993,7 +12995,16 @@ fn constants_equal(c1: &Constant, c2: &Constant) -> bool {
 fn pressure_matrix_coherent_heads(left: &Pattern, right: &Pattern) -> bool {
     match (&left.pat_desc, &right.pat_desc) {
         (PatternDesc::Tpat_construct(_, c1, _), PatternDesc::Tpat_construct(_, c2, _)) => {
-            c1.cstr_consts == c2.cstr_consts && c1.cstr_nonconsts == c2.cstr_nonconsts
+            matches!(
+                (&c1.cstr_kind, &c2.cstr_kind),
+                (
+                    crate::types::ConstructorKind::Ordinary(_),
+                    crate::types::ConstructorKind::Ordinary(_)
+                ) | (
+                    crate::types::ConstructorKind::Extension(_),
+                    crate::types::ConstructorKind::Extension(_)
+                )
+            )
         }
         (PatternDesc::Tpat_constant(c1), PatternDesc::Tpat_constant(c2)) => {
             pressure_matrix_constant_kind(c1) == pressure_matrix_constant_kind(c2)
@@ -13322,12 +13333,17 @@ fn pressure_matrix_full_match(
         return false;
     };
     match &pat.pat_desc {
-        PatternDesc::Tpat_construct(_, cstr, _) => {
-            !matches!(
-                cstr.cstr_tag,
-                crate::types::ConstructorTag::CstrExtension(_)
-            ) && branches.len() as i32 == cstr.cstr_consts + cstr.cstr_nonconsts
-        }
+        PatternDesc::Tpat_construct(_, cstr, _) => match cstr.cstr_kind {
+            crate::types::ConstructorKind::Ordinary(reference) => {
+                branches.len()
+                    == tctx
+                        .type_ctx
+                        .variant_layout(reference.variant)
+                        .constructors
+                        .len()
+            }
+            crate::types::ConstructorKind::Extension(_) => false,
+        },
         PatternDesc::Tpat_variant(_, _, _) => {
             let fields: Vec<String> = branches
                 .iter()
@@ -18421,10 +18437,10 @@ fn make_some_constructor(ctx: &TypeContext) -> crate::types::ConstructorDescript
         cstr_existentials: vec![],
         cstr_args: vec![inner_ty],
         cstr_arity: 1,
-        cstr_kind: None,
-        cstr_tag: crate::types::ConstructorTag::CstrBlock(0),
-        cstr_consts: 1,
-        cstr_nonconsts: 1,
+        cstr_kind: crate::types::ConstructorKind::Ordinary(crate::types::ConstructorReference {
+            variant: ctx.predef_option_layout(),
+            position: 1,
+        }),
         cstr_generalized: false,
         cstr_private: crate::types::PrivateFlag::Public,
         cstr_loc: crate::location::Location::none(),
@@ -18442,10 +18458,10 @@ fn make_none_constructor(ctx: &TypeContext) -> crate::types::ConstructorDescript
         cstr_existentials: vec![],
         cstr_args: vec![],
         cstr_arity: 0,
-        cstr_kind: None,
-        cstr_tag: crate::types::ConstructorTag::CstrConstant(0),
-        cstr_consts: 1,
-        cstr_nonconsts: 1,
+        cstr_kind: crate::types::ConstructorKind::Ordinary(crate::types::ConstructorReference {
+            variant: ctx.predef_option_layout(),
+            position: 0,
+        }),
         cstr_generalized: false,
         cstr_private: crate::types::PrivateFlag::Public,
         cstr_loc: crate::location::Location::none(),
@@ -18505,9 +18521,9 @@ fn get_record_labels<'a>(
         // constructors with the same short name.
         let cstr_name = path.last();
         let mut matches_inline_record_path =
-            |cstr: &crate::types::decl::ConstructorDescription| match &cstr.cstr_tag {
-                crate::types::decl::ConstructorTag::CstrExtension(ext_path) => ext_path.same(path),
-                _ => {
+            |cstr: &crate::types::decl::ConstructorDescription| match &cstr.cstr_kind {
+                crate::types::ConstructorKind::Extension(ext_path) => ext_path.same(path),
+                crate::types::ConstructorKind::Ordinary(_) => {
                     let cstr_res = ctx.repr(cstr.cstr_res);
                     let cstr_res_desc = ctx.get_desc(cstr_res);
                     let Some(matches_parent) = (match &*cstr_res_desc {
@@ -18552,9 +18568,9 @@ fn constructor_matches_inline_record_path<'a>(
         return false;
     }
 
-    match &cstr.cstr_tag {
-        crate::types::decl::ConstructorTag::CstrExtension(ext_path) => ext_path.same(path),
-        _ => {
+    match &cstr.cstr_kind {
+        crate::types::ConstructorKind::Extension(ext_path) => ext_path.same(path),
+        crate::types::ConstructorKind::Ordinary(_) => {
             let cstr_res = ctx.repr(cstr.cstr_res);
             let cstr_res_desc = ctx.get_desc(cstr_res);
             match &*cstr_res_desc {
@@ -19930,10 +19946,7 @@ fn type_letexception(
         cstr_existentials: vec![],
         cstr_args: cstr_args.clone(),
         cstr_arity: cstr_args.len() as i32,
-        cstr_kind: None,
-        cstr_tag: crate::types::decl::ConstructorTag::CstrExtension(exn_path),
-        cstr_consts: -1,
-        cstr_nonconsts: -1,
+        cstr_kind: crate::types::ConstructorKind::Extension(exn_path.clone()),
         cstr_generalized: false,
         cstr_private: crate::types::PrivateFlag::Public,
         cstr_loc: crate::location::Location::none(),
@@ -20075,7 +20088,7 @@ fn type_extension_expr(
         let Some(constructor) = constructor else {
             return Err(TypeCoreError::InvalidExtensionConstructorPayload { loc });
         };
-        let crate::types::decl::ConstructorTag::CstrExtension(path) = constructor.cstr_tag else {
+        let crate::types::ConstructorKind::Extension(path) = constructor.cstr_kind else {
             return Err(TypeCoreError::NotAnExtensionConstructor {
                 loc: constructor_lid.loc,
             });
@@ -23002,11 +23015,16 @@ fn rec_expression_class(expr: &Expression) -> RecExpressionClass {
     }
 }
 
-fn rec_option_expression(env: &RecEnv, expr: Option<&Expression>) -> RecUse {
-    expr.map_or_else(RecUse::default, |expr| rec_expression(env, expr))
+fn rec_option_expression(ctx: &TypeContext, env: &RecEnv, expr: Option<&Expression>) -> RecUse {
+    expr.map_or_else(RecUse::default, |expr| rec_expression(ctx, env, expr))
 }
 
-fn rec_case(env: &RecEnv, case: &crate::types::typedtree::Case, scrutinee: RecUse) -> RecUse {
+fn rec_case(
+    ctx: &TypeContext,
+    env: &RecEnv,
+    case: &crate::types::typedtree::Case,
+    scrutinee: RecUse,
+) -> RecUse {
     let scrutinee = if rec_pattern_is_destructuring(&case.c_lhs) {
         rec_use_inspect(scrutinee)
     } else {
@@ -23019,15 +23037,15 @@ fn rec_case(env: &RecEnv, case: &crate::types::typedtree::Case, scrutinee: RecUs
     rec_use_join(
         scrutinee,
         rec_use_join(
-            rec_expression(&case_env, &case.c_rhs),
-            rec_use_inspect(rec_option_expression(&case_env, case.c_guard.as_ref())),
+            rec_expression(ctx, &case_env, &case.c_rhs),
+            rec_use_inspect(rec_option_expression(ctx, &case_env, case.c_guard.as_ref())),
         ),
     )
 }
 
-fn rec_value_binding(env: &RecEnv, binding: &ValueBinding) -> (RecEnv, RecUse) {
+fn rec_value_binding(ctx: &TypeContext, env: &RecEnv, binding: &ValueBinding) -> (RecEnv, RecUse) {
     let vars = rec_pattern_variables(&binding.vb_pat);
-    let mut use_ = rec_expression(env, &binding.vb_expr);
+    let mut use_ = rec_expression(ctx, env, &binding.vb_expr);
     if rec_pattern_is_destructuring(&binding.vb_pat) {
         use_ = rec_use_inspect(use_);
     }
@@ -23039,6 +23057,7 @@ fn rec_value_binding(env: &RecEnv, binding: &ValueBinding) -> (RecEnv, RecUse) {
 }
 
 fn rec_value_bindings(
+    ctx: &TypeContext,
     rec_flag: RecFlag,
     env: &RecEnv,
     bindings: &[ValueBinding],
@@ -23049,7 +23068,7 @@ fn rec_value_bindings(
             let mut use_ = RecUse::default();
             for binding in bindings {
                 ids.extend(rec_pattern_variables(&binding.vb_pat));
-                use_ = rec_use_join(use_, rec_expression(env, &binding.vb_expr));
+                use_ = rec_use_join(use_, rec_expression(ctx, env, &binding.vb_expr));
             }
             let mut binding_env = RecEnv::default();
             for id in ids {
@@ -23062,7 +23081,7 @@ fn rec_value_bindings(
             let mut use_ = RecUse::default();
             let mut current_env = env.clone();
             for binding in bindings {
-                let (binding_env, binding_use) = rec_value_binding(&current_env, binding);
+                let (binding_env, binding_use) = rec_value_binding(ctx, &current_env, binding);
                 current_env = rec_env_join(current_env, binding_env.clone());
                 out_env = rec_env_join(out_env, binding_env);
                 use_ = rec_use_join(use_, binding_use);
@@ -23072,21 +23091,25 @@ fn rec_value_bindings(
     }
 }
 
-fn rec_module_expr(env: &RecEnv, module_expr: &crate::types::typedtree::ModuleExpr) -> RecUse {
+fn rec_module_expr(
+    ctx: &TypeContext,
+    env: &RecEnv,
+    module_expr: &crate::types::typedtree::ModuleExpr,
+) -> RecUse {
     match &module_expr.mod_desc {
         crate::types::typedtree::ModuleExprDesc::Tmod_ident(path, _) => rec_path(env, path),
         crate::types::typedtree::ModuleExprDesc::Tmod_structure(structure) => {
-            rec_use_guard(rec_structure(env, structure))
+            rec_use_guard(rec_structure(ctx, env, structure))
         }
         crate::types::typedtree::ModuleExprDesc::Tmod_functor(_, _, _, body) => {
-            rec_use_delay(rec_module_expr(env, body))
+            rec_use_delay(rec_module_expr(ctx, env, body))
         }
         crate::types::typedtree::ModuleExprDesc::Tmod_apply(functor, arg, _) => rec_use_join(
-            rec_use_inspect(rec_module_expr(env, functor)),
-            rec_use_inspect(rec_module_expr(env, arg)),
+            rec_use_inspect(rec_module_expr(ctx, env, functor)),
+            rec_use_inspect(rec_module_expr(ctx, env, arg)),
         ),
         crate::types::typedtree::ModuleExprDesc::Tmod_constraint(inner, _, _, coercion) => {
-            let use_ = rec_module_expr(env, inner);
+            let use_ = rec_module_expr(ctx, env, inner);
             if matches!(
                 coercion,
                 crate::types::typedtree::ModuleCoercion::Tcoerce_none
@@ -23096,15 +23119,21 @@ fn rec_module_expr(env: &RecEnv, module_expr: &crate::types::typedtree::ModuleEx
                 rec_use_inspect(use_)
             }
         }
-        crate::types::typedtree::ModuleExprDesc::Tmod_unpack(expr, _) => rec_expression(env, expr),
+        crate::types::typedtree::ModuleExprDesc::Tmod_unpack(expr, _) => {
+            rec_expression(ctx, env, expr)
+        }
     }
 }
 
-fn rec_structure(env: &RecEnv, structure: &crate::types::typedtree::Structure) -> RecUse {
+fn rec_structure(
+    ctx: &TypeContext,
+    env: &RecEnv,
+    structure: &crate::types::typedtree::Structure,
+) -> RecUse {
     let mut current_env = env.clone();
     let mut use_ = RecUse::default();
     for item in &structure.str_items {
-        let (item_env, item_use) = rec_structure_item(&current_env, item);
+        let (item_env, item_use) = rec_structure_item(ctx, &current_env, item);
         current_env = rec_env_join(current_env, item_env);
         use_ = rec_use_join(use_, item_use);
     }
@@ -23112,31 +23141,32 @@ fn rec_structure(env: &RecEnv, structure: &crate::types::typedtree::Structure) -
 }
 
 fn rec_structure_item(
+    ctx: &TypeContext,
     env: &RecEnv,
     item: &crate::types::typedtree::StructureItem,
 ) -> (RecEnv, RecUse) {
     match &item.str_desc {
         crate::types::typedtree::StructureItemDesc::Tstr_eval(expr, _) => {
-            (RecEnv::default(), rec_expression(env, expr))
+            (RecEnv::default(), rec_expression(ctx, env, expr))
         }
         crate::types::typedtree::StructureItemDesc::Tstr_value(rec_flag, bindings) => {
-            rec_value_bindings(*rec_flag, env, bindings)
+            rec_value_bindings(ctx, *rec_flag, env, bindings)
         }
         crate::types::typedtree::StructureItemDesc::Tstr_module(binding) => {
-            let use_ = rec_module_expr(env, &binding.mb_expr);
+            let use_ = rec_module_expr(ctx, env, &binding.mb_expr);
             let mut item_env = RecEnv::default();
             item_env.insert(binding.mb_id.clone(), use_.clone());
             (item_env, use_)
         }
         crate::types::typedtree::StructureItemDesc::Tstr_recmodule(bindings) => {
             let use_ = bindings.iter().fold(RecUse::default(), |use_, binding| {
-                rec_use_join(use_, rec_module_expr(env, &binding.mb_expr))
+                rec_use_join(use_, rec_module_expr(ctx, env, &binding.mb_expr))
             });
             (RecEnv::default(), rec_use_inspect(use_))
         }
         crate::types::typedtree::StructureItemDesc::Tstr_include(include_decl) => (
             RecEnv::default(),
-            rec_use_inspect(rec_module_expr(env, &include_decl.incl_mod)),
+            rec_use_inspect(rec_module_expr(ctx, env, &include_decl.incl_mod)),
         ),
         crate::types::typedtree::StructureItemDesc::Tstr_primitive(_)
         | crate::types::typedtree::StructureItemDesc::Tstr_type(_, _)
@@ -23150,43 +23180,46 @@ fn rec_structure_item(
     }
 }
 
-fn rec_expression(env: &RecEnv, expr: &Expression) -> RecUse {
+fn rec_expression(ctx: &TypeContext, env: &RecEnv, expr: &Expression) -> RecUse {
     match &expr.exp_desc {
         ExpressionDesc::Texp_ident(path, _, _) => rec_path(env, path),
         ExpressionDesc::Texp_let(rec_flag, bindings, body) => {
-            let (binding_env, binding_use) = rec_value_bindings(*rec_flag, env, bindings);
+            let (binding_env, binding_use) = rec_value_bindings(ctx, *rec_flag, env, bindings);
             rec_use_join(
                 rec_use_discard(binding_use),
-                rec_expression(&rec_env_join(env.clone(), binding_env), body),
+                rec_expression(ctx, &rec_env_join(env.clone(), binding_env), body),
             )
         }
         ExpressionDesc::Texp_letmodule(id, _, module_expr, body) => {
-            let module_use = rec_module_expr(env, module_expr);
+            let module_use = rec_module_expr(ctx, env, module_expr);
             let mut body_env = env.clone();
             body_env.insert(id.clone(), module_use.clone());
-            rec_use_join(rec_use_discard(module_use), rec_expression(&body_env, body))
+            rec_use_join(
+                rec_use_discard(module_use),
+                rec_expression(ctx, &body_env, body),
+            )
         }
         ExpressionDesc::Texp_match(scrutinee, value_cases, exn_cases, _) => {
-            let scrutinee_use = rec_expression(env, scrutinee);
+            let scrutinee_use = rec_expression(ctx, env, scrutinee);
             let value_use = value_cases.iter().fold(RecUse::default(), |use_, case| {
-                rec_use_join(use_, rec_case(env, case, scrutinee_use.clone()))
+                rec_use_join(use_, rec_case(ctx, env, case, scrutinee_use.clone()))
             });
             let exn_use = exn_cases.iter().fold(RecUse::default(), |use_, case| {
-                rec_use_join(use_, rec_expression(env, &case.c_rhs))
+                rec_use_join(use_, rec_expression(ctx, env, &case.c_rhs))
             });
             rec_use_join(value_use, exn_use)
         }
         ExpressionDesc::Texp_for(_, _, start, stop, _, body) => rec_use_join(
             rec_use_join(
-                rec_use_inspect(rec_expression(env, start)),
-                rec_use_inspect(rec_expression(env, stop)),
+                rec_use_inspect(rec_expression(ctx, env, start)),
+                rec_use_inspect(rec_expression(ctx, env, stop)),
             ),
-            rec_use_discard(rec_expression(env, body)),
+            rec_use_discard(rec_expression(ctx, env, body)),
         ),
         ExpressionDesc::Texp_for_of(_, _, iterable, body)
         | ExpressionDesc::Texp_for_await_of(_, _, iterable, body) => rec_use_join(
-            rec_use_inspect(rec_expression(env, iterable)),
-            rec_use_discard(rec_expression(env, body)),
+            rec_use_inspect(rec_expression(ctx, env, iterable)),
+            rec_use_discard(rec_expression(ctx, env, body)),
         ),
         ExpressionDesc::Texp_constant(_)
         | ExpressionDesc::Texp_break
@@ -23198,45 +23231,53 @@ fn rec_expression(env: &RecEnv, expr: &Expression) -> RecUse {
                 && args[0].expression.is_some()
             {
                 return rec_use_guard(rec_expression(
+                    ctx,
                     env,
                     args[0].expression.as_ref().expect("checked is_some"),
                 ));
             }
             let args_use = args.iter().fold(RecUse::default(), |use_, arg| {
-                rec_use_join(use_, rec_option_expression(env, arg.expression.as_ref()))
+                rec_use_join(
+                    use_,
+                    rec_option_expression(ctx, env, arg.expression.as_ref()),
+                )
             });
             rec_use_join(
-                rec_use_inspect(rec_expression(env, funct)),
+                rec_use_inspect(rec_expression(ctx, env, funct)),
                 rec_use_inspect(args_use),
             )
         }
         ExpressionDesc::Texp_tuple(items) | ExpressionDesc::Texp_array(items) => {
             rec_use_guard(items.iter().fold(RecUse::default(), |use_, item| {
-                rec_use_join(use_, rec_expression(env, item))
+                rec_use_join(use_, rec_expression(ctx, env, item))
             }))
         }
         ExpressionDesc::Texp_construct(_, desc, items) => {
             let args_use = items.iter().fold(RecUse::default(), |use_, item| {
-                rec_use_join(use_, rec_expression(env, item))
+                rec_use_join(use_, rec_expression(ctx, env, item))
             });
-            let args_use = if matches!(
-                desc.cstr_tag,
-                crate::types::decl::ConstructorTag::CstrUnboxed
-            ) {
+            let payload_is_unboxed = match desc.cstr_kind {
+                crate::types::ConstructorKind::Ordinary(reference) => matches!(
+                    reference.representation(ctx),
+                    crate::types::VariantConstructorCase::Block(ref block) if block.runtime.untagged
+                ),
+                crate::types::ConstructorKind::Extension(_) => false,
+            };
+            let args_use = if payload_is_unboxed {
                 args_use
             } else {
                 rec_use_guard(args_use)
             };
-            let constructor_use = match &desc.cstr_tag {
-                crate::types::decl::ConstructorTag::CstrExtension(path) => {
+            let constructor_use = match &desc.cstr_kind {
+                crate::types::ConstructorKind::Extension(path) => {
                     rec_use_inspect(rec_path(env, path))
                 }
-                _ => RecUse::default(),
+                crate::types::ConstructorKind::Ordinary(_) => RecUse::default(),
             };
             rec_use_join(constructor_use, args_use)
         }
         ExpressionDesc::Texp_variant(_, payload) => {
-            rec_use_guard(rec_option_expression(env, payload.as_deref()))
+            rec_use_guard(rec_option_expression(ctx, env, payload.as_deref()))
         }
         ExpressionDesc::Texp_record {
             fields,
@@ -23252,7 +23293,7 @@ fn rec_expression(env: &RecEnv, expr: &Expression) -> RecUse {
                 .fold(RecUse::default(), |use_, (_, _, def, _)| {
                     let field_use = match def {
                         crate::types::typedtree::RecordLabelDefinition::Overridden(_, expr) => {
-                            rec_expression(env, expr)
+                            rec_expression(ctx, env, expr)
                         }
                         crate::types::typedtree::RecordLabelDefinition::Kept(_)
                         | crate::types::typedtree::RecordLabelDefinition::OmittedOptionalNone(
@@ -23264,7 +23305,7 @@ fn rec_expression(env: &RecEnv, expr: &Expression) -> RecUse {
                 });
             let record_use = rec_use_join(
                 fields_use,
-                rec_option_expression(env, extended_expression.as_deref()),
+                rec_option_expression(ctx, env, extended_expression.as_deref()),
             );
             let unboxed = fields.first().is_some_and(|(_, label, _, _)| {
                 matches!(
@@ -23279,40 +23320,40 @@ fn rec_expression(env: &RecEnv, expr: &Expression) -> RecUse {
             }
         }
         ExpressionDesc::Texp_ifthenelse(cond, ifso, ifnot) => rec_use_join(
-            rec_use_inspect(rec_expression(env, cond)),
+            rec_use_inspect(rec_expression(ctx, env, cond)),
             rec_use_join(
-                rec_expression(env, ifso),
-                rec_option_expression(env, ifnot.as_deref()),
+                rec_expression(ctx, env, ifso),
+                rec_option_expression(ctx, env, ifnot.as_deref()),
             ),
         ),
         ExpressionDesc::Texp_setfield(base, _, _, value) => rec_use_join(
-            rec_use_inspect(rec_expression(env, base)),
-            rec_use_inspect(rec_expression(env, value)),
+            rec_use_inspect(rec_expression(ctx, env, base)),
+            rec_use_inspect(rec_expression(ctx, env, value)),
         ),
         ExpressionDesc::Texp_sequence(first, second) => rec_use_join(
-            rec_use_discard(rec_expression(env, first)),
-            rec_expression(env, second),
+            rec_use_discard(rec_expression(ctx, env, first)),
+            rec_expression(ctx, env, second),
         ),
         ExpressionDesc::Texp_while(cond, body) => rec_use_join(
-            rec_use_inspect(rec_expression(env, cond)),
-            rec_use_discard(rec_expression(env, body)),
+            rec_use_inspect(rec_expression(ctx, env, cond)),
+            rec_use_discard(rec_expression(ctx, env, body)),
         ),
         ExpressionDesc::Texp_send(receiver, _, arg) => rec_use_join(
-            rec_use_inspect(rec_expression(env, receiver)),
-            rec_use_inspect(rec_option_expression(env, arg.as_deref())),
+            rec_use_inspect(rec_expression(ctx, env, receiver)),
+            rec_use_inspect(rec_option_expression(ctx, env, arg.as_deref())),
         ),
         ExpressionDesc::Texp_field(base, _, _) | ExpressionDesc::Texp_assert(base) => {
-            rec_use_inspect(rec_expression(env, base))
+            rec_use_inspect(rec_expression(ctx, env, base))
         }
-        ExpressionDesc::Texp_letexception(_, body) => rec_expression(env, body),
-        ExpressionDesc::Texp_pack(module_expr) => rec_module_expr(env, module_expr),
+        ExpressionDesc::Texp_letexception(_, body) => rec_expression(ctx, env, body),
+        ExpressionDesc::Texp_pack(module_expr) => rec_module_expr(ctx, env, module_expr),
         ExpressionDesc::Texp_try(body, cases) => {
             let cases_use = cases.iter().fold(RecUse::default(), |use_, case| {
-                rec_use_join(use_, rec_expression(env, &case.c_rhs))
+                rec_use_join(use_, rec_expression(ctx, env, &case.c_rhs))
             });
-            rec_use_join(rec_expression(env, body), cases_use)
+            rec_use_join(rec_expression(ctx, env, body), cases_use)
         }
-        ExpressionDesc::Texp_function { body, .. } => rec_use_delay(rec_expression(env, body)),
+        ExpressionDesc::Texp_function { body, .. } => rec_use_delay(rec_expression(ctx, env, body)),
     }
 }
 
@@ -23331,7 +23372,11 @@ fn rec_binding_rhs_is_exempt(expr: &Expression) -> bool {
     }
 }
 
-fn check_recursive_expression(idlist: &[Ident], expr: &Expression) -> TypeCoreResult<()> {
+fn check_recursive_expression(
+    ctx: &TypeContext,
+    idlist: &[Ident],
+    expr: &Expression,
+) -> TypeCoreResult<()> {
     let env = idlist
         .iter()
         .cloned()
@@ -23339,7 +23384,7 @@ fn check_recursive_expression(idlist: &[Ident], expr: &Expression) -> TypeCoreRe
             env.insert(id.clone(), rec_use_single(id, RecAccess::Unguarded));
             env
         });
-    let use_ = rec_expression(&env, expr);
+    let use_ = rec_expression(ctx, &env, expr);
     let has_unguarded = use_
         .values()
         .any(|access| matches!(access, RecAccess::Unguarded | RecAccess::Dereferenced));
@@ -23353,14 +23398,14 @@ fn check_recursive_expression(idlist: &[Ident], expr: &Expression) -> TypeCoreRe
     }
 }
 
-fn check_recursive_bindings(bindings: &[ValueBinding]) -> TypeCoreResult<()> {
+fn check_recursive_bindings(ctx: &TypeContext, bindings: &[ValueBinding]) -> TypeCoreResult<()> {
     let ids = bindings
         .iter()
         .flat_map(|binding| rec_pattern_variables(&binding.vb_pat))
         .collect::<Vec<_>>();
     for binding in bindings {
         if !rec_binding_rhs_is_exempt(&binding.vb_expr) {
-            check_recursive_expression(&ids, &binding.vb_expr)?;
+            check_recursive_expression(ctx, &ids, &binding.vb_expr)?;
         }
     }
     Ok(())
@@ -23763,7 +23808,7 @@ fn type_let_bindings(
         }
 
         if rec_flag == RecFlag::Recursive {
-            check_recursive_bindings(&typed_bindings)?;
+            check_recursive_bindings(tctx.type_ctx, &typed_bindings)?;
             report_unused_rec_flag_warning(tctx, &typed_bindings);
         }
 
@@ -26416,17 +26461,9 @@ fn lookup_predef_option_constructor<'b>(
 
     let cstr_name = arena.get_string(*cstr_idx);
     let (inner_ty, option_ty) = ctx.predef_option_scheme();
-    let (arity, args, tag) = match cstr_name {
-        "Some" => (
-            1,
-            vec![inner_ty],
-            crate::types::decl::ConstructorTag::CstrBlock(0),
-        ),
-        "None" => (
-            0,
-            vec![],
-            crate::types::decl::ConstructorTag::CstrConstant(0),
-        ),
+    let (arity, args, position) = match cstr_name {
+        "Some" => (1, vec![inner_ty], 1),
+        "None" => (0, vec![], 0),
         _ => return None,
     };
 
@@ -26436,10 +26473,10 @@ fn lookup_predef_option_constructor<'b>(
         cstr_existentials: vec![],
         cstr_args: args,
         cstr_arity: arity,
-        cstr_kind: None,
-        cstr_tag: tag,
-        cstr_consts: 1,
-        cstr_nonconsts: 1,
+        cstr_kind: crate::types::ConstructorKind::Ordinary(crate::types::ConstructorReference {
+            variant: ctx.predef_option_layout(),
+            position,
+        }),
         cstr_generalized: false,
         cstr_private: crate::types::PrivateFlag::Public,
         cstr_loc: crate::location::Location::none(),
@@ -29285,25 +29322,9 @@ fn lookup_constructor_by_expected_type<'b>(
 
     // Check if it's a variant type with a matching constructor
     if let crate::types::TypeKind::TypeVariant(ref constrs, layout) = concrete_type_decl.type_kind {
-        let num_consts = constrs.iter()
-            .filter(|c| matches!(c.cd_args, crate::types::ConstructorArguments::CstrTuple(ref args) if args.is_empty()))
-            .count() as i32;
-        let num_nonconsts = constrs.len() as i32 - num_consts;
-        let mut const_idx = 0i32;
-        let mut block_idx = 0i32;
         for (position, cd) in constrs.iter().enumerate() {
-            let is_constant = matches!(cd.cd_args, crate::types::ConstructorArguments::CstrTuple(ref args) if args.is_empty());
             if cd.cd_id.name() == cstr_name {
                 let mut inst_cache = HashMap::new();
-                let tag = if concrete_type_decl.type_representation
-                    == crate::types::TypeRepresentation::Unboxed
-                {
-                    crate::types::decl::ConstructorTag::CstrUnboxed
-                } else if is_constant {
-                    crate::types::decl::ConstructorTag::CstrConstant(const_idx)
-                } else {
-                    crate::types::decl::ConstructorTag::CstrBlock(block_idx)
-                };
                 let constructor_module_access_path = concrete_type_path.parent();
                 let result_module_access_path = result_type_path.parent();
                 let (cstr_args, cstr_arity, cstr_inlined) = match &cd.cd_args {
@@ -29503,10 +29524,12 @@ fn lookup_constructor_by_expected_type<'b>(
                     cstr_existentials: vec![],
                     cstr_args,
                     cstr_arity,
-                    cstr_kind: None,
-                    cstr_tag: tag,
-                    cstr_consts: num_consts,
-                    cstr_nonconsts: num_nonconsts,
+                    cstr_kind: crate::types::ConstructorKind::Ordinary(
+                        crate::types::ConstructorReference {
+                            variant: layout,
+                            position,
+                        },
+                    ),
                     cstr_generalized: cd.cd_res.is_some(),
                     cstr_private: concrete_type_decl.type_private,
                     cstr_loc: cd.cd_loc,
@@ -29517,11 +29540,6 @@ fn lookup_constructor_by_expected_type<'b>(
                 };
                 let path = Path::pident(Ident::create_persistent(cstr_name));
                 return Some((path, desc));
-            }
-            if is_constant {
-                const_idx += 1;
-            } else {
-                block_idx += 1;
             }
         }
     }

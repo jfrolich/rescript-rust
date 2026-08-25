@@ -13,7 +13,7 @@ use std::sync::Arc;
 use crate::ident::Ident;
 
 use super::decl::{
-    ConstructorDescription, ConstructorKind, ConstructorTag, LabelDescription, ModtypeDeclaration,
+    ConstructorDescription, ConstructorKind, LabelDescription, ModtypeDeclaration,
     ModuleDeclaration, ModuleType, Signature, SignatureItem, TypeDeclaration, ValueDescription,
     ValueKind,
 };
@@ -47,38 +47,8 @@ fn build_matching_type_constructors(
     };
 
     let type_path = Path::pdot(access_path.clone(), type_name);
-    let num_consts = cstrs
-        .iter()
-        .filter(|c| {
-            matches!(
-                c.cd_args,
-                super::decl::ConstructorArguments::CstrTuple(ref args) if args.is_empty()
-            )
-        })
-        .count() as i32;
-    let num_nonconsts = cstrs.len() as i32 - num_consts;
-    let mut const_idx = 0i32;
-    let mut block_idx = 0i32;
-
     for (position, cd) in cstrs.iter().enumerate() {
-        let is_constant = matches!(
-            cd.cd_args,
-            super::decl::ConstructorArguments::CstrTuple(ref args) if args.is_empty()
-        );
-        let tag = if decl.type_representation == crate::types::TypeRepresentation::Unboxed {
-            ConstructorTag::CstrUnboxed
-        } else if is_constant {
-            ConstructorTag::CstrConstant(const_idx)
-        } else {
-            ConstructorTag::CstrBlock(block_idx)
-        };
-
         if cd.cd_id.name() != constructor_name {
-            if is_constant {
-                const_idx += 1;
-            } else {
-                block_idx += 1;
-            }
             continue;
         }
 
@@ -171,15 +141,12 @@ fn build_matching_type_constructors(
                 cstr_existentials: vec![],
                 cstr_args,
                 cstr_arity,
-                cstr_kind: Some(ConstructorKind::Ordinary(
+                cstr_kind: ConstructorKind::Ordinary(
                     super::variant_runtime::ConstructorReference {
                         variant: *layout,
                         position,
                     },
-                )),
-                cstr_tag: tag,
-                cstr_consts: num_consts,
-                cstr_nonconsts: num_nonconsts,
+                ),
                 cstr_generalized: cd.cd_res.is_some(),
                 cstr_private: decl.type_private,
                 cstr_loc: cd.cd_loc,
@@ -187,11 +154,6 @@ fn build_matching_type_constructors(
                 cstr_inlined,
             },
         );
-        if is_constant {
-            const_idx += 1;
-        } else {
-            block_idx += 1;
-        }
     }
 }
 
@@ -317,10 +279,7 @@ fn build_constructors_for_name(
                         cstr_existentials: vec![],
                         cstr_args,
                         cstr_arity,
-                        cstr_kind: Some(ConstructorKind::Extension(ext_path.clone())),
-                        cstr_tag: ConstructorTag::CstrExtension(ext_path),
-                        cstr_consts: -1,
-                        cstr_nonconsts: -1,
+                        cstr_kind: ConstructorKind::Extension(ext_path.clone()),
                         cstr_generalized: ext.ext_ret_type.is_some(),
                         cstr_private: ext.ext_private,
                         cstr_loc: ext.ext_loc,

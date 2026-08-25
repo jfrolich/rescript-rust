@@ -441,7 +441,7 @@ impl LoweringContext {
         let lowered_scrutinee = self.lower_lambda(scrutinee);
 
         if const_only_switch {
-            if let Some(diff) = happens_to_be_diff(&lowered_consts, switch.sw_names.as_ref()) {
+            if let Some(diff) = happens_to_be_diff(&lowered_consts, &switch.sw_dispatch) {
                 if diff == 0 {
                     return lowered_scrutinee;
                 }
@@ -468,7 +468,7 @@ impl LoweringContext {
                     sw_blocks_full: true,
                     sw_blocks: lowered_blocks,
                     sw_failaction: lowered_failaction,
-                    sw_names: switch.sw_names,
+                    sw_dispatch: switch.sw_dispatch,
                 },
             )
         } else {
@@ -480,7 +480,7 @@ impl LoweringContext {
                     sw_blocks_full: lowered_blocks.len() >= switch.sw_numblocks,
                     sw_blocks: lowered_blocks,
                     sw_failaction: lowered_failaction,
-                    sw_names: switch.sw_names,
+                    sw_dispatch: switch.sw_dispatch,
                 },
             )
         }
@@ -1136,22 +1136,27 @@ fn int_constant_value(lam: &Lambda) -> Option<i32> {
 }
 
 fn happens_to_be_diff(
-    sw_consts: &[(i32, Lambda)],
-    sw_names: Option<&crate::lambda::SwitchNames>,
+    sw_consts: &[(crate::lambda::SwitchKey, Lambda)],
+    sw_dispatch: &crate::lambda::SwitchDispatch,
 ) -> Option<i32> {
-    if sw_names.is_some() {
+    if !matches!(sw_dispatch, crate::lambda::SwitchDispatch::Direct) {
         return None;
     }
-    let ((a, a_lam), rest) = sw_consts.split_first()?;
-    let (b, b_lam) = rest.first()?;
-    let a0 = int_constant_value(a_lam)?;
-    let b0 = int_constant_value(b_lam)?;
-    let diff = a0.checked_sub(*a)?;
-    if b0.checked_sub(*b)? != diff {
+    let ((crate::lambda::SwitchKey::Int(a), a_lam), rest) = sw_consts.split_first()? else {
+        return None;
+    };
+    let (crate::lambda::SwitchKey::Int(b), b_lam) = rest.first()? else {
+        return None;
+    };
+    let diff = int_constant_value(a_lam)?.checked_sub(*a)?;
+    if int_constant_value(b_lam)?.checked_sub(*b)? != diff {
         return None;
     }
-    for (x, lam) in rest.iter().skip(1) {
-        if int_constant_value(lam)?.checked_sub(*x)? != diff {
+    for (key, lam) in rest.iter().skip(1) {
+        let crate::lambda::SwitchKey::Int(value) = key else {
+            return None;
+        };
+        if int_constant_value(lam)?.checked_sub(*value)? != diff {
             return None;
         }
     }
@@ -1397,12 +1402,19 @@ fn fold_offset_switch_alias(id: &Ident, value: &Lambda, body: &Lambda) -> Option
             sw_consts: switch
                 .sw_consts
                 .iter()
-                .map(|(tag, lam)| (*tag - offset, lam.clone()))
+                .map(|(key, lam)| match key {
+                    crate::lambda::SwitchKey::Int(value) => {
+                        (crate::lambda::SwitchKey::Int(*value - offset), lam.clone())
+                    }
+                    crate::lambda::SwitchKey::Constructor(_) => {
+                        unreachable!("offset constructor switch")
+                    }
+                })
                 .collect(),
             sw_blocks_full: switch.sw_blocks_full,
             sw_blocks: Vec::new(),
             sw_failaction: switch.sw_failaction.clone(),
-            sw_names: switch.sw_names.clone(),
+            sw_dispatch: switch.sw_dispatch.clone(),
         },
     ))
 }
@@ -2503,7 +2515,7 @@ mod tests {
                 sw_blocks_full: false,
                 sw_blocks: Vec::new(),
                 sw_failaction: None,
-                sw_names: Some(crate::lambda::SwitchNames {
+                sw_dispatch: Some(crate::lambda::SwitchNames {
                     consts: vec![crate::lambda::SwitchTag::named("A")],
                     blocks: Vec::new(),
                 }),
@@ -2533,7 +2545,7 @@ mod tests {
                 sw_blocks_full: false,
                 sw_blocks: Vec::new(),
                 sw_failaction: None,
-                sw_names: None,
+                sw_dispatch: crate::lambda::SwitchDispatch::Direct,
             },
             Location::none(),
         ));
@@ -2655,7 +2667,7 @@ mod tests {
                 sw_blocks_full: false,
                 sw_blocks: Vec::new(),
                 sw_failaction: None,
-                sw_names: None,
+                sw_dispatch: crate::lambda::SwitchDispatch::Direct,
             },
             Location::none(),
         ));
@@ -2685,7 +2697,7 @@ mod tests {
                 sw_blocks_full: false,
                 sw_blocks: Vec::new(),
                 sw_failaction: Some(Box::new(raw_exit_alias(7, 8))),
-                sw_names: None,
+                sw_dispatch: crate::lambda::SwitchDispatch::Direct,
             },
             Location::none(),
         ));
@@ -2719,7 +2731,7 @@ mod tests {
                 sw_blocks_full: false,
                 sw_blocks: Vec::new(),
                 sw_failaction: None,
-                sw_names: Some(crate::lambda::SwitchNames {
+                sw_dispatch: Some(crate::lambda::SwitchNames {
                     consts: vec![
                         crate::lambda::SwitchTag::named("A"),
                         crate::lambda::SwitchTag::named("B"),
@@ -2770,7 +2782,7 @@ mod tests {
                     sw_blocks_full: false,
                     sw_blocks: Vec::new(),
                     sw_failaction: None,
-                    sw_names: None,
+                    sw_dispatch: crate::lambda::SwitchDispatch::Direct,
                 },
                 loc,
             )),

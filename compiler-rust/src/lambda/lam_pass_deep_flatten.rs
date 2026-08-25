@@ -376,7 +376,7 @@ pub fn deep_flatten_owned_with_id_gen(lam: Lambda, id_gen: &IdGenerator) -> Lamb
                         .map(|(tag, lam)| (tag, aux(lam, id_gen)))
                         .collect(),
                     sw_failaction: switch.sw_failaction.map(|lam| Box::new(aux(*lam, id_gen))),
-                    sw_names: switch.sw_names,
+                    sw_dispatch: switch.sw_dispatch,
                 },
             ),
             Lambda::LstringSwitch(scrutinee, cases, default) => Lambda::LstringSwitch(

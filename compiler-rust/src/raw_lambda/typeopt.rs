@@ -26,6 +26,26 @@ enum BuiltinPathTest {
     NotApplicable,
 }
 
+pub(crate) fn constructor_case(
+    ctx: &TypeContext,
+    cstr: &ConstructorDescription,
+) -> Option<crate::types::VariantConstructorCase> {
+    match cstr.cstr_kind {
+        crate::types::ConstructorKind::Ordinary(reference) => Some(reference.representation(ctx)),
+        crate::types::ConstructorKind::Extension(_) => None,
+    }
+}
+
+pub(crate) fn constructor_payload_is_unboxed(
+    ctx: &TypeContext,
+    cstr: &ConstructorDescription,
+) -> bool {
+    matches!(
+        constructor_case(ctx, cstr),
+        Some(crate::types::VariantConstructorCase::Block(block)) if block.runtime.untagged
+    )
+}
+
 pub(crate) fn constructor_has_optional_shape(cstr: &ConstructorDescription) -> bool {
     cstr.cstr_attributes
         .iter()

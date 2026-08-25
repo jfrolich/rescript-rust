@@ -34,11 +34,11 @@ use crate::parse_arena::{LidentIdx, LocIdx, Located, ParseArena};
 use crate::parser::ast::{Arity, MutableFlag as ParserMutableFlag};
 use crate::raw_lambda::matching as full_matching;
 use crate::raw_lambda::typeopt::{
-    constructor_has_optional_shape, is_base_type as typeopt_is_base_type,
-    type_cannot_contain_undefined, type_cannot_contain_undefined_no_env, type_is_builtin_object,
+    constructor_case, constructor_has_optional_shape, constructor_payload_is_unboxed,
+    is_base_type as typeopt_is_base_type, type_cannot_contain_undefined,
+    type_cannot_contain_undefined_no_env, type_is_builtin_object,
 };
 use crate::raw_lambda::{RawLambda, RawPrimInfo};
-use crate::types::ConstructorTag;
 use crate::types::SignatureItem;
 use crate::types::asttypes::MutableFlag as TypeMutableFlag;
 use crate::types::context::TypeContext;
@@ -102,7 +102,7 @@ fn raw_constructor_constant(
     // only when Datarepr.constructor_has_optional_shape marks the
     // constructor; an ordinary constructor named `None` stays Pt_constructor.
     if !constructor_has_optional_shape(cstr)
-        && let Some(crate::types::ConstructorKind::Ordinary(reference)) = cstr.cstr_kind
+        && let crate::types::ConstructorKind::Ordinary(reference) = cstr.cstr_kind
         && let crate::types::VariantConstructorCase::Constant(tag) = reference.representation(ctx)
     {
         return Constant::Constructor(tag);
@@ -110,10 +110,16 @@ fn raw_constructor_constant(
     let comment = if constructor_has_optional_shape(cstr) {
         PointerInfo::ShapeNone
     } else {
+        let layout = match cstr.cstr_kind {
+            crate::types::ConstructorKind::Ordinary(reference) => {
+                ctx.variant_layout(reference.variant)
+            }
+            crate::types::ConstructorKind::Extension(_) => unreachable!(),
+        };
         PointerInfo::Constructor(PointerConstructorTag {
             name: cstr.cstr_name.clone(),
-            const_: cstr.cstr_consts,
-            non_const: cstr.cstr_nonconsts,
+            const_: layout.num_constants() as i32,
+            non_const: layout.num_blocks() as i32,
             runtime_tag: constructor_runtime_tag(&cstr.cstr_attributes),
         })
     };
@@ -323,7 +329,7 @@ fn raw_subst_idents_owned(subst: &HashMap<Ident, Ident>, lam: RawLambda) -> RawL
                 sw_failaction: sw
                     .sw_failaction
                     .map(|lam| Box::new(raw_subst_idents_owned(subst, *lam))),
-                sw_names: sw.sw_names,
+                sw_dispatch: sw.sw_dispatch,
             },
             loc,
         ),
@@ -720,21 +726,22 @@ fn trace_raw_match_fallback(loc: &Location, scrut: &Expression, cases: &[Case]) 
 #[derive(Clone, PartialEq, Eq)]
 enum SimpleSwitchKey {
     Int(i32),
-    ConstCtor(i32),
-    BlockCtor(i32),
+    Constructor(crate::types::VariantConstructorCase),
 }
 
 impl SimpleSwitchKey {
-    fn tag(&self) -> i32 {
+    fn switch_key(&self) -> crate::lambda::SwitchKey {
         match self {
-            SimpleSwitchKey::Int(i)
-            | SimpleSwitchKey::ConstCtor(i)
-            | SimpleSwitchKey::BlockCtor(i) => *i,
+            Self::Int(value) => crate::lambda::SwitchKey::Int(*value),
+            Self::Constructor(case) => crate::lambda::SwitchKey::Constructor(case.clone()),
         }
     }
 
     fn is_block(&self) -> bool {
-        matches!(self, SimpleSwitchKey::BlockCtor(_))
+        matches!(
+            self,
+            Self::Constructor(crate::types::VariantConstructorCase::Block(_))
+        )
     }
 }
 
@@ -2011,11 +2018,11 @@ impl<'a> RawLambdaConverter<'a> {
                 let scrut_norm = Self::normalize_for_key(scrut, env, counter)?;
                 let mut consts = Vec::new();
                 for (tag, act) in &sw.sw_consts {
-                    consts.push((*tag, Self::normalize_for_key(act, env, counter)?));
+                    consts.push((tag.clone(), Self::normalize_for_key(act, env, counter)?));
                 }
                 let mut blocks = Vec::new();
                 for (tag, act) in &sw.sw_blocks {
-                    blocks.push((*tag, Self::normalize_for_key(act, env, counter)?));
+                    blocks.push((tag.clone(), Self::normalize_for_key(act, env, counter)?));
                 }
                 let fail = match &sw.sw_failaction {
                     Some(f) => Some(Box::new(Self::normalize_for_key(f, env, counter)?)),
@@ -2031,7 +2038,7 @@ impl<'a> RawLambdaConverter<'a> {
                         sw_blocks_full: sw.sw_blocks_full,
                         sw_blocks: blocks,
                         sw_failaction: fail,
-                        sw_names: sw.sw_names.clone(),
+                        sw_dispatch: sw.sw_dispatch.clone(),
                     },
                     loc.clone(),
                 ))
@@ -2214,20 +2221,31 @@ impl<'a> RawLambdaConverter<'a> {
         mut block_cases: Vec<(i32, RawLambda)>,
         failaction: Option<Box<RawLambda>>,
     ) -> RawLambda {
-        self.make_switch_with_catch_exit(scrut, const_cases, block_cases, failaction, None)
+        self.make_switch_with_catch_exit(
+            scrut,
+            const_cases
+                .into_iter()
+                .map(|(key, action)| (crate::lambda::SwitchKey::Int(key), action))
+                .collect(),
+            block_cases
+                .into_iter()
+                .map(|(key, action)| (crate::lambda::SwitchKey::Int(key), action))
+                .collect(),
+            failaction,
+            None,
+            crate::lambda::SwitchDispatch::Direct,
+        )
     }
 
     fn make_switch_with_catch_exit(
         &mut self,
         scrut: RawLambda,
-        mut const_cases: Vec<(i32, RawLambda)>,
-        mut block_cases: Vec<(i32, RawLambda)>,
+        const_cases: Vec<(crate::lambda::SwitchKey, RawLambda)>,
+        block_cases: Vec<(crate::lambda::SwitchKey, RawLambda)>,
         failaction: Option<Box<RawLambda>>,
         pre_exit: Option<i32>,
+        dispatch: crate::lambda::SwitchDispatch,
     ) -> RawLambda {
-        // OCaml's matching.ml sorts cases by tag via sort_int_lambda_list/split_cases
-        const_cases.sort_by_key(|(tag, _)| *tag);
-        block_cases.sort_by_key(|(tag, _)| *tag);
         match failaction {
             Some(default) => {
                 let exit_id = pre_exit.unwrap_or_else(|| self.next_raise_count());
@@ -2241,7 +2259,7 @@ impl<'a> RawLambdaConverter<'a> {
                         sw_blocks_full: false,
                         sw_blocks: block_cases,
                         sw_failaction: Some(Box::new(RawLambda::LstaticRaise(exit_id, Vec::new()))),
-                        sw_names: None,
+                        sw_dispatch: dispatch.clone(),
                     },
                     Location::none(),
                 );
@@ -2256,7 +2274,7 @@ impl<'a> RawLambdaConverter<'a> {
                     sw_blocks_full: false,
                     sw_blocks: block_cases,
                     sw_failaction: None,
-                    sw_names: None,
+                    sw_dispatch: dispatch,
                 };
                 // OCaml: share_actions_sw then reintroduce_fail
                 let share_handlers = self.share_actions_sw(&mut sw);
@@ -2991,18 +3009,14 @@ impl<'a> RawLambdaConverter<'a> {
     }
 
     fn has_constant_constructor_arg(expr: &Expression) -> bool {
-        matches!(
-            &expr.exp_desc,
-            ExpressionDesc::Texp_construct(
-                _,
-                crate::types::ConstructorDescription {
-                    cstr_kind: None,
-                    cstr_tag: ConstructorTag::CstrConstant(_),
-                    ..
-                },
-                _
-            ) | ExpressionDesc::Texp_variant(_, None)
-        )
+        match &expr.exp_desc {
+            ExpressionDesc::Texp_construct(_, cstr, _) => {
+                cstr.cstr_args.is_empty()
+                    && matches!(cstr.cstr_kind, crate::types::ConstructorKind::Ordinary(_))
+            }
+            ExpressionDesc::Texp_variant(_, None) => true,
+            _ => false,
+        }
     }
 
     fn find_raw_primitive(&self, prim_name: &str) -> Option<Primitive> {
@@ -3508,54 +3522,48 @@ impl<'a> RawLambdaConverter<'a> {
         args: &[Expression],
         fallback_env: EnvRef,
     ) -> TagInfo {
-        match &cstr.cstr_tag {
-            ConstructorTag::CstrBlock(_) if constructor_has_optional_shape(cstr) => match args {
-                [arg] => {
-                    let arg_env_skip = self.type_ctx.get_typed_env(arg.exp_env).map(|env| {
-                        type_cannot_contain_undefined(self.type_ctx, env.as_ref(), arg.exp_type)
-                    });
-                    let fallback_env_skip = self.type_ctx.get_typed_env(fallback_env).map(|env| {
-                        type_cannot_contain_undefined(self.type_ctx, env.as_ref(), arg.exp_type)
-                    });
-                    let no_env_skip =
-                        type_cannot_contain_undefined_no_env(self.type_ctx, arg.exp_type);
-                    let can_skip = arg_env_skip.unwrap_or(false)
-                        || fallback_env_skip.unwrap_or(false)
-                        || no_env_skip;
-                    if can_skip {
-                        TagInfo::SomeNotNested
-                    } else {
-                        TagInfo::Some
+        match &cstr.cstr_kind {
+            crate::types::ConstructorKind::Ordinary(_) if constructor_has_optional_shape(cstr) => {
+                match args {
+                    [arg] => {
+                        let arg_env_skip = self.type_ctx.get_typed_env(arg.exp_env).map(|env| {
+                            type_cannot_contain_undefined(self.type_ctx, env.as_ref(), arg.exp_type)
+                        });
+                        let fallback_env_skip =
+                            self.type_ctx.get_typed_env(fallback_env).map(|env| {
+                                type_cannot_contain_undefined(
+                                    self.type_ctx,
+                                    env.as_ref(),
+                                    arg.exp_type,
+                                )
+                            });
+                        let no_env_skip =
+                            type_cannot_contain_undefined_no_env(self.type_ctx, arg.exp_type);
+                        let can_skip = arg_env_skip.unwrap_or(false)
+                            || fallback_env_skip.unwrap_or(false)
+                            || no_env_skip;
+                        if can_skip {
+                            TagInfo::SomeNotNested
+                        } else {
+                            TagInfo::Some
+                        }
                     }
+                    _ => TagInfo::Some,
                 }
-                _ => TagInfo::Some,
-            },
+            }
             _ => {
-                let (runtime, num_nonconst) = match cstr.cstr_kind {
-                    Some(crate::types::ConstructorKind::Ordinary(reference)) => {
-                        let layout = self.type_ctx.variant_layout(reference.variant);
-                        let runtime = match &layout.constructors[reference.position] {
-                            crate::types::VariantConstructorCase::Block(block) => {
-                                block.runtime.clone()
-                            }
-                            crate::types::VariantConstructorCase::Constant(_) => {
-                                unreachable!("payload constructor has constant layout")
-                            }
-                        };
-                        (runtime, layout.num_blocks() as i32)
-                    }
-                    _ => (
-                        crate::types::BlockRuntime {
-                            tag: crate::types::VariantTag {
-                                name: cstr.cstr_name.clone(),
-                                tag_type: None,
-                            },
-                            tag_name: None,
-                            untagged: matches!(cstr.cstr_tag, ConstructorTag::CstrUnboxed),
-                        },
-                        cstr.cstr_nonconsts,
-                    ),
+                let reference = match cstr.cstr_kind {
+                    crate::types::ConstructorKind::Ordinary(reference) => reference,
+                    crate::types::ConstructorKind::Extension(_) => unreachable!(),
                 };
+                let layout = self.type_ctx.variant_layout(reference.variant);
+                let runtime = match &layout.constructors[reference.position] {
+                    crate::types::VariantConstructorCase::Block(block) => block.runtime.clone(),
+                    crate::types::VariantConstructorCase::Constant(_) => {
+                        unreachable!("payload constructor has constant layout")
+                    }
+                };
+                let num_nonconst = layout.num_blocks() as i32;
                 TagInfo::Constructor {
                     name: cstr.cstr_name.clone(),
                     num_nonconst,
@@ -3606,30 +3614,45 @@ impl<'a> RawLambdaConverter<'a> {
                     }
                     _ => self.convert_expr_raw(arg),
                 },
-                [] if matches!(cstr.cstr_tag, ConstructorTag::CstrUnboxed) => {
-                    RawLambda::const_(raw_constructor_constant(self.type_ctx, cstr, 0))
-                }
+                [] => RawLambda::const_(raw_constructor_constant(self.type_ctx, cstr, 0)),
                 _ => RawLambda::unit(),
             };
         }
 
-        match &cstr.cstr_tag {
-            ConstructorTag::CstrConstant(tag) => match cstr.cstr_name.as_str() {
-                "true" => RawLambda::const_(Constant::JsTrue),
-                "false" => RawLambda::const_(Constant::JsFalse),
-                _ => RawLambda::const_(raw_constructor_constant(self.type_ctx, cstr, *tag)),
+        match cstr.cstr_kind {
+            crate::types::ConstructorKind::Ordinary(reference) => match reference
+                .representation(self.type_ctx)
+            {
+                crate::types::VariantConstructorCase::Constant(_) => {
+                    match cstr.cstr_name.as_str() {
+                        "true" => RawLambda::const_(Constant::JsTrue),
+                        "false" => RawLambda::const_(Constant::JsFalse),
+                        _ => RawLambda::const_(raw_constructor_constant(
+                            self.type_ctx,
+                            cstr,
+                            reference.position as i32,
+                        )),
+                    }
+                }
+                crate::types::VariantConstructorCase::Block(block) if block.runtime.untagged => {
+                    match args {
+                        [arg] => self.convert_expr_raw(arg),
+                        [] => RawLambda::const_(raw_constructor_constant(self.type_ctx, cstr, 0)),
+                        _ => RawLambda::unit(),
+                    }
+                }
+                crate::types::VariantConstructorCase::Block(_) => {
+                    let elems = args.iter().map(|arg| self.convert_expr_raw(arg)).collect();
+                    let tag_info = self.raw_constructor_tag_info(cstr, args, fallback_env);
+                    self.raw_block_or_prim(
+                        reference.block_index(self.type_ctx) as i32,
+                        tag_info,
+                        elems,
+                        loc,
+                    )
+                }
             },
-            ConstructorTag::CstrUnboxed => match args {
-                [arg] => self.convert_expr_raw(arg),
-                [] => RawLambda::const_(raw_constructor_constant(self.type_ctx, cstr, 0)),
-                _ => RawLambda::unit(),
-            },
-            ConstructorTag::CstrBlock(tag) => {
-                let elems = args.iter().map(|arg| self.convert_expr_raw(arg)).collect();
-                let tag_info = self.raw_constructor_tag_info(cstr, args, fallback_env);
-                self.raw_block_or_prim(*tag, tag_info, elems, loc)
-            }
-            ConstructorTag::CstrExtension(path) => {
+            crate::types::ConstructorKind::Extension(ref path) => {
                 let mut args_lam = Vec::with_capacity(args.len() + 1);
                 args_lam.push(self.translate_extension_path_raw(path, loc));
                 args_lam.extend(args.iter().map(|arg| self.convert_expr_raw(arg)));
@@ -6029,7 +6052,7 @@ impl<'a> RawLambdaConverter<'a> {
                     for binding in bindings {
                         match &binding.vb_pat.pat_desc {
                             PatternDesc::Tpat_var(_, _) | PatternDesc::Tpat_alias(_, _, _) => {}
-                            _ if !Self::is_irrefutable_pattern(&binding.vb_pat) => {
+                            _ if !self.is_irrefutable_pattern(&binding.vb_pat) => {
                                 self.report_diagnostic(
                                     self.loc(binding.vb_pat.pat_loc),
                                     "This pattern can fail to match, so it is not allowed in a top-level `let` binding.".to_string(),
@@ -6409,7 +6432,13 @@ impl<'a> RawLambdaConverter<'a> {
                     // use the irrefutable path which correctly handles transparent field access.
                     if cases.len() == 1 && cases[0].c_guard.is_none() {
                         if let PatternDesc::Tpat_construct(_, cstr, _) = &cases[0].c_lhs.pat_desc {
-                            if matches!(cstr.cstr_tag, ConstructorTag::CstrUnboxed) {
+                            if matches!(
+                                cstr.cstr_kind,
+                                crate::types::ConstructorKind::Ordinary(reference)
+                                    if matches!(reference.representation(self.type_ctx),
+                                        crate::types::VariantConstructorCase::Block(ref block)
+                                            if block.runtime.untagged)
+                            ) {
                                 if let Some(result) =
                                     self.compile_irrefutable_match_raw(scrut, cases)
                                 {
@@ -6683,8 +6712,13 @@ impl<'a> RawLambdaConverter<'a> {
                     self.loc(expr.exp_loc),
                 )
             }
-            ExpressionDesc::Texp_construct(_, cstr, args) => match &cstr.cstr_tag {
-                ConstructorTag::CstrConstant(_) | ConstructorTag::CstrUnboxed => {
+            ExpressionDesc::Texp_construct(_, cstr, args) => match cstr.cstr_kind {
+                crate::types::ConstructorKind::Ordinary(reference)
+                    if matches!(
+                        reference.representation(self.type_ctx),
+                        crate::types::VariantConstructorCase::Constant(_)
+                    ) =>
+                {
                     self.convert_construct(self.loc(expr.exp_loc), cstr, args)
                 }
                 _ => {
@@ -6915,8 +6949,8 @@ impl<'a> RawLambdaConverter<'a> {
             Bind(Ident, Lambda),
         }
 
-        let mut seen_const_tags = std::collections::BTreeSet::new();
-        let mut seen_block_tags = std::collections::BTreeSet::new();
+        let mut seen_const_tags: Vec<crate::lambda::SwitchKey> = Vec::new();
+        let mut seen_block_tags: Vec<crate::lambda::SwitchKey> = Vec::new();
         let mut default_case = None;
 
         for case in cases {
@@ -6926,30 +6960,44 @@ impl<'a> RawLambdaConverter<'a> {
 
             let (pat, _) = peel_aliases(&case.c_lhs);
             match &pat.pat_desc {
-                PatternDesc::Tpat_construct(_, cstr, args) => match &cstr.cstr_tag {
-                    ConstructorTag::CstrConstant(tag) => {
-                        if !args.is_empty() || !seen_const_tags.insert(*tag) {
-                            return None;
+                PatternDesc::Tpat_construct(_, cstr, args) => {
+                    let reference = match cstr.cstr_kind {
+                        crate::types::ConstructorKind::Ordinary(reference) => reference,
+                        crate::types::ConstructorKind::Extension(_) => return None,
+                    };
+                    let case = reference.representation(self.type_ctx);
+                    let key = crate::lambda::SwitchKey::Constructor(case.clone());
+                    match case {
+                        crate::types::VariantConstructorCase::Constant(_) => {
+                            if !args.is_empty() || seen_const_tags.contains(&key) {
+                                return None;
+                            }
+                            seen_const_tags.push(key);
                         }
-                    }
-                    ConstructorTag::CstrBlock(tag) => {
-                        if !seen_block_tags.insert(*tag)
-                            || !args.iter().all(Self::is_irrefutable_pattern)
-                        {
-                            return None;
+                        crate::types::VariantConstructorCase::Block(block) => {
+                            if block.runtime.untagged
+                                || seen_block_tags.contains(&key)
+                                || !args.iter().all(|pat| self.is_irrefutable_pattern(pat))
+                            {
+                                return None;
+                            }
+                            seen_block_tags.push(key);
                         }
-                    }
-                    ConstructorTag::CstrUnboxed | ConstructorTag::CstrExtension(_) => return None,
-                },
-                PatternDesc::Tpat_constant(TConstant::Int(i)) => {
-                    if !seen_const_tags.insert(*i as i32) {
-                        return None;
                     }
                 }
-                PatternDesc::Tpat_constant(TConstant::Char(c)) => {
-                    if !seen_const_tags.insert(*c as i32) {
+                PatternDesc::Tpat_constant(TConstant::Int(i)) => {
+                    let key = crate::lambda::SwitchKey::Int(*i as i32);
+                    if seen_const_tags.contains(&key) {
                         return None;
                     }
+                    seen_const_tags.push(key);
+                }
+                PatternDesc::Tpat_constant(TConstant::Char(c)) => {
+                    let key = crate::lambda::SwitchKey::Int(*c as i32);
+                    if seen_const_tags.contains(&key) {
+                        return None;
+                    }
+                    seen_const_tags.push(key);
                 }
                 PatternDesc::Tpat_any => {
                     if default_case.is_some() {
@@ -7004,32 +7052,39 @@ impl<'a> RawLambdaConverter<'a> {
             let body = self.convert_expr(&case.c_rhs);
             let (pat, aliases) = peel_aliases(&case.c_lhs);
             match &pat.pat_desc {
-                PatternDesc::Tpat_construct(_, cstr, args) => match &cstr.cstr_tag {
-                    ConstructorTag::CstrConstant(tag) => const_cases.push((
-                        *tag,
-                        wrap_aliases(&aliases, Lambda::var(scrut_id.clone()), body),
-                    )),
-                    ConstructorTag::CstrBlock(tag) => block_cases.push((
-                        *tag,
-                        wrap_aliases(
-                            &aliases,
-                            Lambda::var(scrut_id.clone()),
-                            self.bind_constructor_args_irrefutably(
-                                &scrut_id, pat, cstr, args, body,
+                PatternDesc::Tpat_construct(_, cstr, args) => {
+                    let reference = match cstr.cstr_kind {
+                        crate::types::ConstructorKind::Ordinary(reference) => reference,
+                        crate::types::ConstructorKind::Extension(_) => continue,
+                    };
+                    let case = reference.representation(self.type_ctx);
+                    let key = crate::lambda::SwitchKey::Constructor(case.clone());
+                    match case {
+                        crate::types::VariantConstructorCase::Constant(_) => const_cases.push((
+                            key,
+                            wrap_aliases(&aliases, Lambda::var(scrut_id.clone()), body),
+                        )),
+                        crate::types::VariantConstructorCase::Block(_) => block_cases.push((
+                            key,
+                            wrap_aliases(
+                                &aliases,
+                                Lambda::var(scrut_id.clone()),
+                                self.bind_constructor_args_irrefutably(
+                                    &scrut_id, pat, cstr, args, body,
+                                ),
                             ),
-                        ),
-                    )),
-                    ConstructorTag::CstrUnboxed | ConstructorTag::CstrExtension(_) => {}
-                },
+                        )),
+                    }
+                }
                 PatternDesc::Tpat_constant(TConstant::Int(i)) => {
                     const_cases.push((
-                        *i as i32,
+                        crate::lambda::SwitchKey::Int(*i as i32),
                         wrap_aliases(&aliases, Lambda::var(scrut_id.clone()), body),
                     ));
                 }
                 PatternDesc::Tpat_constant(TConstant::Char(c)) => {
                     const_cases.push((
-                        *c as i32,
+                        crate::lambda::SwitchKey::Int(*c as i32),
                         wrap_aliases(&aliases, Lambda::var(scrut_id.clone()), body),
                     ));
                 }
@@ -7051,6 +7106,23 @@ impl<'a> RawLambdaConverter<'a> {
             },
         };
 
+        let dispatch = cases
+            .iter()
+            .find_map(|case| match &case.c_lhs.pat_desc {
+                PatternDesc::Tpat_construct(_, cstr, _) => match cstr.cstr_kind {
+                    crate::types::ConstructorKind::Ordinary(reference) => {
+                        Some(crate::lambda::SwitchDispatch::Variant(
+                            self.type_ctx
+                                .variant_layout(reference.variant)
+                                .matching_facts
+                                .clone(),
+                        ))
+                    }
+                    crate::types::ConstructorKind::Extension(_) => None,
+                },
+                _ => None,
+            })
+            .unwrap_or(crate::lambda::SwitchDispatch::Direct);
         let sw = Lambda::Lswitch(
             Box::new(scrut_var),
             LambdaSwitch {
@@ -7059,7 +7131,7 @@ impl<'a> RawLambdaConverter<'a> {
                 sw_blocks_full: false,
                 sw_blocks: block_cases,
                 sw_failaction: failaction,
-                sw_names: None,
+                sw_dispatch: dispatch,
             },
         );
 
@@ -7403,7 +7475,7 @@ impl<'a> RawLambdaConverter<'a> {
             return None;
         }
 
-        if !Self::is_irrefutable_pattern(&cases[0].c_lhs) {
+        if !self.is_irrefutable_pattern(&cases[0].c_lhs) {
             return None;
         }
 
@@ -7520,10 +7592,10 @@ impl<'a> RawLambdaConverter<'a> {
             let (pat, aliases) = peel_aliases(&case.c_lhs);
             match &pat.pat_desc {
                 PatternDesc::Tpat_construct(_, cstr, args) => {
-                    let ConstructorTag::CstrExtension(path) = &cstr.cstr_tag else {
+                    let crate::types::ConstructorKind::Extension(path) = &cstr.cstr_kind else {
                         return None;
                     };
-                    if !args.iter().all(Self::is_irrefutable_pattern) {
+                    if !args.iter().all(|pat| self.is_irrefutable_pattern(pat)) {
                         return None;
                     }
                     let inner = if cstr.cstr_inlined.is_some() {
@@ -7758,30 +7830,36 @@ impl<'a> RawLambdaConverter<'a> {
         }
 
         for (idx, arg_pat) in args.iter().enumerate() {
-            let field = match &cstr.cstr_tag {
-                ConstructorTag::CstrBlock(_) => RawLambda::prim(
-                    Primitive::Pfield(
-                        idx as i32,
-                        if cstr.cstr_name == "::" {
-                            FieldDbgInfo::Cons
-                        } else {
-                            FieldDbgInfo::Variant
-                        },
-                    ),
-                    vec![RawLambda::var(scrut_id.clone())],
-                    pat_loc,
-                ),
-                ConstructorTag::CstrExtension(_) => RawLambda::prim(
+            let field = match cstr.cstr_kind {
+                crate::types::ConstructorKind::Ordinary(reference) => {
+                    match reference.representation(self.type_ctx) {
+                        crate::types::VariantConstructorCase::Block(block)
+                            if block.runtime.untagged =>
+                        {
+                            RawLambda::var(scrut_id.clone())
+                        }
+                        crate::types::VariantConstructorCase::Block(_) => RawLambda::prim(
+                            Primitive::Pfield(
+                                idx as i32,
+                                if cstr.cstr_name == "::" {
+                                    FieldDbgInfo::Cons
+                                } else {
+                                    FieldDbgInfo::Variant
+                                },
+                            ),
+                            vec![RawLambda::var(scrut_id.clone())],
+                            pat_loc,
+                        ),
+                        crate::types::VariantConstructorCase::Constant(_) => {
+                            unreachable!("constant constructor payload")
+                        }
+                    }
+                }
+                crate::types::ConstructorKind::Extension(_) => RawLambda::prim(
                     Primitive::Pfield(idx as i32 + 1, FieldDbgInfo::Extension),
                     vec![RawLambda::var(scrut_id.clone())],
                     pat_loc,
                 ),
-                ConstructorTag::CstrUnboxed => RawLambda::var(scrut_id.clone()),
-                ConstructorTag::CstrConstant(_) => {
-                    unreachable!(
-                        "constructor payload binding only applies to non-constant constructors"
-                    )
-                }
             };
             // For Tpat_any, OCaml's matching.ml still creates a binding
             // (let (match/N =a (field:var/K scrut)) body). Match this behavior.
@@ -7949,6 +8027,8 @@ impl<'a> RawLambdaConverter<'a> {
     /// Check if a single leaf pattern (after peeling aliases and flattening or-patterns)
     /// is valid for simple constructor matching. Returns false if we should bail out.
     fn check_simple_constructor_leaf(
+        &self,
+        type_ctx: &TypeContext,
         pat: &Pattern,
         seen_const_tags: &mut std::collections::BTreeSet<i32>,
         seen_block_tags: &mut std::collections::BTreeSet<i32>,
@@ -7961,19 +8041,25 @@ impl<'a> RawLambdaConverter<'a> {
                 if repr_cstr.is_none() {
                     *repr_cstr = Some(cstr.clone());
                 }
-                match &cstr.cstr_tag {
-                    ConstructorTag::CstrConstant(tag) => {
-                        args.is_empty() && seen_const_tags.insert(*tag)
+                match cstr.cstr_kind {
+                    crate::types::ConstructorKind::Ordinary(reference) => {
+                        match reference.representation(type_ctx) {
+                            crate::types::VariantConstructorCase::Constant(_) => {
+                                args.is_empty() && seen_const_tags.insert(reference.position as i32)
+                            }
+                            crate::types::VariantConstructorCase::Block(block)
+                                if !block.runtime.untagged =>
+                            {
+                                seen_block_tags.insert(reference.position as i32);
+                                true
+                            }
+                            crate::types::VariantConstructorCase::Block(_) => false,
+                        }
                     }
-                    ConstructorTag::CstrBlock(tag) => {
-                        seen_block_tags.insert(*tag);
-                        true
-                    }
-                    ConstructorTag::CstrExtension(path) => {
-                        args.iter().all(Self::is_irrefutable_pattern)
+                    crate::types::ConstructorKind::Extension(ref path) => {
+                        args.iter().all(|pat| self.is_irrefutable_pattern(pat))
                             && seen_extensions.insert(path.name())
                     }
-                    ConstructorTag::CstrUnboxed => false,
                 }
             }
             PatternDesc::Tpat_constant(TConstant::Int(i)) => {
@@ -7990,6 +8076,8 @@ impl<'a> RawLambdaConverter<'a> {
 
     /// Recursively check all leaves of an or-pattern for simple constructor matching.
     fn check_or_pattern_leaves(
+        &self,
+        type_ctx: &TypeContext,
         pat: &Pattern,
         seen_const_tags: &mut std::collections::BTreeSet<i32>,
         seen_block_tags: &mut std::collections::BTreeSet<i32>,
@@ -8000,14 +8088,16 @@ impl<'a> RawLambdaConverter<'a> {
         let (inner, _) = peel_aliases(pat);
         match &inner.pat_desc {
             PatternDesc::Tpat_or(left, right, _) => {
-                Self::check_or_pattern_leaves(
+                self.check_or_pattern_leaves(
+                    type_ctx,
                     left,
                     seen_const_tags,
                     seen_block_tags,
                     seen_extensions,
                     repr_cstr,
                     has_non_ctor_constants,
-                ) && Self::check_or_pattern_leaves(
+                ) && self.check_or_pattern_leaves(
+                    type_ctx,
                     right,
                     seen_const_tags,
                     seen_block_tags,
@@ -8021,7 +8111,8 @@ impl<'a> RawLambdaConverter<'a> {
                 // collect_or_pattern_cases skips field binding for LstaticRaise actions,
                 // so the sub-pattern info is lost but the tag dispatch still works.
                 // The sub-pattern matching happens through the block_sub_groups mechanism.
-                Self::check_simple_constructor_leaf(
+                self.check_simple_constructor_leaf(
+                    type_ctx,
                     inner,
                     seen_const_tags,
                     seen_block_tags,
@@ -8039,8 +8130,8 @@ impl<'a> RawLambdaConverter<'a> {
         pat: &Pattern,
         scrut_id: &Ident,
         action: &RawLambda,
-        const_cases: &mut Vec<(i32, RawLambda)>,
-        block_cases: &mut Vec<(i32, RawLambda)>,
+        const_cases: &mut Vec<(crate::lambda::SwitchKey, RawLambda)>,
+        block_cases: &mut Vec<(crate::lambda::SwitchKey, RawLambda)>,
     ) {
         let (inner, aliases) = peel_aliases(pat);
         match &inner.pat_desc {
@@ -8048,42 +8139,51 @@ impl<'a> RawLambdaConverter<'a> {
                 self.collect_or_pattern_cases(left, scrut_id, action, const_cases, block_cases);
                 self.collect_or_pattern_cases(right, scrut_id, action, const_cases, block_cases);
             }
-            PatternDesc::Tpat_construct(_, cstr, args) => match &cstr.cstr_tag {
-                ConstructorTag::CstrConstant(tag) => const_cases.push((
-                    *tag,
-                    wrap_aliases_raw(&aliases, RawLambda::var(scrut_id.clone()), action.clone()),
-                )),
-                ConstructorTag::CstrBlock(tag) => {
-                    // Skip field bindings when action is a static raise (or-pattern shared exit)
-                    // since the bound variables won't be used in the exit handler
-                    let is_exit = matches!(action, RawLambda::LstaticRaise(_, _));
-                    let act = if is_exit {
-                        action.clone()
-                    } else {
-                        self.bind_constructor_args_irrefutably_raw(
-                            scrut_id,
-                            inner,
-                            cstr,
-                            args,
+            PatternDesc::Tpat_construct(_, cstr, args) => {
+                let reference = match cstr.cstr_kind {
+                    crate::types::ConstructorKind::Ordinary(reference) => reference,
+                    crate::types::ConstructorKind::Extension(_) => return,
+                };
+                let case = reference.representation(self.type_ctx);
+                let key = crate::lambda::SwitchKey::Constructor(case.clone());
+                match case {
+                    crate::types::VariantConstructorCase::Constant(_) => const_cases.push((
+                        key,
+                        wrap_aliases_raw(
+                            &aliases,
+                            RawLambda::var(scrut_id.clone()),
                             action.clone(),
-                        )
-                    };
-                    block_cases.push((
-                        *tag,
-                        wrap_aliases_raw(&aliases, RawLambda::var(scrut_id.clone()), act),
-                    ));
+                        ),
+                    )),
+                    crate::types::VariantConstructorCase::Block(_) => {
+                        let is_exit = matches!(action, RawLambda::LstaticRaise(_, _));
+                        let act = if is_exit {
+                            action.clone()
+                        } else {
+                            self.bind_constructor_args_irrefutably_raw(
+                                scrut_id,
+                                inner,
+                                cstr,
+                                args,
+                                action.clone(),
+                            )
+                        };
+                        block_cases.push((
+                            key,
+                            wrap_aliases_raw(&aliases, RawLambda::var(scrut_id.clone()), act),
+                        ));
+                    }
                 }
-                _ => {}
-            },
+            }
             PatternDesc::Tpat_constant(TConstant::Int(i)) => {
                 const_cases.push((
-                    *i as i32,
+                    crate::lambda::SwitchKey::Int(*i as i32),
                     wrap_aliases_raw(&aliases, RawLambda::var(scrut_id.clone()), action.clone()),
                 ));
             }
             PatternDesc::Tpat_constant(TConstant::Char(c)) => {
                 const_cases.push((
-                    *c as i32,
+                    crate::lambda::SwitchKey::Int(*c as i32),
                     wrap_aliases_raw(&aliases, RawLambda::var(scrut_id.clone()), action.clone()),
                 ));
             }
@@ -8123,7 +8223,8 @@ impl<'a> RawLambdaConverter<'a> {
             match &pat.pat_desc {
                 PatternDesc::Tpat_or(_, _, _) => {
                     // Flatten or-pattern and validate each leaf
-                    if !Self::check_or_pattern_leaves(
+                    if !self.check_or_pattern_leaves(
+                        self.type_ctx,
                         &case.c_lhs,
                         &mut seen_const_tags,
                         &mut seen_block_tags,
@@ -8136,7 +8237,8 @@ impl<'a> RawLambdaConverter<'a> {
                     or_case_indices.insert(case_idx);
                 }
                 PatternDesc::Tpat_construct(_, cstr, args) => {
-                    if !Self::check_simple_constructor_leaf(
+                    if !self.check_simple_constructor_leaf(
+                        self.type_ctx,
                         pat,
                         &mut seen_const_tags,
                         &mut seen_block_tags,
@@ -8151,7 +8253,8 @@ impl<'a> RawLambdaConverter<'a> {
                 }
                 PatternDesc::Tpat_constant(TConstant::Int(_))
                 | PatternDesc::Tpat_constant(TConstant::Char(_)) => {
-                    if !Self::check_simple_constructor_leaf(
+                    if !self.check_simple_constructor_leaf(
+                        self.type_ctx,
                         pat,
                         &mut seen_const_tags,
                         &mut seen_block_tags,
@@ -8215,7 +8318,7 @@ impl<'a> RawLambdaConverter<'a> {
                 let body = self.convert_expr_raw(&case.c_rhs);
                 let (pat, aliases) = peel_aliases(&case.c_lhs);
                 if let PatternDesc::Tpat_construct(_, cstr, args) = &pat.pat_desc {
-                    if let ConstructorTag::CstrExtension(path) = &cstr.cstr_tag {
+                    if let crate::types::ConstructorKind::Extension(path) = &cstr.cstr_kind {
                         let act = wrap_aliases_raw(
                             &aliases,
                             RawLambda::var(scrut_id.clone()),
@@ -8288,13 +8391,18 @@ impl<'a> RawLambdaConverter<'a> {
                 // Skip guard cases in pre-scan (they don't affect tag grouping)
             }
             let (pat, _) = peel_aliases(&case.c_lhs);
-            if let PatternDesc::Tpat_construct(_, cstr, args) = &pat.pat_desc {
-                if let ConstructorTag::CstrBlock(tag) = &cstr.cstr_tag {
-                    let count = block_tag_counts.entry(*tag).or_insert(0);
-                    *count += 1;
-                    if *count > 1 || !args.iter().all(Self::is_irrefutable_pattern) {
-                        block_tags_needing_grouping.insert(*tag);
-                    }
+            if let PatternDesc::Tpat_construct(_, cstr, args) = &pat.pat_desc
+                && let crate::types::ConstructorKind::Ordinary(reference) = cstr.cstr_kind
+                && matches!(
+                    reference.representation(self.type_ctx),
+                    crate::types::VariantConstructorCase::Block(_)
+                )
+            {
+                let position = reference.position as i32;
+                let count = block_tag_counts.entry(position).or_insert(0);
+                *count += 1;
+                if *count > 1 || !args.iter().all(|pat| self.is_irrefutable_pattern(pat)) {
+                    block_tags_needing_grouping.insert(position);
                 }
             }
         }
@@ -8345,57 +8453,69 @@ impl<'a> RawLambdaConverter<'a> {
             } else {
                 let (pat, aliases) = peel_aliases(&case.c_lhs);
                 match &pat.pat_desc {
-                    PatternDesc::Tpat_construct(_, cstr, args) => match &cstr.cstr_tag {
-                        ConstructorTag::CstrConstant(tag) => const_cases.push((
-                            *tag,
-                            wrap_aliases_raw(&aliases, RawLambda::var(scrut_id.clone()), body),
-                        )),
-                        ConstructorTag::CstrBlock(tag) => {
-                            if block_tags_needing_grouping.contains(tag) {
-                                // Tag needs sub-pattern grouping: collect for later
-                                block_tag_info.entry(*tag).or_insert((cstr, pat));
-                                let body_with_aliases = wrap_aliases_raw(
-                                    &aliases,
-                                    RawLambda::var(scrut_id.clone()),
-                                    body,
-                                );
-                                block_sub_groups
-                                    .entry(*tag)
-                                    .or_default()
-                                    .push((args.iter().collect(), body_with_aliases));
-                            } else {
-                                // Single case with irrefutable args: existing behavior
-                                let all_wildcards = args
-                                    .iter()
-                                    .all(|a| matches!(a.pat_desc, PatternDesc::Tpat_any));
-                                let block_body = if case.c_guard.is_some() && all_wildcards {
-                                    body
-                                } else {
-                                    self.bind_constructor_args_irrefutably_raw(
-                                        &scrut_id, pat, cstr, args, body,
-                                    )
-                                };
-                                block_cases.push((
-                                    *tag,
-                                    wrap_aliases_raw(
-                                        &aliases,
-                                        RawLambda::var(scrut_id.clone()),
-                                        block_body,
-                                    ),
-                                ));
+                    PatternDesc::Tpat_construct(_, cstr, args) => {
+                        if let crate::types::ConstructorKind::Ordinary(reference) = cstr.cstr_kind {
+                            let runtime_case = reference.representation(self.type_ctx);
+                            let key = crate::lambda::SwitchKey::Constructor(runtime_case.clone());
+                            match runtime_case {
+                                crate::types::VariantConstructorCase::Constant(_) => const_cases
+                                    .push((
+                                        key,
+                                        wrap_aliases_raw(
+                                            &aliases,
+                                            RawLambda::var(scrut_id.clone()),
+                                            body,
+                                        ),
+                                    )),
+                                crate::types::VariantConstructorCase::Block(_) => {
+                                    let tag = reference.position as i32;
+                                    if block_tags_needing_grouping.contains(&tag) {
+                                        // Tag needs sub-pattern grouping: collect for later
+                                        block_tag_info.entry(tag).or_insert((cstr, pat));
+                                        let body_with_aliases = wrap_aliases_raw(
+                                            &aliases,
+                                            RawLambda::var(scrut_id.clone()),
+                                            body,
+                                        );
+                                        block_sub_groups
+                                            .entry(tag)
+                                            .or_default()
+                                            .push((args.iter().collect(), body_with_aliases));
+                                    } else {
+                                        // Single case with irrefutable args: existing behavior
+                                        let all_wildcards = args
+                                            .iter()
+                                            .all(|a| matches!(a.pat_desc, PatternDesc::Tpat_any));
+                                        let block_body = if case.c_guard.is_some() && all_wildcards
+                                        {
+                                            body
+                                        } else {
+                                            self.bind_constructor_args_irrefutably_raw(
+                                                &scrut_id, pat, cstr, args, body,
+                                            )
+                                        };
+                                        block_cases.push((
+                                            key,
+                                            wrap_aliases_raw(
+                                                &aliases,
+                                                RawLambda::var(scrut_id.clone()),
+                                                block_body,
+                                            ),
+                                        ));
+                                    }
+                                }
                             }
                         }
-                        ConstructorTag::CstrUnboxed | ConstructorTag::CstrExtension(_) => {}
-                    },
+                    }
                     PatternDesc::Tpat_constant(TConstant::Int(i)) => {
                         const_cases.push((
-                            *i as i32,
+                            crate::lambda::SwitchKey::Int(*i as i32),
                             wrap_aliases_raw(&aliases, RawLambda::var(scrut_id.clone()), body),
                         ));
                     }
                     PatternDesc::Tpat_constant(TConstant::Char(c)) => {
                         const_cases.push((
-                            *c as i32,
+                            crate::lambda::SwitchKey::Int(*c as i32),
                             wrap_aliases_raw(&aliases, RawLambda::var(scrut_id.clone()), body),
                         ));
                     }
@@ -8409,7 +8529,14 @@ impl<'a> RawLambdaConverter<'a> {
             let (cstr, pat) = block_tag_info[&tag];
             let pat_loc = self.loc(pat.pat_loc);
             let block_body = self.compile_block_sub_match(&scrut_id, cstr, sub_cases, pat_loc);
-            block_cases.push((tag, block_body));
+            let reference = match cstr.cstr_kind {
+                crate::types::ConstructorKind::Ordinary(reference) => reference,
+                crate::types::ConstructorKind::Extension(_) => continue,
+            };
+            block_cases.push((
+                crate::lambda::SwitchKey::Constructor(reference.representation(self.type_ctx)),
+                block_body,
+            ));
         }
 
         // OCaml's combine_constructor: when sig_complete (all constructor tags covered),
@@ -8426,18 +8553,31 @@ impl<'a> RawLambdaConverter<'a> {
                 // OCaml's combine_constructor: when we have a regular constructor type
                 // (not extensions), a default/wildcard pattern makes the signature complete.
                 // Fill missing tags explicitly and drop the failaction.
-                let sig_complete = if let Some(cstr) = &repr_cstr {
-                    cstr.cstr_consts >= 0
-                } else {
-                    false
-                };
+                let sig_complete = repr_cstr.as_ref().is_some_and(|cstr| {
+                    matches!(cstr.cstr_kind, crate::types::ConstructorKind::Ordinary(_))
+                });
 
                 if sig_complete && !has_guards {
                     // OCaml's mk_failaction_pos: fill missing tags with exit to default,
                     // wrap default body in catch handler (like mk_failaction_pos does).
                     let has_missing = if let Some(cstr) = &repr_cstr {
-                        (0..cstr.cstr_consts).any(|t| !seen_const_tags.contains(&t))
-                            || (0..cstr.cstr_nonconsts).any(|t| !seen_block_tags.contains(&t))
+                        let reference = match cstr.cstr_kind {
+                            crate::types::ConstructorKind::Ordinary(reference) => reference,
+                            crate::types::ConstructorKind::Extension(_) => unreachable!(),
+                        };
+                        self.type_ctx
+                            .variant_layout(reference.variant)
+                            .constructors
+                            .iter()
+                            .enumerate()
+                            .any(|(position, case)| match case {
+                                crate::types::VariantConstructorCase::Constant(_) => {
+                                    !seen_const_tags.contains(&(position as i32))
+                                }
+                                crate::types::VariantConstructorCase::Block(_) => {
+                                    !seen_block_tags.contains(&(position as i32))
+                                }
+                            })
                     } else {
                         false
                     };
@@ -8446,14 +8586,30 @@ impl<'a> RawLambdaConverter<'a> {
                         let default_exit = self.next_raise_count();
                         let default_raise = RawLambda::LstaticRaise(default_exit, Vec::new());
                         if let Some(cstr) = &repr_cstr {
-                            for tag in 0..cstr.cstr_consts {
-                                if !seen_const_tags.contains(&tag) {
-                                    const_cases.push((tag, default_raise.clone()));
-                                }
-                            }
-                            for tag in 0..cstr.cstr_nonconsts {
-                                if !seen_block_tags.contains(&tag) {
-                                    block_cases.push((tag, default_raise.clone()));
+                            let reference = match cstr.cstr_kind {
+                                crate::types::ConstructorKind::Ordinary(reference) => reference,
+                                crate::types::ConstructorKind::Extension(_) => unreachable!(),
+                            };
+                            for (position, case) in self
+                                .type_ctx
+                                .variant_layout(reference.variant)
+                                .constructors
+                                .iter()
+                                .enumerate()
+                            {
+                                let key = crate::lambda::SwitchKey::Constructor(case.clone());
+                                match case {
+                                    crate::types::VariantConstructorCase::Constant(_)
+                                        if !seen_const_tags.contains(&(position as i32)) =>
+                                    {
+                                        const_cases.push((key, default_raise.clone()))
+                                    }
+                                    crate::types::VariantConstructorCase::Block(_)
+                                        if !seen_block_tags.contains(&(position as i32)) =>
+                                    {
+                                        block_cases.push((key, default_raise.clone()))
+                                    }
+                                    _ => {}
                                 }
                             }
                         }
@@ -8493,7 +8649,13 @@ impl<'a> RawLambdaConverter<'a> {
 
         let dense_const_partial = if block_cases.is_empty() {
             failaction.as_ref().and_then(|default| {
-                let mut sorted_consts = const_cases.clone();
+                let mut sorted_consts: Vec<(i32, RawLambda)> = const_cases
+                    .iter()
+                    .map(|(key, action)| match key {
+                        crate::lambda::SwitchKey::Int(value) => Some((*value, action.clone())),
+                        crate::lambda::SwitchKey::Constructor(_) => None,
+                    })
+                    .collect::<Option<_>>()?;
                 sorted_consts.sort_by_key(|(tag, _)| *tag);
                 let first = sorted_consts.first()?.0;
                 let last = sorted_consts.last()?.0;
@@ -8566,12 +8728,15 @@ impl<'a> RawLambdaConverter<'a> {
                         crate::raw_lambda::RawLambdaSwitch {
                             sw_numconsts: sorted_consts.len(),
                             sw_consts_full: false,
-                            sw_consts: sorted_consts,
+                            sw_consts: sorted_consts
+                                .into_iter()
+                                .map(|(key, action)| (crate::lambda::SwitchKey::Int(key), action))
+                                .collect(),
                             sw_numblocks: 0,
                             sw_blocks_full: false,
                             sw_blocks: Vec::new(),
                             sw_failaction: None,
-                            sw_names: None,
+                            sw_dispatch: crate::lambda::SwitchDispatch::Direct,
                         },
                         Location::none(),
                     )
@@ -8591,63 +8756,88 @@ impl<'a> RawLambdaConverter<'a> {
             None
         };
 
+        let constructor_dispatch = repr_cstr
+            .as_ref()
+            .and_then(|cstr| match cstr.cstr_kind {
+                crate::types::ConstructorKind::Ordinary(reference) => {
+                    Some(crate::lambda::SwitchDispatch::Variant(
+                        self.type_ctx
+                            .variant_layout(reference.variant)
+                            .matching_facts
+                            .clone(),
+                    ))
+                }
+                crate::types::ConstructorKind::Extension(_) => None,
+            })
+            .unwrap_or(crate::lambda::SwitchDispatch::Direct);
+
         let mut result = if let Some(result) = dense_const_partial {
             result
         } else if !has_non_ctor_constants {
             if let Some(cstr) = repr_cstr.as_ref() {
-                match (
-                    cstr.cstr_consts,
-                    cstr.cstr_nonconsts,
-                    const_cases.as_slice(),
-                    block_cases.as_slice(),
-                    failaction.as_ref(),
-                ) {
-                    (1, 1, [(0, act1)], [(0, act2)], _)
-                        if cstr.cstr_name == "::"
-                            || cstr.cstr_name == "[]"
-                            || constructor_has_optional_shape(cstr) =>
-                    {
-                        let cond = if constructor_has_optional_shape(cstr) {
-                            RawLambda::prim(Primitive::PisNotNone, vec![scrut_var.clone()], loc)
-                        } else {
-                            RawLambda::prim(
-                                Primitive::Pjscomp(Comparison::Neq),
-                                vec![scrut_var.clone(), RawLambda::const_(Constant::int(0))],
-                                loc,
-                            )
-                        };
-                        RawLambda::LifThenElse(
-                            Box::new(cond),
-                            Box::new(act2.clone()),
-                            Box::new(act1.clone()),
+                let reference = match cstr.cstr_kind {
+                    crate::types::ConstructorKind::Ordinary(reference) => reference,
+                    crate::types::ConstructorKind::Extension(_) => unreachable!(),
+                };
+                let layout = self.type_ctx.variant_layout(reference.variant);
+                if layout.num_constants() == 1
+                    && layout.num_blocks() == 1
+                    && const_cases.len() == 1
+                    && block_cases.len() == 1
+                    && (cstr.cstr_name == "::"
+                        || cstr.cstr_name == "[]"
+                        || constructor_has_optional_shape(cstr))
+                {
+                    let cond = if constructor_has_optional_shape(cstr) {
+                        RawLambda::prim(Primitive::PisNotNone, vec![scrut_var.clone()], loc)
+                    } else {
+                        RawLambda::prim(
+                            Primitive::Pjscomp(Comparison::Neq),
+                            vec![scrut_var.clone(), RawLambda::const_(Constant::int(0))],
+                            loc,
                         )
-                    }
-                    (2, 0, [(i1, act1), (_, act2)], [], None)
-                        if cstr.cstr_name == "true" || cstr.cstr_name == "false" =>
-                    {
-                        if *i1 == 0 {
-                            RawLambda::LifThenElse(
-                                Box::new(scrut_var.clone()),
-                                Box::new(act2.clone()),
-                                Box::new(act1.clone()),
-                            )
-                        } else {
-                            RawLambda::LifThenElse(
-                                Box::new(scrut_var.clone()),
-                                Box::new(act1.clone()),
-                                Box::new(act2.clone()),
-                            )
-                        }
-                    }
-                    // Single-constructor block type: no switch needed
-                    (0, _, [], [(_, act)], None) => act.clone(),
-                    _ => self.make_switch_with_catch_exit(
+                    };
+                    RawLambda::LifThenElse(
+                        Box::new(cond),
+                        Box::new(block_cases[0].1.clone()),
+                        Box::new(const_cases[0].1.clone()),
+                    )
+                } else if layout.num_constants() == 2
+                    && layout.num_blocks() == 0
+                    && const_cases.len() == 2
+                    && failaction.is_none()
+                    && (cstr.cstr_name == "true" || cstr.cstr_name == "false")
+                {
+                    let action = |name: &str| {
+                        const_cases
+                            .iter()
+                            .find_map(|(key, action)| match key {
+                                crate::lambda::SwitchKey::Constructor(
+                                    crate::types::VariantConstructorCase::Constant(tag),
+                                ) if tag.name == name => Some(action.clone()),
+                                _ => None,
+                            })
+                            .expect("boolean constructor action")
+                    };
+                    RawLambda::LifThenElse(
+                        Box::new(scrut_var.clone()),
+                        Box::new(action("true")),
+                        Box::new(action("false")),
+                    )
+                } else if layout.num_constants() == 0
+                    && block_cases.len() == 1
+                    && failaction.is_none()
+                {
+                    block_cases[0].1.clone()
+                } else {
+                    self.make_switch_with_catch_exit(
                         scrut_var.clone(),
                         const_cases,
                         block_cases,
                         failaction,
                         guard_fail_exit,
-                    ),
+                        constructor_dispatch.clone(),
+                    )
                 }
             } else {
                 self.make_switch_with_catch_exit(
@@ -8656,6 +8846,7 @@ impl<'a> RawLambdaConverter<'a> {
                     block_cases,
                     failaction,
                     guard_fail_exit,
+                    constructor_dispatch.clone(),
                 )
             }
         } else {
@@ -8665,6 +8856,7 @@ impl<'a> RawLambdaConverter<'a> {
                 block_cases,
                 failaction,
                 guard_fail_exit,
+                constructor_dispatch,
             )
         };
 
@@ -8685,7 +8877,7 @@ impl<'a> RawLambdaConverter<'a> {
             return None;
         }
 
-        if !Self::is_irrefutable_pattern(&cases[0].c_lhs) {
+        if !self.is_irrefutable_pattern(&cases[0].c_lhs) {
             return None;
         }
 
@@ -8707,24 +8899,33 @@ impl<'a> RawLambdaConverter<'a> {
         let mut result = body;
 
         for (idx, arg_pat) in args.iter().enumerate().rev() {
-            let field = match &cstr.cstr_tag {
-                ConstructorTag::CstrBlock(_) => Lambda::prim(
-                    Primitive::Pfield(
-                        idx as i32,
-                        if cstr.cstr_name == "::" {
-                            FieldDbgInfo::Cons
-                        } else {
-                            FieldDbgInfo::Variant
-                        },
-                    ),
-                    vec![Lambda::var(tmp.clone())],
-                    pat_loc.clone(),
-                ),
-                ConstructorTag::CstrUnboxed => Lambda::var(tmp.clone()),
-                ConstructorTag::CstrConstant(_) | ConstructorTag::CstrExtension(_) => {
-                    unreachable!(
-                        "constructor payload binding only applies to non-constant constructors"
-                    )
+            let field = match cstr.cstr_kind {
+                crate::types::ConstructorKind::Ordinary(reference) => {
+                    match reference.representation(self.type_ctx) {
+                        crate::types::VariantConstructorCase::Block(block)
+                            if block.runtime.untagged =>
+                        {
+                            Lambda::var(tmp.clone())
+                        }
+                        crate::types::VariantConstructorCase::Block(_) => Lambda::prim(
+                            Primitive::Pfield(
+                                idx as i32,
+                                if cstr.cstr_name == "::" {
+                                    FieldDbgInfo::Cons
+                                } else {
+                                    FieldDbgInfo::Variant
+                                },
+                            ),
+                            vec![Lambda::var(tmp.clone())],
+                            pat_loc.clone(),
+                        ),
+                        crate::types::VariantConstructorCase::Constant(_) => {
+                            unreachable!("constant constructor payload")
+                        }
+                    }
+                }
+                crate::types::ConstructorKind::Extension(_) => {
+                    unreachable!("extension payload in ordinary binder")
                 }
             };
             result = self.bind_irrefutable_pattern(arg_pat, field, result);
@@ -8898,7 +9099,7 @@ impl<'a> RawLambdaConverter<'a> {
         {
             // Re-scan the original sub_cases to build a nested constructor switch
             // using the inner constructor tags
-            let mut inner_const_cases: Vec<(i32, RawLambda)> = Vec::new();
+            let mut inner_const_cases: Vec<(crate::lambda::SwitchKey, RawLambda)> = Vec::new();
             let mut inner_block_groups: std::collections::BTreeMap<
                 i32,
                 Vec<(Vec<&Pattern>, RawLambda)>,
@@ -8911,52 +9112,68 @@ impl<'a> RawLambdaConverter<'a> {
                     if inner_repr_cstr.is_none() {
                         inner_repr_cstr = Some(cstr);
                     }
-                    match &cstr.cstr_tag {
-                        ConstructorTag::CstrConstant(tag) => {
-                            inner_const_cases.push((*tag, body.clone()));
-                        }
-                        ConstructorTag::CstrBlock(tag) => {
-                            if args.iter().all(Self::is_irrefutable_pattern) {
-                                let inner_body = self.bind_constructor_args_irrefutably_raw(
-                                    field_id,
-                                    pat,
-                                    cstr,
-                                    args,
+                    if let crate::types::ConstructorKind::Ordinary(reference) = cstr.cstr_kind {
+                        let case = reference.representation(self.type_ctx);
+                        match case {
+                            crate::types::VariantConstructorCase::Constant(_) => {
+                                inner_const_cases.push((
+                                    crate::lambda::SwitchKey::Constructor(case),
                                     body.clone(),
-                                );
+                                ));
+                            }
+                            crate::types::VariantConstructorCase::Block(_) => {
+                                let inner_body =
+                                    if args.iter().all(|pat| self.is_irrefutable_pattern(pat)) {
+                                        self.bind_constructor_args_irrefutably_raw(
+                                            field_id,
+                                            pat,
+                                            cstr,
+                                            args,
+                                            body.clone(),
+                                        )
+                                    } else {
+                                        body.clone()
+                                    };
                                 inner_block_groups
-                                    .entry(*tag)
+                                    .entry(reference.position as i32)
                                     .or_default()
                                     .push((args.iter().collect(), inner_body));
-                            } else {
-                                // Recursively handle inner refutable sub-patterns
-                                inner_block_groups
-                                    .entry(*tag)
-                                    .or_default()
-                                    .push((args.iter().collect(), body.clone()));
                             }
                         }
-                        _ => {}
                     }
                 }
             }
 
             // Build the inner switch
-            let mut final_block_cases: Vec<(i32, RawLambda)> = Vec::new();
+            let mut final_block_cases: Vec<(crate::lambda::SwitchKey, RawLambda)> = Vec::new();
             for (tag, group) in inner_block_groups {
                 if group.len() == 1 {
-                    final_block_cases.push((tag, group.into_iter().next().unwrap().1));
+                    let reference = match inner_repr_cstr.expect("inner constructor").cstr_kind {
+                        crate::types::ConstructorKind::Ordinary(reference) => reference,
+                        crate::types::ConstructorKind::Extension(_) => unreachable!(),
+                    };
+                    let case = self.type_ctx.variant_layout(reference.variant).constructors
+                        [tag as usize]
+                        .clone();
+                    final_block_cases.push((
+                        crate::lambda::SwitchKey::Constructor(case),
+                        group.into_iter().next().unwrap().1,
+                    ));
                 } else {
                     // Multiple cases for same inner tag: recursive sub-match
                     if let Some(cstr) = inner_repr_cstr {
                         let body = self.compile_block_sub_match(field_id, cstr, group, loc);
-                        final_block_cases.push((tag, body));
+                        let reference = match cstr.cstr_kind {
+                            crate::types::ConstructorKind::Ordinary(reference) => reference,
+                            crate::types::ConstructorKind::Extension(_) => unreachable!(),
+                        };
+                        let case = self.type_ctx.variant_layout(reference.variant).constructors
+                            [tag as usize]
+                            .clone();
+                        final_block_cases.push((crate::lambda::SwitchKey::Constructor(case), body));
                     }
                 }
             }
-
-            inner_const_cases.sort_by_key(|(t, _)| *t);
-            final_block_cases.sort_by_key(|(t, _)| *t);
 
             let failaction = default_body.map(Box::new);
 
@@ -8966,6 +9183,19 @@ impl<'a> RawLambdaConverter<'a> {
                 final_block_cases,
                 failaction,
                 None,
+                inner_repr_cstr
+                    .and_then(|cstr| match cstr.cstr_kind {
+                        crate::types::ConstructorKind::Ordinary(reference) => {
+                            Some(crate::lambda::SwitchDispatch::Variant(
+                                self.type_ctx
+                                    .variant_layout(reference.variant)
+                                    .matching_facts
+                                    .clone(),
+                            ))
+                        }
+                        crate::types::ConstructorKind::Extension(_) => None,
+                    })
+                    .unwrap_or(crate::lambda::SwitchDispatch::Direct),
             );
         }
 
@@ -9340,29 +9570,32 @@ impl<'a> RawLambdaConverter<'a> {
         result
     }
 
-    fn is_irrefutable_pattern(pat: &Pattern) -> bool {
+    fn is_irrefutable_pattern(&self, pat: &Pattern) -> bool {
         match &pat.pat_desc {
             PatternDesc::Tpat_any | PatternDesc::Tpat_var(_, _) => true,
-            PatternDesc::Tpat_alias(inner, _, _) => Self::is_irrefutable_pattern(inner),
+            PatternDesc::Tpat_alias(inner, _, _) => self.is_irrefutable_pattern(inner),
             PatternDesc::Tpat_tuple(items) | PatternDesc::Tpat_array(items) => {
-                items.iter().all(Self::is_irrefutable_pattern)
+                items.iter().all(|pat| self.is_irrefutable_pattern(pat))
             }
             PatternDesc::Tpat_record(fields, _, _) => fields
                 .iter()
-                .all(|(_, _, pat, _)| Self::is_irrefutable_pattern(pat)),
-            PatternDesc::Tpat_construct(_, cstr, args) => match cstr.cstr_tag {
-                ConstructorTag::CstrUnboxed => args.iter().all(Self::is_irrefutable_pattern),
-                ConstructorTag::CstrConstant(_) => {
-                    args.is_empty() && cstr.cstr_consts == 1 && cstr.cstr_nonconsts == 0
+                .all(|(_, _, pat, _)| self.is_irrefutable_pattern(pat)),
+            PatternDesc::Tpat_construct(_, cstr, args) => match cstr.cstr_kind {
+                crate::types::ConstructorKind::Extension(_) => false,
+                crate::types::ConstructorKind::Ordinary(reference) => {
+                    let layout = self.type_ctx.variant_layout(reference.variant);
+                    match reference.representation(self.type_ctx) {
+                        crate::types::VariantConstructorCase::Constant(_) => {
+                            args.is_empty() && layout.constructors.len() == 1
+                        }
+                        crate::types::VariantConstructorCase::Block(_) => {
+                            layout.constructors.len() == 1
+                                && args.iter().all(|pat| self.is_irrefutable_pattern(pat))
+                        }
+                    }
                 }
-                ConstructorTag::CstrBlock(_) => {
-                    cstr.cstr_consts == 0
-                        && cstr.cstr_nonconsts == 1
-                        && args.iter().all(Self::is_irrefutable_pattern)
-                }
-                ConstructorTag::CstrExtension(_) => false,
             },
-            PatternDesc::Tpat_variant(_, Some(inner), _) => Self::is_irrefutable_pattern(inner),
+            PatternDesc::Tpat_variant(_, Some(inner), _) => self.is_irrefutable_pattern(inner),
             PatternDesc::Tpat_variant(_, None, _) => false,
             PatternDesc::Tpat_constant(_) | PatternDesc::Tpat_or(_, _, _) => false,
         }
@@ -9437,22 +9670,20 @@ impl<'a> RawLambdaConverter<'a> {
                 }
                 Lambda::let_(LetKind::Alias, tmp, scrut, result)
             }
-            PatternDesc::Tpat_construct(_, cstr, args)
-                if matches!(cstr.cstr_tag, ConstructorTag::CstrUnboxed) =>
-            {
-                if let Some(arg) = args.first() {
-                    self.bind_irrefutable_pattern(arg, scrut, body)
-                } else {
-                    body
+            PatternDesc::Tpat_construct(_, cstr, args) => {
+                match constructor_case(self.type_ctx, cstr) {
+                    Some(crate::types::VariantConstructorCase::Block(block))
+                        if block.runtime.untagged =>
+                    {
+                        args.first().map_or(body.clone(), |arg| {
+                            self.bind_irrefutable_pattern(arg, scrut, body)
+                        })
+                    }
+                    Some(crate::types::VariantConstructorCase::Constant(_)) if args.is_empty() => {
+                        body
+                    }
+                    _ => unreachable!("expected irrefutable constructor"),
                 }
-            }
-            PatternDesc::Tpat_construct(_, cstr, args)
-                if matches!(cstr.cstr_tag, ConstructorTag::CstrConstant(_))
-                    && args.is_empty()
-                    && cstr.cstr_consts == 1
-                    && cstr.cstr_nonconsts == 0 =>
-            {
-                body
             }
             PatternDesc::Tpat_variant(_, Some(inner), _) => {
                 let payload = Lambda::prim(
@@ -9752,31 +9983,21 @@ impl<'a> RawLambdaConverter<'a> {
                 }
             }
             PatternDesc::Tpat_construct(_, cstr, args)
-                if matches!(cstr.cstr_tag, ConstructorTag::CstrUnboxed) =>
+                if constructor_payload_is_unboxed(self.type_ctx, cstr) =>
             {
-                if let Some(arg) = args.first() {
-                    // OCaml compiler/ml/matching.ml:1249-1271 passes
-                    // Cstr_unboxed payloads through as `(arg, Alias)`;
-                    // record payload patterns are then decomposed by normal
-                    // record matching at compiler/ml/matching.ml:1439-1454.
+                args.first().map_or(body.clone(), |arg| {
                     self.bind_irrefutable_pattern_raw(arg, scrut, body)
-                } else {
-                    body
-                }
+                })
             }
             PatternDesc::Tpat_construct(_, cstr, args)
-                if matches!(cstr.cstr_tag, ConstructorTag::CstrConstant(_))
-                    && args.is_empty()
-                    && cstr.cstr_consts == 1
-                    && cstr.cstr_nonconsts == 0 =>
+                if matches!(
+                    constructor_case(self.type_ctx, cstr),
+                    Some(crate::types::VariantConstructorCase::Constant(_))
+                ) && args.is_empty() =>
             {
                 body
             }
-            PatternDesc::Tpat_construct(_, cstr, args)
-                if matches!(cstr.cstr_tag, ConstructorTag::CstrBlock(_))
-                    && cstr.cstr_consts == 0
-                    && cstr.cstr_nonconsts == 1 =>
-            {
+            PatternDesc::Tpat_construct(_, cstr, args) => {
                 // Single-constructor block type: bind fields directly from scrutinee
                 let (scrut_id, wrap_let) = match &scrut {
                     RawLambda::Lvar(id) => (id.clone(), None),
@@ -9847,16 +10068,20 @@ impl<'a> RawLambdaConverter<'a> {
             | PatternDesc::Tpat_variant(_, Some(_), _) => {
                 self.bind_irrefutable_pattern_raw(inner, scrut.clone(), body)
             }
-            PatternDesc::Tpat_construct(_, cstr, args) => match &cstr.cstr_tag {
-                ConstructorTag::CstrConstant(_) if args.is_empty() => body,
-                ConstructorTag::CstrBlock(_) if args.iter().all(Self::is_irrefutable_pattern) => {
-                    self.bind_constructor_args_irrefutably_raw(scrut_id, inner, cstr, args, body)
-                }
-                ConstructorTag::CstrUnboxed => {
+            PatternDesc::Tpat_construct(_, cstr, args) => match cstr.cstr_kind {
+                crate::types::ConstructorKind::Extension(_) => body,
+                crate::types::ConstructorKind::Ordinary(_)
+                    if constructor_payload_is_unboxed(self.type_ctx, cstr) =>
+                {
                     self.bind_irrefutable_pattern_raw(inner, scrut.clone(), body)
                 }
-                ConstructorTag::CstrExtension(_) => body,
-                _ => return None,
+                crate::types::ConstructorKind::Ordinary(_) if args.is_empty() => body,
+                crate::types::ConstructorKind::Ordinary(_)
+                    if args.iter().all(|pat| self.is_irrefutable_pattern(pat)) =>
+                {
+                    self.bind_constructor_args_irrefutably_raw(scrut_id, inner, cstr, args, body)
+                }
+                crate::types::ConstructorKind::Ordinary(_) => return None,
             },
             PatternDesc::Tpat_constant(_) | PatternDesc::Tpat_variant(_, None, _) => body,
             PatternDesc::Tpat_alias(_, _, _) | PatternDesc::Tpat_or(_, _, _) => return None,
@@ -10013,7 +10238,7 @@ impl<'a> RawLambdaConverter<'a> {
         let mut default_states = Vec::new();
         for state in states {
             let pat = state.case.items[idx];
-            match Self::simple_switch_key(pat) {
+            match self.simple_switch_key(pat) {
                 Some(key) => {
                     if key.is_block() {
                         if !block_keys.contains(&key) {
@@ -10045,7 +10270,7 @@ impl<'a> RawLambdaConverter<'a> {
                 .filter(|state| {
                     let pat = state.case.items[idx];
                     Self::is_default_pattern(pat)
-                        || Self::simple_switch_key(pat).as_ref() == Some(&key)
+                        || self.simple_switch_key(pat).as_ref() == Some(&key)
                 })
                 .cloned()
                 .map(|mut state| {
@@ -10060,7 +10285,7 @@ impl<'a> RawLambdaConverter<'a> {
                 idx + 1,
                 partial,
             )?;
-            sw_consts.push((key.tag(), branch));
+            sw_consts.push((key.switch_key(), branch));
         }
 
         let mut sw_blocks = Vec::new();
@@ -10070,7 +10295,7 @@ impl<'a> RawLambdaConverter<'a> {
                 .filter(|state| {
                     let pat = state.case.items[idx];
                     Self::is_default_pattern(pat)
-                        || Self::simple_switch_key(pat).as_ref() == Some(&key)
+                        || self.simple_switch_key(pat).as_ref() == Some(&key)
                 })
                 .cloned()
                 .map(|mut state| {
@@ -10085,7 +10310,7 @@ impl<'a> RawLambdaConverter<'a> {
                 idx + 1,
                 partial,
             )?;
-            sw_blocks.push((key.tag(), branch));
+            sw_blocks.push((key.switch_key(), branch));
         }
 
         let failaction = if default_states.is_empty() {
@@ -10111,7 +10336,7 @@ impl<'a> RawLambdaConverter<'a> {
                 sw_blocks_full: false,
                 sw_blocks,
                 sw_failaction: failaction,
-                sw_names: None,
+                sw_dispatch: crate::lambda::SwitchDispatch::Direct,
             },
         ))
     }
@@ -10144,7 +10369,7 @@ impl<'a> RawLambdaConverter<'a> {
         let mut default_states = Vec::new();
         for state in states {
             let pat = state.case.items[idx];
-            match Self::simple_switch_key(pat) {
+            match self.simple_switch_key(pat) {
                 Some(key) => {
                     if key.is_block() {
                         if !block_keys.contains(&key) {
@@ -10176,7 +10401,7 @@ impl<'a> RawLambdaConverter<'a> {
                 .filter(|state| {
                     let pat = state.case.items[idx];
                     Self::is_default_pattern(pat)
-                        || Self::simple_switch_key(pat).as_ref() == Some(&key)
+                        || self.simple_switch_key(pat).as_ref() == Some(&key)
                 })
                 .cloned()
                 .map(|mut state| {
@@ -10191,7 +10416,7 @@ impl<'a> RawLambdaConverter<'a> {
                 idx + 1,
                 partial,
             )?;
-            sw_consts.push((key.tag(), branch));
+            sw_consts.push((key.switch_key(), branch));
         }
 
         let mut sw_blocks = Vec::new();
@@ -10201,7 +10426,7 @@ impl<'a> RawLambdaConverter<'a> {
                 .filter(|state| {
                     let pat = state.case.items[idx];
                     Self::is_default_pattern(pat)
-                        || Self::simple_switch_key(pat).as_ref() == Some(&key)
+                        || self.simple_switch_key(pat).as_ref() == Some(&key)
                 })
                 .cloned()
                 .map(|mut state| {
@@ -10216,7 +10441,7 @@ impl<'a> RawLambdaConverter<'a> {
                 idx + 1,
                 partial,
             )?;
-            sw_blocks.push((key.tag(), branch));
+            sw_blocks.push((key.switch_key(), branch));
         }
 
         let failaction = if default_states.is_empty() {
@@ -10237,8 +10462,6 @@ impl<'a> RawLambdaConverter<'a> {
         };
 
         // OCaml's matching.ml sorts cases by tag via sort_int_lambda_list/split_cases
-        sw_consts.sort_by_key(|(tag, _)| *tag);
-        sw_blocks.sort_by_key(|(tag, _)| *tag);
 
         Some(RawLambda::Lswitch(
             Box::new(RawLambda::var(ids[idx].clone())),
@@ -10250,7 +10473,7 @@ impl<'a> RawLambdaConverter<'a> {
                 sw_blocks_full: false,
                 sw_blocks,
                 sw_failaction: failaction,
-                sw_names: None,
+                sw_dispatch: crate::lambda::SwitchDispatch::Direct,
             },
             Location::none(),
         ))
@@ -10296,17 +10519,14 @@ impl<'a> RawLambdaConverter<'a> {
         )
     }
 
-    fn simple_switch_key(pat: &Pattern) -> Option<SimpleSwitchKey> {
+    fn simple_switch_key(&self, pat: &Pattern) -> Option<SimpleSwitchKey> {
         match &peel_aliases(pat).0.pat_desc {
-            PatternDesc::Tpat_construct(_, cstr, args) => match &cstr.cstr_tag {
-                ConstructorTag::CstrConstant(tag) if args.is_empty() => {
-                    Some(SimpleSwitchKey::ConstCtor(*tag))
-                }
-                ConstructorTag::CstrBlock(tag) if args.iter().all(Self::is_irrefutable_pattern) => {
-                    Some(SimpleSwitchKey::BlockCtor(*tag))
-                }
-                _ => None,
-            },
+            PatternDesc::Tpat_construct(_, cstr, args)
+                if args.iter().all(|pat| self.is_irrefutable_pattern(pat)) =>
+            {
+                constructor_case(self.type_ctx, cstr).map(SimpleSwitchKey::Constructor)
+            }
+
             PatternDesc::Tpat_constant(TConstant::Int(i)) => Some(SimpleSwitchKey::Int(*i as i32)),
             PatternDesc::Tpat_constant(TConstant::Char(c)) => Some(SimpleSwitchKey::Int(*c as i32)),
             _ => None,
@@ -10330,16 +10550,20 @@ impl<'a> RawLambdaConverter<'a> {
             | PatternDesc::Tpat_variant(_, Some(_), _) => {
                 self.bind_irrefutable_pattern(inner, scrut.clone(), body)
             }
-            PatternDesc::Tpat_construct(_, cstr, args) => match &cstr.cstr_tag {
-                ConstructorTag::CstrConstant(_) if args.is_empty() => body,
-                ConstructorTag::CstrBlock(_) if args.iter().all(Self::is_irrefutable_pattern) => {
-                    self.bind_constructor_args_irrefutably(scrut_id, inner, cstr, args, body)
-                }
-                ConstructorTag::CstrUnboxed => {
+            PatternDesc::Tpat_construct(_, cstr, args) => match cstr.cstr_kind {
+                crate::types::ConstructorKind::Extension(_) => body,
+                crate::types::ConstructorKind::Ordinary(_)
+                    if constructor_payload_is_unboxed(self.type_ctx, cstr) =>
+                {
                     self.bind_irrefutable_pattern(inner, scrut.clone(), body)
                 }
-                ConstructorTag::CstrExtension(_) => body,
-                _ => return None,
+                crate::types::ConstructorKind::Ordinary(_) if args.is_empty() => body,
+                crate::types::ConstructorKind::Ordinary(_)
+                    if args.iter().all(|pat| self.is_irrefutable_pattern(pat)) =>
+                {
+                    self.bind_constructor_args_irrefutably(scrut_id, inner, cstr, args, body)
+                }
+                crate::types::ConstructorKind::Ordinary(_) => return None,
             },
             PatternDesc::Tpat_constant(_) | PatternDesc::Tpat_variant(_, None, _) => body,
             PatternDesc::Tpat_alias(_, _, _) | PatternDesc::Tpat_or(_, _, _) => return None,
@@ -10475,7 +10699,7 @@ impl<'a> RawLambdaConverter<'a> {
             crate::parser::ast::RecFlag::Nonrecursive => {
                 if bindings.iter().any(|binding| {
                     simple_let_binding_id(binding).is_none()
-                        && !Self::is_irrefutable_pattern(&binding.vb_pat)
+                        && !self.is_irrefutable_pattern(&binding.vb_pat)
                 }) {
                     // Use OCaml's simple_for_let / for_let approach via full matching compiler
                     let converted_bindings = bindings
@@ -10601,7 +10825,7 @@ impl<'a> RawLambdaConverter<'a> {
                             _ => LetKind::Strict,
                         };
                         acc = RawLambda::let_(kind, id, value, acc);
-                    } else if Self::is_irrefutable_pattern(&binding.vb_pat) {
+                    } else if self.is_irrefutable_pattern(&binding.vb_pat) {
                         acc = full_matching::for_let(
                             self.type_ctx,
                             self.arena,
@@ -10994,28 +11218,20 @@ impl<'a> RawLambdaConverter<'a> {
         cstr: &crate::types::ConstructorDescription,
         args: &[Expression],
     ) -> Lambda {
-        match &cstr.cstr_tag {
-            ConstructorTag::CstrConstant(tag) => match cstr.cstr_name.as_str() {
-                "true" => Lambda::const_(Constant::JsTrue),
-                "false" => Lambda::const_(Constant::JsFalse),
-                _ => {
-                    // OCaml raw lambda prints constant constructors via their numeric
-                    // pointer tag (`0a`, `1a`, ...). The lowered Lambda constant type
-                    // does not preserve that pointer metadata, so the raw stage stores
-                    // the printed pointer form directly.
-                    let printed_tag = format!("{tag}a");
-                    Lambda::const_(Constant::Pointer(printed_tag))
-                }
-            },
-            ConstructorTag::CstrUnboxed => {
-                if let Some(arg) = args.first() {
-                    self.convert_expr(arg)
-                } else {
-                    Lambda::unit()
+        match constructor_case(self.type_ctx, cstr) {
+            Some(crate::types::VariantConstructorCase::Constant(tag)) => {
+                match cstr.cstr_name.as_str() {
+                    "true" => Lambda::const_(Constant::JsTrue),
+                    "false" => Lambda::const_(Constant::JsFalse),
+                    _ => Lambda::const_(Constant::Constructor(tag)),
                 }
             }
-            ConstructorTag::CstrBlock(_) | ConstructorTag::CstrExtension(_) => {
-                unreachable!("convert_construct is only used for raw constant/unboxed constructors")
+            Some(crate::types::VariantConstructorCase::Block(block)) if block.runtime.untagged => {
+                args.first()
+                    .map_or_else(Lambda::unit, |arg| self.convert_expr(arg))
+            }
+            Some(crate::types::VariantConstructorCase::Block(_)) | None => {
+                unreachable!("convert_construct is only used for constant/unboxed constructors")
             }
         }
     }
@@ -11963,9 +12179,6 @@ mod tests {
             cstr_args: Vec::new(),
             cstr_arity: 0,
             cstr_kind: None,
-            cstr_tag: crate::types::ConstructorTag::CstrUnboxed,
-            cstr_consts: 1,
-            cstr_nonconsts: 0,
             cstr_generalized: false,
             cstr_private: crate::types::asttypes::PrivateFlag::Public,
             cstr_loc: Location::none(),
@@ -12014,9 +12227,6 @@ mod tests {
             cstr_args: Vec::new(),
             cstr_arity: 1,
             cstr_kind: None,
-            cstr_tag: crate::types::ConstructorTag::CstrBlock(0),
-            cstr_consts: 1,
-            cstr_nonconsts: 1,
             cstr_generalized: false,
             cstr_private: crate::types::asttypes::PrivateFlag::Public,
             cstr_loc: Location::none(),
@@ -12104,9 +12314,6 @@ mod tests {
             cstr_args: Vec::new(),
             cstr_arity: 0,
             cstr_kind: None,
-            cstr_tag: crate::types::ConstructorTag::CstrExtension(path),
-            cstr_consts: -1,
-            cstr_nonconsts: -1,
             cstr_generalized: false,
             cstr_private: crate::types::asttypes::PrivateFlag::Public,
             cstr_loc: Location::none(),

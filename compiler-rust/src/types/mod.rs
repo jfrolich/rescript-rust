@@ -59,10 +59,11 @@ pub use asttypes::{
 pub use context::TypeContext;
 pub use decl::{
     AliasPresence, Attribute, AttributePayload, ConstructorArguments, ConstructorDeclaration,
-    ConstructorDescription, ConstructorKind, ConstructorTag, ExtStatus, ExtensionConstructor,
-    LabelArrayRef, LabelDeclaration, LabelDescription, ModtypeDeclaration, ModuleDeclaration,
-    ModuleType, PrimitiveDescription, RecStatus, RecordRepresentation, Signature, SignatureItem,
+    ConstructorDescription, ConstructorKind, ExtStatus, ExtensionConstructor, LabelArrayRef,
+    LabelDeclaration, LabelDescription, ModtypeDeclaration, ModuleDeclaration, ModuleType,
+    PrimitiveDescription, RecStatus, RecordRepresentation, Signature, SignatureItem,
     TypeDeclaration, TypeInlinedType, TypeKind, TypeRepresentation, ValueDescription, ValueKind,
+    may_equal_constructor, same_constructor,
 };
 pub use path::{NOPOS, Path, Typath};
 pub(crate) use type_expr::TypeExprRefMap;

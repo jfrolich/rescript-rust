@@ -14,7 +14,7 @@ use std::collections::{HashMap, HashSet};
 
 use super::context::TypeContext;
 use super::ctype;
-use super::decl::{ConstructorArguments, ConstructorDescription, ConstructorTag, TypeKind};
+use super::decl::{ConstructorArguments, ConstructorDescription, ConstructorKind, TypeKind};
 use super::env::Env;
 use super::path::Path;
 use super::predef;
@@ -556,31 +556,8 @@ fn type_info_constructor_description<'a>(
         return None;
     };
 
-    let num_consts = constrs
-        .iter()
-        .filter(
-            |c| matches!(c.cd_args, ConstructorArguments::CstrTuple(ref args) if args.is_empty()),
-        )
-        .count() as i32;
-    let num_nonconsts = constrs.len() as i32 - num_consts;
-    let mut const_idx = 0i32;
-    let mut nonconst_idx = 0i32;
-
-    for cd in constrs {
-        let is_constant =
-            matches!(cd.cd_args, ConstructorArguments::CstrTuple(ref args) if args.is_empty());
-        let cstr_tag = if decl.type_representation == crate::types::TypeRepresentation::Unboxed {
-            ConstructorTag::CstrUnboxed
-        } else if is_constant {
-            let tag = ConstructorTag::CstrConstant(const_idx);
-            const_idx += 1;
-            tag
-        } else {
-            let tag = ConstructorTag::CstrBlock(nonconst_idx);
-            nonconst_idx += 1;
-            tag
-        };
-
+    let layout = decl.variant_layout_ref()?;
+    for (position, cd) in constrs.iter().enumerate() {
         if cd.cd_id.name() != ctor_name {
             continue;
         }
@@ -603,10 +580,10 @@ fn type_info_constructor_description<'a>(
             cstr_existentials,
             cstr_args,
             cstr_arity,
-            cstr_kind: None,
-            cstr_tag,
-            cstr_consts: num_consts,
-            cstr_nonconsts: num_nonconsts,
+            cstr_kind: ConstructorKind::Ordinary(super::variant_runtime::ConstructorReference {
+                variant: layout,
+                position,
+            }),
             cstr_generalized: cd.cd_res.is_some(),
             cstr_private: decl.type_private,
             cstr_loc: cd.cd_loc,

@@ -354,15 +354,15 @@ fn lets_helper(state: &mut LetsState<'_>, lam: &Lambda) -> Lambda {
         // Lswitch (lam_pass_lets_dce.ml:179-190).
         Lambda::Lswitch(scrut, sw) => {
             let new_scrut = lets_helper(state, scrut);
-            let new_consts: Vec<(i32, Lambda)> = sw
+            let new_consts: Vec<(crate::lambda::SwitchKey, Lambda)> = sw
                 .sw_consts
                 .iter()
-                .map(|(n, e)| (*n, lets_helper(state, e)))
+                .map(|(n, e)| (n.clone(), lets_helper(state, e)))
                 .collect();
-            let new_blocks: Vec<(i32, Lambda)> = sw
+            let new_blocks: Vec<(crate::lambda::SwitchKey, Lambda)> = sw
                 .sw_blocks
                 .iter()
-                .map(|(n, e)| (*n, lets_helper(state, e)))
+                .map(|(n, e)| (n.clone(), lets_helper(state, e)))
                 .collect();
             let new_failaction = sw
                 .sw_failaction
@@ -376,7 +376,7 @@ fn lets_helper(state: &mut LetsState<'_>, lam: &Lambda) -> Lambda {
                     sw_blocks_full: sw.sw_blocks_full,
                     sw_blocks: new_blocks,
                     sw_failaction: new_failaction,
-                    sw_names: sw.sw_names.clone(),
+                    sw_dispatch: sw.sw_dispatch.clone(),
                 },
             )
         }
@@ -745,7 +745,7 @@ fn lets_helper_owned(state: &mut LetsState<'_>, lam: Lambda) -> Lambda {
                     sw_blocks_full: sw.sw_blocks_full,
                     sw_blocks: new_blocks,
                     sw_failaction: new_failaction,
-                    sw_names: sw.sw_names,
+                    sw_dispatch: sw.sw_dispatch,
                 },
             )
         }

@@ -394,9 +394,11 @@ fn lookup_rebind_constructor<'a>(
             let name = tctx.arena.get_string(*name_idx);
             env.find_constructor(name).ok().map(|desc| {
                 let desc = desc.clone();
-                let path = match &desc.cstr_tag {
-                    crate::types::decl::ConstructorTag::CstrExtension(path) => path.clone(),
-                    _ => Path::pident(Ident::create_persistent(name)),
+                let path = match &desc.cstr_kind {
+                    crate::types::ConstructorKind::Extension(path) => path.clone(),
+                    crate::types::ConstructorKind::Ordinary(_) => {
+                        Path::pident(Ident::create_persistent(name))
+                    }
                 };
                 (path, desc)
             })
@@ -10316,8 +10318,8 @@ fn constructor_matches_extension_check(
 ) -> bool {
     desc.cstr_name == check.name
         && matches!(
-            &desc.cstr_tag,
-            crate::types::decl::ConstructorTag::CstrExtension(Path::Pident(id))
+            &desc.cstr_kind,
+            crate::types::ConstructorKind::Extension(Path::Pident(id))
                 if id.same(&check.id)
         )
 }
@@ -20372,10 +20374,12 @@ pub fn type_structure<'a>(
                         cstr_existentials: vec![],
                         cstr_args: vec![],
                         cstr_arity: 0,
-                        cstr_kind: None,
-                        cstr_tag: crate::types::decl::ConstructorTag::CstrConstant(i as i32),
-                        cstr_consts: num_consts,
-                        cstr_nonconsts: 0,
+                        cstr_kind: crate::types::ConstructorKind::Ordinary(
+                            crate::types::ConstructorReference {
+                                variant: layout,
+                                position: i,
+                            },
+                        ),
                         cstr_generalized: false,
                         cstr_private: crate::types::asttypes::PrivateFlag::Public,
                         cstr_loc: crate::location::Location::none(),
@@ -20907,12 +20911,12 @@ fn type_structure_item<'a>(
                                 cstr_existentials: vec![],
                                 cstr_args: vec![],
                                 cstr_arity: 0,
-                                cstr_kind: None,
-                                cstr_tag: crate::types::decl::ConstructorTag::CstrConstant(
-                                    i as i32,
+                                cstr_kind: crate::types::ConstructorKind::Ordinary(
+                                    crate::types::ConstructorReference {
+                                        variant: layout,
+                                        position: i,
+                                    },
                                 ),
-                                cstr_consts: num_consts,
-                                cstr_nonconsts: 0,
                                 cstr_generalized: false,
                                 cstr_private: crate::types::asttypes::PrivateFlag::Public,
                                 cstr_loc: crate::location::Location::none(),
@@ -21768,8 +21772,6 @@ fn type_structure_item<'a>(
                             (nc, nnc)
                         };
 
-                        let mut const_tag = 0i32;
-                        let mut block_tag = 0i32;
                         // @unboxed is only the single-constructor OCaml-style unboxed
                         // when there's exactly one constructor. Multi-constructor
                         // @unboxed is ReScript's "untagged variants" which uses different handling.
@@ -21799,19 +21801,6 @@ fn type_structure_item<'a>(
                                     let source_cd_loc =
                                         find_existing_loc_idx(arena, &source_cstr.cd_loc)
                                             .unwrap_or(cstr.pcd_loc);
-                                    let sc_is_const = matches!(&source_cstr.cd_args, crate::types::ConstructorArguments::CstrTuple(args) if args.is_empty());
-                                    let sc_tag = if has_unboxed {
-                                        crate::types::ConstructorTag::CstrUnboxed
-                                    } else if sc_is_const {
-                                        let t = const_tag;
-                                        const_tag += 1;
-                                        crate::types::ConstructorTag::CstrConstant(t)
-                                    } else {
-                                        let t = block_tag;
-                                        block_tag += 1;
-                                        crate::types::ConstructorTag::CstrBlock(t)
-                                    };
-
                                     // Use actual types from the source constructor (like OCaml's typedecl.ml lines 523-530)
                                     // ctyp_desc = Ttyp_var(None) acts as Ttyp_any placeholder, ctyp_type = real type from source
                                     let (
@@ -22056,10 +22045,13 @@ fn type_structure_item<'a>(
                                             cstr_existentials: sc_existentials,
                                             cstr_args: sc_desc_args,
                                             cstr_arity: sc_desc_arity,
-                                            cstr_kind: None,
-                                            cstr_tag: sc_tag,
-                                            cstr_consts: num_consts,
-                                            cstr_nonconsts: num_nonconsts,
+                                            cstr_kind: crate::types::ConstructorKind::Ordinary(
+                                                crate::types::ConstructorReference {
+                                                    variant: type_variant_layout
+                                                        .expect("variant declaration layout"),
+                                                    position: cstr_descs.len(),
+                                                },
+                                            ),
                                             cstr_generalized: source_cstr.cd_res.is_some(),
                                             cstr_private: crate::types::PrivateFlag::Public,
                                             cstr_loc: source_cstr.cd_loc.clone(),
@@ -22307,18 +22299,6 @@ fn type_structure_item<'a>(
                                 None => (None, None),
                             };
 
-                            // Determine the tag
-                            let tag = if has_unboxed {
-                                crate::types::ConstructorTag::CstrUnboxed
-                            } else if is_constant {
-                                let t = const_tag;
-                                const_tag += 1;
-                                crate::types::ConstructorTag::CstrConstant(t)
-                            } else {
-                                let t = block_tag;
-                                block_tag += 1;
-                                crate::types::ConstructorTag::CstrBlock(t)
-                            };
                             let mut combined_parser_attrs = tag_attrs.clone();
                             combined_parser_attrs.extend(cstr.pcd_attributes.iter().cloned());
                             let combined_typed_attrs =
@@ -22429,10 +22409,12 @@ fn type_structure_item<'a>(
                                     cstr_existentials,
                                     cstr_args,
                                     cstr_arity,
-                                    cstr_kind: None,
-                                    cstr_tag: tag,
-                                    cstr_consts: num_consts,
-                                    cstr_nonconsts: num_nonconsts,
+                                    cstr_kind: crate::types::ConstructorKind::Ordinary(
+                                        crate::types::ConstructorReference {
+                                            variant: type_variant_layout.expect("variant declaration layout"),
+                                            position: cstr_descs.len(),
+                                        },
+                                    ),
                                     cstr_generalized: internal_cd_res.is_some(),
                                     cstr_private: crate::types::PrivateFlag::Public,
                                     cstr_loc: arena.to_location(cstr.pcd_loc),
@@ -22769,17 +22751,6 @@ fn type_structure_item<'a>(
                     type_inlined_types: vec![],
                     type_path: None,
                 };
-
-                if let Some(layout_ref) = type_variant_layout {
-                    for (position, (_, description)) in constructors.iter_mut().enumerate() {
-                        description.cstr_kind = Some(crate::types::ConstructorKind::Ordinary(
-                            crate::types::ConstructorReference {
-                                variant: layout_ref,
-                                position,
-                            },
-                        ));
-                    }
-                }
 
                 // Save for generalization after the loop
                 internal_decls_for_generalize.push(internal_decl.clone());
@@ -23450,10 +23421,7 @@ fn type_structure_item<'a>(
                     cstr_existentials,
                     cstr_args: cstr_args.clone(),
                     cstr_arity: cstr_args.len() as i32,
-                    cstr_kind: None,
-                    cstr_tag: crate::types::decl::ConstructorTag::CstrExtension(ext_path),
-                    cstr_consts: -1,
-                    cstr_nonconsts: -1,
+                    cstr_kind: crate::types::ConstructorKind::Extension(ext_path.clone()),
                     cstr_generalized: ext_ret_ty.is_some(),
                     cstr_private: ext_private,
                     cstr_loc: crate::location::Location::none(),
@@ -23841,10 +23809,7 @@ fn type_structure_item<'a>(
                 cstr_existentials,
                 cstr_args: cstr_args.clone(),
                 cstr_arity: cstr_args.len() as i32,
-                cstr_kind: None,
-                cstr_tag: crate::types::decl::ConstructorTag::CstrExtension(exn_path),
-                cstr_consts: -1,
-                cstr_nonconsts: -1,
+                cstr_kind: crate::types::ConstructorKind::Extension(exn_path.clone()),
                 cstr_generalized: ext_ret_ty.is_some(),
                 cstr_private: crate::types::PrivateFlag::Public,
                 cstr_loc: crate::location::Location::none(),
@@ -24495,8 +24460,6 @@ fn type_structure_item<'a>(
                                     .count()
                                     as i32;
                                 let num_nonconsts = constructors.len() as i32 - num_consts;
-                                let mut const_idx = 0i32;
-                                let mut nonconst_idx = 0i32;
 
                                 for (position, cd) in constructors.iter().enumerate() {
                                     let is_constant = matches!(
@@ -24505,20 +24468,6 @@ fn type_structure_item<'a>(
                                             ref args
                                         ) if args.is_empty()
                                     ) && cd.cd_res.is_none();
-
-                                    let cstr_tag = if is_constant {
-                                        let tag = crate::types::decl::ConstructorTag::CstrConstant(
-                                            const_idx,
-                                        );
-                                        const_idx += 1;
-                                        tag
-                                    } else {
-                                        let tag = crate::types::decl::ConstructorTag::CstrBlock(
-                                            nonconst_idx,
-                                        );
-                                        nonconst_idx += 1;
-                                        tag
-                                    };
 
                                     let (cstr_args, cstr_arity) = match &cd.cd_args {
                                         crate::types::decl::ConstructorArguments::CstrTuple(
@@ -24561,14 +24510,12 @@ fn type_structure_item<'a>(
                                         cstr_existentials,
                                         cstr_args,
                                         cstr_arity,
-                                        cstr_kind: decl.variant_layout_ref().map(|variant| {
-                                            crate::types::ConstructorKind::Ordinary(
-                                                crate::types::ConstructorReference { variant, position },
-                                            )
-                                        }),
-                                        cstr_tag,
-                                        cstr_consts: num_consts,
-                                        cstr_nonconsts: num_nonconsts,
+                                        cstr_kind: crate::types::ConstructorKind::Ordinary(
+                                            crate::types::ConstructorReference {
+                                                variant: decl.variant_layout_ref().expect("variant layout"),
+                                                position,
+                                            },
+                                        ),
                                         cstr_generalized: cd.cd_res.is_some(),
                                         cstr_private: decl.type_private,
                                         cstr_loc: cd.cd_loc,

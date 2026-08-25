@@ -518,19 +518,29 @@ fn rewrite_bounded_vars(substitution: &mut Subst, lam: &Lambda, id_gen: &IdGener
                 sw_consts: switch
                     .sw_consts
                     .iter()
-                    .map(|(key, value)| (*key, rewrite_bounded_vars(substitution, value, id_gen)))
+                    .map(|(key, value)| {
+                        (
+                            key.clone(),
+                            rewrite_bounded_vars(substitution, value, id_gen),
+                        )
+                    })
                     .collect(),
                 sw_blocks_full: switch.sw_blocks_full,
                 sw_blocks: switch
                     .sw_blocks
                     .iter()
-                    .map(|(key, value)| (*key, rewrite_bounded_vars(substitution, value, id_gen)))
+                    .map(|(key, value)| {
+                        (
+                            key.clone(),
+                            rewrite_bounded_vars(substitution, value, id_gen),
+                        )
+                    })
                     .collect(),
                 sw_failaction: switch
                     .sw_failaction
                     .as_ref()
                     .map(|value| Box::new(rewrite_bounded_vars(substitution, value, id_gen))),
-                sw_names: switch.sw_names.clone(),
+                sw_dispatch: switch.sw_dispatch.clone(),
             },
         ),
         Lambda::LstringSwitch(arg, cases, default) => Lambda::string_switch(
@@ -1172,7 +1182,7 @@ mod tests {
                     sw_blocks_full: true,
                     sw_blocks: vec![],
                     sw_failaction: None,
-                    sw_names: None,
+                    sw_dispatch: crate::lambda::SwitchDispatch::Direct,
                 },
             ),
             &[Lambda::const_(Constant::int(1))],

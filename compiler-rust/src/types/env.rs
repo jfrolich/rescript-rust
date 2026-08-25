@@ -20,9 +20,8 @@ use super::asttypes::{MutableFlag, PrivateFlag};
 use super::context::TypeContext;
 use super::decl::{
     ConstructorArguments, ConstructorDeclaration, ConstructorDescription, ConstructorKind,
-    ConstructorTag, LabelDeclaration, LabelDescription, ModtypeDeclaration, ModuleDeclaration,
-    ModuleType, RecordRepresentation, Signature, SignatureItem, TypeDeclaration, TypeKind,
-    ValueDescription,
+    LabelDeclaration, LabelDescription, ModtypeDeclaration, ModuleDeclaration, ModuleType,
+    RecordRepresentation, Signature, SignatureItem, TypeDeclaration, TypeKind, ValueDescription,
 };
 use super::path::Path;
 use super::type_expr::{TypeDesc, TypeExprRef};
@@ -1838,13 +1837,6 @@ pub fn initial_env(ctx: &TypeContext) -> Env {
         // available for disambiguation just like OCaml's initial environment.
         match &decl.type_kind {
             TypeKind::TypeVariant(constrs, _) => {
-                let num_consts = constrs.iter()
-                    .filter(|c| matches!(c.cd_args, ConstructorArguments::CstrTuple(ref args) if args.is_empty()))
-                    .count() as i32;
-                let num_nonconsts = constrs.len() as i32 - num_consts;
-                let mut const_idx = 0i32;
-                let mut nonconst_idx = 0i32;
-
                 let layout_ref = decl.variant_layout_ref().unwrap_or_else(|| {
                     crate::types::variant_runtime::plain_layout(
                         ctx,
@@ -1856,21 +1848,6 @@ pub fn initial_env(ctx: &TypeContext) -> Env {
                 });
 
                 for (position, cd) in constrs.iter().enumerate() {
-                    let is_constant = matches!(cd.cd_args, ConstructorArguments::CstrTuple(ref args) if args.is_empty());
-
-                    let cstr_tag =
-                        if decl.type_representation == crate::types::TypeRepresentation::Unboxed {
-                            ConstructorTag::CstrUnboxed
-                        } else if is_constant {
-                            let tag = ConstructorTag::CstrConstant(const_idx);
-                            const_idx += 1;
-                            tag
-                        } else {
-                            let tag = ConstructorTag::CstrBlock(nonconst_idx);
-                            nonconst_idx += 1;
-                            tag
-                        };
-
                     let (cstr_args, cstr_arity) = match &cd.cd_args {
                         ConstructorArguments::CstrTuple(args) => (args.clone(), args.len() as i32),
                         ConstructorArguments::CstrRecord(labels) => {
@@ -1894,15 +1871,10 @@ pub fn initial_env(ctx: &TypeContext) -> Env {
                         cstr_existentials,
                         cstr_args,
                         cstr_arity,
-                        cstr_kind: Some(ConstructorKind::Ordinary(
-                            crate::types::ConstructorReference {
-                                variant: layout_ref,
-                                position,
-                            },
-                        )),
-                        cstr_tag,
-                        cstr_consts: num_consts,
-                        cstr_nonconsts: num_nonconsts,
+                        cstr_kind: ConstructorKind::Ordinary(crate::types::ConstructorReference {
+                            variant: layout_ref,
+                            position,
+                        }),
                         cstr_generalized: cd.cd_res.is_some(),
                         cstr_private: decl.type_private,
                         cstr_loc: Location::none(),
@@ -2488,10 +2460,7 @@ pub fn initial_env(ctx: &TypeContext) -> Env {
                     cstr_existentials: vec![],
                     cstr_arity: args.len() as i32,
                     cstr_args: args,
-                    cstr_kind: Some(ConstructorKind::Extension(path.clone())),
-                    cstr_tag: ConstructorTag::CstrExtension(path),
-                    cstr_consts: -1,
-                    cstr_nonconsts: -1,
+                    cstr_kind: ConstructorKind::Extension(path.clone()),
                     cstr_generalized: false,
                     cstr_private: PrivateFlag::Public,
                     cstr_loc: Location::none(),

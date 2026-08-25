@@ -249,19 +249,19 @@ impl<'a, 'r> Alpha<'a, 'r> {
                     sw_consts: switch
                         .sw_consts
                         .iter()
-                        .map(|(k, l)| (*k, self.simpl(l)))
+                        .map(|(k, l)| (k.clone(), self.simpl(l)))
                         .collect(),
                     sw_blocks_full: switch.sw_blocks_full,
                     sw_blocks: switch
                         .sw_blocks
                         .iter()
-                        .map(|(k, l)| (*k, self.simpl(l)))
+                        .map(|(k, l)| (k.clone(), self.simpl(l)))
                         .collect(),
                     sw_failaction: switch
                         .sw_failaction
                         .as_ref()
                         .map(|f| Box::new(self.simpl(f))),
-                    sw_names: switch.sw_names.clone(),
+                    sw_dispatch: switch.sw_dispatch.clone(),
                 },
             ),
 
@@ -382,7 +382,7 @@ impl<'a, 'r> Alpha<'a, 'r> {
                         .map(|(k, l)| (k, self.simpl_owned(l)))
                         .collect(),
                     sw_failaction: switch.sw_failaction.map(|f| Box::new(self.simpl_owned(*f))),
-                    sw_names: switch.sw_names,
+                    sw_dispatch: switch.sw_dispatch,
                 },
             ),
             Lambda::LstringSwitch(scrut, sw, d) => Lambda::string_switch(

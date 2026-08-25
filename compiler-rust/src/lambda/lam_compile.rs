@@ -43,7 +43,7 @@ use crate::lambda::lam_primitive::{ExternalArgConst, ExternalArgDelim, Primitive
 use crate::lambda::lam_subst;
 use crate::lambda::{
     ApInfo, Apply, ApplyStatus, FunctionAttribute, InlineAttribute, LFunction, Lambda,
-    LambdaSwitch, PrimInfo, SwitchCaseTag, TagInfo,
+    LambdaSwitch, PrimInfo, SwitchCaseTag, SwitchKey, TagInfo,
 };
 use crate::location::Location;
 use tracing::info_span;
@@ -218,6 +218,13 @@ impl ShortCircuitOp {
             Self::And => Lambda::false_(),
             Self::Or => Lambda::true_(),
         }
+    }
+}
+
+fn direct_switch_int(key: SwitchKey) -> i32 {
+    match key {
+        SwitchKey::Int(value) => value,
+        SwitchKey::Constructor(_) => unreachable!("constructor key with direct switch dispatch"),
     }
 }
 
@@ -3730,7 +3737,7 @@ impl LambdaCompiler {
                 cases.push((tag.clone(), empty_switch_case_clause(), group_falls_through));
             }
             cases.push((
-                grouped_cases[group_end].0,
+                grouped_cases[group_end].0.clone(),
                 CaseClause {
                     source_loc: None,
                     body: compiled_body,
@@ -3746,7 +3753,7 @@ impl LambdaCompiler {
             self.reorder_fallthrough_return_clauses(cases, |(_, _, falls_through)| *falls_through);
         let cases = cases
             .into_iter()
-            .map(|(tag, clause, _)| (tag, clause))
+            .map(|(key, clause, _)| (direct_switch_int(key), clause))
             .collect();
 
         let default_block = switch
@@ -4763,7 +4770,7 @@ impl LambdaCompiler {
             .into_iter()
             .map(|(tag, body, is_last)| {
                 (
-                    tag,
+                    direct_switch_int(tag),
                     if is_last {
                         crate::js_ir::CaseClause {
                             source_loc: None,
@@ -4916,7 +4923,7 @@ impl LambdaCompiler {
                 cases.push((tag.clone(), empty_switch_case_clause(), group_falls_through));
             }
             cases.push((
-                grouped_cases[group_end].0,
+                grouped_cases[group_end].0.clone(),
                 crate::js_ir::CaseClause {
                     source_loc: None,
                     body: compiled_body,
@@ -4932,7 +4939,7 @@ impl LambdaCompiler {
             self.reorder_fallthrough_return_clauses(cases, |(_, _, falls_through)| *falls_through);
         let cases = cases
             .into_iter()
-            .map(|(tag, clause, _)| (tag, clause))
+            .map(|(key, clause, _)| (direct_switch_int(key), clause))
             .collect();
 
         let default_block = switch
@@ -5070,7 +5077,7 @@ impl LambdaCompiler {
                 } else {
                     empty_switch_case_clause()
                 };
-                (tag, clause)
+                (direct_switch_int(tag), clause)
             })
             .collect();
 
@@ -7700,9 +7707,9 @@ fn lambda_contains_static_raise_to_label(lam: &Lambda, label: i32, arity: usize)
     }
 }
 
-fn switch_cases_contain_static_raise_to_label(
-    const_cases: &[(i32, Lambda)],
-    block_cases: &[(i32, Lambda)],
+fn switch_cases_contain_static_raise_to_label<K>(
+    const_cases: &[(K, Lambda)],
+    block_cases: &[(K, Lambda)],
     label: i32,
     arity: usize,
 ) -> bool {
@@ -7728,9 +7735,9 @@ fn lambda_is_direct_static_raise_to_label(lam: &Lambda, label: i32, arity: usize
     matches!(lam, Lambda::LstaticRaise(raise_label, args) if *raise_label == label && args.len() == arity)
 }
 
-fn switch_cases_contain_nontrivial_static_raise_to_label(
-    const_cases: &[(i32, Lambda)],
-    block_cases: &[(i32, Lambda)],
+fn switch_cases_contain_nontrivial_static_raise_to_label<K>(
+    const_cases: &[(K, Lambda)],
+    block_cases: &[(K, Lambda)],
     label: i32,
     arity: usize,
 ) -> bool {

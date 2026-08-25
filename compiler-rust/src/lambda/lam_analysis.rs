@@ -728,7 +728,7 @@ mod tests {
                 sw_blocks_full: true,
                 sw_blocks: vec![],
                 sw_failaction: None,
-                sw_names: None,
+                sw_dispatch: crate::lambda::SwitchDispatch::Direct,
             },
         );
         assert_eq!(size(&switch), TOO_BIG_TO_INLINE);
@@ -856,7 +856,7 @@ mod tests {
                     sw_blocks_full: true,
                     sw_blocks: vec![],
                     sw_failaction: None,
-                    sw_names: None,
+                    sw_dispatch: crate::lambda::SwitchDispatch::Direct,
                 },
             )),
             attr: FunctionAttribute::default(),

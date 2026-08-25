@@ -234,13 +234,7 @@ pub struct ConstructorDescription {
     /// Number of arguments
     pub cstr_arity: i32,
     /// Semantic constructor kind and canonical runtime representation.
-    pub cstr_kind: Option<ConstructorKind>,
-    /// Transitional positional tag used by lowering until switch migration.
-    pub cstr_tag: ConstructorTag,
-    /// Number of constant constructors in the type
-    pub cstr_consts: i32,
-    /// Number of non-constant constructors
-    pub cstr_nonconsts: i32,
+    pub cstr_kind: ConstructorKind,
     /// Is this a GADT constructor?
     pub cstr_generalized: bool,
     /// Private flag
@@ -266,48 +260,21 @@ pub enum ConstructorKind {
 /// scrutinee type.
 pub fn same_constructor(c1: &ConstructorDescription, c2: &ConstructorDescription) -> bool {
     match (&c1.cstr_kind, &c2.cstr_kind) {
-        (Some(ConstructorKind::Ordinary(_)), Some(ConstructorKind::Ordinary(_))) => {
+        (ConstructorKind::Ordinary(_), ConstructorKind::Ordinary(_)) => {
             c1.cstr_name == c2.cstr_name
         }
-        (Some(ConstructorKind::Extension(p1)), Some(ConstructorKind::Extension(p2))) => p1.same(p2),
-        (Some(_), Some(_)) => false,
-        _ => c1.cstr_tag.equal(&c2.cstr_tag),
+        (ConstructorKind::Extension(p1), ConstructorKind::Extension(p2)) => p1.same(p2),
+        _ => false,
     }
 }
 
 /// Conservative equality used while checking extension patterns.
 pub fn may_equal_constructor(c1: &ConstructorDescription, c2: &ConstructorDescription) -> bool {
     match (&c1.cstr_kind, &c2.cstr_kind) {
-        (Some(ConstructorKind::Extension(_)), Some(ConstructorKind::Extension(_))) => {
+        (ConstructorKind::Extension(_), ConstructorKind::Extension(_)) => {
             c1.cstr_arity == c2.cstr_arity
         }
         _ => same_constructor(c1, c2),
-    }
-}
-
-/// Constructor tag for heap blocks.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ConstructorTag {
-    /// Constant constructor (an int)
-    CstrConstant(i32),
-    /// Regular constructor (a block)
-    CstrBlock(i32),
-    /// Unboxed constructor
-    CstrUnboxed,
-    /// Extension constructor
-    CstrExtension(Path),
-}
-
-impl ConstructorTag {
-    /// Check if two tags are equal.
-    pub fn equal(&self, other: &ConstructorTag) -> bool {
-        match (self, other) {
-            (ConstructorTag::CstrConstant(i1), ConstructorTag::CstrConstant(i2)) => i1 == i2,
-            (ConstructorTag::CstrBlock(i1), ConstructorTag::CstrBlock(i2)) => i1 == i2,
-            (ConstructorTag::CstrUnboxed, ConstructorTag::CstrUnboxed) => true,
-            (ConstructorTag::CstrExtension(p1), ConstructorTag::CstrExtension(p2)) => p1.same(p2),
-            _ => false,
-        }
     }
 }
 
@@ -639,16 +606,6 @@ pub(crate) fn parse_ocaml_int_literal(s: &str) -> Option<i64> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn test_constructor_tag_equality() {
-        let t1 = ConstructorTag::CstrConstant(0);
-        let t2 = ConstructorTag::CstrConstant(0);
-        let t3 = ConstructorTag::CstrConstant(1);
-
-        assert!(t1.equal(&t2));
-        assert!(!t1.equal(&t3));
-    }
 
     #[test]
     fn test_record_representation() {

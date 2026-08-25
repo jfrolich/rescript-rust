@@ -37,9 +37,8 @@ use crate::location::Location;
 use crate::parser::{Parser, jsx_ppx, module};
 use crate::types::context::TypeContext;
 use crate::types::decl::{
-    AliasPresence, ConstructorDescription, ConstructorKind, ConstructorTag, LabelDescription,
-    ModtypeDeclaration, ModuleDeclaration, ModuleType, RecStatus, Signature, SignatureItem,
-    TypeKind,
+    AliasPresence, ConstructorDescription, ConstructorKind, LabelDescription, ModtypeDeclaration,
+    ModuleDeclaration, ModuleType, RecStatus, Signature, SignatureItem, TypeKind,
 };
 use crate::types::env::{Env, initial_env};
 use crate::types::path::Path;
@@ -5914,27 +5913,7 @@ fn add_signature_to_env_with_options(
                 match &decl.type_kind {
                     TypeKind::TypeVariant(constrs, layout) => {
                         let type_path = Path::pdot(module_path.clone(), id.name());
-                        let num_consts = constrs
-                            .iter()
-                            .filter(|c| matches!(c.cd_args, crate::types::decl::ConstructorArguments::CstrTuple(ref args) if args.is_empty()))
-                            .count() as i32;
-                        let num_nonconsts = constrs.len() as i32 - num_consts;
-                        let mut const_idx = 0i32;
-                        let mut nonconst_idx = 0i32;
-
                         for (position, cd) in constrs.iter().enumerate() {
-                            let is_constant = matches!(cd.cd_args, crate::types::decl::ConstructorArguments::CstrTuple(ref args) if args.is_empty());
-
-                            let cstr_tag = if is_constant {
-                                let tag = ConstructorTag::CstrConstant(const_idx);
-                                const_idx += 1;
-                                tag
-                            } else {
-                                let tag = ConstructorTag::CstrBlock(nonconst_idx);
-                                nonconst_idx += 1;
-                                tag
-                            };
-
                             let inline_record = match &cd.cd_args {
                                 crate::types::decl::ConstructorArguments::CstrRecord(labels) => {
                                     let inline_params =
@@ -6014,15 +5993,12 @@ fn add_signature_to_env_with_options(
                                 cstr_existentials: vec![],
                                 cstr_args,
                                 cstr_arity,
-                                cstr_kind: Some(ConstructorKind::Ordinary(
+                                cstr_kind: ConstructorKind::Ordinary(
                                     crate::types::ConstructorReference {
                                         variant: *layout,
                                         position,
                                     },
-                                )),
-                                cstr_tag,
-                                cstr_consts: num_consts,
-                                cstr_nonconsts: num_nonconsts,
+                                ),
                                 cstr_generalized: cd.cd_res.is_some(),
                                 cstr_private: decl.type_private,
                                 cstr_loc: crate::location::Location::none(),
@@ -6265,10 +6241,7 @@ fn add_signature_to_env_with_options(
                             labels.len() as i32
                         }
                     },
-                    cstr_kind: Some(ConstructorKind::Extension(slot_path(id.name(), ext_slot))),
-                    cstr_tag: ConstructorTag::CstrExtension(slot_path(id.name(), ext_slot)),
-                    cstr_consts: -1,
-                    cstr_nonconsts: -1,
+                    cstr_kind: ConstructorKind::Extension(slot_path(id.name(), ext_slot)),
                     cstr_generalized: ext.ext_ret_type.is_some(),
                     cstr_private: ext.ext_private,
                     cstr_loc: crate::location::Location::none(),
