@@ -9182,6 +9182,34 @@ fn type_application(
         return result;
     }
 
+    // compiler/ml/typecore.ml:4049-4069: a total call of an unknown
+    // function commits it to one n-ary arrow matching the complete call site.
+    let uncommitted_funct_ty = crate::types::ctype::expand_head(ctx, env, typed_funct.exp_type);
+    if total_app && matches!(&*ctx.get_desc(uncommitted_funct_ty), TypeDesc::Tvar(_)) {
+        let params = args
+            .iter()
+            .map(|(label, _)| {
+                crate::types::TypeArg::new(
+                    convert_arg_label_for_ctx(label, tctx.arena),
+                    ctx.new_var(None),
+                )
+            })
+            .collect();
+        let ret = ctx.new_var(None);
+        let is_identity = matches!(
+            &typed_funct.exp_desc,
+            ExpressionDesc::Texp_ident(_, _, desc)
+                if matches!(&desc.val_kind, crate::types::ValueKind::ValPrim(prim) if prim.prim_name == "%identity")
+        );
+        if ctx.get_level(uncommitted_funct_ty) >= ctx.get_level(ret) && !is_identity {
+            for (_, arg) in args {
+                tctx.report_warning(tctx.arena.get_expr(*arg).pexp_loc, Warning::UnusedArgument);
+            }
+        }
+        let arrow = ctx.new_type(TypeDesc::Tarrow { args: params, ret });
+        unify_expression_types(tctx, loc, uncommitted_funct_ty, arrow, None)?;
+    }
+
     // Match OCaml's use of expand_head when deciding application behavior.
     let mut current_ty = typed_funct.exp_type;
     // OCaml typecore.ml:
@@ -9745,17 +9773,17 @@ fn type_application(
         }
     }
 
-    // Re-wrap omitted parameters for partial/labeled applications.
+    // compiler/ml/typecore.ml:4191-4200: a partial application returns one
+    // n-ary arrow containing exactly the omitted parameters, in declaration
+    // order (rather than rebuilding a nested unary chain).
     let mut result_ty = current_ty0;
-    for omitted_arrow in omitted.iter().rev() {
-        result_ty = new_arrow_with_level(
-            ctx,
-            omitted_arrow.label.clone(),
-            omitted_arrow.arg_ty,
-            result_ty,
-            omitted_arrow.level,
-            None,
-        );
+    if !omitted.is_empty() {
+        let level = omitted[0].level;
+        let params = omitted
+            .iter()
+            .map(|arg| crate::types::TypeArg::new(arg.label.clone(), arg.arg_ty))
+            .collect();
+        result_ty = ctx.alloc_type_at_level(TypeDesc::Tarrow { args: params, ret: result_ty }, level);
     }
 
     // OCaml update_uncurried_arity: preserve remaining uncurried arity on
