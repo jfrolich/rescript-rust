@@ -11536,6 +11536,109 @@ fn add_covered_literal(covered_literals: &mut Vec<Constant>, literal: Constant) 
     }
 }
 
+fn generalized_tuple_space_is_covered(
+    tctx: &mut TypeCheckContext<'_>,
+    env: &Env,
+    previous: &[PartialCheckCase<'_>],
+    current: &Pattern,
+) -> bool {
+    let current_items = match &current.pat_desc {
+        PatternDesc::Tpat_tuple(items) => items,
+        _ => match previous.first().map(|row| &row.lhs.pat_desc) {
+            Some(PatternDesc::Tpat_tuple(items)) => items,
+            _ => return false,
+        },
+    };
+    if current_items.len() < 2
+        || !previous
+            .iter()
+            .any(|row| typed_pattern_contains_generalized_constructor(row.lhs))
+    {
+        return false;
+    }
+
+    let mut constructor_sets = Vec::with_capacity(current_items.len());
+    for item in current_items {
+        let Some(constructors) = variant_constructors_for_type(tctx, env, item.pat_type) else {
+            return false;
+        };
+        constructor_sets.push(constructors);
+    }
+
+    let mut covered = HashSet::default();
+    for row in previous {
+        let PatternDesc::Tpat_tuple(items) = &row.lhs.pat_desc else {
+            continue;
+        };
+        let names = items
+            .iter()
+            .map(|item| match &item.pat_desc {
+                PatternDesc::Tpat_construct(_, cstr, _) => Some(cstr.cstr_name.clone()),
+                _ => None,
+            })
+            .collect::<Option<Vec<_>>>();
+        if let Some(names) = names {
+            covered.insert(names);
+        }
+    }
+
+    fn visit(
+        ctx: &TypeContext,
+        env: &Env,
+        sets: &[Vec<crate::types::decl::ConstructorDeclaration>],
+        index: usize,
+        names: &mut Vec<String>,
+        results: &mut Vec<TypeExprRef>,
+        covered: &HashSet<Vec<String>>,
+        checked: &mut usize,
+    ) -> bool {
+        if index == sets.len() {
+            *checked += 1;
+            return *checked <= 256 && covered.contains(names);
+        }
+        for constructor in &sets[index] {
+            let Some(result) = constructor.cd_res else {
+                return false;
+            };
+            if results
+                .iter()
+                .any(|previous| !type_exprs_may_unify_without_alloc(ctx, env, *previous, result))
+            {
+                continue;
+            }
+            names.push(constructor.cd_id.name().to_string());
+            results.push(result);
+            let is_covered = visit(
+                ctx,
+                env,
+                sets,
+                index + 1,
+                names,
+                results,
+                covered,
+                checked,
+            );
+            results.pop();
+            names.pop();
+            if !is_covered {
+                return false;
+            }
+        }
+        true
+    }
+
+    visit(
+        tctx.type_ctx,
+        env,
+        &constructor_sets,
+        0,
+        &mut Vec::new(),
+        &mut Vec::new(),
+        &covered,
+        &mut 0,
+    )
+}
+
 fn report_unused_match_cases<'case>(
     tctx: &mut TypeCheckContext<'_>,
     env: &Env,
@@ -11568,8 +11671,14 @@ fn report_unused_match_cases<'case>(
                 .cloned()
                 .collect::<Vec<_>>();
             if !non_dict_previous.is_empty()
-                && check_partial_simple_rows(ctx, env, &non_dict_previous)
+                && (check_partial_simple_rows(ctx, env, &non_dict_previous)
                     == crate::types::typedtree::Partial::Total
+                    || generalized_tuple_space_is_covered(
+                        tctx,
+                        env,
+                        &non_dict_previous,
+                        &case.c_lhs,
+                    ))
             {
                 tctx.report_warning(case.c_lhs.pat_loc, Warning::UnreachableCase);
                 if case.c_guard.is_none() {
