@@ -11048,32 +11048,20 @@ impl<'a> TypeExprPrinter<'a> {
     }
 
     fn format_arrow(&mut self, ty: TypeExprRef) -> String {
-        let mut args = Vec::new();
-        let mut current = ty;
-        let mut seen = AHashSet::new();
-
-        loop {
-            let repr = self.type_ctx.repr(current);
-            if !seen.insert(repr) {
-                break;
-            }
-
-            match &*self.type_ctx.get_desc(repr) {
-                TypeDesc::Tarrow { args: params, ret } => {
-                    args.extend(params.iter().map(|arg| {
-                        (
-                            self.format_arrow_arg(&arg.lbl, arg.typ),
-                            !matches!(arg.lbl, TypeArgLabel::Nolabel),
-                        )
-                    }));
-                    current = *ret;
-                }
-                TypeDesc::Tlink(next) | TypeDesc::Tsubst(next) => current = *next,
-                _ => break,
-            }
-        }
-
-        let ret = self.format(current);
+        let (params, ret) = match &*self.type_ctx.get_desc(self.type_ctx.repr(ty)) {
+            TypeDesc::Tarrow { args, ret } => (args.clone(), *ret),
+            _ => unreachable!("format_arrow called for a non-arrow type"),
+        };
+        let args = params
+            .iter()
+            .map(|arg| {
+                (
+                    self.format_arrow_arg(&arg.lbl, arg.typ),
+                    !matches!(arg.lbl, TypeArgLabel::Nolabel),
+                )
+            })
+            .collect::<Vec<_>>();
+        let ret = self.format(ret);
         if let [(arg, true)] = args.as_slice() {
             format!("({arg}) => {ret}")
         } else if let [(arg, false)] = args.as_slice() {

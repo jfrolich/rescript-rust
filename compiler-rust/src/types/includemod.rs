@@ -402,10 +402,10 @@ fn format_include_error(
         } => {
             let actual_text = format_value_description(type_ctx, name, actual);
             let expected_text = format_value_description(type_ctx, name, expected);
-            output.push_str("  Values do not match: ");
-            output.push_str(&actual_text);
-            output.push_str(" is not included in ");
-            output.push_str(&expected_text);
+            output.push_str("  Values do not match:\n    ");
+            output.push_str(&indent_lines(&actual_text, "    ").trim_start());
+            output.push_str("\n  is not included in\n    ");
+            output.push_str(&indent_lines(&expected_text, "    ").trim_start());
             output.push('\n');
             if let Some((actual_arity, expected_arity)) = arity_mismatch {
                 let arguments = |arity: usize| {
@@ -1074,31 +1074,15 @@ impl<'a> TypeExprErrorPrinter<'a> {
     }
 
     fn format_arrow(&mut self, ty: TypeExprRef) -> String {
-        let mut args = Vec::new();
-        let mut current = ty;
-        let mut seen = HashSet::new();
-
-        loop {
-            let repr = self.type_ctx.repr(current);
-            if !seen.insert(repr) {
-                break;
-            }
-
-            match &*self.type_ctx.get_desc(repr) {
-                TypeDesc::Tarrow { args: params, ret } => {
-                    args.extend(
-                        params
-                            .iter()
-                            .map(|arg| self.format_arrow_arg(&arg.lbl, arg.typ)),
-                    );
-                    current = *ret;
-                }
-                TypeDesc::Tlink(next) | TypeDesc::Tsubst(next) => current = *next,
-                _ => break,
-            }
-        }
-
-        let ret = self.format(current);
+        let (params, ret) = match &*self.type_ctx.get_desc(self.type_ctx.repr(ty)) {
+            TypeDesc::Tarrow { args, ret } => (args.clone(), *ret),
+            _ => unreachable!("format_arrow called for a non-arrow type"),
+        };
+        let args = params
+            .iter()
+            .map(|arg| self.format_arrow_arg(&arg.lbl, arg.typ))
+            .collect::<Vec<_>>();
+        let ret = self.format(ret);
         if args.len() == 1 {
             format!("{} => {ret}", args[0])
         } else {
