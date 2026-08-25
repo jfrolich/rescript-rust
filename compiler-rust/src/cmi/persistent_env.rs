@@ -2740,7 +2740,6 @@ fn decode_cmj_external_spec(value: &OcamlValue) -> Option<ExternalSpec> {
             external_module_name: decode_cmj_external_module_name_option(&fields[1])?,
             splice: fields[2].as_bool(),
             scopes: decode_cmj_string_list(&fields[3])?,
-            tagged_template: false,
         }),
         OcamlValue::Block(6, fields) if fields.len() >= 4 => Some(ExternalSpec::JsNew {
             name: fields[0].as_string().to_string(),

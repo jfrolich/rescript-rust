@@ -11287,7 +11287,6 @@ fn decode_external_spec(value: &OcamlValue) -> Option<ExternalSpec> {
                 .and_then(decode_external_module_name),
             splice: splice.as_bool(),
             scopes: decode_string_list(scopes),
-            tagged_template: false,
         }),
         (5, [name, splice, scopes]) => Some(ExternalSpec::JsSend {
             name: name.as_string().to_string(),

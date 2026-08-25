@@ -2185,6 +2185,13 @@ fn validate_external_attribute_payload_errors(
 ) -> PpxResult<()> {
     for (attr_name, payload) in attrs {
         match arena.get_string(attr_name.txt) {
+            "taggedTemplate" => {
+                // Upstream compiler/frontend/ast_external_process.ml:354-362.
+                return Err(PpxError::at_loc(
+                    attr_name.loc,
+                    "The @taggedTemplate decorator has been removed. Bind the external with the builtin taggedTemplate<'param, 'output> type instead, e.g. `@module(\"x\") external sql: taggedTemplate<'a, 'b> = \"sql\"`.",
+                ));
+            }
             "val" | "send" | "set" | "get" | "new" => {
                 if !payload_is_empty_str(payload)
                     && !payload_is_single_string_literal(payload, arena)

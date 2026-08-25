@@ -997,7 +997,6 @@ impl LambdaCompiler {
                 external_module_name,
                 splice,
                 scopes,
-                tagged_template,
             }) => {
                 let target = self.translate_scoped_module_value(
                     external_module_name.as_ref(),
@@ -1005,28 +1004,6 @@ impl LambdaCompiler {
                     scopes,
                     dynamic_import,
                 );
-
-                if *tagged_template {
-                    match args.as_slice() {
-                        [
-                            Expression {
-                                desc: ExpressionDesc::Array(strings, _),
-                                ..
-                            },
-                            Expression {
-                                desc: ExpressionDesc::Array(values, _),
-                                ..
-                            },
-                        ] => {
-                            return Expression::new(ExpressionDesc::TaggedTemplate(
-                                Box::new(target),
-                                strings.clone(),
-                                values.clone(),
-                            ));
-                        }
-                        _ => {}
-                    }
-                }
 
                 let (args, effect) = self.assemble_external_args(arg_types, args, *splice);
                 self.add_external_effect(

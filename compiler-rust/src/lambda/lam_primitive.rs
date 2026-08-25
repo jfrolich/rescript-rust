@@ -145,7 +145,6 @@ pub enum ExternalSpec {
         external_module_name: Option<ExternalModuleName>,
         splice: bool,
         scopes: Vec<String>,
-        tagged_template: bool,
     },
     JsSend {
         name: String,
