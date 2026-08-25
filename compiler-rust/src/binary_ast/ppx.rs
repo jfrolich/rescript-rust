@@ -3669,7 +3669,6 @@ struct ExternalDesc {
     get_index: bool,
     set_index: bool,
     splice: bool,
-    tagged_template: bool,
     scopes: Vec<String>,
     return_wrapper: ReturnWrapper,
     mk_obj: bool,
@@ -3692,7 +3691,6 @@ impl Default for ExternalDesc {
             get_index: false,
             set_index: false,
             splice: false,
-            tagged_template: false,
             scopes: Vec::new(),
             return_wrapper: ReturnWrapper::ReturnUnset,
             mk_obj: false,
@@ -3798,10 +3796,6 @@ fn parse_external_attrs(
             }
             "variadic" => {
                 desc.splice = true;
-            }
-            "taggedTemplate" => {
-                desc.splice = true;
-                desc.tagged_template = true;
             }
             "scope" => {
                 let scopes = get_payload_strings(payload, arena);
@@ -4346,7 +4340,6 @@ fn build_ffi_type(
                 external_module_name,
                 splice: desc.splice,
                 scopes: desc.scopes.clone(),
-                tagged_template: desc.tagged_template,
             }
         }
     } else if external_module_name.is_some() {
@@ -4364,7 +4357,6 @@ fn build_ffi_type(
                 external_module_name,
                 splice: desc.splice,
                 scopes: desc.scopes.clone(),
-                tagged_template: desc.tagged_template,
             }
         }
     } else if arity == 0 {
@@ -4381,7 +4373,6 @@ fn build_ffi_type(
             external_module_name: None,
             splice: desc.splice,
             scopes: desc.scopes.clone(),
-            tagged_template: desc.tagged_template,
         }
     };
 

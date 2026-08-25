@@ -260,7 +260,6 @@ pub enum ExternalSpec {
         external_module_name: Option<ExternalModuleName>,
         splice: bool,
         scopes: Vec<String>,
-        tagged_template: bool,
     },
     JsSend {
         name: String,
@@ -323,14 +322,12 @@ impl Marshal for ExternalSpec {
                 external_module_name,
                 splice,
                 scopes,
-                tagged_template,
             } => {
-                w.write_block_header(4, 5);
+                w.write_block_header(4, 4);
                 w.write_string(name.as_bytes());
                 marshal_option(w, external_module_name, |w, m| m.marshal(w));
                 w.write_int(if *splice { 1 } else { 0 });
                 marshal_string_list(w, scopes);
-                w.write_int(if *tagged_template { 1 } else { 0 });
             }
             ExternalSpec::JsSend {
                 name,
@@ -884,7 +881,6 @@ mod tests {
                 external_module_name: None,
                 splice: false,
                 scopes: vec![],
-                tagged_template: false,
             },
         };
 
