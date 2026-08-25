@@ -1273,6 +1273,9 @@ impl LambdaCompiler {
             ));
         }
 
+        // OCaml's fold builds object properties by prepending each compiled
+        // override, so the final JS object stores them in reverse source order.
+        props.reverse();
         Some(Compiled {
             prelude,
             expr: Expression::new(ExpressionDesc::Object(Some(Box::new(init_expr)), props)),
