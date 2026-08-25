@@ -3447,7 +3447,7 @@ fn extract_type_from_pat_variant_spread(
     };
 
     let constructors = match &type_decl.type_kind {
-        crate::types::TypeKind::TypeVariant(cstrs) => {
+        crate::types::TypeKind::TypeVariant(cstrs, _) => {
             if !type_decl.type_params.is_empty() {
                 return Err(TypeCoreError::TypeParamsNotSupported {
                     loc: lid.loc,
@@ -5754,37 +5754,40 @@ fn record_rest_instance_declaration(
                 .collect(),
             repr.clone(),
         ),
-        crate::types::TypeKind::TypeVariant(constrs) => crate::types::TypeKind::TypeVariant(
-            constrs
-                .iter()
-                .map(|cstr| {
-                    let mut cstr = cstr.clone();
-                    match &cstr.cd_args {
-                        crate::types::ConstructorArguments::CstrTuple(args) => {
-                            cstr.cd_args = crate::types::ConstructorArguments::CstrTuple(
-                                args.iter().map(|arg| copy(*arg)).collect(),
-                            );
+        crate::types::TypeKind::TypeVariant(constrs, layout) => {
+            crate::types::TypeKind::TypeVariant(
+                constrs
+                    .iter()
+                    .map(|cstr| {
+                        let mut cstr = cstr.clone();
+                        match &cstr.cd_args {
+                            crate::types::ConstructorArguments::CstrTuple(args) => {
+                                cstr.cd_args = crate::types::ConstructorArguments::CstrTuple(
+                                    args.iter().map(|arg| copy(*arg)).collect(),
+                                );
+                            }
+                            crate::types::ConstructorArguments::CstrRecord(labels) => {
+                                cstr.cd_args = crate::types::ConstructorArguments::CstrRecord(
+                                    labels
+                                        .iter()
+                                        .map(|label| {
+                                            let mut label = label.clone();
+                                            label.ld_type = copy(label.ld_type);
+                                            label
+                                        })
+                                        .collect(),
+                                );
+                            }
                         }
-                        crate::types::ConstructorArguments::CstrRecord(labels) => {
-                            cstr.cd_args = crate::types::ConstructorArguments::CstrRecord(
-                                labels
-                                    .iter()
-                                    .map(|label| {
-                                        let mut label = label.clone();
-                                        label.ld_type = copy(label.ld_type);
-                                        label
-                                    })
-                                    .collect(),
-                            );
+                        if let Some(res) = cstr.cd_res {
+                            cstr.cd_res = Some(copy(res));
                         }
-                    }
-                    if let Some(res) = cstr.cd_res {
-                        cstr.cd_res = Some(copy(res));
-                    }
-                    cstr
-                })
-                .collect(),
-        ),
+                        cstr
+                    })
+                    .collect(),
+                *layout,
+            )
+        }
         crate::types::TypeKind::TypeOpen => crate::types::TypeKind::TypeOpen,
     };
     crate::types::decl::TypeDeclaration {
@@ -5869,6 +5872,7 @@ fn record_rest_extract_instantiated_concrete_typedecl(
 /// source labels plus an optional inlined-record tag name to exclude at
 /// runtime (`runtime_excluded_labels`).
 fn record_rest_source_fields_and_repr(
+    type_ctx: &crate::types::TypeContext,
     decl: &crate::types::decl::TypeDeclaration,
 ) -> Result<(Vec<crate::types::decl::LabelDeclaration>, Option<String>), RecordRestError> {
     match &decl.type_kind {
@@ -5886,25 +5890,17 @@ fn record_rest_source_fields_and_repr(
                 // compiler/ml/typecore_record_rest.ml runtime_excluded_labels:
                 // only non-untagged inlined records contribute a tag exclusion.
                 let tag_exclusion = match repr {
-                    crate::types::RecordRepresentation::RecordInlined { attrs, .. } => {
-                        let untagged = attrs.iter().any(|a| a.attr_name.txt == "untagged");
-                        if !untagged {
-                            Some(
-                                attrs
-                                    .iter()
-                                    .find(|a| a.attr_name.txt == "tag")
-                                    .and_then(|a| match &a.attr_payload {
-                                        crate::types::decl::AttributePayload::Str(value) => {
-                                            Some(value.clone())
-                                        }
-                                        _ => None,
-                                    })
-                                    .unwrap_or_else(|| "TAG".to_string()),
-                            )
-                        } else {
-                            None
+                    crate::types::RecordRepresentation::RecordInlined {
+                        representation, ..
+                    } => match representation.representation(type_ctx) {
+                        crate::types::VariantConstructorCase::Block(block)
+                            if !block.runtime.untagged =>
+                        {
+                            Some(block.runtime.tag_name.unwrap_or_else(|| "TAG".to_string()))
                         }
-                    }
+                        crate::types::VariantConstructorCase::Constant(_)
+                        | crate::types::VariantConstructorCase::Block(_) => None,
+                    },
                     _ => None,
                 };
                 Ok((labels.clone(), tag_exclusion))
@@ -6114,14 +6110,16 @@ fn type_record_pat_rest(
     let source_result =
         record_rest_extract_instantiated_concrete_typedecl(tctx, env, loc, record_ty);
     let (source_fields, tag_exclusion) = match source_result {
-        Ok(Some(source_decl)) => match record_rest_source_fields_and_repr(&source_decl) {
-            Ok(v) => v,
-            Err(err) => return rest_err(loc, err),
-        },
+        Ok(Some(source_decl)) => {
+            match record_rest_source_fields_and_repr(tctx.type_ctx, &source_decl) {
+                Ok(v) => v,
+                Err(err) => return rest_err(loc, err),
+            }
+        }
         Ok(None) | Err(_) => {
             // unify record_ty with rest_type_expr, then read fields off rest_decl.
             unify_pattern_types(tctx, rest_type_lid.loc, record_ty, rest_type_expr)?;
-            match record_rest_source_fields_and_repr(&rest_decl) {
+            match record_rest_source_fields_and_repr(tctx.type_ctx, &rest_decl) {
                 Ok(v) => v,
                 Err(err) => return rest_err(rest_type_lid.loc, err),
             }
@@ -12446,7 +12444,7 @@ fn variant_constructors_for_type(
     drop(desc);
     let decl = lookup_type_decl_for_path(&path, env, &mut tctx.persistent_env, ctx)?;
     match &decl.type_kind {
-        crate::types::TypeKind::TypeVariant(constructors) => Some(constructors.clone()),
+        crate::types::TypeKind::TypeVariant(constructors, _) => Some(constructors.clone()),
         _ => None,
     }
 }
@@ -15522,7 +15520,6 @@ fn type_function_nary_with_newtypes(
                         type_attributes: vec![],
                         type_immediate: false,
                         type_representation: crate::types::decl::TypeRepresentation::Boxed,
-                        type_variant_layout: None,
                         type_inlined_types: vec![],
                         type_path: None,
                     },
@@ -18581,7 +18578,7 @@ fn inline_record_decl_from_variant_type<'a>(
     type_decl: &crate::types::TypeDeclaration,
     cstr_name: &str,
 ) -> Option<crate::types::TypeDeclaration> {
-    let crate::types::TypeKind::TypeVariant(ref constrs) = type_decl.type_kind else {
+    let crate::types::TypeKind::TypeVariant(ref constrs, layout) = type_decl.type_kind else {
         return None;
     };
 
@@ -18596,8 +18593,7 @@ fn inline_record_decl_from_variant_type<'a>(
         .count() as i32;
     let num_nonconsts = constrs.len() as i32 - num_consts;
 
-    let mut block_tag = 0i32;
-    for cd in constrs {
+    for (position, cd) in constrs.iter().enumerate() {
         let is_constant = matches!(
             cd.cd_args,
             crate::types::ConstructorArguments::CstrTuple(ref args) if args.is_empty()
@@ -18613,10 +18609,11 @@ fn inline_record_decl_from_variant_type<'a>(
                     crate::types::RecordRepresentation::RecordUnboxed(false)
                 } else {
                     crate::types::RecordRepresentation::RecordInlined {
-                        tag: block_tag,
                         name: cstr_name.to_string(),
-                        num_nonconsts,
-                        attrs: cd.cd_attributes.clone(),
+                        representation: crate::types::ConstructorReference {
+                            variant: layout,
+                            position,
+                        },
                     }
                 };
             return Some(crate::types::TypeDeclaration {
@@ -18634,15 +18631,12 @@ fn inline_record_decl_from_variant_type<'a>(
                 type_attributes: vec![],
                 type_immediate: false,
                 type_representation: crate::types::TypeRepresentation::Boxed,
-                type_variant_layout: None,
                 type_inlined_types: vec![],
                 type_path: None,
             });
         }
 
-        if !is_constant {
-            block_tag += 1;
-        }
+        let _ = is_constant;
     }
 
     None
@@ -19448,7 +19442,6 @@ fn type_newtype(
                 type_attributes: vec![],
                 type_immediate: false,
                 type_representation: crate::types::decl::TypeRepresentation::Boxed,
-                type_variant_layout: None,
                 type_inlined_types: vec![],
                 type_path: None,
             },
@@ -19874,7 +19867,6 @@ fn type_letexception(
                         type_attributes: vec![],
                         type_immediate: false,
                         type_representation: crate::types::TypeRepresentation::Boxed,
-                        type_variant_layout: None,
                         type_inlined_types: vec![],
                         type_path: None,
                     };
@@ -20685,7 +20677,7 @@ fn unbound_constructor_alternatives(
                     .flat_map(|item| match item {
                         crate::types::decl::SignatureItem::SigType(_, decl, _) => {
                             match &decl.type_kind {
-                                crate::types::decl::TypeKind::TypeVariant(constructors) => {
+                                crate::types::decl::TypeKind::TypeVariant(constructors, _) => {
                                     constructors
                                         .iter()
                                         .map(|cstr| cstr.cd_id.name().to_string())
@@ -24478,7 +24470,7 @@ where
                 repr.clone(),
             )
         }
-        crate::types::decl::TypeKind::TypeVariant(constructors) => {
+        crate::types::decl::TypeKind::TypeVariant(constructors, layout) => {
             crate::types::decl::TypeKind::TypeVariant(
                 constructors
                     .iter()
@@ -24498,6 +24490,7 @@ where
                         cd_attributes: constructor.cd_attributes.clone(),
                     })
                     .collect(),
+                *layout,
             )
         }
     }
@@ -24603,7 +24596,6 @@ where
         type_attributes: decl.type_attributes.clone(),
         type_immediate: decl.type_immediate,
         type_representation: decl.type_representation,
-        type_variant_layout: decl.type_variant_layout,
         type_inlined_types: decl
             .type_inlined_types
             .iter()
@@ -26578,7 +26570,7 @@ fn extract_variant_type_path_from_expected_with_persistent_env<'a>(
                 return Some(current);
             };
             match decl.type_kind {
-                crate::types::TypeKind::TypeVariant(_) | crate::types::TypeKind::TypeOpen => {
+                crate::types::TypeKind::TypeVariant(_, _) | crate::types::TypeKind::TypeOpen => {
                     return Some(current);
                 }
                 crate::types::TypeKind::TypeAbstract => {
@@ -29292,14 +29284,14 @@ fn lookup_constructor_by_expected_type<'b>(
     let result_type_path = concrete_type_path.clone();
 
     // Check if it's a variant type with a matching constructor
-    if let crate::types::TypeKind::TypeVariant(ref constrs) = concrete_type_decl.type_kind {
+    if let crate::types::TypeKind::TypeVariant(ref constrs, layout) = concrete_type_decl.type_kind {
         let num_consts = constrs.iter()
             .filter(|c| matches!(c.cd_args, crate::types::ConstructorArguments::CstrTuple(ref args) if args.is_empty()))
             .count() as i32;
         let num_nonconsts = constrs.len() as i32 - num_consts;
         let mut const_idx = 0i32;
         let mut block_idx = 0i32;
-        for cd in constrs {
+        for (position, cd) in constrs.iter().enumerate() {
             let is_constant = matches!(cd.cd_args, crate::types::ConstructorArguments::CstrTuple(ref args) if args.is_empty());
             if cd.cd_id.name() == cstr_name {
                 let mut inst_cache = HashMap::new();
@@ -29403,10 +29395,11 @@ fn lookup_constructor_by_expected_type<'b>(
                                     crate::types::RecordRepresentation::RecordUnboxed(false)
                                 } else {
                                     crate::types::RecordRepresentation::RecordInlined {
-                                        tag: block_idx,
                                         name: cstr_name.to_string(),
-                                        num_nonconsts,
-                                        attrs: cd.cd_attributes.clone(),
+                                        representation: crate::types::ConstructorReference {
+                                            variant: layout,
+                                            position,
+                                        },
                                     }
                                 },
                             ),
@@ -29421,7 +29414,6 @@ fn lookup_constructor_by_expected_type<'b>(
                             type_attributes: vec![],
                             type_immediate: false,
                             type_representation: crate::types::TypeRepresentation::Boxed,
-                            type_variant_layout: None,
                             type_inlined_types: vec![],
                             type_path: None,
                         };
@@ -31923,7 +31915,8 @@ fn lookup_type_decl_for_path_with_cache_mode<'a>(
             && let Some(parent_decl) =
                 lookup_type_decl_for_path_with_cache_mode(parent, env, pers_env, ctx, cache_mode)
         {
-            if let crate::types::TypeKind::TypeVariant(ref constrs) = parent_decl.type_kind {
+            if let crate::types::TypeKind::TypeVariant(ref constrs, layout) = parent_decl.type_kind
+            {
                 let num_consts = constrs
                     .iter()
                     .filter(|c| {
@@ -31936,7 +31929,7 @@ fn lookup_type_decl_for_path_with_cache_mode<'a>(
                     .count() as i32;
                 let num_nonconsts = constrs.len() as i32 - num_consts;
                 let mut block_idx = 0i32;
-                for cd in constrs {
+                for (position, cd) in constrs.iter().enumerate() {
                     let is_constant = matches!(
                         cd.cd_args,
                         crate::types::ConstructorArguments::CstrTuple(ref args) if args.is_empty()
@@ -31958,10 +31951,11 @@ fn lookup_type_decl_for_path_with_cache_mode<'a>(
                                         crate::types::RecordRepresentation::RecordUnboxed(false)
                                     } else {
                                         crate::types::RecordRepresentation::RecordInlined {
-                                            tag: block_idx,
                                             name: type_name.to_string(),
-                                            num_nonconsts,
-                                            attrs: cd.cd_attributes.clone(),
+                                            representation: crate::types::ConstructorReference {
+                                                variant: layout,
+                                                position,
+                                            },
                                         }
                                     },
                                 ),
@@ -31976,7 +31970,6 @@ fn lookup_type_decl_for_path_with_cache_mode<'a>(
                                 type_attributes: vec![],
                                 type_immediate: false,
                                 type_representation: crate::types::TypeRepresentation::Boxed,
-                                type_variant_layout: None,
                                 type_inlined_types: vec![],
                                 type_path: None,
                             }));

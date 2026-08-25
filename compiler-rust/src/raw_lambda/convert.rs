@@ -3756,19 +3756,22 @@ impl<'a> RawLambdaConverter<'a> {
                     _ => RawLambda::unit(),
                 },
                 RecordRepresentation::RecordInlined {
-                    tag,
                     name,
-                    num_nonconsts,
-                    attrs,
+                    representation,
                 } => {
-                    let runtime = block_runtime_from_attributes(name.clone(), &attrs);
+                    let crate::types::VariantConstructorCase::Block(block) =
+                        representation.representation(self.type_ctx)
+                    else {
+                        unreachable!("inlined record must reference a block constructor")
+                    };
+                    let tag = representation.block_index(self.type_ctx) as i32;
                     let tag_info = TagInfo::RecordInlined {
                         name,
-                        num_nonconst: num_nonconsts,
+                        num_nonconst: representation.num_blocks(self.type_ctx) as i32,
                         fields: fields_info,
                         logical_field_count,
                         mutable_flag,
-                        runtime,
+                        runtime: block.runtime,
                     };
                     // OCaml: if mut = Mutable then raise Not_constant
                     if matches!(mutable_flag, ParserMutableFlag::Mutable) {
@@ -12038,7 +12041,6 @@ mod tests {
                 type_attributes: vec![],
                 type_immediate: false,
                 type_representation: crate::types::TypeRepresentation::Boxed,
-                type_variant_layout: None,
                 type_inlined_types: vec![],
                 type_path: None,
             })),
@@ -12712,7 +12714,6 @@ external myJson: Js.Json.t = "default"
             type_attributes: vec![],
             type_immediate: false,
             type_representation: crate::types::TypeRepresentation::Boxed,
-            type_variant_layout: None,
             type_inlined_types: vec![],
             type_path: None,
         }

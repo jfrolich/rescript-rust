@@ -7005,7 +7005,7 @@ fn get_variant_constructors_from_env(
 
         if let Some(decl) = env_decl {
             match &decl.type_kind {
-                TypeKind::TypeVariant(cds) => return build_descriptions(cds, result_type),
+                TypeKind::TypeVariant(cds, _) => return build_descriptions(cds, result_type),
                 TypeKind::TypeAbstract => {
                     if let Some(manifest) = decl.type_manifest {
                         let manifest = ctx_ref.repr(manifest);
@@ -7019,7 +7019,7 @@ fn get_variant_constructors_from_env(
             }
         } else if let Some(decl) = fallback_decl {
             match &decl.type_kind {
-                TypeKind::TypeVariant(cds) => return build_descriptions(cds, result_type),
+                TypeKind::TypeVariant(cds, _) => return build_descriptions(cds, result_type),
                 TypeKind::TypeAbstract => {
                     if let Some(manifest) = decl.type_manifest {
                         let manifest = ctx_ref.repr(manifest);
@@ -9029,34 +9029,19 @@ fn resolve_labels_from_type(
                 }
             });
         if let Some(parent_decl) = parent_decl {
-            if let crate::types::TypeKind::TypeVariant(ref constrs) = parent_decl.type_kind {
-                for cd in constrs {
+            if let crate::types::TypeKind::TypeVariant(ref constrs, layout) = parent_decl.type_kind
+            {
+                for (position, cd) in constrs.iter().enumerate() {
                     if cd.cd_id.name() == cstr_name.as_str() {
                         if let crate::types::ConstructorArguments::CstrRecord(ref labels) =
                             cd.cd_args
                         {
-                            // Determine the block tag for this constructor
-                            let mut block_tag = 0i32;
-                            let num_nonconsts = constrs.iter().filter(|c| {
-                                !matches!(c.cd_args, crate::types::ConstructorArguments::CstrTuple(ref args) if args.is_empty())
-                            }).count() as i32;
-                            for c in constrs {
-                                if c.cd_id.name() == cstr_name.as_str() {
-                                    break;
-                                }
-                                let is_constant = matches!(
-                                    c.cd_args,
-                                    crate::types::ConstructorArguments::CstrTuple(ref args) if args.is_empty()
-                                );
-                                if !is_constant {
-                                    block_tag += 1;
-                                }
-                            }
                             let repr = RecordRepresentation::RecordInlined {
-                                tag: block_tag,
                                 name: cstr_name.clone(),
-                                num_nonconsts,
-                                attrs: cd.cd_attributes.clone(),
+                                representation: crate::types::ConstructorReference {
+                                    variant: layout,
+                                    position,
+                                },
                             };
                             return Some(build_label_descriptions(
                                 labels,
@@ -9427,7 +9412,7 @@ fn names_from_construct_pattern(ctx_ref: &TypeContext, pat: &Pattern) -> Option<
         // guarded by ctype's no-disk invariant.
         let decl = find_type_decl_pub(ctx_ref, env, path)?;
         match &decl.type_kind {
-            TypeKind::TypeVariant(cstrs) => Some(switch_names_from_variant(ctx_ref, env, cstrs)),
+            TypeKind::TypeVariant(cstrs, _) => Some(switch_names_from_variant(ctx_ref, env, cstrs)),
             TypeKind::TypeAbstract => decl
                 .type_manifest
                 .and_then(|manifest| resolve_type(ctx_ref, manifest, env, seen)),

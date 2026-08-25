@@ -215,6 +215,17 @@ impl ConstructorReference {
     pub fn representation(self, ctx: &TypeContext) -> ConstructorCase {
         ctx.variant_layout(self.variant).constructors[self.position].clone()
     }
+
+    pub fn block_index(self, ctx: &TypeContext) -> usize {
+        ctx.variant_layout(self.variant).constructors[..self.position]
+            .iter()
+            .filter(|case| matches!(case, ConstructorCase::Block(_)))
+            .count()
+    }
+
+    pub fn num_blocks(self, ctx: &TypeContext) -> usize {
+        ctx.variant_layout(self.variant).num_blocks()
+    }
 }
 
 pub fn plain_layout(

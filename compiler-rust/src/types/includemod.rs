@@ -804,7 +804,7 @@ fn format_type_declaration_with_options_and_rec(
             let fields = fields.join(", ");
             format!("{head} = {{{fields}}}")
         }
-        TypeKind::TypeVariant(constructors) => {
+        TypeKind::TypeVariant(constructors, _) => {
             if constructors.is_empty() {
                 format!("{head} = |")
             } else {
@@ -2593,13 +2593,14 @@ fn substitute_type_kind_paths<'a>(
                 .collect(),
             repr.clone(),
         ),
-        TypeKind::TypeVariant(constructors) => TypeKind::TypeVariant(
+        TypeKind::TypeVariant(constructors, layout) => TypeKind::TypeVariant(
             constructors
                 .iter()
                 .map(|constructor| {
                     substitute_constructor_declaration_paths(type_ctx, constructor, subst)
                 })
                 .collect(),
+            *layout,
         ),
     }
 }
@@ -2635,7 +2636,7 @@ fn collect_type_kind_types(kind: &TypeKind, types: &mut Vec<TypeExprRef>) {
         TypeKind::TypeRecord(labels, _) => {
             types.extend(labels.iter().map(|label| label.ld_type));
         }
-        TypeKind::TypeVariant(constructors) => {
+        TypeKind::TypeVariant(constructors, _) => {
             for constructor in constructors {
                 collect_constructor_argument_types(&constructor.cd_args, types);
                 if let Some(ty) = constructor.cd_res {
@@ -2711,13 +2712,14 @@ fn substitute_type_kind_with_copied_types(
                 .collect(),
             repr.clone(),
         ),
-        TypeKind::TypeVariant(constructors) => TypeKind::TypeVariant(
+        TypeKind::TypeVariant(constructors, layout) => TypeKind::TypeVariant(
             constructors
                 .iter()
                 .map(|constructor| {
                     substitute_constructor_declaration_with_copied_types(constructor, types)
                 })
                 .collect(),
+            *layout,
         ),
     }
 }
@@ -3221,7 +3223,7 @@ pub(crate) fn type_declarations<'a>(
     }
 
     let canonical_unboxed = |decl: &TypeDeclaration| {
-        decl.type_variant_layout
+        decl.variant_layout_ref()
             .map(|layout_ref| type_ctx.variant_layout(layout_ref).unboxed)
             .unwrap_or(decl.type_representation == crate::types::TypeRepresentation::Unboxed)
     };
@@ -3282,7 +3284,10 @@ pub(crate) fn type_declarations<'a>(
             }
         }
 
-        (TypeKind::TypeVariant(impl_constructors), TypeKind::TypeVariant(sig_constructors)) => {
+        (
+            TypeKind::TypeVariant(impl_constructors, _),
+            TypeKind::TypeVariant(sig_constructors, _),
+        ) => {
             if let Some(detail) = compare_variant_declarations(
                 type_ctx,
                 env,
@@ -3291,10 +3296,10 @@ pub(crate) fn type_declarations<'a>(
                 impl_constructors,
                 sig_constructors,
                 impl_decl
-                    .type_variant_layout
+                    .variant_layout_ref()
                     .map(|r| type_ctx.variant_layout(r)),
                 sig_decl
-                    .type_variant_layout
+                    .variant_layout_ref()
                     .map(|r| type_ctx.variant_layout(r)),
                 warnings,
             ) {
@@ -3509,7 +3514,7 @@ fn type_decl_has_attr(decl: &TypeDeclaration, name: &str) -> bool {
 }
 
 fn type_decl_tag_name(type_ctx: &TypeContext, decl: &TypeDeclaration) -> Option<String> {
-    decl.type_variant_layout
+    decl.variant_layout_ref()
         .and_then(|layout_ref| type_ctx.variant_layout(layout_ref).matching_facts.tag_name)
 }
 
@@ -4912,7 +4917,6 @@ mod tests {
             type_attributes: vec![],
             type_immediate: false,
             type_representation: TypeRepresentation::Boxed,
-            type_variant_layout: None,
             type_inlined_types: vec![],
             type_path,
         }
@@ -5195,7 +5199,6 @@ mod tests {
                     type_attributes: vec![],
                     type_immediate: false,
                     type_representation: TypeRepresentation::Boxed,
-                    type_variant_layout: None,
                     type_inlined_types: vec![],
                     type_path: None,
                 },

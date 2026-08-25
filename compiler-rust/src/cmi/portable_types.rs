@@ -456,7 +456,7 @@ fn hash_type_kind(hasher: &mut impl Hasher, kind: &TypeKind, entries: &[Portable
             hash_label_decls(hasher, labels, entries);
             std::mem::discriminant(repr).hash(hasher);
         }
-        TypeKind::TypeVariant(ctors) => {
+        TypeKind::TypeVariant(ctors, _) => {
             ctors.len().hash(hasher);
             for ctor in ctors {
                 ctor.cd_id.name().hash(hasher);
@@ -786,17 +786,17 @@ impl<'a> TypeGraphSerializer<'a> {
     }
 
     fn remap_type_decl(&mut self, td: &mut TypeDeclaration) {
-        if let Some(layout_ref) = td.type_variant_layout {
-            let index = if let Some(index) = self.variant_layout_cache.get(&layout_ref) {
+        if let TypeKind::TypeVariant(_, layout_ref) = &mut td.type_kind {
+            let index = if let Some(index) = self.variant_layout_cache.get(layout_ref) {
                 *index
             } else {
                 let index = self.variant_layouts.len();
                 self.variant_layouts
-                    .push(self.ctx.variant_layout(layout_ref));
-                self.variant_layout_cache.insert(layout_ref, index);
+                    .push(self.ctx.variant_layout(*layout_ref));
+                self.variant_layout_cache.insert(*layout_ref, index);
                 index
             };
-            td.type_variant_layout = Some(crate::types::VariantLayoutRef(index as u32));
+            *layout_ref = crate::types::VariantLayoutRef(index as u32);
         }
         for p in td.type_params.iter_mut() {
             *p = TypeExprRef::from_usize(self.serialize_type(*p));
@@ -811,7 +811,7 @@ impl<'a> TypeGraphSerializer<'a> {
                     self.remap_label_decl(label);
                 }
             }
-            TypeKind::TypeVariant(ctors) => {
+            TypeKind::TypeVariant(ctors, _) => {
                 for ctor in ctors.iter_mut() {
                     self.remap_ctor_decl(ctor);
                 }
@@ -1111,8 +1111,8 @@ fn remap_type_decl_refs(
     remap: &[TypeExprRef],
     layout_remap: &[crate::types::VariantLayoutRef],
 ) {
-    if let Some(layout_ref) = td.type_variant_layout {
-        td.type_variant_layout = Some(layout_remap[layout_ref.0 as usize]);
+    if let TypeKind::TypeVariant(_, layout_ref) = &mut td.type_kind {
+        *layout_ref = layout_remap[layout_ref.0 as usize];
     }
     for p in td.type_params.iter_mut() {
         *p = remap[p.index()];
@@ -1127,7 +1127,7 @@ fn remap_type_decl_refs(
                 remap_label_decl_refs(label, remap);
             }
         }
-        TypeKind::TypeVariant(ctors) => {
+        TypeKind::TypeVariant(ctors, _) => {
             for ctor in ctors.iter_mut() {
                 remap_ctor_decl_refs(ctor, remap);
             }

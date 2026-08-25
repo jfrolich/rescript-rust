@@ -38,7 +38,6 @@ pub struct SigReadContext<'a> {
     /// OCaml layout refs are shared mutable blocks. Preserve that physical
     /// sharing by mapping their marshal block identity to one TypeContext slot.
     variant_layout_cache: HashMap<usize, crate::types::VariantLayoutRef>,
-    last_type_kind_layout: Option<crate::types::VariantLayoutRef>,
 }
 
 impl<'a> SigReadContext<'a> {
@@ -48,7 +47,6 @@ impl<'a> SigReadContext<'a> {
             ctx,
             type_expr_cache: HashMap::new(),
             variant_layout_cache: HashMap::new(),
-            last_type_kind_layout: None,
         }
     }
 
@@ -212,10 +210,6 @@ impl<'a> SigReadContext<'a> {
             TypeRepresentation::Boxed
         };
         let type_inlined_types = self.read_type_inlined_types(&fields[11]);
-        let type_variant_layout = match &type_kind {
-            TypeKind::TypeVariant(_) => self.last_type_kind_layout.take(),
-            _ => None,
-        };
 
         TypeDeclaration {
             type_params,
@@ -229,7 +223,6 @@ impl<'a> SigReadContext<'a> {
             type_attributes,
             type_immediate,
             type_representation,
-            type_variant_layout,
             type_inlined_types,
             type_path: None,
         }
@@ -263,10 +256,12 @@ impl<'a> SigReadContext<'a> {
                     .iter()
                     .map(|cd| self.read_constructor_declaration(cd))
                     .collect();
-                self.last_type_kind_layout = fields
-                    .get(1)
-                    .map(|value| self.read_variant_layout_ref(value));
-                TypeKind::TypeVariant(constrs)
+                let layout = self.read_variant_layout_ref(
+                    fields
+                        .get(1)
+                        .expect("variant type kind must carry a layout"),
+                );
+                TypeKind::TypeVariant(constrs, layout)
             }
             _ => TypeKind::TypeAbstract, // fallback
         }
@@ -289,12 +284,9 @@ impl<'a> SigReadContext<'a> {
                 // Record_inlined {name; representation}
                 let (_, f) = fields[0].as_block();
                 let representation = self.read_constructor_reference(&f[1]);
-                let layout = self.ctx.variant_layout(representation.variant);
                 RecordRepresentation::RecordInlined {
-                    tag: representation.position as i32,
                     name: f[0].as_string().to_string(),
-                    num_nonconsts: layout.num_blocks() as i32,
-                    attrs: vec![],
+                    representation,
                 }
             }
             _ => RecordRepresentation::RecordRegular, // fallback

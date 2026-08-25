@@ -1798,7 +1798,6 @@ pub fn initial_env(ctx: &TypeContext) -> Env {
         type_attributes: vec![],
         type_immediate: immediate,
         type_representation: crate::types::TypeRepresentation::Boxed,
-        type_variant_layout: None,
         type_inlined_types: vec![],
         type_path: None,
     };
@@ -1810,6 +1809,21 @@ pub fn initial_env(ctx: &TypeContext) -> Env {
         cd_res: None,
         cd_loc: Location::none(),
         cd_attributes: vec![],
+    };
+    let variant_kind = |constructors: Vec<ConstructorDeclaration>| {
+        let layout = crate::types::variant_runtime::plain_layout(
+            ctx,
+            constructors.iter().map(|constructor| {
+                (
+                    constructor.cd_id.name().to_string(),
+                    !matches!(
+                        &constructor.cd_args,
+                        ConstructorArguments::CstrTuple(args) if args.is_empty()
+                    ),
+                )
+            }),
+        );
+        TypeKind::TypeVariant(constructors, layout)
     };
 
     // Helper: add a type with its constructors to the environment
@@ -1823,7 +1837,7 @@ pub fn initial_env(ctx: &TypeContext) -> Env {
         // Extract constructors/labels from predef declarations so they are
         // available for disambiguation just like OCaml's initial environment.
         match &decl.type_kind {
-            TypeKind::TypeVariant(constrs) => {
+            TypeKind::TypeVariant(constrs, _) => {
                 let num_consts = constrs.iter()
                     .filter(|c| matches!(c.cd_args, ConstructorArguments::CstrTuple(ref args) if args.is_empty()))
                     .count() as i32;
@@ -1831,7 +1845,7 @@ pub fn initial_env(ctx: &TypeContext) -> Env {
                 let mut const_idx = 0i32;
                 let mut nonconst_idx = 0i32;
 
-                let layout_ref = decl.type_variant_layout.unwrap_or_else(|| {
+                let layout_ref = decl.variant_layout_ref().unwrap_or_else(|| {
                     crate::types::variant_runtime::plain_layout(
                         ctx,
                         constrs.iter().map(|cd| (
@@ -1945,7 +1959,7 @@ pub fn initial_env(ctx: &TypeContext) -> Env {
         &mut env,
         predef::ident_bool(),
         TypeDeclaration {
-            type_kind: TypeKind::TypeVariant(vec![
+            type_kind: variant_kind(vec![
                 cstr(predef::ident_false(), vec![]),
                 cstr(predef::ident_true(), vec![]),
             ]),
@@ -1962,7 +1976,7 @@ pub fn initial_env(ctx: &TypeContext) -> Env {
         &mut env,
         predef::ident_unit(),
         TypeDeclaration {
-            type_kind: TypeKind::TypeVariant(vec![cstr(predef::ident_void(), vec![])]),
+            type_kind: variant_kind(vec![cstr(predef::ident_void(), vec![])]),
             type_immediate: true,
             ..decl_abstr(0, true)
         },
@@ -1991,7 +2005,7 @@ pub fn initial_env(ctx: &TypeContext) -> Env {
             TypeDeclaration {
                 type_params: vec![tvar],
                 type_arity: 1,
-                type_kind: TypeKind::TypeVariant(vec![
+                type_kind: variant_kind(vec![
                     cstr(predef::ident_none(), vec![]),
                     cstr(predef::ident_some(), vec![tvar]),
                 ]),
@@ -2010,7 +2024,7 @@ pub fn initial_env(ctx: &TypeContext) -> Env {
             TypeDeclaration {
                 type_params: vec![tvar1, tvar2],
                 type_arity: 2,
-                type_kind: TypeKind::TypeVariant(vec![
+                type_kind: variant_kind(vec![
                     cstr(predef::ident_ok(), vec![tvar1]),
                     cstr(predef::ident_error(), vec![tvar2]),
                 ]),
@@ -2095,7 +2109,7 @@ pub fn initial_env(ctx: &TypeContext) -> Env {
             TypeDeclaration {
                 type_params: vec![tvar],
                 type_arity: 1,
-                type_kind: TypeKind::TypeVariant(vec![
+                type_kind: variant_kind(vec![
                     cstr(predef::ident_nil(), vec![]),
                     cstr(predef::ident_cons(), vec![tvar, list_ty]),
                 ]),
@@ -2141,7 +2155,7 @@ pub fn initial_env(ctx: &TypeContext) -> Env {
             TypeDeclaration {
                 type_params: vec![],
                 type_arity: 0,
-                type_kind: TypeKind::TypeVariant(vec![ConstructorDeclaration {
+                type_kind: variant_kind(vec![ConstructorDeclaration {
                     cd_id: predef::ident_ctor_unknown(),
                     cd_args: ConstructorArguments::CstrTuple(vec![tvar]),
                     cd_res: Some(type_unknown),
@@ -2370,7 +2384,7 @@ pub fn initial_env(ctx: &TypeContext) -> Env {
             &mut env,
             predef::ident_type_info(),
             TypeDeclaration {
-                type_kind: TypeKind::TypeVariant(all_ctors),
+                type_kind: variant_kind(all_ctors),
                 ..decl_abstr(0, false)
             },
         );
@@ -2623,7 +2637,6 @@ mod tests {
             type_attributes: vec![],
             type_immediate: false,
             type_representation: crate::types::TypeRepresentation::Boxed,
-            type_variant_layout: None,
             type_inlined_types: vec![],
             type_path: None,
         };

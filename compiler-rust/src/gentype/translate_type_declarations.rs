@@ -603,7 +603,7 @@ pub fn translate_type_declaration(
         TypeKind::TypeRecord(label_declarations, _) => {
             DeclarationKind::RecordDeclarationFromTypes(label_declarations.clone())
         }
-        TypeKind::TypeVariant(constructor_declarations) => {
+        TypeKind::TypeVariant(constructor_declarations, _) => {
             DeclarationKind::VariantDeclarationFromTypes(constructor_declarations.clone())
         }
         TypeKind::TypeAbstract => {

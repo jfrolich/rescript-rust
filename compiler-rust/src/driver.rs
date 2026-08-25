@@ -714,7 +714,7 @@ pub fn max_lambda_input_stamp(typed_structure: &crate::types::typedtree::Structu
                     visit_ident(max_stamp, &label.ld_id);
                 }
             }
-            DeclTypeKind::TypeVariant(constructors) => {
+            DeclTypeKind::TypeVariant(constructors, _) => {
                 for constructor in constructors {
                     visit_ident(max_stamp, &constructor.cd_id);
                     if let DeclConstructorArguments::CstrRecord(labels) = &constructor.cd_args {
@@ -8753,7 +8753,7 @@ fn variant_constructors_for_type(
     };
     let decl = type_decl_for_path(type_ctx, path)?;
     match decl.type_kind {
-        crate::types::decl::TypeKind::TypeVariant(constructors) => Some((
+        crate::types::decl::TypeKind::TypeVariant(constructors, _) => Some((
             path.clone(),
             constructors,
             decl.type_params,
@@ -8972,7 +8972,7 @@ fn concrete_variant_constructors(
             TypeDesc::Tconstr { path, .. } => {
                 let decl = type_decl_for_path(type_ctx, path)?;
                 match decl.type_kind {
-                    crate::types::decl::TypeKind::TypeVariant(constructors) => {
+                    crate::types::decl::TypeKind::TypeVariant(constructors, _) => {
                         return Some(constructors);
                     }
                     crate::types::decl::TypeKind::TypeAbstract => {

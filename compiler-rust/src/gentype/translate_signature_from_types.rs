@@ -28,7 +28,7 @@ pub fn translate_type_declaration_from_types(
                 label_declarations.clone(),
             )
         }
-        TypeKind::TypeVariant(constructor_declarations)
+        TypeKind::TypeVariant(constructor_declarations, _)
             if !crate::gentype::translate_type_declarations::has_some_gadt_leaf(
                 constructor_declarations,
             ) =>

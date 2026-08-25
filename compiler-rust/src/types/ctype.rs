@@ -725,7 +725,6 @@ fn add_gadt_equation(
         type_attributes: vec![],
         type_immediate: false,
         type_representation: super::TypeRepresentation::Boxed,
-        type_variant_layout: None,
         type_inlined_types: vec![],
         type_path: None,
     };
@@ -754,7 +753,6 @@ fn reified_type_decl(newtype_level: i32) -> super::TypeDeclaration {
         type_attributes: vec![],
         type_immediate: false,
         type_representation: super::TypeRepresentation::Boxed,
-        type_variant_layout: None,
         type_inlined_types: vec![],
         type_path: None,
     }
@@ -3342,7 +3340,7 @@ fn primitive_coercion_path(path: &Path) -> bool {
 }
 
 fn can_try_coerce_variant_to_primitive(path: &Path, decl: &crate::types::TypeDeclaration) -> bool {
-    matches!(decl.type_kind, crate::types::TypeKind::TypeVariant(_))
+    matches!(decl.type_kind, crate::types::TypeKind::TypeVariant(_, _))
         && decl.type_params.is_empty()
         && !path.same(&crate::types::predef::path_bool())
 }
@@ -3394,7 +3392,7 @@ fn subtype_type_kind(kind: &crate::types::TypeKind) -> SubtypeTypeKind {
     match kind {
         crate::types::TypeKind::TypeAbstract => SubtypeTypeKind::Abstract,
         crate::types::TypeKind::TypeRecord(_, _) => SubtypeTypeKind::Record,
-        crate::types::TypeKind::TypeVariant(_) => SubtypeTypeKind::Variant,
+        crate::types::TypeKind::TypeVariant(_, _) => SubtypeTypeKind::Variant,
         crate::types::TypeKind::TypeOpen => SubtypeTypeKind::Open,
     }
 }
@@ -3781,7 +3779,7 @@ fn subtype_rec(
                 && primitive_coercion_path(path1)
                 && let Some(decl2) = lookup_type_decl_for_path(ctx, env, path2)
                 && can_try_coerce_variant_to_primitive(path2, &decl2)
-                && let crate::types::TypeKind::TypeVariant(constructors) = &decl2.type_kind
+                && let crate::types::TypeKind::TypeVariant(constructors, _) = &decl2.type_kind
             {
                 if !variant_coercion_has_unboxed_attr(&decl2) {
                     return Err(subtype_error_with_context(
@@ -3811,7 +3809,7 @@ fn subtype_rec(
                 && primitive_coercion_path(path2)
                 && let Some(decl1) = lookup_type_decl_for_path(ctx, env, path1)
                 && can_try_coerce_variant_to_primitive(path1, &decl1)
-                && let crate::types::TypeKind::TypeVariant(constructors) = &decl1.type_kind
+                && let crate::types::TypeKind::TypeVariant(constructors, _) = &decl1.type_kind
             {
                 let issues = variant_runtime_representation_issues(
                     ctx,
@@ -3877,7 +3875,7 @@ fn subtype_rec(
                 }
                 if row.row_closed
                     && let Some(decl2) = lookup_type_decl_for_path(ctx, env, path)
-                    && let crate::types::TypeKind::TypeVariant(constructors) = &decl2.type_kind
+                    && let crate::types::TypeKind::TypeVariant(constructors, _) = &decl2.type_kind
                     && can_coerce_polyvariant_to_variant(
                         ctx,
                         &row,
@@ -4186,7 +4184,7 @@ fn subtype_concrete_type_declarations(
         } else {
             Err(subtype_error(trace))
         }),
-        (super::TypeKind::TypeVariant(cstrs1), super::TypeKind::TypeVariant(cstrs2)) => Some(
+        (super::TypeKind::TypeVariant(cstrs1, _), super::TypeKind::TypeVariant(cstrs2, _)) => Some(
             if let Some(issue) = variant_configuration_issue(&decl1, &decl2) {
                 Err(subtype_error_with_context(
                     trace,
@@ -7385,7 +7383,7 @@ fn lower_nongen_type_decl_rec(
                 lower_nongen_type_expr_rec(ctx, nglev, label.ld_type, seen);
             }
         }
-        TypeKind::TypeVariant(constructors) => {
+        TypeKind::TypeVariant(constructors, _) => {
             for cstr in constructors {
                 match &cstr.cd_args {
                     ConstructorArguments::CstrTuple(args) => {
@@ -7835,7 +7833,7 @@ pub fn compute_variance_decl(
                 ));
             }
         }
-        super::TypeKind::TypeVariant(constructors) => {
+        super::TypeKind::TypeVariant(constructors, _) => {
             for cstr in constructors {
                 // Skip GADT constructors (cd_res != None) — their variance is more complex
                 if cstr.cd_res.is_some() {
@@ -9228,7 +9226,6 @@ pub fn instance_constructor_in_pattern(
             type_attributes: vec![],
             type_immediate: false,
             type_representation: super::decl::TypeRepresentation::Boxed,
-            type_variant_layout: None,
             type_inlined_types: vec![],
             type_path: None,
         };
@@ -9794,7 +9791,7 @@ pub(crate) fn is_recursive_local_type_for_identity(ctx: &TypeContext, path: &Pat
     };
 
     match &decl.type_kind {
-        super::decl::TypeKind::TypeVariant(constructors) => constructors.iter().any(|ctor| {
+        super::decl::TypeKind::TypeVariant(constructors, _) => constructors.iter().any(|ctor| {
             let args_has_self = match &ctor.cd_args {
                 super::decl::ConstructorArguments::CstrTuple(args) => {
                     args.iter().copied().any(contains_self)
@@ -11451,7 +11448,6 @@ pub fn nondep_type_decl<'a>(
         type_immediate: decl.type_immediate,
         type_representation: decl.type_representation,
         type_path: decl.type_path.clone(),
-        type_variant_layout: decl.type_variant_layout,
         type_inlined_types: decl.type_inlined_types.clone(),
     })
 }
@@ -11478,7 +11474,7 @@ fn nondep_type_kind<'a>(
                 .collect();
             Some(super::decl::TypeKind::TypeRecord(new_labels?, repr.clone()))
         }
-        super::decl::TypeKind::TypeVariant(constructors) => {
+        super::decl::TypeKind::TypeVariant(constructors, layout) => {
             let new_constructors: Option<Vec<_>> = constructors
                 .iter()
                 .map(|cd| {
@@ -11515,7 +11511,10 @@ fn nondep_type_kind<'a>(
                     })
                 })
                 .collect();
-            Some(super::decl::TypeKind::TypeVariant(new_constructors?))
+            Some(super::decl::TypeKind::TypeVariant(
+                new_constructors?,
+                *layout,
+            ))
         }
     }
 }
@@ -11543,7 +11542,6 @@ mod tests {
             type_attributes: vec![],
             type_immediate: false,
             type_representation: crate::types::TypeRepresentation::Boxed,
-            type_variant_layout: None,
             type_inlined_types: vec![],
             type_path,
         }
@@ -11752,7 +11750,6 @@ mod tests {
             type_attributes: vec![],
             type_immediate: false,
             type_representation: crate::types::TypeRepresentation::Boxed,
-            type_variant_layout: None,
             type_inlined_types: vec![],
             type_path: None,
         };
@@ -11770,7 +11767,6 @@ mod tests {
             type_attributes: vec![],
             type_immediate: false,
             type_representation: crate::types::TypeRepresentation::Boxed,
-            type_variant_layout: None,
             type_inlined_types: vec![],
             type_path: None,
         };

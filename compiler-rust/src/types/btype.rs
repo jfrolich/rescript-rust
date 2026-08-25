@@ -432,7 +432,7 @@ where
 {
     match kind {
         TypeKind::TypeAbstract => {}
-        TypeKind::TypeVariant(constructors) => {
+        TypeKind::TypeVariant(constructors, _) => {
             for cstr in constructors {
                 iter_type_expr_cstr_args(&cstr.cd_args, &mut f);
                 if let Some(res) = cstr.cd_res {

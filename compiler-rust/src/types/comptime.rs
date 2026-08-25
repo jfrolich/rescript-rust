@@ -496,7 +496,7 @@ fn build_type_info_from_constr<'a>(
                     unboxed: is_unboxed,
                 }
             }
-            TypeKind::TypeVariant(constrs) => {
+            TypeKind::TypeVariant(constrs, _) => {
                 let constructors = constrs
                     .iter()
                     .map(|cd| {
@@ -552,7 +552,7 @@ fn type_info_constructor_description<'a>(
     // compiler/ml/typecore.ml:990-1010 disambiguation.
     let type_info_ident = predef::ident_type_info();
     let decl = env.find_type_by_ident(&type_info_ident).ok()?;
-    let TypeKind::TypeVariant(constrs) = &decl.type_kind else {
+    let TypeKind::TypeVariant(constrs, _) = &decl.type_kind else {
         return None;
     };
 

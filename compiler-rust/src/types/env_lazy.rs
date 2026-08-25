@@ -42,7 +42,7 @@ fn build_matching_type_constructors(
     constructor_name: &str,
     ctx: &super::context::TypeContext,
 ) {
-    let super::decl::TypeKind::TypeVariant(cstrs) = &decl.type_kind else {
+    let super::decl::TypeKind::TypeVariant(cstrs, layout) = &decl.type_kind else {
         return;
     };
 
@@ -100,10 +100,11 @@ fn build_matching_type_constructors(
                             super::decl::RecordRepresentation::RecordUnboxed(false)
                         } else {
                             super::decl::RecordRepresentation::RecordInlined {
-                                tag: block_idx,
                                 name: cd.cd_id.name().to_string(),
-                                num_nonconsts,
-                                attrs: cd.cd_attributes.clone(),
+                                representation: super::variant_runtime::ConstructorReference {
+                                    variant: *layout,
+                                    position,
+                                },
                             }
                         },
                     ),
@@ -118,7 +119,6 @@ fn build_matching_type_constructors(
                     type_attributes: vec![],
                     type_immediate: false,
                     type_representation: crate::types::TypeRepresentation::Boxed,
-                    type_variant_layout: None,
                     type_inlined_types: vec![],
                     type_path: None,
                 };
@@ -171,12 +171,12 @@ fn build_matching_type_constructors(
                 cstr_existentials: vec![],
                 cstr_args,
                 cstr_arity,
-                cstr_kind: decl.type_variant_layout.map(|variant| {
-                    ConstructorKind::Ordinary(super::variant_runtime::ConstructorReference {
-                        variant,
+                cstr_kind: Some(ConstructorKind::Ordinary(
+                    super::variant_runtime::ConstructorReference {
+                        variant: *layout,
                         position,
-                    })
-                }),
+                    },
+                )),
                 cstr_tag: tag,
                 cstr_consts: num_consts,
                 cstr_nonconsts: num_nonconsts,
@@ -297,7 +297,6 @@ fn build_constructors_for_name(
                             type_attributes: vec![],
                             type_immediate: false,
                             type_representation: crate::types::TypeRepresentation::Boxed,
-                            type_variant_layout: None,
                             type_inlined_types: vec![],
                             type_path: None,
                         };

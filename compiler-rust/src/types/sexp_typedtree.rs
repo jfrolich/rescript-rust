@@ -1828,7 +1828,7 @@ fn sexp_type_kind(
 ) -> Sexp {
     match kind {
         TypeKind::TypeAbstract => Sexp::atom("Ttype_abstract"),
-        TypeKind::TypeVariant(cds) => {
+        TypeKind::TypeVariant(cds, _) => {
             let mut items = vec![Sexp::atom("Ttype_variant")];
             for cd in cds.iter() {
                 items.push(sexp_constructor_decl(arena, ctx, with_locs, dedup, cd));

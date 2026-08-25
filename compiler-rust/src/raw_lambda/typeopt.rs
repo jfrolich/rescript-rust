@@ -62,13 +62,13 @@ fn type_cannot_contain_undefined_rec(
                     }
                     TypeKind::TypeOpen => false,
                     TypeKind::TypeRecord(_, _) => true,
-                    TypeKind::TypeVariant(cdecls)
+                    TypeKind::TypeVariant(cdecls, _)
                         if is_option_like_variant(cdecls) || is_unit_like_variant(cdecls) =>
                     {
                         false
                     }
-                    TypeKind::TypeVariant(cdecls) => {
-                        let layout = decl.type_variant_layout.map(|r| ctx.variant_layout(r));
+                    TypeKind::TypeVariant(cdecls, _) => {
+                        let layout = decl.variant_layout_ref().map(|r| ctx.variant_layout(r));
                         cdecls.iter().enumerate().all(|(position, cd)| {
                             let case = layout.as_ref().map(|layout| &layout.constructors[position]);
                             let has_undefined = matches!(
@@ -219,7 +219,7 @@ fn get_unboxed_repr_rec(
                 return Some(ty);
             }
             match &decl.type_kind {
-                TypeKind::TypeVariant(cdecls) if cdecls.len() == 1 => {
+                TypeKind::TypeVariant(cdecls, _) if cdecls.len() == 1 => {
                     match &cdecls[0].cd_args {
                         ConstructorArguments::CstrTuple(tys) if tys.len() == 1 => {
                             let arg_ty = tys[0];
@@ -425,7 +425,6 @@ mod tests {
                 type_attributes: vec![],
                 type_immediate: false,
                 type_representation: crate::types::TypeRepresentation::Boxed,
-                type_variant_layout: None,
                 type_inlined_types: vec![],
                 type_path: None,
             },

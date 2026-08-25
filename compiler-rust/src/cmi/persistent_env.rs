@@ -3612,7 +3612,7 @@ fn substitute_type_paths_in_sig_with_maps(
                 }
 
                 match &decl.type_kind {
-                    TypeKind::TypeVariant(constrs) => {
+                    TypeKind::TypeVariant(constrs, _) => {
                         for cd in constrs {
                             match &cd.cd_args {
                                 crate::types::decl::ConstructorArguments::CstrTuple(args) => {
@@ -3962,7 +3962,7 @@ pub fn substitute_type_paths_in_sig(
                 }
                 // Substitute in constructor/label types
                 match &decl.type_kind {
-                    TypeKind::TypeVariant(constrs) => {
+                    TypeKind::TypeVariant(constrs, _) => {
                         for cd in constrs {
                             match &cd.cd_args {
                                 crate::types::decl::ConstructorArguments::CstrTuple(args) => {
@@ -4796,7 +4796,7 @@ pub fn rewrite_module_prefix_in_sig_shallow(
                     rewrite_type_expr_prefix(manifest, old_name, new_prefix, ctx, &mut visited);
                 }
                 match &decl.type_kind {
-                    TypeKind::TypeVariant(constrs) => {
+                    TypeKind::TypeVariant(constrs, _) => {
                         for cd in constrs {
                             match &cd.cd_args {
                                 crate::types::decl::ConstructorArguments::CstrTuple(args) => {
@@ -4926,7 +4926,7 @@ fn rewrite_module_prefix_in_sig_with_visited(
                     rewrite_type_expr_prefix(manifest, old_name, new_prefix, ctx, visited);
                 }
                 match &decl.type_kind {
-                    TypeKind::TypeVariant(constrs) => {
+                    TypeKind::TypeVariant(constrs, _) => {
                         for cd in constrs {
                             match &cd.cd_args {
                                 crate::types::decl::ConstructorArguments::CstrTuple(args) => {
@@ -5435,7 +5435,7 @@ pub fn rewrite_sig_by_path_prefix(
                     );
                 }
                 match &decl.type_kind {
-                    TypeKind::TypeVariant(constrs) => {
+                    TypeKind::TypeVariant(constrs, _) => {
                         for cd in constrs {
                             match &cd.cd_args {
                                 crate::types::decl::ConstructorArguments::CstrTuple(args) => {
@@ -5523,7 +5523,7 @@ pub fn rewrite_sig_by_path_prefixes(
                     rewrite_type_expr_by_path_prefixes(manifest, prefixes, ctx, &mut visited);
                 }
                 match &decl.type_kind {
-                    TypeKind::TypeVariant(constrs) => {
+                    TypeKind::TypeVariant(constrs, _) => {
                         for cd in constrs {
                             match &cd.cd_args {
                                 crate::types::decl::ConstructorArguments::CstrTuple(args) => {
@@ -5912,7 +5912,7 @@ fn add_signature_to_env_with_options(
 
                 // Also add constructors and labels from this type
                 match &decl.type_kind {
-                    TypeKind::TypeVariant(constrs) => {
+                    TypeKind::TypeVariant(constrs, layout) => {
                         let type_path = Path::pdot(module_path.clone(), id.name());
                         let num_consts = constrs
                             .iter()
@@ -5941,20 +5941,18 @@ fn add_signature_to_env_with_options(
                                         inline_record_type_params(ctx, &decl.type_params, labels);
                                     let inline_path =
                                         Path::pdot(type_path.clone(), cd.cd_id.name());
-                                    let inline_tag = match cstr_tag {
-                                        ConstructorTag::CstrBlock(tag) => tag,
-                                        _ => 0,
-                                    };
                                     let inline_decl = crate::types::TypeDeclaration {
                                         type_params: inline_params.clone(),
                                         type_arity: inline_params.len() as i32,
                                         type_kind: crate::types::TypeKind::TypeRecord(
                                             labels.clone(),
                                             crate::types::RecordRepresentation::RecordInlined {
-                                                tag: inline_tag,
                                                 name: cd.cd_id.name().to_string(),
-                                                num_nonconsts,
-                                                attrs: cd.cd_attributes.clone(),
+                                                representation:
+                                                    crate::types::ConstructorReference {
+                                                        variant: *layout,
+                                                        position,
+                                                    },
                                             },
                                         ),
                                         type_private: decl.type_private,
@@ -5969,7 +5967,6 @@ fn add_signature_to_env_with_options(
                                         type_immediate: false,
                                         type_representation:
                                             crate::types::TypeRepresentation::Boxed,
-                                        type_variant_layout: None,
                                         type_inlined_types: vec![],
                                         type_path: None,
                                     };
@@ -6017,12 +6014,12 @@ fn add_signature_to_env_with_options(
                                 cstr_existentials: vec![],
                                 cstr_args,
                                 cstr_arity,
-                                cstr_kind: decl.type_variant_layout.map(|variant| {
-                                    ConstructorKind::Ordinary(crate::types::ConstructorReference {
-                                        variant,
+                                cstr_kind: Some(ConstructorKind::Ordinary(
+                                    crate::types::ConstructorReference {
+                                        variant: *layout,
                                         position,
-                                    })
-                                }),
+                                    },
+                                )),
                                 cstr_tag,
                                 cstr_consts: num_consts,
                                 cstr_nonconsts: num_nonconsts,

@@ -83,9 +83,6 @@ pub struct TypeDeclaration {
     pub type_immediate: bool,
     /// Runtime representation for single-payload unboxing.
     pub type_representation: TypeRepresentation,
-    /// Canonical runtime layout for a variant declaration. This is a stable
-    /// forward reference completed after the recursive declaration group.
-    pub type_variant_layout: Option<super::variant_runtime::LayoutRef>,
     /// Inlined types (for record printing)
     pub type_inlined_types: Vec<TypeInlinedType>,
     /// Qualified path for this type (e.g., Pdot(Pident "Pervasives") "ref").
@@ -110,10 +107,22 @@ pub enum TypeKind {
     TypeAbstract,
     /// Record type
     TypeRecord(Vec<LabelDeclaration>, RecordRepresentation),
-    /// Variant type
-    TypeVariant(Vec<ConstructorDeclaration>),
+    /// Variant type with its canonical runtime layout.
+    TypeVariant(
+        Vec<ConstructorDeclaration>,
+        super::variant_runtime::LayoutRef,
+    ),
     /// Open type (extensible)
     TypeOpen,
+}
+
+impl TypeDeclaration {
+    pub fn variant_layout_ref(&self) -> Option<super::variant_runtime::LayoutRef> {
+        match self.type_kind {
+            TypeKind::TypeVariant(_, layout) => Some(layout),
+            TypeKind::TypeAbstract | TypeKind::TypeRecord(..) | TypeKind::TypeOpen => None,
+        }
+    }
 }
 
 /// Record representation.
@@ -127,10 +136,8 @@ pub enum RecordRepresentation {
     RecordUnboxed(bool),
     /// Inlined record (in variant constructor)
     RecordInlined {
-        tag: i32,
         name: String,
-        num_nonconsts: i32,
-        attrs: Vec<Attribute>,
+        representation: super::variant_runtime::ConstructorReference,
     },
     /// Extension record
     RecordExtension,
