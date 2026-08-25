@@ -22346,7 +22346,7 @@ fn type_structure_item<'a>(
                                             representation: crate::types::ConstructorReference {
                                                 variant: type_variant_layout
                                                     .expect("variant declaration layout"),
-                                                position: internal_cstrs.len() - 1,
+                                                position: internal_cstrs.len(),
                                             },
                                         }
                                     };
