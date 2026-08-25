@@ -6241,7 +6241,7 @@ fn format_expr_type_clash_report(
         ),
         Some(TypeClashContext::JsxComponent) => (
             Cow::Borrowed("This JSX tag has type: "),
-            Cow::Borrowed("But JSX component positions require: "),
+            Cow::Borrowed("But JSX component positions require:\n  "),
         ),
         Some(TypeClashContext::StatementFunctionCall) => (
             Cow::Borrowed("This function call returns: "),
@@ -7447,11 +7447,9 @@ fn append_extra_type_clash_help(
     }
 
     if matches!(context, Some(TypeClashContext::JsxComponent)) {
-        message.push_str(
-            "\n\nJSX tags must be React components, not plain functions.\n\n\
-             Possible solutions:\n\
-             - If this function takes labeled props, annotate it with ",
-        );
+        message.push_str("\n\nJSX tags must be React components, not plain functions.\n\n");
+        message.push_str("Possible solutions:\n");
+        message.push_str("- If this function takes labeled props, annotate it with ");
         message.push_str(INFO);
         message.push_str("@react.component");
         message.push_str(RESET);
