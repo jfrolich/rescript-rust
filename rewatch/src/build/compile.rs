@@ -877,7 +877,6 @@ pub fn compile(
     let dump_typed_sexp = build_state.dump_typed_sexp();
     let build_state_ref: &BuildState = &build_state.build_state;
     let build_command_state_ref: &BuildCommandState = build_state;
-    let compile_span = tracing::Span::current();
 
     let (tx, rx) = mpsc::channel::<WorkerMsg>();
     // Bound concurrency to rayon's pool size so the priority heap actually
@@ -964,7 +963,6 @@ pub fn compile(
                 let module_name = work.module_name.clone();
                 let is_dirty = dirty_set.contains(&module_name);
                 let warn_override = warn_error_override.clone();
-                let parent_span = compile_span.clone();
                 let tx = tx.clone();
                 let inc_ref = &inc;
                 in_flight += 1;

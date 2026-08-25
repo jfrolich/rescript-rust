@@ -488,52 +488,53 @@ async fn async_watch(
                 let timing_total = Instant::now();
                 // Reinitialization runs cleanup for previous build artifacts, so full rebuilds need
                 // the same build lock boundary as regular `rescript build`.
-                let rebuild = build::with_build_lock(path, || -> anyhow::Result<build::CompilationOutcome> {
-                    let mut next_build_state = match build::initialize_build(
-                        None,
-                        filter,
-                        show_progress,
-                        path,
-                        plain_output,
-                        build_state.get_warn_error_override(),
-                        build_state.build_mode(),
-                        build_state.subprocess(),
-                        build_state.dump_typed_sexp,
-                        prod,
-                        features.clone(),
-                        crate::config::SourceMapCommand::Watch,
-                    ) {
-                        Ok(build_state) => build_state,
-                        Err(error) => {
-                            return Err(anyhow::anyhow!(
-                                "Could not reinitialize build after config change: {error:#}"
-                            ));
-                        }
-                    };
+                let rebuild =
+                    build::with_build_lock(path, || -> anyhow::Result<build::CompilationOutcome> {
+                        let mut next_build_state = match build::initialize_build(
+                            None,
+                            filter,
+                            show_progress,
+                            path,
+                            plain_output,
+                            build_state.get_warn_error_override(),
+                            build_state.build_mode(),
+                            build_state.subprocess(),
+                            build_state.dump_typed_sexp,
+                            prod,
+                            features.clone(),
+                            SourceMapCommand::Watch,
+                        ) {
+                            Ok(build_state) => build_state,
+                            Err(error) => {
+                                return Err(anyhow::anyhow!(
+                                    "Could not reinitialize build after config change: {error:#}"
+                                ));
+                            }
+                        };
 
-                    // Full rebuilds can be triggered by editor atomic saves that surface as rename events.
-                    // Preserve warning state for unchanged modules so their warnings are re-emitted after the
-                    // fresh build state replaces the previous one.
-                    carry_forward_compile_warnings(&build_state, &mut next_build_state);
-                    build_state = next_build_state;
+                        // Full rebuilds can be triggered by editor atomic saves that surface as rename events.
+                        // Preserve warning state for unchanged modules so their warnings are re-emitted after the
+                        // fresh build state replaces the previous one.
+                        carry_forward_compile_warnings(&build_state, &mut next_build_state);
+                        build_state = next_build_state;
 
-                    // Re-register watches based on the new build state
-                    unregister_watches(watcher, &current_watch_paths);
-                    current_watch_paths = compute_watch_paths(&build_state, path);
-                    register_watches(watcher, &current_watch_paths);
+                        // Re-register watches based on the new build state
+                        unregister_watches(watcher, &current_watch_paths);
+                        current_watch_paths = compute_watch_paths(&build_state, path);
+                        register_watches(watcher, &current_watch_paths);
 
-                    let result = build::incremental_build_without_lock(
-                        &mut build_state,
-                        None,
-                        false,
-                        show_progress,
-                        false,
-                        create_sourcedirs,
-                        plain_output,
-                    );
-                    build::write_build_ninja(&build_state);
-                    result.map_err(|e| anyhow::anyhow!("{e}"))
-                });
+                        let result = build::incremental_build_without_lock(
+                            &mut build_state,
+                            None,
+                            false,
+                            show_progress,
+                            false,
+                            create_sourcedirs,
+                            plain_output,
+                        );
+                        build::write_build_ninja(&build_state);
+                        result.map_err(|e| anyhow::anyhow!("{e}"))
+                    });
                 match rebuild {
                     Ok(result) => {
                         finish_successful_watch_compile(
@@ -613,7 +614,7 @@ pub fn start(
                     dump_typed_sexp,
                     prod,
                     features.clone(),
-                    crate::config::SourceMapCommand::Watch,
+                    SourceMapCommand::Watch,
                 )
                 .with_context(|| "Could not initialize build")?;
 
