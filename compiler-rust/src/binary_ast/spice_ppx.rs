@@ -3876,17 +3876,6 @@ impl<'a> LocCloner<'a> {
         }
     }
 
-    fn normalize_unary_jsx_prop_locs_to_none(&mut self, props: &mut [JsxProp]) {
-        for prop in props.iter_mut() {
-            match prop {
-                JsxProp::Value { name, .. } => {
-                    name.loc = self.arena.none_loc();
-                }
-                JsxProp::Punning { .. } | JsxProp::Spreading { .. } => {}
-            }
-        }
-    }
-
     fn attributes(&mut self, attrs: &mut Attributes) {
         for attr in attrs {
             self.attribute(attr);
@@ -4179,8 +4168,7 @@ impl<'a> LocCloner<'a> {
         if let JsxElement::Unary(unary) = element {
             // External spice PPX path normalizes unary JSX nodes into container
             // nodes with empty children.
-            let mut props = std::mem::take(&mut unary.props);
-            self.normalize_unary_jsx_prop_locs_to_none(&mut props);
+            let props = std::mem::take(&mut unary.props);
             let mut container = JsxContainerElement {
                 tag_name_start: unary.tag_name.clone(),
                 opening_end: self.arena.none_pos(),
@@ -4238,7 +4226,7 @@ impl<'a> LocCloner<'a> {
         match prop {
             JsxProp::Punning { name, .. } => self.located(name),
             JsxProp::Value { name, value, .. } => {
-                name.loc = self.arena.none_loc();
+                self.located(name);
                 self.expression_idx(value);
             }
             JsxProp::Spreading { loc, expr } => {
