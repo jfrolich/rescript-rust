@@ -1226,33 +1226,11 @@ impl TypeContext {
     // Type Creation
     // ========================================================================
 
-    fn normalize_arrow_desc(&self, desc: TypeDesc) -> TypeDesc {
-        // Keep the upstream invariant that an arrow node owns its complete
-        // consecutive parameter list. Legacy Rust construction sites may still
-        // hand us an arrow-returning arrow while the parser bridge is migrated.
-        match desc {
-            TypeDesc::Tarrow { mut args, mut ret } => {
-                let mut seen = std::collections::HashSet::new();
-                while seen.insert(ret) {
-                    let ret_repr = self.repr(ret);
-                    let ret_desc = self.get_desc(ret_repr);
-                    match &*ret_desc {
-                        TypeDesc::Tarrow { args: more, ret: final_ret } => {
-                            args.extend(more.iter().cloned());
-                            ret = *final_ret;
-                        }
-                        _ => break,
-                    }
-                }
-                TypeDesc::Tarrow { args, ret }
-            }
-            desc => desc,
-        }
-    }
-
     /// Create a new type expression.
     fn alloc_type(&self, desc: TypeDesc, level: i32) -> TypeExprRef {
-        let desc = self.normalize_arrow_desc(desc);
+        // A n-ary arrow owns exactly the parameters supplied by its syntax
+        // node. Its return type may itself be an arrow (a sequential
+        // application such as `f(a)(b)`); never flatten that nested boundary.
         let id = self.id_gen.next_type_id();
         self.types.push(TypeExpr::new(desc, level, id))
     }
@@ -1478,7 +1456,7 @@ impl TypeContext {
     /// Set the descriptor of a type.
     #[inline]
     pub fn set_desc(&self, r: TypeExprRef, desc: TypeDesc) {
-        self.types.get(r).set_desc(self.normalize_arrow_desc(desc));
+        self.types.get(r).set_desc(desc);
     }
 
     /// Save mutable type state before a speculative unification.
