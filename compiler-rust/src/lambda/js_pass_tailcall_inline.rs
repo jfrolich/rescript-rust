@@ -469,27 +469,27 @@ impl TailcallInlineState {
 
     fn try_inline_single_return_statement(&mut self, stmt: Statement) -> Result<Block, Statement> {
         let Statement {
-            source_loc,
+            source_loc: stmt_source_loc,
             desc,
             comment,
         } = stmt;
         let StatementDesc::Return(expr) = desc else {
             return Err(Statement {
-                source_loc,
+                source_loc: stmt_source_loc,
                 desc,
                 comment,
             });
         };
         let Expression {
-            source_loc,
+            source_loc: expr_source_loc,
             desc: expr_desc,
             comment: expr_comment,
         } = expr;
         let ExpressionDesc::Call(func, args, info) = expr_desc else {
             return Err(Statement {
-                source_loc,
+                source_loc: stmt_source_loc,
                 desc: StatementDesc::Return(Expression {
-                    source_loc,
+                    source_loc: expr_source_loc,
                     desc: expr_desc,
                     comment: expr_comment,
                 }),
@@ -498,7 +498,7 @@ impl TailcallInlineState {
         };
 
         let Expression {
-            source_loc,
+            source_loc: func_source_loc,
             desc: func_desc,
             comment: func_comment,
         } = *func;
@@ -507,12 +507,12 @@ impl TailcallInlineState {
                 match self.inline_named_call_owned(&id, args) {
                     Ok(block) => Ok(block),
                     Err(args) => Err(Statement {
-                        source_loc,
+                        source_loc: stmt_source_loc,
                         desc: StatementDesc::Return(Expression {
-                            source_loc,
+                            source_loc: expr_source_loc,
                             desc: ExpressionDesc::Call(
                                 Box::new(Expression {
-                                    source_loc,
+                                    source_loc: func_source_loc,
                                     desc: ExpressionDesc::Var(crate::js_ir::VIdent::Id(id)),
                                     comment: func_comment,
                                 }),
@@ -537,12 +537,12 @@ impl TailcallInlineState {
                 Ok(self.inline_function_call_owned(params, body, args))
             }
             func_desc => Err(Statement {
-                source_loc,
+                source_loc: stmt_source_loc,
                 desc: StatementDesc::Return(Expression {
-                    source_loc,
+                    source_loc: expr_source_loc,
                     desc: ExpressionDesc::Call(
                         Box::new(Expression {
-                            source_loc,
+                            source_loc: func_source_loc,
                             desc: func_desc,
                             comment: func_comment,
                         }),
