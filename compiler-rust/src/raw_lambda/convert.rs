@@ -12085,9 +12085,7 @@ fn ffi_marshaled_variant_tag_type(value: &OcamlValue) -> Option<crate::types::Va
     }
 }
 
-fn ffi_marshaled_variant_block_type(
-    value: &OcamlValue,
-) -> Option<crate::types::VariantBlockType> {
+fn ffi_marshaled_variant_block_type(value: &OcamlValue) -> Option<crate::types::VariantBlockType> {
     use crate::types::{VariantBlockType, VariantInstance};
     match value {
         OcamlValue::Int(0) => Some(VariantBlockType::Int),
@@ -12098,8 +12096,8 @@ fn ffi_marshaled_variant_block_type(
         OcamlValue::Int(5) => Some(VariantBlockType::Function),
         OcamlValue::Int(6) => Some(VariantBlockType::Object),
         OcamlValue::Int(7) => Some(VariantBlockType::Unknown),
-        OcamlValue::Block(0, fields) if fields.len() == 1 => Some(VariantBlockType::Instance(
-            match fields[0].as_int() {
+        OcamlValue::Block(0, fields) if fields.len() == 1 => {
+            Some(VariantBlockType::Instance(match fields[0].as_int() {
                 0 => VariantInstance::Array,
                 1 => VariantInstance::ArrayBuffer,
                 2 => VariantInstance::BigInt64Array,
@@ -12124,8 +12122,8 @@ fn ffi_marshaled_variant_block_type(
                 21 => VariantInstance::WeakSet,
                 22 => VariantInstance::WeakMap,
                 _ => return None,
-            },
-        )),
+            }))
+        }
         _ => None,
     }
 }
