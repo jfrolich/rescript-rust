@@ -5839,28 +5839,21 @@ fn handle_ffi(
             })
             .collect();
 
-        // Build arrow type matching OCaml's Ast_helper.Typ.arrows:
-        // arrows [arg1; arg2] ret => arrow ~arity:(Some n) arg1 (arrow ~arity:None arg2 ret)
+        // Current Ast_helper.Typ.arrow stores every argument in one n-ary
+        // Ptyp_arrow. The same `any` node is shared by all arguments and the
+        // return type, matching ast_exp_handle_external.ml:81-90.
         let total_arity = arena.push_arity(Some(effective_arity as i32));
-        let none_arity = arena.static_arity_none();
-        let arrow_type_idx = {
-            // Build from right to left
-            let mut result_idx = any_type_idx; // return type
-            for i in (0..args.len()).rev() {
-                let arity = if i == 0 { total_arity } else { none_arity };
-                let arrow = CoreType {
-                    ptyp_desc: Box::new(CoreTypeDesc::Ptyp_arrow(Box::new((
-                        Box::new(args[i].clone()),
-                        result_idx,
-                        arity,
-                    )))),
-                    ptyp_loc: loc,
-                    ptyp_attributes: Attributes::new(),
-                };
-                result_idx = arena.push_core_type(arrow);
-            }
-            result_idx
-        };
+        let first = args[0].clone();
+        arena.set_nary_arrow_args(total_arity, args);
+        let arrow_type_idx = arena.push_core_type(CoreType {
+            ptyp_desc: Box::new(CoreTypeDesc::Ptyp_arrow(Box::new((
+                Box::new(first),
+                any_type_idx,
+                total_arity,
+            )))),
+            ptyp_loc: loc,
+            ptyp_attributes: Attributes::new(),
+        });
 
         let raw_expr_idx = arena.push_expr(raw_expr);
         Expression {
