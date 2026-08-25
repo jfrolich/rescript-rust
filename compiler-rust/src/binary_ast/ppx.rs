@@ -7947,87 +7947,61 @@ fn split_this_attrs(attrs: &[Attribute], arena: &ParseArena) -> (bool, Vec<Attri
 /// Mirrors OCaml's ast_uncurry_gen.to_method_callback for `fun [@this]`.
 fn rewrite_method_callback_expression(
     expr: &Expression,
-    arg_label: &ArgLabel,
-    lhs: PatIdx,
-    rhs: ExprIdx,
+    fun: &PexpFun,
     is_async: bool,
     filtered_attrs: Vec<Attribute>,
     arena: &mut ParseArena,
 ) -> Expression {
     let loc = expr.pexp_loc;
-    let self_pat = arena.get_pat(lhs).clone();
-    let rewritten_self_pat = rewrite_pattern(&self_pat, arena);
+    let source_params = arena.nary_fun_params(fun).into_owned();
+    let source_newtypes = arena.nary_fun_newtypes(fun).to_vec();
+    let body = arena.nary_fun_body(fun);
 
-    let mut rev_extra_args: Vec<(ArgLabel, Pattern, Vec<Attribute>, bool)> =
-        vec![(arg_label.clone(), rewritten_self_pat, vec![], false)];
+    let mut rewritten_params = Vec::with_capacity(source_params.len());
+    for source in source_params {
+        let source_pattern = arena.get_pat(source.p_pat).clone();
+        let rewritten_pattern = rewrite_pattern(&source_pattern, arena);
+        let rewritten_default = source.p_default.map(|default| {
+            let default = arena.get_expr(default).clone();
+            let default = rewrite_expression(&default, arena);
+            arena.push_expr(default)
+        });
+        rewritten_params.push(FunParam {
+            p_attrs: rewrite_attributes(&source.p_attrs, arena).into(),
+            p_lbl: source.p_lbl,
+            p_default: rewritten_default,
+            p_pat: arena.push_pat(rewritten_pattern),
+        });
+    }
 
-    let mut current_body = arena.get_expr(rhs).clone();
-    let result = loop {
-        let (has_this_attr, body_attrs) = split_this_attrs(&current_body.pexp_attributes, arena);
-        if has_this_attr {
-            break rewrite_expression(&current_body, arena);
-        }
-        match &*current_body.pexp_desc {
-            ExpressionDesc::Pexp_fun(inner) => {
-                let PexpFun {
-                    arg_label: inner_label,
-                    lhs: inner_lhs,
-                    rhs: inner_rhs,
-                    is_async: inner_async,
-                    ..
-                } = &**inner;
-                let inner_pat = arena.get_pat(*inner_lhs).clone();
-                let rewritten_inner_pat = rewrite_pattern(&inner_pat, arena);
-                rev_extra_args.push((
-                    inner_label.clone(),
-                    rewritten_inner_pat,
-                    body_attrs,
-                    *inner_async,
-                ));
-                current_body = arena.get_expr(*inner_rhs).clone();
-            }
-            _ => break rewrite_expression(&current_body, arena),
-        }
+    let result = arena.get_expr(body).clone();
+    let result = rewrite_expression(&result, arena);
+    let result = arena.push_expr(result);
+    let total_arity = rewritten_params.len() as i32;
+    let arity = arena.push_arity(Some(total_arity));
+    let unknown_arity = arena.nary_fun_unknown_arity(fun);
+    let first = rewritten_params[0].clone();
+    arena.set_nary_fun_params(arity, rewritten_params, unknown_arity);
+    if !source_newtypes.is_empty() {
+        let newtypes = source_newtypes
+            .into_iter()
+            .map(|(name, attrs)| (name, rewrite_attributes(&attrs, arena).into()))
+            .collect();
+        arena.set_nary_fun_newtypes(first.p_pat, newtypes);
+    }
+
+    let mut method_body = Expression {
+        pexp_desc: Box::new(ExpressionDesc::Pexp_fun(Box::new(PexpFun {
+            arg_label: first.p_lbl,
+            default: first.p_default,
+            lhs: first.p_pat,
+            rhs: result,
+            arity,
+            is_async,
+        }))),
+        pexp_loc: loc,
+        pexp_attributes: Attributes::new(),
     };
-
-    let mut method_body = result;
-    for (label, pat, attrs, arg_async) in rev_extra_args.iter().rev() {
-        method_body = Expression {
-            pexp_desc: Box::new(ExpressionDesc::Pexp_fun(Box::new(PexpFun {
-                arg_label: label.clone(),
-                default: None,
-                lhs: arena.push_pat(pat.clone()),
-                rhs: arena.push_expr(method_body),
-                arity: arena.static_arity_none(),
-                is_async: *arg_async,
-            }))),
-            pexp_loc: loc,
-            pexp_attributes: attrs.clone().into(),
-        };
-    }
-
-    let total_arity = rev_extra_args.len() as i32;
-    if let ExpressionDesc::Pexp_fun(inner) = &*method_body.pexp_desc {
-        let PexpFun {
-            arg_label: outer_label,
-            default: outer_default,
-            lhs: outer_lhs,
-            rhs: outer_rhs,
-            ..
-        } = &**inner;
-        method_body = Expression {
-            pexp_desc: Box::new(ExpressionDesc::Pexp_fun(Box::new(PexpFun {
-                arg_label: outer_label.clone(),
-                default: *outer_default,
-                lhs: *outer_lhs,
-                rhs: *outer_rhs,
-                arity: arena.push_arity(Some(total_arity)),
-                is_async,
-            }))),
-            pexp_loc: method_body.pexp_loc,
-            pexp_attributes: method_body.pexp_attributes.clone(),
-        };
-    }
 
     if is_async {
         let async_loc = match &*method_body.pexp_desc {
@@ -8663,20 +8637,15 @@ fn rewrite_expression_generic(expr: &Expression, arena: &mut ParseArena) -> Expr
 
         ExpressionDesc::Pexp_fun(inner) => {
             let PexpFun {
-                ref arg_label,
-                ref default,
-                ref lhs,
-                ref rhs,
                 ref arity,
                 ref is_async,
+                ..
             } = **inner;
             let (has_this_attr, filtered_attrs) = split_this_attrs(&expr.pexp_attributes, arena);
             if has_this_attr {
                 return rewrite_method_callback_expression(
                     expr,
-                    arg_label,
-                    *lhs,
-                    *rhs,
+                    inner,
                     *is_async,
                     filtered_attrs,
                     arena,
