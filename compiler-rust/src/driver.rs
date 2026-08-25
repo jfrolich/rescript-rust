@@ -5317,13 +5317,16 @@ fn format_type_arity_mismatch_report(
     provided: usize,
 ) -> String {
     let name = format_longident_for_report(arena, lid);
+    let plural = |count: usize| if count == 1 { "" } else { "s" };
     let message = if expected == 0 {
         format!(
-            "The type {name} is not generic so expects no arguments,\nbut is here applied to {provided} argument(s).\nHave you tried removing the angular brackets `<` and `>` and the\narguments within them and just writing `{name}` instead? "
+            "The type `{name}` is not generic so expects no arguments,\nbut is here given {provided} argument{}.\nHave you tried removing the angular brackets `<` and `>` and the\narguments within them and just writing `{name}` instead? ",
+            plural(provided),
         )
     } else {
         format!(
-            "The type constructor {name} expects {expected} argument(s),\nbut is here applied to {provided} argument(s)"
+            "The type constructor `{name}` expects {expected} type argument{}, but is given {provided}",
+            plural(expected),
         )
     };
     format_compiler_error_report(arena, source, filename, loc, &message)
