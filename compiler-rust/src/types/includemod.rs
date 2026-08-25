@@ -128,6 +128,7 @@ pub enum IncludeModError {
         name: Ident,
         actual: ValueDescription,
         expected: ValueDescription,
+        arity_mismatch: Option<(usize, usize)>,
     },
     /// Type declaration mismatch.
     TypeMismatch { name: Ident, reason: String },
@@ -397,6 +398,7 @@ fn format_include_error(
             name,
             actual,
             expected,
+            arity_mismatch,
         } => {
             let actual_text = format_value_description(type_ctx, name, actual);
             let expected_text = format_value_description(type_ctx, name, expected);
@@ -405,6 +407,20 @@ fn format_include_error(
             output.push_str(" is not included in ");
             output.push_str(&expected_text);
             output.push('\n');
+            if let Some((actual_arity, expected_arity)) = arity_mismatch {
+                let arguments = |arity: usize| {
+                    if arity == 1 {
+                        "1 argument".to_string()
+                    } else {
+                        format!("{arity} arguments")
+                    }
+                };
+                output.push_str("  The implementation contains a function taking ");
+                output.push_str(&arguments(*actual_arity));
+                output.push_str(" where the interface expects one taking ");
+                output.push_str(&arguments(*expected_arity));
+                output.push_str(".\n");
+            }
             output.push_str("  ");
             output.push_str(&code_frame::format_location(
                 &location_filename(type_ctx, filename, &expected.val_loc),
@@ -2302,6 +2318,57 @@ fn signatures_with_subst<'a>(
 // ============================================================================
 
 /// Check if value description `impl_desc` is a subtype of `sig_desc`.
+/// compiler/ml/includemod.ml:496-529: find the first nested n-ary arrow
+/// whose parameter count differs, descending only through equal-label arrows.
+fn find_arity_mismatch(
+    type_ctx: &TypeContext,
+    env: &Env,
+    impl_ty: TypeExprRef,
+    sig_ty: TypeExprRef,
+) -> Option<(usize, usize)> {
+    fn loop_(
+        type_ctx: &TypeContext,
+        env: &Env,
+        seen: &mut HashSet<(TypeExprRef, TypeExprRef)>,
+        impl_ty: TypeExprRef,
+        sig_ty: TypeExprRef,
+    ) -> Option<(usize, usize)> {
+        let impl_ty = type_ctx.repr(impl_ty);
+        let sig_ty = type_ctx.repr(sig_ty);
+        if !seen.insert((impl_ty, sig_ty)) {
+            return None;
+        }
+        let impl_ty = type_ctx.repr(ctype::expand_head(type_ctx, env, impl_ty));
+        let sig_ty = type_ctx.repr(ctype::expand_head(type_ctx, env, sig_ty));
+        let (impl_args, impl_ret, sig_args, sig_ret) =
+            match (&*type_ctx.get_desc(impl_ty), &*type_ctx.get_desc(sig_ty)) {
+                (
+                    TypeDesc::Tarrow { args: impl_args, ret: impl_ret },
+                    TypeDesc::Tarrow { args: sig_args, ret: sig_ret },
+                ) => (impl_args.clone(), *impl_ret, sig_args.clone(), *sig_ret),
+                _ => return None,
+            };
+        if impl_args.len() != sig_args.len() {
+            return Some((impl_args.len(), sig_args.len()));
+        }
+        if !impl_args
+            .iter()
+            .zip(&sig_args)
+            .all(|(impl_arg, sig_arg)| impl_arg.lbl.same_label(&sig_arg.lbl))
+        {
+            return None;
+        }
+        for (impl_arg, sig_arg) in impl_args.iter().zip(&sig_args) {
+            if let Some(mismatch) = loop_(type_ctx, env, seen, impl_arg.typ, sig_arg.typ) {
+                return Some(mismatch);
+            }
+        }
+        loop_(type_ctx, env, seen, impl_ret, sig_ret)
+    }
+
+    loop_(type_ctx, env, &mut HashSet::new(), impl_ty, sig_ty)
+}
+
 fn value_descriptions<'a>(
     type_ctx: &'a TypeContext,
     env: &Env,
@@ -2334,10 +2401,13 @@ fn value_descriptions<'a>(
     if !moregeneral {
         let mut expected_desc = sig_desc.clone();
         expected_desc.val_type = expected_ty;
+        let arity_mismatch =
+            find_arity_mismatch(type_ctx, env, impl_desc.val_type, expected_ty);
         return Err(IncludeModError::ValueTypeMismatch {
             name: id,
             actual: impl_desc.clone(),
             expected: expected_desc,
+            arity_mismatch,
         });
     }
 
