@@ -2033,43 +2033,17 @@ impl LambdaCompiler {
                         effects,
                     );
                 }
-                // OCaml's `compile_recursive_let` catch-all (lam_compile.ml:485-486)
-                // wraps the value via `Declare (Alias, id)`. When the value is a
-                // function expression, the printer (js_dump.ml:1294-1310 +
-                // pp_function `Name_top`) emits a `function name(...) {...}`
-                // declaration, which JS hoists to the top of the enclosing scope.
-                // Hoisting is *load-bearing* for recursive value bindings whose
-                // prelude references the binding before the assignment site, e.g.
-                // `let rec r = (let x = makeblock(A, r); fun () => x)` lowers to
-                // `let x = {VAL: r}; <r-binding>`. Without hoisting `r` is
-                // `undefined` when `let x` runs and `x.VAL` captures the wrong
-                // value. Mirror that here by emitting `let r = function_expr`
-                // as a single Variable declaration (printer turns it into
-                // `function r(...) {...}` at top level) instead of splitting
-                // into `let r; ...; r = function_expr;`.
-                if matches!(&compiled.expr.desc, ExpressionDesc::Fun { .. }) {
-                    effects.push(Statement::variable(VariableDeclaration {
-                        ident: id.clone(),
-                        value: Some(compiled.expr),
-                        property: LetKind::Alias,
-                        ident_info: IdentInfo::default(),
-                    }));
-                    return (vec![], effects);
-                }
-                effects.push(Statement::exp(Expression::bin(
-                    BinOp::Eq,
-                    Expression::var(id.clone()),
-                    compiled.expr,
-                )));
-                (
-                    vec![Statement::variable(VariableDeclaration {
-                        ident: id.clone(),
-                        value: None,
-                        property: LetKind::Strict,
-                        ident_info: IdentInfo::default(),
-                    })],
-                    effects,
-                )
+                // OCaml `compile_recursive_let`'s catch-all compiles directly
+                // under `Declare (Alias, id)` (`lam_compile.ml:552-553`).  The
+                // value's prelude therefore precedes a normal declaration; it
+                // does not introduce a placeholder plus a later assignment.
+                effects.push(Statement::variable(VariableDeclaration {
+                    ident: id.clone(),
+                    value: Some(compiled.expr),
+                    property: LetKind::Alias,
+                    ident_info: IdentInfo::default(),
+                }));
+                (vec![], effects)
             }
         }
     }
