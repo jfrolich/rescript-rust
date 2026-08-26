@@ -4483,6 +4483,29 @@ impl<'a> RawLambdaConverter<'a> {
         }
     }
 
+    fn force_qualified_module_for_normalization(
+        &mut self,
+        env: &crate::types::env::Env,
+        parent: &crate::types::Path,
+        name: &str,
+    ) -> Option<crate::types::decl::ModuleDeclaration> {
+        // OCaml has one global Ident counter. Component forcing can run
+        // Subst.modtype while raw translation is already allocating binders,
+        // so keep the Rust converter and type-context generators in lockstep
+        // across the Env.find_module force boundary.
+        self.sync_local_stamp_generators();
+        let result = crate::types::typecore::lookup_module_in_resolved_path(
+            parent,
+            name,
+            env,
+            &mut self.persistent_env,
+            self.type_ctx,
+        )
+        .map(|(_, _, md)| md);
+        self.sync_local_stamp_generators();
+        result
+    }
+
     fn normalize_module_path_in_env(
         &mut self,
         env: &crate::types::env::Env,
@@ -4500,6 +4523,14 @@ impl<'a> RawLambdaConverter<'a> {
             ),
             crate::types::Path::Pident(_) => path.clone(),
         };
+
+        if let crate::types::Path::Pdot(parent, name, _) = &path
+            && let Some(md) = self.force_qualified_module_for_normalization(env, parent, name)
+            && let crate::types::decl::ModuleType::MtyAlias(_, alias_target) = &md.md_type
+            && !alias_target.same(&path)
+        {
+            return self.normalize_module_path_in_env(env, alias_target);
+        }
 
         if matches!(&path, crate::types::Path::Pdot(..))
             && let Some(alias_target) = crate::types::typecore::module_alias_target_for_path(
@@ -4603,6 +4634,14 @@ impl<'a> RawLambdaConverter<'a> {
                 path.clone()
             }
         };
+
+        if let crate::types::Path::Pdot(parent, name, _) = &path
+            && let Some(md) = self.force_qualified_module_for_normalization(env, parent, name)
+            && let crate::types::decl::ModuleType::MtyAlias(_, alias_target) = &md.md_type
+            && !alias_target.same(&path)
+        {
+            return self.normalize_value_prefix_path_in_env(env, alias_target);
+        }
 
         if matches!(&path, crate::types::Path::Pdot(..))
             && let Some(alias_target) = crate::types::typecore::module_alias_target_for_path(

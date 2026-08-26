@@ -367,7 +367,8 @@ pub struct TypeContext {
     /// Cached child-module access paths keyed by resolved parent access path.
     resolved_child_module_path_cache: RefCell<ahash::AHashMap<Path, ahash::AHashMap<String, Path>>>,
 
-    /// Cached forced module declarations from qualified component tables.
+    /// Forced declarations shared by persistent/global alias component views.
+    /// Local component views keep their own thunk state in StructureComponentTables.
     qualified_module_decl_cache: RefCell<
         ahash::AHashMap<
             Path,
@@ -1137,7 +1138,10 @@ impl TypeContext {
             .cloned()
     }
 
-    /// Cache a forced qualified module declaration.
+    /// Share a forced declaration across persistent/global alias component views.
+    ///
+    /// Local declarations are intentionally not published here: OCaml keeps
+    /// descriptor component tables and later `find_module` thunks distinct.
     pub(crate) fn register_qualified_module_decl(
         &self,
         parent_path: &Path,
@@ -1145,6 +1149,10 @@ impl TypeContext {
         id: Ident,
         md: Arc<super::decl::ModuleDeclaration>,
     ) {
+        let head = parent_path.head();
+        if !head.is_persistent() && !head.is_global() && head.stamp() != 0 {
+            return;
+        }
         self.qualified_module_decl_cache
             .borrow_mut()
             .entry(parent_path.clone())
@@ -1152,12 +1160,16 @@ impl TypeContext {
             .insert(child_name.to_string(), (id, md));
     }
 
-    /// Look up a forced qualified module declaration.
+    /// Look up a forced persistent/global qualified module declaration.
     pub(crate) fn find_qualified_module_decl(
         &self,
         parent_path: &Path,
         child_name: &str,
     ) -> Option<(Ident, Arc<super::decl::ModuleDeclaration>)> {
+        let head = parent_path.head();
+        if !head.is_persistent() && !head.is_global() && head.stamp() != 0 {
+            return None;
+        }
         self.qualified_module_decl_cache
             .borrow()
             .get(parent_path)
