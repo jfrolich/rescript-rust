@@ -1173,6 +1173,8 @@ pub struct TypeCheckContext<'a> {
     /// Mirrors OCaml Env.check_usage/Delayed_checks: lookup marks a binding as
     /// used, and the warning is emitted only when delayed checks are forced.
     value_usage_checks: Vec<ValueUsageCheck>,
+    /// Existential constructors instantiated by delayed unused-case witnesses.
+    unused_witness_existentials: Vec<(crate::types::ConstructorDescription, i32)>,
     /// Current warning configuration.
     pub warning_config: WarningConfig,
     /// Current loop nesting depth for validating break/continue.
@@ -1277,6 +1279,7 @@ impl<'a> TypeCheckContext<'a> {
             diagnostics: Vec::new(),
             warnings: Vec::new(),
             value_usage_checks: Vec::new(),
+            unused_witness_existentials: Vec::new(),
             warning_config: WarningConfig::new(),
             loop_depth: 0,
             used_variables: HashMap::new(),
@@ -1399,6 +1402,22 @@ impl<'a> TypeCheckContext<'a> {
                     is_error: check.is_error,
                 });
             }
+        }
+
+        for (constructor, newtype_level) in std::mem::take(&mut self.unused_witness_existentials) {
+            // OCaml runs unused-case predicates through Delayed_checks after
+            // the complete structure has been typed. Preserve the existential
+            // Ident allocation from Ctype.instance_constructor, then discard
+            // the witness's temporary type/environment mutations.
+            let snapshot = self.type_ctx.snapshot_type_state();
+            let mut witness_env = Env::empty();
+            let _ = crate::types::instance_constructor_in_pattern(
+                self.type_ctx,
+                &mut witness_env,
+                newtype_level,
+                &constructor,
+            );
+            self.type_ctx.restore_type_state(snapshot);
         }
     }
 
@@ -11707,6 +11726,41 @@ fn generalized_tuple_space_is_covered(
     )
 }
 
+fn instantiate_unused_witness_existentials(
+    tctx: &mut TypeCheckContext<'_>,
+    env: &Env,
+    pat: &Pattern,
+) {
+    fn visit(tctx: &mut TypeCheckContext<'_>, env: &Env, pat: &Pattern) {
+        let PatternDesc::Tpat_construct(_, _, args) = &pat.pat_desc else {
+            return;
+        };
+
+        for arg in args {
+            // Parmatch.check_unused builds a witness for a catch-all clause and
+            // Typecore.partial_pred types it with existentials enabled
+            // (compiler/ml/typecore.ml:1743-1759, 1769-1774). A wildcard at a
+            // singleton variant is refined to that constructor; reproduce the
+            // constructor instantiation even though Rust's warning checker does
+            // not retain the temporary typed witness.
+            if matches!(
+                arg.pat_desc,
+                PatternDesc::Tpat_any | PatternDesc::Tpat_var(_, _)
+            ) && let Some(constructors) = variant_constructors_for_type(tctx, env, arg.pat_type)
+                && let [constructor] = constructors.as_slice()
+                && let Ok(desc) = env.find_constructor(constructor.cd_id.name())
+                && !desc.cstr_existentials.is_empty()
+            {
+                tctx.unused_witness_existentials
+                    .push((desc.clone(), tctx.type_ctx.current_level()));
+            }
+            visit(tctx, env, arg);
+        }
+    }
+
+    visit(tctx, env, pat);
+}
+
 fn report_unused_match_cases<'case>(
     tctx: &mut TypeCheckContext<'_>,
     env: &Env,
@@ -11725,6 +11779,15 @@ fn report_unused_match_cases<'case>(
     let mut covered_by_catch_all = false;
 
     for case in cases {
+        if case.c_guard.is_none()
+            && pattern_is_simple_catch_all(&case.c_lhs)
+            && tctx.warning_config.is_active(&Warning::UnreachableCase)
+        {
+            for previous in &previous_unguarded_cases {
+                instantiate_unused_witness_existentials(tctx, env, previous.lhs);
+            }
+        }
+
         let has_dict_pattern = typed_pattern_contains_dict_pattern(tctx.arena, &case.c_lhs)
             || previous_unguarded_cases
                 .iter()
