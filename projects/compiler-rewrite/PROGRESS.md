@@ -2,17 +2,32 @@
 
 > **Note**: This is a living document. Update it as you complete tasks, discover new work items, or gain insights. See [PLAN.md](./PLAN.md) for the full migration plan.
 
-## Current Phase: Phase 2 - Parser
+## Current Phase: Phase 5 - Integration
 
 ### Overall Progress
 
 | Phase | Status | Progress | Key Blocker |
 |-------|--------|----------|-------------|
 | Phase 1: Foundation | ✅ Complete | 100% | None |
-| Phase 2: Parser | ✅ Complete | 100% | **100% binary parity achieved!** |
-| Phase 3: Lambda/JS IR | 🚧 In Progress | ~30% | None |
-| Phase 4: Type Checker | ✅ Complete | 100% | Parallel with Phase 2 |
-| Phase 5: Integration | ⏳ Not Started | 0% | Depends on Phase 4 |
+| Phase 2: Parser | 🚧 In Progress | ~99% | Marshal identity parity after upstream allocation changes |
+| Phase 3: Lambda/JS IR | ✅ Complete | 100% | None |
+| Phase 4: Type Checker | ✅ Complete | 100% | None |
+| Phase 5: Integration | 🚧 In Progress | ~95% | Release hardening and external-project compatibility |
+
+### Milestone: Strict Compiler Parity and External Build (August 2026)
+
+The Rust compiler now matches the current OCaml compiler across the complete canonical corpus:
+
+- Typedtree parity: **610/610**
+- Raw Lambda parity: **610/610**
+- Optimized Lambda parity: **610/610**
+- JavaScript output parity: **610/610**, plus **344/344** focused fixtures, in debug and release builds
+- Diagnostics parity: **1431/1431**
+- Compiler tests: **1189 passed**, with no failures
+- Rewatch tests: **147 passed**, with no failures
+- Disposable current-runtime Tella migration: **2169 modules compiled** and **2115/2115** release JavaScript outputs matched using rewatch `--in-process`
+
+The parser remains semantically exact over the 3,567-file corpus (including PPX and Spice checks). The remaining parser debt is Marshal object-identity allocation parity for binary AST output after recent upstream parser/PPX allocation changes; expected AST structure and locations remain exact.
 
 ### Milestone: 100% Binary AST Parity (January 2026)
 
