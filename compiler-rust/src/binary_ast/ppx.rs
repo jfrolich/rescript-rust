@@ -201,13 +201,15 @@ fn has_unwrap_attr(attrs: &[Attribute], arena: &ParseArena) -> bool {
 }
 
 /// Conservative variable extraction used by OCaml's Ast_pat helper.
-fn single_var_pattern_name_conservative(pat: &Pattern, arena: &ParseArena) -> Option<String> {
+/// Returns the pattern's own name StrIdx so desugaring can reuse the same
+/// string object, matching OCaml marshal identity.
+fn single_var_pattern_name_conservative(pat: &Pattern, arena: &ParseArena) -> Option<StrIdx> {
     match &*pat.ppat_desc {
-        PatternDesc::Ppat_any => Some(String::new()),
-        PatternDesc::Ppat_var(name) => Some(arena.get_string(name.txt).to_string()),
+        PatternDesc::Ppat_any => Some(arena.static_empty_str()),
+        PatternDesc::Ppat_var(name) => Some(name.txt),
         PatternDesc::Ppat_alias(inner, alias_name) => {
             if single_var_pattern_name_conservative(arena.get_pat(*inner), arena).is_some() {
-                Some(arena.get_string(alias_name.txt).to_string())
+                Some(alias_name.txt)
             } else {
                 None
             }
@@ -233,7 +235,7 @@ enum LetUnwrapVariant {
 fn classify_let_unwrap_pattern(
     pat: &Pattern,
     arena: &ParseArena,
-) -> Option<(LetUnwrapVariant, String)> {
+) -> Option<(LetUnwrapVariant, StrIdx)> {
     let PatternDesc::Ppat_construct(ctor_lid, payload) = &*pat.ppat_desc else {
         return None;
     };
@@ -253,8 +255,8 @@ fn classify_let_unwrap_pattern(
     let var_name = payload
         .as_ref()
         .and_then(|inner| single_var_pattern_name_conservative(arena.get_pat(*inner), arena))
-        .filter(|name| !name.is_empty())
-        .unwrap_or_else(|| "x".to_string());
+        .filter(|name_idx| !arena.get_string(*name_idx).is_empty())
+        .unwrap_or_else(|| arena.static_x_name());
 
     Some((variant, var_name))
 }
@@ -8510,12 +8512,10 @@ fn rewrite_expression_generic(expr: &Expression, arena: &mut ParseArena) -> Expr
                         ExpressionDesc::Pexp_pack(_)
                     ) {
                         let vb_pat = arena.get_pat(vb.pvb_pat);
-                        if let Some((variant, var_name)) =
+                        if let Some((variant, var_name_idx)) =
                             classify_let_unwrap_pattern(vb_pat, arena)
                         {
                             let loc = arena.mk_ghost_loc(vb_pat.ppat_loc);
-                            let var_name_idx = arena.intern(&var_name);
-                            let var_lid = arena.push_lident_from_idx(var_name_idx);
 
                             let (early_ctor_name, early_ctor_payload) = match variant {
                                 LetUnwrapVariant::ResultOk => ("Error", true),
@@ -8524,7 +8524,10 @@ fn rewrite_expression_generic(expr: &Expression, arena: &mut ParseArena) -> Expr
                                 LetUnwrapVariant::OptionNone => ("Some", true),
                             };
                             let early_ctor_idx = arena.intern(early_ctor_name);
-                            let early_ctor_lid = arena.push_lident_from_idx(early_ctor_idx);
+                            // OCaml builds each synthesized Longident inline at
+                            // the desugar site; blocks are never shared across
+                            // occurrences even for static name strings.
+                            let early_ctor_lid = arena.fresh_lident_from_idx(early_ctor_idx);
                             let early_ctor_payload_pat = if early_ctor_payload {
                                 Some(arena.push_pat(Pattern {
                                     ppat_desc: Box::new(PatternDesc::Ppat_any),
@@ -8562,7 +8565,7 @@ fn rewrite_expression_generic(expr: &Expression, arena: &mut ParseArena) -> Expr
                                 pc_guard: None,
                                 pc_rhs: arena.push_expr(Expression {
                                     pexp_desc: Box::new(ExpressionDesc::Pexp_ident(Located {
-                                        txt: var_lid,
+                                        txt: arena.fresh_lident_from_idx(var_name_idx),
                                         loc,
                                     })),
                                     pexp_loc: loc,

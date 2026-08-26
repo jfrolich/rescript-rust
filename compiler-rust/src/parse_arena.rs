@@ -595,6 +595,13 @@ pub struct ParseArena {
     static_optional_default_sth_str: StrIdx,
     /// Pre-allocated `"#default"` attribute name used by optional-default rewrite lets.
     static_default_attr_str: StrIdx,
+    /// Pre-allocated empty string. OCaml string literals are statically shared,
+    /// so conservative single-variable extraction of a wildcard needs one
+    /// canonical empty StrIdx.
+    static_empty_str: StrIdx,
+    /// Pre-allocated `"x"`. OCaml's let-unwrap desugar falls back to the static
+    /// literal `"x"` (bs_builtin_ppx.ml), shared across every site.
+    static_x_name: StrIdx,
     /// Pre-allocated `"res.constructor_from_spread"` attribute name used by variant spreads.
     static_constructor_from_spread_attr_str: StrIdx,
     /// Pre-allocated `"res.patFromVariantSpread"` attribute name used for synthetic spread patterns.
@@ -706,6 +713,8 @@ impl Default for ParseArena {
         let static_optional_default_opt_str = strings.intern("*opt*");
         let static_optional_default_sth_str = strings.intern("*sth*");
         let static_default_attr_str = strings.intern("#default");
+        let static_empty_str = strings.intern("");
+        let static_x_name = strings.intern("x");
         let static_constructor_from_spread_attr_str = strings.intern("res.constructor_from_spread");
         let static_pat_from_variant_spread_attr_str = strings.intern("res.patFromVariantSpread");
         // CMI-loaded declaration attributes are converted back into parser attrs
@@ -962,6 +971,8 @@ impl Default for ParseArena {
             static_optional_default_opt_str,
             static_optional_default_sth_str,
             static_default_attr_str,
+            static_empty_str,
+            static_x_name,
             static_constructor_from_spread_attr_str,
             static_pat_from_variant_spread_attr_str,
             static_ppx_lidents,
@@ -1548,6 +1559,15 @@ impl ParseArena {
         lid_idx
     }
 
+    /// Fresh `Longident::Lident` for one synthesized AST node.
+    ///
+    /// OCaml allocates a new Longident block at every desugar site even when
+    /// the name string is a shared static literal (for example the `"x"`
+    /// fallback in the let-unwrap rewrite); never reuse a cached block here.
+    pub fn fresh_lident_from_idx(&mut self, str_idx: StrIdx) -> LidentIdx {
+        self.longidents.push(Longident::Lident(str_idx))
+    }
+
     /// Push a dotted identifier (Ldot) with a dynamic string.
     pub fn push_ldot(&mut self, prefix: LidentIdx, name: &str) -> LidentIdx {
         let str_idx = self.strings.push_interned(name);
@@ -1796,6 +1816,16 @@ impl ParseArena {
     /// Get `Ast_literal.No_loc.type_string`.
     pub fn ast_literal_type_string(&self) -> CoreTypeIdx {
         self.static_ast_literal_types.type_string
+    }
+
+    /// Pre-interned empty string (OCaml static literal sharing).
+    pub fn static_empty_str(&self) -> StrIdx {
+        self.static_empty_str
+    }
+
+    /// Pre-interned `"x"` fallback binder name for let-unwrap desugaring.
+    pub fn static_x_name(&self) -> StrIdx {
+        self.static_x_name
     }
 
     /// Get `Ast_literal.No_loc.type_int`.

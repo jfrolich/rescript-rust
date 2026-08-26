@@ -695,7 +695,7 @@ fn make_let_unwrap_early_case(
     };
     let alias_pat_idx = arena.push_pat(alias_pat);
 
-    let alias_lid = arena.push_lident_from_idx(alias_name);
+    let alias_lid = arena.fresh_lident_from_idx(alias_name);
     let alias_expr = Expression {
         pexp_desc: Box::new(ExpressionDesc::Pexp_ident(Located {
             txt: alias_lid,
@@ -721,7 +721,9 @@ fn make_ctor_pattern(
     arena: &mut ParseArena,
 ) -> Pattern {
     let ctor_name_idx = arena.intern_string(ctor_name);
-    let ctor_lid_idx = arena.push_lident_from_idx(ctor_name_idx);
+    // OCaml builds each synthesized Longident inline at the desugar site;
+    // blocks are never shared across occurrences.
+    let ctor_lid_idx = arena.fresh_lident_from_idx(ctor_name_idx);
     let payload = if with_payload {
         let any_idx = arena.push_pat(Pattern {
             ppat_desc: Box::new(PatternDesc::Ppat_any),
