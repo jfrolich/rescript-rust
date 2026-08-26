@@ -1255,7 +1255,9 @@ fn parse_record_pattern(p: &mut Parser<'_>) -> Pattern {
                 let name_start_idx = p.start_pos_idx();
                 let name = match p.token.clone() {
                     Token::Lident(ident) => {
-                        let name_idx = p.arena_mut().intern(&ident);
+                        // OCaml's lexer allocates a fresh string per token, so
+                        // each source occurrence must keep a distinct StrIdx.
+                        let name_idx = p.arena_mut().push_string(ident);
                         p.next();
                         with_loc(name_idx, p.mk_loc_idx_to_prev_end(name_start_idx))
                     }
@@ -1273,8 +1275,9 @@ fn parse_record_pattern(p: &mut Parser<'_>) -> Pattern {
             } else {
                 match p.token.clone() {
                     Token::Lident(ident) => {
-                        // ...name (no type annotation)
-                        let name_idx = p.arena_mut().intern(&ident);
+                        // ...name (no type annotation); fresh StrIdx per token
+                        // to match OCaml's per-token lexer strings.
+                        let name_idx = p.arena_mut().push_string(ident);
                         p.next();
                         let rest_loc = p.mk_loc_idx_to_prev_end(rest_start_pos_idx);
                         let name_loc = p.mk_loc_idx_to_prev_end(rest_name_start_pos_idx);
