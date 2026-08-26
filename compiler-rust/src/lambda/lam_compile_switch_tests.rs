@@ -2300,17 +2300,13 @@ fn mixed_untagged_literal_dispatch_keeps_ocaml_block_overlap_order() {
     );
     for (tag, result) in [("A", 1), ("B", 2), ("C", 3), ("D", 4)] {
         assert!(
-            rendered.contains(&format!(
-                "case \"{tag}\" :\n      return {result};"
-            )),
+            rendered.contains(&format!("case \"{tag}\" :\n      return {result};")),
             "expected literal case {tag} to keep its bound result inside the guarded string switch:\n{rendered}"
         );
     }
     for (kind, result) in [("string", 5), ("number", 6), ("object", 7)] {
         assert!(
-            rendered.contains(&format!(
-                "case \"{kind}\" :\n      return {result};"
-            )),
+            rendered.contains(&format!("case \"{kind}\" :\n      return {result};")),
             "expected block-kind clause {kind} to keep its bound result inside the typeof switch:\n{rendered}"
         );
     }
