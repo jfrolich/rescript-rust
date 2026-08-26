@@ -471,9 +471,14 @@ fn deriving_accessors_curried_rewrites_alias_initializers_through_exported_bindi
     );
     let compose_idx = output.find("function compose").unwrap();
     let no_param_idx = output.find("let noParam = \"NoParam\";").unwrap();
+    let composed_idx = output.find("let _composedMyField = 1;").unwrap();
     assert!(
-        no_param_idx < compose_idx,
-        "expected the rebound literal export to retain source order before compose in DerivingAccessorsCurried, got:\n{output}"
+        compose_idx < composed_idx && composed_idx < no_param_idx,
+        "expected derived accessors before compose and the rebound literal export after compose in the natural semantic layout of DerivingAccessorsCurried, got:\n{output}"
+    );
+    assert!(
+        output.contains("let _composedNum = {\n  TAG: \"Num\",\n  _0: 1\n};"),
+        "expected the composed num alias to keep its canonical substituted initializer in DerivingAccessorsCurried, got:\n{output}"
     );
 }
 
@@ -497,9 +502,14 @@ fn deriving_accessors_uncurried_rewrites_alias_initializers_through_exported_bin
     );
     let compose_idx = output.find("function compose").unwrap();
     let no_param_idx = output.find("let noParam = \"NoParam\";").unwrap();
+    let composed_idx = output.find("let _composedMyField = 1;").unwrap();
     assert!(
-        no_param_idx < compose_idx,
-        "expected the rebound literal export to retain source order before compose in DerivingAccessorsUncurried, got:\n{output}"
+        compose_idx < composed_idx && composed_idx < no_param_idx,
+        "expected derived accessors before compose and the rebound literal export after compose in the natural semantic layout of DerivingAccessorsUncurried, got:\n{output}"
+    );
+    assert!(
+        output.contains("let _composedNum = {\n  TAG: \"Num\",\n  _0: 1\n};"),
+        "expected the composed num alias to keep its canonical substituted initializer in DerivingAccessorsUncurried, got:\n{output}"
     );
 }
 

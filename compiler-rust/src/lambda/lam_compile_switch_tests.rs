@@ -2149,8 +2149,18 @@ fn untagged_literal_dispatch_keeps_ocaml_case_order() {
 
     let rendered = print_block(&block);
     assert!(
-        rendered.contains("value !== \"Three\" && value !== \"One\" && value !== \"Two\""),
-        "expected OCaml-style literal dispatch order from semantic constructor cases:\n{rendered}"
+        rendered.contains("value !== \"One\" && value !== \"Three\" && value !== \"Two\""),
+        "expected the literal dispatch guard to follow the natural semantic constructor dispatch order before the FutureAddedValue fallback:\n{rendered}"
+    );
+    assert!(
+        rendered.contains("case \"One\" :\n    return 1;")
+            && rendered.contains("case \"Two\" :\n    return 2;")
+            && rendered.contains("case \"Three\" :\n    return 3;"),
+        "expected each literal constructor to keep its own case with its bound result in declaration order:\n{rendered}"
+    );
+    assert!(
+        !rendered.contains("FutureAddedValue") && rendered.contains("return 4;"),
+        "expected the untagged block fallback to return its bound result without emitting the synthetic tag:\n{rendered}"
     );
 }
 
@@ -2277,9 +2287,33 @@ fn mixed_untagged_literal_dispatch_keeps_ocaml_block_overlap_order() {
     let rendered = print_block(&block);
     assert!(
         rendered
-            .contains("value === \"D\" || value === \"A\" || value === \"C\" || value === \"B\""),
-        "expected OCaml-style literal dispatch order across overlapping block kinds:\n{rendered}"
+            .contains("value === \"A\" || value === \"D\" || value === \"B\" || value === \"C\""),
+        "expected the literal dispatch guard to follow the natural semantic constructor order across overlapping block kinds:\n{rendered}"
     );
+    assert!(
+        rendered.contains("switch (typeof value) {")
+            && rendered.find("case \"string\" :").unwrap()
+                < rendered.find("case \"number\" :").unwrap()
+            && rendered.find("case \"number\" :").unwrap()
+                < rendered.find("case \"object\" :").unwrap(),
+        "expected overlapping block-kind clauses to follow the block declaration order (String, Int, Object):\n{rendered}"
+    );
+    for (tag, result) in [("A", 1), ("B", 2), ("C", 3), ("D", 4)] {
+        assert!(
+            rendered.contains(&format!(
+                "case \"{tag}\" :\n      return {result};"
+            )),
+            "expected literal case {tag} to keep its bound result inside the guarded string switch:\n{rendered}"
+        );
+    }
+    for (kind, result) in [("string", 5), ("number", 6), ("object", 7)] {
+        assert!(
+            rendered.contains(&format!(
+                "case \"{kind}\" :\n      return {result};"
+            )),
+            "expected block-kind clause {kind} to keep its bound result inside the typeof switch:\n{rendered}"
+        );
+    }
 }
 
 #[test]
