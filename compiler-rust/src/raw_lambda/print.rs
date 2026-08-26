@@ -107,6 +107,10 @@ fn let_kind_suffix(kind: LetKind) -> &'static str {
     }
 }
 
+fn print_internal_utf8<W: Write>(f: &mut Formatter<W>, s: &str) {
+    f.string(&crate::source_text::decode_internal_utf8(s));
+}
+
 fn print_field_info<W: Write>(f: &mut Formatter<W>, field: &FieldDbgInfo) {
     match field {
         FieldDbgInfo::Record { name }
@@ -137,7 +141,7 @@ fn print_tag_info<W: Write>(f: &mut Formatter<W>, tag_info: &TagInfo) {
         } => f.print(format_args!("{name}/{num_nonconst}")),
         TagInfo::PolyVar(name) => {
             f.string("`");
-            f.string(name);
+            print_internal_utf8(f, name);
         }
         TagInfo::Record { fields, .. } | TagInfo::RecordInlined { fields, .. } => {
             let names = fields
@@ -165,7 +169,10 @@ fn print_struct_const<W: Write>(f: &mut Formatter<W>, cst: &Constant) {
         Constant::Int { i, comment } => match comment {
             Some(PointerInfo::ShapeNone) => f.string("shape_none"),
             Some(PointerInfo::Constructor(tag)) => f.print(format_args!("`{}", tag.name)),
-            Some(PointerInfo::PolyVariant(name)) => f.print(format_args!("`{name}")),
+            Some(PointerInfo::PolyVariant(name)) => {
+                f.string("`");
+                print_internal_utf8(f, name);
+            }
             _ => f.print(format_args!("{i}")),
         },
         Constant::NativeInt { i, .. } => f.print(format_args!("{i}")),
@@ -190,7 +197,7 @@ fn print_struct_const<W: Write>(f: &mut Formatter<W>, cst: &Constant) {
                 f.print(format_args!("{value}n"));
             }
         }
-        Constant::Pointer(name) => f.string(name),
+        Constant::Pointer(name) => print_internal_utf8(f, name),
         Constant::Block { tag_info, elements } if elements.is_empty() => match tag_info {
             TagInfo::Constructor { name, .. } | TagInfo::RecordInlined { name, .. } => {
                 f.print(format_args!("[{name}]"))
@@ -663,5 +670,24 @@ fn lam<W: Write>(f: &mut Formatter<W>, lam0: &RawLambda, reraise_exn: Option<&Id
         }
         RawLambda::Lbreak => f.string("break"),
         RawLambda::Lcontinue => f.string("continue"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn polyvariant_pointer_decodes_internal_utf8_without_changing_ascii() {
+        let unicode = crate::source_text::latin1_bytes_to_string("`🚀".as_bytes().to_vec());
+        let unicode = RawLambda::const_(Constant::Pointer(unicode));
+        let mut unicode_out = Vec::new();
+        print_raw_lambda(&unicode, &mut unicode_out);
+        assert_eq!(unicode_out, "`🚀".as_bytes());
+
+        let ascii = RawLambda::const_(Constant::Pointer("`Ready".to_string()));
+        let mut ascii_out = Vec::new();
+        print_raw_lambda(&ascii, &mut ascii_out);
+        assert_eq!(ascii_out, b"`Ready");
     }
 }
