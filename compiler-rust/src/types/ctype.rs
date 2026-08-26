@@ -1119,7 +1119,7 @@ fn update_level_expand_with_lookup_capture<'a>(
                 // `level < get_level env p` after the outer `ty.level > level`
                 // check. Generic-level constructor nodes are still eligible
                 // for abbreviation expansion during `moregeneral`.
-                let should_try_expand = current != GENERIC_LEVEL && level < path_level;
+                let should_try_expand = level < path_level;
                 drop(desc);
                 // OCaml compiler/ml/ctype.ml:742-768 does not special-case
                 // local Pident constructors here. It attempts abbreviation
