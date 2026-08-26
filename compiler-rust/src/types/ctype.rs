@@ -2948,23 +2948,15 @@ fn try_expand_head_with_mode<'a>(
                         // compiler/ml/ctype.ml:1395-1439).
                         true
                     }
-                    Path::Pdot(_parent, _type_name, _) => {
-                        // OCaml `Env.find_type` resolves a qualified path
-                        // through the parent module; it does not fall back to
-                        // an unrelated leaf-name binding from the current env
-                        // (compiler/ml/env.ml:784-823, compiler/ml/ctype.ml:1395-1439).
-                        // Rust `Env::lookup_type` still has a name fallback, so
-                        // only trust this fast path when the returned declaration
-                        // carries the queried qualified path. The module-component
-                        // resolver below handles path lookup for declarations with
-                        // no stored `type_path`.
-                        env_decl.type_path.as_ref().is_some_and(|decl_path| {
-                            // OCaml compiler/ml/env.ml:800-813 `Env.find_type`
-                            // reaches a qualified declaration through the
-                            // parent component table; it does not accept an
-                            // unrelated declaration with the same printed path.
-                            decl_path.same(&path)
-                        })
+                    Path::Pdot(_, _, _) => {
+                        // OCaml `Env.find_type` resolves every qualified path
+                        // through `find_module_descr` and the parent component
+                        // table (compiler/ml/env.ml:781-813). Even an exact
+                        // declaration cached in Rust's flat Env must take that
+                        // route: a `Papply` parent forces the functor component
+                        // and result substitutions in env.ml:1595-1602 and
+                        // env.ml:1699-1710 before exposing the type.
+                        false
                     }
                     Path::Papply(_, _) => false,
                 };
