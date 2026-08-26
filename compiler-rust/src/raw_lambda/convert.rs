@@ -7402,11 +7402,15 @@ impl<'a> RawLambdaConverter<'a> {
     ) -> RawLambda {
         let val_id = self.name_pattern_ident("val", cases);
 
-        // Compile the exception handler: matching on the exception
-        let exn_handler = self.compile_trywith_handler_raw(&exn_id, exn_cases);
-
-        // Compile the normal handler: matching on the scrutinee value
+        // OCaml evaluates the `static_catch [transl_exp arg] ...` scrutinee
+        // before Matching.for_trywith builds the exception handler
+        // (translcore.ml:1266-1271). In particular, value-path normalization
+        // may force a persistent ps_sig and allocate its substituted binders
+        // before Matching allocates extension-switch temporaries.
         let scrut_lam = self.convert_expr_raw(scrut);
+
+        // Compile the exception handler: matching on the exception.
+        let exn_handler = self.compile_trywith_handler_raw(&exn_id, exn_cases);
 
         // Compile normal cases with val_id as the scrutinee
         let normal_handler = {
