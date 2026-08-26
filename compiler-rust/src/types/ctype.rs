@@ -1750,6 +1750,7 @@ pub(crate) fn resolve_type_item_through_modules<'a>(
                 // Cache the target type in the path store
                 let path_name = path_name.clone().unwrap_or_else(|| path.name());
                 ctx.register_type_decl_by_path(&path_name, qualified_decl.clone());
+                ctx.register_type_decl_by_exact_path(path.clone(), qualified_decl.clone());
                 ctx.register_type_item_by_path(&path_name, id.clone(), qualified_decl.clone());
                 result = Some((id.clone(), qualified_decl));
             }

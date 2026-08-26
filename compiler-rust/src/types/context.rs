@@ -312,6 +312,8 @@ pub struct TypeContext {
     /// Global type declaration store, indexed by full qualified path string.
     /// Used for looking up types via Pdot paths (e.g., "Js.Promise.t").
     type_decl_by_path: RefCell<ahash::AHashMap<String, super::decl::TypeDeclaration>>,
+    /// Qualified declarations keyed by Path identity, preserving local stamps.
+    type_decl_by_exact_path: RefCell<ahash::AHashMap<Path, super::decl::TypeDeclaration>>,
     type_item_by_path: RefCell<ahash::AHashMap<String, (Ident, super::decl::TypeDeclaration)>>,
     missing_type_item_by_path: RefCell<ahash::AHashSet<String>>,
 
@@ -554,6 +556,7 @@ impl TypeContext {
             type_decl_store: RefCell::new(ahash::AHashMap::new()),
             type_decl_by_stamp: RefCell::new(ahash::AHashMap::new()),
             type_decl_by_path: RefCell::new(ahash::AHashMap::new()),
+            type_decl_by_exact_path: RefCell::new(ahash::AHashMap::new()),
             type_item_by_path: RefCell::new(ahash::AHashMap::new()),
             missing_type_item_by_path: RefCell::new(ahash::AHashSet::new()),
             resolved_pdot_type_cache: RefCell::new(ahash::AHashMap::new()),
@@ -807,6 +810,11 @@ impl TypeContext {
         self.type_decl_by_path
             .borrow_mut()
             .insert(path.to_string(), decl);
+    }
+
+    /// Register a qualified declaration by exact Path identity.
+    pub fn register_type_decl_by_exact_path(&self, path: Path, decl: super::decl::TypeDeclaration) {
+        self.type_decl_by_exact_path.borrow_mut().insert(path, decl);
     }
 
     pub(crate) fn register_type_item_by_path(
@@ -1140,8 +1148,9 @@ impl TypeContext {
 
     /// Share a forced declaration across persistent/global alias component views.
     ///
-    /// Local declarations are intentionally not published here: OCaml keeps
-    /// descriptor component tables and later `find_module` thunks distinct.
+    /// Local declarations and functor-application paths are intentionally not
+    /// published here: OCaml keeps descriptor component tables and later
+    /// `find_module` thunks distinct.
     pub(crate) fn register_qualified_module_decl(
         &self,
         parent_path: &Path,
@@ -1149,7 +1158,9 @@ impl TypeContext {
         id: Ident,
         md: Arc<super::decl::ModuleDeclaration>,
     ) {
-        let head = parent_path.head();
+        let Some(head) = parent_path.head_opt() else {
+            return;
+        };
         if !head.is_persistent() && !head.is_global() && head.stamp() != 0 {
             return;
         }
@@ -1166,7 +1177,7 @@ impl TypeContext {
         parent_path: &Path,
         child_name: &str,
     ) -> Option<(Ident, Arc<super::decl::ModuleDeclaration>)> {
-        let head = parent_path.head();
+        let head = parent_path.head_opt()?;
         if !head.is_persistent() && !head.is_global() && head.stamp() != 0 {
             return None;
         }
@@ -1294,6 +1305,21 @@ impl TypeContext {
         let store = self.type_decl_by_path.borrow();
         if store.contains_key(path) {
             Some(std::cell::Ref::map(store, |s| s.get(path).unwrap()))
+        } else {
+            None
+        }
+    }
+
+    /// Look up a qualified declaration by exact Path identity.
+    pub fn find_type_decl_by_exact_path(
+        &self,
+        path: &Path,
+    ) -> Option<std::cell::Ref<'_, super::decl::TypeDeclaration>> {
+        let store = self.type_decl_by_exact_path.borrow();
+        if store.contains_key(path) {
+            Some(std::cell::Ref::map(store, |entries| {
+                entries.get(path).expect("checked exact type path")
+            }))
         } else {
             None
         }

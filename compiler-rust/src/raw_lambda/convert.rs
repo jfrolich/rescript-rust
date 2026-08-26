@@ -1544,6 +1544,8 @@ impl<'a> RawLambdaConverter<'a> {
                         let path = crate::types::Path::pdot(prefix.clone(), id.name());
                         self.type_ctx
                             .register_type_decl_by_path(&path.name(), decl.clone());
+                        self.type_ctx
+                            .register_type_decl_by_exact_path(path, decl.clone());
                     }
                 }
                 SignatureItem::SigModule(id, md, _) => {

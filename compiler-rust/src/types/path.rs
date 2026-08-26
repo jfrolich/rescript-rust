@@ -175,10 +175,15 @@ impl Path {
     ///
     /// Panics if the path is a `Papply`.
     pub fn head(&self) -> &Ident {
+        self.head_opt().expect("Path::head called on Papply")
+    }
+
+    /// Return the identifier at the root of a non-application path.
+    pub fn head_opt(&self) -> Option<&Ident> {
         match self {
-            Path::Pident(id) => id,
-            Path::Pdot(p, _, _) => p.head(),
-            Path::Papply(_, _) => panic!("Path::head called on Papply"),
+            Path::Pident(id) => Some(id),
+            Path::Pdot(parent, _, _) => parent.head_opt(),
+            Path::Papply(_, _) => None,
         }
     }
 
@@ -350,6 +355,8 @@ mod tests {
         let path = Path::papply(Path::pident(f_id), Path::pident(x_id));
 
         assert_eq!(path.name(), "F(X)");
+        assert_eq!(path.head_opt(), None);
+        assert_eq!(Path::pdot(path, "t").head_opt(), None);
     }
 
     #[test]

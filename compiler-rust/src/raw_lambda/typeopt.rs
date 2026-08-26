@@ -289,12 +289,43 @@ pub(crate) fn scrape_ty(ctx: &TypeContext, env: &Env, ty: TypeExprRef) -> TypeEx
 }
 
 pub(crate) fn is_base_type(ctx: &TypeContext, env: &Env, ty: TypeExprRef, name: &str) -> bool {
+    fn visit(
+        ctx: &TypeContext,
+        env: &Env,
+        ty: TypeExprRef,
+        name: &str,
+        seen: &mut HashSet<TypeExprRef>,
+    ) -> bool {
+        let ty = scrape_ty(ctx, env, ty);
+        if !seen.insert(ty) {
+            return false;
+        }
+        match &*ctx.get_desc(ty) {
+            TypeDesc::Tconstr { path, args, .. } => {
+                if path.head_name() == name || path.last() == name {
+                    return true;
+                }
+                // Strengthening can give an expression a stamped owner path
+                // while its captured module-body Env still contains the local
+                // pre-strengthened declaration. Typeopt only needs to inspect
+                // the exact nullary representation here; use Path identity and
+                // never printed-name or structural lookup.
+                if args.is_empty()
+                    && let Some(decl) = ctx.find_type_decl_by_exact_path(path)
+                    && decl.type_params.is_empty()
+                    && let Some(manifest) = decl.type_manifest
+                {
+                    return visit(ctx, env, manifest, name, seen);
+                }
+                false
+            }
+            _ => false,
+        }
+    }
+
     // Match OCaml `Typeopt.is_base_type`: inspect `scrape env ty`
     // (compiler/ml/typeopt.ml:99-101).
-    match &*ctx.get_desc(scrape_ty(ctx, env, ty)) {
-        TypeDesc::Tconstr { path, .. } => path.head_name() == name || path.last() == name,
-        _ => false,
-    }
+    visit(ctx, env, ty, name, &mut HashSet::new())
 }
 
 fn type_is_builtin_path_but_option(path: &Path) -> BuiltinPathTest {
@@ -338,12 +369,6 @@ pub(crate) fn find_type_decl_pub(
 fn find_type_decl(ctx: &TypeContext, env: &Env, path: &Path) -> Option<TypeDeclaration> {
     match path {
         Path::Pident(id) if !id.is_persistent() && id.stamp() != 0 => {
-            // `matching_polyfill.ml:31-35` and `ctype.ml:4492-4512` call
-            // `Env.find_type`; for Pident, env.ml:800-862 resolves through the
-            // caller's `IdTbl` before any auxiliary persistent/side-table
-            // fallback. In-process builds can have an abstract exported copy in
-            // `TypeContext` under the same stamp, so the environment must win
-            // for local constructor switches.
             crate::types::ctype::lookup_type_decl_for_path_pub(ctx, env, path)
                 .or_else(|| {
                     ctx.find_type_decl_by_stamp(id.stamp())
@@ -423,6 +448,35 @@ mod tests {
         let object = ctx.new_type(TypeDesc::Tobject { fields, name: None });
 
         assert!(type_is_builtin_object(&ctx, &Env::empty(), object));
+    }
+
+    #[test]
+    fn base_type_expands_strengthened_local_path_by_identity() {
+        let id_gen = IdGenerator::new();
+        let ctx = TypeContext::new(std::sync::Arc::new(id_gen));
+        let module_id = ctx.create_ident("Dimension");
+        let path = Path::pdot(Path::pident(module_id), "t");
+        ctx.register_type_decl_by_exact_path(
+            path.clone(),
+            TypeDeclaration {
+                type_params: vec![],
+                type_arity: 0,
+                type_kind: TypeKind::TypeAbstract,
+                type_private: PrivateFlag::Public,
+                type_manifest: Some(ctx.predef_float()),
+                type_variance: vec![],
+                type_newtype_level: None,
+                type_loc: Location::none(),
+                type_attributes: vec![],
+                type_immediate: false,
+                type_representation: crate::types::TypeRepresentation::Boxed,
+                type_inlined_types: vec![],
+                type_path: Some(path.clone()),
+            },
+        );
+        let ty = ctx.new_constr(path, vec![]);
+
+        assert!(is_base_type(&ctx, &Env::empty(), ty, "float"));
     }
 
     #[test]

@@ -2117,6 +2117,7 @@ fn register_sig_types_recursive<'a>(
                 // Register by fully qualified path for Pdot lookup (e.g., "Js.Promise.t")
                 let full_path = Path::pdot(module_path.clone(), id.name());
                 ctx.register_type_decl_by_path(&full_path.name(), decl.clone());
+                ctx.register_type_decl_by_exact_path(full_path, decl.clone());
             }
             SignatureItem::SigModule(id, md, _) => {
                 let sub_path = Path::pdot(module_path.clone(), id.name());
