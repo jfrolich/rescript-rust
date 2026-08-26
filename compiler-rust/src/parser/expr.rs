@@ -3364,8 +3364,9 @@ fn parse_array_expr(p: &mut Parser<'_>) -> Expression {
         pexp_attributes: Attributes::new(),
     };
 
-    // Use static pre-allocated Primitive_array.spread lident for sharing parity with OCaml
-    let lid_idx = p.arena().belt_array_concat_many_lid();
+    // OCaml builds the Primitive_array.spread longident inline at each spread
+    // site (res_core.ml:4528), allocating fresh Longident blocks per occurrence.
+    let lid_idx = p.arena_mut().fresh_belt_array_spread_lid();
     let spread_idx = p.arena_mut().intern("res.spread");
     let concat_many = Expression {
         pexp_desc: Box::new(ExpressionDesc::Pexp_ident(with_loc(lid_idx, loc.clone()))),
@@ -3457,8 +3458,9 @@ fn parse_list_expr(p: &mut Parser<'_>, start_pos_idx: PosIdx) -> Expression {
                 pexp_attributes: Attributes::new(),
             };
 
-            // Use static pre-allocated Primitive_list.spread lident for sharing parity with OCaml
-            let lid_idx = p.arena().belt_list_concat_many_lid();
+            // OCaml builds the Primitive_list.spread longident inline at each
+            // spread site (res_core.ml:4386), allocating fresh Longident blocks.
+            let lid_idx = p.arena_mut().fresh_belt_list_spread_lid();
             let spread_idx = p.arena_mut().intern("res.spread");
             let concat_many_ident = Expression {
                 pexp_desc: Box::new(ExpressionDesc::Pexp_ident(Loc {
