@@ -2124,15 +2124,16 @@ pub(crate) fn resolve_type_constructor_path(
                 tctx.type_ctx,
                 |components| {
                     let module_path = components.access_path().clone();
-                    if let Some((cached_path, _, decl)) = tctx
-                        .type_ctx
-                        .find_resolved_module_type(&module_path, type_name)
+                    if let Some((cached_path, _, decl)) =
+                        tctx.type_ctx
+                            .find_resolved_module_type(env.id(), &module_path, type_name)
                     {
                         return Some((cached_path, (*decl).clone()));
                     }
                     components.lookup_type(type_name).map(|(id, decl)| {
                         let decl = Arc::new(decl.clone());
                         tctx.type_ctx.register_resolved_module_type(
+                            env.id(),
                             &module_path,
                             type_name,
                             module_path.clone(),
@@ -30694,7 +30695,7 @@ fn lookup_type_in_resolved_path_with_cache_mode<'a>(
     ctx: &'a crate::types::context::TypeContext,
     cache_mode: ComponentLookupApi,
 ) -> Option<(Path, Ident, Arc<crate::types::decl::TypeDeclaration>)> {
-    if let Some(cached) = ctx.find_resolved_module_type(parent_module_path, type_name) {
+    if let Some(cached) = ctx.find_resolved_module_type(env.id(), parent_module_path, type_name) {
         return Some(cached);
     }
 
@@ -30742,6 +30743,7 @@ fn lookup_type_in_resolved_path_with_cache_mode<'a>(
             // CMI declaration.
             if cache_mode.publishes() {
                 ctx.register_resolved_module_type(
+                    env.id(),
                     parent_module_path,
                     type_name,
                     found.0.clone(),
@@ -30783,6 +30785,7 @@ fn lookup_type_in_resolved_path_with_cache_mode<'a>(
                 // descriptor without publishing Rust's selected lookup cache.
                 if cache_mode.publishes() {
                     ctx.register_resolved_module_type(
+                        env.id(),
                         parent_module_path,
                         type_name,
                         result.0.clone(),
@@ -30805,7 +30808,9 @@ fn lookup_type_decl_in_resolved_path_with_cache_mode<'a>(
     ctx: &'a crate::types::context::TypeContext,
     cache_mode: ComponentLookupApi,
 ) -> Option<Arc<crate::types::decl::TypeDeclaration>> {
-    if let Some((_, _, decl)) = ctx.find_resolved_module_type(parent_module_path, type_name) {
+    if let Some((_, _, decl)) =
+        ctx.find_resolved_module_type(env.id(), parent_module_path, type_name)
+    {
         return Some(decl);
     }
 
@@ -30843,6 +30848,7 @@ fn lookup_type_decl_in_resolved_path_with_cache_mode<'a>(
             // signature directly without forcing child-module component views.
             if cache_mode.publishes() {
                 ctx.register_resolved_module_type(
+                    env.id(),
                     parent_module_path,
                     type_name,
                     parent_module_path.clone(),
@@ -30868,6 +30874,7 @@ fn lookup_type_decl_in_resolved_path_with_cache_mode<'a>(
                 // keep that descriptor view out of the normal lookup cache.
                 if cache_mode.publishes() {
                     ctx.register_resolved_module_type(
+                        env.id(),
                         parent_module_path,
                         type_name,
                         parent_module_path.clone(),

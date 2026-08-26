@@ -354,9 +354,12 @@ pub struct TypeContext {
     >,
 
     /// Cached dotted type lookups keyed by resolved module access path.
+    /// Keyed by env id as well: OCaml's Env is persistent, so a binding can
+    /// never change under an existing path, but Rust's Env is mutated in
+    /// place (`add_module`) and must invalidate these derived entries.
     resolved_module_type_cache: RefCell<
         ahash::AHashMap<
-            Path,
+            (u64, Path),
             ahash::AHashMap<String, (Path, Ident, Arc<super::decl::TypeDeclaration>)>,
         >,
     >,
@@ -1079,6 +1082,7 @@ impl TypeContext {
     /// Cache a dotted type lookup for a resolved module access path.
     pub(crate) fn register_resolved_module_type(
         &self,
+        env_id: u64,
         module_path: &Path,
         type_name: &str,
         access_path: Path,
@@ -1087,7 +1091,7 @@ impl TypeContext {
     ) {
         self.resolved_module_type_cache
             .borrow_mut()
-            .entry(module_path.clone())
+            .entry((env_id, module_path.clone()))
             .or_default()
             .insert(type_name.to_string(), (access_path, id, decl));
     }
@@ -1095,12 +1099,13 @@ impl TypeContext {
     /// Look up a cached dotted type lookup for a resolved module access path.
     pub(crate) fn find_resolved_module_type(
         &self,
+        env_id: u64,
         module_path: &Path,
         type_name: &str,
     ) -> Option<(Path, Ident, Arc<super::decl::TypeDeclaration>)> {
         self.resolved_module_type_cache
             .borrow()
-            .get(module_path)
+            .get(&(env_id, module_path.clone()))
             .and_then(|types| types.get(type_name))
             .cloned()
     }
