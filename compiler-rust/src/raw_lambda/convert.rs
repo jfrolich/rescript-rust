@@ -1028,6 +1028,18 @@ impl<'a> RawLambdaConverter<'a> {
         id
     }
 
+    fn rename_ident(&mut self, id: &Ident) -> Ident {
+        // `Typecore.id_of_pattern` and functor translation call `Ident.rename`
+        // on the same global counter as `Ident.create` (compiler/ml/typecore.ml:
+        // 2268-2283, compiler/ml/translmod.ml:250-256). Component forcing can
+        // allocate through the type context immediately afterward, so publish
+        // the renamed stamp at the same boundary as `fresh_ident`.
+        self.sync_local_stamp_generators();
+        let renamed = id.rename(&self.id_gen);
+        self.type_ctx.set_current_time(renamed.stamp());
+        renamed
+    }
+
     fn note_possible_required_module(&mut self, id: &Ident, dynamic_import: bool) {
         self.possible_required_modules.insert(ModuleId {
             id: id.clone(),
@@ -1313,7 +1325,7 @@ impl<'a> RawLambdaConverter<'a> {
             PatternDesc::Tpat_var(id, _) | PatternDesc::Tpat_alias(_, id, _) => Some(id.clone()),
             PatternDesc::Tpat_construct(_, _, args) if args.len() == 1 => match &args[0].pat_desc {
                 PatternDesc::Tpat_var(id, _) | PatternDesc::Tpat_alias(_, id, _) => {
-                    Some(id.rename(&self.id_gen))
+                    Some(self.rename_ident(id))
                 }
                 _ => None,
             },
@@ -5354,7 +5366,7 @@ impl<'a> RawLambdaConverter<'a> {
                     }
                 };
                 let body_path = Self::functor_path(rootpath, param);
-                let renamed_param = param.rename(&self.id_gen);
+                let renamed_param = self.rename_ident(param);
                 let arg = self.apply_coercion_raw(
                     loc.clone(),
                     LetKind::Alias,
@@ -12610,6 +12622,28 @@ mod tests {
         assert_eq!(match_id.stamp(), 251);
         assert_eq!(converter.id_gen.current_stamp(), 251);
         assert_eq!(ctx.current_stamp(), 251);
+    }
+
+    #[test]
+    fn rename_ident_shares_the_type_context_stamp_stream() {
+        let arena = ParseArena::new();
+        let id_gen = IdGenerator::with_start_stamp(100);
+        let ctx = TypeContext::new(std::sync::Arc::new(id_gen));
+        let env = initial_env(&ctx);
+        let mut converter = RawLambdaConverter::with_start_stamp(&arena, &ctx, &env, 10);
+        let source_id = Ident::new("err", 7, IdentFlags::NONE);
+
+        ctx.set_current_time(200);
+        let renamed = converter.rename_ident(&source_id);
+        assert_eq!(renamed.stamp(), 201);
+        assert_eq!(converter.current_stamp(), 201);
+        assert_eq!(ctx.current_stamp(), 201);
+
+        let forced_id = ctx.create_ident("forced");
+        assert_eq!(forced_id.stamp(), 202);
+        let renamed_after_force = converter.rename_ident(&source_id);
+        assert_eq!(renamed_after_force.stamp(), 203);
+        assert_eq!(ctx.current_stamp(), 203);
     }
 
     #[test]
