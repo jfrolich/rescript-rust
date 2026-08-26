@@ -1559,11 +1559,10 @@ impl ParseArena {
         lid_idx
     }
 
-    /// Fresh `Longident::Lident` for one synthesized AST node.
-    ///
-    /// OCaml allocates a new Longident block at every desugar site even when
-    /// the name string is a shared static literal (for example the `"x"`
-    /// fallback in the let-unwrap rewrite); never reuse a cached block here.
+    /// Fresh `Longident::Lident` for a synthesized AST node whose constructor
+    /// is allocated dynamically by OCaml (for example `Lident var_name` in the
+    /// let-unwrap rewrite). Static `Lident "Name"` values may instead be shared
+    /// across calls and should use `push_lident_from_idx`.
     pub fn fresh_lident_from_idx(&mut self, str_idx: StrIdx) -> LidentIdx {
         self.longidents.push(Longident::Lident(str_idx))
     }

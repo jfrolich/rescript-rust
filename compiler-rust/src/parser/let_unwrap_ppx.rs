@@ -721,9 +721,9 @@ fn make_ctor_pattern(
     arena: &mut ParseArena,
 ) -> Pattern {
     let ctor_name_idx = arena.intern_string(ctor_name);
-    // OCaml builds each synthesized Longident inline at the desugar site;
-    // blocks are never shared across occurrences.
-    let ctor_lid_idx = arena.fresh_lident_from_idx(ctor_name_idx);
+    // The constructor is a static literal in bs_builtin_ppx.ml, so OCaml
+    // reuses its Longident wrapper each time this rewrite branch runs.
+    let ctor_lid_idx = arena.push_lident_from_idx(ctor_name_idx);
     let payload = if with_payload {
         let any_idx = arena.push_pat(Pattern {
             ppat_desc: Box::new(PatternDesc::Ppat_any),

@@ -8524,10 +8524,10 @@ fn rewrite_expression_generic(expr: &Expression, arena: &mut ParseArena) -> Expr
                                 LetUnwrapVariant::OptionNone => ("Some", true),
                             };
                             let early_ctor_idx = arena.intern(early_ctor_name);
-                            // OCaml builds each synthesized Longident inline at
-                            // the desugar site; blocks are never shared across
-                            // occurrences even for static name strings.
-                            let early_ctor_lid = arena.fresh_lident_from_idx(early_ctor_idx);
+                            // This constructor comes from a static literal in
+                            // bs_builtin_ppx.ml, so OCaml reuses its Longident
+                            // wrapper each time this rewrite branch runs.
+                            let early_ctor_lid = arena.push_lident_from_idx(early_ctor_idx);
                             let early_ctor_payload_pat = if early_ctor_payload {
                                 Some(arena.push_pat(Pattern {
                                     ppat_desc: Box::new(PatternDesc::Ppat_any),
@@ -8549,6 +8549,7 @@ fn rewrite_expression_generic(expr: &Expression, arena: &mut ParseArena) -> Expr
                                 ppat_attributes: Attributes::new(),
                             };
                             let early_ctor_pat_idx = arena.push_pat(early_ctor_pat);
+                            let early_rhs_lid = arena.fresh_lident_from_idx(var_name_idx);
                             let early_case = Case {
                                 pc_bar: None,
                                 pc_lhs: arena.push_pat(Pattern {
@@ -8565,7 +8566,7 @@ fn rewrite_expression_generic(expr: &Expression, arena: &mut ParseArena) -> Expr
                                 pc_guard: None,
                                 pc_rhs: arena.push_expr(Expression {
                                     pexp_desc: Box::new(ExpressionDesc::Pexp_ident(Located {
-                                        txt: arena.fresh_lident_from_idx(var_name_idx),
+                                        txt: early_rhs_lid,
                                         loc,
                                     })),
                                     pexp_loc: loc,
@@ -17402,6 +17403,79 @@ fn rewrite_signature_item_no_spice(item: &SignatureItem, arena: &mut ParseArena)
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::parser::{Parser, module};
+
+    fn parse_structure(source: &str) -> (ParseArena, Vec<StructureItem>) {
+        let mut parser = Parser::new("test.res", source);
+        let structure = module::parse_structure(&mut parser);
+        assert!(
+            !parser.has_errors(),
+            "parser errors: {:?}",
+            parser.diagnostics()
+        );
+        (parser.into_arena(), structure)
+    }
+
+    fn let_unwrap_case_lidents(
+        expr_idx: ExprIdx,
+        arena: &ParseArena,
+    ) -> (LidentIdx, LidentIdx, ExprIdx) {
+        let ExpressionDesc::Pexp_match(match_expr) = &*arena.get_expr(expr_idx).pexp_desc else {
+            panic!("expected rewritten let? match");
+        };
+        let (_, cases) = &**match_expr;
+        let [early_case, continue_case] = cases.as_slice() else {
+            panic!("expected early-return and continuation cases");
+        };
+        let PatternDesc::Ppat_alias(ctor_pat, _) = &*arena.get_pat(early_case.pc_lhs).ppat_desc
+        else {
+            panic!("expected aliased early-return constructor");
+        };
+        let PatternDesc::Ppat_construct(ctor, _) = &*arena.get_pat(*ctor_pat).ppat_desc else {
+            panic!("expected early-return constructor");
+        };
+        let ExpressionDesc::Pexp_ident(rhs) = &*arena.get_expr(early_case.pc_rhs).pexp_desc else {
+            panic!("expected early-return binder expression");
+        };
+        (ctor.txt, rhs.txt, continue_case.pc_rhs)
+    }
+
+    #[test]
+    fn let_unwrap_shares_static_constructors_but_not_fallback_binder_lidents() {
+        let source = r#"
+let f = value => {
+  let? Ok(_) = value
+  let? Ok(_) = value
+  value
+}
+"#;
+        let (mut arena, structure) = parse_structure(source);
+        let rewritten = rewrite_structure(&structure, &mut arena).expect("rewrite should work");
+        let StructureItemDesc::Pstr_value(value) = &*rewritten[0].pstr_desc else {
+            panic!("expected value binding");
+        };
+        let (_, bindings) = &**value;
+        let ExpressionDesc::Pexp_fun(fun) = &*arena.get_expr(bindings[0].pvb_expr).pexp_desc else {
+            panic!("expected function");
+        };
+
+        let (first_ctor, first_rhs, second_match) = let_unwrap_case_lidents(fun.rhs, &arena);
+        let (second_ctor, second_rhs, _) = let_unwrap_case_lidents(second_match, &arena);
+
+        // `Lident "Error"` is a static value in the OCaml rewrite branch, while
+        // `Lident var_name` is allocated from the dynamic fallback variable at
+        // each rewrite invocation.
+        assert_eq!(first_ctor, second_ctor);
+        assert_ne!(first_rhs, second_rhs);
+        assert_eq!(
+            arena.get_string(arena.get_longident(first_ctor).last_idx()),
+            "Error"
+        );
+        assert_eq!(
+            arena.get_string(arena.get_longident(first_rhs).last_idx()),
+            "x"
+        );
+    }
 
     #[test]
     fn test_first_char_special() {
