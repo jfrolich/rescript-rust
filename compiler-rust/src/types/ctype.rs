@@ -3134,8 +3134,12 @@ fn try_expand_head_with_mode<'a>(
             // For non-persistent heads, avoid global/path-store fallbacks that can
             // over-expand local aliases (e.g. LayerStyleID.ID.t -> string) and
             // diverge from OCaml's identity/linking behavior.
-            let allow_global_fallbacks =
-                path_root_is_persistent(&path) && matches!(mode, ExpandHeadMode::General);
+            // OCaml expand_abbrev_gen resolves qualified constructors through
+            // Env.find_type_expansion and then Env.normalize_path. Rust's
+            // global declaration store is not an Env lookup boundary and must
+            // not bypass normalize_path's persistent-module force.
+            let allow_global_fallbacks = matches!(&path, Path::Pident(id) if id.is_persistent())
+                && matches!(mode, ExpandHeadMode::General);
 
             // 2. Try stamp-based global store (for CMI types with non-zero stamps)
             if allow_global_fallbacks && let Some(stamp) = stamp {
