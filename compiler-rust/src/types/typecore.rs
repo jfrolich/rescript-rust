@@ -11195,7 +11195,7 @@ fn finish_non_gadt_type_cases<'a>(
         parsed_cases,
         [case] if is_simple_variable_pattern(tctx.arena, tctx.arena.get_pat(case.pc_lhs))
     );
-    if needs_exhaust_check {
+    let partial = if needs_exhaust_check {
         // OCaml compiler/ml/typecore.ml:4511-4535 runs init_env after
         // type_cases body typing, even when partial_flag is false (for try
         // handlers from typecore.ml:2681-2685). Ident.set_current_time reserves
@@ -11220,15 +11220,20 @@ fn finish_non_gadt_type_cases<'a>(
             ctx.new_var(None),
             None,
         )?;
-        Ok(partial)
+        partial
     } else if partial_flag {
         let partial = check_partial_simple(ctx, env, typed_cases);
         report_all_clauses_guarded_if_needed(tctx, loc, typed_cases, partial);
         report_fragile_match_if_needed(tctx, ctx, env, loc, typed_cases, partial);
-        Ok(partial)
+        partial
     } else {
-        Ok(crate::types::typedtree::Partial::Partial)
-    }
+        crate::types::typedtree::Partial::Partial
+    };
+
+    // type_cases always schedules check_unused, including try handlers where
+    // partial_flag is false (typecore.ml:4483-4496).
+    report_unused_match_cases(tctx, env, typed_cases, needs_exhaust_check);
+    Ok(partial)
 }
 
 #[derive(Clone)]
@@ -11751,9 +11756,15 @@ fn instantiate_unused_witness_existentials(
     pat: &Pattern,
 ) {
     fn visit(tctx: &mut TypeCheckContext<'_>, env: &Env, pat: &Pattern) {
-        let PatternDesc::Tpat_construct(_, _, args) = &pat.pat_desc else {
+        let PatternDesc::Tpat_construct(_, parent, args) = &pat.pat_desc else {
             return;
         };
+        if !matches!(
+            parent.cstr_kind,
+            crate::types::decl::ConstructorKind::Extension(_)
+        ) {
+            return;
+        }
 
         for arg in args {
             // Parmatch.check_unused builds a witness for a catch-all clause and
@@ -11832,15 +11843,6 @@ fn report_unused_match_cases<'case>(
     let mut delayed_expansion_types = Vec::new();
 
     for case in cases {
-        if case.c_guard.is_none()
-            && pattern_is_simple_catch_all(&case.c_lhs)
-            && tctx.warning_config.is_active(&Warning::UnreachableCase)
-        {
-            for previous in &previous_unguarded_cases {
-                instantiate_unused_witness_existentials(tctx, env, previous.lhs);
-            }
-        }
-
         let has_dict_pattern = typed_pattern_contains_dict_pattern(tctx.arena, &case.c_lhs)
             || previous_unguarded_cases
                 .iter()
@@ -11938,16 +11940,22 @@ fn report_unused_match_cases<'case>(
             false
         };
 
-        if delay_witness_expansions
-            && !is_unused
+        if !is_unused
             && !previous_unguarded_cases.is_empty()
             && tctx.warning_config.is_active(&Warning::UnreachableCase)
         {
-            // Parmatch.check_unused invokes partial_pred for each useful row
-            // after the first. When type_cases delayed that check, the witness
-            // type expansions run only after the complete structure has been
-            // typed (typecore.ml:4483-4490, parmatch.ml:2218-2235).
-            collect_unused_witness_expansion_types(&case.c_lhs, &mut delayed_expansion_types);
+            // Parmatch.check_unused refines each useful row after the first.
+            // Preserve singleton existential instantiation from the current
+            // extension-constructor witness rather than reconstructing it from
+            // prior rows.
+            instantiate_unused_witness_existentials(tctx, env, &case.c_lhs);
+
+            if delay_witness_expansions {
+                // When type_cases delayed the check, witness type expansions
+                // run only after the complete structure has been typed
+                // (typecore.ml:4483-4490, parmatch.ml:2218-2235).
+                collect_unused_witness_expansion_types(&case.c_lhs, &mut delayed_expansion_types);
+            }
         }
 
         if is_unused {
