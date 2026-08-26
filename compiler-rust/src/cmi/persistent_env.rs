@@ -24,7 +24,7 @@ use crate::driver::{
 use crate::ident::Ident;
 use crate::lambda::lam_arity::Arity;
 use crate::lambda::lam_compat::{Comparison, FieldDbgInfo};
-use crate::lambda::lam_constant::{Constant as LambdaConstant, StringDelim};
+use crate::lambda::lam_constant::{Constant as LambdaConstant, PointerInfo, StringDelim};
 use crate::lambda::lam_primitive::{
     ExternalArgAttr, ExternalArgConst, ExternalArgDelim, ExternalArgLabel, ExternalArgSpec,
     ExternalFfiKind, ExternalFfiSpec, ExternalModuleName, ExternalReturnWrapper, ExternalSpec,
@@ -2593,7 +2593,7 @@ fn decode_cmj_prim_info(value: &OcamlValue) -> Option<PrimInfo> {
 }
 
 fn decode_cmj_lambda_constant(value: &OcamlValue) -> Option<LambdaConstant> {
-    // OCaml Lam_constant.t constructor order is in compiler/frontend/lam_constant.ml:43-56.
+    // OCaml Lam_constant.t constructor order is in compiler/frontend/lam_constant.ml:33-50.
     match value {
         OcamlValue::Int(0) => Some(LambdaConstant::JsNull),
         OcamlValue::Int(1) => Some(LambdaConstant::JsTrue),
@@ -2602,9 +2602,9 @@ fn decode_cmj_lambda_constant(value: &OcamlValue) -> Option<LambdaConstant> {
         OcamlValue::Block(0, fields) if fields.len() == 1 => Some(LambdaConstant::JsUndefined {
             is_unit: fields[0].as_bool(),
         }),
-        OcamlValue::Block(1, fields) if fields.len() >= 1 => Some(LambdaConstant::Int {
+        OcamlValue::Block(1, fields) if fields.len() == 2 => Some(LambdaConstant::Int {
             i: fields[0].as_int() as i32,
-            comment: None,
+            comment: decode_cmj_pointer_info(&fields[1])?,
         }),
         OcamlValue::Block(2, fields) if fields.len() == 1 => Some(LambdaConstant::Constructor(
             decode_cmj_variant_tag(&fields[0])?,
@@ -2612,15 +2612,13 @@ fn decode_cmj_lambda_constant(value: &OcamlValue) -> Option<LambdaConstant> {
         OcamlValue::Block(3, fields) if fields.len() == 1 => {
             Some(LambdaConstant::Char(fields[0].as_int() as i32))
         }
-        OcamlValue::Block(4, fields) if !fields.is_empty() => Some(LambdaConstant::String {
+        OcamlValue::Block(4, fields) if fields.len() == 2 => Some(LambdaConstant::String {
             s: fields[0].as_string().to_string(),
-            delim: fields.get(1).and_then(decode_cmj_external_delim_option),
+            delim: decode_cmj_external_delim_option(&fields[1])?,
         }),
-        OcamlValue::Block(5, fields) if fields.len() == 1 => match &fields[0] {
-            OcamlValue::String(s) => Some(LambdaConstant::Float(s.clone())),
-            OcamlValue::Float(f) => Some(LambdaConstant::Float(f.to_string())),
-            _ => None,
-        },
+        OcamlValue::Block(5, fields) if fields.len() == 1 => {
+            Some(LambdaConstant::Float(fields[0].as_string().to_string()))
+        }
         OcamlValue::Block(6, fields) if fields.len() == 2 => Some(LambdaConstant::BigInt {
             negative: fields[0].as_bool(),
             value: fields[1].as_string().to_string(),
@@ -2639,15 +2637,40 @@ fn decode_cmj_lambda_constant(value: &OcamlValue) -> Option<LambdaConstant> {
     }
 }
 
+fn decode_cmj_pointer_info(value: &OcamlValue) -> Option<Option<PointerInfo>> {
+    match value {
+        OcamlValue::Int(0) => Some(None),
+        OcamlValue::Int(1) => Some(Some(PointerInfo::AssertFalse)),
+        OcamlValue::Block(0, fields) if fields.len() == 1 => {
+            Some(Some(PointerInfo::Some(fields[0].as_string().to_string())))
+        }
+        _ => None,
+    }
+}
+
 fn decode_cmj_variant_tag(value: &OcamlValue) -> Option<crate::types::VariantTag> {
-    let (_, fields) = value.as_block_opt()?;
+    let (0, fields) = value.as_block_opt()? else {
+        return None;
+    };
+    if fields.len() != 2 {
+        return None;
+    }
     Some(crate::types::VariantTag {
-        name: fields.first()?.as_string().to_string(),
-        tag_type: fields
-            .get(1)?
-            .as_option()
-            .and_then(decode_cmj_variant_tag_type),
+        name: fields[0].as_string().to_string(),
+        tag_type: decode_cmj_variant_tag_type_option(&fields[1])?,
     })
+}
+
+fn decode_cmj_variant_tag_type_option(
+    value: &OcamlValue,
+) -> Option<Option<crate::types::VariantTagType>> {
+    match value {
+        OcamlValue::Int(0) => Some(None),
+        OcamlValue::Block(0, fields) if fields.len() == 1 => {
+            Some(Some(decode_cmj_variant_tag_type(&fields[0])?))
+        }
+        _ => None,
+    }
 }
 
 fn decode_cmj_variant_tag_type(value: &OcamlValue) -> Option<crate::types::VariantTagType> {
@@ -2655,14 +2678,65 @@ fn decode_cmj_variant_tag_type(value: &OcamlValue) -> Option<crate::types::Varia
     match value {
         OcamlValue::Int(0) => Some(T::Null),
         OcamlValue::Int(1) => Some(T::Undefined),
-        OcamlValue::Block(tag, fields) => match tag {
-            0 => Some(T::String(fields.first()?.as_string().to_string())),
-            1 => Some(T::Int(fields.first()?.as_int() as i32)),
-            2 => Some(T::Float(fields.first()?.as_string().to_string())),
-            3 => Some(T::BigInt(fields.first()?.as_string().to_string())),
-            4 => Some(T::Bool(fields.first()?.as_bool())),
-            _ => None,
-        },
+        OcamlValue::Block(0, fields) if fields.len() == 1 => {
+            Some(T::String(fields[0].as_string().to_string()))
+        }
+        OcamlValue::Block(1, fields) if fields.len() == 1 => {
+            Some(T::Int(fields[0].as_int() as i32))
+        }
+        OcamlValue::Block(2, fields) if fields.len() == 1 => {
+            Some(T::Float(fields[0].as_string().to_string()))
+        }
+        OcamlValue::Block(3, fields) if fields.len() == 1 => {
+            Some(T::BigInt(fields[0].as_string().to_string()))
+        }
+        OcamlValue::Block(4, fields) if fields.len() == 1 => Some(T::Bool(fields[0].as_bool())),
+        OcamlValue::Block(5, fields) if fields.len() == 1 => {
+            Some(T::Untagged(decode_cmj_variant_block_type(&fields[0])?))
+        }
+        _ => None,
+    }
+}
+
+fn decode_cmj_variant_block_type(value: &OcamlValue) -> Option<crate::types::VariantBlockType> {
+    use crate::types::{VariantBlockType as T, VariantInstance as I};
+    match value {
+        OcamlValue::Int(0) => Some(T::Int),
+        OcamlValue::Int(1) => Some(T::String),
+        OcamlValue::Int(2) => Some(T::Float),
+        OcamlValue::Int(3) => Some(T::Bigint),
+        OcamlValue::Int(4) => Some(T::Boolean),
+        OcamlValue::Int(5) => Some(T::Function),
+        OcamlValue::Int(6) => Some(T::Object),
+        OcamlValue::Int(7) => Some(T::Unknown),
+        OcamlValue::Block(0, fields) if fields.len() == 1 => {
+            Some(T::Instance(match fields[0].as_int() {
+                0 => I::Array,
+                1 => I::ArrayBuffer,
+                2 => I::BigInt64Array,
+                3 => I::BigUint64Array,
+                4 => I::Blob,
+                5 => I::DataView,
+                6 => I::Date,
+                7 => I::File,
+                8 => I::Float32Array,
+                9 => I::Float64Array,
+                10 => I::Int16Array,
+                11 => I::Int32Array,
+                12 => I::Int8Array,
+                13 => I::Promise,
+                14 => I::RegExp,
+                15 => I::Uint16Array,
+                16 => I::Uint32Array,
+                17 => I::Uint8Array,
+                18 => I::Uint8ClampedArray,
+                19 => I::Set,
+                20 => I::Map,
+                21 => I::WeakSet,
+                22 => I::WeakMap,
+                _ => return None,
+            }))
+        }
         _ => None,
     }
 }
@@ -2917,13 +2991,16 @@ fn decode_cmj_external_arg_delim(value: &OcamlValue) -> Option<ExternalArgDelim>
     }
 }
 
-fn decode_cmj_external_delim_option(value: &OcamlValue) -> Option<StringDelim> {
-    let delim = value.as_option()?;
-    match delim.as_int() {
-        0 => Some(StringDelim::Plain),
-        1 => Some(StringDelim::StarJ),
-        2 => Some(StringDelim::NoQuotes),
-        3 => Some(StringDelim::Backtick),
+fn decode_cmj_external_delim_option(value: &OcamlValue) -> Option<Option<StringDelim>> {
+    match value {
+        OcamlValue::Int(0) => Some(None),
+        OcamlValue::Block(0, fields) if fields.len() == 1 => Some(Some(match fields[0].as_int() {
+            0 => StringDelim::Plain,
+            1 => StringDelim::StarJ,
+            2 => StringDelim::NoQuotes,
+            3 => StringDelim::Backtick,
+            _ => return None,
+        })),
         _ => None,
     }
 }
