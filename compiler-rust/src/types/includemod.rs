@@ -3217,8 +3217,6 @@ pub(crate) fn type_declarations<'a>(
         ));
     }
 
-    force_package_manifest_inclusion_side_effects(type_ctx, env, impl_decl, sig_decl);
-
     let param_map = build_type_param_map(type_ctx, &impl_decl.type_params, &sig_decl.type_params);
     match (impl_decl.type_manifest, sig_decl.type_manifest) {
         (_, None) => {
@@ -3471,6 +3469,8 @@ fn compare_record_declarations(
         type_ctx,
         env,
         &param_map,
+        impl_params,
+        sig_params,
         impl_labels,
         sig_labels,
         warnings,
@@ -3481,6 +3481,8 @@ fn compare_record_declarations_with_param_map(
     type_ctx: &TypeContext,
     env: &Env,
     param_map: &HashMap<TypeExprRef, TypeExprRef>,
+    impl_params: &[TypeExprRef],
+    sig_params: &[TypeExprRef],
     impl_labels: &[LabelDeclaration],
     sig_labels: &[LabelDeclaration],
     warnings: &mut Vec<Warning>,
@@ -3532,18 +3534,6 @@ fn compare_record_declarations_with_param_map(
                 sig_runtime_name
             ));
         }
-        if !type_exprs_equal_for_inclusion(
-            type_ctx,
-            Some(env),
-            &param_map,
-            impl_label.ld_type,
-            sig_label.ld_type,
-        ) {
-            return Some(format!(
-                "The types for field {} are not equal.",
-                impl_label.ld_id.name()
-            ));
-        }
         index += 1;
     }
 
@@ -3558,6 +3548,35 @@ fn compare_record_declarations_with_param_map(
             "The field {} is only present in the first declaration.",
             label.ld_id.name()
         ));
+    }
+
+    // OCaml compiler/ml/includecore.ml:271-313 first compares every record
+    // parameter and field in one Ctype.equal call. Fields are consed while
+    // traversing, so the final comparison visits them in reverse declaration
+    // order before the type parameters.
+    let mut impl_types = Vec::with_capacity(impl_labels.len() + impl_params.len());
+    let mut sig_types = Vec::with_capacity(sig_labels.len() + sig_params.len());
+    impl_types.extend(impl_labels.iter().rev().map(|label| label.ld_type));
+    impl_types.extend_from_slice(impl_params);
+    sig_types.extend(sig_labels.iter().rev().map(|label| label.ld_type));
+    sig_types.extend_from_slice(sig_params);
+    if type_expr_lists_equal_for_inclusion(type_ctx, env, param_map, &impl_types, &sig_types) {
+        return None;
+    }
+
+    // The reference retries field-by-field only after the batched fast path
+    // fails, so diagnostics can identify the first incompatible declaration.
+    let mut prior_impl = impl_params.to_vec();
+    let mut prior_sig = sig_params.to_vec();
+    for (impl_label, sig_label) in impl_labels.iter().zip(sig_labels) {
+        prior_impl.insert(0, impl_label.ld_type);
+        prior_sig.insert(0, sig_label.ld_type);
+        if !type_expr_lists_equal_for_inclusion(type_ctx, env, param_map, &prior_impl, &prior_sig) {
+            return Some(format!(
+                "The types for field {} are not equal.",
+                impl_label.ld_id.name()
+            ));
+        }
     }
 
     None
@@ -3624,13 +3643,23 @@ fn type_expr_lists_equal_for_inclusion(
     impl_types: &[TypeExprRef],
     sig_types: &[TypeExprRef],
 ) -> bool {
-    impl_types.len() == sig_types.len()
-        && impl_types
-            .iter()
-            .zip(sig_types.iter())
-            .all(|(impl_ty, sig_ty)| {
-                type_exprs_equal_for_inclusion(type_ctx, Some(env), param_map, *impl_ty, *sig_ty)
-            })
+    if impl_types.len() != sig_types.len() {
+        return false;
+    }
+    let mut seen = HashSet::new();
+    impl_types
+        .iter()
+        .zip(sig_types.iter())
+        .all(|(impl_ty, sig_ty)| {
+            type_exprs_equal_for_inclusion_inner(
+                type_ctx,
+                Some(env),
+                param_map,
+                *impl_ty,
+                *sig_ty,
+                &mut seen,
+            )
+        })
 }
 
 fn type_manifest_is_absrow(type_ctx: &TypeContext, env: &Env, ty: TypeExprRef) -> bool {
@@ -3984,30 +4013,35 @@ fn compare_variant_declarations(
             warnings.push(warning);
         }
 
-        let arg_param_map = match (impl_constructor.cd_res, sig_constructor.cd_res) {
-            (Some(impl_res), Some(sig_res)) => {
-                if !type_exprs_equal_for_inclusion(
-                    type_ctx,
-                    Some(env),
-                    &param_map,
-                    impl_res,
-                    sig_res,
-                ) {
+        let (arg_param_map, arg_impl_params, arg_sig_params) =
+            match (impl_constructor.cd_res, sig_constructor.cd_res) {
+                (Some(impl_res), Some(sig_res)) => {
+                    if !type_exprs_equal_for_inclusion(
+                        type_ctx,
+                        Some(env),
+                        &param_map,
+                        impl_res,
+                        sig_res,
+                    ) {
+                        return Some(format!(
+                            "The types for field {} are not equal.",
+                            impl_constructor.cd_id.name()
+                        ));
+                    }
+                    (
+                        build_type_param_map(type_ctx, &[impl_res], &[sig_res]),
+                        vec![impl_res],
+                        vec![sig_res],
+                    )
+                }
+                (Some(_), None) | (None, Some(_)) => {
                     return Some(format!(
                         "The types for field {} are not equal.",
                         impl_constructor.cd_id.name()
                     ));
                 }
-                build_type_param_map(type_ctx, &[impl_res], &[sig_res])
-            }
-            (Some(_), None) | (None, Some(_)) => {
-                return Some(format!(
-                    "The types for field {} are not equal.",
-                    impl_constructor.cd_id.name()
-                ));
-            }
-            (None, None) => param_map.clone(),
-        };
+                (None, None) => (param_map.clone(), impl_params.to_vec(), sig_params.to_vec()),
+            };
 
         match (&impl_constructor.cd_args, &sig_constructor.cd_args) {
             (
@@ -4018,6 +4052,8 @@ fn compare_variant_declarations(
                     type_ctx,
                     env,
                     &arg_param_map,
+                    &arg_impl_params,
+                    &arg_sig_params,
                     impl_labels,
                     sig_labels,
                     warnings,
@@ -4192,12 +4228,13 @@ fn type_exprs_equal_for_inclusion_inner(
         },
     ) = (&*type_ctx.get_desc(impl_ty), &*type_ctx.get_desc(sig_ty))
         && impl_path.same(sig_path)
-        && impl_args.len() == sig_args.len()
+        && impl_args.is_empty()
+        && sig_args.is_empty()
     {
-        // OCaml compiler/ml/ctype.ml:3165 handles equal Tconstr paths before
-        // `expand_head_rigid`, then compares their arguments recursively. Do
-        // not repeatedly expand a strengthened constructor such as `Make.t<'a>`
-        // back through the same local signature path.
+        // OCaml compiler/ml/ctype.ml:3008 handles only equal nullary Tconstr
+        // paths before `expand_head_rigid`. Parameterized constructors must
+        // expand first; aliases can expose package types whose comparison has
+        // observable Env/Ident allocation side effects.
         return impl_args
             .iter()
             .zip(sig_args.iter())
@@ -4303,16 +4340,38 @@ fn type_exprs_equal_for_inclusion_inner(
         (
             TypeDesc::Tpackage {
                 path: impl_path,
+                lids: impl_lids,
                 args: impl_args,
-                ..
             },
             TypeDesc::Tpackage {
                 path: sig_path,
+                lids: sig_lids,
                 args: sig_args,
-                ..
             },
         ) => {
-            impl_path.same(sig_path)
+            // OCaml compiler/ml/includecore.ml routes these comparisons through
+            // Ctype.equal. Its package branch calls complete_type_list twice
+            // (compiler/ml/ctype.ml:3048-3053, 2044-2047), allocating one
+            // hidden `Pkg` module per side before comparing package arguments.
+            let labels_complete = env.is_none_or(|env| {
+                let sig_complete = crate::types::ctype::package_type_lists_have_ocaml_same_label_completion_side_effect(
+                    type_ctx,
+                    Some(env),
+                    ModuleType::MtyIdent(sig_path.clone()),
+                    impl_lids,
+                    sig_lids,
+                );
+                let impl_complete = crate::types::ctype::package_type_lists_have_ocaml_same_label_completion_side_effect(
+                    type_ctx,
+                    Some(env),
+                    ModuleType::MtyIdent(impl_path.clone()),
+                    sig_lids,
+                    impl_lids,
+                );
+                sig_complete && impl_complete
+            });
+            labels_complete
+                && impl_path.same(sig_path)
                 && impl_args.len() == sig_args.len()
                 && impl_args
                     .iter()
@@ -4623,65 +4682,6 @@ fn arg_labels_equal(left: &ArgLabel, right: &ArgLabel) -> bool {
         | (ArgLabel::Optional(left), ArgLabel::Optional(right)) => left.txt == right.txt,
         _ => false,
     }
-}
-
-fn force_package_manifest_inclusion_side_effects<'a>(
-    type_ctx: &'a TypeContext,
-    env: &Env,
-    impl_decl: &TypeDeclaration,
-    sig_decl: &TypeDeclaration,
-) {
-    let (Some(impl_manifest), Some(sig_manifest)) =
-        (impl_decl.type_manifest, sig_decl.type_manifest)
-    else {
-        return;
-    };
-
-    let impl_manifest = type_ctx.repr(impl_manifest);
-    let sig_manifest = type_ctx.repr(sig_manifest);
-    let impl_desc = type_ctx.get_desc(impl_manifest);
-    let sig_desc = type_ctx.get_desc(sig_manifest);
-    let (
-        TypeDesc::Tpackage {
-            path: impl_path,
-            lids: impl_lids,
-            ..
-        },
-        TypeDesc::Tpackage {
-            path: sig_path,
-            lids: sig_lids,
-            ..
-        },
-    ) = (&*impl_desc, &*sig_desc)
-    else {
-        return;
-    };
-    let impl_path = impl_path.clone();
-    let sig_path = sig_path.clone();
-    let impl_lids = impl_lids.clone();
-    let sig_lids = sig_lids.clone();
-    drop(impl_desc);
-    drop(sig_desc);
-
-    // OCaml compiler/ml/includecore.ml:87-151 compares manifests with
-    // `Ctype.equal`; for package types that reaches compiler/ml/ctype.ml:2237-2238,
-    // which calls `complete_type_list` twice. `complete_type_list` allocates
-    // a hidden `Pkg` module at compiler/ml/ctype.ml:2199-2201 even when both
-    // packages already list the same labels.
-    let _ = crate::types::ctype::package_type_lists_have_ocaml_same_label_completion_side_effect(
-        type_ctx,
-        Some(env),
-        ModuleType::MtyIdent(sig_path),
-        &impl_lids,
-        &sig_lids,
-    );
-    let _ = crate::types::ctype::package_type_lists_have_ocaml_same_label_completion_side_effect(
-        type_ctx,
-        Some(env),
-        ModuleType::MtyIdent(impl_path),
-        &sig_lids,
-        &impl_lids,
-    );
 }
 
 /// Check if extension constructor `impl_ext` is compatible with `sig_ext`.
