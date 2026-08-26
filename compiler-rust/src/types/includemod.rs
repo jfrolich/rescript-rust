@@ -1505,17 +1505,20 @@ fn modtypes_inner<'a>(
 
     match (mty_impl, mty_sig) {
         (ModuleType::MtyAlias(pres_impl, impl_path), ModuleType::MtyAlias(pres_sig, sig_path)) => {
-            let lax_impl_path = normalized_alias_path(type_ctx, env, impl_path);
-            // OCaml compiler/ml/includemod.ml:209-215 compares alias paths after
-            // applying the current signature inclusion substitution to the
-            // expected alias path (`Subst.module_path subst p2`).
+            // OCaml compiler/ml/includemod.ml:202-208 first compares the alias
+            // paths directly. Only unequal paths cross Env.normalize_path;
+            // forcing equal aliases here materializes component thunks that
+            // OCaml leaves delayed until translation.
             let subst_sig_path = substitute_module_path(sig_path, subst);
-            let lax_sig_path = normalized_alias_path(type_ctx, env, &subst_sig_path);
-            if !lax_impl_path.same(&lax_sig_path) {
-                return Err(IncludeModError::ModuleTypeMismatch {
-                    name: Ident::create_local("module"),
-                    reason: "module aliases do not match".to_string(),
-                });
+            if !impl_path.same(&subst_sig_path) {
+                let lax_impl_path = normalized_alias_path(type_ctx, env, impl_path);
+                let lax_sig_path = normalized_alias_path(type_ctx, env, &subst_sig_path);
+                if !lax_impl_path.same(&lax_sig_path) {
+                    return Err(IncludeModError::ModuleTypeMismatch {
+                        name: Ident::create_local("module"),
+                        reason: "module aliases do not match".to_string(),
+                    });
+                }
             }
             match (pres_impl, pres_sig) {
                 (
