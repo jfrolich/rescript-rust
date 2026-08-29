@@ -310,11 +310,18 @@ pub(crate) fn is_base_type(ctx: &TypeContext, env: &Env, ty: TypeExprRef, name: 
                 // pre-strengthened declaration. Typeopt only needs to inspect
                 // the exact nullary representation here; use Path identity and
                 // never printed-name or structural lookup.
-                if args.is_empty()
-                    && let Some(decl) = ctx.find_type_decl_by_exact_path(path)
-                    && decl.type_params.is_empty()
-                    && let Some(manifest) = decl.type_manifest
-                {
+                let manifest = if args.is_empty() {
+                    ctx.find_type_decl_by_exact_path(path).and_then(|decl| {
+                        if decl.type_params.is_empty() {
+                            decl.type_manifest
+                        } else {
+                            None
+                        }
+                    })
+                } else {
+                    None
+                };
+                if let Some(manifest) = manifest {
                     return visit(ctx, env, manifest, name, seen);
                 }
                 false
