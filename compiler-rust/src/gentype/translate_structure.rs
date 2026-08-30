@@ -117,41 +117,6 @@ pub fn add_annotations_to_function_type(
     }
 }
 
-pub fn remove_value_binding_duplicates(structure_items: &[StructureItem]) -> Vec<StructureItem> {
-    // Mirrors compiler/gentype/TranslateStructure.ml:75-102.
-    fn process_bindings(bindings: &[ValueBinding], seen: &mut StringSet) -> Vec<ValueBinding> {
-        let mut out = Vec::new();
-        for binding in bindings {
-            match &binding.vb_pat.pat_desc {
-                PatternDesc::Tpat_var(id, _) => {
-                    let name = id.name().to_string();
-                    if !seen.contains(&name) {
-                        seen.insert(name);
-                        out.push(binding.clone());
-                    }
-                }
-                _ => out.push(binding.clone()),
-            }
-        }
-        out
-    }
-
-    let mut seen = StringSet::new();
-    let mut acc = Vec::new();
-    for item in structure_items.iter().rev() {
-        let mut item = item.clone();
-        if let StructureItemDesc::Tstr_value(rec_flag, value_bindings) = &item.str_desc {
-            item.str_desc = StructureItemDesc::Tstr_value(
-                rec_flag.clone(),
-                process_bindings(value_bindings, &mut seen),
-            );
-        }
-        acc.push(item);
-    }
-    acc.reverse();
-    acc
-}
-
 pub fn translate_value_binding(
     ctx: &crate::types::context::TypeContext,
     arena: &ParseArena,
@@ -194,46 +159,6 @@ pub fn translate_value_binding(
         )
     } else {
         crate::gentype::translation::empty()
-    }
-}
-
-pub fn remove_duplicate_value_bindings(
-    structure_items: &[StructureItem],
-) -> (StringSet, Vec<StructureItem>) {
-    // Mirrors compiler/gentype/TranslateStructure.ml:125-159.
-    match structure_items.split_first() {
-        Some((structure_item, rest)) => {
-            let (mut bound_in_rest, filtered_rest) = remove_duplicate_value_bindings(rest);
-            match &structure_item.str_desc {
-                StructureItemDesc::Tstr_value(rec_flag, value_bindings) => {
-                    let value_bindings_filtered = value_bindings
-                        .iter()
-                        .filter(|value_binding| match &value_binding.vb_pat.pat_desc {
-                            PatternDesc::Tpat_var(id, _) => !bound_in_rest.contains(id.name()),
-                            _ => true,
-                        })
-                        .cloned()
-                        .collect::<Vec<_>>();
-                    for value_binding in value_bindings {
-                        if let PatternDesc::Tpat_var(id, _) = &value_binding.vb_pat.pat_desc {
-                            bound_in_rest.insert(id.name().to_string());
-                        }
-                    }
-                    let mut item = structure_item.clone();
-                    item.str_desc =
-                        StructureItemDesc::Tstr_value(rec_flag.clone(), value_bindings_filtered);
-                    let mut out = vec![item];
-                    out.extend(filtered_rest);
-                    (bound_in_rest, out)
-                }
-                _ => {
-                    let mut out = vec![structure_item.clone()];
-                    out.extend(filtered_rest);
-                    (bound_in_rest, out)
-                }
-            }
-        }
-        None => (StringSet::new(), vec![]),
     }
 }
 
@@ -526,22 +451,64 @@ pub fn translate_structure(
     type_env: &crate::gentype::type_env::T,
     structure: &Structure,
 ) -> Vec<crate::gentype::translation::T> {
-    // Mirrors compiler/gentype/TranslateStructure.ml:359-366.
+    // Mirrors compiler/gentype/TranslateStructure.ml:75-102 and 359-366.
+    // OCaml rebuilds list cells while retaining immutable typedtree items. Keep
+    // the same last-binding-wins traversal without cloning Rust's owned trees.
     if crate::gentype::debug::translation.load(std::sync::atomic::Ordering::Relaxed) {
         crate::gentype::log_::item("Translate Structure\n");
     }
-    remove_value_binding_duplicates(&structure.str_items)
-        .iter()
-        .map(|struct_item| {
-            translate_structure_item(
+
+    enum Item<'a> {
+        Borrowed(&'a StructureItem),
+        Values(Vec<&'a ValueBinding>),
+    }
+
+    let mut seen = StringSet::new();
+    let mut items = Vec::with_capacity(structure.str_items.len());
+    for item in structure.str_items.iter().rev() {
+        match &item.str_desc {
+            StructureItemDesc::Tstr_value(_, value_bindings) => {
+                let value_bindings = value_bindings
+                    .iter()
+                    .filter(|binding| match &binding.vb_pat.pat_desc {
+                        PatternDesc::Tpat_var(id, _) => seen.insert(id.name().to_string()),
+                        _ => true,
+                    })
+                    .collect();
+                items.push(Item::Values(value_bindings));
+            }
+            _ => items.push(Item::Borrowed(item)),
+        }
+    }
+    items
+        .into_iter()
+        .rev()
+        .map(|item| match item {
+            Item::Borrowed(item) => translate_structure_item(
                 ctx,
                 arena,
                 config,
                 output_file_relative,
                 resolver,
                 type_env,
-                struct_item,
-            )
+                item,
+            ),
+            Item::Values(bindings) => crate::gentype::translation::combine(
+                &bindings
+                    .into_iter()
+                    .map(|binding| {
+                        translate_value_binding(
+                            ctx,
+                            arena,
+                            config,
+                            output_file_relative,
+                            resolver,
+                            type_env,
+                            binding,
+                        )
+                    })
+                    .collect::<Vec<_>>(),
+            ),
         })
         .collect()
 }
@@ -568,9 +535,6 @@ fn translate_module_constraint(
         // structural constraints created around duplicate JSX `make` bindings
         // are translated from the inner structure after the OCaml duplicate
         // value-binding pass.
-        let (_, str_items) = remove_duplicate_value_bindings(&structure.str_items);
-        let mut structure = structure.clone();
-        structure.str_items = str_items;
         return crate::gentype::translation::combine(&translate_structure(
             ctx,
             arena,
@@ -578,7 +542,7 @@ fn translate_module_constraint(
             output_file_relative,
             resolver,
             type_env,
-            &structure,
+            structure,
         ));
     }
 
