@@ -24,7 +24,7 @@ use rescript_compiler::parser::ast::{Signature, Structure};
 use rescript_compiler::types::path::Path as TypePath;
 use std::cmp::Ordering;
 use std::collections::BinaryHeap;
-use std::io::Read;
+use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
 use std::path::Path;
 use std::path::PathBuf;
 use std::process::Command;
@@ -657,6 +657,54 @@ fn compile_one(
 /// The sexp starts with "(structure" or "(signature" and continues to the end.
 /// Everything before that is warnings.
 /// Returns (warnings, Option<sexp>).
+fn extract_warning_prefix_from_sexp_file(path: &Path) -> std::io::Result<String> {
+    const MAX_WARNING_BYTES: usize = 16 * 1024 * 1024;
+
+    let file = std::fs::File::open(path)?;
+    let mut reader = BufReader::new(file);
+    let mut warnings = Vec::new();
+    let mut offset = 0_u64;
+    let mut at_line_start = true;
+    let mut sexp_offset = None;
+
+    loop {
+        let buffer = reader.fill_buf()?;
+        if buffer.is_empty() {
+            break;
+        }
+        if at_line_start && (buffer.starts_with(b"(structure") || buffer.starts_with(b"(signature")) {
+            sexp_offset = Some(offset);
+            break;
+        }
+
+        let consumed = buffer
+            .iter()
+            .position(|byte| *byte == b'\n')
+            .map_or(buffer.len(), |position| position + 1);
+        let remaining = MAX_WARNING_BYTES.saturating_sub(warnings.len());
+        warnings.extend_from_slice(&buffer[..consumed.min(remaining)]);
+        at_line_start = buffer[consumed - 1] == b'\n';
+        reader.consume(consumed);
+        offset += consumed as u64;
+    }
+
+    if warnings.len() == MAX_WARNING_BYTES {
+        warnings.extend_from_slice(b"\n[compiler warning output truncated]\n");
+    }
+
+    if let Some(sexp_offset) = sexp_offset.filter(|offset| *offset > 0) {
+        let mut source = reader.into_inner();
+        source.seek(SeekFrom::Start(sexp_offset))?;
+        let parent = path.parent().unwrap_or_else(|| Path::new("."));
+        let mut replacement = tempfile::NamedTempFile::new_in(parent)?;
+        std::io::copy(&mut source, &mut replacement)?;
+        replacement.flush()?;
+        replacement.persist(path).map_err(|error| error.error)?;
+    }
+
+    Ok(String::from_utf8_lossy(&warnings).into_owned())
+}
+
 fn extract_sexp_from_stderr(stderr: &str) -> (String, Option<String>) {
     // Find the start of the sexp - it begins with "(structure" or "(signature" at the start of a line
     let pos = stderr
@@ -3733,21 +3781,11 @@ fn compile_file(
                     }));
                 }
 
-                let raw_stderr = if dump_typed_sexp {
+                let warnings = if dump_typed_sexp {
                     let sexp_path = ocaml_build_path_abs.join(format!("{basename}.sexp"));
-                    std::fs::read_to_string(&sexp_path).unwrap_or_default()
+                    extract_warning_prefix_from_sexp_file(&sexp_path).unwrap_or_default()
                 } else {
                     compiler_output_to_string(&stderr)
-                };
-                let warnings = if dump_typed_sexp {
-                    let (warnings, sexp) = extract_sexp_from_stderr(&raw_stderr);
-                    if let Some(sexp_content) = sexp {
-                        let sexp_path = ocaml_build_path_abs.join(format!("{basename}.sexp"));
-                        let _ = std::fs::write(&sexp_path, sexp_content);
-                    }
-                    warnings
-                } else {
-                    raw_stderr
                 };
                 return Ok(visible_compiler_warnings(&warnings, package.is_local_dep));
             }
@@ -4229,6 +4267,31 @@ mod tests {
             visible_compiler_warnings(warning, true),
             Some(warning.to_string())
         );
+    }
+
+    #[test]
+    fn typed_sexp_warning_prefix_is_removed_without_buffering_the_sexp() {
+        let temp_dir = tempfile::tempdir().expect("temp directory should be created");
+        let path = temp_dir.path().join("Module.sexp");
+        let warning = "Warning number 26\nunused variable x\n";
+        let sexp_body = "x".repeat(4 * 1024 * 1024);
+        let sexp = format!("(structure\n{sexp_body})\n");
+        let mut contents = warning.as_bytes().to_vec();
+        contents.extend_from_slice(sexp.as_bytes());
+        fs::write(&path, contents).expect("mixed compiler output should be written");
+
+        let extracted =
+            extract_warning_prefix_from_sexp_file(&path).expect("warning prefix should be extracted");
+
+        assert_eq!(extracted, warning);
+        assert_eq!(
+            fs::metadata(&path).expect("sexp should remain").len(),
+            sexp.len() as u64
+        );
+        let mut file = fs::File::open(&path).expect("sexp should open");
+        let mut prefix = [0_u8; 10];
+        file.read_exact(&mut prefix).expect("sexp prefix should read");
+        assert_eq!(&prefix, b"(structure");
     }
 
     #[test]
