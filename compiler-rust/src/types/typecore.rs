@@ -1182,8 +1182,9 @@ pub struct TypeCheckContext<'a> {
     value_usage_checks: Vec<ValueUsageCheck>,
     /// Useful match witnesses retyped when delayed checks are flushed.
     delayed_unused_witnesses: Vec<DelayedUnusedCheck>,
-    generated_pattern_constructors: HashMap<String, crate::types::ConstructorDescription>,
-    generated_pattern_labels: HashMap<String, crate::types::LabelDescription>,
+    generated_pattern_constructors: Vec<(String, crate::types::ConstructorDescription)>,
+    generated_pattern_labels: Vec<(String, crate::types::LabelDescription)>,
+    delayed_pattern_explode: i32,
     /// Current warning configuration.
     pub warning_config: WarningConfig,
     /// Current loop nesting depth for validating break/continue.
@@ -1289,8 +1290,9 @@ impl<'a> TypeCheckContext<'a> {
             warnings: Vec::new(),
             value_usage_checks: Vec::new(),
             delayed_unused_witnesses: Vec::new(),
-            generated_pattern_constructors: HashMap::new(),
-            generated_pattern_labels: HashMap::new(),
+            generated_pattern_constructors: Vec::new(),
+            generated_pattern_labels: Vec::new(),
+            delayed_pattern_explode: 0,
             warning_config: WarningConfig::new(),
             loop_depth: 0,
             used_variables: HashMap::new(),
@@ -3625,6 +3627,7 @@ pub fn type_pattern(
         true,
         state,
         tctx.type_ctx.current_level(),
+        0,
     )
 }
 
@@ -3645,6 +3648,7 @@ fn type_pattern_without_existentials(
         false,
         state,
         tctx.type_ctx.current_level(),
+        0,
     )
 }
 
@@ -3692,6 +3696,7 @@ fn type_pattern_with_existentials_at_level(
     allow_existentials: bool,
     state: &mut PatternState,
     level: i32,
+    explode: i32,
 ) -> TypeCoreResult<Pattern> {
     // Match OCaml's type_pat: delayed checks reuse the level captured by
     // type_cases rather than the level current when the queue is flushed.
@@ -3705,7 +3710,7 @@ fn type_pattern_with_existentials_at_level(
         mode,
         allow_existentials,
         state,
-        0,
+        explode,
     );
     if result.is_ok() {
         for field_ty in state.take_deferred_type_path_forces() {
@@ -3737,9 +3742,10 @@ fn type_pattern_inner(
     mode: PatternMode,
     allow_existentials: bool,
     state: &mut PatternState,
-    _explode: i32,
+    explode: i32,
 ) -> TypeCoreResult<Pattern> {
     use crate::parser::ast::PatternDesc as PD;
+    let explode = explode.max(tctx.delayed_pattern_explode);
     let pat_env_ref = tctx.type_ctx.store_typed_env(env);
 
     let expanded_pat = maybe_expand_variant_spread_in_pattern(tctx, env, pat, expected_ty)?;
@@ -3749,7 +3755,44 @@ fn type_pattern_inner(
 
     match &*pat.ppat_desc {
         PD::Ppat_any => {
-            // Wildcard pattern matches any type
+            if explode > 0 {
+                let constructor_checkpoint = tctx.generated_pattern_constructors.len();
+                let label_checkpoint = tctx.generated_pattern_labels.len();
+                if let Some(generated) = materialize_pattern_of_type(tctx, env, expected_ty, loc) {
+                    if mode == PatternMode::InsideOr {
+                        tctx.generated_pattern_constructors
+                            .truncate(constructor_checkpoint);
+                        tctx.generated_pattern_labels.truncate(label_checkpoint);
+                        return Err(TypeCoreError::NeedBacktrack);
+                    }
+                    let next_explode =
+                        if matches!(mode, PatternMode::SplitOr | PatternMode::SplittingOr) {
+                            explode
+                        } else {
+                            explode - 1
+                        };
+                    let next_mode = if mode == PatternMode::SplittingOr {
+                        PatternMode::Normal
+                    } else {
+                        mode
+                    };
+                    let result = type_pattern_inner(
+                        tctx,
+                        env,
+                        tctx.arena.get_pat(generated),
+                        expected_ty,
+                        next_mode,
+                        allow_existentials,
+                        state,
+                        next_explode,
+                    );
+                    tctx.generated_pattern_constructors
+                        .truncate(constructor_checkpoint);
+                    tctx.generated_pattern_labels.truncate(label_checkpoint);
+                    return result;
+                }
+            }
+
             Ok(Pattern::new(
                 PatternDesc::Tpat_any,
                 loc,
@@ -4846,7 +4889,13 @@ fn type_pattern_construct(
         None
     };
     let generated_constructor = (!is_qualified)
-        .then(|| tctx.generated_pattern_constructors.get(&lid_name).cloned())
+        .then(|| {
+            tctx.generated_pattern_constructors
+                .iter()
+                .rev()
+                .find(|(name, _)| name == &lid_name)
+                .map(|(_, desc)| desc.clone())
+        })
         .flatten();
     let (cstr_desc, _cstr_path) = if let Some(desc) = generated_constructor {
         (desc, Path::pident(Ident::create_persistent(&lid_name)))
@@ -5321,8 +5370,10 @@ fn type_pattern_record(
         // Try to look up the label from the environment for type info
         let disambiguated = tctx
             .generated_pattern_labels
-            .get(&field_name)
-            .cloned()
+            .iter()
+            .rev()
+            .find(|(name, _)| name == &field_name)
+            .map(|(_, label)| label.clone())
             .or_else(|| {
                 lookup_label_by_lid(
                     &resolved_lid,
@@ -11775,6 +11826,112 @@ fn generalized_tuple_space_is_covered(
     )
 }
 
+fn materialize_pattern_of_type(
+    tctx: &mut TypeCheckContext<'_>,
+    env: &Env,
+    expected_ty: TypeExprRef,
+    loc: LocIdx,
+) -> Option<crate::parse_arena::PatIdx> {
+    let ctx = tctx.type_ctx;
+    let expanded = crate::types::ctype::expand_head(ctx, env, expected_ty);
+    let desc = ctx.get_desc(ctx.repr(expanded)).clone();
+    let generated = match &desc {
+        TypeDesc::Ttuple(types) => {
+            let items = types
+                .iter()
+                .map(|ty| {
+                    Pattern::new(
+                        PatternDesc::Tpat_any,
+                        LocIdx::none(),
+                        *ty,
+                        EnvRef(0),
+                        Attributes::new(),
+                    )
+                })
+                .collect();
+            Pattern::new(
+                PatternDesc::Tpat_tuple(items),
+                loc,
+                expected_ty,
+                EnvRef(0),
+                Attributes::new(),
+            )
+        }
+        TypeDesc::Tconstr { path, .. } => {
+            let path = path.clone();
+            let declaration = lookup_type_decl_for_path(&path, env, &mut tctx.persistent_env, ctx)?;
+            match &declaration.type_kind {
+                crate::types::TypeKind::TypeVariant(constructors, _)
+                    if constructors.len() == 1
+                        || constructors
+                            .iter()
+                            .all(|constructor| constructor.cd_res.is_some()) =>
+                {
+                    let descriptions =
+                        variant_constructor_descriptions_for_type(tctx, env, expected_ty)?;
+                    pressure_matrix_orify_many(
+                        descriptions
+                            .into_iter()
+                            .map(|constructor| {
+                                let mut template = Pattern::new(
+                                    PatternDesc::Tpat_any,
+                                    loc,
+                                    expected_ty,
+                                    EnvRef(0),
+                                    Attributes::new(),
+                                );
+                                template.pat_env = EnvRef(0);
+                                pressure_matrix_constructor_pattern(tctx, &template, constructor)
+                            })
+                            .collect(),
+                    )?
+                }
+                crate::types::TypeKind::TypeRecord(labels, _) => {
+                    let fields = labels
+                        .iter()
+                        .map(|declaration| {
+                            let label = env
+                                .find_all_labels(declaration.ld_id.name())
+                                .into_iter()
+                                .find(|candidate| {
+                                    let result = ctx.get_desc(ctx.repr(candidate.lbl_res));
+                                    matches!(&*result, TypeDesc::Tconstr { path: result_path, .. } if result_path.same(&path))
+                                })
+                                .cloned()?;
+                            let lid = Located::new(
+                                tctx.arena.push_typecheck_lident(&label.lbl_name),
+                                LocIdx::none(),
+                            );
+                            let field = Pattern::new(
+                                PatternDesc::Tpat_any,
+                                LocIdx::none(),
+                                label.lbl_arg,
+                                EnvRef(0),
+                                Attributes::new(),
+                            );
+                            Some((lid, label, field, false))
+                        })
+                        .collect::<Option<Vec<_>>>()?;
+                    Pattern::new(
+                        PatternDesc::Tpat_record(
+                            fields,
+                            crate::parser::ast::ClosedFlag::Closed,
+                            None,
+                        ),
+                        loc,
+                        expected_ty,
+                        EnvRef(0),
+                        Attributes::new(),
+                    )
+                }
+                _ => return None,
+            }
+        }
+        _ => return None,
+    };
+    Some(materialize_unused_witness(tctx, env, &generated))
+}
+
 fn materialize_unused_witness(
     tctx: &mut TypeCheckContext<'_>,
     env: &Env,
@@ -11806,64 +11963,9 @@ fn materialize_unused_witness_inner(
         })
     }
 
-    fn constructor(
-        tctx: &TypeCheckContext<'_>,
-        loc: LocIdx,
-        name: &str,
-        args: Vec<crate::parse_arena::PatIdx>,
-    ) -> crate::parse_arena::PatIdx {
-        let argument = match args.len() {
-            0 => None,
-            1 => args.first().copied(),
-            _ => Some(push(
-                tctx,
-                loc,
-                ParsedPatternDesc::Ppat_tuple(Box::new(args)),
-            )),
-        };
-        let lid = tctx.arena.push_typecheck_lident(name);
-        push(
-            tctx,
-            loc,
-            ParsedPatternDesc::Ppat_construct(Located::new(lid, loc), argument),
-        )
-    }
-
-    // Parmatch.pats_of_type expands each witness node before partial_pred
-    // retypes the generated parsetree pattern under the captured environment.
-    let _ = crate::types::ctype::expand_head(tctx.type_ctx, env, witness.pat_type);
-
     match &witness.pat_desc {
         PatternDesc::Tpat_any | PatternDesc::Tpat_var(_, _) => {
-            let generated = variant_constructor_descriptions_for_type(tctx, env, witness.pat_type)
-                .unwrap_or_default()
-                .into_iter()
-                .map(|constructor_desc| {
-                    let name = format!("#${}{}", constructor_desc.cstr_name, *fresh_counter);
-                    *fresh_counter += 1;
-                    let args = constructor_desc
-                        .cstr_args
-                        .iter()
-                        .map(|_| push(tctx, witness.pat_loc, ParsedPatternDesc::Ppat_any))
-                        .collect();
-                    tctx.generated_pattern_constructors
-                        .insert(name.clone(), constructor_desc);
-                    constructor(tctx, witness.pat_loc, &name, args)
-                })
-                .collect::<Vec<_>>();
-            let mut generated = generated.into_iter().rev();
-            if let Some(mut pattern) = generated.next() {
-                for left in generated {
-                    pattern = push(
-                        tctx,
-                        witness.pat_loc,
-                        ParsedPatternDesc::Ppat_or(left, pattern),
-                    );
-                }
-                pattern
-            } else {
-                push(tctx, witness.pat_loc, ParsedPatternDesc::Ppat_any)
-            }
+            push(tctx, witness.pat_loc, ParsedPatternDesc::Ppat_any)
         }
         PatternDesc::Tpat_alias(inner, _, _) => {
             materialize_unused_witness_inner(tctx, env, inner, fresh_counter)
@@ -11911,7 +12013,7 @@ fn materialize_unused_witness_inner(
             let name = format!("#${}{}", constructor_desc.cstr_name, *fresh_counter);
             *fresh_counter += 1;
             tctx.generated_pattern_constructors
-                .insert(name.clone(), constructor_desc.clone());
+                .push((name.clone(), constructor_desc.clone()));
             let items = items
                 .iter()
                 .map(|item| materialize_unused_witness_inner(tctx, env, item, fresh_counter))
@@ -11942,14 +12044,14 @@ fn materialize_unused_witness_inner(
                 ParsedPatternDesc::Ppat_variant(Box::new((label.clone().into(), argument))),
             )
         }
-        PatternDesc::Tpat_record(fields, closed, _) => {
+        PatternDesc::Tpat_record(fields, _, _) => {
             let fields = fields
                 .iter()
                 .map(|(_, label_desc, field, opt)| {
                     let name = format!("#${}{}", label_desc.lbl_name, *fresh_counter);
                     *fresh_counter += 1;
                     tctx.generated_pattern_labels
-                        .insert(name.clone(), label_desc.clone());
+                        .push((name.clone(), label_desc.clone()));
                     PatternRecordField {
                         lid: Located::new(tctx.arena.push_typecheck_lident(&name), witness.pat_loc),
                         pat: materialize_unused_witness_inner(tctx, env, field, fresh_counter),
@@ -11960,7 +12062,10 @@ fn materialize_unused_witness_inner(
             push(
                 tctx,
                 witness.pat_loc,
-                ParsedPatternDesc::Ppat_record(Box::new((fields, *closed))),
+                ParsedPatternDesc::Ppat_record(Box::new((
+                    fields,
+                    crate::parser::ast::ClosedFlag::Open,
+                ))),
             )
         }
         PatternDesc::Tpat_array(items) => {
@@ -11997,6 +12102,8 @@ fn retype_unused_witnesses(tctx: &mut TypeCheckContext<'_>, check: DelayedUnused
         let warning_len = tctx.warnings.len();
         let diagnostic_len = tctx.diagnostics.len();
         let mut state = PatternState::new();
+        let old_explode = tctx.delayed_pattern_explode;
+        tctx.delayed_pattern_explode = 5;
         let _ = type_pattern_with_existentials_at_level(
             tctx,
             &check.env,
@@ -12006,7 +12113,9 @@ fn retype_unused_witnesses(tctx: &mut TypeCheckContext<'_>, check: DelayedUnused
             true,
             &mut state,
             check.level,
+            5,
         );
+        tctx.delayed_pattern_explode = old_explode;
         tctx.type_ctx.restore_type_state(type_snapshot);
         tctx.unify_state.restore_backtrack_state(unify_snapshot);
         tctx.warnings.truncate(warning_len);
@@ -12890,15 +12999,22 @@ fn variant_constructor_descriptions_for_type(
         _ => return None,
     };
     drop(desc);
-    let declarations = variant_constructors_for_type(tctx, env, ty)?;
+    let declaration = lookup_type_decl_for_path(&target_path, env, &mut tctx.persistent_env, ctx)?;
+    let (declarations, target_layout) = match &declaration.type_kind {
+        crate::types::TypeKind::TypeVariant(constructors, layout) => (constructors, *layout),
+        _ => return None,
+    };
     declarations
-        .into_iter()
+        .iter()
         .map(|declaration| {
             env.find_all_constructors(declaration.cd_id.name())
                 .into_iter()
                 .find(|candidate| {
-                    constructor_result_path(ctx, candidate)
-                        .is_some_and(|path| path.same(&target_path))
+                    matches!(
+                        candidate.cstr_kind,
+                        crate::types::ConstructorKind::Ordinary(reference)
+                            if reference.variant == target_layout
+                    )
                 })
                 .cloned()
         })
