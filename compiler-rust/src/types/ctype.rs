@@ -476,13 +476,13 @@ fn is_instantiable(env: &Env, path: &Path) -> bool {
     }
 }
 
-fn lookup_type_decl_for_path(
-    ctx: &TypeContext,
-    env: &Env,
+fn lookup_type_decl_for_path<'a>(
+    ctx: &'a TypeContext,
+    env: &'a Env,
     path: &Path,
-) -> Option<super::decl::TypeDeclaration> {
+) -> Option<std::borrow::Cow<'a, super::decl::TypeDeclaration>> {
     if let Some(decl) = env.find_local_constraint(path) {
-        return Some(decl.clone());
+        return Some(std::borrow::Cow::Borrowed(decl));
     }
 
     // Try direct env lookup. For qualified paths, only accept exact
@@ -501,7 +501,7 @@ fn lookup_type_decl_for_path(
                 .is_some_and(|decl_path| decl_path.same(path)),
         };
         if exact_lookup {
-            return Some(decl.clone());
+            return Some(std::borrow::Cow::Borrowed(decl));
         }
     }
 
@@ -511,11 +511,11 @@ fn lookup_type_decl_for_path(
     // persistent structures. Prefer the env/component path here so lookups like
     // `Js.Types.tagged_t` do not eagerly read `Js.cmi`.
     if let Some(decl) = resolve_type_through_env(ctx, env, path, true) {
-        return Some(decl);
+        return Some(std::borrow::Cow::Owned(decl));
     }
 
     if let Some(decl) = resolve_type_through_modules(ctx, path) {
-        return Some(decl);
+        return Some(std::borrow::Cow::Owned(decl));
     }
 
     None
@@ -526,7 +526,7 @@ pub(crate) fn lookup_type_decl_for_path_pub(
     env: &Env,
     path: &Path,
 ) -> Option<super::decl::TypeDeclaration> {
-    lookup_type_decl_for_path(ctx, env, path)
+    lookup_type_decl_for_path(ctx, env, path).map(std::borrow::Cow::into_owned)
 }
 
 fn get_level(ctx: &TypeContext, env: &Env, path: &Path) -> i32 {
@@ -654,7 +654,7 @@ fn local_non_recursive_abbrev(
                 }
 
                 let params = lookup_type_decl_for_path(ctx, env, &path)
-                    .map(|decl| decl.type_params)
+                    .map(|decl| decl.type_params.clone())
                     .unwrap_or_else(|| args.clone());
                 for (param, arg) in params.iter().zip(args.iter()) {
                     let strict = strict || !btype::is_tvar(ctx, ctx.repr(*param));
