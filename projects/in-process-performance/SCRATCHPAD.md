@@ -2,7 +2,7 @@
 
 This file is for transient measurements, hypotheses, rejected experiments, and slow-file notes. Keep committed facts concise; use temp files under `/tmp` for bulky logs/profiles.
 
-## Current Retained Baseline
+## Expanded 3,248-Module Migration History
 
 - The updated Tella corpus has grown to 3,248 compiled modules. Before the current candidate, release in-process builds measured `15.686s +/- 0.118s` over 5 runs, range `15.581s..15.887s`.
 - Module timing identified one dominant regression: the 12,875-line `Layout__Types` module took `13.228s` wall / `12.549s` typecheck because every `TypeContext::variant_layout` lookup cloned its hundreds-entry constructor layout.
@@ -19,6 +19,10 @@ This file is for transient measurements, hypotheses, rejected experiments, and s
 - Environment persistent HAMTs now use the compiler's existing AHash state instead of SipHash, preserving the OCaml-shaped `Id_tbl`/`Tycomp_tbl` algorithms. The 16-worker benchmark improved to `4.769s +/- 0.008s`. Usage marking retains OCaml's composed callbacks for declarations that share a `(name, location)` key.
 - GenType's immutable package config is built once alongside its compile-wave-scoped resolver instead of rebuilding the same CLI-derived value per module. The first seven-run default-16 benchmark was `4.710s +/- 0.016s`, range `4.681s..4.729s`, with user/system CPU `40.750s / 2.126s`; a final run after rebuilding both release artifacts measured `4.746s +/- 0.052s`, range `4.714s..4.861s`. Treat the retained baseline as the `4.7-4.75s` band.
 - The remaining path is no longer a collection of lookup-cache wins. A timed 16-worker run attributes aggregate CPU to typecheck `27.537s`, Lambda conversion `9.290s`, Lambda optimization `5.408s`, codegen `5.558s`, parse `4.161s`, and GenType `1.129s`. `Layout__Types` alone remains about `1.10s` under timing instrumentation. Reaching one second requires the planned arena/index ownership work for typed signatures and Lambda/JS IR, not more ad hoc caches.
+## 2,127-Module Output-Parity Baseline
+
+The measurements below use the smaller pinned output-parity checkout, not the expanded 3,248-module migration above.
+
 - Latest retained change: share stored persistent alias component views in normal in-process mode.
 - Tella `hyperfine`: `2.488s +/- 0.014s` over 12 runs, range `2.457s..2.510s` after rebuilding both release artifacts from current HEAD (`2ffafbcd0`)
 - Previous same-change retained measurement: `2.494s +/- 0.027s` over 12 runs, range `2.471s..2.556s`

@@ -1,7 +1,7 @@
 # In-Process Cold-Build Performance TODO
 
-**Last Updated:** 2026-05-07
-**Status:** The expanded 3,248-module Tella corpus exposed an accidental whole-layout clone in every variant-layout lookup: `Layout__Types` alone took 13.2s of a 15.7s build. Scoped layout borrows reduced that module below one second. The internal Spice mapper now matches v0.5.2 and unblocks the complete migrated corpus. GenType now borrows declaration items like OCaml's immutable list traversal and shares its immutable module resolver once per compile wave instead of rescanning the same source/dependency directories for every module. Type declaration indexes likewise share one declaration value, matching OCaml's physical sharing. After further OCaml-aligned ownership work—allocation-free path segment clones, borrowed direct Env declarations, on-demand imported raw-CMT internalization, fast persistent-environment hashing, and compile-wave GenType config sharing—the current complete release benchmark band is `4.7-4.75s` at the default 16 workers (`4.710s +/- 0.016s`, range `4.681s..4.729s`; final rebuilt-artifact confirmation `4.746s +/- 0.052s`, range `4.714s..4.861s`). The 10-worker result after lazy raw-CMT loading was `5.007s +/- 0.016s`, down from the previous `6.680s` baseline. The project goal remains a subsecond clean compile with 100% codegen parity.
+**Last Updated:** 2026-08-30
+**Status:** Two explicitly different Tella corpora are tracked. The expanded v13-migration checkout compiles 3,248 modules in `4.7-4.75s` at 16 workers, down from `15.686s` before scoped variant-layout borrowing and subsequent GenType/Env ownership work. The smaller 2,127-module output-parity checkout measures `2.478s +/- 0.024s`, range `2.452s..2.528s`, after shared persistent component views and shallow signature freshening. Do not compare these numbers as one continuous corpus. The project goal remains a subsecond clean compile with 100% codegen parity.
 
 ## Goal
 
