@@ -4295,7 +4295,12 @@ impl<'a> RawLambdaConverter<'a> {
                     *pos
                 };
                 RawLambda::prim(
-                    Primitive::Pfield(resolved_pos, FieldDbgInfo::Module { name: name.clone() }),
+                    Primitive::Pfield(
+                        resolved_pos,
+                        FieldDbgInfo::Module {
+                            name: name.to_string(),
+                        },
+                    ),
                     vec![prefix_lam],
                     loc,
                 )
@@ -6191,7 +6196,12 @@ impl<'a> RawLambdaConverter<'a> {
             crate::types::Path::Pdot(prefix, name, _) => {
                 let prefix_lam = self.translate_module_path(prefix, loc.clone());
                 Lambda::prim(
-                    Primitive::Pfield(0, FieldDbgInfo::Module { name: name.clone() }),
+                    Primitive::Pfield(
+                        0,
+                        FieldDbgInfo::Module {
+                            name: name.to_string(),
+                        },
+                    ),
                     vec![prefix_lam],
                     loc,
                 )
@@ -10696,7 +10706,12 @@ impl<'a> RawLambdaConverter<'a> {
             crate::types::Path::Pdot(prefix, name, _) => {
                 let prefix_lam = self.translate_value_path(loc_idx, prefix);
                 Lambda::prim(
-                    Primitive::Pfield(0, FieldDbgInfo::Module { name: name.clone() }),
+                    Primitive::Pfield(
+                        0,
+                        FieldDbgInfo::Module {
+                            name: name.to_string(),
+                        },
+                    ),
                     vec![prefix_lam],
                     self.loc(loc_idx),
                 )

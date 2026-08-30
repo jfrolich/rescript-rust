@@ -23,6 +23,7 @@
 
 use crate::ident::Ident;
 use serde::{Deserialize, Serialize};
+use smol_str::SmolStr;
 use std::fmt;
 use std::sync::Arc;
 
@@ -37,7 +38,7 @@ pub enum Path {
     Pident(Ident),
     /// A dotted access: `Array.t` is `Pdot(Pident(Array), "t", -1)`
     /// The integer is a position hint (usually -1 for no hint).
-    Pdot(Arc<Path>, String, i32),
+    Pdot(Arc<Path>, SmolStr, i32),
     /// Functor application: `F(X)` is `Papply(F, X)`
     Papply(Arc<Path>, Arc<Path>),
 }
@@ -75,7 +76,7 @@ impl Path {
 
     /// Create a dotted path.
     #[inline]
-    pub fn pdot(prefix: Path, name: impl Into<String>) -> Self {
+    pub fn pdot(prefix: Path, name: impl Into<SmolStr>) -> Self {
         Path::Pdot(Arc::new(prefix), name.into(), NOPOS)
     }
 
@@ -91,7 +92,7 @@ impl Path {
 
     /// Create a dotted path with position.
     #[inline]
-    pub fn pdot_pos(prefix: Path, name: impl Into<String>, pos: i32) -> Self {
+    pub fn pdot_pos(prefix: Path, name: impl Into<SmolStr>, pos: i32) -> Self {
         Path::Pdot(Arc::new(prefix), name.into(), pos)
     }
 
@@ -300,9 +301,9 @@ impl Path {
             Path::Pident(id) if is_uident_str(id.name()) => Typath::LocalExt(id.clone()),
             Path::Pdot(ty_path, s, _) if is_uident_str(s) => {
                 if is_uident_str(ty_path.last()) {
-                    Typath::Ext((**ty_path).clone(), s.clone())
+                    Typath::Ext((**ty_path).clone(), s.to_string())
                 } else {
-                    Typath::Cstr((**ty_path).clone(), s.clone())
+                    Typath::Cstr((**ty_path).clone(), s.to_string())
                 }
             }
             p => Typath::Regular(p.clone()),

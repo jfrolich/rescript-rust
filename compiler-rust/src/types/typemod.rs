@@ -2355,7 +2355,7 @@ fn rewrite_module_path_prefix_with_aliases(
                 rewrite_module_path_prefix_with_aliases(prefix, old_param, arg_aliases);
             if let Path::Pident(id) = &rewritten_prefix {
                 if id.same(old_param) {
-                    if let Some(alias_path) = arg_aliases.get(name) {
+                    if let Some(alias_path) = arg_aliases.get(name.as_str()) {
                         return alias_path.clone();
                     }
                 }
@@ -14299,7 +14299,7 @@ fn rewrite_functor_param_type_paths_in_type(
                                     &mut manifest_visited,
                                     manifest_subst_cache,
                                 );
-                                manifest_subst_cache.insert(type_name.clone(), copy);
+                                manifest_subst_cache.insert(type_name.to_string(), copy);
                                 copy
                             };
                             ctx.set_desc(ty, TypeDesc::Tlink(manifest_copy));
@@ -16958,7 +16958,7 @@ fn strip_self_module_prefix_in_sig(
             Path::Pdot(prefix, name, pos) => {
                 if let Path::Pident(prefix_id) = prefix.as_ref() {
                     if prefix_id.name() == module_id.name() {
-                        if let Some(local_id) = direct_items.get(name) {
+                        if let Some(local_id) = direct_items.get(name.as_str()) {
                             return Some(Path::pident(local_id.clone()));
                         }
                     }
@@ -17548,7 +17548,7 @@ where
                     }
 
                     let parent_sig = resolve_path(parent, env, type_ctx, visiting)?;
-                    let owner_path = Path::pdot((**parent).clone(), name);
+                    let owner_path = Path::pdot((**parent).clone(), name.as_str());
                     parent_sig.iter().find_map(|item| match item {
                         SigItem::SigModule(id, md, _) if id.name() == name.as_str() => {
                             let child_mty = if let Some(type_ctx) = type_ctx {
@@ -17688,7 +17688,7 @@ where
 
                 let parent_mty = resolve_module_type_path_in_env(parent, env, type_ctx)?;
                 let parent_sig = resolve_modtype_to_sig_in_env(&parent_mty, env, type_ctx)?;
-                let owner_path = Path::pdot((**parent).clone(), name);
+                let owner_path = Path::pdot((**parent).clone(), name.as_str());
                 for item in &parent_sig {
                     match item {
                         SigItem::SigModule(id, md, _) if id.name() == name.as_str() => {
@@ -18026,7 +18026,7 @@ where
                             if let ModuleExprDesc::Tmod_ident(path, _) = &incl.incl_mod.mod_desc {
                                 let mod_name = match path {
                                     crate::types::Path::Pident(id) => Some(id.name().to_string()),
-                                    crate::types::Path::Pdot(_, name, _) => Some(name.clone()),
+                                    crate::types::Path::Pdot(_, name, _) => Some(name.to_string()),
                                     _ => None,
                                 };
                                 if let Some(mod_name) = mod_name {

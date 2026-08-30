@@ -7275,7 +7275,12 @@ fn transl_normal_path(path: &crate::types::path::Path) -> RawLambda {
             }
         }
         Path::Pdot(p, s, pos) => RawLambda::Lprim(RawPrimInfo {
-            primitive: Primitive::Pfield(*pos, FieldDbgInfo::Module { name: s.clone() }),
+            primitive: Primitive::Pfield(
+                *pos,
+                FieldDbgInfo::Module {
+                    name: s.to_string(),
+                },
+            ),
             args: vec![transl_normal_path(p)],
             loc: Location::none(),
         }),
@@ -8941,7 +8946,7 @@ fn resolve_labels_from_type(
                             cd.cd_args
                         {
                             let repr = RecordRepresentation::RecordInlined {
-                                name: cstr_name.clone(),
+                                name: cstr_name.to_string(),
                                 representation: crate::types::ConstructorReference {
                                     variant: layout,
                                     position,

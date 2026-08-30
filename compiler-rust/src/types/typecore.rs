@@ -9193,7 +9193,7 @@ fn lookup_qualified_value_for_arity_suggestion(
     {
         let path = Path::Pdot(
             std::sync::Arc::new(mod_path),
-            value_name.to_string(),
+            value_name.to_string().into(),
             pos as i32,
         );
         let result = (path, vd);
@@ -25480,7 +25480,7 @@ impl Env {
                     {
                         let path = Path::Pdot(
                             std::sync::Arc::new(mod_path),
-                            value_name.to_string(),
+                            value_name.to_string().into(),
                             pos as i32,
                         );
                         let result = (path, vd);

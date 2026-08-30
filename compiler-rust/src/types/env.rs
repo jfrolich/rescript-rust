@@ -1660,7 +1660,7 @@ impl Env {
                         }
                     }
                 }
-                Err(EnvError::ModuleNotFound(name.clone()))
+                Err(EnvError::ModuleNotFound(name.to_string()))
             }
             Path::Papply(_, _) => Err(EnvError::ModuleNotFound(
                 "(functor application)".to_string(),

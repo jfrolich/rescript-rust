@@ -51,7 +51,7 @@ pub fn path_to_list(path: &Path) -> Vec<String> {
         }
         Path::Pident(id) => vec![id.name().to_string()],
         Path::Pdot(p, s, _) => {
-            let mut out = vec![s.clone()];
+            let mut out = vec![s.to_string()];
             out.extend(path_to_list(p));
             out
         }

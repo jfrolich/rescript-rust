@@ -1224,7 +1224,7 @@ fn read_path(value: &OcamlValue) -> Path {
             let prefix = read_path(&fields[0]);
             let name = fields[1].as_string().to_string();
             let pos = fields[2].as_int() as i32;
-            Path::Pdot(std::sync::Arc::new(prefix), name, pos)
+            Path::Pdot(std::sync::Arc::new(prefix), name.into(), pos)
         }
         OcamlValue::Block(2, fields) => {
             let f = read_path(&fields[0]);

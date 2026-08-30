@@ -6028,7 +6028,7 @@ fn add_signature_to_env_with_options(
         let slot_path = |name: &str, p: i32| {
             Path::Pdot(
                 std::sync::Arc::new(module_path.clone()),
-                name.to_string(),
+                name.to_string().into(),
                 p,
             )
         };
