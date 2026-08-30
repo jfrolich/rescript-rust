@@ -1173,11 +1173,6 @@ pub struct TypeCheckContext<'a> {
     /// Mirrors OCaml Env.check_usage/Delayed_checks: lookup marks a binding as
     /// used, and the warning is emitted only when delayed checks are forced.
     value_usage_checks: Vec<ValueUsageCheck>,
-    /// Type expansions performed while delayed unused-case witnesses are
-    /// reconstructed by Parmatch.partial_pred.
-    unused_witness_type_expansions: Vec<(Env, Vec<TypeExprRef>)>,
-    /// Existential constructors instantiated by delayed unused-case witnesses.
-    unused_witness_existentials: Vec<(crate::types::ConstructorDescription, i32)>,
     /// Current warning configuration.
     pub warning_config: WarningConfig,
     /// Current loop nesting depth for validating break/continue.
@@ -1282,8 +1277,6 @@ impl<'a> TypeCheckContext<'a> {
             diagnostics: Vec::new(),
             warnings: Vec::new(),
             value_usage_checks: Vec::new(),
-            unused_witness_type_expansions: Vec::new(),
-            unused_witness_existentials: Vec::new(),
             warning_config: WarningConfig::new(),
             loop_depth: 0,
             used_variables: HashMap::new(),
@@ -1406,37 +1399,6 @@ impl<'a> TypeCheckContext<'a> {
                     is_error: check.is_error,
                 });
             }
-        }
-
-        for (env, types) in std::mem::take(&mut self.unused_witness_type_expansions) {
-            // OCaml Delayed_checks runs Parmatch.check_unused after the whole
-            // structure is typed. Its generated witness is converted through
-            // partial_pred; Parmatch.pats_of_type expands each wildcard's type
-            // before reconstructing singleton constructors/records
-            // (parmatch.ml:942-967, typecore.ml:1743-1776). Preserve that Env /
-            // Ctype traversal even though Rust's warning checker does not keep
-            // the temporary reconstructed pattern.
-            let snapshot = self.type_ctx.snapshot_type_state();
-            for ty in types {
-                let _ = crate::types::ctype::expand_head(self.type_ctx, &env, ty);
-            }
-            self.type_ctx.restore_type_state(snapshot);
-        }
-
-        for (constructor, newtype_level) in std::mem::take(&mut self.unused_witness_existentials) {
-            // OCaml runs unused-case predicates through Delayed_checks after
-            // the complete structure has been typed. Preserve the existential
-            // Ident allocation from Ctype.instance_constructor, then discard
-            // the witness's temporary type/environment mutations.
-            let snapshot = self.type_ctx.snapshot_type_state();
-            let mut witness_env = Env::empty();
-            let _ = crate::types::instance_constructor_in_pattern(
-                self.type_ctx,
-                &mut witness_env,
-                newtype_level,
-                &constructor,
-            );
-            self.type_ctx.restore_type_state(snapshot);
         }
     }
 
@@ -11234,7 +11196,7 @@ fn finish_non_gadt_type_cases<'a>(
 
     // type_cases always schedules check_unused, including try handlers where
     // partial_flag is false (typecore.ml:4483-4496).
-    report_unused_match_cases(tctx, env, typed_cases, needs_exhaust_check);
+    report_unused_match_cases(tctx, env, typed_cases);
     Ok(partial)
 }
 
@@ -11752,84 +11714,10 @@ fn generalized_tuple_space_is_covered(
     )
 }
 
-fn instantiate_unused_witness_existentials(
-    tctx: &mut TypeCheckContext<'_>,
-    env: &Env,
-    pat: &Pattern,
-) {
-    fn visit(tctx: &mut TypeCheckContext<'_>, env: &Env, pat: &Pattern) {
-        let PatternDesc::Tpat_construct(_, parent, args) = &pat.pat_desc else {
-            return;
-        };
-        if !matches!(
-            parent.cstr_kind,
-            crate::types::decl::ConstructorKind::Extension(_)
-        ) {
-            return;
-        }
-
-        for arg in args {
-            // Parmatch.check_unused builds a witness for a catch-all clause and
-            // Typecore.partial_pred types it with existentials enabled
-            // (compiler/ml/typecore.ml:1743-1759, 1769-1774). A wildcard at a
-            // singleton variant is refined to that constructor; reproduce the
-            // constructor instantiation even though Rust's warning checker does
-            // not retain the temporary typed witness.
-            if matches!(
-                arg.pat_desc,
-                PatternDesc::Tpat_any | PatternDesc::Tpat_var(_, _)
-            ) && let Some(constructors) = variant_constructors_for_type(tctx, env, arg.pat_type)
-                && let [constructor] = constructors.as_slice()
-                && let Ok(desc) = env.find_constructor(constructor.cd_id.name())
-                && !desc.cstr_existentials.is_empty()
-            {
-                tctx.unused_witness_existentials
-                    .push((desc.clone(), tctx.type_ctx.current_level()));
-            }
-            visit(tctx, env, arg);
-        }
-    }
-
-    visit(tctx, env, pat);
-}
-
-fn collect_unused_witness_expansion_types(pat: &Pattern, types: &mut Vec<TypeExprRef>) {
-    types.push(pat.pat_type);
-    match &pat.pat_desc {
-        PatternDesc::Tpat_alias(inner, _, _) => {
-            collect_unused_witness_expansion_types(inner, types)
-        }
-        PatternDesc::Tpat_tuple(items)
-        | PatternDesc::Tpat_array(items)
-        | PatternDesc::Tpat_construct(_, _, items) => {
-            for item in items {
-                collect_unused_witness_expansion_types(item, types);
-            }
-        }
-        PatternDesc::Tpat_variant(_, Some(inner), _) => {
-            collect_unused_witness_expansion_types(inner, types)
-        }
-        PatternDesc::Tpat_record(fields, _, _) => {
-            for (_, _, field, _) in fields {
-                collect_unused_witness_expansion_types(field, types);
-            }
-        }
-        PatternDesc::Tpat_or(left, right, _) => {
-            collect_unused_witness_expansion_types(left, types);
-            collect_unused_witness_expansion_types(right, types);
-        }
-        PatternDesc::Tpat_any
-        | PatternDesc::Tpat_var(_, _)
-        | PatternDesc::Tpat_constant(_)
-        | PatternDesc::Tpat_variant(_, None, _) => {}
-    }
-}
-
 fn report_unused_match_cases<'case>(
     tctx: &mut TypeCheckContext<'_>,
     env: &Env,
     cases: &'case [crate::types::typedtree::Case],
-    delay_witness_expansions: bool,
 ) {
     if !tctx.warning_config.is_active(&Warning::UnusedMatch) {
         return;
@@ -11842,7 +11730,6 @@ fn report_unused_match_cases<'case>(
     let mut previous_unguarded_cases: Vec<PartialCheckCase<'case>> = Vec::new();
     let mut covered_keys: HashSet<String> = HashSet::default();
     let mut covered_by_catch_all = false;
-    let mut delayed_expansion_types = Vec::new();
 
     for case in cases {
         let has_dict_pattern = typed_pattern_contains_dict_pattern(tctx.arena, &case.c_lhs)
@@ -11942,24 +11829,6 @@ fn report_unused_match_cases<'case>(
             false
         };
 
-        if !is_unused
-            && !previous_unguarded_cases.is_empty()
-            && tctx.warning_config.is_active(&Warning::UnreachableCase)
-        {
-            // Parmatch.check_unused refines each useful row after the first.
-            // Preserve singleton existential instantiation from the current
-            // extension-constructor witness rather than reconstructing it from
-            // prior rows.
-            instantiate_unused_witness_existentials(tctx, env, &case.c_lhs);
-
-            if delay_witness_expansions {
-                // When type_cases delayed the check, witness type expansions
-                // run only after the complete structure has been typed
-                // (typecore.ml:4483-4490, parmatch.ml:2218-2235).
-                collect_unused_witness_expansion_types(&case.c_lhs, &mut delayed_expansion_types);
-            }
-        }
-
         if is_unused {
             tctx.report_warning(case.c_lhs.pat_loc, Warning::UnusedMatch);
         } else {
@@ -11986,11 +11855,6 @@ fn report_unused_match_cases<'case>(
                 has_guard: false,
             });
         }
-    }
-
-    if !delayed_expansion_types.is_empty() {
-        tctx.unused_witness_type_expansions
-            .push((env.clone(), delayed_expansion_types));
     }
 }
 
@@ -14438,12 +14302,7 @@ fn type_match(
         report_fragile_match_if_needed(tctx, ctx, val_case_env, loc, &typed_val_cases, partial);
         partial
     };
-    report_unused_match_cases(
-        tctx,
-        val_case_env,
-        &typed_val_cases,
-        has_generalized_value_patterns || needs_exhaust_check,
-    );
+    report_unused_match_cases(tctx, val_case_env, &typed_val_cases);
     report_ambiguous_guarded_or_patterns(tctx, &typed_val_cases);
     if partial == crate::types::typedtree::Partial::Partial
         && !all_clauses_guarded
