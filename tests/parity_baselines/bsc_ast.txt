@@ -6,6 +6,7 @@ syntax_tests/data/api/resiSyntax.resi
 syntax_tests/data/ast-mapping/ForAwaitOfExpressions.res
 syntax_tests/data/ast-mapping/ForOfExpressions.res
 syntax_tests/data/ast-mapping/FunWithAttribute.res
+syntax_tests/data/ast-mapping/FunctionsAndArrows.res
 syntax_tests/data/ast-mapping/JSXElements.res
 syntax_tests/data/ast-mapping/JSXFragments.res
 syntax_tests/data/conversion/reason/attributes.res
@@ -1005,6 +1006,7 @@ syntax_tests/data/parsing/other/stringLiterals.res
 syntax_tests/data/parsing/recovery/expression/emptyBlock.res
 syntax_tests/data/parsing/recovery/expression/infinite.res
 syntax_tests/data/parsing/recovery/string/unclosed.res
+syntax_tests/data/parsing/warnings/uncurriedDot.res
 syntax_tests/data/ppx/react/aliasProps.res
 syntax_tests/data/ppx/react/asyncAwait.res
 syntax_tests/data/ppx/react/commentAtTop.res
@@ -1141,6 +1143,7 @@ syntax_tests/data/printer/modExpr/unpack.res
 syntax_tests/data/printer/modType/exoticIdent.res
 syntax_tests/data/printer/modType/extension.res
 syntax_tests/data/printer/modType/functor.res
+syntax_tests/data/printer/modType/functorInterface.resi
 syntax_tests/data/printer/modType/ident.res
 syntax_tests/data/printer/modType/moduleTypeOf.res
 syntax_tests/data/printer/modType/signature.res

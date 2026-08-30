@@ -49,7 +49,7 @@ fn parse_newline_or_semicolon_structure(p: &mut Parser<'_>) {
                 p.prev_end_pos.clone(),
                 p.end_pos.clone(),
                 DiagnosticCategory::message(
-                    "consecutive statements on a line must be separated by ';' or a newline",
+                    "Consecutive statements on a line must be separated by ';' or a newline",
                 ),
             );
         }
@@ -2485,176 +2485,71 @@ fn parse_let_bindings(
         let pat = pattern::parse_pattern(p);
         p.eat_breadcrumb();
 
-        // Handle optional type annotation: let x: int = ...
-        // Also track locally abstract types for Pexp_newtype wrapping
-        let (pat, newtype_info, is_locally_abstract) = if p.token == Token::Colon {
+        // Parse an ordinary pattern constraint or the current-Parsetree
+        // value constraint used by `let x: type a. t = expr`.
+        let (pat, value_constraint) = if p.token == Token::Colon {
             p.next();
-
-            // Check if this is `type a.` syntax (locally abstract types)
-            // Only `type a.` syntax generates Pexp_newtype, not `'a.` syntax
-            let is_locally_abstract = p.token == Token::Typ;
-
-            // OCaml uses parse_poly_type_expr here (not parse_typ_expr)
-            // This has special handling for `'a => T` to exclude the `'` from arrow location
-            let typ = if is_locally_abstract {
-                typ::parse_locally_abstract_type(p)
+            if p.token == Token::Typ {
+                p.next();
+                let pvc_newtypes = expr::parse_lident_list(p);
+                p.expect(Token::Dot);
+                let pvc_type = typ::parse_typ_expr(p);
+                let pvc_type = p.arena_mut().push_core_type(pvc_type);
+                (
+                    pat,
+                    Some(crate::parser::ast::ValueConstraint {
+                        pvc_newtypes,
+                        pvc_type,
+                        pvc_pattern: None,
+                        pvc_expression: None,
+                    }),
+                )
             } else {
-                typ::parse_poly_type_expr(p)
-            };
-
-            // Extract type variables and inner type if this is a Ptyp_poly from `type a.` syntax
-            // The inner type is used directly for Pexp_constraint (with Ptyp_constr for type vars)
-            // But for the Ptyp_poly in the pattern, we need to substitute Ptyp_constr -> Ptyp_var
-            let (final_typ, newtype_info) = match *typ.ptyp_desc {
-                CoreTypeDesc::Ptyp_poly(poly_inner) if is_locally_abstract => {
-                    let (vars, ct_idx) = *poly_inner;
-                    // Build the set of variable names for substitution
-                    let var_set: std::collections::HashSet<String> = vars
-                        .iter()
-                        .map(|v| p.arena().get_string(v.txt).to_string())
-                        .collect();
-
-                    // The inner type (with Ptyp_constr) is used for Pexp_constraint
-                    let inner_for_constraint = p.arena().get_core_type(ct_idx).clone();
-                    let inner_for_constraint_idx =
-                        p.arena_mut().push_core_type(inner_for_constraint);
-
-                    // Substitute Ptyp_constr -> Ptyp_var for the Ptyp_poly body
-                    let ct_clone = p.arena().get_core_type(ct_idx).clone();
-                    let substituted_inner = match typ::substitute_type_vars(
-                        p.arena_mut(),
-                        ct_clone.clone(),
-                        &var_set,
-                    ) {
-                        Ok(substituted_inner) => substituted_inner,
-                        Err(loc) => {
-                            p.err_at(
-                                p.loc_start(loc),
-                                p.loc_end(loc),
-                                DiagnosticCategory::FatalSyntaxerr,
-                            );
-                            ct_clone
-                        }
-                    };
-
-                    // Rebuild the Ptyp_poly with the substituted body
-                    let substituted_inner_idx = p.arena_mut().push_core_type(substituted_inner);
-                    let substituted_typ = CoreType {
-                        ptyp_desc: Box::new(CoreTypeDesc::Ptyp_poly(Box::new((
-                            vars.clone(),
-                            substituted_inner_idx,
+                let poly_type = typ::parse_poly_type_expr(p);
+                let loc = p.mk_loc_spanning(pat.ppat_loc, poly_type.ptyp_loc);
+                let pat_idx = p.arena_mut().push_pat(pat);
+                let typ_idx = p.arena_mut().push_core_type(poly_type);
+                (
+                    Pattern {
+                        ppat_desc: Box::new(PatternDesc::Ppat_constraint(Box::new((
+                            pat_idx, typ_idx,
                         )))),
-                        ptyp_loc: typ.ptyp_loc,
-                        ptyp_attributes: typ.ptyp_attributes,
-                    };
-
-                    (substituted_typ, Some((vars, inner_for_constraint_idx)))
-                }
-                _ => (typ, None),
-            };
-
-            // Create a constraint pattern
-            let loc = p.mk_loc_spanning(pat.ppat_loc, final_typ.ptyp_loc);
-            let pat_idx = p.arena_mut().push_pat(pat);
-            let final_typ_idx = p.arena_mut().push_core_type(final_typ);
-            let pat = Pattern {
-                ppat_desc: Box::new(PatternDesc::Ppat_constraint(Box::new((
-                    pat_idx,
-                    final_typ_idx,
-                )))),
-                ppat_loc: loc,
-                ppat_attributes: Attributes::new(),
-            };
-            (pat, newtype_info, is_locally_abstract)
+                        ppat_loc: loc,
+                        ppat_attributes: Attributes::new(),
+                    },
+                    None,
+                )
+            }
         } else {
-            (pat, None, false)
+            (pat, None)
         };
 
         p.expect(Token::Equal);
         let mut expr = expr::parse_expr(p);
-        // OCaml: over_parse_constrained_or_coerced_or_arrow_expression on the let binding value
-        expr = expr::over_parse_constrained_or_coerced_or_arrow_expression(p, expr);
+        // The locally abstract branch follows `parse_expr` directly; ordinary
+        // bindings retain the parser's constrained/arrow over-parse.
+        if value_constraint.is_none() {
+            expr = expr::over_parse_constrained_or_coerced_or_arrow_expression(p, expr);
+        }
 
-        // OCaml allocates a wrapper location and then allocates a fresh Vb.mk
-        // location with the same span. Keep those allocations distinct.
-        let wrapper_loc = if is_locally_abstract {
-            Some(p.mk_loc_idx_to_prev_end(binding_start_idx))
-        } else {
-            None
-        };
         let vb_loc = p.mk_loc_idx_to_prev_end(binding_start_idx);
         if first_binding_loc.is_none() {
             first_binding_loc = Some(vb_loc);
         }
 
-        // For locally abstract types, OCaml uses the binding location for the pattern constraint and Ptyp_poly
-        let pat = if is_locally_abstract {
-            let wrapper_loc =
-                wrapper_loc.expect("locally abstract let-binding should have wrapper loc");
-            // Update Ppat_constraint and inner Ptyp_poly locations to use the binding location
-            if let PatternDesc::Ppat_constraint(inner) = *pat.ppat_desc {
-                let (inner_pat_idx, typ_idx) = *inner;
-                // Update the Ptyp_poly location to use binding location
-                let typ = p.arena().get_core_type(typ_idx).clone();
-                let updated_typ_idx = match *typ.ptyp_desc {
-                    CoreTypeDesc::Ptyp_poly(poly_inner) => {
-                        let (vars, ct) = *poly_inner;
-                        let updated = CoreType {
-                            ptyp_desc: Box::new(CoreTypeDesc::Ptyp_poly(Box::new((vars, ct)))),
-                            ptyp_loc: wrapper_loc,
-                            ptyp_attributes: typ.ptyp_attributes,
-                        };
-                        p.arena_mut().push_core_type(updated)
-                    }
-                    _ => typ_idx,
-                };
-                Pattern {
-                    ppat_desc: Box::new(PatternDesc::Ppat_constraint(Box::new((
-                        inner_pat_idx,
-                        updated_typ_idx,
-                    )))),
-                    ppat_loc: wrapper_loc,
-                    ppat_attributes: pat.ppat_attributes,
-                }
-            } else {
-                pat
-            }
-        } else {
-            pat
-        };
-
-        // Wrap expression in Pexp_newtype for locally abstract types
-        // Also add Pexp_constraint with the inner type (from Ptyp_poly)
-        // OCaml uses the binding location for all these wrappers
-        if let Some((newtype_vars, inner_type)) = newtype_info {
-            let wrapper_loc =
-                wrapper_loc.expect("locally abstract wrappers should have wrapper loc");
-            // First wrap the expression in Pexp_constraint with the inner type
-            // OCaml uses the binding location for this Pexp_constraint
-            let expr_idx = p.arena_mut().push_expr(expr);
-            expr = Expression {
-                pexp_desc: Box::new(ExpressionDesc::Pexp_constraint(Box::new((
-                    expr_idx, inner_type,
-                )))),
-                pexp_loc: wrapper_loc,
-                pexp_attributes: Attributes::new(),
-            };
-
-            // Then wrap in Pexp_newtype for each type variable
-            // Fold in reverse order so that the outermost newtype is the first variable
-            // OCaml uses the binding location for all Pexp_newtype wrappers
-            for var in newtype_vars.into_iter().rev() {
-                let expr_idx = p.arena_mut().push_expr(expr);
-                expr = Expression {
-                    pexp_desc: Box::new(ExpressionDesc::Pexp_newtype(Box::new((var, expr_idx)))),
-                    pexp_loc: wrapper_loc,
-                    pexp_attributes: Attributes::new(),
-                };
-            }
-        }
-
         let pat_idx = p.arena_mut().push_pat(pat);
         let expr_idx = p.arena_mut().push_expr(expr);
+        if let Some(value_constraint) = value_constraint
+            && let Err(loc) =
+                p.arena_mut()
+                    .set_value_constraint(pat_idx, value_constraint, expr_idx, vb_loc)
+        {
+            p.err_at(
+                p.loc_start(loc),
+                p.loc_end(loc),
+                DiagnosticCategory::FatalSyntaxerr,
+            );
+        }
         bindings.push(ValueBinding {
             pvb_pat: pat_idx,
             pvb_expr: expr_idx,
@@ -3489,15 +3384,22 @@ fn fix_spread_first_object_manifest(
         }
         CoreTypeDesc::Ptyp_arrow(arrow_inner) => {
             let (arg, ret_idx, arity) = *arrow_inner;
-            // Recurse into arg ONLY if this is the direct manifest level
-            let (fixed_arg_typ_idx, _) = fix_spread_first_object_manifest(p, arg.typ, true);
-            let fixed_arg = TypeArg {
-                typ: fixed_arg_typ_idx,
-                ..*arg
-            };
+            let args = p.arena().nary_arrow_args(&arg, arity).into_owned();
+            // Recurse into every argument when this is the direct manifest level.
+            let mut fixed_args = args
+                .into_iter()
+                .map(|arg| {
+                    let (typ, _) = fix_spread_first_object_manifest(p, arg.typ, true);
+                    TypeArg { typ, ..arg }
+                })
+                .collect::<Vec<_>>();
+            let first = fixed_args[0].clone();
+            if fixed_args.len() > 1 {
+                p.arena_mut().set_nary_arrow_args(arity, fixed_args.clone());
+            }
             let fixed = CoreType {
                 ptyp_desc: Box::new(CoreTypeDesc::Ptyp_arrow(Box::new((
-                    Box::new(fixed_arg),
+                    Box::new(first),
                     ret_idx,
                     arity,
                 )))),
@@ -3542,19 +3444,26 @@ fn fix_type_manifest_location(p: &mut Parser<'_>, typ_idx: CoreTypeIdx) -> CoreT
             }
         }
         CoreTypeDesc::Ptyp_arrow(inner) => {
-            let (ref arg, ref ret_idx, ref arity) = **inner;
-            // Also adjust Ldot types in arrow parameter positions
-            // But NOT in return types - OCaml keeps type args in return type ptyp_loc
-            let fixed_arg = TypeArg {
-                typ: fix_type_manifest_location(p, arg.typ),
-                ..arg.as_ref().clone()
-            };
-            // Return type is NOT fixed - OCaml includes type args for return types
+            let (ref arg, ret_idx, arity) = **inner;
+            let args = p.arena().nary_arrow_args(arg, arity).into_owned();
+            // Also adjust Ldot types in every arrow parameter position, but not
+            // in the return type: OCaml keeps type arguments in return locations.
+            let fixed_args = args
+                .into_iter()
+                .map(|arg| TypeArg {
+                    typ: fix_type_manifest_location(p, arg.typ),
+                    ..arg
+                })
+                .collect::<Vec<_>>();
+            let first = fixed_args[0].clone();
+            if fixed_args.len() > 1 {
+                p.arena_mut().set_nary_arrow_args(arity, fixed_args.clone());
+            }
             let fixed = CoreType {
                 ptyp_desc: Box::new(CoreTypeDesc::Ptyp_arrow(Box::new((
-                    Box::new(fixed_arg),
-                    *ret_idx,
-                    *arity,
+                    Box::new(first),
+                    ret_idx,
+                    arity,
                 )))),
                 ..typ
             };

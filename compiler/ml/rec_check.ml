@@ -156,8 +156,13 @@ let rec pattern_variables : Typedtree.pattern -> Ident.t list =
   | Tpat_construct (_, _, pats) -> List.concat (List.map pattern_variables pats)
   | Tpat_variant (_, Some pat, _) -> pattern_variables pat
   | Tpat_variant (_, None, _) -> []
-  | Tpat_record (fields, _) ->
-    List.concat (List.map (fun (_, _, p, _) -> pattern_variables p) fields)
+  | Tpat_record (fields, _, rest) -> (
+    let fields =
+      List.concat (List.map (fun (_, _, p, _) -> pattern_variables p) fields)
+    in
+    match rest with
+    | None -> fields
+    | Some {rest_ident; _} -> rest_ident :: fields)
   | Tpat_array pats -> List.concat (List.map pattern_variables pats)
   | Tpat_or (l, r, _) -> pattern_variables l @ pattern_variables r
 
@@ -259,14 +264,12 @@ let rec expression : Env.env -> Typedtree.expression -> Use.t =
   | Texp_array exprs -> Use.guard (list expression env exprs)
   | Texp_construct (_, desc, exprs) ->
     let access_constructor =
-      match desc.cstr_tag with
-      | Cstr_extension pth -> Use.inspect (path env pth)
+      match desc.cstr_kind with
+      | Extension_constructor pth -> Use.inspect (path env pth)
       | _ -> Use.empty
     in
     let use =
-      match desc.cstr_tag with
-      | Cstr_unboxed -> fun x -> x
-      | Cstr_constant _ | Cstr_block _ | Cstr_extension _ -> Use.guard
+      if Datarepr.constructor_is_unboxed desc then fun x -> x else Use.guard
     in
     Use.join access_constructor (use (list expression env exprs))
   | Texp_variant (_, eo) -> Use.guard (option expression env eo)
@@ -304,8 +307,19 @@ let rec expression : Env.env -> Typedtree.expression -> Use.t =
     (* This is more permissive than the old check. *)
     let case env {Typedtree.c_rhs} = expression env c_rhs in
     Use.join (expression env e) (list case env cases)
-  | Texp_function {case = case_} ->
-    Use.delay (list (case ~scrutinee:Use.empty) env [case_])
+  | Texp_function {params; body} ->
+    let env =
+      List.fold_left
+        (fun env {Typedtree.fp_pat} ->
+          let ty =
+            if is_destructuring_pattern fp_pat then Use.inspect Use.empty
+            else Use.discard Use.empty
+          in
+          let vars = pattern_variables fp_pat in
+          List.fold_left (fun env id -> Ident.add id ty env) env vars)
+        env params
+    in
+    Use.delay (expression env body)
   | Texp_extension_constructor _ -> Use.empty
 
 and option : 'a. (Env.env -> 'a -> Use.t) -> Env.env -> 'a option -> Use.t =
@@ -438,7 +452,7 @@ and is_destructuring_pattern : Typedtree.pattern -> bool =
   | Tpat_tuple _ -> true
   | Tpat_construct (_, _, _) -> true
   | Tpat_variant _ -> true
-  | Tpat_record (_, _) -> true
+  | Tpat_record (_, _, _) -> true
   | Tpat_array _ -> true
   | Tpat_or (l, r, _) ->
     is_destructuring_pattern l || is_destructuring_pattern r
@@ -472,7 +486,7 @@ let check_recursive_bindings valbinds =
 let report_error ppf = function
   | Illegal_letrec_expr ->
     Format.fprintf ppf
-      "This kind of expression is not allowed as right-hand side of `let rec'"
+      "This kind of expression is not allowed as right-hand side of `let rec`"
 
 let () =
   Location.register_error_of_exn (function

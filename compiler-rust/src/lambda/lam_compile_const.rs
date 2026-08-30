@@ -95,6 +95,31 @@ impl LambdaCompiler {
                 }
                 None => Expression::number(Number::int(*i)),
             },
+            Constant::Constructor(tag) => match &tag.tag_type {
+                Some(crate::types::VariantTagType::Int(value)) => {
+                    Expression::number(Number::int(*value))
+                }
+                Some(crate::types::VariantTagType::String(value)) => {
+                    Expression::string(value.clone())
+                }
+                Some(crate::types::VariantTagType::Float(value)) => {
+                    Expression::number(Number::float(value.clone()))
+                }
+                Some(crate::types::VariantTagType::BigInt(value)) => {
+                    Expression::number(Number::bigint(true, value.clone()))
+                }
+                Some(crate::types::VariantTagType::Bool(value)) => Expression::bool(*value),
+                Some(crate::types::VariantTagType::Null) => Expression::null(),
+                Some(crate::types::VariantTagType::Undefined) => Expression::undefined(false),
+                Some(crate::types::VariantTagType::Untagged(_)) => {
+                    Expression::string(tag.name.clone())
+                }
+                None if tag.name == "[]" => Expression::with_comment(
+                    ExpressionDesc::Number(Number::int(0)),
+                    tag.name.clone(),
+                ),
+                None => Expression::string(tag.name.clone()),
+            },
             Constant::NativeInt { i, comment } => {
                 match pointer_info_comment_text(comment.as_ref()) {
                     Some(comment) => Expression::with_comment(
@@ -128,11 +153,7 @@ impl LambdaCompiler {
                 Expression::number(Number::bigint(!negative, value.clone()))
             }
             Constant::Pointer(name) => Expression::string(name.clone()),
-            Constant::Block {
-                tag,
-                tag_info,
-                elements,
-            } => {
+            Constant::Block { tag_info, elements } => {
                 let elems = elements.iter().map(Self::compile_constant).collect();
                 // OCaml's `Lam_compile_const.translate` (lam_compile_const.ml:67-69)
                 // calls `Js_of_lam_block.make_block NA tag_info ...` — `NA`, not
@@ -147,7 +168,6 @@ impl LambdaCompiler {
                 Expression::new(ExpressionDesc::CamlBlock(
                     elems,
                     MutableFlag::NA,
-                    Box::new(Expression::number(Number::int(*tag))),
                     tag_info.clone(),
                 ))
             }
@@ -212,7 +232,7 @@ impl LambdaCompiler {
                     ))
                 }),
             },
-            FieldDbgInfo::Record { name, .. }
+            FieldDbgInfo::Record { name }
             | FieldDbgInfo::RecordInline { name }
             | FieldDbgInfo::RecordExtension { name } => pure_record_field_item(target, name, idx)
                 .unwrap_or_else(|| {
@@ -283,7 +303,7 @@ impl LambdaCompiler {
         if js_expr_no_side_effects(target)
             && matches!(
                 target.desc,
-                ExpressionDesc::Array(_, _) | ExpressionDesc::CamlBlock(_, _, _, _)
+                ExpressionDesc::Array(_, _) | ExpressionDesc::CamlBlock(_, _, _)
             )
         {
             return value.clone();

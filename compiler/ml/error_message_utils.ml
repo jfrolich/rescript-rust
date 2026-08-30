@@ -90,6 +90,7 @@ type type_clash_context =
       optional: bool;
     }
   | ArrayValue
+  | TaggedTemplateValue
   | MaybeUnwrapOption
   | IfCondition
   | AssertCondition
@@ -107,33 +108,11 @@ type type_clash_context =
       is_constant: string option;
     }
   | FunctionArgument of {optional: bool; name: string option}
+  | JsxComponent
   | BracedIdent
   | Statement of type_clash_statement
   | ForLoopCondition
   | Await
-
-let context_to_string = function
-  | Some WhileCondition -> "WhileCondition"
-  | Some ForLoopCondition -> "ForLoopCondition"
-  | Some AssertCondition -> "AssertCondition"
-  | Some IfCondition -> "IfCondition"
-  | Some (Statement _) -> "Statement"
-  | Some (MathOperator _) -> "MathOperator"
-  | Some ArrayValue -> "ArrayValue"
-  | Some (SetRecordField _) -> "SetRecordField"
-  | Some (RecordField _) -> "RecordField"
-  | Some MaybeUnwrapOption -> "MaybeUnwrapOption"
-  | Some SwitchReturn -> "SwitchReturn"
-  | Some TryReturn -> "TryReturn"
-  | Some StringConcat -> "StringConcat"
-  | Some (FunctionArgument _) -> "FunctionArgument"
-  | Some ComparisonOperator -> "ComparisonOperator"
-  | Some IfReturn -> "IfReturn"
-  | Some TernaryReturn -> "TernaryReturn"
-  | Some Await -> "Await"
-  | Some BracedIdent -> "BracedIdent"
-  | Some LetUnwrapReturn -> "LetUnwrapReturn"
-  | None -> "None"
 
 let fprintf = Format.fprintf
 
@@ -143,8 +122,10 @@ let error_type_text ppf type_clash_context =
     | Some (Statement FunctionCall) -> "This function call returns:"
     | Some (MathOperator {is_constant = Some _}) -> "This value has type:"
     | Some ArrayValue -> "This array item has type:"
+    | Some TaggedTemplateValue -> "This interpolated value has type:"
     | Some (SetRecordField _) ->
       "You're assigning something to this field that has type:"
+    | Some JsxComponent -> "This JSX tag has type:"
     | _ -> "This has type:"
   in
   fprintf ppf "%s" text
@@ -162,6 +143,7 @@ let error_expected_type_text ppf type_clash_context =
     | None -> ());
 
     fprintf ppf " is expecting:"
+  | Some JsxComponent -> fprintf ppf "But JSX component positions require:"
   | Some ComparisonOperator ->
     fprintf ppf "But it's being compared to something of type:"
   | Some SwitchReturn -> fprintf ppf "But this switch is expected to return:"
@@ -180,6 +162,8 @@ let error_expected_type_text ppf type_clash_context =
   | Some TernaryReturn -> fprintf ppf "But this ternary is expected to return:"
   | Some ArrayValue ->
     fprintf ppf "But this array is expected to have items of type:"
+  | Some TaggedTemplateValue ->
+    fprintf ppf "But this tag expects interpolations of type:"
   | Some (SetRecordField _) -> fprintf ppf "But the record field is of type:"
   | Some
       (RecordField {field_name = "children"; jsx = Some {jsx_type = `Fragment}})
@@ -224,11 +208,18 @@ let is_variant_type ~(extract_concrete_typedecl : extract_concrete_typedecl)
     | _ -> false
   with _ -> false
 
+let is_jsx_component_type ~env ty =
+  match Ctype.expand_head env ty with
+  | {desc = Tconstr (Pdot (Pident {name = "Jsx"}, "component", _), _, _)} ->
+    true
+  | _ -> false
+
 let get_variant_constructors
     ~(extract_concrete_typedecl : extract_concrete_typedecl) ~env ty =
   match extract_concrete_typedecl env ty with
-  | _, _, {Types.type_kind = Type_variant constructors; _} -> constructors
-  | _ -> []
+  | _, _, {Types.type_kind = Type_variant (constructors, layout_ref); _} ->
+    Some (constructors, Variant_runtime.get_layout layout_ref)
+  | _ -> None
 
 let extract_string_constant text =
   match !Parser.parse_source text with
@@ -396,6 +387,17 @@ let print_extra_type_clash_help ~extract_concrete_typedecl ~env loc ppf
       \  - Remove the @{<info>await@} if this is not expected to be a promise\n\
       \  - Wrap the expression in @{<info>Promise.resolve@} to convert the \
        expression to a promise"
+  | Some JsxComponent, _ ->
+    fprintf ppf
+      "\n\n\
+      \  JSX tags must be React components, not plain functions.\n\n\
+      \  Possible solutions:\n\
+      \  - If this function takes labeled props, annotate it with \
+       @{<info>@react.component@}\n\
+      \  - If this function takes a single props record, annotate it with \
+       @{<info>@react.componentWithProps@}\n\
+      \  - If this is already a valid component-like value, wrap it with \
+       @{<info>React.component(...)@}"
   | Some IfReturn, _ ->
     fprintf ppf
       "\n\n\
@@ -423,6 +425,17 @@ let print_extra_type_clash_help ~extract_concrete_typedecl ~env loc ppf
       \  - Use a tuple, if your array is of fixed length. Tuples can mix types \
        freely, and compiles to a JavaScript array. Example of a tuple: `let \
        myTuple = (10, \"hello\", 15.5, true)"
+  | _, Some ({desc = Tarrow _}, expected)
+    when is_jsx_component_type ~env expected ->
+    fprintf ppf
+      "\n\n\
+      \  A React component is expected here, but this expression is a plain \
+       function.\n\n\
+      \  Possible solutions:\n\
+      \  - Extract it to a component annotated with @{<info>@react.component@} \
+       or @{<info>@react.componentWithProps@}\n\
+      \  - If this is already a valid component-like value, wrap it with \
+       @{<info>React.component(...)@}"
   | _, Some (_, {desc = Tconstr (p2, _, _)}) when Path.same Predef.path_dict p2
     ->
     fprintf ppf
@@ -673,16 +686,16 @@ let print_extra_type_clash_help ~extract_concrete_typedecl ~env loc ppf
     let target_expr_text = Parser.extract_text_at_loc loc in
     match extract_string_constant target_expr_text with
     | Some string_value -> (
-      let constructors =
-        get_variant_constructors ~extract_concrete_typedecl ~env t2
+      let constructors, layout =
+        Option.get (get_variant_constructors ~extract_concrete_typedecl ~env t2)
       in
       (* Extract runtime representations from constructor declarations *)
       let constructor_mappings =
-        List.filter_map
-          (fun (cd : Types.constructor_declaration) ->
+        List.mapi
+          (fun position (cd : Types.constructor_declaration) ->
             let constructor_name = Ident.name cd.cd_id in
             let runtime_repr =
-              match Ast_untagged_variants.process_tag_type cd.cd_attributes with
+              match Variant_runtime.constructor_tag layout position with
               | Some (String s) -> Some s (* @as("string_value") *)
               | Some _ -> None (* @as with non-string values *)
               | None -> Some constructor_name (* No @as, use constructor name *)
@@ -691,6 +704,7 @@ let print_extra_type_clash_help ~extract_concrete_typedecl ~env loc ppf
             | Some repr -> Some (repr, constructor_name)
             | None -> None)
           constructors
+        |> List.filter_map Fun.id
       in
       let matching_constructor =
         List.find_opt

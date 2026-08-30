@@ -79,7 +79,7 @@ let matchTupleOr = (auth, route) =>
 let matchListAlias = values =>
   switch values {
   | list{(name, _) as head, ...tail} =>
-    name ++ ":" ++ Int.toString(snd(head) + List.length(tail))
+    name ++ ":" ++ Int.toString(Pair.second(head) + List.length(tail))
   | list{} => "empty"
   }
 

@@ -29,8 +29,7 @@ use crate::types::decl::{
 };
 use crate::types::path::Path;
 use crate::types::type_expr::{
-    Commutable, FieldKind, GENERIC_LEVEL, RowDesc, RowField, RowFieldRef, TypeArg, TypeDesc,
-    TypeExprRef,
+    FieldKind, GENERIC_LEVEL, RowDesc, RowField, RowFieldRef, TypeArg, TypeDesc, TypeExprRef,
 };
 
 use super::persistent_env::PersStruct;
@@ -45,6 +44,8 @@ pub struct PortableTypeGraph {
     /// Type entries indexed by position. TypeExprRef values in the associated
     /// signature are indices into this vec.
     pub entries: Vec<PortableTypeEntry>,
+    /// Canonical variant layouts referenced by declarations in the signature.
+    pub variant_layouts: Vec<crate::types::VariantLayout>,
 }
 
 /// One type expression in portable form.
@@ -59,10 +60,8 @@ pub struct PortableTypeEntry {
 pub enum PortableTypeDesc {
     Tvar(Option<String>),
     Tarrow {
-        arg_label: ArgLabel,
-        arg: usize,
+        args: Vec<(ArgLabel, usize)>,
         ret: usize,
-        arity: Option<i32>,
     },
     Ttuple(Vec<usize>),
     Tconstr {
@@ -248,16 +247,13 @@ fn hash_portable_desc(
     std::mem::discriminant(desc).hash(hasher);
     match desc {
         PortableTypeDesc::Tvar(name) => name.hash(hasher),
-        PortableTypeDesc::Tarrow {
-            arg_label,
-            arg,
-            ret,
-            arity,
-        } => {
-            arg_label.hash(hasher);
-            hash_type_ref(hasher, *arg, entries, visiting);
+        PortableTypeDesc::Tarrow { args, ret } => {
+            args.len().hash(hasher);
+            for (label, arg) in args {
+                label.hash(hasher);
+                hash_type_ref(hasher, *arg, entries, visiting);
+            }
             hash_type_ref(hasher, *ret, entries, visiting);
-            arity.hash(hasher);
         }
         PortableTypeDesc::Ttuple(elems) => hash_type_refs(hasher, elems, entries, visiting),
         PortableTypeDesc::Tconstr { path, args } => {
@@ -422,8 +418,7 @@ fn hash_type_decl(hasher: &mut impl Hasher, td: &TypeDeclaration, entries: &[Por
     td.type_variance.hash(hasher);
     td.type_newtype_level.hash(hasher);
     td.type_immediate.hash(hasher);
-    td.type_unboxed.unboxed.hash(hasher);
-    td.type_unboxed.default.hash(hasher);
+    td.type_representation.hash(hasher);
     if let Some(path) = &td.type_path {
         true.hash(hasher);
         hash_path_by_name(hasher, path);
@@ -461,7 +456,7 @@ fn hash_type_kind(hasher: &mut impl Hasher, kind: &TypeKind, entries: &[Portable
             hash_label_decls(hasher, labels, entries);
             std::mem::discriminant(repr).hash(hasher);
         }
-        TypeKind::TypeVariant(ctors) => {
+        TypeKind::TypeVariant(ctors, _) => {
             ctors.len().hash(hasher);
             for ctor in ctors {
                 ctor.cd_id.name().hash(hasher);
@@ -597,11 +592,14 @@ fn serialize_signature(
         arena,
         entries: Vec::new(),
         cache: HashMap::new(),
+        variant_layouts: Vec::new(),
+        variant_layout_cache: HashMap::new(),
     };
     let mut sig = sig.clone();
     ser.remap_signature(&mut sig);
     let type_graph = PortableTypeGraph {
         entries: ser.entries,
+        variant_layouts: ser.variant_layouts,
     };
     (sig, type_graph)
 }
@@ -611,6 +609,8 @@ struct TypeGraphSerializer<'a> {
     arena: Option<&'a ParseArena>,
     entries: Vec<PortableTypeEntry>,
     cache: HashMap<TypeExprRef, usize>,
+    variant_layouts: Vec<crate::types::VariantLayout>,
+    variant_layout_cache: HashMap<crate::types::VariantLayoutRef, usize>,
 }
 
 impl<'a> TypeGraphSerializer<'a> {
@@ -641,13 +641,12 @@ impl<'a> TypeGraphSerializer<'a> {
     fn serialize_desc(&mut self, desc: &TypeDesc) -> PortableTypeDesc {
         match desc {
             TypeDesc::Tvar(name) => PortableTypeDesc::Tvar(name.clone()),
-            TypeDesc::Tarrow {
-                arg, ret, arity, ..
-            } => PortableTypeDesc::Tarrow {
-                arg_label: arg.lbl.clone(),
-                arg: self.serialize_type(arg.typ),
+            TypeDesc::Tarrow { args, ret } => PortableTypeDesc::Tarrow {
+                args: args
+                    .iter()
+                    .map(|arg| (arg.lbl.clone(), self.serialize_type(arg.typ)))
+                    .collect(),
                 ret: self.serialize_type(*ret),
-                arity: *arity,
             },
             TypeDesc::Ttuple(types) => {
                 PortableTypeDesc::Ttuple(types.iter().map(|t| self.serialize_type(*t)).collect())
@@ -787,6 +786,18 @@ impl<'a> TypeGraphSerializer<'a> {
     }
 
     fn remap_type_decl(&mut self, td: &mut TypeDeclaration) {
+        if let TypeKind::TypeVariant(_, layout_ref) = &mut td.type_kind {
+            let index = if let Some(index) = self.variant_layout_cache.get(layout_ref) {
+                *index
+            } else {
+                let index = self.variant_layouts.len();
+                self.variant_layouts
+                    .push(self.ctx.variant_layout(*layout_ref));
+                self.variant_layout_cache.insert(*layout_ref, index);
+                index
+            };
+            *layout_ref = crate::types::VariantLayoutRef(index as u32);
+        }
         for p in td.type_params.iter_mut() {
             *p = TypeExprRef::from_usize(self.serialize_type(*p));
         }
@@ -800,7 +811,7 @@ impl<'a> TypeGraphSerializer<'a> {
                     self.remap_label_decl(label);
                 }
             }
-            TypeKind::TypeVariant(ctors) => {
+            TypeKind::TypeVariant(ctors, _) => {
                 for ctor in ctors.iter_mut() {
                     self.remap_ctor_decl(ctor);
                 }
@@ -892,13 +903,12 @@ impl<'a> TypeGraphSerializer<'a> {
 
 /// Load a PortablePersStruct into the current TypeContext, producing a PersStruct
 /// with valid TypeExprRefs.
-pub fn internalize_pers_struct(pps: &PortablePersStruct, ctx: &TypeContext) -> PersStruct {
+pub fn internalize_pers_struct(pps: Arc<PortablePersStruct>, ctx: &TypeContext) -> PersStruct {
     ctx.import_cmi_longident_names(&pps.cmi_longident_names);
 
     let sig = internalize_signature(&pps.ps_sig, &pps.type_graph, ctx);
-    if let (Some(raw_ps_sig), Some(raw_type_graph)) = (&pps.raw_ps_sig, &pps.raw_type_graph) {
-        let raw_sig = internalize_signature(raw_ps_sig, raw_type_graph, ctx);
-        ctx.register_gentype_raw_module_sig(&pps.ps_name, Arc::new(raw_sig));
+    if pps.raw_ps_sig.is_some() && pps.raw_type_graph.is_some() {
+        ctx.register_gentype_portable_raw_module_sig(&pps.ps_name, pps.clone());
     }
 
     PersStruct {
@@ -906,6 +916,17 @@ pub fn internalize_pers_struct(pps: &PortablePersStruct, ctx: &TypeContext) -> P
         ps_sig: Arc::new(sig),
         ps_filename: pps.ps_filename.clone(),
     }
+}
+
+pub(crate) fn internalize_raw_signature(
+    pps: &PortablePersStruct,
+    ctx: &TypeContext,
+) -> Option<Signature> {
+    Some(internalize_signature(
+        pps.raw_ps_sig.as_ref()?,
+        pps.raw_type_graph.as_ref()?,
+        ctx,
+    ))
 }
 
 fn internalize_signature(
@@ -933,28 +954,31 @@ fn internalize_signature(
         ctx.set_desc(remap[i], desc);
     }
 
+    let layout_remap: Vec<_> = graph
+        .variant_layouts
+        .iter()
+        .cloned()
+        .map(|layout| ctx.alloc_complete_variant_layout(layout))
+        .collect();
+
     // Phase 3: clone and remap the signature.
     let mut sig = portable_sig.clone();
-    remap_signature_refs(&mut sig, &remap);
+    remap_signature_refs(&mut sig, &remap, &layout_remap);
     sig
 }
 
 fn internalize_desc(desc: &PortableTypeDesc, remap: &[TypeExprRef], ctx: &TypeContext) -> TypeDesc {
     match desc {
         PortableTypeDesc::Tvar(name) => TypeDesc::Tvar(name.clone()),
-        PortableTypeDesc::Tarrow {
-            arg_label,
-            arg,
-            ret,
-            arity,
-        } => TypeDesc::Tarrow {
-            arg: TypeArg {
-                lbl: arg_label.clone(),
-                typ: remap[*arg],
-            },
+        PortableTypeDesc::Tarrow { args, ret } => TypeDesc::Tarrow {
+            args: args
+                .iter()
+                .map(|(lbl, typ)| TypeArg {
+                    lbl: lbl.clone(),
+                    typ: remap[*typ],
+                })
+                .collect(),
             ret: remap[*ret],
-            commutable: Commutable::Cok,
-            arity: *arity,
         },
         PortableTypeDesc::Ttuple(types) => {
             TypeDesc::Ttuple(types.iter().map(|&i| remap[i]).collect())
@@ -1063,19 +1087,27 @@ fn internalize_row_field(
 // Signature ref remapping (portable index -> real TypeExprRef)
 // ============================================================================
 
-fn remap_signature_refs(sig: &mut Signature, remap: &[TypeExprRef]) {
+fn remap_signature_refs(
+    sig: &mut Signature,
+    remap: &[TypeExprRef],
+    layout_remap: &[crate::types::VariantLayoutRef],
+) {
     for item in sig.iter_mut() {
-        remap_sig_item_refs(item, remap);
+        remap_sig_item_refs(item, remap, layout_remap);
     }
 }
 
-fn remap_sig_item_refs(item: &mut SignatureItem, remap: &[TypeExprRef]) {
+fn remap_sig_item_refs(
+    item: &mut SignatureItem,
+    remap: &[TypeExprRef],
+    layout_remap: &[crate::types::VariantLayoutRef],
+) {
     match item {
         SignatureItem::SigValue(_, vd) => remap_value_desc_refs(vd, remap),
-        SignatureItem::SigType(_, td, _) => remap_type_decl_refs(td, remap),
+        SignatureItem::SigType(_, td, _) => remap_type_decl_refs(td, remap, layout_remap),
         SignatureItem::SigTypext(_, ec, _) => remap_ext_ctor_refs(ec, remap),
-        SignatureItem::SigModule(_, md, _) => remap_module_decl_refs(md, remap),
-        SignatureItem::SigModtype(_, mtd) => remap_modtype_decl_refs(mtd, remap),
+        SignatureItem::SigModule(_, md, _) => remap_module_decl_refs(md, remap, layout_remap),
+        SignatureItem::SigModtype(_, mtd) => remap_modtype_decl_refs(mtd, remap, layout_remap),
         SignatureItem::SigClass | SignatureItem::SigClassType => {}
     }
 }
@@ -1084,7 +1116,14 @@ fn remap_value_desc_refs(vd: &mut ValueDescription, remap: &[TypeExprRef]) {
     vd.val_type = remap[vd.val_type.index()];
 }
 
-fn remap_type_decl_refs(td: &mut TypeDeclaration, remap: &[TypeExprRef]) {
+fn remap_type_decl_refs(
+    td: &mut TypeDeclaration,
+    remap: &[TypeExprRef],
+    layout_remap: &[crate::types::VariantLayoutRef],
+) {
+    if let TypeKind::TypeVariant(_, layout_ref) = &mut td.type_kind {
+        *layout_ref = layout_remap[layout_ref.0 as usize];
+    }
     for p in td.type_params.iter_mut() {
         *p = remap[p.index()];
     }
@@ -1098,7 +1137,7 @@ fn remap_type_decl_refs(td: &mut TypeDeclaration, remap: &[TypeExprRef]) {
                 remap_label_decl_refs(label, remap);
             }
         }
-        TypeKind::TypeVariant(ctors) => {
+        TypeKind::TypeVariant(ctors, _) => {
             for ctor in ctors.iter_mut() {
                 remap_ctor_decl_refs(ctor, remap);
             }
@@ -1158,26 +1197,38 @@ fn remap_ext_ctor_refs(ec: &mut ExtensionConstructor, remap: &[TypeExprRef]) {
     }
 }
 
-fn remap_module_decl_refs(md: &mut ModuleDeclaration, remap: &[TypeExprRef]) {
-    remap_module_type_refs(&mut md.md_type, remap);
+fn remap_module_decl_refs(
+    md: &mut ModuleDeclaration,
+    remap: &[TypeExprRef],
+    layout_remap: &[crate::types::VariantLayoutRef],
+) {
+    remap_module_type_refs(&mut md.md_type, remap, layout_remap);
 }
 
-fn remap_modtype_decl_refs(mtd: &mut ModtypeDeclaration, remap: &[TypeExprRef]) {
+fn remap_modtype_decl_refs(
+    mtd: &mut ModtypeDeclaration,
+    remap: &[TypeExprRef],
+    layout_remap: &[crate::types::VariantLayoutRef],
+) {
     if let Some(ref mut mt) = mtd.mtd_type {
-        remap_module_type_refs(mt, remap);
+        remap_module_type_refs(mt, remap, layout_remap);
     }
 }
 
-fn remap_module_type_refs(mt: &mut ModuleType, remap: &[TypeExprRef]) {
+fn remap_module_type_refs(
+    mt: &mut ModuleType,
+    remap: &[TypeExprRef],
+    layout_remap: &[crate::types::VariantLayoutRef],
+) {
     match mt {
-        ModuleType::MtySignature(sig) => remap_signature_refs(sig, remap),
+        ModuleType::MtySignature(sig) => remap_signature_refs(sig, remap, layout_remap),
         ModuleType::MtyFunctor {
             param_type, result, ..
         } => {
             if let Some(pt) = param_type.as_mut() {
-                remap_module_type_refs(pt, remap);
+                remap_module_type_refs(pt, remap, layout_remap);
             }
-            remap_module_type_refs(result, remap);
+            remap_module_type_refs(result, remap, layout_remap);
         }
         ModuleType::MtyIdent(_) | ModuleType::MtyAlias(_, _) => {}
     }

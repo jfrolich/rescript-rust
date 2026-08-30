@@ -1,5 +1,5 @@
 use crate::build::packages::{Namespace, Package};
-use crate::config::Config;
+use crate::config::{Config, SourceMapCommand};
 use crate::project_context::ProjectContext;
 use ahash::{AHashMap, AHashSet};
 use blake3::Hash;
@@ -202,6 +202,12 @@ pub struct BuildState {
     pub deleted_modules: AHashSet<String>,
     pub compiler_info: CompilerInfo,
     pub deps_initialized: bool,
+    pub source_map_command: SourceMapCommand,
+}
+
+pub struct GentypeCompileContext {
+    pub config: Arc<rescript_compiler::gentype::config::T>,
+    pub resolver: Arc<rescript_compiler::gentype::module_resolver::Resolver>,
 }
 
 /// Extended build state that includes command-line specific overrides.
@@ -238,6 +244,8 @@ pub struct BuildCommandState {
     // Keyed by "{module_name}:impl" or "{module_name}:intf" (matching stored_asts convention).
     // Values are the raw module names extracted from the parsed AST.
     pub in_memory_deps: Mutex<AHashMap<String, Dependencies>>,
+    // GenType config and resolver inputs are immutable within one compile wave.
+    pub gentype_contexts: Mutex<AHashMap<PathBuf, Arc<GentypeCompileContext>>>,
     // Command-line --features override. `None` means all features are active; `Some(list)`
     // restricts the root package to those features (and whatever they transitively imply).
     pub features: Option<Vec<String>>,
@@ -260,6 +268,7 @@ impl std::fmt::Debug for BuildCommandState {
             )
             .field("module_registry", &"<Mutex<ModuleRegistry>>")
             .field("in_memory_deps", &"<Mutex<..>>")
+            .field("gentype_contexts", &"<Mutex<..>>")
             .field("features", &self.features)
             .finish()
     }
@@ -285,6 +294,7 @@ impl BuildState {
         project_context: ProjectContext,
         packages: AHashMap<String, Package>,
         compiler: CompilerInfo,
+        source_map_command: SourceMapCommand,
     ) -> Self {
         Self {
             project_context,
@@ -294,6 +304,7 @@ impl BuildState {
             deleted_modules: AHashSet::new(),
             compiler_info: compiler,
             deps_initialized: false,
+            source_map_command,
         }
     }
 
@@ -318,10 +329,11 @@ impl BuildCommandState {
         subprocess: bool,
         dump_typed_sexp: bool,
         features: Option<Vec<String>>,
+        source_map_command: SourceMapCommand,
     ) -> Self {
         Self {
             root_folder,
-            build_state: BuildState::new(project_context, packages, compiler),
+            build_state: BuildState::new(project_context, packages, compiler, source_map_command),
             warn_error_override,
             build_mode,
             subprocess,
@@ -331,8 +343,33 @@ impl BuildCommandState {
             interface_generation: AtomicU64::new(0),
             module_registry: Mutex::new(ModuleRegistry::new()),
             in_memory_deps: Mutex::new(AHashMap::new()),
+            gentype_contexts: Mutex::new(AHashMap::new()),
             features,
         }
+    }
+
+    pub fn gentype_context(
+        &self,
+        package_path: &std::path::Path,
+        build_config: impl FnOnce() -> rescript_compiler::gentype::config::T,
+    ) -> Arc<GentypeCompileContext> {
+        let mut contexts = self.gentype_contexts.lock().unwrap();
+        contexts
+            .entry(package_path.to_path_buf())
+            .or_insert_with(|| {
+                let config = Arc::new(build_config());
+                let resolver = Arc::new(rescript_compiler::gentype::module_resolver::create_lazy_resolver(
+                    &config,
+                    &[".res".to_string(), ".shim.ts".to_string()],
+                    |fname| fname == "React.res" || fname == "ReasonReact.res",
+                ));
+                Arc::new(GentypeCompileContext { config, resolver })
+            })
+            .clone()
+    }
+
+    pub fn clear_gentype_contexts(&self) {
+        self.gentype_contexts.lock().unwrap().clear();
     }
 
     pub fn get_warn_error_override(&self) -> Option<String> {
@@ -368,12 +405,7 @@ impl BuildCommandState {
     /// Only bumps the generation counter if the interface fingerprint actually
     /// changed (or if this is the first registration). Returns the generation
     /// number assigned (which may be the same as before if unchanged).
-    pub fn register_in_memory_interface(
-        &self,
-        module_name: String,
-        fingerprint: u64,
-        is_pure: bool,
-    ) -> u64 {
+    pub fn register_in_memory_interface(&self, module_name: String, fingerprint: u64, is_pure: bool) -> u64 {
         let mut interfaces = self.in_memory_interfaces.lock().unwrap();
         // Check if the existing interface has the same fingerprint
         if let Some(existing) = interfaces.get(&module_name) {

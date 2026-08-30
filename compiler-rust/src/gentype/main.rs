@@ -296,36 +296,38 @@ pub fn input_cmt_translate_type_declarations_from_cmt(
     // Mirrors compiler/gentype/GenTypeMain.ml:26-52.
     let type_env = crate::gentype::type_env::root();
     let translations = match &input_cmt.cmt_annots {
-        BinaryAnnots::Implementation(structure) => {
-            let mut structure = structure.clone();
-            structure
-                .str_items
-                .retain(|item| structure_item_is_declaration(item));
-            crate::gentype::translate_structure::translate_structure(
-                input_cmt.ctx,
-                &input_cmt.arena,
-                config,
-                output_file_relative,
-                resolver,
-                &type_env,
-                &structure,
-            )
-        }
-        BinaryAnnots::Interface(signature) => {
-            let mut signature = signature.clone();
-            signature
-                .sig_items
-                .retain(|item| signature_item_is_declaration(item));
-            crate::gentype::translate_signature::translate_signature(
-                input_cmt.ctx,
-                &input_cmt.arena,
-                config,
-                output_file_relative,
-                resolver,
-                &type_env,
-                &signature,
-            )
-        }
+        BinaryAnnots::Implementation(structure) => structure
+            .str_items
+            .iter()
+            .filter(|item| structure_item_is_declaration(item))
+            .map(|item| {
+                crate::gentype::translate_structure::translate_structure_item(
+                    input_cmt.ctx,
+                    &input_cmt.arena,
+                    config,
+                    output_file_relative,
+                    resolver,
+                    &type_env,
+                    item,
+                )
+            })
+            .collect(),
+        BinaryAnnots::Interface(signature) => signature
+            .sig_items
+            .iter()
+            .filter(|item| signature_item_is_declaration(item))
+            .map(|item| {
+                crate::gentype::translate_signature::translate_signature_item(
+                    input_cmt.ctx,
+                    &input_cmt.arena,
+                    config,
+                    output_file_relative,
+                    resolver,
+                    &type_env,
+                    item,
+                )
+            })
+            .collect(),
         BinaryAnnots::Packed
         | BinaryAnnots::PartialImplementation
         | BinaryAnnots::PartialInterface => {
@@ -350,36 +352,38 @@ pub fn typed_artifact_translate_type_declarations(
     // translation under the CMT path before EmitJs asks for it recursively.
     let type_env = crate::gentype::type_env::root();
     let translations = match artifact.annots {
-        TypedArtifactAnnots::Implementation(structure) => {
-            let mut structure = structure.clone();
-            structure
-                .str_items
-                .retain(|item| structure_item_is_declaration(item));
-            crate::gentype::translate_structure::translate_structure(
-                artifact.ctx,
-                artifact.arena,
-                config,
-                output_file_relative,
-                resolver,
-                &type_env,
-                &structure,
-            )
-        }
-        TypedArtifactAnnots::Interface(signature) => {
-            let mut signature = signature.clone();
-            signature
-                .sig_items
-                .retain(|item| signature_item_is_declaration(item));
-            crate::gentype::translate_signature::translate_signature(
-                artifact.ctx,
-                artifact.arena,
-                config,
-                output_file_relative,
-                resolver,
-                &type_env,
-                &signature,
-            )
-        }
+        TypedArtifactAnnots::Implementation(structure) => structure
+            .str_items
+            .iter()
+            .filter(|item| structure_item_is_declaration(item))
+            .map(|item| {
+                crate::gentype::translate_structure::translate_structure_item(
+                    artifact.ctx,
+                    artifact.arena,
+                    config,
+                    output_file_relative,
+                    resolver,
+                    &type_env,
+                    item,
+                )
+            })
+            .collect(),
+        TypedArtifactAnnots::Interface(signature) => signature
+            .sig_items
+            .iter()
+            .filter(|item| signature_item_is_declaration(item))
+            .map(|item| {
+                crate::gentype::translate_signature::translate_signature_item(
+                    artifact.ctx,
+                    artifact.arena,
+                    config,
+                    output_file_relative,
+                    resolver,
+                    &type_env,
+                    item,
+                )
+            })
+            .collect(),
         TypedArtifactAnnots::Packed
         | TypedArtifactAnnots::PartialImplementation
         | TypedArtifactAnnots::PartialInterface => {
@@ -502,7 +506,7 @@ pub fn read_cmt(cmt_file: &str) -> InputCmt<'static> {
             );
             panic!("Fatal error: exception Cmt_format.Error(_)")
         }
-        Ok(data) if data.starts_with(b"Caml1999I022") => {
+        Ok(data) if data.starts_with(b"Caml1999I024") => {
             panic!("Fatal error: exception Cmt_format.Error(_)")
         }
         _ => {
@@ -512,7 +516,7 @@ pub fn read_cmt(cmt_file: &str) -> InputCmt<'static> {
             );
             crate::gentype::log_::item("Try to clean and rebuild.\n\n");
             panic!(
-                "Fatal error: exception File \"compiler/gentype/GenTypeMain.ml\", line 91, characters 4-10: Assertion failed"
+                "Fatal error: exception File \"compiler/gentype/gentype_main.ml\", line 91, characters 4-10: Assertion failed"
             )
         }
     }
@@ -645,6 +649,7 @@ pub fn process_cmt_file(cmt: &str) -> std::io::Result<()> {
 
 pub fn process_typed_artifact(
     config: &crate::gentype::config::T,
+    shared_resolver: Option<&crate::gentype::module_resolver::Resolver>,
     artifact: TypedArtifact<'_>,
 ) -> std::io::Result<()> {
     // Mirrors compiler/gentype/GenTypeMain.ml:136-175, but starts from the
@@ -675,15 +680,20 @@ pub fn process_typed_artifact(
     let output_file = crate::gentype::paths::get_output_file(&config, &source_file);
     let output_file_relative =
         crate::gentype::paths::get_output_file_relative(&config, &source_file);
-    let resolver = crate::gentype::module_resolver::create_lazy_resolver(
-        &config,
-        &[".res".to_string(), ".shim.ts".to_string()],
-        |fname| fname == "React.res" || fname == "ReasonReact.res",
-    );
+    let local_resolver = shared_resolver.is_none().then(|| {
+        crate::gentype::module_resolver::create_lazy_resolver(
+            &config,
+            &[".res".to_string(), ".shim.ts".to_string()],
+            |fname| fname == "React.res" || fname == "ReasonReact.res",
+        )
+    });
+    let resolver = shared_resolver
+        .or(local_resolver.as_ref())
+        .expect("GenType resolver must be available");
     let type_declaration_translation = typed_artifact_translate_type_declarations(
         &config,
         &output_file_relative,
-        &resolver,
+        resolver,
         &artifact,
     );
     if let Some(cmt_file) =
@@ -707,7 +717,7 @@ pub fn process_typed_artifact(
     );
     if has_gentype_annotations {
         let translation =
-            translate_typed_artifact(&config, &output_file_relative, &resolver, &artifact);
+            translate_typed_artifact(&config, &output_file_relative, resolver, &artifact);
         let project_root = config.project_root.clone();
         let get_cmt_file = |cmt: &str| get_cmt_file_for_typed_artifact_import(&project_root, cmt);
         emit_translation(
@@ -715,7 +725,7 @@ pub fn process_typed_artifact(
             &artifact.file_name,
             &output_file,
             &output_file_relative,
-            &resolver,
+            resolver,
             &get_cmt_file,
             &source_file,
             &translation,

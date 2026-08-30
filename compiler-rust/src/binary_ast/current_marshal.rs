@@ -16,13 +16,14 @@ use crate::parse_arena::{LocIdx, StrIdx};
 use crate::parser::ast::{
     ArgLabel, Arity, Attribute, Attributes, Case, ClosedFlag, Constant, ConstructorArguments,
     ConstructorDeclaration, CoreType, CoreTypeDesc, DirectionFlag, Expression, ExpressionDesc,
-    ExpressionRecordField, Extension, ExtensionConstructor, ExtensionConstructorKind,
+    ExpressionRecordField, Extension, ExtensionConstructor, ExtensionConstructorKind, FunParam,
     IncludeDeclaration, IncludeDescription, LabelDeclaration, ModuleBinding, ModuleDeclaration,
     ModuleExpr, ModuleExprDesc, ModuleType, ModuleTypeDeclaration, ModuleTypeDesc, MutableFlag,
     ObjectField, OpenDescription, OverrideFlag, Pattern, PatternDesc, PatternRecordField, Payload,
-    PexpApply, PexpFun, PrivateFlag, RecFlag, RowField, SignatureItem, SignatureItemDesc,
-    StringLoc, StructureItem, StructureItemDesc, TypeArg, TypeDeclaration, TypeExtension, TypeKind,
-    ValueBinding, ValueDescription, Variance, WithConstraint,
+    PexpApply, PexpFun, PrivateFlag, RecFlag, RecordPatRest, RowField, SignatureItem,
+    SignatureItemDesc, StringLoc, StructureItem, StructureItemDesc, TypeArg, TypeDeclaration,
+    TypeExtension, TypeKind, ValueBinding, ValueConstraint, ValueDescription, Variance,
+    WithConstraint,
 };
 use crate::parser::longident::Longident;
 
@@ -888,6 +889,20 @@ impl Marshal for TypeArg {
     }
 }
 
+// ========== FunParam (fun_param record in current parsetree) ==========
+
+impl Marshal for FunParam {
+    fn marshal(&self, w: &mut MarshalWriter<'_>) {
+        // fun_param = { p_attrs: attributes; p_lbl: arg_label;
+        //               p_default: expression option; p_pat: pattern }
+        w.write_block_header(0, 4);
+        self.p_attrs.marshal(w);
+        self.p_lbl.marshal(w);
+        self.p_default.marshal(w);
+        self.p_pat.marshal(w);
+    }
+}
+
 // ========== Core Types ==========
 
 impl Marshal for CoreType {
@@ -991,13 +1006,13 @@ impl Marshal for CoreTypeDesc {
                 w.write_str(s);
             }
             CoreTypeDesc::Ptyp_arrow(inner) => {
-                let (ref arg, ref ret, ref arity) = **inner;
-                // Ptyp_arrow of { arg: arg; ret: core_type; arity: arity }
-                // Inline record is encoded as block with 3 fields
-                w.write_block_header(1, 3);
-                arg.marshal(w);
+                let (arg, ret, arity) = &**inner;
+                // Ptyp_arrow of { params: arg list; ret: core_type }
+                // Inline record is encoded as block with 2 fields
+                let params = w.get_arena().nary_arrow_args(arg, *arity).into_owned();
+                w.write_block_header(1, 2);
+                params.marshal(w);
                 ret.marshal(w);
-                arity.marshal(w);
             }
             CoreTypeDesc::Ptyp_tuple(types) => {
                 w.write_block_header(2, 1);
@@ -1105,7 +1120,16 @@ impl Marshal for ObjectField {
 impl Marshal for Pattern {
     fn marshal(&self, w: &mut MarshalWriter<'_>) {
         w.write_block_header(0, 3);
-        self.ppat_desc.marshal(w);
+        if let PatternDesc::Ppat_record(inner) = &*self.ppat_desc {
+            let (fields, flag) = &**inner;
+            let rest = w.get_arena().record_pat_rest(self.ppat_loc).cloned();
+            w.write_block_header(7, 3);
+            fields.marshal(w);
+            flag.marshal(w);
+            rest.marshal(w);
+        } else {
+            self.ppat_desc.marshal(w);
+        }
         let mut wrote_shared_ppat_loc = false;
         if let PatternDesc::Ppat_var(name) = &*self.ppat_desc {
             if name.loc != self.ppat_loc {
@@ -1230,6 +1254,16 @@ impl Marshal for PatternDesc {
 }
 
 // ========== Record Field Types ==========
+
+impl Marshal for RecordPatRest {
+    fn marshal(&self, w: &mut MarshalWriter<'_>) {
+        // record_pat_rest = {rest_loc; rest_name; rest_type}
+        w.write_block_header(0, 3);
+        self.rest_loc.marshal(w);
+        self.rest_name.marshal(w);
+        self.rest_type.marshal(w);
+    }
+}
 
 impl Marshal for PatternRecordField {
     fn marshal(&self, w: &mut MarshalWriter<'_>) {
@@ -1409,19 +1443,31 @@ impl Marshal for ExpressionDesc {
                     ref arity,
                     ref is_async,
                 } = **inner;
-                let default_idx = w
-                    .current_expr_idx()
-                    .and_then(|owner| w.get_arena().fun_default(owner))
-                    .or(*default);
-                // Pexp_fun of { arg_label; default; lhs; rhs; arity; async }
-                // Inline record with 6 fields
-                w.write_block_header(3, 6);
-                arg_label.marshal(w);
-                default_idx.marshal(w);
-                lhs.marshal(w);
-                rhs.marshal(w);
-                arity.marshal(w);
+                let params = w.get_arena().nary_fun_params(inner).into_owned();
+                let newtypes = w.get_arena().nary_fun_newtypes(inner).to_vec();
+                let body = w.get_arena().nary_fun_body(inner);
+                // Pexp_fun of { newtypes; params; body; async }
+                // Inline record with 4 fields
+                w.write_block_header(3, 4);
+                // OCaml serializes each newtype as a tuple
+                // `(string loc * attributes)`; lists are cons cells.
+                if newtypes.is_empty() {
+                    w.write_int(0);
+                } else {
+                    for (i, (name, attrs)) in newtypes.iter().enumerate() {
+                        w.write_block_header(0, 2);
+                        w.write_block_header(0, 2);
+                        name.marshal(w);
+                        attrs.marshal(w);
+                        if i == newtypes.len() - 1 {
+                            w.write_int(0);
+                        }
+                    }
+                }
+                params.marshal(w);
+                body.marshal(w);
                 w.write_int(if *is_async { 1 } else { 0 });
+                let _ = (arg_label, lhs, rhs, default, arity);
             }
             ExpressionDesc::Pexp_apply(inner) => {
                 let PexpApply {
@@ -1541,25 +1587,9 @@ impl Marshal for ExpressionDesc {
                 dir.marshal(w);
                 e3.marshal(w);
             }
-            // Upstream #7887: Pexp_for_of / Pexp_for_await_of inserted between
-            // Pexp_for and Pexp_constraint, shifting all subsequent tags by 2.
-            ExpressionDesc::Pexp_for_of(inner) => {
-                let (ref pat, ref iterable, ref body) = **inner;
-                w.write_block_header(18, 3);
-                pat.marshal(w);
-                iterable.marshal(w);
-                body.marshal(w);
-            }
-            ExpressionDesc::Pexp_for_await_of(inner) => {
-                let (ref pat, ref iterable, ref body) = **inner;
-                w.write_block_header(19, 3);
-                pat.marshal(w);
-                iterable.marshal(w);
-                body.marshal(w);
-            }
             ExpressionDesc::Pexp_constraint(inner) => {
                 let (ref e, ref t) = **inner;
-                w.write_block_header(20, 2);
+                w.write_block_header(18, 2);
                 e.marshal(w);
                 t.marshal(w);
             }
@@ -1570,20 +1600,20 @@ impl Marshal for ExpressionDesc {
                     .and_then(|owner| w.get_arena().coerce_from_type(owner));
                 // Pexp_coerce of expression * unit * core_type
                 // The middle field in Rust is Option<CoreType> but OCaml uses unit
-                w.write_block_header(21, 3);
+                w.write_block_header(19, 3);
                 e.marshal(w);
                 w.write_int(0); // unit = ()
                 t.marshal(w);
             }
             ExpressionDesc::Pexp_send(inner) => {
                 let (ref e, ref label) = **inner;
-                w.write_block_header(22, 2);
+                w.write_block_header(20, 2);
                 e.marshal(w);
                 label.marshal(w);
             }
             ExpressionDesc::Pexp_letmodule(inner) => {
                 let (ref name, ref me, ref body) = **inner;
-                w.write_block_header(23, 3);
+                w.write_block_header(21, 3);
                 name.marshal(w);
                 w.enter_letmodule_expr();
                 me.marshal(w);
@@ -1592,44 +1622,55 @@ impl Marshal for ExpressionDesc {
             }
             ExpressionDesc::Pexp_letexception(inner) => {
                 let (ref ec, ref body) = **inner;
-                w.write_block_header(24, 2);
+                w.write_block_header(22, 2);
                 ec.marshal(w);
                 body.marshal(w);
             }
             ExpressionDesc::Pexp_assert(e) => {
-                w.write_block_header(25, 1);
+                w.write_block_header(23, 1);
                 e.marshal(w);
             }
-            ExpressionDesc::Pexp_newtype(inner) => {
-                let (ref name, ref e) = **inner;
-                w.write_block_header(26, 2);
-                name.marshal(w);
-                e.marshal(w);
+            ExpressionDesc::Pexp_newtype(_) => {
+                unreachable!("Pexp_newtype is eliminated from the current n-ary parsetree")
             }
             ExpressionDesc::Pexp_pack(me) => {
-                w.write_block_header(27, 1);
+                w.write_block_header(24, 1);
                 w.enter_pack();
                 me.marshal(w);
                 w.exit_pack();
             }
             ExpressionDesc::Pexp_open(inner) => {
                 let (ref flag, ref lid, ref e) = **inner;
-                w.write_block_header(28, 3);
+                w.write_block_header(25, 3);
                 flag.marshal(w);
                 w.write_lident_loc_shared(lid.txt, lid.loc);
                 e.marshal(w);
             }
             ExpressionDesc::Pexp_extension(ext) => {
-                w.write_block_header(29, 1);
+                w.write_block_header(26, 1);
                 marshal_extension(ext, w, Some(EmptyPayloadShareKind::ParserAttr));
             }
             ExpressionDesc::Pexp_await(e) => {
-                w.write_block_header(30, 1);
+                w.write_block_header(27, 1);
                 e.marshal(w);
             }
             ExpressionDesc::Pexp_jsx_element(jsx) => {
-                w.write_block_header(31, 1);
+                w.write_block_header(28, 1);
                 jsx.marshal(w);
+            }
+            ExpressionDesc::Pexp_for_of(inner) => {
+                let (ref pat, ref iterable, ref body) = **inner;
+                w.write_block_header(29, 3);
+                pat.marshal(w);
+                iterable.marshal(w);
+                body.marshal(w);
+            }
+            ExpressionDesc::Pexp_for_await_of(inner) => {
+                let (ref pat, ref iterable, ref body) = **inner;
+                w.write_block_header(30, 3);
+                pat.marshal(w);
+                iterable.marshal(w);
+                body.marshal(w);
             }
             ExpressionDesc::Pexp_inline_for(_)
             | ExpressionDesc::Pexp_comptime_typeinfo(_)
@@ -1667,12 +1708,26 @@ impl Marshal for Case {
 
 // ========== Value Binding ==========
 
+impl Marshal for ValueConstraint {
+    fn marshal(&self, w: &mut MarshalWriter<'_>) {
+        // value_constraint = { pvc_newtypes; pvc_type }
+        w.write_block_header(0, 2);
+        self.pvc_newtypes.marshal(w);
+        self.pvc_type.marshal(w);
+    }
+}
+
 impl Marshal for ValueBinding {
     fn marshal(&self, w: &mut MarshalWriter<'_>) {
-        // value_binding = { pvb_pat; pvb_expr; pvb_attributes; pvb_loc }
-        w.write_block_header(0, 4);
+        // value_binding = { pvb_pat; pvb_expr; pvb_constraint;
+        //                   pvb_attributes; pvb_loc }
+        w.write_block_header(0, 5);
         self.pvb_pat.marshal(w);
         self.pvb_expr.marshal(w);
+        w.get_arena()
+            .value_constraint(self.pvb_pat)
+            .cloned()
+            .marshal(w);
         let share_empty_pstr = if has_braces_attr(&self.pvb_attributes, w)
             || has_ternary_attr(&self.pvb_attributes, w)
         {

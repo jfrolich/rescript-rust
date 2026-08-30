@@ -33,6 +33,188 @@ pub struct SimplifiedForJsBackend {
     pub meta: LamStats,
 }
 
+/// Insert flat hoisted-function aliases after simplification/coercion, matching
+/// `js_hoisted_aliases` and the group append in `compiler/core/lam_compile_main.ml`.
+pub fn add_hoisted_function_aliases(
+    mut simplified: SimplifiedForJsBackend,
+    hoisted: &[crate::lambda::HoistedFunction],
+) -> SimplifiedForJsBackend {
+    use std::collections::{HashMap, HashSet};
+
+    fn collect_groups(lam: &Lambda, groups: &mut HashMap<Ident, Lambda>) {
+        match lam {
+            Lambda::Llet(_, id, value, body) => {
+                groups.insert(id.clone(), (**value).clone());
+                collect_groups(body, groups);
+            }
+            Lambda::Lletrec(bindings, body) => {
+                groups.extend(bindings.iter().cloned());
+                collect_groups(body, groups);
+            }
+            Lambda::Lsequence(_, body) => collect_groups(body, groups),
+            _ => {}
+        }
+    }
+    fn terminal_exports(lam: &Lambda) -> Vec<Ident> {
+        match lam {
+            Lambda::Llet(_, _, _, body) | Lambda::Lletrec(_, body) => terminal_exports(body),
+            Lambda::Lsequence(_, body) => terminal_exports(body),
+            Lambda::Lprim(PrimInfo {
+                primitive: Primitive::Pmakeblock(TagInfo::ModuleExport(ids), _),
+                ..
+            }) => ids.clone(),
+            _ => Vec::new(),
+        }
+    }
+    fn resolve_binding(
+        lam: &Lambda,
+        groups: &HashMap<Ident, Lambda>,
+        seen: &mut HashSet<Ident>,
+    ) -> (Lambda, Option<Ident>) {
+        match lam {
+            Lambda::Lvar(id) => {
+                if !seen.insert(id.clone()) {
+                    return (lam.clone(), Some(id.clone()));
+                }
+                match groups.get(id) {
+                    Some(alias @ (Lambda::Lvar(_) | Lambda::Lprim(_))) => {
+                        resolve_binding(alias, groups, seen)
+                    }
+                    Some(resolved) => (resolved.clone(), Some(id.clone())),
+                    None => (lam.clone(), Some(id.clone())),
+                }
+            }
+            Lambda::Lprim(PrimInfo {
+                primitive: Primitive::Pfield(pos, _),
+                args,
+                ..
+            }) if args.len() == 1 => {
+                let (base, _) = resolve_binding(&args[0], groups, seen);
+                if let Lambda::Lprim(PrimInfo {
+                    primitive: Primitive::Pmakeblock(TagInfo::Module(_), _),
+                    args,
+                    ..
+                }) = base
+                    && let Some(field) = usize::try_from(*pos).ok().and_then(|pos| args.get(pos))
+                {
+                    return resolve_binding(field, groups, seen);
+                }
+                (lam.clone(), None)
+            }
+            _ => (lam.clone(), None),
+        }
+    }
+    fn find_path(
+        lam: &Lambda,
+        fields: &[String],
+        groups: &HashMap<Ident, Lambda>,
+        positions: &mut Vec<(i32, String)>,
+    ) -> Option<Option<Ident>> {
+        if fields.is_empty() {
+            return Some(resolve_binding(lam, groups, &mut HashSet::new()).1);
+        }
+        let (resolved, _) = resolve_binding(lam, groups, &mut HashSet::new());
+        let Lambda::Lprim(PrimInfo {
+            primitive: Primitive::Pmakeblock(TagInfo::Module(names), _),
+            args,
+            ..
+        }) = resolved
+        else {
+            return None;
+        };
+        let pos = names.iter().position(|name| name == &fields[0])?;
+        positions.push((pos as i32, fields[0].clone()));
+        find_path(args.get(pos)?, &fields[1..], groups, positions)
+    }
+    fn append_aliases(lam: Lambda, aliases: &[(Ident, Lambda)]) -> Lambda {
+        match lam {
+            Lambda::Llet(kind, id, value, body) => {
+                Lambda::Llet(kind, id, value, Box::new(append_aliases(*body, aliases)))
+            }
+            Lambda::Lletrec(bindings, body) => {
+                Lambda::Lletrec(bindings, Box::new(append_aliases(*body, aliases)))
+            }
+            Lambda::Lsequence(left, body) => {
+                Lambda::Lsequence(left, Box::new(append_aliases(*body, aliases)))
+            }
+            Lambda::Lprim(PrimInfo {
+                primitive: Primitive::Pmakeblock(TagInfo::ModuleExport(mut ids), mutable_),
+                mut args,
+                loc,
+            }) => {
+                ids.extend(aliases.iter().map(|(id, _)| id.clone()));
+                args.extend(aliases.iter().map(|(id, _)| Lambda::var(id.clone())));
+                let mut result = Lambda::prim(
+                    Primitive::Pmakeblock(TagInfo::ModuleExport(ids), mutable_),
+                    args,
+                    loc,
+                );
+                for (id, value) in aliases.iter().rev() {
+                    result = Lambda::let_(LetKind::Alias, id.clone(), value.clone(), result);
+                }
+                result
+            }
+            other => other,
+        }
+    }
+
+    if hoisted.is_empty() {
+        return simplified;
+    }
+    let mut groups = HashMap::new();
+    collect_groups(&simplified.lambda, &mut groups);
+    let exported = terminal_exports(&simplified.lambda)
+        .into_iter()
+        .map(|id| (id.name().to_string(), id))
+        .collect::<HashMap<_, _>>();
+    let mut aliases = Vec::new();
+    for item in hoisted {
+        let Some((top, fields)) = item.path.split_first() else {
+            continue;
+        };
+        let Some(top_id) = exported.get(top) else {
+            continue;
+        };
+        let Some(module) = groups.get(top_id) else {
+            continue;
+        };
+        let mut positions = Vec::new();
+        let Some(Some(target_id)) = find_path(module, fields, &groups, &mut positions) else {
+            continue;
+        };
+        if !target_id.same(&item.binding) {
+            continue;
+        }
+        let export_name = item
+            .path
+            .iter()
+            .map(|part| {
+                if part.len() >= 3 && part.starts_with("\\\"") && part.ends_with('"') {
+                    &part[2..part.len() - 1]
+                } else {
+                    part.as_str()
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("$");
+        let id = simplified.meta.id_gen.create(&export_name);
+        let mut access = Lambda::var(top_id.clone());
+        for (pos, name) in positions {
+            access = Lambda::prim(
+                Primitive::Pfield(pos, crate::lambda::FieldDbgInfo::Module { name }),
+                vec![access],
+                item.loc.clone(),
+            );
+        }
+        aliases.insert(0, (id, access));
+    }
+    simplified.lambda = append_aliases(simplified.lambda, &aliases);
+    let alias_ids = aliases.iter().map(|(id, _)| id.clone()).collect::<Vec<_>>();
+    simplified.meta.exports.extend(alias_ids.iter().cloned());
+    simplified.meta.export_idents.extend(alias_ids);
+    simplified
+}
+
 /// Direct port of `compiler/core/lam_compile_main.ml:148-200` pipeline.
 pub fn simplify_for_js_backend(lam: &Lambda) -> Lambda {
     simplify_for_js_backend_with_jsx_preserve(lam, false)
@@ -93,7 +275,7 @@ pub fn simplify_for_js_backend_with_external_inline_and_meta_owned(
     // `~export_idents` and `~export_ident_sets` from the Lam_compile_main.compile
     // entry point. The exports come from `Translmod.transl_implementation`. In
     // Rust, the lowered Lambda still carries them in the top-level
-    // `Pmakeblock(_, TagInfo::ModuleExport(ids), _)`, so we recover the same
+    // `Pmakeblock( TagInfo::ModuleExport(ids), _)`, so we recover the same
     // list here. This drives the `Set_ident.mem meta.export_idents` arm in
     // `Lam_pass_collect.collect_info` (lam_pass_collect.ml:92-93) and the
     // `is_export_id` guard in `Lam_pass_remove_alias.simplify_alias`
@@ -180,7 +362,7 @@ pub fn simplify_for_js_backend_with_external_inline_and_meta_owned(
     // lam_compile_main.ml:212 — Lam_coercion.coerce_and_group_big_lambda
     // (lam_coercion.ml:196). The OCaml flow flattens the lambda into a list
     // of `Lam_group.t` and runs `handle_exports` on the trailing
-    // `Pmakeblock(_, ModuleExport _, args)`. Each non-`Lvar` arg gets
+    // `Pmakeblock( ModuleExport _, args)`. Each non-`Lvar` arg gets
     // hoisted into a fresh `Single (Strict, newid, lam)` group; the
     // makeblock's arg list becomes `Lvar newid`. In Rust the JS compile
     // walks one Lambda tree, so we re-emit the equivalent shape: rename
@@ -215,7 +397,7 @@ fn rewrite_export_makeblock(meta: &mut LamStats, lam: Lambda) -> Lambda {
             Lambda::Lsequence(left, Box::new(new_right))
         }
         Lambda::Lprim(PrimInfo {
-            primitive: Primitive::Pmakeblock(tag, TagInfo::ModuleExport(export_ids), mutable_),
+            primitive: Primitive::Pmakeblock(TagInfo::ModuleExport(export_ids), mutable_),
             args,
             loc,
         }) => {
@@ -274,11 +456,7 @@ fn rewrite_export_makeblock(meta: &mut LamStats, lam: Lambda) -> Lambda {
             meta.export_idents = new_export_ids.iter().cloned().collect();
 
             let mut result = Lambda::Lprim(PrimInfo {
-                primitive: Primitive::Pmakeblock(
-                    tag,
-                    TagInfo::ModuleExport(new_export_ids),
-                    mutable_,
-                ),
+                primitive: Primitive::Pmakeblock(TagInfo::ModuleExport(new_export_ids), mutable_),
                 args: new_args,
                 loc,
             });
@@ -298,7 +476,7 @@ fn rewrite_export_makeblock(meta: &mut LamStats, lam: Lambda) -> Lambda {
 
 /// Walks the same top-level spine as `Lam_coercion.flatten`
 /// (`compiler/core/lam_coercion.ml:179-199`) and returns the idents carried in
-/// the final `Pmakeblock(_, TagInfo::ModuleExport(ids), _)`. These mirror the
+/// the final `Pmakeblock( TagInfo::ModuleExport(ids), _)`. These mirror the
 /// `exports` list `Translmod.transl_implementation` returns to
 /// `Lam_compile_main.compile` (`compiler/core/js_implementation.ml:158-163`).
 /// Do not walk nested module values: OCaml's `meta.exports` contains the
@@ -309,7 +487,7 @@ fn extract_export_idents(lam: &Lambda) -> Vec<Ident> {
         Lambda::Llet(_, _, _, body) | Lambda::Lletrec(_, body) => extract_export_idents(body),
         Lambda::Lsequence(_, right) => extract_export_idents(right),
         Lambda::Lprim(PrimInfo {
-            primitive: Primitive::Pmakeblock(_, TagInfo::ModuleExport(ids), _),
+            primitive: Primitive::Pmakeblock(TagInfo::ModuleExport(ids), _),
             ..
         }) => ids.clone(),
         _ => Vec::new(),

@@ -87,14 +87,9 @@ let property_map : 'a. ('a, property_map) fn =
       st)
     _self st arg
 
-let length_object : 'a. ('a, length_object) fn = unknown
-
 let expression_desc : 'a. ('a, expression_desc) fn =
  fun _self st -> function
-  | Length (_x0, _x1) ->
-    let st = _self.expression _self st _x0 in
-    let st = length_object _self st _x1 in
-    st
+  | Length _x0 -> _self.expression _self st _x0
   | Is_null_or_undefined _x0 ->
     let st = _self.expression _self st _x0 in
     st
@@ -155,12 +150,7 @@ let expression_desc : 'a. ('a, expression_desc) fn =
     st
   | New (_x0, _x1) ->
     let st = _self.expression _self st _x0 in
-    let st =
-      option
-        (fun _self st arg -> list _self.expression _self st arg)
-        _self st _x1
-    in
-    st
+    list _self.expression _self st _x1
   | Var _x0 ->
     let st = _self.vident _self st _x0 in
     st
@@ -170,15 +160,12 @@ let expression_desc : 'a. ('a, expression_desc) fn =
     st
   | Str _ -> st
   | Raw_js_code _ -> st
-  | Array (_x0, _x1) ->
-    let st = list _self.expression _self st _x0 in
-    st
+  | Array _x0 -> list _self.expression _self st _x0
   | Optional_block (_x0, _x1) ->
     let st = _self.expression _self st _x0 in
     st
-  | Caml_block (_x0, _x1, _x2, _x3) ->
+  | Caml_block (_x0, _x1, _x2) ->
     let st = list _self.expression _self st _x0 in
-    let st = _self.expression _self st _x2 in
     st
   | Caml_block_tag (_x0, _tag) ->
     let st = _self.expression _self st _x0 in
@@ -196,6 +183,9 @@ let expression_desc : 'a. ('a, expression_desc) fn =
   | Spread _x0 ->
     let st = _self.expression _self st _x0 in
     st
+  | Record_rest (_x0, _x1) ->
+    let st = _self.expression _self st _x1 in
+    st
 
 let for_ident_expression : 'a. ('a, for_ident_expression) fn =
  fun _self arg -> _self.expression _self arg
@@ -204,7 +194,8 @@ let finish_ident_expression : 'a. ('a, finish_ident_expression) fn =
  fun _self arg -> _self.expression _self arg
 
 let case_clause : 'a. ('a, case_clause) fn =
- fun _self st {switch_body = _x0; should_break = _x1; comment = _x2} ->
+ fun _self st
+     {switch_body = _x0; should_break = _x1; comment = _x2; source_loc = _x3} ->
   let st = _self.block _self st _x0 in
   st
 
@@ -288,12 +279,12 @@ let statement_desc : 'a. ('a, statement_desc) fn =
   | Debugger -> st
 
 let expression : 'a. ('a, expression) fn =
- fun _self st {expression_desc = _x0; comment = _x1} ->
+ fun _self st {expression_desc = _x0; comment = _x1; source_loc = _x2} ->
   let st = expression_desc _self st _x0 in
   st
 
 let statement : 'a. ('a, statement) fn =
- fun _self st {statement_desc = _x0; comment = _x1} ->
+ fun _self st {statement_desc = _x0; comment = _x1; source_loc = _x2} ->
   let st = statement_desc _self st _x0 in
   st
 

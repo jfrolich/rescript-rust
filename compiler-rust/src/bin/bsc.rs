@@ -20,6 +20,7 @@ use rescript_compiler::driver::{
     typecheck_interface_file,
 };
 use rescript_compiler::js_ir::ModuleFormat;
+use rescript_compiler::js_ir::source_map::SourceMapMode;
 use rescript_compiler::parser::{Parser, code_frame, module, sexp_locs};
 use rescript_compiler::source_text::latin1_bytes_to_string;
 use std::env;
@@ -87,6 +88,9 @@ struct Options {
     dump_lambda_sexp_locs: bool,
     output: Option<PathBuf>,
     package_outputs: Vec<String>,
+    source_map: SourceMapMode,
+    source_map_sources_content: bool,
+    source_map_root: String,
     namespace: Option<String>,
     module_name: Option<String>,
     input: Option<PathBuf>,
@@ -182,6 +186,37 @@ fn run() -> Result<()> {
                     if let Some(val) = args.next() {
                         opts.output = Some(PathBuf::from(val));
                     }
+                }
+                "-bs-source-map" => {
+                    let value = args
+                        .next()
+                        .ok_or_else(|| anyhow!("-bs-source-map requires a value"))?;
+                    opts.source_map = match value.to_ascii_lowercase().as_str() {
+                        "linked" => SourceMapMode::Linked,
+                        "inline" => SourceMapMode::Inline,
+                        "hidden" => SourceMapMode::Hidden,
+                        "false" | "none" => SourceMapMode::None,
+                        _ => {
+                            return Err(anyhow!(
+                                "Unsupported sourceMap value: {value}. Expected linked, inline, hidden, false, or none"
+                            ));
+                        }
+                    };
+                }
+                "-bs-source-map-sources-content" => {
+                    let value = args.next().ok_or_else(|| {
+                        anyhow!("-bs-source-map-sources-content requires a value")
+                    })?;
+                    opts.source_map_sources_content = match value.as_str() {
+                        "true" => true,
+                        "false" => false,
+                        _ => return Err(anyhow!("Expected true or false, got {value}")),
+                    };
+                }
+                "-bs-source-map-root" => {
+                    opts.source_map_root = args
+                        .next()
+                        .ok_or_else(|| anyhow!("-bs-source-map-root requires a value"))?;
                 }
                 "-bs-package-output" => {
                     if let Some(val) = args.next() {
@@ -418,6 +453,9 @@ fn run() -> Result<()> {
             .as_ref()
             .map(|(module_format, _, _)| *module_format),
         js_output_targets: Vec::new(),
+        source_map: opts.source_map,
+        source_map_sources_content: opts.source_map_sources_content,
+        source_map_root: opts.source_map_root.clone(),
         jsx_version: opts.jsx_version,
         experimental_let_unwrap: opts.experimental_let_unwrap,
         jsx_preserve: opts.jsx_preserve,
@@ -436,11 +474,12 @@ fn run() -> Result<()> {
         make_runtime: opts.make_runtime,
         assume_compiled_interface: opts.read_cmi,
         gentype_config: opts.gentype.then(|| {
-            rescript_compiler::gentype::config::build_config_from_flags(
+            std::sync::Arc::new(rescript_compiler::gentype::config::build_config_from_flags(
                 opts.namespace.clone(),
                 opts.gentype_flags.clone(),
-            )
+            ))
         }),
+        gentype_resolver: None,
         capture_intermediates: false,
         skip_js_render: false,
         publish_in_process_signature: true,
@@ -733,7 +772,7 @@ fn check_gentype_cmt_file(cmt_file: &Path) -> Result<()> {
     // Cmt_format.read_cmt raises Cmt_format.Error(Not_a_typedtree _) when the
     // selected file contains a compiled interface without typedtree data.
     const CMT_MAGIC: &[u8; 12] = b"Caml1999T022";
-    const CMI_MAGIC: &[u8; 12] = b"Caml1999I022";
+    const CMI_MAGIC: &[u8; 12] = b"Caml1999I024";
 
     let data = fs::read(cmt_file).with_context(|| cmt_file.display().to_string())?;
     if data.len() < CMT_MAGIC.len() {
@@ -760,7 +799,7 @@ fn check_gentype_cmt_file(cmt_file: &Path) -> Result<()> {
     );
     let _ = io::stdout().flush();
     Err(UserDiagnostic::new(
-        "Fatal error: exception File \"compiler/gentype/GenTypeMain.ml\", line 91, characters 4-10: Assertion failed\n".to_string(),
+        "Fatal error: exception File \"compiler/gentype/gentype_main.ml\", line 91, characters 4-10: Assertion failed\n".to_string(),
         2,
     )
     .into())

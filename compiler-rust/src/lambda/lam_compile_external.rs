@@ -131,7 +131,10 @@ impl LambdaCompiler {
                 self.val_from_option_expr(arg),
                 Expression::undefined(false),
             ),
-            _ => self.runtime_call_expr("Primitive_option", "toUndefined", vec![arg]),
+            // `Js_of_lam_option.get_default_undefined_from_optional`: a
+            // non-duplicable option is already represented so that the
+            // ordinary option unboxer yields `undefined` for `None`.
+            _ => self.runtime_call_expr("Primitive_option", "valFromOption", vec![arg]),
         }
     }
 
@@ -169,7 +172,7 @@ impl LambdaCompiler {
         dispatches: Option<&[(String, String)]>,
     ) -> Vec<Expression> {
         match &arg.desc {
-            ExpressionDesc::CamlBlock(items, _, _, TagInfo::PolyVar(_))
+            ExpressionDesc::CamlBlock(items, _, TagInfo::PolyVar(_))
                 if matches!(
                     items.as_slice(),
                     [
@@ -233,7 +236,7 @@ impl LambdaCompiler {
 
     pub(crate) fn external_polyvar_unwrap_expr(&self, arg: Expression) -> Expression {
         match &arg.desc {
-            ExpressionDesc::CamlBlock(items, _, _, _)
+            ExpressionDesc::CamlBlock(items, _, _)
                 if matches!(
                     items.as_slice(),
                     [
@@ -345,7 +348,7 @@ impl LambdaCompiler {
                     cursor = body.as_ref();
                 }
                 Lambda::Lprim(info) => {
-                    let Primitive::Pmakeblock(_, TagInfo::Module(fields), Mutable::Immutable) =
+                    let Primitive::Pmakeblock(TagInfo::Module(fields), Mutable::Immutable) =
                         &info.primitive
                     else {
                         return None;
@@ -538,7 +541,7 @@ impl LambdaCompiler {
             ExpressionDesc::Null
                 | ExpressionDesc::Object(_, _)
                 | ExpressionDesc::Number(_)
-                | ExpressionDesc::CamlBlock(_, _, _, _)
+                | ExpressionDesc::CamlBlock(_, _, _)
                 | ExpressionDesc::Array(_, _)
                 | ExpressionDesc::Str { .. }
         );
@@ -997,7 +1000,6 @@ impl LambdaCompiler {
                 external_module_name,
                 splice,
                 scopes,
-                tagged_template,
             }) => {
                 let target = self.translate_scoped_module_value(
                     external_module_name.as_ref(),
@@ -1005,28 +1007,6 @@ impl LambdaCompiler {
                     scopes,
                     dynamic_import,
                 );
-
-                if *tagged_template {
-                    match args.as_slice() {
-                        [
-                            Expression {
-                                desc: ExpressionDesc::Array(strings, _),
-                                ..
-                            },
-                            Expression {
-                                desc: ExpressionDesc::Array(values, _),
-                                ..
-                            },
-                        ] => {
-                            return Expression::new(ExpressionDesc::TaggedTemplate(
-                                Box::new(target),
-                                strings.clone(),
-                                values.clone(),
-                            ));
-                        }
-                        _ => {}
-                    }
-                }
 
                 let (args, effect) = self.assemble_external_args(arg_types, args, *splice);
                 self.add_external_effect(

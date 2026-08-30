@@ -55,7 +55,11 @@ fn rewrite_block(block: Block, shadowed_globals: &HashSet<String>) -> Block {
 }
 
 fn rewrite_statement(stmt: Statement, shadowed_globals: &HashSet<String>) -> Statement {
-    let Statement { desc, comment } = stmt;
+    let Statement {
+        source_loc,
+        desc,
+        comment,
+    } = stmt;
     let desc = match desc {
         StatementDesc::Block(block) => StatementDesc::Block(rewrite_block(block, shadowed_globals)),
         StatementDesc::Variable(decl) => {
@@ -144,11 +148,16 @@ fn rewrite_statement(stmt: Statement, shadowed_globals: &HashSet<String>) -> Sta
         StatementDesc::Debugger => StatementDesc::Debugger,
     };
 
-    Statement { desc, comment }
+    Statement {
+        source_loc,
+        desc,
+        comment,
+    }
 }
 
 fn rewrite_case_clause(clause: CaseClause, shadowed_globals: &HashSet<String>) -> CaseClause {
     CaseClause {
+        source_loc: clause.source_loc,
         body: rewrite_block(clause.body, shadowed_globals),
         should_break: clause.should_break,
         comment: clause.comment,
@@ -180,7 +189,11 @@ fn rewrite_global_static_index_expr(
     let mut rewrite_expr = |child| rewrite_global_static_index_expr(child, shadowed_globals);
     let mut rewrite_function_body = |body| rewrite_block(body, shadowed_globals);
     let expr = rewrite_expr_children(expr, &mut rewrite_expr, &mut rewrite_function_body);
-    let Expression { desc, comment } = expr;
+    let Expression {
+        source_loc,
+        desc,
+        comment,
+    } = expr;
     match desc {
         ExpressionDesc::StaticIndex(obj, field, pos) => match &obj.desc {
             ExpressionDesc::Var(crate::js_ir::VIdent::Id(id))
@@ -193,11 +206,16 @@ fn rewrite_global_static_index_expr(
                 ))
             }
             _ => Expression {
+                source_loc,
                 desc: ExpressionDesc::StaticIndex(obj, field, pos),
                 comment,
             },
         },
-        desc => Expression { desc, comment },
+        desc => Expression {
+            source_loc,
+            desc,
+            comment,
+        },
     }
 }
 
@@ -206,7 +224,11 @@ fn rewrite_expr_children(
     rewrite: &mut impl FnMut(Expression) -> Expression,
     rewrite_function_body: &mut impl FnMut(Block) -> Block,
 ) -> Expression {
-    let Expression { desc, comment } = expr;
+    let Expression {
+        source_loc,
+        desc,
+        comment,
+    } = expr;
     let desc = match desc {
         ExpressionDesc::Length(inner, kind) => {
             ExpressionDesc::Length(Box::new(rewrite(*inner)), kind)
@@ -292,14 +314,11 @@ fn rewrite_expr_children(
         ExpressionDesc::OptionalBlock(value, flag) => {
             ExpressionDesc::OptionalBlock(Box::new(rewrite(*value)), flag)
         }
-        ExpressionDesc::CamlBlock(values, mutable_flag, tag, tag_info) => {
-            ExpressionDesc::CamlBlock(
-                values.into_iter().map(&mut *rewrite).collect(),
-                mutable_flag,
-                Box::new(rewrite(*tag)),
-                tag_info,
-            )
-        }
+        ExpressionDesc::CamlBlock(values, mutable_flag, tag_info) => ExpressionDesc::CamlBlock(
+            values.into_iter().map(&mut *rewrite).collect(),
+            mutable_flag,
+            tag_info,
+        ),
         ExpressionDesc::CamlBlockTag(value, tag) => {
             ExpressionDesc::CamlBlockTag(Box::new(rewrite(*value)), tag)
         }
@@ -315,9 +334,16 @@ fn rewrite_expr_children(
         ExpressionDesc::Null => ExpressionDesc::Null,
         ExpressionDesc::Await(inner) => ExpressionDesc::Await(Box::new(rewrite(*inner))),
         ExpressionDesc::Spread(inner) => ExpressionDesc::Spread(Box::new(rewrite(*inner))),
+        ExpressionDesc::RecordRest(fields, source) => {
+            ExpressionDesc::RecordRest(fields, Box::new(rewrite(*source)))
+        }
     };
 
-    Expression { desc, comment }
+    Expression {
+        source_loc,
+        desc,
+        comment,
+    }
 }
 
 fn rewrite_block_exprs(block: Block, rewrite: &mut impl FnMut(Expression) -> Expression) -> Block {
@@ -332,6 +358,7 @@ fn rewrite_case_clause_exprs(
     rewrite: &mut impl FnMut(Expression) -> Expression,
 ) -> CaseClause {
     CaseClause {
+        source_loc: clause.source_loc,
         body: rewrite_block_exprs(clause.body, rewrite),
         should_break: clause.should_break,
         comment: clause.comment,
@@ -342,7 +369,11 @@ fn rewrite_statement_exprs(
     stmt: Statement,
     rewrite: &mut impl FnMut(Expression) -> Expression,
 ) -> Statement {
-    let Statement { desc, comment } = stmt;
+    let Statement {
+        source_loc,
+        desc,
+        comment,
+    } = stmt;
     let desc = match desc {
         StatementDesc::Block(block) => StatementDesc::Block(rewrite_block_exprs(block, rewrite)),
         StatementDesc::Variable(mut decl) => {
@@ -409,7 +440,11 @@ fn rewrite_statement_exprs(
         StatementDesc::Debugger => StatementDesc::Debugger,
     };
 
-    Statement { desc, comment }
+    Statement {
+        source_loc,
+        desc,
+        comment,
+    }
 }
 
 fn global_this_field(name: &str) -> Expression {

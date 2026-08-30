@@ -96,8 +96,8 @@ module T = struct
     sub.attributes sub attrs;
     match desc with
     | Ptyp_any | Ptyp_var _ -> ()
-    | Ptyp_arrow {arg; ret} ->
-      sub.typ sub arg.typ;
+    | Ptyp_arrow {params; ret} ->
+      List.iter (fun (arg : Parsetree.arg) -> sub.typ sub arg.typ) params;
       sub.typ sub ret
     | Ptyp_tuple tyl -> List.iter (sub.typ sub) tyl
     | Ptyp_constr (lid, tl) ->
@@ -289,10 +289,18 @@ module E = struct
     | Pexp_let (_r, vbs, e) ->
       List.iter (sub.value_binding sub) vbs;
       sub.expr sub e
-    | Pexp_fun {default = def; lhs = p; rhs = e} ->
-      iter_opt (sub.expr sub) def;
-      sub.pat sub p;
-      sub.expr sub e
+    | Pexp_fun {newtypes; params; body} ->
+      List.iter
+        (fun (name, attrs) ->
+          iter_loc sub name;
+          sub.attributes sub attrs)
+        newtypes;
+      List.iter
+        (fun {p_default; p_pat} ->
+          iter_opt (sub.expr sub) p_default;
+          sub.pat sub p_pat)
+        params;
+      sub.expr sub body
     | Pexp_apply {funct = e; args = l} ->
       sub.expr sub e;
       List.iter (iter_snd (sub.expr sub)) l
@@ -361,7 +369,6 @@ module E = struct
       sub.extension_constructor sub cd;
       sub.expr sub e
     | Pexp_assert e -> sub.expr sub e
-    | Pexp_newtype (_s, e) -> sub.expr sub e
     | Pexp_pack me -> sub.module_expr sub me
     | Pexp_open (_ovf, lid, e) ->
       iter_loc sub lid;
@@ -407,12 +414,17 @@ module P = struct
       iter_loc sub l;
       iter_opt (sub.pat sub) p
     | Ppat_variant (_l, p) -> iter_opt (sub.pat sub) p
-    | Ppat_record (lpl, _cf) ->
+    | Ppat_record (lpl, _cf, rest) ->
       List.iter
         (fun {lid; x = pat} ->
           iter_loc sub lid;
           sub.pat sub pat)
-        lpl
+        lpl;
+      iter_opt
+        (fun {rest_name; rest_type; _} ->
+          iter_loc sub rest_name;
+          iter_opt (sub.typ sub) rest_type)
+        rest
     | Ppat_array pl -> List.iter (sub.pat sub) pl
     | Ppat_or (p1, p2) ->
       sub.pat sub p1;
@@ -491,8 +503,13 @@ let default_iterator =
         this.location this pincl_loc;
         this.attributes this pincl_attributes);
     value_binding =
-      (fun this {pvb_pat; pvb_expr; pvb_attributes; pvb_loc} ->
+      (fun this {pvb_pat; pvb_expr; pvb_constraint; pvb_attributes; pvb_loc} ->
         this.pat this pvb_pat;
+        Option.iter
+          (fun {pvc_newtypes; pvc_type} ->
+            List.iter (iter_loc this) pvc_newtypes;
+            this.typ this pvc_type)
+          pvb_constraint;
         this.expr this pvb_expr;
         this.location this pvb_loc;
         this.attributes this pvb_attributes);

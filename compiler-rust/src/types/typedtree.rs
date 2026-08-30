@@ -231,6 +231,7 @@ pub enum PatternDesc {
     Tpat_record(
         Vec<(Loc<LidentIdx>, LabelDescription, Pattern, bool)>,
         ClosedFlag,
+        Option<RecordPatternRest>,
     ),
 
     /// Array: `[| P1, ..., Pn |]`.
@@ -239,6 +240,19 @@ pub enum PatternDesc {
     /// Or-pattern: `P1 | P2`.
     /// The RowDesc is Some when translating type patterns.
     Tpat_or(Box<Pattern>, Box<Pattern>, Option<RowDesc>),
+}
+
+/// Typed record-rest binding (compiler/ml/typedtree.ml:38-43).
+#[derive(Debug, Clone)]
+pub struct RecordPatternRest {
+    /// Identifier bound for the rest value.
+    pub rest_ident: Ident,
+    /// Source name of the rest binding.
+    pub rest_name: Loc<String>,
+    /// Inferred record-rest type.
+    pub rest_type: TypeExprRef,
+    /// Runtime labels excluded from the rest object.
+    pub excluded_runtime_labels: Vec<String>,
 }
 
 // ============================================================================
@@ -287,13 +301,10 @@ pub enum ExpressionDesc {
     /// Let binding: `let P = E in E'`.
     Texp_let(RecFlag, Vec<ValueBinding>, Box<Expression>),
 
-    /// Function: `fun P -> E`.
-    /// Uses the new multi-parameter representation with FunctionParam.
+    /// Function expression. Mirrors `compiler/ml/typedtree.ml`.
     Texp_function {
         params: Vec<FunctionParam>,
-        body: Vec<Case>,
-        partial: Partial,
-        arity: Arity,
+        body: Box<Expression>,
         /// Whether this is an async function.
         async_: bool,
     },
@@ -473,26 +484,17 @@ pub struct ApplyArg {
     pub expression: Option<Expression>,
 }
 
-/// A function parameter.
+/// A function parameter. Mirrors `compiler/ml/typedtree.ml`.
 #[derive(Debug, Clone)]
 pub struct FunctionParam {
-    /// Identifier OCaml uses to name this parameter during lambda translation.
-    pub param_id: Ident,
-    /// Parameter label.
-    pub label: ParserArgLabel,
-    /// Default value for optional parameter.
-    pub default: Option<Box<Expression>>,
-    /// Parameter pattern.
-    pub pat: FunctionParamPattern,
-}
-
-/// Pattern for a function parameter.
-#[derive(Debug, Clone)]
-pub enum FunctionParamPattern {
-    /// Simple pattern binding.
-    Simple(Pattern),
-    /// Nested function parameter.
-    Nested(Vec<FunctionParam>),
+    /// Source argument label.
+    pub fp_lbl: TypeArgLabel,
+    /// Identifier bound by generated Lambda.
+    pub fp_param: Ident,
+    /// Typed source pattern.
+    pub fp_pat: Pattern,
+    /// Whether the parameter pattern is exhaustive.
+    pub fp_partial: Partial,
 }
 
 // ============================================================================
@@ -559,9 +561,9 @@ pub struct ArrowArg {
 pub enum TypedCoreTypeDesc {
     /// Type variable: `'a`.
     Ttyp_var(Option<String>),
-    /// Arrow type: `T1 -> T2` with optional arity.
-    /// Structure: (arg, ret, arity) where arg contains (attrs, lbl, typ).
-    Ttyp_arrow(ArrowArg, Box<TypedCoreType>, Option<i32>),
+    /// N-ary arrow type. Mirrors `compiler/ml/typedtree.ml`:
+    /// `Ttyp_arrow of Parsetree.arg list * core_type`.
+    Ttyp_arrow(Vec<ArrowArg>, Box<TypedCoreType>),
     /// Tuple type: `(T1, ..., Tn)`.
     Ttyp_tuple(Vec<TypedCoreType>),
     /// Type constructor: `t`, `M.t`, `('a, 'b) t`.
@@ -623,8 +625,6 @@ pub enum RowFieldDesc {
 pub struct PackageType {
     /// Module type path.
     pub pack_path: Path,
-    /// Module type identifier.
-    pub pack_txt: Loc<LidentIdx>,
     /// Type constraints.
     pub pack_fields: Vec<(Loc<LidentIdx>, TypedCoreType)>,
 }
@@ -958,16 +958,12 @@ pub struct TypedLabelDeclaration {
 pub struct TypeExtension {
     /// Extended type path.
     pub tyext_path: Path,
-    /// Extended type longident.
-    pub tyext_txt: Loc<LidentIdx>,
     /// Type parameters.
     pub tyext_params: Vec<(TypedCoreType, Variance)>,
     /// Extension constructors.
     pub tyext_constructors: Vec<ExtensionConstructor>,
     /// Private flag.
     pub tyext_private: PrivateFlag,
-    /// Location.
-    pub tyext_loc: LocIdx,
     /// Attributes.
     pub tyext_attributes: Attributes,
 }
@@ -1014,8 +1010,6 @@ pub struct OpenDeclaration {
     pub open_txt: Located<LidentIdx>,
     /// Open override flag.
     pub open_override: OverrideFlag,
-    /// Location.
-    pub open_loc: LocIdx,
     /// Attributes.
     pub open_attributes: Attributes,
 }

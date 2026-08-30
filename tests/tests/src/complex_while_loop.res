@@ -8,8 +8,8 @@ let f = () => {
       }
     fib(n.contents) > 10
   } {
-    n.contents->Js.Int.toString->Console.log
-    incr(n)
+    n.contents->Int.toString->Console.log
+    Int.Ref.increment(n)
   }
 }
 

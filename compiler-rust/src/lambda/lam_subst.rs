@@ -88,19 +88,19 @@ fn subst_aux(s: &Subst, lam: &Lambda) -> Lambda {
                 sw_consts: switch
                     .sw_consts
                     .iter()
-                    .map(|(k, v)| (*k, subst_aux(s, v)))
+                    .map(|(k, v)| (k.clone(), subst_aux(s, v)))
                     .collect(),
                 sw_blocks_full: switch.sw_blocks_full,
                 sw_blocks: switch
                     .sw_blocks
                     .iter()
-                    .map(|(k, v)| (*k, subst_aux(s, v)))
+                    .map(|(k, v)| (k.clone(), subst_aux(s, v)))
                     .collect(),
                 sw_failaction: switch
                     .sw_failaction
                     .as_ref()
                     .map(|f| Box::new(subst_aux(s, f))),
-                sw_names: switch.sw_names.clone(),
+                sw_dispatch: switch.sw_dispatch.clone(),
             },
         ),
 

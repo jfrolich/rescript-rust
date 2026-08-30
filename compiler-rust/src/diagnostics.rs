@@ -172,6 +172,10 @@ pub enum Warning {
     },
     /// Warning 110: Todo found.
     BsTodo { message: Option<String> },
+    /// Warning 111: Mutation of a private record field.
+    BsPrivateRecordMutation { field_name: String },
+    /// Warning 112: record rest pattern overlaps an optional field.
+    BsRecordRestOptionalOverlap { fields: Vec<String> },
 }
 
 impl Warning {
@@ -233,6 +237,8 @@ impl Warning {
             Warning::BsUninterpretedDelimiters { .. } => 108,
             Warning::BsToplevelExpressionUnit { .. } => 109,
             Warning::BsTodo { .. } => 110,
+            Warning::BsPrivateRecordMutation { .. } => 111,
+            Warning::BsRecordRestOptionalOverlap { .. } => 112,
         }
     }
 
@@ -444,7 +450,7 @@ The first one was selected. Disambiguate if this is wrong.",
                 )
             }
             Warning::AttributePayload { attr, message } => {
-                format!("illegal payload for attribute '{}'.\n{}", attr, message)
+                format!("illegal payload for attribute @{attr}.\n{message}")
             }
             Warning::EliminatedOptionalArguments { args } => {
                 let plural = if args.len() == 1 { "" } else { "s" };
@@ -463,16 +469,13 @@ The first one was selected. Disambiguate if this is wrong.",
             },
             Warning::FragileLiteralPattern => "Code should not depend on the actual values of\n\
 this constructor's arguments. They are only for information\n\
-and may change in future versions. (See manual section 8.5)"
+and may change in future versions."
                 .to_string(),
             Warning::MisplacedAttribute { name } => {
-                format!("the \"{}\" attribute cannot appear in this context", name)
+                format!("the @{name} attribute cannot appear in this context")
             }
             Warning::DuplicatedAttribute { name } => {
-                format!(
-                    "the \"{}\" attribute is used more than once on this expression",
-                    name
-                )
+                format!("the @{name} attribute is used more than once on this expression")
             }
             Warning::UnreachableCase => {
                 "this match case is unreachable.\nConsider replacing it with a refutation case '<pat> -> .'"
@@ -482,11 +485,11 @@ and may change in future versions. (See manual section 8.5)"
                 let msg = if vars.len() == 1 {
                     format!("variable {}", vars[0])
                 } else {
-                    format!("variables {}", vars.join(","))
+                    format!("variables {}", vars.join(", "))
                 };
                 format!(
                     "Ambiguous or-pattern variables under guard;\n\
-                     {} may match different arguments. (See manual section 8.5)",
+                     {} may match different arguments.",
                     msg
                 )
             }
@@ -571,6 +574,25 @@ and may change in future versions. (See manual section 8.5)"
                 );
                 text
             }
+            Warning::BsPrivateRecordMutation { field_name } => {
+                format!("Mutation of private record field {:?}.", field_name)
+            }
+            Warning::BsRecordRestOptionalOverlap { fields } => {
+                // Match compiler/ext/warnings.ml:440-456.
+                let field_list = fields
+                    .iter()
+                    .map(|field| format!("\n- {}", field))
+                    .collect::<String>();
+                let header = match fields.len() {
+                    1 => "The following optional field appears in both the explicit pattern and the rest type:",
+                    _ => "The following optional fields appear in both the explicit pattern and the rest type:",
+                };
+                let footer = match fields.len() {
+                    1 => "\n\nIt will always be absent from the rest record.",
+                    _ => "\n\nThey will always be absent from the rest record.",
+                };
+                format!("{}{}{}", header, field_list, footer)
+            }
         }
     }
 }
@@ -594,7 +616,7 @@ pub struct WarningConfig {
     disabled: bool,
 }
 
-const MAX_WARNING_NUMBER: usize = 111;
+const MAX_WARNING_NUMBER: usize = 113;
 
 impl Default for WarningConfig {
     fn default() -> Self {
@@ -990,6 +1012,13 @@ mod tests {
             26
         );
         assert_eq!(Warning::BsTodo { message: None }.number(), 110);
+        assert_eq!(
+            Warning::BsPrivateRecordMutation {
+                field_name: "value".to_string()
+            }
+            .number(),
+            111
+        );
     }
 
     #[test]

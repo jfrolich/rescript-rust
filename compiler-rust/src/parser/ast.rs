@@ -557,6 +557,19 @@ pub struct PatternRecordField {
     pub opt: bool,
 }
 
+/// Record-rest pattern binding (`...Type.t as name`), stored in a sparse
+/// arena side table keyed by the record pattern's location.
+/// Mirrors OCaml compiler/ml/parsetree.ml:164-168 `record_pat_rest`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RecordPatRest {
+    /// Location of the whole `...rest` row.
+    pub rest_loc: Location,
+    /// Name of the bound rest variable.
+    pub rest_name: StringLoc,
+    /// Type annotation from `...Type.t as name`.
+    pub rest_type: Option<CoreTypeIdx>,
+}
+
 // ============================================================================
 // Expressions
 // ============================================================================
@@ -572,7 +585,22 @@ pub struct Expression {
     pub pexp_attributes: Attributes,
 }
 
-/// Named struct for Pexp_fun variant (boxed for enum size optimization).
+/// A source-level function parameter. N-ary function nodes store their full
+/// parameter list in `ParseArena`'s sparse function-shape side table.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FunParam {
+    pub p_attrs: Attributes,
+    pub p_lbl: ArgLabel,
+    pub p_default: Option<ExprIdx>,
+    pub p_pat: PatIdx,
+}
+
+/// Compact inline payload for `Pexp_fun`.
+///
+/// Recursive expression data remains arena-indexed. The parser-facing n-ary
+/// shape (`newtypes`, `params`, `body`) is kept in a sparse side table keyed by
+/// the owning `ExprIdx`; these fields retain the first parameter as compact
+/// fallback data for ASTs read from the frozen v0 PPX format.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PexpFun {
     pub arg_label: ArgLabel,
@@ -717,6 +745,19 @@ pub struct Case {
     pub pc_guard: Option<ExprIdx>,
     /// Right-hand side expression (arena index).
     pub pc_rhs: ExprIdx,
+}
+
+/// A locally abstract value-binding constraint: `: type a. t`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ValueConstraint {
+    /// Locally abstract type names, in source order.
+    pub pvc_newtypes: Vec<StringLoc>,
+    /// The constrained expression type.
+    pub pvc_type: CoreTypeIdx,
+    /// Rust-side cached polymorphic pattern used by typecore; not part of the wire record.
+    pub(crate) pvc_pattern: Option<PatIdx>,
+    /// Rust-side cached legacy wrapper used to reuse the existing newtype typer.
+    pub(crate) pvc_expression: Option<ExprIdx>,
 }
 
 /// A value binding: `let P = E`.

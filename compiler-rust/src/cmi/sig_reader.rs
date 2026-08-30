@@ -16,11 +16,11 @@ use crate::types::decl::{
     AliasPresence, Attribute, AttributePayload, ConstructorArguments, ConstructorDeclaration,
     ExtStatus, ExtensionConstructor, LabelDeclaration, ModtypeDeclaration, ModuleDeclaration,
     ModuleType, PrimitiveDescription, RecStatus, RecordRepresentation, Signature, SignatureItem,
-    TypeDeclaration, TypeKind, UnboxedStatus, ValueDescription, ValueKind,
+    TypeDeclaration, TypeKind, TypeRepresentation, ValueDescription, ValueKind,
 };
 use crate::types::path::Path;
 use crate::types::type_expr::{
-    Commutable, FieldKind, GENERIC_LEVEL, RowDesc, RowField, TypeArg, TypeDesc, TypeExprRef,
+    FieldKind, GENERIC_LEVEL, RowDesc, RowField, TypeArg, TypeDesc, TypeExprRef,
 };
 use crate::types::variance::Variance;
 
@@ -35,6 +35,9 @@ pub struct SigReadContext<'a> {
     pub ctx: &'a TypeContext,
     /// Map from OCaml type_expr id to TypeExprRef, for shared type references.
     type_expr_cache: HashMap<i64, TypeExprRef>,
+    /// OCaml layout refs are shared mutable blocks. Preserve that physical
+    /// sharing by mapping their marshal block identity to one TypeContext slot.
+    variant_layout_cache: HashMap<usize, crate::types::VariantLayoutRef>,
 }
 
 impl<'a> SigReadContext<'a> {
@@ -43,6 +46,7 @@ impl<'a> SigReadContext<'a> {
         SigReadContext {
             ctx,
             type_expr_cache: HashMap::new(),
+            variant_layout_cache: HashMap::new(),
         }
     }
 
@@ -174,7 +178,7 @@ impl<'a> SigReadContext<'a> {
     ///  7: type_loc: Location.t
     ///  8: type_attributes: attributes
     ///  9: type_immediate: bool
-    /// 10: type_unboxed: unboxed_status
+    /// 10: type_representation
     /// 11: type_inlined_types: type_inlined_type list
     fn read_type_declaration(&mut self, value: &OcamlValue) -> TypeDeclaration {
         let fields = &value.as_block().1;
@@ -200,7 +204,11 @@ impl<'a> SigReadContext<'a> {
         let type_loc = read_location(self.ctx, &fields[7]);
         let type_attributes = read_attributes(self.ctx, &fields[8]);
         let type_immediate = fields[9].as_bool();
-        let type_unboxed = read_unboxed_status(&fields[10]);
+        let type_representation = if fields[10].as_int() == 1 {
+            TypeRepresentation::Unboxed
+        } else {
+            TypeRepresentation::Boxed
+        };
         let type_inlined_types = self.read_type_inlined_types(&fields[11]);
 
         TypeDeclaration {
@@ -214,7 +222,7 @@ impl<'a> SigReadContext<'a> {
             type_loc,
             type_attributes,
             type_immediate,
-            type_unboxed,
+            type_representation,
             type_inlined_types,
             type_path: None,
         }
@@ -242,13 +250,18 @@ impl<'a> SigReadContext<'a> {
                 TypeKind::TypeRecord(labels, repr)
             }
             OcamlValue::Block(1, fields) => {
-                // Type_variant(constructor_declaration list)
+                // Type_variant(constructor_declaration list, layout_ref)
                 let constrs: Vec<ConstructorDeclaration> = fields[0]
                     .as_list()
                     .iter()
                     .map(|cd| self.read_constructor_declaration(cd))
                     .collect();
-                TypeKind::TypeVariant(constrs)
+                let layout = self.read_variant_layout_ref(
+                    fields
+                        .get(1)
+                        .expect("variant type kind must carry a layout"),
+                );
+                TypeKind::TypeVariant(constrs, layout)
             }
             _ => TypeKind::TypeAbstract, // fallback
         }
@@ -268,18 +281,154 @@ impl<'a> SigReadContext<'a> {
                 RecordRepresentation::RecordUnboxed(fields[0].as_bool())
             }
             OcamlValue::Block(1, fields) => {
-                // Record_inlined { tag, name, num_nonconsts, attrs }
-                // The inner record is the single argument
+                // Record_inlined {name; representation}
                 let (_, f) = fields[0].as_block();
+                let representation = self.read_constructor_reference(&f[1]);
                 RecordRepresentation::RecordInlined {
-                    tag: f[0].as_int() as i32,
-                    name: f[1].as_string().to_string(),
-                    num_nonconsts: f[2].as_int() as i32,
-                    attrs: read_attributes(self.ctx, &f[3]),
+                    name: f[0].as_string().to_string(),
+                    representation,
                 }
             }
             _ => RecordRepresentation::RecordRegular, // fallback
         }
+    }
+
+    fn read_variant_layout_ref(&mut self, value: &OcamlValue) -> crate::types::VariantLayoutRef {
+        let (_, fields) = value.as_block();
+        let key = fields.as_ptr() as usize;
+        if let Some(layout_ref) = self.variant_layout_cache.get(&key) {
+            return *layout_ref;
+        }
+        let layout_ref = self.ctx.pending_variant_layout();
+        self.variant_layout_cache.insert(key, layout_ref);
+        let state = &fields[0];
+        let OcamlValue::Block(0, complete) = state else {
+            panic!("CMI contains pending variant layout")
+        };
+        let layout = self.read_variant_layout(&complete[0]);
+        self.ctx.complete_variant_layout(layout_ref, layout);
+        layout_ref
+    }
+
+    fn read_constructor_reference(
+        &mut self,
+        value: &OcamlValue,
+    ) -> crate::types::ConstructorReference {
+        let (_, fields) = value.as_block();
+        crate::types::ConstructorReference {
+            variant: self.read_variant_layout_ref(&fields[0]),
+            position: fields[1].as_int() as usize,
+        }
+    }
+
+    fn read_variant_layout(&mut self, value: &OcamlValue) -> crate::types::VariantLayout {
+        let (_, fields) = value.as_block();
+        let constructors = fields[1]
+            .as_block()
+            .1
+            .iter()
+            .map(|case| self.read_variant_case(case))
+            .collect();
+        crate::types::VariantLayout::new(
+            crate::types::VariantConfiguration {
+                unboxed: fields[0].as_bool(),
+                tag_name: self.read_string_option(&fields[2].as_block().1[0]),
+            },
+            constructors,
+        )
+    }
+
+    fn read_variant_case(&mut self, value: &OcamlValue) -> crate::types::VariantConstructorCase {
+        let (tag, fields) = value.as_block();
+        match tag {
+            0 => crate::types::VariantConstructorCase::Constant(self.read_variant_tag(&fields[0])),
+            1 => {
+                let (_, block) = fields[0].as_block();
+                let (_, runtime) = block[0].as_block();
+                crate::types::VariantConstructorCase::Block(crate::types::VariantBlock {
+                    runtime: crate::types::BlockRuntime {
+                        tag: self.read_variant_tag(&runtime[0]),
+                        tag_name: self.read_string_option(&runtime[1]),
+                        untagged: runtime[2].as_bool(),
+                    },
+                    block_type: block[1]
+                        .as_option()
+                        .map(|v| self.read_variant_block_type(v)),
+                })
+            }
+            _ => panic!("invalid variant constructor case tag {tag}"),
+        }
+    }
+
+    fn read_variant_tag(&mut self, value: &OcamlValue) -> crate::types::VariantTag {
+        let (_, fields) = value.as_block();
+        crate::types::VariantTag {
+            name: fields[0].as_string().to_string(),
+            tag_type: fields[1].as_option().map(|v| self.read_variant_tag_type(v)),
+        }
+    }
+
+    fn read_variant_tag_type(&mut self, value: &OcamlValue) -> crate::types::VariantTagType {
+        use crate::types::VariantTagType as T;
+        match value {
+            OcamlValue::Int(0) => T::Null,
+            OcamlValue::Int(1) => T::Undefined,
+            OcamlValue::Block(tag, fields) => match tag {
+                0 => T::String(fields[0].as_string().to_string()),
+                1 => T::Int(fields[0].as_int() as i32),
+                2 => T::Float(fields[0].as_string().to_string()),
+                3 => T::BigInt(fields[0].as_string().to_string()),
+                4 => T::Bool(fields[0].as_bool()),
+                5 => T::Untagged(self.read_variant_block_type(&fields[0])),
+                _ => panic!("invalid variant tag type {tag}"),
+            },
+            _ => panic!("invalid variant tag type"),
+        }
+    }
+
+    fn read_variant_block_type(&mut self, value: &OcamlValue) -> crate::types::VariantBlockType {
+        use crate::types::{VariantBlockType as B, VariantInstance as I};
+        match value {
+            OcamlValue::Int(0) => B::Int,
+            OcamlValue::Int(1) => B::String,
+            OcamlValue::Int(2) => B::Float,
+            OcamlValue::Int(3) => B::Bigint,
+            OcamlValue::Int(4) => B::Boolean,
+            OcamlValue::Int(5) => B::Function,
+            OcamlValue::Int(6) => B::Object,
+            OcamlValue::Int(7) => B::Unknown,
+            OcamlValue::Block(0, fields) => B::Instance(match fields[0].as_int() {
+                0 => I::Array,
+                1 => I::ArrayBuffer,
+                2 => I::BigInt64Array,
+                3 => I::BigUint64Array,
+                4 => I::Blob,
+                5 => I::DataView,
+                6 => I::Date,
+                7 => I::File,
+                8 => I::Float32Array,
+                9 => I::Float64Array,
+                10 => I::Int16Array,
+                11 => I::Int32Array,
+                12 => I::Int8Array,
+                13 => I::Promise,
+                14 => I::RegExp,
+                15 => I::Uint16Array,
+                16 => I::Uint32Array,
+                17 => I::Uint8Array,
+                18 => I::Uint8ClampedArray,
+                19 => I::Set,
+                20 => I::Map,
+                21 => I::WeakSet,
+                22 => I::WeakMap,
+                n => panic!("invalid variant instance {n}"),
+            }),
+            _ => panic!("invalid variant block type"),
+        }
+    }
+
+    fn read_string_option(&self, value: &OcamlValue) -> Option<String> {
+        value.as_option().map(|v| v.as_string().to_string())
     }
 
     /// Read a label_declaration (record field).
@@ -570,18 +719,15 @@ impl<'a> SigReadContext<'a> {
                     TypeDesc::Tvar(name)
                 }
                 1 => {
-                    // Tarrow(arg, type_expr, commutable, arity)
-                    let arg = self.read_arg(&fields[0]);
+                    // Caml1999I024 stores the complete parameter list directly;
+                    // keep that allocation shape rather than rebuilding unary nodes.
+                    let args = fields[0]
+                        .as_list()
+                        .iter()
+                        .map(|arg| self.read_arg(arg))
+                        .collect();
                     let ret = self.read_type_expr(&fields[1]);
-                    let commutable = read_commutable(&fields[2]);
-                    let arity = fields[3].as_option().map(|n| n.as_int() as i32);
-
-                    TypeDesc::Tarrow {
-                        arg,
-                        ret,
-                        commutable,
-                        arity,
-                    }
+                    TypeDesc::Tarrow { args, ret }
                 }
                 2 => {
                     // Ttuple(type_expr list)
@@ -931,8 +1077,10 @@ fn debug_loaded_type_refs(ctx: &TypeContext, ty: TypeExprRef) -> String {
         drop(desc);
 
         match &*ctx.get_desc(ty) {
-            TypeDesc::Tarrow { arg, ret, .. } => {
-                walk(ctx, arg.typ, out, seen);
+            TypeDesc::Tarrow { args, ret } => {
+                for arg in args {
+                    walk(ctx, arg.typ, out, seen);
+                }
                 walk(ctx, *ret, out, seen);
             }
             TypeDesc::Ttuple(items) => {
@@ -1076,7 +1224,7 @@ fn read_path(value: &OcamlValue) -> Path {
             let prefix = read_path(&fields[0]);
             let name = fields[1].as_string().to_string();
             let pos = fields[2].as_int() as i32;
-            Path::Pdot(std::sync::Arc::new(prefix), name, pos)
+            Path::Pdot(std::sync::Arc::new(prefix), name.into(), pos)
         }
         OcamlValue::Block(2, fields) => {
             let f = read_path(&fields[0]);
@@ -1379,30 +1527,10 @@ fn read_alias_presence(value: &OcamlValue) -> AliasPresence {
     }
 }
 
-/// Read commutable.
-fn read_commutable(_value: &OcamlValue) -> Commutable {
-    // For CMI-loaded types, commutability doesn't matter.
-    // Just use Cok.
-    Commutable::Cok
-}
-
 /// Read field_kind.
 fn read_field_kind(_value: &OcamlValue) -> FieldKind {
     // For CMI-loaded types, just use Fpresent.
     FieldKind::Fpresent
-}
-
-/// Read unboxed_status.
-///
-/// Record fields:
-/// 0: unboxed: bool
-/// 1: default: bool
-fn read_unboxed_status(value: &OcamlValue) -> UnboxedStatus {
-    let fields = &value.as_block().1;
-    UnboxedStatus {
-        unboxed: fields[0].as_bool(),
-        default: fields[1].as_bool(),
-    }
 }
 
 #[cfg(test)]

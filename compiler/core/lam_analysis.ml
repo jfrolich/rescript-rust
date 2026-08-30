@@ -46,14 +46,13 @@ let rec no_side_effects (lam : Lam.t) : bool =
       | _ -> false)
     | Pcreate_extension _ | Ptypeof | Pis_null | Pis_not_none | Psome
     | Psome_not_nest | Pis_undefined | Pis_null_undefined | Pnull_to_opt
-    | Pnull_undefined_to_opt | Pjs_fn_make _ | Pjs_fn_make_unit
-    | Pjs_object_create _ | Pimport
+    | Pnull_undefined_to_opt | Pjs_object_create _ | Pimport
     (* TODO: check *)
     | Pmakeblock _
     (* whether it's mutable or not *)
     | Pfield _ | Pval_from_option | Pval_from_option_not_nest
     (* NOP The compiler already [t option] is the same as t *)
-    | Pduprecord
+    | Pduprecord | Precord_rest _
     (* generic primitives *)
     | Pobjcomp _ | Pobjorder | Pobjmin | Pobjmax | Pobjtag | Pobjsize
     (* bool primitives *)
@@ -91,8 +90,10 @@ let rec no_side_effects (lam : Lam.t) : bool =
         {code_info = Exp (Js_function _ | Js_literal _) | Stmt Js_stmt_comment}
       ->
       true
-    | Pjs_apply | Pjs_runtime_apply | Pjs_call _ | Pinit_mod | Pupdate_mod
-    | Pjs_unsafe_downgrade _ | Pdebugger | Pjs_fn_method
+    (* A tagged template invokes its tag at runtime, so it always has side
+       effects. *)
+    | Ptagged_template | Pjs_apply | Pjs_runtime_apply | Pjs_call _ | Pinit_mod
+    | Pupdate_mod | Pjs_unsafe_downgrade _ | Pdebugger | Pjs_fn_method
     (* Await promise *)
     | Pawait
     (* TODO *)
@@ -190,13 +191,13 @@ let rec size (lam : Lam.t) =
 
 and size_constant x =
   match x with
-  | Const_int _ | Const_char _ | Const_float _ | Const_bigint _
-  | Const_pointer _ | Const_js_null | Const_js_undefined _ | Const_module_alias
-  | Const_js_true | Const_js_false ->
+  | Const_int _ | Const_constructor _ | Const_char _ | Const_float _
+  | Const_bigint _ | Const_pointer _ | Const_js_null | Const_js_undefined _
+  | Const_module_alias | Const_js_true | Const_js_false ->
     1
   | Const_string _ -> 1
   | Const_some s -> size_constant s
-  | Const_block (_, _, str) ->
+  | Const_block (_, str) ->
     Ext_list.fold_left str 0 (fun acc x -> acc + size_constant x)
 
 and size_lams acc (lams : Lam.t list) =
@@ -266,8 +267,7 @@ let safe_to_inline (lam : Lam.t) =
   match lam with
   | Lfunction _ -> true
   | Lconst
-      ( Const_pointer _
-      | Const_int {comment = Pt_constructor _}
-      | Const_js_true | Const_js_false | Const_js_undefined _ ) ->
+      ( Const_pointer _ | Const_constructor _ | Const_js_true | Const_js_false
+      | Const_js_undefined _ ) ->
     true
   | _ -> false

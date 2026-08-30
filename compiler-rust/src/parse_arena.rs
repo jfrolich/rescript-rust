@@ -34,8 +34,8 @@ use crate::arena::{Arena, ArenaIdx};
 use crate::intern::Interner;
 use crate::location::{Location, Position};
 use crate::parser::ast::{
-    Attributes, CoreType, CoreTypeDesc, Expression, ExpressionDesc, ModuleExpr, ModuleExprDesc,
-    ModuleType, ModuleTypeDesc, Pattern, PatternDesc,
+    Attributes, CoreType, CoreTypeDesc, Expression, ExpressionDesc, FunParam, ModuleExpr,
+    ModuleExprDesc, ModuleType, ModuleTypeDesc, Pattern, PatternDesc, StringLoc, ValueConstraint,
 };
 use crate::parser::longident::Longident;
 
@@ -337,19 +337,19 @@ impl Default for InternedLocation {
 pub struct StaticArrayLidents {
     /// `Lident "Array"` prefix shared by Array.get/set.
     pub array_lident: LidentIdx,
-    /// `Lident "Belt"` prefix shared by Belt.Array/List.
+    /// `Lident "Primitive_array"` used by array spread lowering.
     pub belt_lident: LidentIdx,
-    /// `Ldot(Lident "Belt", "Array")` prefix for Belt.Array.concatMany.
+    /// Alias of the `Primitive_array` prefix retained for marshal handling.
     pub belt_array: LidentIdx,
-    /// `Ldot(Lident "Belt", "List")` prefix for Belt.List.concatMany.
+    /// `Lident "Primitive_list"` used by list spread lowering.
     pub belt_list: LidentIdx,
     /// `Ldot(Lident "Array", "set")` for array assignment desugaring
     pub array_set: LidentIdx,
     /// `Ldot(Lident "Array", "get")` for array access desugaring
     pub array_get: LidentIdx,
-    /// `Ldot(Ldot(Lident "Belt", "Array"), "concatMany")` for spread array desugaring
+    /// `Ldot(Lident "Primitive_array", "spread")` for spread array desugaring.
     pub belt_array_concat_many: LidentIdx,
-    /// `Ldot(Ldot(Lident "Belt", "List"), "concatMany")` for spread list desugaring
+    /// `Ldot(Lident "Primitive_list", "spread")` for spread list desugaring.
     pub belt_list_concat_many: LidentIdx,
 }
 
@@ -451,10 +451,15 @@ impl SpiceCache {
 pub struct ParseArena {
     /// Arena of positions (returns PosIdx).
     positions: Arena<Position, PosIdx>,
+    position_file_names: HashMap<StrIdx, String>,
     /// Arena of locations (returns LocIdx).
     locations: Arena<InternedLocation, LocIdx>,
     /// Arena of longidents (returns LidentIdx).
     longidents: Arena<Longident, LidentIdx>,
+    /// Slots reserved before type checking for environment-dependent synthetic
+    /// longidents, such as record-field qualification and omitted labels.
+    synthetic_longidents: elsa::sync::FrozenVec<Box<Longident>>,
+    synthetic_longident_base: u32,
     /// Arena of arities (returns ArityIdx).
     /// Use `push_arity()` for computed paths (fresh indices).
     /// Use `static_arities` for literal paths (shared indices).
@@ -473,6 +478,29 @@ pub struct ParseArena {
     /// keeps the same AST behavior and comparable parser memory profile.
     /// Sparse side table for function default expressions, keyed by function ExprIdx.
     expr_fun_defaults: Vec<Option<ExprIdx>>,
+    /// N-ary source parameter lists keyed by the function body's arena index.
+    ///
+    /// `PexpFun` keeps only a compact first-parameter fallback for frozen-v0 PPX
+    /// conversion. Parser-created current parsetrees use this table as the
+    /// authoritative `Pexp_fun.params` representation.
+    nary_fun_params_by_first_pattern: HashMap<PatIdx, Box<[FunParam]>>,
+    nary_fun_unknown_arity_by_first_pattern: HashMap<PatIdx, ArityIdx>,
+    /// Optional-default lowering prepared before type checking.
+    ///
+    /// Typecore must not append to the parse arena through a shared reference:
+    /// doing so invalidates Rust's aliasing guarantees and was miscompiled in
+    /// release builds. Keep the OCaml-shaped synthetic AST here, constructed
+    /// while the arena is still exclusively borrowed.
+    nary_fun_default_bindings_by_first_pattern:
+        HashMap<PatIdx, Box<[(FunParam, Option<crate::parser::ast::ValueBinding>)]>>,
+    /// N-ary locally-abstract-type (`newtypes`) lists keyed by the function's
+    /// first parameter pattern, mirroring `Pexp_fun.newtypes` in the current
+    /// upstream parsetree. Each entry is `(name, attributes)`; the parser puts
+    /// the type-parameter group's attributes on the group's first newtype.
+    nary_fun_newtypes_by_first_pattern: HashMap<PatIdx, Box<[(StringLoc, Attributes)]>>,
+    nary_arrow_args_by_first_type: HashMap<CoreTypeIdx, Box<[crate::parser::ast::TypeArg]>>,
+    /// Sparse current-Parsetree value constraints keyed by the binding pattern.
+    value_constraints_by_pattern: HashMap<PatIdx, ValueConstraint>,
     /// Sparse side table for case guards, keyed by owning match/try ExprIdx.
     /// Value is a case-indexed list of optional guard expressions.
     expr_case_guards: Vec<Option<Box<[Option<ExprIdx>]>>>,
@@ -482,6 +510,14 @@ pub struct ParseArena {
     expr_variant_args: Vec<Option<ExprIdx>>,
     /// Sparse side table for record spread/base expression, keyed by record ExprIdx.
     expr_record_spreads: Vec<Option<ExprIdx>>,
+    /// Sparse side table for record-rest pattern bindings (`...T as r`),
+    /// keyed by the record pattern's own location index.
+    ///
+    /// OCaml compiler/ml/parsetree.ml:164-168 stores `record_pat_rest` inline
+    /// in `Ppat_record`. The arena parser keeps it in a sparse side table keyed
+    /// by the record pattern's `ppat_loc` (a stable arena index available both
+    /// at parse time and during type checking).
+    pat_record_rests: HashMap<LocIdx, crate::parser::ast::RecordPatRest>,
     /// Sparse side table for if-then-else else branch expression, keyed by if ExprIdx.
     expr_if_else_branches: Vec<Option<ExprIdx>>,
     /// Sparse side table for `Pexp_coerce` source type annotation, keyed by coerce ExprIdx.
@@ -489,6 +525,13 @@ pub struct ParseArena {
     /// Arena of patterns (returns PatIdx).
     /// Replaces `Box<Pattern>` for recursive AST references.
     patterns: Arena<Pattern, PatIdx>,
+    /// Append-only stable storage for OCaml-shaped synthetic pattern rewrites.
+    synthetic_patterns: elsa::sync::FrozenVec<Box<Pattern>>,
+    synthetic_pattern_base: u32,
+    /// Slots reserved before type checking for strings discovered only after
+    /// environment lookup (notably omitted record labels).
+    synthetic_strings: elsa::sync::FrozenVec<Box<String>>,
+    synthetic_string_base: u32,
     /// Arena of core types (returns CoreTypeIdx).
     /// Replaces `Box<CoreType>` for recursive AST references.
     core_types: Arena<CoreType, CoreTypeIdx>,
@@ -505,7 +548,7 @@ pub struct ParseArena {
     /// Pattern and expression contexts get separate Lidents to match OCaml's
     /// per-compilation-unit CSE behavior.
     static_list_lidents: StaticListLidents,
-    /// Pre-allocated static Longident indices for Array.set/get/Belt.Array.concatMany.
+    /// Pre-allocated static Longident indices for array access and spread lowering.
     static_array_lidents: StaticArrayLidents,
     /// Pre-allocated `Ldot(Lident "Stdlib_RegExp", "t")` for `%re` lowering.
     /// OCaml uses `Ast_literal.Lid.regexp_id` as a module-level constant.
@@ -545,6 +588,13 @@ pub struct ParseArena {
     static_optional_default_sth_str: StrIdx,
     /// Pre-allocated `"#default"` attribute name used by optional-default rewrite lets.
     static_default_attr_str: StrIdx,
+    /// Pre-allocated empty string. OCaml string literals are statically shared,
+    /// so conservative single-variable extraction of a wildcard needs one
+    /// canonical empty StrIdx.
+    static_empty_str: StrIdx,
+    /// Pre-allocated `"x"`. OCaml's let-unwrap desugar falls back to the static
+    /// literal `"x"` (bs_builtin_ppx.ml), shared across every site.
+    static_x_name: StrIdx,
     /// Pre-allocated `"res.constructor_from_spread"` attribute name used by variant spreads.
     static_constructor_from_spread_attr_str: StrIdx,
     /// Pre-allocated `"res.patFromVariantSpread"` attribute name used for synthetic spread patterns.
@@ -656,6 +706,8 @@ impl Default for ParseArena {
         let static_optional_default_opt_str = strings.intern("*opt*");
         let static_optional_default_sth_str = strings.intern("*sth*");
         let static_default_attr_str = strings.intern("#default");
+        let static_empty_str = strings.intern("");
+        let static_x_name = strings.intern("x");
         let static_constructor_from_spread_attr_str = strings.intern("res.constructor_from_spread");
         let static_pat_from_variant_spread_attr_str = strings.intern("res.patFromVariantSpread");
         // CMI-loaded declaration attributes are converted back into parser attrs
@@ -731,7 +783,7 @@ impl Default for ParseArena {
             )),
             ppx_empty_field_str,
         ));
-        let ppx_js_oo_str = strings.intern("Js_OO");
+        let ppx_js_oo_str = strings.intern("Primitive_js_extern");
         let ppx_callback_str = strings.intern("Callback");
         let ppx_js_oo_lident = longidents.push(Longident::Lident(ppx_js_oo_str));
         lident_dedup.insert(ppx_js_oo_str, ppx_js_oo_lident);
@@ -761,8 +813,8 @@ impl Default for ParseArena {
         let array_str = strings.intern("Array");
         let set_str = strings.intern("set");
         let get_str = strings.intern("get");
-        let belt_str = strings.intern("Belt");
-        let concat_many_str = strings.intern("concatMany");
+        let belt_str = strings.intern("Primitive_array");
+        let concat_many_str = strings.intern("spread");
 
         let lident_array = longidents.push(Longident::Lident(array_str));
         let array_set = longidents.push(Longident::Ldot(
@@ -774,29 +826,16 @@ impl Default for ParseArena {
             get_str,
         ));
         let lident_belt = longidents.push(Longident::Lident(belt_str));
-        let belt_array = longidents.push(Longident::Ldot(
-            Box::new(Longident::Lident(belt_str)),
-            array_str,
-        ));
+        let belt_array = lident_belt;
         let belt_array_concat_many = longidents.push(Longident::Ldot(
-            Box::new(Longident::Ldot(
-                Box::new(Longident::Lident(belt_str)),
-                array_str,
-            )),
+            Box::new(Longident::Lident(belt_str)),
             concat_many_str,
         ));
-        // Pre-allocate Belt.List.concatMany for list spread desugaring
-        let list_str = strings.intern("List");
-        let _lident_list = longidents.push(Longident::Lident(list_str));
-        let belt_list = longidents.push(Longident::Ldot(
-            Box::new(Longident::Lident(belt_str)),
-            list_str,
-        ));
+        // Pre-allocate Primitive_list.spread for list spread desugaring.
+        let list_str = strings.intern("Primitive_list");
+        let belt_list = longidents.push(Longident::Lident(list_str));
         let belt_list_concat_many = longidents.push(Longident::Ldot(
-            Box::new(Longident::Ldot(
-                Box::new(Longident::Lident(belt_str)),
-                list_str,
-            )),
+            Box::new(Longident::Lident(list_str)),
             concat_many_str,
         ));
         let static_array_lidents = StaticArrayLidents {
@@ -874,18 +913,32 @@ impl Default for ParseArena {
 
         Self {
             positions: Arena::default(),
+            position_file_names: HashMap::new(),
             locations: Arena::default(),
             longidents,
+            synthetic_longidents: elsa::sync::FrozenVec::new(),
+            synthetic_longident_base: u32::MAX,
             arities,
             expressions: Arena::default(),
             expr_fun_defaults: Vec::new(),
+            nary_fun_params_by_first_pattern: HashMap::new(),
+            nary_fun_unknown_arity_by_first_pattern: HashMap::new(),
+            nary_fun_default_bindings_by_first_pattern: HashMap::new(),
+            nary_fun_newtypes_by_first_pattern: HashMap::new(),
+            nary_arrow_args_by_first_type: HashMap::new(),
+            value_constraints_by_pattern: HashMap::new(),
             expr_case_guards: Vec::new(),
             expr_construct_args: Vec::new(),
             expr_variant_args: Vec::new(),
             expr_record_spreads: Vec::new(),
+            pat_record_rests: HashMap::new(),
             expr_if_else_branches: Vec::new(),
             expr_coerce_from_types: Vec::new(),
             patterns: Arena::default(),
+            synthetic_patterns: elsa::sync::FrozenVec::new(),
+            synthetic_pattern_base: u32::MAX,
+            synthetic_strings: elsa::sync::FrozenVec::new(),
+            synthetic_string_base: u32::MAX,
             core_types,
             mod_exprs: Arena::default(),
             mod_types: Arena::default(),
@@ -909,6 +962,8 @@ impl Default for ParseArena {
             static_optional_default_opt_str,
             static_optional_default_sth_str,
             static_default_attr_str,
+            static_empty_str,
+            static_x_name,
             static_constructor_from_spread_attr_str,
             static_pat_from_variant_spread_attr_str,
             static_ppx_lidents,
@@ -947,12 +1002,18 @@ impl ParseArena {
         // Pre-allocate none file name and position at index 0
         // This way LocIdx::default() == LocIdx(0) is always valid
         let none_file_idx = arena.strings.intern("_none_");
+        arena
+            .position_file_names
+            .insert(none_file_idx, "_none_".to_string());
         let none_pos = Position::new(none_file_idx, 1, 0, -1);
         let pos_idx = arena.positions.push(none_pos);
         let none_loc = InternedLocation::new(pos_idx, pos_idx, true);
         arena.locations.push(none_loc);
         // Pre-allocate dummy location with line 0 for internal PPX nodes
         let dummy_file_idx = arena.strings.push("_none_".to_string());
+        arena
+            .position_file_names
+            .insert(dummy_file_idx, "_none_".to_string());
         let dummy_pos = Position::new(dummy_file_idx, 0, 0, -1);
         let dummy_pos_idx = arena.positions.push(dummy_pos);
         let dummy_loc = InternedLocation::new(dummy_pos_idx, dummy_pos_idx, true);
@@ -1052,10 +1113,18 @@ impl ParseArena {
 
     // ========== Position methods ==========
 
+    fn record_position_file_name(&mut self, file_name: StrIdx) {
+        if !self.position_file_names.contains_key(&file_name) {
+            self.position_file_names
+                .insert(file_name, self.get_string(file_name).to_string());
+        }
+    }
+
     /// Push a position into the arena and return its index.
     /// Creates a fresh entry each time - sharing is achieved by passing the same
     /// PosIdx through code paths (reference sharing), not by value deduplication.
     pub fn push_position(&mut self, pos: Position) -> PosIdx {
+        self.record_position_file_name(pos.file_name);
         let key = PosKey::from_position(&pos);
         let idx = self.positions.push(pos);
         // Register in dedup table only if not already there (for lookup purposes)
@@ -1074,6 +1143,7 @@ impl ParseArena {
     /// Push a position with deduplication - reuses an existing index if the position
     /// content matches.
     pub fn push_position_dedup(&mut self, pos: Position) -> PosIdx {
+        self.record_position_file_name(pos.file_name);
         let key = PosKey::from_position(&pos);
         if let Some(&idx) = self.position_dedup.get(&key) {
             return idx;
@@ -1088,6 +1158,7 @@ impl ParseArena {
     /// This matches OCaml's behavior where each position is a separate object.
     /// file_name should be an interned StrIdx (from arena.intern_string).
     pub fn push_pos(&mut self, file_name: StrIdx, line: i32, bol: i32, cnum: i32) -> PosIdx {
+        self.record_position_file_name(file_name);
         self.positions
             .push(Position::new(file_name, line, bol, cnum))
     }
@@ -1400,6 +1471,8 @@ impl ParseArena {
     /// Useful for migrating code that creates Location values.
     /// Creates fresh positions to match OCaml behavior.
     pub fn from_location(&mut self, loc: &Location) -> LocIdx {
+        self.record_position_file_name(loc.loc_start.file_name);
+        self.record_position_file_name(loc.loc_end.file_name);
         let start_idx = self.positions.push(loc.loc_start);
         let end_idx = self.positions.push(loc.loc_end);
         self.push_loc(start_idx, end_idx, loc.loc_ghost)
@@ -1495,6 +1568,14 @@ impl ParseArena {
         lid_idx
     }
 
+    /// Fresh `Longident::Lident` for a synthesized AST node whose constructor
+    /// is allocated dynamically by OCaml (for example `Lident var_name` in the
+    /// let-unwrap rewrite). Static `Lident "Name"` values may instead be shared
+    /// across calls and should use `push_lident_from_idx`.
+    pub fn fresh_lident_from_idx(&mut self, str_idx: StrIdx) -> LidentIdx {
+        self.longidents.push(Longident::Lident(str_idx))
+    }
+
     /// Push a dotted identifier (Ldot) with a dynamic string.
     pub fn push_ldot(&mut self, prefix: LidentIdx, name: &str) -> LidentIdx {
         let str_idx = self.strings.push_interned(name);
@@ -1549,7 +1630,14 @@ impl ParseArena {
 
     /// Look up a longident by index.
     pub fn get_longident(&self, idx: LidentIdx) -> &Longident {
-        self.longidents.get(idx)
+        let raw = idx.to_u32();
+        if raw < self.synthetic_longident_base {
+            self.longidents.get(idx)
+        } else {
+            self.synthetic_longidents
+                .get((raw - self.synthetic_longident_base) as usize)
+                .expect("typechecker synthetic longident read before initialization")
+        }
     }
 
     /// Get the parent prefix index for an `Ldot` created via `push_ldot*`.
@@ -1672,31 +1760,55 @@ impl ParseArena {
         self.static_array_lidents.array_lident
     }
 
-    /// Get the pre-allocated `Lident "Belt"` prefix.
+    /// Get the pre-allocated `Lident "Primitive_array"` prefix.
     pub fn belt_lident(&self) -> LidentIdx {
         self.static_array_lidents.belt_lident
     }
 
-    /// Get the pre-allocated `Ldot(Lident "Belt", "Array")` prefix.
+    /// Get the pre-allocated `Lident "Primitive_array"` prefix.
     pub fn belt_array_lident(&self) -> LidentIdx {
         self.static_array_lidents.belt_array
     }
 
-    /// Get the pre-allocated `Ldot(Lident "Belt", "List")` prefix.
+    /// Get the pre-allocated `Lident "Primitive_list"` prefix.
     pub fn belt_list_lident(&self) -> LidentIdx {
         self.static_array_lidents.belt_list
     }
 
-    /// Get the pre-allocated `Ldot(Ldot(Lident "Belt", "Array"), "concatMany")`.
-    /// Use in spread array desugaring: `[...a, ...b]` → `Belt.Array.concatMany(...)`.
+    /// Get the pre-allocated `Ldot(Lident "Primitive_array", "spread")`.
+    /// Use in spread array desugaring: `[...a, ...b]` → `Primitive_array.spread(...)`.
     pub fn belt_array_concat_many_lid(&self) -> LidentIdx {
         self.static_array_lidents.belt_array_concat_many
     }
 
-    /// Get the pre-allocated `Ldot(Ldot(Lident "Belt", "List"), "concatMany")`.
-    /// Use in spread list desugaring: `list{...a, ...b}` → `Belt.List.concatMany(...)`.
+    /// Get the pre-allocated `Ldot(Lident "Primitive_list", "spread")`.
+    /// Use in spread list desugaring: `list{...a, ...b}` → `Primitive_list.spread(...)`.
     pub fn belt_list_concat_many_lid(&self) -> LidentIdx {
         self.static_array_lidents.belt_list_concat_many
+    }
+
+    /// Fresh `Ldot(Lident "Primitive_array", "spread")` for one desugared occurrence.
+    /// OCaml builds this longident inline at each spread site
+    /// (compiler/syntax/src/res_core.ml:4528), so every occurrence allocates a
+    /// new Longident block; only the name strings are static.
+    pub fn fresh_belt_array_spread_lid(&mut self) -> LidentIdx {
+        let module_str = self.strings.intern("Primitive_array");
+        let spread_str = self.strings.intern("spread");
+        self.longidents.push(Longident::Ldot(
+            Box::new(Longident::Lident(module_str)),
+            spread_str,
+        ))
+    }
+
+    /// Fresh `Ldot(Lident "Primitive_list", "spread")` for one desugared occurrence.
+    /// See `fresh_belt_array_spread_lid`; OCaml site is res_core.ml:4386.
+    pub fn fresh_belt_list_spread_lid(&mut self) -> LidentIdx {
+        let module_str = self.strings.intern("Primitive_list");
+        let spread_str = self.strings.intern("spread");
+        self.longidents.push(Longident::Ldot(
+            Box::new(Longident::Lident(module_str)),
+            spread_str,
+        ))
     }
 
     /// Get the static `Stdlib_RegExp.t` longident index used for `%re`.
@@ -1712,6 +1824,16 @@ impl ParseArena {
     /// Get `Ast_literal.No_loc.type_string`.
     pub fn ast_literal_type_string(&self) -> CoreTypeIdx {
         self.static_ast_literal_types.type_string
+    }
+
+    /// Pre-interned empty string (OCaml static literal sharing).
+    pub fn static_empty_str(&self) -> StrIdx {
+        self.static_empty_str
+    }
+
+    /// Pre-interned `"x"` fallback binder name for let-unwrap desugaring.
+    pub fn static_x_name(&self) -> StrIdx {
+        self.static_x_name
     }
 
     /// Get `Ast_literal.No_loc.type_int`.
@@ -1829,7 +1951,19 @@ impl ParseArena {
 
     /// Get the string content for a StrIdx.
     pub fn get_string(&self, idx: StrIdx) -> &str {
-        self.strings.get(idx)
+        let raw = idx.raw();
+        if raw < self.synthetic_string_base {
+            self.strings.get(idx)
+        } else {
+            self.synthetic_strings
+                .get((raw - self.synthetic_string_base) as usize)
+                .expect("typechecker synthetic string read before initialization")
+        }
+    }
+
+    /// File names referenced by source positions in this arena.
+    pub fn source_file_names(&self) -> HashMap<StrIdx, String> {
+        self.position_file_names.clone()
     }
 
     /// Number of strings currently stored in the arena string table.
@@ -1837,20 +1971,59 @@ impl ParseArena {
         self.strings.len()
     }
 
-    /// Reserve append-only AST space used by typecore synthetic rewrites.
+    /// Prepare append-only AST storage used by typecore synthetic rewrites.
     ///
     /// Typechecking creates a few parsed AST fragments to mirror OCaml rewrites
     /// such as optional-default lowering and variant-spread expansion. This must
     /// happen before the arena is handed to `TypeCheckContext` for the primary
-    /// AST and identifier arenas: reserving at an append site can reallocate
-    /// backing storage while existing parser refs are still live. Sparse side
-    /// tables are keyed by `ExprIdx` and are only appended alongside synthetic
-    /// expressions, so they do not need an unconditional per-file reserve.
+    /// AST and identifier arenas. Environment-dependent patterns, longidents,
+    /// and strings use stable append-only storage and can grow during checking.
+    /// Sparse side tables are keyed by `ExprIdx` and are only appended alongside
+    /// synthetic expressions, so they do not need an unconditional reserve.
     pub fn reserve_typecheck_synthetic_capacity(&mut self) {
         self.expressions.reserve(64);
         self.patterns.reserve(64);
         self.longidents.reserve(128);
         self.strings.reserve(128);
+
+        self.synthetic_pattern_base = self.patterns.len() as u32;
+        self.synthetic_patterns = elsa::sync::FrozenVec::new();
+        self.synthetic_longident_base = self.longidents.len() as u32;
+        self.synthetic_longidents = elsa::sync::FrozenVec::new();
+        self.synthetic_string_base = self.strings.len() as u32;
+        self.synthetic_strings = elsa::sync::FrozenVec::new();
+    }
+
+    /// Append a typechecker-generated longident to storage reserved before the
+    /// arena became shared.
+    pub fn push_typecheck_longident(&self, longident: Longident) -> LidentIdx {
+        let slot = self.synthetic_longidents.len();
+        self.synthetic_longidents.push(Box::new(longident));
+        LidentIdx::from_u32(self.synthetic_longident_base + slot as u32)
+    }
+
+    /// Append a typechecker-generated string to storage reserved before the
+    /// arena became shared.
+    pub fn push_typecheck_string(&self, string: String) -> StrIdx {
+        let slot = self.synthetic_strings.len();
+        self.synthetic_strings.push(Box::new(string));
+        StrIdx::from_raw(self.synthetic_string_base + slot as u32)
+    }
+
+    /// Append a typechecker-generated simple identifier, allocating its string
+    /// in the matching reserved storage.
+    pub fn push_typecheck_lident(&self, name: &str) -> LidentIdx {
+        let name = self.push_typecheck_string(name.to_owned());
+        self.push_typecheck_longident(Longident::Lident(name))
+    }
+
+    /// Append a typechecker-generated pattern to storage reserved before the
+    /// arena became shared. This is a safe, append-only equivalent of OCaml's
+    /// allocation during pattern rewrites.
+    pub fn push_typecheck_pattern(&self, pattern: Pattern) -> PatIdx {
+        let slot = self.synthetic_patterns.len();
+        self.synthetic_patterns.push(Box::new(pattern));
+        PatIdx::from_u32(self.synthetic_pattern_base + slot as u32)
     }
 
     /// Find the most recently inserted string index for the given content.
@@ -2189,6 +2362,236 @@ impl ParseArena {
         self.expressions.len()
     }
 
+    /// Store the authoritative n-ary argument list for a parser-created arrow.
+    pub fn set_nary_arrow_args(
+        &mut self,
+        _arity: ArityIdx,
+        args: Vec<crate::parser::ast::TypeArg>,
+    ) {
+        let first_type = args.first().expect("Ptyp_arrow has arguments").typ;
+        self.nary_arrow_args_by_first_type
+            .insert(first_type, args.into_boxed_slice());
+    }
+
+    pub fn nary_arrow_args<'a>(
+        &'a self,
+        arg: &'a crate::parser::ast::TypeArg,
+        arity: ArityIdx,
+    ) -> std::borrow::Cow<'a, [crate::parser::ast::TypeArg]> {
+        let _ = arity;
+        if let Some(args) = self.nary_arrow_args_by_first_type.get(&arg.typ) {
+            std::borrow::Cow::Borrowed(&args[..])
+        } else {
+            std::borrow::Cow::Owned(vec![arg.clone()])
+        }
+    }
+
+    /// Return snapshots of function nodes and their locations so typecore can
+    /// prepare synthetic optional-default AST under an exclusive arena borrow.
+    pub fn nary_functions(&self) -> Vec<(crate::parser::ast::PexpFun, LocIdx)> {
+        self.expressions
+            .as_slice()
+            .iter()
+            .filter_map(|expr| match &*expr.pexp_desc {
+                ExpressionDesc::Pexp_fun(fun) => Some(((**fun).clone(), expr.pexp_loc)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Store the optional-default lowering associated with a function's first pattern.
+    pub fn set_nary_fun_default_bindings(
+        &mut self,
+        first_pattern: PatIdx,
+        bindings: Vec<(FunParam, Option<crate::parser::ast::ValueBinding>)>,
+    ) {
+        self.nary_fun_default_bindings_by_first_pattern
+            .insert(first_pattern, bindings.into_boxed_slice());
+    }
+
+    /// Return optional-default lowering prepared before type checking.
+    pub fn nary_fun_default_bindings(
+        &self,
+        fun: &crate::parser::ast::PexpFun,
+    ) -> Option<&[(FunParam, Option<crate::parser::ast::ValueBinding>)]> {
+        self.nary_fun_default_bindings_by_first_pattern
+            .get(&fun.lhs)
+            .map(|bindings| &bindings[..])
+    }
+
+    /// Store the authoritative n-ary parameter list for a parser-created function.
+    pub fn set_nary_fun_params(
+        &mut self,
+        arity: ArityIdx,
+        params: Vec<FunParam>,
+        unknown_arity: ArityIdx,
+    ) {
+        debug_assert!(!params.is_empty());
+        let first_pattern = params[0].p_pat;
+        self.nary_fun_params_by_first_pattern
+            .insert(first_pattern, params.into_boxed_slice());
+        self.nary_fun_unknown_arity_by_first_pattern
+            .insert(first_pattern, unknown_arity);
+        let _ = arity;
+    }
+
+    pub fn nary_fun_unknown_arity(&self, fun: &crate::parser::ast::PexpFun) -> ArityIdx {
+        if self.get_arity(fun.arity).is_some() {
+            self.nary_fun_unknown_arity_by_first_pattern
+                .get(&fun.lhs)
+                .copied()
+                .or_else(|| match &*self.get_expr(fun.rhs).pexp_desc {
+                    ExpressionDesc::Pexp_fun(next) => Some(next.arity),
+                    _ => None,
+                })
+                .unwrap_or(fun.arity)
+        } else {
+            fun.arity
+        }
+    }
+
+    /// Attach a current-Parsetree locally abstract constraint to a value binding.
+    /// Also cache the polymorphic pattern that OCaml typecore synthesizes before
+    /// typing let patterns (`typecore.ml:4503-4514`).
+    pub fn set_value_constraint(
+        &mut self,
+        pattern: PatIdx,
+        mut constraint: ValueConstraint,
+        expression: ExprIdx,
+        loc: LocIdx,
+    ) -> Result<(), LocIdx> {
+        let names = constraint
+            .pvc_newtypes
+            .iter()
+            .map(|name| self.get_string(name.txt).to_string())
+            .collect::<std::collections::HashSet<_>>();
+        let source = self.get_core_type(constraint.pvc_type).clone();
+        let body = crate::parser::typ::substitute_type_vars(self, source, &names)?;
+        let body = self.push_core_type(body);
+        let poly = self.push_core_type(CoreType {
+            ptyp_desc: Box::new(CoreTypeDesc::Ptyp_poly(Box::new((
+                constraint.pvc_newtypes.clone(),
+                body,
+            )))),
+            ptyp_loc: loc,
+            ptyp_attributes: Attributes::new(),
+        });
+        constraint.pvc_pattern = Some(self.push_pat(Pattern {
+            ppat_desc: Box::new(PatternDesc::Ppat_constraint(Box::new((pattern, poly)))),
+            ppat_loc: loc,
+            ppat_attributes: Attributes::new(),
+        }));
+        let mut wrapped = self.push_expr(Expression {
+            pexp_desc: Box::new(ExpressionDesc::Pexp_constraint(Box::new((
+                expression,
+                constraint.pvc_type,
+            )))),
+            pexp_loc: loc,
+            pexp_attributes: Attributes::new(),
+        });
+        for name in constraint.pvc_newtypes.iter().rev() {
+            wrapped = self.push_expr(Expression {
+                pexp_desc: Box::new(ExpressionDesc::Pexp_newtype(Box::new((
+                    name.clone(),
+                    wrapped,
+                )))),
+                pexp_loc: loc,
+                pexp_attributes: Attributes::new(),
+            });
+        }
+        constraint.pvc_expression = Some(wrapped);
+        self.value_constraints_by_pattern
+            .insert(pattern, constraint);
+        Ok(())
+    }
+
+    /// Return a value binding's locally abstract constraint, when present.
+    pub fn value_constraint(&self, pattern: PatIdx) -> Option<&ValueConstraint> {
+        self.value_constraints_by_pattern.get(&pattern)
+    }
+
+    /// Return the authoritative n-ary parameters, or the compact fallback.
+    pub fn stored_nary_fun_params(&self, fun: &crate::parser::ast::PexpFun) -> Option<&[FunParam]> {
+        self.nary_fun_params_by_first_pattern
+            .get(&fun.lhs)
+            .map(|params| &params[..])
+    }
+
+    /// Store the authoritative `Pexp_fun.newtypes` list for a parser-created function.
+    pub fn set_nary_fun_newtypes(
+        &mut self,
+        first_pattern: PatIdx,
+        newtypes: Vec<(StringLoc, Attributes)>,
+    ) {
+        self.nary_fun_newtypes_by_first_pattern
+            .insert(first_pattern, newtypes.into_boxed_slice());
+    }
+
+    /// Return the authoritative n-ary newtypes list, or an empty slice.
+    pub fn nary_fun_newtypes(
+        &self,
+        fun: &crate::parser::ast::PexpFun,
+    ) -> &[(StringLoc, Attributes)] {
+        self.nary_fun_newtypes_by_first_pattern
+            .get(&fun.lhs)
+            .map(|v| &v[..])
+            .unwrap_or(&[])
+    }
+
+    pub fn nary_fun_params<'a>(
+        &'a self,
+        fun: &'a crate::parser::ast::PexpFun,
+    ) -> std::borrow::Cow<'a, [FunParam]> {
+        if self.get_arity(fun.arity).is_some()
+            && let Some(params) = self.nary_fun_params_by_first_pattern.get(&fun.lhs)
+        {
+            std::borrow::Cow::Borrowed(params)
+        } else {
+            let mut params = vec![FunParam {
+                p_attrs: self.get_pat(fun.lhs).ppat_attributes.clone(),
+                p_lbl: fun.arg_label.clone(),
+                p_default: fun.default,
+                p_pat: fun.lhs,
+            }];
+            if let Some(arity) = self.get_arity(fun.arity) {
+                let mut body = fun.rhs;
+                while params.len() < arity.max(1) as usize {
+                    let ExpressionDesc::Pexp_fun(next) = &*self.get_expr(body).pexp_desc else {
+                        break;
+                    };
+                    params.push(FunParam {
+                        p_attrs: self.get_pat(next.lhs).ppat_attributes.clone(),
+                        p_lbl: next.arg_label.clone(),
+                        p_default: next.default,
+                        p_pat: next.lhs,
+                    });
+                    body = next.rhs;
+                }
+            }
+            std::borrow::Cow::Owned(params)
+        }
+    }
+
+    /// Return the body belonging to the n-ary parameter list.
+    pub fn nary_fun_body(&self, fun: &crate::parser::ast::PexpFun) -> ExprIdx {
+        if self.nary_fun_params_by_first_pattern.contains_key(&fun.lhs) {
+            return fun.rhs;
+        }
+        let Some(arity) = self.get_arity(fun.arity) else {
+            return fun.rhs;
+        };
+        let mut consumed = 1;
+        let mut body = fun.rhs;
+        while consumed < arity.max(1) as usize {
+            let ExpressionDesc::Pexp_fun(next) = &*self.get_expr(body).pexp_desc else {
+                break;
+            };
+            consumed += 1;
+            body = next.rhs;
+        }
+        body
+    }
+
     /// Attach sparse function default data to an expression node.
     ///
     /// The key must be the `ExprIdx` of the owning `Pexp_fun` expression.
@@ -2298,6 +2701,23 @@ impl ParseArena {
     }
 
     /// Attach sparse record spread/base expression data to a record expression node.
+    /// Attach record-rest binding data to a record pattern, keyed by its location index.
+    pub fn set_record_pat_rest(&mut self, loc: LocIdx, rest: crate::parser::ast::RecordPatRest) {
+        self.pat_record_rests.insert(loc, rest);
+    }
+
+    /// Get sparse record-rest binding data for a record pattern node.
+    pub fn record_pat_rest(&self, loc: LocIdx) -> Option<&crate::parser::ast::RecordPatRest> {
+        self.pat_record_rests.get(&loc)
+    }
+
+    pub fn take_record_pat_rest(
+        &mut self,
+        loc: LocIdx,
+    ) -> Option<crate::parser::ast::RecordPatRest> {
+        self.pat_record_rests.remove(&loc)
+    }
+
     pub fn set_record_spread(&mut self, owner: ExprIdx, spread: Option<ExprIdx>) {
         let slot = owner.0 as usize;
         if slot >= self.expr_record_spreads.len() {
@@ -2393,7 +2813,14 @@ impl ParseArena {
     /// Get a pattern by index.
     #[inline]
     pub fn get_pat(&self, idx: PatIdx) -> &Pattern {
-        self.patterns.get(idx)
+        let raw = idx.to_u32();
+        if raw < self.synthetic_pattern_base {
+            self.patterns.get(idx)
+        } else {
+            self.synthetic_patterns
+                .get((raw - self.synthetic_pattern_base) as usize)
+                .expect("typechecker synthetic pattern read before initialization")
+        }
     }
 
     /// Get a mutable pattern by index.
@@ -2581,6 +3008,58 @@ mod tests {
             pexp_loc: LocIdx::default(),
             pexp_attributes: Attributes::new(),
         }
+    }
+
+    #[test]
+    fn typecheck_synthetic_storage_grows_without_a_fixed_limit() {
+        let mut arena = ParseArena::new();
+        arena.reserve_typecheck_synthetic_capacity();
+        let mut patterns = Vec::new();
+        let mut longidents = Vec::new();
+        for index in 0..2048 {
+            longidents.push(arena.push_typecheck_lident(&format!("Generated{index}")));
+            patterns.push(arena.push_typecheck_pattern(Pattern {
+                ppat_desc: Box::new(PatternDesc::Ppat_any),
+                ppat_loc: LocIdx::none(),
+                ppat_attributes: Attributes::new(),
+            }));
+        }
+
+        assert!(matches!(
+            arena.get_longident(longidents[0]),
+            Longident::Lident(_)
+        ));
+        assert_eq!(
+            arena.get_string(match arena.get_longident(longidents[2047]) {
+                Longident::Lident(name) => *name,
+                _ => unreachable!(),
+            }),
+            "Generated2047"
+        );
+        assert!(matches!(
+            &*arena.get_pat(patterns[2047]).ppat_desc,
+            PatternDesc::Ppat_any
+        ));
+    }
+
+    #[test]
+    fn source_file_names_are_tracked_while_positions_are_added() {
+        let mut arena = ParseArena::new();
+        let first = arena.intern("first.res");
+        let second = arena.intern("generated.res");
+        arena.push_pos(first, 1, 0, 0);
+        arena.from_location(&Location {
+            loc_start: Position::new(second, 2, 10, 12),
+            loc_end: Position::new(second, 2, 10, 20),
+            loc_ghost: false,
+        });
+
+        let names = arena.source_file_names();
+        assert_eq!(names.get(&first).map(String::as_str), Some("first.res"));
+        assert_eq!(
+            names.get(&second).map(String::as_str),
+            Some("generated.res")
+        );
     }
 
     #[test]

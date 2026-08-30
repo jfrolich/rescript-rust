@@ -161,16 +161,15 @@ pub enum TypeDesc {
     /// Type variable: `'a` or `'_a`
     Tvar(Option<String>),
 
-    /// Arrow (function) type: `arg -> ret`
+    /// N-ary arrow (function) type: `(arg1, ..., argN) -> ret`.
+    ///
+    /// Mirrors `compiler/ml/types.ml`, where `Tarrow` stores the complete
+    /// parameter list in one node rather than a chain of unary arrows.
     Tarrow {
-        /// The argument with its label
-        arg: TypeArg,
-        /// The return type
+        /// Arguments in source order.
+        args: Vec<TypeArg>,
+        /// The return type.
         ret: TypeExprRef,
-        /// Commutability flag
-        commutable: Commutable,
-        /// Function arity
-        arity: Option<i32>,
     },
 
     /// Tuple type: `(t1, t2, ...)`
@@ -412,35 +411,6 @@ impl TypeArg {
     }
 }
 
-/// Commutability flag for arrow types.
-///
-/// This tracks whether argument order matters in function application.
-#[derive(Debug, Clone)]
-pub enum Commutable {
-    /// Order is known to be OK
-    Cok,
-    /// Order is unknown
-    Cunknown,
-    /// Linked to another commutable
-    Clink(CommutableRef),
-}
-
-/// Reference to a commutable flag.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct CommutableRef(pub u32);
-
-impl CommutableRef {
-    #[inline]
-    pub(crate) fn from_usize(idx: usize) -> Self {
-        Self(u32::try_from(idx).expect("commutable arena index exceeds u32::MAX"))
-    }
-
-    #[inline]
-    pub(crate) fn index(self) -> usize {
-        self.0 as usize
-    }
-}
-
 /// Abbreviation memo for type expansion caching.
 #[derive(Debug, Clone)]
 pub enum AbbrevMemo {
@@ -578,10 +548,8 @@ impl RowFieldRef {
 pub enum TypeDescSer {
     Tvar(Option<String>),
     Tarrow {
-        arg_label: ArgLabel,
-        arg_type: usize,
+        args: Vec<(ArgLabel, usize)>,
         ret_type: usize,
-        arity: Option<i32>,
     },
     Ttuple(Vec<usize>),
     Tconstr {

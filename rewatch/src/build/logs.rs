@@ -54,37 +54,37 @@ fn write_to_log_file(mut file: File, package_name: &str, content: &str) {
 pub fn initialize(packages: &AHashMap<String, Package>) {
     packages.par_iter().for_each(|(name, package)| {
         let log_path = get_log_file_path(package, Location::Bs);
-        if let Some(parent) = log_path.parent() {
-            fs::create_dir_all(parent).unwrap_or_else(|err| {
-                panic!("Cannot create compiler log directory for package {name}: {err}");
-            });
+        if let Some(parent) = log_path.parent()
+            && let Err(error) = fs::create_dir_all(parent)
+        {
+            error!("Cannot create compiler log directory for package {name}: {error}");
+            return;
         }
-        File::create(log_path)
-            .map(|file| write_to_log_file(file, name, &format!("#Start({})\n", helpers::get_system_time())))
-            .unwrap_or_else(|err| {
-                panic!("Cannot create compiler log for package {name}: {err}");
-            });
+        match File::create(&log_path) {
+            Ok(file) => write_to_log_file(file, name, &format!("#Start({})\n", helpers::get_system_time())),
+            Err(error) => error!(
+                "Cannot create compiler log {} for package {name}: {error}",
+                log_path.display()
+            ),
+        }
     })
 }
 
 pub fn append(package: &packages::Package, str: &str) {
     let log_path = get_log_file_path(package, Location::Bs);
-    if let Some(parent) = log_path.parent() {
-        fs::create_dir_all(parent).unwrap_or_else(|err| {
-            panic!(
-                "Cannot create compiler log directory for package {}: {err}",
-                package.name
-            );
-        });
+    if let Some(parent) = log_path.parent()
+        && let Err(error) = fs::create_dir_all(parent)
+    {
+        error!(
+            "Cannot create compiler log directory for package {}: {error}",
+            package.name
+        );
+        return;
     }
-    File::options()
-        .append(true)
-        .create(true)
-        .open(&log_path)
-        .map(|file| write_to_log_file(file, &package.name, str))
-        .unwrap_or_else(|err| {
-            panic!("Cannot write compilerlog: {} ({err})", log_path.to_string_lossy());
-        });
+    match File::options().append(true).create(true).open(&log_path) {
+        Ok(file) => write_to_log_file(file, &package.name, str),
+        Err(error) => error!("Cannot write compiler log {}: {error}", log_path.display()),
+    }
 }
 
 pub fn finalize(packages: &AHashMap<String, Package>) {

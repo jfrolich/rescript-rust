@@ -38,7 +38,7 @@ pub(crate) fn js_expr_no_side_effects(expr: &Expression) -> bool {
         | ExpressionDesc::CamlBlockTag(inner, _)
         | ExpressionDesc::OptionalBlock(inner, _) => js_expr_no_side_effects(inner),
         ExpressionDesc::Array(items, _) => items.iter().all(js_expr_no_side_effects),
-        ExpressionDesc::CamlBlock(items, _, _, _) => items.iter().all(js_expr_no_side_effects),
+        ExpressionDesc::CamlBlock(items, _, _) => items.iter().all(js_expr_no_side_effects),
         ExpressionDesc::Object(dup, props) => {
             dup.as_deref().is_none_or(js_expr_no_side_effects)
                 && props
@@ -63,7 +63,8 @@ pub(crate) fn js_expr_no_side_effects(expr: &Expression) -> bool {
         | ExpressionDesc::New(_, _)
         | ExpressionDesc::RawJsCode(_)
         | ExpressionDesc::Await(_)
-        | ExpressionDesc::Spread(_) => false,
+        | ExpressionDesc::Spread(_)
+        | ExpressionDesc::RecordRest(_, _) => false,
     }
 }
 
@@ -158,15 +159,10 @@ pub(crate) fn runtime_member_for_eta_wrapped_primitive(
 
 pub(crate) fn eta_wrapped_args_match_params(params: &[Ident], args: &[Lambda]) -> bool {
     params.len() == args.len()
-        && params.iter().zip(args).all(|(param, arg)| match arg {
-            Lambda::Lvar(id) => id.same(param),
-            Lambda::Lprim(crate::lambda::PrimInfo {
-                primitive: Primitive::PjsFnMake(_) | Primitive::PjsFnMakeUnit,
-                args: inner_args,
-                ..
-            }) => matches!(inner_args.as_slice(), [Lambda::Lvar(id)] if id.same(param)),
-            _ => false,
-        })
+        && params
+            .iter()
+            .zip(args)
+            .all(|(param, arg)| matches!(arg, Lambda::Lvar(id) if id.same(param)))
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -191,7 +187,7 @@ pub(crate) fn is_nullish_eq_impossible_non_null_expr(expr: &Expression) -> bool 
             | ExpressionDesc::Typeof(_)
             | ExpressionDesc::Fun { .. }
             | ExpressionDesc::Array(_, _)
-            | ExpressionDesc::CamlBlock(_, _, _, _)
+            | ExpressionDesc::CamlBlock(_, _, _)
     ) && js_expr_no_side_effects(expr)
 }
 
@@ -272,35 +268,6 @@ pub(crate) fn compile_int_equality(left: Expression, right: Expression) -> Expre
             ExpressionDesc::Number(Number::Int { i: left_int, .. }),
             ExpressionDesc::Number(Number::Int { i: right_int, .. }),
         ) => Expression::bool(left_int == right_int),
-        // Pintcomp Ceq is also used for hash-collision polyvar switches that
-        // compare string tags via string equality. OCaml's string_comp folds
-        // literal-vs-literal cases at `js_exp_make.ml:1355-1362`, matching
-        // the raw `Bin EqEqEq` shape we want to emit otherwise. Fold Str,Str
-        // here to keep the polyvar switch chain collapsing to a single arm.
-        (
-            ExpressionDesc::Str {
-                txt: left_txt,
-                delim: left_delim,
-            },
-            ExpressionDesc::Str {
-                txt: right_txt,
-                delim: right_delim,
-            },
-        ) => {
-            match crate::js_ir::fold_strict_string_equality_pub(
-                left_txt,
-                left_delim,
-                right_txt,
-                right_delim,
-            ) {
-                Some(equal) => Expression::bool(equal),
-                None => crate::js_ir::raw_bin_expression(
-                    comparison_to_binop(Comparison::Eq),
-                    left,
-                    right,
-                ),
-            }
-        }
         // OCaml's `Js_exp_make.int_equal` (= float_equal) constructs a raw
         // `Bin (EqEqEq, e0, e1)` without going through `bin`/`triple_equal`,
         // so `3 === null` from `Pintcomp Ceq` stays as the literal comparison
@@ -629,13 +596,18 @@ pub(crate) fn int32_offset(expr: Expression, offset: i32) -> Expression {
 }
 
 pub(crate) fn ocaml_typeof_expr(expr: Expression) -> Expression {
-    let Expression { desc, comment } = expr;
+    let Expression {
+        source_loc,
+        desc,
+        comment,
+    } = expr;
     match desc {
         ExpressionDesc::Number(_) | ExpressionDesc::Length(_, _) => Expression::string("number"),
         ExpressionDesc::Str { .. } => Expression::string("string"),
         ExpressionDesc::Array(_, _) => Expression::string("object"),
         ExpressionDesc::Bool(_) => Expression::string("boolean"),
         desc => Expression::new(ExpressionDesc::Typeof(Box::new(Expression {
+            source_loc: None,
             desc,
             comment,
         }))),
@@ -657,7 +629,7 @@ pub(crate) fn pure_indexed_block_item(target: &Expression, idx: i32) -> Option<E
 
     let index = usize::try_from(idx).ok()?;
     match &target.desc {
-        ExpressionDesc::Array(items, _) | ExpressionDesc::CamlBlock(items, _, _, _) => {
+        ExpressionDesc::Array(items, _) | ExpressionDesc::CamlBlock(items, _, _) => {
             items.get(index).cloned()
         }
         _ => None,
@@ -674,8 +646,8 @@ pub(crate) fn pure_record_field_item(
     }
 
     match &target.desc {
-        ExpressionDesc::CamlBlock(items, _, _, TagInfo::Record { fields, .. })
-        | ExpressionDesc::CamlBlock(items, _, _, TagInfo::RecordInlined { fields, .. }) => {
+        ExpressionDesc::CamlBlock(items, _, TagInfo::Record { fields, .. })
+        | ExpressionDesc::CamlBlock(items, _, TagInfo::RecordInlined { fields, .. }) => {
             for (item, (field_name, _)) in items.iter().zip(fields.iter()) {
                 if field_name == field {
                     return Some(item.clone());
@@ -697,8 +669,8 @@ pub(crate) fn direct_projection_from_pure_literal(
     }
 
     match &target.desc {
-        ExpressionDesc::CamlBlock(items, _, _, TagInfo::Record { fields, .. })
-        | ExpressionDesc::CamlBlock(items, _, _, TagInfo::RecordInlined { fields, .. }) => {
+        ExpressionDesc::CamlBlock(items, _, TagInfo::Record { fields, .. })
+        | ExpressionDesc::CamlBlock(items, _, TagInfo::RecordInlined { fields, .. }) => {
             if let Some(field) = field {
                 for (item, (field_name, _)) in items.iter().zip(fields.iter()) {
                     if field_name == field {
@@ -711,7 +683,7 @@ pub(crate) fn direct_projection_from_pure_literal(
                 items.get(index).cloned()
             }
         }
-        ExpressionDesc::Array(items, _) | ExpressionDesc::CamlBlock(items, _, _, _) => {
+        ExpressionDesc::Array(items, _) | ExpressionDesc::CamlBlock(items, _, _) => {
             let index = usize::try_from(index?).ok()?;
             items.get(index).cloned()
         }
@@ -721,7 +693,7 @@ pub(crate) fn direct_projection_from_pure_literal(
 
 pub(crate) fn poly_var_tag_access(target: &Expression) -> Expression {
     match &target.desc {
-        ExpressionDesc::CamlBlock(items, _, _, _) if js_expr_no_side_effects(target) => items
+        ExpressionDesc::CamlBlock(items, _, _) if js_expr_no_side_effects(target) => items
             .first()
             .cloned()
             .expect("polyvariant tag access expects a tag element"),
@@ -735,7 +707,7 @@ pub(crate) fn poly_var_tag_access(target: &Expression) -> Expression {
 
 pub(crate) fn poly_var_value_access(target: &Expression) -> Expression {
     match &target.desc {
-        ExpressionDesc::CamlBlock(items, _, _, _) if js_expr_no_side_effects(target) => items
+        ExpressionDesc::CamlBlock(items, _, _) if js_expr_no_side_effects(target) => items
             .get(1)
             .cloned()
             .expect("polyvariant value access expects a payload element"),
@@ -775,6 +747,7 @@ pub(crate) fn string_switch_iife(
         .map(|(tag, value)| StringClause {
             tag_type: SwitchCaseTag::String(tag),
             clause: CaseClause {
+                source_loc: None,
                 body: vec![Statement::return_(value)],
                 should_break: false,
                 comment: None,

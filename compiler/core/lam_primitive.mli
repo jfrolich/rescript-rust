@@ -24,18 +24,13 @@
 
 type ident = Ident.t
 
-type record_representation =
-  | Record_regular
-  | Record_inlined of {tag: int; name: string; num_nonconsts: int}
-    (* Inlined record *)
-  | Record_extension
-(* Inlined record under extension *)
-
 type t =
-  | Pmakeblock of int * Lam_tag_info.t * Asttypes.mutable_flag
+  | Pmakeblock of Lam_tag_info.t * Asttypes.mutable_flag
   | Pfield of int * Lambda.field_dbg_info
   | Psetfield of int * Lambda.set_field_dbg_info
   | Pduprecord
+  | Ptagged_template
+  | Precord_rest of string list
   | Pjs_call of {
       (* Location.t *  [loc] is passed down *)
       prim_name: string;
@@ -149,8 +144,6 @@ type t =
   | Pinit_mod
   | Pupdate_mod
   | Praw_js_code of Js_raw_info.t
-  | Pjs_fn_make of int
-  | Pjs_fn_make_unit
   | Pjs_fn_method
   | Pnull_to_opt
   | Pnull_undefined_to_opt

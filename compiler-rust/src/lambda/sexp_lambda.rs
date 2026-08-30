@@ -176,13 +176,12 @@ fn tag_info(info: &TagInfo) -> Sexp {
         TagInfo::Constructor {
             name,
             num_nonconst,
-            tag,
-            ..
+            runtime,
         } => Sexp::list(vec![
             Sexp::atom("Blk_constructor"),
             string(name),
             int(*num_nonconst),
-            int(*tag as i32),
+            variant_block_runtime(runtime),
         ]),
         TagInfo::Tuple => Sexp::atom("Blk_tuple"),
         TagInfo::PolyVar(s) => Sexp::list(vec![Sexp::atom("Blk_poly_var"), string(s)]),
@@ -198,15 +197,15 @@ fn tag_info(info: &TagInfo) -> Sexp {
         TagInfo::RecordInlined {
             name,
             num_nonconst,
-            tag,
             fields,
             mutable_flag,
+            runtime,
             ..
         } => Sexp::list(vec![
             Sexp::atom("Blk_record_inlined"),
             string(name),
             int(*num_nonconst),
-            int(*tag as i32),
+            variant_block_runtime(runtime),
             Sexp::list(fields.iter().map(|(name, _)| string(name)).collect()),
             mutable_flag_sexp(mutable_flag),
         ]),
@@ -233,11 +232,7 @@ fn tag_info(info: &TagInfo) -> Sexp {
 // Field debug info
 fn field_dbg_info(info: &FieldDbgInfo) -> Sexp {
     match info {
-        FieldDbgInfo::Record { name, mutable_flag } => Sexp::list(vec![
-            Sexp::atom("Fld_record"),
-            string(name),
-            mutable_flag_sexp(mutable_flag),
-        ]),
+        FieldDbgInfo::Record { name } => Sexp::list(vec![Sexp::atom("Fld_record"), string(name)]),
         FieldDbgInfo::Module { name } => Sexp::list(vec![Sexp::atom("Fld_module"), string(name)]),
         FieldDbgInfo::RecordInline { name } => {
             Sexp::list(vec![Sexp::atom("Fld_record_inline"), string(name)])
@@ -302,6 +297,114 @@ fn string_delim(delim: &Option<StringDelim>) -> Sexp {
     }
 }
 
+fn variant_block_type(block: &crate::types::VariantBlockType) -> Sexp {
+    use crate::types::VariantBlockType as B;
+    match block {
+        B::Int => Sexp::atom("IntType"),
+        B::String => Sexp::atom("StringType"),
+        B::Float => Sexp::atom("FloatType"),
+        B::Bigint => Sexp::atom("BigintType"),
+        B::Boolean => Sexp::atom("BooleanType"),
+        B::Instance(instance) => Sexp::list(vec![
+            Sexp::atom("InstanceType"),
+            Sexp::atom(instance.as_str()),
+        ]),
+        B::Function => Sexp::atom("FunctionType"),
+        B::Object => Sexp::atom("ObjectType"),
+        B::Unknown => Sexp::atom("UnknownType"),
+    }
+}
+
+fn variant_tag_type(tag: &crate::types::VariantTagType) -> Sexp {
+    use crate::types::VariantTagType as T;
+    match tag {
+        T::String(value) => Sexp::list(vec![Sexp::atom("String"), string(value)]),
+        T::Int(value) => Sexp::list(vec![Sexp::atom("Int"), int(*value)]),
+        T::Float(value) => Sexp::list(vec![Sexp::atom("Float"), string(value)]),
+        T::BigInt(value) => Sexp::list(vec![Sexp::atom("BigInt"), string(value)]),
+        T::Bool(value) => Sexp::list(vec![Sexp::atom("Bool"), bool_sexp(*value)]),
+        T::Null => Sexp::atom("Null"),
+        T::Undefined => Sexp::atom("Undefined"),
+        T::Untagged(block) => Sexp::list(vec![Sexp::atom("Untagged"), variant_block_type(block)]),
+    }
+}
+
+fn variant_block_runtime(runtime: &crate::types::BlockRuntime) -> Sexp {
+    Sexp::list(vec![
+        Sexp::atom("runtime"),
+        variant_tag(&runtime.tag),
+        runtime.tag_name.as_ref().map_or_else(
+            || Sexp::atom("None"),
+            |name| Sexp::list(vec![Sexp::atom("Some"), string(name)]),
+        ),
+        bool_sexp(runtime.untagged),
+    ])
+}
+
+fn variant_tag(tag: &crate::types::VariantTag) -> Sexp {
+    Sexp::list(vec![
+        Sexp::atom("tag"),
+        string(&tag.name),
+        tag.tag_type.as_ref().map_or_else(
+            || Sexp::atom("None"),
+            |tag| Sexp::list(vec![Sexp::atom("Some"), variant_tag_type(tag)]),
+        ),
+    ])
+}
+
+fn variant_constructor_case(case: &crate::types::VariantConstructorCase) -> Sexp {
+    match case {
+        crate::types::VariantConstructorCase::Constant(tag) => {
+            Sexp::list(vec![Sexp::atom("Constant"), variant_tag(tag)])
+        }
+        crate::types::VariantConstructorCase::Block(block) => Sexp::list(vec![
+            Sexp::atom("Block"),
+            variant_block_runtime(&block.runtime),
+            block.block_type.as_ref().map_or_else(
+                || Sexp::atom("None"),
+                |ty| Sexp::list(vec![Sexp::atom("Some"), variant_block_type(ty)]),
+            ),
+        ]),
+    }
+}
+
+fn variant_matching_facts(facts: &crate::types::VariantMatchingFacts) -> Sexp {
+    Sexp::list(vec![
+        Sexp::atom("matching_facts"),
+        facts.tag_name.as_ref().map_or_else(
+            || Sexp::atom("None"),
+            |name| Sexp::list(vec![Sexp::atom("Some"), string(name)]),
+        ),
+        Sexp::list(facts.block_types.iter().map(variant_block_type).collect()),
+        Sexp::list(facts.literal_tags.iter().map(variant_tag_type).collect()),
+        bool_sexp(facts.has_null),
+        bool_sexp(facts.has_undefined),
+        bool_sexp(facts.has_other_literal),
+    ])
+}
+
+fn switch_key(key: &crate::lambda::SwitchKey) -> Sexp {
+    match key {
+        crate::lambda::SwitchKey::Int(value) => {
+            Sexp::list(vec![Sexp::atom("Switch_int"), int(*value)])
+        }
+        crate::lambda::SwitchKey::Constructor(case) => Sexp::list(vec![
+            Sexp::atom("Switch_constructor"),
+            variant_constructor_case(case),
+        ]),
+    }
+}
+
+fn switch_dispatch(dispatch: &crate::lambda::SwitchDispatch) -> Sexp {
+    match dispatch {
+        crate::lambda::SwitchDispatch::Direct => Sexp::atom("Switch_direct"),
+        crate::lambda::SwitchDispatch::Variant(facts) => Sexp::list(vec![
+            Sexp::atom("Switch_variant"),
+            variant_matching_facts(facts),
+        ]),
+    }
+}
+
 // Constant
 fn constant(c: &Constant) -> Sexp {
     match c {
@@ -321,6 +424,9 @@ fn constant(c: &Constant) -> Sexp {
             Sexp::atom(i.to_string()),
             pointer_info(comment),
         ]),
+        Constant::Constructor(tag) => {
+            Sexp::list(vec![Sexp::atom("Const_constructor"), variant_tag(tag)])
+        }
         Constant::Char(c) => Sexp::list(vec![Sexp::atom("Const_char"), int(*c)]),
         Constant::String { s, delim } => Sexp::list(vec![
             Sexp::atom("Const_string"),
@@ -336,12 +442,11 @@ fn constant(c: &Constant) -> Sexp {
         ]),
         Constant::Pointer(s) => Sexp::list(vec![Sexp::atom("Const_pointer"), string(s)]),
         Constant::Block {
-            tag,
             tag_info: info,
             elements,
+            ..
         } => Sexp::list(vec![
             Sexp::atom("Const_block"),
-            int(*tag),
             tag_info(info),
             Sexp::list(elements.iter().map(constant).collect()),
         ]),
@@ -370,8 +475,6 @@ fn primitive(prim: &Primitive, _with_locs: bool) -> Sexp {
             bool_sexp(*setter),
         ]),
         Primitive::PfnArity => Sexp::atom("Pfn_arity"),
-        Primitive::PjsFnMake(i) => Sexp::list(vec![Sexp::atom("Pjs_fn_make"), int(*i)]),
-        Primitive::PjsFnMakeUnit => Sexp::atom("Pjs_fn_make_unit"),
         Primitive::PjsFnMethod => Sexp::atom("Pjs_fn_method"),
         Primitive::Pdebugger => Sexp::atom("Pdebugger"),
         Primitive::PrawJsCode(info) => {
@@ -395,9 +498,8 @@ fn primitive(prim: &Primitive, _with_locs: bool) -> Sexp {
         Primitive::Pnull => Sexp::atom("Pnull"),
         Primitive::Pundefined => Sexp::atom("Pundefined"),
         Primitive::Pimport => Sexp::atom("Pimport"),
-        Primitive::Pmakeblock(tag, info, m) => Sexp::list(vec![
+        Primitive::Pmakeblock(info, m) => Sexp::list(vec![
             Sexp::atom("Pmakeblock"),
-            int(*tag),
             tag_info(info),
             mutable_sexp(m),
         ]),
@@ -410,6 +512,11 @@ fn primitive(prim: &Primitive, _with_locs: bool) -> Sexp {
             set_field_dbg_info(info),
         ]),
         Primitive::Pduprecord => Sexp::atom("Pduprecord"),
+        Primitive::PrecordRest(excluded) => Sexp::list(
+            std::iter::once(Sexp::atom("Precord_rest"))
+                .chain(excluded.iter().map(|label| string(label)))
+                .collect(),
+        ),
         Primitive::PjsCall {
             prim_name,
             dynamic_import,
@@ -508,6 +615,7 @@ fn primitive(prim: &Primitive, _with_locs: bool) -> Sexp {
         Primitive::PisPolyVarBlock => Sexp::atom("Pis_poly_var_block"),
         Primitive::Pisout(n) => Sexp::list(vec![Sexp::atom("Pisout"), int(*n)]),
         Primitive::Pawait => Sexp::atom("Pawait"),
+        Primitive::PtaggedTemplate => Sexp::atom("Ptagged_template"),
         Primitive::Phash => Sexp::atom("Phash"),
         Primitive::PhashMixint => Sexp::atom("Phash_mixint"),
         Primitive::PhashMixstring => Sexp::atom("Phash_mixstring"),
@@ -691,7 +799,7 @@ fn lambda_switch(sw: &LambdaSwitch, with_locs: bool) -> Sexp {
             Sexp::list(
                 sw.sw_consts
                     .iter()
-                    .map(|(tag, lam)| Sexp::list(vec![int(*tag), lambda(lam, with_locs)]))
+                    .map(|(tag, lam)| Sexp::list(vec![switch_key(tag), lambda(lam, with_locs)]))
                     .collect(),
             ),
         ]),
@@ -704,7 +812,7 @@ fn lambda_switch(sw: &LambdaSwitch, with_locs: bool) -> Sexp {
             Sexp::list(
                 sw.sw_blocks
                     .iter()
-                    .map(|(tag, lam)| Sexp::list(vec![int(*tag), lambda(lam, with_locs)]))
+                    .map(|(tag, lam)| Sexp::list(vec![switch_key(tag), lambda(lam, with_locs)]))
                     .collect(),
             ),
         ]),
@@ -716,50 +824,45 @@ fn lambda_switch(sw: &LambdaSwitch, with_locs: bool) -> Sexp {
             ),
         ]),
         Sexp::list(vec![
-            Sexp::atom("sw_names"),
-            switch_names_sexp(&sw.sw_names),
+            Sexp::atom("sw_dispatch"),
+            switch_dispatch(&sw.sw_dispatch),
         ]),
     ])
 }
 
-fn switch_names_sexp(names: &Option<crate::lambda::SwitchNames>) -> Sexp {
-    match names {
-        None => Sexp::atom("None"),
-        Some(n) => Sexp::list(vec![
-            Sexp::atom("Some"),
-            Sexp::list({
-                let mut items = vec![Sexp::atom("consts")];
-                items.extend(n.consts.iter().map(|tag| string(&tag.name)));
-                items
-            }),
-            Sexp::list({
-                let mut items = vec![Sexp::atom("blocks")];
-                items.extend(n.blocks.iter().map(|block| string(&block.tag.name)));
-                items
-            }),
-        ]),
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{constant, escape_ocaml_string, switch_names_sexp};
+    use super::{constant, escape_ocaml_string, switch_key};
     use crate::lambda::lam_constant::{Constant, StringDelim};
-    use crate::lambda::{SwitchBlock, SwitchNames, SwitchTag};
 
     #[test]
-    fn prints_switch_names_consts_and_blocks() {
-        let names = Some(SwitchNames {
-            consts: vec![SwitchTag::named("Null")],
-            blocks: vec![SwitchBlock::named("Boolean"), SwitchBlock::named("String")],
-        });
+    fn prints_semantic_constructor_switch_keys() {
+        let constant_key = crate::lambda::SwitchKey::Constructor(
+            crate::types::VariantConstructorCase::Constant(crate::types::VariantTag {
+                name: "Null".to_string(),
+                tag_type: None,
+            }),
+        );
+        let block_key = crate::lambda::SwitchKey::Constructor(
+            crate::types::VariantConstructorCase::Block(crate::types::VariantBlock {
+                runtime: crate::types::BlockRuntime {
+                    tag: crate::types::VariantTag {
+                        name: "Boolean".to_string(),
+                        tag_type: None,
+                    },
+                    tag_name: None,
+                    untagged: false,
+                },
+                block_type: None,
+            }),
+        );
 
-        let printed = switch_names_sexp(&names).to_string();
-        assert!(printed.contains("(consts"));
-        assert!(printed.contains("\"Null\""));
-        assert!(printed.contains("(blocks"));
-        assert!(printed.contains("\"Boolean\""));
-        assert!(printed.contains("\"String\""));
+        let constant_printed = switch_key(&constant_key).to_string();
+        let block_printed = switch_key(&block_key).to_string();
+        assert!(constant_printed.contains("Switch_constructor"));
+        assert!(constant_printed.contains("\"Null\""));
+        assert!(block_printed.contains("Switch_constructor"));
+        assert!(block_printed.contains("\"Boolean\""));
     }
 
     #[test]

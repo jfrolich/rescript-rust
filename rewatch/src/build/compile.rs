@@ -24,6 +24,7 @@ use rescript_compiler::parser::ast::{Signature, Structure};
 use rescript_compiler::types::path::Path as TypePath;
 use std::cmp::Ordering;
 use std::collections::BinaryHeap;
+use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
 use std::path::Path;
 use std::path::PathBuf;
 use std::process::Command;
@@ -33,13 +34,29 @@ use std::sync::mpsc;
 use std::time::Duration;
 use std::time::Instant;
 use std::time::SystemTime;
-use tracing::{Span, info_span};
+use tracing::{Span, info_span, instrument};
+
+/// Decode captured compiler output (stdout or stderr) into a String.
+///
+/// The output is not guaranteed to be valid UTF-8: a code frame can truncate a
+/// multi-byte character. Decode lossily so a bad byte becomes a replacement
+/// character instead of crashing the build.
+fn compiler_output_to_string(bytes: &[u8]) -> String {
+    String::from_utf8_lossy(bytes).to_string()
+}
 
 /// Execute js-post-build command for a compiled JavaScript file.
 /// The command runs in the directory containing the rescript.json that defines it.
 /// The absolute path to the JS file is passed as an argument.
 fn execute_post_build_command(cmd: &str, js_file_path: &Path, working_dir: &Path) -> Result<()> {
     let full_command = format!("{} {}", cmd, js_file_path.display());
+
+    let _span = info_span!(
+        "build.js_post_build",
+        command = %cmd,
+        js_file = %js_file_path.display(),
+    )
+    .entered();
 
     debug!(
         "Executing js-post-build: {} (in {})",
@@ -398,6 +415,11 @@ fn compute_module_costs(
 
 /// Compute the weighted critical-path priority of every module in the universe:
 /// `priority(m) = cost(m) + max(priority(d) for d in in-universe dependents of m)`.
+struct CompileWarning {
+    module_name: String,
+    package_name: String,
+    warning: String,
+}
 /// Runs a reverse-topological sweep from leaves to roots. Modules stuck in a
 /// cycle get priority 0, and the actual cycle is diagnosed later by
 /// `dependency_cycle::find` when the dispatcher detects a stall.
@@ -550,6 +572,31 @@ fn compile_one(
             }
         }
         SourceType::SourceFile(source_file) => {
+            // Construct span + attributes only when a subscriber is listening.
+            // Otherwise root_config.get_package_specs() (which clones) and the
+            // attribute formatting run per-module on the build hot path.
+            let _file_span = if tracing::enabled!(tracing::Level::INFO) {
+                let root_config = build_state.get_root_config();
+                let specs = root_config.get_package_specs();
+                // A package can be built under multiple specs (e.g. ESM + CJS).
+                // Report all of them joined by "," instead of silently picking
+                // the first — the compile_file span covers work for every spec.
+                let suffix = specs
+                    .iter()
+                    .map(|s| root_config.get_suffix(s))
+                    .collect::<Vec<_>>()
+                    .join(",");
+                let module_system = specs
+                    .iter()
+                    .map(|s| s.module.as_str())
+                    .collect::<Vec<_>>()
+                    .join(",");
+                let namespace = package.namespace.to_suffix().unwrap_or_default();
+                info_span!("build.compile_file", module = %module_name, package = %package.name, suffix, module_system, namespace).entered()
+            } else {
+                tracing::Span::none().entered()
+            };
+
             let cmi_path = helpers::get_compiler_asset(
                 package,
                 &package.namespace,
@@ -610,6 +657,54 @@ fn compile_one(
 /// The sexp starts with "(structure" or "(signature" and continues to the end.
 /// Everything before that is warnings.
 /// Returns (warnings, Option<sexp>).
+fn extract_warning_prefix_from_sexp_file(path: &Path) -> std::io::Result<String> {
+    const MAX_WARNING_BYTES: usize = 16 * 1024 * 1024;
+
+    let file = std::fs::File::open(path)?;
+    let mut reader = BufReader::new(file);
+    let mut warnings = Vec::new();
+    let mut offset = 0_u64;
+    let mut at_line_start = true;
+    let mut sexp_offset = None;
+
+    loop {
+        let buffer = reader.fill_buf()?;
+        if buffer.is_empty() {
+            break;
+        }
+        if at_line_start && (buffer.starts_with(b"(structure") || buffer.starts_with(b"(signature")) {
+            sexp_offset = Some(offset);
+            break;
+        }
+
+        let consumed = buffer
+            .iter()
+            .position(|byte| *byte == b'\n')
+            .map_or(buffer.len(), |position| position + 1);
+        let remaining = MAX_WARNING_BYTES.saturating_sub(warnings.len());
+        warnings.extend_from_slice(&buffer[..consumed.min(remaining)]);
+        at_line_start = buffer[consumed - 1] == b'\n';
+        reader.consume(consumed);
+        offset += consumed as u64;
+    }
+
+    if warnings.len() == MAX_WARNING_BYTES {
+        warnings.extend_from_slice(b"\n[compiler warning output truncated]\n");
+    }
+
+    if let Some(sexp_offset) = sexp_offset.filter(|offset| *offset > 0) {
+        let mut source = reader.into_inner();
+        source.seek(SeekFrom::Start(sexp_offset))?;
+        let parent = path.parent().unwrap_or_else(|| Path::new("."));
+        let mut replacement = tempfile::NamedTempFile::new_in(parent)?;
+        std::io::copy(&mut source, &mut replacement)?;
+        replacement.flush()?;
+        replacement.persist(path).map_err(|error| error.error)?;
+    }
+
+    Ok(String::from_utf8_lossy(&warnings).into_owned())
+}
+
 fn extract_sexp_from_stderr(stderr: &str) -> (String, Option<String>) {
     // Find the start of the sexp - it begins with "(structure" or "(signature" at the start of a line
     let pos = stderr
@@ -632,6 +727,62 @@ fn extract_sexp_from_stderr(stderr: &str) -> (String, Option<String>) {
     }
 }
 
+fn collect_stored_warnings_for_modules_not_recompiled(
+    build_state: &BuildState,
+    recompiled_modules: &AHashSet<String>,
+) -> Vec<CompileWarning> {
+    // Collect warnings from modules that were not recompiled in this build but still have stored
+    // warnings from a previous compilation. This includes ready modules that were in the compile
+    // universe but never scheduled because an earlier module failed.
+    let mut warnings = Vec::new();
+    for (module_name, module) in build_state.modules.iter() {
+        if recompiled_modules.contains(module_name) {
+            continue;
+        }
+        if let SourceType::SourceFile(ref source_file) = module.source_type {
+            if let Some(ref warning) = source_file.implementation.compile_warnings {
+                warnings.push(CompileWarning {
+                    module_name: module_name.clone(),
+                    package_name: module.package_name.clone(),
+                    warning: warning.clone(),
+                });
+            }
+            if let Some(ref interface) = source_file.interface
+                && let Some(ref warning) = interface.compile_warnings
+            {
+                warnings.push(CompileWarning {
+                    module_name: module_name.clone(),
+                    package_name: module.package_name.clone(),
+                    warning: warning.clone(),
+                });
+            }
+        }
+    }
+    warnings
+}
+
+// Warning output should use the same deterministic module-name order whether a
+// warning was emitted by this compile pass or replayed from a previous one.
+fn append_compile_warnings(
+    build_state: &BuildState,
+    mut warning_entries: Vec<CompileWarning>,
+    compile_warnings: &mut String,
+) {
+    warning_entries.sort_by(|a, b| a.module_name.cmp(&b.module_name));
+    for CompileWarning {
+        package_name,
+        warning,
+        ..
+    } in warning_entries
+    {
+        if let Some(package) = build_state.get_package(&package_name) {
+            logs::append(package, &warning);
+        }
+        compile_warnings.push_str(&warning);
+    }
+}
+
+#[instrument(name = "build.compile", skip_all)]
 pub fn compile(
     build_state: &mut BuildCommandState,
     show_progress: bool,
@@ -662,6 +813,7 @@ pub fn compile(
     // registries so stale entries don't remain resolvable in watch mode.
     if build_state.build_mode().is_in_process() {
         build_state.purge_deleted_modules(&build_state.build_state.deleted_modules.clone());
+        build_state.clear_gentype_contexts();
     }
 
     // In --in-process mode, synthesize namespace module signatures in memory
@@ -1095,6 +1247,7 @@ pub fn compile(
 
     let mut compile_errors = String::new();
     let mut compile_warnings = String::new();
+    let mut warning_entries = Vec::new();
     let mut num_compiled_modules = 0;
 
     // Persist propagated dirtiness back onto build_state. Modules that were
@@ -1114,6 +1267,14 @@ pub fn compile(
     // though modules complete in arbitrary order.
     results_buffer.sort_by(|a, b| a.module_name.cmp(&b.module_name));
 
+    // These timestamps are used as a compile-generation marker by
+    // mark_modules_with_expired_deps_dirty, not as precise wall-clock compile
+    // times. All modules successfully compiled in one pass are mutually
+    // up-to-date for that pass, so they must receive the same timestamp.
+    let compile_timestamp = SystemTime::now();
+
+    let mut recompiled_modules = AHashSet::<String>::new();
+
     for msg in results_buffer {
         let CompletionMsg {
             module_name,
@@ -1125,6 +1286,7 @@ pub fn compile(
 
         if is_compiled {
             num_compiled_modules += 1;
+            recompiled_modules.insert(module_name.clone());
         }
 
         let package_name = {
@@ -1155,6 +1317,7 @@ pub fn compile(
                     (None, None)
                 }
                 SourceType::SourceFile(ref mut source_file) => match &result {
+                    Ok(None) if !is_compiled => (None, None),
                     Ok(Some(err)) => {
                         let warning_text = err.to_string();
                         source_file.implementation.compile_state = CompileState::Warning;
@@ -1178,6 +1341,7 @@ pub fn compile(
                 module.source_type
             {
                 match &interface_result {
+                    Some(Ok(None)) if !is_compiled => (None, None),
                     Some(Ok(Some(err))) => {
                         let warning_text = err.to_string();
                         source_file.interface.as_mut().unwrap().compile_state = CompileState::Warning;
@@ -1204,24 +1368,30 @@ pub fn compile(
 
             if result.is_ok() && interface_result.as_ref().is_none_or(|r| r.is_ok()) {
                 module.compile_dirty = false;
-                module.last_compiled_cmi = Some(SystemTime::now());
-                module.last_compiled_cmt = Some(SystemTime::now());
+                module.last_compiled_cmi = Some(compile_timestamp);
+                module.last_compiled_cmt = Some(compile_timestamp);
             }
 
             (compile_warning, compile_error, interface_warning, interface_error)
         };
 
         if let Some(warning) = compile_warning {
-            logs::append(package, &warning);
-            compile_warnings.push_str(&warning);
+            warning_entries.push(CompileWarning {
+                module_name: module_name.clone(),
+                package_name: package_name.clone(),
+                warning,
+            });
         }
         if let Some(error) = compile_error {
             logs::append(package, &error);
             compile_errors.push_str(&error);
         }
         if let Some(warning) = interface_warning {
-            logs::append(package, &warning);
-            compile_warnings.push_str(&warning);
+            warning_entries.push(CompileWarning {
+                module_name: module_name.clone(),
+                package_name: package_name.clone(),
+                warning,
+            });
         }
         if let Some(error) = interface_error {
             logs::append(package, &error);
@@ -1258,31 +1428,13 @@ pub fn compile(
         compile_errors.push_str(&message);
     }
 
-    // Collect warnings from modules that were not recompiled in this build
-    // but still have stored warnings from a previous compilation.
-    // This ensures warnings are not lost during incremental builds in watch mode.
-    for (module_name, module) in build_state.modules.iter() {
-        if compile_universe.contains(module_name) {
-            continue;
-        }
-        if let SourceType::SourceFile(ref source_file) = module.source_type {
-            let package = build_state.get_package(&module.package_name);
-            if let Some(ref warning) = source_file.implementation.compile_warnings {
-                if let Some(package) = package {
-                    logs::append(package, warning);
-                }
-                compile_warnings.push_str(warning);
-            }
-            if let Some(ref interface) = source_file.interface
-                && let Some(ref warning) = interface.compile_warnings
-            {
-                if let Some(package) = package {
-                    logs::append(package, warning);
-                }
-                compile_warnings.push_str(warning);
-            }
-        }
-    }
+    // Collect replayed warnings into the same list as fresh warnings so mixed
+    // output matches the sorted order used when every module compiles normally.
+    warning_entries.extend(collect_stored_warnings_for_modules_not_recompiled(
+        &build_state.build_state,
+        &recompiled_modules,
+    ));
+    append_compile_warnings(&build_state.build_state, warning_entries, &mut compile_warnings);
 
     Ok((compile_errors, compile_warnings, num_compiled_modules))
 }
@@ -1335,6 +1487,7 @@ pub fn compiler_args(
     is_local_dep: bool,
     // Command-line --warn-error flag override (takes precedence over rescript.json config)
     warn_error_override: Option<String>,
+    source_map_command: config::SourceMapCommand,
     // Pre-expanded source directories for the current package (used by gentype).
     // Pass an empty slice when unavailable (e.g. the compiler-args CLI command).
     current_package_dirs: &[PathBuf],
@@ -1369,6 +1522,7 @@ pub fn compiler_args(
     let jsx_module_args = root_config.get_jsx_module_args();
     let jsx_mode_args = root_config.get_jsx_mode_args();
     let jsx_preserve_args = root_config.get_jsx_preserve_args();
+    let source_map_args = root_config.get_source_map_args(source_map_command);
     let bsb_project_root = project_context.get_root_path();
     let dep_paths: Vec<(String, PathBuf)> = if config.gentype_config.is_some() {
         let resolved = packages.as_ref().map(|pkgs| {
@@ -1453,6 +1607,7 @@ pub fn compiler_args(
         jsx_module_args,
         jsx_mode_args,
         jsx_preserve_args,
+        source_map_args,
         bsc_flags.to_owned(),
         warning_args,
         gentype_arg,
@@ -1651,8 +1806,9 @@ fn build_compiler_options(
     package: &packages::Package,
     module_name: &str,
     source_file_path: &Path,
-    build_state: &BuildState,
+    build_command_state: &BuildCommandState,
 ) -> Result<rescript_compiler::driver::CompilerOptions> {
+    let build_state = &build_command_state.build_state;
     let root_config = build_state.get_root_config();
     let project_context = &build_state.project_context;
 
@@ -1730,47 +1886,111 @@ fn build_compiler_options(
     let js_output_targets = js_output_targets_for_source(package, source_file_path, root_config);
     let output_module_format = js_output_targets.first().map(|target| target.module_format);
     let output_path = js_output_targets.first().map(|target| target.path.clone());
-    let gentype_config = if package.config.gentype_config.is_some() {
-        // Mirrors the bsc CLI path in compiler/bsc/rescript_compiler_main.ml:300-343:
-        // rewatch first materializes the exact -bs-gentype-* flags, then the
-        // Rust compiler builds GenTypeConfig.t from that flag stream.
-        let current_package_dirs: &[PathBuf] = package.gentype_dirs.as_deref().unwrap_or(&[]);
-        let dep_paths: Vec<(String, PathBuf)> = package
-            .config
-            .dependencies
-            .as_ref()
-            .map(|deps| {
-                deps.iter()
-                    .filter_map(|dep| {
-                        let name = dep.name();
-                        build_state
-                            .packages
-                            .get(name)
-                            .map(|pkg| (name.to_string(), pkg.path.clone()))
+    let gentype_context = package.config.gentype_config.as_ref().map(|_| {
+        build_command_state.gentype_context(&package.path, || {
+            // Mirrors the bsc CLI path in compiler/bsc/rescript_compiler_main.ml:300-343:
+            // rewatch first materializes the exact -bs-gentype-* flags, then the
+            // Rust compiler builds GenTypeConfig.t from that flag stream.
+            let current_package_dirs: &[PathBuf] = package.gentype_dirs.as_deref().unwrap_or(&[]);
+            let dep_paths: Vec<(String, PathBuf)> = package
+                .config
+                .dependencies
+                .as_ref()
+                .map(|deps| {
+                    deps.iter()
+                        .filter_map(|dep| {
+                            let name = dep.name();
+                            build_state
+                                .packages
+                                .get(name)
+                                .map(|pkg| (name.to_string(), pkg.path.clone()))
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            // OCaml bsc wires -bs-project-root into GenTypeConfig.project_root at
+            // compiler/bsc/rescript_compiler_main.ml:266-269 before
+            // compiler/gentype/GenTypeConfig.ml:124-131 builds Config.t.
+            let mut gentype_args = package.config.get_project_root_args();
+            gentype_args.extend(package.config.get_gentype_args(
+                current_package_dirs,
+                Some(project_context.get_root_path()),
+                &dep_paths,
+            ));
+            rescript_compiler::gentype::config::build_config_from_cli_args(
+                package.config.get_namespace().to_suffix(),
+                &gentype_args,
+            )
+        })
+    });
+    let gentype_config = gentype_context.as_ref().map(|context| context.config.clone());
+    let gentype_resolver = gentype_context.map(|context| context.resolver.clone());
+
+    let (source_map, source_map_sources_content, source_map_root) =
+        match root_config.effective_source_map_mode(build_state.source_map_command) {
+            Some(config::SourceMapMode::Linked) => (
+                rescript_compiler::js_ir::source_map::SourceMapMode::Linked,
+                root_config
+                    .source_map
+                    .as_ref()
+                    .and_then(|value| match value {
+                        config::SourceMapConfig::Options(options) => options.sources_content,
+                        config::SourceMapConfig::Disabled => None,
                     })
-                    .collect()
-            })
-            .unwrap_or_default();
-        // OCaml bsc wires -bs-project-root into GenTypeConfig.project_root at
-        // compiler/bsc/rescript_compiler_main.ml:266-269 before
-        // compiler/gentype/GenTypeConfig.ml:124-131 builds Config.t. Keep
-        // the in-process path on the same flag-shaped input so
-        // compiler/gentype/Paths.ml:48-56 and
-        // compiler/gentype/ModuleResolver.ml:111-164 resolve package-local
-        // output/source directories from the package root.
-        let mut gentype_args = package.config.get_project_root_args();
-        gentype_args.extend(package.config.get_gentype_args(
-            current_package_dirs,
-            Some(project_context.get_root_path()),
-            &dep_paths,
-        ));
-        Some(rescript_compiler::gentype::config::build_config_from_cli_args(
-            package.config.get_namespace().to_suffix(),
-            &gentype_args,
-        ))
-    } else {
-        None
-    };
+                    .unwrap_or(false),
+                root_config
+                    .source_map
+                    .as_ref()
+                    .and_then(|value| match value {
+                        config::SourceMapConfig::Options(options) => options.source_root.clone(),
+                        config::SourceMapConfig::Disabled => None,
+                    })
+                    .unwrap_or_default(),
+            ),
+            Some(config::SourceMapMode::Inline) => (
+                rescript_compiler::js_ir::source_map::SourceMapMode::Inline,
+                root_config
+                    .source_map
+                    .as_ref()
+                    .and_then(|value| match value {
+                        config::SourceMapConfig::Options(options) => options.sources_content,
+                        config::SourceMapConfig::Disabled => None,
+                    })
+                    .unwrap_or(false),
+                root_config
+                    .source_map
+                    .as_ref()
+                    .and_then(|value| match value {
+                        config::SourceMapConfig::Options(options) => options.source_root.clone(),
+                        config::SourceMapConfig::Disabled => None,
+                    })
+                    .unwrap_or_default(),
+            ),
+            Some(config::SourceMapMode::Hidden) => (
+                rescript_compiler::js_ir::source_map::SourceMapMode::Hidden,
+                root_config
+                    .source_map
+                    .as_ref()
+                    .and_then(|value| match value {
+                        config::SourceMapConfig::Options(options) => options.sources_content,
+                        config::SourceMapConfig::Disabled => None,
+                    })
+                    .unwrap_or(false),
+                root_config
+                    .source_map
+                    .as_ref()
+                    .and_then(|value| match value {
+                        config::SourceMapConfig::Options(options) => options.source_root.clone(),
+                        config::SourceMapConfig::Disabled => None,
+                    })
+                    .unwrap_or_default(),
+            ),
+            None => (
+                rescript_compiler::js_ir::source_map::SourceMapMode::None,
+                false,
+                String::new(),
+            ),
+        };
 
     Ok(rescript_compiler::driver::CompilerOptions {
         include_paths,
@@ -1782,6 +2002,9 @@ fn build_compiler_options(
         output_path,
         output_module_format,
         js_output_targets,
+        source_map,
+        source_map_sources_content,
+        source_map_root,
         jsx_version,
         experimental_let_unwrap,
         jsx_preserve: parsed_flags.jsx_preserve,
@@ -1797,6 +2020,7 @@ fn build_compiler_options(
         package_name: Some(package.config.name.clone()),
         make_runtime: parsed_flags.make_runtime,
         gentype_config,
+        gentype_resolver,
         ..Default::default()
     })
 }
@@ -1856,10 +2080,12 @@ fn in_memory_module_info_for_package(
     is_pure: bool,
     cmj_export_constants: AHashMap<String, CmjExportConstant>,
     cmj_export_arities: AHashMap<String, CmjExportArity>,
+    hoisted_exports: Vec<rescript_compiler::lambda::HoistedExport>,
     is_runtime: bool,
 ) -> InMemoryModuleInfo {
     InMemoryModuleInfo::new(source_path, is_pure, cmj_export_constants, is_runtime)
         .with_cmj_export_arities(cmj_export_arities)
+        .with_cmj_hoisted_exports(hoisted_exports)
         .with_package(
             package.name.clone(),
             package.path.clone(),
@@ -1876,6 +2102,7 @@ fn js_metadata_registry_updates_for_package(
     is_pure: bool,
     cmj_export_constants: AHashMap<String, CmjExportConstant>,
     cmj_export_arities: AHashMap<String, CmjExportArity>,
+    hoisted_exports: Vec<rescript_compiler::lambda::HoistedExport>,
     is_runtime: bool,
     has_interface: bool,
     interface_registry_update: Option<PendingRegistryUpdate>,
@@ -1889,6 +2116,7 @@ fn js_metadata_registry_updates_for_package(
         is_pure,
         cmj_export_constants,
         cmj_export_arities,
+        hoisted_exports,
         is_runtime,
     );
 
@@ -1988,6 +2216,12 @@ fn write_compiled_js_outputs(
 
     for output in js_outputs {
         write_file_creating_parent_on_missing(&output.path, &output.code)?;
+        let map_path = PathBuf::from(format!("{}.map", output.path.display()));
+        if let Some(source_map) = output.source_map.as_deref() {
+            write_file_creating_parent_on_missing(&map_path, source_map)?;
+        } else {
+            let _ = std::fs::remove_file(map_path);
+        }
     }
     Ok(())
 }
@@ -2485,7 +2719,8 @@ fn compile_runtime_module_from_source(
         compile_result.cmj_export_constants,
         true,
     )
-    .with_cmj_export_arities(compile_result.cmj_export_arities);
+    .with_cmj_export_arities(compile_result.cmj_export_arities)
+    .with_cmj_hoisted_exports(compile_result.hoisted_exports);
 
     let mut shared_registry = build_state.module_registry.lock().unwrap();
     if has_runtime_interface {
@@ -2632,7 +2867,7 @@ fn parse_runtime_signature(path: &Path, source: &str) -> Result<(ParseArena, Sig
             .into_iter()
             .collect();
         let mut arena = parser.into_arena();
-        arena.reserve_typecheck_synthetic_capacity();
+        rescript_compiler::types::typecore::prepare_typecheck_arena(&mut arena);
         Ok((arena, signature, deps))
     })
 }
@@ -2662,7 +2897,7 @@ fn parse_runtime_structure(path: &Path, source: &str) -> Result<(ParseArena, Str
             .into_iter()
             .collect();
         let mut arena = parser.into_arena();
-        arena.reserve_typecheck_synthetic_capacity();
+        rescript_compiler::types::typecore::prepare_typecheck_arena(&mut arena);
         Ok((arena, structure, deps))
     })
 }
@@ -2884,7 +3119,7 @@ fn compile_module_in_process_to_js_boundary(
     let has_interface = source_file.interface.is_some();
 
     // Build compiler options from package config
-    let mut options = build_compiler_options(package, module_name, implementation_path, build_state)?;
+    let mut options = build_compiler_options(package, module_name, implementation_path, build_command_state)?;
     let root_config = build_state.get_root_config();
 
     let source_abs = Path::new(&package.path).join(implementation_path);
@@ -2897,6 +3132,7 @@ fn compile_module_in_process_to_js_boundary(
         provisional_is_pure,
         AHashMap::new(),
         AHashMap::new(),
+        Vec::new(),
         is_runtime,
     );
 
@@ -3240,7 +3476,7 @@ fn finish_in_process_js_inner(
         Span::none().entered()
     };
     let root_config = build_command_state.get_root_config();
-    let options = build_compiler_options(package, &module_name, &implementation_path, build_state)?;
+    let options = build_compiler_options(package, &module_name, &implementation_path, build_command_state)?;
     let metadata_interface_registry_update = interface_registry_update;
     let mut metadata_registry_updates: Option<Vec<PendingRegistryUpdate>> = None;
     let mut metadata_hook = |metadata: rescript_compiler::driver::InProcessJsMetadataReady| -> Result<()> {
@@ -3251,6 +3487,7 @@ fn finish_in_process_js_inner(
             metadata.is_pure,
             metadata.cmj_export_constants,
             metadata.cmj_export_arities,
+            metadata.hoisted_exports,
             is_runtime,
         );
         let registry_updates = vec![PendingRegistryUpdate {
@@ -3302,6 +3539,7 @@ fn finish_in_process_js_inner(
             compile_result.is_pure,
             compile_result.cmj_export_constants.clone(),
             compile_result.cmj_export_arities.clone(),
+            compile_result.hoisted_exports.clone(),
             is_runtime,
             has_interface,
             metadata_interface_registry_update,
@@ -3424,6 +3662,7 @@ fn compile_file(
         is_type_dev,
         package.is_local_dep,
         warn_error_override,
+        build_state.source_map_command,
         current_package_dirs,
     )?;
 
@@ -3463,26 +3702,43 @@ fn compile_file(
             .spawn()
         {
             Ok(mut child) => {
+                // Drain piped stderr while the compiler is running. Waiting with try_wait while a
+                // full pipe blocks the child would otherwise turn ordinary diagnostics into a
+                // misleading timeout.
+                let stderr_reader = child.stderr.take().map(|mut stderr| {
+                    std::thread::spawn(move || {
+                        let mut bytes = Vec::new();
+                        stderr.read_to_end(&mut bytes).map(|_| bytes)
+                    })
+                });
                 let timeout = std::time::Duration::from_secs(30);
                 let start = std::time::Instant::now();
                 let mut timed_out = false;
-                let mut exit_status = None;
-                loop {
+                let mut wait_error = None;
+                let exit_status = loop {
                     match child.try_wait() {
-                        Ok(Some(status)) => {
-                            exit_status = Some(status);
-                            break;
-                        }
+                        Ok(Some(status)) => break Some(status),
                         Ok(None) if start.elapsed() > timeout => {
                             let _ = child.kill();
                             let _ = child.wait();
                             timed_out = true;
-                            break;
+                            break None;
                         }
                         Ok(None) => std::thread::sleep(std::time::Duration::from_millis(50)),
-                        Err(_) => break,
+                        Err(error) => {
+                            let _ = child.kill();
+                            let _ = child.wait();
+                            wait_error = Some(error);
+                            break None;
+                        }
                     }
-                }
+                };
+                let stderr = match stderr_reader {
+                    Some(reader) => reader
+                        .join()
+                        .map_err(|_| anyhow!("bsc stderr reader thread panicked"))??,
+                    None => Vec::new(),
+                };
 
                 if timed_out {
                     if dump_typed_sexp {
@@ -3496,9 +3752,42 @@ fn compile_file(
                     );
                     log::warn!("{}", msg);
                     return Ok(Some(msg));
-                } else if exit_status.is_some_and(|s| !s.success()) {
-                    log::warn!("bsc subprocess crashed for `{module_name}`");
                 }
+                if let Some(error) = wait_error {
+                    let msg = format!("bsc subprocess failed while waiting for `{module_name}`: {error}");
+                    log::warn!("{msg}");
+                    return Ok(Some(msg));
+                }
+                if let Some(status) = exit_status.filter(|status| !status.success()) {
+                    let diagnostics = if dump_typed_sexp {
+                        let sexp_path = ocaml_build_path_abs.join(format!("{basename}.sexp"));
+                        std::fs::read_to_string(&sexp_path).unwrap_or_default()
+                    } else {
+                        String::from_utf8_lossy(&stderr).into_owned()
+                    };
+
+                    // An exit without a code represents a crash (for example, termination by a
+                    // signal). Subprocess mode deliberately keeps crashes nonfatal.
+                    if status.code().is_none() {
+                        let msg = format!("bsc subprocess crashed for `{module_name}`: {diagnostics}");
+                        log::warn!("{msg}");
+                        return Ok(Some(msg));
+                    }
+
+                    return Err(anyhow!(if diagnostics.is_empty() {
+                        format!("bsc exited with {status} compiling `{module_name}`")
+                    } else {
+                        diagnostics
+                    }));
+                }
+
+                let warnings = if dump_typed_sexp {
+                    let sexp_path = ocaml_build_path_abs.join(format!("{basename}.sexp"));
+                    extract_warning_prefix_from_sexp_file(&sexp_path).unwrap_or_default()
+                } else {
+                    compiler_output_to_string(&stderr)
+                };
+                return Ok(visible_compiler_warnings(&warnings, package.is_local_dep));
             }
             Err(e) => {
                 log::warn!("Failed to spawn bsc subprocess: {e}");
@@ -3545,7 +3834,7 @@ fn compile_file(
             "Could not compile file. Error: {e}. Path to AST: {ast_path:?}"
         )),
         Ok(x) => {
-            let raw_stderr = String::from_utf8_lossy(&x.stderr).to_string();
+            let raw_stderr = compiler_output_to_string(&x.stderr);
 
             let err = if dump_typed_sexp {
                 let (warnings, sexp) = extract_sexp_from_stderr(&raw_stderr);
@@ -3659,6 +3948,20 @@ fn compile_file(
                     if source.exists() {
                         let _ = std::fs::copy(&source, &destination).expect("copying source file failed");
                     }
+
+                    let mut source_map = source.clone().into_os_string();
+                    source_map.push(".map");
+                    let source_map = PathBuf::from(source_map);
+                    let mut destination_map = destination.clone().into_os_string();
+                    destination_map.push(".map");
+                    let destination_map = PathBuf::from(destination_map);
+
+                    if source_map.exists() {
+                        let _ = std::fs::copy(&source_map, &destination_map)
+                            .expect("copying source map file failed");
+                    } else {
+                        let _ = std::fs::remove_file(&destination_map);
+                    }
                 }
             });
 
@@ -3699,20 +4002,21 @@ fn compile_file(
                 }
             }
 
-            if helpers::contains_ascii_characters(&err) {
-                if package.is_local_dep {
-                    Ok(Some(err))
-                } else {
-                    // Warnings from external deps are suppressed by default —
-                    // users can't act on them. A small allow-list of critical
-                    // deprecations still gets through so breakage signals are
-                    // visible (and can be reported upstream).
-                    Ok(retain_critical_external_warnings(&err))
-                }
-            } else {
-                Ok(None)
-            }
+            Ok(visible_compiler_warnings(&err, package.is_local_dep))
         }
+    }
+}
+
+fn visible_compiler_warnings(stderr: &str, is_local_dep: bool) -> Option<String> {
+    if !helpers::contains_ascii_characters(stderr) {
+        return None;
+    }
+    if is_local_dep {
+        Some(stderr.to_string())
+    } else {
+        // Warnings from external deps are suppressed by default — users cannot
+        // act on them. Preserve the critical deprecations selected below.
+        retain_critical_external_warnings(stderr)
     }
 }
 
@@ -3778,7 +4082,7 @@ pub fn mark_modules_with_expired_deps_dirty(build_state: &mut BuildCommandState)
                 let dependent_module = build_state.modules.get(dependent).unwrap();
                 match dependent_module.source_type {
                     SourceType::SourceFile(_) => {
-                        match (module.last_compiled_cmt, module.last_compiled_cmt) {
+                        match (module.last_compiled_cmt, module.last_compiled_cmi) {
                             (None, None) | (Some(_), None) | (None, Some(_)) => {
                                 // println!(
                                 //     "🛑 {} is a dependent of {} but has no cmt/cmi",
@@ -3845,6 +4149,150 @@ pub fn mark_modules_with_expired_deps_dirty(build_state: &mut BuildCommandState)
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::build::packages::{Namespace, Package};
+    use crate::config;
+    use crate::project_context::ProjectContext;
+    use ahash::AHashMap;
+    use std::fs;
+    use std::path::{Path, PathBuf};
+    use std::sync::RwLock;
+    use std::time::SystemTime;
+    use tempfile::TempDir;
+
+    // The compiler can write a code frame that truncates a multi-byte character, so the
+    // captured output is not always valid UTF-8. Decoding it must not panic.
+    #[test]
+    fn compiler_output_to_string_handles_invalid_utf8() {
+        // 0xe2 0x80 is the start of an em dash (U+2014); the third byte is missing.
+        let truncated = [b'W', b'a', b'r', b'n', b'i', b'n', b'g', b' ', 0xe2, 0x80];
+        let decoded = compiler_output_to_string(&truncated);
+        assert!(decoded.starts_with("Warning "));
+    }
+
+    fn test_project_context(root: &Path) -> ProjectContext {
+        let config = config::tests::create_config(config::tests::CreateConfigArgs {
+            name: "test-root".to_string(),
+            bs_deps: vec![],
+            build_dev_deps: vec![],
+            allowed_dependents: None,
+            path: root.to_path_buf(),
+        });
+
+        ProjectContext {
+            current_config: config,
+            monorepo_context: None,
+            node_modules_exist_cache: RwLock::new(AHashMap::new()),
+            packages_cache: RwLock::new(AHashMap::new()),
+        }
+    }
+
+    fn test_package(name: &str, path: PathBuf) -> Package {
+        Package {
+            name: name.to_string(),
+            config: config::tests::create_config(config::tests::CreateConfigArgs {
+                name: name.to_string(),
+                bs_deps: vec![],
+                build_dev_deps: vec![],
+                allowed_dependents: None,
+                path: path.clone(),
+            }),
+            source_folders: Default::default(),
+            source_files: None,
+            namespace: Namespace::NoNamespace,
+            modules: None,
+            path,
+            dirs: None,
+            gentype_dirs: None,
+            is_local_dep: true,
+            is_root: true,
+        }
+    }
+
+    fn test_module(package_name: &str, implementation_warning: Option<&str>) -> Module {
+        Module {
+            source_type: SourceType::SourceFile(SourceFile {
+                implementation: Implementation {
+                    path: PathBuf::from("src/ModuleA.res"),
+                    parse_state: ParseState::Success,
+                    compile_state: if implementation_warning.is_some() {
+                        CompileState::Warning
+                    } else {
+                        CompileState::Success
+                    },
+                    last_modified: SystemTime::UNIX_EPOCH,
+                    parse_dirty: false,
+                    compile_warnings: implementation_warning.map(str::to_string),
+                },
+                interface: None,
+            }),
+            deps: Default::default(),
+            dependents: Default::default(),
+            package_name: package_name.to_string(),
+            compile_dirty: false,
+            last_compiled_cmi: None,
+            last_compiled_cmt: None,
+            deps_dirty: false,
+            is_type_dev: false,
+        }
+    }
+
+    fn test_build_state(temp_dir: &TempDir, module_name: &str, module: Module) -> BuildState {
+        let package = test_package("test-package", temp_dir.path().to_path_buf());
+        fs::create_dir_all(package.get_build_path()).expect("build log directory should be created");
+
+        let mut packages = AHashMap::new();
+        packages.insert(package.name.clone(), package);
+
+        let compiler = CompilerInfo {
+            bsc_path: temp_dir.path().join("bsc"),
+            bsc_hash: blake3::hash(b"test-bsc"),
+            runtime_path: temp_dir.path().join("runtime"),
+        };
+
+        let mut build_state = BuildState::new(
+            test_project_context(temp_dir.path()),
+            packages,
+            compiler,
+            config::SourceMapCommand::Build,
+        );
+        build_state.insert_module(module_name, module);
+        logs::initialize(&build_state.packages);
+        build_state
+    }
+
+    #[test]
+    fn successful_local_subprocess_warnings_remain_visible() {
+        let warning = "Warning number 26\nunused variable x\n";
+        assert_eq!(
+            visible_compiler_warnings(warning, true),
+            Some(warning.to_string())
+        );
+    }
+
+    #[test]
+    fn typed_sexp_warning_prefix_is_removed_without_buffering_the_sexp() {
+        let temp_dir = tempfile::tempdir().expect("temp directory should be created");
+        let path = temp_dir.path().join("Module.sexp");
+        let warning = "Warning number 26\nunused variable x\n";
+        let sexp_body = "x".repeat(4 * 1024 * 1024);
+        let sexp = format!("(structure\n{sexp_body})\n");
+        let mut contents = warning.as_bytes().to_vec();
+        contents.extend_from_slice(sexp.as_bytes());
+        fs::write(&path, contents).expect("mixed compiler output should be written");
+
+        let extracted =
+            extract_warning_prefix_from_sexp_file(&path).expect("warning prefix should be extracted");
+
+        assert_eq!(extracted, warning);
+        assert_eq!(
+            fs::metadata(&path).expect("sexp should remain").len(),
+            sexp.len() as u64
+        );
+        let mut file = fs::File::open(&path).expect("sexp should open");
+        let mut prefix = [0_u8; 10];
+        file.read_exact(&mut prefix).expect("sexp prefix should read");
+        assert_eq!(&prefix, b"(structure");
+    }
 
     #[test]
     fn retain_critical_external_warnings_returns_none_without_marker() {
@@ -3878,5 +4326,95 @@ mod tests {
             .expect("uncurried-dot warning should survive on Windows too");
         assert!(kept.contains("`(. ...)` uncurried syntax"));
         assert!(!kept.contains("unused variable"));
+    }
+
+    #[test]
+    fn replays_stored_warning_for_module_that_did_not_recompile() {
+        let temp_dir = TempDir::new().expect("temp dir should be created");
+        let build_state = test_build_state(
+            &temp_dir,
+            "ModuleA",
+            test_module("test-package", Some("warning: carried forward\n")),
+        );
+        let recompiled_modules = Default::default();
+
+        let compile_warnings =
+            collect_stored_warnings_for_modules_not_recompiled(&build_state, &recompiled_modules)
+                .into_iter()
+                .map(|entry| entry.warning)
+                .collect::<String>();
+
+        assert_eq!(compile_warnings, "warning: carried forward\n");
+    }
+
+    #[test]
+    fn replays_stored_warnings_in_module_name_order() {
+        let temp_dir = TempDir::new().expect("temp dir should be created");
+        let mut build_state = test_build_state(
+            &temp_dir,
+            "Zed",
+            test_module("test-package", Some("warning: zed\n")),
+        );
+        build_state.insert_module("Alpha", test_module("test-package", Some("warning: alpha\n")));
+        let mut compile_warnings = String::new();
+        let recompiled_modules = Default::default();
+
+        append_compile_warnings(
+            &build_state,
+            collect_stored_warnings_for_modules_not_recompiled(&build_state, &recompiled_modules),
+            &mut compile_warnings,
+        );
+
+        assert_eq!(compile_warnings, "warning: alpha\nwarning: zed\n");
+    }
+
+    #[test]
+    fn appends_fresh_and_stored_warnings_in_shared_module_name_order() {
+        let temp_dir = TempDir::new().expect("temp dir should be created");
+        let build_state = test_build_state(
+            &temp_dir,
+            "ModuleA",
+            test_module("test-package", Some("warning: stored\n")),
+        );
+        let mut compile_warnings = String::new();
+
+        append_compile_warnings(
+            &build_state,
+            vec![
+                CompileWarning {
+                    module_name: "Zed".to_string(),
+                    package_name: "test-package".to_string(),
+                    warning: "warning: fresh\n".to_string(),
+                },
+                CompileWarning {
+                    module_name: "Alpha".to_string(),
+                    package_name: "test-package".to_string(),
+                    warning: "warning: stored\n".to_string(),
+                },
+            ],
+            &mut compile_warnings,
+        );
+
+        assert_eq!(compile_warnings, "warning: stored\nwarning: fresh\n");
+    }
+
+    #[test]
+    fn does_not_replay_stored_warning_for_module_that_recompiled() {
+        let temp_dir = TempDir::new().expect("temp dir should be created");
+        let build_state = test_build_state(
+            &temp_dir,
+            "ModuleA",
+            test_module("test-package", Some("warning: already emitted\n")),
+        );
+        let mut recompiled_modules = ahash::AHashSet::new();
+        recompiled_modules.insert("ModuleA".to_string());
+
+        let compile_warnings =
+            collect_stored_warnings_for_modules_not_recompiled(&build_state, &recompiled_modules)
+                .into_iter()
+                .map(|entry| entry.warning)
+                .collect::<String>();
+
+        assert!(compile_warnings.is_empty());
     }
 }

@@ -90,15 +90,36 @@ pub fn translate_arrow_type(
 ) -> crate::gentype::translate_type_expr_from_types::Translation {
     // Mirrors compiler/gentype/TranslateCoreType.ml:52-120.
     match &core_type.ctyp_desc {
-        TypedCoreTypeDesc::Ttyp_arrow(arg, core_type2, arity)
-            if matches!(arg.lbl, ArgLabel::Nolabel) && (arity.is_none() || rev_args.is_empty()) =>
-        {
-            let translation =
-                translateCoreType_(ctx, arena, config, type_vars_gen, false, type_env, &arg.typ);
-            let mut next_rev_deps = translation.dependencies;
-            next_rev_deps.extend(rev_arg_deps);
-            let mut next_rev_args = vec![(Label::Nolabel, translation.type_)];
-            next_rev_args.extend(rev_args);
+        TypedCoreTypeDesc::Ttyp_arrow(args, core_type2) => {
+            let as_label = crate::gentype::annotation::get_gentype_as_renaming(
+                arena,
+                &core_type.ctyp_attributes,
+            )
+            .unwrap_or_default();
+            let mut next_rev_deps = rev_arg_deps;
+            let mut next_rev_args = rev_args;
+            for arg in args {
+                let (label, typ) = match remove_option(&arg.lbl, &arg.typ) {
+                    Some((lbl, typ)) => (Label::OptLabel(lbl), typ),
+                    None if matches!(arg.lbl, ArgLabel::Nolabel) => {
+                        (Label::Nolabel, (*arg.typ).clone())
+                    }
+                    None => {
+                        let label = if as_label.is_empty() {
+                            label_name(&arg.lbl)
+                        } else {
+                            as_label.clone()
+                        };
+                        (Label::Label(label), (*arg.typ).clone())
+                    }
+                };
+                let translation =
+                    translateCoreType_(ctx, arena, config, type_vars_gen, false, type_env, &typ);
+                let mut deps = translation.dependencies;
+                deps.extend(next_rev_deps);
+                next_rev_deps = deps;
+                next_rev_args.insert(0, (label, translation.type_));
+            }
             translate_arrow_type(
                 ctx,
                 arena,
@@ -110,67 +131,6 @@ pub fn translate_arrow_type(
                 next_rev_args,
                 core_type2,
             )
-        }
-        TypedCoreTypeDesc::Ttyp_arrow(arg, core_type2, arity)
-            if !matches!(arg.lbl, ArgLabel::Nolabel)
-                && (arity.is_none() || rev_args.is_empty()) =>
-        {
-            let as_label = crate::gentype::annotation::get_gentype_as_renaming(
-                arena,
-                &core_type.ctyp_attributes,
-            )
-            .unwrap_or_default();
-            match remove_option(&arg.lbl, &arg.typ) {
-                None => {
-                    let translation = translateCoreType_(
-                        ctx,
-                        arena,
-                        config,
-                        type_vars_gen,
-                        false,
-                        type_env,
-                        &arg.typ,
-                    );
-                    let mut next_rev_deps = translation.dependencies;
-                    next_rev_deps.extend(rev_arg_deps);
-                    let label = match as_label.is_empty() {
-                        true => label_name(&arg.lbl),
-                        false => as_label,
-                    };
-                    let mut next_rev_args = vec![(Label::Label(label), translation.type_)];
-                    next_rev_args.extend(rev_args);
-                    translate_arrow_type(
-                        ctx,
-                        arena,
-                        config,
-                        type_vars_gen,
-                        no_function_return_dependencies,
-                        type_env,
-                        next_rev_deps,
-                        next_rev_args,
-                        core_type2,
-                    )
-                }
-                Some((lbl, t1)) => {
-                    let translation =
-                        translateCoreType_(ctx, arena, config, type_vars_gen, false, type_env, &t1);
-                    let mut next_rev_deps = translation.dependencies;
-                    next_rev_deps.extend(rev_arg_deps);
-                    let mut next_rev_args = vec![(Label::OptLabel(lbl), translation.type_)];
-                    next_rev_args.extend(rev_args);
-                    translate_arrow_type(
-                        ctx,
-                        arena,
-                        config,
-                        type_vars_gen,
-                        no_function_return_dependencies,
-                        type_env,
-                        next_rev_deps,
-                        next_rev_args,
-                        core_type2,
-                    )
-                }
-            }
         }
         _ => {
             let translation = translateCoreType_(
@@ -250,7 +210,7 @@ pub fn translateCoreType_(
             type_env,
             t,
         ),
-        TypedCoreTypeDesc::Ttyp_arrow(_, _, _) => translate_arrow_type(
+        TypedCoreTypeDesc::Ttyp_arrow(_, _) => translate_arrow_type(
             ctx,
             arena,
             config,

@@ -88,10 +88,10 @@ let rewrite (map : _ Hash_ident.t) (lam : Lam.t) : Lam.t =
       in
       let body = aux body in
       Lam.letrec bindings body
-    | Lfunction {arity; params; body; attr} ->
+    | Lfunction {arity; params; body; attr; loc} ->
       let params = Ext_list.map params rebind in
       let body = aux body in
-      Lam.function_ ~arity ~params ~body ~attr
+      Lam.function_ ~loc ~arity ~params ~body ~attr
     | Lstaticcatch (l1, (i, xs), l2) ->
       let l1 = aux l1 in
       let xs = Ext_list.map xs rebind in
@@ -130,7 +130,7 @@ let rewrite (map : _ Hash_ident.t) (lam : Lam.t) : Lam.t =
             sw_blocks;
             sw_blocks_full;
             sw_consts_full;
-            sw_names;
+            sw_dispatch;
           } ) ->
       let l = aux l in
       Lam.switch l
@@ -140,7 +140,7 @@ let rewrite (map : _ Hash_ident.t) (lam : Lam.t) : Lam.t =
           sw_consts_full;
           sw_blocks_full;
           sw_failaction = option_map sw_failaction;
-          sw_names;
+          sw_dispatch;
         }
     | Lstringswitch (l, sw, d) ->
       let l = aux l in

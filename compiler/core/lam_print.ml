@@ -26,13 +26,16 @@ let rec struct_const ppf (cst : Lam_constant.t) =
   | Const_float f -> fprintf ppf "%s" f
   | Const_bigint (sign, i) -> fprintf ppf "%sn" (Bigint_utils.to_string sign i)
   | Const_pointer name -> fprintf ppf "`%s" name
+  | Const_constructor {name} -> fprintf ppf "`%s" name
   | Const_some n -> fprintf ppf "[some-c]%a" struct_const n
-  | Const_block (tag, _, []) -> fprintf ppf "[%i]" tag
-  | Const_block (tag, _, sc1 :: scl) ->
+  | Const_block (i, []) -> fprintf ppf "[%s]" (Lambda.tag_label_of_tag_info i)
+  | Const_block (i, sc1 :: scl) ->
     let sconsts ppf scl =
       List.iter (fun sc -> fprintf ppf "@ %a" struct_const sc) scl
     in
-    fprintf ppf "@[<1>[%i:@ @[%a%a@]]@]" tag struct_const sc1 sconsts scl
+    fprintf ppf "@[<1>[%s:@ @[%a%a@]]@]"
+      (Lambda.tag_label_of_tag_info i)
+      struct_const sc1 sconsts scl
 
 (* let string_of_loc_kind (loc : Lambda.loc_kind) =
    match loc with
@@ -51,11 +54,11 @@ let primitive ppf (prim : Lam_primitive.t) =
   | Pupdate_mod -> fprintf ppf "update_mod!"
   | Pjs_apply -> fprintf ppf "#apply"
   | Pjs_runtime_apply -> fprintf ppf "#runtime_apply"
+  (* Debug-only dump, exercised solely under -drawlambda/-dlambda. *)
+  | Ptagged_template -> fprintf ppf "#tagged_template" [@coverage off]
   | Pjs_unsafe_downgrade {name; setter} ->
     if setter then fprintf ppf "##%s#=" name else fprintf ppf "##%s" name
   | Pfn_arity -> fprintf ppf "fn.length"
-  | Pjs_fn_make i -> fprintf ppf "js_fn_make_%i" i
-  | Pjs_fn_make_unit -> fprintf ppf "js_fn_make_unit"
   | Pjs_fn_method -> fprintf ppf "js_fn_method"
   | Pdebugger -> fprintf ppf "debugger"
   | Praw_js_code _ -> fprintf ppf "[raw]"
@@ -71,8 +74,10 @@ let primitive ppf (prim : Lam_primitive.t) =
   | Pis_undefined -> fprintf ppf "[?undefined]"
   | Pis_null_undefined -> fprintf ppf "[?null?undefined]"
   | Pimport -> fprintf ppf "[import]"
-  | Pmakeblock (tag, _, Immutable) -> fprintf ppf "makeblock %i" tag
-  | Pmakeblock (tag, _, Mutable) -> fprintf ppf "makemutable %i" tag
+  | Pmakeblock (i, Immutable) ->
+    fprintf ppf "makeblock %s" (Lambda.tag_label_of_tag_info i)
+  | Pmakeblock (i, Mutable) ->
+    fprintf ppf "makemutable %s" (Lambda.tag_label_of_tag_info i)
   | Pfield (n, field_info) -> (
     match Lam_compat.str_of_field_info field_info with
     | None -> fprintf ppf "field %i" n
@@ -81,6 +86,8 @@ let primitive ppf (prim : Lam_primitive.t) =
     let instr = "setfield " in
     fprintf ppf "%s%i" instr n
   | Pduprecord -> fprintf ppf "duprecord"
+  | Precord_rest excluded ->
+    fprintf ppf "record_rest(%s)" (String.concat ", " excluded)
   | Pjs_call {prim_name} -> fprintf ppf "%s[js]" prim_name
   | Pjs_object_create _ -> fprintf ppf "[js.obj]"
   | Praise -> fprintf ppf "raise"
@@ -252,33 +259,6 @@ let flatten (lam : Lam.t) : (print_kind * Ident.t * Lam.t) list * Lam.t =
     aux (Ext_list.map bind_args (fun (id, l) -> (Recursive, id, l))) body
   | _ -> assert false
 
-(* let get_string ((id : Ident.t), (pos : int)) (env : Env.t) : string =
-   match  Env.find_module (Pident id) env with
-   | {md_type = Mty_signature signature  ; _ } ->
-    (* Env.prefix_idents, could be cached  *)
-    let serializable_sigs =
-      Ext_list.filter (fun x ->
-          match x with
-          | Sig_typext _
-          | Sig_module _
-          | Sig_class _ -> true
-          | Sig_value(_, {val_kind = Val_prim _}) -> false
-                           | Sig_value _ -> true
-                           | _ -> false
-                           ) signature  in
-                           (begin match Ext_list.nth_opt  serializable_sigs  pos  with
-                           | Some (Sig_value (i,_)
-                           | Sig_module (i,_,_)
-                           | Sig_typext (i,_,_)
-                           | Sig_modtype(i,_)
-                           | Sig_class (i,_,_)
-                           | Sig_class_type(i,_,_)
-                           | Sig_type(i,_,_)) -> i
-                           | None -> assert false
-                           end).name
-                           | _ -> assert false
-*)
-
 let lambda ppf v =
   let rec lam ppf (l : Lam.t) =
     match l with
@@ -339,22 +319,24 @@ let lambda ppf v =
       let switch ppf (sw : Lam.lambda_switch) =
         let spc = ref false in
         List.iter
-          (fun (n, l) ->
+          (fun (key, l) ->
             if !spc then fprintf ppf "@ " else spc := true;
-            fprintf ppf "@[<hv 1>case int %i %S:@ %a@]" n
-              (match sw.sw_names with
-              | None -> ""
-              | Some x -> x.consts.(n).name)
-              lam l)
+            match key with
+            | Lambda.Switch_int ordinal ->
+              fprintf ppf "@[<hv 1>case int %i:@ %a@]" ordinal lam l
+            | Lambda.Switch_constructor (Constant {name}) ->
+              fprintf ppf "@[<hv 1>case constructor %S:@ %a@]" name lam l
+            | Lambda.Switch_constructor (Block _) -> assert false)
           sw.sw_consts;
         List.iter
-          (fun (n, l) ->
+          (fun (key, l) ->
             if !spc then fprintf ppf "@ " else spc := true;
-            fprintf ppf "@[<hv 1>case tag %i %S:@ %a@]" n
-              (match sw.sw_names with
-              | None -> ""
-              | Some x -> x.blocks.(n).tag.name)
-              lam l)
+            match key with
+            | Lambda.Switch_int ordinal ->
+              fprintf ppf "@[<hv 1>case tag %i:@ %a@]" ordinal lam l
+            | Lambda.Switch_constructor (Block {runtime = {tag = {name}}}) ->
+              fprintf ppf "@[<hv 1>case constructor %S:@ %a@]" name lam l
+            | Lambda.Switch_constructor (Constant _) -> assert false)
           sw.sw_blocks;
         match sw.sw_failaction with
         | None -> ()
@@ -456,7 +438,7 @@ let lambda ppf v =
     (* -> *)
 
     begin match flat [] lam  with
-      | (Nop, Lprim {primitive = Pmakeblock (_, _, _); args =  toplevels; _})
+      | (Nop, Lprim {primitive = Pmakeblock (_, _); args =  toplevels; _})
         :: rest ->
         (* let spc = ref false in *)
         List.iter
@@ -491,5 +473,3 @@ let serialize (filename : string) (lam : Lam.t) : unit =
   Format.set_margin old
 
 let lambda_to_string = Format.asprintf "%a" lambda
-
-let primitive_to_string = Format.asprintf "%a" primitive

@@ -63,12 +63,11 @@ and type_desc =
   | Tvar of string option
       (** [Tvar (Some "a")] ==> ['a] or ['_a]
       [Tvar None]       ==> [_] *)
-  | Tarrow of arg * type_expr * commutable * arity
-      (** [Tarrow (Nolabel,      e1, e2, c)] ==> [e1    -> e2]
-      [Tarrow (Labelled {txt="l"}, e1, e2, c)] ==> [l:e1  -> e2]
-      [Tarrow (Optional {txt="l"}, e1, e2, c)] ==> [?l:e1 -> e2]
-
-      See [commutable] for the last argument. *)
+  | Tarrow of arg list * type_expr
+      (** [Tarrow ([e1; ~l:e2; ?l:e3], ret)] ==> [(e1, ~l:e2, ~l:e3=?) => ret]
+      The n-ary uncurried function type: the arity is the length of the
+      parameter list, and a function returning a function is a nested
+      [Tarrow] in the return type. Invariant: the list is non-empty. *)
   | Ttuple of type_expr list  (** [Ttuple [t1;...;tn]] ==> [(t1 * ... * tn)] *)
   | Tconstr of Path.t * type_expr list * abbrev_memo ref
       (** [Tconstr (`A.B.t', [t1;...;tn], _)] ==> [(t1,...,tn) A.B.t]
@@ -81,8 +80,7 @@ and type_desc =
       [Tobject (_, `Some (`A.ct', [t1;...;tn]')] ==> [(t1, ..., tn) A.ct].
       where A.ct is the type of some class.
 
-      There are also special cases for so-called "class-types", cf. [Typeclass]
-      and [Ctype.set_object_name]:
+      There are also special cases for so-called "class-types", cf. [Typeclass]:
 
         [Tobject (Tfield(_,_,...(Tfield(_,_,rv)...),
                          Some(`A.#ct`, [rv;t1;...;tn])]
@@ -181,30 +179,7 @@ and abbrev_memo =
 
 and field_kind = Fvar of field_kind option ref | Fpresent | Fabsent
 
-(** [commutable] is a flag appended to every arrow type.
-
-    When typing an application, if the type of the functional is
-    known, its type is instantiated with [Cok] arrows, otherwise as
-    [Clink (ref Cunknown)].
-
-    When the type is not known, the application will be used to infer
-    the actual type.  This is fragile in presence of labels where
-    there is no principal type.
-
-    Two incompatible applications relying on [Cunknown] arrows will
-    trigger an error.
-
-    let f g =
-      g ~a:() ~b:();
-      g ~b:() ~a:();
-
-    Error: This function is applied to arguments
-    in an order different from other calls.
-    This is only allowed when the real type is known.
-*)
-and commutable = Cok | Cunknown | Clink of commutable ref
-
-module TypeOps : sig
+module Type_ops : sig
   type t = type_expr
   val compare : t -> t -> int
   val equal : t -> t -> bool
@@ -263,7 +238,7 @@ type type_declaration = {
   type_loc: Location.t;
   type_attributes: Parsetree.attributes;
   type_immediate: bool; (* true iff type should not be a pointer *)
-  type_unboxed: unboxed_status;
+  type_representation: type_representation;
   type_inlined_types: type_inlined_type list;
       (** Representation of inlined types, needed for printing *)
 }
@@ -274,7 +249,7 @@ and type_inlined_type =
 and type_kind =
   | Type_abstract
   | Type_record of label_declaration list * record_representation
-  | Type_variant of constructor_declaration list
+  | Type_variant of constructor_declaration list * Variant_runtime.layout_ref
   | Type_open
 
 and record_representation =
@@ -284,10 +259,8 @@ and record_representation =
   | Record_inlined of
       (* Inlined record *)
        {
-      tag: int;
       name: string;
-      num_nonconsts: int;
-      attrs: Parsetree.attributes;
+      representation: Variant_runtime.constructor_reference;
     }
   | Record_extension (* Inlined record under extension *)
 
@@ -312,19 +285,10 @@ and constructor_arguments =
   | Cstr_tuple of type_expr list
   | Cstr_record of label_declaration list
 
-and unboxed_status =
-  private
-  (* This type must be private in order to ensure perfect sharing of the
-     four possible values. Otherwise, ocamlc.byte and ocamlc.opt produce
-     different executables. *) {
-  unboxed: bool;
-  default: bool; (* True for unannotated unboxable types. *)
-}
-
-val unboxed_false_default_false : unboxed_status
-val unboxed_false_default_true : unboxed_status
-val unboxed_true_default_false : unboxed_status
-val unboxed_true_default_true : unboxed_status
+and type_representation = Boxed | Unboxed
+(* Single-payload @unboxed type: the payload is the whole runtime
+         value. Multi-constructor unboxed variants are tracked by their layout,
+         not here. *)
 
 type extension_constructor = {
   ext_type_path: Path.t;
@@ -357,8 +321,6 @@ and signature_item =
   | Sig_typext of Ident.t * extension_constructor * ext_status
   | Sig_module of Ident.t * module_declaration * rec_status
   | Sig_modtype of Ident.t * modtype_declaration
-  | Sig_class of unit
-  | Sig_class_type of unit (* Dummy AST node *)
 
 and module_declaration = {
   md_type: module_type;
@@ -391,9 +353,7 @@ type constructor_description = {
   cstr_existentials: type_expr list; (* list of existentials *)
   cstr_args: type_expr list; (* Type of the arguments *)
   cstr_arity: int; (* Number of arguments *)
-  cstr_tag: constructor_tag; (* Tag for heap blocks *)
-  cstr_consts: int; (* Number of constant constructors *)
-  cstr_nonconsts: int; (* Number of non-const constructors *)
+  cstr_kind: constructor_kind;
   cstr_generalized: bool; (* Constrained return type? *)
   cstr_private: private_flag; (* Read-only constructor? *)
   cstr_loc: Location.t;
@@ -401,14 +361,21 @@ type constructor_description = {
   cstr_inlined: type_declaration option;
 }
 
-and constructor_tag =
-  | Cstr_constant of int (* Constant constructor (an int) *)
-  | Cstr_block of int (* Regular constructor (a block) *)
-  | Cstr_unboxed (* Constructor of an unboxed type *)
-  | Cstr_extension of Path.t (* Extension constructor *)
+and constructor_kind =
+  | Ordinary_constructor of Variant_runtime.constructor_reference
+    (* Constructor introduced by a variant type declaration. This stable
+       reference addresses its runtime representation directly; the shared
+       variant value also supplies declaration-level matching facts. *)
+  | Extension_constructor of Path.t
+(* Extension constructor, identified by its own path since extension
+         constructors can be rebound *)
 
-(* Constructors are the same *)
-val equal_tag : constructor_tag -> constructor_tag -> bool
+(* Constructor descriptions of a common scrutinee type denote the same
+   constructor: ordinary constructors compare by name (re-exported variants
+   carry a different type path), extension constructors by path. Not a
+   general-purpose identity test across unrelated types. *)
+val same_constructor :
+  constructor_description -> constructor_description -> bool
 
 (* Constructors may be the same, given potential rebinding *)
 val may_equal_constr :

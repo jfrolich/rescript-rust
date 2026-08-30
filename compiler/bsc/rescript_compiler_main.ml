@@ -209,6 +209,25 @@ let[@inline] string_optional_set s : Bsc_args.spec =
 let[@inline] unit_call s : Bsc_args.spec = Unit (Unit_call s)
 let[@inline] string_list_add s : Bsc_args.spec = String (String_list_add s)
 
+let parse_source_map value =
+  Js_config.source_map :=
+    match String.lowercase_ascii value with
+    | "linked" -> Linked
+    | "inline" -> Inline
+    | "hidden" -> Hidden
+    | "false" | "none" -> No_source_map
+    | value ->
+      Bsc_args.bad_arg
+        ("Unsupported sourceMap value: " ^ value
+       ^ ". Expected linked, inline, hidden, false, or none")
+
+let parse_bool_ref target value =
+  target :=
+    match String.lowercase_ascii value with
+    | "true" -> true
+    | "false" -> false
+    | value -> Bsc_args.bad_arg ("Expected true or false, got: " ^ value)
+
 (* mostly common used to list in the beginning to make search fast
 *)
 let command_line_flags : (string * Bsc_args.spec * string) array =
@@ -259,6 +278,15 @@ let command_line_flags : (string * Bsc_args.spec * string) array =
       string_call ignore,
       "*internal* Set jsx mode, this is no longer used and is a no-op." );
     ("-bs-jsx-preserve", set Js_config.jsx_preserve, "*internal* Preserve jsx");
+    ( "-bs-source-map",
+      string_call parse_source_map,
+      "*internal* Configure source map output" );
+    ( "-bs-source-map-sources-content",
+      string_call (parse_bool_ref Js_config.source_map_sources_content),
+      "*internal* Include original source text in source maps" );
+    ( "-bs-source-map-root",
+      string_call (fun value -> Js_config.source_map_root := value),
+      "*internal* Set sourceRoot in source maps" );
     ( "-bs-package-output",
       string_call Js_packages_state.update_npm_package_path,
       "*internal* Set npm-output-path: [opt_module]:path, for example: \
@@ -266,7 +294,7 @@ let command_line_flags : (string * Bsc_args.spec * string) array =
     ( "-bs-project-root",
       string_call (fun s ->
           Ext_path.project_root := Some s;
-          GenTypeConfig.project_root := s),
+          Gentype_config.project_root := s),
       "*internal* Set the project root directory" );
     ( "-bs-ast",
       unit_call (fun _ ->
@@ -300,26 +328,26 @@ let command_line_flags : (string * Bsc_args.spec * string) array =
     ("-bs-gentype", set Clflags.bs_gentype, "*internal* Pass gentype command");
     ( "-bs-gentype-module",
       string_call (fun s ->
-          GenTypeConfig.module_flag := GenTypeConfig.module_of_string s),
+          Gentype_config.module_flag := Gentype_config.module_of_string s),
       "*internal* Set gentype module system: commonjs|esmodule" );
     ( "-bs-gentype-module-resolution",
       string_call (fun s ->
-          GenTypeConfig.module_resolution_flag :=
-            GenTypeConfig.module_resolution_of_string s),
+          Gentype_config.module_resolution_flag :=
+            Gentype_config.module_resolution_of_string s),
       "*internal* Set gentype module resolution strategy: node|node16|bundler"
     );
     ( "-bs-gentype-export-interfaces",
-      set GenTypeConfig.export_interfaces_flag,
+      set Gentype_config.export_interfaces_flag,
       "*internal* Emit gentype interface files" );
     ( "-bs-gentype-generated-extension",
       string_call (fun s ->
-          GenTypeConfig.generated_file_extension_flag := Some s),
+          Gentype_config.generated_file_extension_flag := Some s),
       "*internal* Set gentype generated-file extension (e.g. .gen.tsx)" );
     ( "-bs-gentype-suffix",
-      string_call (fun s -> GenTypeConfig.suffix_flag := Some s),
+      string_call (fun s -> Gentype_config.suffix_flag := Some s),
       "*internal* Set gentype import-path suffix (e.g. .bs.js, .mjs)" );
     ( "-bs-gentype-shim",
-      string_call GenTypeConfig.add_shim,
+      string_call Gentype_config.add_shim,
       "*internal* Register a gentype shim mapping: From=To (repeatable)" );
     ( "-bs-gentype-debug",
       string_call Debug.set_item,
@@ -327,24 +355,21 @@ let command_line_flags : (string * Bsc_args.spec * string) array =
        all|basic|codeItems|config|converter|dependencies|moduleResolution|notImplemented|translation|typeEnv|typeResolution"
     );
     ( "-bs-gentype-dep",
-      string_call GenTypeConfig.add_bs_dependency,
+      string_call Gentype_config.add_bs_dependency,
       "*internal* Register a gentype bsb dependency (repeatable)" );
     ( "-bs-gentype-source-dir",
-      string_call GenTypeConfig.add_source_dir,
+      string_call Gentype_config.add_source_dir,
       "*internal* Register a gentype source directory relative to the project \
        root (repeatable)" );
     ( "-bs-gentype-dep-path",
-      string_call GenTypeConfig.add_dep_path,
+      string_call Gentype_config.add_dep_path,
       "*internal* Register a gentype dependency install path: \
        <name>=<absolute-path> (repeatable)" );
     ( "-bs-gentype-bsb-project-root",
-      string_call (fun s -> GenTypeConfig.bsb_project_root := s),
+      string_call (fun s -> Gentype_config.bsb_project_root := s),
       "*internal* Set gentype bsb project root (workspace root containing \
        .sourcedirs.json)" );
     (******************************************************************************)
-    ( "-unboxed-types",
-      set Clflags.unboxed_types,
-      "*internal* Unannotated unboxable types will be unboxed" );
     ("-nostdlib", set Js_config.no_stdlib, "*internal* Don't use stdlib");
     ( "-color",
       string_call set_color_option,
@@ -381,7 +406,12 @@ let command_line_flags : (string * Bsc_args.spec * string) array =
     ( "-bs-no-cross-module-opt",
       clear Js_config.cross_module_inline,
       "*internal* Disable cross module inlining(experimental)" );
-    ("-bs-diagnose", set Js_config.diagnose, "*internal* More verbose output");
+    ( "-debug-ir",
+      set Js_config.debug_ir,
+      "*internal* Dump compiler IR and enable Lam invariant checks" );
+    ( "-check-lam",
+      set Js_config.check_lam,
+      "*internal* Check Lam invariants after optimization passes" );
     ( "-bs-no-check-div-by-zero",
       clear Js_config.check_div_by_zero,
       "*internal* unsafe mode, don't check div by zero and mod by zero" );

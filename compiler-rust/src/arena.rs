@@ -118,7 +118,14 @@ impl<T, Idx: ArenaIdx> Arena<T, Idx> {
 
     /// Get a reference to a value by typed index.
     pub fn get(&self, idx: Idx) -> &T {
-        &self.items[idx.to_u32() as usize]
+        let index = idx.to_u32() as usize;
+        self.items.get(index).unwrap_or_else(|| {
+            panic!(
+                "{} arena index {index} out of bounds for length {}",
+                std::any::type_name::<T>(),
+                self.items.len()
+            )
+        })
     }
 
     /// Get a mutable reference to a value by typed index.

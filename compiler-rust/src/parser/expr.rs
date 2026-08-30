@@ -831,13 +831,11 @@ fn parse_es6_arrow_expression_internal(
     p: &mut Parser<'_>,
     is_async: bool,
     arrow_start_pos_idx: Option<PosIdx>,
-    newtype_start_pos_idx: Option<PosIdx>, // For async, the position including 'async'
+    _newtype_start_pos_idx: Option<PosIdx>, // For async, the position including 'async'
     arrow_attrs: Attributes,
     context: ExprContext,
 ) -> Expression {
     let start_pos_idx = arrow_start_pos_idx.unwrap_or_else(|| p.start_pos_idx());
-    // For async functions, newtype_start_pos is set to the 'async' position
-    let newtype_start_idx = newtype_start_pos_idx.unwrap_or(start_pos_idx);
     p.leave_breadcrumb(Grammar::Es6ArrowExpr);
 
     // Parse parameters
@@ -882,15 +880,30 @@ fn parse_es6_arrow_expression_internal(
 
     // Build the function expression from parameters
     let (type_params, term_params) = super::core::extract_fundef_params(parameters);
+    let has_type_params = !type_params.is_empty();
+
+    // Build the authoritative `Pexp_fun.newtypes` list: each type-parameter
+    // group carries its attributes on its first newtype (mirrors upstream
+    // res_core.ml `newtypes` construction).
+    let mut newtypes: Vec<(StringLoc, Attributes)> = Vec::new();
+    for tp in &type_params {
+        let mut locs = tp.locs.iter();
+        if let Some(first) = locs.next() {
+            newtypes.push((first.clone(), tp.attrs.clone()));
+            for name in locs {
+                newtypes.push((name.clone(), Attributes::new()));
+            }
+        }
+    }
 
     // Fold the term parameters into nested functions
     // If there are type params but no term params, add an implicit unit param
     // We capture the Pexp_fun location for use in the final wrapper (for position sharing)
-    let (arrow_expr, pexp_fun_loc) = if term_params.is_empty() && type_params.is_some() {
+    let (arrow_expr, pexp_fun_loc) = if term_params.is_empty() && has_type_params {
         // Implicit unit parameter for type-only arrow
         // OCaml uses the location of the parenthesized type params group for the implicit unit PATTERN
         // but the Pexp_fun location spans from the paren start to the end of the body
-        let tp = type_params.as_ref().unwrap();
+        let tp = &type_params[0];
         let (unit_pat_loc, pexp_fun_loc) = match (tp.paren_start_pos_idx, tp.paren_end_pos_idx) {
             (Some(start_idx), Some(paren_end_idx)) => {
                 (
@@ -925,7 +938,7 @@ fn parse_es6_arrow_expression_internal(
                     is_async,
                 }))),
                 pexp_loc: pexp_fun_loc.clone(),
-                pexp_attributes: Attributes::new(),
+                pexp_attributes: arrow_attrs.clone(),
             },
             pexp_fun_loc,
         )
@@ -934,144 +947,59 @@ fn parse_es6_arrow_expression_internal(
         let loc = p.mk_loc_idx(end_pos_idx, end_pos_idx);
         (body, loc)
     } else {
-        // Compute arity for the outermost function
+        // Upstream parsetree stores all source parameters on one Pexp_fun.
+        // Keep that logical shape in the arena side table while retaining the
+        // compact first-parameter payload needed by frozen-v0 PPX conversion.
         let total_arity = term_params.len();
-        // Pre-create arity indices before the fold (arena access needs mutable borrow)
         let full_arity_idx = p.push_arity_full(total_arity);
         let unknown_arity_idx = p.push_arity_unknown();
-        // Build locations for Pexp_funs.
-        // In OCaml (res_core.ml:1792), each Pexp_fun's loc uses parameter.p_pos.
-        // parameter.p_pos is captured at the start of parse_parameter, which is:
-        // - For `x => x`: at `x` (same as pattern's loc_start)
-        // - For `(x, y)`: at `x` and `y` respectively (pattern's loc_start)
-        // - For `~name as pat`: at `~` (different from pattern's loc_start!)
-        //
-        // For the final wrapper (res_core.ml:1807), loc_start is overridden with
-        // start_pos captured at line 1726 (before parsing parameters).
-        //
-        // For position sharing:
-        // - In OCaml, for `x => x`, start_pos and parameter.p_pos are the same object
-        // - The pattern was already parsed and has a PosIdx for its loc_start
-        // - If start_pos matches the first param's start_pos (which for simple cases
-        //   equals pattern.loc_start), we reuse the pattern's existing PosIdx
         let outermost_param = &term_params[0];
-        // Check if start_pos_idx matches the first param's pattern loc_start PosIdx
-        // This enables sharing for simple cases like `x => x`
         let pattern_start_idx = p.loc_start_idx(outermost_param.pat.ppat_loc);
         let wrapper_start_idx = if start_pos_idx == pattern_start_idx {
-            // Same PosIdx - reuse the pattern's existing PosIdx for sharing
             pattern_start_idx
         } else {
-            // Different - use the arrow's start PosIdx
             start_pos_idx
         };
         let wrapper_loc = p.mk_loc_idx(wrapper_start_idx, end_pos_idx);
-        let arrow_expr = term_params
-            .into_iter()
-            .rev()
-            .enumerate()
-            .fold(body, |acc, (i, param)| {
-                // Use parameter.start_pos for the Pexp_fun loc_start
-                // This matches OCaml's parameter.p_pos
-                //
-                // For position sharing to match OCaml:
-                // - In OCaml, p_pos is captured from p.Parser.start_pos
-                // - For simple patterns, p_pos and pattern.ppat_loc.loc_start are the SAME object
-                // - We need to check if param.start_pos matches the pattern's loc_start
-                //   and if so, reuse the pattern's PosIdx
-                let pattern_start_idx = p.loc_start_idx(param.pat.ppat_loc);
-                let start_idx = if param.start_pos_idx == wrapper_start_idx {
-                    // First param case: same PosIdx as the wrapper
-                    wrapper_start_idx
-                } else if param.start_pos_idx == pattern_start_idx {
-                    // Same PosIdx as pattern's loc_start - reuse for sharing
-                    pattern_start_idx
-                } else {
-                    // Different (e.g., labeled param ~x as pat) - use param's stored PosIdx
-                    param.start_pos_idx
-                };
-                let loc = p.mk_loc_idx(start_idx, end_pos_idx);
-                // Apply parameter attributes to the pattern's ppat_attributes
-                // This is where attributes like @as("open") on parameters like (@as("open") ~_open)
-                // should end up, so the JSX PPX can access them via pattern.ppat_attributes
-                let mut pat = param.pat;
-                if !param.attrs.is_empty() {
-                    let mut attrs = param.attrs;
-                    attrs.extend(pat.ppat_attributes);
-                    pat.ppat_attributes = attrs;
-                }
-                // Only the outermost function (last in fold, first in original list) gets arity
-                // After reversing, index 0 in fold corresponds to the innermost function
-                // The last iteration (i == total_arity - 1) is the outermost function
-                let is_outermost = i == total_arity - 1;
-                let arity = if is_outermost {
-                    full_arity_idx
-                } else {
-                    unknown_arity_idx
-                };
-                // Only the outermost function gets is_async: true (OCaml behavior)
-                let fn_is_async = is_outermost && is_async;
-                let default_idx = param.expr.map(|e| p.arena_mut().push_expr(e));
-                let rhs_idx = p.arena_mut().push_expr(acc);
-                let pat_idx = p.arena_mut().push_pat(pat);
-                Expression {
-                    pexp_desc: Box::new(ExpressionDesc::Pexp_fun(Box::new(PexpFun {
-                        arg_label: param.label,
-                        default: default_idx,
-                        lhs: pat_idx,
-                        rhs: rhs_idx,
-                        arity,
-                        is_async: fn_is_async,
-                    }))),
-                    pexp_loc: loc,
-                    pexp_attributes: Attributes::new(),
-                }
+        let body_idx = p.arena_mut().push_expr(body);
+        let mut params = Vec::with_capacity(total_arity);
+        for param in term_params {
+            let default = param.expr.map(|expr| p.arena_mut().push_expr(expr));
+            let pat = p.arena_mut().push_pat(param.pat);
+            params.push(FunParam {
+                p_attrs: param.attrs,
+                p_lbl: param.label,
+                p_default: default,
+                p_pat: pat,
             });
-        // Return wrapper_loc for the final wrapper to use
-        (arrow_expr, wrapper_loc)
+        }
+        let first = params[0].clone();
+        p.arena_mut()
+            .set_nary_fun_params(full_arity_idx, params, unknown_arity_idx);
+        (
+            Expression {
+                pexp_desc: Box::new(ExpressionDesc::Pexp_fun(Box::new(PexpFun {
+                    arg_label: first.p_lbl,
+                    default: first.p_default,
+                    lhs: first.p_pat,
+                    rhs: body_idx,
+                    arity: full_arity_idx,
+                    is_async,
+                }))),
+                pexp_loc: wrapper_loc,
+                pexp_attributes: arrow_attrs.clone(),
+            },
+            wrapper_loc,
+        )
     };
 
-    // Handle newtype parameters
-    // OCaml's make_newtypes creates the chain without attrs, then adds attrs to outermost
-    // In OCaml, when there are type params, arrow_attrs is prepended to tp.attrs
-    // and all combined attrs go on the outermost Pexp_newtype (not on the outer wrapper)
-    // For async functions, OCaml uses the 'async' keyword position (newtype_start)
-    // For non-async, OCaml uses the 'type' keyword position (tp.start_pos_idx)
-    let arrow_expr = match type_params {
-        Some(tp) => {
-            let loc_start_idx = if is_async {
-                newtype_start_idx
-            } else {
-                tp.start_pos_idx
-            };
-            let loc = p.mk_loc_idx(loc_start_idx, end_pos_idx);
-            // OCaml prepends arrow_attrs to tp.attrs
-            let mut combined_attrs = arrow_attrs;
-            combined_attrs.extend(tp.attrs);
-            // Create the Pexp_newtype chain with combined attrs on outermost
-            let mut locs_iter = tp.locs.into_iter().rev().peekable();
-            let mut expr = arrow_expr;
-            while let Some(name) = locs_iter.next() {
-                let is_outermost = locs_iter.peek().is_none();
-                let expr_idx = p.arena_mut().push_expr(expr);
-                expr = Expression {
-                    pexp_desc: Box::new(ExpressionDesc::Pexp_newtype(Box::new((name, expr_idx)))),
-                    pexp_loc: loc.clone(),
-                    // Only outermost gets the combined attrs
-                    pexp_attributes: if is_outermost {
-                        combined_attrs.clone()
-                    } else {
-                        Attributes::new()
-                    },
-                };
-            }
-            expr
-        }
-        None => Expression {
-            pexp_attributes: arrow_attrs,
-            ..arrow_expr
-        },
-    };
+    // Register the authoritative `Pexp_fun.newtypes` list beside the parameter
+    // table, keyed by the function's first parameter pattern.
+    if !newtypes.is_empty()
+        && let ExpressionDesc::Pexp_fun(inner) = &*arrow_expr.pexp_desc
+    {
+        p.arena_mut().set_nary_fun_newtypes(inner.lhs, newtypes);
+    }
 
     // Update the location, preserving position sharing.
     // In OCaml (res_core.ml line 1807):
@@ -1486,7 +1414,7 @@ fn parse_parameter(p: &mut Parser<'_>) -> Option<super::core::FundefParameter> {
         // For function parameters like `(x: int => int)`, we want to parse
         // the full arrow type, but `parse_constrained_pattern` uses
         // `parse_typ_expr_no_arrow` which is correct for switch cases but not here.
-        let pat = if p.token == Token::Colon {
+        let mut pat = if p.token == Token::Colon {
             p.next();
             let typ = super::typ::parse_typ_expr(p);
             let loc = p.mk_loc_spanning(pat.ppat_loc, typ.ptyp_loc);
@@ -1500,6 +1428,9 @@ fn parse_parameter(p: &mut Parser<'_>) -> Option<super::core::FundefParameter> {
         } else {
             pat
         };
+        let mut pattern_attrs = attrs;
+        pattern_attrs.extend(pat.ppat_attributes);
+        pat.ppat_attributes = pattern_attrs;
 
         // Check for default value (= expr) - this means it's a labeled param missing the ~
         if p.token == Token::Equal {
@@ -1542,7 +1473,7 @@ fn parse_parameter(p: &mut Parser<'_>) -> Option<super::core::FundefParameter> {
 
             return Some(super::core::FundefParameter::Term(
                 super::core::FundefTermParam {
-                    attrs,
+                    attrs: Attributes::new(),
                     label,
                     expr: default,
                     pat,
@@ -1554,7 +1485,7 @@ fn parse_parameter(p: &mut Parser<'_>) -> Option<super::core::FundefParameter> {
 
         return Some(super::core::FundefParameter::Term(
             super::core::FundefTermParam {
-                attrs,
+                attrs: Attributes::new(),
                 label: ArgLabel::Nolabel,
                 expr: None,
                 pat,
@@ -1568,7 +1499,7 @@ fn parse_parameter(p: &mut Parser<'_>) -> Option<super::core::FundefParameter> {
 }
 
 /// Parse a list of lowercase identifiers.
-fn parse_lident_list(p: &mut Parser<'_>) -> Vec<StringLoc> {
+pub(crate) fn parse_lident_list(p: &mut Parser<'_>) -> Vec<StringLoc> {
     let mut lidents = vec![];
     while let Token::Lident(name) = &p.token {
         let name = name.clone();
@@ -2571,7 +2502,7 @@ pub fn over_parse_constrained_or_coerced_or_arrow_expression(
                     let arrow_loc = p.mk_loc_spanning(expr.pexp_loc, body.pexp_loc);
 
                     // Interpretation 1: (param) => (body : type)
-                    let unknown_arity = p.arena_mut().push_arity(None);
+                    let full_arity = p.push_arity_full(1);
                     let body_idx = p.arena_mut().push_expr(body.clone());
                     let typ_idx = p.arena_mut().push_core_type(typ.clone());
                     let constrained_body = Expression {
@@ -2585,7 +2516,7 @@ pub fn over_parse_constrained_or_coerced_or_arrow_expression(
                     let pat1_idx = p.arena_mut().push_pat(pat.clone());
                     let arrow1 = Expression {
                         pexp_desc: Box::new(ExpressionDesc::Pexp_fun(Box::new(PexpFun {
-                            arity: unknown_arity,
+                            arity: full_arity,
                             arg_label: ArgLabel::Nolabel,
                             default: None,
                             lhs: pat1_idx,
@@ -2600,7 +2531,7 @@ pub fn over_parse_constrained_or_coerced_or_arrow_expression(
                         arrow1
                     } else {
                         // Interpretation 2: (param: type) => body
-                        let unknown_arity2 = p.arena_mut().push_arity(None);
+                        let full_arity2 = p.push_arity_full(1);
                         let pat_idx = p.arena_mut().push_pat(pat);
                         let typ_idx2 = p.arena_mut().push_core_type(typ.clone());
                         let body_idx2 = p.arena_mut().push_expr(body.clone());
@@ -2614,7 +2545,7 @@ pub fn over_parse_constrained_or_coerced_or_arrow_expression(
                         let constraint_pat_idx = p.arena_mut().push_pat(constraint_pat);
                         let arrow2 = Expression {
                             pexp_desc: Box::new(ExpressionDesc::Pexp_fun(Box::new(PexpFun {
-                                arity: unknown_arity2,
+                                arity: full_arity2,
                                 arg_label: ArgLabel::Nolabel,
                                 default: None,
                                 lhs: constraint_pat_idx,
@@ -3345,7 +3276,7 @@ fn parse_tuple_expr(p: &mut Parser<'_>, start_pos_idx: PosIdx, first: Expression
 
 /// Parse an array expression [e1, e2, ...].
 /// - `[a, b, c]` becomes `Pexp_array(Box::new([a, b, c]))`
-/// - `[...xs, a, b]` becomes `Belt.Array.concatMany([xs, [a, b]])`
+/// - `[...xs, a, b]` becomes `Primitive_array.spread([xs, [a, b]])`
 fn parse_array_expr(p: &mut Parser<'_>) -> Expression {
     let start_pos_idx = p.start_pos_idx();
     p.expect(Token::Lbracket);
@@ -3388,7 +3319,7 @@ fn parse_array_expr(p: &mut Parser<'_>) -> Expression {
         };
     }
 
-    // With spread: [...xs, a, b, ...ys, c] becomes Belt.Array.concatMany([xs, [a, b], ys, [c]])
+    // With spread: [...xs, a, b, ...ys, c] becomes Primitive_array.spread([xs, [a, b], ys, [c]])
     // Split into segments: each spread item becomes its own array element,
     // consecutive non-spread items become a single array
     let mut array_items: Vec<Expression> = vec![];
@@ -3422,7 +3353,7 @@ fn parse_array_expr(p: &mut Parser<'_>) -> Expression {
         });
     }
 
-    // Create Belt.Array.concatMany([...])
+    // Create Primitive_array.spread([...])
     let array_items_idx: Vec<ExprIdx> = array_items
         .into_iter()
         .map(|e| p.arena_mut().push_expr(e))
@@ -3433,8 +3364,9 @@ fn parse_array_expr(p: &mut Parser<'_>) -> Expression {
         pexp_attributes: Attributes::new(),
     };
 
-    // Use static pre-allocated Belt.Array.concatMany lident for sharing parity with OCaml
-    let lid_idx = p.arena().belt_array_concat_many_lid();
+    // OCaml builds the Primitive_array.spread longident inline at each spread
+    // site (res_core.ml:4528), allocating fresh Longident blocks per occurrence.
+    let lid_idx = p.arena_mut().fresh_belt_array_spread_lid();
     let spread_idx = p.arena_mut().intern("res.spread");
     let concat_many = Expression {
         pexp_desc: Box::new(ExpressionDesc::Pexp_ident(with_loc(lid_idx, loc.clone()))),
@@ -3462,8 +3394,8 @@ fn parse_array_expr(p: &mut Parser<'_>) -> Expression {
 /// Parse a list expression list{e1, e2, ...} and lower to nested :: constructors.
 /// - `list{1, 2, 3}` becomes `1 :: (2 :: (3 :: []))`
 /// - `list{1, 2, ...rest}` becomes `1 :: (2 :: rest)`
-/// - `list{...xs, ...ys}` becomes `Belt.List.concatMany([xs, ys])`
-/// - `list{...xs, 1, ...ys}` becomes `Belt.List.concatMany([xs, 1 :: ys])`
+/// - `list{...xs, ...ys}` becomes `Primitive_list.spread([xs, ys])`
+/// - `list{...xs, 1, ...ys}` becomes `Primitive_list.spread([xs, 1 :: ys])`
 fn parse_list_expr(p: &mut Parser<'_>, start_pos_idx: PosIdx) -> Expression {
     // Token::List already consumed the opening '{'
     // Each item is (is_spread, expr, spread_start_pos)
@@ -3510,7 +3442,7 @@ fn parse_list_expr(p: &mut Parser<'_>, start_pos_idx: PosIdx) -> Expression {
             result
         }
         _ => {
-            // Multiple segments: use Belt.List.concatMany([...])
+            // Multiple segments: use Primitive_list.spread([...])
             // OCaml uses segment locations for sub-expressions
             let sub_exprs: Vec<ExprIdx> = segments
                 .into_iter()
@@ -3526,8 +3458,9 @@ fn parse_list_expr(p: &mut Parser<'_>, start_pos_idx: PosIdx) -> Expression {
                 pexp_attributes: Attributes::new(),
             };
 
-            // Use static pre-allocated Belt.List.concatMany lident for sharing parity with OCaml
-            let lid_idx = p.arena().belt_list_concat_many_lid();
+            // OCaml builds the Primitive_list.spread longident inline at each
+            // spread site (res_core.ml:4386), allocating fresh Longident blocks.
+            let lid_idx = p.arena_mut().fresh_belt_list_spread_lid();
             let spread_idx = p.arena_mut().intern("res.spread");
             let concat_many_ident = Expression {
                 pexp_desc: Box::new(ExpressionDesc::Pexp_ident(Loc {
@@ -4887,158 +4820,46 @@ fn parse_let_in_block_with_continuation_and_attrs(
     let mut bindings = vec![];
     let first_pat = super::pattern::parse_pattern(p);
 
-    // Handle optional type annotation: let x: int = ...
-    // Also track locally abstract types for Pexp_newtype wrapping
-    let (first_pat, newtype_info, is_locally_abstract) = if p.token == Token::Colon {
+    // Parse an ordinary pattern constraint or the current-Parsetree value
+    // constraint used by `let x: type a. t = expr`.
+    let (first_pat, first_constraint) = if p.token == Token::Colon {
         p.next();
-
-        // Check if this is `type a.` syntax (locally abstract types)
-        let is_locally_abstract = p.token == Token::Typ;
-
-        let typ = if is_locally_abstract {
-            super::typ::parse_locally_abstract_type(p)
+        if p.token == Token::Typ {
+            p.next();
+            let pvc_newtypes = parse_lident_list(p);
+            p.expect(Token::Dot);
+            let pvc_type = super::typ::parse_typ_expr(p);
+            let pvc_type = p.arena_mut().push_core_type(pvc_type);
+            (
+                first_pat,
+                Some(crate::parser::ast::ValueConstraint {
+                    pvc_newtypes,
+                    pvc_type,
+                    pvc_pattern: None,
+                    pvc_expression: None,
+                }),
+            )
         } else {
-            super::typ::parse_poly_type_expr(p)
-        };
-
-        // Extract type variables and inner type if this is a Ptyp_poly from `type a.` syntax
-        let (final_typ, newtype_info) = match *typ.ptyp_desc {
-            CoreTypeDesc::Ptyp_poly(inner) if is_locally_abstract => {
-                let (ref vars, ref inner_idx) = *inner;
-                // Build the set of variable names for substitution
-                let var_set: std::collections::HashSet<String> = vars
-                    .iter()
-                    .map(|v| p.arena().get_string(v.txt).to_string())
-                    .collect();
-
-                // The inner type (with Ptyp_constr) is used for Pexp_constraint
-                let inner_for_constraint = p.arena().get_core_type(*inner_idx).clone();
-
-                // Substitute Ptyp_constr -> Ptyp_var for the Ptyp_poly body
-                let inner_ct = p.arena().get_core_type(*inner_idx).clone();
-                let substituted_inner = match super::typ::substitute_type_vars(
-                    p.arena_mut(),
-                    inner_ct.clone(),
-                    &var_set,
-                ) {
-                    Ok(substituted_inner) => substituted_inner,
-                    Err(loc) => {
-                        p.err_at(
-                            p.loc_start(loc),
-                            p.loc_end(loc),
-                            DiagnosticCategory::FatalSyntaxerr,
-                        );
-                        inner_ct
-                    }
-                };
-
-                // Rebuild the Ptyp_poly with the substituted body
-                let substituted_inner_idx = p.arena_mut().push_core_type(substituted_inner);
-                let substituted_typ = CoreType {
-                    ptyp_desc: Box::new(CoreTypeDesc::Ptyp_poly(Box::new((
-                        vars.clone(),
-                        substituted_inner_idx,
-                    )))),
-                    ptyp_loc: typ.ptyp_loc.clone(),
-                    ptyp_attributes: typ.ptyp_attributes.clone(),
-                };
-
-                (substituted_typ, Some((vars.clone(), inner_for_constraint)))
-            }
-            _ => (typ, None),
-        };
-
-        // Create a constraint pattern
-        let loc = p.mk_loc_spanning(first_pat.ppat_loc, final_typ.ptyp_loc);
-        let pat_idx = p.arena_mut().push_pat(first_pat);
-        let typ_idx = p.arena_mut().push_core_type(final_typ);
-        let pat = Pattern {
-            ppat_desc: Box::new(PatternDesc::Ppat_constraint(Box::new((pat_idx, typ_idx)))),
-            ppat_loc: loc,
-            ppat_attributes: Attributes::new(),
-        };
-        (pat, newtype_info, is_locally_abstract)
+            let typ = super::typ::parse_poly_type_expr(p);
+            let loc = p.mk_loc_spanning(first_pat.ppat_loc, typ.ptyp_loc);
+            let pat_idx = p.arena_mut().push_pat(first_pat);
+            let typ_idx = p.arena_mut().push_core_type(typ);
+            (
+                Pattern {
+                    ppat_desc: Box::new(PatternDesc::Ppat_constraint(Box::new((pat_idx, typ_idx)))),
+                    ppat_loc: loc,
+                    ppat_attributes: Attributes::new(),
+                },
+                None,
+            )
+        }
     } else {
-        (first_pat, None, false)
+        (first_pat, None)
     };
 
     p.expect(Token::Equal);
-    let mut first_value = parse_expr(p);
-
-    // OCaml allocates a wrapper location and then allocates a fresh Vb.mk
-    // location with the same span. Keep those allocations distinct.
-    let wrapper_loc = if is_locally_abstract {
-        Some(p.mk_loc_idx_to_prev_end(binding_start_pos_idx))
-    } else {
-        None
-    };
+    let first_value = parse_expr(p);
     let first_loc = p.mk_loc_idx_to_prev_end(binding_start_pos_idx);
-
-    // For locally abstract types, OCaml uses the binding location for the pattern constraint and Ptyp_poly
-    let first_pat = if is_locally_abstract {
-        let wrapper_loc =
-            wrapper_loc.expect("locally abstract let-binding should have wrapper loc");
-        // Update Ppat_constraint and inner Ptyp_poly locations to use the binding location
-        if let PatternDesc::Ppat_constraint(inner) = *first_pat.ppat_desc {
-            let (inner_pat, typ_idx) = *inner;
-            // Update the Ptyp_poly location to use binding location
-            let typ = p.arena_mut().get_core_type(typ_idx).clone();
-            let updated_typ = match *typ.ptyp_desc {
-                CoreTypeDesc::Ptyp_poly(inner) => {
-                    let (vars, ct) = *inner;
-                    CoreType {
-                        ptyp_desc: Box::new(CoreTypeDesc::Ptyp_poly(Box::new((vars, ct)))),
-                        ptyp_loc: wrapper_loc,
-                        ptyp_attributes: typ.ptyp_attributes,
-                    }
-                }
-                _ => typ,
-            };
-            let updated_typ_idx = p.arena_mut().push_core_type(updated_typ);
-            Pattern {
-                ppat_desc: Box::new(PatternDesc::Ppat_constraint(Box::new((
-                    inner_pat,
-                    updated_typ_idx,
-                )))),
-                ppat_loc: wrapper_loc,
-                ppat_attributes: first_pat.ppat_attributes,
-            }
-        } else {
-            first_pat
-        }
-    } else {
-        first_pat
-    };
-
-    // Wrap expression in Pexp_newtype for locally abstract types
-    // OCaml uses the full binding location for all these wrappers
-    if let Some((newtype_vars, inner_type)) = newtype_info {
-        let wrapper_loc = wrapper_loc.expect("locally abstract wrappers should have wrapper loc");
-        // First wrap the expression in Pexp_constraint with the inner type
-        // OCaml uses the binding location for this Pexp_constraint
-        let fv_idx = p.arena_mut().push_expr(first_value);
-        let inner_type_idx = p.arena_mut().push_core_type(inner_type);
-        first_value = Expression {
-            pexp_desc: Box::new(ExpressionDesc::Pexp_constraint(Box::new((
-                fv_idx,
-                inner_type_idx,
-            )))),
-            pexp_loc: wrapper_loc,
-            pexp_attributes: Attributes::new(),
-        };
-
-        // Then wrap in Pexp_newtype for each type variable
-        // Fold in reverse order so that the outermost newtype is the first variable
-        // OCaml uses the binding location for all Pexp_newtype wrappers
-        for var in newtype_vars.into_iter().rev() {
-            let fv_idx = p.arena_mut().push_expr(first_value);
-            first_value = Expression {
-                pexp_desc: Box::new(ExpressionDesc::Pexp_newtype(Box::new((var, fv_idx)))),
-                pexp_loc: wrapper_loc,
-                pexp_attributes: Attributes::new(),
-            };
-        }
-    }
 
     // Combine leading_attrs with let.unwrap attribute if this is let?
     let first_attrs = if unwrap {
@@ -5056,6 +4877,20 @@ fn parse_let_in_block_with_continuation_and_attrs(
 
     let first_pat_idx = p.arena_mut().push_pat(first_pat);
     let first_value_idx = p.arena_mut().push_expr(first_value);
+    if let Some(first_constraint) = first_constraint
+        && let Err(loc) = p.arena_mut().set_value_constraint(
+            first_pat_idx,
+            first_constraint,
+            first_value_idx,
+            first_loc,
+        )
+    {
+        p.err_at(
+            p.loc_start(loc),
+            p.loc_end(loc),
+            DiagnosticCategory::FatalSyntaxerr,
+        );
+    }
     bindings.push(ValueBinding {
         pvb_pat: first_pat_idx,
         pvb_expr: first_value_idx,
@@ -5070,20 +4905,41 @@ fn parse_let_in_block_with_continuation_and_attrs(
         p.next();
         let pat = super::pattern::parse_pattern(p);
 
-        // Handle optional type annotation
-        let pat = if p.token == Token::Colon {
+        let (pat, value_constraint) = if p.token == Token::Colon {
             p.next();
-            let typ = super::typ::parse_poly_type_expr(p);
-            let loc = p.mk_loc_spanning(pat.ppat_loc, typ.ptyp_loc);
-            let pat_idx = p.arena_mut().push_pat(pat);
-            let typ_idx = p.arena_mut().push_core_type(typ);
-            Pattern {
-                ppat_desc: Box::new(PatternDesc::Ppat_constraint(Box::new((pat_idx, typ_idx)))),
-                ppat_loc: loc,
-                ppat_attributes: Attributes::new(),
+            if p.token == Token::Typ {
+                p.next();
+                let pvc_newtypes = parse_lident_list(p);
+                p.expect(Token::Dot);
+                let pvc_type = super::typ::parse_typ_expr(p);
+                let pvc_type = p.arena_mut().push_core_type(pvc_type);
+                (
+                    pat,
+                    Some(crate::parser::ast::ValueConstraint {
+                        pvc_newtypes,
+                        pvc_type,
+                        pvc_pattern: None,
+                        pvc_expression: None,
+                    }),
+                )
+            } else {
+                let typ = super::typ::parse_poly_type_expr(p);
+                let loc = p.mk_loc_spanning(pat.ppat_loc, typ.ptyp_loc);
+                let pat_idx = p.arena_mut().push_pat(pat);
+                let typ_idx = p.arena_mut().push_core_type(typ);
+                (
+                    Pattern {
+                        ppat_desc: Box::new(PatternDesc::Ppat_constraint(Box::new((
+                            pat_idx, typ_idx,
+                        )))),
+                        ppat_loc: loc,
+                        ppat_attributes: Attributes::new(),
+                    },
+                    None,
+                )
             }
         } else {
-            pat
+            (pat, None)
         };
 
         p.expect(Token::Equal);
@@ -5091,6 +4947,20 @@ fn parse_let_in_block_with_continuation_and_attrs(
         let binding_loc = p.mk_loc_idx_to_prev_end(binding_start_idx);
         let pat_idx = p.arena_mut().push_pat(pat);
         let value_idx = p.arena_mut().push_expr(value);
+        if let Some(value_constraint) = value_constraint
+            && let Err(loc) = p.arena_mut().set_value_constraint(
+                pat_idx,
+                value_constraint,
+                value_idx,
+                binding_loc,
+            )
+        {
+            p.err_at(
+                p.loc_start(loc),
+                p.loc_end(loc),
+                DiagnosticCategory::FatalSyntaxerr,
+            );
+        }
         bindings.push(ValueBinding {
             pvb_pat: pat_idx,
             pvb_expr: value_idx,
@@ -5935,21 +5805,39 @@ fn parse_let_in_switch_case(p: &mut Parser<'_>) -> Expression {
     let mut bindings = vec![];
     let first_pat = super::pattern::parse_pattern(p);
 
-    // Handle optional type annotation: let x: int = ...
-    let first_pat = if p.token == Token::Colon {
+    let (first_pat, first_constraint) = if p.token == Token::Colon {
         p.next();
-        let typ = super::typ::parse_poly_type_expr(p);
-        // Create a constraint pattern
-        let loc = p.mk_loc_spanning(first_pat.ppat_loc, typ.ptyp_loc);
-        let pat_idx = p.arena_mut().push_pat(first_pat);
-        let typ_idx = p.arena_mut().push_core_type(typ);
-        Pattern {
-            ppat_desc: Box::new(PatternDesc::Ppat_constraint(Box::new((pat_idx, typ_idx)))),
-            ppat_loc: loc,
-            ppat_attributes: Attributes::new(),
+        if p.token == Token::Typ {
+            p.next();
+            let pvc_newtypes = parse_lident_list(p);
+            p.expect(Token::Dot);
+            let pvc_type = super::typ::parse_typ_expr(p);
+            let pvc_type = p.arena_mut().push_core_type(pvc_type);
+            (
+                first_pat,
+                Some(crate::parser::ast::ValueConstraint {
+                    pvc_newtypes,
+                    pvc_type,
+                    pvc_pattern: None,
+                    pvc_expression: None,
+                }),
+            )
+        } else {
+            let typ = super::typ::parse_poly_type_expr(p);
+            let loc = p.mk_loc_spanning(first_pat.ppat_loc, typ.ptyp_loc);
+            let pat_idx = p.arena_mut().push_pat(first_pat);
+            let typ_idx = p.arena_mut().push_core_type(typ);
+            (
+                Pattern {
+                    ppat_desc: Box::new(PatternDesc::Ppat_constraint(Box::new((pat_idx, typ_idx)))),
+                    ppat_loc: loc,
+                    ppat_attributes: Attributes::new(),
+                },
+                None,
+            )
         }
     } else {
-        first_pat
+        (first_pat, None)
     };
 
     p.expect(Token::Equal);
@@ -5970,6 +5858,20 @@ fn parse_let_in_switch_case(p: &mut Parser<'_>) -> Expression {
 
     let first_pat_idx = p.arena_mut().push_pat(first_pat);
     let first_value_idx = p.arena_mut().push_expr(first_value);
+    if let Some(first_constraint) = first_constraint
+        && let Err(loc) = p.arena_mut().set_value_constraint(
+            first_pat_idx,
+            first_constraint,
+            first_value_idx,
+            first_loc,
+        )
+    {
+        p.err_at(
+            p.loc_start(loc),
+            p.loc_end(loc),
+            DiagnosticCategory::FatalSyntaxerr,
+        );
+    }
     bindings.push(ValueBinding {
         pvb_pat: first_pat_idx,
         pvb_expr: first_value_idx,
@@ -5984,20 +5886,41 @@ fn parse_let_in_switch_case(p: &mut Parser<'_>) -> Expression {
         p.next();
         let pat = super::pattern::parse_pattern(p);
 
-        // Handle optional type annotation
-        let pat = if p.token == Token::Colon {
+        let (pat, value_constraint) = if p.token == Token::Colon {
             p.next();
-            let typ = super::typ::parse_poly_type_expr(p);
-            let loc = p.mk_loc_spanning(pat.ppat_loc, typ.ptyp_loc);
-            let pat_idx = p.arena_mut().push_pat(pat);
-            let typ_idx = p.arena_mut().push_core_type(typ);
-            Pattern {
-                ppat_desc: Box::new(PatternDesc::Ppat_constraint(Box::new((pat_idx, typ_idx)))),
-                ppat_loc: loc,
-                ppat_attributes: Attributes::new(),
+            if p.token == Token::Typ {
+                p.next();
+                let pvc_newtypes = parse_lident_list(p);
+                p.expect(Token::Dot);
+                let pvc_type = super::typ::parse_typ_expr(p);
+                let pvc_type = p.arena_mut().push_core_type(pvc_type);
+                (
+                    pat,
+                    Some(crate::parser::ast::ValueConstraint {
+                        pvc_newtypes,
+                        pvc_type,
+                        pvc_pattern: None,
+                        pvc_expression: None,
+                    }),
+                )
+            } else {
+                let typ = super::typ::parse_poly_type_expr(p);
+                let loc = p.mk_loc_spanning(pat.ppat_loc, typ.ptyp_loc);
+                let pat_idx = p.arena_mut().push_pat(pat);
+                let typ_idx = p.arena_mut().push_core_type(typ);
+                (
+                    Pattern {
+                        ppat_desc: Box::new(PatternDesc::Ppat_constraint(Box::new((
+                            pat_idx, typ_idx,
+                        )))),
+                        ppat_loc: loc,
+                        ppat_attributes: Attributes::new(),
+                    },
+                    None,
+                )
             }
         } else {
-            pat
+            (pat, None)
         };
 
         p.expect(Token::Equal);
@@ -6005,6 +5928,20 @@ fn parse_let_in_switch_case(p: &mut Parser<'_>) -> Expression {
         let binding_loc = p.mk_loc_idx_to_prev_end(binding_start_idx);
         let pat_idx = p.arena_mut().push_pat(pat);
         let value_idx = p.arena_mut().push_expr(value);
+        if let Some(value_constraint) = value_constraint
+            && let Err(loc) = p.arena_mut().set_value_constraint(
+                pat_idx,
+                value_constraint,
+                value_idx,
+                binding_loc,
+            )
+        {
+            p.err_at(
+                p.loc_start(loc),
+                p.loc_end(loc),
+                DiagnosticCategory::FatalSyntaxerr,
+            );
+        }
         bindings.push(ValueBinding {
             pvb_pat: pat_idx,
             pvb_expr: value_idx,

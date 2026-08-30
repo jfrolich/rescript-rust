@@ -81,8 +81,8 @@ pub struct TypeDeclaration {
     pub type_attributes: Vec<Attribute>,
     /// Is this type immediate (unboxed)?
     pub type_immediate: bool,
-    /// Unboxed status
-    pub type_unboxed: UnboxedStatus,
+    /// Runtime representation for single-payload unboxing.
+    pub type_representation: TypeRepresentation,
     /// Inlined types (for record printing)
     pub type_inlined_types: Vec<TypeInlinedType>,
     /// Qualified path for this type (e.g., Pdot(Pident "Pervasives") "ref").
@@ -107,10 +107,22 @@ pub enum TypeKind {
     TypeAbstract,
     /// Record type
     TypeRecord(Vec<LabelDeclaration>, RecordRepresentation),
-    /// Variant type
-    TypeVariant(Vec<ConstructorDeclaration>),
+    /// Variant type with its canonical runtime layout.
+    TypeVariant(
+        Vec<ConstructorDeclaration>,
+        super::variant_runtime::LayoutRef,
+    ),
     /// Open type (extensible)
     TypeOpen,
+}
+
+impl TypeDeclaration {
+    pub fn variant_layout_ref(&self) -> Option<super::variant_runtime::LayoutRef> {
+        match self.type_kind {
+            TypeKind::TypeVariant(_, layout) => Some(layout),
+            TypeKind::TypeAbstract | TypeKind::TypeRecord(..) | TypeKind::TypeOpen => None,
+        }
+    }
 }
 
 /// Record representation.
@@ -124,47 +136,18 @@ pub enum RecordRepresentation {
     RecordUnboxed(bool),
     /// Inlined record (in variant constructor)
     RecordInlined {
-        tag: i32,
         name: String,
-        num_nonconsts: i32,
-        attrs: Vec<Attribute>,
+        representation: super::variant_runtime::ConstructorReference,
     },
     /// Extension record
     RecordExtension,
 }
 
-/// Unboxed status for types.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct UnboxedStatus {
-    /// Is the type unboxed?
-    pub unboxed: bool,
-    /// Is this the default (unannotated)?
-    pub default: bool,
-}
-
-impl UnboxedStatus {
-    pub const FALSE_FALSE: UnboxedStatus = UnboxedStatus {
-        unboxed: false,
-        default: false,
-    };
-    pub const FALSE_TRUE: UnboxedStatus = UnboxedStatus {
-        unboxed: false,
-        default: true,
-    };
-    pub const TRUE_FALSE: UnboxedStatus = UnboxedStatus {
-        unboxed: true,
-        default: false,
-    };
-    pub const TRUE_TRUE: UnboxedStatus = UnboxedStatus {
-        unboxed: true,
-        default: true,
-    };
-}
-
-impl Default for UnboxedStatus {
-    fn default() -> Self {
-        Self::FALSE_TRUE
-    }
+/// Runtime representation for single-payload unboxing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum TypeRepresentation {
+    Boxed,
+    Unboxed,
 }
 
 /// A label (field) declaration in a record.
@@ -250,12 +233,8 @@ pub struct ConstructorDescription {
     pub cstr_args: Vec<TypeExprRef>,
     /// Number of arguments
     pub cstr_arity: i32,
-    /// Constructor tag
-    pub cstr_tag: ConstructorTag,
-    /// Number of constant constructors in the type
-    pub cstr_consts: i32,
-    /// Number of non-constant constructors
-    pub cstr_nonconsts: i32,
+    /// Semantic constructor kind and canonical runtime representation.
+    pub cstr_kind: ConstructorKind,
     /// Is this a GADT constructor?
     pub cstr_generalized: bool,
     /// Private flag
@@ -268,29 +247,34 @@ pub struct ConstructorDescription {
     pub cstr_inlined: Option<Box<TypeDeclaration>>,
 }
 
-/// Constructor tag for heap blocks.
+/// Semantic constructor identity.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ConstructorTag {
-    /// Constant constructor (an int)
-    CstrConstant(i32),
-    /// Regular constructor (a block)
-    CstrBlock(i32),
-    /// Unboxed constructor
-    CstrUnboxed,
-    /// Extension constructor
-    CstrExtension(Path),
+pub enum ConstructorKind {
+    /// Constructor declared by an ordinary variant.
+    Ordinary(super::variant_runtime::ConstructorReference),
+    /// Extensible constructor, identified by its extension path.
+    Extension(Path),
 }
 
-impl ConstructorTag {
-    /// Check if two tags are equal.
-    pub fn equal(&self, other: &ConstructorTag) -> bool {
-        match (self, other) {
-            (ConstructorTag::CstrConstant(i1), ConstructorTag::CstrConstant(i2)) => i1 == i2,
-            (ConstructorTag::CstrBlock(i1), ConstructorTag::CstrBlock(i2)) => i1 == i2,
-            (ConstructorTag::CstrUnboxed, ConstructorTag::CstrUnboxed) => true,
-            (ConstructorTag::CstrExtension(p1), ConstructorTag::CstrExtension(p2)) => p1.same(p2),
-            _ => false,
+/// Whether two descriptions denote the same constructor for a common
+/// scrutinee type.
+pub fn same_constructor(c1: &ConstructorDescription, c2: &ConstructorDescription) -> bool {
+    match (&c1.cstr_kind, &c2.cstr_kind) {
+        (ConstructorKind::Ordinary(_), ConstructorKind::Ordinary(_)) => {
+            c1.cstr_name == c2.cstr_name
         }
+        (ConstructorKind::Extension(p1), ConstructorKind::Extension(p2)) => p1.same(p2),
+        _ => false,
+    }
+}
+
+/// Conservative equality used while checking extension patterns.
+pub fn may_equal_constructor(c1: &ConstructorDescription, c2: &ConstructorDescription) -> bool {
+    match (&c1.cstr_kind, &c2.cstr_kind) {
+        (ConstructorKind::Extension(_), ConstructorKind::Extension(_)) => {
+            c1.cstr_arity == c2.cstr_arity
+        }
+        _ => same_constructor(c1, c2),
     }
 }
 
@@ -622,23 +606,6 @@ pub(crate) fn parse_ocaml_int_literal(s: &str) -> Option<i64> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn test_constructor_tag_equality() {
-        let t1 = ConstructorTag::CstrConstant(0);
-        let t2 = ConstructorTag::CstrConstant(0);
-        let t3 = ConstructorTag::CstrConstant(1);
-
-        assert!(t1.equal(&t2));
-        assert!(!t1.equal(&t3));
-    }
-
-    #[test]
-    fn test_unboxed_status() {
-        let s = UnboxedStatus::default();
-        assert!(!s.unboxed);
-        assert!(s.default);
-    }
 
     #[test]
     fn test_record_representation() {

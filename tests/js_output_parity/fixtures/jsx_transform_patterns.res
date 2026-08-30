@@ -1,7 +1,9 @@
 module React = {
   type element = Jsx.element
+  type componentLike<'props, 'return> = Jsx.componentLike<'props, 'return>
   type component<'props> = Jsx.component<'props>
 
+  external component: componentLike<'props, element> => component<'props> = "%component_identity"
   let null: element = %raw("null")
   external string: string => element = "%identity"
   external int: int => element = "%identity"

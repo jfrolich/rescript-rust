@@ -4,7 +4,7 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use crate::gentype::gen_type_common::{dep_to_resolved_name, dep_to_string, Dep, StringMap, Type};
+use crate::gentype::gen_type_common::{Dep, StringMap, Type, dep_to_resolved_name, dep_to_string};
 use crate::types::path::Path;
 use crate::types::typedtree::TypedSignature;
 
@@ -329,7 +329,7 @@ pub fn path_to_list(path: &Path) -> Vec<String> {
     match path {
         Path::Pident(id) => vec![id.name().to_string()],
         Path::Pdot(p, s, _) => {
-            let mut out = vec![s.clone()];
+            let mut out = vec![s.to_string()];
             out.extend(path_to_list(p));
             out
         }

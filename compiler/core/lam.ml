@@ -32,21 +32,14 @@ type ap_info = {
 }
 
 module Types = struct
-  type lambda_switch = {
-    sw_consts_full: bool;
-    (* TODO: refine its representation *)
-    sw_consts: (int * t) list;
-    sw_blocks_full: bool;
-    sw_blocks: (int * t) list;
-    sw_failaction: t option;
-    sw_names: Ast_untagged_variants.switch_names option;
-  }
+  type lambda_switch = t Lambda.switch
 
   and lfunction = {
     arity: int;
     params: ident list;
     body: t;
     attr: Lambda.function_attribute;
+    loc: Location.t;
   }
 
   (*
@@ -65,10 +58,13 @@ module Types = struct
 
       In most cases: {[
         let sw =
-          {sw_consts_full = cstr.cstr_consts; sw_consts = consts;
-           sw_blocks_full = cstr.cstr_nonconsts; sw_blocks = nonconsts;
+          {sw_consts_full = List.length consts >= num_consts;
+           sw_consts = consts;
+           sw_blocks_full = List.length nonconsts >= num_nonconsts;
+           sw_blocks = nonconsts;
            sw_failaction = None} in
       ]}
+      where the counts come from the variant layout.
 
       but there are some edge cases (see https://caml.inria.fr/mantis/view.php?id=6033)
       one predicate used is
@@ -114,164 +110,7 @@ module Types = struct
   (* | Lsend of Lam_compat.meth_kind * t * t * t list * Location.t *)
 end
 
-module X = struct
-  type lambda_switch = Types.lambda_switch = {
-    sw_consts_full: bool;
-    sw_consts: (int * t) list;
-    sw_blocks_full: bool;
-    sw_blocks: (int * t) list;
-    sw_failaction: t option;
-    sw_names: Ast_untagged_variants.switch_names option;
-  }
-
-  and prim_info = Types.prim_info = {
-    primitive: Lam_primitive.t;
-    args: t list;
-    loc: Location.t;
-  }
-
-  and apply = Types.apply = {
-    ap_func: t;
-    ap_args: t list;
-    ap_info: ap_info;
-    ap_transformed_jsx: bool;
-  }
-
-  and lfunction = Types.lfunction = {
-    arity: int;
-    params: ident list;
-    body: t;
-    attr: Lambda.function_attribute;
-  }
-
-  and t = Types.t =
-    | Lvar of ident
-    | Lglobal_module of ident * bool
-    | Lconst of Lam_constant.t
-    | Lapply of apply
-    | Lfunction of lfunction
-    | Llet of Lam_compat.let_kind * ident * t * t
-    | Lletrec of (ident * t) list * t
-    | Lprim of prim_info
-    | Lswitch of t * lambda_switch
-    | Lstringswitch of t * (string * t) list * t option
-    | Lstaticraise of int * t list
-    | Lstaticcatch of t * (int * ident list) * t
-    | Ltrywith of t * ident * t
-    | Lifthenelse of t * t * t
-    | Lsequence of t * t
-    | Lbreak
-    | Lcontinue
-    | Lwhile of t * t
-    | Lfor of ident * t * t * Asttypes.direction_flag * t
-    | Lfor_of of ident * t * t
-    | Lfor_await_of of ident * t * t
-    | Lassign of ident * t
-  (* | Lsend of Lam_compat.meth_kind * t * t * t list * Location.t *)
-end
-
 include Types
-
-(** apply [f] to direct successor which has type [Lam.t] *)
-
-let inner_map (l : t) (f : t -> X.t) : X.t =
-  match l with
-  | Lvar (_ : ident) | Lconst (_ : Lam_constant.t) -> ((* Obj.magic *) l : X.t)
-  | Lapply {ap_func; ap_args; ap_info; ap_transformed_jsx} ->
-    let ap_func = f ap_func in
-    let ap_args = Ext_list.map ap_args f in
-    Lapply {ap_func; ap_args; ap_info; ap_transformed_jsx}
-  | Lfunction {body; arity; params; attr} ->
-    let body = f body in
-    Lfunction {body; arity; params; attr}
-  | Llet (str, id, arg, body) ->
-    let arg = f arg in
-    let body = f body in
-    Llet (str, id, arg, body)
-  | Lletrec (decl, body) ->
-    let body = f body in
-    let decl = Ext_list.map_snd decl f in
-    Lletrec (decl, body)
-  | Lglobal_module _ -> (l : X.t)
-  | Lprim {args; primitive; loc} ->
-    let args = Ext_list.map args f in
-    Lprim {args; primitive; loc}
-  | Lswitch
-      ( arg,
-        {
-          sw_consts;
-          sw_consts_full;
-          sw_blocks;
-          sw_blocks_full;
-          sw_failaction;
-          sw_names;
-        } ) ->
-    let arg = f arg in
-    let sw_consts = Ext_list.map_snd sw_consts f in
-    let sw_blocks = Ext_list.map_snd sw_blocks f in
-    let sw_failaction = Ext_option.map sw_failaction f in
-    Lswitch
-      ( arg,
-        {
-          sw_consts;
-          sw_blocks;
-          sw_failaction;
-          sw_blocks_full;
-          sw_consts_full;
-          sw_names;
-        } )
-  | Lstringswitch (arg, cases, default) ->
-    let arg = f arg in
-    let cases = Ext_list.map_snd cases f in
-    let default = Ext_option.map default f in
-    Lstringswitch (arg, cases, default)
-  | Lstaticraise (id, args) ->
-    let args = Ext_list.map args f in
-    Lstaticraise (id, args)
-  | Lstaticcatch (e1, vars, e2) ->
-    let e1 = f e1 in
-    let e2 = f e2 in
-    Lstaticcatch (e1, vars, e2)
-  | Ltrywith (e1, exn, e2) ->
-    let e1 = f e1 in
-    let e2 = f e2 in
-    Ltrywith (e1, exn, e2)
-  | Lifthenelse (e1, e2, e3) ->
-    let e1 = f e1 in
-    let e2 = f e2 in
-    let e3 = f e3 in
-    Lifthenelse (e1, e2, e3)
-  | Lsequence (e1, e2) ->
-    let e1 = f e1 in
-    let e2 = f e2 in
-    Lsequence (e1, e2)
-  | Lbreak -> Lbreak
-  | Lcontinue -> Lcontinue
-  | Lwhile (e1, e2) ->
-    let e1 = f e1 in
-    let e2 = f e2 in
-    Lwhile (e1, e2)
-  | Lfor (v, e1, e2, dir, e3) ->
-    let e1 = f e1 in
-    let e2 = f e2 in
-    let e3 = f e3 in
-    Lfor (v, e1, e2, dir, e3)
-  | Lfor_of (v, e1, e2) ->
-    let e1 = f e1 in
-    let e2 = f e2 in
-    Lfor_of (v, e1, e2)
-  | Lfor_await_of (v, e1, e2) ->
-    let e1 = f e1 in
-    let e2 = f e2 in
-    Lfor_await_of (v, e1, e2)
-  | Lassign (id, e) ->
-    let e = f e in
-    Lassign (id, e)
-(* | Lsend (k, met, obj, args, loc) ->
-   let met = f met in
-   let obj = f obj in
-   let args = Ext_list.map args f in
-   Lsend(k,met,obj,args,loc) *)
 
 exception Not_simple_form
 
@@ -296,13 +135,6 @@ let rec is_eta_conversion_exn params inner_args outer_args : t list =
   match (params, inner_args, outer_args) with
   | x :: xs, Lvar y :: ys, r :: rest when Ident.same x y ->
     r :: is_eta_conversion_exn xs ys rest
-  | ( x :: xs,
-      Lprim
-        ({primitive = Pjs_fn_make _ | Pjs_fn_make_unit; args = [Lvar y]} as p)
-      :: ys,
-      r :: rest )
-    when Ident.same x y ->
-    Lprim {p with args = [r]} :: is_eta_conversion_exn xs ys rest
   | [], [], [] -> []
   | _, _, _ -> raise_notrace Not_simple_form
 
@@ -437,17 +269,57 @@ and eq_option l1 l2 =
 and eq_approx_list ls ls1 = Ext_list.for_all2_no_exn ls ls1 eq_approx
 
 let switch lam (lam_switch : lambda_switch) : t =
+  let action_or_switch = function
+    | Some action -> action
+    | None -> (
+      match lam_switch.sw_failaction with
+      | Some action -> action
+      | None -> Lswitch (lam, lam_switch))
+  in
   match lam with
-  | Lconst (Const_int {i}) -> (
+  | Lconst (Const_constructor cstr_name) ->
+    let action =
+      Ext_list.find_opt lam_switch.sw_consts (fun (key, action) ->
+          match key with
+          | Lambda.Switch_constructor (Constant tag) when cstr_name = tag ->
+            Some action
+          | Switch_int _ | Switch_constructor _ -> None)
+    in
+    action_or_switch action
+  | Lconst (Const_int {i; comment}) ->
     (* Because of inlining and dead code, we might be looking at a value of unexpected type
        e.g. an integer, so the const case might not be found *)
-    try
-      Ext_list.assoc_by_int lam_switch.sw_consts (Int32.to_int i)
-        lam_switch.sw_failaction
-    with _ -> Lswitch (lam, lam_switch))
-  | Lconst (Const_block (i, _, _)) -> (
-    try Ext_list.assoc_by_int lam_switch.sw_blocks i lam_switch.sw_failaction
-    with _ -> Lswitch (lam, lam_switch))
+    let i = Int32.to_int i in
+    let action =
+      Ext_list.find_opt lam_switch.sw_consts (fun (key, action) ->
+          match key with
+          | Lambda.Switch_int ordinal when ordinal = i -> Some action
+          | Switch_constructor
+              (Constant {tag_type = Some (Variant_runtime.Int value)})
+            when comment = None && value = i ->
+            Some action
+          | Switch_int _ | Switch_constructor _ -> None)
+    in
+    action_or_switch action
+  | Lconst (Const_block (tag_info, _)) ->
+    let runtime =
+      match tag_info with
+      | Lambda.Blk_constructor {runtime} | Blk_record_inlined {runtime} ->
+        Some runtime
+      | Blk_tuple | Blk_poly_var _ | Blk_record _ | Blk_record_ext _
+      | Blk_module _ | Blk_module_export _ | Blk_extension | Blk_some
+      | Blk_some_not_nested ->
+        None
+    in
+    let action =
+      Ext_list.find_opt lam_switch.sw_blocks (fun (key, action) ->
+          match key with
+          | Switch_constructor (Block {runtime = case_runtime})
+            when runtime = Some case_runtime ->
+            Some action
+          | Lambda.Switch_int _ | Switch_constructor _ -> None)
+    in
+    action_or_switch action
   | _ -> Lswitch (lam, lam_switch)
 
 let stringswitch (lam : t) cases default : t =
@@ -475,8 +347,8 @@ let global_module ?(dynamic_import = false) id =
   Lglobal_module (id, dynamic_import)
 let const ct : t = Lconst ct
 
-let function_ ~attr ~arity ~params ~body : t =
-  Lfunction {arity; params; body; attr}
+let function_ ~loc ~attr ~arity ~params ~body : t =
+  Lfunction {arity; params; body; attr; loc}
 
 let let_ kind id e body : t = Llet (kind, id, e, body)
 let letrec bindings body : t = Lletrec (bindings, body)
@@ -537,6 +409,15 @@ let prim ~primitive:(prim : Lam_primitive.t) ~args loc : t =
         | Ceq -> a = (b : string)
         | Cneq -> a <> b
         | _ -> assert false)
+    | ( Pintcomp ((Ceq | Cneq) as op),
+        Const_constructor {name = a; tag_type = None},
+        Const_constructor {name = b; tag_type = None} ) ->
+      (* Both runtime representations are the constructor names *)
+      Lift.bool
+        (match op with
+        | Ceq -> a = b
+        | Cneq -> a <> b
+        | _ -> assert false)
     | ( ( Paddint | Psubint | Pmulint | Pdivint | Pmodint | Pandint | Porint
         | Pxorint | Plslint | Plsrint | Pasrint ),
         Const_int {i = aa},
@@ -574,7 +455,7 @@ let prim ~primitive:(prim : Lam_primitive.t) ~args loc : t =
     | _ -> default ())
   | _ -> (
     match prim with
-    | Pmakeblock (_size, Blk_module fields, _) -> (
+    | Pmakeblock (Blk_module fields, _) -> (
       let rec aux fields args (var : Ident.t) i =
         match (fields, args) with
         | [], [] -> true
@@ -629,28 +510,42 @@ let has_boolean_type (x : t) =
 (** [complete_range sw_consts 0 7]
     is complete with [0,1,.. 7]
 *)
-let rec complete_range (sw_consts : (int * _) list) ~(start : int) ~finish =
+let rec complete_range (sw_consts : (Lambda.switch_key * _) list) ~(start : int)
+    ~finish =
   match sw_consts with
   | [] -> finish < start
-  | (i, _) :: rest ->
+  | (Switch_int i, _) :: rest ->
     start <= finish && i = start
     && complete_range rest ~start:(start + 1) ~finish
+  | (Switch_constructor _, _) :: _ -> false
 
-let rec eval_const_as_bool (v : Lam_constant.t) : bool =
+let rec eval_const_as_bool (v : Lam_constant.t) : bool option =
   match v with
-  | Const_int {i = x} -> x <> 0l
-  | Const_char x -> x <> 0
+  | Const_int {i = x} -> Some (x <> 0l)
+  | Const_char x -> Some (x <> 0)
   | Const_js_false | Const_js_null | Const_module_alias | Const_js_undefined _
     ->
-    false
+    Some false
   | Const_js_true | Const_string _ | Const_pointer _ | Const_float _
   | Const_bigint _ | Const_block _ ->
-    true
+    Some true
   | Const_some b -> eval_const_as_bool b
+  | Const_constructor {name; tag_type} -> (
+    (* Truthiness of the canonical runtime representation *)
+    match tag_type with
+    | None -> Some (name <> "[]") (* the name string; [] is the number 0 *)
+    | Some (String s) -> Some (s <> "")
+    | Some (Int i) -> Some (i <> 0)
+    | Some (Bool b) -> Some b
+    | Some Null | Some Undefined -> Some false
+    | Some (Float _ | BigInt _ | Untagged _) -> None)
 
 let if_ (a : t) (b : t) (c : t) : t =
   match a with
-  | Lconst v -> if eval_const_as_bool v then b else c
+  | Lconst v -> (
+    match eval_const_as_bool v with
+    | Some v -> if v then b else c
+    | None -> Lifthenelse (a, b, c))
   | _ -> (
     match (b, c) with
     | _, Lconst (Const_int {comment = Pt_assertfalse}) ->

@@ -29,16 +29,20 @@ let rec struct_const ppf = function
   | Const_base (Const_int64 n) -> fprintf ppf "%LiL" n
   | Const_base (Const_bigint (sign, n)) ->
     fprintf ppf "%sn" (Bigint_utils.to_string sign n)
-  | Const_pointer (n, _) -> fprintf ppf "%ia" n
+  | Const_pointer (Pt_constructor {name}) -> fprintf ppf "`%s" name
+  | Const_pointer (Pt_variant {name}) -> fprintf ppf "`%s" name
+  | Const_pointer Pt_module_alias -> fprintf ppf "module_alias"
+  | Const_pointer Pt_shape_none -> fprintf ppf "shape_none"
+  | Const_pointer Pt_assertfalse -> fprintf ppf "assertfalse"
   | Const_block (tag_info, []) ->
-    let tag = Lambda.tag_of_tag_info tag_info in
-    fprintf ppf "[%i]" tag
+    let tag = Lambda.tag_label_of_tag_info tag_info in
+    fprintf ppf "[%s]" tag
   | Const_block (tag_info, sc1 :: scl) ->
-    let tag = Lambda.tag_of_tag_info tag_info in
+    let tag = Lambda.tag_label_of_tag_info tag_info in
     let sconsts ppf scl =
       List.iter (fun sc -> fprintf ppf "@ %a" struct_const sc) scl
     in
-    fprintf ppf "@[<1>[%i:@ @[%a%a@]]@]" tag struct_const sc1 sconsts scl
+    fprintf ppf "@[<1>[%s:@ @[%a%a@]]@]" tag struct_const sc1 sconsts scl
   | Const_false -> fprintf ppf "false"
   | Const_true -> fprintf ppf "true"
 
@@ -116,6 +120,8 @@ let primitive ppf = function
   | Pfield (n, fld) -> fprintf ppf "field:%s/%i" (str_of_field_info fld) n
   | Psetfield (n, _) -> fprintf ppf "setfield %i" n
   | Pduprecord -> fprintf ppf "duprecord"
+  | Precord_rest excluded ->
+    fprintf ppf "record_rest(%s)" (String.concat ", " excluded)
   | Pccall p -> fprintf ppf "%s" p.prim_name
   | Praise k -> fprintf ppf "%s" (Lambda.raise_kind k)
   | Pobjcomp Ceq -> fprintf ppf "=="
@@ -221,14 +227,12 @@ let primitive ppf = function
   | Pstringmax -> fprintf ppf "max"
   | Pstringadd -> fprintf ppf "string.concat"
   | Parraylength -> fprintf ppf "array.length"
-  | Pmakearray Mutable -> fprintf ppf "makearray"
-  | Pmakearray Immutable -> fprintf ppf "makearray_imm"
+  | Pmakearray -> fprintf ppf "makearray"
   | Parrayrefu -> fprintf ppf "array.unsafe_get"
   | Parraysetu -> fprintf ppf "array.unsafe_set"
   | Parrayrefs -> fprintf ppf "array.get"
   | Parraysets -> fprintf ppf "array.set"
-  | Pmakelist Mutable -> fprintf ppf "makelist"
-  | Pmakelist Immutable -> fprintf ppf "makelist_imm"
+  | Pmakelist -> fprintf ppf "makelist"
   | Pmakedict -> fprintf ppf "makedict"
   | Pdict_has -> fprintf ppf "dict.has"
   | Pisint -> fprintf ppf "isint"
@@ -260,9 +264,9 @@ let primitive ppf = function
   | Pis_poly_var_block -> fprintf ppf "#is_poly_var_block"
   | Pjs_raw_expr -> fprintf ppf "#raw_expr"
   | Pjs_raw_stmt -> fprintf ppf "#raw_stmt"
-  | Pjs_fn_make arity -> fprintf ppf "#fn_mk(%d)" arity
-  | Pjs_fn_make_unit -> fprintf ppf "#fn_mk_unit"
   | Pjs_fn_method -> fprintf ppf "#fn_method"
+  (* Debug-only dump, exercised solely under -drawlambda/-dlambda. *)
+  | Ptagged_template -> fprintf ppf "#tagged_template" [@coverage off]
 
 let function_attribute ppf {inline; is_a_functor; return_unit} =
   if is_a_functor then fprintf ppf "is_a_functor@ ";
@@ -326,14 +330,24 @@ let rec lam ppf = function
     let switch ppf sw =
       let spc = ref false in
       List.iter
-        (fun (n, l) ->
+        (fun (key, l) ->
           if !spc then fprintf ppf "@ " else spc := true;
-          fprintf ppf "@[<hv 1>case int %i:@ %a@]" n lam l)
+          match key with
+          | Switch_int ordinal ->
+            fprintf ppf "@[<hv 1>case int %i:@ %a@]" ordinal lam l
+          | Switch_constructor (Constant {name}) ->
+            fprintf ppf "@[<hv 1>case constructor %S:@ %a@]" name lam l
+          | Switch_constructor (Block _) -> assert false)
         sw.sw_consts;
       List.iter
-        (fun (n, l) ->
+        (fun (key, l) ->
           if !spc then fprintf ppf "@ " else spc := true;
-          fprintf ppf "@[<hv 1>case tag %i:@ %a@]" n lam l)
+          match key with
+          | Switch_int ordinal ->
+            fprintf ppf "@[<hv 1>case tag %i:@ %a@]" ordinal lam l
+          | Switch_constructor (Block {runtime = {tag = {name}}}) ->
+            fprintf ppf "@[<hv 1>case constructor %S:@ %a@]" name lam l
+          | Switch_constructor (Constant _) -> assert false)
         sw.sw_blocks;
       match sw.sw_failaction with
       | None -> ()

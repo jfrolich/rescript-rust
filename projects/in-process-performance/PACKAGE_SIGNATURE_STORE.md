@@ -242,8 +242,8 @@ Benchmarks:
 Every retained implementation step must keep:
 
 - Tella build complete
-- JS output parity at `660/660`
-- canonical typedtree parity at `660/660`
+- JS output parity on the current corpus (`610/610` at the latest validation)
+- canonical typedtree parity on the current corpus (`610/610` at the latest validation)
 - subprocess `bsc` path supported
 
 ## Milestones

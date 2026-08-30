@@ -19,20 +19,20 @@ open Asttypes
 
 type loc_kind = Loc_FILE | Loc_LINE | Loc_MODULE | Loc_LOC | Loc_POS
 
+type hoisted_function = {binding: Ident.t; path: string list; loc: Location.t}
+
 type tag_info =
   | Blk_constructor of {
       name: string;
       num_nonconst: int;
-      tag: int;
-      attrs: Parsetree.attributes;
+      runtime: Variant_runtime.block_runtime;
     }
   | Blk_record_inlined of {
       name: string;
       num_nonconst: int;
-      tag: int;
       fields: (string * bool (* optional *)) array;
       mutable_flag: mutable_flag;
-      attrs: Parsetree.attributes;
+      runtime: Variant_runtime.block_runtime;
     }
   | Blk_tuple
   | Blk_poly_var of string
@@ -59,7 +59,7 @@ type tag_info =
 
 val find_name : Parsetree.attribute -> Asttypes.label option
 
-val tag_of_tag_info : tag_info -> int
+val tag_label_of_tag_info : tag_info -> string
 val mutable_flag_of_tag_info : tag_info -> mutable_flag
 val blk_record :
   (Types.label_description * Typedtree.record_label_definition * bool) array ->
@@ -75,15 +75,14 @@ val blk_record_inlined :
   (Types.label_description * Typedtree.record_label_definition * bool) array ->
   string ->
   int ->
-  tag:int ->
-  attrs:Parsetree.attributes ->
+  runtime:Variant_runtime.block_runtime ->
   mutable_flag ->
   tag_info
 
 val ref_tag_info : tag_info
 
 type field_dbg_info =
-  | Fld_record of {name: string; mutable_flag: Asttypes.mutable_flag}
+  | Fld_record of {name: string}
   | Fld_module of {name: string}
   | Fld_record_inline of {name: string}
   | Fld_record_extension of {name: string}
@@ -118,12 +117,7 @@ val fld_record_extension_set : Types.label_description -> set_field_dbg_info
 type immediate_or_pointer = Immediate | Pointer
 
 type pointer_info =
-  | Pt_constructor of {
-      name: string;
-      const: int;
-      non_const: int;
-      attrs: Parsetree.attributes;
-    }
+  | Pt_constructor of Variant_runtime.tag
   | Pt_variant of {name: string}
   | Pt_module_alias
   | Pt_shape_none
@@ -146,6 +140,7 @@ type primitive =
   | Pfield of int * field_dbg_info
   | Psetfield of int * set_field_dbg_info
   | Pduprecord
+  | Precord_rest of string list (* excluded runtime field names *)
   (* External call *)
   | Pccall of Primitive.description
   (* Exceptions *)
@@ -229,14 +224,14 @@ type primitive =
   | Pstringmax
   | Pstringadd
   (* Array operations *)
-  | Pmakearray of mutable_flag
+  | Pmakearray
   | Parraylength
   | Parrayrefu
   | Parraysetu
   | Parrayrefs
   | Parraysets
   (* List primitives *)
-  | Pmakelist of Asttypes.mutable_flag
+  | Pmakelist
   (* dict primitives *)
   | Pmakedict
   | Pdict_has
@@ -272,9 +267,8 @@ type primitive =
   | Pis_poly_var_block
   | Pjs_raw_expr
   | Pjs_raw_stmt
-  | Pjs_fn_make of int
-  | Pjs_fn_make_unit
   | Pjs_fn_method
+  | Ptagged_template
 
 and comparison = Ceq | Cneq | Clt | Cgt | Cle | Cge
 
@@ -284,7 +278,7 @@ and raise_kind = Raise_regular | Raise_reraise
 
 type structured_constant =
   | Const_base of constant
-  | Const_pointer of int * pointer_info
+  | Const_pointer of pointer_info
   | Const_block of tag_info * structured_constant list
   | Const_immstring of string
   | Const_false
@@ -359,14 +353,24 @@ and lambda_apply = {
   ap_transformed_jsx: bool;
 }
 
-and lambda_switch = {
-  sw_numconsts: int; (* Number of integer cases *)
-  sw_consts: (int * lambda) list; (* Integer cases *)
-  sw_numblocks: int; (* Number of tag block cases *)
-  sw_blocks: (int * lambda) list; (* Tag block cases *)
-  sw_failaction: lambda option; (* Action to take if failure *)
-  sw_names: Ast_untagged_variants.switch_names option;
+and switch_key =
+  | Switch_int of int
+  | Switch_constructor of Variant_runtime.constructor_case
+
+and switch_dispatch =
+  | Switch_direct
+  | Switch_variant of Variant_runtime.matching_facts
+
+and 'a switch = {
+  sw_consts_full: bool;
+  sw_consts: (switch_key * 'a) list;
+  sw_blocks_full: bool;
+  sw_blocks: (switch_key * 'a) list;
+  sw_failaction: 'a option; (* Action to take if failure *)
+  sw_dispatch: switch_dispatch;
 }
+
+and lambda_switch = lambda switch
 
 (* Lambda code for the middle-end.
    * In the closure case the code is a sequence of assignments to a
@@ -390,8 +394,8 @@ val lambda_module_alias : lambda
 val name_lambda : let_kind -> lambda -> (Ident.t -> lambda) -> lambda
 
 val iter : (lambda -> unit) -> lambda -> unit
-module IdentSet : Set.S with type elt = Ident.t
-val free_variables : lambda -> IdentSet.t
+module Ident_set : Set.S with type elt = Ident.t
+val free_variables : lambda -> Ident_set.t
 
 val transl_normal_path : Path.t -> lambda (* Path.t is already normal *)
 

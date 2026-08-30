@@ -16,7 +16,7 @@ use crate::location::Location;
 
 /// Equivalent of OCaml's `is_block_constructor` (lam_util.ml:69-72).
 fn is_block_constructor(primitive: &Primitive) -> bool {
-    matches!(primitive, Primitive::Pmakeblock(_, _, _))
+    matches!(primitive, Primitive::Pmakeblock(_, _))
 }
 
 /// Equivalent of OCaml's `is_safe_to_alias` recursive helper
@@ -153,7 +153,7 @@ pub fn field_flatten_get(
             elements,
             ..
         })) => match info {
-            FieldDbgInfo::Record { name, .. } => {
+            FieldDbgInfo::Record { name } => {
                 let mut found: Option<&Constant> = None;
                 for (idx, (field_name, _)) in fields.iter().enumerate() {
                     if field_name == name {
@@ -253,7 +253,7 @@ mod tests {
         let x = ident("x", 14);
         let inner_e = Lambda::Lconst(Constant::int(1));
         let mk = Lambda::prim(
-            Primitive::Pmakeblock(0, crate::lambda::TagInfo::Tuple, Mutable::Immutable),
+            Primitive::Pmakeblock(crate::lambda::TagInfo::Tuple, Mutable::Immutable),
             vec![inner_e],
             Location::none(),
         );

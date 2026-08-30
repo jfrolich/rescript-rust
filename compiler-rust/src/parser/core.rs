@@ -205,12 +205,14 @@ pub mod error_messages {
          middle would create new lists; out of performance concern, our pattern \
          matching currently guarantees to never create new intermediate data.";
 
-    /// Error message for record pattern spread.
-    pub const RECORD_PATTERN_SPREAD: &str = "Record spread (`...`) is not supported in pattern matches.\n\
-         Explanation: you can't collect a subset of a record's field into its own \
-         record, since a record needs an explicit declaration and that subset \
-         wouldn't have one.\n\
-         Solution: you need to pull out each field you want explicitly.";
+    /// Error message for record pattern spread (fallback row after `...`).
+    pub const RECORD_PATTERN_SPREAD: &str = "Record rest patterns require a type annotation and a binding name.\n\
+         Correct syntax: `...typeName as bindingName`\n\
+         Example: `let {name, ...Config.t as rest} = myRecord`";
+
+    /// Error message for multiple record-rest clauses.
+    pub const RECORD_PATTERN_MULTIPLE_REST: &str = "Record patterns can only have one `...` rest clause.\n\
+         Use a single `...typeName as bindingName` clause to capture the remaining fields.";
 
     /// Error message for array pattern spread.
     pub const ARRAY_PATTERN_SPREAD: &str = "Array spread (`...`) is not supported in pattern matches.\n\n\
@@ -1165,8 +1167,8 @@ pub enum FundefParameter {
 /// Extract type and term parameters from a list of function definition parameters.
 pub fn extract_fundef_params(
     params: Vec<FundefParameter>,
-) -> (Option<FundefTypeParam>, Vec<FundefTermParam>) {
-    let mut type_acc: Option<FundefTypeParam> = None;
+) -> (Vec<FundefTypeParam>, Vec<FundefTermParam>) {
+    let mut type_acc: Vec<FundefTypeParam> = Vec::new();
     let mut term_acc: Vec<FundefTermParam> = Vec::new();
 
     for param in params {
@@ -1175,14 +1177,10 @@ pub fn extract_fundef_params(
                 term_acc.push(tp);
             }
             FundefParameter::Type(tp) => {
-                type_acc = match type_acc {
-                    Some(mut tpa) => {
-                        tpa.attrs.extend(tp.attrs);
-                        tpa.locs.extend(tp.locs);
-                        Some(tpa)
-                    }
-                    None => Some(tp),
-                };
+                // Each parenthesized `(type a b)` group is kept as its own
+                // entry, mirroring upstream `type_groups`; the group's
+                // attributes belong to the group's first newtype.
+                type_acc.push(tp);
             }
             FundefParameter::ComptimeType {
                 name,
@@ -1198,13 +1196,7 @@ pub fn extract_fundef_params(
                     paren_start_pos_idx: None,
                     paren_end_pos_idx: None,
                 };
-                type_acc = match type_acc {
-                    Some(mut tpa) => {
-                        tpa.locs.extend(tp.locs);
-                        Some(tpa)
-                    }
-                    None => Some(tp),
-                };
+                type_acc.push(tp);
             }
         }
     }

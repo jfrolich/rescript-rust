@@ -2,15 +2,15 @@
 let checkedDiv = (left, right) => left / right
 
 @inline(never)
-let checkedMod = (left, right) => mod(left, right)
+let checkedMod = (left, right) => Int.mod(left, right)
 
 let bitwiseOps = value => (
-  land(value, 0xff),
-  lor(value, 0x0f),
-  lxor(value, 0xaa),
-  lsl(value, 3),
-  lsr(value, 1),
-  asr(value, 1),
+  Int.bitwiseAnd(value, 0xff),
+  Int.bitwiseOr(value, 0x0f),
+  Int.bitwiseXor(value, 0xaa),
+  Int.shiftLeft(value, 3),
+  Int.shiftRightUnsigned(value, 1),
+  Int.shiftRight(value, 1),
 )
 
 let overflowOps = value => {
@@ -20,7 +20,7 @@ let overflowOps = value => {
     maxInt + value,
     minInt - value,
     maxInt + maxInt + minInt,
-    lor(maxInt + value, 0),
+    Int.bitwiseOr(maxInt + value, 0),
   )
 }
 
@@ -46,7 +46,10 @@ let assertionValue = value => {
 }
 
 let hashStep = (hash, codePoint) =>
-  lxor(lor(lsl(hash, 5), lsr(hash, 27)), codePoint)
+  Int.bitwiseXor(
+    Int.bitwiseOr(Int.shiftLeft(hash, 5), Int.shiftRightUnsigned(hash, 27)),
+    codePoint,
+  )
 
 let hashString = value => {
   let hash = ref(0)
@@ -64,7 +67,7 @@ let allValues = (
   floatOps(7.5, 2.5),
   compareOps(3, 4),
   assertionValue(1),
-  int_of_float(3.8),
-  float_of_int(7),
+  Float.toInt(3.8),
+  Int.toFloat(7),
   hashString("output"),
 )

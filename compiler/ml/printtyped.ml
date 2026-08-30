@@ -34,8 +34,6 @@ let rec fmt_longident_aux f x =
   match x with
   | Longident.Lident s -> fprintf f "%s" s
   | Longident.Ldot (y, s) -> fprintf f "%a.%s" fmt_longident_aux y s
-  | Longident.Lapply (y, z) ->
-    fprintf f "%a(%a)" fmt_longident_aux y fmt_longident_aux z
 
 let fmt_longident f x = fprintf f "\"%a\"" fmt_longident_aux x.txt
 
@@ -125,13 +123,17 @@ let arg_label i ppf = function
   | Optional {txt} -> line i ppf "Optional \"%s\"\n" txt
   | Labelled {txt} -> line i ppf "Labelled \"%s\"\n" txt
 
+let record_pat_rest i ppf {rest_ident; rest_type; _} =
+  line i ppf "rest \"%a\" : %a\n" fmt_ident rest_ident Printtyp.type_expr
+    rest_type
+
 let record_representation i ppf =
   let open Types in
   function
   | Record_regular -> line i ppf "Record_regular\n"
   | Record_float_unused -> assert false
   | Record_unboxed b -> line i ppf "Record_unboxed %b\n" b
-  | Record_inlined {tag = i} -> line i ppf "Record_inlined %d\n" i
+  | Record_inlined {name} -> line i ppf "Record_inlined %s\n" name
   | Record_extension -> line i ppf "Record_extension\n"
 
 let attributes i ppf l =
@@ -149,11 +151,14 @@ let rec core_type i ppf x =
   match x.ctyp_desc with
   | Ttyp_any -> line i ppf "Ttyp_any\n"
   | Ttyp_var s -> line i ppf "Ttyp_var %s\n" s
-  | Ttyp_arrow (arg, ret, _) ->
+  | Ttyp_arrow (params, ret) ->
     line i ppf "Ttyp_arrow\n";
-    arg_label i ppf arg.lbl;
-    attributes i ppf arg.attrs;
-    core_type i ppf arg.typ;
+    List.iter
+      (fun (arg : Typedtree.arg) ->
+        arg_label i ppf arg.lbl;
+        attributes i ppf arg.attrs;
+        core_type i ppf arg.typ)
+      params;
     core_type i ppf ret
   | Ttyp_tuple l ->
     line i ppf "Ttyp_tuple\n";
@@ -233,9 +238,10 @@ and pattern i ppf x =
     | Tpat_variant (l, po, _) ->
       line i ppf "Tpat_variant \"%s\"\n" l;
       option i pattern ppf po
-    | Tpat_record (l, _c) ->
+    | Tpat_record (l, _c, rest) ->
       line i ppf "Tpat_record\n";
-      list i longident_x_pattern ppf l
+      list i longident_x_pattern ppf l;
+      Option.iter (record_pat_rest i ppf) rest
     | Tpat_array l ->
       line i ppf "Tpat_array\n";
       list i pattern ppf l
@@ -257,9 +263,6 @@ and expression_extra i ppf x attrs =
   | Texp_open (ovf, m, _, _) ->
     line i ppf "Texp_open %a \"%a\"\n" fmt_override_flag ovf fmt_path m;
     attributes i ppf attrs
-  | Texp_newtype s ->
-    line i ppf "Texp_newtype \"%s\"\n" s;
-    attributes i ppf attrs
 
 and expression i ppf x =
   line i ppf "expression %a\n" fmt_location x.exp_loc;
@@ -278,16 +281,17 @@ and expression i ppf x =
     line i ppf "Texp_let %a\n" fmt_rec_flag rf;
     list i value_binding ppf l;
     expression i ppf e
-  | Texp_function
-      {arg_label = p; arity; async; param; case = case_; partial = _} ->
+  | Texp_function {params; body; async} ->
     line i ppf "Texp_function\n";
     if async then line i ppf "async\n";
-    (match arity with
-    | Some arity -> line i ppf "arity: %d\n" arity
-    | None -> ());
-    line i ppf "%a" Ident.print param;
-    arg_label i ppf p;
-    case i ppf case_
+    line i ppf "arity: %d\n" (List.length params);
+    List.iter
+      (fun {fp_lbl; fp_param; fp_pat} ->
+        line i ppf "%a" Ident.print fp_param;
+        arg_label i ppf fp_lbl;
+        pattern i ppf fp_pat)
+      params;
+    expression i ppf body
   | Texp_apply {funct = e; args = l; partial} ->
     if partial then line i ppf "partial\n";
     line i ppf "Texp_apply\n";

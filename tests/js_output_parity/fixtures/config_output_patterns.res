@@ -12,4 +12,4 @@ module Local = {
   let value = "local"
 }
 
-let () = Js.log2(Local.value, localFn(2))
+let () = Console.log2(Local.value, localFn(2))

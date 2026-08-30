@@ -107,9 +107,13 @@ fn let_kind_suffix(kind: LetKind) -> &'static str {
     }
 }
 
+fn print_internal_utf8<W: Write>(f: &mut Formatter<W>, s: &str) {
+    f.string(&crate::source_text::decode_internal_utf8(s));
+}
+
 fn print_field_info<W: Write>(f: &mut Formatter<W>, field: &FieldDbgInfo) {
     match field {
-        FieldDbgInfo::Record { name, .. }
+        FieldDbgInfo::Record { name }
         | FieldDbgInfo::Module { name }
         | FieldDbgInfo::RecordInline { name }
         | FieldDbgInfo::RecordExtension { name } => f.string(name),
@@ -137,7 +141,7 @@ fn print_tag_info<W: Write>(f: &mut Formatter<W>, tag_info: &TagInfo) {
         } => f.print(format_args!("{name}/{num_nonconst}")),
         TagInfo::PolyVar(name) => {
             f.string("`");
-            f.string(name);
+            print_internal_utf8(f, name);
         }
         TagInfo::Record { fields, .. } | TagInfo::RecordInlined { fields, .. } => {
             let names = fields
@@ -163,12 +167,16 @@ fn print_tag_info<W: Write>(f: &mut Formatter<W>, tag_info: &TagInfo) {
 fn print_struct_const<W: Write>(f: &mut Formatter<W>, cst: &Constant) {
     match cst {
         Constant::Int { i, comment } => match comment {
-            Some(PointerInfo::Constructor(_))
-            | Some(PointerInfo::ShapeNone)
-            | Some(PointerInfo::PolyVariant(_)) => f.print(format_args!("{i}a")),
+            Some(PointerInfo::ShapeNone) => f.string("shape_none"),
+            Some(PointerInfo::Constructor(tag)) => f.print(format_args!("`{}", tag.name)),
+            Some(PointerInfo::PolyVariant(name)) => {
+                f.string("`");
+                print_internal_utf8(f, name);
+            }
             _ => f.print(format_args!("{i}")),
         },
         Constant::NativeInt { i, .. } => f.print(format_args!("{i}")),
+        Constant::Constructor(tag) => f.print(format_args!("`{}", tag.name)),
         Constant::Char(i) => {
             if let Some(ch) = char::from_u32(*i as u32) {
                 f.print(format_args!("{ch:?}"));
@@ -189,13 +197,21 @@ fn print_struct_const<W: Write>(f: &mut Formatter<W>, cst: &Constant) {
                 f.print(format_args!("{value}n"));
             }
         }
-        Constant::Pointer(name) => f.string(name),
-        Constant::Block { tag, elements, .. } if elements.is_empty() => {
-            f.print(format_args!("[{tag}]"));
-        }
-        Constant::Block { tag, elements, .. } => {
+        Constant::Pointer(name) => print_internal_utf8(f, name),
+        Constant::Block { tag_info, elements } if elements.is_empty() => match tag_info {
+            TagInfo::Constructor { name, .. } | TagInfo::RecordInlined { name, .. } => {
+                f.print(format_args!("[{name}]"))
+            }
+            _ => f.print(format_args!("[{}]", tag_info.tag_label())),
+        },
+        Constant::Block { tag_info, elements } => {
             f.open_box(BoxKind::Box, 1);
-            f.print(format_args!("[{tag}:"));
+            match tag_info {
+                TagInfo::Constructor { name, .. } | TagInfo::RecordInlined { name, .. } => {
+                    f.print(format_args!("[{name}:"))
+                }
+                _ => f.print(format_args!("[{}:", tag_info.tag_label())),
+            }
             f.space();
             f.open_box(BoxKind::HOV, 0);
             if let Some((first, rest)) = elements.split_first() {
@@ -211,10 +227,11 @@ fn print_struct_const<W: Write>(f: &mut Formatter<W>, cst: &Constant) {
         }
         Constant::JsFalse => f.string("false"),
         Constant::JsTrue => f.string("true"),
-        Constant::JsUndefined { .. } => f.string("0a"),
+        Constant::JsUndefined { is_unit: true } => f.string("`()"),
+        Constant::JsUndefined { is_unit: false } => f.string("undefined"),
         Constant::JsNull => f.string("null"),
         Constant::Some(inner) => print_struct_const(f, inner),
-        Constant::ModuleAlias => f.string("0a"),
+        Constant::ModuleAlias => f.string("module_alias"),
     }
 }
 
@@ -228,12 +245,10 @@ fn print_primitive<W: Write>(f: &mut Formatter<W>, prim: &Primitive) {
                 f.string("#raw_expr");
             }
         }
-        Primitive::PjsFnMake(arity) => f.print(format_args!("#fn_mk({arity})")),
-        Primitive::PjsFnMakeUnit => f.string("#fn_mk_unit"),
         Primitive::PjsFnMethod => f.string("#fn_method"),
         Primitive::PcreateExtension(name) => f.print(format_args!("extension[{name}]")),
-        Primitive::Pmakeblock(_, tag_info, Mutable::Immutable)
-        | Primitive::Pmakeblock(_, tag_info, Mutable::Mutable) => {
+        Primitive::Pmakeblock(tag_info, Mutable::Immutable)
+        | Primitive::Pmakeblock(tag_info, Mutable::Mutable) => {
             f.string("makeblock ");
             print_tag_info(f, tag_info);
         }
@@ -314,7 +329,15 @@ fn print_switch_cases_with_exn<W: Write>(
             f.space();
         }
         f.open_box(BoxKind::HV, 1);
-        f.print(format_args!("case int {n}:"));
+        match n {
+            crate::lambda::SwitchKey::Int(value) => f.print(format_args!("case int {value}:")),
+            crate::lambda::SwitchKey::Constructor(
+                crate::types::VariantConstructorCase::Constant(tag),
+            ) => f.print(format_args!("case constructor {:?}:", tag.name)),
+            crate::lambda::SwitchKey::Constructor(crate::types::VariantConstructorCase::Block(
+                _,
+            )) => unreachable!("block key in constant cases"),
+        }
         f.space();
         lam(f, l, reraise_exn);
         f.close_box();
@@ -325,7 +348,18 @@ fn print_switch_cases_with_exn<W: Write>(
             f.space();
         }
         f.open_box(BoxKind::HV, 1);
-        f.print(format_args!("case tag {n}:"));
+        match n {
+            crate::lambda::SwitchKey::Int(value) => f.print(format_args!("case tag {value}:")),
+            crate::lambda::SwitchKey::Constructor(crate::types::VariantConstructorCase::Block(
+                block,
+            )) => f.print(format_args!(
+                "case constructor {:?}:",
+                block.runtime.tag.name
+            )),
+            crate::lambda::SwitchKey::Constructor(
+                crate::types::VariantConstructorCase::Constant(_),
+            ) => unreachable!("constant key in block cases"),
+        }
         f.space();
         lam(f, l, reraise_exn);
         f.close_box();
@@ -478,7 +512,9 @@ fn lam<W: Write>(f: &mut Formatter<W>, lam0: &RawLambda, reraise_exn: Option<&Id
             } else {
                 f.string("(switch*");
             }
-            f.space();
+            // OCaml lam_print.ml keeps the operator and scrutinee on the
+            // same line; only the break before the cases is conditional.
+            f.string(" ");
             lam(f, arg, reraise_exn);
             f.space();
             f.open_vbox(0);
@@ -489,8 +525,7 @@ fn lam<W: Write>(f: &mut Formatter<W>, lam0: &RawLambda, reraise_exn: Option<&Id
         }
         RawLambda::LstringSwitch(arg, cases, default) => {
             f.open_box(BoxKind::Box, 1);
-            f.string("(stringswitch");
-            f.space();
+            f.string("(stringswitch ");
             lam(f, arg, reraise_exn);
             f.space();
             f.open_vbox(0);
@@ -593,9 +628,9 @@ fn lam<W: Write>(f: &mut Formatter<W>, lam0: &RawLambda, reraise_exn: Option<&Id
         }
         RawLambda::Lfor_of(param, iterable, body) => {
             f.open_box(BoxKind::Box, 2);
-            f.string("(for ");
+            f.string("(for_of ");
             print_ident(f, param);
-            f.string(" of ");
+            f.space();
             lam(f, iterable, reraise_exn);
             f.space();
             lam(f, body, reraise_exn);
@@ -604,9 +639,9 @@ fn lam<W: Write>(f: &mut Formatter<W>, lam0: &RawLambda, reraise_exn: Option<&Id
         }
         RawLambda::Lfor_await_of(param, iterable, body) => {
             f.open_box(BoxKind::Box, 2);
-            f.string("(for await ");
+            f.string("(for_await_of ");
             print_ident(f, param);
-            f.string(" of ");
+            f.space();
             lam(f, iterable, reraise_exn);
             f.space();
             lam(f, body, reraise_exn);
@@ -635,5 +670,24 @@ fn lam<W: Write>(f: &mut Formatter<W>, lam0: &RawLambda, reraise_exn: Option<&Id
         }
         RawLambda::Lbreak => f.string("break"),
         RawLambda::Lcontinue => f.string("continue"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn polyvariant_pointer_decodes_internal_utf8_without_changing_ascii() {
+        let unicode = crate::source_text::latin1_bytes_to_string("`🚀".as_bytes().to_vec());
+        let unicode = RawLambda::const_(Constant::Pointer(unicode));
+        let mut unicode_out = Vec::new();
+        print_raw_lambda(&unicode, &mut unicode_out);
+        assert_eq!(unicode_out, "`🚀".as_bytes());
+
+        let ascii = RawLambda::const_(Constant::Pointer("`Ready".to_string()));
+        let mut ascii_out = Vec::new();
+        print_raw_lambda(&ascii, &mut ascii_out);
+        assert_eq!(ascii_out, b"`Ready");
     }
 }

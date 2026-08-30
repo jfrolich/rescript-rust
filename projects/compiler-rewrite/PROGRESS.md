@@ -2,17 +2,33 @@
 
 > **Note**: This is a living document. Update it as you complete tasks, discover new work items, or gain insights. See [PLAN.md](./PLAN.md) for the full migration plan.
 
-## Current Phase: Phase 2 - Parser
+## Current Phase: Phase 5 - Integration
 
 ### Overall Progress
 
 | Phase | Status | Progress | Key Blocker |
 |-------|--------|----------|-------------|
 | Phase 1: Foundation | ✅ Complete | 100% | None |
-| Phase 2: Parser | ✅ Complete | 100% | **100% binary parity achieved!** |
-| Phase 3: Lambda/JS IR | 🚧 In Progress | ~30% | None |
-| Phase 4: Type Checker | ✅ Complete | 100% | Parallel with Phase 2 |
-| Phase 5: Integration | ⏳ Not Started | 0% | Depends on Phase 4 |
+| Phase 2: Parser | 🚧 In Progress | ~99% | Marshal identity parity after upstream allocation changes |
+| Phase 3: Lambda/JS IR | ✅ Complete | 100% | None |
+| Phase 4: Type Checker | ✅ Complete | 100% | None |
+| Phase 5: Integration | 🚧 In Progress | ~95% | Release hardening and external-project compatibility |
+
+### Milestone: Strict Compiler Parity and External Build (August 2026)
+
+The Rust compiler now matches the current OCaml compiler across the complete canonical corpus:
+
+- Typedtree parity: **610/610**
+- Raw Lambda parity: **610/610**
+- Optimized Lambda parity: **610/610**
+- JavaScript output parity: **610/610**, plus **344/344** focused fixtures, in debug and release builds
+- Diagnostics parity: **1431/1431**
+- Compiler tests: **1197 passed**, with no failures
+- Rewatch tests: **150 passed**, with no failures
+- v13-migrated Tella checkout at `66a5edabdbfdbc5dd7496e59ee0573de2a2a1ffa`: **3248 modules compiled** using release rewatch `--in-process`
+- Checked-in parser corpus: **1231/1231** primary semantic parity; **1209** post-PPX and **1196** binary AST reference-supported checks have zero differences, with 22/35 inputs explicitly skipped because the OCaml secondary command rejects them
+
+External parser runs are opt-in and require `TELLA_REVISION=<exact commit> --with-external`; the checked-in parser baseline remains read-only unless `--update-baseline` is explicit.
 
 ### Milestone: 100% Binary AST Parity (January 2026)
 

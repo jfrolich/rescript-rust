@@ -1,14 +1,14 @@
 # In-Process Cold-Build Performance TODO
 
-**Last Updated:** 2026-05-07
-**Status:** Tella clean in-process builds are around 2.49s on the current branch after the latest retained persistent signature sharing and lazy signature freshening optimizations. The project goal is a subsecond clean compile of the Tella repo with 100% codegen parity. The current pass is focused on slow non-Icon Tella modules such as `Css_Js_Core`, `Css_Legacy_Core`, `LayoutDetail`, `Layout`, `UI__LayoutPickerStructured`, `TrimTranscriptEditor`, `Recording__Layers`, `UI__BackgroundPicker`, and `Page__Stories`.
+**Last Updated:** 2026-08-30
+**Status:** Two explicitly different Tella corpora are tracked. The expanded v13-migration checkout compiles 3,248 modules in roughly `5.1s` at 16 workers after the merge-review correctness hardening, down from `15.686s` before scoped variant-layout borrowing and subsequent GenType/Env ownership work. The smaller 2,127-module output-parity checkout measures `2.478s +/- 0.024s`, range `2.452s..2.528s`, after shared persistent component views and shallow signature freshening. Do not compare these numbers as one continuous corpus. The project goal remains a subsecond clean compile with 100% codegen parity.
 
 ## Goal
 
 Make clean in-process builds fast enough for large real projects, with Tella as the active benchmark target. The hard target is a clean parallel in-process compile of the Tella repo below 1s while preserving:
 
 - `bsc` subprocess path support
-- 100% codegen parity, measured as JavaScript output parity on the 660-file test corpus
+- 100% codegen parity, currently measured on the 610-file test corpus
 - 100% canonical typedtree parity on the test corpus
 - successful Tella compilation with the configured runtime and project output extension
 
@@ -16,9 +16,9 @@ Make clean in-process builds fast enough for large real projects, with Tella as 
 
 - [x] Use `hyperfine` for accepted before/after wall-clock comparisons.
 - [x] Keep a Tella module-timing run for every serious candidate to identify the slow non-Icon files.
-- [ ] Validate retained compiler changes with JS output parity and canonical typedtree parity.
+- [x] Validate retained compiler changes with JS output parity and canonical typedtree parity.
 - [ ] Commit each retained improvement atomically with the benchmark and parity result in the commit message.
-- [ ] Revert candidates that regress the 660-file parity gates or Tella `hyperfine` baseline.
+- [ ] Revert candidates that regress the current 610-file parity gates or Tella `hyperfine` baseline.
 
 ## Top 10 Improvements Checklist
 

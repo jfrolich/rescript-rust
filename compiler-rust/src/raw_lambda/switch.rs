@@ -13,7 +13,7 @@
 
 use std::collections::HashMap;
 
-use crate::lambda::{Comparison, Constant, LetKind, Primitive, SwitchNames};
+use crate::lambda::{Comparison, Constant, LetKind, Primitive};
 use crate::location::Location;
 use crate::raw_lambda::{RawLambda, RawLambdaSwitch, RawPrimInfo};
 
@@ -264,7 +264,7 @@ fn build_lswitch(
     tbl: &[usize],
     acts: Vec<RawLambda>,
     offset: i32,
-    sw_names: Option<SwitchNames>,
+    sw_dispatch: Option<crate::lambda::SwitchDispatch>,
 ) -> RawLambda {
     let cases_for_counts: Vec<(i32, i32, usize)> = tbl
         .iter()
@@ -282,12 +282,15 @@ fn build_lswitch(
         RawLambdaSwitch {
             sw_numconsts: tbl.len(),
             sw_consts_full: false,
-            sw_consts: cases,
+            sw_consts: cases
+                .into_iter()
+                .map(|(key, action)| (crate::lambda::SwitchKey::Int(key), action))
+                .collect(),
             sw_numblocks: 0,
             sw_blocks_full: false,
             sw_blocks: Vec::new(),
             sw_failaction: None,
-            sw_names,
+            sw_dispatch: crate::lambda::SwitchDispatch::Direct,
         },
         loc.clone(),
     )
@@ -875,7 +878,7 @@ fn build_clustered_test(
     cases: &[(i32, i32, usize)],
     actions: &[RawLambda],
     arg: &RawLambda,
-    sw_names: &Option<SwitchNames>,
+    sw_dispatch: &Option<crate::lambda::SwitchDispatch>,
 ) -> RawLambda {
     let (n_clusters, k) = compiler.comp_clusters(cases);
     let len = cases.len();
@@ -896,7 +899,7 @@ fn build_clustered_test(
         cases: &[(i32, i32, usize)],
         actions: &[RawLambda],
         k: &[usize],
-        sw_names: &Option<SwitchNames>,
+        sw_dispatch: &Option<crate::lambda::SwitchDispatch>,
         cluster_cases: &mut [(i32, i32, usize)],
         cluster_actions: &mut Vec<RawLambda>,
         single_act_map: &mut HashMap<usize, usize>,
@@ -975,7 +978,7 @@ fn build_clustered_test(
                 &tbl,
                 switch_acts,
                 ll, // offset will be adjusted
-                sw_names.clone(),
+                sw_dispatch.clone(),
             );
             // Store as cluster action - but we need arg...
             // We'll store the template info and apply arg later
@@ -994,7 +997,7 @@ fn build_clustered_test(
                 cases,
                 actions,
                 k,
-                sw_names,
+                sw_dispatch,
                 cluster_cases,
                 cluster_actions,
                 single_act_map,
@@ -1011,7 +1014,7 @@ fn build_clustered_test(
         cases,
         actions,
         &k,
-        sw_names,
+        sw_dispatch,
         &mut cluster_cases,
         &mut cluster_actions,
         &mut single_act_map,
@@ -1103,13 +1106,21 @@ pub fn zyva(
     arg: RawLambda,
     cases: &[(i32, i32, usize)],
     store: ActionStore,
-    sw_names: Option<SwitchNames>,
+    sw_dispatch: Option<crate::lambda::SwitchDispatch>,
     next_raise: &mut dyn FnMut() -> i32,
 ) -> RawLambda {
     assert!(!cases.is_empty());
 
     let shared_actions = store.act_get_shared();
-    zyva_with_shared_actions(loc, edges, arg, cases, shared_actions, sw_names, next_raise)
+    zyva_with_shared_actions(
+        loc,
+        edges,
+        arg,
+        cases,
+        shared_actions,
+        sw_dispatch,
+        next_raise,
+    )
 }
 
 /// Main entry point when the caller already owns the action array.
@@ -1122,7 +1133,7 @@ pub fn zyva_with_shared_actions(
     arg: RawLambda,
     cases: &[(i32, i32, usize)],
     shared_actions: Vec<Shared<RawLambda>>,
-    sw_names: Option<SwitchNames>,
+    sw_dispatch: Option<crate::lambda::SwitchDispatch>,
     next_raise: &mut dyn FnMut() -> i32,
 ) -> RawLambda {
     assert!(!cases.is_empty());
@@ -1133,7 +1144,7 @@ pub fn zyva_with_shared_actions(
     let ok_inter = low.abs() <= INTER_LIMIT && high.abs() <= INTER_LIMIT;
     let mut compiler = SwitchCompiler::new(ok_inter);
 
-    let result = build_clustered_test(&mut compiler, &loc, cases, &actions, &arg, &sw_names);
+    let result = build_clustered_test(&mut compiler, &loc, cases, &actions, &arg, &sw_dispatch);
     wrap_handlers(result, handlers)
 }
 
@@ -1327,12 +1338,12 @@ pub fn call_switcher(
     low: i32,
     high: i32,
     int_lambda_list: &[(i32, RawLambda)],
-    sw_names: Option<SwitchNames>,
+    sw_dispatch: Option<crate::lambda::SwitchDispatch>,
     next_raise: &mut dyn FnMut() -> i32,
 ) -> RawLambda {
     let mut sorted = int_lambda_list.to_vec();
     sorted.sort_by_key(|(i, _)| *i);
 
     let (edges, cases, store) = as_interval(fail, low, high, &sorted);
-    zyva(loc, edges, arg, &cases, store, sw_names, next_raise)
+    zyva(loc, edges, arg, &cases, store, sw_dispatch, next_raise)
 }

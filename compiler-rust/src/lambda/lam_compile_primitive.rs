@@ -38,6 +38,48 @@ impl LambdaCompiler {
             return self.compile_import_primitive(loc, args);
         }
 
+        // compiler/core/lam_compile.ml:293-325: nested module field reads may
+        // name a flat root export recorded in the dependency CMJ.
+        fn external_field_path<'a>(
+            prim: &'a Primitive,
+            args: &'a [Lambda],
+            segments: &mut Vec<String>,
+        ) -> Option<(&'a Ident, bool)> {
+            let Primitive::Pfield(_, FieldDbgInfo::Module { name }) = prim else {
+                return None;
+            };
+            segments.push(name.clone());
+            match args {
+                [Lambda::LglobalModule(id, dynamic_import)] => Some((id, *dynamic_import)),
+                [Lambda::Lprim(info)] => external_field_path(&info.primitive, &info.args, segments),
+                _ => None,
+            }
+        }
+        if matches!(prim, Primitive::Pfield(_, FieldDbgInfo::Module { .. })) {
+            let mut reversed = Vec::new();
+            if let Some((id, dynamic_import)) = external_field_path(prim, args, &mut reversed) {
+                reversed.reverse();
+                if reversed.len() >= 2
+                    && let Some(export_name) =
+                        self.module_path_resolver.as_ref().and_then(|resolver| {
+                            resolver.module_cmj_hoisted_export(id.name(), &reversed)
+                        })
+                {
+                    return Compiled {
+                        prelude: Vec::new(),
+                        expr: Expression::qualified(
+                            crate::js_ir::ModuleId {
+                                id: id.clone(),
+                                kind: crate::js_ir::Kind::Ml,
+                                dynamic_import,
+                            },
+                            Some(export_name),
+                        ),
+                    };
+                }
+            }
+        }
+
         use Primitive::*;
         let mut prelude = vec![];
         let mut compiled_args = Vec::new();
@@ -50,6 +92,25 @@ impl LambdaCompiler {
         let expr = match prim {
             Pstringlength => Expression::length(compiled_args[0].clone(), LengthObject::String),
             Parraylength => Expression::length(compiled_args[0].clone(), LengthObject::Array),
+            // Upstream compiler/core/lam_compile_primitive.ml:91-101.
+            PtaggedTemplate => match compiled_args.as_slice() {
+                [
+                    tag,
+                    Expression {
+                        desc: ExpressionDesc::Array(strings, _),
+                        ..
+                    },
+                    Expression {
+                        desc: ExpressionDesc::Array(values, _),
+                        ..
+                    },
+                ] => Expression::new(ExpressionDesc::TaggedTemplate(
+                    Box::new(tag.clone()),
+                    strings.clone(),
+                    values.clone(),
+                )),
+                _ => unreachable!("tagged-template primitive operands are two arrays"),
+            },
             // OCaml lam_compile_primitive.ml:87-90 lowers Pjs_apply to a
             // direct call of the first argument with the remaining arguments.
             PjsApply => match compiled_args.split_first() {
@@ -380,7 +441,6 @@ impl LambdaCompiler {
                     0,
                     &FieldDbgInfo::Record {
                         name: "contents".to_string(),
-                        mutable_flag: crate::parser::ast::MutableFlag::Mutable,
                     },
                     &compiled_args[0],
                 );
@@ -410,7 +470,7 @@ impl LambdaCompiler {
                     let props = items
                         .iter()
                         .filter_map(|item| match &item.desc {
-                            ExpressionDesc::CamlBlock(fields, _, _, _)
+                            ExpressionDesc::CamlBlock(fields, _, _)
                                 if matches!(
                                     fields.as_slice(),
                                     [
@@ -461,6 +521,19 @@ impl LambdaCompiler {
                 )),
                 _ => Expression::undefined(false),
             },
+            PrecordRest(excluded) => match compiled_args.as_slice() {
+                [source] => Expression::new(ExpressionDesc::RecordRest(
+                    excluded
+                        .iter()
+                        .map(|label| crate::js_ir::RecordRestField {
+                            label: label.clone(),
+                            ident: None,
+                        })
+                        .collect(),
+                    Box::new(source.clone()),
+                )),
+                _ => Expression::undefined(false),
+            },
             Pstringadd => {
                 Expression::string_append(compiled_args[0].clone(), compiled_args[1].clone())
             }
@@ -485,7 +558,7 @@ impl LambdaCompiler {
                     Box::new(Expression::undefined(false)),
                 ))
             }
-            Pmakeblock(tag, tag_info, mutable_flag) => {
+            Pmakeblock(tag_info, mutable_flag) => {
                 let js_mutable = match mutable_flag {
                     Mutable::Mutable => MutableFlag::Mutable,
                     Mutable::Immutable => MutableFlag::Immutable,
@@ -493,7 +566,6 @@ impl LambdaCompiler {
                 Expression::new(ExpressionDesc::CamlBlock(
                     compiled_args,
                     js_mutable,
-                    Box::new(Expression::number(Number::int(*tag))),
                     tag_info.clone(),
                 ))
             }
@@ -502,13 +574,7 @@ impl LambdaCompiler {
             Pmakelist => Expression::new(ExpressionDesc::CamlBlock(
                 compiled_args,
                 MutableFlag::Mutable,
-                Box::new(Expression::number(Number::int(0))),
-                TagInfo::Constructor {
-                    name: "::".to_string(),
-                    num_nonconst: 1,
-                    tag: 0,
-                    attrs: Vec::new(),
-                },
+                TagInfo::constructor("::", 1),
             )),
             PrawJsCode(info) => {
                 Expression::new(ExpressionDesc::RawJsCode(crate::js_ir::JsRawInfo {
@@ -517,7 +583,9 @@ impl LambdaCompiler {
                 }))
             }
             Pdebugger => {
-                prelude.push(Statement::debugger());
+                let mut statement = Statement::debugger();
+                statement.source_loc = self.source_loc(loc);
+                prelude.push(statement);
                 Expression::undefined(false)
             }
             Praise => {
@@ -525,7 +593,9 @@ impl LambdaCompiler {
                     .first()
                     .cloned()
                     .unwrap_or_else(|| Expression::undefined(false));
-                prelude.push(Statement::throw(expr));
+                let mut statement = Statement::throw(expr);
+                statement.source_loc = self.source_loc(loc);
+                prelude.push(statement);
                 Expression::undefined(false)
             }
             Pidentity => compiled_args
@@ -559,12 +629,9 @@ impl LambdaCompiler {
             PjsObjectCreate(obj_params) => {
                 self.compile_js_object_create(obj_params, compiled_args, &mut prelude)
             }
-            PjsFnMake(_) | PjsFnMakeUnit => compiled_args
-                .first()
-                .cloned()
-                .unwrap_or_else(|| Expression::undefined(false)),
             PjsFnMethod => match compiled_args.first().cloned() {
                 Some(Expression {
+                    source_loc,
                     desc:
                         ExpressionDesc::Fun {
                             params,
@@ -577,6 +644,7 @@ impl LambdaCompiler {
                         },
                     comment,
                 }) => Expression {
+                    source_loc: None,
                     desc: ExpressionDesc::Fun {
                         is_method: true,
                         params,
@@ -743,37 +811,14 @@ impl LambdaCompiler {
                     && matches!(&right.desc, ExpressionDesc::Undefined { .. }))
                     || (matches!(&left.desc, ExpressionDesc::Undefined { .. })
                         && is_optional_block(&right))
-                    || (matches!(&left.desc, ExpressionDesc::CamlBlock(_, _, _, _))
+                    || (matches!(&left.desc, ExpressionDesc::CamlBlock(_, _, _))
                         && matches!(&right.desc, ExpressionDesc::Number(_)))
                     || (matches!(&left.desc, ExpressionDesc::Number(_))
-                        && matches!(&right.desc, ExpressionDesc::CamlBlock(_, _, _, _))))
+                        && matches!(&right.desc, ExpressionDesc::CamlBlock(_, _, _))))
                     && js_expr_no_side_effects(&left)
                     && js_expr_no_side_effects(&right)
                 {
                     return Expression::bool(true);
-                }
-
-                // Fold literal string!==string, mirroring OCaml's
-                // `string_comp Cneq` at `js_exp_make.ml:1355-1362`.
-                if let (
-                    ExpressionDesc::Str {
-                        txt: left_txt,
-                        delim: left_delim,
-                    },
-                    ExpressionDesc::Str {
-                        txt: right_txt,
-                        delim: right_delim,
-                    },
-                ) = (&left.desc, &right.desc)
-                {
-                    if let Some(equal) = crate::js_ir::fold_strict_string_equality_pub(
-                        left_txt,
-                        left_delim,
-                        right_txt,
-                        right_delim,
-                    ) {
-                        return Expression::bool(!equal);
-                    }
                 }
 
                 // OCaml's `Js_exp_make.int_comp` falls through to

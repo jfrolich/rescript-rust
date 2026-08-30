@@ -57,6 +57,7 @@ pub fn format_constant(c: &Constant, f: &mut fmt::Formatter<'_>) -> fmt::Result 
         Constant::JsUndefined { .. } => write!(f, "#undefined"),
         Constant::Int { i, .. } => write!(f, "{i}"),
         Constant::NativeInt { i, .. } => write!(f, "{i}"),
+        Constant::Constructor(tag) => write!(f, "{}", tag.name),
         Constant::Char(c) => {
             if let Some(ch) = char::from_u32(*c as u32) {
                 write!(f, "'{ch}'")
@@ -79,7 +80,8 @@ pub fn format_constant(c: &Constant, f: &mut fmt::Formatter<'_>) -> fmt::Result 
             write!(f, "[some-c]")?;
             format_constant(inner, f)
         }
-        Constant::Block { tag, elements, .. } => {
+        Constant::Block { tag_info, elements } => {
+            let tag = tag_info.tag_label();
             if elements.is_empty() {
                 write!(f, "[{tag}]")
             } else {
@@ -131,6 +133,7 @@ pub fn format_primitive(p: &Primitive, f: &mut fmt::Formatter<'_>) -> fmt::Resul
         Primitive::PupdateMod => write!(f, "update_mod!"),
         Primitive::PjsApply => write!(f, "#apply"),
         Primitive::PjsRuntimeApply => write!(f, "#runtime_apply"),
+        Primitive::PtaggedTemplate => write!(f, "#tagged_template"),
         Primitive::PjsUnsafeDowngrade { name, setter } => {
             if *setter {
                 write!(f, "##{name}#=")
@@ -139,8 +142,6 @@ pub fn format_primitive(p: &Primitive, f: &mut fmt::Formatter<'_>) -> fmt::Resul
             }
         }
         Primitive::PfnArity => write!(f, "fn.length"),
-        Primitive::PjsFnMake(i) => write!(f, "js_fn_make_{i}"),
-        Primitive::PjsFnMakeUnit => write!(f, "js_fn_make_unit"),
         Primitive::PjsFnMethod => write!(f, "js_fn_method"),
         Primitive::Pdebugger => write!(f, "debugger"),
         Primitive::PrawJsCode(_) => write!(f, "[raw]"),
@@ -158,8 +159,12 @@ pub fn format_primitive(p: &Primitive, f: &mut fmt::Formatter<'_>) -> fmt::Resul
         Primitive::Pnull => write!(f, "null"),
         Primitive::Pundefined => write!(f, "undefined"),
         Primitive::Pimport => write!(f, "import"),
-        Primitive::Pmakeblock(tag, _, Mutable::Immutable) => write!(f, "makeblock {tag}"),
-        Primitive::Pmakeblock(tag, _, Mutable::Mutable) => write!(f, "makemutable {tag}"),
+        Primitive::Pmakeblock(tag_info, Mutable::Immutable) => {
+            write!(f, "makeblock {}", tag_info.tag_label())
+        }
+        Primitive::Pmakeblock(tag_info, Mutable::Mutable) => {
+            write!(f, "makemutable {}", tag_info.tag_label())
+        }
         Primitive::Pfield(n, field_info) => {
             if let Some(name) = field_info.name() {
                 write!(f, "field {name}/{n}")
@@ -169,6 +174,9 @@ pub fn format_primitive(p: &Primitive, f: &mut fmt::Formatter<'_>) -> fmt::Resul
         }
         Primitive::Psetfield(n, _) => write!(f, "setfield {n}"),
         Primitive::Pduprecord => write!(f, "duprecord"),
+        Primitive::PrecordRest(excluded) => {
+            write!(f, "record_rest({})", excluded.join(", "))
+        }
         Primitive::PjsCall { prim_name, .. } => write!(f, "{prim_name}[js]"),
         Primitive::PjsObjectCreate(_) => write!(f, "[js.obj]"),
         Primitive::Praise => write!(f, "raise"),
@@ -613,7 +621,7 @@ fn format_raw_tag_info(tag_info: &TagInfo, f: &mut fmt::Formatter<'_>) -> fmt::R
 
 fn format_raw_field_info(field_info: &FieldDbgInfo, f: &mut fmt::Formatter<'_>) -> fmt::Result {
     match field_info {
-        FieldDbgInfo::Record { name, .. }
+        FieldDbgInfo::Record { name }
         | FieldDbgInfo::Module { name }
         | FieldDbgInfo::RecordInline { name }
         | FieldDbgInfo::RecordExtension { name } => write!(f, "{name}"),
@@ -630,8 +638,6 @@ fn format_raw_field_info(field_info: &FieldDbgInfo, f: &mut fmt::Formatter<'_>) 
 fn format_raw_primitive(p: &Primitive, f: &mut fmt::Formatter<'_>) -> fmt::Result {
     match p {
         Primitive::PjsCall { prim_name, .. } => write!(f, "{prim_name}"),
-        Primitive::PjsFnMake(arity) => write!(f, "#fn_mk({arity})"),
-        Primitive::PjsFnMakeUnit => write!(f, "#fn_mk_unit"),
         Primitive::PjsFnMethod => write!(f, "#fn_method"),
         Primitive::Pjscomp(cmp) => write!(f, "{}", format_comparison(*cmp)),
         Primitive::Pstringadd => write!(f, "string.concat"),
@@ -655,11 +661,11 @@ fn format_raw_primitive(p: &Primitive, f: &mut fmt::Formatter<'_>) -> fmt::Resul
                 write!(f, "#raw_expr")
             }
         }
-        Primitive::Pmakeblock(_, tag_info, Mutable::Immutable) => {
+        Primitive::Pmakeblock(tag_info, Mutable::Immutable) => {
             write!(f, "makeblock ")?;
             format_raw_tag_info(tag_info, f)
         }
-        Primitive::Pmakeblock(_, tag_info, Mutable::Mutable) => {
+        Primitive::Pmakeblock(tag_info, Mutable::Mutable) => {
             write!(f, "makemutable ")?;
             format_raw_tag_info(tag_info, f)
         }
@@ -680,6 +686,7 @@ fn format_raw_constant(c: &Constant, f: &mut fmt::Formatter<'_>) -> fmt::Result 
         Constant::JsNull => write!(f, "null"),
         Constant::Int { i, .. } => write!(f, "{i}"),
         Constant::NativeInt { i, .. } => write!(f, "{i}"),
+        Constant::Constructor(tag) => write!(f, "{}", tag.name),
         Constant::Char(c) => {
             if let Some(ch) = char::from_u32(*c as u32) {
                 write!(f, "'{ch}'")
@@ -698,7 +705,8 @@ fn format_raw_constant(c: &Constant, f: &mut fmt::Formatter<'_>) -> fmt::Result 
             }
         }
         Constant::Pointer(name) => write!(f, "{name}"),
-        Constant::Block { tag, elements, .. } => {
+        Constant::Block { tag_info, elements } => {
+            let tag = tag_info.tag_label();
             if elements.is_empty() {
                 write!(f, "[{tag}]")
             } else {
@@ -1018,7 +1026,6 @@ fn rebuild_top_level_structure(lam: &Lambda) -> Option<Lambda> {
 
     let export_block = Lambda::prim(
         Primitive::Pmakeblock(
-            0,
             TagInfo::ModuleExport(export_ids.clone()),
             Mutable::Immutable,
         ),

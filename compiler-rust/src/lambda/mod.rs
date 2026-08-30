@@ -25,6 +25,7 @@
 pub mod js_exp_make;
 pub mod js_pass_external_shadow;
 pub mod js_pass_flatten_and_mark_dead;
+pub mod js_pass_record_rest;
 pub mod js_pass_tailcall_inline;
 pub mod js_shake;
 pub mod js_stmt_make;
@@ -68,6 +69,23 @@ pub use lam_constant::Constant;
 use lam_constant::StringDelim;
 pub use lam_primitive::Primitive;
 pub use lam_tag_info::TagInfo;
+
+/// Source binding selected by `@res.hoistedFunction` for a flat JS export.
+/// Mirrors `Lambda.hoisted_function` in `compiler/ml/lambda.ml`.
+#[derive(Debug, Clone)]
+pub struct HoistedFunction {
+    pub binding: Ident,
+    pub path: Vec<String>,
+    pub loc: Location,
+    pub target_loc: Location,
+}
+
+/// CMJ lookup entry for a successfully materialized flat export.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HoistedExport {
+    pub path: Vec<String>,
+    pub export_name: String,
+}
 
 /// Application status for function calls
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -133,21 +151,43 @@ impl Default for FunctionAttribute {
     }
 }
 
-/// Switch construct for pattern matching
+/// Key selected by a Lambda switch branch.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum SwitchKey {
+    Int(i32),
+    Constructor(crate::types::VariantConstructorCase),
+}
+
+impl std::fmt::Display for SwitchKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Int(value) => value.fmt(f),
+            Self::Constructor(crate::types::VariantConstructorCase::Constant(tag)) => {
+                write!(f, "constructor {:?}", tag.name)
+            }
+            Self::Constructor(crate::types::VariantConstructorCase::Block(block)) => {
+                write!(f, "constructor {:?}", block.runtime.tag.name)
+            }
+        }
+    }
+}
+
+/// Runtime dispatch semantics for a Lambda switch.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SwitchDispatch {
+    Direct,
+    Variant(crate::types::VariantMatchingFacts),
+}
+
+/// Switch construct for pattern matching.
 #[derive(Debug, Clone)]
 pub struct LambdaSwitch {
-    /// Are all constant cases covered?
     pub sw_consts_full: bool,
-    /// Constant case branches (tag -> lambda)
-    pub sw_consts: Vec<(i32, Lambda)>,
-    /// Are all block cases covered?
+    pub sw_consts: Vec<(SwitchKey, Lambda)>,
     pub sw_blocks_full: bool,
-    /// Block case branches (tag -> lambda)
-    pub sw_blocks: Vec<(i32, Lambda)>,
-    /// Fallback action if no case matches
+    pub sw_blocks: Vec<(SwitchKey, Lambda)>,
     pub sw_failaction: Option<Box<Lambda>>,
-    /// Names for switch cases (for untagged variants)
-    pub sw_names: Option<SwitchNames>,
+    pub sw_dispatch: SwitchDispatch,
 }
 
 /// Runtime literal carried by an OCaml/ReScript variant tag.
@@ -160,68 +200,6 @@ pub enum SwitchCaseTag {
     Bool(bool),
     Null,
     Undefined,
-}
-
-/// Runtime kind used for ReScript's untagged payload cases.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum SwitchBlockType {
-    Int,
-    String,
-    Float,
-    BigInt,
-    Boolean,
-    Instance(String),
-    Function,
-    Object,
-    Unknown,
-}
-
-/// Runtime tag metadata for one constructor case.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SwitchTag {
-    /// Source constructor name.
-    pub name: String,
-    /// Optional `@as(...)` runtime literal.
-    pub tag_type: Option<SwitchCaseTag>,
-}
-
-impl SwitchTag {
-    pub fn named(name: impl Into<String>) -> Self {
-        Self {
-            name: name.into(),
-            tag_type: None,
-        }
-    }
-}
-
-/// Runtime metadata for one payload-carrying constructor case.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SwitchBlock {
-    /// Constructor tag metadata.
-    pub tag: SwitchTag,
-    /// Optional custom tag field name from `@tag(...)`.
-    pub tag_name: Option<String>,
-    /// Optional untagged runtime payload kind.
-    pub block_type: Option<SwitchBlockType>,
-}
-
-impl SwitchBlock {
-    pub fn named(name: impl Into<String>) -> Self {
-        Self {
-            tag: SwitchTag::named(name),
-            tag_name: None,
-            block_type: None,
-        }
-    }
-}
-
-/// Switch names and runtime metadata for tagged and untagged variants.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SwitchNames {
-    /// Nullary constructor names.
-    pub consts: Vec<SwitchTag>,
-    /// Constructor names for payload-carrying cases.
-    pub blocks: Vec<SwitchBlock>,
 }
 
 /// Lambda function definition
@@ -545,7 +523,7 @@ impl Lambda {
                 },
                 _ => default(primitive, args, loc),
             },
-            // lam.ml:549-582 — `Pmakeblock(_, Blk_module fields, _)` arm of
+            // lam.ml:549-582 — `Pmakeblock( Blk_module fields, _)` arm of
             // `Lam.prim`. When every argument `args.[i]` is
             // `Pfield(i, Fld_module {name = fields.[i]}) [Lglobal_module v | Lvar v]`
             // referencing the SAME source module `v`, the makeblock collapses
@@ -561,20 +539,54 @@ impl Lambda {
     /// Create a switch using OCaml's `Lam.switch` smart constructor.
     pub fn switch(scrutinee: Lambda, switch: LambdaSwitch) -> Self {
         match scrutinee {
+            Lambda::Lconst(Constant::Constructor(tag)) => {
+                let action = switch.sw_consts.iter().find(|(key, _)| matches!(
+                    key,
+                    SwitchKey::Constructor(crate::types::VariantConstructorCase::Constant(candidate))
+                        if candidate == &tag
+                ));
+                action
+                    .map(|(_, branch)| branch.clone())
+                    .or_else(|| switch.sw_failaction.as_deref().cloned())
+                    .unwrap_or_else(|| {
+                        Lambda::Lswitch(
+                            Box::new(Lambda::Lconst(Constant::Constructor(tag))),
+                            switch,
+                        )
+                    })
+            }
             Lambda::Lconst(constant @ Constant::Int { i, .. }) => switch
                 .sw_consts
                 .iter()
-                .find(|(tag, _)| *tag == i)
+                .find(|(key, _)| matches!(key, SwitchKey::Int(value) if *value == i))
                 .map(|(_, branch)| branch.clone())
                 .or_else(|| switch.sw_failaction.as_deref().cloned())
                 .unwrap_or_else(|| Lambda::Lswitch(Box::new(Lambda::Lconst(constant)), switch)),
-            Lambda::Lconst(constant @ Constant::Block { tag, .. }) => switch
-                .sw_blocks
-                .iter()
-                .find(|(block_tag, _)| *block_tag == tag)
-                .map(|(_, branch)| branch.clone())
-                .or_else(|| switch.sw_failaction.as_deref().cloned())
-                .unwrap_or_else(|| Lambda::Lswitch(Box::new(Lambda::Lconst(constant)), switch)),
+            Lambda::Lconst(Constant::Block { tag_info, elements }) => {
+                let runtime = match &tag_info {
+                    TagInfo::Constructor { runtime, .. }
+                    | TagInfo::RecordInlined { runtime, .. } => Some(runtime.clone()),
+                    _ => None,
+                };
+                switch
+                    .sw_blocks
+                    .iter()
+                    .find(|(key, _)| matches!(
+                        (key, runtime.as_ref()),
+                        (
+                            SwitchKey::Constructor(crate::types::VariantConstructorCase::Block(candidate)),
+                            Some(runtime)
+                        ) if &candidate.runtime == runtime
+                    ))
+                    .map(|(_, branch)| branch.clone())
+                    .or_else(|| switch.sw_failaction.as_deref().cloned())
+                    .unwrap_or_else(|| {
+                        Lambda::Lswitch(
+                            Box::new(Lambda::Lconst(Constant::Block { tag_info, elements })),
+                            switch,
+                        )
+                    })
+            }
             other => Lambda::Lswitch(Box::new(other), switch),
         }
     }
@@ -656,7 +668,7 @@ impl Lambda {
     pub fn seq(first: Lambda, second: Lambda) -> Self {
         match first {
             Lambda::Lprim(PrimInfo {
-                primitive: primitive @ Primitive::Pmakeblock(_, _, _),
+                primitive: primitive @ Primitive::Pmakeblock(_, _),
                 args,
                 loc,
             }) => {
@@ -1082,28 +1094,6 @@ fn eta_conversion_args(
         .zip(outer_args.iter())
         .map(|((param, inner_arg), outer_arg)| match inner_arg {
             Lambda::Lvar(id) if param.same(id) => Some(outer_arg.clone()),
-            Lambda::Lprim(PrimInfo {
-                primitive: Primitive::PjsFnMake(arity),
-                args,
-                loc,
-            }) if matches!(args.as_slice(), [Lambda::Lvar(id)] if param.same(id)) => {
-                Some(Lambda::Lprim(PrimInfo {
-                    primitive: Primitive::PjsFnMake(*arity),
-                    args: vec![outer_arg.clone()],
-                    loc: loc.clone(),
-                }))
-            }
-            Lambda::Lprim(PrimInfo {
-                primitive: Primitive::PjsFnMakeUnit,
-                args,
-                loc,
-            }) if matches!(args.as_slice(), [Lambda::Lvar(id)] if param.same(id)) => {
-                Some(Lambda::Lprim(PrimInfo {
-                    primitive: Primitive::PjsFnMakeUnit,
-                    args: vec![outer_arg.clone()],
-                    loc: loc.clone(),
-                }))
-            }
             _ => None,
         })
         .collect()
@@ -1139,13 +1129,13 @@ fn is_assertfalse(lam: &Lambda) -> bool {
 
 /// Direct port of OCaml's `Lam.prim` Blk_module collapse arm (lam.ml:551-575).
 ///
-/// Recognises `Pmakeblock(_, Blk_module fields, _) [arg0; arg1; …]` where
+/// Recognises `Pmakeblock( Blk_module fields, _) [arg0; arg1; …]` where
 /// every `argi` has the shape `Pfield(i, Fld_module {name = fields.[i]}) [src]`
 /// and every `src` is the SAME `Lglobal_module v` or `Lvar v`. Returns that
 /// module reference — the makeblock is reconstructing the source module
 /// exactly, so the alias can be expressed as a single variable.
 fn fold_makeblock_module_alias(primitive: &Primitive, args: &[Lambda]) -> Option<Lambda> {
-    let Primitive::Pmakeblock(_, TagInfo::Module(fields), _) = primitive else {
+    let Primitive::Pmakeblock(TagInfo::Module(fields), _) = primitive else {
         return None;
     };
 
@@ -1246,12 +1236,13 @@ fn has_boolean_type(lam: &Lambda) -> Option<Location> {
     }
 }
 
-fn complete_range(sw_consts: &[(i32, Lambda)], start: i32, finish: i32) -> bool {
+fn complete_range(sw_consts: &[(SwitchKey, Lambda)], start: i32, finish: i32) -> bool {
     match sw_consts.split_first() {
         None => finish < start,
-        Some(((i, _), rest)) => {
-            start <= finish && *i == start && complete_range(rest, start + 1, finish)
+        Some(((SwitchKey::Int(value), _), rest)) => {
+            start <= finish && *value == start && complete_range(rest, start + 1, finish)
         }
+        Some(((SwitchKey::Constructor(_), _), _)) => false,
     }
 }
 

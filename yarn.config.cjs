@@ -14,11 +14,14 @@ const execPromise = util.promisify(exec);
  * @param {Yarn.Constraints.Context} ctx
  */
 async function enforceCompilerMeta({ Yarn }) {
-  const EXPECTED_VERSION = "13.0.0-alpha.4";
+  const EXPECTED_VERSION = "13.0.0-alpha.6";
 
   for (const workspace of Yarn.workspaces()) {
     const { ident } = workspace.pkg;
-    if (ident === "rescript" || ident.startsWith("@rescript/")) {
+    if (
+      ident === "rescript" ||
+      (workspace.cwd.startsWith("packages") && ident.startsWith("@rescript/"))
+    ) {
       workspace.set("version", EXPECTED_VERSION);
       workspace.set("homepage", "https://rescript-lang.org");
       workspace.set("bugs", "https://github.com/rescript-lang/rescript/issues");
@@ -35,7 +38,6 @@ async function enforceCompilerMeta({ Yarn }) {
         "Cristiano Calcagno (https://github.com/cristianoc)",
         "Dmitry Zakharov (https://github.com/DZakh)",
         "Florian Hammerschmidt (https://github.com/fhammerschmidt)",
-        "Florian Verdonck (https://github.com/nojaf)",
         "Gabriel Nordeborn (https://github.com/zth)",
         "Hyeseong Kim (https://github.com/cometkim)",
         "Jaap Frolich (https://github.com/jfrolich)",

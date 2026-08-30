@@ -37,8 +37,6 @@ and dump_typedtree = ref false (* -dtypedtree *)
 
 and dump_rawlambda = ref false (* -drawlambda *)
 
-and dump_lambda = ref false (* -dlambda *)
-
 and dump_typed_sexp = ref false (* -dtyped-sexp *)
 
 and dump_typed_sexp_locs = ref false (* -dtyped-sexp-locs *)
@@ -76,8 +74,6 @@ let parse_color_setting = function
 let color = ref None
 
 (* -color *)
-
-let unboxed_types = ref false
 
 type mli_status = Mli_exists | Mli_non_exists
 let assume_no_mli = ref Mli_non_exists

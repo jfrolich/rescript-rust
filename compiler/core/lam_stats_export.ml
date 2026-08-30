@@ -44,7 +44,7 @@ let values_of_export (meta : Lam_stats.t) (export_map : Lam.t Map_ident.t) :
                  | SimpleForm lam -> Lam_arity_analysis.get_arity meta lam))
         | Some _ | None -> (
           match Map_ident.find_opt export_map x with
-          | Some (Lprim {primitive = Pmakeblock (_, _, Immutable); args}) ->
+          | Some (Lprim {primitive = Pmakeblock (_, Immutable); args}) ->
             Submodule
               (Ext_array.of_list_map args (fun lam ->
                    Lam_arity_analysis.get_arity meta lam))
@@ -128,11 +128,11 @@ let get_dependent_module_effect (maybe_pure : string option)
    ]}
    TODO: check that we don't do this in browser environment
 *)
-let export_to_cmj (meta : Lam_stats.t) effect_ export_map case : Js_cmj_format.t
-    =
+let export_to_cmj (meta : Lam_stats.t) effect_ export_map hoisted_exports case :
+    Js_cmj_format.t =
   let values = values_of_export meta export_map in
 
-  Js_cmj_format.make ~values ~effect_
+  Js_cmj_format.make ~values ~hoisted_exports ~effect_
     ~package_spec:(Js_packages_state.get_packages_info ())
     ~case
 (* FIXME: make sure [-o] would not change its case

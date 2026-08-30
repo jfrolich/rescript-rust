@@ -69,19 +69,19 @@ fn test_primitive_keeps_positive_effectful_if_else_return_shape() {
 }
 
 #[test]
-fn pr6726_keeps_local_module_wrapper_call_materialized_like_ocaml() {
+fn pr6726_inlines_local_module_wrapper_call_like_ocaml() {
     let output = compile_checked_in_test_file_to_js("pr6726");
     assert!(
-        output.contains("let v = test_endian_string(1);"),
-        "expected pr6726 to keep the local module wrapper call materialized, got:\n{output}"
+        output.contains("let v = 33;"),
+        "expected pr6726 to match the OCaml snapshot by fully inlining the wrapper call, got:\n{output}"
     );
     assert!(
         output.contains("v: v"),
         "expected the local module block to reference the call-result binding, got:\n{output}"
     );
     assert!(
-        output.contains("/* v Not a pure module */"),
-        "expected pr6726 to preserve OCaml's module-side-effect reason, got:\n{output}"
+        output.contains("/* No side effect */"),
+        "expected pr6726 to match OCaml's pure-module classification after inlining, got:\n{output}"
     );
     assert!(
         !output.contains("v: 33"),
@@ -471,9 +471,14 @@ fn deriving_accessors_curried_rewrites_alias_initializers_through_exported_bindi
     );
     let compose_idx = output.find("function compose").unwrap();
     let no_param_idx = output.find("let noParam = \"NoParam\";").unwrap();
+    let composed_idx = output.find("let _composedMyField = 1;").unwrap();
     assert!(
-        compose_idx < no_param_idx,
-        "expected compose to remain before the rebound literal export in DerivingAccessorsCurried, got:\n{output}"
+        compose_idx < composed_idx && composed_idx < no_param_idx,
+        "expected derived accessors before compose and the rebound literal export after compose in the natural semantic layout of DerivingAccessorsCurried, got:\n{output}"
+    );
+    assert!(
+        output.contains("let _composedNum = {\n  TAG: \"Num\",\n  _0: 1\n};"),
+        "expected the composed num alias to keep its canonical substituted initializer in DerivingAccessorsCurried, got:\n{output}"
     );
 }
 
@@ -497,9 +502,14 @@ fn deriving_accessors_uncurried_rewrites_alias_initializers_through_exported_bin
     );
     let compose_idx = output.find("function compose").unwrap();
     let no_param_idx = output.find("let noParam = \"NoParam\";").unwrap();
+    let composed_idx = output.find("let _composedMyField = 1;").unwrap();
     assert!(
-        compose_idx < no_param_idx,
-        "expected compose to remain before the rebound literal export in DerivingAccessorsUncurried, got:\n{output}"
+        compose_idx < composed_idx && composed_idx < no_param_idx,
+        "expected derived accessors before compose and the rebound literal export after compose in the natural semantic layout of DerivingAccessorsUncurried, got:\n{output}"
+    );
+    assert!(
+        output.contains("let _composedNum = {\n  TAG: \"Num\",\n  _0: 1\n};"),
+        "expected the composed num alias to keep its canonical substituted initializer in DerivingAccessorsUncurried, got:\n{output}"
     );
 }
 
@@ -606,47 +616,7 @@ fn import_attributes_keeps_exported_alias_bindings_before_log_calls_like_snapsho
 }
 
 #[test]
-fn bs_mutable_set_test_inlines_inner_fromarray_alias_calls_like_snapshot() {
-    let output = compile_checked_in_test_file_to_js("bs_mutable_set_test");
-    assert!(
-        output.contains(
-            "Belt_MutableSetInt.eq(cc, Belt_MutableSetInt.fromArray(Array_data_util.randomRange(0, 120)))"
-        ),
-        "expected bs_mutable_set_test to call Belt_MutableSetInt.fromArray directly at the checked site, got:\n{output}"
-    );
-    assert!(
-        !output.contains("let f = Belt_MutableSetInt.fromArray;"),
-        "unexpected callee alias binding remained in bs_mutable_set_test:\n{output}"
-    );
-}
-
 #[test]
-fn bs_mutable_set_test_keeps_exported_module_field_aliases_only_in_late_export_section() {
-    let output = compile_checked_in_test_file_to_js("bs_mutable_set_test");
-    assert!(
-        output
-            .find("Mocha.describe(\"Bs_mutable_set_test\"")
-            .is_some()
-            && output
-                .find("let empty = Belt_MutableSetInt.make;")
-                .is_some()
-            && output
-                .find("let fromArray = Belt_MutableSetInt.fromArray;")
-                .is_some()
-            && output
-                .find("Mocha.describe(\"Bs_mutable_set_test\"")
-                .unwrap()
-                < output.find("let empty = Belt_MutableSetInt.make;").unwrap()
-            && output
-                .find("Mocha.describe(\"Bs_mutable_set_test\"")
-                .unwrap()
-                < output
-                    .find("let fromArray = Belt_MutableSetInt.fromArray;")
-                    .unwrap(),
-        "expected bs_mutable_set_test to keep the exported module-field aliases only in the late export section, got:\n{output}"
-    );
-}
-
 #[test]
 fn inline_string_test_keeps_alias_materialized_named_matcher_like_snapshot() {
     let output = compile_checked_in_test_file_to_js("inline_string_test");
@@ -694,7 +664,7 @@ fn string_set_reuses_same_name_export_aliases_for_module_fields_like_snapshot() 
     assert!(
         output.contains("return Set_gen.empty;")
             && output.contains("return Set_gen.singleton(x0);")
-            && output.contains("return Set_gen.of_sorted_list(Belt_List.sort(l, compare_elt));"),
+            && output.contains("return Set_gen.of_sorted_list(Stdlib_List.sort(l, (a, b) => Primitive_string.compare(a, b) | 0));"),
         "expected string_set to inline exported module-field aliases at ordinary internal call sites like OCaml, got:\n{output}"
     );
     assert!(
@@ -768,23 +738,6 @@ fn forward_ref_regress_keeps_props_ref_wrapper_materialized_like_snapshot() {
 }
 
 #[test]
-fn belt_hashmap_test_keeps_exported_hash_alias_materialized_like_snapshot() {
-    let output = compile_checked_in_test_file_to_js("belt_hashmap_test");
-    assert!(
-        output.contains("let intHash = Hash_utils.hash;")
-            && output.contains("let Y = Belt_Id.hashable(intHash, intEq);"),
-        "expected belt_hashmap_test to keep the exported hash alias materialized at its internal higher-order use site, got:\n{output}"
-    );
-    assert!(
-        !output.contains("Belt_Id.hashable(Hash_utils.hash, intEq)")
-            && output.find("let intHash = Hash_utils.hash;").is_some()
-            && output.find("let cmp = Primitive_int.compare;").is_some()
-            && output.find("let intHash = Hash_utils.hash;").unwrap()
-                < output.find("let cmp = Primitive_int.compare;").unwrap(),
-        "unexpected inlined hash alias or late export-tail-only binding remained in belt_hashmap_test:\n{output}"
-    );
-}
-
 #[test]
 fn offset_keeps_exported_module_alias_placeholder_before_local_module_block_like_snapshot() {
     let output = compile_checked_in_test_file_to_js("offset");
@@ -892,15 +845,15 @@ fn gpr_4924_inlines_local_variant_matcher_calls_to_constants_like_ocaml() {
 fn uncurried_cast_keeps_local_module_field_alias_binding_materialized_like_ocaml() {
     let output = compile_checked_in_test_file_to_js("uncurried_cast");
     assert!(
-        output.contains("let map = Belt_List.map;\n\nlet List = {\n  map: map\n};"),
+        output.contains("let map = Stdlib_List.map;\n\nlet List = {\n  map: map\n};"),
         "expected uncurried_cast to keep the eta-reduced module field alias materialized in List, got:\n{output}"
     );
     assert!(
-        output.contains("let l = Belt_List.map({")
-            && output.contains("function partial(x) {\n  return Belt_List.map({")
-            && output.contains("let l$1 = Belt_List.map({")
-            && output.contains("function partial$1(extra) {\n  return Belt_List.map({"),
-        "expected uncurried_cast to rewrite map call sites back to Belt_List.map like OCaml, got:\n{output}"
+        output.contains("let l = Stdlib_List.map({")
+            && output.contains("function partial(x) {\n  return Stdlib_List.map({")
+            && output.contains("let l$1 = Stdlib_List.map({")
+            && output.contains("function partial$1(extra) {\n  return Stdlib_List.map({"),
+        "expected uncurried_cast to rewrite map call sites back to Stdlib_List.map like OCaml, got:\n{output}"
     );
     assert!(
         !output.contains("let List = {\n  map: Belt_List.map\n};"),

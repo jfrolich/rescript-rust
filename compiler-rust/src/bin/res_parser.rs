@@ -374,7 +374,10 @@ fn main() {
                 if has_parse_errors {
                     sexp_locs::print_structure(&structure, parser.arena(), &mut io::stdout());
                 } else {
-                    let rewritten = match ppx::rewrite_structure(&structure, parser.arena_mut()) {
+                    let rewritten = match ppx::rewrite_structure_for_parser_debug(
+                        &structure,
+                        parser.arena_mut(),
+                    ) {
                         Ok(rewritten) => rewritten,
                         Err(e) => {
                             eprintln!("PPX rewrite failed: {e}");

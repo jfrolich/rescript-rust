@@ -145,7 +145,6 @@ fn lowers_module_external_calls_to_namespace_imports() {
                     external_module_name: Some(external_module("mocha")),
                     splice: false,
                     scopes: vec![],
-                    tagged_template: false,
                 }),
                 obj_params: None,
                 return_wrapper: ExternalReturnWrapper::Identity,
@@ -298,7 +297,6 @@ fn lowers_spliced_js_calls_by_flattening_literal_variadic_arrays() {
                     external_module_name: Some(external_module("path")),
                     splice: true,
                     scopes: vec![],
-                    tagged_template: false,
                 }),
                 obj_params: None,
                 return_wrapper: ExternalReturnWrapper::Identity,
@@ -487,7 +485,6 @@ fn lowers_js_call_omits_trailing_optional_undefined_args_like_ocaml() {
                     external_module_name: Some(external_module("SomeModule")),
                     splice: false,
                     scopes: vec![],
-                    tagged_template: false,
                 }),
                 obj_params: None,
                 return_wrapper: ExternalReturnWrapper::Identity,
@@ -633,7 +630,6 @@ fn lowers_external_polyvar_string_and_int_args_like_ocaml() {
                     external_module_name: None,
                     splice: false,
                     scopes: vec![],
-                    tagged_template: false,
                 }),
                 obj_params: None,
                 return_wrapper: ExternalReturnWrapper::Identity,
@@ -672,7 +668,6 @@ fn lowers_external_polyvar_payload_args_to_two_js_args_like_ocaml() {
                     external_module_name: None,
                     splice: false,
                     scopes: vec![],
-                    tagged_template: false,
                 }),
                 obj_params: None,
                 return_wrapper: ExternalReturnWrapper::Identity,
@@ -682,7 +677,6 @@ fn lowers_external_polyvar_payload_args_to_two_js_args_like_ocaml() {
             transformed_jsx: false,
         },
         vec![Lambda::const_(Constant::Block {
-            tag: 0,
             tag_info: TagInfo::PolyVar("b".to_string()),
             elements: vec![Constant::Pointer("b".to_string()), Constant::int(2)],
         })],
@@ -751,7 +745,6 @@ fn lowers_marshaled_constant_args_in_js_call() {
                     external_module_name: None,
                     splice: false,
                     scopes: vec!["somescope".to_string()],
-                    tagged_template: false,
                 }),
                 obj_params: None,
                 return_wrapper: ExternalReturnWrapper::Identity,
@@ -1281,7 +1274,6 @@ fn lowers_ignored_js_call_args_to_ocaml_sequence_effects() {
                     external_module_name: None,
                     splice: false,
                     scopes: vec![],
-                    tagged_template: false,
                 }),
                 obj_params: None,
                 return_wrapper: ExternalReturnWrapper::Identity,
@@ -1445,7 +1437,7 @@ fn compile_deps_program_keeps_exported_dict_initializer_object_literals() {
         vec![Lambda::prim(
             Primitive::Pmakearray,
             vec![Lambda::prim(
-                Primitive::Pmakeblock(0, TagInfo::Tuple, Mutable::Immutable),
+                Primitive::Pmakeblock(TagInfo::Tuple, Mutable::Immutable),
                 vec![
                     Lambda::const_(Constant::string("first")),
                     Lambda::const_(Constant::string("hello")),
@@ -1462,7 +1454,6 @@ fn compile_deps_program_keeps_exported_dict_initializer_object_literals() {
         dict_value,
         Lambda::prim(
             Primitive::Pmakeblock(
-                0,
                 TagInfo::ModuleExport(vec![dict_ident.clone()]),
                 Mutable::Immutable,
             ),

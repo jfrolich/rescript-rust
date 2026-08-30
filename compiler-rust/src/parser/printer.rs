@@ -1516,7 +1516,7 @@ pub fn print_expression(
                 rhs_doc,
             ]))
         }
-        // Spread array: Belt.Array.concatMany([xs, [a, b]]) -> [...xs, a, b]
+        // Spread array: Primitive_array.spread([xs, [a, b]]) -> [...xs, a, b]
         ExpressionDesc::Pexp_apply(apply_inner)
             if apply_inner.args.len() == 1
                 && matches!(&apply_inner.args[0].0, ArgLabel::Nolabel)
@@ -1536,7 +1536,7 @@ pub fn print_expression(
                 Doc::nil() // Should never happen due to guard
             }
         }
-        // Spread list: Belt.List.concatMany([xs, [a, b]]) -> list{...xs, a, b}
+        // Spread list: Primitive_list.spread([xs, [a, b]]) -> list{...xs, a, b}
         ExpressionDesc::Pexp_apply(apply_inner)
             if apply_inner.args.len() == 1
                 && matches!(&apply_inner.args[0].0, ArgLabel::Nolabel)
@@ -3569,7 +3569,7 @@ fn print_tagged_template_literal(
     ])
 }
 
-/// Print spread array syntax: Belt.Array.concatMany([xs, [a, b]]) -> [...xs, a, b]
+/// Print spread array syntax: Primitive_array.spread([xs, [a, b]]) -> [...xs, a, b]
 fn print_belt_array_concat_apply(
     state: &PrinterState,
     sub_lists: &[ExprIdx],
@@ -3641,7 +3641,7 @@ fn print_belt_array_concat_apply(
     ]))
 }
 
-/// Print spread list syntax: Belt.List.concatMany([xs, [a, b]]) -> list{...xs, a, b}
+/// Print spread list syntax: Primitive_list.spread([xs, [a, b]]) -> list{...xs, a, b}
 fn print_belt_list_concat_apply(
     state: &PrinterState,
     sub_lists: &[ExprIdx],

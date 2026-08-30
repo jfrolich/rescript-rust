@@ -8,7 +8,8 @@
     "dev": "rescript -w"
   },
   "dependencies": {
-    "@rescript/react": "link:../dependencies/rescript-react",
+    "@rescript/belt": "workspace:^",
+    "@rescript/react": "workspace:^",
     "rescript": "workspace:^"
   }
 }

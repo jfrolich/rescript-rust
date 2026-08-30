@@ -19,7 +19,7 @@
 use super::asttypes::{MutableFlag, PrivateFlag};
 use super::context::TypeContext;
 use super::decl::{
-    ConstructorArguments, ConstructorDeclaration, ConstructorDescription, ConstructorTag,
+    ConstructorArguments, ConstructorDeclaration, ConstructorDescription, ConstructorKind,
     LabelDeclaration, LabelDescription, ModtypeDeclaration, ModuleDeclaration, ModuleType,
     RecordRepresentation, Signature, SignatureItem, TypeDeclaration, TypeKind, ValueDescription,
 };
@@ -31,6 +31,9 @@ use ahash::{AHashMap as HashMap, AHashSet as HashSet};
 use std::cell::RefCell;
 use std::sync::Arc;
 
+type PersistentHashMap<K, V> = im_rc::HashMap<K, V, ahash::RandomState>;
+type PersistentHashSet<T> = im_rc::HashSet<T, ahash::RandomState>;
+
 /// Collect free type variables (Tvar nodes) from a type expression.
 /// Matches OCaml's Datarepr.free_vars.
 fn free_vars(ctx: &TypeContext, ty: TypeExprRef) -> HashSet<TypeExprRef> {
@@ -41,23 +44,18 @@ fn free_vars(ctx: &TypeContext, ty: TypeExprRef) -> HashSet<TypeExprRef> {
 }
 
 fn predef_exception_ident(name: &str) -> Option<Ident> {
-    let stamp = match name {
-        "Match_failure" => 17,
-        "Invalid_argument" => 18,
-        "Failure" => 19,
-        "JsExn" => 23,
-        "Not_found" => 24,
-        "End_of_file" => 25,
-        "Division_by_zero" => 26,
-        "Assert_failure" => 27,
-        "Undefined_recursive_module" => 28,
+    Some(match name {
+        "Match_failure" => super::predef::ident_match_failure(),
+        "Invalid_argument" => super::predef::ident_invalid_argument(),
+        "Failure" => super::predef::ident_failure(),
+        "JsExn" => super::predef::ident_js_exn(),
+        "Not_found" => super::predef::ident_not_found(),
+        "End_of_file" => super::predef::ident_end_of_file(),
+        "Division_by_zero" => super::predef::ident_division_by_zero(),
+        "Assert_failure" => super::predef::ident_assert_failure(),
+        "Undefined_recursive_module" => super::predef::ident_undefined_recursive_module(),
         _ => return None,
-    };
-    Some(Ident::new(
-        name,
-        stamp,
-        IdentFlags::PREDEF_EXN.with_global(),
-    ))
+    })
 }
 
 fn free_vars_rec(
@@ -195,7 +193,7 @@ pub enum EnvSummary {
 #[derive(Debug, Clone)]
 struct IdOpened<T> {
     root: Option<Path>,
-    components: im_rc::HashMap<String, (Ident, T, i32)>,
+    components: PersistentHashMap<String, (Ident, T, i32)>,
     next: Arc<IdTbl<T>>,
 }
 
@@ -206,27 +204,20 @@ struct IdOpened<T> {
 /// every opened binding into the same name map with an origin boolean.
 #[derive(Debug, Clone)]
 pub struct IdTbl<T> {
-    current: im_rc::HashMap<String, Vec<(Ident, T)>>,
-    current_by_stamp: im_rc::HashMap<i32, (Ident, T)>,
+    current: PersistentHashMap<String, Vec<(Ident, T)>>,
     opened: Option<Arc<IdOpened<T>>>,
 }
 
 impl<T: Clone> IdTbl<T> {
     pub fn new() -> Self {
         Self {
-            current: im_rc::HashMap::new(),
-            current_by_stamp: im_rc::HashMap::new(),
+            current: PersistentHashMap::default(),
             opened: None,
         }
     }
 
     pub fn add(&mut self, id: Ident, value: T) {
         let name = id.name().to_string();
-        let stamp = id.stamp();
-        if stamp != 0 {
-            self.current_by_stamp
-                .insert(stamp, (id.clone(), value.clone()));
-        }
         match self.current.get_mut(&name) {
             Some(entries) => entries.push((id, value)),
             None => {
@@ -245,8 +236,7 @@ impl<T: Clone> IdTbl<T> {
             .map(|(id, value, pos)| (id.name().to_string(), (id, value, pos)))
             .collect();
         *self = Self {
-            current: im_rc::HashMap::new(),
-            current_by_stamp: im_rc::HashMap::new(),
+            current: PersistentHashMap::default(),
             opened: Some(Arc::new(IdOpened {
                 root: Some(root),
                 components: opened_components,
@@ -284,14 +274,6 @@ impl<T: Clone> IdTbl<T> {
 
     fn find_current_by_ident(&self, id: &Ident) -> Option<&T> {
         let stamp = id.stamp();
-        if stamp != 0
-            && let Some((entry_id, value)) = self.current_by_stamp.get(&stamp)
-            && entry_id.same(id)
-            && entry_id.name() == id.name()
-        {
-            return Some(value);
-        }
-
         self.current.get(id.name()).and_then(|entries| {
             entries
                 .iter()
@@ -378,10 +360,6 @@ impl<T: Clone> IdTbl<T> {
         {
             let updated = f(value);
             *value = updated.clone();
-            if id.stamp() != 0 {
-                self.current_by_stamp
-                    .insert(id.stamp(), (id.clone(), updated.clone()));
-            }
             return Some((id.clone(), updated));
         }
 
@@ -468,7 +446,7 @@ impl<T: Clone> Default for IdTbl<T> {
 
 #[derive(Debug, Clone)]
 struct TycompOpened<T> {
-    components: im_rc::HashMap<String, Vec<(Ident, T)>>,
+    components: PersistentHashMap<String, Vec<(Ident, T)>>,
     next: Arc<TycompTbl<T>>,
 }
 
@@ -479,26 +457,20 @@ struct TycompOpened<T> {
 /// as lists.
 #[derive(Debug, Clone)]
 pub struct TycompTbl<T> {
-    current: im_rc::HashMap<String, Vec<(Ident, T)>>,
-    current_by_stamp: im_rc::HashMap<i32, (Ident, T)>,
+    current: PersistentHashMap<String, Vec<(Ident, T)>>,
     opened: Option<Arc<TycompOpened<T>>>,
 }
 
 impl<T: Clone> TycompTbl<T> {
     pub fn new() -> Self {
         Self {
-            current: im_rc::HashMap::new(),
-            current_by_stamp: im_rc::HashMap::new(),
+            current: PersistentHashMap::default(),
             opened: None,
         }
     }
 
     pub fn add(&mut self, id: Ident, value: T) {
         let name = id.name().to_string();
-        if id.stamp() != 0 {
-            self.current_by_stamp
-                .insert(id.stamp(), (id.clone(), value.clone()));
-        }
         match self.current.get_mut(&name) {
             Some(entries) => entries.push((id, value)),
             None => {
@@ -512,7 +484,8 @@ impl<T: Clone> TycompTbl<T> {
             return;
         }
         let next = std::mem::take(self);
-        let mut opened_components: im_rc::HashMap<String, Vec<(Ident, T)>> = im_rc::HashMap::new();
+        let mut opened_components: PersistentHashMap<String, Vec<(Ident, T)>> =
+            PersistentHashMap::default();
         for (id, value) in components {
             let name = id.name().to_string();
             match opened_components.get_mut(&name) {
@@ -523,8 +496,7 @@ impl<T: Clone> TycompTbl<T> {
             }
         }
         *self = Self {
-            current: im_rc::HashMap::new(),
-            current_by_stamp: im_rc::HashMap::new(),
+            current: PersistentHashMap::default(),
             opened: Some(Arc::new(TycompOpened {
                 components: opened_components,
                 next: Arc::new(next),
@@ -591,13 +563,6 @@ impl<T: Clone> TycompTbl<T> {
 
     pub fn find_by_ident(&self, id: &Ident) -> Option<&T> {
         let stamp = id.stamp();
-        if stamp != 0
-            && let Some((entry_id, value)) = self.current_by_stamp.get(&stamp)
-            && entry_id.same(id)
-            && entry_id.name() == id.name()
-        {
-            return Some(value);
-        }
         if let Some(value) = self.current.get(id.name()).and_then(|entries| {
             entries
                 .iter()
@@ -736,7 +701,7 @@ pub struct Env {
     /// roots through compiler/ml/env.ml:865-875 because no source open selected
     /// them. Source-level opens use the same component tables but should not be
     /// classified as initial-env roots.
-    implicit_open_roots: im_rc::HashSet<String>,
+    implicit_open_roots: PersistentHashSet<String>,
 
     /// Summary of bindings.
     ///
@@ -748,7 +713,7 @@ pub struct Env {
     summary: EnvSummary,
 
     /// Local constraints (for GADTs).
-    local_constraints: im_rc::HashMap<Path, Arc<TypeDeclaration>>,
+    local_constraints: PersistentHashMap<Path, Arc<TypeDeclaration>>,
 
     /// GADT instance levels.
     gadt_instances: Vec<(i32, Vec<TypeExprRef>)>,
@@ -811,9 +776,9 @@ impl Env {
             functor_args: HashSet::new(),
             local_module_aliases_cache: RefCell::new(None),
             module_path_requires_env_scoped_cache_cache: RefCell::new(HashMap::new()),
-            implicit_open_roots: im_rc::HashSet::new(),
+            implicit_open_roots: PersistentHashSet::default(),
             summary: EnvSummary::Empty,
-            local_constraints: im_rc::HashMap::new(),
+            local_constraints: PersistentHashMap::default(),
             gadt_instances: Vec::new(),
             flags: EnvFlags::default(),
         }
@@ -1699,7 +1664,7 @@ impl Env {
                         }
                     }
                 }
-                Err(EnvError::ModuleNotFound(name.clone()))
+                Err(EnvError::ModuleNotFound(name.to_string()))
             }
             Path::Papply(_, _) => Err(EnvError::ModuleNotFound(
                 "(functor application)".to_string(),
@@ -1801,7 +1766,7 @@ pub fn initial_env(ctx: &TypeContext) -> Env {
         type_loc: Location::none(),
         type_attributes: vec![],
         type_immediate: immediate,
-        type_unboxed: super::decl::UnboxedStatus::default(),
+        type_representation: crate::types::TypeRepresentation::Boxed,
         type_inlined_types: vec![],
         type_path: None,
     };
@@ -1813,6 +1778,21 @@ pub fn initial_env(ctx: &TypeContext) -> Env {
         cd_res: None,
         cd_loc: Location::none(),
         cd_attributes: vec![],
+    };
+    let variant_kind = |constructors: Vec<ConstructorDeclaration>| {
+        let layout = crate::types::variant_runtime::plain_layout(
+            ctx,
+            constructors.iter().map(|constructor| {
+                (
+                    constructor.cd_id.name().to_string(),
+                    !matches!(
+                        &constructor.cd_args,
+                        ConstructorArguments::CstrTuple(args) if args.is_empty()
+                    ),
+                )
+            }),
+        );
+        TypeKind::TypeVariant(constructors, layout)
     };
 
     // Helper: add a type with its constructors to the environment
@@ -1826,29 +1806,18 @@ pub fn initial_env(ctx: &TypeContext) -> Env {
         // Extract constructors/labels from predef declarations so they are
         // available for disambiguation just like OCaml's initial environment.
         match &decl.type_kind {
-            TypeKind::TypeVariant(constrs) => {
-                let num_consts = constrs.iter()
-                    .filter(|c| matches!(c.cd_args, ConstructorArguments::CstrTuple(ref args) if args.is_empty()))
-                    .count() as i32;
-                let num_nonconsts = constrs.len() as i32 - num_consts;
-                let mut const_idx = 0i32;
-                let mut nonconst_idx = 0i32;
+            TypeKind::TypeVariant(constrs, _) => {
+                let layout_ref = decl.variant_layout_ref().unwrap_or_else(|| {
+                    crate::types::variant_runtime::plain_layout(
+                        ctx,
+                        constrs.iter().map(|cd| (
+                            cd.cd_id.name().to_string(),
+                            !matches!(&cd.cd_args, ConstructorArguments::CstrTuple(args) if args.is_empty()),
+                        )),
+                    )
+                });
 
-                for cd in constrs {
-                    let is_constant = matches!(cd.cd_args, ConstructorArguments::CstrTuple(ref args) if args.is_empty());
-
-                    let cstr_tag = if decl.type_unboxed.unboxed {
-                        ConstructorTag::CstrUnboxed
-                    } else if is_constant {
-                        let tag = ConstructorTag::CstrConstant(const_idx);
-                        const_idx += 1;
-                        tag
-                    } else {
-                        let tag = ConstructorTag::CstrBlock(nonconst_idx);
-                        nonconst_idx += 1;
-                        tag
-                    };
-
+                for (position, cd) in constrs.iter().enumerate() {
                     let (cstr_args, cstr_arity) = match &cd.cd_args {
                         ConstructorArguments::CstrTuple(args) => (args.clone(), args.len() as i32),
                         ConstructorArguments::CstrRecord(labels) => {
@@ -1872,9 +1841,10 @@ pub fn initial_env(ctx: &TypeContext) -> Env {
                         cstr_existentials,
                         cstr_args,
                         cstr_arity,
-                        cstr_tag,
-                        cstr_consts: num_consts,
-                        cstr_nonconsts: num_nonconsts,
+                        cstr_kind: ConstructorKind::Ordinary(crate::types::ConstructorReference {
+                            variant: layout_ref,
+                            position,
+                        }),
                         cstr_generalized: cd.cd_res.is_some(),
                         cstr_private: decl.type_private,
                         cstr_loc: Location::none(),
@@ -1931,7 +1901,7 @@ pub fn initial_env(ctx: &TypeContext) -> Env {
         &mut env,
         predef::ident_bool(),
         TypeDeclaration {
-            type_kind: TypeKind::TypeVariant(vec![
+            type_kind: variant_kind(vec![
                 cstr(predef::ident_false(), vec![]),
                 cstr(predef::ident_true(), vec![]),
             ]),
@@ -1948,7 +1918,7 @@ pub fn initial_env(ctx: &TypeContext) -> Env {
         &mut env,
         predef::ident_unit(),
         TypeDeclaration {
-            type_kind: TypeKind::TypeVariant(vec![cstr(predef::ident_void(), vec![])]),
+            type_kind: variant_kind(vec![cstr(predef::ident_void(), vec![])]),
             type_immediate: true,
             ..decl_abstr(0, true)
         },
@@ -1977,7 +1947,7 @@ pub fn initial_env(ctx: &TypeContext) -> Env {
             TypeDeclaration {
                 type_params: vec![tvar],
                 type_arity: 1,
-                type_kind: TypeKind::TypeVariant(vec![
+                type_kind: variant_kind(vec![
                     cstr(predef::ident_none(), vec![]),
                     cstr(predef::ident_some(), vec![tvar]),
                 ]),
@@ -1996,7 +1966,7 @@ pub fn initial_env(ctx: &TypeContext) -> Env {
             TypeDeclaration {
                 type_params: vec![tvar1, tvar2],
                 type_arity: 2,
-                type_kind: TypeKind::TypeVariant(vec![
+                type_kind: variant_kind(vec![
                     cstr(predef::ident_ok(), vec![tvar1]),
                     cstr(predef::ident_error(), vec![tvar2]),
                 ]),
@@ -2019,6 +1989,26 @@ pub fn initial_env(ctx: &TypeContext) -> Env {
                 type_arity: 1,
                 type_variance: vec![crate::types::variance::Variance::covariant()],
                 ..decl_abstr(1, false)
+            },
+            ctx,
+        );
+    }
+    {
+        // Upstream compiler/ml/predef.ml:367-376: first-class tags are an
+        // abstract, invariant two-parameter builtin type.
+        let param = ctx.new_generic_var(None);
+        let output = ctx.new_generic_var(None);
+        add_type_with_constrs(
+            &mut env,
+            predef::ident_tagged_template(),
+            TypeDeclaration {
+                type_params: vec![param, output],
+                type_arity: 2,
+                type_variance: vec![
+                    crate::types::variance::Variance::full(),
+                    crate::types::variance::Variance::full(),
+                ],
+                ..decl_abstr(2, false)
             },
             ctx,
         );
@@ -2061,7 +2051,7 @@ pub fn initial_env(ctx: &TypeContext) -> Env {
             TypeDeclaration {
                 type_params: vec![tvar],
                 type_arity: 1,
-                type_kind: TypeKind::TypeVariant(vec![
+                type_kind: variant_kind(vec![
                     cstr(predef::ident_nil(), vec![]),
                     cstr(predef::ident_cons(), vec![tvar, list_ty]),
                 ]),
@@ -2107,14 +2097,14 @@ pub fn initial_env(ctx: &TypeContext) -> Env {
             TypeDeclaration {
                 type_params: vec![],
                 type_arity: 0,
-                type_kind: TypeKind::TypeVariant(vec![ConstructorDeclaration {
+                type_kind: variant_kind(vec![ConstructorDeclaration {
                     cd_id: predef::ident_ctor_unknown(),
                     cd_args: ConstructorArguments::CstrTuple(vec![tvar]),
                     cd_res: Some(type_unknown),
                     cd_loc: Location::none(),
                     cd_attributes: vec![],
                 }]),
-                type_unboxed: super::decl::UnboxedStatus::TRUE_FALSE,
+                type_representation: super::decl::TypeRepresentation::Unboxed,
                 ..decl_abstr(0, false)
             },
             ctx,
@@ -2336,7 +2326,7 @@ pub fn initial_env(ctx: &TypeContext) -> Env {
             &mut env,
             predef::ident_type_info(),
             TypeDeclaration {
-                type_kind: TypeKind::TypeVariant(all_ctors),
+                type_kind: variant_kind(all_ctors),
                 ..decl_abstr(0, false)
             },
         );
@@ -2440,9 +2430,7 @@ pub fn initial_env(ctx: &TypeContext) -> Env {
                     cstr_existentials: vec![],
                     cstr_arity: args.len() as i32,
                     cstr_args: args,
-                    cstr_tag: ConstructorTag::CstrExtension(path),
-                    cstr_consts: -1,
-                    cstr_nonconsts: -1,
+                    cstr_kind: ConstructorKind::Extension(path.clone()),
                     cstr_generalized: false,
                     cstr_private: PrivateFlag::Public,
                     cstr_loc: Location::none(),
@@ -2587,7 +2575,7 @@ mod tests {
             type_loc: Location::none(),
             type_attributes: vec![],
             type_immediate: false,
-            type_unboxed: super::super::decl::UnboxedStatus::default(),
+            type_representation: crate::types::TypeRepresentation::Boxed,
             type_inlined_types: vec![],
             type_path: None,
         };

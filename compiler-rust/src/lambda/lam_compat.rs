@@ -3,8 +3,6 @@
 //! This module contains types that are shared between Lambda IR and other
 //! parts of the compiler, maintaining compatibility with the OCaml types.
 
-use crate::parser::ast::MutableFlag;
-
 /// Comparison operators
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Comparison {
@@ -70,10 +68,7 @@ pub enum LetKind {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FieldDbgInfo {
     /// Record field
-    Record {
-        name: String,
-        mutable_flag: MutableFlag,
-    },
+    Record { name: String },
     /// Module field
     Module { name: String },
     /// Inlined record field
@@ -100,7 +95,7 @@ impl FieldDbgInfo {
     /// Get the field name if available
     pub fn name(&self) -> Option<&str> {
         match self {
-            FieldDbgInfo::Record { name, .. }
+            FieldDbgInfo::Record { name }
             | FieldDbgInfo::Module { name }
             | FieldDbgInfo::RecordInline { name }
             | FieldDbgInfo::RecordExtension { name } => Some(name),
@@ -177,7 +172,6 @@ mod tests {
     fn test_field_dbg_info_name() {
         let record = FieldDbgInfo::Record {
             name: "field".to_string(),
-            mutable_flag: MutableFlag::Immutable,
         };
         assert_eq!(record.name(), Some("field"));
 

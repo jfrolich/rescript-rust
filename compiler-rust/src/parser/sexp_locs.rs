@@ -350,35 +350,22 @@ fn core_type(typ: &CoreType, arena: &ParseArena) -> Sexp {
             Sexp::list(vec![Sexp::atom("Ptyp_var"), Sexp::atom(&quote_string(var))])
         }
         CoreTypeDesc::Ptyp_arrow(inner) => {
-            let (ref arg, ref ret, ref ar) = **inner;
-            // OCaml's attribute placement depends on whether there's a label:
-            // - For Nolabel: attributes go on the type
-            // - For Labelled/Optional: attributes stay in the arrow slot
-            let is_labeled = !matches!(arg.lbl, ArgLabel::Nolabel);
-            let arg_typ = arena.get_core_type(arg.typ);
-            let (arrow_attrs, arg_typ_sexp) = if arg.attrs.is_empty() {
-                (attributes(&[], arena), core_type(arg_typ, arena))
-            } else if is_labeled {
-                // Labeled: attributes stay in arrow slot
-                (attributes(&arg.attrs, arena), core_type(arg_typ, arena))
-            } else {
-                // Nolabel: merge attributes onto the type
-                let mut merged_attrs = arg.attrs.clone();
-                merged_attrs.extend(arg_typ.ptyp_attributes.clone());
-                let merged_typ = CoreType {
-                    ptyp_desc: arg_typ.ptyp_desc.clone(),
-                    ptyp_loc: arg_typ.ptyp_loc,
-                    ptyp_attributes: merged_attrs,
-                };
-                (attributes(&[], arena), core_type(&merged_typ, arena))
-            };
+            let (arg, ret, arity) = &**inner;
+            let params = arena
+                .nary_arrow_args(arg, *arity)
+                .iter()
+                .map(|param| {
+                    Sexp::list(vec![
+                        arg_label(&param.lbl, arena),
+                        attributes(&param.attrs, arena),
+                        core_type(arena.get_core_type(param.typ), arena),
+                    ])
+                })
+                .collect();
             Sexp::list(vec![
                 Sexp::atom("Ptyp_arrow"),
-                arg_label(&arg.lbl, arena),
-                arrow_attrs,
-                arg_typ_sexp,
+                Sexp::list(params),
                 core_type(arena.get_core_type(*ret), arena),
-                arity(ar, arena),
             ])
         }
         CoreTypeDesc::Ptyp_tuple(types) => Sexp::list(vec![
@@ -620,6 +607,20 @@ fn pattern(p: &Pattern, arena: &ParseArena) -> Sexp {
                         })
                         .collect()
                 }),
+                match arena.record_pat_rest(p.ppat_loc) {
+                    None => Sexp::atom("None"),
+                    Some(rest) => Sexp::list(vec![
+                        match rest.rest_type {
+                            None => Sexp::atom("None"),
+                            Some(ty) => Sexp::list(vec![
+                                Sexp::atom("Some"),
+                                core_type(arena.get_core_type(ty), arena),
+                            ]),
+                        },
+                        Sexp::atom(&quote_string(arena.get_string(rest.rest_name.txt))),
+                        location(rest.rest_name.loc, arena),
+                    ]),
+                },
             ])
         }
         PatternDesc::Ppat_array(pats) => Sexp::list(vec![
@@ -701,29 +702,42 @@ fn expression(expr: &Expression, arena: &ParseArena) -> Sexp {
             ])
         }
         ExpressionDesc::Pexp_fun(inner) => {
-            let PexpFun {
-                arg_label: ref lbl,
-                default: ref opt_default,
-                ref lhs,
-                ref rhs,
-                arity: ref ar,
-                is_async: ref is_async_flag,
-                ..
-            } = **inner;
+            let params = arena
+                .nary_fun_params(inner)
+                .iter()
+                .map(|param| {
+                    Sexp::list(vec![
+                        attributes(&param.p_attrs, arena),
+                        arg_label(&param.p_lbl, arena),
+                        match param.p_default {
+                            None => Sexp::atom("None"),
+                            Some(default) => Sexp::list(vec![
+                                Sexp::atom("Some"),
+                                expression(arena.get_expr(default), arena),
+                            ]),
+                        },
+                        pattern(arena.get_pat(param.p_pat), arena),
+                    ])
+                })
+                .collect();
             Sexp::list(vec![
                 Sexp::atom("Pexp_fun"),
-                arg_label(lbl, arena),
-                match opt_default {
-                    None => Sexp::atom("None"),
-                    Some(e) => Sexp::list(vec![
-                        Sexp::atom("Some"),
-                        expression(arena.get_expr(*e), arena),
-                    ]),
-                },
-                pattern(arena.get_pat(*lhs), arena),
-                expression(arena.get_expr(*rhs), arena),
-                arity(ar, arena),
-                Sexp::atom(if *is_async_flag { "true" } else { "false" }),
+                Sexp::list(
+                    arena
+                        .nary_fun_newtypes(inner)
+                        .iter()
+                        .map(|(name, attrs)| {
+                            Sexp::list(vec![
+                                Sexp::atom(&quote_string(arena.get_string(name.txt))),
+                                attributes(attrs, arena),
+                                location(name.loc, arena),
+                            ])
+                        })
+                        .collect(),
+                ),
+                Sexp::list(params),
+                expression(arena.get_expr(arena.nary_fun_body(inner)), arena),
+                Sexp::atom(if inner.is_async { "true" } else { "false" }),
             ])
         }
         ExpressionDesc::Pexp_apply(inner) => {
@@ -1126,10 +1140,32 @@ fn case(c: &Case, arena: &ParseArena) -> Sexp {
 }
 
 fn value_binding(vb: &ValueBinding, arena: &ParseArena) -> Sexp {
+    let constraint = arena.value_constraint(vb.pvb_pat).map_or_else(
+        || Sexp::atom("None"),
+        |constraint| {
+            Sexp::list(vec![
+                Sexp::atom("Some"),
+                Sexp::list(
+                    constraint
+                        .pvc_newtypes
+                        .iter()
+                        .map(|name| {
+                            Sexp::list(vec![
+                                Sexp::atom(&quote_string(arena.get_string(name.txt))),
+                                location(name.loc, arena),
+                            ])
+                        })
+                        .collect(),
+                ),
+                core_type(arena.get_core_type(constraint.pvc_type), arena),
+            ])
+        },
+    );
     Sexp::list(vec![
         Sexp::atom("value_binding"),
         location(vb.pvb_loc, arena),
         pattern(arena.get_pat(vb.pvb_pat), arena),
+        constraint,
         expression(arena.get_expr(vb.pvb_expr), arena),
         attributes(&vb.pvb_attributes, arena),
     ])

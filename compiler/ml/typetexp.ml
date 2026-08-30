@@ -36,7 +36,6 @@ type error =
   | Present_has_no_type of string
   | Constructor_mismatch of type_expr * type_expr
   | Not_a_variant of type_expr
-  | Variant_tags of string * string
   | Invalid_variable_name of string
   | Cannot_quantify of string * type_expr
   | Multiple_constraints_on_type of Longident.t
@@ -46,10 +45,8 @@ type error =
   | Unbound_label of Longident.t * type_expr option
   | Unbound_module of Longident.t
   | Unbound_modtype of Longident.t
-  | Ill_typed_functor_application of Longident.t
   | Illegal_reference_to_recursive_module
   | Access_functor_as_structure of Longident.t
-  | Apply_structure_as_functor of Longident.t
   | Cannot_scrape_alias of Longident.t * Path.t
   | Opened_object of Path.t option
   | Not_an_object of type_expr
@@ -84,22 +81,7 @@ let rec narrow_unbound_lid_error : 'a. _ -> _ -> _ -> _ -> 'a =
       raise (Error (loc, env, Access_functor_as_structure mlid))
     | Mty_alias (_, p) ->
       raise (Error (loc, env, Cannot_scrape_alias (mlid, p)))
-    | _ -> ())
-  | Longident.Lapply (flid, mlid) -> (
-    check_module flid;
-    let fmd = Env.find_module (Env.lookup_module ~load:true flid env) env in
-    (match Env.scrape_alias env fmd.md_type with
-    | Mty_signature _ ->
-      raise (Error (loc, env, Apply_structure_as_functor flid))
-    | Mty_alias (_, p) ->
-      raise (Error (loc, env, Cannot_scrape_alias (flid, p)))
-    | _ -> ());
-    check_module mlid;
-    let mmd = Env.find_module (Env.lookup_module ~load:true mlid env) env in
-    match Env.scrape_alias env mmd.md_type with
-    | Mty_alias (_, p) ->
-      raise (Error (loc, env, Cannot_scrape_alias (mlid, p)))
-    | _ -> raise (Error (loc, env, Ill_typed_functor_application lid))));
+    | _ -> ()));
   raise (Error (loc, env, make_error lid))
 
 let find_component (lookup : ?loc:_ -> _) make_error env loc lid =
@@ -322,18 +304,37 @@ and transl_type_aux env policy styp =
           v)
     in
     ctyp (Ttyp_var name) ty
-  | Ptyp_arrow {arg; ret; arity} ->
-    let lbl = arg.lbl in
-    let cty1 = transl_type env policy arg.typ in
-    let cty2 = transl_type env policy ret in
-    let ty1 = cty1.ctyp_type in
-    let ty1 =
-      if Btype.is_optional lbl then
-        newty (Tconstr (Predef.path_option, [ty1], ref Mnil))
-      else ty1
+  | Ptyp_arrow {params; ret} ->
+    let cparams =
+      List.map
+        (fun (arg : Parsetree.arg) ->
+          let cty = transl_type env policy arg.typ in
+          let ty =
+            if Btype.is_optional arg.lbl then
+              newty (Tconstr (Predef.path_option, [cty.ctyp_type], ref Mnil))
+            else cty.ctyp_type
+          in
+          (arg, cty, ty))
+        params
     in
-    let ty = newty (Tarrow ({lbl; typ = ty1}, cty2.ctyp_type, Cok, arity)) in
-    ctyp (Ttyp_arrow ({attrs = arg.attrs; lbl; typ = cty1}, cty2, arity)) ty
+    let cty2 = transl_type env policy ret in
+    let ty =
+      newty
+        (Tarrow
+           ( List.map
+               (fun ((arg : Parsetree.arg), _, ty1) ->
+                 {Types.lbl = arg.lbl; typ = ty1})
+               cparams,
+             cty2.ctyp_type ))
+    in
+    ctyp
+      (Ttyp_arrow
+         ( List.map
+             (fun ((arg : Parsetree.arg), cty1, _) ->
+               {Typedtree.attrs = arg.attrs; lbl = arg.lbl; typ = cty1})
+             cparams,
+           cty2 ))
+      ty
   | Ptyp_tuple stl ->
     assert (List.length stl >= 2);
     let ctys = List.map (transl_type env policy) stl in
@@ -547,7 +548,7 @@ and transl_type_aux env policy styp =
   | Ptyp_package (p, l) ->
     let l, mty = create_package_mty true styp.ptyp_loc env (p, l) in
     let z = narrow () in
-    let mty = !transl_modtype env mty in
+    ignore (!transl_modtype env mty);
     widen z;
     let ptys = List.map (fun (s, pty) -> (s, transl_type env policy pty)) l in
     let path = !transl_modtype_longident styp.ptyp_loc env p.txt in
@@ -558,15 +559,7 @@ and transl_type_aux env policy styp =
              List.map (fun (s, _pty) -> s.txt) l,
              List.map (fun (_, cty) -> cty.ctyp_type) ptys ))
     in
-    ctyp
-      (Ttyp_package
-         {
-           pack_path = path;
-           pack_type = mty.mty_type;
-           pack_fields = ptys;
-           pack_txt = p;
-         })
-      ty
+    ctyp (Ttyp_package {pack_path = path; pack_fields = ptys}) ty
   | Ptyp_extension ext ->
     raise (Error_forward (Builtin_attributes.error_of_extension ext))
 
@@ -743,7 +736,6 @@ let super_spellcheck ppf fold env lid =
     Misc.spellcheck env name
   in
   match lid with
-  | Longident.Lapply _ -> false
   | Longident.Lident s -> did_you_mean ppf (fun _ -> choices None s)
   | Longident.Ldot (r, s) -> did_you_mean ppf (fun _ -> choices (Some r) s)
 
@@ -753,7 +745,6 @@ let spellcheck ppf fold env lid =
     Misc.spellcheck env name
   in
   match lid with
-  | Longident.Lapply _ -> ()
   | Longident.Lident s -> Misc.did_you_mean ppf (fun () -> choices ~path:None s)
   | Longident.Ldot (r, s) ->
     Misc.did_you_mean ppf (fun () -> choices ~path:(Some r) s)
@@ -783,18 +774,19 @@ let report_error env ppf = function
   | Unbound_type_constructor_2 p ->
     fprintf ppf "The type constructor@ %a@ is not yet completely defined" path p
   | Type_arity_mismatch (lid, expected, provided) ->
+    let plural n = if n = 1 then "" else "s" in
     if expected == 0 then
       fprintf ppf
-        "@[The type %a is not generic so expects no arguments,@ but is here \
-         applied to %i argument(s).@ Have you tried removing the angular \
-         brackets `<` and `>` and the@ arguments within them and just writing \
-         `%a` instead? @]"
-        longident lid provided longident lid
+        "@[The type `%a` is not generic so expects no arguments,@ but is here \
+         given %i argument%s.@ Have you tried removing the angular brackets \
+         `<` and `>` and the@ arguments within them and just writing `%a` \
+         instead? @]"
+        longident lid provided (plural provided) longident lid
     else
       fprintf ppf
-        "@[The type constructor %a@ expects %i argument(s),@ but is here \
-         applied to %i argument(s)@]"
-        longident lid expected provided
+        "@[The type constructor `%a`@ expects %i type argument%s,@ but is \
+         given %i@]"
+        longident lid expected (plural expected) provided
   | Type_mismatch trace ->
     Printtyp.report_unification_error ppf Env.empty trace
       (function
@@ -824,13 +816,11 @@ let report_error env ppf = function
       (* PR#7012: help the user that wrote 'Foo instead of `Foo *)
       Misc.did_you_mean ppf (fun () -> ["`" ^ s])
     | _ -> ())
-  | Variant_tags (lab1, lab2) ->
-    fprintf ppf "@[Variant tags %s@ and %s have the same hash value.@ %s@]"
-      (!Printtyp.print_res_poly_identifier lab1)
-      (!Printtyp.print_res_poly_identifier lab2)
-      "Change one of them."
   | Invalid_variable_name name ->
-    fprintf ppf "The type variable name %s is not allowed in programs" name
+    fprintf ppf
+      "The type variable name %s is not allowed; type variable names cannot \
+       start with an underscore."
+      name
   | Cannot_quantify (name, v) ->
     fprintf ppf
       "@[<hov>The universal type variable '%s cannot be generalized:@ %s.@]"
@@ -885,7 +875,7 @@ let report_error env ppf = function
         "@[@{<info>The module or file %a can't be found.@}@,\
          @,\
          Are you trying to use the standard library's Str?@ If you're \
-         compiling to JavaScript,@ use @{<info>Js.Re@} instead.@ Otherwise, \
+         compiling to JavaScript,@ use @{<info>RegExp@} instead.@ Otherwise, \
          add str.cma to your ocamlc/ocamlopt command.@]"
         Printtyp.longident lid
     | lid ->
@@ -960,14 +950,10 @@ let report_error env ppf = function
   | Unbound_modtype lid ->
     fprintf ppf "Unbound module type %a" longident lid;
     spellcheck ppf fold_modtypes env lid
-  | Ill_typed_functor_application lid ->
-    fprintf ppf "Ill-typed functor application %a" longident lid
   | Illegal_reference_to_recursive_module ->
     fprintf ppf "Illegal recursive module reference"
   | Access_functor_as_structure lid ->
     fprintf ppf "The module %a is a functor, not a structure" longident lid
-  | Apply_structure_as_functor lid ->
-    fprintf ppf "The module %a is a structure, not a functor" longident lid
   | Cannot_scrape_alias (lid, p) ->
     fprintf ppf "The module %a is an alias for module %a, which is missing"
       longident lid path p

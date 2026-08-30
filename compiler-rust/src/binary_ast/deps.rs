@@ -436,6 +436,36 @@ impl<'a> DependencyCollector<'a> {
                 }
             }
             ExpressionDesc::Pexp_fun(inner) => {
+                // OCaml Depend.add_expr folds over all n-ary parameters
+                // (compiler/ml/depend.ml:215-226): for each parameter visit its
+                // default expression then its pattern, threading bound module
+                // names through the parameter list, before visiting the body.
+                // The parser-facing parameter list lives in a sparse side table;
+                // only the first parameter is kept in the compact node payload.
+                let nary_params: Vec<crate::parser::ast::FunParam> =
+                    match self.arena.stored_nary_fun_params(inner) {
+                        Some(params) => params.to_vec(),
+                        None => Vec::new(),
+                    };
+                if !nary_params.is_empty() {
+                    let mut newly_added: Vec<String> = Vec::new();
+                    for param in &nary_params {
+                        if let Some(default) = param.p_default {
+                            self.add_expr_idx(default);
+                        }
+                        let unpack_names = self.add_pat_idx_collecting_unpack(param.p_pat);
+                        for name in unpack_names {
+                            if self.bound_modules.insert(name.clone()) {
+                                newly_added.push(name);
+                            }
+                        }
+                    }
+                    self.add_expr_idx(inner.rhs);
+                    for name in newly_added {
+                        self.bound_modules.remove(&name);
+                    }
+                    return;
+                }
                 let PexpFun {
                     default, lhs, rhs, ..
                 } = &**inner;
@@ -825,6 +855,15 @@ impl<'a> DependencyCollector<'a> {
                     // field.pat is PatIdx
                     self.add_pat_idx_inner(field.pat, unpack_names);
                 }
+                // OCaml Depend visits the rest pattern's type annotation
+                // (compiler/ml/depend.ml:187): `...M.t as rest` records a
+                // dependency on M. The rest row lives in a sparse side table
+                // keyed by the pattern location.
+                if let Some(rest) = self.arena.record_pat_rest(pat.ppat_loc)
+                    && let Some(rest_type) = rest.rest_type
+                {
+                    self.add_core_type_idx(rest_type);
+                }
             }
             PatternDesc::Ppat_or(p1, p2) => {
                 // p1 and p2 are PatIdx
@@ -873,9 +912,13 @@ impl<'a> DependencyCollector<'a> {
         match &*ty.ptyp_desc {
             CoreTypeDesc::Ptyp_any | CoreTypeDesc::Ptyp_var(_) => {}
             CoreTypeDesc::Ptyp_arrow(inner) => {
-                let (ref arg, ref ret, ..) = **inner;
-                // arg.typ is CoreTypeIdx, ret is CoreTypeIdx
-                self.add_core_type_idx(arg.typ);
+                let (ref arg, ref ret, arity) = **inner;
+                // OCaml Depend.add_type visits every n-ary arrow parameter
+                // (compiler/ml/depend.ml:102-105); the compact payload keeps
+                // only the first argument, so recover the full list here.
+                for a in self.arena.nary_arrow_args(arg, arity).iter() {
+                    self.add_core_type_idx(a.typ);
+                }
                 let ret = *ret;
                 self.add_core_type_idx(ret);
             }

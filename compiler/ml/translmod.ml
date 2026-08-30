@@ -32,6 +32,18 @@ let is_top (rootpath : Path.t option) =
   | Some (Pident _) -> true
   | _ -> false
 
+let module_path = function
+  | Some path -> (
+    match Path.flatten path with
+    | `Ok (_, segments) -> Some segments
+    | `Contains_apply -> None)
+  | None -> None
+
+let exportable_module_path rootpath =
+  match module_path rootpath with
+  | Some (_ :: _ as path) -> Some path
+  | _ -> None
+
 let functor_path path param : Path.t option =
   match path with
   | None -> None
@@ -112,7 +124,7 @@ and wrap_id_pos_list loc id_pos_list get_field lam =
   let lam, s =
     List.fold_left
       (fun (lam, s) (id', pos, c) ->
-        if Lambda.IdentSet.mem id' fv then
+        if Lambda.Ident_set.mem id' fv then
           let id'' = Ident.create (Ident.name id') in
           ( Lambda.Llet
               ( Alias,
@@ -195,7 +207,6 @@ let rec bound_value_identifiers : Types.signature_item list -> Ident.t list =
     id :: bound_value_identifiers rem
   | Sig_typext (id, _, _) :: rem -> id :: bound_value_identifiers rem
   | Sig_module (id, _, _) :: rem -> id :: bound_value_identifiers rem
-  | Sig_class _ :: _ -> assert false
   | _ :: rem -> bound_value_identifiers rem
 
 (* Compile one or more functors, merging curried functors to produce
@@ -223,6 +234,17 @@ let get_functor_params mexp coercion root_path =
   | _ -> assert false
 
 let export_identifiers : Ident.t list ref = ref []
+let js_hoisted : Lambda.hoisted_function list ref = ref []
+
+let js_hoist_handler rootpath =
+  match exportable_module_path rootpath with
+  | None -> None
+  | Some path ->
+    Some
+      (fun id loc ->
+        js_hoisted :=
+          {Lambda.binding = id; path = path @ [id.Ident.name]; loc}
+          :: !js_hoisted)
 
 let rec compile_functor mexp coercion root_path loc =
   let functor_param, body, body_path, res_coercion, inline_attribute =
@@ -318,7 +340,7 @@ and transl_structure loc fields cc rootpath final_env = function
       let v = Ext_array.reverse_of_list fields in
       let get_field pos = Lambda.Lvar v.(pos)
       and ids =
-        List.fold_right Lambda.IdentSet.add fields Lambda.IdentSet.empty
+        List.fold_right Lambda.Ident_set.add fields Lambda.Ident_set.empty
       in
       let get_field_name _name = get_field in
       let result =
@@ -345,7 +367,7 @@ and transl_structure loc fields cc rootpath final_env = function
             loc )
       and id_pos_list =
         Ext_list.filter id_pos_list (fun (id, _, _) ->
-            not (Lambda.IdentSet.mem id ids))
+            not (Lambda.Ident_set.mem id ids))
       in
       ( wrap_id_pos_list loc id_pos_list get_field_name lam,
         List.length pos_cc_list )
@@ -368,7 +390,10 @@ and transl_structure loc fields cc rootpath final_env = function
             | _ ->
               if not (Parmatch.irrefutable vb_pat) then
                 raise (Error (vb_pat.pat_loc, Fragile_pattern_in_toplevel)));
-      (Translcore.transl_let rec_flag pat_expr_list body, size)
+      ( Translcore.transl_let
+          ~js_hoist:(js_hoist_handler rootpath)
+          rec_flag pat_expr_list body,
+        size )
     | Tstr_typext tyext ->
       let ids = List.map (fun ext -> ext.ext_id) tyext.tyext_constructors in
       let body, size =
@@ -392,9 +417,10 @@ and transl_structure loc fields cc rootpath final_env = function
         size )
     | Tstr_module mb as s ->
       let id = mb.mb_id in
+      let hidden = Typemod.rescript_hide s in
       let body, size =
         transl_structure loc
-          (if Typemod.rescript_hide s then fields else id :: fields)
+          (if hidden then fields else id :: fields)
           cc rootpath final_env rem
       in
       let module_body =
@@ -457,11 +483,22 @@ let _ = Translcore.transl_module := transl_module
 
 (* Compile an implementation *)
 
+type implementation = {
+  lambda: Lambda.lambda;
+  exports: Ident.t list;
+  hoisted_functions: Lambda.hoisted_function list;
+}
+
 let transl_implementation module_name (str, cc) =
   export_identifiers := [];
+  js_hoisted := [];
   let module_id = Ident.create_persistent module_name in
   let body, _ = transl_struct Location.none [] cc (global_path module_id) str in
-  (body, !export_identifiers)
+  {
+    lambda = body;
+    exports = !export_identifiers;
+    hoisted_functions = !js_hoisted;
+  }
 
 (* Build the list of value identifiers defined by a toplevel structure
    (excluding primitive declarations). *)
@@ -486,7 +523,9 @@ let transl_implementation module_name (str, cc) =
 
 let report_error ppf = function
   | Fragile_pattern_in_toplevel ->
-    Format.fprintf ppf "@[Such fragile pattern not allowed in the toplevel@]"
+    Format.fprintf ppf
+      "@[This pattern can fail to match, so it is not allowed in a top-level \
+       `let` binding.@]"
 
 let () =
   Location.register_error_of_exn (function

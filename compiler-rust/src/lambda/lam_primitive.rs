@@ -7,21 +7,6 @@
 use super::lam_compat::{Comparison, FieldDbgInfo, SetFieldDbgInfo};
 use super::lam_tag_info::TagInfo;
 
-/// Record representation for optimization purposes
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum RecordRepresentation {
-    /// Regular record
-    Regular,
-    /// Inlined record (variant payload)
-    Inlined {
-        tag: i32,
-        name: String,
-        num_nonconsts: i32,
-    },
-    /// Extension record
-    Extension,
-}
-
 /// Raw JavaScript code info
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct JsRawInfo {
@@ -145,7 +130,6 @@ pub enum ExternalSpec {
         external_module_name: Option<ExternalModuleName>,
         splice: bool,
         scopes: Vec<String>,
-        tagged_template: bool,
     },
     JsSend {
         name: String,
@@ -213,7 +197,7 @@ pub enum ExternalReturnWrapper {
 pub enum Primitive {
     // ==================== Block Operations ====================
     /// Make a block (tuple, record, variant)
-    Pmakeblock(i32, TagInfo, Mutable),
+    Pmakeblock(TagInfo, Mutable),
 
     /// Get a field from a block
     Pfield(i32, FieldDbgInfo),
@@ -223,6 +207,12 @@ pub enum Primitive {
 
     /// Duplicate a record
     Pduprecord,
+
+    /// Copy an object while excluding the listed runtime field names.
+    PrecordRest(Vec<String>),
+
+    /// Tagged template literal: `[tag, strings_array, values_array]`.
+    PtaggedTemplate,
 
     // ==================== External Call ====================
     /// JavaScript FFI call
@@ -450,10 +440,6 @@ pub enum Primitive {
     PupdateMod,
     /// Raw JavaScript code
     PrawJsCode(JsRawInfo),
-    /// Make function with arity
-    PjsFnMake(i32),
-    /// Make unit function
-    PjsFnMakeUnit,
     /// Method
     PjsFnMethod,
     /// Null to option
@@ -614,13 +600,14 @@ impl Primitive {
             | PinitMod
             | PupdateMod
             | Pduprecord
+            | PrecordRest(_)
+            | PtaggedTemplate
             | Pmakearray
             | Parraylength
             | Parrayrefu
             | Parraysetu
             | Parrayrefs
             | Parraysets
-            | PjsFnMakeUnit
             | PjsFnMethod
             | Phash
             | PhashMixstring
@@ -655,8 +642,8 @@ impl Primitive {
                 _ => false,
             },
             // lam_primitive.ml:250-254
-            Pmakeblock(i0, info0, flag0) => match other {
-                Pmakeblock(i1, info1, flag1) => i0 == i1 && flag0 == flag1 && info0 == info1,
+            Pmakeblock(info0, flag0) => match other {
+                Pmakeblock(info1, flag1) => flag0 == flag1 && info0 == info1,
                 _ => false,
             },
             // lam_primitive.ml:255-260: Pjs_call only checks
@@ -715,12 +702,7 @@ impl Primitive {
                 } => name == n1 && setter == s1,
                 _ => false,
             },
-            // lam_primitive.ml:297-300
-            PjsFnMake(i) => match other {
-                PjsFnMake(i1) => i == i1,
-                _ => false,
-            },
-            // lam_primitive.ml:301
+            // lam_primitive.ml:298
             PrawJsCode(_) => false,
         }
     }

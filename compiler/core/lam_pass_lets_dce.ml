@@ -26,7 +26,7 @@ let lets_helper (count_var : Ident.t -> Lam_pass_count.used_info) lam : Lam.t =
           v,
           Lprim
             {
-              primitive = Pmakeblock (0, _, Mutable) as primitive;
+              primitive = Pmakeblock (_, Mutable) as primitive;
               args = [linit];
               loc;
             },
@@ -51,9 +51,10 @@ let lets_helper (count_var : Ident.t -> Lam_pass_count.used_info) lam : Lam.t =
       | {times = 1; captured = true}, (Lconst _ | Lvar _)
       | ( _,
           ( Lconst
-              ( Const_int _ | Const_char _ | Const_float _ | Const_bigint _
-              | Const_pointer _ | Const_js_true | Const_js_false
-              | Const_js_undefined _ ) (* could be poly-variant [`A] -> [65a]*)
+              ( Const_int _ | Const_constructor _ | Const_char _ | Const_float _
+              | Const_bigint _ | Const_pointer _ | Const_js_true
+              | Const_js_false | Const_js_undefined _ )
+          (* could be poly-variant [`A] -> [65a]*)
           | Lprim {primitive = Pfield _; args = [Lglobal_module _]} ) )
       (* Const_int64 is no longer primitive
          Note for some constant which is not
@@ -95,7 +96,7 @@ let lets_helper (count_var : Ident.t -> Lam_pass_count.used_info) lam : Lam.t =
         match l1 with
         | Lprim
             {
-              primitive = Pmakeblock (0, _, Mutable) as primitive;
+              primitive = Pmakeblock (_, Mutable) as primitive;
               args = [linit];
               loc;
             } -> (
@@ -147,8 +148,8 @@ let lets_helper (count_var : Ident.t -> Lam_pass_count.used_info) lam : Lam.t =
     | Lapply {ap_func = l1; ap_args = ll; ap_info; ap_transformed_jsx} ->
       Lam.apply (simplif l1) (Ext_list.map ll simplif) ap_info
         ~ap_transformed_jsx
-    | Lfunction {arity; params; body; attr} ->
-      Lam.function_ ~arity ~params ~body:(simplif body) ~attr
+    | Lfunction {arity; params; body; attr; loc} ->
+      Lam.function_ ~loc ~arity ~params ~body:(simplif body) ~attr
     | Lconst _ -> lam
     | Lletrec (bindings, body) ->
       Lam.letrec (Ext_list.map_snd bindings simplif) (simplif body)
@@ -219,5 +220,4 @@ let apply_lets occ lambda =
 
 let simplify_lets (lam : Lam.t) : Lam.t =
   let occ = Lam_pass_count.collect_occurs lam in
-  (* Ext_log.dwarn ~__POS__ "@[%a@]@." Lam_pass_count.pp_occ_tbl occ ; *)
   apply_lets occ lam

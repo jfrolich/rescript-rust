@@ -675,12 +675,16 @@ fn parse_es6_arrow_type(p: &mut Parser<'_>, attrs: Attributes) -> CoreType {
         };
 
         let ret_idx = p.arena_mut().push_core_type(return_type);
+        // A bare labeled arrow is the same complete one-parameter arrow as
+        // its parenthesized spelling (res_core.ml:4973-4980).
+        let full_arity = p.push_arity_full(1);
+        p.arena_mut()
+            .set_nary_arrow_args(full_arity, vec![arg.clone()]);
         CoreType {
             ptyp_desc: Box::new(CoreTypeDesc::Ptyp_arrow(Box::new((
                 Box::new(arg),
                 ret_idx,
-                // OCaml uses ~arity:None for parsed type expressions
-                p.push_arity_unknown(),
+                full_arity,
             )))),
             ptyp_loc: loc,
             ptyp_attributes: Attributes::new(),
@@ -916,7 +920,11 @@ fn parse_atomic_typ_expr_with_start(
 }
 
 /// Parse an atomic type expression (wrapper without outer start position).
-fn parse_atomic_typ_expr(p: &mut Parser<'_>, attrs: Attributes, es6_arrow: bool) -> CoreType {
+pub(crate) fn parse_atomic_typ_expr(
+    p: &mut Parser<'_>,
+    attrs: Attributes,
+    es6_arrow: bool,
+) -> CoreType {
     parse_atomic_typ_expr_with_start(p, attrs, es6_arrow, None)
 }
 
@@ -1550,52 +1558,23 @@ fn parse_function_type(p: &mut Parser<'_>, start_pos_idx: PosIdx) -> CoreType {
     };
     let total_arity = params.len() - as_underscore_count;
 
-    // Build the arrow type from right to left.
-    // In OCaml (res_core.ml:4735-4740), ALL arrow locations use the SAME end_pos:
-    //   let end_pos = p.prev_end_pos in
-    //   List.fold_right (fun ... -> let loc = mk_loc start_pos end_pos in ...)
-    // So we capture end_pos_idx once and reuse it for all arrows.
-    let mut acc = return_type;
+    // Current Parsetree stores one n-ary arrow. Keep the complete argument
+    // list in the arena side table keyed by the fresh arity identity; the
+    // inline payload retains the first argument for frozen-v0 conversion.
     let end_pos_idx = p.prev_end_pos_idx();
-    // Pre-allocate arity indices for the inner arrows and outermost arrow
-    let unknown_arity = p.push_arity_unknown();
     let full_arity = p.push_arity_full(total_arity);
-    for (param, param_start_idx) in params.into_iter().rev() {
-        // Each arrow's location spans from the label (if any) to the end of return
-        // OCaml includes the ~ in the location for labeled arguments
-        let arrow_loc = p.mk_loc_idx(param_start_idx, end_pos_idx);
-        let acc_idx = p.arena_mut().push_core_type(acc);
-        let arrow = CoreType {
-            ptyp_desc: Box::new(CoreTypeDesc::Ptyp_arrow(Box::new((
-                Box::new(param),
-                acc_idx,
-                // Inner arrows don't have arity annotation
-                unknown_arity,
-            )))),
-            ptyp_loc: arrow_loc,
-            ptyp_attributes: Attributes::new(),
-        };
-        acc = arrow;
-    }
-    let result = acc;
-
-    // Update the outermost arrow to have the full arity
-    let result = match *result.ptyp_desc {
-        CoreTypeDesc::Ptyp_arrow(inner) => {
-            let (arg, ret, ..) = *inner;
-            CoreType {
-                ptyp_desc: Box::new(CoreTypeDesc::Ptyp_arrow(Box::new((arg, ret, full_arity)))),
-                ptyp_loc: result.ptyp_loc,
-                ptyp_attributes: result.ptyp_attributes,
-            }
-        }
-        _ => result,
-    };
-
-    // The outermost arrow should start at start_pos_idx (the opening paren) not at first arg
+    let args = params.into_iter().map(|(arg, _)| arg).collect::<Vec<_>>();
+    let first = args[0].clone();
+    let ret = p.arena_mut().push_core_type(return_type);
+    p.arena_mut().set_nary_arrow_args(full_arity, args);
     CoreType {
+        ptyp_desc: Box::new(CoreTypeDesc::Ptyp_arrow(Box::new((
+            Box::new(first),
+            ret,
+            full_arity,
+        )))),
         ptyp_loc: p.mk_loc_idx(start_pos_idx, end_pos_idx),
-        ..result
+        ptyp_attributes: Attributes::new(),
     }
 }
 

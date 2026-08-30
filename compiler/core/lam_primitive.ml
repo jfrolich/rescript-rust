@@ -26,20 +26,16 @@
 
 type ident = Ident.t
 
-type record_representation =
-  | Record_regular
-  | Record_inlined of {tag: int; name: string; num_nonconsts: int}
-    (* Inlined record *)
-  | Record_extension
-(* Inlined record under extension *)
-
 type t =
   (* Operations on heap blocks *)
-  | Pmakeblock of int * Lam_tag_info.t * Asttypes.mutable_flag
+  | Pmakeblock of Lam_tag_info.t * Asttypes.mutable_flag
   | Pfield of int * Lam_compat.field_dbg_info
   | Psetfield of int * Lam_compat.set_field_dbg_info
   (* could have field info at least for record *)
   | Pduprecord
+  (* Tagged template literal: [tag; strings_array; values_array] *)
+  | Ptagged_template
+  | Precord_rest of string list
   (* External call *)
   | Pjs_call of {
       prim_name: string;
@@ -154,8 +150,6 @@ type t =
   | Pinit_mod
   | Pupdate_mod
   | Praw_js_code of Js_raw_info.t
-  | Pjs_fn_make of int
-  | Pjs_fn_make_unit
   (* we wrap it when do the conversion to prevent
      accendential optimization
      play safe first
@@ -227,9 +221,12 @@ let eq_primitive_approx (lhs : t) (rhs : t) =
   | Psome_not_nest | Pis_undefined | Pis_null_undefined | Pimport | Ptypeof
   | Pfn_arity | Pis_poly_var_block | Pdebugger | Pinit_mod | Pupdate_mod
   | Pduprecord | Pmakearray | Parraylength | Parrayrefu | Parraysetu
-  | Parrayrefs | Parraysets | Pjs_fn_make_unit | Pjs_fn_method | Phash
-  | Phash_mixstring | Phash_mixint | Phash_finalmix ->
+  | Parrayrefs | Parraysets | Pjs_fn_method | Phash | Phash_mixstring
+  | Phash_mixint | Phash_finalmix | Precord_rest _ ->
     rhs = lhs
+  (* Reachable only via the optimizer's term-equality comparison, which the
+     test suite doesn't exercise for tagged templates. *)
+  | Ptagged_template -> ( ((rhs = lhs) [@coverage off]))
   | Pcreate_extension a -> (
     match rhs with
     | Pcreate_extension b -> a = (b : string)
@@ -247,10 +244,9 @@ let eq_primitive_approx (lhs : t) (rhs : t) =
     match rhs with
     | Psetfield (i1, info1) -> i0 = i1 && eq_set_field_dbg_info info0 info1
     | _ -> false)
-  | Pmakeblock (i0, info0, flag0) -> (
+  | Pmakeblock (info0, flag0) -> (
     match rhs with
-    | Pmakeblock (i1, info1, flag1) ->
-      i0 = i1 && flag0 = flag1 && eq_tag_info info0 info1
+    | Pmakeblock (info1, flag1) -> flag0 = flag1 && eq_tag_info info0 info1
     | _ -> false)
   | Pjs_call {prim_name; arg_types; ffi; dynamic_import; _} -> (
     match rhs with
@@ -293,10 +289,6 @@ let eq_primitive_approx (lhs : t) (rhs : t) =
   | Pjs_unsafe_downgrade {name; setter} -> (
     match rhs with
     | Pjs_unsafe_downgrade rhs -> name = rhs.name && setter = rhs.setter
-    | _ -> false)
-  | Pjs_fn_make i -> (
-    match rhs with
-    | Pjs_fn_make i1 -> i = i1
     | _ -> false)
   | Praw_js_code _ -> false
 (* TOO lazy, here comparison is only approximation*)

@@ -15,20 +15,20 @@
 
 type loc_kind = Loc_FILE | Loc_LINE | Loc_MODULE | Loc_LOC | Loc_POS
 
+type hoisted_function = {binding: Ident.t; path: string list; loc: Location.t}
+
 type tag_info =
   | Blk_constructor of {
       name: string;
       num_nonconst: int;
-      tag: int;
-      attrs: Parsetree.attributes;
+      runtime: Variant_runtime.block_runtime;
     }
   | Blk_record_inlined of {
       name: string;
       num_nonconst: int;
-      tag: int;
       fields: (string * bool (* optional *)) array;
       mutable_flag: Asttypes.mutable_flag;
-      attrs: Parsetree.attributes;
+      runtime: Variant_runtime.block_runtime;
     }
   | Blk_tuple
   | Blk_poly_var of string
@@ -47,14 +47,15 @@ type tag_info =
       mutable_flag: Asttypes.mutable_flag;
     }
 
-let tag_of_tag_info (tag : tag_info) =
+(* Label used by the lambda printer for a block; blocks carry no
+   numeric tag anymore *)
+let tag_label_of_tag_info (tag : tag_info) =
   match tag with
-  | Blk_constructor {tag} | Blk_record_inlined {tag} -> tag
+  | Blk_constructor {name} | Blk_record_inlined {name} -> name
   | Blk_tuple | Blk_poly_var _ | Blk_record _ | Blk_module _
-  | Blk_module_export _ | Blk_extension | Blk_some (* tag not make sense *)
-  | Blk_some_not_nested (* tag not make sense *)
-  | Blk_record_ext _ (* similar to Blk_extension*) ->
-    0
+  | Blk_module_export _ | Blk_extension | Blk_some | Blk_some_not_nested
+  | Blk_record_ext _ ->
+    "0"
 
 let mutable_flag_of_tag_info (tag : tag_info) =
   match tag with
@@ -98,7 +99,7 @@ let blk_record_ext fields mutable_flag =
   in
   Blk_record_ext {fields = all_labels_info; mutable_flag}
 
-let blk_record_inlined fields name num_nonconst ~tag ~attrs mutable_flag =
+let blk_record_inlined fields name num_nonconst ~runtime mutable_flag =
   let fields =
     Array.map
       (fun ((lbl : label), _, _) ->
@@ -106,13 +107,13 @@ let blk_record_inlined fields name num_nonconst ~tag ~attrs mutable_flag =
           lbl.lbl_optional ))
       fields
   in
-  Blk_record_inlined {fields; name; num_nonconst; tag; mutable_flag; attrs}
+  Blk_record_inlined {fields; name; num_nonconst; mutable_flag; runtime}
 
 let ref_tag_info : tag_info =
   Blk_record {fields = [|("contents", false)|]; mutable_flag = Mutable}
 
 type field_dbg_info =
-  | Fld_record of {name: string; mutable_flag: Asttypes.mutable_flag}
+  | Fld_record of {name: string}
   | Fld_module of {name: string}
   | Fld_record_inline of {name: string}
   | Fld_record_extension of {name: string}
@@ -125,17 +126,13 @@ type field_dbg_info =
 
 let fld_record (lbl : label) =
   Fld_record
-    {
-      name = Ext_list.find_def lbl.lbl_attributes find_name lbl.lbl_name;
-      mutable_flag = lbl.lbl_mut;
-    }
+    {name = Ext_list.find_def lbl.lbl_attributes find_name lbl.lbl_name}
 
 let fld_record_extension (lbl : label) =
   Fld_record_extension
     {name = Ext_list.find_def lbl.lbl_attributes find_name lbl.lbl_name}
 
-let ref_field_info : field_dbg_info =
-  Fld_record {name = "contents"; mutable_flag = Mutable}
+let ref_field_info : field_dbg_info = Fld_record {name = "contents"}
 
 type set_field_dbg_info =
   | Fld_record_set of string
@@ -177,6 +174,7 @@ type primitive =
   | Pfield of int * field_dbg_info
   | Psetfield of int * set_field_dbg_info
   | Pduprecord
+  | Precord_rest of string list (* excluded runtime field names *)
   (* External call *)
   | Pccall of Primitive.description
   (* Exceptions *)
@@ -260,14 +258,14 @@ type primitive =
   | Pstringmax
   | Pstringadd
   (* Array operations *)
-  | Pmakearray of Asttypes.mutable_flag
+  | Pmakearray
   | Parraylength
   | Parrayrefu
   | Parraysetu
   | Parrayrefs
   | Parraysets
   (* List primitives *)
-  | Pmakelist of Asttypes.mutable_flag
+  | Pmakelist
   (* dict primitives *)
   | Pmakedict
   | Pdict_has
@@ -303,9 +301,9 @@ type primitive =
   | Pis_poly_var_block
   | Pjs_raw_expr
   | Pjs_raw_stmt
-  | Pjs_fn_make of int
-  | Pjs_fn_make_unit
   | Pjs_fn_method
+  (* Tagged template literal: [tag; strings_array; values_array] *)
+  | Ptagged_template
 
 and comparison = Ceq | Cneq | Clt | Cgt | Cle | Cge
 
@@ -314,12 +312,7 @@ and value_kind = Pgenval
 and raise_kind = Raise_regular | Raise_reraise
 
 type pointer_info =
-  | Pt_constructor of {
-      name: string;
-      const: int;
-      non_const: int;
-      attrs: Parsetree.attributes;
-    }
+  | Pt_constructor of Variant_runtime.tag
   | Pt_variant of {name: string}
   | Pt_module_alias
   | Pt_shape_none
@@ -327,7 +320,7 @@ type pointer_info =
 
 type structured_constant =
   | Const_base of Asttypes.constant
-  | Const_pointer of int * pointer_info
+  | Const_pointer of pointer_info
   | Const_block of tag_info * structured_constant list
   | Const_immstring of string
   | Const_false
@@ -388,26 +381,35 @@ and lambda_apply = {
   ap_transformed_jsx: bool;
 }
 
-and lambda_switch = {
-  sw_numconsts: int;
-  sw_consts: (int * lambda) list;
-  sw_numblocks: int;
-  sw_blocks: (int * lambda) list;
-  sw_failaction: lambda option;
-  sw_names: Ast_untagged_variants.switch_names option;
+and switch_key =
+  | Switch_int of int
+  | Switch_constructor of Variant_runtime.constructor_case
+
+and switch_dispatch =
+  | Switch_direct
+  | Switch_variant of Variant_runtime.matching_facts
+
+and 'a switch = {
+  sw_consts_full: bool;
+  sw_consts: (switch_key * 'a) list;
+  sw_blocks_full: bool;
+  sw_blocks: (switch_key * 'a) list;
+  sw_failaction: 'a option;
+  sw_dispatch: switch_dispatch;
 }
+
+and lambda_switch = lambda switch
 
 (* This is actually a dummy value
     not necessary "()", it can be used as a place holder for module
     alias etc.
 *)
 let const_unit =
-  Const_pointer
-    (0, Pt_constructor {name = "()"; const = 1; non_const = 0; attrs = []})
+  Const_pointer (Pt_constructor {Variant_runtime.name = "()"; tag_type = None})
 
-let lambda_assert_false = Lconst (Const_pointer (0, Pt_assertfalse))
+let lambda_assert_false = Lconst (Const_pointer Pt_assertfalse)
 
-let lambda_module_alias = Lconst (Const_pointer (0, Pt_module_alias))
+let lambda_module_alias = Lconst (Const_pointer Pt_module_alias)
 
 let lambda_unit = Lconst const_unit
 
@@ -567,26 +569,26 @@ let iter f = function
   | Lassign (_, e) -> f e
   | Lsend (_k, obj, _) -> f obj
 
-module IdentSet = Set.Make (Ident)
+module Ident_set = Set.Make (Ident)
 
 let free_ids get l =
-  let fv = ref IdentSet.empty in
+  let fv = ref Ident_set.empty in
   let rec free l =
     iter free l;
-    fv := List.fold_right IdentSet.add (get l) !fv;
+    fv := List.fold_right Ident_set.add (get l) !fv;
     match l with
     | Lfunction {params} ->
-      List.iter (fun param -> fv := IdentSet.remove param !fv) params
-    | Llet (_str, _k, id, _arg, _body) -> fv := IdentSet.remove id !fv
+      List.iter (fun param -> fv := Ident_set.remove param !fv) params
+    | Llet (_str, _k, id, _arg, _body) -> fv := Ident_set.remove id !fv
     | Lletrec (decl, _body) ->
-      List.iter (fun (id, _exp) -> fv := IdentSet.remove id !fv) decl
+      List.iter (fun (id, _exp) -> fv := Ident_set.remove id !fv) decl
     | Lstaticcatch (_e1, (_, vars), _e2) ->
-      List.iter (fun id -> fv := IdentSet.remove id !fv) vars
-    | Ltrywith (_e1, exn, _e2) -> fv := IdentSet.remove exn !fv
-    | Lfor (v, _e1, _e2, _dir, _e3) -> fv := IdentSet.remove v !fv
+      List.iter (fun id -> fv := Ident_set.remove id !fv) vars
+    | Ltrywith (_e1, exn, _e2) -> fv := Ident_set.remove exn !fv
+    | Lfor (v, _e1, _e2, _dir, _e3) -> fv := Ident_set.remove v !fv
     | Lfor_of (v, _e1, _e2) | Lfor_await_of (v, _e1, _e2) ->
-      fv := IdentSet.remove v !fv
-    | Lassign (id, _e) -> fv := IdentSet.add id !fv
+      fv := Ident_set.remove v !fv
+    | Lassign (id, _e) -> fv := Ident_set.add id !fv
     | Lvar _ | Lconst _ | Lapply _ | Lprim _ | Lswitch _ | Lstringswitch _
     | Lstaticraise _ | Lifthenelse _ | Lsequence _ | Lbreak | Lcontinue
     | Lwhile _ | Lsend _ ->

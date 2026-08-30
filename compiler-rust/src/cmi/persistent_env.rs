@@ -24,20 +24,21 @@ use crate::driver::{
 use crate::ident::Ident;
 use crate::lambda::lam_arity::Arity;
 use crate::lambda::lam_compat::{Comparison, FieldDbgInfo};
-use crate::lambda::lam_constant::{Constant as LambdaConstant, StringDelim};
+use crate::lambda::lam_constant::{Constant as LambdaConstant, PointerInfo, StringDelim};
 use crate::lambda::lam_primitive::{
     ExternalArgAttr, ExternalArgConst, ExternalArgDelim, ExternalArgLabel, ExternalArgSpec,
     ExternalFfiKind, ExternalFfiSpec, ExternalModuleName, ExternalReturnWrapper, ExternalSpec,
-    Primitive,
+    Mutable, Primitive,
 };
 use crate::lambda::{
     ApInfo, Apply, ApplyStatus, FunctionAttribute, InlineAttribute, LFunction, Lambda, PrimInfo,
+    TagInfo,
 };
 use crate::location::Location;
 use crate::parser::{Parser, jsx_ppx, module};
 use crate::types::context::TypeContext;
 use crate::types::decl::{
-    AliasPresence, ConstructorDescription, ConstructorTag, LabelDescription, ModtypeDeclaration,
+    AliasPresence, ConstructorDescription, ConstructorKind, LabelDescription, ModtypeDeclaration,
     ModuleDeclaration, ModuleType, RecStatus, Signature, SignatureItem, TypeKind,
 };
 use crate::types::env::{Env, initial_env};
@@ -72,14 +73,6 @@ fn resolve_first_char_case_key<'a, V>(map: &'a HashMap<String, V>, name: &str) -
     }
     let variant = first_char_case_variant(name)?;
     map.get_key_value(&variant).map(|(key, _)| key.as_str())
-}
-
-fn resolve_first_char_case_value<'a, V>(map: &'a HashMap<String, V>, name: &str) -> Option<&'a V> {
-    if let Some(value) = map.get(name) {
-        return Some(value);
-    }
-    let variant = first_char_case_variant(name)?;
-    map.get(&variant)
 }
 
 #[derive(Debug)]
@@ -151,15 +144,6 @@ impl<V: Clone> SharedRegistryMap<V> {
         self.inner.write().unwrap().extend(values);
     }
 
-    fn iter_cloned(&self) -> Vec<(String, V)> {
-        self.inner
-            .read()
-            .unwrap()
-            .iter()
-            .map(|(key, value)| (key.clone(), value.clone()))
-            .collect()
-    }
-
     fn clone_map(&self) -> HashMap<String, V> {
         self.inner.read().unwrap().clone()
     }
@@ -212,6 +196,7 @@ pub enum CmjExportArity {
 pub struct CmjModuleMetadata {
     pub is_pure: bool,
     pub export_constants: HashMap<String, CmjExportConstant>,
+    pub hoisted_exports: Vec<crate::lambda::HoistedExport>,
     pub package_spec: CmjPackageSpec,
     pub file_case: CmjFileCase,
 }
@@ -270,6 +255,8 @@ pub struct InMemoryModuleInfo {
     pub cmj_export_constants: Arc<HashMap<String, CmjExportConstant>>,
     /// Arity metadata for exports (replaces `.cmj` arity lookup)
     pub cmj_export_arities: Arc<HashMap<String, CmjExportArity>>,
+    /// Flat hoisted-export path metadata (replaces `.cmj` lookup).
+    pub cmj_hoisted_exports: Arc<Vec<crate::lambda::HoistedExport>>,
     /// Whether this module belongs to `@rescript/runtime`
     pub is_runtime: bool,
     /// Package name used by JS import rebasing in `--in-process` builds.
@@ -292,6 +279,7 @@ impl InMemoryModuleInfo {
             is_pure,
             cmj_export_constants: Arc::new(cmj_export_constants),
             cmj_export_arities: Arc::new(HashMap::new()),
+            cmj_hoisted_exports: Arc::new(Vec::new()),
             is_runtime,
             package_name: None,
             package_root: None,
@@ -304,6 +292,14 @@ impl InMemoryModuleInfo {
         cmj_export_arities: HashMap<String, CmjExportArity>,
     ) -> Self {
         self.cmj_export_arities = Arc::new(cmj_export_arities);
+        self
+    }
+
+    pub fn with_cmj_hoisted_exports(
+        mut self,
+        hoisted_exports: Vec<crate::lambda::HoistedExport>,
+    ) -> Self {
+        self.cmj_hoisted_exports = Arc::new(hoisted_exports);
         self
     }
 
@@ -501,6 +497,7 @@ impl ModuleRegistry {
             cmi_longident_names: Vec::new(),
             type_graph: portable_types::PortableTypeGraph {
                 entries: Vec::new(),
+                variant_layouts: Vec::new(),
             },
             raw_type_graph: None,
             fingerprint,
@@ -666,6 +663,11 @@ pub struct PersistentEnv {
 /// Errors reported by OCaml's `Env` persistent interface loader.
 #[derive(Debug, Clone)]
 pub enum PersistentEnvError {
+    /// A discovered compiled interface could not be decoded.
+    InterfaceRead {
+        /// User-facing CMI reader message, with the display path retained.
+        message: String,
+    },
     /// The file found for one module contains a different compiled unit.
     IllegalRenaming {
         /// Module name requested by the lookup.
@@ -1072,7 +1074,7 @@ impl PersistentEnv {
             if self.hidden_modules.contains(&portable_key) {
                 return None;
             }
-            let ps = Arc::new(portable_types::internalize_pers_struct(&portable, ctx));
+            let ps = Arc::new(portable_types::internalize_pers_struct(portable, ctx));
             let module_path = Path::Pident(Ident::create_persistent(&portable_key));
             let effective_module_path = self
                 .alias_prefix_rewrites
@@ -1405,6 +1407,26 @@ impl PersistentEnv {
         read_cmj_export_arities(&path).map(Arc::new)
     }
 
+    /// Resolve a nested source path to its flat hoisted JS export.
+    pub fn module_cmj_hoisted_export(&self, name: &str, path: &[String]) -> Option<String> {
+        if let Some(exports) =
+            self.in_memory_info_with(name, |info| info.cmj_hoisted_exports.clone())
+        {
+            return exports
+                .iter()
+                .find(|entry| entry.path == path)
+                .map(|entry| entry.export_name.clone());
+        }
+        if self.in_process_mode {
+            return None;
+        }
+        let cmj_path = self.resolve_module_cmj_path(name)?;
+        read_cmj_hoisted_exports(&cmj_path)?
+            .into_iter()
+            .find(|entry| entry.path == path)
+            .map(|entry| entry.export_name)
+    }
+
     /// Read closed lambda exports recorded in a module's `.cmj` metadata.
     ///
     /// This mirrors the `cross_module_inline = true` arm of OCaml
@@ -1510,6 +1532,7 @@ impl PersistentEnv {
             let signature =
                 crate::binary_ast::ppx::rewrite_signature(&signature, parser.arena_mut()).ok()?;
 
+            crate::types::typecore::prepare_typecheck_arena(parser.arena_mut());
             let mut tctx = TypeCheckContext::new(ctx, parser.arena());
             tctx.set_persistent_env(fallback_pers);
             let typed_signature =
@@ -1555,6 +1578,7 @@ impl PersistentEnv {
         let structure =
             crate::binary_ast::ppx::rewrite_structure(&structure, parser.arena_mut()).ok()?;
 
+        crate::types::typecore::prepare_typecheck_arena(parser.arena_mut());
         let mut tctx = TypeCheckContext::new(ctx, parser.arena());
         tctx.experimental_let_unwrap = experimental_let_unwrap;
         tctx.set_persistent_env(fallback_pers);
@@ -1655,8 +1679,13 @@ impl PersistentEnv {
         if let Some((full_path, display_path)) = self.find_in_path_uncap_entry(&cmi_filename) {
             let cmi = match cmi_format::read_cmi(&full_path) {
                 Ok(cmi) => cmi,
-                Err(e) => {
-                    eprintln!("warning: failed to read CMI file {}: {}", full_path, e);
+                Err(error) => {
+                    // OCaml Env.find_pers_struct propagates Cmi_format.Error as
+                    // a fatal persistent-environment diagnostic. Preserve the
+                    // load-path spelling rather than leaking the canonical I/O
+                    // path used to open the file.
+                    let message = error.to_string().replacen(&full_path, &display_path, 1);
+                    self.record_error(PersistentEnvError::InterfaceRead { message });
                     return None;
                 }
             };
@@ -1745,7 +1774,14 @@ impl PersistentEnv {
 
         let cmi_filename = format!("{}.cmi", name);
         let (full_path, display_path) = self.find_in_path_uncap_entry(&cmi_filename)?;
-        let cmi = cmi_format::read_cmi(&full_path).ok()?;
+        let cmi = match cmi_format::read_cmi(&full_path) {
+            Ok(cmi) => cmi,
+            Err(error) => {
+                let message = error.to_string().replacen(&full_path, &display_path, 1);
+                self.record_error(PersistentEnvError::InterfaceRead { message });
+                return None;
+            }
+        };
         if !self.validate_cmi_name(name, &cmi.cmi_name, &display_path) {
             return None;
         }
@@ -2073,14 +2109,16 @@ fn register_sig_types_recursive<'a>(
     for item in sig {
         match item {
             SignatureItem::SigType(id, decl, _) => {
-                ctx.register_type_decl(id.name(), decl.clone());
+                let decl = Arc::new(decl.clone());
+                ctx.register_shared_type_decl(id.name(), decl.clone());
                 // Also register by stamp for precise lookup when name is ambiguous (e.g., "t")
                 if id.stamp() != 0 {
-                    ctx.register_type_decl_by_stamp(id.stamp(), decl.clone());
+                    ctx.register_shared_type_decl_by_stamp(id.stamp(), decl.clone());
                 }
                 // Register by fully qualified path for Pdot lookup (e.g., "Js.Promise.t")
                 let full_path = Path::pdot(module_path.clone(), id.name());
-                ctx.register_type_decl_by_path(&full_path.name(), decl.clone());
+                ctx.register_shared_type_decl_by_path(&full_path.name(), decl.clone());
+                ctx.register_shared_type_decl_by_exact_path(full_path, decl);
             }
             SignatureItem::SigModule(id, md, _) => {
                 let sub_path = Path::pdot(module_path.clone(), id.name());
@@ -2099,48 +2137,6 @@ fn register_sig_types_recursive<'a>(
             _ => {}
         }
     }
-}
-
-/// Load a module's signature for resolving module aliases during type registration.
-/// This is a lightweight version that doesn't use the persistent env cache.
-fn load_module_sig_for_alias<'a>(
-    name: &str,
-    ctx: &'a TypeContext,
-    load_path: &[PathBuf],
-) -> Option<Signature> {
-    let cmi_filename = format!("{}.cmi", name);
-
-    // Search load path for the CMI file
-    let full_path = find_in_path(load_path, &cmi_filename)?;
-
-    // Read and parse the CMI file
-    let cmi = cmi_format::read_cmi(&full_path).ok()?;
-
-    // Convert to Rust type structures
-    let mut sig_ctx = SigReadContext::new(ctx);
-    let signature = sig_ctx.read_signature(&cmi.cmi_sign);
-
-    Some(signature)
-}
-
-/// Search load paths for a file (case-insensitive on first character).
-fn find_in_path(load_path: &[PathBuf], filename: &str) -> Option<String> {
-    for dir in load_path {
-        let exact = dir.join(filename);
-        if exact.exists() {
-            return Some(exact.to_string_lossy().into_owned());
-        }
-        if let Some(first_char) = filename.chars().next() {
-            if first_char.is_ascii_uppercase() {
-                let uncap = format!("{}{}", first_char.to_ascii_lowercase(), &filename[1..]);
-                let uncap_path = dir.join(&uncap);
-                if uncap_path.exists() {
-                    return Some(uncap_path.to_string_lossy().into_owned());
-                }
-            }
-        }
-    }
-    None
 }
 
 #[cfg(test)]
@@ -2195,6 +2191,7 @@ pub fn read_cmj_module_metadata(path: &FsPath) -> Option<CmjModuleMetadata> {
     Some(CmjModuleMetadata {
         is_pure: decode_cmj_pure(&value)?,
         export_constants: decode_cmj_export_constants(&value)?,
+        hoisted_exports: decode_cmj_hoisted_exports(&value)?,
         package_spec: decode_cmj_package_spec(&value)?,
         file_case: decode_cmj_file_case(&value)?,
     })
@@ -2207,7 +2204,27 @@ fn read_cmj_pure(path: &FsPath) -> Option<bool> {
 
 fn decode_cmj_pure(value: &OcamlValue) -> Option<bool> {
     let (_, fields) = value.as_block_opt()?;
-    fields.get(1).map(|field| field.as_bool())
+    fields.get(2).map(|field| field.as_bool())
+}
+
+fn read_cmj_hoisted_exports(path: &FsPath) -> Option<Vec<crate::lambda::HoistedExport>> {
+    let value = read_marshaled_cmj(path)?;
+    decode_cmj_hoisted_exports(&value)
+}
+
+fn decode_cmj_hoisted_exports(value: &OcamlValue) -> Option<Vec<crate::lambda::HoistedExport>> {
+    let (_, fields) = value.as_block_opt()?;
+    let (_, entries) = fields.get(1)?.as_block_opt()?;
+    entries
+        .iter()
+        .map(|entry| {
+            let (_, fields) = entry.as_block_opt()?;
+            Some(crate::lambda::HoistedExport {
+                path: decode_cmj_string_list(fields.first()?)?,
+                export_name: fields.get(1)?.as_string().to_string(),
+            })
+        })
+        .collect()
 }
 
 fn read_cmj_export_constants(path: &FsPath) -> Option<HashMap<String, CmjExportConstant>> {
@@ -2365,7 +2382,7 @@ fn decode_cmj_persistent_closed_lambda(value: &OcamlValue) -> Option<Lambda> {
 
 fn decode_cmj_package_spec(value: &OcamlValue) -> Option<CmjPackageSpec> {
     let (_, fields) = value.as_block_opt()?;
-    let package_field = fields.get(2)?;
+    let package_field = fields.get(3)?;
     let (_, package_fields) = package_field.as_block_opt()?;
     if package_fields.len() != 2 {
         return None;
@@ -2415,7 +2432,7 @@ fn decode_cmj_package_module_system(value: &OcamlValue) -> Option<CmjPackageModu
 
 fn decode_cmj_file_case(value: &OcamlValue) -> Option<CmjFileCase> {
     let (_, fields) = value.as_block_opt()?;
-    match fields.get(3)?.as_int() {
+    match fields.get(4)?.as_int() {
         // compiler/ext/ext_js_file_kind.ml:24: Upper | Little.
         0 => Some(CmjFileCase::Upper),
         1 => Some(CmjFileCase::Little),
@@ -2578,7 +2595,7 @@ fn decode_cmj_prim_info(value: &OcamlValue) -> Option<PrimInfo> {
 }
 
 fn decode_cmj_lambda_constant(value: &OcamlValue) -> Option<LambdaConstant> {
-    // OCaml Lam_constant.t constructor order is in compiler/frontend/lam_constant.ml:43-56.
+    // OCaml Lam_constant.t constructor order is in compiler/frontend/lam_constant.ml:33-50.
     match value {
         OcamlValue::Int(0) => Some(LambdaConstant::JsNull),
         OcamlValue::Int(1) => Some(LambdaConstant::JsTrue),
@@ -2587,25 +2604,232 @@ fn decode_cmj_lambda_constant(value: &OcamlValue) -> Option<LambdaConstant> {
         OcamlValue::Block(0, fields) if fields.len() == 1 => Some(LambdaConstant::JsUndefined {
             is_unit: fields[0].as_bool(),
         }),
-        OcamlValue::Block(1, fields) if fields.len() >= 1 => Some(LambdaConstant::Int {
+        OcamlValue::Block(1, fields) if fields.len() == 2 => Some(LambdaConstant::Int {
             i: fields[0].as_int() as i32,
-            comment: None,
+            comment: decode_cmj_pointer_info(&fields[1])?,
         }),
-        OcamlValue::Block(2, fields) if fields.len() == 1 => {
+        OcamlValue::Block(2, fields) if fields.len() == 1 => Some(LambdaConstant::Constructor(
+            decode_cmj_variant_tag(&fields[0])?,
+        )),
+        OcamlValue::Block(3, fields) if fields.len() == 1 => {
             Some(LambdaConstant::Char(fields[0].as_int() as i32))
         }
-        OcamlValue::Block(3, fields) if fields.len() >= 1 => Some(LambdaConstant::String {
+        OcamlValue::Block(4, fields) if fields.len() == 2 => Some(LambdaConstant::String {
             s: fields[0].as_string().to_string(),
-            delim: fields.get(1).and_then(decode_cmj_external_delim_option),
+            delim: decode_cmj_external_delim_option(&fields[1])?,
         }),
-        OcamlValue::Block(4, fields) if fields.len() == 1 => match &fields[0] {
-            OcamlValue::String(s) => Some(LambdaConstant::Float(s.clone())),
-            OcamlValue::Float(f) => Some(LambdaConstant::Float(f.to_string())),
-            _ => None,
-        },
-        OcamlValue::Block(8, fields) if fields.len() == 1 => Some(LambdaConstant::Some(Box::new(
+        OcamlValue::Block(5, fields) if fields.len() == 1 => {
+            Some(LambdaConstant::Float(fields[0].as_string().to_string()))
+        }
+        OcamlValue::Block(6, fields) if fields.len() == 2 => Some(LambdaConstant::BigInt {
+            negative: fields[0].as_bool(),
+            value: fields[1].as_string().to_string(),
+        }),
+        OcamlValue::Block(7, fields) if fields.len() == 1 => {
+            Some(LambdaConstant::Pointer(fields[0].as_string().to_string()))
+        }
+        OcamlValue::Block(8, fields) if fields.len() == 2 => Some(LambdaConstant::Block {
+            tag_info: decode_cmj_tag_info(&fields[0])?,
+            elements: decode_cmj_list(&fields[1], decode_cmj_lambda_constant)?,
+        }),
+        OcamlValue::Block(9, fields) if fields.len() == 1 => Some(LambdaConstant::Some(Box::new(
             decode_cmj_lambda_constant(&fields[0])?,
         ))),
+        _ => None,
+    }
+}
+
+fn decode_cmj_pointer_info(value: &OcamlValue) -> Option<Option<PointerInfo>> {
+    match value {
+        OcamlValue::Int(0) => Some(None),
+        OcamlValue::Int(1) => Some(Some(PointerInfo::AssertFalse)),
+        OcamlValue::Block(0, fields) if fields.len() == 1 => {
+            Some(Some(PointerInfo::Some(fields[0].as_string().to_string())))
+        }
+        _ => None,
+    }
+}
+
+fn decode_cmj_variant_tag(value: &OcamlValue) -> Option<crate::types::VariantTag> {
+    let (0, fields) = value.as_block_opt()? else {
+        return None;
+    };
+    if fields.len() != 2 {
+        return None;
+    }
+    Some(crate::types::VariantTag {
+        name: fields[0].as_string().to_string(),
+        tag_type: decode_cmj_variant_tag_type_option(&fields[1])?,
+    })
+}
+
+fn decode_cmj_variant_tag_type_option(
+    value: &OcamlValue,
+) -> Option<Option<crate::types::VariantTagType>> {
+    match value {
+        OcamlValue::Int(0) => Some(None),
+        OcamlValue::Block(0, fields) if fields.len() == 1 => {
+            Some(Some(decode_cmj_variant_tag_type(&fields[0])?))
+        }
+        _ => None,
+    }
+}
+
+fn decode_cmj_variant_tag_type(value: &OcamlValue) -> Option<crate::types::VariantTagType> {
+    use crate::types::VariantTagType as T;
+    match value {
+        OcamlValue::Int(0) => Some(T::Null),
+        OcamlValue::Int(1) => Some(T::Undefined),
+        OcamlValue::Block(0, fields) if fields.len() == 1 => {
+            Some(T::String(fields[0].as_string().to_string()))
+        }
+        OcamlValue::Block(1, fields) if fields.len() == 1 => {
+            Some(T::Int(fields[0].as_int() as i32))
+        }
+        OcamlValue::Block(2, fields) if fields.len() == 1 => {
+            Some(T::Float(fields[0].as_string().to_string()))
+        }
+        OcamlValue::Block(3, fields) if fields.len() == 1 => {
+            Some(T::BigInt(fields[0].as_string().to_string()))
+        }
+        OcamlValue::Block(4, fields) if fields.len() == 1 => Some(T::Bool(fields[0].as_bool())),
+        OcamlValue::Block(5, fields) if fields.len() == 1 => {
+            Some(T::Untagged(decode_cmj_variant_block_type(&fields[0])?))
+        }
+        _ => None,
+    }
+}
+
+fn decode_cmj_variant_block_type(value: &OcamlValue) -> Option<crate::types::VariantBlockType> {
+    use crate::types::{VariantBlockType as T, VariantInstance as I};
+    match value {
+        OcamlValue::Int(0) => Some(T::Int),
+        OcamlValue::Int(1) => Some(T::String),
+        OcamlValue::Int(2) => Some(T::Float),
+        OcamlValue::Int(3) => Some(T::Bigint),
+        OcamlValue::Int(4) => Some(T::Boolean),
+        OcamlValue::Int(5) => Some(T::Function),
+        OcamlValue::Int(6) => Some(T::Object),
+        OcamlValue::Int(7) => Some(T::Unknown),
+        OcamlValue::Block(0, fields) if fields.len() == 1 => {
+            Some(T::Instance(match fields[0].as_int() {
+                0 => I::Array,
+                1 => I::ArrayBuffer,
+                2 => I::BigInt64Array,
+                3 => I::BigUint64Array,
+                4 => I::Blob,
+                5 => I::DataView,
+                6 => I::Date,
+                7 => I::File,
+                8 => I::Float32Array,
+                9 => I::Float64Array,
+                10 => I::Int16Array,
+                11 => I::Int32Array,
+                12 => I::Int8Array,
+                13 => I::Promise,
+                14 => I::RegExp,
+                15 => I::Uint16Array,
+                16 => I::Uint32Array,
+                17 => I::Uint8Array,
+                18 => I::Uint8ClampedArray,
+                19 => I::Set,
+                20 => I::Map,
+                21 => I::WeakSet,
+                22 => I::WeakMap,
+                _ => return None,
+            }))
+        }
+        _ => None,
+    }
+}
+
+fn decode_cmj_tag_info(value: &OcamlValue) -> Option<TagInfo> {
+    fn mutable_flag(value: &OcamlValue) -> Option<crate::parser::ast::MutableFlag> {
+        match value.as_int() {
+            0 => Some(crate::parser::ast::MutableFlag::Immutable),
+            1 => Some(crate::parser::ast::MutableFlag::Mutable),
+            _ => None,
+        }
+    }
+
+    fn block_runtime(value: &OcamlValue) -> Option<crate::types::BlockRuntime> {
+        let (_, fields) = value.as_block_opt()?;
+        Some(crate::types::BlockRuntime {
+            tag: decode_cmj_variant_tag(fields.first()?)?,
+            tag_name: fields
+                .get(1)?
+                .as_option()
+                .map(|name| name.as_string().to_string()),
+            untagged: fields.get(2)?.as_bool(),
+        })
+    }
+
+    fn record_fields(value: &OcamlValue) -> Option<Vec<(String, bool)>> {
+        if matches!(value, OcamlValue::Int(0)) {
+            return Some(Vec::new());
+        }
+        let (_, fields) = value.as_block_opt()?;
+        fields
+            .iter()
+            .map(|field| {
+                let (_, pair) = field.as_block_opt()?;
+                Some((
+                    pair.first()?.as_string().to_string(),
+                    pair.get(1)?.as_bool(),
+                ))
+            })
+            .collect()
+    }
+
+    fn string_array(value: &OcamlValue) -> Option<Vec<String>> {
+        if matches!(value, OcamlValue::Int(0)) {
+            return Some(Vec::new());
+        }
+        let (_, fields) = value.as_block_opt()?;
+        Some(
+            fields
+                .iter()
+                .map(|field| field.as_string().to_string())
+                .collect(),
+        )
+    }
+
+    match value {
+        OcamlValue::Int(0) => Some(TagInfo::Tuple),
+        OcamlValue::Int(1) => Some(TagInfo::Extension),
+        OcamlValue::Int(2) => Some(TagInfo::Some),
+        OcamlValue::Int(3) => Some(TagInfo::SomeNotNested),
+        OcamlValue::Block(0, fields) if fields.len() == 3 => Some(TagInfo::Constructor {
+            name: fields[0].as_string().to_string(),
+            num_nonconst: fields[1].as_int() as i32,
+            runtime: block_runtime(&fields[2])?,
+        }),
+        OcamlValue::Block(1, fields) if fields.len() == 5 => Some(TagInfo::RecordInlined {
+            name: fields[0].as_string().to_string(),
+            num_nonconst: fields[1].as_int() as i32,
+            fields: record_fields(&fields[2])?,
+            logical_field_count: None,
+            mutable_flag: mutable_flag(&fields[3])?,
+            runtime: block_runtime(&fields[4])?,
+        }),
+        OcamlValue::Block(2, fields) if fields.len() == 1 => {
+            Some(TagInfo::PolyVar(fields[0].as_string().to_string()))
+        }
+        OcamlValue::Block(3, fields) if fields.len() == 2 => Some(TagInfo::Record {
+            fields: record_fields(&fields[0])?,
+            logical_field_count: None,
+            mutable_flag: mutable_flag(&fields[1])?,
+        }),
+        OcamlValue::Block(4, fields) if fields.len() == 1 => {
+            Some(TagInfo::Module(decode_cmj_string_list(&fields[0])?))
+        }
+        OcamlValue::Block(5, fields) if fields.len() == 1 => Some(TagInfo::ModuleExport(
+            decode_cmj_list(&fields[0], decode_cmj_ident)?,
+        )),
+        OcamlValue::Block(6, fields) if fields.len() == 2 => Some(TagInfo::RecordExt {
+            fields: string_array(&fields[0])?,
+            mutable_flag: mutable_flag(&fields[1])?,
+        }),
         _ => None,
     }
 }
@@ -2644,33 +2868,41 @@ fn decode_cmj_primitive(value: &OcamlValue) -> Option<Primitive> {
         OcamlValue::Int(95) => Some(Primitive::PvalFromOptionNotNest),
         OcamlValue::Int(96) => Some(Primitive::Psome),
         OcamlValue::Int(97) => Some(Primitive::PsomeNotNest),
+        OcamlValue::Block(0, fields) if fields.len() == 2 => Some(Primitive::Pmakeblock(
+            decode_cmj_tag_info(&fields[0])?,
+            match fields[1].as_int() {
+                0 => Mutable::Immutable,
+                1 => Mutable::Mutable,
+                _ => return None,
+            },
+        )),
         OcamlValue::Block(1, fields) if fields.len() == 2 => Some(Primitive::Pfield(
             fields[0].as_int() as i32,
             decode_cmj_field_dbg_info(&fields[1])?,
         )),
-        OcamlValue::Block(3, fields) if fields.len() == 5 => Some(Primitive::PjsCall {
+        OcamlValue::Block(4, fields) if fields.len() == 5 => Some(Primitive::PjsCall {
             prim_name: fields[0].as_string().to_string(),
             arg_types: decode_cmj_list(&fields[1], decode_cmj_external_arg_spec)?,
             ffi: decode_cmj_external_ffi_spec(&fields[2])?,
             dynamic_import: fields[3].as_bool(),
             transformed_jsx: fields[4].as_bool(),
         }),
-        OcamlValue::Block(5, fields) if fields.len() == 1 => {
+        OcamlValue::Block(6, fields) if fields.len() == 1 => {
             Some(Primitive::Pobjcomp(decode_cmj_comparison(&fields[0])?))
         }
-        OcamlValue::Block(6, fields) if fields.len() == 1 => {
+        OcamlValue::Block(7, fields) if fields.len() == 1 => {
             Some(Primitive::Pboolcomp(decode_cmj_comparison(&fields[0])?))
         }
-        OcamlValue::Block(9, fields) if fields.len() == 1 => {
+        OcamlValue::Block(10, fields) if fields.len() == 1 => {
             Some(Primitive::Pintcomp(decode_cmj_comparison(&fields[0])?))
         }
-        OcamlValue::Block(10, fields) if fields.len() == 1 => {
+        OcamlValue::Block(11, fields) if fields.len() == 1 => {
             Some(Primitive::Pfloatcomp(decode_cmj_comparison(&fields[0])?))
         }
-        OcamlValue::Block(12, fields) if fields.len() == 1 => {
+        OcamlValue::Block(13, fields) if fields.len() == 1 => {
             Some(Primitive::Pstringcomp(decode_cmj_comparison(&fields[0])?))
         }
-        OcamlValue::Block(14, fields) if fields.len() == 1 => {
+        OcamlValue::Block(15, fields) if fields.len() == 1 => {
             Some(Primitive::Pjscomp(decode_cmj_comparison(&fields[0])?))
         }
         _ => None,
@@ -2692,23 +2924,14 @@ fn decode_cmj_comparison(value: &OcamlValue) -> Option<Comparison> {
 fn decode_cmj_field_dbg_info(value: &OcamlValue) -> Option<FieldDbgInfo> {
     match value {
         // compiler/core/lam_compat.ml:65-75.
-        OcamlValue::Block(0, fields) if fields.len() >= 2 => Some(FieldDbgInfo::Record {
+        OcamlValue::Block(0, fields) if fields.len() == 1 => Some(FieldDbgInfo::Record {
             name: fields[0].as_string().to_string(),
-            mutable_flag: decode_cmj_ast_mutable_flag(&fields[1])?,
         }),
         OcamlValue::Block(1, fields) if fields.len() == 1 => Some(FieldDbgInfo::Module {
             name: fields[0].as_string().to_string(),
         }),
         OcamlValue::Int(0) => Some(FieldDbgInfo::Tuple),
         OcamlValue::Int(5) => Some(FieldDbgInfo::Cons),
-        _ => None,
-    }
-}
-
-fn decode_cmj_ast_mutable_flag(value: &OcamlValue) -> Option<crate::parser::ast::MutableFlag> {
-    match value.as_int() {
-        0 => Some(crate::parser::ast::MutableFlag::Immutable),
-        1 => Some(crate::parser::ast::MutableFlag::Mutable),
         _ => None,
     }
 }
@@ -2770,13 +2993,16 @@ fn decode_cmj_external_arg_delim(value: &OcamlValue) -> Option<ExternalArgDelim>
     }
 }
 
-fn decode_cmj_external_delim_option(value: &OcamlValue) -> Option<StringDelim> {
-    let delim = value.as_option()?;
-    match delim.as_int() {
-        0 => Some(StringDelim::Plain),
-        1 => Some(StringDelim::StarJ),
-        2 => Some(StringDelim::NoQuotes),
-        3 => Some(StringDelim::Backtick),
+fn decode_cmj_external_delim_option(value: &OcamlValue) -> Option<Option<StringDelim>> {
+    match value {
+        OcamlValue::Int(0) => Some(None),
+        OcamlValue::Block(0, fields) if fields.len() == 1 => Some(Some(match fields[0].as_int() {
+            0 => StringDelim::Plain,
+            1 => StringDelim::StarJ,
+            2 => StringDelim::NoQuotes,
+            3 => StringDelim::Backtick,
+            _ => return None,
+        })),
         _ => None,
     }
 }
@@ -2794,12 +3020,11 @@ fn decode_cmj_external_ffi_spec(value: &OcamlValue) -> Option<ExternalFfiSpec> {
 fn decode_cmj_external_spec(value: &OcamlValue) -> Option<ExternalSpec> {
     // compiler/frontend/external_ffi_types.ml:45-75.
     match value {
-        OcamlValue::Block(4, fields) if fields.len() >= 5 => Some(ExternalSpec::JsCall {
+        OcamlValue::Block(4, fields) if fields.len() >= 4 => Some(ExternalSpec::JsCall {
             name: fields[0].as_string().to_string(),
             external_module_name: decode_cmj_external_module_name_option(&fields[1])?,
             splice: fields[2].as_bool(),
             scopes: decode_cmj_string_list(&fields[3])?,
-            tagged_template: fields[4].as_bool(),
         }),
         OcamlValue::Block(6, fields) if fields.len() >= 4 => Some(ExternalSpec::JsNew {
             name: fields[0].as_string().to_string(),
@@ -2990,21 +3215,18 @@ mod tests {
 
     #[test]
     fn reads_belt_map_string_empty_as_closed_undefined_constant_from_cmj() {
-        let mut env = PersistentEnv::new();
-        env.add_load_path(
-            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-                .parent()
-                .expect("repo root")
-                .join("packages")
-                .join("@rescript")
-                .join("runtime")
-                .join("lib")
-                .join("ocaml"),
-        );
+        let temp_dir = tempfile::tempdir().expect("temp directory should be created");
+        std::fs::write(
+            temp_dir.path().join("Belt_MapString.cmj"),
+            include_bytes!("../../tests/fixtures/Belt_MapString.cmj"),
+        )
+        .expect("CMJ fixture should be written");
 
+        let mut env = PersistentEnv::new();
+        env.add_load_path(temp_dir.path().to_path_buf());
         let exports = env
             .module_cmj_export_constants("Belt_MapString")
-            .expect("expected runtime cmj exports");
+            .expect("expected decoded cmj exports");
 
         assert_eq!(
             exports.get("empty"),
@@ -3283,13 +3505,6 @@ pub(crate) fn freshened_signature_bound_idents_from_kind(
         freshen_nested_signature_module_types(&mut copied, ctx);
     }
     copied
-}
-
-pub(crate) fn freshen_copied_signature_bound_idents(
-    sig_items: &mut [SignatureItem],
-    ctx: &TypeContext,
-) {
-    freshen_signature_bound_idents_with_maps(sig_items, &SubstMaps::default(), ctx);
 }
 
 pub(crate) fn freshen_module_type_bound_idents(module_type: &mut ModuleType, ctx: &TypeContext) {
@@ -3575,7 +3790,7 @@ fn substitute_type_paths_in_sig_with_maps(
                 }
 
                 match &decl.type_kind {
-                    TypeKind::TypeVariant(constrs) => {
+                    TypeKind::TypeVariant(constrs, _) => {
                         for cd in constrs {
                             match &cd.cd_args {
                                 crate::types::decl::ConstructorArguments::CstrTuple(args) => {
@@ -3925,7 +4140,7 @@ pub fn substitute_type_paths_in_sig(
                 }
                 // Substitute in constructor/label types
                 match &decl.type_kind {
-                    TypeKind::TypeVariant(constrs) => {
+                    TypeKind::TypeVariant(constrs, _) => {
                         for cd in constrs {
                             match &cd.cd_args {
                                 crate::types::decl::ConstructorArguments::CstrTuple(args) => {
@@ -4176,8 +4391,8 @@ fn substitute_type_expr_path(
                     work_stack.push(arg);
                 }
             }
-            TypeDesc::Tarrow { arg, ret, .. } => {
-                work_stack.push(arg.typ);
+            TypeDesc::Tarrow { args, ret } => {
+                work_stack.extend(args.iter().map(|arg| arg.typ));
                 work_stack.push(*ret);
             }
             TypeDesc::Ttuple(types) => {
@@ -4506,8 +4721,10 @@ fn rewrite_type_expr_prefix(
                 rewrite_type_expr_prefix(arg, old_name, new_prefix, ctx, visited);
             }
         }
-        TypeDesc::Tarrow { arg, ret, .. } => {
-            rewrite_type_expr_prefix(arg.typ, old_name, new_prefix, ctx, visited);
+        TypeDesc::Tarrow { args, ret } => {
+            for arg in args {
+                rewrite_type_expr_prefix(arg.typ, old_name, new_prefix, ctx, visited);
+            }
             rewrite_type_expr_prefix(*ret, old_name, new_prefix, ctx, visited);
         }
         TypeDesc::Ttuple(types) => {
@@ -4757,7 +4974,7 @@ pub fn rewrite_module_prefix_in_sig_shallow(
                     rewrite_type_expr_prefix(manifest, old_name, new_prefix, ctx, &mut visited);
                 }
                 match &decl.type_kind {
-                    TypeKind::TypeVariant(constrs) => {
+                    TypeKind::TypeVariant(constrs, _) => {
                         for cd in constrs {
                             match &cd.cd_args {
                                 crate::types::decl::ConstructorArguments::CstrTuple(args) => {
@@ -4887,7 +5104,7 @@ fn rewrite_module_prefix_in_sig_with_visited(
                     rewrite_type_expr_prefix(manifest, old_name, new_prefix, ctx, visited);
                 }
                 match &decl.type_kind {
-                    TypeKind::TypeVariant(constrs) => {
+                    TypeKind::TypeVariant(constrs, _) => {
                         for cd in constrs {
                             match &cd.cd_args {
                                 crate::types::decl::ConstructorArguments::CstrTuple(args) => {
@@ -5165,8 +5382,10 @@ fn rewrite_type_expr_by_path_prefix(
                 rewrite_type_expr_by_path_prefix(arg, old_prefix, new_prefix, ctx, visited);
             }
         }
-        TypeDesc::Tarrow { arg, ret, .. } => {
-            rewrite_type_expr_by_path_prefix(arg.typ, old_prefix, new_prefix, ctx, visited);
+        TypeDesc::Tarrow { args, ret } => {
+            for arg in args {
+                rewrite_type_expr_by_path_prefix(arg.typ, old_prefix, new_prefix, ctx, visited);
+            }
             rewrite_type_expr_by_path_prefix(*ret, old_prefix, new_prefix, ctx, visited);
         }
         TypeDesc::Ttuple(types) => {
@@ -5277,8 +5496,10 @@ fn rewrite_type_expr_by_path_prefixes(
                 rewrite_type_expr_by_path_prefixes(arg, prefixes, ctx, visited);
             }
         }
-        TypeDesc::Tarrow { arg, ret, .. } => {
-            rewrite_type_expr_by_path_prefixes(arg.typ, prefixes, ctx, visited);
+        TypeDesc::Tarrow { args, ret } => {
+            for arg in args {
+                rewrite_type_expr_by_path_prefixes(arg.typ, prefixes, ctx, visited);
+            }
             rewrite_type_expr_by_path_prefixes(*ret, prefixes, ctx, visited);
         }
         TypeDesc::Ttuple(types) => {
@@ -5392,7 +5613,7 @@ pub fn rewrite_sig_by_path_prefix(
                     );
                 }
                 match &decl.type_kind {
-                    TypeKind::TypeVariant(constrs) => {
+                    TypeKind::TypeVariant(constrs, _) => {
                         for cd in constrs {
                             match &cd.cd_args {
                                 crate::types::decl::ConstructorArguments::CstrTuple(args) => {
@@ -5480,7 +5701,7 @@ pub fn rewrite_sig_by_path_prefixes(
                     rewrite_type_expr_by_path_prefixes(manifest, prefixes, ctx, &mut visited);
                 }
                 match &decl.type_kind {
-                    TypeKind::TypeVariant(constrs) => {
+                    TypeKind::TypeVariant(constrs, _) => {
                         for cd in constrs {
                             match &cd.cd_args {
                                 crate::types::decl::ConstructorArguments::CstrTuple(args) => {
@@ -5623,268 +5844,6 @@ fn collect_alias_rewrites<S: AliasRewriteSink>(
     }
 }
 
-/// Depth-restricted prefix rewriting for an entire signature.
-/// Only rewrites Tconstr paths where old_name appears as a module prefix
-/// at depth >= 2 (not as the direct parent of a type name).
-fn rewrite_deep_prefix_in_sig(
-    sig_items: &[SignatureItem],
-    old_name: &str,
-    new_prefix: &Path,
-    ctx: &TypeContext,
-) {
-    let mut visited = HashSet::new();
-
-    for item in sig_items {
-        match item {
-            SignatureItem::SigValue(_id, desc) => {
-                rewrite_deep_prefix_expr(desc.val_type, old_name, new_prefix, ctx, &mut visited);
-            }
-            SignatureItem::SigType(_id, decl, _) => {
-                for &param in &decl.type_params {
-                    rewrite_deep_prefix_expr(param, old_name, new_prefix, ctx, &mut visited);
-                }
-                if let Some(manifest) = decl.type_manifest {
-                    rewrite_deep_prefix_expr(manifest, old_name, new_prefix, ctx, &mut visited);
-                }
-                match &decl.type_kind {
-                    TypeKind::TypeVariant(constrs) => {
-                        for cd in constrs {
-                            match &cd.cd_args {
-                                crate::types::decl::ConstructorArguments::CstrTuple(args) => {
-                                    for &arg in args {
-                                        rewrite_deep_prefix_expr(
-                                            arg,
-                                            old_name,
-                                            new_prefix,
-                                            ctx,
-                                            &mut visited,
-                                        );
-                                    }
-                                }
-                                crate::types::decl::ConstructorArguments::CstrRecord(labels) => {
-                                    for lbl in labels {
-                                        rewrite_deep_prefix_expr(
-                                            lbl.ld_type,
-                                            old_name,
-                                            new_prefix,
-                                            ctx,
-                                            &mut visited,
-                                        );
-                                    }
-                                }
-                            }
-                            if let Some(res) = cd.cd_res {
-                                rewrite_deep_prefix_expr(
-                                    res,
-                                    old_name,
-                                    new_prefix,
-                                    ctx,
-                                    &mut visited,
-                                );
-                            }
-                        }
-                    }
-                    TypeKind::TypeRecord(labels, _) => {
-                        for lbl in labels {
-                            rewrite_deep_prefix_expr(
-                                lbl.ld_type,
-                                old_name,
-                                new_prefix,
-                                ctx,
-                                &mut visited,
-                            );
-                        }
-                    }
-                    _ => {}
-                }
-            }
-            SignatureItem::SigTypext(_id, ext, _) => {
-                for &param in &ext.ext_type_params {
-                    rewrite_deep_prefix_expr(param, old_name, new_prefix, ctx, &mut visited);
-                }
-                match &ext.ext_args {
-                    crate::types::decl::ConstructorArguments::CstrTuple(args) => {
-                        for &arg in args {
-                            rewrite_deep_prefix_expr(arg, old_name, new_prefix, ctx, &mut visited);
-                        }
-                    }
-                    crate::types::decl::ConstructorArguments::CstrRecord(labels) => {
-                        for lbl in labels {
-                            rewrite_deep_prefix_expr(
-                                lbl.ld_type,
-                                old_name,
-                                new_prefix,
-                                ctx,
-                                &mut visited,
-                            );
-                        }
-                    }
-                }
-                if let Some(ret) = ext.ext_ret_type {
-                    rewrite_deep_prefix_expr(ret, old_name, new_prefix, ctx, &mut visited);
-                }
-            }
-            SignatureItem::SigModule(_, md, _) => {
-                // Recurse into sub-module signatures
-                if let ModuleType::MtySignature(sub_sig) = &md.md_type {
-                    rewrite_deep_prefix_in_sig(sub_sig, old_name, new_prefix, ctx);
-                }
-            }
-            _ => {}
-        }
-    }
-}
-
-/// Walk a type expression and rewrite Tconstr paths where old_name appears
-/// at depth >= 2 as a module prefix. Depth 1 (direct parent) is preserved.
-fn rewrite_deep_prefix_expr(
-    ty_ref: TypeExprRef,
-    old_name: &str,
-    new_prefix: &Path,
-    ctx: &TypeContext,
-    visited: &mut HashSet<usize>,
-) {
-    if !visited.insert(ty_ref.index()) {
-        return;
-    }
-
-    let desc = ctx.get_desc(ty_ref);
-
-    match &*desc {
-        TypeDesc::Tconstr { path, args, .. } => {
-            // Only rewrite if the path has depth >= 2 for the old_name prefix.
-            // Pdot(Pident("old_name"), "t") -> depth 1, don't rewrite
-            // Pdot(Pdot(Pident("old_name"), "Sub"), "t") -> depth 2, rewrite
-            if let Some(new_path) = rewrite_path_deep(path, old_name, new_prefix) {
-                let mut new_desc = (*desc).clone();
-                if let TypeDesc::Tconstr { ref mut path, .. } = new_desc {
-                    *path = new_path;
-                }
-                ctx.set_desc(ty_ref, new_desc);
-            }
-            for &arg in args {
-                rewrite_deep_prefix_expr(arg, old_name, new_prefix, ctx, visited);
-            }
-        }
-        TypeDesc::Tarrow { arg, ret, .. } => {
-            rewrite_deep_prefix_expr(arg.typ, old_name, new_prefix, ctx, visited);
-            rewrite_deep_prefix_expr(*ret, old_name, new_prefix, ctx, visited);
-        }
-        TypeDesc::Ttuple(types) => {
-            for &t in types {
-                rewrite_deep_prefix_expr(t, old_name, new_prefix, ctx, visited);
-            }
-        }
-        TypeDesc::Tlink(t) => {
-            rewrite_deep_prefix_expr(*t, old_name, new_prefix, ctx, visited);
-        }
-        TypeDesc::Tsubst(t) => {
-            rewrite_deep_prefix_expr(*t, old_name, new_prefix, ctx, visited);
-        }
-        TypeDesc::Tpoly { body, vars } => {
-            rewrite_deep_prefix_expr(*body, old_name, new_prefix, ctx, visited);
-            for &v in vars {
-                rewrite_deep_prefix_expr(v, old_name, new_prefix, ctx, visited);
-            }
-        }
-        TypeDesc::Tobject { fields, .. } => {
-            rewrite_deep_prefix_expr(*fields, old_name, new_prefix, ctx, visited);
-        }
-        TypeDesc::Tfield { typ, rest, .. } => {
-            rewrite_deep_prefix_expr(*typ, old_name, new_prefix, ctx, visited);
-            rewrite_deep_prefix_expr(*rest, old_name, new_prefix, ctx, visited);
-        }
-        TypeDesc::Tvariant(row) => {
-            if let Some((path, _)) = &row.row_name
-                && let Some(new_path) = rewrite_path_deep(path, old_name, new_prefix)
-            {
-                let mut new_desc = (*desc).clone();
-                if let TypeDesc::Tvariant(ref mut row) = new_desc
-                    && let Some((ref mut path, _)) = row.row_name
-                {
-                    *path = new_path;
-                }
-                ctx.set_desc(ty_ref, new_desc);
-            }
-            if let Some((_, args)) = &row.row_name {
-                for &arg in args {
-                    rewrite_deep_prefix_expr(arg, old_name, new_prefix, ctx, visited);
-                }
-            }
-            rewrite_deep_prefix_expr(row.row_more, old_name, new_prefix, ctx, visited);
-            for field in &row.row_fields {
-                match &field.1 {
-                    crate::types::type_expr::RowField::Rpresent(Some(t)) => {
-                        rewrite_deep_prefix_expr(*t, old_name, new_prefix, ctx, visited);
-                    }
-                    crate::types::type_expr::RowField::Reither { types, .. } => {
-                        for &t in types {
-                            rewrite_deep_prefix_expr(t, old_name, new_prefix, ctx, visited);
-                        }
-                    }
-                    _ => {}
-                }
-            }
-        }
-        TypeDesc::Tpackage { path, args, .. } => {
-            if let Some(new_path) = rewrite_path_deep(path, old_name, new_prefix) {
-                let mut new_desc = (*desc).clone();
-                if let TypeDesc::Tpackage { ref mut path, .. } = new_desc {
-                    *path = new_path;
-                }
-                ctx.set_desc(ty_ref, new_desc);
-            }
-            for &arg in args {
-                rewrite_deep_prefix_expr(arg, old_name, new_prefix, ctx, visited);
-            }
-        }
-        TypeDesc::Tvar(_) | TypeDesc::Tunivar(_) | TypeDesc::Tnil => {}
-    }
-}
-
-/// Rewrite a path only when old_name appears at depth >= 2.
-/// Pdot(Pident("old"), "t") -> None (depth 1, don't rewrite)
-/// Pdot(Pdot(Pident("old"), "Sub"), "t") -> Some(Pdot(Pdot(new_prefix, "Sub"), "t"))
-fn rewrite_path_deep(path: &Path, old_name: &str, new_prefix: &Path) -> Option<Path> {
-    match path {
-        // Pident("old_name") -> depth 0 as type path: don't rewrite
-        Path::Pident(_) => None,
-        Path::Pdot(inner, name, pos) => {
-            match inner.as_ref() {
-                // Pdot(Pident("old_name"), "t") -> depth 1: don't rewrite
-                Path::Pident(id) if id.name() == old_name => None,
-                // Pdot(Pdot(...), name) -> check if inner has a rewritable prefix
-                _ => {
-                    let rewritten_inner = rewrite_inner_prefix(inner, old_name, new_prefix)?;
-                    Some(Path::Pdot(
-                        std::sync::Arc::new(rewritten_inner),
-                        name.clone(),
-                        *pos,
-                    ))
-                }
-            }
-        }
-        Path::Papply(_, _) => None,
-    }
-}
-
-/// Rewrite old_name in a module path (at any depth).
-/// Used for the inner part of a depth >= 2 path.
-fn rewrite_inner_prefix(path: &Path, old_name: &str, new_prefix: &Path) -> Option<Path> {
-    match path {
-        Path::Pident(id) if id.name() == old_name => Some(new_prefix.clone()),
-        Path::Pdot(inner, name, pos) => {
-            let rewritten_inner = rewrite_inner_prefix(inner, old_name, new_prefix)?;
-            Some(Path::Pdot(
-                std::sync::Arc::new(rewritten_inner),
-                name.clone(),
-                *pos,
-            ))
-        }
-        _ => None,
-    }
-}
-
 /// local bindings. This matches OCaml's behavior where opened modules have
 /// lower lookup priority than local bindings (e.g., Predef types like `int`
 /// are not shadowed when Pervasives.cmi is opened).
@@ -5973,8 +5932,8 @@ fn add_signature_to_env_with_options(
                         work_stack.push(*arg);
                     }
                 }
-                TypeDesc::Tarrow { arg, ret, .. } => {
-                    work_stack.push(arg.typ);
+                TypeDesc::Tarrow { args, ret } => {
+                    work_stack.extend(args.iter().map(|arg| arg.typ));
                     work_stack.push(*ret);
                 }
                 TypeDesc::Ttuple(items) => {
@@ -6065,7 +6024,7 @@ fn add_signature_to_env_with_options(
         let slot_path = |name: &str, p: i32| {
             Path::Pdot(
                 std::sync::Arc::new(module_path.clone()),
-                name.to_string(),
+                name.to_string().into(),
                 p,
             )
         };
@@ -6122,58 +6081,37 @@ fn add_signature_to_env_with_options(
 
                 // Also register in global type store for alias expansion
                 if register_loaded_types {
-                    ctx.register_type_decl(id.name(), decl.clone());
+                    let shared_decl = Arc::new(decl.clone());
+                    ctx.register_shared_type_decl(id.name(), shared_decl.clone());
                     // Register by stamp for types from CMI modules (non-zero stamp)
                     if id.stamp() != 0 {
-                        ctx.register_type_decl_by_stamp(id.stamp(), decl.clone());
+                        ctx.register_shared_type_decl_by_stamp(id.stamp(), shared_decl);
                     }
                 }
 
                 // Also add constructors and labels from this type
                 match &decl.type_kind {
-                    TypeKind::TypeVariant(constrs) => {
+                    TypeKind::TypeVariant(constrs, layout) => {
                         let type_path = Path::pdot(module_path.clone(), id.name());
-                        let num_consts = constrs
-                            .iter()
-                            .filter(|c| matches!(c.cd_args, crate::types::decl::ConstructorArguments::CstrTuple(ref args) if args.is_empty()))
-                            .count() as i32;
-                        let num_nonconsts = constrs.len() as i32 - num_consts;
-                        let mut const_idx = 0i32;
-                        let mut nonconst_idx = 0i32;
-
-                        for cd in constrs {
-                            let is_constant = matches!(cd.cd_args, crate::types::decl::ConstructorArguments::CstrTuple(ref args) if args.is_empty());
-
-                            let cstr_tag = if is_constant {
-                                let tag = ConstructorTag::CstrConstant(const_idx);
-                                const_idx += 1;
-                                tag
-                            } else {
-                                let tag = ConstructorTag::CstrBlock(nonconst_idx);
-                                nonconst_idx += 1;
-                                tag
-                            };
-
+                        for (position, cd) in constrs.iter().enumerate() {
                             let inline_record = match &cd.cd_args {
                                 crate::types::decl::ConstructorArguments::CstrRecord(labels) => {
                                     let inline_params =
                                         inline_record_type_params(ctx, &decl.type_params, labels);
                                     let inline_path =
                                         Path::pdot(type_path.clone(), cd.cd_id.name());
-                                    let inline_tag = match cstr_tag {
-                                        ConstructorTag::CstrBlock(tag) => tag,
-                                        _ => 0,
-                                    };
                                     let inline_decl = crate::types::TypeDeclaration {
                                         type_params: inline_params.clone(),
                                         type_arity: inline_params.len() as i32,
                                         type_kind: crate::types::TypeKind::TypeRecord(
                                             labels.clone(),
                                             crate::types::RecordRepresentation::RecordInlined {
-                                                tag: inline_tag,
                                                 name: cd.cd_id.name().to_string(),
-                                                num_nonconsts,
-                                                attrs: cd.cd_attributes.clone(),
+                                                representation:
+                                                    crate::types::ConstructorReference {
+                                                        variant: *layout,
+                                                        position,
+                                                    },
                                             },
                                         ),
                                         type_private: decl.type_private,
@@ -6186,7 +6124,8 @@ fn add_signature_to_env_with_options(
                                         type_loc: cd.cd_loc,
                                         type_attributes: vec![],
                                         type_immediate: false,
-                                        type_unboxed: crate::types::UnboxedStatus::default(),
+                                        type_representation:
+                                            crate::types::TypeRepresentation::Boxed,
                                         type_inlined_types: vec![],
                                         type_path: None,
                                     };
@@ -6234,9 +6173,12 @@ fn add_signature_to_env_with_options(
                                 cstr_existentials: vec![],
                                 cstr_args,
                                 cstr_arity,
-                                cstr_tag,
-                                cstr_consts: num_consts,
-                                cstr_nonconsts: num_nonconsts,
+                                cstr_kind: ConstructorKind::Ordinary(
+                                    crate::types::ConstructorReference {
+                                        variant: *layout,
+                                        position,
+                                    },
+                                ),
                                 cstr_generalized: cd.cd_res.is_some(),
                                 cstr_private: decl.type_private,
                                 cstr_loc: crate::location::Location::none(),
@@ -6479,9 +6421,7 @@ fn add_signature_to_env_with_options(
                             labels.len() as i32
                         }
                     },
-                    cstr_tag: ConstructorTag::CstrExtension(slot_path(id.name(), ext_slot)),
-                    cstr_consts: -1,
-                    cstr_nonconsts: -1,
+                    cstr_kind: ConstructorKind::Extension(slot_path(id.name(), ext_slot)),
                     cstr_generalized: ext.ext_ret_type.is_some(),
                     cstr_private: ext.ext_private,
                     cstr_loc: crate::location::Location::none(),

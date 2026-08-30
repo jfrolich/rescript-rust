@@ -65,14 +65,16 @@ and ident_unknown = ident_create "unknown"
 
 and ident_promise = ident_create "promise"
 
+and ident_tagged_template = ident_create "taggedTemplate"
+
 type test = For_sure_yes | For_sure_no | NA
 
 let type_is_builtin_path_but_option (p : Path.t) : test =
   match p with
   | Pident {stamp} when stamp = ident_option.stamp -> For_sure_no
   | Pident {stamp} when stamp = ident_unit.stamp -> For_sure_no
-  | Pident {stamp} when stamp >= ident_int.stamp && stamp <= ident_promise.stamp
-    ->
+  | Pident {stamp}
+    when stamp >= ident_int.stamp && stamp <= ident_tagged_template.stamp ->
     For_sure_yes
   | _ -> NA
 
@@ -112,6 +114,8 @@ and path_extension_constructor = Pident ident_extension_constructor
 
 and path_promise = Pident ident_promise
 
+and path_tagged_template = Pident ident_tagged_template
+
 let type_int = newgenty (Tconstr (path_int, [], ref Mnil))
 
 and type_char = newgenty (Tconstr (path_char, [], ref Mnil))
@@ -134,10 +138,6 @@ and type_async_iterable t =
 and type_list t = newgenty (Tconstr (path_list, [t], ref Mnil))
 
 and type_option t = newgenty (Tconstr (path_option, [t], ref Mnil))
-
-and type_result t1 t2 = newgenty (Tconstr (path_result, [t1; t2], ref Mnil))
-
-and type_dict t = newgenty (Tconstr (path_dict, [t], ref Mnil))
 
 and type_bigint = newgenty (Tconstr (path_bigint, [], ref Mnil))
 
@@ -174,24 +174,9 @@ and ident_assert_failure = ident_create_predef_exn "Assert_failure"
 and ident_undefined_recursive_module =
   ident_create_predef_exn "Undefined_recursive_module"
 
-let all_predef_exns =
-  [
-    ident_match_failure;
-    ident_invalid_argument;
-    ident_failure;
-    ident_js_exn;
-    ident_not_found;
-    ident_end_of_file;
-    ident_division_by_zero;
-    ident_assert_failure;
-    ident_undefined_recursive_module;
-  ]
-
 let path_match_failure = Pident ident_match_failure
 
 and path_assert_failure = Pident ident_assert_failure
-
-and path_undefined_recursive_module = Pident ident_undefined_recursive_module
 
 let decl_abstr =
   {
@@ -205,7 +190,7 @@ let decl_abstr =
     type_newtype_level = None;
     type_attributes = [];
     type_immediate = false;
-    type_unboxed = unboxed_false_default_false;
+    type_representation = Boxed;
     type_inlined_types = [];
   }
 
@@ -236,17 +221,27 @@ and ident_some = ident_create "Some"
 
 and ident_ctor_unknown = ident_create "Unknown"
 
+(* Predefined declarations are built by hand, so their layouts are too *)
+let plain_variant (cstrs : Types.constructor_declaration list) =
+  Type_variant
+    ( cstrs,
+      Variant_runtime.plain_layout
+        (List.map
+           (fun (c : Types.constructor_declaration) ->
+             (Ident.name c.cd_id, c.cd_args <> Cstr_tuple []))
+           cstrs) )
+
 let common_initial_env add_type add_extension empty_env =
   let decl_bool =
     {
       decl_abstr with
-      type_kind = Type_variant [cstr ident_false []; cstr ident_true []];
+      type_kind = plain_variant [cstr ident_false []; cstr ident_true []];
       type_immediate = true;
     }
   and decl_unit =
     {
       decl_abstr with
-      type_kind = Type_variant [cstr ident_void []];
+      type_kind = plain_variant [cstr ident_void []];
       type_immediate = true;
     }
   and decl_exn = {decl_abstr with type_kind = Type_open}
@@ -281,7 +276,8 @@ let common_initial_env add_type add_extension empty_env =
       type_params = [tvar];
       type_arity = 1;
       type_kind =
-        Type_variant [cstr ident_nil []; cstr ident_cons [tvar; type_list tvar]];
+        plain_variant
+          [cstr ident_nil []; cstr ident_cons [tvar; type_list tvar]];
       type_variance = [Variance.covariant];
     }
   and decl_option =
@@ -290,7 +286,7 @@ let common_initial_env add_type add_extension empty_env =
       decl_abstr with
       type_params = [tvar];
       type_arity = 1;
-      type_kind = Type_variant [cstr ident_none []; cstr ident_some [tvar]];
+      type_kind = plain_variant [cstr ident_none []; cstr ident_some [tvar]];
       type_variance = [Variance.covariant];
     }
   and decl_result =
@@ -299,7 +295,8 @@ let common_initial_env add_type add_extension empty_env =
       decl_abstr with
       type_params = [tvar1; tvar2];
       type_arity = 2;
-      type_kind = Type_variant [cstr ident_ok [tvar1]; cstr ident_error [tvar2]];
+      type_kind =
+        plain_variant [cstr ident_ok [tvar1]; cstr ident_error [tvar2]];
       type_variance = [Variance.covariant; Variance.covariant];
     }
   and decl_dict =
@@ -343,7 +340,7 @@ let common_initial_env add_type add_extension empty_env =
       type_params = [];
       type_arity = 0;
       type_kind =
-        Type_variant
+        plain_variant
           [
             {
               cd_id = ident_ctor_unknown;
@@ -353,7 +350,7 @@ let common_initial_env add_type add_extension empty_env =
               cd_attributes = [];
             };
           ];
-      type_unboxed = Types.unboxed_true_default_false;
+      type_representation = Types.Unboxed;
     }
   and decl_promise =
     let tvar = newgenvar () in
@@ -362,6 +359,14 @@ let common_initial_env add_type add_extension empty_env =
       type_params = [tvar];
       type_arity = 1;
       type_variance = [Variance.covariant];
+    }
+  and decl_tagged_template =
+    let tvar1, tvar2 = (newgenvar (), newgenvar ()) in
+    {
+      decl_abstr with
+      type_params = [tvar1; tvar2];
+      type_arity = 2;
+      type_variance = [Variance.full; Variance.full];
     }
   in
 
@@ -397,6 +402,7 @@ let common_initial_env add_type add_extension empty_env =
   |> add_type ident_option decl_option
   |> add_type ident_result decl_result
   |> add_type ident_promise decl_promise
+  |> add_type ident_tagged_template decl_tagged_template
   |> add_type ident_array decl_array
   |> add_type ident_iterable decl_iterable
   |> add_type ident_async_iterable decl_async_iterable
@@ -423,11 +429,8 @@ let build_initial_env add_type add_exception empty_env =
   in
   add_type ident_char decl_type_char common
 
-let builtin_values =
-  List.map
-    (fun id ->
-      Ident.make_global id;
-      (Ident.name id, id))
+let () =
+  List.iter Ident.make_global
     [
       ident_match_failure;
       ident_invalid_argument;

@@ -1,6 +1,6 @@
 {
   "name": "@rescript/linux-arm64",
-  "version": "13.0.0-alpha.4",
+  "version": "13.0.0-alpha.6",
   "description": "ReScript binaries for Linux ARM64",
   "type": "module",
   "license": "(LGPL-3.0-or-later AND MIT)",
@@ -19,7 +19,6 @@
     "Cristiano Calcagno (https://github.com/cristianoc)",
     "Dmitry Zakharov (https://github.com/DZakh)",
     "Florian Hammerschmidt (https://github.com/fhammerschmidt)",
-    "Florian Verdonck (https://github.com/nojaf)",
     "Gabriel Nordeborn (https://github.com/zth)",
     "Hyeseong Kim (https://github.com/cometkim)",
     "Jaap Frolich (https://github.com/jfrolich)",

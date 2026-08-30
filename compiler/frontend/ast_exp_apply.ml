@@ -42,9 +42,10 @@ let bound (e : exp) (cb : exp -> _) =
       [Vb.mk ~loc (Pat.var ~loc {txt = tuple_obj_id; loc}) e]
       (cb (Exp.ident ~loc {txt = Lident tuple_obj_id; loc}))
 
-let default_expr_mapper = Bs_ast_mapper.default_mapper.expr
+let default_expr_mapper = Ast_mapper.default_mapper.expr
 
-let check_and_discard (args : Ast_compatible.args) =
+let check_and_discard (args : (Asttypes.arg_label * Parsetree.expression) list)
+    =
   Ext_list.map args (fun (label, x) ->
       Bs_syntaxerr.err_if_label x.pexp_loc label;
       x)
@@ -71,7 +72,7 @@ let view_as_app (fn : exp) (s : string list) : app_pattern option =
 
 let infix_ops = ["->"; "#="; "##"]
 
-let app_exp_mapper (e : exp) (self : Bs_ast_mapper.mapper) : exp =
+let app_exp_mapper (e : exp) (self : Ast_mapper.mapper) : exp =
   match view_as_app e infix_ops with
   | Some {op = "->"; args = [a_; f_]; loc} -> (
     (*
@@ -125,11 +126,12 @@ let app_exp_mapper (e : exp) (self : Bs_ast_mapper.mapper) : exp =
                          pexp_loc = fn.pexp_loc;
                        }
                      | _ ->
-                       Ast_compatible.app1 ~loc:fn.pexp_loc fn bounded_obj_arg));
+                       Exp.apply ~loc:fn.pexp_loc fn
+                         [(Nolabel, bounded_obj_arg)]));
             pexp_attributes = f.pexp_attributes;
             pexp_loc = f.pexp_loc;
           })
-    | _ -> Ast_compatible.app1 ~loc ~attrs:e.pexp_attributes f a)
+    | _ -> Exp.apply ~loc ~attrs:e.pexp_attributes f [(Nolabel, a)])
   | Some {op = "##"; loc; args = [obj; rest]} -> (
     (* - obj##property
        - obj#(method a b )

@@ -22,10 +22,6 @@ function undefined0(x) {
   return x;
 }
 
-function undefined1(x) {
-  return x;
-}
-
 function dict0(x) {
   return x;
 }
@@ -42,7 +38,11 @@ function promise1(x) {
   return x;
 }
 
-function date0(x) {
+function taggedTemplate0(x) {
+  return x;
+}
+
+function taggedTemplate1(x) {
   return x;
 }
 
@@ -54,11 +54,15 @@ function bigint0(x) {
   return x;
 }
 
-function regexp0(x) {
+function stdlibBigInt(x) {
   return x;
 }
 
 function regexp1(x) {
+  return x;
+}
+
+function stdlibArray(x) {
   return x;
 }
 
@@ -108,16 +112,17 @@ export {
   nullable0,
   nullable1,
   undefined0,
-  undefined1,
   dict0,
   dict1,
   promise0,
   promise1,
-  date0,
+  taggedTemplate0,
+  taggedTemplate1,
   date1,
   bigint0,
-  regexp0,
+  stdlibBigInt,
   regexp1,
+  stdlibArray,
   $$Map,
   $$Set,
   map1,

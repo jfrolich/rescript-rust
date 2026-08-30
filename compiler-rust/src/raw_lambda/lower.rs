@@ -14,7 +14,6 @@ use crate::lambda::lam_primitive::{ExternalFfiSpec, ExternalReturnWrapper, Primi
 use crate::lambda::lam_tag_info::TagInfo;
 use crate::lambda::{ApInfo, Apply, ApplyStatus, LFunction, Lambda, LambdaSwitch, PrimInfo};
 use crate::location::Location;
-use crate::parser::ast::MutableFlag;
 use crate::raw_lambda::{RawApply, RawLambda, RawLambdaSwitch};
 
 const SETTER_SUFFIX: &str = "#=";
@@ -302,7 +301,6 @@ impl LoweringContext {
                                 0,
                                 FieldDbgInfo::Record {
                                     name: EXCEPTION_ID_FIELD.to_string(),
-                                    mutable_flag: MutableFlag::Immutable,
                                 },
                             ),
                             vec![lhs.clone()],
@@ -357,23 +355,21 @@ impl LoweringContext {
                 );
                 wrap_ffi_result(call, return_wrapper, loc)
             }
-            Primitive::Pmakeblock(tag, TagInfo::PolyVar(name), mutable_flag) => {
-                match args.as_slice() {
-                    [_, value] => Lambda::prim(
-                        Primitive::Pmakeblock(tag, TagInfo::PolyVar(name.clone()), mutable_flag),
-                        vec![
-                            Lambda::const_(polyvar_block_tag_constant(&name)),
-                            value.clone(),
-                        ],
-                        loc,
-                    ),
-                    _ => unreachable!("polyvariant blocks expect tag and payload"),
-                }
-            }
-            Primitive::Pmakeblock(_, TagInfo::SomeNotNested, _) => {
+            Primitive::Pmakeblock(TagInfo::PolyVar(name), mutable_flag) => match args.as_slice() {
+                [_, value] => Lambda::prim(
+                    Primitive::Pmakeblock(TagInfo::PolyVar(name.clone()), mutable_flag),
+                    vec![
+                        Lambda::const_(polyvar_block_tag_constant(&name)),
+                        value.clone(),
+                    ],
+                    loc,
+                ),
+                _ => unreachable!("polyvariant blocks expect tag and payload"),
+            },
+            Primitive::Pmakeblock(TagInfo::SomeNotNested, _) => {
                 Lambda::prim(Primitive::PsomeNotNest, args, loc)
             }
-            Primitive::Pmakeblock(_, TagInfo::Some, _) => Lambda::prim(Primitive::Psome, args, loc),
+            Primitive::Pmakeblock(TagInfo::Some, _) => Lambda::prim(Primitive::Psome, args, loc),
             Primitive::Pisout(range) => match args.as_slice() {
                 [Lambda::Lprim(inner)]
                     if inner.args.len() == 1
@@ -443,7 +439,7 @@ impl LoweringContext {
         let lowered_scrutinee = self.lower_lambda(scrutinee);
 
         if const_only_switch {
-            if let Some(diff) = happens_to_be_diff(&lowered_consts, switch.sw_names.as_ref()) {
+            if let Some(diff) = happens_to_be_diff(&lowered_consts, &switch.sw_dispatch) {
                 if diff == 0 {
                     return lowered_scrutinee;
                 }
@@ -470,7 +466,7 @@ impl LoweringContext {
                     sw_blocks_full: true,
                     sw_blocks: lowered_blocks,
                     sw_failaction: lowered_failaction,
-                    sw_names: switch.sw_names,
+                    sw_dispatch: switch.sw_dispatch,
                 },
             )
         } else {
@@ -482,7 +478,7 @@ impl LoweringContext {
                     sw_blocks_full: lowered_blocks.len() >= switch.sw_numblocks,
                     sw_blocks: lowered_blocks,
                     sw_failaction: lowered_failaction,
-                    sw_names: switch.sw_names,
+                    sw_dispatch: switch.sw_dispatch,
                 },
             )
         }
@@ -531,7 +527,7 @@ fn collect_exported_idents(raw: &RawLambda, exports: &mut HashSet<Ident>) {
             collect_exported_idents(body, exports);
         }
         RawLambda::Lprim(info) => {
-            if let Primitive::Pmakeblock(_, TagInfo::ModuleExport(ids), _) = &info.primitive {
+            if let Primitive::Pmakeblock(TagInfo::ModuleExport(ids), _) = &info.primitive {
                 exports.extend(ids.iter().cloned());
             }
             for arg in &info.args {
@@ -594,6 +590,14 @@ fn collect_exported_idents(raw: &RawLambda, exports: &mut HashSet<Ident>) {
 
 fn lower_constant(constant: Constant) -> Constant {
     match constant {
+        Constant::Constructor(tag) if tag.name == "()" => Constant::JsUndefined { is_unit: true },
+        Constant::Constructor(tag) => match tag.tag_type {
+            Some(crate::types::VariantTagType::Int(value)) => Constant::Int {
+                i: value,
+                comment: None,
+            },
+            _ => Constant::Constructor(tag),
+        },
         Constant::NativeInt { i, comment } => Constant::Int {
             // OCaml's lam_constant_convert.ml truncates source ints here with Int32.of_int.
             i: i as i32,
@@ -643,11 +647,7 @@ fn lower_constant(constant: Constant) -> Constant {
                 .unwrap_or(Constant::Pointer(name)),
             None => Constant::Pointer(name),
         },
-        Constant::Block {
-            tag,
-            tag_info,
-            elements,
-        } => {
+        Constant::Block { tag_info, elements } => {
             let mut elements = elements.into_iter().map(lower_constant).collect::<Vec<_>>();
             match tag_info {
                 TagInfo::Some | TagInfo::SomeNotNested if elements.len() == 1 => {
@@ -657,19 +657,16 @@ fn lower_constant(constant: Constant) -> Constant {
                     2 => {
                         let value = elements.pop().expect("polyvariant block payload");
                         Constant::Block {
-                            tag,
                             tag_info: TagInfo::PolyVar(name.clone()),
                             elements: vec![polyvar_block_tag_constant(&name), value],
                         }
                     }
                     _ => Constant::Block {
-                        tag,
                         tag_info: TagInfo::PolyVar(name),
                         elements,
                     },
                 },
                 other => Constant::Block {
-                    tag,
                     tag_info: other,
                     elements,
                 },
@@ -905,28 +902,6 @@ fn eta_conversion_args(
         .zip(outer_args.iter())
         .map(|((param, inner_arg), outer_arg)| match inner_arg {
             Lambda::Lvar(id) if param.same(id) => Some(outer_arg.clone()),
-            Lambda::Lprim(PrimInfo {
-                primitive: Primitive::PjsFnMake(arity),
-                args,
-                loc,
-            }) if matches!(args.as_slice(), [Lambda::Lvar(id)] if param.same(id)) => {
-                Some(Lambda::Lprim(PrimInfo {
-                    primitive: Primitive::PjsFnMake(*arity),
-                    args: vec![outer_arg.clone()],
-                    loc: loc.clone(),
-                }))
-            }
-            Lambda::Lprim(PrimInfo {
-                primitive: Primitive::PjsFnMakeUnit,
-                args,
-                loc,
-            }) if matches!(args.as_slice(), [Lambda::Lvar(id)] if param.same(id)) => {
-                Some(Lambda::Lprim(PrimInfo {
-                    primitive: Primitive::PjsFnMakeUnit,
-                    args: vec![outer_arg.clone()],
-                    loc: loc.clone(),
-                }))
-            }
             _ => None,
         })
         .collect()
@@ -1131,7 +1106,7 @@ fn lower_primitive_default(primitive: Primitive, args: Vec<Lambda>, loc: Locatio
         _ => {}
     }
 
-    if let Primitive::Pmakeblock(_, TagInfo::Module(fields), _) = &primitive {
+    if let Primitive::Pmakeblock(TagInfo::Module(fields), _) = &primitive {
         if let Some(module_alias) = collapse_module_alias(fields, &args) {
             return module_alias;
         }
@@ -1143,10 +1118,10 @@ fn lower_primitive_default(primitive: Primitive, args: Vec<Lambda>, loc: Locatio
 fn is_empty_module_shape_constant(lam: &Lambda) -> bool {
     matches!(
         lam,
-        Lambda::Lconst(Constant::Block { tag: 0, elements, .. })
+        Lambda::Lconst(Constant::Block { elements, .. })
             if matches!(
                 elements.as_slice(),
-                [Constant::Block { tag: 0, elements: inner, .. }] if inner.is_empty()
+                [Constant::Block { elements: inner, .. }] if inner.is_empty()
             )
     )
 }
@@ -1160,22 +1135,27 @@ fn int_constant_value(lam: &Lambda) -> Option<i32> {
 }
 
 fn happens_to_be_diff(
-    sw_consts: &[(i32, Lambda)],
-    sw_names: Option<&crate::lambda::SwitchNames>,
+    sw_consts: &[(crate::lambda::SwitchKey, Lambda)],
+    sw_dispatch: &crate::lambda::SwitchDispatch,
 ) -> Option<i32> {
-    if sw_names.is_some() {
+    if !matches!(sw_dispatch, crate::lambda::SwitchDispatch::Direct) {
         return None;
     }
-    let ((a, a_lam), rest) = sw_consts.split_first()?;
-    let (b, b_lam) = rest.first()?;
-    let a0 = int_constant_value(a_lam)?;
-    let b0 = int_constant_value(b_lam)?;
-    let diff = a0.checked_sub(*a)?;
-    if b0.checked_sub(*b)? != diff {
+    let ((crate::lambda::SwitchKey::Int(a), a_lam), rest) = sw_consts.split_first()? else {
+        return None;
+    };
+    let (crate::lambda::SwitchKey::Int(b), b_lam) = rest.first()? else {
+        return None;
+    };
+    let diff = int_constant_value(a_lam)?.checked_sub(*a)?;
+    if int_constant_value(b_lam)?.checked_sub(*b)? != diff {
         return None;
     }
-    for (x, lam) in rest.iter().skip(1) {
-        if int_constant_value(lam)?.checked_sub(*x)? != diff {
+    for (key, lam) in rest.iter().skip(1) {
+        let crate::lambda::SwitchKey::Int(value) = key else {
+            return None;
+        };
+        if int_constant_value(lam)?.checked_sub(*value)? != diff {
             return None;
         }
     }
@@ -1421,12 +1401,19 @@ fn fold_offset_switch_alias(id: &Ident, value: &Lambda, body: &Lambda) -> Option
             sw_consts: switch
                 .sw_consts
                 .iter()
-                .map(|(tag, lam)| (*tag - offset, lam.clone()))
+                .map(|(key, lam)| match key {
+                    crate::lambda::SwitchKey::Int(value) => {
+                        (crate::lambda::SwitchKey::Int(*value - offset), lam.clone())
+                    }
+                    crate::lambda::SwitchKey::Constructor(_) => {
+                        unreachable!("offset constructor switch")
+                    }
+                })
                 .collect(),
             sw_blocks_full: switch.sw_blocks_full,
             sw_blocks: Vec::new(),
             sw_failaction: switch.sw_failaction.clone(),
-            sw_names: switch.sw_names.clone(),
+            sw_dispatch: switch.sw_dispatch.clone(),
         },
     ))
 }
@@ -1717,7 +1704,7 @@ fn max_ident_stamp(raw: &RawLambda) -> i32 {
                 visit_raw(max_stamp, body);
             }
             RawLambda::Lprim(info) => {
-                if let Primitive::Pmakeblock(_, TagInfo::ModuleExport(ids), _) = &info.primitive {
+                if let Primitive::Pmakeblock(TagInfo::ModuleExport(ids), _) = &info.primitive {
                     for id in ids {
                         visit_ident(max_stamp, id);
                     }
@@ -2099,10 +2086,7 @@ mod tests {
             field.primitive,
             Primitive::Pfield(
                 0,
-                FieldDbgInfo::Record {
-                    ref name,
-                    mutable_flag: MutableFlag::Immutable,
-                }
+                FieldDbgInfo::Record { ref name }
             ) if name == EXCEPTION_ID_FIELD
         ));
         let [Lambda::Lvar(field_exn)] = field.args.as_slice() else {
@@ -2321,7 +2305,6 @@ mod tests {
             RawLambda::var(source.clone()),
             RawLambda::prim(
                 Primitive::Pmakeblock(
-                    0,
                     TagInfo::ModuleExport(vec![alias.clone()]),
                     Mutable::Immutable,
                 ),
@@ -2396,7 +2379,7 @@ mod tests {
     #[test]
     fn lowers_polyvariant_block_payload_tag_from_name() {
         let lowered = lower_to_lambda(RawLambda::prim(
-            Primitive::Pmakeblock(0, TagInfo::PolyVar("V".to_string()), Mutable::Immutable),
+            Primitive::Pmakeblock(TagInfo::PolyVar("V".to_string()), Mutable::Immutable),
             vec![
                 RawLambda::const_(Constant::Int {
                     i: crate::types::btype::hash_variant("V"),
@@ -2422,7 +2405,6 @@ mod tests {
     #[test]
     fn lowers_constant_polyvariant_block_payload_tag_from_name() {
         let lowered = lower_to_lambda(RawLambda::const_(Constant::Block {
-            tag: 0,
             tag_info: TagInfo::PolyVar("Pair".to_string()),
             elements: vec![
                 Constant::Int {
@@ -2430,7 +2412,6 @@ mod tests {
                     comment: Some(PointerInfo::PolyVariant("Pair".to_string())),
                 },
                 Constant::Block {
-                    tag: 0,
                     tag_info: TagInfo::Tuple,
                     elements: vec![
                         Constant::Int {
@@ -2453,7 +2434,7 @@ mod tests {
                     elements.as_slice(),
                     [
                         Constant::String { s, delim: None },
-                        Constant::Block { tag: 0, tag_info: TagInfo::Tuple, elements }
+                        Constant::Block { tag_info: TagInfo::Tuple, elements }
                     ] if s == "Pair"
                         && matches!(
                             elements.as_slice(),
@@ -2525,15 +2506,31 @@ mod tests {
             RawLambdaSwitch {
                 sw_numconsts: 1,
                 sw_consts_full: false,
-                sw_consts: vec![(0, RawLambda::const_(Constant::int(0)))],
+                sw_consts: vec![(
+                    crate::lambda::SwitchKey::Constructor(
+                        crate::types::VariantConstructorCase::Constant(crate::types::VariantTag {
+                            name: "A".to_string(),
+                            tag_type: None,
+                        }),
+                    ),
+                    RawLambda::const_(Constant::int(0)),
+                )],
                 sw_numblocks: 0,
                 sw_blocks_full: false,
                 sw_blocks: Vec::new(),
                 sw_failaction: None,
-                sw_names: Some(crate::lambda::SwitchNames {
-                    consts: vec![crate::lambda::SwitchTag::named("A")],
-                    blocks: Vec::new(),
-                }),
+                sw_dispatch: crate::lambda::SwitchDispatch::Variant(
+                    crate::types::VariantMatchingFacts {
+                        tag_name: None,
+                        block_types: vec![],
+                        literal_tags: vec![crate::types::VariantTagType::String(
+                            "A".to_string().clone(),
+                        )],
+                        has_null: false,
+                        has_undefined: false,
+                        has_other_literal: true,
+                    },
+                ),
             },
             Location::none(),
         ));
@@ -2553,14 +2550,20 @@ mod tests {
                 sw_numconsts: 3,
                 sw_consts_full: false,
                 sw_consts: vec![
-                    (0, RawLambda::const_(Constant::int(7))),
-                    (1, RawLambda::const_(Constant::int(9))),
+                    (
+                        crate::lambda::SwitchKey::Int(0),
+                        RawLambda::const_(Constant::int(7)),
+                    ),
+                    (
+                        crate::lambda::SwitchKey::Int(1),
+                        RawLambda::const_(Constant::int(9)),
+                    ),
                 ],
                 sw_numblocks: 0,
                 sw_blocks_full: false,
                 sw_blocks: Vec::new(),
                 sw_failaction: None,
-                sw_names: None,
+                sw_dispatch: crate::lambda::SwitchDispatch::Direct,
             },
             Location::none(),
         ));
@@ -2677,12 +2680,15 @@ mod tests {
             RawLambdaSwitch {
                 sw_numconsts: 1,
                 sw_consts_full: true,
-                sw_consts: vec![(0, RawLambda::LstaticRaise(7, Vec::new()))],
+                sw_consts: vec![(
+                    crate::lambda::SwitchKey::Int(0),
+                    RawLambda::LstaticRaise(7, Vec::new()),
+                )],
                 sw_numblocks: 0,
                 sw_blocks_full: false,
                 sw_blocks: Vec::new(),
                 sw_failaction: None,
-                sw_names: None,
+                sw_dispatch: crate::lambda::SwitchDispatch::Direct,
             },
             Location::none(),
         ));
@@ -2696,7 +2702,7 @@ mod tests {
         ));
         assert!(matches!(
             switch.sw_consts.as_slice(),
-            [(0, Lambda::LstaticRaise(7, args))] if args.is_empty()
+            [(crate::lambda::SwitchKey::Int(0), Lambda::LstaticRaise(7, args))] if args.is_empty()
         ));
     }
 
@@ -2712,7 +2718,7 @@ mod tests {
                 sw_blocks_full: false,
                 sw_blocks: Vec::new(),
                 sw_failaction: Some(Box::new(raw_exit_alias(7, 8))),
-                sw_names: None,
+                sw_dispatch: crate::lambda::SwitchDispatch::Direct,
             },
             Location::none(),
         ));
@@ -2739,20 +2745,46 @@ mod tests {
                 sw_numconsts: 2,
                 sw_consts_full: true,
                 sw_consts: vec![
-                    (0, RawLambda::const_(Constant::int(0))),
-                    (1, RawLambda::const_(Constant::int(1))),
+                    (
+                        crate::lambda::SwitchKey::Constructor(
+                            crate::types::VariantConstructorCase::Constant(
+                                crate::types::VariantTag {
+                                    name: "A".to_string(),
+                                    tag_type: None,
+                                },
+                            ),
+                        ),
+                        RawLambda::const_(Constant::int(0)),
+                    ),
+                    (
+                        crate::lambda::SwitchKey::Constructor(
+                            crate::types::VariantConstructorCase::Constant(
+                                crate::types::VariantTag {
+                                    name: "B".to_string(),
+                                    tag_type: None,
+                                },
+                            ),
+                        ),
+                        RawLambda::const_(Constant::int(1)),
+                    ),
                 ],
                 sw_numblocks: 0,
                 sw_blocks_full: false,
                 sw_blocks: Vec::new(),
                 sw_failaction: None,
-                sw_names: Some(crate::lambda::SwitchNames {
-                    consts: vec![
-                        crate::lambda::SwitchTag::named("A"),
-                        crate::lambda::SwitchTag::named("B"),
-                    ],
-                    blocks: Vec::new(),
-                }),
+                sw_dispatch: crate::lambda::SwitchDispatch::Variant(
+                    crate::types::VariantMatchingFacts {
+                        tag_name: None,
+                        block_types: vec![],
+                        literal_tags: vec![
+                            crate::types::VariantTagType::String("B".to_string().clone()),
+                            crate::types::VariantTagType::String("A".to_string().clone()),
+                        ],
+                        has_null: false,
+                        has_undefined: false,
+                        has_other_literal: true,
+                    },
+                ),
             },
             Location::none(),
         ));
@@ -2789,15 +2821,24 @@ mod tests {
                     sw_numconsts: 3,
                     sw_consts_full: false,
                     sw_consts: vec![
-                        (1, RawLambda::const_(Constant::Char(97))),
-                        (2, RawLambda::const_(Constant::Char(98))),
-                        (3, RawLambda::const_(Constant::Char(99))),
+                        (
+                            crate::lambda::SwitchKey::Int(1),
+                            RawLambda::const_(Constant::Char(97)),
+                        ),
+                        (
+                            crate::lambda::SwitchKey::Int(2),
+                            RawLambda::const_(Constant::Char(98)),
+                        ),
+                        (
+                            crate::lambda::SwitchKey::Int(3),
+                            RawLambda::const_(Constant::Char(99)),
+                        ),
                     ],
                     sw_numblocks: 0,
                     sw_blocks_full: false,
                     sw_blocks: Vec::new(),
                     sw_failaction: None,
-                    sw_names: None,
+                    sw_dispatch: crate::lambda::SwitchDispatch::Direct,
                 },
                 loc,
             )),
@@ -2827,7 +2868,6 @@ mod tests {
                     fake_y.clone(),
                     RawLambda::prim(
                         Primitive::Pmakeblock(
-                            0,
                             TagInfo::Tuple,
                             crate::lambda::lam_primitive::Mutable::Immutable,
                         ),
@@ -2839,7 +2879,6 @@ mod tests {
                     fake_z.clone(),
                     RawLambda::prim(
                         Primitive::Pmakeblock(
-                            0,
                             TagInfo::Tuple,
                             crate::lambda::lam_primitive::Mutable::Immutable,
                         ),
@@ -2871,25 +2910,17 @@ mod tests {
         let beg_param = Ident::create_local("p");
 
         let function_attr = FunctionAttribute::default();
-        let find_end_binding = Lambda::prim(
-            Primitive::PjsFnMake(1),
-            vec![Lambda::function_(
-                1,
-                vec![end_param],
-                Lambda::seq(Lambda::var(find_end.clone()), Lambda::var(find_beg.clone())),
-                function_attr.clone(),
-            )],
-            Location::none(),
+        let find_end_binding = Lambda::function_(
+            1,
+            vec![end_param],
+            Lambda::seq(Lambda::var(find_end.clone()), Lambda::var(find_beg.clone())),
+            function_attr.clone(),
         );
-        let find_beg_binding = Lambda::prim(
-            Primitive::PjsFnMake(1),
-            vec![Lambda::function_(
-                1,
-                vec![beg_param],
-                Lambda::var(find_beg.clone()),
-                function_attr,
-            )],
-            Location::none(),
+        let find_beg_binding = Lambda::function_(
+            1,
+            vec![beg_param],
+            Lambda::var(find_beg.clone()),
+            function_attr,
         );
 
         let lowered = rebuild_recursive_bindings(
@@ -3014,7 +3045,6 @@ mod tests {
         let module_id = Ident::create_local("A");
         let lowered = lower_to_lambda(RawLambda::prim(
             Primitive::Pmakeblock(
-                0,
                 TagInfo::Module(vec!["presentLight".to_string()]),
                 Mutable::Immutable,
             ),
@@ -3036,7 +3066,7 @@ mod tests {
         };
         assert!(matches!(
             block.primitive,
-            Primitive::Pmakeblock(0, TagInfo::Module(_), Mutable::Immutable)
+            Primitive::Pmakeblock(TagInfo::Module(_), Mutable::Immutable)
         ));
         let [Lambda::Lprim(field)] = block.args.as_slice() else {
             panic!("expected module field access to stay under makeblock");

@@ -44,7 +44,7 @@ let id_is_for_sure_true_in_boolean (tbl : Lam_stats.ident_tbl) id =
 let is_const_some (cst : Lam_constant.t) : bool =
   match cst with
   | Const_some _ -> true
-  | Const_block (_, (Lambda.Blk_some | Lambda.Blk_some_not_nested), _) -> true
+  | Const_block ((Lambda.Blk_some | Lambda.Blk_some_not_nested), _) -> true
   | _ -> false
 
 let simplify_alias (meta : Lam_stats.t) (lam : Lam.t) : Lam.t =
@@ -244,8 +244,8 @@ let simplify_alias (meta : Lam_stats.t) (lam : Lam.t) : Lam.t =
     (*   simpl (Lam_beta_reduce.propogate_beta_reduce meta params body args) *)
     | Lapply {ap_func = l1; ap_args = ll; ap_info; ap_transformed_jsx} ->
       Lam.apply (simpl l1) (Ext_list.map ll simpl) ap_info ~ap_transformed_jsx
-    | Lfunction {arity; params; body; attr} ->
-      Lam.function_ ~arity ~params ~body:(simpl body) ~attr
+    | Lfunction {arity; params; body; attr; loc} ->
+      Lam.function_ ~loc ~arity ~params ~body:(simpl body) ~attr
     | Lswitch
         ( l,
           {
@@ -254,7 +254,7 @@ let simplify_alias (meta : Lam_stats.t) (lam : Lam.t) : Lam.t =
             sw_blocks;
             sw_blocks_full;
             sw_consts_full;
-            sw_names;
+            sw_dispatch;
           } ) ->
       Lam.switch (simpl l)
         {
@@ -263,7 +263,7 @@ let simplify_alias (meta : Lam_stats.t) (lam : Lam.t) : Lam.t =
           sw_consts_full;
           sw_blocks_full;
           sw_failaction = Ext_option.map sw_failaction simpl;
-          sw_names;
+          sw_dispatch;
         }
     | Lstringswitch (l, sw, d) ->
       let l =

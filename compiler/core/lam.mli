@@ -32,14 +32,7 @@ type ap_info = {
 
 type ident = Ident.t
 
-type lambda_switch = {
-  sw_consts_full: bool;
-  sw_consts: (int * t) list;
-  sw_blocks_full: bool;
-  sw_blocks: (int * t) list;
-  sw_failaction: t option;
-  sw_names: Ast_untagged_variants.switch_names option;
-}
+type lambda_switch = t Lambda.switch
 
 and apply = private {
   ap_func: t;
@@ -53,6 +46,7 @@ and lfunction = {
   params: ident list;
   body: t;
   attr: Lambda.function_attribute;
+  loc: Location.t;
 }
 
 and prim_info = private {
@@ -91,8 +85,6 @@ and t = private
    we should use record for trivial debugger info
 *)
 
-val inner_map : t -> (t -> t) -> t
-
 val handle_bs_non_obj_ffi :
   ?transformed_jsx:bool ->
   External_arg_spec.params ->
@@ -116,6 +108,7 @@ val const : Lam_constant.t -> t
 val apply : ?ap_transformed_jsx:bool -> t -> t list -> ap_info -> t
 
 val function_ :
+  loc:Location.t ->
   attr:Lambda.function_attribute ->
   arity:int ->
   params:ident list ->

@@ -29,8 +29,8 @@ use super::decl::LabelDeclaration;
 use super::env::Env;
 use super::path::Path;
 use super::type_expr::{
-    AbbrevMemo, AbbrevMemoRef, Commutable, FieldKind, GENERIC_LEVEL, RowDesc, RowField, TypeDesc,
-    TypeExprRef, TypeExprRefSet,
+    AbbrevMemo, AbbrevMemoRef, FieldKind, GENERIC_LEVEL, RowDesc, RowField, TypeDesc, TypeExprRef,
+    TypeExprRefSet,
 };
 use super::variance::{Variance, VarianceFlag};
 use crate::ident::Ident;
@@ -476,13 +476,13 @@ fn is_instantiable(env: &Env, path: &Path) -> bool {
     }
 }
 
-fn lookup_type_decl_for_path(
-    ctx: &TypeContext,
-    env: &Env,
+fn lookup_type_decl_for_path<'a>(
+    ctx: &'a TypeContext,
+    env: &'a Env,
     path: &Path,
-) -> Option<super::decl::TypeDeclaration> {
+) -> Option<std::borrow::Cow<'a, super::decl::TypeDeclaration>> {
     if let Some(decl) = env.find_local_constraint(path) {
-        return Some(decl.clone());
+        return Some(std::borrow::Cow::Borrowed(decl));
     }
 
     // Try direct env lookup. For qualified paths, only accept exact
@@ -501,7 +501,7 @@ fn lookup_type_decl_for_path(
                 .is_some_and(|decl_path| decl_path.same(path)),
         };
         if exact_lookup {
-            return Some(decl.clone());
+            return Some(std::borrow::Cow::Borrowed(decl));
         }
     }
 
@@ -511,11 +511,11 @@ fn lookup_type_decl_for_path(
     // persistent structures. Prefer the env/component path here so lookups like
     // `Js.Types.tagged_t` do not eagerly read `Js.cmi`.
     if let Some(decl) = resolve_type_through_env(ctx, env, path, true) {
-        return Some(decl);
+        return Some(std::borrow::Cow::Owned(decl));
     }
 
     if let Some(decl) = resolve_type_through_modules(ctx, path) {
-        return Some(decl);
+        return Some(std::borrow::Cow::Owned(decl));
     }
 
     None
@@ -526,24 +526,7 @@ pub(crate) fn lookup_type_decl_for_path_pub(
     env: &Env,
     path: &Path,
 ) -> Option<super::decl::TypeDeclaration> {
-    lookup_type_decl_for_path(ctx, env, path)
-}
-
-fn is_newtype_path(ctx: &TypeContext, env: &Env, path: &Path) -> bool {
-    lookup_type_decl_for_path(ctx, env, path).is_some_and(|decl| {
-        decl.type_newtype_level.is_some()
-            && matches!(decl.type_kind, super::TypeKind::TypeAbstract)
-            && matches!(decl.type_private, super::PrivateFlag::Public)
-    })
-}
-
-fn find_newtype_level_for_path(ctx: &TypeContext, env: &Env, path: &Path) -> (i32, i32) {
-    lookup_type_decl_for_path(ctx, env, path)
-        .and_then(|decl| decl.type_newtype_level)
-        .unwrap_or_else(|| {
-            let lev = path_binding_time(path);
-            (lev, lev)
-        })
+    lookup_type_decl_for_path(ctx, env, path).map(std::borrow::Cow::into_owned)
 }
 
 fn get_level(ctx: &TypeContext, env: &Env, path: &Path) -> i32 {
@@ -671,7 +654,7 @@ fn local_non_recursive_abbrev(
                 }
 
                 let params = lookup_type_decl_for_path(ctx, env, &path)
-                    .map(|decl| decl.type_params)
+                    .map(|decl| decl.type_params.clone())
                     .unwrap_or_else(|| args.clone());
                 for (param, arg) in params.iter().zip(args.iter()) {
                     let strict = strict || !btype::is_tvar(ctx, ctx.repr(*param));
@@ -741,7 +724,7 @@ fn add_gadt_equation(
         type_loc: crate::location::Location::none(),
         type_attributes: vec![],
         type_immediate: false,
-        type_unboxed: super::UnboxedStatus::FALSE_FALSE,
+        type_representation: super::TypeRepresentation::Boxed,
         type_inlined_types: vec![],
         type_path: None,
     };
@@ -769,7 +752,7 @@ fn reified_type_decl(newtype_level: i32) -> super::TypeDeclaration {
         type_loc: crate::location::Location::none(),
         type_attributes: vec![],
         type_immediate: false,
-        type_unboxed: super::UnboxedStatus::FALSE_FALSE,
+        type_representation: super::TypeRepresentation::Boxed,
         type_inlined_types: vec![],
         type_path: None,
     }
@@ -1136,7 +1119,7 @@ fn update_level_expand_with_lookup_capture<'a>(
                 // `level < get_level env p` after the outer `ty.level > level`
                 // check. Generic-level constructor nodes are still eligible
                 // for abbreviation expansion during `moregeneral`.
-                let should_try_expand = current != GENERIC_LEVEL && level < path_level;
+                let should_try_expand = level < path_level;
                 drop(desc);
                 // OCaml compiler/ml/ctype.ml:742-768 does not special-case
                 // local Pident constructors here. It attempts abbreviation
@@ -1767,6 +1750,7 @@ pub(crate) fn resolve_type_item_through_modules<'a>(
                 // Cache the target type in the path store
                 let path_name = path_name.clone().unwrap_or_else(|| path.name());
                 ctx.register_type_decl_by_path(&path_name, qualified_decl.clone());
+                ctx.register_type_decl_by_exact_path(path.clone(), qualified_decl.clone());
                 ctx.register_type_item_by_path(&path_name, id.clone(), qualified_decl.clone());
                 result = Some((id.clone(), qualified_decl));
             }
@@ -2965,23 +2949,15 @@ fn try_expand_head_with_mode<'a>(
                         // compiler/ml/ctype.ml:1395-1439).
                         true
                     }
-                    Path::Pdot(_parent, _type_name, _) => {
-                        // OCaml `Env.find_type` resolves a qualified path
-                        // through the parent module; it does not fall back to
-                        // an unrelated leaf-name binding from the current env
-                        // (compiler/ml/env.ml:784-823, compiler/ml/ctype.ml:1395-1439).
-                        // Rust `Env::lookup_type` still has a name fallback, so
-                        // only trust this fast path when the returned declaration
-                        // carries the queried qualified path. The module-component
-                        // resolver below handles path lookup for declarations with
-                        // no stored `type_path`.
-                        env_decl.type_path.as_ref().is_some_and(|decl_path| {
-                            // OCaml compiler/ml/env.ml:800-813 `Env.find_type`
-                            // reaches a qualified declaration through the
-                            // parent component table; it does not accept an
-                            // unrelated declaration with the same printed path.
-                            decl_path.same(&path)
-                        })
+                    Path::Pdot(_, _, _) => {
+                        // OCaml `Env.find_type` resolves every qualified path
+                        // through `find_module_descr` and the parent component
+                        // table (compiler/ml/env.ml:781-813). Even an exact
+                        // declaration cached in Rust's flat Env must take that
+                        // route: a `Papply` parent forces the functor component
+                        // and result substitutions in env.ml:1595-1602 and
+                        // env.ml:1699-1710 before exposing the type.
+                        false
                     }
                     Path::Papply(_, _) => false,
                 };
@@ -3159,8 +3135,12 @@ fn try_expand_head_with_mode<'a>(
             // For non-persistent heads, avoid global/path-store fallbacks that can
             // over-expand local aliases (e.g. LayerStyleID.ID.t -> string) and
             // diverge from OCaml's identity/linking behavior.
-            let allow_global_fallbacks =
-                path_root_is_persistent(&path) && matches!(mode, ExpandHeadMode::General);
+            // OCaml expand_abbrev_gen resolves qualified constructors through
+            // Env.find_type_expansion and then Env.normalize_path. Rust's
+            // global declaration store is not an Env lookup boundary and must
+            // not bypass normalize_path's persistent-module force.
+            let allow_global_fallbacks = matches!(&path, Path::Pident(id) if id.is_persistent())
+                && matches!(mode, ExpandHeadMode::General);
 
             // 2. Try stamp-based global store (for CMI types with non-zero stamps)
             if allow_global_fallbacks && let Some(stamp) = stamp {
@@ -3357,35 +3337,35 @@ fn primitive_coercion_path(path: &Path) -> bool {
 }
 
 fn can_try_coerce_variant_to_primitive(path: &Path, decl: &crate::types::TypeDeclaration) -> bool {
-    matches!(decl.type_kind, crate::types::TypeKind::TypeVariant(_))
+    matches!(decl.type_kind, crate::types::TypeKind::TypeVariant(_, _))
         && decl.type_params.is_empty()
         && !path.same(&crate::types::predef::path_bool())
 }
 
-fn variant_coercion_has_unboxed_attr(decl: &crate::types::TypeDeclaration) -> bool {
-    decl.type_attributes
-        .iter()
-        .any(|attr| attr.attr_name.txt == "unboxed")
-}
-
-fn variant_coercion_tag_name(decl: &crate::types::TypeDeclaration) -> Option<String> {
-    decl.type_attributes.iter().find_map(|attr| {
-        if attr.attr_name.txt == "tag"
-            && let crate::types::decl::AttributePayload::Str(value) = &attr.attr_payload
-        {
-            Some(value.clone())
-        } else {
-            None
-        }
-    })
+fn variant_runtime_configuration(
+    ctx: &TypeContext,
+    decl: &crate::types::TypeDeclaration,
+) -> crate::types::VariantConfiguration {
+    let mut configuration = decl
+        .variant_layout_ref()
+        .map(|layout_ref| ctx.variant_layout(layout_ref).configuration())
+        .unwrap_or(crate::types::VariantConfiguration {
+            unboxed: false,
+            tag_name: None,
+        });
+    configuration.unboxed |= decl.type_representation == crate::types::TypeRepresentation::Unboxed;
+    configuration
 }
 
 fn variant_configuration_issue(
+    ctx: &TypeContext,
     decl1: &crate::types::TypeDeclaration,
     decl2: &crate::types::TypeDeclaration,
 ) -> Option<VariantConfigurationIssue> {
-    let left_unboxed = variant_coercion_has_unboxed_attr(decl1);
-    let right_unboxed = variant_coercion_has_unboxed_attr(decl2);
+    let left = variant_runtime_configuration(ctx, decl1);
+    let right = variant_runtime_configuration(ctx, decl2);
+    let left_unboxed = left.unboxed;
+    let right_unboxed = right.unboxed;
     if left_unboxed != right_unboxed {
         return Some(VariantConfigurationIssue::UnboxedConfigNotMatching {
             left_unboxed,
@@ -3393,8 +3373,8 @@ fn variant_configuration_issue(
         });
     }
 
-    let left_tag = variant_coercion_tag_name(decl1);
-    let right_tag = variant_coercion_tag_name(decl2);
+    let left_tag = left.tag_name;
+    let right_tag = right.tag_name;
     if left_tag != right_tag {
         return Some(VariantConfigurationIssue::TagNameNotMatching {
             left_tag,
@@ -3409,7 +3389,7 @@ fn subtype_type_kind(kind: &crate::types::TypeKind) -> SubtypeTypeKind {
     match kind {
         crate::types::TypeKind::TypeAbstract => SubtypeTypeKind::Abstract,
         crate::types::TypeKind::TypeRecord(_, _) => SubtypeTypeKind::Record,
-        crate::types::TypeKind::TypeVariant(_) => SubtypeTypeKind::Variant,
+        crate::types::TypeKind::TypeVariant(_, _) => SubtypeTypeKind::Variant,
         crate::types::TypeKind::TypeOpen => SubtypeTypeKind::Open,
     }
 }
@@ -3432,50 +3412,30 @@ fn type_expr_path_same(ctx: &TypeContext, ty: TypeExprRef, target_path: &Path) -
 }
 
 fn variant_constructor_as_payload(
-    attrs: &[crate::types::decl::Attribute],
+    tag: &Option<crate::types::VariantTagType>,
 ) -> Option<VariantConstructorAsPayload> {
-    attrs.iter().find_map(|attr| {
-        if attr.attr_name.txt != "as" {
-            return None;
-        }
-        match &attr.attr_payload {
-            crate::types::decl::AttributePayload::Str(_) => {
-                Some(VariantConstructorAsPayload::String)
-            }
-            crate::types::decl::AttributePayload::Int(_)
-            | crate::types::decl::AttributePayload::IntLiteral(_) => {
-                Some(VariantConstructorAsPayload::Int)
-            }
-            crate::types::decl::AttributePayload::Float(_) => {
-                Some(VariantConstructorAsPayload::Float)
-            }
-            crate::types::decl::AttributePayload::BigInt(_) => {
-                Some(VariantConstructorAsPayload::BigInt)
-            }
-            crate::types::decl::AttributePayload::Bool(_) => {
-                Some(VariantConstructorAsPayload::Bool)
-            }
-            crate::types::decl::AttributePayload::Ident(value) if value == "null" => {
-                Some(VariantConstructorAsPayload::Null)
-            }
-            crate::types::decl::AttributePayload::Ident(value) if value == "undefined" => {
-                Some(VariantConstructorAsPayload::Undefined)
-            }
-            _ => None,
+    tag.as_ref().map(|tag| match tag {
+        crate::types::VariantTagType::String(_) => VariantConstructorAsPayload::String,
+        crate::types::VariantTagType::Int(_) => VariantConstructorAsPayload::Int,
+        crate::types::VariantTagType::Float(_) => VariantConstructorAsPayload::Float,
+        crate::types::VariantTagType::BigInt(_) => VariantConstructorAsPayload::BigInt,
+        crate::types::VariantTagType::Bool(_) => VariantConstructorAsPayload::Bool,
+        crate::types::VariantTagType::Null => VariantConstructorAsPayload::Null,
+        crate::types::VariantTagType::Undefined => VariantConstructorAsPayload::Undefined,
+        crate::types::VariantTagType::Untagged(_) => {
+            unreachable!("constructor tags are never untagged")
         }
     })
 }
 
-fn variant_constructor_as_string_payload(attrs: &[crate::types::decl::Attribute]) -> Option<&str> {
-    attrs.iter().find_map(|attr| {
-        if attr.attr_name.txt == "as"
-            && let crate::types::decl::AttributePayload::Str(value) = &attr.attr_payload
-        {
-            Some(value.as_str())
-        } else {
-            None
-        }
-    })
+fn variant_constructor_tag(
+    layout: &crate::types::VariantLayout,
+    position: usize,
+) -> &Option<crate::types::VariantTagType> {
+    match &layout.constructors[position] {
+        crate::types::VariantConstructorCase::Constant(tag) => &tag.tag_type,
+        crate::types::VariantConstructorCase::Block(block) => &block.runtime.tag.tag_type,
+    }
 }
 
 fn variant_constructor_covers_primitive(
@@ -3491,27 +3451,17 @@ fn variant_constructor_covers_primitive(
     }
 }
 
-fn variant_representation_matches(
-    left_attrs: &[crate::types::decl::Attribute],
-    right_attrs: &[crate::types::decl::Attribute],
-) -> bool {
-    // OCaml compiler/ml/variant_coercion.ml:152-160 compares the processed
-    // constructor tag type, not the whole attribute list. Distinct source
-    // locations on otherwise equal `@as` attributes must not make variant
-    // subtyping fail.
-    variant_constructor_as_payload(left_attrs) == variant_constructor_as_payload(right_attrs)
-}
-
 fn variant_constructor_matches_polyvariant_label(
     ctx: &TypeContext,
     constructor: &crate::types::decl::ConstructorDeclaration,
+    tag: &Option<crate::types::VariantTagType>,
     label: &str,
     unboxed: bool,
 ) -> bool {
-    if let Some(as_string) = variant_constructor_as_string_payload(&constructor.cd_attributes) {
+    if let Some(crate::types::VariantTagType::String(as_string)) = tag {
         return as_string == label;
     }
-    if variant_constructor_as_payload(&constructor.cd_attributes).is_some() {
+    if tag.is_some() {
         return false;
     }
     if unboxed
@@ -3528,19 +3478,26 @@ fn can_coerce_polyvariant_to_variant(
     ctx: &TypeContext,
     row: &RowDesc,
     constructors: &[crate::types::decl::ConstructorDeclaration],
-    type_attributes: &[crate::types::decl::Attribute],
+    layout: &crate::types::VariantLayout,
+    unboxed: bool,
 ) -> bool {
     // OCaml compiler/ml/variant_coercion.ml:246-286 accepts only closed
     // payload-free polymorphic variant rows, then compares each row label with
     // the target variant constructor runtime representation.
-    let unboxed = type_attributes
-        .iter()
-        .any(|attr| attr.attr_name.txt == "unboxed");
     row.row_fields.iter().all(|(label, field)| {
         matches!(btype::row_field_repr(ctx, field), RowField::Rpresent(None))
-            && constructors.iter().any(|constructor| {
-                variant_constructor_matches_polyvariant_label(ctx, constructor, label, unboxed)
-            })
+            && constructors
+                .iter()
+                .enumerate()
+                .any(|(position, constructor)| {
+                    variant_constructor_matches_polyvariant_label(
+                        ctx,
+                        constructor,
+                        variant_constructor_tag(layout, position),
+                        label,
+                        unboxed,
+                    )
+                })
     })
 }
 
@@ -3592,12 +3549,14 @@ fn variant_row_is_subtype_of_primitive(
 fn variant_runtime_representation_issues(
     ctx: &TypeContext,
     constructors: &[crate::types::decl::ConstructorDeclaration],
+    layout: &crate::types::VariantLayout,
     target_path: &Path,
     unboxed: bool,
 ) -> Vec<VariantRuntimeRepresentationIssue> {
     constructors
         .iter()
-        .filter_map(|constructor| {
+        .enumerate()
+        .filter_map(|(position, constructor)| {
             let constructor_name = constructor.cd_id.name().to_string();
             match &constructor.cd_args {
                 crate::types::decl::ConstructorArguments::CstrTuple(args)
@@ -3620,7 +3579,8 @@ fn variant_runtime_representation_issues(
                     }
                 }
                 crate::types::decl::ConstructorArguments::CstrTuple(args) if args.is_empty() => {
-                    let as_payload = variant_constructor_as_payload(&constructor.cd_attributes);
+                    let as_payload =
+                        variant_constructor_as_payload(variant_constructor_tag(layout, position));
                     let matches_as_payload = match as_payload {
                         None | Some(VariantConstructorAsPayload::String) => {
                             target_path.same(&crate::types::predef::path_string())
@@ -3703,19 +3663,24 @@ fn subtype_rec(
         }
         (
             TypeDesc::Tarrow {
-                arg: arg1,
+                args: args1,
                 ret: ret1,
-                ..
             },
             TypeDesc::Tarrow {
-                arg: arg2,
+                args: args2,
                 ret: ret2,
-                ..
             },
-        ) if arg1.lbl.same_label(&arg2.lbl) => {
-            let mut arg_trace = trace.to_vec();
-            arg_trace.push((arg2.typ, arg1.typ));
-            subtype_rec(ctx, env, visited, &arg_trace, arg2.typ, arg1.typ)?;
+        ) if args1.len() == args2.len()
+            && args1
+                .iter()
+                .zip(args2)
+                .all(|(a1, a2)| a1.lbl.same_label(&a2.lbl)) =>
+        {
+            for (arg1, arg2) in args1.iter().zip(args2) {
+                let mut arg_trace = trace.to_vec();
+                arg_trace.push((arg2.typ, arg1.typ));
+                subtype_rec(ctx, env, visited, &arg_trace, arg2.typ, arg1.typ)?;
+            }
             let mut ret_trace = trace.to_vec();
             ret_trace.push((*ret1, *ret2));
             subtype_rec(ctx, env, visited, &ret_trace, *ret1, *ret2)
@@ -3791,9 +3756,10 @@ fn subtype_rec(
                 && primitive_coercion_path(path1)
                 && let Some(decl2) = lookup_type_decl_for_path(ctx, env, path2)
                 && can_try_coerce_variant_to_primitive(path2, &decl2)
-                && let crate::types::TypeKind::TypeVariant(constructors) = &decl2.type_kind
+                && let crate::types::TypeKind::TypeVariant(constructors, layout_ref) =
+                    &decl2.type_kind
             {
-                if !variant_coercion_has_unboxed_attr(&decl2) {
+                if !variant_runtime_configuration(ctx, &decl2).unboxed {
                     return Err(subtype_error_with_context(
                         trace,
                         SubtypeContext::CoercionTargetVariantNotUnboxed {
@@ -3821,13 +3787,16 @@ fn subtype_rec(
                 && primitive_coercion_path(path2)
                 && let Some(decl1) = lookup_type_decl_for_path(ctx, env, path1)
                 && can_try_coerce_variant_to_primitive(path1, &decl1)
-                && let crate::types::TypeKind::TypeVariant(constructors) = &decl1.type_kind
+                && let crate::types::TypeKind::TypeVariant(constructors, layout_ref) =
+                    &decl1.type_kind
             {
+                let layout = ctx.variant_layout(*layout_ref);
                 let issues = variant_runtime_representation_issues(
                     ctx,
                     constructors,
+                    &layout,
                     path2,
-                    variant_coercion_has_unboxed_attr(&decl1),
+                    variant_runtime_configuration(ctx, &decl1).unboxed,
                 );
                 if issues.is_empty() {
                     return Ok(());
@@ -3887,12 +3856,14 @@ fn subtype_rec(
                 }
                 if row.row_closed
                     && let Some(decl2) = lookup_type_decl_for_path(ctx, env, path)
-                    && let crate::types::TypeKind::TypeVariant(constructors) = &decl2.type_kind
+                    && let crate::types::TypeKind::TypeVariant(constructors, layout_ref) =
+                        &decl2.type_kind
                     && can_coerce_polyvariant_to_variant(
                         ctx,
                         &row,
                         constructors,
-                        &decl2.type_attributes,
+                        &ctx.variant_layout(*layout_ref),
+                        variant_runtime_configuration(ctx, &decl2).unboxed,
                     )
                 {
                     // OCaml compiler/ml/ctype.ml:3974-3988 handles closed
@@ -4089,8 +4060,10 @@ fn subtype_constructor_arguments(
     trace: &[(TypeExprRef, TypeExprRef)],
     left: &crate::types::decl::ConstructorDeclaration,
     right: &crate::types::decl::ConstructorDeclaration,
+    left_tag: &Option<crate::types::VariantTagType>,
+    right_tag: &Option<crate::types::VariantTagType>,
 ) -> TypeResult<()> {
-    if !variant_representation_matches(&left.cd_attributes, &right.cd_attributes) {
+    if left_tag != right_tag {
         return Err(subtype_error(trace));
     }
     match (&left.cd_args, &right.cd_args) {
@@ -4131,10 +4104,13 @@ fn subtype_variant_constructors(
     path2: &Path,
     cstrs1: &[crate::types::decl::ConstructorDeclaration],
     cstrs2: &[crate::types::decl::ConstructorDeclaration],
+    layout1: &crate::types::VariantLayout,
+    layout2: &crate::types::VariantLayout,
 ) -> TypeResult<()> {
     let cstrs2_by_name = cstrs2
         .iter()
-        .map(|cstr| (cstr.cd_id.name().to_string(), cstr))
+        .enumerate()
+        .map(|(position, cstr)| (cstr.cd_id.name().to_string(), (position, cstr)))
         .collect::<HashMap<_, _>>();
     // OCaml compiler/ml/ctype.ml:3805-3827 only attaches
     // Incompatible_constructor_count when the source variant has more
@@ -4161,11 +4137,22 @@ fn subtype_variant_constructors(
     // OCaml compiler/ml/ctype.ml:3828-3904 builds a constructor map from the
     // target variant, then checks each source constructor's representation and
     // payload fields with subtype_list/Record_coercion.check_record_fields.
-    for left in cstrs1 {
-        let Some(right) = cstrs2_by_name.get(left.cd_id.name()) else {
+    for (left_position, left) in cstrs1.iter().enumerate() {
+        let Some((right_position, right)) = cstrs2_by_name.get(left.cd_id.name()) else {
             return Err(subtype_error(trace));
         };
-        if subtype_constructor_arguments(ctx, env, visited, trace, left, right).is_err() {
+        if subtype_constructor_arguments(
+            ctx,
+            env,
+            visited,
+            trace,
+            left,
+            right,
+            variant_constructor_tag(layout1, left_position),
+            variant_constructor_tag(layout2, *right_position),
+        )
+        .is_err()
+        {
             // OCaml compiler/ml/ctype.ml:3863-3905 treats constructor payload
             // subtyping as a boolean while checking variant-to-variant
             // coercion, then records the root variant subtype failure with no
@@ -4196,8 +4183,11 @@ fn subtype_concrete_type_declarations(
         } else {
             Err(subtype_error(trace))
         }),
-        (super::TypeKind::TypeVariant(cstrs1), super::TypeKind::TypeVariant(cstrs2)) => Some(
-            if let Some(issue) = variant_configuration_issue(&decl1, &decl2) {
+        (
+            super::TypeKind::TypeVariant(cstrs1, layout_ref1),
+            super::TypeKind::TypeVariant(cstrs2, layout_ref2),
+        ) => Some(
+            if let Some(issue) = variant_configuration_issue(ctx, &decl1, &decl2) {
                 Err(subtype_error_with_context(
                     trace,
                     SubtypeContext::VariantConfigurationsMismatch {
@@ -4207,7 +4197,18 @@ fn subtype_concrete_type_declarations(
                     },
                 ))
             } else {
-                subtype_variant_constructors(ctx, env, visited, trace, path1, path2, cstrs1, cstrs2)
+                subtype_variant_constructors(
+                    ctx,
+                    env,
+                    visited,
+                    trace,
+                    path1,
+                    path2,
+                    cstrs1,
+                    cstrs2,
+                    &ctx.variant_layout(*layout_ref1),
+                    &ctx.variant_layout(*layout_ref2),
+                )
             },
         ),
         (super::TypeKind::TypeAbstract, super::TypeKind::TypeAbstract)
@@ -4580,17 +4581,24 @@ fn subst_type(
             }
         }
         TypeDesc::Tarrow {
-            arg, ret, arity, ..
+            args: arrow_args,
+            ret,
         } => {
-            let new_arg_typ = subst_type(ctx, params, args, arg.typ);
+            let new_args = arrow_args
+                .iter()
+                .map(|arg| {
+                    super::TypeArg::new(arg.lbl.clone(), subst_type(ctx, params, args, arg.typ))
+                })
+                .collect::<Vec<_>>();
             let new_ret = subst_type(ctx, params, args, *ret);
-            if new_arg_typ == arg.typ && new_ret == *ret {
+            if new_args.iter().zip(arrow_args).all(|(a, b)| a.typ == b.typ) && new_ret == *ret {
                 ty
             } else {
-                let lbl = arg.lbl.clone();
-                let arity = *arity;
                 drop(desc);
-                ctx.new_arrow(lbl, new_arg_typ, new_ret, arity)
+                ctx.new_type(TypeDesc::Tarrow {
+                    args: new_args,
+                    ret: new_ret,
+                })
             }
         }
         TypeDesc::Ttuple(tl) => {
@@ -5245,92 +5253,43 @@ fn unify_types<'a>(
             Ok(())
         }
 
-        // Arrow types - propagate arity during unification
+        // compiler/ml/ctype.ml:2204-2218: n-ary arrows unify only when
+        // parameter counts agree and labels are pairwise compatible.
         (
             TypeDesc::Tarrow {
-                arg: arg1,
+                args: args1,
                 ret: ret1,
-                commutable: c1,
-                arity: a1,
             },
             TypeDesc::Tarrow {
-                arg: arg2,
+                args: args2,
                 ret: ret2,
-                commutable: c2,
-                arity: a2,
             },
-        ) => {
-            // Check arities: if both have explicit arities, they must match
-            // (matches OCaml's `when a1 = a2` guard behavior)
-            if a1.is_some() && a2.is_some() && a1 != a2 {
-                drop(desc1);
-                drop(desc2);
-                return Err(TypeError::Unify(vec![(t1, t2)]));
-            }
-
+        ) if args1.len() == args2.len()
+            && args1.iter().zip(args2).all(|(a1, a2)| {
+                a1.lbl.same_label(&a2.lbl)
+                    || (state.mode == UnifyMode::Pattern
+                        && !(a1.lbl.is_optional() || a2.lbl.is_optional()))
+            }) =>
+        {
             let original_desc1 = (*desc1).clone();
-            let arg1_typ = arg1.typ;
+            let args1 = args1.clone();
+            let args2 = args2.clone();
             let ret1 = *ret1;
-            let commutable1 = c1.clone();
-            let arg2_typ = arg2.typ;
             let ret2 = *ret2;
-            let commutable2 = c2.clone();
-            // Propagate arity: if one side has arity and the other doesn't,
-            // we need to update the surviving side (t2) to carry the arity.
-            let need_arity_update = a1.is_some() && a2.is_none();
-            let arity_to_set = *a1;
             drop(desc1);
             drop(desc2);
 
-            // OCaml links t1'→t2 BEFORE recursing (unify3 line 2341).
-            // This affects cycle detection: child unifications see t1 already resolved to t2.
+            // OCaml links t1'→t2 before recursively unifying children.
             link_type(ctx, t1, t2);
-
             let result = (|| {
-                // Unify argument types
-                unify(ctx, state, arg1_typ, arg2_typ)?;
-                // Unify return types
-                unify(ctx, state, ret1, ret2)?;
-
-                match (
-                    ctx.commutable_repr(&commutable1),
-                    ctx.commutable_repr(&commutable2),
-                ) {
-                    (Commutable::Clink(link), c2) => ctx.set_commutable(link, c2),
-                    (c1, Commutable::Clink(link)) => ctx.set_commutable(link, c1),
-                    _ => {}
+                for (arg1, arg2) in args1.iter().zip(&args2) {
+                    unify(ctx, state, arg1.typ, arg2.typ)?;
                 }
-
-                // Propagate arity from t1 to t2 if t2 lacks it
-                if need_arity_update {
-                    let desc = ctx.get_desc(t2);
-                    if let TypeDesc::Tarrow {
-                        arg,
-                        ret,
-                        commutable,
-                        ..
-                    } = &*desc
-                    {
-                        let new_desc = TypeDesc::Tarrow {
-                            arg: arg.clone(),
-                            ret: *ret,
-                            commutable: commutable.clone(),
-                            arity: arity_to_set,
-                        };
-                        drop(desc);
-                        ctx.set_desc(t2, new_desc);
-                    } else {
-                        drop(desc);
-                    }
-                }
-
-                Ok(())
+                unify(ctx, state, ret1, ret2)
             })();
-
             if matches!(result, Err(TypeError::Unify(_))) {
                 ctx.set_desc(t1, original_desc1);
             }
-
             result
         }
 
@@ -5473,33 +5432,9 @@ fn unify_types<'a>(
                 } else {
                     None
                 };
-                let are_both_nullary = args1.is_empty() && args2.is_empty();
-                let path1_for_newtype = path1.clone();
-                let path2_for_newtype = path2.clone();
 
                 drop(desc1);
                 drop(desc2);
-
-                // OCaml ctype.ml: when both sides are local newtypes, prefer
-                // one-step expansion by newtype level before general unify2.
-                if false && are_both_nullary {
-                    if let Some(env) = state.env() {
-                        if env.has_local_constraints()
-                            && is_newtype_path(ctx, env, &path1_for_newtype)
-                            && is_newtype_path(ctx, env, &path2_for_newtype)
-                        {
-                            let lev1 = find_newtype_level_for_path(ctx, env, &path1_for_newtype);
-                            let lev2 = find_newtype_level_for_path(ctx, env, &path2_for_newtype);
-                            if lev1 < lev2 {
-                                if let Some(expanded_t2) = expand_head_once(ctx, env, t2) {
-                                    return unify(ctx, state, t1, expanded_t2);
-                                }
-                            } else if let Some(expanded_t1) = expand_head_once(ctx, env, t1) {
-                                return unify(ctx, state, expanded_t1, t2);
-                            }
-                        }
-                    }
-                }
 
                 // GADT equation handling for Tconstr with different paths
                 if state.generate_equations {
@@ -7113,23 +7048,28 @@ fn moregen(
         // participate in the inclusion check.
         (
             TypeDesc::Tarrow {
-                arg: arg1,
+                args: args1,
                 ret: ret1,
-                ..
             },
             TypeDesc::Tarrow {
-                arg: arg2,
+                args: args2,
                 ret: ret2,
-                ..
             },
-        ) if arg1.lbl.same_label(&arg2.lbl) => {
-            let arg1 = arg1.typ;
-            let arg2 = arg2.typ;
+        ) if args1.len() == args2.len()
+            && args1
+                .iter()
+                .zip(args2)
+                .all(|(a1, a2)| a1.lbl.same_label(&a2.lbl)) =>
+        {
+            let args1 = args1.clone();
+            let args2 = args2.clone();
             let ret1 = *ret1;
             let ret2 = *ret2;
             drop(desc1);
             drop(desc2);
-            moregen(ctx, inst_nongen, type_pairs, env, arg1, arg2)?;
+            for (arg1, arg2) in args1.iter().zip(&args2) {
+                moregen(ctx, inst_nongen, type_pairs, env, arg1.typ, arg2.typ)?;
+            }
             moregen(ctx, inst_nongen, type_pairs, env, ret1, ret2)
         }
         (TypeDesc::Ttuple(left), TypeDesc::Ttuple(right)) => {
@@ -7456,7 +7396,7 @@ fn lower_nongen_type_decl_rec(
                 lower_nongen_type_expr_rec(ctx, nglev, label.ld_type, seen);
             }
         }
-        TypeKind::TypeVariant(constructors) => {
+        TypeKind::TypeVariant(constructors, _) => {
             for cstr in constructors {
                 match &cstr.cd_args {
                     ConstructorArguments::CstrTuple(args) => {
@@ -7759,9 +7699,17 @@ fn generalize_expansive_rec(
     }
 
     enum Action {
-        Constr { path: Path, args: Vec<TypeExprRef> },
-        Package { args: Vec<TypeExprRef> },
-        Arrow { arg: TypeExprRef, ret: TypeExprRef },
+        Constr {
+            path: Path,
+            args: Vec<TypeExprRef>,
+        },
+        Package {
+            args: Vec<TypeExprRef>,
+        },
+        Arrow {
+            args: Vec<TypeExprRef>,
+            ret: TypeExprRef,
+        },
         Recurse(Vec<TypeExprRef>),
     }
 
@@ -7773,8 +7721,8 @@ fn generalize_expansive_rec(
                 args: args.clone(),
             },
             TypeDesc::Tpackage { args, .. } => Action::Package { args: args.clone() },
-            TypeDesc::Tarrow { arg, ret, .. } => Action::Arrow {
-                arg: arg.typ,
+            TypeDesc::Tarrow { args, ret } => Action::Arrow {
+                args: args.iter().map(|arg| arg.typ).collect(),
                 ret: *ret,
             },
             _ => {
@@ -7807,8 +7755,10 @@ fn generalize_expansive_rec(
                 generalize_structure(ctx, var_level, arg);
             }
         }
-        Action::Arrow { arg, ret } => {
-            generalize_structure(ctx, var_level, arg);
+        Action::Arrow { args, ret } => {
+            for arg in args {
+                generalize_structure(ctx, var_level, arg);
+            }
             generalize_expansive_rec(ctx, env, var_level, visited, ret);
         }
         Action::Recurse(children) => {
@@ -7896,7 +7846,7 @@ pub fn compute_variance_decl(
                 ));
             }
         }
-        super::TypeKind::TypeVariant(constructors) => {
+        super::TypeKind::TypeVariant(constructors, _) => {
             for cstr in constructors {
                 // Skip GADT constructors (cd_res != None) — their variance is more complex
                 if cstr.cd_res.is_some() {
@@ -8081,23 +8031,28 @@ fn equal_type_exprs_without_renaming_rec(
     match (&*left_desc, &*right_desc) {
         (
             TypeDesc::Tarrow {
-                arg: left_arg,
+                args: left_args,
                 ret: left_ret,
-                ..
             },
             TypeDesc::Tarrow {
-                arg: right_arg,
+                args: right_args,
                 ret: right_ret,
-                ..
             },
-        ) if left_arg.lbl.same_label(&right_arg.lbl) => {
-            let left_arg = left_arg.typ;
-            let right_arg = right_arg.typ;
+        ) if left_args.len() == right_args.len()
+            && left_args
+                .iter()
+                .zip(right_args)
+                .all(|(a, b)| a.lbl.same_label(&b.lbl)) =>
+        {
+            let left_args = left_args.clone();
+            let right_args = right_args.clone();
             let left_ret = *left_ret;
             let right_ret = *right_ret;
             drop(left_desc);
             drop(right_desc);
-            equal_type_exprs_without_renaming_rec(ctx, env, type_pairs, left_arg, right_arg)?;
+            for (left, right) in left_args.iter().zip(&right_args) {
+                equal_type_exprs_without_renaming_rec(ctx, env, type_pairs, left.typ, right.typ)?;
+            }
             equal_type_exprs_without_renaming_rec(ctx, env, type_pairs, left_ret, right_ret)
         }
         (TypeDesc::Ttuple(left_items), TypeDesc::Ttuple(right_items)) => {
@@ -8433,18 +8388,20 @@ fn compute_variance_rec(
 
     let desc = ctx.get_desc(ty);
     match &*desc {
-        TypeDesc::Tarrow { arg, ret, .. } => {
+        TypeDesc::Tarrow { args, ret } => {
             let v = vari.conjugate();
             let v1 = if v.mem(VarianceFlag::MayPos) || v.mem(VarianceFlag::MayNeg) {
                 v.set(VarianceFlag::MayWeak, true)
             } else {
                 v
             };
-            let arg_ty = arg.typ;
-            let ret_ty = *ret;
+            let args = args.clone();
+            let ret = *ret;
             drop(desc);
-            compute_variance_rec(ctx, env, visited, v1, arg_ty, depth + 1);
-            compute_variance_rec(ctx, env, visited, vari, ret_ty, depth + 1);
+            for arg in args {
+                compute_variance_rec(ctx, env, visited, v1, arg.typ, depth + 1);
+            }
+            compute_variance_rec(ctx, env, visited, vari, ret, depth + 1);
         }
         TypeDesc::Ttuple(tl) => {
             let tl = tl.clone();
@@ -8571,13 +8528,13 @@ pub fn lower_args<'a>(ctx: &'a TypeContext, env: &Env, ty: TypeExprRef) -> (Vec<
         }
         let arrow = {
             let desc = ctx.get_desc(expanded);
-            if let TypeDesc::Tarrow { arg, ret, .. } = &*desc {
-                Some((arg.typ, *ret))
+            if let TypeDesc::Tarrow { args, ret } = &*desc {
+                Some((args.iter().map(|arg| arg.typ).collect::<Vec<_>>(), *ret))
             } else {
                 None
             }
         };
-        let Some((arg_ty, ret_ty)) = arrow else {
+        let Some((arg_types, ret_ty)) = arrow else {
             return (pending_type_lookup_paths, pending_type_expansion_paths);
         };
 
@@ -8587,15 +8544,18 @@ pub fn lower_args<'a>(ctx: &'a TypeContext, env: &Env, ty: TypeExprRef) -> (Vec<
         // Its ctype.ml:666-673 `get_level` path reaches Env.find_type, so
         // return those dotted lookup points for typecore to force through the
         // persistent component environment.
-        let mut state = UnifyState::new();
-        state.set_env(env);
-        let previous_capture = state.begin_type_lookup_capture();
-        if unify_var(ctx, &mut state, ctx.new_var(None), arg_ty).is_err() {
-            unreachable!("lower_args failed unify_var")
+        for arg_ty in arg_types {
+            let mut state = UnifyState::new();
+            state.set_env(env);
+            let previous_capture = state.begin_type_lookup_capture();
+            if unify_var(ctx, &mut state, ctx.new_var(None), arg_ty).is_err() {
+                unreachable!("lower_args failed unify_var")
+            }
+            let (lookup_paths, expansion_paths) =
+                state.finish_type_lookup_capture(previous_capture);
+            pending_type_lookup_paths.extend(lookup_paths);
+            pending_type_expansion_paths.extend(expansion_paths);
         }
-        let (lookup_paths, expansion_paths) = state.finish_type_lookup_capture(previous_capture);
-        pending_type_lookup_paths.extend(lookup_paths);
-        pending_type_expansion_paths.extend(expansion_paths);
 
         seen.push(expanded);
         current = ret_ty;
@@ -8701,14 +8661,6 @@ fn bound_conflicts(
     bound: &[TypeExprRef],
 ) -> bool {
     bound.iter().any(|ty| free_univars.contains(&ctx.repr(*ty)))
-}
-
-fn copy_commutable(ctx: &TypeContext, commutable: &Commutable) -> Commutable {
-    if matches!(ctx.commutable_repr(commutable), Commutable::Cok) {
-        Commutable::Cok
-    } else {
-        Commutable::Clink(ctx.alloc_commutable(Commutable::Cunknown))
-    }
 }
 
 fn build_inverse_type_graph(
@@ -8948,24 +8900,23 @@ fn copy_sep_inner(
 
     let copied_desc = match desc {
         TypeDesc::Tvar(_) => TypeDesc::Tvar(None),
-        TypeDesc::Tarrow {
-            arg,
-            ret,
-            commutable,
-            arity,
-        } => TypeDesc::Tarrow {
-            arg: super::type_expr::TypeArg {
-                lbl: arg.lbl,
-                typ: copy_sep_inner(
-                    ctx,
-                    arg.typ,
-                    fixed,
-                    free_univars,
-                    bound,
-                    &visited_for_children,
-                    delayed_copy,
-                ),
-            },
+        // compiler/ml/btype.ml:422-423 maps every argument type and then ret.
+        TypeDesc::Tarrow { args, ret } => TypeDesc::Tarrow {
+            args: args
+                .into_iter()
+                .map(|arg| super::type_expr::TypeArg {
+                    lbl: arg.lbl,
+                    typ: copy_sep_inner(
+                        ctx,
+                        arg.typ,
+                        fixed,
+                        free_univars,
+                        bound,
+                        &visited_for_children,
+                        delayed_copy,
+                    ),
+                })
+                .collect(),
             ret: copy_sep_inner(
                 ctx,
                 ret,
@@ -8975,8 +8926,6 @@ fn copy_sep_inner(
                 &visited_for_children,
                 delayed_copy,
             ),
-            commutable: copy_commutable(ctx, &commutable),
-            arity,
         },
         TypeDesc::Ttuple(types) => TypeDesc::Ttuple(
             types
@@ -9289,10 +9238,7 @@ pub fn instance_constructor_in_pattern(
             type_loc: crate::location::Location::none(),
             type_attributes: vec![],
             type_immediate: false,
-            type_unboxed: super::decl::UnboxedStatus {
-                unboxed: false,
-                default: false,
-            },
+            type_representation: super::decl::TypeRepresentation::Boxed,
             type_inlined_types: vec![],
             type_path: None,
         };
@@ -9545,27 +9491,24 @@ pub fn copy_type_deep(
             cache.insert(ty, fresh);
             fresh
         }
-        TypeDesc::Tarrow {
-            arg,
-            ret,
-            commutable,
-            arity,
-        } => {
+        TypeDesc::Tarrow { args, ret } => {
             // Create placeholder first to handle cycles
             let placeholder = ctx.new_var(None);
             cache.insert(ty, placeholder);
-            let arg_lbl = arg.lbl.clone();
-            let commutable = commutable.clone();
-            let new_arg_typ = copy_type_deep(ctx, arg.typ, cache);
-            let new_ret = copy_type_deep(ctx, *ret, cache);
+            let args = args.clone();
+            let ret = *ret;
+            drop(desc);
+            let new_args = args
+                .into_iter()
+                .map(|arg| crate::types::type_expr::TypeArg {
+                    lbl: arg.lbl,
+                    typ: copy_type_deep(ctx, arg.typ, cache),
+                })
+                .collect();
+            let new_ret = copy_type_deep(ctx, ret, cache);
             let new_ty = ctx.new_type(TypeDesc::Tarrow {
-                arg: crate::types::type_expr::TypeArg {
-                    lbl: arg_lbl,
-                    typ: new_arg_typ,
-                },
+                args: new_args,
                 ret: new_ret,
-                commutable: copy_commutable(ctx, &commutable),
-                arity: *arity,
             });
             // Update placeholder to point to the real type
             ctx.set_desc(placeholder, TypeDesc::Tlink(new_ty));
@@ -9720,7 +9663,7 @@ pub fn copy_type_deep(
 }
 
 /// Cache for copy_type_cached: tracks node identity to preserve sharing.
-struct CopyCache {
+pub(crate) struct CopyCache {
     /// Node identity cache: maps original TypeExprRef → copied TypeExprRef.
     /// Ensures that if the same node is visited twice, we reuse the copy.
     nodes: HashMap<TypeExprRef, TypeExprRef>,
@@ -9740,7 +9683,7 @@ struct CopyPartial {
 }
 
 impl CopyCache {
-    fn new() -> Self {
+    pub(crate) fn new() -> Self {
         CopyCache {
             nodes: HashMap::new(),
             row_more_markers: HashMap::new(),
@@ -9785,8 +9728,9 @@ fn type_expr_contains_ident_stamp(
                     .copied()
                     .any(|arg| type_expr_contains_ident_stamp(ctx, arg, target_stamp, seen))
         }
-        TypeDesc::Tarrow { arg, ret, .. } => {
-            type_expr_contains_ident_stamp(ctx, arg.typ, target_stamp, seen)
+        TypeDesc::Tarrow { args, ret } => {
+            args.iter()
+                .any(|arg| type_expr_contains_ident_stamp(ctx, arg.typ, target_stamp, seen))
                 || type_expr_contains_ident_stamp(ctx, *ret, target_stamp, seen)
         }
         TypeDesc::Ttuple(types) => types
@@ -9860,7 +9804,7 @@ pub(crate) fn is_recursive_local_type_for_identity(ctx: &TypeContext, path: &Pat
     };
 
     match &decl.type_kind {
-        super::decl::TypeKind::TypeVariant(constructors) => constructors.iter().any(|ctor| {
+        super::decl::TypeKind::TypeVariant(constructors, _) => constructors.iter().any(|ctor| {
             let args_has_self = match &ctor.cd_args {
                 super::decl::ConstructorArguments::CstrTuple(args) => {
                     args.iter().copied().any(contains_self)
@@ -10005,41 +9949,31 @@ fn subst_identity_copy_rec(
                         row_more_markers,
                     );
                 }
-                TypeDesc::Tarrow {
-                    arg,
-                    ret,
-                    commutable,
-                    arity,
-                } => {
-                    let arg_typ = arg.typ;
-                    let arg_lbl = arg.lbl.clone();
+                TypeDesc::Tarrow { args, ret } => {
+                    let args = args.clone();
                     let ret = *ret;
-                    let commutable = commutable.clone();
-                    let arity = *arity;
                     drop(desc);
-                    let arg_copy = subst_identity_copy_rec(
-                        ctx,
-                        arg_typ,
-                        reopen_closed_variant_rows,
-                        seen,
-                        row_more_markers,
-                    );
-                    let ret_copy = subst_identity_copy_rec(
+                    let args = args
+                        .into_iter()
+                        .map(|arg| crate::types::type_expr::TypeArg {
+                            lbl: arg.lbl,
+                            typ: subst_identity_copy_rec(
+                                ctx,
+                                arg.typ,
+                                reopen_closed_variant_rows,
+                                seen,
+                                row_more_markers,
+                            ),
+                        })
+                        .collect();
+                    let ret = subst_identity_copy_rec(
                         ctx,
                         ret,
                         reopen_closed_variant_rows,
                         seen,
                         row_more_markers,
                     );
-                    TypeDesc::Tarrow {
-                        arg: crate::types::type_expr::TypeArg {
-                            lbl: arg_lbl,
-                            typ: arg_copy,
-                        },
-                        ret: ret_copy,
-                        commutable: copy_commutable(ctx, &commutable),
-                        arity,
-                    }
+                    TypeDesc::Tarrow { args, ret }
                 }
                 TypeDesc::Ttuple(types) => {
                     let types = types.clone();
@@ -10385,7 +10319,11 @@ fn subst_identity_copy_rec(
 /// OCaml `Ctype.copy` only duplicates nodes at `generic_level` and returns
 /// non-generic nodes unchanged (`partial = None` case used by `instance`).
 /// For duplicated generic nodes, sharing is preserved across the copied graph.
-fn copy_type_cached(ctx: &TypeContext, ty: TypeExprRef, cache: &mut CopyCache) -> TypeExprRef {
+pub(crate) fn copy_type_cached(
+    ctx: &TypeContext,
+    ty: TypeExprRef,
+    cache: &mut CopyCache,
+) -> TypeExprRef {
     let ty = ctx.repr(ty);
 
     // OCaml Ctype.copy marker precedence:
@@ -10421,11 +10359,8 @@ fn copy_type_cached(ctx: &TypeContext, ty: TypeExprRef, cache: &mut CopyCache) -
         NewVar(Option<String>),
         NewUnivar(Option<String>),
         Arrow {
-            arg_lbl: super::asttypes::ArgLabel,
-            arg_typ: TypeExprRef,
+            args: Vec<super::type_expr::TypeArg>,
             ret: TypeExprRef,
-            commutable: Commutable,
-            arity: Option<i32>,
         },
         Tuple(Vec<TypeExprRef>),
         Constr {
@@ -10503,17 +10438,9 @@ fn copy_type_cached(ctx: &TypeContext, ty: TypeExprRef, cache: &mut CopyCache) -
             match &*desc {
                 TypeDesc::Tvar(_) => CopyAction::NewVar(None),
                 TypeDesc::Tunivar(name) => CopyAction::NewUnivar(name.clone()),
-                TypeDesc::Tarrow {
-                    arg,
-                    ret,
-                    commutable,
-                    arity,
-                } => CopyAction::Arrow {
-                    arg_lbl: arg.lbl.clone(),
-                    arg_typ: arg.typ,
+                TypeDesc::Tarrow { args, ret } => CopyAction::Arrow {
+                    args: args.clone(),
                     ret: *ret,
-                    commutable: commutable.clone(),
-                    arity: *arity,
                 },
                 TypeDesc::Ttuple(types) => CopyAction::Tuple(types.clone()),
                 TypeDesc::Tconstr { path, args, .. } => CopyAction::Constr {
@@ -10582,24 +10509,16 @@ fn copy_type_cached(ctx: &TypeContext, ty: TypeExprRef, cache: &mut CopyCache) -
             }
             cache.nodes.insert(ty, placeholder);
             let copied_desc = match structural {
-                CopyAction::Arrow {
-                    arg_lbl,
-                    arg_typ,
-                    ret,
-                    commutable,
-                    arity,
-                } => {
-                    let arg_copy = copy_type_cached(ctx, arg_typ, cache);
-                    let ret_copy = copy_type_cached(ctx, ret, cache);
-                    TypeDesc::Tarrow {
-                        arg: crate::types::type_expr::TypeArg {
-                            lbl: arg_lbl,
-                            typ: arg_copy,
-                        },
-                        ret: ret_copy,
-                        commutable: copy_commutable(ctx, &commutable),
-                        arity,
-                    }
+                CopyAction::Arrow { args, ret } => {
+                    let args = args
+                        .into_iter()
+                        .map(|arg| crate::types::type_expr::TypeArg {
+                            lbl: arg.lbl,
+                            typ: copy_type_cached(ctx, arg.typ, cache),
+                        })
+                        .collect();
+                    let ret = copy_type_cached(ctx, ret, cache);
+                    TypeDesc::Tarrow { args, ret }
                 }
                 CopyAction::Tuple(types) => {
                     let types_copy: Vec<_> = types
@@ -10932,10 +10851,11 @@ pub fn function_arity(ctx: &TypeContext, ty: TypeExprRef) -> usize {
     let ty = ctx.repr(ty);
     let desc = ctx.borrow_desc(ty);
     match &*desc {
-        TypeDesc::Tarrow { ret, .. } => {
+        TypeDesc::Tarrow { args, ret } => {
+            let count = args.len();
             let ret = *ret;
             drop(desc);
-            1 + function_arity(ctx, ret)
+            count + function_arity(ctx, ret)
         }
         _ => 0,
     }
@@ -10945,10 +10865,21 @@ pub fn function_arity(ctx: &TypeContext, ty: TypeExprRef) -> usize {
 pub fn split_arrow(ctx: &TypeContext, ty: TypeExprRef) -> Option<(TypeExprRef, TypeExprRef)> {
     let ty = ctx.repr(ty);
     let desc = ctx.borrow_desc(ty);
-    match &*desc {
-        TypeDesc::Tarrow { arg, ret, .. } => Some((arg.typ, *ret)),
-        _ => None,
-    }
+    let (args, ret) = match &*desc {
+        TypeDesc::Tarrow { args, ret } => (args.clone(), *ret),
+        _ => return None,
+    };
+    drop(desc);
+    let arg = args.first()?;
+    let remaining = if args.len() == 1 {
+        ret
+    } else {
+        ctx.new_type(TypeDesc::Tarrow {
+            args: args[1..].to_vec(),
+            ret,
+        })
+    };
+    Some((arg.typ, remaining))
 }
 
 /// Extract the argument type, label, and return type from an arrow type.
@@ -10958,28 +10889,21 @@ pub fn split_arrow_with_label(
 ) -> Option<(super::ArgLabel, TypeExprRef, TypeExprRef)> {
     let ty = ctx.repr(ty);
     let desc = ctx.borrow_desc(ty);
-    match &*desc {
-        TypeDesc::Tarrow { arg, ret, .. } => Some((arg.lbl.clone(), arg.typ, *ret)),
-        _ => None,
-    }
-}
-
-/// Extract the argument type, label, return type, and commutability from an arrow type.
-pub fn split_arrow_with_label_and_commutable(
-    ctx: &TypeContext,
-    ty: TypeExprRef,
-) -> Option<(super::ArgLabel, TypeExprRef, TypeExprRef, Commutable)> {
-    let ty = ctx.repr(ty);
-    let desc = ctx.borrow_desc(ty);
-    match &*desc {
-        TypeDesc::Tarrow {
-            arg,
+    let (args, ret) = match &*desc {
+        TypeDesc::Tarrow { args, ret } => (args.clone(), *ret),
+        _ => return None,
+    };
+    drop(desc);
+    let arg = args.first()?;
+    let remaining = if args.len() == 1 {
+        ret
+    } else {
+        ctx.new_type(TypeDesc::Tarrow {
+            args: args[1..].to_vec(),
             ret,
-            commutable,
-            ..
-        } => Some((arg.lbl.clone(), arg.typ, *ret, commutable.clone())),
-        _ => None,
-    }
+        })
+    };
+    Some((arg.lbl.clone(), arg.typ, remaining))
 }
 
 /// Extract the inner type from option<T>, returning T.
@@ -11310,23 +11234,18 @@ fn nondep_type_rec<'a>(
                 }
             }
         }
-        TypeDesc::Tarrow {
-            arg,
-            ret,
-            commutable,
-            arity,
-        } => {
-            let new_arg_typ = nondep_type_rec(ctx, env, mid, arg.typ, cache)?;
-            let new_ret = nondep_type_rec(ctx, env, mid, *ret, cache)?;
-            TypeDesc::Tarrow {
-                arg: super::type_expr::TypeArg {
-                    lbl: arg.lbl.clone(),
-                    typ: new_arg_typ,
-                },
-                ret: new_ret,
-                commutable: commutable.clone(),
-                arity: *arity,
-            }
+        TypeDesc::Tarrow { args, ret } => {
+            let args = args
+                .iter()
+                .map(|arg| {
+                    Some(super::type_expr::TypeArg {
+                        lbl: arg.lbl.clone(),
+                        typ: nondep_type_rec(ctx, env, mid, arg.typ, cache)?,
+                    })
+                })
+                .collect::<Option<Vec<_>>>()?;
+            let ret = nondep_type_rec(ctx, env, mid, *ret, cache)?;
+            TypeDesc::Tarrow { args, ret }
         }
         TypeDesc::Ttuple(types) => {
             let new_types: Option<Vec<_>> = types
@@ -11540,7 +11459,7 @@ pub fn nondep_type_decl<'a>(
         type_loc: decl.type_loc,
         type_attributes: decl.type_attributes.clone(),
         type_immediate: decl.type_immediate,
-        type_unboxed: decl.type_unboxed.clone(),
+        type_representation: decl.type_representation,
         type_path: decl.type_path.clone(),
         type_inlined_types: decl.type_inlined_types.clone(),
     })
@@ -11568,7 +11487,7 @@ fn nondep_type_kind<'a>(
                 .collect();
             Some(super::decl::TypeKind::TypeRecord(new_labels?, repr.clone()))
         }
-        super::decl::TypeKind::TypeVariant(constructors) => {
+        super::decl::TypeKind::TypeVariant(constructors, layout) => {
             let new_constructors: Option<Vec<_>> = constructors
                 .iter()
                 .map(|cd| {
@@ -11605,7 +11524,10 @@ fn nondep_type_kind<'a>(
                     })
                 })
                 .collect();
-            Some(super::decl::TypeKind::TypeVariant(new_constructors?))
+            Some(super::decl::TypeKind::TypeVariant(
+                new_constructors?,
+                *layout,
+            ))
         }
     }
 }
@@ -11632,7 +11554,7 @@ mod tests {
             type_loc: crate::location::Location::none(),
             type_attributes: vec![],
             type_immediate: false,
-            type_unboxed: crate::types::decl::UnboxedStatus::default(),
+            type_representation: crate::types::TypeRepresentation::Boxed,
             type_inlined_types: vec![],
             type_path,
         }
@@ -11840,7 +11762,7 @@ mod tests {
             type_loc: crate::location::Location::none(),
             type_attributes: vec![],
             type_immediate: false,
-            type_unboxed: crate::types::decl::UnboxedStatus::default(),
+            type_representation: crate::types::TypeRepresentation::Boxed,
             type_inlined_types: vec![],
             type_path: None,
         };
@@ -11857,7 +11779,7 @@ mod tests {
             type_loc: crate::location::Location::none(),
             type_attributes: vec![],
             type_immediate: false,
-            type_unboxed: crate::types::decl::UnboxedStatus::default(),
+            type_representation: crate::types::TypeRepresentation::Boxed,
             type_inlined_types: vec![],
             type_path: None,
         };

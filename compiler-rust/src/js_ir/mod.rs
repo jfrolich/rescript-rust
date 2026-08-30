@@ -16,6 +16,7 @@
 pub mod op;
 pub mod printer;
 pub mod program_printer;
+pub mod source_map;
 
 use ahash::AHashMap;
 use std::cell::RefCell;
@@ -36,7 +37,8 @@ pub use op::{BinOp, IdentInfo, Kind, LengthObject, MutableFlag, Number, Property
 pub use printer::{JsPrinter, print_block, print_expression};
 pub use program_printer::{
     print_deps_program, print_deps_program_with_directives,
-    print_deps_program_with_directives_and_options, print_program,
+    print_deps_program_with_directives_and_options, print_deps_program_with_source_map,
+    print_program,
 };
 
 /// Module identifier for imports/requires
@@ -79,6 +81,7 @@ pub struct ModulePathResolver {
     cmj_export_arities_cache:
         RefCell<AHashMap<String, Option<Arc<AHashMap<String, CmjExportArity>>>>>,
     cmj_export_lambdas_cache: RefCell<AHashMap<String, Option<Arc<AHashMap<String, Lambda>>>>>,
+    cmj_hoisted_exports_cache: RefCell<AHashMap<(String, Vec<String>), Option<String>>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -125,6 +128,7 @@ impl ModulePathResolver {
             cmj_export_constants_cache: RefCell::new(AHashMap::new()),
             cmj_export_arities_cache: RefCell::new(AHashMap::new()),
             cmj_export_lambdas_cache: RefCell::new(AHashMap::new()),
+            cmj_hoisted_exports_cache: RefCell::new(AHashMap::new()),
         }
     }
 
@@ -296,6 +300,22 @@ impl ModulePathResolver {
         self.cmj_export_arities_cache
             .borrow_mut()
             .insert(module_name.to_string(), resolved.clone());
+        resolved
+    }
+
+    /// Resolve a source-level nested field path through hoisted CMJ metadata.
+    pub fn module_cmj_hoisted_export(&self, module_name: &str, path: &[String]) -> Option<String> {
+        let key = (module_name.to_string(), path.to_vec());
+        if let Some(cached) = self.cmj_hoisted_exports_cache.borrow().get(&key) {
+            return cached.clone();
+        }
+        let resolved = self
+            .persistent_env
+            .as_ref()
+            .and_then(|env| env.module_cmj_hoisted_export(module_name, path));
+        self.cmj_hoisted_exports_cache
+            .borrow_mut()
+            .insert(key, resolved.clone());
         resolved
     }
 
@@ -825,7 +845,7 @@ pub enum ExpressionDesc {
     OptionalBlock(Box<Expression>, bool),
 
     /// Caml block (variant, record, tuple)
-    CamlBlock(Vec<Expression>, MutableFlag, Box<Expression>, TagInfo),
+    CamlBlock(Vec<Expression>, MutableFlag, TagInfo),
 
     /// Block tag access
     CamlBlockTag(Box<Expression>, String),
@@ -847,6 +867,16 @@ pub enum ExpressionDesc {
 
     /// spread operator
     Spread(Box<Expression>),
+
+    /// Object-rest destructuring expression used until statement printing.
+    RecordRest(Vec<RecordRestField>, Box<Expression>),
+}
+
+/// A field excluded by object-rest destructuring.
+#[derive(Debug, Clone)]
+pub struct RecordRestField {
+    pub label: String,
+    pub ident: Option<Ident>,
 }
 
 /// Property map for object literals
@@ -859,6 +889,8 @@ pub struct Expression {
     pub desc: ExpressionDesc,
     /// Optional comment
     pub comment: Option<String>,
+    /// Original ReScript source location used by source map generation.
+    pub source_loc: Option<crate::location::Location>,
 }
 
 impl Expression {
@@ -867,6 +899,7 @@ impl Expression {
         Self {
             desc,
             comment: None,
+            source_loc: None,
         }
     }
 
@@ -875,6 +908,7 @@ impl Expression {
         Self {
             desc,
             comment: Some(comment.into()),
+            source_loc: None,
         }
     }
 
@@ -1005,6 +1039,7 @@ impl Expression {
         Self {
             desc: ExpressionDesc::StringAppend(Box::new(left), Box::new(right)),
             comment: None,
+            source_loc: None,
         }
     }
 
@@ -1032,7 +1067,7 @@ impl Expression {
     pub fn length(target: Expression, object: LengthObject) -> Self {
         match (&target.desc, object) {
             (
-                ExpressionDesc::Array(items, _) | ExpressionDesc::CamlBlock(items, _, _, _),
+                ExpressionDesc::Array(items, _) | ExpressionDesc::CamlBlock(items, _, _),
                 LengthObject::Array,
             ) if expression_has_no_side_effects(&target) => {
                 Expression::number(Number::int(items.len() as i32))
@@ -1063,7 +1098,7 @@ impl Expression {
             ExpressionDesc::Null | ExpressionDesc::Undefined { .. } => Expression::bool(true),
             ExpressionDesc::Number(_)
             | ExpressionDesc::Array(_, _)
-            | ExpressionDesc::CamlBlock(_, _, _, _) => Expression::bool(false),
+            | ExpressionDesc::CamlBlock(_, _, _) => Expression::bool(false),
             _ => Self::new(ExpressionDesc::IsNullOrUndefined(Box::new(target))),
         }
     }
@@ -1126,7 +1161,7 @@ impl Expression {
             ExpressionDesc::Bool(true) => return consequent,
             ExpressionDesc::Number(_)
             | ExpressionDesc::Array(_, _)
-            | ExpressionDesc::CamlBlock(_, _, _, _)
+            | ExpressionDesc::CamlBlock(_, _, _)
                 if expression_has_no_side_effects(&test) =>
             {
                 return consequent;
@@ -1220,47 +1255,61 @@ impl Expression {
 
     /// Create a negated boolean expression, mirroring OCaml `Js_exp_make.not`.
     pub fn not(expr: Expression) -> Self {
-        let Expression { desc, comment } = expr;
+        let Expression {
+            source_loc,
+            desc,
+            comment,
+        } = expr;
         match desc {
             ExpressionDesc::Number(Number::Int { i, .. }) => Expression {
+                source_loc: None,
                 desc: ExpressionDesc::Bool(i == 0),
                 comment,
             },
             ExpressionDesc::JsNot(inner) => *inner,
             ExpressionDesc::Bool(value) => Expression {
+                source_loc: None,
                 desc: ExpressionDesc::Bool(!value),
                 comment,
             },
             ExpressionDesc::Bin(BinOp::EqEqEq, left, right) => Expression {
+                source_loc: None,
                 desc: ExpressionDesc::Bin(BinOp::NotEqEq, left, right),
                 comment,
             },
             ExpressionDesc::Bin(BinOp::NotEqEq, left, right) => Expression {
+                source_loc: None,
                 desc: ExpressionDesc::Bin(BinOp::EqEqEq, left, right),
                 comment,
             },
             ExpressionDesc::Bin(BinOp::Lt, left, right) => Expression {
+                source_loc: None,
                 desc: ExpressionDesc::Bin(BinOp::Ge, left, right),
                 comment,
             },
             ExpressionDesc::Bin(BinOp::Ge, left, right) => Expression {
+                source_loc: None,
                 desc: ExpressionDesc::Bin(BinOp::Lt, left, right),
                 comment,
             },
             ExpressionDesc::Bin(BinOp::Le, left, right) => Expression {
+                source_loc: None,
                 desc: ExpressionDesc::Bin(BinOp::Gt, left, right),
                 comment,
             },
             ExpressionDesc::Bin(BinOp::Gt, left, right) => Expression {
+                source_loc: None,
                 desc: ExpressionDesc::Bin(BinOp::Le, left, right),
                 comment,
             },
             other => {
                 let expr = Expression {
+                    source_loc: None,
                     desc: other,
                     comment,
                 };
                 push_negation(expr.clone()).unwrap_or_else(|| Expression {
+                    source_loc: None,
                     desc: ExpressionDesc::JsNot(Box::new(expr)),
                     comment: None,
                 })
@@ -1457,7 +1506,7 @@ fn is_nullish_eq_impossible_non_null_expr(expr: &Expression) -> bool {
             | ExpressionDesc::Typeof(_)
             | ExpressionDesc::Fun { .. }
             | ExpressionDesc::Array(_, _)
-            | ExpressionDesc::CamlBlock(_, _, _, _)
+            | ExpressionDesc::CamlBlock(_, _, _)
     ) && expression_has_no_side_effects(expr)
 }
 
@@ -1486,9 +1535,7 @@ pub(crate) fn expression_has_no_side_effects(expr: &Expression) -> bool {
         | ExpressionDesc::CamlBlockTag(inner, _)
         | ExpressionDesc::OptionalBlock(inner, _) => expression_has_no_side_effects(inner),
         ExpressionDesc::Array(items, _) => items.iter().all(expression_has_no_side_effects),
-        ExpressionDesc::CamlBlock(items, _, _, _) => {
-            items.iter().all(expression_has_no_side_effects)
-        }
+        ExpressionDesc::CamlBlock(items, _, _) => items.iter().all(expression_has_no_side_effects),
         ExpressionDesc::Object(dup, props) => {
             dup.as_deref().is_none_or(expression_has_no_side_effects)
                 && props
@@ -1520,7 +1567,8 @@ pub(crate) fn expression_has_no_side_effects(expr: &Expression) -> bool {
         | ExpressionDesc::New(_, _)
         | ExpressionDesc::RawJsCode(_)
         | ExpressionDesc::Await(_)
-        | ExpressionDesc::Spread(_) => false,
+        | ExpressionDesc::Spread(_)
+        | ExpressionDesc::RecordRest(_, _) => false,
     }
 }
 
@@ -1553,18 +1601,25 @@ fn expression_branch_is_not_empty(expr: &Expression) -> bool {
 }
 
 fn push_negation(expr: Expression) -> Option<Expression> {
-    let Expression { desc, comment } = expr;
+    let Expression {
+        source_loc,
+        desc,
+        comment,
+    } = expr;
     match desc {
         ExpressionDesc::JsNot(inner) => Some(*inner),
         ExpressionDesc::Bool(value) => Some(Expression {
+            source_loc: None,
             desc: ExpressionDesc::Bool(!value),
             comment,
         }),
         ExpressionDesc::Bin(BinOp::EqEqEq, left, right) => Some(Expression {
+            source_loc: None,
             desc: ExpressionDesc::Bin(BinOp::NotEqEq, left, right),
             comment,
         }),
         ExpressionDesc::Bin(BinOp::NotEqEq, left, right) => Some(Expression {
+            source_loc: None,
             desc: ExpressionDesc::Bin(BinOp::EqEqEq, left, right),
             comment,
         }),
@@ -1572,6 +1627,7 @@ fn push_negation(expr: Expression) -> Option<Expression> {
             let left = push_negation(*left)?;
             let right = push_negation(*right)?;
             Some(Expression {
+                source_loc: None,
                 desc: ExpressionDesc::Bin(BinOp::Or, Box::new(left), Box::new(right)),
                 comment,
             })
@@ -1580,6 +1636,7 @@ fn push_negation(expr: Expression) -> Option<Expression> {
             let left = push_negation(*left)?;
             let right = push_negation(*right)?;
             Some(Expression {
+                source_loc: None,
                 desc: ExpressionDesc::Bin(BinOp::And, Box::new(left), Box::new(right)),
                 comment,
             })
@@ -1597,6 +1654,8 @@ pub struct CaseClause {
     pub should_break: bool,
     /// Optional comment
     pub comment: Option<String>,
+    /// Original ReScript source location used by source map generation.
+    pub source_loc: Option<crate::location::Location>,
 }
 
 /// Integer switch clause
@@ -1695,6 +1754,8 @@ pub struct Statement {
     pub desc: StatementDesc,
     /// Optional comment
     pub comment: Option<String>,
+    /// Original ReScript source location used by source map generation.
+    pub source_loc: Option<crate::location::Location>,
 }
 
 impl Statement {
@@ -1719,6 +1780,7 @@ impl Statement {
                     return Self::exp(*left);
                 }
                 Self::new(StatementDesc::Exp(Expression {
+                    source_loc: None,
                     desc: ExpressionDesc::Seq(left, right),
                     comment: expr.comment,
                 }))
@@ -1776,7 +1838,10 @@ impl Statement {
 
     /// Create a return statement
     pub fn return_(expr: Expression) -> Self {
-        Self::new(StatementDesc::Return(expr))
+        let source_loc = expr.source_loc;
+        let mut statement = Self::new(StatementDesc::Return(expr));
+        statement.source_loc = source_loc;
+        statement
     }
 
     /// Create a throw statement
@@ -1818,6 +1883,7 @@ impl Statement {
 fn block_with_comment(block: Block, comment: Option<String>) -> Statement {
     match block.as_slice() {
         [] => Statement {
+            source_loc: None,
             desc: StatementDesc::Block(vec![]),
             comment,
         },
@@ -1826,6 +1892,7 @@ fn block_with_comment(block: Block, comment: Option<String>) -> Statement {
             _ => stmt.clone(),
         },
         _ => Statement {
+            source_loc: None,
             desc: StatementDesc::Block(block),
             comment,
         },
@@ -1867,7 +1934,11 @@ fn normalize_statement(desc: StatementDesc, comment: Option<String>) -> Statemen
                 .expect("literal string switch must have a matching case or default");
             block_with_comment(continuation, comment)
         }
-        _ => Statement { desc, comment },
+        _ => Statement {
+            source_loc: None,
+            desc,
+            comment,
+        },
     }
 }
 
@@ -2412,6 +2483,7 @@ fn expression_contains_await(expr: &Expression) -> bool {
                 || values.iter().any(expression_contains_await)
         }
         ExpressionDesc::StaticIndex(target, _, _) => expression_contains_await(target),
+        ExpressionDesc::RecordRest(_, source) => expression_contains_await(source),
         ExpressionDesc::New(target, args) => {
             expression_contains_await(target)
                 || args
@@ -2425,9 +2497,7 @@ fn expression_contains_await(expr: &Expression) -> bool {
                     .iter()
                     .any(|(_, value)| expression_contains_await(value))
         }
-        ExpressionDesc::CamlBlock(items, _, tag, _) => {
-            items.iter().any(expression_contains_await) || expression_contains_await(tag)
-        }
+        ExpressionDesc::CamlBlock(items, _, _) => items.iter().any(expression_contains_await),
         ExpressionDesc::Fun { .. }
         | ExpressionDesc::Var(_)
         | ExpressionDesc::Str { .. }
@@ -3140,8 +3210,8 @@ pub(crate) fn ocaml_eq_expression(left: &Expression, right: &Expression) -> bool
             ExpressionDesc::OptionalBlock(right_inner, right_identity),
         ) => left_identity == right_identity && ocaml_eq_expression(left_inner, right_inner),
         (
-            ExpressionDesc::CamlBlock(left_items, left_mutable, left_tag, _),
-            ExpressionDesc::CamlBlock(right_items, right_mutable, right_tag, _),
+            ExpressionDesc::CamlBlock(left_items, left_mutable, left_info),
+            ExpressionDesc::CamlBlock(right_items, right_mutable, right_info),
         ) => {
             left_mutable == right_mutable
                 && left_items.len() == right_items.len()
@@ -3149,7 +3219,7 @@ pub(crate) fn ocaml_eq_expression(left: &Expression, right: &Expression) -> bool
                     .iter()
                     .zip(right_items)
                     .all(|(left_item, right_item)| ocaml_eq_expression(left_item, right_item))
-                && ocaml_eq_expression(left_tag, right_tag)
+                && left_info == right_info
         }
         _ => false,
     }
@@ -3323,6 +3393,7 @@ fn push_optional_expression_vec(
 
 fn dispose_case_clause_nonrecursive(clause: CaseClause, stack: &mut Vec<DisposeItem>) {
     let CaseClause {
+        source_loc,
         body,
         should_break: _,
         comment: _,
@@ -3331,7 +3402,11 @@ fn dispose_case_clause_nonrecursive(clause: CaseClause, stack: &mut Vec<DisposeI
 }
 
 fn dispose_statement_nonrecursive(statement: Statement, stack: &mut Vec<DisposeItem>) {
-    let Statement { desc, comment: _ } = statement;
+    let Statement {
+        source_loc,
+        desc,
+        comment: _,
+    } = statement;
     match desc {
         StatementDesc::Block(block) => stack.push(DisposeItem::Block(block)),
         StatementDesc::Variable(decl) => {
@@ -3397,7 +3472,11 @@ fn dispose_statement_nonrecursive(statement: Statement, stack: &mut Vec<DisposeI
 }
 
 fn dispose_expression_nonrecursive(expression: Expression, stack: &mut Vec<DisposeItem>) {
-    let Expression { desc, comment: _ } = expression;
+    let Expression {
+        source_loc,
+        desc,
+        comment: _,
+    } = expression;
     match desc {
         ExpressionDesc::Length(expr, _)
         | ExpressionDesc::IsNullOrUndefined(expr)
@@ -3408,7 +3487,8 @@ fn dispose_expression_nonrecursive(expression: Expression, stack: &mut Vec<Dispo
         | ExpressionDesc::OptionalBlock(expr, _)
         | ExpressionDesc::CamlBlockTag(expr, _)
         | ExpressionDesc::Await(expr)
-        | ExpressionDesc::Spread(expr) => {
+        | ExpressionDesc::Spread(expr)
+        | ExpressionDesc::RecordRest(_, expr) => {
             stack.push(DisposeItem::Expression(*expr));
         }
         ExpressionDesc::StringAppend(left, right)
@@ -3431,7 +3511,6 @@ fn dispose_expression_nonrecursive(expression: Expression, stack: &mut Vec<Dispo
             push_expression_vec(args, stack);
         }
         ExpressionDesc::TaggedTemplate(tag, quasi, expressions) => {
-            stack.push(DisposeItem::Expression(*tag));
             push_expression_vec(quasi, stack);
             push_expression_vec(expressions, stack);
         }
@@ -3447,9 +3526,8 @@ fn dispose_expression_nonrecursive(expression: Expression, stack: &mut Vec<Dispo
             stack.push(DisposeItem::Block(body));
         }
         ExpressionDesc::Array(expressions, _) => push_expression_vec(expressions, stack),
-        ExpressionDesc::CamlBlock(expressions, _, tag, _) => {
+        ExpressionDesc::CamlBlock(expressions, _, _) => {
             push_expression_vec(expressions, stack);
-            stack.push(DisposeItem::Expression(*tag));
         }
         ExpressionDesc::Object(proto, properties) => {
             if let Some(proto) = proto {
@@ -3911,6 +3989,7 @@ mod tests {
                 StringClause {
                     tag_type: SwitchCaseTag::String("y".to_string()),
                     clause: CaseClause {
+                        source_loc: None,
                         body: vec![Statement::return_(Expression::number(Number::int(1)))],
                         should_break: false,
                         comment: None,
@@ -3919,6 +3998,7 @@ mod tests {
                 StringClause {
                     tag_type: SwitchCaseTag::String("x".to_string()),
                     clause: CaseClause {
+                        source_loc: None,
                         body: vec![Statement::return_(Expression::number(Number::int(3)))],
                         should_break: false,
                         comment: None,
@@ -3944,6 +4024,7 @@ mod tests {
             vec![(
                 3,
                 CaseClause {
+                    source_loc: None,
                     body: vec![Statement::return_(Expression::number(Number::int(1)))],
                     should_break: false,
                     comment: None,

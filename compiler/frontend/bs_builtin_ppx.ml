@@ -58,11 +58,37 @@ let succeed attr attrs =
     Used_attributes.mark_used_attribute attr;
     Bs_ast_invariant.warn_discarded_unused_attributes attrs
 
-type mapper = Bs_ast_mapper.mapper
+type mapper = Ast_mapper.mapper
 
-let default_mapper = Bs_ast_mapper.default_mapper
-let default_expr_mapper = Bs_ast_mapper.default_mapper.expr
-let default_pat_mapper = Bs_ast_mapper.default_mapper.pat
+let default_mapper = Ast_mapper.default_mapper
+
+let mark_hoisted_function_attributes (bindings : Parsetree.value_binding list) =
+  Ext_list.iter bindings (fun {pvb_attributes} ->
+      Ext_list.iter pvb_attributes (fun (({txt}, _) as attr) ->
+          if txt = "res.hoistedFunction" then
+            Used_attributes.mark_used_attribute attr))
+
+(* [Ast_mapper.default_mapper.expr], with non-recursive binding groups
+   routed through tuple/module-record pattern flattening ([let rec] groups
+   only admit variable patterns, so they map per binding). Every fallback in
+   [expr_mapper] funnels through here, so the flattening applies uniformly. *)
+let default_expr_mapper (self : mapper) (e : Parsetree.expression) =
+  (match e.pexp_desc with
+  | Pexp_let (_, bindings, _) -> mark_hoisted_function_attributes bindings
+  | _ -> ());
+  match e.pexp_desc with
+  | Pexp_let (Nonrecursive, vbs, body) ->
+    {
+      e with
+      pexp_desc =
+        Pexp_let
+          ( Nonrecursive,
+            Ast_tuple_pattern_flatten.value_bindings_mapper self vbs,
+            self.expr self body );
+      pexp_attributes = self.attributes self e.pexp_attributes;
+    }
+  | _ -> Ast_mapper.default_mapper.expr self e
+let default_pat_mapper = Ast_mapper.default_mapper.pat
 
 let pat_mapper (self : mapper) (p : Parsetree.pattern) =
   match p.ppat_desc with
@@ -73,7 +99,7 @@ let pat_mapper (self : mapper) (p : Parsetree.pattern) =
   | _ -> default_pat_mapper self p
 
 (* Unpack requires core_type package for type inference:
-   Generate a module type name eg. __Belt_List__*)
+   Generate a module type name eg. __List__*)
 let local_module_type_name txt =
   "_"
   ^ (Longident.flatten txt |> List.fold_left (fun ll l -> ll ^ "_" ^ l) "")
@@ -92,48 +118,48 @@ let expr_mapper ~async_context ~in_function_def (self : mapper)
   | Pexp_constant (Pconst_integer (s, Some 'l')) ->
     {e with pexp_desc = Pexp_constant (Pconst_integer (s, None))}
   (* End rewriting *)
-  | Pexp_newtype (s, body) ->
-    let res = self.expr self body in
-    {e with pexp_desc = Pexp_newtype (s, res)}
-  | Pexp_fun {arg_label = label; lhs = pat; rhs = body; async; arity; default}
-    -> (
+  | Pexp_fun {newtypes; params; body; async} -> (
     match Ast_attributes.process_attributes_rev e.pexp_attributes with
     | Nothing, _ ->
       (* Handle @async x => y => ... is in async context *)
       async_context := (old_in_function_def && !async_context) || async;
-      (* The default mapper would descend into nested [Pexp_fun] nodes (used for
-         additional parameters) before visiting the function body. Those
-         nested calls see [async = false] and would reset [async_context] to
-         false, so by the time we translate the body we incorrectly think we are
-         outside of an async function. This shows up with function-level
-         [@directive] (GH #7974): the directive attribute lives on the outer
-         async lambda, while extra parameters are represented as nested
-         functions. Rebuild the function manually to keep the async flag alive
-         until the body is processed. *)
       let attrs = self.attributes self e.pexp_attributes in
-      let default = Option.map (self.expr self) default in
-      let lhs = self.pat self pat in
+      let params =
+        Ext_list.map params (fun (p : Parsetree.fun_param) ->
+            {
+              p with
+              p_default = Option.map (self.expr self) p.p_default;
+              p_pat = self.pat self p.p_pat;
+            })
+      in
       let saved_in_function_def = !in_function_def in
       in_function_def := true;
-      (* Keep reporting nested parameters as part of a function definition so
-         they propagate async context exactly like the original mapper. *)
-      let rhs = self.expr self body in
+      (* Keep reporting the body as part of a function definition so nested
+         functions propagate async context exactly like the legacy curried
+         mapper did (GH #7974). *)
+      let body = self.expr self body in
       in_function_def := saved_in_function_def;
+      let newtypes =
+        Ext_list.map newtypes (fun (name, nt_attrs) ->
+            (name, self.attributes self nt_attrs))
+      in
       let mapped =
-        Ast_helper.Exp.fun_ ~loc:e.pexp_loc ~attrs ~arity ~async label default
-          lhs rhs
+        Ast_helper.Exp.fun_ ~loc:e.pexp_loc ~attrs ~async ~newtypes params body
       in
       Ast_async.make_function_async ~async mapped
     | Meth_callback _, pexp_attributes ->
       (* FIXME: does it make sense to have a label for [this] ? *)
       async_context := false;
-      {
-        e with
-        pexp_desc =
-          Ast_uncurry_gen.to_method_callback ~async e.pexp_loc self label pat
-            body;
-        pexp_attributes;
-      })
+      let callback =
+        {
+          e with
+          pexp_desc =
+            Ast_uncurry_gen.to_method_callback ~async ~newtypes e.pexp_loc self
+              params body;
+          pexp_attributes;
+        }
+      in
+      callback)
   | Pexp_apply _ -> Ast_exp_apply.app_exp_mapper e self
   | Pexp_match
       ( b,
@@ -188,6 +214,7 @@ let expr_mapper ~async_context ~in_function_def (self : mapper)
                       ({txt = Lident ("None" as variant_name)}, None) );
               } as pvb_pat;
             pvb_expr;
+            pvb_constraint = None;
             pvb_attributes;
           };
         ],
@@ -300,6 +327,7 @@ let expr_mapper ~async_context ~in_function_def (self : mapper)
               ( {ppat_desc = Ppat_record _}
               | {ppat_desc = Ppat_alias ({ppat_desc = Ppat_record _}, _)} ) as p;
             pvb_expr;
+            pvb_constraint = None;
             pvb_attributes;
             pvb_loc = _;
           };
@@ -323,7 +351,7 @@ let expr_mapper ~async_context ~in_function_def (self : mapper)
      the attribute to the whole expression, in general, when shuffuling the ast
      it is very hard to place attributes correctly
   *)
-  (* module M = await Belt.List *)
+  (* module M = await List *)
   | Pexp_letmodule
       (lid, ({pmod_desc = Pmod_ident {txt}; pmod_attributes} as me), expr)
     when Res_parsetree_viewer.has_await_attribute pmod_attributes ->
@@ -339,7 +367,7 @@ let expr_mapper ~async_context ~in_function_def (self : mapper)
               ~module_type_lid:safe_module_type_lid me,
             self.expr self expr );
     }
-  (* module M = await (Belt.List: BeltList) *)
+  (* module M = await (List: ListType) *)
   | Pexp_letmodule
       ( lid,
         ({
@@ -484,6 +512,9 @@ let signature_item_mapper (self : mapper) (sigi : Parsetree.signature_item) :
 
 let structure_item_mapper (self : mapper) (str : Parsetree.structure_item) :
     Parsetree.structure_item =
+  (match str.pstr_desc with
+  | Pstr_value (_, bindings) -> mark_hoisted_function_attributes bindings
+  | _ -> ());
   match str.pstr_desc with
   | Pstr_value (_, vbs)
     when List.exists
@@ -514,6 +545,7 @@ let structure_item_mapper (self : mapper) (str : Parsetree.structure_item) :
           {
             pvb_pat = {ppat_desc = Ppat_var pval_name} as pvb_pat;
             pvb_expr;
+            pvb_constraint = None;
             pvb_attributes;
             pvb_loc;
           };
@@ -587,9 +619,21 @@ let structure_item_mapper (self : mapper) (str : Parsetree.structure_item) :
         str with
         pstr_desc =
           Pstr_value
-            (Nonrecursive, [{pvb_pat; pvb_expr; pvb_attributes; pvb_loc}]);
+            ( Nonrecursive,
+              [
+                {
+                  pvb_pat;
+                  pvb_expr;
+                  pvb_constraint = None;
+                  pvb_attributes;
+                  pvb_loc;
+                };
+              ] );
       })
   | Pstr_attribute ({txt = "config"}, _) -> str
+  | Pstr_value (Nonrecursive, vbs) ->
+    Ast_helper.Str.value ~loc:str.pstr_loc Nonrecursive
+      (Ast_tuple_pattern_flatten.value_bindings_mapper self vbs)
   | _ -> default_mapper.structure_item self str
 
 let local_module_name =
@@ -661,7 +705,7 @@ let rec structure_mapper ~await_context (self : mapper) (stru : Ast_structure.t)
         | _ -> expand_reverse acc (structure_mapper ~await_context self rest)
       in
       aux [] stru
-    (* Dynamic import of module transformation: module M = @res.await Belt.List *)
+    (* Dynamic import of module transformation: module M = @res.await List *)
     | Pstr_module
         ({pmb_expr = {pmod_desc = Pmod_ident {txt; loc}; pmod_attributes} as me}
          as mb)
@@ -671,7 +715,7 @@ let rec structure_mapper ~await_context (self : mapper) (stru : Ast_structure.t)
       let has_local_module_name =
         Hashtbl.find_opt !await_context safe_module_type_name
       in
-      (* module __Belt_List__ = module type of Belt.List *)
+      (* module __List__ = module type of List *)
       let module_type_decl =
         match has_local_module_name with
         | Some _ -> []
@@ -690,7 +734,7 @@ let rec structure_mapper ~await_context (self : mapper) (stru : Ast_structure.t)
       in
       module_type_decl
       @
-      (* module M = @res.await Belt.List *)
+      (* module M = @res.await List *)
       {
         item with
         pstr_desc =
@@ -705,7 +749,7 @@ let rec structure_mapper ~await_context (self : mapper) (stru : Ast_structure.t)
       :: structure_mapper ~await_context self rest
     | Pstr_value (_, vbs) ->
       let item = self.structure_item self item in
-      (* [ module __Belt_List__ = module type of Belt.List ] *)
+      (* [ module __List__ = module type of List ] *)
       let rec spelunk_vbs acc vbs =
         match vbs with
         | [] -> acc
@@ -737,7 +781,7 @@ let rec structure_mapper ~await_context (self : mapper) (stru : Ast_structure.t)
             | Pexp_ifthenelse (_, then_expr, Some else_expr) ->
               aux then_expr @ aux else_expr
             | Pexp_construct (_, Some expr) -> aux expr
-            | Pexp_fun {rhs = expr} | Pexp_newtype (_, expr) -> aux expr
+            | Pexp_fun {body = expr} -> aux expr
             | Pexp_constraint (expr, _) -> aux expr
             | Pexp_match (expr, cases) ->
               let case_results =
@@ -772,7 +816,6 @@ let mapper : mapper =
     pat = pat_mapper;
     typ = typ_mapper;
     signature_item = signature_item_mapper;
-    value_bindings = Ast_tuple_pattern_flatten.value_bindings_mapper;
     structure_item = structure_item_mapper;
     structure = structure_mapper ~await_context:(ref (Hashtbl.create 10));
     (* Ad-hoc way to internalize stuff *)

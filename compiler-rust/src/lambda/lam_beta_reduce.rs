@@ -264,16 +264,12 @@ pub fn propagate_beta_reduce_with_meta_and_id_gen(
     }
 
     let new_body = rewrite_bounded_vars(&mut substitution, body, id_gen);
-    // OCaml's `propagate_beta_reduce` (lam_beta_reduce.ml:66) builds
-    // `rest_bindings` via `fold_left2` with prepending (`(p, arg) :: rest_bindings`),
-    // so the list ends up in REVERSE param-order, then walks it with
-    // `Ext_list.fold_right` to wrap the body. The Rust loop above appends
-    // (push) instead of prepending, so iterating rest_bindings forward here
-    // is equivalent to OCaml's prepend-then-fold-right shape. Each iteration
-    // wraps the current result in a new outer Llet, so the LAST element
-    // becomes the outermost binding (matching OCaml).
+    // OCaml builds `rest_bindings` in reverse parameter order and folds it
+    // left, making the first source argument's strict binding outermost. Rust
+    // appends in parameter order, so walk that vector in reverse to preserve
+    // the same left-to-right argument evaluation order.
     let mut result = new_body;
-    for (param, arg) in rest_bindings.into_iter() {
+    for (param, arg) in rest_bindings.into_iter().rev() {
         register_bound_param_kind(ident_tbl, &param, &arg);
         result = refine_let(LetKind::Strict, param, arg, result);
     }
@@ -373,13 +369,11 @@ pub fn propagate_beta_reduce_with_map_and_meta_and_id_gen(
     // Apply substitution to body
     let new_body = rewrite_bounded_vars(&mut substitution, body, id_gen);
 
-    // See `propagate_beta_reduce_with_meta_and_id_gen` above for why we
-    // iterate forward here despite the OCaml source using `fold_right`:
-    // OCaml prepends to `rest_bindings` (reversing param-order), then
-    // `fold_right` rebuilds the wrap from the right, equivalent to walking a
-    // push-built list forward and wrapping outward at each step.
+    // See `propagate_beta_reduce_with_meta_and_id_gen`: Rust stores bindings
+    // in parameter order, so reverse iteration makes the first source
+    // argument's binding outermost, matching OCaml's reverse-list fold-left.
     let mut result = new_body;
-    for (param, arg) in rest_bindings.into_iter() {
+    for (param, arg) in rest_bindings.into_iter().rev() {
         register_bound_param_kind(ident_tbl, &param, &arg);
         result = refine_let(LetKind::Strict, param, arg, result);
     }
@@ -395,7 +389,7 @@ pub fn propagate_beta_reduce_with_map_and_meta_and_id_gen(
 fn register_bound_param_kind(ident_tbl: &mut IdentTable, param: &Ident, arg: &Lambda) {
     match arg {
         Lambda::Lprim(PrimInfo {
-            primitive: Primitive::Pmakeblock(_, _, Mutable::Immutable),
+            primitive: Primitive::Pmakeblock(_, Mutable::Immutable),
             args,
             ..
         }) => {
@@ -524,19 +518,29 @@ fn rewrite_bounded_vars(substitution: &mut Subst, lam: &Lambda, id_gen: &IdGener
                 sw_consts: switch
                     .sw_consts
                     .iter()
-                    .map(|(key, value)| (*key, rewrite_bounded_vars(substitution, value, id_gen)))
+                    .map(|(key, value)| {
+                        (
+                            key.clone(),
+                            rewrite_bounded_vars(substitution, value, id_gen),
+                        )
+                    })
                     .collect(),
                 sw_blocks_full: switch.sw_blocks_full,
                 sw_blocks: switch
                     .sw_blocks
                     .iter()
-                    .map(|(key, value)| (*key, rewrite_bounded_vars(substitution, value, id_gen)))
+                    .map(|(key, value)| {
+                        (
+                            key.clone(),
+                            rewrite_bounded_vars(substitution, value, id_gen),
+                        )
+                    })
                     .collect(),
                 sw_failaction: switch
                     .sw_failaction
                     .as_ref()
                     .map(|value| Box::new(rewrite_bounded_vars(substitution, value, id_gen))),
-                sw_names: switch.sw_names.clone(),
+                sw_dispatch: switch.sw_dispatch.clone(),
             },
         ),
         Lambda::LstringSwitch(arg, cases, default) => Lambda::string_switch(
@@ -831,6 +835,65 @@ mod tests {
     }
 
     #[test]
+    fn test_propagate_beta_reduce_preserves_source_argument_order() {
+        let x = Ident::create_local("x");
+        let y = Ident::create_local("y");
+        // A sequence is deliberately outside `simple_beta_reduce`'s
+        // primitive/application fast path, so both effectful arguments become
+        // explicit strict bindings whose nesting order is observable.
+        let body = Lambda::seq(Lambda::var(x.clone()), Lambda::var(y.clone()));
+        let call = |name: &str| {
+            Lambda::prim(
+                Primitive::PjsCall {
+                    prim_name: name.to_string(),
+                    arg_types: vec![],
+                    ffi: crate::lambda::lam_primitive::ExternalFfiSpec {
+                        kind: crate::lambda::lam_primitive::ExternalFfiKind::Default,
+                        spec: None,
+                        obj_params: None,
+                        return_wrapper:
+                            crate::lambda::lam_primitive::ExternalReturnWrapper::Identity,
+                        inline_constant: None,
+                    },
+                    dynamic_import: false,
+                    transformed_jsx: false,
+                },
+                vec![],
+                Location::none(),
+            )
+        };
+        let first = call("first");
+        let second = call("second");
+
+        let reduced = propagate_beta_reduce(&[x, y], &body, &[first, second]);
+        let Lambda::Llet(_, _, outer_value, inner) = reduced else {
+            panic!("expected first argument binding to be outermost");
+        };
+        assert!(matches!(
+            outer_value.as_ref(),
+            Lambda::Lprim(PrimInfo {
+                primitive: Primitive::PjsCall { prim_name, .. },
+                ..
+            }) if prim_name == "first"
+        ));
+        assert!(matches!(
+            inner.as_ref(),
+            Lambda::Llet(
+                _,
+                _,
+                inner_value,
+                _
+            ) if matches!(
+                inner_value.as_ref(),
+                Lambda::Lprim(PrimInfo {
+                    primitive: Primitive::PjsCall { prim_name, .. },
+                    ..
+                }) if prim_name == "second"
+            )
+        ));
+    }
+
+    #[test]
     #[ignore = "stale internal shape expectation; covered by strict lambda/JS parity gates"]
     fn test_propagate_beta_reduce_keeps_let_wrapped_returned_functions() {
         let outer = Ident::create_local("outer");
@@ -1113,13 +1176,19 @@ mod tests {
                 LambdaSwitch {
                     sw_consts_full: true,
                     sw_consts: vec![
-                        (0, Lambda::const_(Constant::JsFalse)),
-                        (1, Lambda::const_(Constant::JsTrue)),
+                        (
+                            crate::lambda::SwitchKey::Int(0),
+                            Lambda::const_(Constant::JsFalse),
+                        ),
+                        (
+                            crate::lambda::SwitchKey::Int(1),
+                            Lambda::const_(Constant::JsTrue),
+                        ),
                     ],
                     sw_blocks_full: true,
                     sw_blocks: vec![],
                     sw_failaction: None,
-                    sw_names: None,
+                    sw_dispatch: crate::lambda::SwitchDispatch::Direct,
                 },
             ),
             &[Lambda::const_(Constant::int(1))],

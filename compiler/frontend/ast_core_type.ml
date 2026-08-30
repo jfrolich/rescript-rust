@@ -97,7 +97,9 @@ let from_labels ~loc arity labels : t =
     Ext_list.map2 labels tyvars (fun label tyvar ->
         {Parsetree.attrs = []; lbl = Asttypes.Labelled label; typ = tyvar})
   in
-  Typ.arrows ~loc args result_type
+  match args with
+  | [] -> result_type
+  | _ -> Typ.arrow ~loc args result_type
 
 let make_obj ~loc xs = Typ.object_ ~loc xs Closed
 
@@ -108,43 +110,12 @@ let make_obj ~loc xs = Typ.object_ ~loc xs Closed
    {[ 'a -> ('a. 'a -> 'b) ]}
 
 *)
-let rec get_uncurry_arity_aux (ty : t) acc =
+let is_arity_one (ty : t) =
   match ty.ptyp_desc with
-  | Ptyp_arrow {ret = new_ty} -> get_uncurry_arity_aux new_ty (succ acc)
-  | Ptyp_poly (_, ty) -> get_uncurry_arity_aux ty acc
-  | _ -> acc
-
-(**
-   {[ unit -> 'b ]} return arity 1
-   {[ unit -> 'a1 -> a2']} arity 2
-   {[ 'a1 -> 'a2 -> ... 'aN -> 'b ]} return arity N
-*)
-let get_uncurry_arity (ty : t) =
-  match ty.ptyp_desc with
-  | Ptyp_arrow {ret = rest} -> Some (get_uncurry_arity_aux rest 1)
-  | _ -> None
-
-let get_curry_arity (ty : t) =
-  match ty.ptyp_desc with
-  | Ptyp_arrow {arity = Some arity} -> arity
-  | _ -> get_uncurry_arity_aux ty 0
-
-let is_arity_one ty = get_curry_arity ty = 1
+  | Ptyp_arrow {params = [_]} -> true
+  | _ -> false
 
 let list_of_arrow (ty : t) : t * Parsetree.arg list =
-  let rec aux (ty : t) acc =
-    match ty.ptyp_desc with
-    | Ptyp_arrow {arg; ret; arity} when arity = None || acc = [] ->
-      aux ret (arg :: acc)
-    | Ptyp_poly (_, ty) ->
-      (* should not happen? *)
-      Bs_syntaxerr.err ty.ptyp_loc Unhandled_poly_type
-    | _ -> (ty, List.rev acc)
-  in
-  aux ty []
-
-let add_last_obj (ty : t) (obj : t) =
-  let result, params = list_of_arrow ty in
-  Typ.arrows ~loc:obj.ptyp_loc
-    (params @ [{lbl = Nolabel; typ = obj; attrs = []}])
-    result
+  match ty.ptyp_desc with
+  | Ptyp_arrow {params; ret} -> (ret, params)
+  | _ -> (ty, [])

@@ -14,7 +14,7 @@ use std::collections::{HashMap, HashSet};
 
 use super::context::TypeContext;
 use super::ctype;
-use super::decl::{ConstructorArguments, ConstructorDescription, ConstructorTag, TypeKind};
+use super::decl::{ConstructorArguments, ConstructorDescription, ConstructorKind, TypeKind};
 use super::env::Env;
 use super::path::Path;
 use super::predef;
@@ -359,19 +359,25 @@ pub fn build_type_info<'a>(
                 .collect(),
         },
 
-        TypeDesc::Tarrow { arg, ret, .. } => {
-            let mut args = vec![build_type_info(ctx, env, arg.typ, visited)];
+        TypeDesc::Tarrow { args, ret } => {
+            let mut args = args
+                .iter()
+                .map(|arg| build_type_info(ctx, env, arg.typ, visited))
+                .collect::<Vec<_>>();
             let mut current_ret = *ret;
             loop {
                 let ret_repr = ctx.repr(current_ret);
                 let ret_desc = ctx.get_desc(ret_repr);
                 match &*ret_desc {
                     TypeDesc::Tarrow {
-                        arg: next_arg,
+                        args: next_args,
                         ret: next_ret,
-                        ..
                     } => {
-                        args.push(build_type_info(ctx, env, next_arg.typ, visited));
+                        args.extend(
+                            next_args
+                                .iter()
+                                .map(|arg| build_type_info(ctx, env, arg.typ, visited)),
+                        );
                         current_ret = *next_ret;
                     }
                     _ => break,
@@ -471,7 +477,7 @@ fn build_type_info_from_constr<'a>(
     };
 
     if let Some(decl) = decl {
-        let is_unboxed = decl.type_unboxed.unboxed;
+        let is_unboxed = decl.type_representation == crate::types::TypeRepresentation::Unboxed;
         match &decl.type_kind {
             TypeKind::TypeRecord(labels, _) => {
                 let fields = labels
@@ -490,7 +496,7 @@ fn build_type_info_from_constr<'a>(
                     unboxed: is_unboxed,
                 }
             }
-            TypeKind::TypeVariant(constrs) => {
+            TypeKind::TypeVariant(constrs, _) => {
                 let constructors = constrs
                     .iter()
                     .map(|cd| {
@@ -546,35 +552,12 @@ fn type_info_constructor_description<'a>(
     // compiler/ml/typecore.ml:990-1010 disambiguation.
     let type_info_ident = predef::ident_type_info();
     let decl = env.find_type_by_ident(&type_info_ident).ok()?;
-    let TypeKind::TypeVariant(constrs) = &decl.type_kind else {
+    let TypeKind::TypeVariant(constrs, _) = &decl.type_kind else {
         return None;
     };
 
-    let num_consts = constrs
-        .iter()
-        .filter(
-            |c| matches!(c.cd_args, ConstructorArguments::CstrTuple(ref args) if args.is_empty()),
-        )
-        .count() as i32;
-    let num_nonconsts = constrs.len() as i32 - num_consts;
-    let mut const_idx = 0i32;
-    let mut nonconst_idx = 0i32;
-
-    for cd in constrs {
-        let is_constant =
-            matches!(cd.cd_args, ConstructorArguments::CstrTuple(ref args) if args.is_empty());
-        let cstr_tag = if decl.type_unboxed.unboxed {
-            ConstructorTag::CstrUnboxed
-        } else if is_constant {
-            let tag = ConstructorTag::CstrConstant(const_idx);
-            const_idx += 1;
-            tag
-        } else {
-            let tag = ConstructorTag::CstrBlock(nonconst_idx);
-            nonconst_idx += 1;
-            tag
-        };
-
+    let layout = decl.variant_layout_ref()?;
+    for (position, cd) in constrs.iter().enumerate() {
         if cd.cd_id.name() != ctor_name {
             continue;
         }
@@ -597,9 +580,10 @@ fn type_info_constructor_description<'a>(
             cstr_existentials,
             cstr_args,
             cstr_arity,
-            cstr_tag,
-            cstr_consts: num_consts,
-            cstr_nonconsts: num_nonconsts,
+            cstr_kind: ConstructorKind::Ordinary(super::variant_runtime::ConstructorReference {
+                variant: layout,
+                position,
+            }),
             cstr_generalized: cd.cd_res.is_some(),
             cstr_private: decl.type_private,
             cstr_loc: cd.cd_loc,
@@ -1291,7 +1275,8 @@ fn match_case_pattern(
                     // Bind the constructor arguments if present
                     if args.len() == 1 {
                         // Single argument — match against the record of bindings
-                        if let typedtree::PatternDesc::Tpat_record(fields, _) = &args[0].pat_desc {
+                        if let typedtree::PatternDesc::Tpat_record(fields, _, _) = &args[0].pat_desc
+                        {
                             for (_field_lid, lbl_desc, field_pat, _optional) in fields {
                                 let field_name = &lbl_desc.lbl_name;
                                 if let Some(field_value) = bindings.remove(field_name.as_str()) {
@@ -1327,7 +1312,7 @@ fn match_case_pattern(
         }
 
         // Record pattern — destructure comptime record
-        typedtree::PatternDesc::Tpat_record(fields, _) => {
+        typedtree::PatternDesc::Tpat_record(fields, _, _) => {
             if let ComptimeValue::Record(entries) = value {
                 let mut bindings = HashMap::new();
                 for (_field_lid, lbl_desc, field_pat, _optional) in fields {

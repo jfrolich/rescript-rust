@@ -57,9 +57,6 @@ mod tests {
     /// At ~10ms per run, process startup jitter alone is ±1-2ms (~20%).
     const MAX_SLOWDOWN_FACTOR: f64 = 1.2;
 
-    /// Minimum file size (bytes) for inclusion in comprehensive benchmark.
-    const MIN_FILE_SIZE: u64 = 0;
-
     /// Base path for core syntax tests, relative to compiler-rust/
     const TEST_BASE: &str = "../tests/syntax_tests/data";
 
@@ -252,19 +249,17 @@ mod tests {
                         .map_or(false, |e| e == "res" || e == "resi")
                 {
                     let size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
-                    if size >= MIN_FILE_SIZE {
-                        let rel = path.strip_prefix(base).unwrap_or(&path);
-                        let name = format!("{}/{}", corpus_name, rel.to_string_lossy());
-                        let lines = std::fs::read(&path)
-                            .map(|b| b.iter().filter(|&&c| c == b'\n').count() as u64)
-                            .unwrap_or(0);
-                        files.push(TestFile {
-                            name,
-                            path,
-                            size,
-                            lines,
-                        });
-                    }
+                    let rel = path.strip_prefix(base).unwrap_or(&path);
+                    let name = format!("{}/{}", corpus_name, rel.to_string_lossy());
+                    let lines = std::fs::read(&path)
+                        .map(|b| b.iter().filter(|&&c| c == b'\n').count() as u64)
+                        .unwrap_or(0);
+                    files.push(TestFile {
+                        name,
+                        path,
+                        size,
+                        lines,
+                    });
                 }
             }
         }
@@ -537,10 +532,7 @@ mod tests {
 
         let files = discover_test_files();
         let total = files.len();
-        println!(
-            "\nDiscovered {} .res files (>= {} bytes)\n",
-            total, MIN_FILE_SIZE
-        );
+        println!("\nDiscovered {} .res files\n", total);
 
         println!("{:-<110}", "");
         println!(

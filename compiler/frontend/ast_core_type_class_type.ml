@@ -56,7 +56,7 @@ let process_getter_setter ~not_getter_setter
         pctf_attributes
       :: get_acc
 
-let default_typ_mapper = Bs_ast_mapper.default_mapper.typ
+let default_typ_mapper = Ast_mapper.default_mapper.typ
 (*
   Attributes are very hard to attribute
   (since ptyp_attributes could happen in so many places), 
@@ -64,18 +64,33 @@ let default_typ_mapper = Bs_ast_mapper.default_mapper.typ
   we can only use it locally
 *)
 
-let typ_mapper (self : Bs_ast_mapper.mapper) (ty : Parsetree.core_type) =
+(* Turns [(t1, .., tn) => ret] with a method-callback attribute into
+   [Js.MethodCallback.arityN<full type>]. *)
+let to_method_callback_type loc (mapper : Ast_mapper.mapper) ~arity
+    (meth_type : Parsetree.core_type) =
+  let meth_type = Ast_mapper.default_mapper.typ mapper meth_type in
+  Ast_helper.Typ.constr
+    {
+      txt = Ldot (Ast_literal.Lid.method_callback, "arity" ^ string_of_int arity);
+      loc;
+    }
+    [meth_type]
+
+let typ_mapper (self : Ast_mapper.mapper) (ty : Parsetree.core_type) =
   let loc = ty.ptyp_loc in
   match ty.ptyp_desc with
-  | Ptyp_arrow {arity}
+  | Ptyp_arrow {params = _}
   (* let it go without regard label names,
      it will report error later when the label is not empty
   *)
     -> (
     match fst (Ast_attributes.process_attributes_rev ty.ptyp_attributes) with
-    | Meth_callback _ ->
-      Ast_typ_uncurry.to_method_callback_type loc self ~arity ty
-    | Nothing -> Bs_ast_mapper.default_mapper.typ self ty)
+    | Meth_callback _ -> (
+      match ty.ptyp_desc with
+      | Ptyp_arrow {params} ->
+        to_method_callback_type loc self ~arity:(List.length params) ty
+      | _ -> assert false)
+    | Nothing -> Ast_mapper.default_mapper.typ self ty)
   | Ptyp_object (methods, closed_flag) ->
     let ( +> ) attr (typ : Parsetree.core_type) =
       {typ with ptyp_attributes = attr :: typ.ptyp_attributes}
@@ -91,7 +106,7 @@ let typ_mapper (self : Bs_ast_mapper.mapper) (ty : Parsetree.core_type) =
                 | Nothing, attrs -> (attrs, ty) (* #1678 *)
                 | Meth_callback attr, attrs -> (attrs, attr +> ty)
               in
-              Ast_compatible.object_field name attrs (self.typ self core_type)
+              Parsetree.Otag (name, attrs, self.typ self core_type)
             in
             let set ty name attrs =
               let attrs, core_type =
@@ -99,10 +114,12 @@ let typ_mapper (self : Bs_ast_mapper.mapper) (ty : Parsetree.core_type) =
                 | Nothing, attrs -> (attrs, ty)
                 | Meth_callback attr, attrs -> (attrs, attr +> ty)
               in
-              Ast_compatible.object_field name attrs
-                (Ast_helper.Typ.arrows ~loc
-                   [{attrs = []; lbl = Nolabel; typ = self.typ self core_type}]
-                   (Ast_literal.type_unit ~loc ()))
+              Parsetree.Otag
+                ( name,
+                  attrs,
+                  Ast_helper.Typ.arrow ~loc
+                    [{attrs = []; lbl = Nolabel; typ = self.typ self core_type}]
+                    (Ast_literal.type_unit ~loc ()) )
             in
             let not_getter_setter ty =
               let attrs, core_type =
@@ -110,7 +127,7 @@ let typ_mapper (self : Bs_ast_mapper.mapper) (ty : Parsetree.core_type) =
                 | Nothing, attrs -> (attrs, ty)
                 | Meth_callback attr, attrs -> (attrs, attr +> ty)
               in
-              Ast_compatible.object_field label attrs (self.typ self core_type)
+              Parsetree.Otag (label, attrs, self.typ self core_type)
             in
             process_getter_setter ~not_getter_setter ~get ~set loc label
               ptyp_attrs core_type acc)

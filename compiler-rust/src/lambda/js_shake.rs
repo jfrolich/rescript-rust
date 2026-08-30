@@ -913,6 +913,7 @@ fn expression_uses_ident_only_in_tail_move_safe_positions(
         | ExpressionDesc::JsNot(inner)
         | ExpressionDesc::JsBnot(inner)
         | ExpressionDesc::Spread(inner)
+        | ExpressionDesc::RecordRest(_, inner)
         | ExpressionDesc::Await(inner)
         | ExpressionDesc::OptionalBlock(inner, _)
         | ExpressionDesc::StaticIndex(inner, _, _)
@@ -1020,19 +1021,13 @@ fn expression_uses_ident_only_in_tail_move_safe_positions(
                 TailMoveUseContext::Other,
             )
         }),
-        ExpressionDesc::CamlBlock(items, _, tag, _) => {
+        ExpressionDesc::CamlBlock(items, _, _) => items.iter().all(|item| {
             expression_uses_ident_only_in_tail_move_safe_positions(
-                tag,
+                item,
                 target,
                 TailMoveUseContext::Other,
-            ) && items.iter().all(|item| {
-                expression_uses_ident_only_in_tail_move_safe_positions(
-                    item,
-                    target,
-                    TailMoveUseContext::Other,
-                )
-            })
-        }
+            )
+        }),
         ExpressionDesc::Object(dup, props) => {
             dup.as_ref().is_none_or(|expr| {
                 expression_uses_ident_only_in_tail_move_safe_positions(
@@ -1204,6 +1199,7 @@ fn expression_mentions_ident_outside_nested_functions(expr: &Expression, target:
         | ExpressionDesc::JsNot(inner)
         | ExpressionDesc::JsBnot(inner)
         | ExpressionDesc::Spread(inner)
+        | ExpressionDesc::RecordRest(_, inner)
         | ExpressionDesc::Await(inner)
         | ExpressionDesc::OptionalBlock(inner, _)
         | ExpressionDesc::StaticIndex(inner, _, _)
@@ -1251,12 +1247,9 @@ fn expression_mentions_ident_outside_nested_functions(expr: &Expression, target:
         ExpressionDesc::Array(items, _) => items
             .iter()
             .any(|item| expression_mentions_ident_outside_nested_functions(item, target)),
-        ExpressionDesc::CamlBlock(items, _, tag, _) => {
-            expression_mentions_ident_outside_nested_functions(tag, target)
-                || items
-                    .iter()
-                    .any(|item| expression_mentions_ident_outside_nested_functions(item, target))
-        }
+        ExpressionDesc::CamlBlock(items, _, _) => items
+            .iter()
+            .any(|item| expression_mentions_ident_outside_nested_functions(item, target)),
         ExpressionDesc::Object(dup, props) => {
             dup.as_deref()
                 .is_some_and(|dup| expression_mentions_ident_outside_nested_functions(dup, target))
@@ -1391,6 +1384,7 @@ fn substitute_export_alias_use_in_expression(
         | ExpressionDesc::JsNot(inner)
         | ExpressionDesc::JsBnot(inner)
         | ExpressionDesc::Spread(inner)
+        | ExpressionDesc::RecordRest(_, inner)
         | ExpressionDesc::Await(inner)
         | ExpressionDesc::OptionalBlock(inner, _)
         | ExpressionDesc::StaticIndex(inner, _, _)
@@ -1446,11 +1440,10 @@ fn substitute_export_alias_use_in_expression(
                 substitute_export_alias_use_in_expression(item, target, replacement);
             }
         }
-        ExpressionDesc::CamlBlock(items, _, tag, _) => {
+        ExpressionDesc::CamlBlock(items, _, _) => {
             for item in items {
                 substitute_export_alias_use_in_expression(item, target, replacement);
             }
-            substitute_export_alias_use_in_expression(tag, target, replacement);
         }
         ExpressionDesc::Object(dup, props) => {
             if let Some(dup) = dup {
@@ -1571,6 +1564,7 @@ fn expression_mentions_ident_anywhere(expr: &Expression, target: &Ident) -> bool
         | ExpressionDesc::JsNot(inner)
         | ExpressionDesc::JsBnot(inner)
         | ExpressionDesc::Spread(inner)
+        | ExpressionDesc::RecordRest(_, inner)
         | ExpressionDesc::Await(inner)
         | ExpressionDesc::OptionalBlock(inner, _)
         | ExpressionDesc::StaticIndex(inner, _, _)
@@ -1621,12 +1615,9 @@ fn expression_mentions_ident_anywhere(expr: &Expression, target: &Ident) -> bool
         ExpressionDesc::Array(items, _) => items
             .iter()
             .any(|item| expression_mentions_ident_anywhere(item, target)),
-        ExpressionDesc::CamlBlock(items, _, tag, _) => {
-            expression_mentions_ident_anywhere(tag, target)
-                || items
-                    .iter()
-                    .any(|item| expression_mentions_ident_anywhere(item, target))
-        }
+        ExpressionDesc::CamlBlock(items, _, _) => items
+            .iter()
+            .any(|item| expression_mentions_ident_anywhere(item, target)),
         ExpressionDesc::Object(dup, props) => {
             dup.as_deref()
                 .is_some_and(|dup| expression_mentions_ident_anywhere(dup, target))
@@ -1689,7 +1680,11 @@ pub(crate) fn flatten_toplevel_block_refs(block: &Block) -> Vec<&Statement> {
 
 fn flatten_toplevel_block_owned_into(block: Block, flattened: &mut Block) {
     for stmt in block {
-        let Statement { desc, comment } = stmt;
+        let Statement {
+            source_loc,
+            desc,
+            comment,
+        } = stmt;
         match desc {
             StatementDesc::Variable(VariableDeclaration {
                 ident_info:
@@ -1707,7 +1702,11 @@ fn flatten_toplevel_block_owned_into(block: Block, flattened: &mut Block) {
                 ..
             }) => {}
             StatementDesc::Block(inner) => flatten_toplevel_block_owned_into(inner, flattened),
-            desc => flattened.push(Statement { desc, comment }),
+            desc => flattened.push(Statement {
+                source_loc,
+                desc,
+                comment,
+            }),
         }
     }
 }
@@ -1939,7 +1938,8 @@ fn collect_expression_idents(expr: &Expression, stats: &mut JsIdentStats) {
         | ExpressionDesc::CamlBlockTag(inner, _)
         | ExpressionDesc::OptionalBlock(inner, _)
         | ExpressionDesc::Await(inner)
-        | ExpressionDesc::Spread(inner) => collect_expression_idents(inner, stats),
+        | ExpressionDesc::Spread(inner)
+        | ExpressionDesc::RecordRest(_, inner) => collect_expression_idents(inner, stats),
         ExpressionDesc::StringAppend(left, right)
         | ExpressionDesc::In(left, right)
         | ExpressionDesc::Seq(left, right)
@@ -1990,11 +1990,10 @@ fn collect_expression_idents(expr: &Expression, stats: &mut JsIdentStats) {
                 collect_expression_idents(item, stats);
             }
         }
-        ExpressionDesc::CamlBlock(items, _, tag, _) => {
+        ExpressionDesc::CamlBlock(items, _, _) => {
             for item in items {
                 collect_expression_idents(item, stats);
             }
-            collect_expression_idents(tag, stats);
         }
         ExpressionDesc::Object(dup, props) => {
             if let Some(dup) = dup {

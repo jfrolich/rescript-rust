@@ -145,19 +145,18 @@ fn is_pure_primitive(prim: &Primitive, args: &[Lambda]) -> bool {
         | Primitive::PisNullUndefined
         | Primitive::PnullToOpt
         | Primitive::PnullUndefinedToOpt
-        | Primitive::PjsFnMake(_)
-        | Primitive::PjsFnMakeUnit
         | Primitive::PjsObjectCreate(_)
         | Primitive::Pimport
         | Primitive::Pnull
         | Primitive::Pundefined => true,
 
         // Block operations
-        Primitive::Pmakeblock(_, _, _)
+        Primitive::Pmakeblock(_, _)
         | Primitive::Pfield(_, _)
         | Primitive::PvalFromOption
         | Primitive::PvalFromOptionNotNest
-        | Primitive::Pduprecord => true,
+        | Primitive::Pduprecord
+        | Primitive::PrecordRest(_) => true,
 
         // Object primitives
         Primitive::Pobjcomp(_)
@@ -262,7 +261,8 @@ fn is_pure_primitive(prim: &Primitive, args: &[Lambda]) -> bool {
         Primitive::PrawJsCode(info) => raw_js_is_pure(info),
 
         // Impure primitives
-        Primitive::PjsApply
+        Primitive::PtaggedTemplate
+        | Primitive::PjsApply
         | Primitive::PjsRuntimeApply
         | Primitive::PjsCall { .. }
         | Primitive::PinitMod
@@ -343,7 +343,6 @@ fn size_inner(lam: &Lambda) -> Option<i32> {
                     }
                 }
                 Primitive::Pmakeblock(
-                    _,
                     tag_info @ (TagInfo::Record { .. } | TagInfo::RecordInlined { .. }),
                     _,
                 ) => {
@@ -424,6 +423,7 @@ fn size_inner(lam: &Lambda) -> Option<i32> {
 fn size_constant(c: &Constant) -> i32 {
     match c {
         Constant::Int { .. }
+        | Constant::Constructor(_)
         | Constant::NativeInt { .. }
         | Constant::Char(_)
         | Constant::Float(_)
@@ -727,7 +727,7 @@ mod tests {
                 sw_blocks_full: true,
                 sw_blocks: vec![],
                 sw_failaction: None,
-                sw_names: None,
+                sw_dispatch: crate::lambda::SwitchDispatch::Direct,
             },
         );
         assert_eq!(size(&switch), TOO_BIG_TO_INLINE);
@@ -817,7 +817,6 @@ mod tests {
         // Block sums up fields
         assert_eq!(
             size_constant(&Constant::Block {
-                tag: 0,
                 tag_info: crate::lambda::lam_tag_info::TagInfo::Tuple,
                 elements: vec![Constant::int(1), Constant::int(2), Constant::int(3)],
             }),
@@ -826,7 +825,6 @@ mod tests {
 
         assert_eq!(
             size_constant(&Constant::Block {
-                tag: 0,
                 tag_info: TagInfo::Record {
                     fields: vec![("className".to_string(), true)],
                     logical_field_count: Some(4),
@@ -849,13 +847,19 @@ mod tests {
                 LambdaSwitch {
                     sw_consts_full: true,
                     sw_consts: vec![
-                        (0, Lambda::const_(Constant::JsFalse)),
-                        (1, Lambda::const_(Constant::JsTrue)),
+                        (
+                            crate::lambda::SwitchKey::Int(0),
+                            Lambda::const_(Constant::JsFalse),
+                        ),
+                        (
+                            crate::lambda::SwitchKey::Int(1),
+                            Lambda::const_(Constant::JsTrue),
+                        ),
                     ],
                     sw_blocks_full: true,
                     sw_blocks: vec![],
                     sw_failaction: None,
-                    sw_names: None,
+                    sw_dispatch: crate::lambda::SwitchDispatch::Direct,
                 },
             )),
             attr: FunctionAttribute::default(),

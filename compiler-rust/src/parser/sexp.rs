@@ -484,11 +484,20 @@ fn core_type(arena: &ParseArena, typ: &CoreType) -> Sexp {
             Sexp::list(vec![Sexp::atom("Ptyp_var"), Sexp::atom(&quote_string(var))])
         }
         CoreTypeDesc::Ptyp_arrow(inner) => {
-            let (ref arg, ref ret, ..) = **inner;
+            let (arg, ret, arity) = &**inner;
+            let params = arena
+                .nary_arrow_args(arg, *arity)
+                .iter()
+                .map(|param| {
+                    Sexp::list(vec![
+                        arg_label(arena, &param.lbl),
+                        core_type(arena, arena.get_core_type(param.typ)),
+                    ])
+                })
+                .collect();
             Sexp::list(vec![
                 Sexp::atom("Ptyp_arrow"),
-                arg_label(arena, &arg.lbl),
-                core_type(arena, arena.get_core_type(arg.typ)),
+                Sexp::list(params),
                 core_type(arena, arena.get_core_type(*ret)),
             ])
         }
@@ -674,6 +683,22 @@ fn pattern(arena: &ParseArena, p: &Pattern) -> Sexp {
                         pattern(arena, arena.get_pat(f.pat)),
                     ])
                 })),
+                match arena.record_pat_rest(p.ppat_loc) {
+                    None => Sexp::atom("None"),
+                    Some(rest) => Sexp::list(vec![
+                        Sexp::atom("Some"),
+                        Sexp::list(vec![
+                            Sexp::atom(arena.get_string(rest.rest_name.txt)),
+                            match rest.rest_type {
+                                None => Sexp::atom("None"),
+                                Some(ty) => Sexp::list(vec![
+                                    Sexp::atom("Some"),
+                                    core_type(arena, arena.get_core_type(ty)),
+                                ]),
+                            },
+                        ]),
+                    ]),
+                },
             ])
         }
         PatternDesc::Ppat_array(pats) => Sexp::list(vec![
@@ -739,25 +764,40 @@ fn expression(arena: &ParseArena, expr: &Expression) -> Sexp {
             ])
         }
         ExpressionDesc::Pexp_fun(inner) => {
-            let PexpFun {
-                arg_label: ref lbl,
-                ref default,
-                ref lhs,
-                ref rhs,
-                ..
-            } = **inner;
+            let params = arena
+                .nary_fun_params(inner)
+                .iter()
+                .map(|param| {
+                    Sexp::list(vec![
+                        arg_label(arena, &param.p_lbl),
+                        match param.p_default {
+                            None => Sexp::atom("None"),
+                            Some(default) => Sexp::list(vec![
+                                Sexp::atom("Some"),
+                                expression(arena, arena.get_expr(default)),
+                            ]),
+                        },
+                        pattern(arena, arena.get_pat(param.p_pat)),
+                    ])
+                })
+                .collect();
             Sexp::list(vec![
                 Sexp::atom("Pexp_fun"),
-                arg_label(arena, lbl),
-                match default {
-                    None => Sexp::atom("None"),
-                    Some(e) => Sexp::list(vec![
-                        Sexp::atom("Some"),
-                        expression(arena, arena.get_expr(*e)),
-                    ]),
-                },
-                pattern(arena, arena.get_pat(*lhs)),
-                expression(arena, arena.get_expr(*rhs)),
+                Sexp::list(
+                    arena
+                        .nary_fun_newtypes(inner)
+                        .iter()
+                        .map(|(name, attrs)| {
+                            Sexp::list(vec![
+                                Sexp::atom("newtype"),
+                                Sexp::atom(&quote_string(arena.get_string(name.txt))),
+                                attributes(arena, attrs),
+                            ])
+                        })
+                        .collect(),
+                ),
+                Sexp::list(params),
+                expression(arena, arena.get_expr(arena.nary_fun_body(inner))),
             ])
         }
         ExpressionDesc::Pexp_apply(inner) => {
@@ -1117,9 +1157,26 @@ fn case(arena: &ParseArena, c: &Case) -> Sexp {
 }
 
 fn value_binding(arena: &ParseArena, vb: &ValueBinding) -> Sexp {
+    let constraint = arena.value_constraint(vb.pvb_pat).map_or_else(
+        || Sexp::atom("None"),
+        |constraint| {
+            Sexp::list(vec![
+                Sexp::atom("Some"),
+                Sexp::list(
+                    constraint
+                        .pvc_newtypes
+                        .iter()
+                        .map(|name| Sexp::atom(&quote_string(arena.get_string(name.txt))))
+                        .collect(),
+                ),
+                core_type(arena, arena.get_core_type(constraint.pvc_type)),
+            ])
+        },
+    );
     Sexp::list(vec![
         Sexp::atom("value_binding"),
         pattern(arena, arena.get_pat(vb.pvb_pat)),
+        constraint,
         expression(arena, arena.get_expr(vb.pvb_expr)),
         attributes(arena, &vb.pvb_attributes),
     ])

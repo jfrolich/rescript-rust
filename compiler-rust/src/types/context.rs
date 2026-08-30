@@ -22,8 +22,8 @@ use super::asttypes::{ArgLabel, PrivateFlag};
 use super::env::Env;
 use super::path::Path;
 use super::type_expr::{
-    AbbrevMemo, AbbrevMemoRef, Commutable, CommutableRef, FieldKind, FieldKindRef, GENERIC_LEVEL,
-    RowDesc, RowField, RowFieldRef, TypeArg, TypeDesc, TypeExpr, TypeExprRef,
+    AbbrevMemo, AbbrevMemoRef, FieldKind, FieldKindRef, GENERIC_LEVEL, RowDesc, RowField,
+    RowFieldRef, TypeArg, TypeDesc, TypeExpr, TypeExprRef,
 };
 use super::typedtree::EnvRef;
 use crate::context::IdGenerator;
@@ -288,11 +288,13 @@ pub struct TypeContext {
     /// last cleanup. Mirrors OCaml btype.ml `memo` list used by cleanup_abbrev.
     memoized_abbrev_refs: RefCell<Vec<AbbrevMemoRef>>,
 
+    /// Stable forward references for canonical variant layouts. Entries are
+    /// allocated before translating a recursive declaration group and completed
+    /// exactly once after the group is available in the environment.
+    variant_layouts: RefCell<Vec<RefCell<super::variant_runtime::LayoutState>>>,
+
     /// Row field storage
     row_fields: RefCell<Vec<RefCell<Option<RowField>>>>,
-
-    /// Commutable storage
-    commutables: RefCell<Vec<RefCell<Commutable>>>,
 
     /// Field kind storage
     field_kinds: RefCell<Vec<RefCell<Option<FieldKind>>>>,
@@ -300,16 +302,18 @@ pub struct TypeContext {
     /// Global type declaration store, indexed by type name.
     /// Populated when loading CMI module signatures so that type alias
     /// expansion can find declarations for types not directly in the env.
-    type_decl_store: RefCell<ahash::AHashMap<String, super::decl::TypeDeclaration>>,
+    type_decl_store: RefCell<ahash::AHashMap<String, Arc<super::decl::TypeDeclaration>>>,
 
     /// Global type declaration store, indexed by ident stamp.
     /// Used for looking up CMI-loaded type declarations by their stamp
     /// when the type name is too generic (e.g., "t").
-    type_decl_by_stamp: RefCell<ahash::AHashMap<i32, super::decl::TypeDeclaration>>,
+    type_decl_by_stamp: RefCell<ahash::AHashMap<i32, Arc<super::decl::TypeDeclaration>>>,
 
     /// Global type declaration store, indexed by full qualified path string.
     /// Used for looking up types via Pdot paths (e.g., "Js.Promise.t").
-    type_decl_by_path: RefCell<ahash::AHashMap<String, super::decl::TypeDeclaration>>,
+    type_decl_by_path: RefCell<ahash::AHashMap<String, Arc<super::decl::TypeDeclaration>>>,
+    /// Qualified declarations keyed by Path identity, preserving local stamps.
+    type_decl_by_exact_path: RefCell<ahash::AHashMap<Path, Arc<super::decl::TypeDeclaration>>>,
     type_item_by_path: RefCell<ahash::AHashMap<String, (Ident, super::decl::TypeDeclaration)>>,
     missing_type_item_by_path: RefCell<ahash::AHashSet<String>>,
 
@@ -352,9 +356,12 @@ pub struct TypeContext {
     >,
 
     /// Cached dotted type lookups keyed by resolved module access path.
+    /// Keyed by env id as well: OCaml's Env is persistent, so a binding can
+    /// never change under an existing path, but Rust's Env is mutated in
+    /// place (`add_module`) and must invalidate these derived entries.
     resolved_module_type_cache: RefCell<
         ahash::AHashMap<
-            Path,
+            (u64, Path),
             ahash::AHashMap<String, (Path, Ident, Arc<super::decl::TypeDeclaration>)>,
         >,
     >,
@@ -362,7 +369,8 @@ pub struct TypeContext {
     /// Cached child-module access paths keyed by resolved parent access path.
     resolved_child_module_path_cache: RefCell<ahash::AHashMap<Path, ahash::AHashMap<String, Path>>>,
 
-    /// Cached forced module declarations from qualified component tables.
+    /// Forced declarations shared by persistent/global alias component views.
+    /// Local component views keep their own thunk state in StructureComponentTables.
     qualified_module_decl_cache: RefCell<
         ahash::AHashMap<
             Path,
@@ -408,6 +416,8 @@ pub struct TypeContext {
     /// copied signatures separate from `raw_module_sigs`; typechecking lookup
     /// paths expect the normal component/rename caches, not this CMT view.
     gentype_raw_module_sigs: RefCell<ahash::AHashMap<String, Arc<super::decl::Signature>>>,
+    gentype_portable_raw_module_sigs:
+        RefCell<ahash::AHashMap<String, Arc<crate::cmi::portable_types::PortablePersStruct>>>,
 
     /// Raw signatures loaded only for persistent component lookup.
     ///
@@ -442,6 +452,7 @@ pub struct TypeContext {
     predef_bigint: Cell<Option<TypeExprRef>>,
     predef_option_inner: Cell<Option<TypeExprRef>>,
     predef_option_type: Cell<Option<TypeExprRef>>,
+    predef_option_layout: Cell<Option<super::variant_runtime::LayoutRef>>,
 
     /// Arity update aliases: maps arity-updated TypeExprRef → original TypeExprRef.
     /// OCaml's `{t with desc = Tarrow(..., Some newarity)}` creates a new record
@@ -456,7 +467,7 @@ pub struct TypeContext {
     /// Used by raw lambda conversion to bind ALL record fields (matching OCaml's make_record_matching).
     record_labels_cache: RefCell<
         ahash::AHashMap<
-            String,
+            Path,
             Vec<(
                 String,
                 i32,
@@ -541,12 +552,13 @@ impl TypeContext {
                 RefCell::new(AbbrevMemo::Mnil),
             ]),
             memoized_abbrev_refs: RefCell::new(Vec::new()),
+            variant_layouts: RefCell::new(Vec::new()),
             row_fields: RefCell::new(Vec::new()),
-            commutables: RefCell::new(Vec::new()),
             field_kinds: RefCell::new(Vec::new()),
             type_decl_store: RefCell::new(ahash::AHashMap::new()),
             type_decl_by_stamp: RefCell::new(ahash::AHashMap::new()),
             type_decl_by_path: RefCell::new(ahash::AHashMap::new()),
+            type_decl_by_exact_path: RefCell::new(ahash::AHashMap::new()),
             type_item_by_path: RefCell::new(ahash::AHashMap::new()),
             missing_type_item_by_path: RefCell::new(ahash::AHashSet::new()),
             resolved_pdot_type_cache: RefCell::new(ahash::AHashMap::new()),
@@ -566,6 +578,7 @@ impl TypeContext {
             renamed_module_sigs: RefCell::new(ahash::AHashMap::new()),
             raw_module_sigs: RefCell::new(ahash::AHashMap::new()),
             gentype_raw_module_sigs: RefCell::new(ahash::AHashMap::new()),
+            gentype_portable_raw_module_sigs: RefCell::new(ahash::AHashMap::new()),
             raw_component_module_sigs: RefCell::new(ahash::AHashMap::new()),
             cmi_longident_names: RefCell::new(ahash::AHashMap::new()),
             arena_longident_names: RefCell::new(ahash::AHashMap::new()),
@@ -580,6 +593,7 @@ impl TypeContext {
             predef_bigint: Cell::new(None),
             predef_option_inner: Cell::new(None),
             predef_option_type: Cell::new(None),
+            predef_option_layout: Cell::new(None),
             arity_aliases: RefCell::new(ahash::AHashMap::new()),
             record_labels_cache: RefCell::new(ahash::AHashMap::new()),
             record_label_descriptions_cache: RefCell::new(ahash::AHashMap::new()),
@@ -590,6 +604,67 @@ impl TypeContext {
             typed_envs: RefCell::new(Vec::new()),
             typed_envs_by_id: RefCell::new(ahash::AHashMap::new()),
         }
+    }
+
+    pub fn pending_variant_layout(&self) -> super::variant_runtime::LayoutRef {
+        let mut layouts = self.variant_layouts.borrow_mut();
+        let layout_ref = super::variant_runtime::LayoutRef(layouts.len() as u32);
+        layouts.push(RefCell::new(super::variant_runtime::LayoutState::Pending));
+        layout_ref
+    }
+
+    pub fn alloc_complete_variant_layout(
+        &self,
+        layout: super::variant_runtime::Layout,
+    ) -> super::variant_runtime::LayoutRef {
+        let layout_ref = self.pending_variant_layout();
+        self.complete_variant_layout(layout_ref, layout);
+        layout_ref
+    }
+
+    pub fn complete_variant_layout(
+        &self,
+        layout_ref: super::variant_runtime::LayoutRef,
+        layout: super::variant_runtime::Layout,
+    ) {
+        let layouts = self.variant_layouts.borrow();
+        let Some(state) = layouts.get(layout_ref.0 as usize) else {
+            panic!("variant layout reference belongs to another TypeContext")
+        };
+        let mut state = state.borrow_mut();
+        match &*state {
+            super::variant_runtime::LayoutState::Pending => {
+                *state = super::variant_runtime::LayoutState::Complete(layout)
+            }
+            super::variant_runtime::LayoutState::Complete(_) => {
+                panic!("variant layout completed twice")
+            }
+        }
+    }
+
+    /// Read a completed variant layout without copying its constructor table.
+    pub fn with_variant_layout<R>(
+        &self,
+        layout_ref: super::variant_runtime::LayoutRef,
+        read: impl FnOnce(&super::variant_runtime::Layout) -> R,
+    ) -> R {
+        let layouts = self.variant_layouts.borrow();
+        let Some(state) = layouts.get(layout_ref.0 as usize) else {
+            panic!("variant layout reference belongs to another TypeContext")
+        };
+        match &*state.borrow() {
+            super::variant_runtime::LayoutState::Complete(layout) => read(layout),
+            super::variant_runtime::LayoutState::Pending => {
+                panic!("variant layout accessed before declaration completion")
+            }
+        }
+    }
+
+    pub fn variant_layout(
+        &self,
+        layout_ref: super::variant_runtime::LayoutRef,
+    ) -> super::variant_runtime::Layout {
+        self.with_variant_layout(layout_ref, Clone::clone)
     }
 
     /// Store a typedtree environment snapshot and return a stable reference.
@@ -694,6 +769,14 @@ impl TypeContext {
     /// Register a type declaration for type alias expansion.
     /// Called when loading module signatures from CMI files.
     pub fn register_type_decl(&self, name: &str, decl: super::decl::TypeDeclaration) {
+        self.register_shared_type_decl(name, Arc::new(decl));
+    }
+
+    pub(crate) fn register_shared_type_decl(
+        &self,
+        name: &str,
+        decl: Arc<super::decl::TypeDeclaration>,
+    ) {
         self.type_decl_store
             .borrow_mut()
             .insert(name.to_string(), decl);
@@ -701,6 +784,14 @@ impl TypeContext {
 
     /// Register a type declaration by ident stamp for alias expansion.
     pub fn register_type_decl_by_stamp(&self, stamp: i32, decl: super::decl::TypeDeclaration) {
+        self.register_shared_type_decl_by_stamp(stamp, Arc::new(decl));
+    }
+
+    pub(crate) fn register_shared_type_decl_by_stamp(
+        &self,
+        stamp: i32,
+        decl: Arc<super::decl::TypeDeclaration>,
+    ) {
         self.type_decl_by_stamp.borrow_mut().insert(stamp, decl);
     }
 
@@ -723,7 +814,9 @@ impl TypeContext {
     ) -> Option<std::cell::Ref<'_, super::decl::TypeDeclaration>> {
         let store = self.type_decl_store.borrow();
         if store.contains_key(name) {
-            Some(std::cell::Ref::map(store, |s| s.get(name).unwrap()))
+            Some(std::cell::Ref::map(store, |s| {
+                s.get(name).unwrap().as_ref()
+            }))
         } else {
             None
         }
@@ -736,7 +829,9 @@ impl TypeContext {
     ) -> Option<std::cell::Ref<'_, super::decl::TypeDeclaration>> {
         let store = self.type_decl_by_stamp.borrow();
         if store.contains_key(&stamp) {
-            Some(std::cell::Ref::map(store, |s| s.get(&stamp).unwrap()))
+            Some(std::cell::Ref::map(store, |s| {
+                s.get(&stamp).unwrap().as_ref()
+            }))
         } else {
             None
         }
@@ -744,9 +839,30 @@ impl TypeContext {
 
     /// Register a type declaration by full qualified path string for alias expansion.
     pub fn register_type_decl_by_path(&self, path: &str, decl: super::decl::TypeDeclaration) {
+        self.register_shared_type_decl_by_path(path, Arc::new(decl));
+    }
+
+    pub(crate) fn register_shared_type_decl_by_path(
+        &self,
+        path: &str,
+        decl: Arc<super::decl::TypeDeclaration>,
+    ) {
         self.type_decl_by_path
             .borrow_mut()
             .insert(path.to_string(), decl);
+    }
+
+    /// Register a qualified declaration by exact Path identity.
+    pub fn register_type_decl_by_exact_path(&self, path: Path, decl: super::decl::TypeDeclaration) {
+        self.register_shared_type_decl_by_exact_path(path, Arc::new(decl));
+    }
+
+    pub(crate) fn register_shared_type_decl_by_exact_path(
+        &self,
+        path: Path,
+        decl: Arc<super::decl::TypeDeclaration>,
+    ) {
+        self.type_decl_by_exact_path.borrow_mut().insert(path, decl);
     }
 
     pub(crate) fn register_type_item_by_path(
@@ -1023,6 +1139,7 @@ impl TypeContext {
     /// Cache a dotted type lookup for a resolved module access path.
     pub(crate) fn register_resolved_module_type(
         &self,
+        env_id: u64,
         module_path: &Path,
         type_name: &str,
         access_path: Path,
@@ -1031,7 +1148,7 @@ impl TypeContext {
     ) {
         self.resolved_module_type_cache
             .borrow_mut()
-            .entry(module_path.clone())
+            .entry((env_id, module_path.clone()))
             .or_default()
             .insert(type_name.to_string(), (access_path, id, decl));
     }
@@ -1039,12 +1156,13 @@ impl TypeContext {
     /// Look up a cached dotted type lookup for a resolved module access path.
     pub(crate) fn find_resolved_module_type(
         &self,
+        env_id: u64,
         module_path: &Path,
         type_name: &str,
     ) -> Option<(Path, Ident, Arc<super::decl::TypeDeclaration>)> {
         self.resolved_module_type_cache
             .borrow()
-            .get(module_path)
+            .get(&(env_id, module_path.clone()))
             .and_then(|types| types.get(type_name))
             .cloned()
     }
@@ -1076,7 +1194,11 @@ impl TypeContext {
             .cloned()
     }
 
-    /// Cache a forced qualified module declaration.
+    /// Share a forced declaration across persistent/global alias component views.
+    ///
+    /// Local declarations and functor-application paths are intentionally not
+    /// published here: OCaml keeps descriptor component tables and later
+    /// `find_module` thunks distinct.
     pub(crate) fn register_qualified_module_decl(
         &self,
         parent_path: &Path,
@@ -1084,6 +1206,12 @@ impl TypeContext {
         id: Ident,
         md: Arc<super::decl::ModuleDeclaration>,
     ) {
+        let Some(head) = parent_path.head_opt() else {
+            return;
+        };
+        if !head.is_persistent() && !head.is_global() && head.stamp() != 0 {
+            return;
+        }
         self.qualified_module_decl_cache
             .borrow_mut()
             .entry(parent_path.clone())
@@ -1091,12 +1219,16 @@ impl TypeContext {
             .insert(child_name.to_string(), (id, md));
     }
 
-    /// Look up a forced qualified module declaration.
+    /// Look up a forced persistent/global qualified module declaration.
     pub(crate) fn find_qualified_module_decl(
         &self,
         parent_path: &Path,
         child_name: &str,
     ) -> Option<(Ident, Arc<super::decl::ModuleDeclaration>)> {
+        let head = parent_path.head_opt()?;
+        if !head.is_persistent() && !head.is_global() && head.stamp() != 0 {
+            return None;
+        }
         self.qualified_module_decl_cache
             .borrow()
             .get(parent_path)
@@ -1220,7 +1352,24 @@ impl TypeContext {
     ) -> Option<std::cell::Ref<'_, super::decl::TypeDeclaration>> {
         let store = self.type_decl_by_path.borrow();
         if store.contains_key(path) {
-            Some(std::cell::Ref::map(store, |s| s.get(path).unwrap()))
+            Some(std::cell::Ref::map(store, |s| {
+                s.get(path).unwrap().as_ref()
+            }))
+        } else {
+            None
+        }
+    }
+
+    /// Look up a qualified declaration by exact Path identity.
+    pub fn find_type_decl_by_exact_path(
+        &self,
+        path: &Path,
+    ) -> Option<std::cell::Ref<'_, super::decl::TypeDeclaration>> {
+        let store = self.type_decl_by_exact_path.borrow();
+        if store.contains_key(path) {
+            Some(std::cell::Ref::map(store, |entries| {
+                entries.get(path).expect("checked exact type path").as_ref()
+            }))
         } else {
             None
         }
@@ -1232,6 +1381,9 @@ impl TypeContext {
 
     /// Create a new type expression.
     fn alloc_type(&self, desc: TypeDesc, level: i32) -> TypeExprRef {
+        // A n-ary arrow owns exactly the parameters supplied by its syntax
+        // node. Its return type may itself be an arrow (a sequential
+        // application such as `f(a)(b)`); never flatten that nested boundary.
         let id = self.id_gen.next_type_id();
         self.types.push(TypeExpr::new(desc, level, id))
     }
@@ -1274,30 +1426,22 @@ impl TypeContext {
         ret_type: TypeExprRef,
         arity: Option<i32>,
     ) -> TypeExprRef {
-        let commutable = self.alloc_commutable(Commutable::Cok);
-        self.new_arrow_with_commutable(
-            arg_label,
-            arg_type,
-            ret_type,
-            Commutable::Clink(commutable),
-            arity,
-        )
-    }
-
-    pub(crate) fn new_arrow_with_commutable(
-        &self,
-        arg_label: ArgLabel,
-        arg_type: TypeExprRef,
-        ret_type: TypeExprRef,
-        commutable: Commutable,
-        arity: Option<i32>,
-    ) -> TypeExprRef {
-        self.new_type(TypeDesc::Tarrow {
-            arg: TypeArg::new(arg_label, arg_type),
-            ret: ret_type,
-            commutable,
-            arity,
-        })
+        let _ = arity;
+        let mut args = vec![TypeArg::new(arg_label, arg_type)];
+        let ret = {
+            let desc = self.get_desc(self.repr(ret_type));
+            match &*desc {
+                TypeDesc::Tarrow {
+                    args: ret_args,
+                    ret,
+                } => {
+                    args.extend(ret_args.iter().cloned());
+                    *ret
+                }
+                _ => ret_type,
+            }
+        };
+        self.new_type(TypeDesc::Tarrow { args, ret })
     }
 
     /// Create an unlabeled arrow type.
@@ -1368,6 +1512,19 @@ impl TypeContext {
 
     /// Get the cached generic option constructor scheme types.
     /// Returns (`'a`, `option('a)`), both allocated once at generic level.
+    pub fn predef_option_layout(&self) -> super::variant_runtime::LayoutRef {
+        if let Some(layout) = self.predef_option_layout.get() {
+            layout
+        } else {
+            let layout = super::variant_runtime::plain_layout(
+                self,
+                [("None".to_string(), false), ("Some".to_string(), true)],
+            );
+            self.predef_option_layout.set(Some(layout));
+            layout
+        }
+    }
+
     pub fn predef_option_scheme(&self) -> (TypeExprRef, TypeExprRef) {
         match (
             self.predef_option_inner.get(),
@@ -1392,13 +1549,22 @@ impl TypeContext {
         ret_type: TypeExprRef,
         arity: Option<i32>,
     ) -> TypeExprRef {
-        let commutable = self.alloc_commutable(Commutable::Cok);
-        self.new_generic_type(TypeDesc::Tarrow {
-            arg: TypeArg::new(arg_label, arg_type),
-            ret: ret_type,
-            commutable: Commutable::Clink(commutable),
-            arity,
-        })
+        let _ = arity;
+        let mut args = vec![TypeArg::new(arg_label, arg_type)];
+        let ret = {
+            let desc = self.get_desc(self.repr(ret_type));
+            match &*desc {
+                TypeDesc::Tarrow {
+                    args: ret_args,
+                    ret,
+                } => {
+                    args.extend(ret_args.iter().cloned());
+                    *ret
+                }
+                _ => ret_type,
+            }
+        };
+        self.new_generic_type(TypeDesc::Tarrow { args, ret })
     }
 
     /// Create a link type (for unification).
@@ -1563,7 +1729,7 @@ impl TypeContext {
     /// Called during type checking when record patterns are processed.
     pub fn register_record_labels(
         &self,
-        type_path_name: &str,
+        type_path: &Path,
         labels: Vec<(
             String,
             i32,
@@ -1574,13 +1740,13 @@ impl TypeContext {
     ) {
         self.record_labels_cache
             .borrow_mut()
-            .insert(type_path_name.to_string(), labels);
+            .insert(type_path.clone(), labels);
     }
 
     /// Look up cached record labels for a type path.
     pub fn get_record_labels(
         &self,
-        type_path_name: &str,
+        type_path: &Path,
     ) -> Option<
         Vec<(
             String,
@@ -1590,10 +1756,7 @@ impl TypeContext {
             Vec<super::decl::Attribute>,
         )>,
     > {
-        self.record_labels_cache
-            .borrow()
-            .get(type_path_name)
-            .cloned()
+        self.record_labels_cache.borrow().get(type_path).cloned()
     }
 
     /// Cache reconstructed record label descriptions for a type path.
@@ -2016,46 +2179,6 @@ impl TypeContext {
     }
 
     // ========================================================================
-    // Commutables
-    // ========================================================================
-
-    /// Allocate a commutable reference.
-    pub(crate) fn alloc_commutable(&self, c: Commutable) -> CommutableRef {
-        let mut commutables = self.commutables.borrow_mut();
-        let idx = commutables.len();
-        commutables.push(RefCell::new(c));
-        CommutableRef::from_usize(idx)
-    }
-
-    pub(crate) fn get_commutable(&self, c: CommutableRef) -> Commutable {
-        let commutables = self.commutables.borrow();
-        commutables
-            .get(c.index())
-            .map(|cell| cell.borrow().clone())
-            .unwrap_or(Commutable::Cunknown)
-    }
-
-    pub(crate) fn set_commutable(&self, c: CommutableRef, value: Commutable) {
-        let commutables = self.commutables.borrow();
-        if let Some(cell) = commutables.get(c.index()) {
-            *cell.borrow_mut() = value;
-        }
-    }
-
-    pub(crate) fn commutable_repr(&self, c: &Commutable) -> Commutable {
-        match c {
-            Commutable::Clink(link) => {
-                let linked = self.get_commutable(*link);
-                match linked {
-                    Commutable::Cunknown => c.clone(),
-                    _ => self.commutable_repr(&linked),
-                }
-            }
-            _ => c.clone(),
-        }
-    }
-
-    // ========================================================================
     // Field Kinds
     // ========================================================================
 
@@ -2175,11 +2298,34 @@ impl TypeContext {
             .insert(name.to_string(), sig);
     }
 
+    pub(crate) fn register_gentype_portable_raw_module_sig(
+        &self,
+        name: &str,
+        pers_struct: Arc<crate::cmi::portable_types::PortablePersStruct>,
+    ) {
+        self.gentype_portable_raw_module_sigs
+            .borrow_mut()
+            .insert(name.to_string(), pers_struct);
+    }
+
     pub(crate) fn get_gentype_raw_module_sig(
         &self,
         name: &str,
     ) -> Option<Arc<super::decl::Signature>> {
-        self.gentype_raw_module_sigs.borrow().get(name).cloned()
+        if let Some(sig) = self.gentype_raw_module_sigs.borrow().get(name).cloned() {
+            return Some(sig);
+        }
+        let portable = self
+            .gentype_portable_raw_module_sigs
+            .borrow_mut()
+            .remove(name)?;
+        let sig = Arc::new(crate::cmi::portable_types::internalize_raw_signature(
+            &portable, self,
+        )?);
+        self.gentype_raw_module_sigs
+            .borrow_mut()
+            .insert(name.to_string(), sig.clone());
+        Some(sig)
     }
 
     pub fn has_raw_module_sig(&self, name: &str) -> bool {
@@ -2545,6 +2691,21 @@ mod tests {
 
         let desc = ctx.get_desc(arrow);
         assert!(matches!(*desc, TypeDesc::Tarrow { .. }));
+    }
+
+    #[test]
+    fn variant_layout_can_be_read_without_cloning() {
+        let id_gen = IdGenerator::new();
+        let ctx = TypeContext::new(std::sync::Arc::new(id_gen));
+        let layout_ref = super::super::variant_runtime::plain_layout(
+            &ctx,
+            [("First".to_string(), false), ("Second".to_string(), true)],
+        );
+
+        let constructor_count =
+            ctx.with_variant_layout(layout_ref, |layout| layout.constructors.len());
+
+        assert_eq!(constructor_count, 2);
     }
 
     #[test]

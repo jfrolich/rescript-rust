@@ -31,7 +31,7 @@ let print_if_pipe ppf flag printer arg =
 let print_if ppf flag printer arg = if !flag then fprintf ppf "%a@." printer arg
 
 let process_with_gentype cmt_file =
-  if !Clflags.bs_gentype then GenTypeMain.process_cmt_file cmt_file
+  if !Clflags.bs_gentype then Gentype_main.process_cmt_file cmt_file
 
 let after_parsing_sig ppf outputprefix ast =
   if !Clflags.only_parse = false then (
@@ -158,12 +158,12 @@ let after_parsing_impl ppf outputprefix (ast : Parsetree.structure) =
       (if typedtree_only () then Warnings.check_fatal ()
        else if !Js_config.cmi_only then Warnings.check_fatal ()
        else
-         let lambda, exports =
+         let {Translmod.lambda; exports; hoisted_functions} =
            Translmod.transl_implementation modulename typedtree_coercion
          in
          let js_program =
            print_if_pipe ppf Clflags.dump_rawlambda Printlambda.lambda lambda
-           |> Lam_compile_main.compile outputprefix exports
+           |> Lam_compile_main.compile outputprefix exports hoisted_functions
          in
          if not !Js_config.cmj_only then
            Lam_compile_main.lambda_as_module js_program outputprefix);

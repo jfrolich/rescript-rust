@@ -98,6 +98,9 @@ pub enum Constant {
         comment: Option<PointerInfo>,
     },
 
+    /// Nullary nominal constructor with its canonical runtime tag.
+    Constructor(crate::types::VariantTag),
+
     /// Character constant (stored as Unicode code point)
     Char(i32),
 
@@ -128,8 +131,6 @@ pub enum Constant {
 
     /// Block constant (for variants, records, tuples)
     Block {
-        /// Block tag
-        tag: i32,
         /// Tag info for debugging/codegen
         tag_info: TagInfo,
         /// Block elements
@@ -226,6 +227,7 @@ impl Constant {
             | Constant::JsTrue
             | Constant::JsFalse
             | Constant::Int { .. }
+            | Constant::Constructor(_)
             | Constant::NativeInt { .. }
             | Constant::Char(_)
             | Constant::String { .. }
@@ -245,6 +247,7 @@ impl Constant {
             (Constant::JsTrue, Constant::JsTrue) => true,
             (Constant::JsFalse, Constant::JsFalse) => true,
             (Constant::Int { i: a, .. }, Constant::Int { i: b, .. }) => a == b,
+            (Constant::Constructor(a), Constant::Constructor(b)) => a == b,
             (Constant::NativeInt { i: a, .. }, Constant::NativeInt { i: b, .. }) => a == b,
             (Constant::Char(a), Constant::Char(b)) => a == b,
             (Constant::String { s: a, delim: da }, Constant::String { s: b, delim: db }) => {
@@ -265,14 +268,12 @@ impl Constant {
             (Constant::Pointer(a), Constant::Pointer(b)) => a == b,
             (
                 Constant::Block {
-                    tag: ta,
+                    tag_info: ta,
                     elements: ea,
-                    ..
                 },
                 Constant::Block {
-                    tag: tb,
+                    tag_info: tb,
                     elements: eb,
-                    ..
                 },
             ) => {
                 ta == tb
@@ -290,6 +291,20 @@ impl Constant {
         match self {
             Constant::Int { i, .. } => *i != 0,
             Constant::NativeInt { i, .. } => *i != 0,
+            Constant::Constructor(tag) => match &tag.tag_type {
+                None => tag.name != "[]",
+                Some(crate::types::VariantTagType::String(value)) => !value.is_empty(),
+                Some(crate::types::VariantTagType::Int(value)) => *value != 0,
+                Some(crate::types::VariantTagType::Bool(value)) => *value,
+                Some(
+                    crate::types::VariantTagType::Null | crate::types::VariantTagType::Undefined,
+                ) => false,
+                Some(
+                    crate::types::VariantTagType::Float(_)
+                    | crate::types::VariantTagType::BigInt(_)
+                    | crate::types::VariantTagType::Untagged(_),
+                ) => true,
+            },
             Constant::Char(c) => *c != 0,
             Constant::JsFalse
             | Constant::JsNull
@@ -373,7 +388,6 @@ mod tests {
         assert!(!Constant::Some(Box::new(Constant::int(42))).is_allocating());
         assert!(
             Constant::Some(Box::new(Constant::Block {
-                tag: 0,
                 tag_info: TagInfo::Tuple,
                 elements: vec![Constant::int(1)],
             }))
@@ -381,7 +395,6 @@ mod tests {
         );
         assert!(
             Constant::Block {
-                tag: 0,
                 tag_info: TagInfo::Tuple,
                 elements: vec![Constant::int(1), Constant::int(2)],
             }

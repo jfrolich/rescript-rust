@@ -150,13 +150,11 @@ let raw_snippet_exp_simple_enough (s : string) =
 *)
 let rec exp_need_paren ?(arrow = false) (e : J.expression) =
   match e.expression_desc with
-  (* | Caml_uninitialized_obj _  *)
   | Call ({expression_desc = Raw_js_code _}, _, _) -> true
   | Raw_js_code {code_info = Exp _}
   | Fun _
   | Caml_block
       ( _,
-        _,
         _,
         ( Blk_record _ | Blk_module _ | Blk_poly_var _ | Blk_extension
         | Blk_record_ext _ | Blk_record_inlined _ | Blk_constructor _ ) )
@@ -172,17 +170,9 @@ let rec exp_need_paren ?(arrow = false) (e : J.expression) =
   | Await _ -> false
   | Spread _ -> false
   | Tagged_template _ -> false
+  | Record_rest _ -> false
   | Optional_block (e, true) when arrow -> exp_need_paren ~arrow e
   | Optional_block _ -> false
-
-(** Print as underscore for unused vars, may not be 
-    needed in the future *)
-(* let ipp_ident cxt f id (un_used : bool) =
-   Ext_pp_scope.ident cxt f (
-    if un_used then
-      Ext_ident.make_unused ()
-    else
-      id) *)
 
 let pp_var_assign cxt f id =
   P.string f L.let_;
@@ -237,7 +227,38 @@ let debugger_nl f =
   semi f;
   P.newline f
 
-let formal_parameter_list cxt f l = iter_lst cxt f l Ext_pp_scope.ident comma_sp
+let rec record_rest_field cxt f
+    ({record_rest_label; record_rest_ident} : J.record_rest_field) =
+  let key = Js_dump_property.property_key (Lit record_rest_label) in
+  match record_rest_ident with
+  | None ->
+    P.string f key;
+    cxt
+  | Some id ->
+    let str, cxt = Ext_pp_scope.str_of_ident cxt id in
+    if key = str then P.string f key
+    else (
+      P.string f key;
+      P.string f L.colon_space;
+      P.string f str);
+    cxt
+
+and record_rest_pattern cxt f fields rest =
+  P.string f "{";
+  let cxt =
+    match fields with
+    | [] -> cxt
+    | _ ->
+      let cxt = iter_lst cxt f fields record_rest_field comma_sp in
+      comma_sp f;
+      cxt
+  in
+  P.string f "...";
+  let cxt = Ext_pp_scope.ident cxt f rest in
+  P.string f "}";
+  cxt
+
+and formal_parameter_list cxt f l = iter_lst cxt f l Ext_pp_scope.ident comma_sp
 
 (* IdentMap *)
 (*
@@ -268,6 +289,17 @@ let is_var (b : J.expression) a =
   match b.expression_desc with
   | Var (Id i) -> Ident.same i a
   | _ -> false
+
+let params_match_call params args fn =
+  Ext_list.for_all2_no_exn args params is_var
+  &&
+  match fn with
+  (* This check is needed to avoid some edge cases
+        {[function(x){return x(x)}]}
+        here the function is also called `x`
+     *)
+  | J.Id id -> not (Ext_list.exists params (fun x -> Ident.same x id))
+  | Qualified _ -> true
 
 type fn_exp_state =
   | Is_return (* for sure no name *)
@@ -309,16 +341,7 @@ and pp_function ~return_unit ~async ~is_method ?directive cxt (f : P.t)
             {[ function(x,y){ return u(x,y) } ]}
             it can be optimized in to either [u] or [Curry.__n(u)]
          *)
-         (not is_method)
-         && Ext_list.for_all2_no_exn ls l is_var
-         &&
-         match v with
-         (* This check is needed to avoid some edge cases
-            {[function(x){return x(x)}]}
-            here the function is also called `x`
-         *)
-         | Id id -> not (Ext_list.exists l (fun x -> Ident.same x id))
-         | Qualified _ -> true -> (
+         (not is_method) && params_match_call l ls v -> (
     let optimize len ~p cxt f v =
       if p then try_optimize_curry cxt f len function_id else vident cxt f v
     in
@@ -429,7 +452,8 @@ and pp_function ~return_unit ~async ~is_method ?directive cxt (f : P.t)
 and pp_one_case_clause :
     'a. _ -> P.t -> (P.t -> 'a -> unit) -> 'a * J.case_clause -> _ =
  fun cxt f pp_cond
-     (switch_case, ({switch_body; should_break; comment} : J.case_clause)) ->
+     ( switch_case,
+       ({switch_body; should_break; comment; source_loc} : J.case_clause) ) ->
   P.newline f;
   let cxt =
     P.group f 1 (fun _ ->
@@ -437,6 +461,7 @@ and pp_one_case_clause :
             P.string f L.case;
             P.space f;
             pp_comment_option f comment;
+            Js_source_map.mark_source_loc f source_loc;
             pp_cond f switch_case;
             (* could be integer or string *)
             P.space f;
@@ -483,6 +508,7 @@ and vident cxt f (v : J.vident) =
 (* The higher the level, the more likely that inner has to add parens *)
 and expression ~level:l cxt f (exp : J.expression) : cxt =
   pp_comment_option f exp.comment;
+  Js_source_map.mark_source_loc f exp.source_loc;
   expression_desc cxt ~level:l f exp.expression_desc
 
 and expression_desc cxt ~(level : int) f x : cxt =
@@ -494,6 +520,25 @@ and expression_desc cxt ~(level : int) f x : cxt =
     P.string f L.undefined;
     cxt
   | Var v -> vident cxt f v
+  | Record_rest (fields, source) ->
+    P.cond_paren_group f (level > 15) (fun _ ->
+        P.string f "(({";
+        fields
+        |> List.iteri (fun i ({record_rest_label; _} : J.record_rest_field) ->
+               if i > 0 then comma_sp f;
+               let key =
+                 Js_dump_property.property_key (Lit record_rest_label)
+               in
+               P.string f key;
+               P.string f L.colon_space;
+               P.string f ("__unused" ^ string_of_int i));
+        (match fields with
+        | [] -> ()
+        | _ -> comma_sp f);
+        P.string f "...__rest}) => __rest)(";
+        let cxt = expression ~level:0 cxt f source in
+        P.string f ")";
+        cxt)
   | Bool b ->
     bool f b;
     cxt
@@ -524,10 +569,10 @@ and expression_desc cxt ~(level : int) f x : cxt =
       ( ({
            expression_desc =
              J.Var
-               ( Id {name = fnName}
+               ( Id {name = fn_name}
                | J.Qualified
                    ( _,
-                     Some fnName
+                     Some fn_name
                      (* We care about the function name when it is jsxs,
                        If this is the case, we need to unpack an array later on *)
                    ) );
@@ -542,7 +587,7 @@ and expression_desc cxt ~(level : int) f x : cxt =
      {
        expression_desc =
          (* This is the props javascript object *)
-         Caml_block (el, _mutable_flag, _, Lambda.Blk_record {fields});
+         Caml_block (el, _mutable_flag, Lambda.Blk_record {fields});
      };
     ] ->
       (* We extract the props from the javascript object *)
@@ -552,12 +597,12 @@ and expression_desc cxt ~(level : int) f x : cxt =
             | Undefined _ when opt -> None
             | _ -> Some (f, x))
       in
-      print_jsx cxt ~level f fnName tag fields
+      print_jsx cxt ~level f fn_name tag fields
     | [
      tag;
      {
        expression_desc =
-         Caml_block (el, _mutable_flag, _, Lambda.Blk_record {fields});
+         Caml_block (el, _mutable_flag, Lambda.Blk_record {fields});
      };
      key;
     ] ->
@@ -568,7 +613,7 @@ and expression_desc cxt ~(level : int) f x : cxt =
             | Undefined _ when opt -> None
             | _ -> Some (f, x))
       in
-      print_jsx cxt ~level ~key f fnName tag fields
+      print_jsx cxt ~level ~key f fn_name tag fields
     | [tag; ({expression_desc = J.Seq _} as props)] ->
       (* In the case of prop spreading, the expression will look like:
            (props.a = "Hello, world!", props)
@@ -594,7 +639,7 @@ and expression_desc cxt ~(level : int) f x : cxt =
         in
         visit [] props
       in
-      print_jsx cxt ~level ~spread_props f fnName tag fields
+      print_jsx cxt ~level ~spread_props f fn_name tag fields
     | [tag; ({expression_desc = J.Seq _} as props); key] ->
       (* In the case of props + prop spreading and key argument *)
       let fields, spread_props =
@@ -614,10 +659,33 @@ and expression_desc cxt ~(level : int) f x : cxt =
         in
         visit [] props
       in
-      print_jsx cxt ~level ~spread_props ~key f fnName tag fields
+      print_jsx cxt ~level ~spread_props ~key f fn_name tag fields
     | [tag; ({expression_desc = J.Var _} as spread_props)] ->
       (* All the props are spread *)
-      print_jsx cxt ~level ~spread_props f fnName tag []
+      print_jsx cxt ~level ~spread_props f fn_name tag []
+    | [tag; {expression_desc = J.Object (Some spread, props)}] ->
+      (* Spread props with overrides emitted as a single object literal:
+         {...base, x: 1}
+      *)
+      let fields =
+        List.filter_map
+          (fun (n, x) ->
+            match n with
+            | Js_op.Lit name -> Some (name, x)
+            | Symbol_name -> None)
+          props
+      in
+      print_jsx cxt ~level ~spread_props:spread f fn_name tag fields
+    | [tag; {expression_desc = J.Object (Some spread, props)}; key] ->
+      let fields =
+        List.filter_map
+          (fun (n, x) ->
+            match n with
+            | Js_op.Lit name -> Some (name, x)
+            | Symbol_name -> None)
+          props
+      in
+      print_jsx cxt ~level ~spread_props:spread ~key f fn_name tag fields
     | _ ->
       (* This should not happen, we fallback to the general case *)
       expression_desc cxt ~level f
@@ -675,8 +743,7 @@ and expression_desc cxt ~(level : int) f x : cxt =
                 P.paren_group f 0 (fun _ -> arguments cxt f (e :: el)))
               else (
                 Curry_gen.pp_app_any f;
-                P.paren_group f 0 (fun _ ->
-                    arguments cxt f [e; E.array Mutable el]))))
+                P.paren_group f 0 (fun _ -> arguments cxt f [e; E.array el]))))
   | FlatCall (e, el) ->
     P.group f 0 (fun _ ->
         let cxt = expression ~level:15 cxt f e in
@@ -860,7 +927,7 @@ and expression_desc cxt ~(level : int) f x : cxt =
         P.string f "+";
         P.space f;
         expression ~level:rght cxt f e2)
-  | Array (el, _) -> (
+  | Array el -> (
     (* TODO: simplify for singleton list *)
     match el with
     | [] | [_] -> P.bracket_group f 1 (fun _ -> array_element_list cxt f el)
@@ -869,18 +936,18 @@ and expression_desc cxt ~(level : int) f x : cxt =
     expression ~level cxt f
       (if identity then e
        else E.runtime_call Primitive_modules.option "some" [e])
-  | Caml_block (el, _, _, Blk_module fields) ->
+  | Caml_block (el, _, Blk_module fields) ->
     expression_desc cxt ~level f
       (Object
          ( None,
            Ext_list.map_combine fields el (fun x ->
                Js_op.Lit (Ext_ident.convert x)) ))
   (*name convention of Record is slight different from modules*)
-  | Caml_block (el, mutable_flag, _, Blk_record {fields}) ->
+  | Caml_block (el, _, Blk_record {fields}) ->
     if
       Array.length fields <> 0
       && Ext_array.for_alli fields (fun i (v, _) -> string_of_int i = v)
-    then expression_desc cxt ~level f (Array (el, mutable_flag))
+    then expression_desc cxt ~level f (Array el)
     else
       let fields =
         Ext_list.array_list_filter_map fields el (fun (f, opt) x ->
@@ -889,7 +956,7 @@ and expression_desc cxt ~(level : int) f x : cxt =
             | _ -> Some (Js_op.Lit f, x))
       in
       expression_desc cxt ~level f (Object (None, fields))
-  | Caml_block (el, _, _, Blk_poly_var _) -> (
+  | Caml_block (el, _, Blk_poly_var _) -> (
     match el with
     | [tag; value] ->
       expression_desc cxt ~level f
@@ -900,19 +967,15 @@ and expression_desc cxt ~(level : int) f x : cxt =
                (Lit Literals.polyvar_value, value);
              ] ))
     | _ -> assert false)
-  | Caml_block (el, _, _, ((Blk_extension | Blk_record_ext _) as ext)) ->
+  | Caml_block (el, _, ((Blk_extension | Blk_record_ext _) as ext)) ->
     expression_desc cxt ~level f (exn_block_as_obj ~stack:false el ext)
-  | Caml_block (el, _, tag, Blk_record_inlined p) ->
-    let untagged = Ast_untagged_variants.process_untagged p.attrs in
+  | Caml_block (el, _, Blk_record_inlined p) ->
+    let {Variant_runtime.tag; tag_name; untagged} = p.runtime in
     let objs =
       let tails =
         Ext_list.combine_array p.fields el (fun (i, opt) -> (Js_op.Lit i, opt))
       in
-      let tag_name =
-        match Ast_untagged_variants.process_tag_name p.attrs with
-        | None -> L.tag
-        | Some s -> s
-      in
+      let tag_name = Option.value tag_name ~default:L.tag in
       let tails =
         Ext_list.filter_map tails (fun ((f, optional), x) ->
             match x.expression_desc with
@@ -923,21 +986,17 @@ and expression_desc cxt ~(level : int) f x : cxt =
       else
         ( Js_op.Lit tag_name,
           (* TAG:xx for inline records *)
-          match Ast_untagged_variants.process_tag_type p.attrs with
+          match tag.tag_type with
           | None -> E.str p.name
           | Some t -> E.tag_type t )
         :: tails
     in
     expression_desc cxt ~level f (Object (None, objs))
-  | Caml_block (el, _, tag, Blk_constructor p) ->
+  | Caml_block (el, _, Blk_constructor p) ->
     let not_is_cons = p.name <> Literals.cons in
-    let tag_type = Ast_untagged_variants.process_tag_type p.attrs in
-    let untagged = Ast_untagged_variants.process_untagged p.attrs in
-    let tag_name =
-      match Ast_untagged_variants.process_tag_name p.attrs with
-      | None -> L.tag
-      | Some s -> s
-    in
+    let {Variant_runtime.tag; tag_name; untagged} = p.runtime in
+    let tag_type = tag.tag_type in
+    let tag_name = Option.value tag_name ~default:L.tag in
     let objs =
       let tails =
         Ext_list.mapi_append el
@@ -951,7 +1010,7 @@ and expression_desc cxt ~(level : int) f x : cxt =
              [(name_symbol, E.str p.name)]
            else [])
       in
-      if untagged || (not_is_cons = false && p.num_nonconst = 1) then tails
+      if untagged || not_is_cons = false then tails
       else
         ( Js_op.Lit tag_name,
           (* TAG:xx *)
@@ -968,11 +1027,9 @@ and expression_desc cxt ~(level : int) f x : cxt =
       | _ -> J.Object (None, objs)
     in
     expression_desc cxt ~level f exp
-  | Caml_block (_, _, _, (Blk_module_export _ | Blk_some | Blk_some_not_nested))
-    ->
+  | Caml_block (_, _, (Blk_module_export _ | Blk_some | Blk_some_not_nested)) ->
     assert false
-  | Caml_block (el, mutable_flag, _tag, Blk_tuple) ->
-    expression_desc cxt ~level f (Array (el, mutable_flag))
+  | Caml_block (el, _, Blk_tuple) -> expression_desc cxt ~level f (Array el)
   | Caml_block_tag (e, tag) ->
     P.group f 1 (fun _ ->
         let cxt = expression ~level:15 cxt f e in
@@ -993,23 +1050,20 @@ and expression_desc cxt ~(level : int) f x : cxt =
            refer and export
         *)
         cxt)
-  | Length (e, _) ->
+  | Length e ->
     (*Todo: check parens *)
     P.cond_paren_group f (level > 15) (fun _ ->
         let cxt = expression ~level:15 cxt f e in
         P.string f L.dot;
         P.string f L.length;
         cxt)
-  | New (e, el) ->
+  | New (e, args) ->
     P.cond_paren_group f (level > 15) (fun _ ->
         P.group f 0 (fun _ ->
             P.string f L.new_;
             P.space f;
             let cxt = expression ~level:16 cxt f e in
-            P.paren_group f 0 (fun _ ->
-                match el with
-                | Some el -> arguments cxt f el
-                | None -> cxt)))
+            P.paren_group f 0 (fun _ -> arguments cxt f args)))
   | Cond (e, e1, e2) ->
     let action () =
       let cxt = expression ~level:3 cxt f e in
@@ -1094,7 +1148,7 @@ and print_indented_list (f : P.t) (parent_expr_level : int) (cxt : cxt)
         process_items cxt items)
 
 and print_jsx cxt ?(spread_props : J.expression option)
-    ?(key : J.expression option) ~(level : int) f (fnName : string)
+    ?(key : J.expression option) ~(level : int) f (fn_name : string)
     (tag : J.expression) (fields : (string * J.expression) list) : cxt =
   (* TODO: make fragment detection respect custom JSX runtime modules instead of
      assuming "JsxRuntime". *)
@@ -1119,10 +1173,10 @@ and print_jsx cxt ?(spread_props : J.expression option)
     List.find_map
       (fun (n, e) ->
         if n = "children" then
-          if fnName = "jsxs" then
+          if fn_name = "jsxs" then
             match e.J.expression_desc with
-            | J.Array (xs, _)
-            | J.Optional_block ({expression_desc = J.Array (xs, _)}, _) ->
+            | J.Array xs | J.Optional_block ({expression_desc = J.Array xs}, _)
+              ->
               Some xs
             | _ -> Some [e]
           else Some [e]
@@ -1291,9 +1345,21 @@ and variable_declaration top cxt f (variable : J.variable_declaration) : cxt =
     | _ -> (
       match e.expression_desc with
       | Fun {is_method; params; body; env; return_unit; async; directive} ->
+        pp_comment_option f e.comment;
+        Js_source_map.mark_source_loc f e.source_loc;
         pp_function ?directive ~is_method ~return_unit ~async
           ~fn_state:(if top then Name_top name else Name_non_top name)
           cxt f params body env
+      | Record_rest (fields, source) ->
+        P.string f L.let_;
+        P.space f;
+        let cxt = record_rest_pattern cxt f fields name in
+        P.space f;
+        P.string f L.eq;
+        P.space f;
+        let cxt = expression ~level:1 cxt f source in
+        semi f;
+        cxt
       | _ ->
         let cxt = pp_var_assign cxt f name in
         let cxt = expression ~level:1 cxt f e in
@@ -1321,8 +1387,10 @@ and pp_comment_option f comment =
   | None -> ()
   | Some x -> pp_comment f x
 
-and statement top cxt f ({statement_desc = s; comment; _} : J.statement) : cxt =
+and statement top cxt f
+    ({statement_desc = s; comment; source_loc} : J.statement) : cxt =
   pp_comment_option f comment;
+  Js_source_map.mark_source_loc f source_loc;
   statement_desc top cxt f s
 
 and statement_desc top cxt f (s : J.statement_desc) : cxt =
@@ -1621,7 +1689,7 @@ and statement_desc top cxt f (s : J.statement_desc) : cxt =
     let cxt = P.paren_group f 1 (fun _ -> expression ~level:0 cxt f e) in
     P.space f;
     P.brace_vgroup f 1 (fun _ ->
-        let pp_as_value f (tag_type : Ast_untagged_variants.tag_type) =
+        let pp_as_value f (tag_type : Variant_runtime.tag_type) =
           let e = E.tag_type tag_type in
           ignore @@ expression_desc cxt ~level:0 f e.expression_desc
         in
@@ -1638,7 +1706,7 @@ and statement_desc top cxt f (s : J.statement_desc) : cxt =
   | Throw e ->
     let e =
       match e.expression_desc with
-      | Caml_block (el, _, _, ((Blk_extension | Blk_record_ext _) as ext)) ->
+      | Caml_block (el, _, ((Blk_extension | Blk_record_ext _) as ext)) ->
         {e with expression_desc = exn_block_as_obj ~stack:true el ext}
       | _ -> e
     in

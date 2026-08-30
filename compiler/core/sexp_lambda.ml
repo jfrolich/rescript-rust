@@ -98,16 +98,102 @@ let mutable_flag_sexp = function
   | Mutable -> Sexp.atom "Mutable"
   | Immutable -> Sexp.atom "Immutable"
 
+(* Semantic variant runtime information. *)
+let variant_instance instance =
+  Sexp.atom (Variant_runtime.Instance.to_string instance)
+
+let variant_block_type = function
+  | Variant_runtime.IntType -> Sexp.atom "IntType"
+  | StringType -> Sexp.atom "StringType"
+  | FloatType -> Sexp.atom "FloatType"
+  | BigintType -> Sexp.atom "BigintType"
+  | BooleanType -> Sexp.atom "BooleanType"
+  | InstanceType instance ->
+    Sexp.list [Sexp.atom "InstanceType"; variant_instance instance]
+  | FunctionType -> Sexp.atom "FunctionType"
+  | ObjectType -> Sexp.atom "ObjectType"
+  | UnknownType -> Sexp.atom "UnknownType"
+
+let variant_tag_type = function
+  | Variant_runtime.String value -> Sexp.list [Sexp.atom "String"; string value]
+  | Int value -> Sexp.list [Sexp.atom "Int"; int value]
+  | Float value -> Sexp.list [Sexp.atom "Float"; string value]
+  | BigInt value -> Sexp.list [Sexp.atom "BigInt"; string value]
+  | Bool value -> Sexp.list [Sexp.atom "Bool"; bool value]
+  | Null -> Sexp.atom "Null"
+  | Undefined -> Sexp.atom "Undefined"
+  | Untagged block_type ->
+    Sexp.list [Sexp.atom "Untagged"; variant_block_type block_type]
+
+let variant_tag ({name; tag_type} : Variant_runtime.tag) =
+  Sexp.list
+    [
+      Sexp.atom "tag";
+      string name;
+      (match tag_type with
+      | None -> Sexp.atom "None"
+      | Some tag_type -> Sexp.list [Sexp.atom "Some"; variant_tag_type tag_type]);
+    ]
+
+let variant_block_runtime
+    ({tag; tag_name; untagged} : Variant_runtime.block_runtime) =
+  Sexp.list
+    [
+      Sexp.atom "runtime";
+      variant_tag tag;
+      (match tag_name with
+      | None -> Sexp.atom "None"
+      | Some name -> Sexp.list [Sexp.atom "Some"; string name]);
+      bool untagged;
+    ]
+
+let variant_constructor_case = function
+  | Variant_runtime.Constant tag ->
+    Sexp.list [Sexp.atom "Constant"; variant_tag tag]
+  | Block {runtime; block_type} ->
+    Sexp.list
+      [
+        Sexp.atom "Block";
+        variant_block_runtime runtime;
+        (match block_type with
+        | None -> Sexp.atom "None"
+        | Some block_type ->
+          Sexp.list [Sexp.atom "Some"; variant_block_type block_type]);
+      ]
+
+let variant_matching_facts
+    ({
+       tag_name;
+       block_types;
+       literal_tags;
+       has_null;
+       has_undefined;
+       has_other_literal;
+     } : Variant_runtime.matching_facts) =
+  Sexp.list
+    [
+      Sexp.atom "matching_facts";
+      (match tag_name with
+      | None -> Sexp.atom "None"
+      | Some name -> Sexp.list [Sexp.atom "Some"; string name]);
+      Sexp.list (List.map variant_block_type block_types);
+      Sexp.list (List.map variant_tag_type literal_tags);
+      bool has_null;
+      bool has_undefined;
+      bool has_other_literal;
+    ]
+
 (* Tag info *)
 let tag_info (info : Lambda.tag_info) =
   match info with
-  | Blk_constructor {name; num_nonconst; tag; attrs = _} ->
-    Sexp.list [
-      Sexp.atom "Blk_constructor";
-      string name;
-      int num_nonconst;
-      int tag;
-    ]
+  | Blk_constructor {name; num_nonconst; runtime} ->
+    Sexp.list
+      [
+        Sexp.atom "Blk_constructor";
+        string name;
+        int num_nonconst;
+        variant_block_runtime runtime;
+      ]
   | Blk_tuple -> Sexp.atom "Blk_tuple"
   | Blk_poly_var s -> Sexp.list [Sexp.atom "Blk_poly_var"; string s]
   | Blk_record {fields; mutable_flag} ->
@@ -116,15 +202,17 @@ let tag_info (info : Lambda.tag_info) =
       Sexp.list (List.map (fun (name, _) -> string name) (Array.to_list fields));
       mutable_flag_sexp mutable_flag;
     ]
-  | Blk_record_inlined {name; num_nonconst; tag; fields; mutable_flag; attrs = _} ->
-    Sexp.list [
-      Sexp.atom "Blk_record_inlined";
-      string name;
-      int num_nonconst;
-      int tag;
-      Sexp.list (List.map (fun (name, _) -> string name) (Array.to_list fields));
-      mutable_flag_sexp mutable_flag;
-    ]
+  | Blk_record_inlined
+      {name; num_nonconst; fields; mutable_flag; runtime} ->
+    Sexp.list
+      [
+        Sexp.atom "Blk_record_inlined";
+        string name;
+        int num_nonconst;
+        variant_block_runtime runtime;
+        Sexp.list (List.map (fun (name, _) -> string name) (Array.to_list fields));
+        mutable_flag_sexp mutable_flag;
+      ]
   | Blk_module fields ->
     Sexp.list (Sexp.atom "Blk_module" :: List.map string fields)
   | Blk_module_export _ ->
@@ -142,8 +230,8 @@ let tag_info (info : Lambda.tag_info) =
 (* Field debug info *)
 let field_dbg_info (info : Lam_compat.field_dbg_info) =
   match info with
-  | Fld_record {name; mutable_flag} ->
-    Sexp.list [Sexp.atom "Fld_record"; string name; mutable_flag_sexp mutable_flag]
+  | Fld_record {name} ->
+    Sexp.list [Sexp.atom "Fld_record"; string name]
   | Fld_module {name} -> Sexp.list [Sexp.atom "Fld_module"; string name]
   | Fld_record_inline {name} -> Sexp.list [Sexp.atom "Fld_record_inline"; string name]
   | Fld_record_extension {name} -> Sexp.list [Sexp.atom "Fld_record_extension"; string name]
@@ -165,13 +253,6 @@ let set_field_dbg_info (info : Lam_compat.set_field_dbg_info) =
 let pointer_info (info : Lam_constant.pointer_info) =
   match info with
   | None -> Sexp.atom "None"
-  | Pt_constructor {cstr_name; const; non_const} ->
-    Sexp.list [
-      Sexp.atom "Pt_constructor";
-      string cstr_name.name;
-      int const;
-      int non_const;
-    ]
   | Pt_assertfalse -> Sexp.atom "Pt_assertfalse"
   | Some s -> Sexp.list [Sexp.atom "Some"; string s]
 
@@ -194,6 +275,8 @@ let rec constant (c : Lam_constant.t) =
   | Const_js_false -> Sexp.atom "Const_js_false"
   | Const_int {i; comment} ->
     Sexp.list [Sexp.atom "Const_int"; int32 i; pointer_info comment]
+  | Const_constructor tag ->
+    Sexp.list [Sexp.atom "Const_constructor"; variant_tag tag]
   | Const_char c -> Sexp.list [Sexp.atom "Const_char"; int c]
   | Const_string {s; delim} ->
     Sexp.list [Sexp.atom "Const_string"; string s; string_delim delim]
@@ -201,13 +284,13 @@ let rec constant (c : Lam_constant.t) =
   | Const_bigint (sign, s) ->
     Sexp.list [Sexp.atom "Const_bigint"; bool sign; string s]
   | Const_pointer s -> Sexp.list [Sexp.atom "Const_pointer"; string s]
-  | Const_block (tag, info, elements) ->
-    Sexp.list [
-      Sexp.atom "Const_block";
-      int tag;
-      tag_info info;
-      Sexp.list (List.map constant elements);
-    ]
+  | Const_block (info, elements) ->
+    Sexp.list
+      [
+        Sexp.atom "Const_block";
+        tag_info info;
+        Sexp.list (List.map constant elements);
+      ]
   | Const_some c -> Sexp.list [Sexp.atom "Const_some"; constant c]
   | Const_module_alias -> Sexp.atom "Const_module_alias"
 
@@ -223,8 +306,6 @@ let primitive ~with_locs (prim : Lam_primitive.t) =
   | Pjs_unsafe_downgrade {name; setter} ->
     Sexp.list [Sexp.atom "Pjs_unsafe_downgrade"; string name; bool setter]
   | Pfn_arity -> Sexp.atom "Pfn_arity"
-  | Pjs_fn_make i -> Sexp.list [Sexp.atom "Pjs_fn_make"; int i]
-  | Pjs_fn_make_unit -> Sexp.atom "Pjs_fn_make_unit"
   | Pjs_fn_method -> Sexp.atom "Pjs_fn_method"
   | Pdebugger -> Sexp.atom "Pdebugger"
   | Praw_js_code {code; code_info = Exp _} ->
@@ -243,8 +324,8 @@ let primitive ~with_locs (prim : Lam_primitive.t) =
   | Pis_undefined -> Sexp.atom "Pis_undefined"
   | Pis_null_undefined -> Sexp.atom "Pis_null_undefined"
   | Pimport -> Sexp.atom "Pimport"
-  | Pmakeblock (tag, info, mut) ->
-    Sexp.list [Sexp.atom "Pmakeblock"; int tag; tag_info info; mutable_flag_sexp mut]
+  | Pmakeblock (info, mut) ->
+    Sexp.list [Sexp.atom "Pmakeblock"; tag_info info; mutable_flag_sexp mut]
   | Pfield (n, info) ->
     Sexp.list [Sexp.atom "Pfield"; int n; field_dbg_info info]
   | Psetfield (n, info) ->
@@ -345,6 +426,9 @@ let primitive ~with_locs (prim : Lam_primitive.t) =
   | Pis_poly_var_block -> Sexp.atom "Pis_poly_var_block"
   | Pisout n -> Sexp.list [Sexp.atom "Pisout"; int n]
   | Pawait -> Sexp.atom "Pawait"
+  | Ptagged_template -> Sexp.atom "Ptagged_template"
+  | Precord_rest excluded ->
+    Sexp.list (Sexp.atom "Precord_rest" :: List.map string excluded)
   | Phash -> Sexp.atom "Phash"
   | Phash_mixint -> Sexp.atom "Phash_mixint"
   | Phash_mixstring -> Sexp.atom "Phash_mixstring"
@@ -493,41 +577,44 @@ and ap_info_sexp ~with_locs (info : Lam.ap_info) =
     apply_status info.ap_status;
   ] @ loc_sexp)
 
-and lambda_switch ~with_locs (sw : Lam.lambda_switch) =
-  Sexp.list [
-    Sexp.atom "lambda_switch";
-    Sexp.list [Sexp.atom "sw_consts_full"; bool sw.sw_consts_full];
-    Sexp.list [
-      Sexp.atom "sw_consts";
-      Sexp.list (List.map (fun (tag, lam) ->
-        Sexp.list [int tag; lambda ~with_locs lam]
-      ) sw.sw_consts);
-    ];
-    Sexp.list [Sexp.atom "sw_blocks_full"; bool sw.sw_blocks_full];
-    Sexp.list [
-      Sexp.atom "sw_blocks";
-      Sexp.list (List.map (fun (tag, lam) ->
-        Sexp.list [int tag; lambda ~with_locs lam]
-      ) sw.sw_blocks);
-    ];
-    Sexp.list [Sexp.atom "sw_failaction"; opt (lambda ~with_locs) sw.sw_failaction];
-    Sexp.list [Sexp.atom "sw_names"; switch_names_sexp sw.sw_names];
-  ]
+and switch_key_sexp = function
+  | Lambda.Switch_int value -> Sexp.list [Sexp.atom "Switch_int"; int value]
+  | Switch_constructor case ->
+    Sexp.list [Sexp.atom "Switch_constructor"; variant_constructor_case case]
 
-and switch_names_sexp (names : Ast_untagged_variants.switch_names option) =
-  match names with
-  | None -> Sexp.atom "None"
-  | Some n ->
-    Sexp.list [
-      Sexp.atom "Some";
-      Sexp.list (
-        Sexp.atom "consts" ::
-        Array.to_list (Array.map (fun (t : Ast_untagged_variants.tag) -> string t.name) n.consts)
-      );
-      Sexp.list (
-        Sexp.atom "blocks" ::
-        Array.to_list (Array.map (fun (b : Ast_untagged_variants.block) -> string b.tag.name) n.blocks)
-      );
+and switch_dispatch_sexp = function
+  | Lambda.Switch_direct -> Sexp.atom "Switch_direct"
+  | Switch_variant facts ->
+    Sexp.list [Sexp.atom "Switch_variant"; variant_matching_facts facts]
+
+and lambda_switch ~with_locs (sw : Lam.lambda_switch) =
+  Sexp.list
+    [
+      Sexp.atom "lambda_switch";
+      Sexp.list [Sexp.atom "sw_consts_full"; bool sw.sw_consts_full];
+      Sexp.list
+        [
+          Sexp.atom "sw_consts";
+          Sexp.list
+            (List.map
+               (fun (key, lam) ->
+                 Sexp.list [switch_key_sexp key; lambda ~with_locs lam])
+               sw.sw_consts);
+        ];
+      Sexp.list [Sexp.atom "sw_blocks_full"; bool sw.sw_blocks_full];
+      Sexp.list
+        [
+          Sexp.atom "sw_blocks";
+          Sexp.list
+            (List.map
+               (fun (key, lam) ->
+                 Sexp.list [switch_key_sexp key; lambda ~with_locs lam])
+               sw.sw_blocks);
+        ];
+      Sexp.list
+        [Sexp.atom "sw_failaction"; opt (lambda ~with_locs) sw.sw_failaction];
+      Sexp.list
+        [Sexp.atom "sw_dispatch"; switch_dispatch_sexp sw.sw_dispatch];
     ]
 
 (* Public API *)

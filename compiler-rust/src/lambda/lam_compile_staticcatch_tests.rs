@@ -275,12 +275,17 @@ fn nested_wrapped_staticcatch_trywith_tail_loops_lower_like_gpr_1701() {
     let eof = Ident::create_local("End_of_file");
     let cons = Lambda::prim(
         Primitive::Pmakeblock(
-            0,
             TagInfo::Constructor {
                 name: "::".to_string(),
                 num_nonconst: 1,
-                tag: 0,
-                attrs: vec![],
+                runtime: crate::types::BlockRuntime {
+                    tag: crate::types::VariantTag {
+                        name: "::".to_string(),
+                        tag_type: None,
+                    },
+                    tag_name: None,
+                    untagged: false,
+                },
             },
             Mutable::Immutable,
         ),
@@ -291,17 +296,13 @@ fn nested_wrapped_staticcatch_trywith_tail_loops_lower_like_gpr_1701() {
     let lam = Lambda::letrec(
         vec![(
             outer.clone(),
-            Lambda::prim(
-                Primitive::PjsFnMake(1),
-                vec![Lambda::function_(
+            Lambda::function_(
                     1,
                     vec![inc.clone()],
                     Lambda::letrec(
                         vec![(
                             loop_.clone(),
-                            Lambda::prim(
-                                Primitive::PjsFnMake(1),
-                                vec![Lambda::function_(
+                            Lambda::function_(
                                     1,
                                     vec![acc.clone()],
                                     Lambda::LstaticCatch(
@@ -342,7 +343,6 @@ fn nested_wrapped_staticcatch_trywith_tail_loops_lower_like_gpr_1701() {
                                                                         0,
                                                                         crate::lambda::lam_compat::FieldDbgInfo::Record {
                                                                             name: "RE_EXN_ID".to_string(),
-                                                                            mutable_flag: crate::parser::ast::MutableFlag::Immutable,
                                                                         },
                                                                     ),
                                                                     vec![Lambda::var(exn.clone())],
@@ -391,9 +391,7 @@ fn nested_wrapped_staticcatch_trywith_tail_loops_lower_like_gpr_1701() {
                                         })),
                                     ),
                                     FunctionAttribute::default(),
-                                )],
-                                Location::none(),
-                            ),
+                                ),
                         )],
                         Lambda::Lapply(Apply {
                             ap_func: Box::new(Lambda::var(loop_.clone())),
@@ -407,13 +405,10 @@ fn nested_wrapped_staticcatch_trywith_tail_loops_lower_like_gpr_1701() {
                         }),
                     ),
                     FunctionAttribute::default(),
-                )],
-                Location::none(),
-            ),
+                ),
         )],
         Lambda::prim(
             Primitive::Pmakeblock(
-                0,
                 TagInfo::ModuleExport(vec![outer.clone()]),
                 Mutable::Immutable,
             ),
@@ -631,13 +626,19 @@ fn staticcatch_wrapped_int_return_switches_omit_empty_default_arms() {
                 LambdaSwitch {
                     sw_consts_full: false,
                     sw_consts: vec![
-                        (1, Lambda::const_(Constant::int(10))),
-                        (2, Lambda::const_(Constant::int(20))),
+                        (
+                            crate::lambda::SwitchKey::Int(1),
+                            Lambda::const_(Constant::int(10)),
+                        ),
+                        (
+                            crate::lambda::SwitchKey::Int(2),
+                            Lambda::const_(Constant::int(20)),
+                        ),
                     ],
                     sw_blocks_full: true,
                     sw_blocks: vec![],
                     sw_failaction: Some(Box::new(Lambda::static_raise(2, Vec::new()))),
-                    sw_names: None,
+                    sw_dispatch: crate::lambda::SwitchDispatch::Direct,
                 },
             )),
             (2, vec![]),
@@ -684,19 +685,22 @@ fn partial_int_return_switch_cases_break_to_shared_handler_like_test_set() {
                 sw_consts_full: false,
                 sw_consts: vec![
                     (
-                        1,
+                        crate::lambda::SwitchKey::Int(1),
                         Lambda::if_(
                             Lambda::var(cond.clone()),
                             Lambda::const_(Constant::int(10)),
                             Lambda::static_raise(1, Vec::new()),
                         ),
                     ),
-                    (2, Lambda::const_(Constant::int(20))),
+                    (
+                        crate::lambda::SwitchKey::Int(2),
+                        Lambda::const_(Constant::int(20)),
+                    ),
                 ],
                 sw_blocks_full: true,
                 sw_blocks: vec![],
                 sw_failaction: None,
-                sw_names: None,
+                sw_dispatch: crate::lambda::SwitchDispatch::Direct,
             },
         )),
         (1, vec![]),
@@ -752,14 +756,23 @@ fn direct_return_switch_cases_with_shared_plain_handlers_fall_through_like_ocaml
             LambdaSwitch {
                 sw_consts_full: false,
                 sw_consts: vec![
-                    (1, Lambda::static_raise(1, Vec::new())),
-                    (2, Lambda::static_raise(1, Vec::new())),
-                    (3, Lambda::const_(Constant::int(40))),
+                    (
+                        crate::lambda::SwitchKey::Int(1),
+                        Lambda::static_raise(1, Vec::new()),
+                    ),
+                    (
+                        crate::lambda::SwitchKey::Int(2),
+                        Lambda::static_raise(1, Vec::new()),
+                    ),
+                    (
+                        crate::lambda::SwitchKey::Int(3),
+                        Lambda::const_(Constant::int(40)),
+                    ),
                 ],
                 sw_blocks_full: true,
                 sw_blocks: vec![],
                 sw_failaction: None,
-                sw_names: None,
+                sw_dispatch: crate::lambda::SwitchDispatch::Direct,
             },
         )),
         (1, vec![]),
@@ -851,13 +864,19 @@ fn staticcatch_wrapped_int_return_switches_keep_single_handlers_as_default_arms(
             LambdaSwitch {
                 sw_consts_full: false,
                 sw_consts: vec![
-                    (1, Lambda::const_(Constant::int(10))),
-                    (2, Lambda::const_(Constant::int(20))),
+                    (
+                        crate::lambda::SwitchKey::Int(1),
+                        Lambda::const_(Constant::int(10)),
+                    ),
+                    (
+                        crate::lambda::SwitchKey::Int(2),
+                        Lambda::const_(Constant::int(20)),
+                    ),
                 ],
                 sw_blocks_full: true,
                 sw_blocks: vec![],
                 sw_failaction: Some(Box::new(Lambda::static_raise(2, Vec::new()))),
-                sw_names: None,
+                sw_dispatch: crate::lambda::SwitchDispatch::Direct,
             },
         )),
         (2, vec![]),
@@ -996,20 +1015,69 @@ fn nested_staticcatch_switch_forwarders_to_outer_handlers_avoid_exit_temps_like_
                 Box::new(Lambda::var(state.clone())),
                 LambdaSwitch {
                     sw_consts_full: true,
-                    sw_consts: vec![(0, Lambda::const_(Constant::int(0)))],
+                    sw_consts: vec![(
+                        crate::lambda::SwitchKey::Constructor(
+                            crate::types::VariantConstructorCase::Constant(
+                                crate::types::VariantTag {
+                                    name: "Empty".to_string(),
+                                    tag_type: None,
+                                },
+                            ),
+                        ),
+                        Lambda::const_(Constant::int(0)),
+                    )],
                     sw_blocks_full: true,
                     sw_blocks: vec![
-                        (0, Lambda::static_raise(2, Vec::new())),
-                        (1, Lambda::static_raise(2, Vec::new())),
+                        (
+                            crate::lambda::SwitchKey::Constructor(
+                                crate::types::VariantConstructorCase::Block(
+                                    crate::types::VariantBlock {
+                                        runtime: crate::types::BlockRuntime {
+                                            tag: crate::types::VariantTag {
+                                                name: "Int1".to_string(),
+                                                tag_type: None,
+                                            },
+                                            tag_name: None,
+                                            untagged: false,
+                                        },
+                                        block_type: None,
+                                    },
+                                ),
+                            ),
+                            Lambda::static_raise(2, Vec::new()),
+                        ),
+                        (
+                            crate::lambda::SwitchKey::Constructor(
+                                crate::types::VariantConstructorCase::Block(
+                                    crate::types::VariantBlock {
+                                        runtime: crate::types::BlockRuntime {
+                                            tag: crate::types::VariantTag {
+                                                name: "Int2".to_string(),
+                                                tag_type: None,
+                                            },
+                                            tag_name: None,
+                                            untagged: false,
+                                        },
+                                        block_type: None,
+                                    },
+                                ),
+                            ),
+                            Lambda::static_raise(2, Vec::new()),
+                        ),
                     ],
                     sw_failaction: None,
-                    sw_names: Some(SwitchNames {
-                        consts: vec![crate::lambda::SwitchTag::named("Empty")],
-                        blocks: vec![
-                            crate::lambda::SwitchBlock::named("Int1"),
-                            crate::lambda::SwitchBlock::named("Int2"),
-                        ],
-                    }),
+                    sw_dispatch: crate::lambda::SwitchDispatch::Variant(
+                        crate::types::VariantMatchingFacts {
+                            tag_name: None,
+                            block_types: vec![],
+                            literal_tags: vec![crate::types::VariantTagType::String(
+                                "Empty".to_string().clone(),
+                            )],
+                            has_null: false,
+                            has_undefined: false,
+                            has_other_literal: true,
+                        },
+                    ),
                 },
             )),
             (2, vec![]),
@@ -1028,19 +1096,15 @@ fn nested_staticcatch_switch_forwarders_to_outer_handlers_avoid_exit_temps_like_
         Box::new(Lambda::let_(
             LetKind::Strict,
             int_func.clone(),
-            Lambda::prim(
-                Primitive::PjsFnMake(1),
-                vec![Lambda::function_(
-                    1,
-                    vec![int_param.clone()],
-                    Lambda::prim(
-                        Primitive::Paddint,
-                        vec![Lambda::var(int_param), Lambda::var(int_value.clone())],
-                        Location::none(),
-                    ),
-                    FunctionAttribute::default(),
-                )],
-                Location::none(),
+            Lambda::function_(
+                1,
+                vec![int_param.clone()],
+                Lambda::prim(
+                    Primitive::Paddint,
+                    vec![Lambda::var(int_param), Lambda::var(int_value.clone())],
+                    Location::none(),
+                ),
+                FunctionAttribute::default(),
             ),
             Lambda::apply(
                 Lambda::var(int_func),
@@ -1079,20 +1143,69 @@ fn nested_staticcatch_switch_forwarders_keep_collapsed_shared_return_like_gpr_36
                 Box::new(Lambda::var(state.clone())),
                 LambdaSwitch {
                     sw_consts_full: true,
-                    sw_consts: vec![(0, Lambda::const_(Constant::int(0)))],
+                    sw_consts: vec![(
+                        crate::lambda::SwitchKey::Constructor(
+                            crate::types::VariantConstructorCase::Constant(
+                                crate::types::VariantTag {
+                                    name: "Empty".to_string(),
+                                    tag_type: None,
+                                },
+                            ),
+                        ),
+                        Lambda::const_(Constant::int(0)),
+                    )],
                     sw_blocks_full: true,
                     sw_blocks: vec![
-                        (0, Lambda::static_raise(2, Vec::new())),
-                        (1, Lambda::static_raise(2, Vec::new())),
+                        (
+                            crate::lambda::SwitchKey::Constructor(
+                                crate::types::VariantConstructorCase::Block(
+                                    crate::types::VariantBlock {
+                                        runtime: crate::types::BlockRuntime {
+                                            tag: crate::types::VariantTag {
+                                                name: "Int1".to_string(),
+                                                tag_type: None,
+                                            },
+                                            tag_name: None,
+                                            untagged: false,
+                                        },
+                                        block_type: None,
+                                    },
+                                ),
+                            ),
+                            Lambda::static_raise(2, Vec::new()),
+                        ),
+                        (
+                            crate::lambda::SwitchKey::Constructor(
+                                crate::types::VariantConstructorCase::Block(
+                                    crate::types::VariantBlock {
+                                        runtime: crate::types::BlockRuntime {
+                                            tag: crate::types::VariantTag {
+                                                name: "Int2".to_string(),
+                                                tag_type: None,
+                                            },
+                                            tag_name: None,
+                                            untagged: false,
+                                        },
+                                        block_type: None,
+                                    },
+                                ),
+                            ),
+                            Lambda::static_raise(2, Vec::new()),
+                        ),
                     ],
                     sw_failaction: None,
-                    sw_names: Some(SwitchNames {
-                        consts: vec![crate::lambda::SwitchTag::named("Empty")],
-                        blocks: vec![
-                            crate::lambda::SwitchBlock::named("Int1"),
-                            crate::lambda::SwitchBlock::named("Int2"),
-                        ],
-                    }),
+                    sw_dispatch: crate::lambda::SwitchDispatch::Variant(
+                        crate::types::VariantMatchingFacts {
+                            tag_name: None,
+                            block_types: vec![],
+                            literal_tags: vec![crate::types::VariantTagType::String(
+                                "Empty".to_string().clone(),
+                            )],
+                            has_null: false,
+                            has_undefined: false,
+                            has_other_literal: true,
+                        },
+                    ),
                 },
             )),
             (2, vec![]),
@@ -1111,19 +1224,15 @@ fn nested_staticcatch_switch_forwarders_keep_collapsed_shared_return_like_gpr_36
         Box::new(Lambda::let_(
             LetKind::Strict,
             int_func.clone(),
-            Lambda::prim(
-                Primitive::PjsFnMake(1),
-                vec![Lambda::function_(
-                    1,
-                    vec![int_param.clone()],
-                    Lambda::prim(
-                        Primitive::Paddint,
-                        vec![Lambda::var(int_param), Lambda::var(int_value.clone())],
-                        Location::none(),
-                    ),
-                    FunctionAttribute::default(),
-                )],
-                Location::none(),
+            Lambda::function_(
+                1,
+                vec![int_param.clone()],
+                Lambda::prim(
+                    Primitive::Paddint,
+                    vec![Lambda::var(int_param), Lambda::var(int_value.clone())],
+                    Location::none(),
+                ),
+                FunctionAttribute::default(),
             ),
             Lambda::apply(
                 Lambda::var(int_func),
@@ -1344,14 +1453,32 @@ fn single_case_staticcatch_wrapped_named_variant_return_switch_falls_through_to_
                 Box::new(Lambda::var(action.clone())),
                 LambdaSwitch {
                     sw_consts_full: false,
-                    sw_consts: vec![(0, Lambda::const_(Constant::int(1)))],
+                    sw_consts: vec![(
+                        crate::lambda::SwitchKey::Constructor(
+                            crate::types::VariantConstructorCase::Constant(
+                                crate::types::VariantTag {
+                                    name: "One".to_string(),
+                                    tag_type: None,
+                                },
+                            ),
+                        ),
+                        Lambda::const_(Constant::int(1)),
+                    )],
                     sw_blocks_full: true,
                     sw_blocks: vec![],
                     sw_failaction: Some(Box::new(Lambda::static_raise(7, Vec::new()))),
-                    sw_names: Some(SwitchNames {
-                        consts: vec![crate::lambda::SwitchTag::named("One")],
-                        blocks: vec![],
-                    }),
+                    sw_dispatch: crate::lambda::SwitchDispatch::Variant(
+                        crate::types::VariantMatchingFacts {
+                            tag_name: None,
+                            block_types: vec![],
+                            literal_tags: vec![crate::types::VariantTagType::String(
+                                "One".to_string().clone(),
+                            )],
+                            has_null: false,
+                            has_undefined: false,
+                            has_other_literal: true,
+                        },
+                    ),
                 },
             )),
             (7, vec![]),
@@ -1398,14 +1525,30 @@ fn single_case_staticcatch_wrapped_named_variant_non_unit_return_switch_falls_th
             Box::new(Lambda::var(action.clone())),
             LambdaSwitch {
                 sw_consts_full: false,
-                sw_consts: vec![(0, Lambda::const_(Constant::int(1)))],
+                sw_consts: vec![(
+                    crate::lambda::SwitchKey::Constructor(
+                        crate::types::VariantConstructorCase::Constant(crate::types::VariantTag {
+                            name: "One".to_string(),
+                            tag_type: None,
+                        }),
+                    ),
+                    Lambda::const_(Constant::int(1)),
+                )],
                 sw_blocks_full: true,
                 sw_blocks: vec![],
                 sw_failaction: Some(Box::new(Lambda::static_raise(7, Vec::new()))),
-                sw_names: Some(SwitchNames {
-                    consts: vec![crate::lambda::SwitchTag::named("One")],
-                    blocks: vec![],
-                }),
+                sw_dispatch: crate::lambda::SwitchDispatch::Variant(
+                    crate::types::VariantMatchingFacts {
+                        tag_name: None,
+                        block_types: vec![],
+                        literal_tags: vec![crate::types::VariantTagType::String(
+                            "One".to_string().clone(),
+                        )],
+                        has_null: false,
+                        has_undefined: false,
+                        has_other_literal: true,
+                    },
+                ),
             },
         )),
         (7, vec![]),
@@ -1445,7 +1588,14 @@ fn single_case_staticcatch_wrapped_named_variant_unit_handler_falls_through_like
                 LambdaSwitch {
                     sw_consts_full: false,
                     sw_consts: vec![(
-                        0,
+                        crate::lambda::SwitchKey::Constructor(
+                            crate::types::VariantConstructorCase::Constant(
+                                crate::types::VariantTag {
+                                    name: "One".to_string(),
+                                    tag_type: None,
+                                },
+                            ),
+                        ),
                         Lambda::Lassign(
                             then_seen.clone(),
                             Box::new(Lambda::const_(Constant::int(1))),
@@ -1454,10 +1604,18 @@ fn single_case_staticcatch_wrapped_named_variant_unit_handler_falls_through_like
                     sw_blocks_full: true,
                     sw_blocks: vec![],
                     sw_failaction: Some(Box::new(Lambda::static_raise(7, Vec::new()))),
-                    sw_names: Some(SwitchNames {
-                        consts: vec![crate::lambda::SwitchTag::named("One")],
-                        blocks: vec![],
-                    }),
+                    sw_dispatch: crate::lambda::SwitchDispatch::Variant(
+                        crate::types::VariantMatchingFacts {
+                            tag_name: None,
+                            block_types: vec![],
+                            literal_tags: vec![crate::types::VariantTagType::String(
+                                "One".to_string().clone(),
+                            )],
+                            has_null: false,
+                            has_undefined: false,
+                            has_other_literal: true,
+                        },
+                    ),
                 },
             )),
             (7, vec![]),
@@ -1510,7 +1668,14 @@ fn js_pipeline_keeps_single_case_staticcatch_unit_handler_as_fallthrough_guard()
                     LambdaSwitch {
                         sw_consts_full: false,
                         sw_consts: vec![(
-                            0,
+                            crate::lambda::SwitchKey::Constructor(
+                                crate::types::VariantConstructorCase::Constant(
+                                    crate::types::VariantTag {
+                                        name: "One".to_string(),
+                                        tag_type: None,
+                                    },
+                                ),
+                            ),
                             Lambda::Lassign(
                                 then_seen.clone(),
                                 Box::new(Lambda::const_(Constant::int(1))),
@@ -1519,10 +1684,18 @@ fn js_pipeline_keeps_single_case_staticcatch_unit_handler_as_fallthrough_guard()
                         sw_blocks_full: true,
                         sw_blocks: vec![],
                         sw_failaction: Some(Box::new(Lambda::static_raise(7, Vec::new()))),
-                        sw_names: Some(SwitchNames {
-                            consts: vec![crate::lambda::SwitchTag::named("One")],
-                            blocks: vec![],
-                        }),
+                        sw_dispatch: crate::lambda::SwitchDispatch::Variant(
+                            crate::types::VariantMatchingFacts {
+                                tag_name: None,
+                                block_types: vec![],
+                                literal_tags: vec![crate::types::VariantTagType::String(
+                                    "One".to_string().clone(),
+                                )],
+                                has_null: false,
+                                has_undefined: false,
+                                has_other_literal: true,
+                            },
+                        ),
                     },
                 )),
                 (7, vec![]),
@@ -1537,11 +1710,7 @@ fn js_pipeline_keeps_single_case_staticcatch_unit_handler_as_fallthrough_guard()
             },
         ),
         Lambda::prim(
-            Primitive::Pmakeblock(
-                0,
-                TagInfo::ModuleExport(vec![run.clone()]),
-                Mutable::Immutable,
-            ),
+            Primitive::Pmakeblock(TagInfo::ModuleExport(vec![run.clone()]), Mutable::Immutable),
             vec![Lambda::var(run.clone())],
             Location::none(),
         ),
@@ -1586,30 +1755,39 @@ fn single_case_staticcatch_wrapped_untagged_object_unit_handler_keeps_negative_g
                     sw_consts: vec![],
                     sw_blocks_full: false,
                     sw_blocks: vec![(
-                        0,
+                        crate::lambda::SwitchKey::Constructor(
+                            crate::types::VariantConstructorCase::Block(
+                                crate::types::VariantBlock {
+                                    runtime: crate::types::BlockRuntime {
+                                        tag: crate::types::VariantTag {
+                                            name: "Object".to_string(),
+                                            tag_type: None,
+                                        },
+                                        tag_name: None,
+                                        untagged: true,
+                                    },
+                                    block_type: Some(crate::types::VariantBlockType::Object),
+                                },
+                            ),
+                        ),
                         Lambda::Lassign(seen.clone(), Box::new(Lambda::const_(Constant::int(1)))),
                     )],
                     sw_failaction: Some(Box::new(Lambda::static_raise(9, Vec::new()))),
-                    sw_names: Some(SwitchNames {
-                        consts: vec![crate::lambda::SwitchTag {
-                            name: "Null".to_string(),
-                            tag_type: Some(crate::lambda::SwitchCaseTag::Null),
-                        }],
-                        blocks: vec![
-                            crate::lambda::SwitchBlock {
-                                tag: crate::lambda::SwitchTag::named("Object"),
-                                tag_name: None,
-                                block_type: Some(crate::lambda::SwitchBlockType::Object),
-                            },
-                            crate::lambda::SwitchBlock {
-                                tag: crate::lambda::SwitchTag::named("Array"),
-                                tag_name: None,
-                                block_type: Some(crate::lambda::SwitchBlockType::Instance(
-                                    "Array".to_string(),
-                                )),
-                            },
-                        ],
-                    }),
+                    sw_dispatch: crate::lambda::SwitchDispatch::Variant(
+                        crate::types::VariantMatchingFacts {
+                            tag_name: None,
+                            block_types: vec![
+                                crate::types::VariantBlockType::Instance(
+                                    crate::types::VariantInstance::Array,
+                                ),
+                                crate::types::VariantBlockType::Object,
+                            ],
+                            literal_tags: vec![crate::types::VariantTagType::Null],
+                            has_null: true,
+                            has_undefined: false,
+                            has_other_literal: false,
+                        },
+                    ),
                 },
             )),
             (9, vec![]),
@@ -1651,7 +1829,23 @@ fn effectful_unit_staticcatch_handlers_keep_fail_first_guards() {
                     sw_consts: vec![],
                     sw_blocks_full: false,
                     sw_blocks: vec![(
-                        0,
+                        crate::lambda::SwitchKey::Constructor(
+                            crate::types::VariantConstructorCase::Block(
+                                crate::types::VariantBlock {
+                                    runtime: crate::types::BlockRuntime {
+                                        tag: crate::types::VariantTag {
+                                            name: "Array".to_string(),
+                                            tag_type: None,
+                                        },
+                                        tag_name: None,
+                                        untagged: true,
+                                    },
+                                    block_type: Some(crate::types::VariantBlockType::Instance(
+                                        crate::types::VariantInstance::Array,
+                                    )),
+                                },
+                            ),
+                        ),
                         Lambda::let_(
                             LetKind::Alias,
                             len.clone(),
@@ -1686,7 +1880,18 @@ fn effectful_unit_staticcatch_handlers_keep_fail_first_guards() {
                                         LambdaSwitch {
                                             sw_consts_full: false,
                                             sw_consts: vec![(
-                                                2,
+                                                crate::lambda::SwitchKey::Constructor(
+                                                    crate::types::VariantConstructorCase::Constant(
+                                                        crate::types::VariantTag {
+                                                            name: "True".to_string(),
+                                                            tag_type: Some(
+                                                                crate::types::VariantTagType::Bool(
+                                                                    true,
+                                                                ),
+                                                            ),
+                                                        },
+                                                    ),
+                                                ),
                                                 Lambda::Lassign(
                                                     seen.clone(),
                                                     Box::new(Lambda::const_(Constant::int(1))),
@@ -1694,77 +1899,32 @@ fn effectful_unit_staticcatch_handlers_keep_fail_first_guards() {
                                             )],
                                             sw_blocks_full: false,
                                             sw_blocks: vec![],
-                                            sw_failaction: Some(Box::new(
-                                                Lambda::static_raise(11, Vec::new()),
-                                            )),
-                                            sw_names: Some(SwitchNames {
-                                                consts: vec![
-                                                    crate::lambda::SwitchTag {
-                                                        name: "Missing".to_string(),
-                                                        tag_type: Some(
-                                                            crate::lambda::SwitchCaseTag::Undefined,
+                                            sw_failaction: Some(Box::new(Lambda::static_raise(
+                                                11,
+                                                Vec::new(),
+                                            ))),
+                                            sw_dispatch: crate::lambda::SwitchDispatch::Variant(
+                                                crate::types::VariantMatchingFacts {
+                                                    tag_name: None,
+                                                    block_types: vec![
+                                                        crate::types::VariantBlockType::Instance(
+                                                            crate::types::VariantInstance::Array,
                                                         ),
-                                                    },
-                                                    crate::lambda::SwitchTag {
-                                                        name: "False".to_string(),
-                                                        tag_type: Some(
-                                                            crate::lambda::SwitchCaseTag::Bool(false),
-                                                        ),
-                                                    },
-                                                    crate::lambda::SwitchTag {
-                                                        name: "True".to_string(),
-                                                        tag_type: Some(
-                                                            crate::lambda::SwitchCaseTag::Bool(true),
-                                                        ),
-                                                    },
-                                                    crate::lambda::SwitchTag {
-                                                        name: "Null".to_string(),
-                                                        tag_type: Some(
-                                                            crate::lambda::SwitchCaseTag::Null,
-                                                        ),
-                                                    },
-                                                ],
-                                                blocks: vec![
-                                                    crate::lambda::SwitchBlock {
-                                                        tag: crate::lambda::SwitchTag::named(
-                                                            "String",
-                                                        ),
-                                                        tag_name: None,
-                                                        block_type: Some(
-                                                            crate::lambda::SwitchBlockType::String,
-                                                        ),
-                                                    },
-                                                    crate::lambda::SwitchBlock {
-                                                        tag: crate::lambda::SwitchTag::named(
-                                                            "Number",
-                                                        ),
-                                                        tag_name: None,
-                                                        block_type: Some(
-                                                            crate::lambda::SwitchBlockType::Float,
-                                                        ),
-                                                    },
-                                                    crate::lambda::SwitchBlock {
-                                                        tag: crate::lambda::SwitchTag::named(
-                                                            "Object",
-                                                        ),
-                                                        tag_name: None,
-                                                        block_type: Some(
-                                                            crate::lambda::SwitchBlockType::Object,
-                                                        ),
-                                                    },
-                                                    crate::lambda::SwitchBlock {
-                                                        tag: crate::lambda::SwitchTag::named(
-                                                            "Array",
-                                                        ),
-                                                        tag_name: None,
-                                                        block_type: Some(
-                                                            crate::lambda::SwitchBlockType::Instance(
-                                                                "Array".to_string(),
-                                                            ),
-                                                        ),
-                                                    },
-                                                ],
-                                            }),
+                                                        crate::types::VariantBlockType::Object,
+                                                        crate::types::VariantBlockType::Float,
+                                                        crate::types::VariantBlockType::String,
+                                                    ],
+                                                    literal_tags: vec![
+                                                        crate::types::VariantTagType::Null,
+                                                        crate::types::VariantTagType::Bool(true),
+                                                        crate::types::VariantTagType::Bool(false),
+                                                        crate::types::VariantTagType::Undefined,
+                                                    ],
+                                                    has_null: true,
+                                                    has_undefined: true,
+                                                    has_other_literal: true,
+                                                },
+                                            ),
                                         },
                                     ),
                                 )),
@@ -1772,16 +1932,18 @@ fn effectful_unit_staticcatch_handlers_keep_fail_first_guards() {
                         ),
                     )],
                     sw_failaction: Some(Box::new(Lambda::static_raise(11, Vec::new()))),
-                    sw_names: Some(SwitchNames {
-                        consts: vec![],
-                        blocks: vec![crate::lambda::SwitchBlock {
-                            tag: crate::lambda::SwitchTag::named("Array"),
+                    sw_dispatch: crate::lambda::SwitchDispatch::Variant(
+                        crate::types::VariantMatchingFacts {
                             tag_name: None,
-                            block_type: Some(crate::lambda::SwitchBlockType::Instance(
-                                "Array".to_string(),
-                            )),
-                        }],
-                    }),
+                            block_types: vec![crate::types::VariantBlockType::Instance(
+                                crate::types::VariantInstance::Array,
+                            )],
+                            literal_tags: vec![],
+                            has_null: false,
+                            has_undefined: false,
+                            has_other_literal: false,
+                        },
+                    ),
                 },
             )),
             (11, vec![]),
@@ -1823,21 +1985,57 @@ fn multi_case_staticcatch_wrapped_named_variant_return_switch_moves_fallthrough_
                     LambdaSwitch {
                         sw_consts_full: true,
                         sw_consts: vec![
-                            (0, Lambda::static_raise(4, Vec::new())),
-                            (1, Lambda::static_raise(1, Vec::new())),
-                            (2, Lambda::static_raise(4, Vec::new())),
+                            (
+                                crate::lambda::SwitchKey::Constructor(
+                                    crate::types::VariantConstructorCase::Constant(
+                                        crate::types::VariantTag {
+                                            name: "A".to_string(),
+                                            tag_type: None,
+                                        },
+                                    ),
+                                ),
+                                Lambda::static_raise(4, Vec::new()),
+                            ),
+                            (
+                                crate::lambda::SwitchKey::Constructor(
+                                    crate::types::VariantConstructorCase::Constant(
+                                        crate::types::VariantTag {
+                                            name: "B".to_string(),
+                                            tag_type: None,
+                                        },
+                                    ),
+                                ),
+                                Lambda::static_raise(1, Vec::new()),
+                            ),
+                            (
+                                crate::lambda::SwitchKey::Constructor(
+                                    crate::types::VariantConstructorCase::Constant(
+                                        crate::types::VariantTag {
+                                            name: "C".to_string(),
+                                            tag_type: None,
+                                        },
+                                    ),
+                                ),
+                                Lambda::static_raise(4, Vec::new()),
+                            ),
                         ],
                         sw_blocks_full: true,
                         sw_blocks: vec![],
                         sw_failaction: None,
-                        sw_names: Some(SwitchNames {
-                            consts: vec![
-                                crate::lambda::SwitchTag::named("A"),
-                                crate::lambda::SwitchTag::named("B"),
-                                crate::lambda::SwitchTag::named("C"),
-                            ],
-                            blocks: vec![],
-                        }),
+                        sw_dispatch: crate::lambda::SwitchDispatch::Variant(
+                            crate::types::VariantMatchingFacts {
+                                tag_name: None,
+                                block_types: vec![],
+                                literal_tags: vec![
+                                    crate::types::VariantTagType::String("C".to_string().clone()),
+                                    crate::types::VariantTagType::String("B".to_string().clone()),
+                                    crate::types::VariantTagType::String("A".to_string().clone()),
+                                ],
+                                has_null: false,
+                                has_undefined: false,
+                                has_other_literal: true,
+                            },
+                        ),
                     },
                 )),
                 (4, vec![]),
@@ -1897,23 +2095,75 @@ fn nested_named_variant_return_switches_keep_plain_inner_handlers_as_default_arm
                     LambdaSwitch {
                         sw_consts_full: false,
                         sw_consts: vec![
-                            (0, Lambda::static_raise(4, Vec::new())),
-                            (1, Lambda::static_raise(4, Vec::new())),
-                            (2, Lambda::static_raise(5, Vec::new())),
-                            (3, Lambda::static_raise(5, Vec::new())),
+                            (
+                                crate::lambda::SwitchKey::Constructor(
+                                    crate::types::VariantConstructorCase::Constant(
+                                        crate::types::VariantTag {
+                                            name: "Four".to_string(),
+                                            tag_type: None,
+                                        },
+                                    ),
+                                ),
+                                Lambda::static_raise(4, Vec::new()),
+                            ),
+                            (
+                                crate::lambda::SwitchKey::Constructor(
+                                    crate::types::VariantConstructorCase::Constant(
+                                        crate::types::VariantTag {
+                                            name: "Five".to_string(),
+                                            tag_type: None,
+                                        },
+                                    ),
+                                ),
+                                Lambda::static_raise(4, Vec::new()),
+                            ),
+                            (
+                                crate::lambda::SwitchKey::Constructor(
+                                    crate::types::VariantConstructorCase::Constant(
+                                        crate::types::VariantTag {
+                                            name: "Six".to_string(),
+                                            tag_type: None,
+                                        },
+                                    ),
+                                ),
+                                Lambda::static_raise(5, Vec::new()),
+                            ),
+                            (
+                                crate::lambda::SwitchKey::Constructor(
+                                    crate::types::VariantConstructorCase::Constant(
+                                        crate::types::VariantTag {
+                                            name: "Seven".to_string(),
+                                            tag_type: None,
+                                        },
+                                    ),
+                                ),
+                                Lambda::static_raise(5, Vec::new()),
+                            ),
                         ],
                         sw_blocks_full: true,
                         sw_blocks: vec![],
                         sw_failaction: Some(Box::new(Lambda::static_raise(3, Vec::new()))),
-                        sw_names: Some(SwitchNames {
-                            consts: vec![
-                                crate::lambda::SwitchTag::named("Four"),
-                                crate::lambda::SwitchTag::named("Five"),
-                                crate::lambda::SwitchTag::named("Six"),
-                                crate::lambda::SwitchTag::named("Seven"),
-                            ],
-                            blocks: vec![],
-                        }),
+                        sw_dispatch: crate::lambda::SwitchDispatch::Variant(
+                            crate::types::VariantMatchingFacts {
+                                tag_name: None,
+                                block_types: vec![],
+                                literal_tags: vec![
+                                    crate::types::VariantTagType::String(
+                                        "Seven".to_string().clone(),
+                                    ),
+                                    crate::types::VariantTagType::String("Six".to_string().clone()),
+                                    crate::types::VariantTagType::String(
+                                        "Five".to_string().clone(),
+                                    ),
+                                    crate::types::VariantTagType::String(
+                                        "Four".to_string().clone(),
+                                    ),
+                                ],
+                                has_null: false,
+                                has_undefined: false,
+                                has_other_literal: true,
+                            },
+                        ),
                     },
                 )),
                 (3, vec![]),
@@ -1978,7 +2228,7 @@ fn nested_plain_int_return_switches_can_fall_through_like_gpr_1438() {
                     sw_blocks_full: true,
                     sw_blocks: vec![],
                     sw_failaction: Some(Box::new(Lambda::static_raise(2, Vec::new()))),
-                    sw_names: None,
+                    sw_dispatch: crate::lambda::SwitchDispatch::Direct,
                 },
             )),
             (2, vec![]),

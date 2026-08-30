@@ -135,12 +135,12 @@ pub fn eliminate_ref(id: &Ident, lam: &Lambda) -> Result<Lambda, RealReference> 
             let new_consts: Result<Vec<_>, _> = sw
                 .sw_consts
                 .iter()
-                .map(|(n, e)| eliminate_ref(id, e).map(|new_e| (*n, new_e)))
+                .map(|(n, e)| eliminate_ref(id, e).map(|new_e| (n.clone(), new_e)))
                 .collect();
             let new_blocks: Result<Vec<_>, _> = sw
                 .sw_blocks
                 .iter()
-                .map(|(n, e)| eliminate_ref(id, e).map(|new_e| (*n, new_e)))
+                .map(|(n, e)| eliminate_ref(id, e).map(|new_e| (n.clone(), new_e)))
                 .collect();
             let new_failaction = match &sw.sw_failaction {
                 None => None,
@@ -154,7 +154,7 @@ pub fn eliminate_ref(id: &Ident, lam: &Lambda) -> Result<Lambda, RealReference> 
                     sw_blocks_full: sw.sw_blocks_full,
                     sw_blocks: new_blocks?,
                     sw_failaction: new_failaction,
-                    sw_names: sw.sw_names.clone(),
+                    sw_dispatch: sw.sw_dispatch.clone(),
                 },
             ))
         }

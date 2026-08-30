@@ -17,7 +17,7 @@ tests/js_output_parity/fixtures/advanced_output_patterns.res
 tests/js_output_parity/fixtures/control_module_patterns.res	
 tests/js_output_parity/fixtures/module_pack_patterns.res
 tests/js_output_parity/fixtures/module_value_patterns.res
-tests/js_output_parity/fixtures/external_edge_patterns.res	
+tests/js_output_parity/fixtures/external_edge_patterns
 tests/js_output_parity/fixtures/import_binding_patterns.res
 tests/js_output_parity/fixtures/variant_representation_patterns.res	
 tests/js_output_parity/fixtures/unboxed_recursive_output_patterns.res

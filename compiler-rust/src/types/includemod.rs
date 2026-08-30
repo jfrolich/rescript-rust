@@ -128,6 +128,7 @@ pub enum IncludeModError {
         name: Ident,
         actual: ValueDescription,
         expected: ValueDescription,
+        arity_mismatch: Option<(usize, usize)>,
     },
     /// Type declaration mismatch.
     TypeMismatch { name: Ident, reason: String },
@@ -136,7 +137,7 @@ pub enum IncludeModError {
         name: Ident,
         actual: TypeDeclaration,
         expected: TypeDeclaration,
-        detail: String,
+        detail: TypeDeclarationMismatchDetail,
     },
     /// Extension constructor mismatch.
     ExtensionConstructorMismatch {
@@ -190,6 +191,41 @@ pub enum IncludeModError {
     SignatureMismatch(Vec<IncludeModError>),
 }
 
+/// Structured counterpart of `Includecore.type_mismatch`.
+///
+/// Most inclusion checks still produce a pre-rendered detail while they are
+/// ported, but semantic mismatches must remain distinguishable from their
+/// diagnostic text. In particular, `TagName` originates from the canonical
+/// variant layout rather than from a formatted declaration.
+#[derive(Debug, Clone)]
+pub enum TypeDeclarationMismatchDetail {
+    TagName,
+    Variance,
+    Rendered(String),
+}
+
+impl TypeDeclarationMismatchDetail {
+    fn message(&self) -> &str {
+        match self {
+            Self::TagName => "Their @tag annotations differ.",
+            Self::Variance => "Their variances do not agree.",
+            Self::Rendered(message) => message,
+        }
+    }
+}
+
+impl From<String> for TypeDeclarationMismatchDetail {
+    fn from(value: String) -> Self {
+        Self::Rendered(value)
+    }
+}
+
+impl From<&str> for TypeDeclarationMismatchDetail {
+    fn from(value: &str) -> Self {
+        Self::Rendered(value.to_string())
+    }
+}
+
 pub fn format_error(type_ctx: &TypeContext, filename: &str, error: &IncludeModError) -> String {
     let mut output = String::new();
     output.push_str("  Signature mismatch:\n");
@@ -224,32 +260,42 @@ fn format_include_error(
             expected,
             error,
         } => {
-            let actual = format_module_type(type_ctx, actual);
-            let expected = format_module_type(type_ctx, expected);
-            if should_elide_module_mismatch(&actual, &expected)
-                || should_elide_type_declaration_module_mismatch(error, &actual, &expected)
+            let actual_text = format_module_type(type_ctx, actual);
+            let expected_text = format_module_type(type_ctx, expected);
+            if should_elide_module_mismatch(&actual_text, &expected_text)
+                || should_elide_type_declaration_module_mismatch(
+                    error,
+                    &actual_text,
+                    &expected_text,
+                )
             {
                 output.push_str("  ...\n");
             } else if is_compact_type_declaration_mismatch(error) {
                 output.push_str("  Modules do not match: ");
-                output.push_str(&actual);
+                output.push_str(&actual_text);
                 output.push_str(" is not included in ");
-                output.push_str(&expected);
+                output.push_str(&expected_text);
                 output.push('\n');
-            } else if !expected.contains('\n') {
+            } else if !(actual_text.contains('\n') && expected_text.contains('\n'))
+                && "  Modules do not match: ".len()
+                    + actual_text.len()
+                    + " is not included in ".len()
+                    + expected_text.len()
+                    <= 80
+            {
                 output.push_str("  Modules do not match: ");
-                output.push_str(&actual);
+                output.push_str(&actual_text);
                 output.push_str(" is not included in ");
-                output.push_str(&expected);
+                output.push_str(&expected_text);
                 output.push('\n');
             } else {
                 output.push_str("  Modules do not match:\n");
                 output.push_str("    ");
-                output.push_str(&actual);
+                output.push_str(&actual_text);
                 output.push('\n');
                 output.push_str("  is not included in\n");
                 output.push_str("    ");
-                output.push_str(&expected);
+                output.push_str(&expected_text);
                 output.push('\n');
             }
             format_include_error(type_ctx, filename, error, output);
@@ -310,7 +356,7 @@ fn format_include_error(
             expected,
             detail,
         } => {
-            if detail == "Their variances do not agree." {
+            if matches!(detail, TypeDeclarationMismatchDetail::Variance) {
                 output.push_str("  Type declarations do not match: ");
                 output.push_str(&format_type_declaration(type_ctx, name, actual));
                 output.push_str(" is not included in ");
@@ -342,7 +388,7 @@ fn format_include_error(
             ));
             output.push_str(":\n");
             output.push_str("    Actual declaration\n");
-            for line in detail.lines() {
+            for line in detail.message().lines() {
                 output.push_str("  ");
                 output.push_str(line);
                 output.push('\n');
@@ -397,14 +443,41 @@ fn format_include_error(
             name,
             actual,
             expected,
+            arity_mismatch,
         } => {
             let actual_text = format_value_description(type_ctx, name, actual);
             let expected_text = format_value_description(type_ctx, name, expected);
-            output.push_str("  Values do not match: ");
-            output.push_str(&actual_text);
-            output.push_str(" is not included in ");
-            output.push_str(&expected_text);
-            output.push('\n');
+            let inline_width = "  Values do not match: ".len()
+                + actual_text.len()
+                + " is not included in ".len()
+                + expected_text.len();
+            if !actual_text.contains('\n') && !expected_text.contains('\n') && inline_width <= 80 {
+                output.push_str("  Values do not match: ");
+                output.push_str(&actual_text);
+                output.push_str(" is not included in ");
+                output.push_str(&expected_text);
+                output.push('\n');
+            } else {
+                output.push_str("  Values do not match:\n    ");
+                output.push_str(&indent_lines(&actual_text, "    ").trim_start());
+                output.push_str("\n  is not included in\n    ");
+                output.push_str(&indent_lines(&expected_text, "    ").trim_start());
+                output.push('\n');
+            }
+            if let Some((actual_arity, expected_arity)) = arity_mismatch {
+                let arguments = |arity: usize| {
+                    if arity == 1 {
+                        "1 argument".to_string()
+                    } else {
+                        format!("{arity} arguments")
+                    }
+                };
+                output.push_str("  The implementation contains a function taking ");
+                output.push_str(&arguments(*actual_arity));
+                output.push_str(" where the interface expects one taking ");
+                output.push_str(&arguments(*expected_arity));
+                output.push_str(".\n");
+            }
             output.push_str("  ");
             output.push_str(&code_frame::format_location(
                 &location_filename(type_ctx, filename, &expected.val_loc),
@@ -470,8 +543,10 @@ fn format_include_error(
 fn is_compact_type_declaration_mismatch(error: &IncludeModError) -> bool {
     matches!(
         error,
-        IncludeModError::TypeDeclarationMismatch { detail, .. }
-            if detail == "Their variances do not agree."
+        IncludeModError::TypeDeclarationMismatch {
+            detail: TypeDeclarationMismatchDetail::Variance,
+            ..
+        }
     )
 }
 
@@ -527,9 +602,20 @@ fn should_elide_type_declaration_module_mismatch(
     actual: &str,
     expected: &str,
 ) -> bool {
+    // OCaml includemod.ml:637-655 bounds the structured `Module_types`
+    // symptom, whose declarations still carry @tag attributes even though
+    // Printtyp omits them. Preserve that distinction after the semantic
+    // layout migration rather than inferring it from rendered text.
+    let has_hidden_tag_layout = matches!(
+        error,
+        IncludeModError::TypeDeclarationMismatch {
+            detail: TypeDeclarationMismatchDetail::TagName,
+            ..
+        }
+    );
     matches!(error, IncludeModError::TypeDeclarationMismatch { .. })
         && !is_compact_type_declaration_mismatch(error)
-        && actual.len() + expected.len() > 80
+        && (has_hidden_tag_layout || actual.len() + expected.len() > 80)
 }
 
 pub(crate) fn format_module_type(type_ctx: &TypeContext, mty: &ModuleType) -> String {
@@ -741,7 +827,14 @@ fn format_type_declaration_with_options_and_rec(
         &decl.type_variance,
         matches!(decl.type_kind, TypeKind::TypeAbstract),
     );
-    let prefix = if decl.type_unboxed.unboxed || type_decl_has_attr(decl, "unboxed") {
+    let unboxed = decl
+        .variant_layout_ref()
+        .map(|layout_ref| {
+            decl.type_representation == crate::types::TypeRepresentation::Unboxed
+                || type_ctx.variant_layout(layout_ref).configuration().unboxed
+        })
+        .unwrap_or(decl.type_representation == crate::types::TypeRepresentation::Unboxed);
+    let prefix = if unboxed {
         "@unboxed "
     } else if type_decl_has_attr(decl, "immediate") || type_decl_has_attr(decl, "ocaml.immediate") {
         "@immediate "
@@ -768,14 +861,18 @@ fn format_type_declaration_with_options_and_rec(
             let fields = fields.join(", ");
             format!("{head} = {{{fields}}}")
         }
-        TypeKind::TypeVariant(constructors) => {
+        TypeKind::TypeVariant(constructors, layout_ref) => {
             if constructors.is_empty() {
                 format!("{head} = |")
             } else {
+                let layout = type_ctx.variant_layout(*layout_ref);
                 let mut formatted_constructors = Vec::with_capacity(constructors.len());
-                for constructor in constructors {
-                    formatted_constructors
-                        .push(format_constructor_declaration(&mut printer, constructor));
+                for (position, constructor) in constructors.iter().enumerate() {
+                    formatted_constructors.push(format_constructor_declaration(
+                        &mut printer,
+                        constructor,
+                        Some(&layout.constructors[position]),
+                    ));
                 }
                 let constructors = formatted_constructors.join(" | ");
                 format!("{head} = {constructors}")
@@ -855,8 +952,9 @@ fn format_type_extension(
 fn format_constructor_declaration(
     printer: &mut TypeExprErrorPrinter<'_>,
     constructor: &ConstructorDeclaration,
+    representation: Option<&crate::types::VariantConstructorCase>,
 ) -> String {
-    let constructor_prefix = format_constructor_attributes(&constructor.cd_attributes);
+    let constructor_prefix = format_constructor_representation(constructor, representation);
     let rendered_constructor = match &constructor.cd_args {
         ConstructorArguments::CstrTuple(args) if args.is_empty() => {
             format!("{constructor_prefix}{}", constructor.cd_id.name())
@@ -887,27 +985,30 @@ fn format_constructor_declaration(
     }
 }
 
-fn format_constructor_attributes(attrs: &[Attribute]) -> String {
-    attrs
-        .iter()
-        .filter_map(|attr| {
-            if attr.attr_name.txt != "as" {
-                return None;
-            }
-            let payload = match &attr.attr_payload {
-                AttributePayload::Ident(value) => value.clone(),
-                AttributePayload::Str(value) => format!("\"{value}\""),
-                AttributePayload::Int(value) => value.to_string(),
-                AttributePayload::IntLiteral(value) => value.clone(),
-                AttributePayload::Float(value) | AttributePayload::BigInt(value) => value.clone(),
-                AttributePayload::Bool(true) => "true".to_string(),
-                AttributePayload::Bool(false) => "false".to_string(),
-                AttributePayload::Deprecated { reason, .. } => format!("\"{reason}\""),
-                AttributePayload::Empty | AttributePayload::Structure(_) => return None,
-            };
-            Some(format!("@as({payload}) "))
-        })
-        .collect::<String>()
+fn format_constructor_representation(
+    constructor: &ConstructorDeclaration,
+    representation: Option<&crate::types::VariantConstructorCase>,
+) -> String {
+    if !constructor_is_nullary(constructor) {
+        return String::new();
+    }
+    let Some(crate::types::VariantConstructorCase::Constant(tag)) = representation else {
+        return String::new();
+    };
+    let Some(tag) = &tag.tag_type else {
+        return String::new();
+    };
+    let payload = match tag {
+        crate::types::VariantTagType::String(value) => format!("\"{value}\""),
+        crate::types::VariantTagType::Int(value) => value.to_string(),
+        crate::types::VariantTagType::Float(value) => value.clone(),
+        crate::types::VariantTagType::BigInt(value) => format!("{value}n"),
+        crate::types::VariantTagType::Bool(value) => value.to_string(),
+        crate::types::VariantTagType::Null => "null".to_string(),
+        crate::types::VariantTagType::Undefined => "undefined".to_string(),
+        crate::types::VariantTagType::Untagged(_) => return String::new(),
+    };
+    format!("@as({payload}) ")
 }
 
 fn format_type_params(
@@ -1058,27 +1159,15 @@ impl<'a> TypeExprErrorPrinter<'a> {
     }
 
     fn format_arrow(&mut self, ty: TypeExprRef) -> String {
-        let mut args = Vec::new();
-        let mut current = ty;
-        let mut seen = HashSet::new();
-
-        loop {
-            let repr = self.type_ctx.repr(current);
-            if !seen.insert(repr) {
-                break;
-            }
-
-            match &*self.type_ctx.get_desc(repr) {
-                TypeDesc::Tarrow { arg, ret, .. } => {
-                    args.push(self.format_arrow_arg(&arg.lbl, arg.typ));
-                    current = *ret;
-                }
-                TypeDesc::Tlink(next) | TypeDesc::Tsubst(next) => current = *next,
-                _ => break,
-            }
-        }
-
-        let ret = self.format(current);
+        let (params, ret) = match &*self.type_ctx.get_desc(self.type_ctx.repr(ty)) {
+            TypeDesc::Tarrow { args, ret } => (args.clone(), *ret),
+            _ => unreachable!("format_arrow called for a non-arrow type"),
+        };
+        let args = params
+            .iter()
+            .map(|arg| self.format_arrow_arg(&arg.lbl, arg.typ))
+            .collect::<Vec<_>>();
+        let ret = self.format(ret);
         if args.len() == 1 {
             format!("{} => {ret}", args[0])
         } else {
@@ -1400,23 +1489,36 @@ fn modtypes_inner<'a>(
         env: &Env,
         path: &Path,
     ) -> IncludeModResult<Path> {
+        // OCaml compiler/ml/env.ml:903-914 follows only Mty_alias while
+        // normalizing a module path. A selected module whose declaration is
+        // Mty_ident names a module type; it exists at the selected path and is
+        // not an alias to that module-type path.
+        if env
+            .lookup_module(path)
+            .is_ok_and(|md| matches!(md.md_type, ModuleType::MtyIdent(_)))
+        {
+            return Ok(path.clone());
+        }
         ctype::normalize_path_full_strict(type_ctx, env, path)
             .map_err(|path| IncludeModError::UnboundModulePath { path })
     }
 
     match (mty_impl, mty_sig) {
         (ModuleType::MtyAlias(pres_impl, impl_path), ModuleType::MtyAlias(pres_sig, sig_path)) => {
-            let lax_impl_path = normalized_alias_path(type_ctx, env, impl_path);
-            // OCaml compiler/ml/includemod.ml:209-215 compares alias paths after
-            // applying the current signature inclusion substitution to the
-            // expected alias path (`Subst.module_path subst p2`).
+            // OCaml compiler/ml/includemod.ml:202-208 first compares the alias
+            // paths directly. Only unequal paths cross Env.normalize_path;
+            // forcing equal aliases here materializes component thunks that
+            // OCaml leaves delayed until translation.
             let subst_sig_path = substitute_module_path(sig_path, subst);
-            let lax_sig_path = normalized_alias_path(type_ctx, env, &subst_sig_path);
-            if !lax_impl_path.same(&lax_sig_path) {
-                return Err(IncludeModError::ModuleTypeMismatch {
-                    name: Ident::create_local("module"),
-                    reason: "module aliases do not match".to_string(),
-                });
+            if !impl_path.same(&subst_sig_path) {
+                let lax_impl_path = normalized_alias_path(type_ctx, env, impl_path);
+                let lax_sig_path = normalized_alias_path(type_ctx, env, &subst_sig_path);
+                if !lax_impl_path.same(&lax_sig_path) {
+                    return Err(IncludeModError::ModuleTypeMismatch {
+                        name: Ident::create_local("module"),
+                        reason: "module aliases do not match".to_string(),
+                    });
+                }
             }
             match (pres_impl, pres_sig) {
                 (
@@ -1657,9 +1759,8 @@ fn modtypes_inner<'a>(
         }
 
         (ModuleType::MtyIdent(path), mty_sig) => {
-            // Match compiler/ml/includemod.ml:242-244: implementation-side
-            // `Mty_ident` expands before OCaml reaches the same-identifier
-            // check in `try_modtypes2` at compiler/ml/includemod.ml:269-280.
+            // compiler/ml/includemod.ml:235-236 expands an implementation-side
+            // identifier only when Env says that module type path is manifest.
             if let Some(result) = with_local_pident_module_type(env, path, |expanded| {
                 modtypes_inner(
                     type_ctx,
@@ -1685,17 +1786,60 @@ fn modtypes_inner<'a>(
                     aliasable,
                     warnings,
                 )
+            } else if let ModuleType::MtyIdent(sig_path) = mty_sig {
+                // try_modtypes2 receives `Subst.modtype subst mty2`. For an
+                // identifier this first applies Subst.modtype_path; if neither
+                // side can expand, only normalized prefix identity succeeds.
+                let sig_path = substitute_modtype_path(sig_path, subst);
+                if env
+                    .normalize_path_prefix(path)
+                    .same(&env.normalize_path_prefix(&sig_path))
+                {
+                    Ok(ModuleCoercion::Tcoerce_none)
+                } else if let Some(expanded) = expand_module_type_in_env(type_ctx, env, &sig_path) {
+                    let identity = InclusionSubst::default();
+                    modtypes_inner(
+                        type_ctx,
+                        env,
+                        &identity,
+                        mty_impl,
+                        &expanded,
+                        sig_access_path,
+                        aliasable,
+                        warnings,
+                    )
+                } else {
+                    Err(IncludeModError::ModuleTypeMismatch {
+                        name: Ident::create_local("module"),
+                        reason: "incompatible module types".to_string(),
+                    })
+                }
             } else {
-                Ok(ModuleCoercion::Tcoerce_none)
+                Err(IncludeModError::ModuleTypeMismatch {
+                    name: Ident::create_local("module"),
+                    reason: "incompatible module types".to_string(),
+                })
             }
         }
 
         (mty_impl, ModuleType::MtyIdent(path)) => {
-            if let Some(result) = with_local_pident_module_type(env, path, |expanded| {
+            // compiler/ml/includemod.ml:237 and 262-273 substitute the expected
+            // module type before testing/expanding its identifier, and restart
+            // expansion with Subst.identity.
+            let path = substitute_modtype_path(path, subst);
+            if let ModuleType::MtyIdent(impl_path) = mty_impl
+                && env
+                    .normalize_path_prefix(impl_path)
+                    .same(&env.normalize_path_prefix(&path))
+            {
+                return Ok(ModuleCoercion::Tcoerce_none);
+            }
+            let identity = InclusionSubst::default();
+            if let Some(result) = with_local_pident_module_type(env, &path, |expanded| {
                 modtypes_inner(
                     type_ctx,
                     env,
-                    subst,
+                    &identity,
                     mty_impl,
                     expanded,
                     sig_access_path,
@@ -1705,11 +1849,11 @@ fn modtypes_inner<'a>(
             }) {
                 return result;
             }
-            if let Some(expanded) = expand_module_type_in_env(type_ctx, env, path) {
+            if let Some(expanded) = expand_module_type_in_env(type_ctx, env, &path) {
                 modtypes_inner(
                     type_ctx,
                     env,
-                    subst,
+                    &identity,
                     mty_impl,
                     &expanded,
                     sig_access_path,
@@ -1717,7 +1861,10 @@ fn modtypes_inner<'a>(
                     warnings,
                 )
             } else {
-                Ok(ModuleCoercion::Tcoerce_none)
+                Err(IncludeModError::ModuleTypeMismatch {
+                    name: Ident::create_local("module"),
+                    reason: "incompatible module types".to_string(),
+                })
             }
         }
 
@@ -1916,6 +2063,10 @@ fn register_paired_signature_substitution(
             }
         }
         (SignatureItem::SigModtype(impl_id, _), SignatureItem::SigModtype(sig_id, _)) => {
+            // OCaml compiler/ml/includemod.ml:353-354 records
+            // `Subst.add_modtype id2 (Mty_ident (Pident id1))`. Dotted module
+            // type paths are handled by Subst.modtype_path through their module
+            // prefix (compiler/ml/subst.ml:77-86), not by a dotted modtype map.
             subst
                 .modtype_paths
                 .insert(Path::pident(sig_id.clone()), Path::pident(impl_id.clone()));
@@ -2302,6 +2453,63 @@ fn signatures_with_subst<'a>(
 // ============================================================================
 
 /// Check if value description `impl_desc` is a subtype of `sig_desc`.
+/// compiler/ml/includemod.ml:496-529: find the first nested n-ary arrow
+/// whose parameter count differs, descending only through equal-label arrows.
+fn find_arity_mismatch(
+    type_ctx: &TypeContext,
+    env: &Env,
+    impl_ty: TypeExprRef,
+    sig_ty: TypeExprRef,
+) -> Option<(usize, usize)> {
+    fn loop_(
+        type_ctx: &TypeContext,
+        env: &Env,
+        seen: &mut HashSet<(TypeExprRef, TypeExprRef)>,
+        impl_ty: TypeExprRef,
+        sig_ty: TypeExprRef,
+    ) -> Option<(usize, usize)> {
+        let impl_ty = type_ctx.repr(impl_ty);
+        let sig_ty = type_ctx.repr(sig_ty);
+        if !seen.insert((impl_ty, sig_ty)) {
+            return None;
+        }
+        let impl_ty = type_ctx.repr(ctype::expand_head(type_ctx, env, impl_ty));
+        let sig_ty = type_ctx.repr(ctype::expand_head(type_ctx, env, sig_ty));
+        let (impl_args, impl_ret, sig_args, sig_ret) =
+            match (&*type_ctx.get_desc(impl_ty), &*type_ctx.get_desc(sig_ty)) {
+                (
+                    TypeDesc::Tarrow {
+                        args: impl_args,
+                        ret: impl_ret,
+                    },
+                    TypeDesc::Tarrow {
+                        args: sig_args,
+                        ret: sig_ret,
+                    },
+                ) => (impl_args.clone(), *impl_ret, sig_args.clone(), *sig_ret),
+                _ => return None,
+            };
+        if impl_args.len() != sig_args.len() {
+            return Some((impl_args.len(), sig_args.len()));
+        }
+        if !impl_args
+            .iter()
+            .zip(&sig_args)
+            .all(|(impl_arg, sig_arg)| impl_arg.lbl.same_label(&sig_arg.lbl))
+        {
+            return None;
+        }
+        for (impl_arg, sig_arg) in impl_args.iter().zip(&sig_args) {
+            if let Some(mismatch) = loop_(type_ctx, env, seen, impl_arg.typ, sig_arg.typ) {
+                return Some(mismatch);
+            }
+        }
+        loop_(type_ctx, env, seen, impl_ret, sig_ret)
+    }
+
+    loop_(type_ctx, env, &mut HashSet::new(), impl_ty, sig_ty)
+}
+
 fn value_descriptions<'a>(
     type_ctx: &'a TypeContext,
     env: &Env,
@@ -2334,10 +2542,12 @@ fn value_descriptions<'a>(
     if !moregeneral {
         let mut expected_desc = sig_desc.clone();
         expected_desc.val_type = expected_ty;
+        let arity_mismatch = find_arity_mismatch(type_ctx, env, impl_desc.val_type, expected_ty);
         return Err(IncludeModError::ValueTypeMismatch {
             name: id,
             actual: impl_desc.clone(),
             expected: expected_desc,
+            arity_mismatch,
         });
     }
 
@@ -2451,13 +2661,14 @@ fn substitute_type_kind_paths<'a>(
                 .collect(),
             repr.clone(),
         ),
-        TypeKind::TypeVariant(constructors) => TypeKind::TypeVariant(
+        TypeKind::TypeVariant(constructors, layout) => TypeKind::TypeVariant(
             constructors
                 .iter()
                 .map(|constructor| {
                     substitute_constructor_declaration_paths(type_ctx, constructor, subst)
                 })
                 .collect(),
+            *layout,
         ),
     }
 }
@@ -2493,7 +2704,7 @@ fn collect_type_kind_types(kind: &TypeKind, types: &mut Vec<TypeExprRef>) {
         TypeKind::TypeRecord(labels, _) => {
             types.extend(labels.iter().map(|label| label.ld_type));
         }
-        TypeKind::TypeVariant(constructors) => {
+        TypeKind::TypeVariant(constructors, _) => {
             for constructor in constructors {
                 collect_constructor_argument_types(&constructor.cd_args, types);
                 if let Some(ty) = constructor.cd_res {
@@ -2569,13 +2780,14 @@ fn substitute_type_kind_with_copied_types(
                 .collect(),
             repr.clone(),
         ),
-        TypeKind::TypeVariant(constructors) => TypeKind::TypeVariant(
+        TypeKind::TypeVariant(constructors, layout) => TypeKind::TypeVariant(
             constructors
                 .iter()
                 .map(|constructor| {
                     substitute_constructor_declaration_with_copied_types(constructor, types)
                 })
                 .collect(),
+            *layout,
         ),
     }
 }
@@ -2888,8 +3100,10 @@ fn rewrite_substituted_type_paths<'a>(
                 );
             }
         }
-        TypeDesc::Tarrow { arg, ret, .. } => {
-            rewrite_substituted_type_paths(type_ctx, arg.typ, subst, seen);
+        TypeDesc::Tarrow { args, ret } => {
+            for arg in args {
+                rewrite_substituted_type_paths(type_ctx, arg.typ, subst, seen);
+            }
             rewrite_substituted_type_paths(type_ctx, *ret, subst, seen);
         }
         TypeDesc::Ttuple(items) => {
@@ -3006,8 +3220,6 @@ pub(crate) fn type_declarations<'a>(
         ));
     }
 
-    force_package_manifest_inclusion_side_effects(type_ctx, env, impl_decl, sig_decl);
-
     let param_map = build_type_param_map(type_ctx, &impl_decl.type_params, &sig_decl.type_params);
     match (impl_decl.type_manifest, sig_decl.type_manifest) {
         (_, None) => {
@@ -3076,10 +3288,16 @@ pub(crate) fn type_declarations<'a>(
         }
     }
 
+    let canonical_unboxed = |decl: &TypeDeclaration| {
+        decl.type_representation == crate::types::TypeRepresentation::Unboxed
+            || decl.variant_layout_ref().is_some_and(|layout_ref| {
+                type_ctx.variant_layout(layout_ref).configuration().unboxed
+            })
+    };
     if !matches!(sig_decl.type_kind, TypeKind::TypeAbstract)
-        && impl_decl.type_unboxed.unboxed != sig_decl.type_unboxed.unboxed
+        && canonical_unboxed(impl_decl) != canonical_unboxed(sig_decl)
     {
-        let unboxed_decl = if sig_decl.type_unboxed.unboxed {
+        let unboxed_decl = if canonical_unboxed(sig_decl) {
             "the second"
         } else {
             "the first"
@@ -3094,12 +3312,12 @@ pub(crate) fn type_declarations<'a>(
         ));
     }
 
-    if type_decl_tag_name(impl_decl) != type_decl_tag_name(sig_decl) {
+    if type_decl_tag_name(type_ctx, impl_decl) != type_decl_tag_name(type_ctx, sig_decl) {
         return Err(type_decl_mismatch(
             id,
             impl_decl,
             sig_decl,
-            "Their @tag annotations differ.",
+            TypeDeclarationMismatchDetail::TagName,
         ));
     }
 
@@ -3133,7 +3351,10 @@ pub(crate) fn type_declarations<'a>(
             }
         }
 
-        (TypeKind::TypeVariant(impl_constructors), TypeKind::TypeVariant(sig_constructors)) => {
+        (
+            TypeKind::TypeVariant(impl_constructors, _),
+            TypeKind::TypeVariant(sig_constructors, _),
+        ) => {
             if let Some(detail) = compare_variant_declarations(
                 type_ctx,
                 env,
@@ -3141,6 +3362,16 @@ pub(crate) fn type_declarations<'a>(
                 &sig_decl.type_params,
                 impl_constructors,
                 sig_constructors,
+                type_ctx.variant_layout(
+                    impl_decl
+                        .variant_layout_ref()
+                        .expect("variant declaration layout"),
+                ),
+                type_ctx.variant_layout(
+                    sig_decl
+                        .variant_layout_ref()
+                        .expect("variant declaration layout"),
+                ),
                 warnings,
             ) {
                 return Err(type_decl_mismatch(id, impl_decl, sig_decl, detail));
@@ -3218,7 +3449,7 @@ pub(crate) fn type_declarations<'a>(
                     id,
                     impl_decl,
                     sig_decl,
-                    "Their variances do not agree.",
+                    TypeDeclarationMismatchDetail::Variance,
                 ));
             }
         }
@@ -3241,6 +3472,8 @@ fn compare_record_declarations(
         type_ctx,
         env,
         &param_map,
+        impl_params,
+        sig_params,
         impl_labels,
         sig_labels,
         warnings,
@@ -3251,6 +3484,8 @@ fn compare_record_declarations_with_param_map(
     type_ctx: &TypeContext,
     env: &Env,
     param_map: &HashMap<TypeExprRef, TypeExprRef>,
+    impl_params: &[TypeExprRef],
+    sig_params: &[TypeExprRef],
     impl_labels: &[LabelDeclaration],
     sig_labels: &[LabelDeclaration],
     warnings: &mut Vec<Warning>,
@@ -3302,18 +3537,6 @@ fn compare_record_declarations_with_param_map(
                 sig_runtime_name
             ));
         }
-        if !type_exprs_equal_for_inclusion(
-            type_ctx,
-            Some(env),
-            &param_map,
-            impl_label.ld_type,
-            sig_label.ld_type,
-        ) {
-            return Some(format!(
-                "The types for field {} are not equal.",
-                impl_label.ld_id.name()
-            ));
-        }
         index += 1;
     }
 
@@ -3330,6 +3553,35 @@ fn compare_record_declarations_with_param_map(
         ));
     }
 
+    // OCaml compiler/ml/includecore.ml:271-313 first compares every record
+    // parameter and field in one Ctype.equal call. Fields are consed while
+    // traversing, so the final comparison visits them in reverse declaration
+    // order before the type parameters.
+    let mut impl_types = Vec::with_capacity(impl_labels.len() + impl_params.len());
+    let mut sig_types = Vec::with_capacity(sig_labels.len() + sig_params.len());
+    impl_types.extend(impl_labels.iter().rev().map(|label| label.ld_type));
+    impl_types.extend_from_slice(impl_params);
+    sig_types.extend(sig_labels.iter().rev().map(|label| label.ld_type));
+    sig_types.extend_from_slice(sig_params);
+    if type_expr_lists_equal_for_inclusion(type_ctx, env, param_map, &impl_types, &sig_types) {
+        return None;
+    }
+
+    // The reference retries field-by-field only after the batched fast path
+    // fails, so diagnostics can identify the first incompatible declaration.
+    let mut prior_impl = impl_params.to_vec();
+    let mut prior_sig = sig_params.to_vec();
+    for (impl_label, sig_label) in impl_labels.iter().zip(sig_labels) {
+        prior_impl.insert(0, impl_label.ld_type);
+        prior_sig.insert(0, sig_label.ld_type);
+        if !type_expr_lists_equal_for_inclusion(type_ctx, env, param_map, &prior_impl, &prior_sig) {
+            return Some(format!(
+                "The types for field {} are not equal.",
+                impl_label.ld_id.name()
+            ));
+        }
+    }
+
     None
 }
 
@@ -3337,7 +3589,7 @@ fn type_decl_mismatch(
     name: Ident,
     actual: &TypeDeclaration,
     expected: &TypeDeclaration,
-    detail: impl Into<String>,
+    detail: impl Into<TypeDeclarationMismatchDetail>,
 ) -> IncludeModError {
     IncludeModError::TypeDeclarationMismatch {
         name,
@@ -3353,16 +3605,9 @@ fn type_decl_has_attr(decl: &TypeDeclaration, name: &str) -> bool {
         .any(|attr| attr.attr_name.txt == name)
 }
 
-fn type_decl_tag_name(decl: &TypeDeclaration) -> Option<&str> {
-    decl.type_attributes.iter().find_map(|attr| {
-        if attr.attr_name.txt == "tag"
-            && let AttributePayload::Str(value) = &attr.attr_payload
-        {
-            Some(value.as_str())
-        } else {
-            None
-        }
-    })
+fn type_decl_tag_name(type_ctx: &TypeContext, decl: &TypeDeclaration) -> Option<String> {
+    decl.variant_layout_ref()
+        .and_then(|layout_ref| type_ctx.variant_layout(layout_ref).matching_facts.tag_name)
 }
 
 fn private_flags(impl_decl: &TypeDeclaration, sig_decl: &TypeDeclaration) -> bool {
@@ -3401,26 +3646,36 @@ fn type_expr_lists_equal_for_inclusion(
     impl_types: &[TypeExprRef],
     sig_types: &[TypeExprRef],
 ) -> bool {
-    impl_types.len() == sig_types.len()
-        && impl_types
-            .iter()
-            .zip(sig_types.iter())
-            .all(|(impl_ty, sig_ty)| {
-                type_exprs_equal_for_inclusion(
-                    type_ctx,
-                    Some(env),
-                    param_map,
-                    *impl_ty,
-                    *sig_ty,
-                )
-            })
+    if impl_types.len() != sig_types.len() {
+        return false;
+    }
+    let mut seen = HashSet::new();
+    impl_types
+        .iter()
+        .zip(sig_types.iter())
+        .all(|(impl_ty, sig_ty)| {
+            type_exprs_equal_for_inclusion_inner(
+                type_ctx,
+                Some(env),
+                param_map,
+                *impl_ty,
+                *sig_ty,
+                &mut seen,
+            )
+        })
 }
 
 fn type_manifest_is_absrow(type_ctx: &TypeContext, env: &Env, ty: TypeExprRef) -> bool {
     let ty = type_ctx.repr(ty);
     let is_pident_constr = {
         let desc = type_ctx.get_desc(ty);
-        matches!(&*desc, TypeDesc::Tconstr { path: Path::Pident(_), .. })
+        matches!(
+            &*desc,
+            TypeDesc::Tconstr {
+                path: Path::Pident(_),
+                ..
+            }
+        )
     };
     if !is_pident_constr {
         return false;
@@ -3646,8 +3901,11 @@ fn type_manifest_for_inclusion(
         env,
         impl_manifest,
     ));
-    let sig_expanded =
-        type_ctx.repr(crate::types::ctype::expand_head(type_ctx, env, sig_manifest));
+    let sig_expanded = type_ctx.repr(crate::types::ctype::expand_head(
+        type_ctx,
+        env,
+        sig_manifest,
+    ));
     let impl_desc = type_ctx.get_desc(impl_expanded).clone();
     let sig_desc = type_ctx.get_desc(sig_expanded).clone();
 
@@ -3693,13 +3951,7 @@ fn type_manifest_for_inclusion(
         _ => {}
     }
 
-    if type_exprs_equal_for_inclusion(
-        type_ctx,
-        Some(env),
-        param_map,
-        impl_manifest,
-        sig_manifest,
-    ) {
+    if type_exprs_equal_for_inclusion(type_ctx, Some(env), param_map, impl_manifest, sig_manifest) {
         return true;
     }
 
@@ -3710,7 +3962,11 @@ fn type_manifest_for_inclusion(
     let mut current = impl_expanded;
     let mut seen = HashSet::new();
     while seen.insert(current) {
-        let Some(next) = crate::types::ctype::expand_head_once(type_ctx, env, current) else {
+        // compiler/ml/includecore.ml:157 calls Ctype.try_expand_once_opt,
+        // whose ctype.ml:1269-1275 path uses Private expansion. This is what
+        // allows inclusion against a private manifest to walk through the
+        // implementation's strengthened self constructor.
+        let Some(next) = crate::types::ctype::expand_abbrev_opt_once(type_ctx, env, current) else {
             break;
         };
         current = type_ctx.repr(next);
@@ -3729,6 +3985,8 @@ fn compare_variant_declarations(
     sig_params: &[TypeExprRef],
     impl_constructors: &[ConstructorDeclaration],
     sig_constructors: &[ConstructorDeclaration],
+    impl_layout: crate::types::VariantLayout,
+    sig_layout: crate::types::VariantLayout,
     warnings: &mut Vec<Warning>,
 ) -> Option<String> {
     let param_map = build_type_param_map(type_ctx, impl_params, sig_params);
@@ -3758,30 +4016,35 @@ fn compare_variant_declarations(
             warnings.push(warning);
         }
 
-        let arg_param_map = match (impl_constructor.cd_res, sig_constructor.cd_res) {
-            (Some(impl_res), Some(sig_res)) => {
-                if !type_exprs_equal_for_inclusion(
-                    type_ctx,
-                    Some(env),
-                    &param_map,
-                    impl_res,
-                    sig_res,
-                ) {
+        let (arg_param_map, arg_impl_params, arg_sig_params) =
+            match (impl_constructor.cd_res, sig_constructor.cd_res) {
+                (Some(impl_res), Some(sig_res)) => {
+                    if !type_exprs_equal_for_inclusion(
+                        type_ctx,
+                        Some(env),
+                        &param_map,
+                        impl_res,
+                        sig_res,
+                    ) {
+                        return Some(format!(
+                            "The types for field {} are not equal.",
+                            impl_constructor.cd_id.name()
+                        ));
+                    }
+                    (
+                        build_type_param_map(type_ctx, &[impl_res], &[sig_res]),
+                        vec![impl_res],
+                        vec![sig_res],
+                    )
+                }
+                (Some(_), None) | (None, Some(_)) => {
                     return Some(format!(
                         "The types for field {} are not equal.",
                         impl_constructor.cd_id.name()
                     ));
                 }
-                build_type_param_map(type_ctx, &[impl_res], &[sig_res])
-            }
-            (Some(_), None) | (None, Some(_)) => {
-                return Some(format!(
-                    "The types for field {} are not equal.",
-                    impl_constructor.cd_id.name()
-                ));
-            }
-            (None, None) => param_map.clone(),
-        };
+                (None, None) => (param_map.clone(), impl_params.to_vec(), sig_params.to_vec()),
+            };
 
         match (&impl_constructor.cd_args, &sig_constructor.cd_args) {
             (
@@ -3792,6 +4055,8 @@ fn compare_variant_declarations(
                     type_ctx,
                     env,
                     &arg_param_map,
+                    &arg_impl_params,
+                    &arg_sig_params,
                     impl_labels,
                     sig_labels,
                     warnings,
@@ -3835,10 +4100,17 @@ fn compare_variant_declarations(
             }
         }
 
-        if constructor_is_nullary(impl_constructor)
-            && constructor_as_payload(&impl_constructor.cd_attributes)
-                != constructor_as_payload(&sig_constructor.cd_attributes)
-        {
+        if constructor_is_nullary(impl_constructor) && {
+            let impl_tag = match &impl_layout.constructors[index] {
+                crate::types::VariantConstructorCase::Constant(tag) => &tag.tag_type,
+                crate::types::VariantConstructorCase::Block(_) => unreachable!(),
+            };
+            let sig_tag = match &sig_layout.constructors[index] {
+                crate::types::VariantConstructorCase::Constant(tag) => &tag.tag_type,
+                crate::types::VariantConstructorCase::Block(_) => unreachable!(),
+            };
+            impl_tag != sig_tag
+        } {
             return Some(format!(
                 "The internal representations for case {} are not equal.",
                 impl_constructor.cd_id.name()
@@ -3885,13 +4157,6 @@ fn constructor_is_nullary(constructor: &ConstructorDeclaration) -> bool {
         &constructor.cd_args,
         ConstructorArguments::CstrTuple(args) if args.is_empty()
     )
-}
-
-fn constructor_as_payload(attrs: &[Attribute]) -> Option<&AttributePayload> {
-    attrs
-        .iter()
-        .find(|attr| attr.attr_name.txt == "as")
-        .map(|attr| &attr.attr_payload)
 }
 
 fn build_type_param_map(
@@ -3965,16 +4230,22 @@ fn type_exprs_equal_for_inclusion_inner(
             ..
         },
     ) = (&*type_ctx.get_desc(impl_ty), &*type_ctx.get_desc(sig_ty))
+        && impl_path.same(sig_path)
         && impl_args.is_empty()
         && sig_args.is_empty()
-        && impl_path.same(sig_path)
     {
-        // OCaml compiler/ml/ctype.ml:3165 handles equal nullary Tconstr
-        // paths before `expand_head_rigid`; Includecore reaches this through
-        // compiler/ml/includecore.ml:216-228 and :229-271 when comparing
-        // constructor arguments. Do not force persistent module normalization
-        // for already-equal nullary field types.
-        return true;
+        // OCaml compiler/ml/ctype.ml:3008 handles only equal nullary Tconstr
+        // paths before `expand_head_rigid`. Parameterized constructors must
+        // expand first; aliases can expose package types whose comparison has
+        // observable Env/Ident allocation side effects.
+        return impl_args
+            .iter()
+            .zip(sig_args.iter())
+            .all(|(impl_arg, sig_arg)| {
+                type_exprs_equal_for_inclusion_inner(
+                    type_ctx, env, param_map, *impl_arg, *sig_arg, seen,
+                )
+            });
     }
 
     if let Some(env) = env {
@@ -3997,25 +4268,26 @@ fn type_exprs_equal_for_inclusion_inner(
         | (TypeDesc::Tunivar(impl_name), TypeDesc::Tunivar(sig_name)) => impl_name == sig_name,
         (
             TypeDesc::Tarrow {
-                arg: impl_arg,
+                args: impl_args,
                 ret: impl_ret,
-                ..
             },
             TypeDesc::Tarrow {
-                arg: sig_arg,
+                args: sig_args,
                 ret: sig_ret,
-                ..
             },
         ) => {
-            arg_labels_equal(&impl_arg.lbl, &sig_arg.lbl)
-                && type_exprs_equal_for_inclusion_inner(
-                    type_ctx,
-                    env,
-                    param_map,
-                    impl_arg.typ,
-                    sig_arg.typ,
-                    seen,
-                )
+            impl_args.len() == sig_args.len()
+                && impl_args.iter().zip(sig_args).all(|(impl_arg, sig_arg)| {
+                    arg_labels_equal(&impl_arg.lbl, &sig_arg.lbl)
+                        && type_exprs_equal_for_inclusion_inner(
+                            type_ctx,
+                            env,
+                            param_map,
+                            impl_arg.typ,
+                            sig_arg.typ,
+                            seen,
+                        )
+                })
                 && type_exprs_equal_for_inclusion_inner(
                     type_ctx, env, param_map, *impl_ret, *sig_ret, seen,
                 )
@@ -4071,16 +4343,38 @@ fn type_exprs_equal_for_inclusion_inner(
         (
             TypeDesc::Tpackage {
                 path: impl_path,
+                lids: impl_lids,
                 args: impl_args,
-                ..
             },
             TypeDesc::Tpackage {
                 path: sig_path,
+                lids: sig_lids,
                 args: sig_args,
-                ..
             },
         ) => {
-            impl_path.same(sig_path)
+            // OCaml compiler/ml/includecore.ml routes these comparisons through
+            // Ctype.equal. Its package branch calls complete_type_list twice
+            // (compiler/ml/ctype.ml:3048-3053, 2044-2047), allocating one
+            // hidden `Pkg` module per side before comparing package arguments.
+            let labels_complete = env.is_none_or(|env| {
+                let sig_complete = crate::types::ctype::package_type_lists_have_ocaml_same_label_completion_side_effect(
+                    type_ctx,
+                    Some(env),
+                    ModuleType::MtyIdent(sig_path.clone()),
+                    impl_lids,
+                    sig_lids,
+                );
+                let impl_complete = crate::types::ctype::package_type_lists_have_ocaml_same_label_completion_side_effect(
+                    type_ctx,
+                    Some(env),
+                    ModuleType::MtyIdent(impl_path.clone()),
+                    sig_lids,
+                    impl_lids,
+                );
+                sig_complete && impl_complete
+            });
+            labels_complete
+                && impl_path.same(sig_path)
                 && impl_args.len() == sig_args.len()
                 && impl_args
                     .iter()
@@ -4393,65 +4687,6 @@ fn arg_labels_equal(left: &ArgLabel, right: &ArgLabel) -> bool {
     }
 }
 
-fn force_package_manifest_inclusion_side_effects<'a>(
-    type_ctx: &'a TypeContext,
-    env: &Env,
-    impl_decl: &TypeDeclaration,
-    sig_decl: &TypeDeclaration,
-) {
-    let (Some(impl_manifest), Some(sig_manifest)) =
-        (impl_decl.type_manifest, sig_decl.type_manifest)
-    else {
-        return;
-    };
-
-    let impl_manifest = type_ctx.repr(impl_manifest);
-    let sig_manifest = type_ctx.repr(sig_manifest);
-    let impl_desc = type_ctx.get_desc(impl_manifest);
-    let sig_desc = type_ctx.get_desc(sig_manifest);
-    let (
-        TypeDesc::Tpackage {
-            path: impl_path,
-            lids: impl_lids,
-            ..
-        },
-        TypeDesc::Tpackage {
-            path: sig_path,
-            lids: sig_lids,
-            ..
-        },
-    ) = (&*impl_desc, &*sig_desc)
-    else {
-        return;
-    };
-    let impl_path = impl_path.clone();
-    let sig_path = sig_path.clone();
-    let impl_lids = impl_lids.clone();
-    let sig_lids = sig_lids.clone();
-    drop(impl_desc);
-    drop(sig_desc);
-
-    // OCaml compiler/ml/includecore.ml:87-151 compares manifests with
-    // `Ctype.equal`; for package types that reaches compiler/ml/ctype.ml:2237-2238,
-    // which calls `complete_type_list` twice. `complete_type_list` allocates
-    // a hidden `Pkg` module at compiler/ml/ctype.ml:2199-2201 even when both
-    // packages already list the same labels.
-    let _ = crate::types::ctype::package_type_lists_have_ocaml_same_label_completion_side_effect(
-        type_ctx,
-        Some(env),
-        ModuleType::MtyIdent(sig_path),
-        &impl_lids,
-        &sig_lids,
-    );
-    let _ = crate::types::ctype::package_type_lists_have_ocaml_same_label_completion_side_effect(
-        type_ctx,
-        Some(env),
-        ModuleType::MtyIdent(impl_path),
-        &sig_lids,
-        &impl_lids,
-    );
-}
-
 /// Check if extension constructor `impl_ext` is compatible with `sig_ext`.
 fn extension_constructors<'a>(
     type_ctx: &'a TypeContext,
@@ -4495,6 +4730,13 @@ fn extension_constructors<'a>(
     {
         return Err(mismatch());
     }
+
+    // OCaml compiler/ml/includecore.ml:470-473 creates an anonymous
+    // constructor identifier before comparing extension arguments. The
+    // comparison uses it for record-constructor diagnostics; preserve the
+    // allocation even when Rust's diagnostic representation does not need the
+    // identifier so subsequent binding stamps follow the same typing order.
+    let _constructor_id = type_ctx.create_ident("");
 
     if !constructor_arguments_equal_for_inclusion(
         type_ctx,
@@ -4715,7 +4957,7 @@ mod tests {
     use crate::location::Location;
     use crate::types::Path;
     use crate::types::decl::{
-        ModtypeDeclaration, ModuleDeclaration, ModuleType, RecStatus, TypeKind, UnboxedStatus,
+        ModtypeDeclaration, ModuleDeclaration, ModuleType, RecStatus, TypeKind, TypeRepresentation,
         ValueKind,
     };
     use crate::types::env::initial_env;
@@ -4732,7 +4974,7 @@ mod tests {
             type_loc: Location::none(),
             type_attributes: vec![],
             type_immediate: false,
-            type_unboxed: UnboxedStatus::FALSE_FALSE,
+            type_representation: TypeRepresentation::Boxed,
             type_inlined_types: vec![],
             type_path,
         }
@@ -4956,6 +5198,37 @@ mod tests {
     }
 
     #[test]
+    fn extension_inclusion_allocates_ocaml_constructor_id() {
+        let id_gen = std::sync::Arc::new(IdGenerator::new());
+        let type_ctx = TypeContext::new(id_gen.clone());
+        let env = initial_env(&type_ctx);
+        let extension = ExtensionConstructor {
+            ext_type_path: crate::types::predef::path_exn(),
+            ext_type_params: vec![],
+            ext_args: ConstructorArguments::CstrTuple(vec![]),
+            ext_ret_type: None,
+            ext_private: crate::types::PrivateFlag::Public,
+            ext_loc: Location::none(),
+            ext_attributes: vec![],
+            ext_is_exception: true,
+        };
+        let before = id_gen.current_stamp();
+
+        let result = extension_constructors(
+            &type_ctx,
+            &env,
+            Ident::create_persistent("Exit"),
+            &extension,
+            &extension,
+            &InclusionSubst::default(),
+            &mut Vec::new(),
+        );
+
+        assert!(result.is_ok());
+        assert_eq!(id_gen.current_stamp(), before + 1);
+    }
+
+    #[test]
     fn test_signature_utilities() {
         let val_ty_placeholder = crate::types::TypeExprRef(0);
 
@@ -4983,7 +5256,7 @@ mod tests {
                     type_loc: Location::none(),
                     type_attributes: vec![],
                     type_immediate: false,
-                    type_unboxed: UnboxedStatus::FALSE_FALSE,
+                    type_representation: TypeRepresentation::Boxed,
                     type_inlined_types: vec![],
                     type_path: None,
                 },

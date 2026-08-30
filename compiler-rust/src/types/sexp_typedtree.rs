@@ -20,11 +20,11 @@ use crate::types::path::Path;
 use crate::types::type_expr::{FieldKind, RowDesc, RowField, TypeDesc, TypeExprRef};
 use crate::types::typedtree::{
     Case, Constant, Expression, ExpressionDesc, ExtensionConstructor, ExtensionConstructorKind,
-    FunctionParam, FunctionParamPattern, Loc, ModuleBinding, ModuleExpr, ModuleExprDesc,
-    ModuleTypeConstraint, OpenDeclaration, Partial, Pattern, PatternDesc, RecordField,
-    RecordLabelDefinition, Structure, StructureItem, StructureItemDesc, TypeExtension,
-    TypedConstructorArguments, TypedConstructorDeclaration, TypedCoreType, TypedCoreTypeDesc,
-    TypedLabelDeclaration, TypedTypeDeclaration, TypedTypeKind, ValueBinding,
+    FunctionParam, Loc, ModuleBinding, ModuleExpr, ModuleExprDesc, ModuleTypeConstraint,
+    OpenDeclaration, Partial, Pattern, PatternDesc, RecordField, RecordLabelDefinition, Structure,
+    StructureItem, StructureItemDesc, TypeExtension, TypedConstructorArguments,
+    TypedConstructorDeclaration, TypedCoreType, TypedCoreTypeDesc, TypedLabelDeclaration,
+    TypedTypeDeclaration, TypedTypeKind, ValueBinding,
 };
 use crate::types::variance::Variance;
 use std::collections::HashMap;
@@ -524,21 +524,18 @@ fn sexp_type_expr_body_inline(
         TypeDesc::Tvar(_) | TypeDesc::Tunivar(_) => {
             unreachable!("variable nodes handled before body serialization")
         }
-        TypeDesc::Tarrow {
-            arg, ret, arity, ..
-        } => {
-            let arg_sexp = sexp_type_expr_inline(arena, ctx, state, arg.typ);
-            let ret_sexp = sexp_type_expr_inline(arena, ctx, state, *ret);
-            Sexp::list(vec![
-                Sexp::atom("Tarrow"),
-                sexp_type_arg_label(&arg.lbl),
-                arg_sexp,
-                ret_sexp,
-                match arity {
-                    Some(n) => Sexp::list(vec![Sexp::atom("Some"), Sexp::atom(&n.to_string())]),
-                    None => Sexp::atom("None"),
-                },
-            ])
+        TypeDesc::Tarrow { args, ret } => {
+            // compiler/ml/sexp_typedtree.ml emits each argument as
+            // [arg_label; typ], followed by the return type.
+            let mut items = vec![Sexp::atom("Tarrow")];
+            for arg in args {
+                items.push(Sexp::list(vec![
+                    sexp_type_arg_label(&arg.lbl),
+                    sexp_type_expr_inline(arena, ctx, state, arg.typ),
+                ]));
+            }
+            items.push(sexp_type_expr_inline(arena, ctx, state, *ret));
+            Sexp::list(items)
         }
         TypeDesc::Ttuple(types) => {
             let mut items = vec![Sexp::atom("Ttuple")];
@@ -864,7 +861,7 @@ fn sexp_pattern_desc(
             };
             Sexp::list(vec![Sexp::atom("Tpat_variant"), string(label), arg_sexp])
         }
-        PatternDesc::Tpat_record(fields, flag) => {
+        PatternDesc::Tpat_record(fields, flag, rest) => {
             let mut field_items = Vec::new();
             for (li, _, p, opt_flag) in fields.iter() {
                 field_items.push(Sexp::list(vec![
@@ -873,6 +870,9 @@ fn sexp_pattern_desc(
                     Sexp::atom(if *opt_flag { "optional" } else { "required" }),
                 ]));
             }
+            // Match compiler/ml/sexp_typedtree.ml: the rest component is
+            // intentionally not serialized (pattern `Tpat_record (fields, flag, _rest)`).
+            let _ = rest;
             Sexp::list(vec![
                 Sexp::atom("Tpat_record"),
                 Sexp::list(field_items),
@@ -1137,58 +1137,26 @@ fn sexp_expression_desc(
         ExpressionDesc::Texp_function {
             params,
             body,
-            partial,
-            arity,
             async_,
         } => {
-            // OCaml Texp_function has: arg_label, arity (Option<int>), param (Ident), case, partial, async
-            // Rust has: params (Vec), body (Vec<Case>), partial, arity, async_
-            // For parity, we need to output in OCaml's format
-
-            // Handle single-param single-case (common case)
-            if params.len() == 1 && body.len() == 1 {
-                let param = &params[0];
-                let case = &body[0];
-
-                Sexp::list(vec![
-                    Sexp::atom("Texp_function"),
-                    sexp_arg_label(arena, &param.label),
-                    sexp_arity(arena, arity),
-                    sexp_ident(&param.param_id),
-                    sexp_case(arena, ctx, with_locs, dedup, case),
-                    sexp_partial(partial),
-                    Sexp::atom(if *async_ { "async" } else { "sync" }),
-                ])
-            } else {
-                // Fallback for complex cases - output in a way that shows the structure
-                // This won't match OCaml for multi-param functions, but provides debugging info
-                let mut param_items = Vec::new();
-                for p in params.iter() {
-                    let default_sexp = match &p.default {
-                        None => Sexp::atom("None"),
-                        Some(e) => Sexp::list(vec![
-                            Sexp::atom("Some"),
-                            sexp_expression(arena, ctx, with_locs, dedup, e),
-                        ]),
-                    };
-                    param_items.push(Sexp::list(vec![
-                        sexp_arg_label(arena, &p.label),
-                        default_sexp,
-                    ]));
-                }
-                let mut body_items = Vec::new();
-                for c in body.iter() {
-                    body_items.push(sexp_case(arena, ctx, with_locs, dedup, c));
-                }
-                Sexp::list(vec![
-                    Sexp::atom("Texp_function"),
-                    Sexp::list(param_items),
-                    Sexp::list(body_items),
-                    sexp_partial(partial),
-                    sexp_arity(arena, arity),
-                    Sexp::atom(if *async_ { "async" } else { "sync" }),
-                ])
-            }
+            // compiler/ml/sexp_typedtree.ml:382-400.
+            let params = params
+                .iter()
+                .map(|param| {
+                    Sexp::list(vec![
+                        sexp_type_arg_label(&param.fp_lbl),
+                        sexp_ident(&param.fp_param),
+                        sexp_pattern(arena, ctx, with_locs, dedup, &param.fp_pat),
+                        sexp_partial(&param.fp_partial),
+                    ])
+                })
+                .collect();
+            Sexp::list(vec![
+                Sexp::atom("Texp_function"),
+                Sexp::list(params),
+                sexp_expression(arena, ctx, with_locs, dedup, body),
+                Sexp::atom(if *async_ { "async" } else { "sync" }),
+            ])
         }
         ExpressionDesc::Texp_apply {
             funct,
@@ -1552,14 +1520,20 @@ fn sexp_core_type_desc(
             None => Sexp::atom("Ttyp_any"),
             Some(s) => Sexp::list(vec![Sexp::atom("Ttyp_var"), string(s)]),
         },
-        TypedCoreTypeDesc::Ttyp_arrow(arg, ret, arity) => Sexp::list(vec![
-            Sexp::atom("Ttyp_arrow"),
-            sexp_type_arg_label(&arg.lbl),
-            sexp_attributes(arena, with_locs, &arg.attrs),
-            sexp_core_type(arena, ctx, with_locs, dedup, &*arg.typ),
-            sexp_core_type(arena, ctx, with_locs, dedup, ret),
-            opt(|a: &i32| Sexp::atom(&a.to_string()), arity),
-        ]),
+        TypedCoreTypeDesc::Ttyp_arrow(args, ret) => {
+            // compiler/ml/sexp_typedtree.ml emits each Parsetree.arg as
+            // [label; attrs; core_type], followed by the return core type.
+            let mut items = vec![Sexp::atom("Ttyp_arrow")];
+            for arg in args {
+                items.push(Sexp::list(vec![
+                    sexp_type_arg_label(&arg.lbl),
+                    sexp_attributes(arena, with_locs, &arg.attrs),
+                    sexp_core_type(arena, ctx, with_locs, dedup, &arg.typ),
+                ]));
+            }
+            items.push(sexp_core_type(arena, ctx, with_locs, dedup, ret));
+            Sexp::list(items)
+        }
         TypedCoreTypeDesc::Ttyp_tuple(types) => {
             let mut items = vec![Sexp::atom("Ttyp_tuple")];
             for t in types.iter() {
@@ -1854,7 +1828,7 @@ fn sexp_type_kind(
 ) -> Sexp {
     match kind {
         TypeKind::TypeAbstract => Sexp::atom("Ttype_abstract"),
-        TypeKind::TypeVariant(cds) => {
+        TypeKind::TypeVariant(cds, _) => {
             let mut items = vec![Sexp::atom("Ttype_variant")];
             for cd in cds.iter() {
                 items.push(sexp_constructor_decl(arena, ctx, with_locs, dedup, cd));
@@ -2154,17 +2128,7 @@ fn sexp_type_extension(
     dedup: &mut TypeDedupTable,
     te: &TypeExtension,
 ) -> Sexp {
-    let loc_sexp = if with_locs {
-        vec![location_idx(arena, with_locs, te.tyext_loc)]
-    } else {
-        vec![]
-    };
-    let mut items = vec![
-        Sexp::atom("type_extension"),
-        sexp_path(&te.tyext_path),
-        sexp_longident_idx(arena, ctx, te.tyext_txt.txt),
-    ];
-    items.extend(loc_sexp);
+    let mut items = vec![Sexp::atom("type_extension"), sexp_path(&te.tyext_path)];
     let mut param_items = Vec::new();
     for (ct, v) in te.tyext_params.iter() {
         param_items.push(Sexp::list(vec![
@@ -2434,17 +2398,11 @@ fn sexp_open_declaration(
     dedup: &mut TypeDedupTable,
     od: &OpenDeclaration,
 ) -> Sexp {
-    let loc_sexp = if with_locs {
-        vec![location_idx(arena, with_locs, od.open_loc)]
-    } else {
-        vec![]
-    };
     let mut items = vec![
         Sexp::atom("open_description"),
         sexp_path(&od.open_path),
         sexp_longident_idx(arena, ctx, od.open_txt.txt),
     ];
-    items.extend(loc_sexp);
     items.push(sexp_override_flag(&od.open_override));
     items.push(sexp_attributes(arena, with_locs, &od.open_attributes));
     Sexp::list(items)
@@ -2801,17 +2759,11 @@ fn sexp_open_description(
     dedup: &mut TypeDedupTable,
     od: &OpenDeclaration,
 ) -> Sexp {
-    let loc_sexp = if with_locs {
-        vec![location_idx(arena, with_locs, od.open_loc)]
-    } else {
-        vec![]
-    };
     let mut items = vec![
         Sexp::atom("open_description"),
         sexp_path(&od.open_path),
         sexp_longident_idx(arena, ctx, od.open_txt.txt),
     ];
-    items.extend(loc_sexp);
     items.push(sexp_override_flag(&od.open_override));
     items.push(sexp_attributes(arena, with_locs, &od.open_attributes));
     Sexp::list(items)

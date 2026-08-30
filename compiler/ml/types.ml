@@ -25,7 +25,7 @@ and arg = {lbl: arg_label; typ: type_expr}
 
 and type_desc =
   | Tvar of string option
-  | Tarrow of arg * type_expr * commutable * arity
+  | Tarrow of arg list * type_expr
   | Ttuple of type_expr list
   | Tconstr of Path.t * type_expr list * abbrev_memo ref
   | Tobject of type_expr * (Path.t * type_expr list) option ref
@@ -61,9 +61,7 @@ and abbrev_memo =
 
 and field_kind = Fvar of field_kind option ref | Fpresent | Fabsent
 
-and commutable = Cok | Cunknown | Clink of commutable ref
-
-module TypeOps = struct
+module Type_ops = struct
   type t = type_expr
   let compare t1 t2 = t1.id - t2.id
   let hash t = t.id
@@ -72,11 +70,11 @@ end
 
 (* Maps of methods and instance variables *)
 
-module OrderedString = struct
+module Ordered_string = struct
   type t = string
   let compare (x : t) y = compare x y
 end
-module Meths = Map.Make (OrderedString)
+module Meths = Map.Make (Ordered_string)
 module Vars = Meths
 
 (* Value descriptions *)
@@ -135,7 +133,7 @@ type type_declaration = {
   type_loc: Location.t;
   type_attributes: Parsetree.attributes;
   type_immediate: bool;
-  type_unboxed: unboxed_status;
+  type_representation: type_representation;
   type_inlined_types: type_inlined_type list;
 }
 
@@ -145,7 +143,7 @@ and type_inlined_type =
 and type_kind =
   | Type_abstract
   | Type_record of label_declaration list * record_representation
-  | Type_variant of constructor_declaration list
+  | Type_variant of constructor_declaration list * Variant_runtime.layout_ref
   | Type_open
 
 and record_representation =
@@ -155,10 +153,8 @@ and record_representation =
   | Record_inlined of
       (* Inlined record *)
        {
-      tag: int;
       name: string;
-      num_nonconsts: int;
-      attrs: Parsetree.attributes;
+      representation: Variant_runtime.constructor_reference;
     }
   | Record_extension (* Inlined record under extension *)
 
@@ -183,15 +179,10 @@ and constructor_arguments =
   | Cstr_tuple of type_expr list
   | Cstr_record of label_declaration list
 
-and unboxed_status = {
-  unboxed: bool;
-  default: bool; (* False if the unboxed field was set from an attribute. *)
-}
-
-let unboxed_false_default_false = {unboxed = false; default = false}
-let unboxed_false_default_true = {unboxed = false; default = true}
-let unboxed_true_default_false = {unboxed = true; default = false}
-let unboxed_true_default_true = {unboxed = true; default = true}
+and type_representation = Boxed | Unboxed
+(* Single-payload @unboxed type: the payload is the whole runtime
+         value. Multi-constructor unboxed variants are tracked by their layout,
+         not here. *)
 
 type extension_constructor = {
   ext_type_path: Path.t;
@@ -206,7 +197,7 @@ type extension_constructor = {
 
 (* Type expressions for the class language *)
 
-module Concr = Set.Make (OrderedString)
+module Concr = Set.Make (Ordered_string)
 
 (* Type expressions for the module language *)
 
@@ -226,8 +217,6 @@ and signature_item =
   | Sig_typext of Ident.t * extension_constructor * ext_status
   | Sig_module of Ident.t * module_declaration * rec_status
   | Sig_modtype of Ident.t * modtype_declaration
-  | Sig_class of unit
-  | Sig_class_type of unit (* Dummy AST node *)
 
 and module_declaration = {
   md_type: module_type;
@@ -260,9 +249,7 @@ type constructor_description = {
   cstr_existentials: type_expr list; (* list of existentials *)
   cstr_args: type_expr list; (* Type of the arguments *)
   cstr_arity: int; (* Number of arguments *)
-  cstr_tag: constructor_tag; (* Tag for heap blocks *)
-  cstr_consts: int; (* Number of constant constructors *)
-  cstr_nonconsts: int; (* Number of non-const constructors *)
+  cstr_kind: constructor_kind;
   cstr_generalized: bool; (* Constrained return type? *)
   cstr_private: private_flag; (* Read-only constructor? *)
   cstr_loc: Location.t;
@@ -270,25 +257,34 @@ type constructor_description = {
   cstr_inlined: type_declaration option;
 }
 
-and constructor_tag =
-  | Cstr_constant of int (* Constant constructor (an int) *)
-  | Cstr_block of int (* Regular constructor (a block) *)
-  | Cstr_unboxed (* Constructor of an unboxed type *)
-  | Cstr_extension of Path.t (* Extension constructor *)
+and constructor_kind =
+  | Ordinary_constructor of Variant_runtime.constructor_reference
+    (* Constructor introduced by a variant type declaration. This stable
+       reference addresses its runtime representation directly; the shared
+       variant value also supplies declaration-level matching facts. *)
+  | Extension_constructor of Path.t
+(* Extension constructor, identified by its own path since extension
+         constructors can be rebound *)
 
-let equal_tag t1 t2 =
-  match (t1, t2) with
-  | Cstr_constant i1, Cstr_constant i2 -> i2 = i1
-  | Cstr_block i1, Cstr_block i2 -> i2 = i1
-  | Cstr_unboxed, Cstr_unboxed -> true
-  | Cstr_extension path1, Cstr_extension path2 -> Path.same path1 path2
-  | (Cstr_constant _ | Cstr_block _ | Cstr_unboxed | Cstr_extension _), _ ->
-    false
+(* Whether two constructor descriptions denote the same constructor of a
+   common scrutinee type. Because a re-exported variant mints descriptions
+   with a different type path, ordinary constructors are compared by name
+   only; the shared scrutinee type makes the name unambiguous. Not a
+   general-purpose identity test across unrelated types. *)
+let same_constructor c1 c2 =
+  match (c1.cstr_kind, c2.cstr_kind) with
+  | Ordinary_constructor _, Ordinary_constructor _ ->
+    c1.cstr_name = c2.cstr_name
+  | Extension_constructor p1, Extension_constructor p2 -> Path.same p1 p2
+  | (Ordinary_constructor _ | Extension_constructor _), _ -> false
 
 let may_equal_constr c1 c2 =
-  match (c1.cstr_tag, c2.cstr_tag) with
-  | Cstr_extension _, Cstr_extension _ -> c1.cstr_arity = c2.cstr_arity
-  | tag1, tag2 -> equal_tag tag1 tag2
+  match (c1.cstr_kind, c2.cstr_kind) with
+  | Extension_constructor _, Extension_constructor _ ->
+    (* extension constructors may be rebound, so paths cannot disprove
+       equality; arity can *)
+    c1.cstr_arity = c2.cstr_arity
+  | _ -> same_constructor c1 c2
 
 type label_description = {
   lbl_name: string; (* Short name *)
@@ -308,10 +304,9 @@ let same_record_representation x y =
   match x with
   | Record_regular -> y = Record_regular
   | Record_float_unused -> y = Record_float_unused
-  | Record_inlined {tag; name; num_nonconsts} -> (
+  | Record_inlined {name} -> (
     match y with
-    | Record_inlined y ->
-      tag = y.tag && name = y.name && num_nonconsts = y.num_nonconsts
+    | Record_inlined y -> name = y.name
     | _ -> false)
   | Record_extension -> y = Record_extension
   | Record_unboxed x -> (

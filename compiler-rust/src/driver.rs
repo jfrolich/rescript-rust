@@ -25,7 +25,7 @@ use crate::diagnostics::WarningConfig;
 use crate::ident::Ident;
 use crate::js_ir::{
     DepsProgram, Kind, ModuleFormat, ModuleId, ModulePathResolutionError, ModulePathResolver,
-    print_deps_program_with_directives_and_options,
+    print_deps_program_with_directives_and_options, print_deps_program_with_source_map,
 };
 use crate::lambda::lam_compile::LambdaCompiler;
 use crate::location::Location;
@@ -91,25 +91,6 @@ impl fmt::Display for UserDiagnostic {
 
 impl std::error::Error for UserDiagnostic {}
 
-/// WASM-safe timing: native returns `Instant::now()`, WASM returns `None`
-/// (Instant::now panics on WASM since time isn't implemented there).
-#[inline]
-fn phase_now() -> Option<std::time::Instant> {
-    #[cfg(not(target_arch = "wasm32"))]
-    {
-        Some(std::time::Instant::now())
-    }
-    #[cfg(target_arch = "wasm32")]
-    {
-        None
-    }
-}
-
-#[inline]
-fn phase_elapsed_ms(t: Option<std::time::Instant>) -> u128 {
-    t.map(|t| t.elapsed().as_millis()).unwrap_or(0)
-}
-
 pub fn enable_cli_cleanup_skip() {
     SKIP_CLI_CLEANUP.store(true, Ordering::Relaxed);
 }
@@ -157,13 +138,12 @@ pub fn max_lambda_input_stamp(typed_structure: &crate::types::typedtree::Structu
     use crate::types::path::Path as TypePath;
     use crate::types::typedtree::{
         Case, ConstructorArgument, ExpExtra, Expression, ExpressionDesc, ExtensionConstructor,
-        ExtensionConstructorKind, FunctionParam, FunctionParamPattern, IncludeDescription,
-        MethKind, ModuleBinding, ModuleCoercion, ModuleExpr, ModuleExprDesc, ModuleType,
-        ModuleTypeConstraint, ModuleTypeDeclaration, ModuleTypeDesc, OpenDeclaration, PatExtra,
-        Pattern, PatternDesc, RowFieldDesc, Structure, StructureItemDesc,
-        TypedConstructorArguments, TypedCoreType, TypedCoreTypeDesc, TypedSignature,
-        TypedSignatureItemDesc, TypedTypeDeclaration, TypedTypeKind, TypedValueDescription,
-        ValueBinding, WithConstraint,
+        ExtensionConstructorKind, FunctionParam, IncludeDescription, MethKind, ModuleBinding,
+        ModuleCoercion, ModuleExpr, ModuleExprDesc, ModuleType, ModuleTypeConstraint,
+        ModuleTypeDeclaration, ModuleTypeDesc, OpenDeclaration, PatExtra, Pattern, PatternDesc,
+        RowFieldDesc, Structure, StructureItemDesc, TypedConstructorArguments, TypedCoreType,
+        TypedCoreTypeDesc, TypedSignature, TypedSignatureItemDesc, TypedTypeDeclaration,
+        TypedTypeKind, TypedValueDescription, ValueBinding, WithConstraint,
     };
 
     fn visit_ident(max_stamp: &mut i32, id: &Ident) {
@@ -184,8 +164,10 @@ pub fn max_lambda_input_stamp(typed_structure: &crate::types::typedtree::Structu
     fn visit_typed_core_type(max_stamp: &mut i32, core_type: &TypedCoreType) {
         match &core_type.ctyp_desc {
             TypedCoreTypeDesc::Ttyp_var(_) => {}
-            TypedCoreTypeDesc::Ttyp_arrow(arg, ret, _) => {
-                visit_typed_core_type(max_stamp, &arg.typ);
+            TypedCoreTypeDesc::Ttyp_arrow(args, ret) => {
+                for arg in args {
+                    visit_typed_core_type(max_stamp, &arg.typ);
+                }
                 visit_typed_core_type(max_stamp, ret);
             }
             TypedCoreTypeDesc::Ttyp_tuple(items) => {
@@ -253,7 +235,7 @@ pub fn max_lambda_input_stamp(typed_structure: &crate::types::typedtree::Structu
                     visit_pattern(max_stamp, inner);
                 }
             }
-            PatternDesc::Tpat_record(fields, _) => {
+            PatternDesc::Tpat_record(fields, _, _) => {
                 for (_, _, pattern, _) in fields {
                     visit_pattern(max_stamp, pattern);
                 }
@@ -286,18 +268,8 @@ pub fn max_lambda_input_stamp(typed_structure: &crate::types::typedtree::Structu
     }
 
     fn visit_function_param(max_stamp: &mut i32, param: &FunctionParam) {
-        visit_ident(max_stamp, &param.param_id);
-        if let Some(default) = &param.default {
-            visit_expression(max_stamp, default);
-        }
-        match &param.pat {
-            FunctionParamPattern::Simple(pattern) => visit_pattern(max_stamp, pattern),
-            FunctionParamPattern::Nested(params) => {
-                for nested in params {
-                    visit_function_param(max_stamp, nested);
-                }
-            }
-        }
+        visit_ident(max_stamp, &param.fp_param);
+        visit_pattern(max_stamp, &param.fp_pat);
     }
 
     fn visit_expression(max_stamp: &mut i32, expr: &Expression) {
@@ -316,9 +288,7 @@ pub fn max_lambda_input_stamp(typed_structure: &crate::types::typedtree::Structu
                 for param in params {
                     visit_function_param(max_stamp, param);
                 }
-                for case in body {
-                    visit_case(max_stamp, case);
-                }
+                visit_expression(max_stamp, body);
             }
             ExpressionDesc::Texp_apply { funct, args, .. } => {
                 visit_expression(max_stamp, funct);
@@ -744,7 +714,7 @@ pub fn max_lambda_input_stamp(typed_structure: &crate::types::typedtree::Structu
                     visit_ident(max_stamp, &label.ld_id);
                 }
             }
-            DeclTypeKind::TypeVariant(constructors) => {
+            DeclTypeKind::TypeVariant(constructors, _) => {
                 for constructor in constructors {
                     visit_ident(max_stamp, &constructor.cd_id);
                     if let DeclConstructorArguments::CstrRecord(labels) = &constructor.cd_args {
@@ -1157,57 +1127,6 @@ fn structure_has_config_string(
     })
 }
 
-fn module_expr_needs_jsx_rewrite(
-    module_expr: &ModuleExpr,
-    arena: &crate::parse_arena::ParseArena,
-) -> bool {
-    match &*module_expr.pmod_desc {
-        ModuleExprDesc::Pmod_structure(structure) => structure_needs_jsx_rewrite(structure, arena),
-        ModuleExprDesc::Pmod_functor(inner) => {
-            let (_, _, body) = &**inner;
-            module_expr_needs_jsx_rewrite(arena.get_mod_expr(*body), arena)
-        }
-        ModuleExprDesc::Pmod_apply(lhs, rhs) => {
-            module_expr_needs_jsx_rewrite(arena.get_mod_expr(*lhs), arena)
-                || module_expr_needs_jsx_rewrite(arena.get_mod_expr(*rhs), arena)
-        }
-        ModuleExprDesc::Pmod_constraint(inner, _) => {
-            module_expr_needs_jsx_rewrite(arena.get_mod_expr(*inner), arena)
-        }
-        _ => false,
-    }
-}
-
-fn structure_needs_jsx_rewrite(
-    structure: &Structure,
-    arena: &crate::parse_arena::ParseArena,
-) -> bool {
-    structure.iter().any(|item| match &*item.pstr_desc {
-        // External @react.component declarations need JSX PPX lowering.
-        StructureItemDesc::Pstr_primitive(vd) => {
-            has_react_component_attr(&vd.pval_attributes, arena)
-                || has_react_component_with_props_attr(&vd.pval_attributes, arena)
-        }
-        StructureItemDesc::Pstr_value(inner) => {
-            let (_, bindings) = &**inner;
-            bindings.iter().any(|vb| {
-                has_react_component_attr(&vb.pvb_attributes, arena)
-                    || has_react_component_with_props_attr(&vb.pvb_attributes, arena)
-            })
-        }
-        StructureItemDesc::Pstr_module(mb) => {
-            module_expr_needs_jsx_rewrite(arena.get_mod_expr(mb.pmb_expr), arena)
-        }
-        StructureItemDesc::Pstr_recmodule(mbs) => mbs
-            .iter()
-            .any(|mb| module_expr_needs_jsx_rewrite(arena.get_mod_expr(mb.pmb_expr), arena)),
-        StructureItemDesc::Pstr_include(incl) => {
-            module_expr_needs_jsx_rewrite(arena.get_mod_expr(incl.pincl_mod), arena)
-        }
-        _ => false,
-    })
-}
-
 fn reject_invalid_react_component_destructure_in_structure(
     structure: &Structure,
     arena: &ParseArena,
@@ -1322,6 +1241,8 @@ pub struct JsOutputTarget {
 pub struct JsOutput {
     pub path: PathBuf,
     pub code: String,
+    /// External source map contents for linked/hidden modes.
+    pub source_map: Option<String>,
 }
 
 /// Compiler options that can be passed to the driver.
@@ -1360,6 +1281,12 @@ pub struct CompilerOptions {
     /// Extra concrete JS outputs for in-process callers that need the same
     /// typed/lambda result rendered for multiple package specs.
     pub js_output_targets: Vec<JsOutputTarget>,
+    /// Source map output mode.
+    pub source_map: crate::js_ir::source_map::SourceMapMode,
+    /// Include original source text in generated source maps.
+    pub source_map_sources_content: bool,
+    /// Optional sourceRoot emitted in generated source maps.
+    pub source_map_root: String,
     /// JSX version from CLI `-bs-jsx` (e.g. 4). When set, enables JSX PPX rewrite.
     pub jsx_version: Option<i32>,
     /// Experimental LetUnwrap feature from `-enable-experimental LetUnwrap`.
@@ -1395,7 +1322,9 @@ pub struct CompilerOptions {
     /// Mirror `Clflags.assume_no_mli := Mli_exists` from `-bs-read-cmi`.
     pub assume_compiled_interface: bool,
     /// GenType configuration derived from `-bs-gentype-*` flags.
-    pub gentype_config: Option<crate::gentype::config::T>,
+    pub gentype_config: Option<std::sync::Arc<crate::gentype::config::T>>,
+    /// Build-scoped GenType module resolver shared by in-process compilations.
+    pub gentype_resolver: Option<std::sync::Arc<crate::gentype::module_resolver::Resolver>>,
     /// When true, `compile_source_in_process` captures the typed tree,
     /// raw lambda, and lambda sexps for display (used by the playground).
     pub capture_intermediates: bool,
@@ -1429,6 +1358,9 @@ impl Default for CompilerOptions {
             output_path: None,
             output_module_format: None,
             js_output_targets: Vec::new(),
+            source_map: crate::js_ir::source_map::SourceMapMode::None,
+            source_map_sources_content: false,
+            source_map_root: String::new(),
             jsx_version: None,
             experimental_let_unwrap: false,
             jsx_preserve: false,
@@ -1447,6 +1379,7 @@ impl Default for CompilerOptions {
             make_runtime: false,
             assume_compiled_interface: false,
             gentype_config: None,
+            gentype_resolver: None,
             capture_intermediates: false,
             skip_js_render: false,
             publish_in_process_signature: true,
@@ -1750,15 +1683,6 @@ pub(crate) fn jsx_preserve_for_structure(
     options.jsx_preserve || structure_has_config_string(structure, "-bs-jsx-preserve", arena)
 }
 
-fn preprocess_signature_for_typecheck(
-    signature: Signature,
-    options: &CompilerOptions,
-    arena: &mut crate::parse_arena::ParseArena,
-) -> Result<Signature> {
-    preprocess_signature_for_typecheck_inner(signature, options, arena)
-        .map_err(|e| anyhow!("PPX rewrite failed: {e}"))
-}
-
 fn preprocess_signature_for_typecheck_with_source(
     signature: Signature,
     options: &CompilerOptions,
@@ -1778,24 +1702,6 @@ fn preprocess_signature_for_typecheck_with_source(
     } else {
         ppx::rewrite_signature(&signature, arena)
             .map_err(|e| ppx_error_to_anyhow(e, arena, source, filename))
-    }
-}
-
-fn preprocess_signature_for_typecheck_inner(
-    signature: Signature,
-    options: &CompilerOptions,
-    arena: &mut crate::parse_arena::ParseArena,
-) -> std::result::Result<Signature, ppx::PpxError> {
-    let signature = if let Some(jsx_version) = options.jsx_version {
-        jsx_ppx::transform_signature(signature, jsx_version, arena)
-    } else {
-        signature
-    };
-
-    if options.no_builtin_ppx {
-        Ok(signature)
-    } else {
-        ppx::rewrite_signature(&signature, arena)
     }
 }
 
@@ -2222,7 +2128,13 @@ fn directive_payload_error_to_anyhow(
     filename: &str,
 ) -> anyhow::Error {
     UserDiagnostic::new(
-        format_compiler_error_report(arena, source, filename, err.loc, "expect string literal "),
+        format_compiler_error_report(
+            arena,
+            source,
+            filename,
+            err.loc,
+            "Expected a string literal.",
+        ),
         2,
     )
     .into()
@@ -2798,7 +2710,20 @@ fn type_mod_error_to_anyhow(
                     source,
                     filename,
                     *loc,
-                    &format!("Variable {name} is bound several times in this matching"),
+                    &format!("Variable {name} is bound several times in this pattern"),
+                ),
+                2,
+            )
+            .into()
+        }
+        TypeModError::CoreError(TypeCoreError::IllegalValueName { loc, name }) => {
+            UserDiagnostic::new(
+                format_compiler_error_report(
+                    arena,
+                    source,
+                    filename,
+                    *loc,
+                    &format!("'{name}' is not a valid value identifier."),
                 ),
                 2,
             )
@@ -2906,7 +2831,7 @@ fn type_mod_error_to_anyhow(
                     source,
                     filename,
                     *loc,
-                    "Only variables are allowed as left-hand side of `let rec'",
+                    "Only variables are allowed as left-hand side of `let rec`",
                 ),
                 2,
             )
@@ -2919,7 +2844,7 @@ fn type_mod_error_to_anyhow(
                     source,
                     filename,
                     *loc,
-                    "This kind of expression is not allowed as right-hand side of `let rec'",
+                    "This kind of expression is not allowed as right-hand side of `let rec`",
                 ),
                 2,
             )
@@ -2958,7 +2883,7 @@ fn type_mod_error_to_anyhow(
                     source,
                     filename,
                     *loc,
-                    "None of the patterns in this 'match' expression match values.",
+                    "None of the patterns in this switch match values.",
                 ),
                 2,
             )
@@ -3164,7 +3089,7 @@ fn type_mod_error_to_anyhow(
                 source,
                 filename,
                 *loc,
-                "The type of this packed module contains variables:",
+                "The type of this first-class module still contains type variables:",
                 &format_package_type_expr_for_error(type_ctx, arena, *ty),
             ),
             2,
@@ -3287,11 +3212,21 @@ fn type_mod_error_to_anyhow(
             loc,
             trace,
             context,
-        }) => UserDiagnostic::new(
-            format_expr_type_clash_report(type_ctx, arena, source, filename, *loc, trace, context),
-            2,
-        )
-        .into(),
+        }) => {
+            let mut report =
+                format_expr_type_clash_report(type_ctx, arena, source, filename, *loc, trace, context);
+            // OCaml's warning printer leaves the formatter with styles disabled
+            // before a following type error (for example warning 41 followed by
+            // a coercion suggestion). Mirror that ordering rather than emitting
+            // embedded style escapes after an already-printed warning.
+            if suppress_info_style {
+                report = report
+                    .replace("\x1b[1;31m", "")
+                    .replace("\x1b[1;33m", "")
+                    .replace("\x1b[0m", "");
+            }
+            UserDiagnostic::new(report, 2).into()
+        }
         TypeModError::CoreError(TypeCoreError::PatternTypeClash {
             loc: Some(loc),
             trace,
@@ -3316,9 +3251,23 @@ fn type_mod_error_to_anyhow(
             )
             .into()
         }
-        TypeModError::CoreError(TypeCoreError::LabelMismatch { loc, lid, trace }) => {
+        TypeModError::CoreError(TypeCoreError::LabelMismatch {
+            loc,
+            lid,
+            trace,
+            record_literal,
+        }) => {
             UserDiagnostic::new(
-                format_label_mismatch_report(type_ctx, arena, source, filename, *loc, lid, trace),
+                format_label_mismatch_report(
+                    type_ctx,
+                    arena,
+                    source,
+                    filename,
+                    *loc,
+                    lid,
+                    trace,
+                    *record_literal,
+                ),
                 2,
             )
             .into()
@@ -3349,7 +3298,7 @@ fn type_mod_error_to_anyhow(
                     filename,
                     *loc,
                     &format!(
-                        "The GADT constructor {} of type {} must be qualified in this pattern.",
+                        "The GADT constructor {} of type {}\nmust be written with its module prefix in this pattern.",
                         name,
                         format_type_path_for_report(tpath)
                     ),
@@ -3365,7 +3314,7 @@ fn type_mod_error_to_anyhow(
                     source,
                     filename,
                     *loc,
-                    "Unexpected existential",
+                    "This pattern introduces an existential type from a GADT constructor, which is not allowed here. Match on it inside a switch instead.",
                 ),
                 2,
             )
@@ -3392,6 +3341,26 @@ fn type_mod_error_to_anyhow(
             )
             .into()
         }
+        TypeModError::CoreError(TypeCoreError::MisplacedLabelSyntax { loc }) => UserDiagnostic::new(
+            format_compiler_error_report(
+                arena,
+                source,
+                filename,
+                *loc,
+                "Label syntax is not supported in this position",
+            ),
+            2,
+        )
+        .into(),
+        TypeModError::CoreError(TypeCoreError::TaggedTemplateNonTag { loc, typ }) => {
+            UserDiagnostic::new(
+                format_tagged_template_non_tag_report(
+                    type_ctx, arena, source, filename, *loc, *typ,
+                ),
+                2,
+            )
+            .into()
+        }
         TypeModError::CoreError(TypeCoreError::TooManyArguments {
             loc,
             in_function,
@@ -3412,7 +3381,7 @@ fn type_mod_error_to_anyhow(
         TypeModError::CoreError(TypeCoreError::AbstractWrongLabel { loc, label, ty }) => {
             UserDiagnostic::new(
                 format_abstract_wrong_label_report(
-                    type_ctx, arena, source, filename, *loc, label, *ty,
+                    type_ctx, source, filename, loc, label, *ty,
                 ),
                 2,
             )
@@ -3768,6 +3737,19 @@ fn type_mod_error_to_anyhow(
             2,
         )
         .into(),
+        TypeModError::CoreError(TypeCoreError::RecordRest { loc, error }) => {
+            UserDiagnostic::new(
+                format_compiler_error_report_with_unindented_continuation(
+                    arena,
+                    source,
+                    filename,
+                    *loc,
+                    &error.message(arena),
+                ),
+                2,
+            )
+            .into()
+        }
         TypeModError::CoreError(TypeCoreError::PrivateType { loc, ty }) => {
             UserDiagnostic::new(
                 format_compiler_error_report(
@@ -3777,23 +3759,6 @@ fn type_mod_error_to_anyhow(
                     *loc,
                     &format!(
                         "Cannot create values of the private type {}",
-                        format_type_expr(type_ctx, *ty)
-                    ),
-                ),
-                2,
-            )
-            .into()
-        }
-        TypeModError::CoreError(TypeCoreError::PrivateLabel { loc, lid, ty }) => {
-            UserDiagnostic::new(
-                format_compiler_error_report(
-                    arena,
-                    source,
-                    filename,
-                    *loc,
-                    &format!(
-                        "Cannot assign field {} of the private type {}",
-                        format_longident_for_report(arena, lid),
                         format_type_expr(type_ctx, *ty)
                     ),
                 ),
@@ -3870,15 +3835,24 @@ fn type_mod_error_to_anyhow(
         )
         .into(),
         TypeModError::CoreError(TypeCoreError::OpenedObject { loc, path }) => {
-            let message = match path {
-                Some(path) => format!("Illegal open object type {}", path.name()),
-                None => "Illegal open object type".to_string(),
+            let report = match path {
+                Some(path) => format_compiler_error_report_with_unindented_break(
+                    arena,
+                    source,
+                    filename,
+                    *loc,
+                    "Illegal open object type",
+                    &path.name(),
+                ),
+                None => format_compiler_error_report(
+                    arena,
+                    source,
+                    filename,
+                    *loc,
+                    "Illegal open object type",
+                ),
             };
-            UserDiagnostic::new(
-                format_compiler_error_report(arena, source, filename, *loc, &message),
-                2,
-            )
-            .into()
+            UserDiagnostic::new(report, 2).into()
         }
         TypeModError::SignatureMismatch { loc, error } => UserDiagnostic::new(
             format_compiler_error_report_raw_message(
@@ -3902,6 +3876,17 @@ fn type_mod_error_to_anyhow(
         .into(),
         TypeModError::InconsistentConstraint { loc, trace } => UserDiagnostic::new(
             format_inconsistent_constraint_report(type_ctx, arena, source, filename, *loc, trace),
+            2,
+        )
+        .into(),
+        TypeModError::NullArityExternal { loc } => UserDiagnostic::new(
+            format_compiler_error_report(
+                arena,
+                source,
+                filename,
+                *loc,
+                "External identifiers must be functions",
+            ),
             2,
         )
         .into(),
@@ -4389,7 +4374,18 @@ fn type_mod_error_to_anyhow(
 }
 
 fn persistent_env_error_to_anyhow(error: PersistentEnvError, filename: &str) -> anyhow::Error {
+    if let PersistentEnvError::InterfaceRead { message } = error {
+        let mut output = String::new();
+        push_compiler_report_intro(&mut output, "We've found a bug for you!");
+        push_compiler_report_location(&mut output, filename);
+        output.push_str("  ");
+        output.push_str(&message);
+        output.push_str("\n\n");
+        return UserDiagnostic::new(output, 2).into();
+    }
+
     let message = match error {
+        PersistentEnvError::InterfaceRead { .. } => unreachable!(),
         PersistentEnvError::IllegalRenaming {
             expected, actual, ..
         } => format!(
@@ -4605,7 +4601,10 @@ fn interface_source_name(source_file: &str) -> String {
     intf.to_string_lossy().into_owned()
 }
 
-fn parsed_signature_has_gentype_ignore_interface(arena: &ParseArena, signature: &Signature) -> bool {
+fn parsed_signature_has_gentype_ignore_interface(
+    arena: &ParseArena,
+    signature: &Signature,
+) -> bool {
     // OCaml compiler/gentype/GenTypeMain.ml:93-134 discovers
     // @@genType.ignoreInterface while scanning the interface CMT before
     // deciding whether the implementation artifact should own GenType output.
@@ -4801,6 +4800,25 @@ fn format_builtin_extension_error_report(
     output
 }
 
+fn format_compiler_error_report_with_unindented_continuation(
+    arena: &ParseArena,
+    source: &str,
+    filename: &str,
+    loc: LocIdx,
+    message: &str,
+) -> String {
+    let mut output = String::new();
+
+    push_compiler_error_report_header(&mut output, arena, source, filename, loc);
+    output.push_str("  ");
+    output.push_str(message);
+    if !message.ends_with('\n') {
+        output.push('\n');
+    }
+    output.push('\n');
+    output
+}
+
 fn format_compiler_error_report_with_unindented_break(
     arena: &ParseArena,
     source: &str,
@@ -4890,7 +4908,12 @@ fn format_structure_expected_report(
     push_compiler_error_report_header(&mut output, arena, source, filename, loc);
 
     let rendered_module_type = format_typemod_module_type(type_ctx, mty);
-    output.push_str("  This module is not a structure; it has type ");
+    output.push_str("  This module is not a structure; it has type");
+    if rendered_module_type.contains('\n') {
+        output.push_str("\n  ");
+    } else {
+        output.push(' ');
+    }
     output.push_str(&rendered_module_type);
     output.push_str("\n\n");
     output
@@ -4912,7 +4935,16 @@ fn format_typemod_module_type(
                 .map(|mty| format_typemod_module_type(type_ctx, mty))
                 .unwrap_or_else(|| "_".to_string());
             let result = format_typemod_module_type(type_ctx, result);
-            format!("({}: {}) => {}", param.name(), param_type, result)
+            if param_type.contains('\n') {
+                format!(
+                    "(\n  {}: {},\n) => {}",
+                    param.name(),
+                    param_type.replace('\n', "\n  "),
+                    result
+                )
+            } else {
+                format!("({}: {}) => {}", param.name(), param_type, result)
+            }
         }
         _ => crate::types::includemod::format_module_type(type_ctx, mty),
     }
@@ -5004,7 +5036,7 @@ fn format_type_params_not_supported_report(
         filename,
         loc,
         &format!("The type {}", format_longident_for_report(arena, lid)),
-        "has type parameters, but type parameters is not supported here.",
+        "has type parameters, but type parameters are not supported here.",
     )
 }
 
@@ -5185,7 +5217,9 @@ fn format_invalid_variable_name_report(
         source,
         filename,
         loc,
-        &format!("The type variable name {name} is not allowed in programs"),
+        &format!(
+            "The type variable name {name} is not allowed; type variable names cannot start with an underscore."
+        ),
     )
 }
 
@@ -5406,13 +5440,16 @@ fn format_type_arity_mismatch_report(
     provided: usize,
 ) -> String {
     let name = format_longident_for_report(arena, lid);
+    let plural = |count: usize| if count == 1 { "" } else { "s" };
     let message = if expected == 0 {
         format!(
-            "The type {name} is not generic so expects no arguments,\nbut is here applied to {provided} argument(s).\nHave you tried removing the angular brackets `<` and `>` and the\narguments within them and just writing `{name}` instead? "
+            "The type `{name}` is not generic so expects no arguments,\nbut is here given {provided} argument{}.\nHave you tried removing the angular brackets `<` and `>` and the\narguments within them and just writing `{name}` instead? ",
+            plural(provided),
         )
     } else {
         format!(
-            "The type constructor {name} expects {expected} argument(s),\nbut is here applied to {provided} argument(s)"
+            "The type constructor `{name}` expects {expected} type argument{}, but is given {provided}",
+            plural(expected),
         )
     };
     format_compiler_error_report(arena, source, filename, loc, &message)
@@ -5608,6 +5645,7 @@ fn format_compiler_warning_report(
             crate::diagnostics::Warning::FragileMatch { .. } => idx == 0,
             crate::diagnostics::Warning::FragileLiteralPattern => idx == 0,
             crate::diagnostics::Warning::UnreachableCase => idx == 0,
+            crate::diagnostics::Warning::BsRecordRestOptionalOverlap { .. } => idx == 0,
             crate::diagnostics::Warning::UnusedConstructor { .. }
             | crate::diagnostics::Warning::UnusedExtension { .. } => idx == 0,
             crate::diagnostics::Warning::PartialMatch { .. } => {
@@ -5922,6 +5960,18 @@ fn push_ocaml_multiline_type_application(
     output.push('\n');
 }
 
+fn compilation_unit_name(filename: &str) -> String {
+    let stem = std::path::Path::new(filename)
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .unwrap_or(filename);
+    let mut chars = stem.chars();
+    match chars.next() {
+        Some(first) => first.to_uppercase().chain(chars).collect(),
+        None => stem.to_string(),
+    }
+}
+
 fn format_unbound_value_report(
     arena: &ParseArena,
     source: &str,
@@ -5989,6 +6039,20 @@ fn format_unbound_value_report(
         message.push_str(RESET);
     }
 
+    // Generated JSX component lookups use Location.none. OCaml's diagnostic
+    // header reads Location.input_name in that case, which the compiler driver
+    // has set to the compilation-unit name rather than the source path.
+    let report_filename;
+    let filename = if qualifier.is_some()
+        && arena.loc_ghost(loc)
+        && arena.loc_start(loc).cnum < 0
+        && arena.loc_end(loc).cnum < 0
+    {
+        report_filename = compilation_unit_name(filename);
+        &report_filename
+    } else {
+        filename
+    };
     format_compiler_error_report(arena, source, filename, loc, &message)
 }
 
@@ -6005,7 +6069,7 @@ fn format_unbound_module_report(
 
     let mut message = if name == "Str" {
         format!(
-            "{INFO}The module or file Str can't be found.{RESET}\nAre you trying to use the standard library's Str?\nIf you're compiling to JavaScript, use {INFO}Js.Re{RESET} instead.\nOtherwise, add str.cma to your ocamlc/ocamlopt command."
+            "{INFO}The module or file Str can't be found.{RESET}\nAre you trying to use the standard library's Str?\nIf you're compiling to JavaScript, use {INFO}RegExp{RESET} instead.\nOtherwise, add str.cma to your ocamlc/ocamlopt command."
         )
     } else {
         format!(
@@ -6257,10 +6321,18 @@ fn format_expr_type_clash_report(
         return format_compiler_error_report(arena, source, filename, loc, "Type error.");
     };
 
-    let actual_is_function = matches!(
-        &*type_ctx.get_desc(type_ctx.repr(actual)),
-        TypeDesc::Tarrow { .. }
-    );
+    let actual_is_function = trace.iter().any(|(actual, _)| {
+        let actual = type_alias_full_expansion(type_ctx, *actual)
+            .or_else(|| rendered_alias_expansion(type_ctx, *actual, trace, true))
+            .unwrap_or_else(|| type_ctx.repr(*actual));
+        matches!(&*type_ctx.get_desc(actual), TypeDesc::Tarrow { .. })
+    });
+    let expected_is_jsx_component = trace
+        .iter()
+        .any(|(_, expected)| type_is_jsx_component(type_ctx, *expected));
+    let plain_function_to_component = actual_is_function
+        && expected_is_jsx_component
+        && !matches!(context, Some(TypeClashContext::JsxComponent));
     let missing_parameters = if actual_is_function {
         Vec::new()
     } else {
@@ -6316,6 +6388,10 @@ fn format_expr_type_clash_report(
             Cow::Borrowed("This array item has type: "),
             Cow::Borrowed("But this array is expected to have items of type: "),
         ),
+        Some(TypeClashContext::TaggedTemplateValue) => (
+            Cow::Borrowed("This interpolated value has type: "),
+            Cow::Borrowed("But this tag expects interpolations of type: "),
+        ),
         Some(TypeClashContext::FunctionCall) => (
             Cow::Borrowed("This has type: "),
             Cow::Borrowed("But this function argument is expecting: "),
@@ -6323,6 +6399,10 @@ fn format_expr_type_clash_report(
         Some(TypeClashContext::FunctionArgument { .. }) => (
             Cow::Borrowed("This has type: "),
             Cow::Borrowed("But this function argument is expecting: "),
+        ),
+        Some(TypeClashContext::JsxComponent) => (
+            Cow::Borrowed("This JSX tag has type: "),
+            Cow::Borrowed("But JSX component positions require:\n  "),
         ),
         Some(TypeClashContext::StatementFunctionCall) => (
             Cow::Borrowed("This function call returns: "),
@@ -6407,6 +6487,8 @@ fn format_expr_type_clash_report(
             | Some(TypeClashContext::AssertCondition)
     );
 
+    let mut shared_type_printer =
+        plain_function_to_component.then(|| TypeExprPrinter::new(type_ctx));
     message.push_str(&error_text);
     if suppress_alias_expansion {
         append_type_clash_type_without_alias_expansion(
@@ -6416,6 +6498,16 @@ fn format_expr_type_clash_report(
             ERROR,
             actual,
             &mut message,
+        );
+    } else if let Some(printer) = shared_type_printer.as_mut() {
+        append_type_clash_type_with_printer(
+            type_ctx,
+            trace,
+            true,
+            ERROR,
+            actual,
+            &mut message,
+            printer,
         );
     } else {
         append_type_clash_type(type_ctx, trace, true, ERROR, actual, &mut message);
@@ -6473,6 +6565,9 @@ fn format_expr_type_clash_report(
             message.push_str(RESET);
         }
         message.push_str(" is expecting:");
+        if plain_function_to_component {
+            message.push_str("\n  ");
+        }
         if type_is_object(type_ctx, expected) {
             message.push_str("\n  ");
             if let Some((field_name, expected_field_ty)) =
@@ -6508,13 +6603,46 @@ fn format_expr_type_clash_report(
 
                 return format_compiler_error_report(arena, source, filename, loc, &message);
             }
-        } else {
+        } else if !plain_function_to_component {
             message.push(' ');
         }
-        append_type_clash_type(type_ctx, trace, false, INFO, expected, &mut message);
+        if let Some(printer) = shared_type_printer.as_mut() {
+            append_type_clash_type_with_printer(
+                type_ctx,
+                trace,
+                false,
+                INFO,
+                expected,
+                &mut message,
+                printer,
+            );
+        } else {
+            append_type_clash_type(type_ctx, trace, false, INFO, expected, &mut message);
+        }
     } else {
-        message.push_str(&expected_text);
-        append_type_clash_type(type_ctx, trace, false, INFO, expected, &mut message);
+        if plain_function_to_component {
+            message.push_str("But it's expected to have type:\n  ");
+        } else {
+            message.push_str(&expected_text);
+        }
+        if let Some(printer) = shared_type_printer.as_mut() {
+            append_type_clash_type_with_printer(
+                type_ctx,
+                trace,
+                false,
+                INFO,
+                expected,
+                &mut message,
+                printer,
+            );
+        } else {
+            append_type_clash_type(type_ctx, trace, false, INFO, expected, &mut message);
+        }
+        if plain_function_to_component {
+            let inline = " \x1b[2m(defined as\x1b[0m \x1b[1;33mJsx.component";
+            let multiline = " \x1b[2m(defined as\x1b[0m\n    \x1b[1;33mJsx.component";
+            message = message.replace(inline, multiline);
+        }
     }
     append_extra_type_clash_help(type_ctx, arena, source, loc, context, trace, &mut message);
 
@@ -6542,8 +6670,11 @@ fn format_expr_type_clash_report(
         format_compiler_error_report_raw_message(arena, source, filename, loc, &message)
     } else if matches!(
         context,
-        Some(TypeClashContext::LetUnwrapReturn) | Some(TypeClashContext::SwitchExpression)
-    ) {
+        Some(TypeClashContext::LetUnwrapReturn)
+            | Some(TypeClashContext::SwitchExpression)
+            | Some(TypeClashContext::JsxComponent)
+    ) || plain_function_to_component
+    {
         let message = format_type_clash_message_with_empty_blank_lines(&message);
         format_compiler_error_report_raw_message(arena, source, filename, loc, &message)
     } else if type_clash_string_to_polyvariant(type_ctx, trace)
@@ -6613,7 +6744,6 @@ fn format_recursive_local_constraint_report(
 ) -> String {
     const INFO: &str = "\x1b[1;33m";
     const ERROR: &str = "\x1b[1;31m";
-    const RESET: &str = "\x1b[0m";
 
     let Some((actual, expected)) = trace.first().copied() else {
         return format_compiler_error_report(arena, source, filename, loc, "Type error.");
@@ -6641,7 +6771,6 @@ fn format_or_pattern_type_clash_report(
 ) -> String {
     const INFO: &str = "\x1b[1;33m";
     const ERROR: &str = "\x1b[1;31m";
-    const RESET: &str = "\x1b[0m";
 
     let Some((left, right)) = trace.first().copied() else {
         return format_compiler_error_report(arena, source, filename, loc, "Type error.");
@@ -6701,17 +6830,30 @@ fn format_label_mismatch_report(
     loc: LocIdx,
     lid: &Longident,
     trace: &[(TypeExprRef, TypeExprRef)],
+    record_literal: bool,
 ) -> String {
     let Some((actual, expected)) = trace.first().copied() else {
         return format_compiler_error_report(arena, source, filename, loc, "Type error.");
     };
 
-    let message = format!(
-        "The field {} belongs to the record type {}\nbut a field was expected belonging to the record type {}",
-        format_longident_for_report(arena, lid),
-        format_type_expr(type_ctx, actual),
-        format_type_expr(type_ctx, expected)
-    );
+    let message = if record_literal {
+        const ERROR: &str = "\x1b[1;31m";
+        const INFO: &str = "\x1b[1;33m";
+        const RESET: &str = "\x1b[0m";
+        format!(
+            "The record field {} belongs to the type {ERROR}{}{RESET}\nbut is mixed here with fields of type {INFO}{}{RESET}",
+            format_longident_for_report(arena, lid),
+            format_type_expr(type_ctx, actual),
+            format_type_expr(type_ctx, expected)
+        )
+    } else {
+        format!(
+            "The field {} belongs to the record type {}\nbut a field was expected belonging to the record type {}",
+            format_longident_for_report(arena, lid),
+            format_type_expr(type_ctx, actual),
+            format_type_expr(type_ctx, expected)
+        )
+    };
     format_compiler_error_report(arena, source, filename, loc, &message)
 }
 
@@ -6781,12 +6923,32 @@ fn append_type_clash_type(
     ty: TypeExprRef,
     message: &mut String,
 ) {
+    append_type_clash_type_with_printer(
+        type_ctx,
+        trace,
+        actual_side,
+        color,
+        ty,
+        message,
+        &mut TypeExprPrinter::new(type_ctx),
+    );
+}
+
+fn append_type_clash_type_with_printer(
+    type_ctx: &TypeContext,
+    trace: &[(TypeExprRef, TypeExprRef)],
+    actual_side: bool,
+    color: &str,
+    ty: TypeExprRef,
+    message: &mut String,
+    printer: &mut TypeExprPrinter<'_>,
+) {
     const DIM: &str = "\x1b[2m";
     const RESET: &str = "\x1b[0m";
 
     let original_ty = ty;
     let ty = type_clash_display_type(type_ctx, trace, actual_side, ty);
-    let ty_text = format_type_expr(type_ctx, ty);
+    let ty_text = printer.format(ty);
     message.push_str(color);
     message.push_str(&ty_text);
     message.push_str(RESET);
@@ -6794,7 +6956,7 @@ fn append_type_clash_type(
     if ty == original_ty
         && let Some(expansion) = rendered_alias_expansion(type_ctx, ty, trace, actual_side)
         && {
-            let expansion_text = format_type_expr(type_ctx, expansion);
+            let expansion_text = printer.format(expansion);
             expansion_text != ty_text || !type_is_polyvariant(type_ctx, expansion)
         }
     {
@@ -6804,7 +6966,7 @@ fn append_type_clash_type(
         message.push_str(RESET);
         message.push(' ');
         message.push_str(color);
-        message.push_str(&format_type_expr(type_ctx, expansion));
+        message.push_str(&printer.format(expansion));
         message.push_str(RESET);
         message.push_str(DIM);
         message.push(')');
@@ -7529,6 +7691,45 @@ fn append_extra_type_clash_help(
         message.push_str("You can only compare things of the same type.");
     }
 
+    if matches!(context, Some(TypeClashContext::JsxComponent)) {
+        message.push_str("\n\nJSX tags must be React components, not plain functions.\n\n");
+        message.push_str("Possible solutions:\n");
+        message.push_str("- If this function takes labeled props, annotate it with ");
+        message.push_str(INFO);
+        message.push_str("@react.component");
+        message.push_str(RESET);
+        message.push_str("\n- If this function takes a single props record, annotate it with ");
+        message.push_str(INFO);
+        message.push_str("@react.componentWithProps");
+        message.push_str(RESET);
+        message.push_str("\n- If this is already a valid component-like value, wrap it with ");
+        message.push_str(INFO);
+        message.push_str("React.component(...)");
+        message.push_str(RESET);
+    } else if trace.iter().any(|(actual, expected)| {
+        matches!(
+            &*type_ctx.get_desc(type_ctx.repr(*actual)),
+            TypeDesc::Tarrow { .. }
+        ) && type_is_jsx_component(type_ctx, *expected)
+    }) {
+        message.push_str(
+            "\n\nA React component is expected here, but this expression is a plain function.\n\n",
+        );
+        message.push_str("Possible solutions:\n");
+        message.push_str("- Extract it to a component annotated with ");
+        message.push_str(INFO);
+        message.push_str("@react.component");
+        message.push_str(RESET);
+        message.push_str(" or ");
+        message.push_str(INFO);
+        message.push_str("@react.componentWithProps");
+        message.push_str(RESET);
+        message.push_str("\n- If this is already a valid component-like value, wrap it with ");
+        message.push_str(INFO);
+        message.push_str("React.component(...)");
+        message.push_str(RESET);
+    }
+
     if matches!(context, Some(TypeClashContext::IfCondition)) {
         message.push_str("\n\n");
         message.push_str("To fix this, change the highlighted code so it evaluates to a ");
@@ -7793,10 +7994,10 @@ fn escaped_constructor_path_in_type(
             }
             None
         }
-        TypeDesc::Tarrow { arg, ret, .. } => {
-            escaped_constructor_path_in_type(type_ctx, arg.typ, var_level, seen)
-                .or_else(|| escaped_constructor_path_in_type(type_ctx, *ret, var_level, seen))
-        }
+        TypeDesc::Tarrow { args, ret } => args
+            .iter()
+            .find_map(|arg| escaped_constructor_path_in_type(type_ctx, arg.typ, var_level, seen))
+            .or_else(|| escaped_constructor_path_in_type(type_ctx, *ret, var_level, seen)),
         TypeDesc::Tlink(next) | TypeDesc::Tsubst(next) | TypeDesc::Tpoly { body: next, .. } => {
             escaped_constructor_path_in_type(type_ctx, *next, var_level, seen)
         }
@@ -8173,6 +8374,24 @@ fn type_is_predef_path(
     }
 }
 
+fn type_is_jsx_component(type_ctx: &TypeContext, ty: TypeExprRef) -> bool {
+    let repr = type_ctx.repr(ty);
+    match &*type_ctx.get_desc(repr) {
+        TypeDesc::Tconstr {
+            path: crate::types::path::Path::Pdot(parent, name, _),
+            ..
+        } => {
+            name == "component"
+                && matches!(
+                    parent.as_ref(),
+                    crate::types::path::Path::Pident(id) if id.name() == "Jsx"
+                )
+        }
+        TypeDesc::Tlink(next) | TypeDesc::Tsubst(next) => type_is_jsx_component(type_ctx, *next),
+        _ => false,
+    }
+}
+
 fn type_expands_to_predef_path(
     type_ctx: &TypeContext,
     ty: TypeExprRef,
@@ -8480,7 +8699,7 @@ fn runtime_variant_to_primitive_coercion_compatible(
     let Some(expected_path) = primitive_coercion_target_path(type_ctx, expected) else {
         return false;
     };
-    let Some((actual_path, constructors, type_params, unboxed)) =
+    let Some((actual_path, constructors, type_params, layout, unboxed)) =
         variant_constructors_for_type(type_ctx, actual)
     else {
         return false;
@@ -8489,14 +8708,18 @@ fn runtime_variant_to_primitive_coercion_compatible(
         return false;
     }
 
-    constructors.iter().all(|constructor| {
-        variant_constructor_runtime_matches_primitive(
-            type_ctx,
-            constructor,
-            unboxed,
-            &expected_path,
-        )
-    })
+    constructors
+        .iter()
+        .enumerate()
+        .all(|(position, constructor)| {
+            variant_constructor_runtime_matches_primitive(
+                type_ctx,
+                constructor,
+                &layout.constructors[position],
+                unboxed,
+                &expected_path,
+            )
+        })
 }
 
 fn primitive_coercion_target_path(
@@ -8528,6 +8751,7 @@ fn variant_constructors_for_type(
     crate::types::Path,
     Vec<crate::types::decl::ConstructorDeclaration>,
     Vec<TypeExprRef>,
+    crate::types::VariantLayout,
     bool,
 )> {
     let repr = type_ctx.repr(ty);
@@ -8537,12 +8761,18 @@ fn variant_constructors_for_type(
     };
     let decl = type_decl_for_path(type_ctx, path)?;
     match decl.type_kind {
-        crate::types::decl::TypeKind::TypeVariant(constructors) => Some((
-            path.clone(),
-            constructors,
-            decl.type_params,
-            decl.type_unboxed.unboxed,
-        )),
+        crate::types::decl::TypeKind::TypeVariant(constructors, layout_ref) => {
+            let layout = type_ctx.variant_layout(layout_ref);
+            let unboxed = decl.type_representation == crate::types::TypeRepresentation::Unboxed
+                || layout.configuration().unboxed;
+            Some((
+                path.clone(),
+                constructors,
+                decl.type_params,
+                layout,
+                unboxed,
+            ))
+        }
         _ => None,
     }
 }
@@ -8550,12 +8780,17 @@ fn variant_constructors_for_type(
 fn variant_constructor_runtime_matches_primitive(
     type_ctx: &TypeContext,
     constructor: &crate::types::decl::ConstructorDeclaration,
+    case: &crate::types::VariantConstructorCase,
     unboxed: bool,
     target_path: &crate::types::Path,
 ) -> bool {
     match &constructor.cd_args {
         crate::types::decl::ConstructorArguments::CstrTuple(args) if args.is_empty() => {
-            match variant_constructor_as_payload(&constructor.cd_attributes) {
+            let tag = match case {
+                crate::types::VariantConstructorCase::Constant(tag) => &tag.tag_type,
+                crate::types::VariantConstructorCase::Block(_) => unreachable!(),
+            };
+            match variant_constructor_as_payload(tag) {
                 None | Some(VariantConstructorAsPayload::String) => {
                     target_path.same(&crate::types::predef::path_string())
                 }
@@ -8595,37 +8830,17 @@ enum VariantConstructorAsPayload {
 }
 
 fn variant_constructor_as_payload(
-    attrs: &[crate::types::decl::Attribute],
+    tag: &Option<crate::types::VariantTagType>,
 ) -> Option<VariantConstructorAsPayload> {
-    attrs.iter().find_map(|attr| {
-        if attr.attr_name.txt != "as" {
-            return None;
-        }
-        match &attr.attr_payload {
-            crate::types::decl::AttributePayload::Str(_) => {
-                Some(VariantConstructorAsPayload::String)
-            }
-            crate::types::decl::AttributePayload::Int(_)
-            | crate::types::decl::AttributePayload::IntLiteral(_) => {
-                Some(VariantConstructorAsPayload::Int)
-            }
-            crate::types::decl::AttributePayload::Float(_) => {
-                Some(VariantConstructorAsPayload::Float)
-            }
-            crate::types::decl::AttributePayload::BigInt(_) => {
-                Some(VariantConstructorAsPayload::BigInt)
-            }
-            crate::types::decl::AttributePayload::Bool(_) => {
-                Some(VariantConstructorAsPayload::Bool)
-            }
-            crate::types::decl::AttributePayload::Ident(value) if value == "null" => {
-                Some(VariantConstructorAsPayload::Null)
-            }
-            crate::types::decl::AttributePayload::Ident(value) if value == "undefined" => {
-                Some(VariantConstructorAsPayload::Undefined)
-            }
-            _ => None,
-        }
+    tag.as_ref().map(|tag| match tag {
+        crate::types::VariantTagType::String(_) => VariantConstructorAsPayload::String,
+        crate::types::VariantTagType::Int(_) => VariantConstructorAsPayload::Int,
+        crate::types::VariantTagType::Float(_) => VariantConstructorAsPayload::Float,
+        crate::types::VariantTagType::BigInt(_) => VariantConstructorAsPayload::BigInt,
+        crate::types::VariantTagType::Bool(_) => VariantConstructorAsPayload::Bool,
+        crate::types::VariantTagType::Null => VariantConstructorAsPayload::Null,
+        crate::types::VariantTagType::Undefined => VariantConstructorAsPayload::Undefined,
+        crate::types::VariantTagType::Untagged(_) => unreachable!(),
     })
 }
 
@@ -8706,7 +8921,7 @@ fn append_string_to_variant_help(
     const INFO: &str = "\x1b[1;33m";
     const RESET: &str = "\x1b[0m";
 
-    let Some(constructors) = trace.iter().copied().find_map(|(actual, expected)| {
+    let Some((constructors, layout)) = trace.iter().copied().find_map(|(actual, expected)| {
         (simple_type_constr_name(type_ctx, actual).as_deref() == Some("string"))
             .then(|| concrete_variant_constructors(type_ctx, expected))
             .flatten()
@@ -8719,10 +8934,18 @@ fn append_string_to_variant_help(
     let Some(string_value) = simple_string_literal_value(&source_literal) else {
         return false;
     };
-    let Some(constructor_name) = constructors.iter().find_map(|constructor| {
-        let runtime_repr = variant_constructor_string_runtime_repr(constructor)?;
-        (runtime_repr == string_value).then(|| constructor.cd_id.name().to_string())
-    }) else {
+    let Some(constructor_name) =
+        constructors
+            .iter()
+            .enumerate()
+            .find_map(|(position, constructor)| {
+                let runtime_repr = variant_constructor_string_runtime_repr(
+                    constructor,
+                    &layout.constructors[position],
+                )?;
+                (runtime_repr == string_value).then(|| constructor.cd_id.name().to_string())
+            })
+    else {
         return false;
     };
 
@@ -8741,7 +8964,10 @@ fn append_string_to_variant_help(
 fn concrete_variant_constructors(
     type_ctx: &TypeContext,
     ty: TypeExprRef,
-) -> Option<Vec<crate::types::decl::ConstructorDeclaration>> {
+) -> Option<(
+    Vec<crate::types::decl::ConstructorDeclaration>,
+    crate::types::VariantLayout,
+)> {
     let mut current = type_ctx.repr(ty);
     let mut seen = Vec::new();
 
@@ -8756,8 +8982,8 @@ fn concrete_variant_constructors(
             TypeDesc::Tconstr { path, .. } => {
                 let decl = type_decl_for_path(type_ctx, path)?;
                 match decl.type_kind {
-                    crate::types::decl::TypeKind::TypeVariant(constructors) => {
-                        return Some(constructors);
+                    crate::types::decl::TypeKind::TypeVariant(constructors, layout_ref) => {
+                        return Some((constructors, type_ctx.variant_layout(layout_ref)));
                     }
                     crate::types::decl::TypeKind::TypeAbstract => {
                         current = type_ctx.repr(decl.type_manifest?);
@@ -8795,18 +9021,17 @@ fn type_decl_for_path(
 
 fn variant_constructor_string_runtime_repr(
     constructor: &crate::types::decl::ConstructorDeclaration,
+    case: &crate::types::VariantConstructorCase,
 ) -> Option<String> {
-    for attr in &constructor.cd_attributes {
-        if attr.attr_name.txt != "as" {
-            continue;
-        }
-        return match &attr.attr_payload {
-            crate::types::decl::AttributePayload::Str(value) => Some(value.clone()),
-            _ => None,
-        };
+    let tag = match case {
+        crate::types::VariantConstructorCase::Constant(tag) => &tag.tag_type,
+        crate::types::VariantConstructorCase::Block(block) => &block.runtime.tag.tag_type,
+    };
+    match tag {
+        Some(crate::types::VariantTagType::String(value)) => Some(value.clone()),
+        Some(_) => None,
+        None => Some(constructor.cd_id.name().to_string()),
     }
-
-    Some(constructor.cd_id.name().to_string())
 }
 
 fn type_clash_string_to_polyvariant(
@@ -9242,13 +9467,12 @@ fn super_trace_reports(
     for (idx, group) in groups.iter().copied().enumerate() {
         let actual_text = format_type_expr(type_ctx, group.actual);
         let expected_text = format_type_expr(type_ctx, group.expected);
-        let is_top_pair_expansion = (actual_text == top_actual_text
-            && expected_text == top_expected_text)
-            || (actual_text == top_expected_text && expected_text == top_actual_text)
-            || (actual_text == top_actual_text && expected_text != top_expected_text)
-            || (expected_text == top_expected_text && actual_text != top_actual_text)
-            || (actual_text == top_expected_text && expected_text != top_actual_text)
-            || (expected_text == top_actual_text && actual_text != top_expected_text);
+        // Semantically equivalent to the original six-term disjunction:
+        // (A∧B) ∨ (C∧D) ∨ (A∧¬B) ∨ (B∧¬A) ∨ (C∧¬D) ∨ (D∧¬C) ≡ A ∨ B ∨ C ∨ D
+        let is_top_pair_expansion = actual_text == top_actual_text
+            || expected_text == top_expected_text
+            || actual_text == top_expected_text
+            || expected_text == top_actual_text;
         if is_top_pair_expansion {
             continue;
         }
@@ -9959,6 +10183,7 @@ fn simple_conversion_candidate(
     trace: &[(TypeExprRef, TypeExprRef)],
 ) -> Option<(String, String, &'static str)> {
     let candidates = [
+        trace.last().copied(),
         bottom_type_clash_aliases(trace),
         nested_type_clash_pair(type_ctx, trace),
         trace.first().copied(),
@@ -10046,9 +10271,7 @@ fn expr_type_clash_uncurried_arity_mismatch(
 
 fn uncurried_arrow_arity(type_ctx: &TypeContext, ty: TypeExprRef) -> Option<i32> {
     match &*type_ctx.get_desc(type_ctx.repr(ty)) {
-        TypeDesc::Tarrow {
-            arity: Some(arity), ..
-        } => Some(*arity),
+        TypeDesc::Tarrow { args, .. } => Some(args.len() as i32),
         _ => None,
     }
 }
@@ -10099,8 +10322,8 @@ fn count_arrow_args(type_ctx: &TypeContext, ty: TypeExprRef, mut count: usize) -
         }
 
         match &*type_ctx.get_desc(repr) {
-            TypeDesc::Tarrow { ret, .. } => {
-                count += 1;
+            TypeDesc::Tarrow { args, ret } => {
+                count += args.len();
                 current = *ret;
             }
             TypeDesc::Tlink(next) | TypeDesc::Tsubst(next) => {
@@ -10125,8 +10348,8 @@ fn format_apply_non_function_report(
     let repr = type_ctx.repr(typ);
     let mut message = String::new();
     match &*type_ctx.get_desc(repr) {
-        TypeDesc::Tarrow { ret, .. } => {
-            let count = count_arrow_args(type_ctx, *ret, 1);
+        TypeDesc::Tarrow { args, ret } => {
+            let count = count_arrow_args(type_ctx, *ret, args.len());
             message.push_str("This function has type ");
             message.push_str(INFO);
             message.push_str(&format_type_expr(type_ctx, typ));
@@ -10138,13 +10361,45 @@ fn format_apply_non_function_report(
             message.push_str(if count == 1 { "argument" } else { "arguments" });
             message.push_str("; here, it's called with more.");
         }
+        TypeDesc::Tconstr { path, .. }
+            if path.same(&crate::types::predef::path_tagged_template()) =>
+        {
+            message.push_str("This is a tagged-template tag of type ");
+            message.push_str(INFO);
+            message.push_str(&format_type_expr(type_ctx, typ));
+            message.push_str(RESET);
+            message.push_str(
+                "\nIt can't be called like a function. Use it with backtick syntax instead, e.g. ",
+            );
+            message.push_str(INFO);
+            message.push_str("tag`SELECT ${id}`");
+            message.push_str(RESET);
+            message.push('.');
+        }
         _ => {
             message.push_str("This can't be called, it's not a function.\n");
-            message.push_str("The function has type: ");
+            message.push_str("It has type: ");
             message.push_str(&format_type_expr(type_ctx, typ));
         }
     }
 
+    format_compiler_error_report(arena, source, filename, loc, &message)
+}
+
+fn format_tagged_template_non_tag_report(
+    type_ctx: &TypeContext,
+    arena: &ParseArena,
+    source: &str,
+    filename: &str,
+    loc: LocIdx,
+    typ: TypeExprRef,
+) -> String {
+    const INFO: &str = "\x1b[1;33m";
+    const RESET: &str = "\x1b[0m";
+    let message = format!(
+        "This value is used with tagged template (backtick) syntax, but it has type\n{INFO}{}{RESET}\nwhich is not a {INFO}taggedTemplate{RESET}.\n\nTagged template syntax now requires a value of type {INFO}taggedTemplate<'param, 'output>{RESET}:\n\n  - To bind a JavaScript tag function, annotate the {INFO}external{RESET} with {INFO}taggedTemplate<...>{RESET} instead of using the removed {INFO}@taggedTemplate{RESET} decorator.\n  - To use a ReScript function as a tag, lift it with {INFO}TaggedTemplate.make{RESET}.",
+        format_type_expr(type_ctx, typ)
+    );
     format_compiler_error_report(arena, source, filename, loc, &message)
 }
 
@@ -10173,10 +10428,9 @@ fn format_too_many_arguments_report(
 
 fn format_abstract_wrong_label_report(
     type_ctx: &TypeContext,
-    arena: &ParseArena,
     source: &str,
     filename: &str,
-    loc: LocIdx,
+    loc: &Location,
     label: &TypeArgLabel,
     ty: TypeExprRef,
 ) -> String {
@@ -10194,7 +10448,7 @@ fn format_abstract_wrong_label_report(
         format_type_expr(type_ctx, ty),
         label_mark
     );
-    format_compiler_error_report(arena, source, filename, loc, &message)
+    format_compiler_error_report_from_location(source, filename, loc, &message)
 }
 
 fn format_apply_wrong_label_report(
@@ -10426,8 +10680,8 @@ fn collect_expected_function_arguments(
         }
 
         match &*type_ctx.get_desc(repr) {
-            TypeDesc::Tarrow { arg, ret, .. } => {
-                args.push((arg.lbl.clone(), arg.typ));
+            TypeDesc::Tarrow { args: params, ret } => {
+                args.extend(params.iter().map(|arg| (arg.lbl.clone(), arg.typ)));
                 current = *ret;
             }
             TypeDesc::Tlink(next) | TypeDesc::Tsubst(next) => current = *next,
@@ -10711,15 +10965,14 @@ fn collect_function_arg_labels(
         }
 
         match &*type_ctx.get_desc(current) {
-            TypeDesc::Tarrow { arg, ret, .. } => {
-                labels.push(arg.lbl.clone());
+            TypeDesc::Tarrow { args, ret } => {
+                labels.extend(args.iter().map(|arg| arg.lbl.clone()));
                 current = *ret;
             }
             _ => break,
         }
     }
 
-    labels.reverse();
     labels
 }
 
@@ -11019,32 +11272,20 @@ impl<'a> TypeExprPrinter<'a> {
     }
 
     fn format_arrow(&mut self, ty: TypeExprRef) -> String {
-        let mut args = Vec::new();
-        let mut current = ty;
-        let mut seen = AHashSet::new();
-
-        loop {
-            let repr = self.type_ctx.repr(current);
-            if !seen.insert(repr) {
-                break;
-            }
-
-            match &*self.type_ctx.get_desc(repr) {
-                TypeDesc::Tarrow {
-                    arg, ret, arity, ..
-                } if arity.is_none() || args.is_empty() => {
-                    args.push((
-                        self.format_arrow_arg(&arg.lbl, arg.typ),
-                        !matches!(arg.lbl, TypeArgLabel::Nolabel),
-                    ));
-                    current = *ret;
-                }
-                TypeDesc::Tlink(next) | TypeDesc::Tsubst(next) => current = *next,
-                _ => break,
-            }
-        }
-
-        let ret = self.format(current);
+        let (params, ret) = match &*self.type_ctx.get_desc(self.type_ctx.repr(ty)) {
+            TypeDesc::Tarrow { args, ret } => (args.clone(), *ret),
+            _ => unreachable!("format_arrow called for a non-arrow type"),
+        };
+        let args = params
+            .iter()
+            .map(|arg| {
+                (
+                    self.format_arrow_arg(&arg.lbl, arg.typ),
+                    !matches!(arg.lbl, TypeArgLabel::Nolabel),
+                )
+            })
+            .collect::<Vec<_>>();
+        let ret = self.format(ret);
         if let [(arg, true)] = args.as_slice() {
             format!("({arg}) => {ret}")
         } else if let [(arg, false)] = args.as_slice() {
@@ -11244,6 +11485,7 @@ pub fn compile_source_to_js_with_options(
     // at module initialization, consuming stamp 1000 before any compilation.
     let _ = id_gen.next_stamp();
     let type_ctx = TypeContext::new(std::sync::Arc::new(id_gen));
+    crate::types::typecore::prepare_typecheck_arena(parser.arena_mut());
     let mut tctx = TypeCheckContext::new(&type_ctx, parser.arena());
     tctx.experimental_let_unwrap = experimental_let_unwrap;
     tctx.transparent_modules = options.transparent_modules;
@@ -11360,12 +11602,23 @@ pub fn compile_source_to_js_with_options(
         return Err(persistent_env_error_to_anyhow(error, filename));
     }
 
-    // OCaml's type_implementation_more calls normalize_signature ONLY when there
-    // is no .resi file (Mli_exists branch skips it). Match this behavior:
-    // normalize sorts Tvariant row fields and Tobject field chains alphabetically.
-    let inferred_simple_signature = if !has_resi {
+    // OCaml's no-interface path runs inferred-signature inclusion before
+    // checking non-generalizable schemes and normalizing the signature
+    // (compiler/ml/typemod.ml:1766-1771). Besides producing the export
+    // coercion, the real Includemod traversal performs substitution and Ident
+    // allocations that must precede Lambda identifier allocation.
+    let (inferred_simple_signature, inferred_implementation_coercion) = if !has_resi {
         let simple_signature =
             crate::types::includemod::simplify_signature(&typed_structure.str_type);
+        let implementation_coercion = crate::types::includemod::compunit(
+            &type_ctx,
+            &env,
+            source_file_for_interface,
+            &typed_structure.str_type,
+            "(inferred signature)",
+            &simple_signature,
+        )
+        .map_err(|e| anyhow!("Inferred signature inclusion failed: {e:?}"))?;
         if let Err(e) =
             crate::types::typemod::check_nongen_schemes(&type_ctx, &final_env, &simple_signature)
         {
@@ -11379,9 +11632,9 @@ pub fn compile_source_to_js_with_options(
             ));
         }
         normalize_signature_types(&type_ctx, &typed_structure, &final_env);
-        Some(simple_signature)
+        (Some(simple_signature), Some(implementation_coercion))
     } else {
-        None
+        (None, None)
     };
 
     // OCaml compiler/ml/typemod.ml:1769-1776 forces delayed checks before
@@ -11411,32 +11664,24 @@ pub fn compile_source_to_js_with_options(
     }
 
     if let Some(simple_signature) = inferred_simple_signature.as_deref() {
-        prepare_inferred_signature_for_saving(
-            &type_ctx,
-            simple_signature,
-            options.source_filename.as_deref(),
-            has_resi,
-        );
+        prepare_inferred_signature_for_saving(&type_ctx, simple_signature, has_resi);
     }
 
     if options.gentype_config.is_some() && (!has_resi || gentype_ignore_interface) {
-        let module_name = current_unit_name.clone().unwrap_or_else(|| {
-            module_name_from_source_filename(source_file_for_interface)
-        });
-        if !has_resi
-            && let Some(simple_signature) = inferred_simple_signature.as_deref()
-        {
+        let module_name = current_unit_name
+            .clone()
+            .unwrap_or_else(|| module_name_from_source_filename(source_file_for_interface));
+        if !has_resi && let Some(simple_signature) = inferred_simple_signature.as_deref() {
             // OCaml saves the inferred signature before GenType consumes CMT
             // data in compiler/ml/typemod.ml:1779-1788 and
             // compiler/gentype/GenTypeMain.ml:136-175. The direct Rust CLI
             // path does not write/read a CMT, so expose the same pre-finalized
             // raw signature to GenType's alias scraping path.
-            let current_raw_sig = std::sync::Arc::new(
-                crate::types::typecore::copy_lookup_signature_for_subst(
+            let current_raw_sig =
+                std::sync::Arc::new(crate::types::typecore::copy_lookup_signature_for_subst(
                     simple_signature,
                     &type_ctx,
-                ),
-            );
+                ));
             type_ctx.register_gentype_raw_module_sig(&module_name, current_raw_sig.clone());
             type_ctx.register_raw_module_sig(&module_name, current_raw_sig);
         }
@@ -11467,14 +11712,16 @@ pub fn compile_source_to_js_with_options(
         eprintln!("[drawlambda-stage] start");
     }
     let unit_name = options.current_unit_name().unwrap_or_default();
-    let implementation_coercion = compute_raw_implementation_coercion(
-        &mut tctx,
-        &type_ctx,
-        &env,
-        &typed_structure,
-        options,
-        Some(has_resi),
-    );
+    let implementation_coercion = inferred_implementation_coercion.unwrap_or_else(|| {
+        compute_raw_implementation_coercion(
+            &mut tctx,
+            &type_ctx,
+            &env,
+            &typed_structure,
+            options,
+            Some(has_resi),
+        )
+    });
     let mut raw_converter =
         crate::raw_lambda::convert::RawLambdaConverter::with_start_stamp_and_unit_name(
             parser.arena(),
@@ -11498,6 +11745,7 @@ pub fn compile_source_to_js_with_options(
     let raw_lambda =
         raw_converter.convert_structure_with_coercion(&typed_structure, &implementation_coercion);
     let raw_warnings = raw_converter.take_warnings();
+    let hoisted_functions = raw_converter.take_hoisted_functions();
     if let Some(diagnostic) = raw_converter.take_diagnostic() {
         emit_type_warnings(parser.arena(), source, filename, &raw_warnings);
         if type_warnings_have_errors(&raw_warnings) {
@@ -11601,6 +11849,10 @@ pub fn compile_source_to_js_with_options(
         options.check_div_by_zero,
         options.cross_module_inline,
     );
+    compiler.set_source_map_enabled(
+        options.source_map != crate::js_ir::source_map::SourceMapMode::None,
+    );
+    compiler.set_hoisted_functions(hoisted_functions);
     let program = compiler.compile_deps_program_with_possible_required_modules(
         &lowered_lambda,
         &possible_required_modules,
@@ -11622,15 +11874,30 @@ pub fn compile_source_to_js_with_options(
         .expect("lambda compiler retained module path resolver");
     check_module_path_resolution_errors(&program, &module_path_resolver, filename)?;
 
-    // JS IR -> JS source
-    let js = print_deps_program_with_directives_and_options(
+    // JS IR -> JS source. File-based compilation writes the companion map
+    // here because its public return value remains the generated JS string;
+    // in-process compilation carries the map on `JsOutput` instead.
+    let (js, source_map) = render_js_program(
         &program,
-        Some(&module_path_resolver),
+        &module_path_resolver,
         &file_directives,
         debug,
         jsx_preserve,
-        !options.no_version_header,
+        options,
+        options.output_path.as_deref(),
+        std::sync::Arc::new(parser.arena().source_file_names()),
     );
+    if let Some(output_path) = options.output_path.as_deref() {
+        let map_path = PathBuf::from(format!("{}.map", output_path.display()));
+        if let Some(source_map) = source_map {
+            if let Some(parent) = map_path.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            std::fs::write(map_path, source_map)?;
+        } else {
+            let _ = std::fs::remove_file(map_path);
+        }
+    }
 
     // The CLI compiler is a short-lived process. Skipping teardown for the
     // large typechecking arenas keeps snapshot runs inside the harness timeout
@@ -11832,86 +12099,6 @@ fn build_name_based_coercion(
     }
 }
 
-fn build_inferred_signature_coercion(
-    impl_sig: &crate::types::decl::Signature,
-) -> crate::types::typedtree::ModuleCoercion {
-    use crate::types::decl::{SignatureItem, ValueKind};
-    use crate::types::includemod::is_runtime_component;
-    use crate::types::typedtree::ModuleCoercion;
-
-    let mut seen_values = std::collections::HashSet::new();
-    let mut keep = vec![true; impl_sig.len()];
-    // OCaml's inferred-signature path uses Typemod.simplify_signature before
-    // Includemod.compunit; simplify_signature only drops earlier duplicate
-    // values by name. See compiler/ml/typemod.ml:650-663 and 1768-1770.
-    for (idx, item) in impl_sig.iter().enumerate().rev() {
-        if let SignatureItem::SigValue(id, _) = item {
-            keep[idx] = seen_values.insert(id.name().to_string());
-        }
-    }
-
-    let mut runtime_pos = 0usize;
-    let mut len_impl = 0usize;
-    let mut coercions = Vec::new();
-    let mut runtime_fields = Vec::new();
-    let mut id_pos_list = Vec::new();
-
-    for (idx, item) in impl_sig.iter().enumerate() {
-        let current_runtime_pos = runtime_pos;
-        if let SignatureItem::SigModule(id, _, _) = item {
-            // OCaml builds id_pos_list by consing during a left fold, so the
-            // final list is reverse module order. See compiler/ml/includemod.ml:288-293.
-            id_pos_list.push((
-                id.clone(),
-                current_runtime_pos,
-                ModuleCoercion::Tcoerce_none,
-            ));
-        }
-        if is_runtime_component(item) {
-            runtime_pos += 1;
-            len_impl += 1;
-        }
-        if !keep[idx] {
-            continue;
-        }
-        match item {
-            SignatureItem::SigValue(id, desc)
-                if !matches!(desc.val_kind, ValueKind::ValPrim(_)) =>
-            {
-                coercions.push((current_runtime_pos, ModuleCoercion::Tcoerce_none));
-                runtime_fields.push(id.name().to_string());
-            }
-            SignatureItem::SigTypext(id, _, _) | SignatureItem::SigModule(id, _, _) => {
-                coercions.push((current_runtime_pos, ModuleCoercion::Tcoerce_none));
-                runtime_fields.push(id.name().to_string());
-            }
-            SignatureItem::SigClass => {
-                coercions.push((current_runtime_pos, ModuleCoercion::Tcoerce_none));
-            }
-            _ => {}
-        }
-    }
-
-    id_pos_list.reverse();
-
-    // Matches Includemod.signatures: it returns Tcoerce_structure when the
-    // runtime lengths differ, otherwise simplify_structure_coercion can erase
-    // identity coercions. See compiler/ml/includemod.ml:329-342 and 181-188.
-    let is_identity = len_impl == coercions.len()
-        && coercions
-            .iter()
-            .enumerate()
-            .all(|(expected_pos, (actual_pos, coercion))| {
-                *actual_pos == expected_pos && matches!(coercion, ModuleCoercion::Tcoerce_none)
-            });
-
-    if is_identity {
-        ModuleCoercion::Tcoerce_none
-    } else {
-        ModuleCoercion::Tcoerce_structure(coercions, id_pos_list, runtime_fields)
-    }
-}
-
 fn report_compunit_inclusion_warnings(
     tctx: &mut TypeCheckContext<'_>,
     warnings: Vec<crate::diagnostics::Warning>,
@@ -12011,6 +12198,10 @@ fn check_compunit_inclusion_for_errors(
     let Some(target_sig) = pers.read_raw_sig_shared(&module_name, type_ctx) else {
         return Ok(());
     };
+    // Env.read_signature forces ps_sig, whose Subst.signature identity copy
+    // renames every bound interface identifier before compunit inclusion
+    // (compiler/ml/env.ml:1867-1869, compiler/ml/subst.ml:322-354).
+    rename_saved_signature_idents(type_ctx, target_sig.as_ref());
 
     let mut inclusion_warnings = Vec::new();
     match crate::types::includemod::compunit_with_warnings(
@@ -12057,7 +12248,9 @@ fn compute_raw_implementation_coercion(
     let has_resi = known_has_interface
         .unwrap_or_else(|| std::path::Path::new(&format!("{source_file}i")).exists());
     if !has_resi {
-        return build_inferred_signature_coercion(impl_sig);
+        // The no-interface coercion is computed at the Typemod boundary before
+        // signature normalization and passed through to Lambda translation.
+        return crate::types::typedtree::ModuleCoercion::Tcoerce_none;
     }
 
     let module_name = module_name_from_source_filename(source_file);
@@ -12179,6 +12372,7 @@ pub fn typecheck_interface_source(
     // at module initialization, consuming stamp 1000 before any compilation.
     let _ = id_gen.next_stamp();
     let type_ctx = TypeContext::new(std::sync::Arc::new(id_gen));
+    crate::types::typecore::prepare_typecheck_arena(parser.arena_mut());
     let mut tctx = TypeCheckContext::new(&type_ctx, parser.arena());
     tctx.experimental_let_unwrap = experimental_let_unwrap;
     tctx.transparent_modules = options.transparent_modules;
@@ -12555,6 +12749,7 @@ pub fn typecheck_and_dump_sexp<W: std::io::Write>(
         // at module initialization, consuming stamp 1000 before any compilation.
         let _ = id_gen.next_stamp();
         let type_ctx = TypeContext::new(std::sync::Arc::new(id_gen));
+        crate::types::typecore::prepare_typecheck_arena(parser.arena_mut());
         let mut tctx = TypeCheckContext::new(&type_ctx, parser.arena());
         tctx.experimental_let_unwrap = experimental_let_unwrap;
         tctx.transparent_modules = options.transparent_modules;
@@ -12671,6 +12866,7 @@ pub fn typecheck_and_dump_sexp<W: std::io::Write>(
         crate::ident::Ident::set_current_time(OCAML_NON_PREDEF_STAMP_START);
         let id_gen = IdGenerator::with_start_stamp(OCAML_NON_PREDEF_STAMP_START);
         let type_ctx = TypeContext::new(std::sync::Arc::new(id_gen));
+        crate::types::typecore::prepare_typecheck_arena(parser.arena_mut());
         let mut tctx = TypeCheckContext::new(&type_ctx, parser.arena());
         tctx.experimental_let_unwrap = experimental_let_unwrap;
         tctx.transparent_modules = options.transparent_modules;
@@ -13087,11 +13283,13 @@ fn dump_all_tvars(
             }
             return;
         }
-        TypeDesc::Tarrow { arg, ret, .. } => {
-            let (at, r) = (arg.typ, *ret);
+        TypeDesc::Tarrow { args, ret } => {
+            let (args, ret) = (args.clone(), *ret);
             drop(desc);
-            dump_all_tvars(ctx, at, debug, seen, depth + 1);
-            dump_all_tvars(ctx, r, debug, seen, depth + 1);
+            for arg in args {
+                dump_all_tvars(ctx, arg.typ, debug, seen, depth + 1);
+            }
+            dump_all_tvars(ctx, ret, debug, seen, depth + 1);
             return;
         }
         _ => {}
@@ -13260,20 +13458,16 @@ fn moregen_link_impl(
                 moregen_link_impl(ctx, *a, *b, visited, debug, allow_generic_anonymous);
             }
         }
-        (
-            TypeDesc::Tarrow {
-                arg: a1, ret: r1, ..
-            },
-            TypeDesc::Tarrow {
-                arg: a2, ret: r2, ..
-            },
-        ) => {
+        (TypeDesc::Tarrow { args: a1, ret: r1 }, TypeDesc::Tarrow { args: a2, ret: r2 })
+            if a1.len() == a2.len() =>
+        {
             moregen_debug!(debug, "  Tarrow match");
-            let (a1t, r1) = (a1.typ, *r1);
-            let (a2t, r2) = (a2.typ, *r2);
+            let (a1, a2, r1, r2) = (a1.clone(), a2.clone(), *r1, *r2);
             drop(impl_desc);
             drop(iface_desc);
-            moregen_link_impl(ctx, a1t, a2t, visited, debug, false);
+            for (a1, a2) in a1.iter().zip(&a2) {
+                moregen_link_impl(ctx, a1.typ, a2.typ, visited, debug, false);
+            }
             moregen_link_impl(ctx, r1, r2, visited, debug, allow_generic_anonymous);
         }
         (TypeDesc::Ttuple(t1), TypeDesc::Ttuple(t2)) if t1.len() == t2.len() => {
@@ -13461,7 +13655,7 @@ struct ConfigPayloadError {
 
 impl std::fmt::Display for DirectivePayloadError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("expect string literal ")
+        f.write_str("Expected a string literal.")
     }
 }
 
@@ -13918,6 +14112,7 @@ pub fn typecheck_stored_structure_and_dump_sexp<W: std::io::Write>(
     // at module initialization, consuming stamp 1000 before any compilation.
     let _ = id_gen.next_stamp();
     let type_ctx = TypeContext::new(std::sync::Arc::new(id_gen));
+    crate::types::typecore::prepare_typecheck_arena(&mut arena);
     let mut tctx = TypeCheckContext::new(&type_ctx, &arena);
     tctx.experimental_let_unwrap = experimental_let_unwrap;
     tctx.transparent_modules = options.transparent_modules;
@@ -13955,7 +14150,7 @@ pub fn typecheck_stored_structure_and_dump_sexp<W: std::io::Write>(
 
 /// Typecheck a stored signature AST (from parse phase) and dump sexp.
 pub fn typecheck_stored_signature_and_dump_sexp<W: std::io::Write>(
-    arena: crate::parse_arena::ParseArena,
+    mut arena: crate::parse_arena::ParseArena,
     signature: Signature,
     options: &CompilerOptions,
     writer: &mut W,
@@ -13971,6 +14166,7 @@ pub fn typecheck_stored_signature_and_dump_sexp<W: std::io::Write>(
     // at module initialization, consuming stamp 1000 before any compilation.
     let _ = id_gen.next_stamp();
     let type_ctx = TypeContext::new(std::sync::Arc::new(id_gen));
+    crate::types::typecore::prepare_typecheck_arena(&mut arena);
     let mut tctx = TypeCheckContext::new(&type_ctx, &arena);
     tctx.experimental_let_unwrap = experimental_let_unwrap;
     tctx.transparent_modules = options.transparent_modules;
@@ -14041,7 +14237,7 @@ pub(crate) fn normalize_signature_types(
                     collect_bound_names(p, names);
                 }
             }
-            PatternDesc::Tpat_record(fields, _) => {
+            PatternDesc::Tpat_record(fields, _, _) => {
                 for (_, _, p, _) in fields {
                     collect_bound_names(p, names);
                 }
@@ -14145,38 +14341,46 @@ pub(crate) fn normalize_signature_types(
     norm_structure(type_ctx, final_env, typed_structure, false);
 }
 
-fn count_module_type_save_signature_renames(mty: &crate::types::decl::ModuleType) -> i32 {
+fn rename_saved_module_type_idents(type_ctx: &TypeContext, mty: &crate::types::decl::ModuleType) {
     use crate::types::decl::ModuleType;
 
     match mty {
-        ModuleType::MtyIdent(_) | ModuleType::MtyAlias(_, _) => 0,
-        ModuleType::MtySignature(sig) => count_signature_save_renames(sig),
+        ModuleType::MtyIdent(_) | ModuleType::MtyAlias(_, _) => {}
+        ModuleType::MtySignature(sig) => rename_saved_signature_idents(type_ctx, sig),
         ModuleType::MtyFunctor {
-            param: _,
+            param,
             param_type,
             result,
         } => {
-            let param_type_count = param_type
-                .as_deref()
-                .map_or(0, count_module_type_save_signature_renames);
-            1 + param_type_count + count_module_type_save_signature_renames(result)
+            // Subst.modtype renames the functor binder before traversing its
+            // argument and result module types (compiler/ml/subst.ml:345-348).
+            drop(type_ctx.rename_ident(param));
+            if let Some(param_type) = param_type {
+                rename_saved_module_type_idents(type_ctx, param_type);
+            }
+            rename_saved_module_type_idents(type_ctx, result);
         }
     }
 }
 
-fn count_signature_save_renames(sig: &[crate::types::decl::SignatureItem]) -> i32 {
+fn rename_saved_signature_idents(
+    type_ctx: &TypeContext,
+    sig: &[crate::types::decl::SignatureItem],
+) {
     use crate::types::decl::SignatureItem;
 
-    let mut count = 0;
-
+    // Subst.signature first runs rename_bound_idents over the complete
+    // signature, then traverses each renamed component in source order
+    // (compiler/ml/subst.ml:322-354). Preserve both allocation passes even
+    // though the direct Rust CMI writer does not need the copied identifiers.
     for item in sig {
         match item {
-            SignatureItem::SigType(_, _, _)
-            | SignatureItem::SigModule(_, _, _)
-            | SignatureItem::SigModtype(_, _)
-            | SignatureItem::SigValue(_, _)
-            | SignatureItem::SigTypext(_, _, _) => {
-                count += 1;
+            SignatureItem::SigType(id, _, _)
+            | SignatureItem::SigModule(id, _, _)
+            | SignatureItem::SigModtype(id, _)
+            | SignatureItem::SigValue(id, _)
+            | SignatureItem::SigTypext(id, _, _) => {
+                drop(type_ctx.rename_ident(id));
             }
             SignatureItem::SigClass | SignatureItem::SigClassType => {}
         }
@@ -14185,13 +14389,12 @@ fn count_signature_save_renames(sig: &[crate::types::decl::SignatureItem]) -> i3
     for item in sig {
         match item {
             SignatureItem::SigModule(_, md, _) => {
-                count += count_module_type_save_signature_renames(&md.md_type);
+                rename_saved_module_type_idents(type_ctx, &md.md_type);
             }
             SignatureItem::SigModtype(_, mtd) => {
-                count += mtd
-                    .mtd_type
-                    .as_ref()
-                    .map_or(0, count_module_type_save_signature_renames);
+                if let Some(mty) = &mtd.mtd_type {
+                    rename_saved_module_type_idents(type_ctx, mty);
+                }
             }
             SignatureItem::SigValue(_, _)
             | SignatureItem::SigType(_, _, _)
@@ -14200,31 +14403,18 @@ fn count_signature_save_renames(sig: &[crate::types::decl::SignatureItem]) -> i3
             | SignatureItem::SigClassType => {}
         }
     }
-
-    count
-}
-
-fn consume_signature_save_renames(
-    type_ctx: &TypeContext,
-    sig: &[crate::types::decl::SignatureItem],
-) {
-    type_ctx.consume_ident_stamps(count_signature_save_renames(sig));
 }
 
 fn prepare_inferred_signature_for_saving(
     type_ctx: &TypeContext,
     simple_sig: &[crate::types::decl::SignatureItem],
-    source_filename: Option<&str>,
     has_resi: bool,
 ) {
-    let Some(source_filename) = source_filename else {
-        return;
-    };
-    if has_resi || !source_filename.ends_with(".res") {
+    if has_resi {
         return;
     }
 
-    consume_signature_save_renames(type_ctx, simple_sig);
+    rename_saved_signature_idents(type_ctx, simple_sig);
 }
 
 fn synchronize_lambda_start_stamp(type_ctx: &TypeContext) -> i32 {
@@ -14250,6 +14440,7 @@ pub struct InProcessCompileResult {
     pub is_pure: bool,
     pub cmj_export_constants: ahash::AHashMap<String, CmjExportConstant>,
     pub cmj_export_arities: ahash::AHashMap<String, CmjExportArity>,
+    pub hoisted_exports: Vec<crate::lambda::HoistedExport>,
     /// Intermediate-representation sexps, populated when
     /// `CompilerOptions::capture_intermediates` is true (for the playground).
     pub typed_tree_sexp: String,
@@ -14262,6 +14453,8 @@ pub struct InProcessCompileResult {
 pub struct InProcessPreJsCompileResult {
     pub lowered_lambda: crate::lambda::Lambda,
     pub possible_required_modules: AHashSet<ModuleId>,
+    pub hoisted_functions: Vec<crate::lambda::HoistedFunction>,
+    pub hoisted_exports: Vec<crate::lambda::HoistedExport>,
     pub ident_stamp_at_js_boundary: i32,
     pub file_directives: Vec<String>,
     pub debug: bool,
@@ -14269,6 +14462,7 @@ pub struct InProcessPreJsCompileResult {
     pub signature: crate::types::decl::Signature,
     pub pers_struct: Option<PortablePersStruct>,
     pub new_alias_rewrites: ahash::AHashMap<String, crate::types::path::Path>,
+    pub source_file_names: std::sync::Arc<std::collections::HashMap<crate::intern::StrIdx, String>>,
     /// Intermediate-representation sexps, populated when
     /// `CompilerOptions::capture_intermediates` is true (for the playground).
     pub typed_tree_sexp: String,
@@ -14280,6 +14474,7 @@ pub struct InProcessJsMetadataReady {
     pub is_pure: bool,
     pub cmj_export_constants: ahash::AHashMap<String, CmjExportConstant>,
     pub cmj_export_arities: ahash::AHashMap<String, CmjExportArity>,
+    pub hoisted_exports: Vec<crate::lambda::HoistedExport>,
     pub pers_struct: Option<PortablePersStruct>,
     pub new_alias_rewrites: ahash::AHashMap<String, crate::types::path::Path>,
 }
@@ -14330,6 +14525,7 @@ fn process_gentype_typed_artifact_if_enabled<'a>(
     crate::timing::measure(crate::timing::Phase::Gentype, || {
         crate::gentype::main::process_typed_artifact(
             config,
+            options.gentype_resolver.as_deref(),
             crate::gentype::main::TypedArtifact {
                 annots,
                 arena,
@@ -14447,6 +14643,7 @@ pub fn compile_source_in_process(
     let mut effective_options = options.clone();
     effective_options.experimental_let_unwrap = experimental_let_unwrap;
 
+    crate::types::typecore::prepare_typecheck_arena(parser.arena_mut());
     compile_preprocessed_structure_in_process(
         parser.arena(),
         &structure,
@@ -14483,8 +14680,56 @@ fn effective_js_output_targets(options: &CompilerOptions) -> Vec<JsOutputTarget>
         .collect()
 }
 
+fn render_js_program(
+    program: &DepsProgram,
+    resolver: &ModulePathResolver,
+    file_directives: &[String],
+    debug: bool,
+    jsx_preserve: bool,
+    options: &CompilerOptions,
+    output_path: Option<&FsPath>,
+    source_file_names: std::sync::Arc<std::collections::HashMap<crate::intern::StrIdx, String>>,
+) -> (String, Option<String>) {
+    let source_path = options.source_filename.as_deref().map(FsPath::new);
+    let source_map_target = output_path.map(FsPath::to_path_buf).or_else(|| {
+        (options.source_map == crate::js_ir::source_map::SourceMapMode::Inline).then(|| {
+            let source = source_path.unwrap_or_else(|| FsPath::new("_none_.res"));
+            source.with_extension("js")
+        })
+    });
+    if let (Some(target), Some(source)) = (source_map_target.as_deref(), source_path) {
+        print_deps_program_with_source_map(
+            program,
+            Some(resolver),
+            file_directives,
+            debug,
+            jsx_preserve,
+            !options.no_version_header,
+            target,
+            source,
+            options.source_map,
+            options.source_map_sources_content,
+            &options.source_map_root,
+            source_file_names,
+        )
+    } else {
+        (
+            print_deps_program_with_directives_and_options(
+                program,
+                Some(resolver),
+                file_directives,
+                debug,
+                jsx_preserve,
+                !options.no_version_header,
+            ),
+            None,
+        )
+    }
+}
+
 fn compile_js_program_for_output(
     lowered_lambda: &crate::lambda::Lambda,
+    hoisted_functions: &[crate::lambda::HoistedFunction],
     possible_required_modules: &AHashSet<ModuleId>,
     options: &CompilerOptions,
     output_path: Option<&FsPath>,
@@ -14528,6 +14773,10 @@ fn compile_js_program_for_output(
         options.check_div_by_zero,
         options.cross_module_inline,
     );
+    compiler.set_source_map_enabled(
+        options.source_map != crate::js_ir::source_map::SourceMapMode::None,
+    );
+    compiler.set_hoisted_functions(hoisted_functions.to_vec());
     let program = compiler.compile_deps_program_with_possible_required_modules(
         lowered_lambda,
         possible_required_modules,
@@ -14548,6 +14797,7 @@ fn compile_js_program_for_output(
 
 fn compile_js_program_for_output_owned(
     lowered_lambda: crate::lambda::Lambda,
+    hoisted_functions: &[crate::lambda::HoistedFunction],
     possible_required_modules: &AHashSet<ModuleId>,
     options: &CompilerOptions,
     output_path: Option<&FsPath>,
@@ -14569,6 +14819,7 @@ fn compile_js_program_for_output_owned(
     collected_possible_required_modules.extend(possible_required_modules.iter().cloned());
     compile_js_program_for_output_owned_with_collected_modules(
         lowered_lambda,
+        hoisted_functions,
         collected_possible_required_modules,
         options,
         output_path,
@@ -14580,6 +14831,7 @@ fn compile_js_program_for_output_owned(
 
 fn compile_js_program_for_output_owned_with_collected_modules(
     lowered_lambda: crate::lambda::Lambda,
+    hoisted_functions: &[crate::lambda::HoistedFunction],
     possible_required_modules: AHashSet<ModuleId>,
     options: &CompilerOptions,
     output_path: Option<&FsPath>,
@@ -14624,6 +14876,10 @@ fn compile_js_program_for_output_owned_with_collected_modules(
         options.check_div_by_zero,
         options.cross_module_inline,
     );
+    compiler.set_source_map_enabled(
+        options.source_map != crate::js_ir::source_map::SourceMapMode::None,
+    );
+    compiler.set_hoisted_functions(hoisted_functions.to_vec());
     let program = compiler.compile_deps_program_with_collected_possible_required_modules_owned(
         lowered_lambda,
         possible_required_modules,
@@ -14772,6 +15028,7 @@ pub fn compile_preprocessed_structure_in_process_until_js(
                 .map_err(|e| anyhow!("Type checking failed: {e:?}"))
         })?;
 
+    let mut inferred_implementation_coercion = None;
     let mut published_signature = {
         let _phase = info_span!("compiler.signature_prepare").entered();
         if has_interface {
@@ -14787,6 +15044,17 @@ pub fn compile_preprocessed_structure_in_process_until_js(
         let simple_signature =
             crate::types::includemod::simplify_signature(&typed_structure.str_type);
         if !has_interface {
+            inferred_implementation_coercion = Some(
+                crate::types::includemod::compunit(
+                    &type_ctx,
+                    &env,
+                    filename,
+                    &typed_structure.str_type,
+                    "(inferred signature)",
+                    &simple_signature,
+                )
+                .map_err(|e| anyhow!("Inferred signature inclusion failed: {e:?}"))?,
+            );
             if let Err(e) = crate::types::typemod::check_nongen_schemes(
                 &type_ctx,
                 &final_env,
@@ -14797,12 +15065,7 @@ pub fn compile_preprocessed_structure_in_process_until_js(
             normalize_signature_types(&type_ctx, &typed_structure, &final_env);
         }
 
-        prepare_inferred_signature_for_saving(
-            &type_ctx,
-            &simple_signature,
-            options.source_filename.as_deref(),
-            has_interface,
-        );
+        prepare_inferred_signature_for_saving(&type_ctx, &simple_signature, has_interface);
 
         simple_signature
     };
@@ -14843,10 +15106,7 @@ pub fn compile_preprocessed_structure_in_process_until_js(
         // signature that compiler/gentype/TranslateStructure.ml:174-183 reads
         // through Env.scrape_alias.
         let current_raw_sig = std::sync::Arc::new(
-            crate::types::typecore::copy_lookup_signature_for_subst(
-                &signature_for_save,
-                &type_ctx,
-            ),
+            crate::types::typecore::copy_lookup_signature_for_subst(&signature_for_save, &type_ctx),
         );
         internal_env.register_in_memory_signature(
             module_name,
@@ -14928,44 +15188,56 @@ pub fn compile_preprocessed_structure_in_process_until_js(
     let lambda_start_stamp = synchronize_lambda_start_stamp(&type_ctx);
 
     let unit_name = options.current_unit_name().unwrap_or_default();
-    let (raw_lambda, raw_diagnostic, raw_possible_required_modules, raw_lambda_current_stamp) =
-        crate::timing::measure(crate::timing::Phase::Lambda, || {
-            let _phase = info_span!("compiler.raw_lambda").entered();
-            let implementation_coercion = compute_raw_implementation_coercion(
+    let (
+        raw_lambda,
+        raw_diagnostic,
+        raw_possible_required_modules,
+        raw_lambda_current_stamp,
+        hoisted_functions,
+        hoisted_exports,
+    ) = crate::timing::measure(crate::timing::Phase::Lambda, || {
+        let _phase = info_span!("compiler.raw_lambda").entered();
+        let implementation_coercion = inferred_implementation_coercion.unwrap_or_else(|| {
+            compute_raw_implementation_coercion(
                 &mut tctx,
                 &type_ctx,
                 &env,
                 &typed_structure,
                 options,
                 Some(has_interface),
-            );
-            let mut raw_converter =
-                crate::raw_lambda::convert::RawLambdaConverter::with_start_stamp_and_unit_name(
-                    arena,
-                    &type_ctx,
-                    &env,
-                    lambda_start_stamp,
-                    unit_name,
-                );
-            raw_converter.set_preserve_expanded_sparse_records(options.capture_intermediates);
-            raw_converter.set_no_assert_false(options.no_assert_false);
-            raw_converter.set_noassert(options.noassert);
-            raw_converter.set_warning_config(tctx.warning_config.clone());
-            if let Some(persistent_env) = tctx.persistent_env.clone() {
-                raw_converter.set_persistent_env(persistent_env);
-            }
-            let raw_lambda = raw_converter
-                .convert_structure_with_coercion(&typed_structure, &implementation_coercion);
-            let raw_diagnostic = raw_converter.take_diagnostic();
-            let possible_required_modules = raw_converter.take_possible_required_modules();
-            let raw_lambda_current_stamp = raw_converter.current_stamp();
-            (
-                raw_lambda,
-                raw_diagnostic,
-                possible_required_modules,
-                raw_lambda_current_stamp,
             )
         });
+        let mut raw_converter =
+            crate::raw_lambda::convert::RawLambdaConverter::with_start_stamp_and_unit_name(
+                arena,
+                &type_ctx,
+                &env,
+                lambda_start_stamp,
+                unit_name,
+            );
+        raw_converter.set_preserve_expanded_sparse_records(options.capture_intermediates);
+        raw_converter.set_no_assert_false(options.no_assert_false);
+        raw_converter.set_noassert(options.noassert);
+        raw_converter.set_warning_config(tctx.warning_config.clone());
+        if let Some(persistent_env) = tctx.persistent_env.clone() {
+            raw_converter.set_persistent_env(persistent_env);
+        }
+        let raw_lambda = raw_converter
+            .convert_structure_with_coercion(&typed_structure, &implementation_coercion);
+        let raw_diagnostic = raw_converter.take_diagnostic();
+        let possible_required_modules = raw_converter.take_possible_required_modules();
+        let raw_lambda_current_stamp = raw_converter.current_stamp();
+        let hoisted_functions = raw_converter.take_hoisted_functions();
+        let hoisted_exports = raw_converter.take_hoisted_exports();
+        (
+            raw_lambda,
+            raw_diagnostic,
+            possible_required_modules,
+            raw_lambda_current_stamp,
+            hoisted_functions,
+            hoisted_exports,
+        )
+    });
     if let Some(diagnostic) = raw_diagnostic {
         return Err(anyhow!(diagnostic.message));
     }
@@ -15008,6 +15280,8 @@ pub fn compile_preprocessed_structure_in_process_until_js(
     Ok(InProcessPreJsCompileResult {
         lowered_lambda,
         possible_required_modules,
+        hoisted_functions,
+        hoisted_exports,
         ident_stamp_at_js_boundary,
         file_directives,
         debug,
@@ -15015,6 +15289,7 @@ pub fn compile_preprocessed_structure_in_process_until_js(
         signature: published_signature,
         pers_struct,
         new_alias_rewrites,
+        source_file_names: std::sync::Arc::new(arena.source_file_names()),
         typed_tree_sexp,
         raw_lambda_sexp,
         lambda_sexp,
@@ -15077,6 +15352,7 @@ pub fn finish_preprocessed_structure_in_process_from_js_boundary_with_metadata_h
                 lowered_lambda
                     .as_ref()
                     .expect("lowered lambda retained for multiple JS targets"),
+                &pre_js.hoisted_functions,
                 &pre_js.possible_required_modules,
                 options,
                 primary_output_path,
@@ -15089,6 +15365,7 @@ pub fn finish_preprocessed_structure_in_process_from_js_boundary_with_metadata_h
                 lowered_lambda
                     .take()
                     .expect("lowered lambda consumed by single JS target"),
+                &pre_js.hoisted_functions,
                 &pre_js.possible_required_modules,
                 options,
                 primary_output_path,
@@ -15111,6 +15388,7 @@ pub fn finish_preprocessed_structure_in_process_from_js_boundary_with_metadata_h
             is_pure,
             cmj_export_constants: std::mem::take(&mut cmj_export_constants),
             cmj_export_arities: std::mem::take(&mut cmj_export_arities),
+            hoisted_exports: pre_js.hoisted_exports.clone(),
             pers_struct: pre_js.pers_struct.take(),
             new_alias_rewrites: std::mem::take(&mut pre_js.new_alias_rewrites),
         })?;
@@ -15129,6 +15407,7 @@ pub fn finish_preprocessed_structure_in_process_from_js_boundary_with_metadata_h
                 lowered_lambda
                     .as_ref()
                     .expect("lowered lambda retained for secondary JS targets"),
+                &pre_js.hoisted_functions,
                 &pre_js.possible_required_modules,
                 options,
                 Some(&target.path),
@@ -15157,19 +15436,22 @@ pub fn finish_preprocessed_structure_in_process_from_js_boundary_with_metadata_h
             (String::new(), Vec::new())
         } else {
             let (primary_path, primary_program, primary_resolver) = rendered_programs.remove(0);
-            let mut primary_js = print_deps_program_with_directives_and_options(
+            let (mut primary_js, primary_source_map) = render_js_program(
                 &primary_program,
-                Some(&primary_resolver),
+                &primary_resolver,
                 &pre_js.file_directives,
                 pre_js.debug,
                 pre_js.jsx_preserve,
-                !options.no_version_header,
+                options,
+                primary_path.as_deref(),
+                pre_js.source_file_names.clone(),
             );
             let mut js_outputs = Vec::new();
             let js = if let Some(path) = primary_path {
                 js_outputs.push(JsOutput {
                     path,
                     code: std::mem::take(&mut primary_js),
+                    source_map: primary_source_map,
                 });
                 crate::js_ir::dispose_deps_program_nonrecursive(primary_program);
                 String::new()
@@ -15182,16 +15464,22 @@ pub fn finish_preprocessed_structure_in_process_from_js_boundary_with_metadata_h
                     crate::js_ir::dispose_deps_program_nonrecursive(program);
                     continue;
                 };
-                let code = print_deps_program_with_directives_and_options(
+                let (code, source_map) = render_js_program(
                     &program,
-                    Some(&module_path_resolver),
+                    &module_path_resolver,
                     &pre_js.file_directives,
                     pre_js.debug,
                     pre_js.jsx_preserve,
-                    !options.no_version_header,
+                    options,
+                    Some(&path),
+                    pre_js.source_file_names.clone(),
                 );
                 crate::js_ir::dispose_deps_program_nonrecursive(program);
-                js_outputs.push(JsOutput { path, code });
+                js_outputs.push(JsOutput {
+                    path,
+                    code,
+                    source_map,
+                });
             }
             (js, js_outputs)
         }
@@ -15205,6 +15493,7 @@ pub fn finish_preprocessed_structure_in_process_from_js_boundary_with_metadata_h
         is_pure,
         cmj_export_constants,
         cmj_export_arities,
+        hoisted_exports: pre_js.hoisted_exports,
         typed_tree_sexp: pre_js.typed_tree_sexp,
         raw_lambda_sexp: pre_js.raw_lambda_sexp,
         lambda_sexp: pre_js.lambda_sexp,
@@ -15261,6 +15550,7 @@ pub fn typecheck_interface_in_process(
     )?;
     parser.arena_mut().reserve_typecheck_synthetic_capacity();
 
+    crate::types::typecore::prepare_typecheck_arena(parser.arena_mut());
     typecheck_preprocessed_signature_in_process(
         parser.arena(),
         &signature,
@@ -15429,6 +15719,7 @@ pub fn typecheck_implementation_in_process(
     let id_gen = IdGenerator::with_start_stamp(OCAML_NON_PREDEF_STAMP_START);
     let _ = id_gen.next_stamp();
     let type_ctx = TypeContext::new(std::sync::Arc::new(id_gen));
+    crate::types::typecore::prepare_typecheck_arena(parser.arena_mut());
     let mut tctx = TypeCheckContext::new(&type_ctx, parser.arena());
     tctx.experimental_let_unwrap = options.experimental_let_unwrap || file_config.let_unwrap;
     tctx.transparent_modules = options.transparent_modules;
@@ -15628,6 +15919,37 @@ mod tests {
             normalized,
             PathBuf::from("/runtime/lib/ocaml/compiler-libs")
         );
+    }
+
+    #[test]
+    fn release_optional_default_lowering_compiles_without_arena_aliasing() {
+        let source = r#"
+let labelled = (~x, ~y=2, ()) => x
+let optional = (~x=?, ()) => x
+"#;
+
+        let output = super::compile_source_to_js(source, "core_patterns_optional_defaults.res")
+            .expect("optional-default functions should compile");
+        assert!(output.contains("function labelled"));
+        assert!(output.contains("function optional"));
+    }
+
+    #[test]
+    fn release_synthetic_record_labels_and_qualified_paths_are_stable() {
+        let source = r#"
+module M = {
+  type t = {x: int, y: int, optional?: string}
+  let value = {x: 1, y: 2}
+}
+
+let extract = ({M.x, y: _}: M.t) => x
+let value: M.t = {M.x: 3, y: 4}
+"#;
+
+        let output = super::compile_source_to_js(source, "synthetic_record_labels.res")
+            .expect("synthetic record labels and qualified paths should compile");
+        assert!(output.contains("function extract"));
+        assert!(output.contains("value"));
     }
 
     #[test]

@@ -65,7 +65,7 @@ pub fn from_path1(
             let (type_env_from_p, dep) = from_path1(config, type_env, p);
             match crate::gentype::type_env::expand_alias_to_external_module(s, &type_env_from_p) {
                 Some(dep) => (type_env_from_p, dep),
-                None => (type_env_from_p, Dep::Dot(Box::new(dep), s.clone())),
+                None => (type_env_from_p, Dep::Dot(Box::new(dep), s.to_string())),
             }
         }
         Path::Papply(_, _) => (

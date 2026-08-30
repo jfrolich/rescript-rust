@@ -12,7 +12,7 @@ use std::sync::Arc;
 use crate::cmi::persistent_env::{CmjExportArity, CmjExportConstant};
 use crate::context::IdGenerator;
 use crate::ident::Ident;
-use crate::js_ir::op::{IdentInfo, Kind, MutableFlag, Number, UsedStats};
+use crate::js_ir::op::{IdentInfo, Kind, MutableFlag, Number, PropertyName, UsedStats};
 use crate::js_ir::{
     BinOp, Block, CallArity, CallInfo, CallKind, CaseClause, Delim, DepsProgram, Expression,
     ExpressionDesc, ForDirection, ModuleId, ModulePathResolver, Program, Statement, StatementDesc,
@@ -22,6 +22,7 @@ use crate::lambda::js_pass_external_shadow::apply_external_shadow_pass;
 use crate::lambda::js_pass_flatten_and_mark_dead::{
     apply_js_flatten_and_mark_dead_pass, apply_js_flatten_pass,
 };
+use crate::lambda::js_pass_record_rest::apply_js_record_rest_pass;
 use crate::lambda::js_pass_tailcall_inline::apply_js_tailcall_inline_pass;
 use crate::lambda::js_shake::{
     TailMoveInitializerKind, apply_js_shake_pass, keeps_declared_same_name_reusable_export_binding,
@@ -42,7 +43,7 @@ use crate::lambda::lam_primitive::{ExternalArgConst, ExternalArgDelim, Primitive
 use crate::lambda::lam_subst;
 use crate::lambda::{
     ApInfo, Apply, ApplyStatus, FunctionAttribute, InlineAttribute, LFunction, Lambda,
-    LambdaSwitch, PrimInfo, SwitchCaseTag, TagInfo,
+    LambdaSwitch, PrimInfo, SwitchCaseTag, SwitchKey, TagInfo,
 };
 use crate::location::Location;
 use tracing::info_span;
@@ -220,6 +221,13 @@ impl ShortCircuitOp {
     }
 }
 
+fn direct_switch_int(key: SwitchKey) -> i32 {
+    match key {
+        SwitchKey::Int(value) => value,
+        SwitchKey::Constructor(_) => unreachable!("constructor key with direct switch dispatch"),
+    }
+}
+
 pub(crate) fn short_circuit_primitive<'a>(
     primitive: &'a Primitive,
     args: &'a [Lambda],
@@ -286,6 +294,7 @@ pub struct LambdaCompiler {
     pub(crate) jsx_preserve: bool,
     pub(crate) check_div_by_zero: bool,
     pub(crate) cross_module_inline: bool,
+    pub(crate) source_map_enabled: bool,
     /// Intentional Rust performance cache for repeated `.cmj` resolver reads.
     ///
     /// OCaml keeps this metadata in Lam_compile_env and queries it through
@@ -306,6 +315,7 @@ pub struct LambdaCompiler {
     pub(crate) cmj_lambda_cache: HashMap<String, Option<Arc<AHashMap<String, Lambda>>>>,
     pub(crate) cmj_export_constants: AHashMap<String, CmjExportConstant>,
     pub(crate) cmj_export_arities: AHashMap<String, CmjExportArity>,
+    hoisted_functions: Vec<crate::lambda::HoistedFunction>,
     pub(crate) external_module_ids: HashMap<ExternalModuleCacheKey, Ident>,
     pub(crate) static_handlers: Vec<StaticHandler>,
     pub(crate) static_jump_handlers: Vec<StaticJumpHandler>,
@@ -392,11 +402,13 @@ impl LambdaCompiler {
             jsx_preserve: false,
             check_div_by_zero: true,
             cross_module_inline: false,
+            source_map_enabled: false,
             cmj_constant_cache: HashMap::new(),
             cmj_arity_cache: HashMap::new(),
             cmj_lambda_cache: HashMap::new(),
             cmj_export_constants: AHashMap::new(),
             cmj_export_arities: AHashMap::new(),
+            hoisted_functions: Vec::new(),
             external_module_ids: HashMap::new(),
             static_handlers: Vec::new(),
             static_jump_handlers: Vec::new(),
@@ -436,11 +448,13 @@ impl LambdaCompiler {
             jsx_preserve,
             check_div_by_zero,
             cross_module_inline,
+            source_map_enabled: false,
             cmj_constant_cache: HashMap::new(),
             cmj_arity_cache: HashMap::new(),
             cmj_lambda_cache: HashMap::new(),
             cmj_export_constants: AHashMap::new(),
             cmj_export_arities: AHashMap::new(),
+            hoisted_functions: Vec::new(),
             external_module_ids: HashMap::new(),
             static_handlers: Vec::new(),
             static_jump_handlers: Vec::new(),
@@ -452,6 +466,10 @@ impl LambdaCompiler {
             loop_label_counter: std::rc::Rc::new(std::cell::Cell::new(0)),
             diagnostic: None,
         }
+    }
+
+    pub fn set_hoisted_functions(&mut self, hoisted: Vec<crate::lambda::HoistedFunction>) {
+        self.hoisted_functions = hoisted;
     }
 
     /// Compile a Lambda expression into a JS IR program.
@@ -585,6 +603,10 @@ impl LambdaCompiler {
                 )
             },
         );
+        let simplified_result = crate::lambda::lam_compile_main::add_hoisted_function_aliases(
+            simplified_result,
+            &self.hoisted_functions,
+        );
         self.cmj_export_constants =
             collect_cmj_export_constants_from_simplified_lambda(&simplified_result.lambda);
         self.cmj_export_arities = collect_cmj_export_arities_from_simplified_lambda(
@@ -645,6 +667,10 @@ impl LambdaCompiler {
                 apply_js_tailcall_inline_pass(deps)
             };
             deps = {
+                let _phase = info_span!("compiler.js_pass_record_rest").entered();
+                apply_js_record_rest_pass(deps)
+            };
+            deps = {
                 let _phase = info_span!("compiler.js_pass_flatten_mark_dead").entered();
                 apply_js_flatten_and_mark_dead_pass(deps, self.jsx_preserve)
             };
@@ -671,6 +697,53 @@ impl LambdaCompiler {
             }
             deps
         })
+    }
+
+    pub fn set_source_map_enabled(&mut self, enabled: bool) {
+        self.source_map_enabled = enabled;
+    }
+
+    pub(crate) fn source_loc(&self, loc: &Location) -> Option<Location> {
+        (self.source_map_enabled && !loc.loc_ghost && loc.loc_start.cnum >= 0).then_some(*loc)
+    }
+
+    pub(crate) fn source_loc_of_lam(&self, lam: &Lambda) -> Option<Location> {
+        if !self.source_map_enabled {
+            return None;
+        }
+        fn find(lam: &Lambda) -> Option<Location> {
+            match lam {
+                Lambda::Lapply(apply) => Some(apply.ap_info.loc),
+                Lambda::Lprim(info) => Some(info.loc),
+                Lambda::Lfunction(function) => find(&function.body),
+                Lambda::Llet(_, _, value, body) => find(value).or_else(|| find(body)),
+                Lambda::Lletrec(_, body) | Lambda::Lsequence(_, body) => find(body),
+                Lambda::LifThenElse(_, then_, _) => find(then_),
+                Lambda::LstaticCatch(body, _, _) | Lambda::LtryWith(body, _, _) => find(body),
+                Lambda::LstringSwitch(_, cases, default) => cases
+                    .first()
+                    .and_then(|(_, body)| find(body))
+                    .or_else(|| default.as_deref().and_then(find)),
+                Lambda::Lswitch(_, switch) => switch
+                    .sw_consts
+                    .first()
+                    .and_then(|(_, body)| find(body))
+                    .or_else(|| switch.sw_blocks.first().and_then(|(_, body)| find(body)))
+                    .or_else(|| switch.sw_failaction.as_deref().and_then(find)),
+                Lambda::LstaticRaise(_, args) => args.first().and_then(find),
+                Lambda::Lwhile(_, body)
+                | Lambda::Lfor(_, _, _, _, body)
+                | Lambda::Lfor_of(_, _, body)
+                | Lambda::Lfor_await_of(_, _, body)
+                | Lambda::Lassign(_, body) => find(body),
+                Lambda::Lvar(_)
+                | Lambda::LglobalModule(_, _)
+                | Lambda::Lconst(_)
+                | Lambda::Lbreak
+                | Lambda::Lcontinue => None,
+            }
+        }
+        find(lam).filter(|loc| !loc.loc_ghost && loc.loc_start.cnum >= 0)
     }
 
     pub(crate) fn take_cmj_export_constants(&mut self) -> AHashMap<String, CmjExportConstant> {
@@ -870,6 +943,14 @@ impl LambdaCompiler {
     }
 
     fn compile_apply_call(&mut self, apply: &Apply) -> Compiled {
+        let mut compiled = self.compile_apply_call_inner(apply);
+        if compiled.expr.source_loc.is_none() {
+            compiled.expr.source_loc = self.source_loc(&apply.ap_info.loc);
+        }
+        compiled
+    }
+
+    fn compile_apply_call_inner(&mut self, apply: &Apply) -> Compiled {
         if apply.ap_info.status == ApplyStatus::Na {
             if let Lambda::Lapply(inner) = apply.ap_func.as_ref() {
                 if inner.ap_info.status == ApplyStatus::Na {
@@ -1136,6 +1217,78 @@ impl LambdaCompiler {
         Statement::new(StatementDesc::Try(body, Some((exn.clone(), handler)), None))
     }
 
+    fn collect_record_spread_overrides<'a>(
+        copy_id: &Ident,
+        lam: &'a Lambda,
+        overrides: &mut Vec<(&'a SetFieldDbgInfo, &'a Lambda)>,
+    ) -> bool {
+        match lam {
+            Lambda::Lsequence(set, rest) => match set.as_ref() {
+                Lambda::Lprim(PrimInfo {
+                    primitive: Primitive::Psetfield(_, field_info),
+                    args,
+                    ..
+                }) if matches!(args.as_slice(), [Lambda::Lvar(id), _] if id == copy_id) => {
+                    overrides.push((field_info, &args[1]));
+                    Self::collect_record_spread_overrides(copy_id, rest, overrides)
+                }
+                _ => false,
+            },
+            Lambda::Lvar(id) => id == copy_id,
+            _ => false,
+        }
+    }
+
+    /// Port of `try_compile_record_spread` from
+    /// `compiler/core/lam_compile.ml`: collapse a duplicated record followed
+    /// by mutations of that copy into one spread object literal. Compiling the
+    /// initializer and overrides from left to right preserves source effects.
+    fn try_compile_record_spread(
+        &mut self,
+        copy_id: &Ident,
+        value: &Lambda,
+        body: &Lambda,
+    ) -> Option<Compiled> {
+        let Lambda::Lprim(PrimInfo {
+            primitive: Primitive::Pduprecord,
+            args,
+            ..
+        }) = value
+        else {
+            return None;
+        };
+        let [init] = args.as_slice() else {
+            return None;
+        };
+
+        let mut overrides = Vec::new();
+        if !Self::collect_record_spread_overrides(copy_id, body, &mut overrides) {
+            return None;
+        }
+
+        let Compiled {
+            mut prelude,
+            expr: init_expr,
+        } = self.compile_expr(init);
+        let mut props = Vec::with_capacity(overrides.len());
+        for (field_info, override_lam) in overrides {
+            let compiled = self.compile_expr(override_lam);
+            prelude.extend(compiled.prelude);
+            props.push((
+                PropertyName::Lit(field_info.name().to_string()),
+                compiled.expr,
+            ));
+        }
+
+        // OCaml's fold builds object properties by prepending each compiled
+        // override, so the final JS object stores them in reverse source order.
+        props.reverse();
+        Some(Compiled {
+            prelude,
+            expr: Expression::new(ExpressionDesc::Object(Some(Box::new(init_expr)), props)),
+        })
+    }
+
     pub(crate) fn compile_expr(&mut self, lam: &Lambda) -> Compiled {
         match lam {
             Lambda::Lvar(id) => Compiled {
@@ -1157,7 +1310,13 @@ impl LambdaCompiler {
                 prelude: vec![],
                 expr: Self::compile_constant(cst),
             },
-            Lambda::Lapply(apply) => self.compile_apply_call(apply),
+            Lambda::Lapply(apply) => {
+                let mut compiled = self.compile_apply_call(apply);
+                if compiled.expr.source_loc.is_none() {
+                    compiled.expr.source_loc = self.source_loc(&apply.ap_info.loc);
+                }
+                compiled
+            }
             Lambda::Lfunction(func) => {
                 if let Some(expr) = self.compile_eta_wrapped_runtime_alias(func) {
                     return Compiled {
@@ -1197,6 +1356,10 @@ impl LambdaCompiler {
                 }
             }
             Lambda::Llet(kind, id, value, body) => {
+                if let Some(compiled) = self.try_compile_record_spread(id, value, body) {
+                    return compiled;
+                }
+
                 // Mirror OCaml's per-Single counter reset
                 // (`lam_compile_main.ml`): each top-level binding compiles
                 // its RHS with `loop_label_counter = ref 0`. Inner Llets
@@ -1212,7 +1375,7 @@ impl LambdaCompiler {
                         | Lambda::Lletrec(..)
                         | Lambda::Lsequence(..)
                         | Lambda::Lprim(crate::lambda::PrimInfo {
-                            primitive: Primitive::Pmakeblock(_, TagInfo::ModuleExport(_), _,),
+                            primitive: Primitive::Pmakeblock(TagInfo::ModuleExport(_), _,),
                             ..
                         })
                 );
@@ -1245,7 +1408,7 @@ impl LambdaCompiler {
                         | Lambda::Lletrec(..)
                         | Lambda::Lsequence(..)
                         | Lambda::Lprim(crate::lambda::PrimInfo {
-                            primitive: Primitive::Pmakeblock(_, TagInfo::ModuleExport(_), _,),
+                            primitive: Primitive::Pmakeblock(TagInfo::ModuleExport(_), _,),
                             ..
                         })
                 );
@@ -1389,7 +1552,7 @@ impl LambdaCompiler {
                         | Lambda::Lletrec(..)
                         | Lambda::Lsequence(..)
                         | Lambda::Lprim(crate::lambda::PrimInfo {
-                            primitive: Primitive::Pmakeblock(_, TagInfo::ModuleExport(_), _,),
+                            primitive: Primitive::Pmakeblock(TagInfo::ModuleExport(_), _,),
                             ..
                         })
                 );
@@ -1733,8 +1896,7 @@ impl LambdaCompiler {
                 }
             }
 
-            let recursive_functions =
-                recursive_function_bindings_in_group(&self.id_gen, bindings, &group);
+            let recursive_functions = recursive_function_bindings_in_group(bindings, &group);
             let recursive_function_tail_targets = direct_recursive_function_tail_targets_with_group(
                 bindings,
                 &group,
@@ -1780,7 +1942,7 @@ impl LambdaCompiler {
         recursive_functions: &HashMap<Ident, LFunction>,
         recursive_function_ids: &HashSet<Ident>,
     ) -> (Block, Block) {
-        if let Some(func) = recursive_function_binding_value(&self.id_gen, expr) {
+        if let Some(func) = recursive_function_binding_value(expr) {
             return (
                 vec![],
                 vec![Statement::variable(VariableDeclaration {
@@ -1819,7 +1981,7 @@ impl LambdaCompiler {
 
         match expr {
             Lambda::Lprim(info)
-                if matches!(info.primitive, Primitive::Pmakeblock(_, _, _))
+                if matches!(info.primitive, Primitive::Pmakeblock(_, _))
                     && info
                         .args
                         .iter()
@@ -1837,7 +1999,7 @@ impl LambdaCompiler {
                 }
                 (vec![], effects)
             }
-            Lambda::Lprim(info) if matches!(info.primitive, Primitive::Pmakeblock(_, _, _)) => {
+            Lambda::Lprim(info) if matches!(info.primitive, Primitive::Pmakeblock(_, _)) => {
                 if let Some(effects) =
                     self.compile_recursive_self_binding_makeblock(id, info, all_bindings, group)
                 {
@@ -1845,7 +2007,7 @@ impl LambdaCompiler {
                 }
 
                 let tag_info = match &info.primitive {
-                    Primitive::Pmakeblock(_, tag_info, _) => tag_info,
+                    Primitive::Pmakeblock(tag_info, _) => tag_info,
                     _ => unreachable!("guard must preserve Pmakeblock"),
                 };
                 let compiled = self.compile_expr(expr);
@@ -1881,43 +2043,17 @@ impl LambdaCompiler {
                         effects,
                     );
                 }
-                // OCaml's `compile_recursive_let` catch-all (lam_compile.ml:485-486)
-                // wraps the value via `Declare (Alias, id)`. When the value is a
-                // function expression, the printer (js_dump.ml:1294-1310 +
-                // pp_function `Name_top`) emits a `function name(...) {...}`
-                // declaration, which JS hoists to the top of the enclosing scope.
-                // Hoisting is *load-bearing* for recursive value bindings whose
-                // prelude references the binding before the assignment site, e.g.
-                // `let rec r = (let x = makeblock(A, r); fun () => x)` lowers to
-                // `let x = {VAL: r}; <r-binding>`. Without hoisting `r` is
-                // `undefined` when `let x` runs and `x.VAL` captures the wrong
-                // value. Mirror that here by emitting `let r = function_expr`
-                // as a single Variable declaration (printer turns it into
-                // `function r(...) {...}` at top level) instead of splitting
-                // into `let r; ...; r = function_expr;`.
-                if matches!(&compiled.expr.desc, ExpressionDesc::Fun { .. }) {
-                    effects.push(Statement::variable(VariableDeclaration {
-                        ident: id.clone(),
-                        value: Some(compiled.expr),
-                        property: LetKind::Alias,
-                        ident_info: IdentInfo::default(),
-                    }));
-                    return (vec![], effects);
-                }
-                effects.push(Statement::exp(Expression::bin(
-                    BinOp::Eq,
-                    Expression::var(id.clone()),
-                    compiled.expr,
-                )));
-                (
-                    vec![Statement::variable(VariableDeclaration {
-                        ident: id.clone(),
-                        value: None,
-                        property: LetKind::Strict,
-                        ident_info: IdentInfo::default(),
-                    })],
-                    effects,
-                )
+                // OCaml `compile_recursive_let`'s catch-all compiles directly
+                // under `Declare (Alias, id)` (`lam_compile.ml:552-553`).  The
+                // value's prelude therefore precedes a normal declaration; it
+                // does not introduce a placeholder plus a later assignment.
+                effects.push(Statement::variable(VariableDeclaration {
+                    ident: id.clone(),
+                    value: Some(compiled.expr),
+                    property: LetKind::Alias,
+                    ident_info: IdentInfo::default(),
+                }));
+                (vec![], effects)
             }
         }
     }
@@ -1947,7 +2083,7 @@ impl LambdaCompiler {
         group: &[usize],
     ) -> Option<Block> {
         let tag_info = match &info.primitive {
-            Primitive::Pmakeblock(_, tag_info, _) => tag_info,
+            Primitive::Pmakeblock(tag_info, _) => tag_info,
             _ => return None,
         };
 
@@ -2171,12 +2307,25 @@ impl LambdaCompiler {
         // result doesn't hide its literal-last terminal from the outer
         // `block_last_is_return_throw_or_continue` check
         // (js_stmt_make.ml:186-193).
-        unnest_block(self.compile_effect_block_inner(lam))
+        let mut block = unnest_block(self.compile_effect_block_inner(lam));
+        let source_loc = self.source_loc_of_lam(lam);
+        if let Some(first) = block.first_mut()
+            && first.source_loc.is_none()
+        {
+            first.source_loc = source_loc;
+        }
+        block
     }
 
     fn compile_effect_block_inner(&mut self, lam: &Lambda) -> Block {
         match lam {
             Lambda::Llet(kind, id, value, body) => {
+                if let Some(compiled) = self.try_compile_record_spread(id, value, body) {
+                    let mut block = compiled.prelude;
+                    push_effect_expression(&mut block, compiled.expr);
+                    return block;
+                }
+
                 let mut block = self.compile_let_binding(*kind, id, value);
                 // Mirror OCaml's output_finished:True from Lbreak/Lcontinue:
                 // if the binding's RHS is an unconditional exit, the body is
@@ -2455,6 +2604,12 @@ impl LambdaCompiler {
     fn compile_return_block_inner(&mut self, lam: &Lambda) -> Block {
         match lam {
             Lambda::Llet(kind, id, value, body) => {
+                if let Some(compiled) = self.try_compile_record_spread(id, value, body) {
+                    let mut block = compiled.prelude;
+                    block.push(Statement::return_(compiled.expr));
+                    return block;
+                }
+
                 let mut block = self.compile_let_binding(*kind, id, value);
                 if block_finishes_output(&block) {
                     return block;
@@ -2483,7 +2638,9 @@ impl LambdaCompiler {
             Lambda::Lapply(apply) => {
                 let compiled = self.compile_apply_call(apply);
                 let mut block = compiled.prelude;
-                block.push(Statement::return_(compiled.expr));
+                let mut statement = Statement::return_(compiled.expr);
+                statement.source_loc = self.source_loc(&apply.ap_info.loc);
+                block.push(statement);
                 block
             }
             Lambda::LifThenElse(cond, then_, else_) => self
@@ -3132,6 +3289,7 @@ impl LambdaCompiler {
             clauses.push((
                 to_tag(grouped_cases[group_end].0.clone()),
                 CaseClause {
+                    source_loc: None,
                     body: compiled_body,
                     should_break,
                     comment: None,
@@ -3579,8 +3737,9 @@ impl LambdaCompiler {
                 cases.push((tag.clone(), empty_switch_case_clause(), group_falls_through));
             }
             cases.push((
-                grouped_cases[group_end].0,
+                grouped_cases[group_end].0.clone(),
                 CaseClause {
+                    source_loc: None,
                     body: compiled_body,
                     should_break,
                     comment: None,
@@ -3594,7 +3753,7 @@ impl LambdaCompiler {
             self.reorder_fallthrough_return_clauses(cases, |(_, _, falls_through)| *falls_through);
         let cases = cases
             .into_iter()
-            .map(|(tag, clause, _)| (tag, clause))
+            .map(|(key, clause, _)| (direct_switch_int(key), clause))
             .collect();
 
         let default_block = switch
@@ -3729,6 +3888,10 @@ impl LambdaCompiler {
     fn compile_effect_output(&mut self, lam: &Lambda) -> Compiled {
         match lam {
             Lambda::Llet(kind, id, value, body) => {
+                if let Some(compiled) = self.try_compile_record_spread(id, value, body) {
+                    return compiled;
+                }
+
                 let mut prelude = self.compile_let_binding(*kind, id, value);
                 if block_terminates(&prelude) {
                     return Compiled {
@@ -4452,6 +4615,16 @@ impl LambdaCompiler {
     pub(crate) fn compile_assign_to_target_block(&mut self, result: &Ident, lam: &Lambda) -> Block {
         match lam {
             Lambda::Llet(kind, id, value, body) => {
+                if let Some(compiled) = self.try_compile_record_spread(id, value, body) {
+                    let mut block = compiled.prelude;
+                    block.push(Statement::exp(Expression::bin(
+                        BinOp::Eq,
+                        Expression::var(result.clone()),
+                        compiled.expr,
+                    )));
+                    return block;
+                }
+
                 let mut block = self.compile_let_binding(*kind, id, value);
                 block.extend(self.compile_assign_to_target_block(result, body));
                 block
@@ -4597,9 +4770,10 @@ impl LambdaCompiler {
             .into_iter()
             .map(|(tag, body, is_last)| {
                 (
-                    tag,
+                    direct_switch_int(tag),
                     if is_last {
                         crate::js_ir::CaseClause {
+                            source_loc: None,
                             body: self.compile_switch_value_block(result, body),
                             should_break: false,
                             comment: None,
@@ -4668,6 +4842,7 @@ impl LambdaCompiler {
                 tag_type: SwitchCaseTag::String(tag),
                 clause: if is_last {
                     crate::js_ir::CaseClause {
+                        source_loc: None,
                         body: self.compile_switch_value_block(result, body),
                         should_break: false,
                         comment: None,
@@ -4748,8 +4923,9 @@ impl LambdaCompiler {
                 cases.push((tag.clone(), empty_switch_case_clause(), group_falls_through));
             }
             cases.push((
-                grouped_cases[group_end].0,
+                grouped_cases[group_end].0.clone(),
                 crate::js_ir::CaseClause {
+                    source_loc: None,
                     body: compiled_body,
                     should_break,
                     comment: None,
@@ -4763,7 +4939,7 @@ impl LambdaCompiler {
             self.reorder_fallthrough_return_clauses(cases, |(_, _, falls_through)| *falls_through);
         let cases = cases
             .into_iter()
-            .map(|(tag, clause, _)| (tag, clause))
+            .map(|(key, clause, _)| (direct_switch_int(key), clause))
             .collect();
 
         let default_block = switch
@@ -4890,8 +5066,10 @@ impl LambdaCompiler {
             .into_iter()
             .map(|(tag, body, is_last)| {
                 let clause = if is_last {
+                    let source_loc = self.source_loc_of_lam(body);
                     let body = self.compile_effect_block(body);
                     crate::js_ir::CaseClause {
+                        source_loc,
                         should_break: !block_terminates(&body),
                         body,
                         comment: None,
@@ -4899,7 +5077,7 @@ impl LambdaCompiler {
                 } else {
                     empty_switch_case_clause()
                 };
-                (tag, clause)
+                (direct_switch_int(tag), clause)
             })
             .collect();
 
@@ -4971,8 +5149,10 @@ impl LambdaCompiler {
             .into_iter()
             .map(|(tag, body, is_last)| {
                 let clause = if is_last {
+                    let source_loc = self.source_loc_of_lam(body);
                     let body = self.compile_effect_block(body);
                     crate::js_ir::CaseClause {
+                        source_loc,
                         should_break: !block_terminates(&body),
                         body,
                         comment: None,
@@ -5921,6 +6101,7 @@ impl LambdaCompiler {
                 (
                     first_code + i32::try_from(i).expect("exit handler index fits in i32"),
                     CaseClause {
+                        source_loc: None,
                         body,
                         should_break,
                         comment: None,
@@ -6095,6 +6276,7 @@ fn normalize_if_assignment_merge_order(
         ExpressionDesc::JsNot(inner) if !else_block.is_empty() => (*inner, else_block, then_block),
         other => (
             Expression {
+                source_loc: None,
                 desc: other,
                 comment: cond.comment,
             },
@@ -6140,24 +6322,9 @@ fn staticcatch_debug_kind(lam: &Lambda) -> &'static str {
     }
 }
 
-fn recursive_function_binding_value(id_gen: &IdGenerator, expr: &Lambda) -> Option<LFunction> {
+fn recursive_function_binding_value(expr: &Lambda) -> Option<LFunction> {
     match expr {
         Lambda::Lfunction(func) => Some(func.clone()),
-        Lambda::Lprim(info) => match (&info.primitive, info.args.as_slice()) {
-            (Primitive::PjsFnMake(arity), [Lambda::Lfunction(func)]) => Some(
-                adjust_recursive_js_fn_make_function(id_gen, func, *arity, &info.loc),
-            ),
-            (Primitive::PjsFnMakeUnit, [Lambda::Lfunction(func)]) => {
-                let mut func = func.clone();
-                if func.arity == 1
-                    && matches!(func.params.as_slice(), [param] if param.name() == "param")
-                {
-                    func.attr.one_unit_arg = true;
-                }
-                Some(func)
-            }
-            _ => None,
-        },
         _ => None,
     }
 }
@@ -6290,20 +6457,16 @@ fn recursive_binding_groups(
     }
 }
 
-fn recursive_function_bindings(
-    id_gen: &IdGenerator,
-    bindings: &[(Ident, Lambda)],
-) -> HashMap<Ident, LFunction> {
+fn recursive_function_bindings(bindings: &[(Ident, Lambda)]) -> HashMap<Ident, LFunction> {
     bindings
         .iter()
         .filter_map(|(id, expr)| {
-            recursive_function_binding_value(id_gen, expr).map(|func| (id.clone(), func))
+            recursive_function_binding_value(expr).map(|func| (id.clone(), func))
         })
         .collect()
 }
 
 fn recursive_function_bindings_in_group(
-    id_gen: &IdGenerator,
     bindings: &[(Ident, Lambda)],
     group: &[usize],
 ) -> HashMap<Ident, LFunction> {
@@ -6311,7 +6474,7 @@ fn recursive_function_bindings_in_group(
         .iter()
         .filter_map(|&index| {
             let (id, expr) = &bindings[index];
-            recursive_function_binding_value(id_gen, expr).map(|func| (id.clone(), func))
+            recursive_function_binding_value(expr).map(|func| (id.clone(), func))
         })
         .collect()
 }
@@ -6328,101 +6491,8 @@ fn recursive_function_binding_alias_target(
 
     match expr {
         Lambda::Lvar(target) => lookup(target).map(|(function_id, _)| function_id.clone()),
-        Lambda::Lprim(info) => match (&info.primitive, info.args.as_slice()) {
-            (Primitive::PjsFnMake(arity), [Lambda::Lvar(target)]) => {
-                let (function_id, func) = lookup(target)?;
-                if func.attr.async_ || func.arity == *arity {
-                    Some(function_id.clone())
-                } else {
-                    None
-                }
-            }
-            (Primitive::PjsFnMakeUnit, [Lambda::Lvar(target)]) => {
-                lookup(target).map(|(function_id, _)| function_id.clone())
-            }
-            _ => None,
-        },
         _ => None,
     }
-}
-
-fn adjust_recursive_js_fn_make_function(
-    id_gen: &IdGenerator,
-    func: &LFunction,
-    to_: i32,
-    loc: &Location,
-) -> LFunction {
-    let from = func.arity;
-    if from == to_ || func.attr.async_ {
-        return func.clone();
-    }
-
-    if to_ == 0 {
-        let [param] = func.params.as_slice() else {
-            unreachable!("direct recursive js fn make adjustment should preserve a body")
-        };
-        let Lambda::Lfunction(adjusted) = Lambda::function_(
-            0,
-            vec![],
-            Lambda::let_(
-                LetKind::Alias,
-                param.clone(),
-                Lambda::unit(),
-                (*func.body).clone(),
-            ),
-            FunctionAttribute::default(),
-        ) else {
-            unreachable!("function constructor must return an Lfunction")
-        };
-        return adjusted;
-    }
-
-    if to_ > from {
-        let mut params = func.params.clone();
-        // This mirrors Lam_eta_conversion.unsafe_adjust_to_arity's fresh
-        // Ident.create params for `Pjs_fn_make` expansion
-        // (compiler/core/lam_pass_alpha_conversion.ml:67-74 and
-        // compiler/core/lam_eta_conversion.ml:159-175).
-        let extra_args = (0..(to_ - from))
-            .map(|_| id_gen.create("param"))
-            .collect::<Vec<_>>();
-        let mut body = (*func.body).clone();
-        for extra_arg in &extra_args {
-            body = Lambda::Lapply(Apply {
-                ap_func: Box::new(body),
-                ap_args: vec![Lambda::var(extra_arg.clone())],
-                ap_info: ApInfo {
-                    loc: loc.clone(),
-                    inlined: InlineAttribute::Default,
-                    status: ApplyStatus::Na,
-                },
-                ap_transformed_jsx: false,
-            });
-        }
-        params.extend(extra_args);
-        let Lambda::Lfunction(adjusted) =
-            Lambda::function_(to_, params, body, FunctionAttribute::default())
-        else {
-            unreachable!("function constructor must return an Lfunction")
-        };
-        return adjusted;
-    }
-
-    let outer_arity = to_ as usize;
-    let outer_params = func.params[..outer_arity].to_vec();
-    let inner_params = func.params[outer_arity..].to_vec();
-    let inner = Lambda::function_(
-        from - to_,
-        inner_params,
-        (*func.body).clone(),
-        FunctionAttribute::default(),
-    );
-    let Lambda::Lfunction(adjusted) =
-        Lambda::function_(to_, outer_params, inner, FunctionAttribute::default())
-    else {
-        unreachable!("function constructor must return an Lfunction")
-    };
-    adjusted
 }
 
 fn lower_ocaml_for_range_direction<'a>(
@@ -6586,15 +6656,7 @@ fn function_has_self_tailcall(tail_targets: &[Ident], lam: &Lambda) -> bool {
 fn direct_recursive_function_tail_targets(
     bindings: &[(Ident, Lambda)],
 ) -> HashMap<Ident, Vec<Ident>> {
-    let start_stamp = bindings
-        .iter()
-        .fold(Ident::current_local_stamp(), |max_stamp, (_, lam)| {
-            max_stamp.max(crate::lambda::lam_beta_reduce::max_ident_stamp_in_lambda(
-                lam,
-            ))
-        });
-    let id_gen = IdGenerator::with_start_stamp(start_stamp);
-    let recursive_functions = recursive_function_bindings(&id_gen, bindings);
+    let recursive_functions = recursive_function_bindings(bindings);
     direct_recursive_function_tail_targets_with_bindings(bindings, &recursive_functions)
 }
 
@@ -6994,7 +7056,7 @@ fn collect_cmj_export_arities_from_simplified_lambda(
                 };
                 if let Lambda::Lprim(PrimInfo {
                     primitive:
-                        Primitive::Pmakeblock(_, _, crate::lambda::lam_primitive::Mutable::Immutable),
+                        Primitive::Pmakeblock(_, crate::lambda::lam_primitive::Mutable::Immutable),
                     args,
                     ..
                 }) = value
@@ -7031,7 +7093,7 @@ fn collect_toplevel_export_bindings<'a>(
         }
         Lambda::Lsequence(_, right) => collect_toplevel_export_bindings(right, bindings),
         Lambda::Lprim(PrimInfo {
-            primitive: Primitive::Pmakeblock(_, TagInfo::ModuleExport(exports), _),
+            primitive: Primitive::Pmakeblock(TagInfo::ModuleExport(exports), _),
             args,
             ..
         }) => Some((exports, args)),
@@ -7270,7 +7332,11 @@ fn required_module_side_effect_reason(
 pub(crate) fn compiled_from_effect_block(mut block: Block) -> Compiled {
     if block.len() == 1 {
         let stmt = block.pop().expect("single-item block");
-        let Statement { desc, comment } = stmt;
+        let Statement {
+            source_loc,
+            desc,
+            comment,
+        } = stmt;
         return match desc {
             StatementDesc::Exp(mut expr) => {
                 if expr.comment.is_none() {
@@ -7283,7 +7349,11 @@ pub(crate) fn compiled_from_effect_block(mut block: Block) -> Compiled {
             }
             StatementDesc::Block(inner) if comment.is_none() => compiled_from_effect_block(inner),
             desc => Compiled {
-                prelude: vec![Statement { desc, comment }],
+                prelude: vec![Statement {
+                    source_loc: None,
+                    desc,
+                    comment,
+                }],
                 expr: Expression::undefined(false),
             },
         };
@@ -7637,9 +7707,9 @@ fn lambda_contains_static_raise_to_label(lam: &Lambda, label: i32, arity: usize)
     }
 }
 
-fn switch_cases_contain_static_raise_to_label(
-    const_cases: &[(i32, Lambda)],
-    block_cases: &[(i32, Lambda)],
+fn switch_cases_contain_static_raise_to_label<K>(
+    const_cases: &[(K, Lambda)],
+    block_cases: &[(K, Lambda)],
     label: i32,
     arity: usize,
 ) -> bool {
@@ -7665,9 +7735,9 @@ fn lambda_is_direct_static_raise_to_label(lam: &Lambda, label: i32, arity: usize
     matches!(lam, Lambda::LstaticRaise(raise_label, args) if *raise_label == label && args.len() == arity)
 }
 
-fn switch_cases_contain_nontrivial_static_raise_to_label(
-    const_cases: &[(i32, Lambda)],
-    block_cases: &[(i32, Lambda)],
+fn switch_cases_contain_nontrivial_static_raise_to_label<K>(
+    const_cases: &[(K, Lambda)],
+    block_cases: &[(K, Lambda)],
     label: i32,
     arity: usize,
 ) -> bool {
@@ -7990,6 +8060,7 @@ fn collect_modules_from_expression(expr: &Expression, modules: &mut OcamlModuleS
         | ExpressionDesc::JsBnot(inner)
         | ExpressionDesc::Await(inner)
         | ExpressionDesc::Spread(inner)
+        | ExpressionDesc::RecordRest(_, inner)
         | ExpressionDesc::CamlBlockTag(inner, _) => collect_modules_from_expression(inner, modules),
         ExpressionDesc::OptionalBlock(inner, identity) => {
             if !identity {
@@ -8047,11 +8118,10 @@ fn collect_modules_from_expression(expr: &Expression, modules: &mut OcamlModuleS
                 collect_modules_from_expression(item, modules);
             }
         }
-        ExpressionDesc::CamlBlock(items, _, tag, _) => {
+        ExpressionDesc::CamlBlock(items, _, _) => {
             for item in items {
                 collect_modules_from_expression(item, modules);
             }
-            collect_modules_from_expression(tag, modules);
         }
         ExpressionDesc::Object(dup, props) => {
             if let Some(dup) = dup {

@@ -26,6 +26,26 @@ enum BuiltinPathTest {
     NotApplicable,
 }
 
+pub(crate) fn constructor_case(
+    ctx: &TypeContext,
+    cstr: &ConstructorDescription,
+) -> Option<crate::types::VariantConstructorCase> {
+    match cstr.cstr_kind {
+        crate::types::ConstructorKind::Ordinary(reference) => Some(reference.representation(ctx)),
+        crate::types::ConstructorKind::Extension(_) => None,
+    }
+}
+
+pub(crate) fn constructor_payload_is_unboxed(
+    ctx: &TypeContext,
+    cstr: &ConstructorDescription,
+) -> bool {
+    matches!(
+        constructor_case(ctx, cstr),
+        Some(crate::types::VariantConstructorCase::Block(block)) if block.runtime.untagged
+    )
+}
+
 pub(crate) fn constructor_has_optional_shape(cstr: &ConstructorDescription) -> bool {
     cstr.cstr_attributes
         .iter()
@@ -62,15 +82,37 @@ fn type_cannot_contain_undefined_rec(
                     }
                     TypeKind::TypeOpen => false,
                     TypeKind::TypeRecord(_, _) => true,
-                    TypeKind::TypeVariant(cdecls)
+                    TypeKind::TypeVariant(cdecls, _)
                         if is_option_like_variant(cdecls) || is_unit_like_variant(cdecls) =>
                     {
                         false
                     }
-                    TypeKind::TypeVariant(cdecls) => {
-                        let untagged = has_untagged(&decl.type_attributes);
-                        cdecls.iter().all(|cd| {
-                            if has_undefined_literal(&cd.cd_attributes) {
+                    TypeKind::TypeVariant(cdecls, _) => {
+                        let mut check_case = |cd: &crate::types::ConstructorDeclaration,
+                                              case: Option<
+                            &crate::types::VariantConstructorCase,
+                        >| {
+                            let has_undefined = matches!(
+                                case,
+                                Some(crate::types::VariantConstructorCase::Constant(
+                                    crate::types::VariantTag {
+                                        tag_type: Some(crate::types::VariantTagType::Undefined),
+                                        ..
+                                    }
+                                ))
+                            ) || case.is_none()
+                                && has_undefined_literal(&cd.cd_attributes);
+                            let untagged = matches!(
+                                case,
+                                Some(crate::types::VariantConstructorCase::Block(
+                                    crate::types::VariantBlock {
+                                        runtime: crate::types::BlockRuntime { untagged: true, .. },
+                                        ..
+                                    }
+                                ))
+                            ) || case.is_none()
+                                && has_untagged(&decl.type_attributes);
+                            if has_undefined {
                                 false
                             } else if untagged {
                                 match &cd.cd_args {
@@ -104,7 +146,16 @@ fn type_cannot_contain_undefined_rec(
                             } else {
                                 true
                             }
-                        })
+                        };
+
+                        match decl.variant_layout_ref() {
+                            Some(layout_ref) => ctx.with_variant_layout(layout_ref, |layout| {
+                                cdecls.iter().enumerate().all(|(position, cd)| {
+                                    check_case(cd, Some(&layout.constructors[position]))
+                                })
+                            }),
+                            None => cdecls.iter().all(|cd| check_case(cd, None)),
+                        }
                     }
                 }
             }
@@ -194,11 +245,11 @@ fn get_unboxed_repr_rec(
     match &*ctx.get_desc(ty) {
         TypeDesc::Tconstr { path, args, .. } => {
             let decl = find_type_decl(ctx, env, path)?;
-            if !decl.type_unboxed.unboxed {
+            if decl.type_representation != crate::types::TypeRepresentation::Unboxed {
                 return Some(ty);
             }
             match &decl.type_kind {
-                TypeKind::TypeVariant(cdecls) if cdecls.len() == 1 => {
+                TypeKind::TypeVariant(cdecls, _) if cdecls.len() == 1 => {
                     match &cdecls[0].cd_args {
                         ConstructorArguments::CstrTuple(tys) if tys.len() == 1 => {
                             let arg_ty = tys[0];
@@ -227,7 +278,7 @@ pub(crate) fn scrape_ty(ctx: &TypeContext, env: &Env, ty: TypeExprRef) -> TypeEx
     match &*ctx.get_desc(ty) {
         TypeDesc::Tconstr { path, .. } => {
             if let Some(decl) = find_type_decl(ctx, env, path) {
-                if decl.type_unboxed.unboxed {
+                if decl.type_representation == crate::types::TypeRepresentation::Unboxed {
                     // For unboxed types, try to get the representation type.
                     // If the type is recursive (representation returns None),
                     // return the original type without further expansion.
@@ -248,12 +299,50 @@ pub(crate) fn scrape_ty(ctx: &TypeContext, env: &Env, ty: TypeExprRef) -> TypeEx
 }
 
 pub(crate) fn is_base_type(ctx: &TypeContext, env: &Env, ty: TypeExprRef, name: &str) -> bool {
+    fn visit(
+        ctx: &TypeContext,
+        env: &Env,
+        ty: TypeExprRef,
+        name: &str,
+        seen: &mut HashSet<TypeExprRef>,
+    ) -> bool {
+        let ty = scrape_ty(ctx, env, ty);
+        if !seen.insert(ty) {
+            return false;
+        }
+        match &*ctx.get_desc(ty) {
+            TypeDesc::Tconstr { path, args, .. } => {
+                if path.head_name() == name || path.last() == name {
+                    return true;
+                }
+                // Strengthening can give an expression a stamped owner path
+                // while its captured module-body Env still contains the local
+                // pre-strengthened declaration. Typeopt only needs to inspect
+                // the exact nullary representation here; use Path identity and
+                // never printed-name or structural lookup.
+                let manifest = if args.is_empty() {
+                    ctx.find_type_decl_by_exact_path(path).and_then(|decl| {
+                        if decl.type_params.is_empty() {
+                            decl.type_manifest
+                        } else {
+                            None
+                        }
+                    })
+                } else {
+                    None
+                };
+                if let Some(manifest) = manifest {
+                    return visit(ctx, env, manifest, name, seen);
+                }
+                false
+            }
+            _ => false,
+        }
+    }
+
     // Match OCaml `Typeopt.is_base_type`: inspect `scrape env ty`
     // (compiler/ml/typeopt.ml:99-101).
-    match &*ctx.get_desc(scrape_ty(ctx, env, ty)) {
-        TypeDesc::Tconstr { path, .. } => path.head_name() == name || path.last() == name,
-        _ => false,
-    }
+    visit(ctx, env, ty, name, &mut HashSet::new())
 }
 
 fn type_is_builtin_path_but_option(path: &Path) -> BuiltinPathTest {
@@ -297,12 +386,6 @@ pub(crate) fn find_type_decl_pub(
 fn find_type_decl(ctx: &TypeContext, env: &Env, path: &Path) -> Option<TypeDeclaration> {
     match path {
         Path::Pident(id) if !id.is_persistent() && id.stamp() != 0 => {
-            // `matching_polyfill.ml:31-35` and `ctype.ml:4492-4512` call
-            // `Env.find_type`; for Pident, env.ml:800-862 resolves through the
-            // caller's `IdTbl` before any auxiliary persistent/side-table
-            // fallback. In-process builds can have an abstract exported copy in
-            // `TypeContext` under the same stamp, so the environment must win
-            // for local constructor switches.
             crate::types::ctype::lookup_type_decl_for_path_pub(ctx, env, path)
                 .or_else(|| {
                     ctx.find_type_decl_by_stamp(id.stamp())
@@ -385,6 +468,35 @@ mod tests {
     }
 
     #[test]
+    fn base_type_expands_strengthened_local_path_by_identity() {
+        let id_gen = IdGenerator::new();
+        let ctx = TypeContext::new(std::sync::Arc::new(id_gen));
+        let module_id = ctx.create_ident("Dimension");
+        let path = Path::pdot(Path::pident(module_id), "t");
+        ctx.register_type_decl_by_exact_path(
+            path.clone(),
+            TypeDeclaration {
+                type_params: vec![],
+                type_arity: 0,
+                type_kind: TypeKind::TypeAbstract,
+                type_private: PrivateFlag::Public,
+                type_manifest: Some(ctx.predef_float()),
+                type_variance: vec![],
+                type_newtype_level: None,
+                type_loc: Location::none(),
+                type_attributes: vec![],
+                type_immediate: false,
+                type_representation: crate::types::TypeRepresentation::Boxed,
+                type_inlined_types: vec![],
+                type_path: Some(path.clone()),
+            },
+        );
+        let ty = ctx.new_constr(path, vec![]);
+
+        assert!(is_base_type(&ctx, &Env::empty(), ty, "float"));
+    }
+
+    #[test]
     fn base_type_uses_private_manifest_for_optimization() {
         let id_gen = IdGenerator::new();
         let ctx = TypeContext::new(std::sync::Arc::new(id_gen));
@@ -403,7 +515,7 @@ mod tests {
                 type_loc: Location::none(),
                 type_attributes: vec![],
                 type_immediate: false,
-                type_unboxed: crate::types::decl::UnboxedStatus::default(),
+                type_representation: crate::types::TypeRepresentation::Boxed,
                 type_inlined_types: vec![],
                 type_path: None,
             },

@@ -30,63 +30,65 @@ const STAMP_STRING: i32 = 15;
 const STAMP_EXTENSION_CONSTRUCTOR: i32 = 16;
 const STAMP_UNKNOWN: i32 = 17;
 const STAMP_PROMISE: i32 = 18;
+// Upstream compiler/ml/predef.ml:68 allocates taggedTemplate immediately after promise.
+const STAMP_TAGGED_TEMPLATE: i32 = 19;
 
 // Predef exceptions (Ident.create_predef_exn) — same counter, with PREDEF_EXN flag
-const STAMP_MATCH_FAILURE: i32 = 19;
-const STAMP_INVALID_ARGUMENT: i32 = 20;
-const STAMP_FAILURE: i32 = 21;
-const STAMP_OK: i32 = 22;
-const STAMP_ERROR: i32 = 23;
+const STAMP_MATCH_FAILURE: i32 = 20;
+const STAMP_INVALID_ARGUMENT: i32 = 21;
+const STAMP_FAILURE: i32 = 22;
+const STAMP_OK: i32 = 23;
+const STAMP_ERROR: i32 = 24;
 // dict_magic_field_name uses regular ident_create (no predef_exn flag)
-const STAMP_DICT_MAGIC_FIELD: i32 = 24;
-const STAMP_JS_EXN: i32 = 25;
-const STAMP_NOT_FOUND: i32 = 26;
-const STAMP_END_OF_FILE: i32 = 27;
-const STAMP_DIVISION_BY_ZERO: i32 = 28;
-const STAMP_ASSERT_FAILURE: i32 = 29;
-const STAMP_UNDEFINED_RECURSIVE_MODULE: i32 = 30;
+const STAMP_DICT_MAGIC_FIELD: i32 = 25;
+const STAMP_JS_EXN: i32 = 26;
+const STAMP_NOT_FOUND: i32 = 27;
+const STAMP_END_OF_FILE: i32 = 28;
+const STAMP_DIVISION_BY_ZERO: i32 = 29;
+const STAMP_ASSERT_FAILURE: i32 = 30;
+const STAMP_UNDEFINED_RECURSIVE_MODULE: i32 = 31;
 
 // Constructor idents (regular Ident.create, in common_initial_env)
-const STAMP_FALSE: i32 = 31;
-const STAMP_TRUE: i32 = 32;
-const STAMP_VOID: i32 = 33; // "()"
-const STAMP_NIL: i32 = 34; // "[]"
-const STAMP_CONS: i32 = 35; // "::"
-const STAMP_NONE: i32 = 36;
-const STAMP_SOME: i32 = 37;
-const STAMP_CTOR_UNKNOWN: i32 = 38;
+const STAMP_FALSE: i32 = 32;
+const STAMP_TRUE: i32 = 33;
+const STAMP_VOID: i32 = 34; // "()"
+const STAMP_NIL: i32 = 35; // "[]"
+const STAMP_CONS: i32 = 36; // "::"
+const STAMP_NONE: i32 = 37;
+const STAMP_SOME: i32 = 38;
+const STAMP_CTOR_UNKNOWN: i32 = 39;
 
 // Comptime type reflection types
-const STAMP_TYPE_INFO: i32 = 39;
-const STAMP_FIELD_INFO: i32 = 40;
-const STAMP_CONSTRUCTOR_INFO: i32 = 41;
+const STAMP_TYPE_INFO: i32 = 40;
+const STAMP_FIELD_INFO: i32 = 41;
+const STAMP_CONSTRUCTOR_INFO: i32 = 42;
 
 // typeInfo constructors
-const STAMP_TI_INT: i32 = 42;
-const STAMP_TI_FLOAT: i32 = 43;
-const STAMP_TI_STRING: i32 = 44;
-const STAMP_TI_BOOL: i32 = 45;
-const STAMP_TI_UNIT: i32 = 46;
-const STAMP_TI_CHAR: i32 = 47;
-const STAMP_TI_BIGINT: i32 = 48;
-const STAMP_TI_RECORD: i32 = 49;
-const STAMP_TI_VARIANT: i32 = 50;
-const STAMP_TI_ARRAY: i32 = 51;
-const STAMP_TI_OPTION: i32 = 52;
-const STAMP_TI_FUNCTION: i32 = 53;
-const STAMP_TI_EXTERNAL: i32 = 54;
-const STAMP_TI_OPAQUE: i32 = 55;
-const STAMP_TI_UNKNOWN: i32 = 56;
+const STAMP_TI_INT: i32 = 43;
+const STAMP_TI_FLOAT: i32 = 44;
+const STAMP_TI_STRING: i32 = 45;
+const STAMP_TI_BOOL: i32 = 46;
+const STAMP_TI_UNIT: i32 = 47;
+const STAMP_TI_CHAR: i32 = 48;
+const STAMP_TI_BIGINT: i32 = 49;
+const STAMP_TI_RECORD: i32 = 50;
+const STAMP_TI_VARIANT: i32 = 51;
+const STAMP_TI_ARRAY: i32 = 52;
+const STAMP_TI_OPTION: i32 = 53;
+const STAMP_TI_FUNCTION: i32 = 54;
+const STAMP_TI_EXTERNAL: i32 = 55;
+const STAMP_TI_OPAQUE: i32 = 56;
+const STAMP_TI_UNKNOWN: i32 = 57;
 
 // fieldInfo labels
-const STAMP_FI_NAME: i32 = 57;
-const STAMP_FI_TYP: i32 = 58;
-const STAMP_FI_OPTIONAL: i32 = 59;
-const STAMP_FI_MUTABLE: i32 = 60;
+const STAMP_FI_NAME: i32 = 58;
+const STAMP_FI_TYP: i32 = 59;
+const STAMP_FI_OPTIONAL: i32 = 60;
+const STAMP_FI_MUTABLE: i32 = 61;
 
 // constructorInfo labels
-const STAMP_CI_NAME: i32 = 61;
-const STAMP_CI_ARGS: i32 = 62;
+const STAMP_CI_NAME: i32 = 62;
+const STAMP_CI_ARGS: i32 = 63;
 
 /// The stamp counter value after all predefs are allocated.
 /// OCaml sets `Ident.set_current_time 999` at the end of predef.ml.
@@ -157,6 +159,9 @@ pub fn ident_unknown() -> Ident {
 }
 pub fn ident_promise() -> Ident {
     make_ident("promise", STAMP_PROMISE)
+}
+pub fn ident_tagged_template() -> Ident {
+    make_ident("taggedTemplate", STAMP_TAGGED_TEMPLATE)
 }
 
 // Comptime type reflection idents
@@ -381,6 +386,9 @@ pub fn path_unknown() -> Path {
 pub fn path_promise() -> Path {
     Path::pident(ident_promise())
 }
+pub fn path_tagged_template() -> Path {
+    Path::pident(ident_tagged_template())
+}
 pub fn path_match_failure() -> Path {
     Path::pident(ident_match_failure())
 }
@@ -400,7 +408,9 @@ pub fn type_is_builtin_path_but_option(p: &Path) -> Option<bool> {
     match p {
         Path::Pident(id) if id.stamp() == STAMP_OPTION => Some(false),
         Path::Pident(id) if id.stamp() == STAMP_UNIT => Some(false),
-        Path::Pident(id) if id.stamp() >= STAMP_INT && id.stamp() <= STAMP_PROMISE => Some(true),
+        Path::Pident(id) if id.stamp() >= STAMP_INT && id.stamp() <= STAMP_TAGGED_TEMPLATE => {
+            Some(true)
+        }
         _ => None,
     }
 }
@@ -427,6 +437,7 @@ pub fn find_predef_ident(name: &str) -> Option<Ident> {
         "extension_constructor" => Some(ident_extension_constructor()),
         "unknown" => Some(ident_unknown()),
         "promise" => Some(ident_promise()),
+        "taggedTemplate" => Some(ident_tagged_template()),
         "typeInfo" => Some(ident_type_info()),
         "fieldInfo" => Some(ident_field_info()),
         "constructorInfo" => Some(ident_constructor_info()),

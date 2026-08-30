@@ -99,7 +99,7 @@ fn run_main(otel_enabled: bool) -> Result<()> {
                 Ok(build_state) => {
                     if let Some(args_after_build) = (*build_args.after_build).clone() {
                         drop(build_state);
-                        cmd::run(args_after_build);
+                        cmd::run(args_after_build)?;
                     } else {
                         // `rescript build` is a one-shot command and `main` exits
                         // immediately after this match. Dropping the full build graph
@@ -146,8 +146,8 @@ fn run_main(otel_enabled: bool) -> Result<()> {
         }
         cli::Command::Clean { folder, prod } => {
             let _lock = get_lock_or_exit(LockKind::Build, &folder);
-            let result = build::clean::clean(Path::new(&folder as &str), show_progress, plain_output, prod);
-            let _lock = drop_lock(LockKind::Build, &folder);
+            let result = build::clean::clean(folder.as_ref(), show_progress, plain_output, prod);
+            let _ = drop_lock(LockKind::Build, &folder);
 
             result
         }

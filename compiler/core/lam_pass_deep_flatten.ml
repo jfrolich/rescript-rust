@@ -114,6 +114,19 @@ let lambda_of_groups ~(rev_bindings : Lam_group.t list) (result : Lam.t) : Lam.t
     since its semantics depend on whether v is used or not
     return value are in reverse order, but handled by [lambda_of_groups]
 *)
+(* The shape [let x = <immutable block> in ... in apply f args]: the residue
+   left by beta reduction of an immediately applied function. *)
+let rec rhs_is_beta_residue (lam : Lam.t) =
+  match lam with
+  | Llet
+      ( (Alias | Strict | StrictOpt),
+        _,
+        (Lprim {primitive = Pmakeblock (_, Immutable)} | Lvar _),
+        rest ) ->
+    rhs_is_beta_residue rest
+  | Lapply _ -> true
+  | _ -> false
+
 let deep_flatten (lam : Lam.t) : Lam.t =
   let rec flatten (acc : Lam_group.t list) (lam : Lam.t) :
       Lam.t * Lam_group.t list =
@@ -145,6 +158,13 @@ let deep_flatten (lam : Lam.t) : Lam.t =
                  ~args:[Lam.var new_id]
                  Location.none (* FIXME*))
               body))
+    | Llet (str, id, arg, body) when rhs_is_beta_residue arg ->
+      (* A let chain of immutable blocks and aliases feeding a final apply is
+         the residue of beta reducing an immediately applied function. Keep
+         it local: hoisting the bindings into the enclosing group would put
+         them beyond [Lam_pass_lets_dce]'s reach, which substitutes
+         single-use arguments back into the call. *)
+      flatten (Single (str, id, aux arg) :: acc) body
     | Llet (str, id, arg, body) -> (
       (*
                          {[ let match = (a,b,c)
@@ -157,7 +177,7 @@ let deep_flatten (lam : Lam.t) : Lam.t =
       match (id.name, str, res) with
       | ( ("match" | "include" | "param"),
           (Alias | Strict | StrictOpt),
-          Lprim {primitive = Pmakeblock (_, _, Immutable); args} ) -> (
+          Lprim {primitive = Pmakeblock (_, Immutable); args} ) -> (
         match eliminate_tuple id body Map_int.empty with
         | Some (tuple_mapping, body) ->
           flatten
@@ -229,8 +249,8 @@ let deep_flatten (lam : Lam.t) : Lam.t =
     | Lprim {primitive; args; loc} ->
       let args = Ext_list.map args aux in
       Lam.prim ~primitive ~args loc
-    | Lfunction {arity; params; body; attr} ->
-      Lam.function_ ~arity ~params ~body:(aux body) ~attr
+    | Lfunction {arity; params; body; attr; loc} ->
+      Lam.function_ ~loc ~arity ~params ~body:(aux body) ~attr
     | Lswitch
         ( l,
           {
@@ -239,7 +259,7 @@ let deep_flatten (lam : Lam.t) : Lam.t =
             sw_blocks;
             sw_blocks_full;
             sw_consts_full;
-            sw_names;
+            sw_dispatch;
           } ) ->
       Lam.switch (aux l)
         {
@@ -248,7 +268,7 @@ let deep_flatten (lam : Lam.t) : Lam.t =
           sw_consts_full;
           sw_blocks_full;
           sw_failaction = Ext_option.map sw_failaction aux;
-          sw_names;
+          sw_dispatch;
         }
     | Lstringswitch (l, sw, d) ->
       Lam.stringswitch (aux l) (Ext_list.map_snd sw aux) (Ext_option.map d aux)
