@@ -13771,6 +13771,7 @@ fn validate_expression_js_string_errors(
             if let Constant::String(s, Some(delim)) = &**constant
                 && delim == "js"
                 && !attributes_have_template_marker(&expr.pexp_attributes, arena)
+                && !is_js_regex_like_literal(s)
             {
                 validate_js_string_literal(s, expr.pexp_loc)?;
             }
@@ -16258,19 +16259,31 @@ pub fn rewrite_structure(
     structure: &[StructureItem],
     arena: &mut ParseArena,
 ) -> PpxResult<Vec<StructureItem>> {
-    rewrite_structure_impl(structure, arena, true)
+    rewrite_structure_impl(structure, arena, true, true)
+}
+
+/// Apply the built-in mapper for parser-debug output. OCaml's `res_parser`
+/// exposes the mapped tree without running the compiler-only invariant pass.
+pub fn rewrite_structure_for_parser_debug(
+    structure: &[StructureItem],
+    arena: &mut ParseArena,
+) -> PpxResult<Vec<StructureItem>> {
+    rewrite_structure_impl(structure, arena, true, false)
 }
 
 fn rewrite_structure_impl(
     structure: &[StructureItem],
     arena: &mut ParseArena,
     apply_spice: bool,
+    validate_invariants: bool,
 ) -> PpxResult<Vec<StructureItem>> {
-    validate_structure_deriving_errors(structure, arena)?;
-    validate_structure_method_attribute_errors(structure, arena)?;
-    validate_structure_js_string_errors(structure, arena)?;
-    validate_structure_await_errors(structure, arena, true)?;
-    validate_structure_this_errors(structure, arena)?;
+    if validate_invariants {
+        validate_structure_deriving_errors(structure, arena)?;
+        validate_structure_method_attribute_errors(structure, arena)?;
+        validate_structure_js_string_errors(structure, arena)?;
+        validate_structure_await_errors(structure, arena, true)?;
+        validate_structure_this_errors(structure, arena)?;
+    }
 
     // Context for tracking already-created module type names (per-structure scope)
     let mut await_context = std::collections::HashSet::new();
@@ -16343,7 +16356,9 @@ fn rewrite_structure_impl(
         }
     }
 
-    validate_structure_builtin_type_redefinition_errors(&result, arena)?;
+    if validate_invariants {
+        validate_structure_builtin_type_redefinition_errors(&result, arena)?;
+    }
 
     Ok(result)
 }
@@ -17088,7 +17103,7 @@ fn rewrite_module_expr(
     let new_desc = match &*mod_expr.pmod_desc {
         current::ModuleExprDesc::Pmod_structure(items) => {
             let rewritten_items =
-                rewrite_structure_impl(items, arena, false).unwrap_or_else(|_| {
+                rewrite_structure_impl(items, arena, false, true).unwrap_or_else(|_| {
                     items
                         .iter()
                         .flat_map(|item| rewrite_structure_item_no_spice(item, arena))
