@@ -26,7 +26,7 @@ The Rust compiler now matches the current OCaml compiler across the complete can
 - Compiler tests: **1197 passed**, with no failures
 - Rewatch tests: **150 passed**, with no failures
 - v13-migrated Tella checkout at `66a5edabdbfdbc5dd7496e59ee0573de2a2a1ffa`: **3248 modules compiled** using release rewatch `--in-process`
-- Checked-in parser corpus: **1231/1231** semantic/post-PPX and binary AST parity with `./scripts/test_parser_ast_parity.sh`
+- Checked-in parser corpus: **1231/1231** primary semantic parity; **1209** post-PPX and **1196** binary AST reference-supported checks have zero differences, with 22/35 inputs explicitly skipped because the OCaml secondary command rejects them
 
 External parser runs are opt-in and require `TELLA_REVISION=<exact commit> --with-external`; the checked-in parser baseline remains read-only unless `--update-baseline` is explicit.
 
