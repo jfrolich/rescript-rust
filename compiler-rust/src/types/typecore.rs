@@ -1390,10 +1390,13 @@ impl<'a> TypeCheckContext<'a> {
     }
 
     pub fn mark_value_used(&mut self, name: &str, val_loc: Location) {
-        for check in &mut self.value_usage_checks {
-            if check.name == name && check.val_loc == val_loc {
-                check.used = true;
-            }
+        if let Some(check) = self
+            .value_usage_checks
+            .iter_mut()
+            .rev()
+            .find(|check| check.name == name && check.val_loc == val_loc)
+        {
+            check.used = true;
         }
     }
 
