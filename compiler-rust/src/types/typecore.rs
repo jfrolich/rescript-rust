@@ -1390,13 +1390,10 @@ impl<'a> TypeCheckContext<'a> {
     }
 
     pub fn mark_value_used(&mut self, name: &str, val_loc: Location) {
-        if let Some(check) = self
-            .value_usage_checks
-            .iter_mut()
-            .rev()
-            .find(|check| check.name == name && check.val_loc == val_loc)
-        {
-            check.used = true;
+        for check in &mut self.value_usage_checks {
+            if check.name == name && check.val_loc == val_loc {
+                check.used = true;
+            }
         }
     }
 
@@ -34190,6 +34187,28 @@ mod tests {
     use super::*;
     use crate::context::IdGenerator;
     use std::borrow::Cow;
+
+    #[test]
+    fn value_usage_marks_all_declarations_with_the_same_key() {
+        let type_ctx = TypeContext::new(std::sync::Arc::new(IdGenerator::new()));
+        let arena = ParseArena::new();
+        let mut tctx = TypeCheckContext::new(&type_ctx, &arena);
+        let val_loc = Location::none();
+        for _ in 0..2 {
+            tctx.value_usage_checks.push(ValueUsageCheck {
+                name: "x".to_string(),
+                val_loc,
+                warning_loc: LocIdx::none(),
+                warning: Warning::UnusedArgument,
+                is_error: false,
+                used: false,
+            });
+        }
+
+        tctx.mark_value_used("x", val_loc);
+
+        assert!(tctx.value_usage_checks.iter().all(|check| check.used));
+    }
 
     #[test]
     fn test_convert_constant_int() {
