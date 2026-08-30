@@ -1173,6 +1173,8 @@ pub struct TypeCheckContext<'a> {
     /// Mirrors OCaml Env.check_usage/Delayed_checks: lookup marks a binding as
     /// used, and the warning is emitted only when delayed checks are forced.
     value_usage_checks: Vec<ValueUsageCheck>,
+    /// Useful match witnesses retyped when delayed checks are flushed.
+    delayed_unused_witnesses: Vec<(Env, Pattern)>,
     /// Current warning configuration.
     pub warning_config: WarningConfig,
     /// Current loop nesting depth for validating break/continue.
@@ -1277,6 +1279,7 @@ impl<'a> TypeCheckContext<'a> {
             diagnostics: Vec::new(),
             warnings: Vec::new(),
             value_usage_checks: Vec::new(),
+            delayed_unused_witnesses: Vec::new(),
             warning_config: WarningConfig::new(),
             loop_depth: 0,
             used_variables: HashMap::new(),
@@ -1399,6 +1402,21 @@ impl<'a> TypeCheckContext<'a> {
                     is_error: check.is_error,
                 });
             }
+        }
+
+        for (env, witness) in std::mem::take(&mut self.delayed_unused_witnesses) {
+            let snapshot = self.type_ctx.snapshot_type_state();
+            let parsed = materialize_unused_witness(self, &env, &witness);
+            let mut state = PatternState::new();
+            let _ = type_pattern(
+                self,
+                &env,
+                self.arena.get_pat(parsed),
+                witness.pat_type,
+                PatternMode::SplitOr,
+                &mut state,
+            );
+            self.type_ctx.restore_type_state(snapshot);
         }
     }
 
@@ -11196,7 +11214,7 @@ fn finish_non_gadt_type_cases<'a>(
 
     // type_cases always schedules check_unused, including try handlers where
     // partial_flag is false (typecore.ml:4483-4496).
-    report_unused_match_cases(tctx, env, typed_cases);
+    report_unused_match_cases(tctx, env, typed_cases, needs_exhaust_check);
     Ok(partial)
 }
 
@@ -11714,10 +11732,157 @@ fn generalized_tuple_space_is_covered(
     )
 }
 
+fn materialize_unused_witness(
+    tctx: &mut TypeCheckContext<'_>,
+    env: &Env,
+    witness: &Pattern,
+) -> crate::parse_arena::PatIdx {
+    use crate::parser::ast::{
+        Pattern as ParsedPattern, PatternDesc as ParsedPatternDesc, PatternRecordField,
+    };
+
+    fn push(
+        tctx: &TypeCheckContext<'_>,
+        loc: LocIdx,
+        desc: ParsedPatternDesc,
+    ) -> crate::parse_arena::PatIdx {
+        tctx.arena.push_typecheck_pattern(ParsedPattern {
+            ppat_desc: Box::new(desc),
+            ppat_loc: loc,
+            ppat_attributes: Attributes::new(),
+        })
+    }
+
+    fn constructor(
+        tctx: &TypeCheckContext<'_>,
+        loc: LocIdx,
+        name: &str,
+        args: Vec<crate::parse_arena::PatIdx>,
+    ) -> crate::parse_arena::PatIdx {
+        let argument = match args.len() {
+            0 => None,
+            1 => args.first().copied(),
+            _ => Some(push(
+                tctx,
+                loc,
+                ParsedPatternDesc::Ppat_tuple(Box::new(args)),
+            )),
+        };
+        let lid = tctx.arena.push_typecheck_lident(name);
+        push(
+            tctx,
+            loc,
+            ParsedPatternDesc::Ppat_construct(Located::new(lid, loc), argument),
+        )
+    }
+
+    // Parmatch.pats_of_type expands each witness node before partial_pred
+    // retypes the generated parsetree pattern under the captured environment.
+    let _ = crate::types::ctype::expand_head(tctx.type_ctx, env, witness.pat_type);
+
+    match &witness.pat_desc {
+        PatternDesc::Tpat_any | PatternDesc::Tpat_var(_, _) => {
+            if let Some(constructors) = variant_constructors_for_type(tctx, env, witness.pat_type)
+                && let [only] = constructors.as_slice()
+            {
+                let arg_count = match &only.cd_args {
+                    crate::types::decl::ConstructorArguments::CstrTuple(types) => types.len(),
+                    crate::types::decl::ConstructorArguments::CstrRecord(_) => 1,
+                };
+                let args = (0..arg_count)
+                    .map(|_| push(tctx, witness.pat_loc, ParsedPatternDesc::Ppat_any))
+                    .collect();
+                constructor(tctx, witness.pat_loc, only.cd_id.name(), args)
+            } else {
+                push(tctx, witness.pat_loc, ParsedPatternDesc::Ppat_any)
+            }
+        }
+        PatternDesc::Tpat_alias(inner, _, _) => materialize_unused_witness(tctx, env, inner),
+        PatternDesc::Tpat_constant(_) => push(tctx, witness.pat_loc, ParsedPatternDesc::Ppat_any),
+        PatternDesc::Tpat_tuple(items) => {
+            let items = items
+                .iter()
+                .map(|item| materialize_unused_witness(tctx, env, item))
+                .collect();
+            push(
+                tctx,
+                witness.pat_loc,
+                ParsedPatternDesc::Ppat_tuple(Box::new(items)),
+            )
+        }
+        PatternDesc::Tpat_construct(lid, _, items) => {
+            let items = items
+                .iter()
+                .map(|item| materialize_unused_witness(tctx, env, item))
+                .collect::<Vec<_>>();
+            let argument = match items.len() {
+                0 => None,
+                1 => items.first().copied(),
+                _ => Some(push(
+                    tctx,
+                    witness.pat_loc,
+                    ParsedPatternDesc::Ppat_tuple(Box::new(items)),
+                )),
+            };
+            push(
+                tctx,
+                witness.pat_loc,
+                ParsedPatternDesc::Ppat_construct(*lid, argument),
+            )
+        }
+        PatternDesc::Tpat_variant(label, argument, _) => {
+            let argument = argument
+                .as_deref()
+                .map(|item| materialize_unused_witness(tctx, env, item));
+            push(
+                tctx,
+                witness.pat_loc,
+                ParsedPatternDesc::Ppat_variant(Box::new((label.clone().into(), argument))),
+            )
+        }
+        PatternDesc::Tpat_record(fields, closed, _) => {
+            let fields = fields
+                .iter()
+                .map(|(lid, _, field, opt)| PatternRecordField {
+                    lid: *lid,
+                    pat: materialize_unused_witness(tctx, env, field),
+                    opt: *opt,
+                })
+                .collect();
+            push(
+                tctx,
+                witness.pat_loc,
+                ParsedPatternDesc::Ppat_record(Box::new((fields, *closed))),
+            )
+        }
+        PatternDesc::Tpat_array(items) => {
+            let items = items
+                .iter()
+                .map(|item| materialize_unused_witness(tctx, env, item))
+                .collect();
+            push(
+                tctx,
+                witness.pat_loc,
+                ParsedPatternDesc::Ppat_array(Box::new(items)),
+            )
+        }
+        PatternDesc::Tpat_or(left, right, _) => {
+            let left = materialize_unused_witness(tctx, env, left);
+            let right = materialize_unused_witness(tctx, env, right);
+            push(
+                tctx,
+                witness.pat_loc,
+                ParsedPatternDesc::Ppat_or(left, right),
+            )
+        }
+    }
+}
+
 fn report_unused_match_cases<'case>(
     tctx: &mut TypeCheckContext<'_>,
     env: &Env,
     cases: &'case [crate::types::typedtree::Case],
+    delay_witness_typing: bool,
 ) {
     if !tctx.warning_config.is_active(&Warning::UnusedMatch) {
         return;
@@ -11828,6 +11993,15 @@ fn report_unused_match_cases<'case>(
         } else {
             false
         };
+
+        if delay_witness_typing
+            && !is_unused
+            && !previous_unguarded_cases.is_empty()
+            && tctx.warning_config.is_active(&Warning::UnreachableCase)
+        {
+            tctx.delayed_unused_witnesses
+                .push((env.clone(), case.c_lhs.clone()));
+        }
 
         if is_unused {
             tctx.report_warning(case.c_lhs.pat_loc, Warning::UnusedMatch);
@@ -14302,7 +14476,12 @@ fn type_match(
         report_fragile_match_if_needed(tctx, ctx, val_case_env, loc, &typed_val_cases, partial);
         partial
     };
-    report_unused_match_cases(tctx, val_case_env, &typed_val_cases);
+    report_unused_match_cases(
+        tctx,
+        val_case_env,
+        &typed_val_cases,
+        has_generalized_value_patterns || needs_exhaust_check,
+    );
     report_ambiguous_guarded_or_patterns(tctx, &typed_val_cases);
     if partial == crate::types::typedtree::Partial::Partial
         && !all_clauses_guarded

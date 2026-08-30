@@ -1984,7 +1984,12 @@ impl ParseArena {
         self.strings.reserve(128);
 
         self.synthetic_pattern_base = self.patterns.len() as u32;
-        let synthetic_pattern_capacity = self.longidents.len().saturating_mul(2).max(64);
+        let synthetic_pattern_capacity = self
+            .patterns
+            .len()
+            .saturating_mul(2)
+            .saturating_add(self.longidents.len())
+            .max(64);
         self.synthetic_patterns = (0..synthetic_pattern_capacity)
             .map(|_| OnceLock::new())
             .collect();
