@@ -302,18 +302,18 @@ pub struct TypeContext {
     /// Global type declaration store, indexed by type name.
     /// Populated when loading CMI module signatures so that type alias
     /// expansion can find declarations for types not directly in the env.
-    type_decl_store: RefCell<ahash::AHashMap<String, super::decl::TypeDeclaration>>,
+    type_decl_store: RefCell<ahash::AHashMap<String, Arc<super::decl::TypeDeclaration>>>,
 
     /// Global type declaration store, indexed by ident stamp.
     /// Used for looking up CMI-loaded type declarations by their stamp
     /// when the type name is too generic (e.g., "t").
-    type_decl_by_stamp: RefCell<ahash::AHashMap<i32, super::decl::TypeDeclaration>>,
+    type_decl_by_stamp: RefCell<ahash::AHashMap<i32, Arc<super::decl::TypeDeclaration>>>,
 
     /// Global type declaration store, indexed by full qualified path string.
     /// Used for looking up types via Pdot paths (e.g., "Js.Promise.t").
-    type_decl_by_path: RefCell<ahash::AHashMap<String, super::decl::TypeDeclaration>>,
+    type_decl_by_path: RefCell<ahash::AHashMap<String, Arc<super::decl::TypeDeclaration>>>,
     /// Qualified declarations keyed by Path identity, preserving local stamps.
-    type_decl_by_exact_path: RefCell<ahash::AHashMap<Path, super::decl::TypeDeclaration>>,
+    type_decl_by_exact_path: RefCell<ahash::AHashMap<Path, Arc<super::decl::TypeDeclaration>>>,
     type_item_by_path: RefCell<ahash::AHashMap<String, (Ident, super::decl::TypeDeclaration)>>,
     missing_type_item_by_path: RefCell<ahash::AHashSet<String>>,
 
@@ -766,6 +766,14 @@ impl TypeContext {
     /// Register a type declaration for type alias expansion.
     /// Called when loading module signatures from CMI files.
     pub fn register_type_decl(&self, name: &str, decl: super::decl::TypeDeclaration) {
+        self.register_shared_type_decl(name, Arc::new(decl));
+    }
+
+    pub(crate) fn register_shared_type_decl(
+        &self,
+        name: &str,
+        decl: Arc<super::decl::TypeDeclaration>,
+    ) {
         self.type_decl_store
             .borrow_mut()
             .insert(name.to_string(), decl);
@@ -773,6 +781,14 @@ impl TypeContext {
 
     /// Register a type declaration by ident stamp for alias expansion.
     pub fn register_type_decl_by_stamp(&self, stamp: i32, decl: super::decl::TypeDeclaration) {
+        self.register_shared_type_decl_by_stamp(stamp, Arc::new(decl));
+    }
+
+    pub(crate) fn register_shared_type_decl_by_stamp(
+        &self,
+        stamp: i32,
+        decl: Arc<super::decl::TypeDeclaration>,
+    ) {
         self.type_decl_by_stamp.borrow_mut().insert(stamp, decl);
     }
 
@@ -795,7 +811,9 @@ impl TypeContext {
     ) -> Option<std::cell::Ref<'_, super::decl::TypeDeclaration>> {
         let store = self.type_decl_store.borrow();
         if store.contains_key(name) {
-            Some(std::cell::Ref::map(store, |s| s.get(name).unwrap()))
+            Some(std::cell::Ref::map(store, |s| {
+                s.get(name).unwrap().as_ref()
+            }))
         } else {
             None
         }
@@ -808,7 +826,9 @@ impl TypeContext {
     ) -> Option<std::cell::Ref<'_, super::decl::TypeDeclaration>> {
         let store = self.type_decl_by_stamp.borrow();
         if store.contains_key(&stamp) {
-            Some(std::cell::Ref::map(store, |s| s.get(&stamp).unwrap()))
+            Some(std::cell::Ref::map(store, |s| {
+                s.get(&stamp).unwrap().as_ref()
+            }))
         } else {
             None
         }
@@ -816,6 +836,14 @@ impl TypeContext {
 
     /// Register a type declaration by full qualified path string for alias expansion.
     pub fn register_type_decl_by_path(&self, path: &str, decl: super::decl::TypeDeclaration) {
+        self.register_shared_type_decl_by_path(path, Arc::new(decl));
+    }
+
+    pub(crate) fn register_shared_type_decl_by_path(
+        &self,
+        path: &str,
+        decl: Arc<super::decl::TypeDeclaration>,
+    ) {
         self.type_decl_by_path
             .borrow_mut()
             .insert(path.to_string(), decl);
@@ -823,6 +851,14 @@ impl TypeContext {
 
     /// Register a qualified declaration by exact Path identity.
     pub fn register_type_decl_by_exact_path(&self, path: Path, decl: super::decl::TypeDeclaration) {
+        self.register_shared_type_decl_by_exact_path(path, Arc::new(decl));
+    }
+
+    pub(crate) fn register_shared_type_decl_by_exact_path(
+        &self,
+        path: Path,
+        decl: Arc<super::decl::TypeDeclaration>,
+    ) {
         self.type_decl_by_exact_path.borrow_mut().insert(path, decl);
     }
 
@@ -1313,7 +1349,9 @@ impl TypeContext {
     ) -> Option<std::cell::Ref<'_, super::decl::TypeDeclaration>> {
         let store = self.type_decl_by_path.borrow();
         if store.contains_key(path) {
-            Some(std::cell::Ref::map(store, |s| s.get(path).unwrap()))
+            Some(std::cell::Ref::map(store, |s| {
+                s.get(path).unwrap().as_ref()
+            }))
         } else {
             None
         }
@@ -1327,7 +1365,7 @@ impl TypeContext {
         let store = self.type_decl_by_exact_path.borrow();
         if store.contains_key(path) {
             Some(std::cell::Ref::map(store, |entries| {
-                entries.get(path).expect("checked exact type path")
+                entries.get(path).expect("checked exact type path").as_ref()
             }))
         } else {
             None

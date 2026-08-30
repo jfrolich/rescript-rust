@@ -2109,15 +2109,16 @@ fn register_sig_types_recursive<'a>(
     for item in sig {
         match item {
             SignatureItem::SigType(id, decl, _) => {
-                ctx.register_type_decl(id.name(), decl.clone());
+                let decl = Arc::new(decl.clone());
+                ctx.register_shared_type_decl(id.name(), decl.clone());
                 // Also register by stamp for precise lookup when name is ambiguous (e.g., "t")
                 if id.stamp() != 0 {
-                    ctx.register_type_decl_by_stamp(id.stamp(), decl.clone());
+                    ctx.register_shared_type_decl_by_stamp(id.stamp(), decl.clone());
                 }
                 // Register by fully qualified path for Pdot lookup (e.g., "Js.Promise.t")
                 let full_path = Path::pdot(module_path.clone(), id.name());
-                ctx.register_type_decl_by_path(&full_path.name(), decl.clone());
-                ctx.register_type_decl_by_exact_path(full_path, decl.clone());
+                ctx.register_shared_type_decl_by_path(&full_path.name(), decl.clone());
+                ctx.register_shared_type_decl_by_exact_path(full_path, decl);
             }
             SignatureItem::SigModule(id, md, _) => {
                 let sub_path = Path::pdot(module_path.clone(), id.name());
@@ -6084,10 +6085,11 @@ fn add_signature_to_env_with_options(
 
                 // Also register in global type store for alias expansion
                 if register_loaded_types {
-                    ctx.register_type_decl(id.name(), decl.clone());
+                    let shared_decl = Arc::new(decl.clone());
+                    ctx.register_shared_type_decl(id.name(), shared_decl.clone());
                     // Register by stamp for types from CMI modules (non-zero stamp)
                     if id.stamp() != 0 {
-                        ctx.register_type_decl_by_stamp(id.stamp(), decl.clone());
+                        ctx.register_shared_type_decl_by_stamp(id.stamp(), shared_decl);
                     }
                 }
 
