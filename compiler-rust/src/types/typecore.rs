@@ -1184,7 +1184,6 @@ pub struct TypeCheckContext<'a> {
     delayed_unused_witnesses: Vec<DelayedUnusedCheck>,
     generated_pattern_constructors: Vec<(String, crate::types::ConstructorDescription)>,
     generated_pattern_labels: Vec<(String, crate::types::LabelDescription)>,
-    delayed_pattern_explode: i32,
     /// Current warning configuration.
     pub warning_config: WarningConfig,
     /// Current loop nesting depth for validating break/continue.
@@ -1292,7 +1291,6 @@ impl<'a> TypeCheckContext<'a> {
             delayed_unused_witnesses: Vec::new(),
             generated_pattern_constructors: Vec::new(),
             generated_pattern_labels: Vec::new(),
-            delayed_pattern_explode: 0,
             warning_config: WarningConfig::new(),
             loop_depth: 0,
             used_variables: HashMap::new(),
@@ -3745,7 +3743,6 @@ fn type_pattern_inner(
     explode: i32,
 ) -> TypeCoreResult<Pattern> {
     use crate::parser::ast::PatternDesc as PD;
-    let explode = explode.max(tctx.delayed_pattern_explode);
     let pat_env_ref = tctx.type_ctx.store_typed_env(env);
 
     let expanded_pat = maybe_expand_variant_spread_in_pattern(tctx, env, pat, expected_ty)?;
@@ -3765,12 +3762,15 @@ fn type_pattern_inner(
                         tctx.generated_pattern_labels.truncate(label_checkpoint);
                         return Err(TypeCoreError::NeedBacktrack);
                     }
-                    let next_explode =
-                        if matches!(mode, PatternMode::SplitOr | PatternMode::SplittingOr) {
-                            explode
-                        } else {
-                            explode - 1
-                        };
+                    let generated_is_or = matches!(
+                        &*tctx.arena.get_pat(generated).ppat_desc,
+                        crate::parser::ast::PatternDesc::Ppat_or(_, _)
+                    );
+                    let next_explode = if generated_is_or {
+                        explode - 5
+                    } else {
+                        explode - 1
+                    };
                     let next_mode = if mode == PatternMode::SplittingOr {
                         PatternMode::Normal
                     } else {
@@ -3862,7 +3862,7 @@ fn type_pattern_inner(
                     mode,
                     allow_existentials,
                     state,
-                    0,
+                    explode,
                 )?;
                 typed_pats.push(typed_pat);
             }
@@ -3900,7 +3900,7 @@ fn type_pattern_inner(
                 mode,
                 allow_existentials,
                 state,
-                0,
+                explode,
             )?;
 
             // Build the as-type.
@@ -3964,7 +3964,7 @@ fn type_pattern_inner(
                     PatternMode::InsideOr,
                     allow_existentials,
                     state,
-                    0,
+                    explode,
                 ) {
                     Ok(pat) => Some(pat),
                     Err(err) if is_need_backtrack(&err) => None,
@@ -3992,7 +3992,7 @@ fn type_pattern_inner(
                     PatternMode::InsideOr,
                     allow_existentials,
                     state,
-                    0,
+                    explode,
                 ) {
                     Ok(pat) => Some(pat),
                     Err(err) if is_need_backtrack(&err) => None,
@@ -4061,7 +4061,7 @@ fn type_pattern_inner(
                         split_mode,
                         allow_existentials,
                         state,
-                        0,
+                        explode,
                     ) {
                         Ok(pat) => Ok(pat),
                         Err(err) if !is_need_backtrack(&err) => {
@@ -4075,7 +4075,7 @@ fn type_pattern_inner(
                                 split_mode,
                                 allow_existentials,
                                 state,
-                                0,
+                                explode,
                             )
                         }
                         Err(err) => Err(err),
@@ -4101,7 +4101,7 @@ fn type_pattern_inner(
                     mode,
                     allow_existentials,
                     state,
-                    0,
+                    explode,
                 )?;
                 typed_pats.push(typed_pat);
             }
@@ -4127,6 +4127,7 @@ fn type_pattern_inner(
                 mode,
                 allow_existentials,
                 state,
+                explode,
                 pat,
             )
         }
@@ -4144,6 +4145,7 @@ fn type_pattern_inner(
                 mode,
                 allow_existentials,
                 state,
+                explode,
                 pat,
             )
         }
@@ -4161,6 +4163,7 @@ fn type_pattern_inner(
                 mode,
                 allow_existentials,
                 state,
+                explode,
                 pat,
             )
         }
@@ -4186,6 +4189,7 @@ fn type_pattern_inner(
                     mode,
                     allow_existentials,
                     state,
+                    explode,
                     pat,
                 )
             } else {
@@ -4199,6 +4203,7 @@ fn type_pattern_inner(
                     mode,
                     allow_existentials,
                     state,
+                    explode,
                     pat,
                 )
             }
@@ -4213,7 +4218,17 @@ fn type_pattern_inner(
         PD::Ppat_exception(inner_pat_idx) => {
             // Exception pattern
             let inner_pat = tctx.arena.get_pat(*inner_pat_idx);
-            type_pattern_exception(tctx, env, loc, inner_pat, expected_ty, mode, state, pat)
+            type_pattern_exception(
+                tctx,
+                env,
+                loc,
+                inner_pat,
+                expected_ty,
+                mode,
+                state,
+                explode,
+                pat,
+            )
         }
 
         PD::Ppat_open(mod_lid, inner_pat_idx) => {
@@ -4229,6 +4244,7 @@ fn type_pattern_inner(
                 mode,
                 allow_existentials,
                 state,
+                explode,
                 pat,
             )
         }
@@ -4863,6 +4879,7 @@ fn type_pattern_construct(
     mode: PatternMode,
     allow_existentials: bool,
     state: &mut PatternState,
+    explode: i32,
     pat: &ParsedPattern,
 ) -> TypeCoreResult<Pattern> {
     let ctx = tctx.type_ctx;
@@ -5100,7 +5117,7 @@ fn type_pattern_construct(
                 mode,
                 allow_existentials,
                 state,
-                0,
+                explode,
             )?;
             vec![typed_arg]
         }
@@ -5119,7 +5136,7 @@ fn type_pattern_construct(
                             mode,
                             allow_existentials,
                             state,
-                            0,
+                            explode,
                         )?;
                         args.push(typed_arg);
                     }
@@ -5136,7 +5153,7 @@ fn type_pattern_construct(
                         mode,
                         allow_existentials,
                         state,
-                        0,
+                        explode,
                     )?;
                     match &typed_tuple.pat_desc {
                         PatternDesc::Tpat_tuple(elements) => elements.clone(),
@@ -5179,7 +5196,7 @@ fn type_pattern_construct(
                 mode,
                 allow_existentials,
                 state,
-                0,
+                explode,
             )?;
             vec![typed_arg]
         }
@@ -5234,6 +5251,7 @@ fn type_pattern_variant(
     mode: PatternMode,
     allow_existentials: bool,
     state: &mut PatternState,
+    explode: i32,
     pat: &ParsedPattern,
 ) -> TypeCoreResult<Pattern> {
     use crate::types::typedtree::RowDescRef;
@@ -5276,7 +5294,7 @@ fn type_pattern_variant(
             mode,
             allow_existentials,
             state,
-            0,
+            explode,
         )?)),
         _ => None,
     };
@@ -5338,6 +5356,7 @@ fn type_pattern_record(
     mode: PatternMode,
     allow_existentials: bool,
     state: &mut PatternState,
+    explode: i32,
     pat: &ParsedPattern,
 ) -> TypeCoreResult<Pattern> {
     let ctx = tctx.type_ctx;
@@ -5559,7 +5578,7 @@ fn type_pattern_record(
                 mode,
                 allow_existentials,
                 state,
-                0,
+                explode,
             )?;
             // Wrap in Tpat_construct("Some", [typed_inner]) with type option<T>
             let some_lid = Located {
@@ -5583,7 +5602,7 @@ fn type_pattern_record(
                 mode,
                 allow_existentials,
                 state,
-                0,
+                explode,
             )?
         };
         if force_label_arg_paths {
@@ -6339,6 +6358,7 @@ fn type_pattern_constraint(
     mode: PatternMode,
     allow_existentials: bool,
     state: &mut PatternState,
+    explode: i32,
     pat: &ParsedPattern,
 ) -> TypeCoreResult<Pattern> {
     let ctx = tctx.type_ctx;
@@ -6365,7 +6385,7 @@ fn type_pattern_constraint(
         mode,
         allow_existentials,
         state,
-        0,
+        explode,
     )?;
     // OCaml compiler/ml/typecore.ml:1650-1664 stores the force returned by
     // Typetexp.transl_simple_type_delayed only after the inner pattern is
@@ -6434,6 +6454,7 @@ fn type_pattern_constraint_poly_var(
     _mode: PatternMode,
     _allow_existentials: bool,
     state: &mut PatternState,
+    _explode: i32,
     pat: &ParsedPattern,
 ) -> TypeCoreResult<Pattern> {
     let ctx = tctx.type_ctx;
@@ -6508,6 +6529,7 @@ fn type_pattern_constraint_poly_var(
                 _mode,
                 _allow_existentials,
                 state,
+                _explode,
                 pat,
             )
         }
@@ -6593,6 +6615,7 @@ fn type_pattern_exception(
     _expected_ty: TypeExprRef,
     _mode: PatternMode,
     _state: &mut PatternState,
+    _explode: i32,
     _pat: &ParsedPattern,
 ) -> TypeCoreResult<Pattern> {
     Err(TypeCoreError::ExceptionPatternBelowToplevel { loc })
@@ -6610,6 +6633,7 @@ fn type_pattern_open(
     mode: PatternMode,
     allow_existentials: bool,
     state: &mut PatternState,
+    explode: i32,
     pat: &ParsedPattern,
 ) -> TypeCoreResult<Pattern> {
     // For now, just type check the inner pattern without opening the module
@@ -6622,7 +6646,7 @@ fn type_pattern_open(
         mode,
         allow_existentials,
         state,
-        0,
+        explode,
     )?;
 
     // Create the open pattern
@@ -12102,8 +12126,6 @@ fn retype_unused_witnesses(tctx: &mut TypeCheckContext<'_>, check: DelayedUnused
         let warning_len = tctx.warnings.len();
         let diagnostic_len = tctx.diagnostics.len();
         let mut state = PatternState::new();
-        let old_explode = tctx.delayed_pattern_explode;
-        tctx.delayed_pattern_explode = 5;
         let _ = type_pattern_with_existentials_at_level(
             tctx,
             &check.env,
@@ -12115,7 +12137,6 @@ fn retype_unused_witnesses(tctx: &mut TypeCheckContext<'_>, check: DelayedUnused
             check.level,
             5,
         );
-        tctx.delayed_pattern_explode = old_explode;
         tctx.type_ctx.restore_type_state(type_snapshot);
         tctx.unify_state.restore_backtrack_state(unify_snapshot);
         tctx.warnings.truncate(warning_len);
@@ -13857,6 +13878,25 @@ fn pressure_matrix_row_of_pat<'a>(
     row
 }
 
+fn pressure_matrix_is_absent_pat(
+    tctx: &mut TypeCheckContext<'_>,
+    env: &Env,
+    pattern: &Pattern,
+) -> bool {
+    let PatternDesc::Tpat_variant(label, _, _) = &pattern.pat_desc else {
+        return false;
+    };
+    pressure_matrix_row_of_pat(tctx, env, pattern).is_some_and(|row| {
+        row.row_fields.iter().any(|(candidate, field)| {
+            candidate == label
+                && matches!(
+                    crate::types::btype::row_field_repr(tctx.type_ctx, field),
+                    crate::types::type_expr::RowField::Rabsent
+                )
+        })
+    })
+}
+
 fn pressure_matrix_close_variant_type(tctx: &mut TypeCheckContext<'_>, env: &Env, ty: TypeExprRef) {
     let ctx = tctx.type_ctx;
     let expanded = crate::types::ctype::expand_head(ctx, env, ty);
@@ -14139,6 +14179,9 @@ fn pressure_matrix_satisfiables(
             let for_constructors = |tctx: &mut TypeCheckContext<'_>| {
                 let mut witnesses = Vec::new();
                 for (pattern, matrix) in &branches {
+                    if pressure_matrix_is_absent_pat(tctx, env, pattern) {
+                        continue;
+                    }
                     let mut specialized_query =
                         pressure_matrix_simple_match_args(pattern, &pressure_matrix_omega_pat());
                     specialized_query.extend_from_slice(tail);
