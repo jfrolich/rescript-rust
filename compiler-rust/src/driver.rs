@@ -11885,7 +11885,11 @@ pub fn compile_source_to_js_with_options(
         jsx_preserve,
         options,
         options.output_path.as_deref(),
-        std::sync::Arc::new(parser.arena().source_file_names()),
+        if options.source_map == crate::js_ir::source_map::SourceMapMode::None {
+            std::sync::Arc::new(std::collections::HashMap::new())
+        } else {
+            std::sync::Arc::new(parser.arena().source_file_names())
+        },
     );
     if let Some(output_path) = options.output_path.as_deref() {
         let map_path = PathBuf::from(format!("{}.map", output_path.display()));
@@ -15289,7 +15293,11 @@ pub fn compile_preprocessed_structure_in_process_until_js(
         signature: published_signature,
         pers_struct,
         new_alias_rewrites,
-        source_file_names: std::sync::Arc::new(arena.source_file_names()),
+        source_file_names: if options.source_map == crate::js_ir::source_map::SourceMapMode::None {
+            std::sync::Arc::new(std::collections::HashMap::new())
+        } else {
+            std::sync::Arc::new(arena.source_file_names())
+        },
         typed_tree_sexp,
         raw_lambda_sexp,
         lambda_sexp,
