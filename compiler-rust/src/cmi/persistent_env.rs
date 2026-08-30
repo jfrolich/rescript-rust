@@ -1074,7 +1074,7 @@ impl PersistentEnv {
             if self.hidden_modules.contains(&portable_key) {
                 return None;
             }
-            let ps = Arc::new(portable_types::internalize_pers_struct(&portable, ctx));
+            let ps = Arc::new(portable_types::internalize_pers_struct(portable, ctx));
             let module_path = Path::Pident(Ident::create_persistent(&portable_key));
             let effective_module_path = self
                 .alias_prefix_rewrites

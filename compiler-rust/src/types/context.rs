@@ -416,6 +416,8 @@ pub struct TypeContext {
     /// copied signatures separate from `raw_module_sigs`; typechecking lookup
     /// paths expect the normal component/rename caches, not this CMT view.
     gentype_raw_module_sigs: RefCell<ahash::AHashMap<String, Arc<super::decl::Signature>>>,
+    gentype_portable_raw_module_sigs:
+        RefCell<ahash::AHashMap<String, Arc<crate::cmi::portable_types::PortablePersStruct>>>,
 
     /// Raw signatures loaded only for persistent component lookup.
     ///
@@ -576,6 +578,7 @@ impl TypeContext {
             renamed_module_sigs: RefCell::new(ahash::AHashMap::new()),
             raw_module_sigs: RefCell::new(ahash::AHashMap::new()),
             gentype_raw_module_sigs: RefCell::new(ahash::AHashMap::new()),
+            gentype_portable_raw_module_sigs: RefCell::new(ahash::AHashMap::new()),
             raw_component_module_sigs: RefCell::new(ahash::AHashMap::new()),
             cmi_longident_names: RefCell::new(ahash::AHashMap::new()),
             arena_longident_names: RefCell::new(ahash::AHashMap::new()),
@@ -2295,11 +2298,34 @@ impl TypeContext {
             .insert(name.to_string(), sig);
     }
 
+    pub(crate) fn register_gentype_portable_raw_module_sig(
+        &self,
+        name: &str,
+        pers_struct: Arc<crate::cmi::portable_types::PortablePersStruct>,
+    ) {
+        self.gentype_portable_raw_module_sigs
+            .borrow_mut()
+            .insert(name.to_string(), pers_struct);
+    }
+
     pub(crate) fn get_gentype_raw_module_sig(
         &self,
         name: &str,
     ) -> Option<Arc<super::decl::Signature>> {
-        self.gentype_raw_module_sigs.borrow().get(name).cloned()
+        if let Some(sig) = self.gentype_raw_module_sigs.borrow().get(name).cloned() {
+            return Some(sig);
+        }
+        let portable = self
+            .gentype_portable_raw_module_sigs
+            .borrow_mut()
+            .remove(name)?;
+        let sig = Arc::new(crate::cmi::portable_types::internalize_raw_signature(
+            &portable, self,
+        )?);
+        self.gentype_raw_module_sigs
+            .borrow_mut()
+            .insert(name.to_string(), sig.clone());
+        Some(sig)
     }
 
     pub fn has_raw_module_sig(&self, name: &str) -> bool {

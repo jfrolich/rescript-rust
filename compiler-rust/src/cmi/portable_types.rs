@@ -903,13 +903,12 @@ impl<'a> TypeGraphSerializer<'a> {
 
 /// Load a PortablePersStruct into the current TypeContext, producing a PersStruct
 /// with valid TypeExprRefs.
-pub fn internalize_pers_struct(pps: &PortablePersStruct, ctx: &TypeContext) -> PersStruct {
+pub fn internalize_pers_struct(pps: Arc<PortablePersStruct>, ctx: &TypeContext) -> PersStruct {
     ctx.import_cmi_longident_names(&pps.cmi_longident_names);
 
     let sig = internalize_signature(&pps.ps_sig, &pps.type_graph, ctx);
-    if let (Some(raw_ps_sig), Some(raw_type_graph)) = (&pps.raw_ps_sig, &pps.raw_type_graph) {
-        let raw_sig = internalize_signature(raw_ps_sig, raw_type_graph, ctx);
-        ctx.register_gentype_raw_module_sig(&pps.ps_name, Arc::new(raw_sig));
+    if pps.raw_ps_sig.is_some() && pps.raw_type_graph.is_some() {
+        ctx.register_gentype_portable_raw_module_sig(&pps.ps_name, pps.clone());
     }
 
     PersStruct {
@@ -917,6 +916,17 @@ pub fn internalize_pers_struct(pps: &PortablePersStruct, ctx: &TypeContext) -> P
         ps_sig: Arc::new(sig),
         ps_filename: pps.ps_filename.clone(),
     }
+}
+
+pub(crate) fn internalize_raw_signature(
+    pps: &PortablePersStruct,
+    ctx: &TypeContext,
+) -> Option<Signature> {
+    Some(internalize_signature(
+        pps.raw_ps_sig.as_ref()?,
+        pps.raw_type_graph.as_ref()?,
+        ctx,
+    ))
 }
 
 fn internalize_signature(
