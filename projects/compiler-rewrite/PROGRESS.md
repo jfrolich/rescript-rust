@@ -25,10 +25,10 @@ The Rust compiler now matches the current OCaml compiler across the complete can
 - Diagnostics parity: **1431/1431**
 - Compiler tests: **1195 passed**, with no failures
 - Rewatch tests: **149 passed**, with no failures
-- Current v13-migrated Tella checkout: **3248 modules compiled** using release rewatch `--in-process`
-- Pinned external output-parity corpus: **2127/2127** generated JavaScript outputs matched
+- v13-migrated Tella checkout at `66a5edabdbfdbc5dd7496e59ee0573de2a2a1ffa`: **3248 modules compiled** using release rewatch `--in-process`
+- Checked-in parser corpus: **1231/1231** semantic/post-PPX and binary AST parity with `./scripts/test_parser_ast_parity.sh`
 
-The parser remains semantically exact over the 3,567-file corpus (including PPX and Spice checks). The remaining parser debt is Marshal object-identity allocation parity for binary AST output after recent upstream parser/PPX allocation changes; expected AST structure and locations remain exact.
+External parser runs are opt-in and require `TELLA_REVISION=<exact commit> --with-external`; the checked-in parser baseline remains read-only unless `--update-baseline` is explicit.
 
 ### Milestone: 100% Binary AST Parity (January 2026)
 

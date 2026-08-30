@@ -8,7 +8,7 @@
 Make clean in-process builds fast enough for large real projects, with Tella as the active benchmark target. The hard target is a clean parallel in-process compile of the Tella repo below 1s while preserving:
 
 - `bsc` subprocess path support
-- 100% codegen parity, measured as JavaScript output parity on the 660-file test corpus
+- 100% codegen parity, currently measured on the 610-file test corpus
 - 100% canonical typedtree parity on the test corpus
 - successful Tella compilation with the configured runtime and project output extension
 
@@ -18,7 +18,7 @@ Make clean in-process builds fast enough for large real projects, with Tella as 
 - [x] Keep a Tella module-timing run for every serious candidate to identify the slow non-Icon files.
 - [x] Validate retained compiler changes with JS output parity and canonical typedtree parity.
 - [ ] Commit each retained improvement atomically with the benchmark and parity result in the commit message.
-- [ ] Revert candidates that regress the 660-file parity gates or Tella `hyperfine` baseline.
+- [ ] Revert candidates that regress the current 610-file parity gates or Tella `hyperfine` baseline.
 
 ## Top 10 Improvements Checklist
 
