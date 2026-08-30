@@ -781,7 +781,9 @@ pub fn build(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use fs2::FileExt;
     use std::fs;
+    use std::fs::OpenOptions;
     use std::process;
     use std::sync::mpsc;
     use std::thread;
@@ -831,6 +833,16 @@ mod tests {
         let build_lock_path = lib_dir.join(LockKind::Build.file_name());
         fs::create_dir_all(&lib_dir).expect("lib directory should be created");
         fs::write(&build_lock_path, process::id().to_string()).expect("lockfile should be written");
+        let active_guard = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(lib_dir.join(".build.lock.guard"))
+            .expect("guard file should open");
+        active_guard
+            .lock_exclusive()
+            .expect("active build should hold advisory lock");
 
         let (sender, receiver) = mpsc::channel();
         let build_project_folder = project_folder.clone();
@@ -859,6 +871,7 @@ mod tests {
             "build should wait for build.lock before running initialization"
         );
 
+        drop(active_guard);
         fs::remove_file(&build_lock_path).expect("lockfile should be removed");
         assert!(
             receiver
