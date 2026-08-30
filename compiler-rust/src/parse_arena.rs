@@ -917,7 +917,7 @@ impl Default for ParseArena {
             locations: Arena::default(),
             longidents,
             synthetic_longidents: elsa::sync::FrozenVec::new(),
-            synthetic_longident_base: 0,
+            synthetic_longident_base: u32::MAX,
             arities,
             expressions: Arena::default(),
             expr_fun_defaults: Vec::new(),
@@ -936,9 +936,9 @@ impl Default for ParseArena {
             expr_coerce_from_types: Vec::new(),
             patterns: Arena::default(),
             synthetic_patterns: elsa::sync::FrozenVec::new(),
-            synthetic_pattern_base: 0,
+            synthetic_pattern_base: u32::MAX,
             synthetic_strings: elsa::sync::FrozenVec::new(),
-            synthetic_string_base: 0,
+            synthetic_string_base: u32::MAX,
             core_types,
             mod_exprs: Arena::default(),
             mod_types: Arena::default(),
@@ -1631,7 +1631,7 @@ impl ParseArena {
     /// Look up a longident by index.
     pub fn get_longident(&self, idx: LidentIdx) -> &Longident {
         let raw = idx.to_u32();
-        if raw < self.synthetic_longident_base || self.synthetic_longidents.is_empty() {
+        if raw < self.synthetic_longident_base {
             self.longidents.get(idx)
         } else {
             self.synthetic_longidents
@@ -1952,7 +1952,7 @@ impl ParseArena {
     /// Get the string content for a StrIdx.
     pub fn get_string(&self, idx: StrIdx) -> &str {
         let raw = idx.raw();
-        if raw < self.synthetic_string_base || self.synthetic_strings.is_empty() {
+        if raw < self.synthetic_string_base {
             self.strings.get(idx)
         } else {
             self.synthetic_strings
@@ -2814,7 +2814,7 @@ impl ParseArena {
     #[inline]
     pub fn get_pat(&self, idx: PatIdx) -> &Pattern {
         let raw = idx.to_u32();
-        if raw < self.synthetic_pattern_base || self.synthetic_patterns.is_empty() {
+        if raw < self.synthetic_pattern_base {
             self.patterns.get(idx)
         } else {
             self.synthetic_patterns
