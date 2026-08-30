@@ -11885,6 +11885,7 @@ pub fn compile_source_to_js_with_options(
         jsx_preserve,
         options,
         options.output_path.as_deref(),
+        std::sync::Arc::new(parser.arena().source_file_names()),
     );
     if let Some(output_path) = options.output_path.as_deref() {
         let map_path = PathBuf::from(format!("{}.map", output_path.display()));
@@ -14461,6 +14462,7 @@ pub struct InProcessPreJsCompileResult {
     pub signature: crate::types::decl::Signature,
     pub pers_struct: Option<PortablePersStruct>,
     pub new_alias_rewrites: ahash::AHashMap<String, crate::types::path::Path>,
+    pub source_file_names: std::sync::Arc<std::collections::HashMap<crate::intern::StrIdx, String>>,
     /// Intermediate-representation sexps, populated when
     /// `CompilerOptions::capture_intermediates` is true (for the playground).
     pub typed_tree_sexp: String,
@@ -14686,6 +14688,7 @@ fn render_js_program(
     jsx_preserve: bool,
     options: &CompilerOptions,
     output_path: Option<&FsPath>,
+    source_file_names: std::sync::Arc<std::collections::HashMap<crate::intern::StrIdx, String>>,
 ) -> (String, Option<String>) {
     let source_path = options.source_filename.as_deref().map(FsPath::new);
     let source_map_target = output_path.map(FsPath::to_path_buf).or_else(|| {
@@ -14707,6 +14710,7 @@ fn render_js_program(
             options.source_map,
             options.source_map_sources_content,
             &options.source_map_root,
+            source_file_names,
         )
     } else {
         (
@@ -15285,6 +15289,7 @@ pub fn compile_preprocessed_structure_in_process_until_js(
         signature: published_signature,
         pers_struct,
         new_alias_rewrites,
+        source_file_names: std::sync::Arc::new(arena.source_file_names()),
         typed_tree_sexp,
         raw_lambda_sexp,
         lambda_sexp,
@@ -15439,6 +15444,7 @@ pub fn finish_preprocessed_structure_in_process_from_js_boundary_with_metadata_h
                 pre_js.jsx_preserve,
                 options,
                 primary_path.as_deref(),
+                pre_js.source_file_names.clone(),
             );
             let mut js_outputs = Vec::new();
             let js = if let Some(path) = primary_path {
@@ -15466,6 +15472,7 @@ pub fn finish_preprocessed_structure_in_process_from_js_boundary_with_metadata_h
                     pre_js.jsx_preserve,
                     options,
                     Some(&path),
+                    pre_js.source_file_names.clone(),
                 );
                 crate::js_ir::dispose_deps_program_nonrecursive(program);
                 js_outputs.push(JsOutput {

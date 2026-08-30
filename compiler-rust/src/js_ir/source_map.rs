@@ -1,8 +1,10 @@
 //! Source Map v3 generation, ported from `compiler/core/js_source_map.ml`.
 
+use crate::intern::StrIdx;
 use crate::location::Location;
 use std::collections::HashMap;
 use std::path::{Component, Path, PathBuf};
+use std::sync::Arc;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum SourceMapMode {
@@ -35,6 +37,7 @@ pub struct SourceMapBuilder {
     source_root: String,
     sources_content: bool,
     default_source: PathBuf,
+    source_file_names: Arc<HashMap<StrIdx, String>>,
     sources: HashMap<PathBuf, usize>,
     source_list: Vec<Source>,
     mappings: Vec<Mapping>,
@@ -61,6 +64,7 @@ impl SourceMapBuilder {
             source_root,
             sources_content,
             default_source: default_source.to_path_buf(),
+            source_file_names: Arc::new(HashMap::new()),
             sources: HashMap::new(),
             source_list: Vec::new(),
             mappings: Vec::new(),
@@ -68,8 +72,23 @@ impl SourceMapBuilder {
         }
     }
 
-    fn add_source(&mut self) -> (usize, Option<&str>) {
-        let filename = absolute_path(&self.default_source);
+    pub fn with_source_file_names(
+        mut self,
+        source_file_names: Arc<HashMap<StrIdx, String>>,
+    ) -> Self {
+        self.source_file_names = source_file_names;
+        self
+    }
+
+    fn add_source(&mut self, source_file_name: StrIdx) -> (usize, Option<&str>) {
+        let source_file = self
+            .source_file_names
+            .get(&source_file_name)
+            .map(String::as_str)
+            .filter(|name| !name.is_empty() && *name != "_none_")
+            .map(Path::new)
+            .unwrap_or(&self.default_source);
+        let filename = absolute_path(source_file);
         if let Some(&index) = self.sources.get(&filename) {
             return (index, self.source_list[index].content.as_deref());
         }
@@ -91,7 +110,7 @@ impl SourceMapBuilder {
         if self.last_generated == Some((generated_line, generated_column)) {
             return;
         }
-        let (source_index, content) = self.add_source();
+        let (source_index, content) = self.add_source(loc.loc_start.file_name);
         let original_line = loc.loc_start.line.saturating_sub(1).max(0) as usize;
         let original_column = match content {
             Some(content) => utf16_units_in_utf8_slice(
@@ -166,8 +185,17 @@ impl SourceMapBuilder {
     }
 }
 
+fn has_windows_drive(path: &Path) -> bool {
+    let rendered = path.to_string_lossy();
+    rendered.as_bytes().get(1) == Some(&b':')
+        && rendered
+            .as_bytes()
+            .first()
+            .is_some_and(u8::is_ascii_alphabetic)
+}
+
 fn absolute_path(path: &Path) -> PathBuf {
-    if path.is_absolute() {
+    if path.is_absolute() || has_windows_drive(path) {
         path.to_path_buf()
     } else {
         std::env::current_dir().unwrap_or_default().join(path)
@@ -188,9 +216,28 @@ fn normalized_parts(path: &Path) -> Vec<String> {
         .collect()
 }
 
+fn drive_root(parts: &[String]) -> Option<String> {
+    parts
+        .first()
+        .filter(|part| part.len() == 2 && part.ends_with(':'))
+        .map(|part| part.to_ascii_uppercase())
+}
+
+fn slash_normalized(path: &Path) -> String {
+    path.to_string_lossy().replace('\\', "/")
+}
+
 fn relative_path(from_dir: &Path, to_file: &Path) -> String {
-    let from = normalized_parts(from_dir);
-    let to = normalized_parts(to_file);
+    let from = normalized_parts(&absolute_path(from_dir));
+    let to_absolute = absolute_path(to_file);
+    let to = normalized_parts(&to_absolute);
+    match (drive_root(&from), drive_root(&to)) {
+        (Some(from_drive), Some(to_drive)) if from_drive != to_drive => {
+            return slash_normalized(&to_absolute);
+        }
+        (Some(_), None) | (None, Some(_)) => return slash_normalized(&to_absolute),
+        _ => {}
+    }
     let common = from.iter().zip(&to).take_while(|(a, b)| a == b).count();
     let mut parts = vec!["..".to_string(); from.len().saturating_sub(common)];
     parts.extend(to.into_iter().skip(common));
@@ -342,6 +389,52 @@ mod tests {
                 original_column: 0
             }]),
             "AAAA"
+        );
+    }
+
+    #[test]
+    fn records_the_source_file_from_each_mapping() {
+        use crate::location::Position;
+
+        let first = StrIdx(1);
+        let second = StrIdx(2);
+        let source_file_names = Arc::new(HashMap::from([
+            (first, "/project/src/first.res".to_string()),
+            (second, "/project/generated/second.res".to_string()),
+        ]));
+        let mut builder = SourceMapBuilder::new(
+            Path::new("/project/lib/app.js"),
+            Path::new("/project/src/default.res"),
+            String::new(),
+            false,
+        )
+        .with_source_file_names(source_file_names);
+        builder.add_mapping(
+            0,
+            0,
+            &Location::from_positions(Position::new(first, 1, 0, 0), Position::new(first, 1, 0, 1)),
+        );
+        builder.add_mapping(
+            1,
+            0,
+            &Location::from_positions(
+                Position::new(second, 1, 0, 0),
+                Position::new(second, 1, 0, 1),
+            ),
+        );
+
+        let json: serde_json::Value = serde_json::from_str(&builder.json()).unwrap();
+        assert_eq!(
+            json["sources"],
+            serde_json::json!(["../src/first.res", "../generated/second.res"])
+        );
+    }
+
+    #[test]
+    fn keeps_cross_drive_windows_source_paths_absolute() {
+        assert_eq!(
+            relative_path(Path::new("C:/project/lib"), Path::new("D:/src/input.res")),
+            "D:/src/input.res"
         );
     }
 }

@@ -1952,6 +1952,17 @@ impl ParseArena {
         }
     }
 
+    /// File names referenced by source positions in this arena.
+    pub fn source_file_names(&self) -> HashMap<StrIdx, String> {
+        let mut names = HashMap::new();
+        for (_, position) in self.positions.iter() {
+            names
+                .entry(position.file_name)
+                .or_insert_with(|| self.get_string(position.file_name).to_string());
+        }
+        names
+    }
+
     /// Number of strings currently stored in the arena string table.
     pub fn string_count(&self) -> usize {
         self.strings.len()

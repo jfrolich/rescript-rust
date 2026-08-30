@@ -13,7 +13,10 @@ use super::{
 };
 use crate::binary_ast::ppx::{JsStmtClassification, classify_js_stmt};
 use crate::ident::Ident;
+use crate::intern::StrIdx;
+use std::collections::HashMap;
 use std::path::Path;
+use std::sync::Arc;
 
 impl JsPrinter {
     /// Print a program
@@ -376,6 +379,7 @@ pub fn print_deps_program_with_source_map(
     mode: SourceMapMode,
     sources_content: bool,
     source_root: &str,
+    source_file_names: Arc<HashMap<StrIdx, String>>,
 ) -> (String, Option<String>) {
     let capacity = estimated_block_output_capacity(
         program.program.block.len(),
@@ -390,12 +394,15 @@ pub fn print_deps_program_with_source_map(
         jsx_preserve,
         capacity,
     );
-    printer.set_source_map_builder(SourceMapBuilder::new(
-        target_file,
-        source_file,
-        source_root.to_string(),
-        sources_content,
-    ));
+    printer.set_source_map_builder(
+        SourceMapBuilder::new(
+            target_file,
+            source_file,
+            source_root.to_string(),
+            sources_content,
+        )
+        .with_source_file_names(source_file_names),
+    );
     printer.print_deps_program_with_directives_and_options(program, directives, emit_header);
     let json = printer
         .take_source_map_builder()
