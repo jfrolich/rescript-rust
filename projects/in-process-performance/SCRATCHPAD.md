@@ -4,6 +4,9 @@ This file is for transient measurements, hypotheses, rejected experiments, and s
 
 ## Current Retained Baseline
 
+- The updated Tella corpus has grown to 3,248 compiled modules. Before the current candidate, release in-process builds measured `15.686s +/- 0.118s` over 5 runs, range `15.581s..15.887s`.
+- Module timing identified one dominant regression: the 12,875-line `Layout__Types` module took `13.228s` wall / `12.549s` typecheck because every `TypeContext::variant_layout` lookup cloned its hundreds-entry constructor layout.
+- A first candidate stored layouts behind `Arc` and reduced `Layout__Types` to `509.8ms` wall / `310.1ms` typecheck, but it was replaced to avoid reference counting in the per-compilation arena. The retained design reads layouts through a scoped callback. After converting typecheck and raw-Lambda hot callers, three module-timing runs averaged `642.6ms` wall / `371.2ms` typecheck / `200.7ms` Lambda, a 20.6x module-wall and 33.8x typecheck improvement over the profiled baseline. Full-corpus timing is temporarily blocked by the updated Tella source expecting newer Spice-generated aliases than the current source-built compiler provides (`Schema__EditorEvents` references missing `Story.event_encode`).
 - Latest retained change: share stored persistent alias component views in normal in-process mode.
 - Tella `hyperfine`: `2.488s +/- 0.014s` over 12 runs, range `2.457s..2.510s` after rebuilding both release artifacts from current HEAD (`2ffafbcd0`)
 - Previous same-change retained measurement: `2.494s +/- 0.027s` over 12 runs, range `2.471s..2.556s`

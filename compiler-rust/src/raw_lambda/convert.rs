@@ -103,10 +103,11 @@ fn raw_constructor_constant(
     let comment = if constructor_has_optional_shape(cstr) {
         PointerInfo::ShapeNone
     } else {
-        let layout = match cstr.cstr_kind {
-            crate::types::ConstructorKind::Ordinary(reference) => {
-                ctx.variant_layout(reference.variant)
-            }
+        let (num_constants, num_blocks) = match cstr.cstr_kind {
+            crate::types::ConstructorKind::Ordinary(reference) => ctx
+                .with_variant_layout(reference.variant, |layout| {
+                    (layout.num_constants(), layout.num_blocks())
+                }),
             crate::types::ConstructorKind::Extension(_) => unreachable!(),
         };
         let runtime_tag = match cstr.cstr_kind {
@@ -124,8 +125,8 @@ fn raw_constructor_constant(
         };
         PointerInfo::Constructor(PointerConstructorTag {
             name: cstr.cstr_name.clone(),
-            const_: layout.num_constants() as i32,
-            non_const: layout.num_blocks() as i32,
+            const_: num_constants as i32,
+            non_const: num_blocks as i32,
             runtime_tag,
         })
     };
@@ -3525,14 +3526,19 @@ impl<'a> RawLambdaConverter<'a> {
                     crate::types::ConstructorKind::Ordinary(reference) => reference,
                     crate::types::ConstructorKind::Extension(_) => unreachable!(),
                 };
-                let layout = self.type_ctx.variant_layout(reference.variant);
-                let runtime = match &layout.constructors[reference.position] {
-                    crate::types::VariantConstructorCase::Block(block) => block.runtime.clone(),
-                    crate::types::VariantConstructorCase::Constant(_) => {
-                        unreachable!("payload constructor has constant layout")
-                    }
-                };
-                let num_nonconst = layout.num_blocks() as i32;
+                let (runtime, num_nonconst) =
+                    self.type_ctx
+                        .with_variant_layout(reference.variant, |layout| {
+                            let runtime = match &layout.constructors[reference.position] {
+                                crate::types::VariantConstructorCase::Block(block) => {
+                                    block.runtime.clone()
+                                }
+                                crate::types::VariantConstructorCase::Constant(_) => {
+                                    unreachable!("payload constructor has constant layout")
+                                }
+                            };
+                            (runtime, layout.num_blocks() as i32)
+                        });
                 TagInfo::Constructor {
                     name: cstr.cstr_name.clone(),
                     num_nonconst,
@@ -3607,10 +3613,9 @@ impl<'a> RawLambdaConverter<'a> {
                     if block.runtime.untagged
                         && self
                             .type_ctx
-                            .variant_layout(reference.variant)
-                            .constructors
-                            .len()
-                            == 1 =>
+                            .with_variant_layout(reference.variant, |layout| {
+                                layout.constructors.len() == 1
+                            }) =>
                 {
                     match args {
                         [arg] => self.convert_expr_raw(arg),
@@ -7122,9 +7127,9 @@ impl<'a> RawLambdaConverter<'a> {
                     crate::types::ConstructorKind::Ordinary(reference) => {
                         Some(crate::lambda::SwitchDispatch::Variant(
                             self.type_ctx
-                                .variant_layout(reference.variant)
-                                .matching_facts
-                                .clone(),
+                                .with_variant_layout(reference.variant, |layout| {
+                                    layout.matching_facts.clone()
+                                }),
                         ))
                     }
                     crate::types::ConstructorKind::Extension(_) => None,
@@ -8571,27 +8576,28 @@ impl<'a> RawLambdaConverter<'a> {
                 if sig_complete && !has_guards {
                     // OCaml's mk_failaction_pos: fill missing tags with exit to default,
                     // wrap default body in catch handler (like mk_failaction_pos does).
-                    let has_missing = if let Some(cstr) = &repr_cstr {
-                        let reference = match cstr.cstr_kind {
-                            crate::types::ConstructorKind::Ordinary(reference) => reference,
-                            crate::types::ConstructorKind::Extension(_) => unreachable!(),
+                    let has_missing =
+                        if let Some(cstr) = &repr_cstr {
+                            let reference = match cstr.cstr_kind {
+                                crate::types::ConstructorKind::Ordinary(reference) => reference,
+                                crate::types::ConstructorKind::Extension(_) => unreachable!(),
+                            };
+                            self.type_ctx
+                                .with_variant_layout(reference.variant, |layout| {
+                                    layout.constructors.iter().enumerate().any(
+                                        |(position, case)| match case {
+                                            crate::types::VariantConstructorCase::Constant(_) => {
+                                                !seen_const_tags.contains(&(position as i32))
+                                            }
+                                            crate::types::VariantConstructorCase::Block(_) => {
+                                                !seen_block_tags.contains(&(position as i32))
+                                            }
+                                        },
+                                    )
+                                })
+                        } else {
+                            false
                         };
-                        self.type_ctx
-                            .variant_layout(reference.variant)
-                            .constructors
-                            .iter()
-                            .enumerate()
-                            .any(|(position, case)| match case {
-                                crate::types::VariantConstructorCase::Constant(_) => {
-                                    !seen_const_tags.contains(&(position as i32))
-                                }
-                                crate::types::VariantConstructorCase::Block(_) => {
-                                    !seen_block_tags.contains(&(position as i32))
-                                }
-                            })
-                    } else {
-                        false
-                    };
 
                     if has_missing {
                         let default_exit = self.next_raise_count();
@@ -8601,28 +8607,28 @@ impl<'a> RawLambdaConverter<'a> {
                                 crate::types::ConstructorKind::Ordinary(reference) => reference,
                                 crate::types::ConstructorKind::Extension(_) => unreachable!(),
                             };
-                            for (position, case) in self
-                                .type_ctx
-                                .variant_layout(reference.variant)
-                                .constructors
-                                .iter()
-                                .enumerate()
-                            {
-                                let key = crate::lambda::SwitchKey::Constructor(case.clone());
-                                match case {
-                                    crate::types::VariantConstructorCase::Constant(_)
-                                        if !seen_const_tags.contains(&(position as i32)) =>
-                                    {
-                                        const_cases.push((key, default_raise.clone()))
+                            self.type_ctx
+                                .with_variant_layout(reference.variant, |layout| {
+                                    for (position, case) in layout.constructors.iter().enumerate() {
+                                        let key =
+                                            crate::lambda::SwitchKey::Constructor(case.clone());
+                                        match case {
+                                            crate::types::VariantConstructorCase::Constant(_)
+                                                if !seen_const_tags
+                                                    .contains(&(position as i32)) =>
+                                            {
+                                                const_cases.push((key, default_raise.clone()))
+                                            }
+                                            crate::types::VariantConstructorCase::Block(_)
+                                                if !seen_block_tags
+                                                    .contains(&(position as i32)) =>
+                                            {
+                                                block_cases.push((key, default_raise.clone()))
+                                            }
+                                            _ => {}
+                                        }
                                     }
-                                    crate::types::VariantConstructorCase::Block(_)
-                                        if !seen_block_tags.contains(&(position as i32)) =>
-                                    {
-                                        block_cases.push((key, default_raise.clone()))
-                                    }
-                                    _ => {}
-                                }
-                            }
+                                });
                         }
                         // Store the catch handler to wrap later
                         shared_bodies.push((default_exit, default_body));
@@ -8773,9 +8779,9 @@ impl<'a> RawLambdaConverter<'a> {
                 crate::types::ConstructorKind::Ordinary(reference) => {
                     Some(crate::lambda::SwitchDispatch::Variant(
                         self.type_ctx
-                            .variant_layout(reference.variant)
-                            .matching_facts
-                            .clone(),
+                            .with_variant_layout(reference.variant, |layout| {
+                                layout.matching_facts.clone()
+                            }),
                     ))
                 }
                 crate::types::ConstructorKind::Extension(_) => None,
@@ -8790,9 +8796,13 @@ impl<'a> RawLambdaConverter<'a> {
                     crate::types::ConstructorKind::Ordinary(reference) => reference,
                     crate::types::ConstructorKind::Extension(_) => unreachable!(),
                 };
-                let layout = self.type_ctx.variant_layout(reference.variant);
-                if layout.num_constants() == 1
-                    && layout.num_blocks() == 1
+                let (num_constants, num_blocks) = self
+                    .type_ctx
+                    .with_variant_layout(reference.variant, |layout| {
+                        (layout.num_constants(), layout.num_blocks())
+                    });
+                if num_constants == 1
+                    && num_blocks == 1
                     && const_cases.len() == 1
                     && block_cases.len() == 1
                     && (cstr.cstr_name == "::"
@@ -8813,8 +8823,8 @@ impl<'a> RawLambdaConverter<'a> {
                         Box::new(block_cases[0].1.clone()),
                         Box::new(const_cases[0].1.clone()),
                     )
-                } else if layout.num_constants() == 2
-                    && layout.num_blocks() == 0
+                } else if num_constants == 2
+                    && num_blocks == 0
                     && const_cases.len() == 2
                     && failaction.is_none()
                     && (cstr.cstr_name == "true" || cstr.cstr_name == "false")
@@ -8835,10 +8845,7 @@ impl<'a> RawLambdaConverter<'a> {
                         Box::new(action("true")),
                         Box::new(action("false")),
                     )
-                } else if layout.num_constants() == 0
-                    && block_cases.len() == 1
-                    && failaction.is_none()
-                {
+                } else if num_constants == 0 && block_cases.len() == 1 && failaction.is_none() {
                     block_cases[0].1.clone()
                 } else {
                     self.make_switch_with_catch_exit(
@@ -9163,9 +9170,11 @@ impl<'a> RawLambdaConverter<'a> {
                         crate::types::ConstructorKind::Ordinary(reference) => reference,
                         crate::types::ConstructorKind::Extension(_) => unreachable!(),
                     };
-                    let case = self.type_ctx.variant_layout(reference.variant).constructors
-                        [tag as usize]
-                        .clone();
+                    let case = self
+                        .type_ctx
+                        .with_variant_layout(reference.variant, |layout| {
+                            layout.constructors[tag as usize].clone()
+                        });
                     final_block_cases.push((
                         crate::lambda::SwitchKey::Constructor(case),
                         group.into_iter().next().unwrap().1,
@@ -9178,9 +9187,11 @@ impl<'a> RawLambdaConverter<'a> {
                             crate::types::ConstructorKind::Ordinary(reference) => reference,
                             crate::types::ConstructorKind::Extension(_) => unreachable!(),
                         };
-                        let case = self.type_ctx.variant_layout(reference.variant).constructors
-                            [tag as usize]
-                            .clone();
+                        let case = self
+                            .type_ctx
+                            .with_variant_layout(reference.variant, |layout| {
+                                layout.constructors[tag as usize].clone()
+                            });
                         final_block_cases.push((crate::lambda::SwitchKey::Constructor(case), body));
                     }
                 }
@@ -9199,9 +9210,9 @@ impl<'a> RawLambdaConverter<'a> {
                         crate::types::ConstructorKind::Ordinary(reference) => {
                             Some(crate::lambda::SwitchDispatch::Variant(
                                 self.type_ctx
-                                    .variant_layout(reference.variant)
-                                    .matching_facts
-                                    .clone(),
+                                    .with_variant_layout(reference.variant, |layout| {
+                                        layout.matching_facts.clone()
+                                    }),
                             ))
                         }
                         crate::types::ConstructorKind::Extension(_) => None,
@@ -9594,13 +9605,17 @@ impl<'a> RawLambdaConverter<'a> {
             PatternDesc::Tpat_construct(_, cstr, args) => match cstr.cstr_kind {
                 crate::types::ConstructorKind::Extension(_) => false,
                 crate::types::ConstructorKind::Ordinary(reference) => {
-                    let layout = self.type_ctx.variant_layout(reference.variant);
+                    let has_one_constructor = self
+                        .type_ctx
+                        .with_variant_layout(reference.variant, |layout| {
+                            layout.constructors.len() == 1
+                        });
                     match reference.representation(self.type_ctx) {
                         crate::types::VariantConstructorCase::Constant(_) => {
-                            args.is_empty() && layout.constructors.len() == 1
+                            args.is_empty() && has_one_constructor
                         }
                         crate::types::VariantConstructorCase::Block(_) => {
-                            layout.constructors.len() == 1
+                            has_one_constructor
                                 && args.iter().all(|pat| self.is_irrefutable_pattern(pat))
                         }
                     }
@@ -11238,7 +11253,9 @@ impl<'a> RawLambdaConverter<'a> {
             Some(crate::types::VariantConstructorCase::Block(block))
                 if block.runtime.untagged
                     && matches!(cstr.cstr_kind, crate::types::ConstructorKind::Ordinary(reference)
-                        if self.type_ctx.variant_layout(reference.variant).constructors.len() == 1) =>
+                    if self.type_ctx.with_variant_layout(reference.variant, |layout| {
+                        layout.constructors.len() == 1
+                    })) =>
             {
                 args.first()
                     .map_or_else(Lambda::unit, |arg| self.convert_expr(arg))

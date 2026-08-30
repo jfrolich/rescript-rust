@@ -88,9 +88,10 @@ fn type_cannot_contain_undefined_rec(
                         false
                     }
                     TypeKind::TypeVariant(cdecls, _) => {
-                        let layout = decl.variant_layout_ref().map(|r| ctx.variant_layout(r));
-                        cdecls.iter().enumerate().all(|(position, cd)| {
-                            let case = layout.as_ref().map(|layout| &layout.constructors[position]);
+                        let mut check_case = |cd: &crate::types::ConstructorDeclaration,
+                                              case: Option<
+                            &crate::types::VariantConstructorCase,
+                        >| {
                             let has_undefined = matches!(
                                 case,
                                 Some(crate::types::VariantConstructorCase::Constant(
@@ -145,7 +146,16 @@ fn type_cannot_contain_undefined_rec(
                             } else {
                                 true
                             }
-                        })
+                        };
+
+                        match decl.variant_layout_ref() {
+                            Some(layout_ref) => ctx.with_variant_layout(layout_ref, |layout| {
+                                cdecls.iter().enumerate().all(|(position, cd)| {
+                                    check_case(cd, Some(&layout.constructors[position]))
+                                })
+                            }),
+                            None => cdecls.iter().all(|cd| check_case(cd, None)),
+                        }
                     }
                 }
             }

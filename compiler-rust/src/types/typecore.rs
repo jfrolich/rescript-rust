@@ -10448,7 +10448,9 @@ fn check_partial_simple_rows(
                 constructors.push(ExhaustConstructor {
                     name: cstr.cstr_name.clone(),
                     arity: args.len(),
-                    total: ctx.variant_layout(reference.variant).constructors.len() as i32,
+                    total: ctx.with_variant_layout(reference.variant, |layout| {
+                        layout.constructors.len() as i32
+                    }),
                 });
             }
         }
@@ -12813,7 +12815,9 @@ fn collect_top_constructs(
         PatternDesc::Tpat_construct(_, cstr_desc, _) => {
             names.insert(cstr_desc.cstr_name.clone());
             if let crate::types::ConstructorKind::Ordinary(reference) = cstr_desc.cstr_kind {
-                *total = Some(ctx.variant_layout(reference.variant).constructors.len() as i32);
+                *total = Some(ctx.with_variant_layout(reference.variant, |layout| {
+                    layout.constructors.len() as i32
+                }));
             }
         }
         PatternDesc::Tpat_or(p1, p2, _) => {
@@ -13476,14 +13480,11 @@ fn pressure_matrix_full_match(
     };
     match &pat.pat_desc {
         PatternDesc::Tpat_construct(_, cstr, _) => match cstr.cstr_kind {
-            crate::types::ConstructorKind::Ordinary(reference) => {
-                branches.len()
-                    == tctx
-                        .type_ctx
-                        .variant_layout(reference.variant)
-                        .constructors
-                        .len()
-            }
+            crate::types::ConstructorKind::Ordinary(reference) => tctx
+                .type_ctx
+                .with_variant_layout(reference.variant, |layout| {
+                    branches.len() == layout.constructors.len()
+                }),
             crate::types::ConstructorKind::Extension(_) => false,
         },
         PatternDesc::Tpat_variant(_, _, _) => {

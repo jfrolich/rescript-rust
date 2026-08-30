@@ -7464,10 +7464,15 @@ fn combine_constructor(
             crate::types::ConstructorKind::Ordinary(reference) => reference,
             crate::types::ConstructorKind::Extension(_) => unreachable!(),
         };
-        let layout = ctx_ref.variant_layout(reference.variant);
-        let num_consts = layout.num_constants();
-        let num_nonconsts = layout.num_blocks();
-        let sig_complete = tag_lambda_list.len() == layout.constructors.len();
+        let (num_consts, num_nonconsts, sig_complete, matching_facts) = ctx_ref
+            .with_variant_layout(reference.variant, |layout| {
+                (
+                    layout.num_constants(),
+                    layout.num_blocks(),
+                    tag_lambda_list.len() == layout.constructors.len(),
+                    layout.matching_facts.clone(),
+                )
+            });
         let (fail_opt, fails, local_jumps) = if sig_complete {
             (None, Vec::new(), jumps_empty())
         } else {
@@ -7569,9 +7574,7 @@ fn combine_constructor(
                     sw_blocks_full: nonconsts.len() >= num_nonconsts,
                     sw_blocks: switch_cases(nonconsts),
                     sw_failaction: fail_opt.map(Box::new),
-                    sw_dispatch: crate::lambda::SwitchDispatch::Variant(
-                        layout.matching_facts.clone(),
-                    ),
+                    sw_dispatch: crate::lambda::SwitchDispatch::Variant(matching_facts),
                 };
                 let (handlers, sw) = share_actions_sw(sw, next_raise_count);
                 let sw = reintroduce_fail(sw);

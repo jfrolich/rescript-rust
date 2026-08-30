@@ -639,20 +639,29 @@ impl TypeContext {
         }
     }
 
-    pub fn variant_layout(
+    /// Read a completed variant layout without copying its constructor table.
+    pub fn with_variant_layout<R>(
         &self,
         layout_ref: super::variant_runtime::LayoutRef,
-    ) -> super::variant_runtime::Layout {
+        read: impl FnOnce(&super::variant_runtime::Layout) -> R,
+    ) -> R {
         let layouts = self.variant_layouts.borrow();
         let Some(state) = layouts.get(layout_ref.0 as usize) else {
             panic!("variant layout reference belongs to another TypeContext")
         };
         match &*state.borrow() {
-            super::variant_runtime::LayoutState::Complete(layout) => layout.clone(),
+            super::variant_runtime::LayoutState::Complete(layout) => read(layout),
             super::variant_runtime::LayoutState::Pending => {
                 panic!("variant layout accessed before declaration completion")
             }
         }
+    }
+
+    pub fn variant_layout(
+        &self,
+        layout_ref: super::variant_runtime::LayoutRef,
+    ) -> super::variant_runtime::Layout {
+        self.with_variant_layout(layout_ref, Clone::clone)
     }
 
     /// Store a typedtree environment snapshot and return a stable reference.
@@ -2618,6 +2627,21 @@ mod tests {
 
         let desc = ctx.get_desc(arrow);
         assert!(matches!(*desc, TypeDesc::Tarrow { .. }));
+    }
+
+    #[test]
+    fn variant_layout_can_be_read_without_cloning() {
+        let id_gen = IdGenerator::new();
+        let ctx = TypeContext::new(std::sync::Arc::new(id_gen));
+        let layout_ref = super::super::variant_runtime::plain_layout(
+            &ctx,
+            [("First".to_string(), false), ("Second".to_string(), true)],
+        );
+
+        let constructor_count =
+            ctx.with_variant_layout(layout_ref, |layout| layout.constructors.len());
+
+        assert_eq!(constructor_count, 2);
     }
 
     #[test]

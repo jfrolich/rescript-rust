@@ -1,7 +1,7 @@
 # In-Process Cold-Build Performance TODO
 
 **Last Updated:** 2026-05-07
-**Status:** Tella clean in-process builds are around 2.49s on the current branch after the latest retained persistent signature sharing and lazy signature freshening optimizations. The project goal is a subsecond clean compile of the Tella repo with 100% codegen parity. The current pass is focused on slow non-Icon Tella modules such as `Css_Js_Core`, `Css_Legacy_Core`, `LayoutDetail`, `Layout`, `UI__LayoutPickerStructured`, `TrimTranscriptEditor`, `Recording__Layers`, `UI__BackgroundPicker`, and `Page__Stories`.
+**Status:** The expanded 3,248-module Tella corpus exposed an accidental whole-layout clone in every variant-layout lookup: `Layout__Types` alone took 13.2s of a 15.7s build. The current candidate reads immutable layouts through scoped borrows and has reduced that module below one second. A new full-corpus baseline is pending alignment between the migrated Tella branch and the source-built compiler's Spice-generated aliases. The project goal remains a subsecond clean compile with 100% codegen parity.
 
 ## Goal
 
@@ -16,7 +16,7 @@ Make clean in-process builds fast enough for large real projects, with Tella as 
 
 - [x] Use `hyperfine` for accepted before/after wall-clock comparisons.
 - [x] Keep a Tella module-timing run for every serious candidate to identify the slow non-Icon files.
-- [ ] Validate retained compiler changes with JS output parity and canonical typedtree parity.
+- [x] Validate retained compiler changes with JS output parity and canonical typedtree parity.
 - [ ] Commit each retained improvement atomically with the benchmark and parity result in the commit message.
 - [ ] Revert candidates that regress the 660-file parity gates or Tella `hyperfine` baseline.
 
