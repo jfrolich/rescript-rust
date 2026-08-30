@@ -8,12 +8,11 @@ use crate::helpers::StrippedVerbatimPath;
 use crate::helpers::emojis::*;
 use crate::project_context::{MonoRepoContext, ProjectContext};
 use ahash::{AHashMap, AHashSet};
-use anyhow::{Result, anyhow};
+use anyhow::{Context, Result, anyhow};
 use console::style;
 use log::debug;
 use rayon::prelude::*;
 use std::collections::hash_map::Entry;
-use std::error;
 use std::fs::{self};
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
@@ -159,19 +158,10 @@ pub fn read_folders(
     path: &Path,
     recurse: bool,
     is_type_dev: bool,
-) -> Result<AHashMap<PathBuf, SourceFileMeta>, Box<dyn error::Error>> {
+) -> Result<AHashMap<PathBuf, SourceFileMeta>> {
     let mut map: AHashMap<PathBuf, SourceFileMeta> = AHashMap::new();
     let path_buf = PathBuf::from(path);
-    let meta = fs::metadata(package_dir.join(path));
-    let path_with_meta = meta.and_then(|meta| {
-        Ok((
-            path.to_owned(),
-            SourceFileMeta {
-                modified: meta.modified()?,
-                is_type_dev,
-            },
-        ))
-    });
+    fs::metadata(package_dir.join(path))?;
 
     for entry in fs::read_dir(package_dir.join(&path_buf))? {
         let entry_path_buf = entry.map(|entry| entry.path())?;
@@ -191,29 +181,30 @@ pub fn read_folders(
         let path_ext = entry_path_buf.extension().and_then(|x| x.to_str());
         let new_path = path_buf.join(&name);
         if metadata.file_type().is_dir() && recurse {
-            match read_folders(filter, package_dir, &new_path, recurse, is_type_dev) {
-                Ok(s) => map.extend(s),
-                Err(e) => log::error!("Could not read directory: {e}"),
-            }
+            map.extend(read_folders(
+                filter,
+                package_dir,
+                &new_path,
+                recurse,
+                is_type_dev,
+            )?);
         }
 
         match path_ext {
-            Some(extension) if helpers::is_source_file(extension) => match path_with_meta {
-                Ok((ref path, _)) if matches_filter(filter, &name) => {
-                    let mut path = path.to_owned();
-                    path.push(&name);
-                    map.insert(
-                        path,
-                        SourceFileMeta {
-                            modified: metadata.modified()?,
-                            is_type_dev,
-                        },
-                    );
-                }
-
-                Ok(_) => log::info!("Filtered: {name:?}"),
-                Err(ref e) => log::error!("Could not read directory: {e}"),
-            },
+            Some(extension) if helpers::is_source_file(extension) && matches_filter(filter, &name) => {
+                let mut path = path.to_owned();
+                path.push(&name);
+                map.insert(
+                    path,
+                    SourceFileMeta {
+                        modified: metadata.modified()?,
+                        is_type_dev,
+                    },
+                );
+            }
+            Some(extension) if helpers::is_source_file(extension) => {
+                log::info!("Filtered: {name:?}")
+            }
             _ => (),
         }
     }
@@ -628,7 +619,7 @@ pub fn get_source_files(
     filter: &Option<regex::Regex>,
     source: &config::PackageSource,
     build_dev_deps: bool,
-) -> AHashMap<PathBuf, SourceFileMeta> {
+) -> Result<AHashMap<PathBuf, SourceFileMeta>> {
     let mut map: AHashMap<PathBuf, SourceFileMeta> = AHashMap::new();
 
     let recurse = match source {
@@ -643,21 +634,19 @@ pub fn get_source_files(
     let is_type_dev = source.is_type_dev();
 
     if !build_dev_deps && is_type_dev {
-        return map;
+        return Ok(map);
     }
 
-    match read_folders(filter, package_dir, path_dir, recurse, is_type_dev) {
-        Ok(files) => map.extend(files),
+    map.extend(
+        read_folders(filter, package_dir, path_dir, recurse, is_type_dev).with_context(|| {
+            format!(
+                "Could not read source folder {:?} specified by package {} at {:?}",
+                path_dir, package_name, package_dir
+            )
+        })?,
+    );
 
-        Err(_e) => log::error!(
-            "Could not read folder: {:?}. Specified in dependency: {}, located {:?}...",
-            path_dir.to_path_buf().into_os_string(),
-            package_name,
-            package_dir
-        ),
-    };
-
-    map
+    Ok(map)
 }
 
 /// This takes the tree of packages, and finds all the source files for each, adding them to the
@@ -666,11 +655,11 @@ fn extend_with_children(
     filter: &Option<regex::Regex>,
     mut build: AHashMap<String, Package>,
     prod: bool,
-) -> AHashMap<String, Package> {
+) -> Result<AHashMap<String, Package>> {
     for (_key, package) in build.iter_mut() {
         let _span = info_span!("build.load_package_sources", package = %package.name).entered();
         let mut map: AHashMap<PathBuf, SourceFileMeta> = AHashMap::new();
-        package
+        let source_maps = package
             .source_folders
             .par_iter()
             .map(|source| {
@@ -682,9 +671,10 @@ fn extend_with_children(
                     package.is_local_dep && !prod,
                 )
             })
-            .collect::<Vec<AHashMap<PathBuf, SourceFileMeta>>>()
-            .into_iter()
-            .for_each(|source| map.extend(source));
+            .collect::<Result<Vec<_>>>()?;
+        for source_map in source_maps {
+            map.extend(source_map);
+        }
 
         let mut modules = AHashSet::from_iter(
             map.keys()
@@ -711,7 +701,7 @@ fn extend_with_children(
         }
         package.source_files = Some(map);
     }
-    build
+    Ok(build)
 }
 
 /// Walks a package's declared source folders and returns every directory
@@ -882,9 +872,7 @@ pub fn make(
 
     /* Once we have the deduplicated packages, we can add the source files for each - to minimize
      * the IO */
-    let result = extend_with_children(filter, map, prod);
-
-    Ok(result)
+    extend_with_children(filter, map, prod)
 }
 
 #[instrument(name = "packages.parse_packages", skip_all)]
@@ -1260,7 +1248,7 @@ mod test {
     use crate::config;
     use crate::project_context::{MonoRepoContext, ProjectContext};
 
-    use super::{Namespace, Package, read_issue_tracker_url, read_package_name};
+    use super::{Namespace, Package, get_source_files, read_issue_tracker_url, read_package_name};
     use ahash::{AHashMap, AHashSet};
     use std::fs;
     use std::path::PathBuf;
@@ -1295,6 +1283,22 @@ mod test {
             is_local_dep: false,
         }
     }
+    #[test]
+    fn source_scan_errors_instead_of_returning_a_partial_graph() {
+        let temp_dir = TempDir::new().unwrap();
+        let source = config::PackageSource {
+            dir: "missing".to_string(),
+            subdirs: Some(config::Subdirs::Recurse(true)),
+            type_: None,
+            feature: None,
+        };
+
+        let error = get_source_files(&"package".to_string(), temp_dir.path(), &None, &source, true)
+            .expect_err("missing source directory must abort package discovery");
+
+        assert!(error.to_string().contains("Could not read source folder"));
+    }
+
     #[test]
     fn should_return_false_with_invalid_parents_as_bs_dependencies() {
         let mut packages: AHashMap<String, Package> = AHashMap::new();
