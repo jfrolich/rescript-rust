@@ -1270,6 +1270,12 @@ if [[ $sexp_locs_ppx_diff_count -gt 0 ]]; then
     exit_code=1
 fi
 
+if [[ $sexp_locs_ppx_spice_diff_count -gt 0 ]]; then
+    echo -e "${RED}${BOLD}FAILED: $sexp_locs_ppx_spice_diff_count files have post-Spice PPX differences${RESET}"
+    all_pass=false
+    exit_code=1
+fi
+
 if [[ $bsc_ast_parity_diff_count -gt 0 ]]; then
     echo -e "${RED}${BOLD}FAILED: $bsc_ast_parity_diff_count files have bsc-ast byte differences${RESET}"
     all_pass=false
