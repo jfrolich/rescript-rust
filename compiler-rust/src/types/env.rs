@@ -202,7 +202,6 @@ struct IdOpened<T> {
 #[derive(Debug, Clone)]
 pub struct IdTbl<T> {
     current: im_rc::HashMap<String, Vec<(Ident, T)>>,
-    current_by_stamp: im_rc::HashMap<i32, (Ident, T)>,
     opened: Option<Arc<IdOpened<T>>>,
 }
 
@@ -210,18 +209,12 @@ impl<T: Clone> IdTbl<T> {
     pub fn new() -> Self {
         Self {
             current: im_rc::HashMap::new(),
-            current_by_stamp: im_rc::HashMap::new(),
             opened: None,
         }
     }
 
     pub fn add(&mut self, id: Ident, value: T) {
         let name = id.name().to_string();
-        let stamp = id.stamp();
-        if stamp != 0 {
-            self.current_by_stamp
-                .insert(stamp, (id.clone(), value.clone()));
-        }
         match self.current.get_mut(&name) {
             Some(entries) => entries.push((id, value)),
             None => {
@@ -241,7 +234,6 @@ impl<T: Clone> IdTbl<T> {
             .collect();
         *self = Self {
             current: im_rc::HashMap::new(),
-            current_by_stamp: im_rc::HashMap::new(),
             opened: Some(Arc::new(IdOpened {
                 root: Some(root),
                 components: opened_components,
@@ -279,14 +271,6 @@ impl<T: Clone> IdTbl<T> {
 
     fn find_current_by_ident(&self, id: &Ident) -> Option<&T> {
         let stamp = id.stamp();
-        if stamp != 0
-            && let Some((entry_id, value)) = self.current_by_stamp.get(&stamp)
-            && entry_id.same(id)
-            && entry_id.name() == id.name()
-        {
-            return Some(value);
-        }
-
         self.current.get(id.name()).and_then(|entries| {
             entries
                 .iter()
@@ -373,10 +357,6 @@ impl<T: Clone> IdTbl<T> {
         {
             let updated = f(value);
             *value = updated.clone();
-            if id.stamp() != 0 {
-                self.current_by_stamp
-                    .insert(id.stamp(), (id.clone(), updated.clone()));
-            }
             return Some((id.clone(), updated));
         }
 
@@ -475,7 +455,6 @@ struct TycompOpened<T> {
 #[derive(Debug, Clone)]
 pub struct TycompTbl<T> {
     current: im_rc::HashMap<String, Vec<(Ident, T)>>,
-    current_by_stamp: im_rc::HashMap<i32, (Ident, T)>,
     opened: Option<Arc<TycompOpened<T>>>,
 }
 
@@ -483,17 +462,12 @@ impl<T: Clone> TycompTbl<T> {
     pub fn new() -> Self {
         Self {
             current: im_rc::HashMap::new(),
-            current_by_stamp: im_rc::HashMap::new(),
             opened: None,
         }
     }
 
     pub fn add(&mut self, id: Ident, value: T) {
         let name = id.name().to_string();
-        if id.stamp() != 0 {
-            self.current_by_stamp
-                .insert(id.stamp(), (id.clone(), value.clone()));
-        }
         match self.current.get_mut(&name) {
             Some(entries) => entries.push((id, value)),
             None => {
@@ -519,7 +493,6 @@ impl<T: Clone> TycompTbl<T> {
         }
         *self = Self {
             current: im_rc::HashMap::new(),
-            current_by_stamp: im_rc::HashMap::new(),
             opened: Some(Arc::new(TycompOpened {
                 components: opened_components,
                 next: Arc::new(next),
@@ -586,13 +559,6 @@ impl<T: Clone> TycompTbl<T> {
 
     pub fn find_by_ident(&self, id: &Ident) -> Option<&T> {
         let stamp = id.stamp();
-        if stamp != 0
-            && let Some((entry_id, value)) = self.current_by_stamp.get(&stamp)
-            && entry_id.same(id)
-            && entry_id.name() == id.name()
-        {
-            return Some(value);
-        }
         if let Some(value) = self.current.get(id.name()).and_then(|entries| {
             entries
                 .iter()
