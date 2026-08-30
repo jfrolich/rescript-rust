@@ -36,7 +36,7 @@
 #
 # OPTIONS:
 #   -q, --quick       Stop on first failure (useful for quick iteration)
-#   -j, --parallel N  Run N tests in parallel (default: 16)
+#   -j, --parallel N  Run N tests in parallel (default: 8)
 #   -v, --verbose     Show progress for each file
 #   --update-baseline Append newly passing files to parity baselines
 #   --with-external  Include a Tella checkout pinned by TELLA_REVISION
@@ -53,7 +53,7 @@
 #   # Run all tests, stop on first failure:
 #   ./scripts/test_parser_ast_parity.sh --quick
 #
-#   # Run all tests in parallel (default 16 jobs):
+#   # Run all tests in parallel (default 8 jobs):
 #   ./scripts/test_parser_ast_parity.sh
 #
 #   # Quick iteration on a specific test:
@@ -63,7 +63,7 @@ set -e
 
 # Parse command line arguments
 QUICK_MODE=false
-PARALLEL_JOBS=16
+PARALLEL_JOBS=8
 VERBOSE=false
 UPDATE_BASELINE=false
 WITH_EXTERNAL=false
@@ -139,11 +139,9 @@ QUICK START:
 
 REGRESSION TRACKING:
 
-  The script maintains baseline files in tests/parity_baselines/. When a file
-  passes, it's added to the baseline. If a file that was passing starts failing,
-  it's flagged as a REGRESSION and the test fails.
-
-  This ensures parity can only increase, never decrease.
+  The script compares against read-only baseline files in tests/parity_baselines/.
+  If a previously passing file starts failing, it's flagged as a REGRESSION.
+  Baselines change only when --update-baseline is passed explicitly.
 
 UNDERSTANDING FAILURES:
 
@@ -307,7 +305,7 @@ fi
 # Include an explicitly pinned external corpus by reference (no file copying).
 TELLA_DIR="${TELLA_DIR:-$HOME/dev/tella-fusion}"
 if $WITH_EXTERNAL; then
-    if [[ ! -d "$TELLA_DIR/.git" ]]; then
+    if [[ "$(git -C "$TELLA_DIR" rev-parse --is-inside-work-tree 2>/dev/null)" != "true" ]]; then
         echo "External Tella checkout not found at $TELLA_DIR" >&2
         exit 1
     fi
@@ -319,6 +317,12 @@ if $WITH_EXTERNAL; then
     expected_tella_revision=$(git -C "$TELLA_DIR" rev-parse "$TELLA_REVISION^{commit}")
     if [[ "$actual_tella_revision" != "$expected_tella_revision" ]]; then
         echo "Tella checkout is at $actual_tella_revision, expected $expected_tella_revision" >&2
+        exit 1
+    fi
+    tella_source_changes=$(git -C "$TELLA_DIR" status --porcelain --untracked-files=all -- '*.res' '*.resi')
+    if [[ -n "$tella_source_changes" ]]; then
+        echo "External Tella checkout has modified or untracked ReScript sources:" >&2
+        echo "$tella_source_changes" >&2
         exit 1
     fi
 fi
@@ -408,9 +412,11 @@ test_single_file() {
 
     # Initialize result
     local locs_pass=0 locs_diff=0
+    local sexp_locs_ppx_checked=0
     local sexp_locs_ppx_diff=0
     local sexp_locs_ppx_spice_checked=0
     local sexp_locs_ppx_spice_diff=0
+    local bsc_ast_checked=0
     local bsc_ast_diff=0
     local ocaml_fail=0 rust_fail=0
 
@@ -474,11 +480,16 @@ test_single_file() {
 
         # Test sexp-locs-ppx parity (post-PPX sexp with locations)
         if ! $skip_sexp_locs_ppx; then
-            if timeout "$TIMEOUT_SECONDS" "$OCAML_PARSER" $intf_flag -print sexp-locs-ppx "$file" > "$file_temp/ocaml.sexp-locs-ppx" 2>/dev/null && \
-               timeout "$TIMEOUT_SECONDS" "$RUST_PARSER" $intf_flag -print sexp-locs-ppx "$file" > "$file_temp/rust.sexp-locs-ppx" 2>/dev/null; then
-                if ! diff -q "$file_temp/ocaml.sexp-locs-ppx" "$file_temp/rust.sexp-locs-ppx" > /dev/null 2>&1; then
+            if timeout "$TIMEOUT_SECONDS" "$OCAML_PARSER" $intf_flag -print sexp-locs-ppx "$file" > "$file_temp/ocaml.sexp-locs-ppx" 2>/dev/null; then
+                sexp_locs_ppx_checked=1
+                if timeout "$TIMEOUT_SECONDS" "$RUST_PARSER" $intf_flag -print sexp-locs-ppx "$file" > "$file_temp/rust.sexp-locs-ppx" 2>/dev/null; then
+                    if ! diff -q "$file_temp/ocaml.sexp-locs-ppx" "$file_temp/rust.sexp-locs-ppx" > /dev/null 2>&1; then
+                        sexp_locs_ppx_diff=1
+                        diff -u --text "$file_temp/ocaml.sexp-locs-ppx" "$file_temp/rust.sexp-locs-ppx" > "$TEMP_DIR/sexp_locs_ppx_diffs/$safe_name.diff" 2>&1 || true
+                    fi
+                else
                     sexp_locs_ppx_diff=1
-                    diff -u --text "$file_temp/ocaml.sexp-locs-ppx" "$file_temp/rust.sexp-locs-ppx" > "$TEMP_DIR/sexp_locs_ppx_diffs/$safe_name.diff" 2>&1 || true
+                    echo "Rust parser failed to produce required sexp-locs-ppx output." > "$TEMP_DIR/sexp_locs_ppx_diffs/$safe_name.diff"
                 fi
             fi
         fi
@@ -528,32 +539,40 @@ test_single_file() {
                     cat "$rust_spice_sexp" 2>/dev/null || true
                 } > "$TEMP_DIR/sexp_locs_ppx_spice_diffs/$safe_name.diff" 2>&1
             fi
-        elif timeout "$TIMEOUT_SECONDS" "${ocaml_bsc_cmd[@]}" -bs-ast "$file" -o "$ocaml_ast_file" 2>/dev/null && \
-             timeout "$TIMEOUT_SECONDS" "${rust_bsc_cmd[@]}" -bs-ast "$file" -o "$rust_ast_file" 2>/dev/null; then
-            # Both compilers create .iast for .resi files (regardless of -o), so check for that.
-            if [[ -f "$ocaml_iast_file" && ! -f "$ocaml_ast_file" ]]; then
-                ocaml_ast_file="$ocaml_iast_file"
-            fi
-            if [[ -f "$rust_iast_file" && ! -f "$rust_ast_file" ]]; then
-                rust_ast_file="$rust_iast_file"
-            fi
-            if [[ -f "$ocaml_ast_file" && -f "$rust_ast_file" ]]; then
-                if ! diff -q "$ocaml_ast_file" "$rust_ast_file" > /dev/null 2>&1; then
-                    bsc_ast_diff=1
-                    {
-                        echo "OCaml bsc-ast size: $(wc -c < "$ocaml_ast_file") bytes"
-                        echo "Rust bsc-ast size:  $(wc -c < "$rust_ast_file") bytes"
-                        echo ""
-                        echo "First differing bytes (hex dump):"
-                        diff <(xxd "$ocaml_ast_file" | head -50) <(xxd "$rust_ast_file" | head -50) || true
-                    } > "$TEMP_DIR/bsc_ast_parity_diffs/$safe_name.diff" 2>&1
+        elif timeout "$TIMEOUT_SECONDS" "${ocaml_bsc_cmd[@]}" -bs-ast "$file" -o "$ocaml_ast_file" 2>/dev/null; then
+            bsc_ast_checked=1
+            if timeout "$TIMEOUT_SECONDS" "${rust_bsc_cmd[@]}" -bs-ast "$file" -o "$rust_ast_file" 2>/dev/null; then
+                # Both compilers create .iast for .resi files (regardless of -o), so check for that.
+                if [[ -f "$ocaml_iast_file" && ! -f "$ocaml_ast_file" ]]; then
+                    ocaml_ast_file="$ocaml_iast_file"
                 fi
+                if [[ -f "$rust_iast_file" && ! -f "$rust_ast_file" ]]; then
+                    rust_ast_file="$rust_iast_file"
+                fi
+                if [[ -f "$ocaml_ast_file" && -f "$rust_ast_file" ]]; then
+                    if ! diff -q "$ocaml_ast_file" "$rust_ast_file" > /dev/null 2>&1; then
+                        bsc_ast_diff=1
+                        {
+                            echo "OCaml bsc-ast size: $(wc -c < "$ocaml_ast_file") bytes"
+                            echo "Rust bsc-ast size:  $(wc -c < "$rust_ast_file") bytes"
+                            echo ""
+                            echo "First differing bytes (hex dump):"
+                            diff <(xxd "$ocaml_ast_file" | head -50) <(xxd "$rust_ast_file" | head -50) || true
+                        } > "$TEMP_DIR/bsc_ast_parity_diffs/$safe_name.diff" 2>&1
+                    fi
+                else
+                    bsc_ast_diff=1
+                    echo "bsc succeeded without producing both expected AST files." > "$TEMP_DIR/bsc_ast_parity_diffs/$safe_name.diff"
+                fi
+            else
+                bsc_ast_diff=1
+                echo "Rust bsc failed after the OCaml reference succeeded." > "$TEMP_DIR/bsc_ast_parity_diffs/$safe_name.diff"
             fi
         fi
     fi
 
     # Write results
-    echo "$file:$locs_pass:$locs_diff:$sexp_locs_ppx_diff:$sexp_locs_ppx_spice_checked:$sexp_locs_ppx_spice_diff:$bsc_ast_diff:$ocaml_fail:$rust_fail" > "$result_file"
+    echo "$file:$locs_pass:$locs_diff:$sexp_locs_ppx_checked:$sexp_locs_ppx_diff:$sexp_locs_ppx_spice_checked:$sexp_locs_ppx_spice_diff:$bsc_ast_checked:$bsc_ast_diff:$ocaml_fail:$rust_fail" > "$result_file"
 
     # Clean up per-file temp
     cleanup_dir_tree "$file_temp"
@@ -588,13 +607,19 @@ if $QUICK_MODE; then
         # Check result
         safe_name=$(echo "$file" | tr '/' '_')
         result=$(cat "$RESULTS_DIR/$safe_name.result")
-        IFS=':' read -r _ locs_pass locs_diff sexp_locs_ppx_diff sexp_locs_ppx_spice_checked sexp_locs_ppx_spice_diff bsc_ast_diff ocaml_fail rust_fail <<< "$result"
+        IFS=':' read -r _ locs_pass locs_diff sexp_locs_ppx_checked sexp_locs_ppx_diff sexp_locs_ppx_spice_checked sexp_locs_ppx_spice_diff bsc_ast_checked bsc_ast_diff ocaml_fail rust_fail <<< "$result"
 
-        if [[ "$locs_diff" -eq 1 ]]; then
-            echo -e "${RED}FAIL:${RESET} $file (sexp-locs differs)"
+        if [[ "$locs_diff" -eq 1 || "$sexp_locs_ppx_diff" -eq 1 || "$sexp_locs_ppx_spice_diff" -eq 1 || "$bsc_ast_diff" -eq 1 || "$ocaml_fail" -eq 1 || "$rust_fail" -eq 1 ]]; then
+            echo -e "${RED}FAIL:${RESET} $file (parser, PPX, or bsc parity failure)"
             echo ""
             echo "Diff:"
-            head -30 "$TEMP_DIR/locs_diffs/$safe_name.diff"
+            for diff_file in \
+                "$TEMP_DIR/locs_diffs/$safe_name.diff" \
+                "$TEMP_DIR/sexp_locs_ppx_diffs/$safe_name.diff" \
+                "$TEMP_DIR/sexp_locs_ppx_spice_diffs/$safe_name.diff" \
+                "$TEMP_DIR/bsc_ast_parity_diffs/$safe_name.diff"; do
+                [[ -f "$diff_file" ]] && head -30 "$diff_file"
+            done
             echo ""
             echo -e "${YELLOW}Quick mode: stopping on first failure${RESET}"
             break
@@ -625,10 +650,12 @@ fi
 # Aggregate results
 locs_pass_count=0
 locs_diff_count=0
+sexp_locs_ppx_checked_count=0
 sexp_locs_ppx_diff_count=0
 sexp_locs_ppx_spice_checked_count=0
 sexp_locs_ppx_spice_diff_count=0
 bsc_ast_parity_diff_count=0
+bsc_ast_checked_count=0
 bsc_ast_byte_diff_count=0
 bsc_ast_byte_checked_count=0
 ocaml_fail_count=0
@@ -644,17 +671,19 @@ rust_fail_files=""
 for result_file in "$RESULTS_DIR"/*.result; do
     [[ -f "$result_file" ]] || continue
     result=$(cat "$result_file")
-    IFS=':' read -r file locs_pass locs_diff sexp_locs_ppx_diff sexp_locs_ppx_spice_checked sexp_locs_ppx_spice_diff bsc_ast_diff ocaml_fail rust_fail <<< "$result"
+    IFS=':' read -r file locs_pass locs_diff sexp_locs_ppx_checked sexp_locs_ppx_diff sexp_locs_ppx_spice_checked sexp_locs_ppx_spice_diff bsc_ast_checked bsc_ast_diff ocaml_fail rust_fail <<< "$result"
 
     locs_pass_count=$((locs_pass_count + locs_pass))
     locs_diff_count=$((locs_diff_count + locs_diff))
+    sexp_locs_ppx_checked_count=$((sexp_locs_ppx_checked_count + sexp_locs_ppx_checked))
     sexp_locs_ppx_diff_count=$((sexp_locs_ppx_diff_count + sexp_locs_ppx_diff))
     sexp_locs_ppx_spice_checked_count=$((sexp_locs_ppx_spice_checked_count + sexp_locs_ppx_spice_checked))
     sexp_locs_ppx_spice_diff_count=$((sexp_locs_ppx_spice_diff_count + sexp_locs_ppx_spice_diff))
     ocaml_fail_count=$((ocaml_fail_count + ocaml_fail))
     rust_fail_count=$((rust_fail_count + rust_fail))
 
-    if [[ "$sexp_locs_ppx_spice_checked" -eq 0 ]]; then
+    bsc_ast_checked_count=$((bsc_ast_checked_count + bsc_ast_checked))
+    if [[ "$bsc_ast_checked" -eq 1 ]]; then
         bsc_ast_byte_checked_count=$((bsc_ast_byte_checked_count + 1))
     fi
 
@@ -672,6 +701,8 @@ done
 
 # Build lists of tested and passing files for each test type
 all_tested_files=""
+sexp_locs_ppx_tested_files=""
+bsc_ast_tested_files=""
 sexp_locs_pass_files=""
 sexp_locs_ppx_pass_files=""
 bsc_ast_pass_files=""
@@ -679,7 +710,7 @@ bsc_ast_pass_files=""
 for result_file in "$RESULTS_DIR"/*.result; do
     [[ -f "$result_file" ]] || continue
     result=$(cat "$result_file")
-    IFS=':' read -r file locs_pass locs_diff sexp_locs_ppx_diff sexp_locs_ppx_spice_checked sexp_locs_ppx_spice_diff bsc_ast_diff ocaml_fail rust_fail <<< "$result"
+    IFS=':' read -r file locs_pass locs_diff sexp_locs_ppx_checked sexp_locs_ppx_diff sexp_locs_ppx_spice_checked sexp_locs_ppx_spice_diff bsc_ast_checked bsc_ast_diff ocaml_fail rust_fail <<< "$result"
 
     # Track all tested files
     all_tested_files="$all_tested_files$file\n"
@@ -688,16 +719,24 @@ for result_file in "$RESULTS_DIR"/*.result; do
     if [[ "$locs_pass" -eq 1 && "$locs_diff" -eq 0 ]]; then
         sexp_locs_pass_files="$sexp_locs_pass_files$file\n"
     fi
-    if [[ "$locs_pass" -eq 1 && "$sexp_locs_ppx_diff" -eq 0 ]]; then
-        sexp_locs_ppx_pass_files="$sexp_locs_ppx_pass_files$file\n"
+    if [[ "$sexp_locs_ppx_checked" -eq 1 ]]; then
+        sexp_locs_ppx_tested_files="$sexp_locs_ppx_tested_files$file\n"
+        if [[ "$locs_pass" -eq 1 && "$sexp_locs_ppx_diff" -eq 0 ]]; then
+            sexp_locs_ppx_pass_files="$sexp_locs_ppx_pass_files$file\n"
+        fi
     fi
-    if [[ "$locs_pass" -eq 1 && "$bsc_ast_diff" -eq 0 ]]; then
-        bsc_ast_pass_files="$bsc_ast_pass_files$file\n"
+    if [[ "$bsc_ast_checked" -eq 1 ]]; then
+        bsc_ast_tested_files="$bsc_ast_tested_files$file\n"
+        if [[ "$locs_pass" -eq 1 && "$bsc_ast_diff" -eq 0 ]]; then
+            bsc_ast_pass_files="$bsc_ast_pass_files$file\n"
+        fi
     fi
 done
 
 # Get sorted list of all tested files (filtered to test suite only)
 tested_files_sorted=$(echo -e "$all_tested_files" | grep -v "^$" | grep "^syntax_tests/data/" | sort -u)
+sexp_locs_ppx_tested_sorted=$(echo -e "$sexp_locs_ppx_tested_files" | grep -v "^$" | grep "^syntax_tests/data/" | sort -u)
+bsc_ast_tested_sorted=$(echo -e "$bsc_ast_tested_files" | grep -v "^$" | grep "^syntax_tests/data/" | sort -u)
 
 # Function to detect regressions and update baseline
 # Args: $1=baseline_file, $2=current_pass_files (newline-separated), $3=test_name, $4=tested_files (sorted)
@@ -951,8 +990,8 @@ echo ""
 
 # Detect regressions for each test type
 detect_regressions_and_update "$BASELINE_SEXP_LOCS" "$sexp_locs_pass_files" "sexp-locs" "$tested_files_sorted"
-detect_regressions_and_update "$BASELINE_SEXP_LOCS_PPX" "$sexp_locs_ppx_pass_files" "sexp-locs-ppx" "$tested_files_sorted"
-detect_regressions_and_update "$BASELINE_BSC_AST" "$bsc_ast_pass_files" "bsc-ast" "$tested_files_sorted"
+detect_regressions_and_update "$BASELINE_SEXP_LOCS_PPX" "$sexp_locs_ppx_pass_files" "sexp-locs-ppx" "$sexp_locs_ppx_tested_sorted"
+detect_regressions_and_update "$BASELINE_BSC_AST" "$bsc_ast_pass_files" "bsc-ast" "$bsc_ast_tested_sorted"
 
 # Count total regressions
 total_regressions=0
@@ -1004,12 +1043,15 @@ echo ""
 echo "  ${BOLD}Parser parity (sexp output for debugging):${RESET}"
 echo "    sexp-locs matches:        $locs_pass_count"
 echo "    sexp-locs differences:    $locs_diff_count"
+echo "    sexp-locs-ppx checks:     $sexp_locs_ppx_checked_count"
+echo "    sexp-locs-ppx reference skips: $((TOTAL_FILES - sexp_locs_ppx_checked_count - sexp_locs_ppx_spice_checked_count))"
 echo "    sexp-locs-ppx differences: $sexp_locs_ppx_diff_count"
 echo "    sexp-with-locs-ppx-and-spice checks: $sexp_locs_ppx_spice_checked_count"
 echo "    sexp-with-locs-ppx-and-spice differences: $sexp_locs_ppx_spice_diff_count"
 echo ""
 echo "  ${BOLD}bsc-ast Byte Parity:${RESET}"
 echo "    bsc-ast byte checks:      $bsc_ast_byte_checked_count"
+echo "    bsc-ast reference skips:  $((TOTAL_FILES - bsc_ast_checked_count - sexp_locs_ppx_spice_checked_count))"
 echo "    bsc-ast byte differences: $bsc_ast_byte_diff_count"
 echo ""
 echo "  ${BOLD}Parse failures:${RESET}"
@@ -1205,6 +1247,12 @@ exit_code=0
 if [[ $total_regressions -gt 0 ]]; then
     echo -e "${RED}${BOLD}REGRESSION DETECTED: $total_regressions file(s) that previously passed now fail!${RESET}"
     echo "  Review the regression lists above and fix before proceeding."
+    all_pass=false
+    exit_code=1
+fi
+
+if [[ $ocaml_fail_count -gt 0 || $rust_fail_count -gt 0 ]]; then
+    echo -e "${RED}${BOLD}FAILED: parser commands failed (OCaml: $ocaml_fail_count, Rust: $rust_fail_count)${RESET}"
     all_pass=false
     exit_code=1
 fi
