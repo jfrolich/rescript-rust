@@ -29,7 +29,7 @@
 #
 # Uses test files from tests/syntax_tests/data/{idempotency,printer,ppx,conversion,ast-mapping}
 # and tests/ppx_spice/src for spice parity.
-# Also includes ~/dev/tella-fusion when present (override with TELLA_DIR).
+# External Tella files are opt-in via --with-external and require TELLA_REVISION.
 #
 # USAGE:
 #   ./scripts/test_parser_ast_parity.sh [OPTIONS] [FILE|PATTERN]
@@ -39,6 +39,7 @@
 #   -j, --parallel N  Run N tests in parallel (default: 16)
 #   -v, --verbose     Show progress for each file
 #   --update-baseline Append newly passing files to parity baselines
+#   --with-external  Include a Tella checkout pinned by TELLA_REVISION
 #   -h, --help        Show this help message
 #   --info            Show detailed usage information and examples
 #
@@ -65,6 +66,7 @@ QUICK_MODE=false
 PARALLEL_JOBS=16
 VERBOSE=false
 UPDATE_BASELINE=false
+WITH_EXTERNAL=false
 FILE_ARG=""
 PATTERN_MODE=false
 SINGLE_FILE_MODE=false
@@ -90,6 +92,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         --update-baseline)
             UPDATE_BASELINE=true
+            shift
+            ;;
+        --with-external)
+            WITH_EXTERNAL=true
             shift
             ;;
         -h|--help)
@@ -298,10 +304,25 @@ else
     find syntax_tests/data/idempotency syntax_tests/data/printer syntax_tests/data/ppx syntax_tests/data/conversion syntax_tests/data/ast-mapping syntax_tests/data/parsing \( -name "*.res" -o -name "*.resi" \) -not -path "*/errors/*" -not -path "*/recovery/*" -not -path "*/infiniteLoops/*" -not -path "*/ffi/export.res" -not -path "*/parsing/other/gentype.res" 2>/dev/null | sort > "$TEMP_DIR/files.txt"
 fi
 
-# Include external corpus by reference (no file copying).
-# For full-suite and pattern runs, include ~/dev/tella-fusion if it exists.
+# Include an explicitly pinned external corpus by reference (no file copying).
 TELLA_DIR="${TELLA_DIR:-$HOME/dev/tella-fusion}"
-if [[ "$SINGLE_FILE_MODE" != true && -d "$TELLA_DIR" ]]; then
+if $WITH_EXTERNAL; then
+    if [[ ! -d "$TELLA_DIR/.git" ]]; then
+        echo "External Tella checkout not found at $TELLA_DIR" >&2
+        exit 1
+    fi
+    if [[ -z "${TELLA_REVISION:-}" ]]; then
+        echo "--with-external requires TELLA_REVISION to pin the corpus" >&2
+        exit 1
+    fi
+    actual_tella_revision=$(git -C "$TELLA_DIR" rev-parse HEAD)
+    expected_tella_revision=$(git -C "$TELLA_DIR" rev-parse "$TELLA_REVISION^{commit}")
+    if [[ "$actual_tella_revision" != "$expected_tella_revision" ]]; then
+        echo "Tella checkout is at $actual_tella_revision, expected $expected_tella_revision" >&2
+        exit 1
+    fi
+fi
+if $WITH_EXTERNAL && [[ "$SINGLE_FILE_MODE" != true ]]; then
     if [[ "$PATTERN_MODE" == true ]]; then
         find "$TELLA_DIR" \
             -type d \( -name .git -o -name target -o -name .next -o -name _build -o -path "*/lib/bs" -o -path "*/lib/ocaml" \) -prune \
@@ -319,7 +340,7 @@ sort -u "$TEMP_DIR/files.txt" -o "$TEMP_DIR/files.txt"
 
 # Explicit blacklist for files that fail in both OCaml and Rust.
 # These are out of parity scope until the OCaml reference parser/compiler succeeds.
-if [[ -n "$TELLA_DIR" && -d "$TELLA_DIR" ]]; then
+if $WITH_EXTERNAL; then
     DUAL_FAIL_BLACKLIST_REL=(
         "node_modules/@greenlabs/ppx-spice/src/rescript/Spice.res"
         "node_modules/@greenlabs/ppx-spice/src/rescript/Spice_Codecs.res"
