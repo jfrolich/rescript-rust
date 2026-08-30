@@ -1,7 +1,7 @@
 # In-Process Cold-Build Performance TODO
 
 **Last Updated:** 2026-08-30
-**Status:** Two explicitly different Tella corpora are tracked. The expanded v13-migration checkout compiles 3,248 modules in roughly `4.7-4.8s` at 16 workers, down from `15.686s` before scoped variant-layout borrowing and subsequent GenType/Env ownership work. The smaller 2,127-module output-parity checkout measures `2.478s +/- 0.024s`, range `2.452s..2.528s`, after shared persistent component views and shallow signature freshening. Do not compare these numbers as one continuous corpus. The project goal remains a subsecond clean compile with 100% codegen parity.
+**Status:** Two explicitly different Tella corpora are tracked. The expanded v13-migration checkout compiles 3,248 modules in roughly `5.1s` at 16 workers after the merge-review correctness hardening, down from `15.686s` before scoped variant-layout borrowing and subsequent GenType/Env ownership work. The smaller 2,127-module output-parity checkout measures `2.478s +/- 0.024s`, range `2.452s..2.528s`, after shared persistent component views and shallow signature freshening. Do not compare these numbers as one continuous corpus. The project goal remains a subsecond clean compile with 100% codegen parity.
 
 ## Goal
 

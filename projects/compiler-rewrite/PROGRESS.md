@@ -23,7 +23,7 @@ The Rust compiler now matches the current OCaml compiler across the complete can
 - Optimized Lambda parity: **610/610**
 - JavaScript output parity: **610/610**, plus **344/344** focused fixtures, in debug and release builds
 - Diagnostics parity: **1431/1431**
-- Compiler tests: **1196 passed**, with no failures
+- Compiler tests: **1197 passed**, with no failures
 - Rewatch tests: **150 passed**, with no failures
 - v13-migrated Tella checkout at `66a5edabdbfdbc5dd7496e59ee0573de2a2a1ffa`: **3248 modules compiled** using release rewatch `--in-process`
 - Checked-in parser corpus: **1231/1231** semantic/post-PPX and binary AST parity with `./scripts/test_parser_ast_parity.sh`
