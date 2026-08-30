@@ -765,6 +765,7 @@ pub fn compile(
     // registries so stale entries don't remain resolvable in watch mode.
     if build_state.build_mode().is_in_process() {
         build_state.purge_deleted_modules(&build_state.build_state.deleted_modules.clone());
+        build_state.clear_gentype_resolvers();
     }
 
     // In --in-process mode, synthesize namespace module signatures in memory
@@ -1757,8 +1758,9 @@ fn build_compiler_options(
     package: &packages::Package,
     module_name: &str,
     source_file_path: &Path,
-    build_state: &BuildState,
+    build_command_state: &BuildCommandState,
 ) -> Result<rescript_compiler::driver::CompilerOptions> {
+    let build_state = &build_command_state.build_state;
     let root_config = build_state.get_root_config();
     let project_context = &build_state.project_context;
 
@@ -1878,6 +1880,10 @@ fn build_compiler_options(
         None
     };
 
+    let gentype_resolver = gentype_config
+        .as_ref()
+        .map(|config| build_command_state.gentype_resolver(&package.path, config));
+
     let (source_map, source_map_sources_content, source_map_root) =
         match root_config.effective_source_map_mode(build_state.source_map_command) {
             Some(config::SourceMapMode::Linked) => (
@@ -1972,6 +1978,7 @@ fn build_compiler_options(
         package_name: Some(package.config.name.clone()),
         make_runtime: parsed_flags.make_runtime,
         gentype_config,
+        gentype_resolver,
         ..Default::default()
     })
 }
@@ -3070,7 +3077,7 @@ fn compile_module_in_process_to_js_boundary(
     let has_interface = source_file.interface.is_some();
 
     // Build compiler options from package config
-    let mut options = build_compiler_options(package, module_name, implementation_path, build_state)?;
+    let mut options = build_compiler_options(package, module_name, implementation_path, build_command_state)?;
     let root_config = build_state.get_root_config();
 
     let source_abs = Path::new(&package.path).join(implementation_path);
@@ -3427,7 +3434,7 @@ fn finish_in_process_js_inner(
         Span::none().entered()
     };
     let root_config = build_command_state.get_root_config();
-    let options = build_compiler_options(package, &module_name, &implementation_path, build_state)?;
+    let options = build_compiler_options(package, &module_name, &implementation_path, build_command_state)?;
     let metadata_interface_registry_update = interface_registry_update;
     let mut metadata_registry_updates: Option<Vec<PendingRegistryUpdate>> = None;
     let mut metadata_hook = |metadata: rescript_compiler::driver::InProcessJsMetadataReady| -> Result<()> {

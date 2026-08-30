@@ -1323,6 +1323,8 @@ pub struct CompilerOptions {
     pub assume_compiled_interface: bool,
     /// GenType configuration derived from `-bs-gentype-*` flags.
     pub gentype_config: Option<crate::gentype::config::T>,
+    /// Build-scoped GenType module resolver shared by in-process compilations.
+    pub gentype_resolver: Option<std::sync::Arc<crate::gentype::module_resolver::Resolver>>,
     /// When true, `compile_source_in_process` captures the typed tree,
     /// raw lambda, and lambda sexps for display (used by the playground).
     pub capture_intermediates: bool,
@@ -1377,6 +1379,7 @@ impl Default for CompilerOptions {
             make_runtime: false,
             assume_compiled_interface: false,
             gentype_config: None,
+            gentype_resolver: None,
             capture_intermediates: false,
             skip_js_render: false,
             publish_in_process_signature: true,
@@ -14520,6 +14523,7 @@ fn process_gentype_typed_artifact_if_enabled<'a>(
     crate::timing::measure(crate::timing::Phase::Gentype, || {
         crate::gentype::main::process_typed_artifact(
             config,
+            options.gentype_resolver.as_deref(),
             crate::gentype::main::TypedArtifact {
                 annots,
                 arena,

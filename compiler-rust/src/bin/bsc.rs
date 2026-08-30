@@ -479,6 +479,7 @@ fn run() -> Result<()> {
                 opts.gentype_flags.clone(),
             )
         }),
+        gentype_resolver: None,
         capture_intermediates: false,
         skip_js_render: false,
         publish_in_process_signature: true,

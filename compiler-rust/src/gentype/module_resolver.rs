@@ -4,11 +4,12 @@
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::Path;
-use std::rc::Rc;
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 
 type ModuleNameMap = BTreeMap<crate::gentype::module_name::T, String>;
-type LazyFind = Box<dyn Fn(bool, &crate::gentype::module_name::T) -> Option<(String, Case, bool)>>;
+type LazyFind = Arc<
+    dyn Fn(bool, &crate::gentype::module_name::T) -> Option<(String, Case, bool)> + Send + Sync,
+>;
 
 fn concat(left: &str, right: &str) -> String {
     Path::new(left).join(right).to_string_lossy().to_string()
@@ -120,20 +121,20 @@ pub enum Case {
 pub struct Resolver {
     config: crate::gentype::config::T,
     extensions: Vec<String>,
-    exclude_file: Rc<dyn Fn(&str) -> bool>,
+    exclude_file: Arc<dyn Fn(&str) -> bool + Send + Sync>,
     pub lazy_find: OnceLock<LazyFind>,
 }
 
 pub fn create_lazy_resolver(
     config: &crate::gentype::config::T,
     extensions: &[String],
-    exclude_file: impl Fn(&str) -> bool + 'static,
+    exclude_file: impl Fn(&str) -> bool + Send + Sync + 'static,
 ) -> Resolver {
     // Mirrors compiler/gentype/ModuleResolver.ml:79-106.
     Resolver {
         config: config.clone(),
         extensions: extensions.to_vec(),
-        exclude_file: Rc::new(exclude_file),
+        exclude_file: Arc::new(exclude_file),
         lazy_find: OnceLock::new(),
     }
 }
@@ -173,7 +174,7 @@ pub fn apply(
             sourcedirs_to_map(&resolver.config, &resolver.extensions, &|file_name| {
                 (resolver.exclude_file)(file_name)
             });
-        Box::new(move |use_bs_dependencies, module_name| {
+        Arc::new(move |use_bs_dependencies, module_name| {
             match find(false, &module_name_map, module_name) {
                 None if use_bs_dependencies => find(true, &bs_dependencies_file_map, module_name),
                 res => res,
