@@ -1154,6 +1154,13 @@ impl Default for PatternState {
 // Type Checking Context
 // ============================================================================
 
+struct DelayedUnusedCheck {
+    env: Env,
+    level: i32,
+    expected_ty: TypeExprRef,
+    witnesses: Vec<Pattern>,
+}
+
 /// Context for type checking.
 pub struct TypeCheckContext<'a> {
     /// Type context for allocation.
@@ -1174,7 +1181,9 @@ pub struct TypeCheckContext<'a> {
     /// used, and the warning is emitted only when delayed checks are forced.
     value_usage_checks: Vec<ValueUsageCheck>,
     /// Useful match witnesses retyped when delayed checks are flushed.
-    delayed_unused_witnesses: Vec<(Env, Pattern)>,
+    delayed_unused_witnesses: Vec<DelayedUnusedCheck>,
+    generated_pattern_constructors: HashMap<String, crate::types::ConstructorDescription>,
+    generated_pattern_labels: HashMap<String, crate::types::LabelDescription>,
     /// Current warning configuration.
     pub warning_config: WarningConfig,
     /// Current loop nesting depth for validating break/continue.
@@ -1280,6 +1289,8 @@ impl<'a> TypeCheckContext<'a> {
             warnings: Vec::new(),
             value_usage_checks: Vec::new(),
             delayed_unused_witnesses: Vec::new(),
+            generated_pattern_constructors: HashMap::new(),
+            generated_pattern_labels: HashMap::new(),
             warning_config: WarningConfig::new(),
             loop_depth: 0,
             used_variables: HashMap::new(),
@@ -1404,19 +1415,8 @@ impl<'a> TypeCheckContext<'a> {
             }
         }
 
-        for (env, witness) in std::mem::take(&mut self.delayed_unused_witnesses) {
-            let snapshot = self.type_ctx.snapshot_type_state();
-            let parsed = materialize_unused_witness(self, &env, &witness);
-            let mut state = PatternState::new();
-            let _ = type_pattern(
-                self,
-                &env,
-                self.arena.get_pat(parsed),
-                witness.pat_type,
-                PatternMode::SplitOr,
-                &mut state,
-            );
-            self.type_ctx.restore_type_state(snapshot);
+        for check in std::mem::take(&mut self.delayed_unused_witnesses) {
+            retype_unused_witnesses(self, check);
         }
     }
 
@@ -3616,7 +3616,16 @@ pub fn type_pattern(
     mode: PatternMode,
     state: &mut PatternState,
 ) -> TypeCoreResult<Pattern> {
-    type_pattern_with_existentials(tctx, env, pat, expected_ty, mode, true, state)
+    type_pattern_with_existentials_at_level(
+        tctx,
+        env,
+        pat,
+        expected_ty,
+        mode,
+        true,
+        state,
+        tctx.type_ctx.current_level(),
+    )
 }
 
 fn type_pattern_without_existentials(
@@ -3627,7 +3636,16 @@ fn type_pattern_without_existentials(
     mode: PatternMode,
     state: &mut PatternState,
 ) -> TypeCoreResult<Pattern> {
-    type_pattern_with_existentials(tctx, env, pat, expected_ty, mode, false, state)
+    type_pattern_with_existentials_at_level(
+        tctx,
+        env,
+        pat,
+        expected_ty,
+        mode,
+        false,
+        state,
+        tctx.type_ctx.current_level(),
+    )
 }
 
 struct PatternBacktrackState {
@@ -3665,7 +3683,7 @@ fn is_need_backtrack(err: &TypeCoreError) -> bool {
     matches!(err, TypeCoreError::NeedBacktrack)
 }
 
-fn type_pattern_with_existentials(
+fn type_pattern_with_existentials_at_level(
     tctx: &mut TypeCheckContext<'_>,
     env: &Env,
     pat: &ParsedPattern,
@@ -3673,10 +3691,12 @@ fn type_pattern_with_existentials(
     mode: PatternMode,
     allow_existentials: bool,
     state: &mut PatternState,
+    level: i32,
 ) -> TypeCoreResult<Pattern> {
-    // Match OCaml's type_pat: set newtype_level for GADT existential support
+    // Match OCaml's type_pat: delayed checks reuse the level captured by
+    // type_cases rather than the level current when the queue is flushed.
     let old_newtype_level = tctx.newtype_level;
-    tctx.newtype_level = Some(tctx.type_ctx.current_level());
+    tctx.newtype_level = Some(level);
     let result = type_pattern_inner(
         tctx,
         env,
@@ -4825,7 +4845,12 @@ fn type_pattern_construct(
     } else {
         None
     };
-    let (cstr_desc, _cstr_path) = if is_qualified {
+    let generated_constructor = (!is_qualified)
+        .then(|| tctx.generated_pattern_constructors.get(&lid_name).cloned())
+        .flatten();
+    let (cstr_desc, _cstr_path) = if let Some(desc) = generated_constructor {
+        (desc, Path::pident(Ident::create_persistent(&lid_name)))
+    } else if is_qualified {
         if let Some((path, desc)) =
             lookup_predef_option_constructor(lid_txt, tctx.arena, env, tctx.type_ctx)
         {
@@ -5294,31 +5319,37 @@ fn type_pattern_record(
         let field_name = tctx.longident_last_name(&resolved_lid);
 
         // Try to look up the label from the environment for type info
-        let disambiguated = lookup_label_by_lid(
-            &resolved_lid,
-            tctx.arena,
-            env,
-            &mut tctx.persistent_env,
-            ctx,
-            Some(record_ty),
-            None,
-        )
-        .or_else(|| {
-            disambiguate_label(
-                &field_name,
-                record_ty,
-                env,
-                &mut tctx.persistent_env,
-                ctx,
-                false,
-                // OCaml compiler/ml/typecore.ml:942-967 `lookup_from_type`
-                // reads label descriptors without forcing nested field paths;
-                // compiler/ml/typecore.ml:1623-1644 `type_label_pat`
-                // allocates the subpattern binders first. Rust drains those
-                // deferred field-path forces after pattern typing.
-                false,
-            )
-        });
+        let disambiguated = tctx
+            .generated_pattern_labels
+            .get(&field_name)
+            .cloned()
+            .or_else(|| {
+                lookup_label_by_lid(
+                    &resolved_lid,
+                    tctx.arena,
+                    env,
+                    &mut tctx.persistent_env,
+                    ctx,
+                    Some(record_ty),
+                    None,
+                )
+            })
+            .or_else(|| {
+                disambiguate_label(
+                    &field_name,
+                    record_ty,
+                    env,
+                    &mut tctx.persistent_env,
+                    ctx,
+                    false,
+                    // OCaml compiler/ml/typecore.ml:942-967 `lookup_from_type`
+                    // reads label descriptors without forcing nested field paths;
+                    // compiler/ml/typecore.ml:1623-1644 `type_label_pat`
+                    // allocates the subpattern binders first. Rust drains those
+                    // deferred field-path forces after pattern typing.
+                    false,
+                )
+            });
 
         let label = disambiguated.map(|env_label| {
             if has_dict_pattern_attr {
@@ -11168,6 +11199,7 @@ fn finish_non_gadt_type_cases<'a>(
     env: &Env,
     loc: LocIdx,
     ty_res: TypeExprRef,
+    ty_arg: TypeExprRef,
     parsed_cases: &[&'a crate::parser::ast::Case],
     typed_cases: &[crate::types::typedtree::Case],
     partial_flag: bool,
@@ -11177,6 +11209,8 @@ fn finish_non_gadt_type_cases<'a>(
         parsed_cases,
         [case] if is_simple_variable_pattern(tctx.arena, tctx.arena.get_pat(case.pc_lhs))
     );
+    let mut unused_check_level = ctx.current_level();
+    let mut unused_expected_ty = ty_arg;
     let partial = if needs_exhaust_check {
         // OCaml compiler/ml/typecore.ml:4511-4535 runs init_env after
         // type_cases body typing, even when partial_flag is false (for try
@@ -11186,6 +11220,8 @@ fn finish_non_gadt_type_cases<'a>(
         ctx.set_current_time(ctx.current_level());
         let lev = ctx.current_stamp();
         ctx.init_def(lev + 1000);
+        unused_check_level = lev;
+        unused_expected_ty = crate::types::ctype::subst_identity_copy(ctx, ty_arg);
         let partial = if partial_flag {
             let partial = check_partial_simple(ctx, env, typed_cases);
             report_all_clauses_guarded_if_needed(tctx, loc, typed_cases, partial);
@@ -11214,7 +11250,14 @@ fn finish_non_gadt_type_cases<'a>(
 
     // type_cases always schedules check_unused, including try handlers where
     // partial_flag is false (typecore.ml:4483-4496).
-    report_unused_match_cases(tctx, env, typed_cases, needs_exhaust_check);
+    report_unused_match_cases(
+        tctx,
+        env,
+        typed_cases,
+        needs_exhaust_check,
+        unused_check_level,
+        unused_expected_ty,
+    );
     Ok(partial)
 }
 
@@ -11737,6 +11780,16 @@ fn materialize_unused_witness(
     env: &Env,
     witness: &Pattern,
 ) -> crate::parse_arena::PatIdx {
+    let mut fresh_counter = 0;
+    materialize_unused_witness_inner(tctx, env, witness, &mut fresh_counter)
+}
+
+fn materialize_unused_witness_inner(
+    tctx: &mut TypeCheckContext<'_>,
+    env: &Env,
+    witness: &Pattern,
+    fresh_counter: &mut u32,
+) -> crate::parse_arena::PatIdx {
     use crate::parser::ast::{
         Pattern as ParsedPattern, PatternDesc as ParsedPatternDesc, PatternRecordField,
     };
@@ -11782,27 +11835,71 @@ fn materialize_unused_witness(
 
     match &witness.pat_desc {
         PatternDesc::Tpat_any | PatternDesc::Tpat_var(_, _) => {
-            if let Some(constructors) = variant_constructors_for_type(tctx, env, witness.pat_type)
-                && let [only] = constructors.as_slice()
-            {
-                let arg_count = match &only.cd_args {
-                    crate::types::decl::ConstructorArguments::CstrTuple(types) => types.len(),
-                    crate::types::decl::ConstructorArguments::CstrRecord(_) => 1,
-                };
-                let args = (0..arg_count)
-                    .map(|_| push(tctx, witness.pat_loc, ParsedPatternDesc::Ppat_any))
-                    .collect();
-                constructor(tctx, witness.pat_loc, only.cd_id.name(), args)
+            let generated = variant_constructor_descriptions_for_type(tctx, env, witness.pat_type)
+                .unwrap_or_default()
+                .into_iter()
+                .map(|constructor_desc| {
+                    let name = format!("#${}{}", constructor_desc.cstr_name, *fresh_counter);
+                    *fresh_counter += 1;
+                    let args = constructor_desc
+                        .cstr_args
+                        .iter()
+                        .map(|_| push(tctx, witness.pat_loc, ParsedPatternDesc::Ppat_any))
+                        .collect();
+                    tctx.generated_pattern_constructors
+                        .insert(name.clone(), constructor_desc);
+                    constructor(tctx, witness.pat_loc, &name, args)
+                })
+                .collect::<Vec<_>>();
+            let mut generated = generated.into_iter().rev();
+            if let Some(mut pattern) = generated.next() {
+                for left in generated {
+                    pattern = push(
+                        tctx,
+                        witness.pat_loc,
+                        ParsedPatternDesc::Ppat_or(left, pattern),
+                    );
+                }
+                pattern
             } else {
                 push(tctx, witness.pat_loc, ParsedPatternDesc::Ppat_any)
             }
         }
-        PatternDesc::Tpat_alias(inner, _, _) => materialize_unused_witness(tctx, env, inner),
-        PatternDesc::Tpat_constant(_) => push(tctx, witness.pat_loc, ParsedPatternDesc::Ppat_any),
+        PatternDesc::Tpat_alias(inner, _, _) => {
+            materialize_unused_witness_inner(tctx, env, inner, fresh_counter)
+        }
+        PatternDesc::Tpat_constant(constant) => {
+            let constant = match constant {
+                Constant::Int(value) => {
+                    crate::parser::ast::Constant::Integer(value.to_string().into(), None)
+                }
+                Constant::Char(value) => crate::parser::ast::Constant::Char(*value),
+                Constant::String(value, delimiter) => crate::parser::ast::Constant::String(
+                    value.clone().into(),
+                    delimiter.clone().map(Into::into),
+                ),
+                Constant::Float(value) => {
+                    crate::parser::ast::Constant::Float(value.clone().into(), None)
+                }
+                Constant::BigInt(positive, digits) => {
+                    let value = if *positive {
+                        digits.clone()
+                    } else {
+                        format!("-{digits}")
+                    };
+                    crate::parser::ast::Constant::Integer(value.into(), Some('n'))
+                }
+            };
+            push(
+                tctx,
+                witness.pat_loc,
+                ParsedPatternDesc::Ppat_constant(Box::new(constant)),
+            )
+        }
         PatternDesc::Tpat_tuple(items) => {
             let items = items
                 .iter()
-                .map(|item| materialize_unused_witness(tctx, env, item))
+                .map(|item| materialize_unused_witness_inner(tctx, env, item, fresh_counter))
                 .collect();
             push(
                 tctx,
@@ -11810,10 +11907,14 @@ fn materialize_unused_witness(
                 ParsedPatternDesc::Ppat_tuple(Box::new(items)),
             )
         }
-        PatternDesc::Tpat_construct(lid, _, items) => {
+        PatternDesc::Tpat_construct(_, constructor_desc, items) => {
+            let name = format!("#${}{}", constructor_desc.cstr_name, *fresh_counter);
+            *fresh_counter += 1;
+            tctx.generated_pattern_constructors
+                .insert(name.clone(), constructor_desc.clone());
             let items = items
                 .iter()
-                .map(|item| materialize_unused_witness(tctx, env, item))
+                .map(|item| materialize_unused_witness_inner(tctx, env, item, fresh_counter))
                 .collect::<Vec<_>>();
             let argument = match items.len() {
                 0 => None,
@@ -11824,16 +11925,17 @@ fn materialize_unused_witness(
                     ParsedPatternDesc::Ppat_tuple(Box::new(items)),
                 )),
             };
+            let lid = tctx.arena.push_typecheck_lident(&name);
             push(
                 tctx,
                 witness.pat_loc,
-                ParsedPatternDesc::Ppat_construct(*lid, argument),
+                ParsedPatternDesc::Ppat_construct(Located::new(lid, witness.pat_loc), argument),
             )
         }
         PatternDesc::Tpat_variant(label, argument, _) => {
             let argument = argument
                 .as_deref()
-                .map(|item| materialize_unused_witness(tctx, env, item));
+                .map(|item| materialize_unused_witness_inner(tctx, env, item, fresh_counter));
             push(
                 tctx,
                 witness.pat_loc,
@@ -11843,10 +11945,16 @@ fn materialize_unused_witness(
         PatternDesc::Tpat_record(fields, closed, _) => {
             let fields = fields
                 .iter()
-                .map(|(lid, _, field, opt)| PatternRecordField {
-                    lid: *lid,
-                    pat: materialize_unused_witness(tctx, env, field),
-                    opt: *opt,
+                .map(|(_, label_desc, field, opt)| {
+                    let name = format!("#${}{}", label_desc.lbl_name, *fresh_counter);
+                    *fresh_counter += 1;
+                    tctx.generated_pattern_labels
+                        .insert(name.clone(), label_desc.clone());
+                    PatternRecordField {
+                        lid: Located::new(tctx.arena.push_typecheck_lident(&name), witness.pat_loc),
+                        pat: materialize_unused_witness_inner(tctx, env, field, fresh_counter),
+                        opt: *opt,
+                    }
                 })
                 .collect();
             push(
@@ -11858,7 +11966,7 @@ fn materialize_unused_witness(
         PatternDesc::Tpat_array(items) => {
             let items = items
                 .iter()
-                .map(|item| materialize_unused_witness(tctx, env, item))
+                .map(|item| materialize_unused_witness_inner(tctx, env, item, fresh_counter))
                 .collect();
             push(
                 tctx,
@@ -11867,8 +11975,8 @@ fn materialize_unused_witness(
             )
         }
         PatternDesc::Tpat_or(left, right, _) => {
-            let left = materialize_unused_witness(tctx, env, left);
-            let right = materialize_unused_witness(tctx, env, right);
+            let left = materialize_unused_witness_inner(tctx, env, left, fresh_counter);
+            let right = materialize_unused_witness_inner(tctx, env, right, fresh_counter);
             push(
                 tctx,
                 witness.pat_loc,
@@ -11878,11 +11986,114 @@ fn materialize_unused_witness(
     }
 }
 
+fn retype_unused_witnesses(tctx: &mut TypeCheckContext<'_>, check: DelayedUnusedCheck) {
+    let expected_ty = crate::types::instance(tctx.type_ctx, check.expected_ty);
+    for witness in check.witnesses {
+        tctx.generated_pattern_constructors.clear();
+        tctx.generated_pattern_labels.clear();
+        let parsed = materialize_unused_witness(tctx, &check.env, &witness);
+        let type_snapshot = tctx.type_ctx.snapshot_type_state();
+        let unify_snapshot = tctx.unify_state.snapshot_backtrack_state();
+        let warning_len = tctx.warnings.len();
+        let diagnostic_len = tctx.diagnostics.len();
+        let mut state = PatternState::new();
+        let _ = type_pattern_with_existentials_at_level(
+            tctx,
+            &check.env,
+            tctx.arena.get_pat(parsed),
+            expected_ty,
+            PatternMode::SplitOr,
+            true,
+            &mut state,
+            check.level,
+        );
+        tctx.type_ctx.restore_type_state(type_snapshot);
+        tctx.unify_state.restore_backtrack_state(unify_snapshot);
+        tctx.warnings.truncate(warning_len);
+        tctx.diagnostics.truncate(diagnostic_len);
+    }
+    tctx.generated_pattern_constructors.clear();
+    tctx.generated_pattern_labels.clear();
+}
+
+fn opaque_dict_patterns(arena: &ParseArena, pattern: &Pattern) -> Pattern {
+    if pattern
+        .pat_attributes
+        .iter()
+        .any(|attribute| arena.get_string(attribute.0.txt) == DICT_PATTERN_ATTRIBUTE)
+    {
+        let mut opaque = pattern.clone();
+        opaque.pat_desc = PatternDesc::Tpat_any;
+        opaque.pat_extra = Default::default();
+        opaque.pat_attributes = Attributes::new();
+        return opaque;
+    }
+
+    let mut opaque = pattern.clone();
+    opaque.pat_desc = match &pattern.pat_desc {
+        PatternDesc::Tpat_alias(inner, id, name) => PatternDesc::Tpat_alias(
+            Box::new(opaque_dict_patterns(arena, inner)),
+            id.clone(),
+            name.clone(),
+        ),
+        PatternDesc::Tpat_tuple(items) => PatternDesc::Tpat_tuple(
+            items
+                .iter()
+                .map(|item| opaque_dict_patterns(arena, item))
+                .collect(),
+        ),
+        PatternDesc::Tpat_construct(lid, desc, args) => PatternDesc::Tpat_construct(
+            *lid,
+            desc.clone(),
+            args.iter()
+                .map(|arg| opaque_dict_patterns(arena, arg))
+                .collect(),
+        ),
+        PatternDesc::Tpat_variant(label, argument, row) => PatternDesc::Tpat_variant(
+            label.clone(),
+            argument
+                .as_deref()
+                .map(|arg| Box::new(opaque_dict_patterns(arena, arg))),
+            row.clone(),
+        ),
+        PatternDesc::Tpat_record(fields, closed, rest) => PatternDesc::Tpat_record(
+            fields
+                .iter()
+                .map(|(lid, label, field, optional)| {
+                    (
+                        *lid,
+                        label.clone(),
+                        opaque_dict_patterns(arena, field),
+                        *optional,
+                    )
+                })
+                .collect(),
+            *closed,
+            rest.clone(),
+        ),
+        PatternDesc::Tpat_array(items) => PatternDesc::Tpat_array(
+            items
+                .iter()
+                .map(|item| opaque_dict_patterns(arena, item))
+                .collect(),
+        ),
+        PatternDesc::Tpat_or(left, right, row) => PatternDesc::Tpat_or(
+            Box::new(opaque_dict_patterns(arena, left)),
+            Box::new(opaque_dict_patterns(arena, right)),
+            row.clone(),
+        ),
+        desc => desc.clone(),
+    };
+    opaque
+}
+
 fn report_unused_match_cases<'case>(
     tctx: &mut TypeCheckContext<'_>,
     env: &Env,
     cases: &'case [crate::types::typedtree::Case],
     delay_witness_typing: bool,
+    level: i32,
+    expected_ty: TypeExprRef,
 ) {
     if !tctx.warning_config.is_active(&Warning::UnusedMatch) {
         return;
@@ -11895,6 +12106,7 @@ fn report_unused_match_cases<'case>(
     let mut previous_unguarded_cases: Vec<PartialCheckCase<'case>> = Vec::new();
     let mut covered_keys: HashSet<String> = HashSet::default();
     let mut covered_by_catch_all = false;
+    let mut useful_witnesses = Vec::new();
 
     for case in cases {
         let has_dict_pattern = typed_pattern_contains_dict_pattern(tctx.arena, &case.c_lhs)
@@ -11994,13 +12206,33 @@ fn report_unused_match_cases<'case>(
             false
         };
 
-        if delay_witness_typing
-            && !is_unused
+        if !is_unused
             && !previous_unguarded_cases.is_empty()
             && tctx.warning_config.is_active(&Warning::UnreachableCase)
         {
-            tctx.delayed_unused_witnesses
-                .push((env.clone(), case.c_lhs.clone()));
+            let contains_dict = typed_pattern_contains_dict_pattern(tctx.arena, &case.c_lhs)
+                || previous_unguarded_cases
+                    .iter()
+                    .any(|previous| typed_pattern_contains_dict_pattern(tctx.arena, previous.lhs));
+            let previous = previous_unguarded_cases
+                .iter()
+                .filter(|previous| {
+                    !contains_dict || !typed_pattern_contains_dict_pattern(tctx.arena, previous.lhs)
+                })
+                .map(|previous| vec![previous.lhs.clone()])
+                .collect::<Vec<_>>();
+            let query = if contains_dict {
+                opaque_dict_patterns(tctx.arena, &case.c_lhs)
+            } else {
+                case.c_lhs.clone()
+            };
+            let witnesses = pressure_matrix_satisfiables(tctx, env, &previous, vec![query])
+                .into_iter()
+                .filter_map(|mut row| (row.len() == 1).then(|| row.remove(0)))
+                .collect::<Vec<_>>();
+            if let Some(witness) = pressure_matrix_orify_many(witnesses) {
+                useful_witnesses.push(witness);
+            }
         }
 
         if is_unused {
@@ -12028,6 +12260,20 @@ fn report_unused_match_cases<'case>(
                 lhs: &case.c_lhs,
                 has_guard: false,
             });
+        }
+    }
+
+    if !useful_witnesses.is_empty() {
+        let check = DelayedUnusedCheck {
+            env: env.clone(),
+            level,
+            expected_ty,
+            witnesses: useful_witnesses,
+        };
+        if delay_witness_typing {
+            tctx.delayed_unused_witnesses.push(check);
+        } else {
+            retype_unused_witnesses(tctx, check);
         }
     }
 }
@@ -12629,6 +12875,34 @@ fn variant_constructors_for_type(
         crate::types::TypeKind::TypeVariant(constructors, _) => Some(constructors.clone()),
         _ => None,
     }
+}
+
+fn variant_constructor_descriptions_for_type(
+    tctx: &mut TypeCheckContext<'_>,
+    env: &Env,
+    ty: TypeExprRef,
+) -> Option<Vec<crate::types::ConstructorDescription>> {
+    let ctx = tctx.type_ctx;
+    let expanded = crate::types::ctype::expand_head(ctx, env, ty);
+    let desc = ctx.get_desc(ctx.repr(expanded));
+    let target_path = match &*desc {
+        TypeDesc::Tconstr { path, .. } => path.clone(),
+        _ => return None,
+    };
+    drop(desc);
+    let declarations = variant_constructors_for_type(tctx, env, ty)?;
+    declarations
+        .into_iter()
+        .map(|declaration| {
+            env.find_all_constructors(declaration.cd_id.name())
+                .into_iter()
+                .find(|candidate| {
+                    constructor_result_path(ctx, candidate)
+                        .is_some_and(|path| path.same(&target_path))
+                })
+                .cloned()
+        })
+        .collect()
 }
 
 fn render_constructor_declaration_example(
@@ -13570,6 +13844,274 @@ fn pressure_matrix_full_match(
     }
 }
 
+fn pressure_matrix_has_instances(patterns: &[Pattern]) -> bool {
+    patterns.iter().all(|pattern| match &pattern.pat_desc {
+        PatternDesc::Tpat_alias(inner, _, _) => {
+            pressure_matrix_has_instances(std::slice::from_ref(inner.as_ref()))
+        }
+        PatternDesc::Tpat_or(left, right, _) => {
+            pressure_matrix_has_instances(std::slice::from_ref(left.as_ref()))
+                || pressure_matrix_has_instances(std::slice::from_ref(right.as_ref()))
+        }
+        PatternDesc::Tpat_construct(_, _, args)
+        | PatternDesc::Tpat_tuple(args)
+        | PatternDesc::Tpat_array(args) => pressure_matrix_has_instances(args),
+        PatternDesc::Tpat_record(fields, _, _) => pressure_matrix_has_instances(
+            &fields
+                .iter()
+                .map(|(_, _, field, _)| field.clone())
+                .collect::<Vec<_>>(),
+        ),
+        PatternDesc::Tpat_variant(_, Some(argument), _) => {
+            pressure_matrix_has_instances(std::slice::from_ref(argument.as_ref()))
+        }
+        PatternDesc::Tpat_any
+        | PatternDesc::Tpat_var(_, _)
+        | PatternDesc::Tpat_constant(_)
+        | PatternDesc::Tpat_variant(_, None, _) => true,
+    })
+}
+
+fn pressure_matrix_set_args(mut pattern: Pattern, args: Vec<Pattern>) -> Pattern {
+    pattern.pat_desc = match pattern.pat_desc {
+        PatternDesc::Tpat_construct(lid, desc, _) => PatternDesc::Tpat_construct(lid, desc, args),
+        PatternDesc::Tpat_tuple(_) => PatternDesc::Tpat_tuple(args),
+        PatternDesc::Tpat_array(_) => PatternDesc::Tpat_array(args),
+        PatternDesc::Tpat_variant(label, argument, row) => PatternDesc::Tpat_variant(
+            label,
+            argument.map(|_| Box::new(args.into_iter().next().expect("variant argument"))),
+            row,
+        ),
+        PatternDesc::Tpat_record(fields, closed, rest) => {
+            debug_assert_eq!(fields.len(), args.len());
+            PatternDesc::Tpat_record(
+                fields
+                    .into_iter()
+                    .zip(args)
+                    .map(|((lid, label, _, optional), argument)| (lid, label, argument, optional))
+                    .collect(),
+                closed,
+                rest,
+            )
+        }
+        desc => desc,
+    };
+    pattern
+}
+
+fn pressure_matrix_orify_many(mut patterns: Vec<Pattern>) -> Option<Pattern> {
+    let first = patterns.pop()?;
+    Some(patterns.into_iter().rev().fold(first, |right, left| {
+        let mut pattern = left.clone();
+        pattern.pat_desc = PatternDesc::Tpat_or(Box::new(left), Box::new(right), None);
+        pattern
+    }))
+}
+
+fn pressure_matrix_constructor_pattern(
+    tctx: &TypeCheckContext<'_>,
+    template: &Pattern,
+    constructor: crate::types::ConstructorDescription,
+) -> Pattern {
+    let args = constructor
+        .cstr_args
+        .iter()
+        .map(|ty| {
+            let mut pattern = pressure_matrix_omega_pat();
+            pattern.pat_loc = template.pat_loc;
+            pattern.pat_type = *ty;
+            pattern.pat_env = template.pat_env;
+            pattern
+        })
+        .collect();
+    let lid = Located::new(
+        tctx.arena.push_typecheck_lident(&constructor.cstr_name),
+        template.pat_loc,
+    );
+    let mut pattern = template.clone();
+    pattern.pat_desc = PatternDesc::Tpat_construct(lid, constructor, args);
+    pattern
+}
+
+fn pressure_matrix_other_constructors(
+    tctx: &mut TypeCheckContext<'_>,
+    env: &Env,
+    branches: &[(Pattern, Vec<Vec<Pattern>>)],
+    template: &Pattern,
+) -> Option<Pattern> {
+    let constructors = variant_constructor_descriptions_for_type(tctx, env, template.pat_type)?;
+    let missing = constructors
+        .into_iter()
+        .filter(|constructor| {
+            !branches.iter().any(|(pattern, _)| {
+                matches!(
+                    &pattern.pat_desc,
+                    PatternDesc::Tpat_construct(_, existing, _)
+                        if crate::types::same_constructor(existing, constructor)
+                )
+            })
+        })
+        .map(|constructor| pressure_matrix_constructor_pattern(tctx, template, constructor))
+        .collect();
+    pressure_matrix_orify_many(missing)
+}
+
+/// OCaml `Parmatch.satisfiables`: return the portions of `query` that remain
+/// after the rows in `previous`. The returned rows are converted back to one
+/// witness by `orify_many` before delayed GADT retyping.
+fn pressure_matrix_satisfiables(
+    tctx: &mut TypeCheckContext<'_>,
+    env: &Env,
+    previous: &[Vec<Pattern>],
+    query: Vec<Pattern>,
+) -> Vec<Vec<Pattern>> {
+    if previous.is_empty() {
+        return pressure_matrix_has_instances(&query)
+            .then_some(query)
+            .into_iter()
+            .collect();
+    }
+    let Some((head, tail)) = query.split_first() else {
+        return Vec::new();
+    };
+
+    match &head.pat_desc {
+        PatternDesc::Tpat_or(left, right, _) => {
+            let mut left_query = vec![(**left).clone()];
+            left_query.extend_from_slice(tail);
+            let mut right_query = vec![(**right).clone()];
+            right_query.extend_from_slice(tail);
+            let mut witnesses = pressure_matrix_satisfiables(tctx, env, previous, left_query);
+            witnesses.extend(pressure_matrix_satisfiables(
+                tctx,
+                env,
+                previous,
+                right_query,
+            ));
+            witnesses
+        }
+        PatternDesc::Tpat_alias(inner, _, _) => {
+            let mut query = vec![(**inner).clone()];
+            query.extend_from_slice(tail);
+            pressure_matrix_satisfiables(tctx, env, previous, query)
+        }
+        PatternDesc::Tpat_any | PatternDesc::Tpat_var(_, _) => {
+            let first_column = pressure_matrix_simplified_first_col(previous);
+            if !pressure_matrix_all_coherent(&first_column) {
+                return Vec::new();
+            }
+            let q0 = pressure_matrix_discr_pat(&pressure_matrix_omega_pat(), previous);
+            let branches = pressure_matrix_filter_all(&q0, previous);
+            let wild = |tctx: &mut TypeCheckContext<'_>, pattern: Pattern| {
+                pressure_matrix_satisfiables(
+                    tctx,
+                    env,
+                    &pressure_matrix_filter_extra(previous),
+                    tail.to_vec(),
+                )
+                .into_iter()
+                .map(|mut row| {
+                    row.insert(0, pattern.clone());
+                    row
+                })
+                .collect::<Vec<_>>()
+            };
+            if branches.is_empty() {
+                return wild(tctx, pressure_matrix_omega_pat());
+            }
+
+            let for_constructors = |tctx: &mut TypeCheckContext<'_>| {
+                let mut witnesses = Vec::new();
+                for (pattern, matrix) in &branches {
+                    let mut specialized_query =
+                        pressure_matrix_simple_match_args(pattern, &pressure_matrix_omega_pat());
+                    specialized_query.extend_from_slice(tail);
+                    for row in pressure_matrix_satisfiables(tctx, env, matrix, specialized_query) {
+                        let arity = pressure_matrix_simple_match_args(
+                            pattern,
+                            &pressure_matrix_omega_pat(),
+                        )
+                        .len();
+                        let (args, rest) = row.split_at(arity);
+                        let mut restored =
+                            vec![pressure_matrix_set_args(pattern.clone(), args.to_vec())];
+                        restored.extend_from_slice(rest);
+                        witnesses.push(restored);
+                    }
+                }
+                witnesses
+            };
+
+            if pressure_matrix_full_match(tctx, env, false, &branches) {
+                for_constructors(tctx)
+            } else if matches!(branches[0].0.pat_desc, PatternDesc::Tpat_construct(_, _, _)) {
+                let other =
+                    pressure_matrix_other_constructors(tctx, env, &branches, &branches[0].0);
+                let mut witnesses = if let Some(pattern) = other {
+                    wild(tctx, pattern)
+                } else if matches!(
+                    &branches[0].0.pat_desc,
+                    PatternDesc::Tpat_construct(
+                        _,
+                        crate::types::ConstructorDescription {
+                            cstr_kind: crate::types::ConstructorKind::Extension(_),
+                            ..
+                        },
+                        _
+                    )
+                ) {
+                    wild(tctx, pressure_matrix_omega_pat())
+                } else {
+                    Vec::new()
+                };
+                witnesses.extend(for_constructors(tctx));
+                witnesses
+            } else {
+                wild(tctx, pressure_matrix_omega_pat())
+            }
+        }
+        PatternDesc::Tpat_variant(label, _, _)
+            if pressure_matrix_row_of_pat(tctx, env, head).is_some_and(|row| {
+                row.row_fields.iter().any(|(candidate, field)| {
+                    candidate == label
+                        && matches!(
+                            crate::types::btype::row_field_repr(tctx.type_ctx, field),
+                            crate::types::type_expr::RowField::Rabsent
+                        )
+                })
+            }) =>
+        {
+            Vec::new()
+        }
+        _ => {
+            let mut column = vec![head.clone()];
+            column.extend(pressure_matrix_simplified_first_col(previous));
+            if !pressure_matrix_all_coherent(&column) {
+                return Vec::new();
+            }
+            let q0 = pressure_matrix_discr_pat(head, previous);
+            let args = pressure_matrix_simple_match_args(&q0, head);
+            let arity = args.len();
+            let mut specialized_query = args;
+            specialized_query.extend_from_slice(tail);
+            pressure_matrix_satisfiables(
+                tctx,
+                env,
+                &pressure_matrix_filter_one(&q0, previous),
+                specialized_query,
+            )
+            .into_iter()
+            .map(|row| {
+                let (args, rest) = row.split_at(arity);
+                let mut restored = vec![pressure_matrix_set_args(q0.clone(), args.to_vec())];
+                restored.extend_from_slice(rest);
+                restored
+            })
+            .collect()
+        }
+    }
+}
+
 #[derive(Clone, Copy, Default)]
 struct PressureVariantsResult {
     exhaustive: bool,
@@ -14430,7 +14972,11 @@ fn type_match(
         [case] if is_simple_variable_pattern(tctx.arena, tctx.arena.get_pat(case.pc_lhs))
     );
     let mut all_clauses_guarded = false;
+    let mut unused_check_level = ctx.current_level();
+    let mut unused_expected_ty = ty_arg;
     let partial = if has_generalized_value_patterns {
+        unused_check_level = gadt_lev;
+        unused_expected_ty = crate::types::ctype::subst_identity_copy(ctx, ty_arg);
         let partial = check_partial_simple(ctx, val_case_env, &typed_val_cases);
         all_clauses_guarded =
             report_all_clauses_guarded_if_needed(tctx, loc, &typed_val_cases, partial);
@@ -14456,6 +15002,8 @@ fn type_match(
         ctx.set_current_time(ctx.current_level());
         let lev = ctx.current_stamp();
         ctx.init_def(lev + 1000);
+        unused_check_level = lev;
+        unused_expected_ty = crate::types::ctype::subst_identity_copy(ctx, ty_arg);
         let partial = check_partial_simple(ctx, val_case_env, &typed_val_cases);
         all_clauses_guarded =
             report_all_clauses_guarded_if_needed(tctx, loc, &typed_val_cases, partial);
@@ -14481,6 +15029,8 @@ fn type_match(
         val_case_env,
         &typed_val_cases,
         has_generalized_value_patterns || needs_exhaust_check,
+        unused_check_level,
+        unused_expected_ty,
     );
     report_ambiguous_guarded_or_patterns(tctx, &typed_val_cases);
     if partial == crate::types::typedtree::Partial::Partial
@@ -15473,6 +16023,7 @@ fn type_try(
         env,
         loc,
         expected_ty,
+        exn_ty,
         &handler_refs,
         &typed_handlers,
         false,
@@ -15619,8 +16170,8 @@ fn desugar_nary_function_defaults(
 /// Prepare OCaml-shaped synthetic AST while the parse arena is exclusively borrowed.
 ///
 /// Type checking only receives a shared arena reference, so every rewrite whose
-/// shape is already known must be allocated here. Environment-dependent pattern
-/// rewrites use the arena's reserved one-time slots.
+/// shape is already known is allocated here. Environment-dependent pattern
+/// rewrites use the arena's stable append-only synthetic storage.
 pub fn prepare_typecheck_arena(arena: &mut ParseArena) {
     // `wrap_unpacks` may attach this internal attribute after environment-driven
     // first-class-module discovery. Its spelling is known up front, so intern it
@@ -15637,8 +16188,8 @@ pub fn prepare_typecheck_arena(arena: &mut ParseArena) {
         arena.set_nary_fun_default_bindings(fun.lhs, bindings);
     }
     // Optional-default AST is allocated above while the arena is exclusive.
-    // Reserve stable one-time slots afterward for environment-dependent pattern
-    // rewrites performed during type checking (for example variant spreads).
+    // Prepare stable append-only storage afterward for environment-dependent
+    // pattern rewrites performed during type checking (for example variants).
     arena.reserve_typecheck_synthetic_capacity();
 }
 
