@@ -1,7 +1,7 @@
 # In-Process Cold-Build Performance TODO
 
 **Last Updated:** 2026-05-07
-**Status:** The expanded 3,248-module Tella corpus exposed an accidental whole-layout clone in every variant-layout lookup: `Layout__Types` alone took 13.2s of a 15.7s build. The current candidate reads immutable layouts through scoped borrows and has reduced that module below one second. A new full-corpus baseline is pending alignment between the migrated Tella branch and the source-built compiler's Spice-generated aliases. The project goal remains a subsecond clean compile with 100% codegen parity.
+**Status:** The expanded 3,248-module Tella corpus exposed an accidental whole-layout clone in every variant-layout lookup: `Layout__Types` alone took 13.2s of a 15.7s build. Scoped layout borrows reduced that module below one second. The internal Spice mapper now matches v0.5.2 codec naming and record semantics, recursively expands nested modules, and supports inline-record variants, unblocking full migrated-Tella builds. The new release baseline is `6.680s +/- 0.019s` over five runs. The project goal remains a subsecond clean compile with 100% codegen parity.
 
 ## Goal
 

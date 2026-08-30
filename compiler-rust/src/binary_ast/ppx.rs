@@ -16258,6 +16258,14 @@ pub fn rewrite_structure(
     structure: &[StructureItem],
     arena: &mut ParseArena,
 ) -> PpxResult<Vec<StructureItem>> {
+    rewrite_structure_impl(structure, arena, true)
+}
+
+fn rewrite_structure_impl(
+    structure: &[StructureItem],
+    arena: &mut ParseArena,
+    apply_spice: bool,
+) -> PpxResult<Vec<StructureItem>> {
     validate_structure_deriving_errors(structure, arena)?;
     validate_structure_method_attribute_errors(structure, arena)?;
     validate_structure_js_string_errors(structure, arena)?;
@@ -16267,7 +16275,8 @@ pub fn rewrite_structure(
     // Context for tracking already-created module type names (per-structure scope)
     let mut await_context = std::collections::HashSet::new();
     let mut result = Vec::new();
-    let spice_mapper_active = spice_ppx::structure_uses_spice_mapper(structure, arena);
+    let spice_mapper_active =
+        apply_spice && spice_ppx::structure_uses_spice_mapper(structure, arena);
 
     for item in structure {
         match &*item.pstr_desc {
@@ -16285,12 +16294,14 @@ pub fn rewrite_structure(
                         }
                     }
                     result.push(transformed_mb);
-                } else {
+                } else if apply_spice {
                     result.extend(try_rewrite_structure_item(
                         item,
                         arena,
                         spice_mapper_active,
                     )?);
+                } else {
+                    result.extend(rewrite_structure_item_no_spice(item, arena));
                 }
             }
             StructureItemDesc::Pstr_value(inner) => {
@@ -16307,19 +16318,27 @@ pub fn rewrite_structure(
                 result.extend(module_type_decls);
 
                 // Then process the structure item normally
-                result.extend(try_rewrite_structure_item(
-                    item,
-                    arena,
-                    spice_mapper_active,
-                )?);
+                if apply_spice {
+                    result.extend(try_rewrite_structure_item(
+                        item,
+                        arena,
+                        spice_mapper_active,
+                    )?);
+                } else {
+                    result.extend(rewrite_structure_item_no_spice(item, arena));
+                }
             }
             _ => {
                 // Non-Pstr_value items: just process normally
-                result.extend(try_rewrite_structure_item(
-                    item,
-                    arena,
-                    spice_mapper_active,
-                )?);
+                if apply_spice {
+                    result.extend(try_rewrite_structure_item(
+                        item,
+                        arena,
+                        spice_mapper_active,
+                    )?);
+                } else {
+                    result.extend(rewrite_structure_item_no_spice(item, arena));
+                }
             }
         }
     }
@@ -17068,12 +17087,13 @@ fn rewrite_module_expr(
 ) -> current::ModuleExpr {
     let new_desc = match &*mod_expr.pmod_desc {
         current::ModuleExprDesc::Pmod_structure(items) => {
-            let rewritten_items = rewrite_structure(items, arena).unwrap_or_else(|_| {
-                items
-                    .iter()
-                    .flat_map(|item| rewrite_structure_item(item, arena))
-                    .collect()
-            });
+            let rewritten_items =
+                rewrite_structure_impl(items, arena, false).unwrap_or_else(|_| {
+                    items
+                        .iter()
+                        .flat_map(|item| rewrite_structure_item_no_spice(item, arena))
+                        .collect()
+                });
             current::ModuleExprDesc::Pmod_structure(Box::new(rewritten_items))
         }
         current::ModuleExprDesc::Pmod_functor(inner) => {
@@ -17526,6 +17546,47 @@ let f = value => {
         assert_eq!(
             classify_js_exp("({kind: \"app.created\"})"),
             JsExpClassification::JsLiteral { comment: None }
+        );
+    }
+
+    #[test]
+    fn spice_expands_nested_inline_record_variants_once() {
+        let source = r#"
+module Story = {
+  @spice
+  type event =
+    | Rename({name: string})
+    | Resize({width: int, height: int})
+}
+
+@spice
+type envelope = Story(Story.event)
+"#;
+        let (mut arena, structure) = parse_structure(source);
+        let rewritten = rewrite_structure(&structure, &mut arena).expect("rewrite should work");
+        let StructureItemDesc::Pstr_module(module) = &*rewritten[0].pstr_desc else {
+            panic!("expected nested module");
+        };
+        let module_expr = arena.get_mod_expr(module.pmb_expr);
+        let ModuleExprDesc::Pmod_structure(items) = &*module_expr.pmod_desc else {
+            panic!("expected nested module structure");
+        };
+
+        let codec_names = items
+            .iter()
+            .filter_map(|item| match &*item.pstr_desc {
+                StructureItemDesc::Pstr_value(value) => Some(&value.1),
+                _ => None,
+            })
+            .flatten()
+            .filter_map(|binding| match &*arena.get_pat(binding.pvb_pat).ppat_desc {
+                PatternDesc::Ppat_var(name) => Some(arena.get_string(name.txt)),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            codec_names,
+            ["event_encode", "event_encodeJson", "event_decode"]
         );
     }
 }
