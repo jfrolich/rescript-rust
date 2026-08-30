@@ -1322,7 +1322,7 @@ pub struct CompilerOptions {
     /// Mirror `Clflags.assume_no_mli := Mli_exists` from `-bs-read-cmi`.
     pub assume_compiled_interface: bool,
     /// GenType configuration derived from `-bs-gentype-*` flags.
-    pub gentype_config: Option<crate::gentype::config::T>,
+    pub gentype_config: Option<std::sync::Arc<crate::gentype::config::T>>,
     /// Build-scoped GenType module resolver shared by in-process compilations.
     pub gentype_resolver: Option<std::sync::Arc<crate::gentype::module_resolver::Resolver>>,
     /// When true, `compile_source_in_process` captures the typed tree,

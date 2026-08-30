@@ -765,7 +765,7 @@ pub fn compile(
     // registries so stale entries don't remain resolvable in watch mode.
     if build_state.build_mode().is_in_process() {
         build_state.purge_deleted_modules(&build_state.build_state.deleted_modules.clone());
-        build_state.clear_gentype_resolvers();
+        build_state.clear_gentype_contexts();
     }
 
     // In --in-process mode, synthesize namespace module signatures in memory
@@ -1838,51 +1838,45 @@ fn build_compiler_options(
     let js_output_targets = js_output_targets_for_source(package, source_file_path, root_config);
     let output_module_format = js_output_targets.first().map(|target| target.module_format);
     let output_path = js_output_targets.first().map(|target| target.path.clone());
-    let gentype_config = if package.config.gentype_config.is_some() {
-        // Mirrors the bsc CLI path in compiler/bsc/rescript_compiler_main.ml:300-343:
-        // rewatch first materializes the exact -bs-gentype-* flags, then the
-        // Rust compiler builds GenTypeConfig.t from that flag stream.
-        let current_package_dirs: &[PathBuf] = package.gentype_dirs.as_deref().unwrap_or(&[]);
-        let dep_paths: Vec<(String, PathBuf)> = package
-            .config
-            .dependencies
-            .as_ref()
-            .map(|deps| {
-                deps.iter()
-                    .filter_map(|dep| {
-                        let name = dep.name();
-                        build_state
-                            .packages
-                            .get(name)
-                            .map(|pkg| (name.to_string(), pkg.path.clone()))
-                    })
-                    .collect()
-            })
-            .unwrap_or_default();
-        // OCaml bsc wires -bs-project-root into GenTypeConfig.project_root at
-        // compiler/bsc/rescript_compiler_main.ml:266-269 before
-        // compiler/gentype/GenTypeConfig.ml:124-131 builds Config.t. Keep
-        // the in-process path on the same flag-shaped input so
-        // compiler/gentype/Paths.ml:48-56 and
-        // compiler/gentype/ModuleResolver.ml:111-164 resolve package-local
-        // output/source directories from the package root.
-        let mut gentype_args = package.config.get_project_root_args();
-        gentype_args.extend(package.config.get_gentype_args(
-            current_package_dirs,
-            Some(project_context.get_root_path()),
-            &dep_paths,
-        ));
-        Some(rescript_compiler::gentype::config::build_config_from_cli_args(
-            package.config.get_namespace().to_suffix(),
-            &gentype_args,
-        ))
-    } else {
-        None
-    };
-
-    let gentype_resolver = gentype_config
-        .as_ref()
-        .map(|config| build_command_state.gentype_resolver(&package.path, config));
+    let gentype_context = package.config.gentype_config.as_ref().map(|_| {
+        build_command_state.gentype_context(&package.path, || {
+            // Mirrors the bsc CLI path in compiler/bsc/rescript_compiler_main.ml:300-343:
+            // rewatch first materializes the exact -bs-gentype-* flags, then the
+            // Rust compiler builds GenTypeConfig.t from that flag stream.
+            let current_package_dirs: &[PathBuf] = package.gentype_dirs.as_deref().unwrap_or(&[]);
+            let dep_paths: Vec<(String, PathBuf)> = package
+                .config
+                .dependencies
+                .as_ref()
+                .map(|deps| {
+                    deps.iter()
+                        .filter_map(|dep| {
+                            let name = dep.name();
+                            build_state
+                                .packages
+                                .get(name)
+                                .map(|pkg| (name.to_string(), pkg.path.clone()))
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            // OCaml bsc wires -bs-project-root into GenTypeConfig.project_root at
+            // compiler/bsc/rescript_compiler_main.ml:266-269 before
+            // compiler/gentype/GenTypeConfig.ml:124-131 builds Config.t.
+            let mut gentype_args = package.config.get_project_root_args();
+            gentype_args.extend(package.config.get_gentype_args(
+                current_package_dirs,
+                Some(project_context.get_root_path()),
+                &dep_paths,
+            ));
+            rescript_compiler::gentype::config::build_config_from_cli_args(
+                package.config.get_namespace().to_suffix(),
+                &gentype_args,
+            )
+        })
+    });
+    let gentype_config = gentype_context.as_ref().map(|context| context.config.clone());
+    let gentype_resolver = gentype_context.map(|context| context.resolver.clone());
 
     let (source_map, source_map_sources_content, source_map_root) =
         match root_config.effective_source_map_mode(build_state.source_map_command) {

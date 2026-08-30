@@ -205,6 +205,11 @@ pub struct BuildState {
     pub source_map_command: SourceMapCommand,
 }
 
+pub struct GentypeCompileContext {
+    pub config: Arc<rescript_compiler::gentype::config::T>,
+    pub resolver: Arc<rescript_compiler::gentype::module_resolver::Resolver>,
+}
+
 /// Extended build state that includes command-line specific overrides.
 /// Wraps `BuildState` and adds command-specific data like warning overrides.
 /// Used by commands that need to respect CLI flags (e.g., `build`, `watch`).
@@ -239,10 +244,8 @@ pub struct BuildCommandState {
     // Keyed by "{module_name}:impl" or "{module_name}:intf" (matching stored_asts convention).
     // Values are the raw module names extracted from the parsed AST.
     pub in_memory_deps: Mutex<AHashMap<String, Dependencies>>,
-    // GenType scans package and dependency source directories when its resolver
-    // is first forced. Share that immutable resolver within one compile wave.
-    pub gentype_resolvers:
-        Mutex<AHashMap<PathBuf, Arc<rescript_compiler::gentype::module_resolver::Resolver>>>,
+    // GenType config and resolver inputs are immutable within one compile wave.
+    pub gentype_contexts: Mutex<AHashMap<PathBuf, Arc<GentypeCompileContext>>>,
     // Command-line --features override. `None` means all features are active; `Some(list)`
     // restricts the root package to those features (and whatever they transitively imply).
     pub features: Option<Vec<String>>,
@@ -265,7 +268,7 @@ impl std::fmt::Debug for BuildCommandState {
             )
             .field("module_registry", &"<Mutex<ModuleRegistry>>")
             .field("in_memory_deps", &"<Mutex<..>>")
-            .field("gentype_resolvers", &"<Mutex<..>>")
+            .field("gentype_contexts", &"<Mutex<..>>")
             .field("features", &self.features)
             .finish()
     }
@@ -340,31 +343,33 @@ impl BuildCommandState {
             interface_generation: AtomicU64::new(0),
             module_registry: Mutex::new(ModuleRegistry::new()),
             in_memory_deps: Mutex::new(AHashMap::new()),
-            gentype_resolvers: Mutex::new(AHashMap::new()),
+            gentype_contexts: Mutex::new(AHashMap::new()),
             features,
         }
     }
 
-    pub fn gentype_resolver(
+    pub fn gentype_context(
         &self,
         package_path: &std::path::Path,
-        config: &rescript_compiler::gentype::config::T,
-    ) -> Arc<rescript_compiler::gentype::module_resolver::Resolver> {
-        let mut resolvers = self.gentype_resolvers.lock().unwrap();
-        resolvers
+        build_config: impl FnOnce() -> rescript_compiler::gentype::config::T,
+    ) -> Arc<GentypeCompileContext> {
+        let mut contexts = self.gentype_contexts.lock().unwrap();
+        contexts
             .entry(package_path.to_path_buf())
             .or_insert_with(|| {
-                Arc::new(rescript_compiler::gentype::module_resolver::create_lazy_resolver(
-                    config,
+                let config = Arc::new(build_config());
+                let resolver = Arc::new(rescript_compiler::gentype::module_resolver::create_lazy_resolver(
+                    &config,
                     &[".res".to_string(), ".shim.ts".to_string()],
                     |fname| fname == "React.res" || fname == "ReasonReact.res",
-                ))
+                ));
+                Arc::new(GentypeCompileContext { config, resolver })
             })
             .clone()
     }
 
-    pub fn clear_gentype_resolvers(&self) {
-        self.gentype_resolvers.lock().unwrap().clear();
+    pub fn clear_gentype_contexts(&self) {
+        self.gentype_contexts.lock().unwrap().clear();
     }
 
     pub fn get_warn_error_override(&self) -> Option<String> {

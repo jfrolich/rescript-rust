@@ -474,10 +474,10 @@ fn run() -> Result<()> {
         make_runtime: opts.make_runtime,
         assume_compiled_interface: opts.read_cmi,
         gentype_config: opts.gentype.then(|| {
-            rescript_compiler::gentype::config::build_config_from_flags(
+            std::sync::Arc::new(rescript_compiler::gentype::config::build_config_from_flags(
                 opts.namespace.clone(),
                 opts.gentype_flags.clone(),
-            )
+            ))
         }),
         gentype_resolver: None,
         capture_intermediates: false,
