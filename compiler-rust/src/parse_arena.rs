@@ -451,6 +451,7 @@ impl SpiceCache {
 pub struct ParseArena {
     /// Arena of positions (returns PosIdx).
     positions: Arena<Position, PosIdx>,
+    position_file_names: HashMap<StrIdx, String>,
     /// Arena of locations (returns LocIdx).
     locations: Arena<InternedLocation, LocIdx>,
     /// Arena of longidents (returns LidentIdx).
@@ -912,6 +913,7 @@ impl Default for ParseArena {
 
         Self {
             positions: Arena::default(),
+            position_file_names: HashMap::new(),
             locations: Arena::default(),
             longidents,
             synthetic_longidents: elsa::sync::FrozenVec::new(),
@@ -1000,12 +1002,18 @@ impl ParseArena {
         // Pre-allocate none file name and position at index 0
         // This way LocIdx::default() == LocIdx(0) is always valid
         let none_file_idx = arena.strings.intern("_none_");
+        arena
+            .position_file_names
+            .insert(none_file_idx, "_none_".to_string());
         let none_pos = Position::new(none_file_idx, 1, 0, -1);
         let pos_idx = arena.positions.push(none_pos);
         let none_loc = InternedLocation::new(pos_idx, pos_idx, true);
         arena.locations.push(none_loc);
         // Pre-allocate dummy location with line 0 for internal PPX nodes
         let dummy_file_idx = arena.strings.push("_none_".to_string());
+        arena
+            .position_file_names
+            .insert(dummy_file_idx, "_none_".to_string());
         let dummy_pos = Position::new(dummy_file_idx, 0, 0, -1);
         let dummy_pos_idx = arena.positions.push(dummy_pos);
         let dummy_loc = InternedLocation::new(dummy_pos_idx, dummy_pos_idx, true);
@@ -1105,10 +1113,18 @@ impl ParseArena {
 
     // ========== Position methods ==========
 
+    fn record_position_file_name(&mut self, file_name: StrIdx) {
+        if !self.position_file_names.contains_key(&file_name) {
+            self.position_file_names
+                .insert(file_name, self.get_string(file_name).to_string());
+        }
+    }
+
     /// Push a position into the arena and return its index.
     /// Creates a fresh entry each time - sharing is achieved by passing the same
     /// PosIdx through code paths (reference sharing), not by value deduplication.
     pub fn push_position(&mut self, pos: Position) -> PosIdx {
+        self.record_position_file_name(pos.file_name);
         let key = PosKey::from_position(&pos);
         let idx = self.positions.push(pos);
         // Register in dedup table only if not already there (for lookup purposes)
@@ -1127,6 +1143,7 @@ impl ParseArena {
     /// Push a position with deduplication - reuses an existing index if the position
     /// content matches.
     pub fn push_position_dedup(&mut self, pos: Position) -> PosIdx {
+        self.record_position_file_name(pos.file_name);
         let key = PosKey::from_position(&pos);
         if let Some(&idx) = self.position_dedup.get(&key) {
             return idx;
@@ -1141,6 +1158,7 @@ impl ParseArena {
     /// This matches OCaml's behavior where each position is a separate object.
     /// file_name should be an interned StrIdx (from arena.intern_string).
     pub fn push_pos(&mut self, file_name: StrIdx, line: i32, bol: i32, cnum: i32) -> PosIdx {
+        self.record_position_file_name(file_name);
         self.positions
             .push(Position::new(file_name, line, bol, cnum))
     }
@@ -1453,6 +1471,8 @@ impl ParseArena {
     /// Useful for migrating code that creates Location values.
     /// Creates fresh positions to match OCaml behavior.
     pub fn from_location(&mut self, loc: &Location) -> LocIdx {
+        self.record_position_file_name(loc.loc_start.file_name);
+        self.record_position_file_name(loc.loc_end.file_name);
         let start_idx = self.positions.push(loc.loc_start);
         let end_idx = self.positions.push(loc.loc_end);
         self.push_loc(start_idx, end_idx, loc.loc_ghost)
@@ -1943,13 +1963,7 @@ impl ParseArena {
 
     /// File names referenced by source positions in this arena.
     pub fn source_file_names(&self) -> HashMap<StrIdx, String> {
-        let mut names = HashMap::new();
-        for (_, position) in self.positions.iter() {
-            names
-                .entry(position.file_name)
-                .or_insert_with(|| self.get_string(position.file_name).to_string());
-        }
-        names
+        self.position_file_names.clone()
     }
 
     /// Number of strings currently stored in the arena string table.
@@ -3026,6 +3040,26 @@ mod tests {
             &*arena.get_pat(patterns[2047]).ppat_desc,
             PatternDesc::Ppat_any
         ));
+    }
+
+    #[test]
+    fn source_file_names_are_tracked_while_positions_are_added() {
+        let mut arena = ParseArena::new();
+        let first = arena.intern("first.res");
+        let second = arena.intern("generated.res");
+        arena.push_pos(first, 1, 0, 0);
+        arena.from_location(&Location {
+            loc_start: Position::new(second, 2, 10, 12),
+            loc_end: Position::new(second, 2, 10, 20),
+            loc_ghost: false,
+        });
+
+        let names = arena.source_file_names();
+        assert_eq!(names.get(&first).map(String::as_str), Some("first.res"));
+        assert_eq!(
+            names.get(&second).map(String::as_str),
+            Some("generated.res")
+        );
     }
 
     #[test]
