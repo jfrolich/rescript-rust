@@ -27,8 +27,6 @@
 //! ```
 
 use std::collections::{HashMap, HashSet};
-use std::sync::OnceLock;
-use std::sync::atomic::{AtomicUsize, Ordering};
 
 use serde::{Deserialize, Serialize};
 
@@ -459,8 +457,7 @@ pub struct ParseArena {
     longidents: Arena<Longident, LidentIdx>,
     /// Slots reserved before type checking for environment-dependent synthetic
     /// longidents, such as record-field qualification and omitted labels.
-    synthetic_longidents: Box<[OnceLock<Longident>]>,
-    next_synthetic_longident: AtomicUsize,
+    synthetic_longidents: elsa::sync::FrozenVec<Box<Longident>>,
     synthetic_longident_base: u32,
     /// Arena of arities (returns ArityIdx).
     /// Use `push_arity()` for computed paths (fresh indices).
@@ -527,17 +524,12 @@ pub struct ParseArena {
     /// Arena of patterns (returns PatIdx).
     /// Replaces `Box<Pattern>` for recursive AST references.
     patterns: Arena<Pattern, PatIdx>,
-    /// Slots exclusively reserved before type checking for OCaml-shaped
-    /// synthetic pattern rewrites. `OnceLock` permits one-time initialization
-    /// through the shared arena reference held by `TypeCheckContext` without
-    /// violating aliasing rules or moving parser-created patterns.
-    synthetic_patterns: Box<[OnceLock<Pattern>]>,
-    next_synthetic_pattern: AtomicUsize,
+    /// Append-only stable storage for OCaml-shaped synthetic pattern rewrites.
+    synthetic_patterns: elsa::sync::FrozenVec<Box<Pattern>>,
     synthetic_pattern_base: u32,
     /// Slots reserved before type checking for strings discovered only after
     /// environment lookup (notably omitted record labels).
-    synthetic_strings: Box<[OnceLock<String>]>,
-    next_synthetic_string: AtomicUsize,
+    synthetic_strings: elsa::sync::FrozenVec<Box<String>>,
     synthetic_string_base: u32,
     /// Arena of core types (returns CoreTypeIdx).
     /// Replaces `Box<CoreType>` for recursive AST references.
@@ -922,8 +914,7 @@ impl Default for ParseArena {
             positions: Arena::default(),
             locations: Arena::default(),
             longidents,
-            synthetic_longidents: Box::new([]),
-            next_synthetic_longident: AtomicUsize::new(0),
+            synthetic_longidents: elsa::sync::FrozenVec::new(),
             synthetic_longident_base: 0,
             arities,
             expressions: Arena::default(),
@@ -942,11 +933,9 @@ impl Default for ParseArena {
             expr_if_else_branches: Vec::new(),
             expr_coerce_from_types: Vec::new(),
             patterns: Arena::default(),
-            synthetic_patterns: Box::new([]),
-            next_synthetic_pattern: AtomicUsize::new(0),
+            synthetic_patterns: elsa::sync::FrozenVec::new(),
             synthetic_pattern_base: 0,
-            synthetic_strings: Box::new([]),
-            next_synthetic_string: AtomicUsize::new(0),
+            synthetic_strings: elsa::sync::FrozenVec::new(),
             synthetic_string_base: 0,
             core_types,
             mod_exprs: Arena::default(),
@@ -1625,8 +1614,8 @@ impl ParseArena {
         if raw < self.synthetic_longident_base || self.synthetic_longidents.is_empty() {
             self.longidents.get(idx)
         } else {
-            self.synthetic_longidents[(raw - self.synthetic_longident_base) as usize]
-                .get()
+            self.synthetic_longidents
+                .get((raw - self.synthetic_longident_base) as usize)
                 .expect("typechecker synthetic longident read before initialization")
         }
     }
@@ -1946,8 +1935,8 @@ impl ParseArena {
         if raw < self.synthetic_string_base || self.synthetic_strings.is_empty() {
             self.strings.get(idx)
         } else {
-            self.synthetic_strings[(raw - self.synthetic_string_base) as usize]
-                .get()
+            self.synthetic_strings
+                .get((raw - self.synthetic_string_base) as usize)
                 .expect("typechecker synthetic string read before initialization")
         }
     }
@@ -1968,15 +1957,15 @@ impl ParseArena {
         self.strings.len()
     }
 
-    /// Reserve append-only AST space used by typecore synthetic rewrites.
+    /// Prepare append-only AST storage used by typecore synthetic rewrites.
     ///
     /// Typechecking creates a few parsed AST fragments to mirror OCaml rewrites
     /// such as optional-default lowering and variant-spread expansion. This must
     /// happen before the arena is handed to `TypeCheckContext` for the primary
-    /// AST and identifier arenas: reserving at an append site can reallocate
-    /// backing storage while existing parser refs are still live. Sparse side
-    /// tables are keyed by `ExprIdx` and are only appended alongside synthetic
-    /// expressions, so they do not need an unconditional per-file reserve.
+    /// AST and identifier arenas. Environment-dependent patterns, longidents,
+    /// and strings use stable append-only storage and can grow during checking.
+    /// Sparse side tables are keyed by `ExprIdx` and are only appended alongside
+    /// synthetic expressions, so they do not need an unconditional reserve.
     pub fn reserve_typecheck_synthetic_capacity(&mut self) {
         self.expressions.reserve(64);
         self.patterns.reserve(64);
@@ -1984,62 +1973,26 @@ impl ParseArena {
         self.strings.reserve(128);
 
         self.synthetic_pattern_base = self.patterns.len() as u32;
-        let synthetic_pattern_capacity = self
-            .patterns
-            .len()
-            .saturating_mul(2)
-            .saturating_add(self.longidents.len())
-            .max(64);
-        self.synthetic_patterns = (0..synthetic_pattern_capacity)
-            .map(|_| OnceLock::new())
-            .collect();
-        self.next_synthetic_pattern.store(0, Ordering::Relaxed);
-
-        // A single sparse JSX record can synthesize hundreds of omitted
-        // optional labels despite containing few source longidents. Keep a
-        // practical floor while scaling with source complexity.
-        let synthetic_longident_capacity = self.longidents.len().saturating_mul(2).max(1024);
+        self.synthetic_patterns = elsa::sync::FrozenVec::new();
         self.synthetic_longident_base = self.longidents.len() as u32;
-        self.synthetic_longidents = (0..synthetic_longident_capacity)
-            .map(|_| OnceLock::new())
-            .collect();
-        self.next_synthetic_longident.store(0, Ordering::Relaxed);
-
-        let synthetic_string_capacity = synthetic_longident_capacity.max(self.strings.len());
+        self.synthetic_longidents = elsa::sync::FrozenVec::new();
         self.synthetic_string_base = self.strings.len() as u32;
-        self.synthetic_strings = (0..synthetic_string_capacity)
-            .map(|_| OnceLock::new())
-            .collect();
-        self.next_synthetic_string.store(0, Ordering::Relaxed);
+        self.synthetic_strings = elsa::sync::FrozenVec::new();
     }
 
     /// Append a typechecker-generated longident to storage reserved before the
     /// arena became shared.
     pub fn push_typecheck_longident(&self, longident: Longident) -> LidentIdx {
-        let slot = self
-            .next_synthetic_longident
-            .fetch_add(1, Ordering::Relaxed);
-        let storage = self
-            .synthetic_longidents
-            .get(slot)
-            .expect("typechecker synthetic longident capacity exhausted");
-        storage
-            .set(longident)
-            .unwrap_or_else(|_| panic!("typechecker synthetic longident slot initialized twice"));
+        let slot = self.synthetic_longidents.len();
+        self.synthetic_longidents.push(Box::new(longident));
         LidentIdx::from_u32(self.synthetic_longident_base + slot as u32)
     }
 
     /// Append a typechecker-generated string to storage reserved before the
     /// arena became shared.
     pub fn push_typecheck_string(&self, string: String) -> StrIdx {
-        let slot = self.next_synthetic_string.fetch_add(1, Ordering::Relaxed);
-        let storage = self
-            .synthetic_strings
-            .get(slot)
-            .expect("typechecker synthetic string capacity exhausted");
-        storage
-            .set(string)
-            .unwrap_or_else(|_| panic!("typechecker synthetic string slot initialized twice"));
+        let slot = self.synthetic_strings.len();
+        self.synthetic_strings.push(Box::new(string));
         StrIdx::from_raw(self.synthetic_string_base + slot as u32)
     }
 
@@ -2054,14 +2007,8 @@ impl ParseArena {
     /// arena became shared. This is a safe, append-only equivalent of OCaml's
     /// allocation during pattern rewrites.
     pub fn push_typecheck_pattern(&self, pattern: Pattern) -> PatIdx {
-        let slot = self.next_synthetic_pattern.fetch_add(1, Ordering::Relaxed);
-        let storage = self
-            .synthetic_patterns
-            .get(slot)
-            .expect("typechecker synthetic pattern capacity exhausted");
-        storage
-            .set(pattern)
-            .unwrap_or_else(|_| panic!("typechecker synthetic pattern slot initialized twice"));
+        let slot = self.synthetic_patterns.len();
+        self.synthetic_patterns.push(Box::new(pattern));
         PatIdx::from_u32(self.synthetic_pattern_base + slot as u32)
     }
 
@@ -2856,8 +2803,8 @@ impl ParseArena {
         if raw < self.synthetic_pattern_base || self.synthetic_patterns.is_empty() {
             self.patterns.get(idx)
         } else {
-            self.synthetic_patterns[(raw - self.synthetic_pattern_base) as usize]
-                .get()
+            self.synthetic_patterns
+                .get((raw - self.synthetic_pattern_base) as usize)
                 .expect("typechecker synthetic pattern read before initialization")
         }
     }
@@ -3047,6 +2994,38 @@ mod tests {
             pexp_loc: LocIdx::default(),
             pexp_attributes: Attributes::new(),
         }
+    }
+
+    #[test]
+    fn typecheck_synthetic_storage_grows_without_a_fixed_limit() {
+        let mut arena = ParseArena::new();
+        arena.reserve_typecheck_synthetic_capacity();
+        let mut patterns = Vec::new();
+        let mut longidents = Vec::new();
+        for index in 0..2048 {
+            longidents.push(arena.push_typecheck_lident(&format!("Generated{index}")));
+            patterns.push(arena.push_typecheck_pattern(Pattern {
+                ppat_desc: Box::new(PatternDesc::Ppat_any),
+                ppat_loc: LocIdx::none(),
+                ppat_attributes: Attributes::new(),
+            }));
+        }
+
+        assert!(matches!(
+            arena.get_longident(longidents[0]),
+            Longident::Lident(_)
+        ));
+        assert_eq!(
+            arena.get_string(match arena.get_longident(longidents[2047]) {
+                Longident::Lident(name) => *name,
+                _ => unreachable!(),
+            }),
+            "Generated2047"
+        );
+        assert!(matches!(
+            &*arena.get_pat(patterns[2047]).ppat_desc,
+            PatternDesc::Ppat_any
+        ));
     }
 
     #[test]
