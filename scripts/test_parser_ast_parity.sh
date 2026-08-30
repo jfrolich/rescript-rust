@@ -20,7 +20,7 @@
 #
 # REGRESSION TRACKING:
 # The script maintains baseline files in tests/parity_baselines/ for each test type.
-# - When a file passes, it's added to the baseline (append-only)
+# - Baselines are read-only unless --update-baseline is passed explicitly
 # - If a file in the baseline fails, it's flagged as a REGRESSION
 # - Regressions cause the test to fail, preventing parity from decreasing
 #
@@ -38,6 +38,7 @@
 #   -q, --quick       Stop on first failure (useful for quick iteration)
 #   -j, --parallel N  Run N tests in parallel (default: 16)
 #   -v, --verbose     Show progress for each file
+#   --update-baseline Append newly passing files to parity baselines
 #   -h, --help        Show this help message
 #   --info            Show detailed usage information and examples
 #
@@ -63,6 +64,7 @@ set -e
 QUICK_MODE=false
 PARALLEL_JOBS=16
 VERBOSE=false
+UPDATE_BASELINE=false
 FILE_ARG=""
 PATTERN_MODE=false
 SINGLE_FILE_MODE=false
@@ -84,6 +86,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         -v|--verbose)
             VERBOSE=true
+            shift
+            ;;
+        --update-baseline)
+            UPDATE_BASELINE=true
             shift
             ;;
         -h|--help)
@@ -682,9 +688,6 @@ detect_regressions_and_update() {
     local regressions=""
     local new_passes=""
 
-    # Create baseline dir if needed
-    mkdir -p "$(dirname "$baseline_file")"
-
     # Get current passing files as sorted list
     # Only include files from the test suite (syntax_tests/data/), not arbitrary paths like /tmp/
     local current_sorted=$(echo -e "$current_pass" | grep -v "^$" | grep "^syntax_tests/data/" | sort -u)
@@ -722,13 +725,16 @@ detect_regressions_and_update() {
         echo "$regressions" > "$TEMP_DIR/regressions_${test_name// /_}.txt"
     fi
 
-    # Append new passes to baseline (only append, never remove)
     if [[ -n "$new_passes" ]]; then
         local new_count=$(echo "$new_passes" | wc -l | tr -d ' ')
         echo -e "${GREEN}New passes in $test_name: $new_count file(s)${RESET}"
-        echo "$new_passes" >> "$baseline_file"
-        # Re-sort and dedupe the baseline file
-        sort -u "$baseline_file" -o "$baseline_file"
+        if $UPDATE_BASELINE; then
+            mkdir -p "$(dirname "$baseline_file")"
+            echo "$new_passes" >> "$baseline_file"
+            sort -u "$baseline_file" -o "$baseline_file"
+        else
+            echo "  Re-run with --update-baseline to record them."
+        fi
     fi
 }
 
@@ -1196,7 +1202,9 @@ if [[ $sexp_locs_ppx_diff_count -gt 0 ]]; then
 fi
 
 if [[ $bsc_ast_parity_diff_count -gt 0 ]]; then
-    echo -e "${YELLOW}${BOLD}NOTE: $bsc_ast_parity_diff_count files have bsc-ast byte differences (non-regression)${RESET}"
+    echo -e "${RED}${BOLD}FAILED: $bsc_ast_parity_diff_count files have bsc-ast byte differences${RESET}"
+    all_pass=false
+    exit_code=1
 fi
 
 if $spice_missing; then
