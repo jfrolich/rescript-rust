@@ -3214,21 +3214,19 @@ mod tests {
     use super::*;
 
     #[test]
-    fn reads_belt_map_string_empty_as_closed_undefined_constant_from_metadata() {
-        let mut env = PersistentEnv::new();
-        let mut constants = HashMap::new();
-        constants.insert(
-            "empty".to_string(),
-            CmjExportConstant::Undefined { is_unit: false },
-        );
-        env.register_in_memory_module(
-            "Belt_MapString",
-            InMemoryModuleInfo::new(PathBuf::from("Belt_MapString.res"), true, constants, false),
-        );
+    fn reads_belt_map_string_empty_as_closed_undefined_constant_from_cmj() {
+        let temp_dir = tempfile::tempdir().expect("temp directory should be created");
+        std::fs::write(
+            temp_dir.path().join("Belt_MapString.cmj"),
+            include_bytes!("../../tests/fixtures/Belt_MapString.cmj"),
+        )
+        .expect("CMJ fixture should be written");
 
+        let mut env = PersistentEnv::new();
+        env.add_load_path(temp_dir.path().to_path_buf());
         let exports = env
             .module_cmj_export_constants("Belt_MapString")
-            .expect("expected in-memory cmj exports");
+            .expect("expected decoded cmj exports");
 
         assert_eq!(
             exports.get("empty"),
