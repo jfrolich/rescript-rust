@@ -31,6 +31,9 @@ use ahash::{AHashMap as HashMap, AHashSet as HashSet};
 use std::cell::RefCell;
 use std::sync::Arc;
 
+type PersistentHashMap<K, V> = im_rc::HashMap<K, V, ahash::RandomState>;
+type PersistentHashSet<T> = im_rc::HashSet<T, ahash::RandomState>;
+
 /// Collect free type variables (Tvar nodes) from a type expression.
 /// Matches OCaml's Datarepr.free_vars.
 fn free_vars(ctx: &TypeContext, ty: TypeExprRef) -> HashSet<TypeExprRef> {
@@ -190,7 +193,7 @@ pub enum EnvSummary {
 #[derive(Debug, Clone)]
 struct IdOpened<T> {
     root: Option<Path>,
-    components: im_rc::HashMap<String, (Ident, T, i32)>,
+    components: PersistentHashMap<String, (Ident, T, i32)>,
     next: Arc<IdTbl<T>>,
 }
 
@@ -201,14 +204,14 @@ struct IdOpened<T> {
 /// every opened binding into the same name map with an origin boolean.
 #[derive(Debug, Clone)]
 pub struct IdTbl<T> {
-    current: im_rc::HashMap<String, Vec<(Ident, T)>>,
+    current: PersistentHashMap<String, Vec<(Ident, T)>>,
     opened: Option<Arc<IdOpened<T>>>,
 }
 
 impl<T: Clone> IdTbl<T> {
     pub fn new() -> Self {
         Self {
-            current: im_rc::HashMap::new(),
+            current: PersistentHashMap::default(),
             opened: None,
         }
     }
@@ -233,7 +236,7 @@ impl<T: Clone> IdTbl<T> {
             .map(|(id, value, pos)| (id.name().to_string(), (id, value, pos)))
             .collect();
         *self = Self {
-            current: im_rc::HashMap::new(),
+            current: PersistentHashMap::default(),
             opened: Some(Arc::new(IdOpened {
                 root: Some(root),
                 components: opened_components,
@@ -443,7 +446,7 @@ impl<T: Clone> Default for IdTbl<T> {
 
 #[derive(Debug, Clone)]
 struct TycompOpened<T> {
-    components: im_rc::HashMap<String, Vec<(Ident, T)>>,
+    components: PersistentHashMap<String, Vec<(Ident, T)>>,
     next: Arc<TycompTbl<T>>,
 }
 
@@ -454,14 +457,14 @@ struct TycompOpened<T> {
 /// as lists.
 #[derive(Debug, Clone)]
 pub struct TycompTbl<T> {
-    current: im_rc::HashMap<String, Vec<(Ident, T)>>,
+    current: PersistentHashMap<String, Vec<(Ident, T)>>,
     opened: Option<Arc<TycompOpened<T>>>,
 }
 
 impl<T: Clone> TycompTbl<T> {
     pub fn new() -> Self {
         Self {
-            current: im_rc::HashMap::new(),
+            current: PersistentHashMap::default(),
             opened: None,
         }
     }
@@ -481,7 +484,8 @@ impl<T: Clone> TycompTbl<T> {
             return;
         }
         let next = std::mem::take(self);
-        let mut opened_components: im_rc::HashMap<String, Vec<(Ident, T)>> = im_rc::HashMap::new();
+        let mut opened_components: PersistentHashMap<String, Vec<(Ident, T)>> =
+            PersistentHashMap::default();
         for (id, value) in components {
             let name = id.name().to_string();
             match opened_components.get_mut(&name) {
@@ -492,7 +496,7 @@ impl<T: Clone> TycompTbl<T> {
             }
         }
         *self = Self {
-            current: im_rc::HashMap::new(),
+            current: PersistentHashMap::default(),
             opened: Some(Arc::new(TycompOpened {
                 components: opened_components,
                 next: Arc::new(next),
@@ -697,7 +701,7 @@ pub struct Env {
     /// roots through compiler/ml/env.ml:865-875 because no source open selected
     /// them. Source-level opens use the same component tables but should not be
     /// classified as initial-env roots.
-    implicit_open_roots: im_rc::HashSet<String>,
+    implicit_open_roots: PersistentHashSet<String>,
 
     /// Summary of bindings.
     ///
@@ -709,7 +713,7 @@ pub struct Env {
     summary: EnvSummary,
 
     /// Local constraints (for GADTs).
-    local_constraints: im_rc::HashMap<Path, Arc<TypeDeclaration>>,
+    local_constraints: PersistentHashMap<Path, Arc<TypeDeclaration>>,
 
     /// GADT instance levels.
     gadt_instances: Vec<(i32, Vec<TypeExprRef>)>,
@@ -772,9 +776,9 @@ impl Env {
             functor_args: HashSet::new(),
             local_module_aliases_cache: RefCell::new(None),
             module_path_requires_env_scoped_cache_cache: RefCell::new(HashMap::new()),
-            implicit_open_roots: im_rc::HashSet::new(),
+            implicit_open_roots: PersistentHashSet::default(),
             summary: EnvSummary::Empty,
-            local_constraints: im_rc::HashMap::new(),
+            local_constraints: PersistentHashMap::default(),
             gadt_instances: Vec::new(),
             flags: EnvFlags::default(),
         }
