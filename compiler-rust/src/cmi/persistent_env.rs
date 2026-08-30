@@ -3214,23 +3214,21 @@ mod tests {
     use super::*;
 
     #[test]
-    fn reads_belt_map_string_empty_as_closed_undefined_constant_from_cmj() {
+    fn reads_belt_map_string_empty_as_closed_undefined_constant_from_metadata() {
         let mut env = PersistentEnv::new();
-        // Belt moved into the separate @rescript/belt package (upstream #8554).
-        env.add_load_path(
-            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-                .parent()
-                .expect("repo root")
-                .join("packages")
-                .join("@rescript")
-                .join("belt")
-                .join("lib")
-                .join("ocaml"),
+        let mut constants = HashMap::new();
+        constants.insert(
+            "empty".to_string(),
+            CmjExportConstant::Undefined { is_unit: false },
+        );
+        env.register_in_memory_module(
+            "Belt_MapString",
+            InMemoryModuleInfo::new(PathBuf::from("Belt_MapString.res"), true, constants, false),
         );
 
         let exports = env
             .module_cmj_export_constants("Belt_MapString")
-            .expect("expected runtime cmj exports");
+            .expect("expected in-memory cmj exports");
 
         assert_eq!(
             exports.get("empty"),

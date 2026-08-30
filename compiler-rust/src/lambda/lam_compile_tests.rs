@@ -487,16 +487,19 @@ pub(super) fn resolver_with_checked_in_cmj() -> ModulePathResolver {
             .join("lib")
             .join("ocaml"),
     );
-    // Belt moved into the separate @rescript/belt package (upstream #8554).
-    persistent_env.add_load_path(
-        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .parent()
-            .expect("repo root")
-            .join("packages")
-            .join("@rescript")
-            .join("belt")
-            .join("lib")
-            .join("ocaml"),
+    let mut belt_constants = ahash::AHashMap::new();
+    belt_constants.insert(
+        "empty".to_string(),
+        crate::cmi::persistent_env::CmjExportConstant::Undefined { is_unit: false },
+    );
+    persistent_env.register_in_memory_module(
+        "Belt_MapString",
+        crate::cmi::persistent_env::InMemoryModuleInfo::new(
+            PathBuf::from("Belt_MapString.res"),
+            true,
+            belt_constants,
+            false,
+        ),
     );
     ModulePathResolver::from_compile_options(
         None,
