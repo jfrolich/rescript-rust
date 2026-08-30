@@ -3732,6 +3732,24 @@ fn compile_file(
                         diagnostics
                     }));
                 }
+
+                let raw_stderr = if dump_typed_sexp {
+                    let sexp_path = ocaml_build_path_abs.join(format!("{basename}.sexp"));
+                    std::fs::read_to_string(&sexp_path).unwrap_or_default()
+                } else {
+                    compiler_output_to_string(&stderr)
+                };
+                let warnings = if dump_typed_sexp {
+                    let (warnings, sexp) = extract_sexp_from_stderr(&raw_stderr);
+                    if let Some(sexp_content) = sexp {
+                        let sexp_path = ocaml_build_path_abs.join(format!("{basename}.sexp"));
+                        let _ = std::fs::write(&sexp_path, sexp_content);
+                    }
+                    warnings
+                } else {
+                    raw_stderr
+                };
+                return Ok(visible_compiler_warnings(&warnings, package.is_local_dep));
             }
             Err(e) => {
                 log::warn!("Failed to spawn bsc subprocess: {e}");
@@ -3946,20 +3964,21 @@ fn compile_file(
                 }
             }
 
-            if helpers::contains_ascii_characters(&err) {
-                if package.is_local_dep {
-                    Ok(Some(err))
-                } else {
-                    // Warnings from external deps are suppressed by default —
-                    // users can't act on them. A small allow-list of critical
-                    // deprecations still gets through so breakage signals are
-                    // visible (and can be reported upstream).
-                    Ok(retain_critical_external_warnings(&err))
-                }
-            } else {
-                Ok(None)
-            }
+            Ok(visible_compiler_warnings(&err, package.is_local_dep))
         }
+    }
+}
+
+fn visible_compiler_warnings(stderr: &str, is_local_dep: bool) -> Option<String> {
+    if !helpers::contains_ascii_characters(stderr) {
+        return None;
+    }
+    if is_local_dep {
+        Some(stderr.to_string())
+    } else {
+        // Warnings from external deps are suppressed by default — users cannot
+        // act on them. Preserve the critical deprecations selected below.
+        retain_critical_external_warnings(stderr)
     }
 }
 
@@ -4201,6 +4220,15 @@ mod tests {
         build_state.insert_module(module_name, module);
         logs::initialize(&build_state.packages);
         build_state
+    }
+
+    #[test]
+    fn successful_local_subprocess_warnings_remain_visible() {
+        let warning = "Warning number 26\nunused variable x\n";
+        assert_eq!(
+            visible_compiler_warnings(warning, true),
+            Some(warning.to_string())
+        );
     }
 
     #[test]
