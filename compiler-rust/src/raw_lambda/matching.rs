@@ -96,7 +96,27 @@ impl MatchAction {
         }
     }
 
+    #[track_caller]
     fn to_raw(&self) -> RawLambda {
+        if crate::perf_counters::enabled() {
+            let (nodes, estimated_bytes) = match_action_clone_footprint(&self.0.kind);
+            let fanout = Arc::strong_count(&self.0);
+            let started = std::time::Instant::now();
+            let raw = self.clone_to_raw();
+            crate::perf_counters::record_match_action_clone(
+                std::panic::Location::caller(),
+                nodes,
+                estimated_bytes,
+                started.elapsed().as_nanos().min(u64::MAX as u128) as u64,
+                fanout,
+            );
+            raw
+        } else {
+            self.clone_to_raw()
+        }
+    }
+
+    fn clone_to_raw(&self) -> RawLambda {
         match &self.0.kind {
             MatchActionKind::Raw(raw) => raw.clone(),
             MatchActionKind::Bind {
@@ -108,7 +128,7 @@ impl MatchAction {
                 *kind,
                 id.clone(),
                 Box::new(arg.clone()),
-                Box::new(action.to_raw()),
+                Box::new(action.clone_to_raw()),
             ),
         }
     }
@@ -169,6 +189,86 @@ impl MatchAction {
             ),
         }
     }
+}
+
+/// Count the RawLambda enum nodes recursively copied by `MatchAction::to_raw`.
+///
+/// The byte count is a conservative inline-size estimate. Heap allocations
+/// owned by vectors, strings, and boxed children are intentionally excluded,
+/// so the counter never overstates clone traffic.
+fn match_action_clone_footprint(kind: &MatchActionKind) -> (usize, usize) {
+    fn raw_nodes(raw: &RawLambda) -> usize {
+        let children = match raw {
+            RawLambda::Lvar(_)
+            | RawLambda::LglobalModule(_, _)
+            | RawLambda::Lconst(_)
+            | RawLambda::Lbreak
+            | RawLambda::Lcontinue => 0,
+            RawLambda::Lapply(apply) => {
+                raw_nodes(&apply.ap_func) + apply.ap_args.iter().map(raw_nodes).sum::<usize>()
+            }
+            RawLambda::Lfunction(function) => raw_nodes(&function.body),
+            RawLambda::Llet(_, _, value, body)
+            | RawLambda::Lsequence(value, body)
+            | RawLambda::Lwhile(value, body)
+            | RawLambda::Lfor_of(_, value, body)
+            | RawLambda::Lfor_await_of(_, value, body) => raw_nodes(value) + raw_nodes(body),
+            RawLambda::Lletrec(bindings, body) => {
+                bindings
+                    .iter()
+                    .map(|(_, value)| raw_nodes(value))
+                    .sum::<usize>()
+                    + raw_nodes(body)
+            }
+            RawLambda::Lprim(info) => info.args.iter().map(raw_nodes).sum(),
+            RawLambda::Lswitch(scrutinee, switch, _) => {
+                raw_nodes(scrutinee)
+                    + switch
+                        .sw_consts
+                        .iter()
+                        .map(|(_, action)| raw_nodes(action))
+                        .sum::<usize>()
+                    + switch
+                        .sw_blocks
+                        .iter()
+                        .map(|(_, action)| raw_nodes(action))
+                        .sum::<usize>()
+                    + switch.sw_failaction.as_deref().map(raw_nodes).unwrap_or(0)
+            }
+            RawLambda::LstringSwitch(scrutinee, cases, default) => {
+                raw_nodes(scrutinee)
+                    + cases
+                        .iter()
+                        .map(|(_, action)| raw_nodes(action))
+                        .sum::<usize>()
+                    + default.as_deref().map(raw_nodes).unwrap_or(0)
+            }
+            RawLambda::LstaticRaise(_, args) => args.iter().map(raw_nodes).sum(),
+            RawLambda::LstaticCatch(body, _, handler) | RawLambda::LtryWith(body, _, handler) => {
+                raw_nodes(body) + raw_nodes(handler)
+            }
+            RawLambda::LifThenElse(condition, ifso, ifnot) => {
+                raw_nodes(condition) + raw_nodes(ifso) + raw_nodes(ifnot)
+            }
+            RawLambda::Lfor(_, start, end, _, body) => {
+                raw_nodes(start) + raw_nodes(end) + raw_nodes(body)
+            }
+            RawLambda::Lassign(_, value) | RawLambda::Lsend(_, value, _) => raw_nodes(value),
+        };
+        1 + children
+    }
+
+    fn kind_nodes(kind: &MatchActionKind) -> usize {
+        match kind {
+            MatchActionKind::Raw(raw) => raw_nodes(raw),
+            MatchActionKind::Bind { arg, action, .. } => {
+                1 + raw_nodes(arg) + kind_nodes(&action.0.kind)
+            }
+        }
+    }
+
+    let nodes = kind_nodes(kind);
+    (nodes, nodes * std::mem::size_of::<RawLambda>())
 }
 
 impl MatchActionData {
