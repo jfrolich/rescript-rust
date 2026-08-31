@@ -1,6 +1,6 @@
 # In-Process Cold-Build Performance TODO
 
-**Last Updated:** 2026-08-30
+**Last Updated:** 2026-08-31
 **Status:** Two explicitly different Tella corpora are tracked. The expanded v13-migration checkout compiles 3,248 modules in roughly `5.1s` at 16 workers after the merge-review correctness hardening, down from `15.686s` before scoped variant-layout borrowing and subsequent GenType/Env ownership work. The smaller 2,127-module output-parity checkout measures `2.478s +/- 0.024s`, range `2.452s..2.528s`, after shared persistent component views and shallow signature freshening. Do not compare these numbers as one continuous corpus. The project goal remains a subsecond clean compile with 100% codegen parity.
 
 ## Goal
@@ -40,6 +40,7 @@ Make clean in-process builds fast enough for large real projects, with Tella as 
 - [ ] **2. Keep typecheck/signature work on the critical path.**
   The JS/typecheck split is useful, but cold builds must prioritize signature-producing typecheck work that unlocks downstream modules. JS/codegen should run when no typecheck work is ready or under a separate cap. A previous naive scheduler priority flip regressed Tella, so this needs measured tuning.
   - [x] Measure ready typecheck queue depth, ready JS queue depth, and worker idle time.
+  - [x] Replace whole-state failed-unification snapshots with a frontier-aware mutation trail and validate its sparse Tella counter shape.
   - [ ] Add a scheduler policy that keeps signature-producing work ahead of JS without starving JS.
   - [ ] Benchmark the policy against the retained Tella baseline.
 
