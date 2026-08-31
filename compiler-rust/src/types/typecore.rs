@@ -3650,17 +3650,17 @@ fn type_pattern_without_existentials(
     )
 }
 
-struct PatternBacktrackState {
-    type_state: crate::types::context::TypeMutationSnapshot,
+struct PatternBacktrackState<'a> {
+    type_state: crate::types::context::TypeMutationSnapshot<'a>,
     unify_state: crate::types::ctype::UnifyStateSnapshot,
     pattern_state: PatternStateCheckpoint,
     newtype_level: Option<i32>,
 }
 
-fn save_pattern_backtrack_state(
-    tctx: &TypeCheckContext<'_>,
+fn save_pattern_backtrack_state<'a>(
+    tctx: &TypeCheckContext<'a>,
     state: &PatternState,
-) -> PatternBacktrackState {
+) -> PatternBacktrackState<'a> {
     PatternBacktrackState {
         type_state: tctx.type_ctx.snapshot_type_state(),
         unify_state: tctx.unify_state.snapshot_backtrack_state(),
@@ -3672,7 +3672,7 @@ fn save_pattern_backtrack_state(
 fn restore_pattern_backtrack_state(
     tctx: &mut TypeCheckContext<'_>,
     state: &mut PatternState,
-    snapshot: PatternBacktrackState,
+    snapshot: PatternBacktrackState<'_>,
 ) {
     tctx.type_ctx.restore_type_state(snapshot.type_state);
     tctx.unify_state
