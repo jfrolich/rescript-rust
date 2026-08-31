@@ -59,6 +59,19 @@ struct MatchActionData {
 
 enum MatchActionKind {
     Raw(RawLambda),
+    // Keep the control nodes that can contain terminal actions owned while the
+    // local sharing pass decides catches/exits. This mirrors the immutable
+    // Lambda trees passed through OCaml matching.ml:1536-1572,1687-1716.
+    If {
+        condition: RawLambda,
+        ifso: MatchAction,
+        ifnot: MatchAction,
+    },
+    StaticCatch {
+        body: MatchAction,
+        exit: (i32, Vec<Ident>),
+        handler: MatchAction,
+    },
     Bind {
         kind: LetKind,
         id: Ident,
@@ -119,6 +132,24 @@ impl MatchAction {
     fn clone_to_raw(&self) -> RawLambda {
         match &self.0.kind {
             MatchActionKind::Raw(raw) => raw.clone(),
+            MatchActionKind::If {
+                condition,
+                ifso,
+                ifnot,
+            } => RawLambda::LifThenElse(
+                Box::new(condition.clone()),
+                Box::new(ifso.clone_to_raw()),
+                Box::new(ifnot.clone_to_raw()),
+            ),
+            MatchActionKind::StaticCatch {
+                body,
+                exit,
+                handler,
+            } => RawLambda::LstaticCatch(
+                Box::new(body.clone_to_raw()),
+                exit.clone(),
+                Box::new(handler.clone_to_raw()),
+            ),
             MatchActionKind::Bind {
                 kind,
                 id,
@@ -155,6 +186,8 @@ impl MatchAction {
     fn is_guarded(&self) -> bool {
         match &self.0.kind {
             MatchActionKind::Raw(raw) => is_guarded(raw),
+            MatchActionKind::If { ifnot, .. } => ifnot.is_guarded(),
+            MatchActionKind::StaticCatch { .. } => false,
             MatchActionKind::Bind { action, .. } => action.is_guarded(),
         }
     }
@@ -162,6 +195,29 @@ impl MatchAction {
     fn free_variables(&self) -> IdentSet {
         match &self.0.kind {
             MatchActionKind::Raw(raw) => raw_lambda_free_variables(raw),
+            MatchActionKind::If {
+                condition,
+                ifso,
+                ifnot,
+            } => {
+                let mut fv = raw_lambda_free_variables(condition);
+                fv.extend(ifso.free_variables());
+                fv.extend(ifnot.free_variables());
+                fv
+            }
+            MatchActionKind::StaticCatch {
+                body,
+                exit: (_, vars),
+                handler,
+            } => {
+                let mut fv = body.free_variables();
+                let mut handler_fv = handler.free_variables();
+                for var in vars {
+                    handler_fv.remove(var);
+                }
+                fv.extend(handler_fv);
+                fv
+            }
             MatchActionKind::Bind {
                 id, arg, action, ..
             } => {
@@ -187,7 +243,26 @@ impl MatchAction {
                 Box::new(arg.clone()),
                 Box::new(action.patch_guarded(patch)),
             ),
+            MatchActionKind::If { .. } | MatchActionKind::StaticCatch { .. } => {
+                panic!("patch_guarded: unexpected delayed wrapper")
+            }
         }
+    }
+
+    fn if_then_else(condition: RawLambda, ifso: Self, ifnot: Self) -> Self {
+        Self::from_kind(MatchActionKind::If {
+            condition,
+            ifso,
+            ifnot,
+        })
+    }
+
+    fn static_catch(body: Self, exit: (i32, Vec<Ident>), handler: Self) -> Self {
+        Self::from_kind(MatchActionKind::StaticCatch {
+            body,
+            exit,
+            handler,
+        })
     }
 }
 
@@ -261,6 +336,14 @@ fn match_action_clone_footprint(kind: &MatchActionKind) -> (usize, usize) {
     fn kind_nodes(kind: &MatchActionKind) -> usize {
         match kind {
             MatchActionKind::Raw(raw) => raw_nodes(raw),
+            MatchActionKind::If {
+                condition,
+                ifso,
+                ifnot,
+            } => 1 + raw_nodes(condition) + kind_nodes(&ifso.0.kind) + kind_nodes(&ifnot.0.kind),
+            MatchActionKind::StaticCatch { body, handler, .. } => {
+                1 + kind_nodes(&body.0.kind) + kind_nodes(&handler.0.kind)
+            }
             MatchActionKind::Bind { arg, action, .. } => {
                 1 + raw_nodes(arg) + kind_nodes(&action.0.kind)
             }
@@ -275,6 +358,24 @@ impl MatchActionData {
     fn into_raw(self) -> RawLambda {
         match self.kind {
             MatchActionKind::Raw(raw) => raw,
+            MatchActionKind::If {
+                condition,
+                ifso,
+                ifnot,
+            } => RawLambda::LifThenElse(
+                Box::new(condition),
+                Box::new(ifso.into_raw()),
+                Box::new(ifnot.into_raw()),
+            ),
+            MatchActionKind::StaticCatch {
+                body,
+                exit,
+                handler,
+            } => RawLambda::LstaticCatch(
+                Box::new(body.into_raw()),
+                exit,
+                Box::new(handler.into_raw()),
+            ),
             MatchActionKind::Bind {
                 kind,
                 id,
@@ -2202,6 +2303,32 @@ impl MakeKeyWriter {
         }
         match &action.0.kind {
             MatchActionKind::Raw(raw) => self.write_raw_after_count(raw, out),
+            MatchActionKind::If {
+                condition,
+                ifso,
+                ifnot,
+            } => {
+                out.push_str("LifThenElse(");
+                self.write_raw(condition, out)?;
+                out.push(',');
+                self.write_action(ifso, out)?;
+                out.push(',');
+                self.write_action(ifnot, out)?;
+                out.push(')');
+                Some(())
+            }
+            MatchActionKind::StaticCatch {
+                body,
+                exit,
+                handler,
+            } => {
+                out.push_str("LstaticCatch(");
+                self.write_action(body, out)?;
+                write!(out, ",{:?},", exit).ok()?;
+                self.write_action(handler, out)?;
+                out.push(')');
+                Some(())
+            }
             MatchActionKind::Bind {
                 kind,
                 id,
