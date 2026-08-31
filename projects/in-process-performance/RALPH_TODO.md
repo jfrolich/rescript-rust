@@ -26,9 +26,9 @@ typecheck and `1,147ms` wall time, down from `1,592ms` and `1,935ms`.
 
 The expanded 3,248-module Tella cold build improved from
 `5.039s +/- 0.035s` (`4.988s..5.098s`, 10 runs) to
-`4.779s +/- 0.018s` (`4.749s..4.813s`, 10 runs). Mean user CPU moved from
-`41.616s` to `41.044s`, mean system CPU from `2.183s` to `2.155s`, and peak RSS
-from `3,247,800,320` to `3,183,460,352` bytes. The canonical 657-file
+`4.769s +/- 0.014s` (`4.752s..4.795s`, 10 runs). Mean user CPU moved from
+`41.616s` to `41.114s`, mean system CPU from `2.183s` to `2.141s`, and peak RSS
+from `3,247,800,320` to `3,207,053,312` bytes. The canonical 657-file
 parser-free benchmark completed without failures at `0.92x` aggregate
 Rust/OCaml time. Release parity remained 610/610 for typedtree, raw Lambda,
 optimized Lambda, and JS, with 344/344 focused JS fixtures and 1432/1432
