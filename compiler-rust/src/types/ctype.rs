@@ -11705,6 +11705,24 @@ mod tests {
     }
 
     #[test]
+    fn failed_unification_backtracks_partial_type_mutations() {
+        let ctx = TypeContext::new(std::sync::Arc::new(IdGenerator::new()));
+        let mut state = UnifyState::new();
+        let variable = ctx.new_var(Some("kept".to_string()));
+        let left = ctx.new_tuple(vec![variable, ctx.predef_int()]);
+        let right = ctx.new_tuple(vec![ctx.predef_string(), ctx.predef_bool()]);
+        let type_snapshot = ctx.snapshot_type_state();
+        let state_snapshot = state.snapshot_backtrack_state();
+
+        assert!(unify(&ctx, &mut state, left, right).is_err());
+        assert_eq!(ctx.repr(variable), ctx.predef_string());
+        ctx.restore_type_state(type_snapshot);
+        state.restore_backtrack_state(state_snapshot);
+
+        assert!(matches!(&*ctx.get_desc(variable), TypeDesc::Tvar(Some(name)) if name == "kept"));
+    }
+
+    #[test]
     fn test_occurs_check() {
         let id_gen = IdGenerator::new();
         let ctx = TypeContext::new(std::sync::Arc::new(id_gen));

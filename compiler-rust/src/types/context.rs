@@ -98,18 +98,82 @@ impl Deref for TypeDescSnapshot {
     }
 }
 
-/// Snapshot of mutable type-checker state for OCaml-style failed-unify
-/// backtracking.
-pub(crate) struct TypeMutationSnapshot {
-    type_states: Vec<(TypeDesc, i32)>,
-    row_field_states: Vec<Option<RowField>>,
-    abbrev_states: Vec<AbbrevMemo>,
-    memoized_abbrev_refs: Vec<AbbrevMemoRef>,
-    current_abbreviations: AbbrevMemoRef,
-    current_level: i32,
-    nongen_level: i32,
-    global_level: i32,
-    saved_levels: Vec<(i32, i32)>,
+/// Cursor into the OCaml-style type mutation trail.
+pub(crate) struct TypeMutationSnapshot<'a> {
+    journal: &'a RefCell<TypeMutationJournal>,
+    logging: &'a Cell<bool>,
+    cursor: usize,
+    id: u64,
+    restored: bool,
+}
+
+impl Drop for TypeMutationSnapshot<'_> {
+    /// Commit this snapshot's mutations. Entries remain available to any
+    /// enclosing snapshot and are discarded once no snapshots are active.
+    fn drop(&mut self) {
+        if self.restored {
+            return;
+        }
+        let mut journal = self.journal.borrow_mut();
+        journal.finish(self.id);
+        self.logging.set(!journal.active.is_empty());
+    }
+}
+
+struct ActiveTypeSnapshot {
+    id: u64,
+    type_len: usize,
+    row_field_len: usize,
+    abbrev_len: usize,
+}
+
+enum TypeMutation {
+    TypeDesc(TypeExprRef, TypeDesc),
+    TypeLevel(TypeExprRef, i32),
+    RowField(RowFieldRef, Option<RowField>),
+    AbbrevMemo(AbbrevMemoRef, AbbrevMemo),
+    MemoizedAbbrevRefs(Vec<AbbrevMemoRef>),
+    CurrentAbbreviations(AbbrevMemoRef),
+    CurrentLevel(i32),
+    NongenLevel(i32),
+    GlobalLevel(i32),
+    SavedLevels(Vec<(i32, i32)>),
+}
+
+#[derive(Default)]
+struct TypeMutationJournal {
+    entries: Vec<TypeMutation>,
+    active: Vec<ActiveTypeSnapshot>,
+    next_id: u64,
+}
+
+impl TypeMutationJournal {
+    fn finish(&mut self, id: u64) {
+        if let Some(index) = self.active.iter().position(|snapshot| snapshot.id == id) {
+            self.active.remove(index);
+        }
+        if self.active.is_empty() {
+            self.entries.clear();
+        }
+    }
+
+    fn records_type(&self, ty: TypeExprRef) -> bool {
+        self.active
+            .last()
+            .is_some_and(|snapshot| ty.index() < snapshot.type_len)
+    }
+
+    fn records_row_field(&self, row: RowFieldRef) -> bool {
+        self.active
+            .last()
+            .is_some_and(|snapshot| row.index() < snapshot.row_field_len)
+    }
+
+    fn records_abbrev(&self, memo: AbbrevMemoRef) -> bool {
+        self.active
+            .last()
+            .is_some_and(|snapshot| memo.index() < snapshot.abbrev_len)
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -278,6 +342,10 @@ pub struct TypeContext {
 
     /// Type expression storage. Uses UnsafeCell-based arena for zero-copy access.
     types: TypeArena,
+
+    /// OCaml-shaped mutation trail. Logging is dormant unless a snapshot lives.
+    mutation_journal: RefCell<TypeMutationJournal>,
+    mutation_logging: Cell<bool>,
 
     /// Cached value of `RESCRIPT_COMPILER_COUNTERS` for hot-path probes.
     compiler_counters_enabled: bool,
@@ -544,6 +612,8 @@ impl TypeContext {
             previous_env_id: Cell::new(0),
             current_abbreviations: Cell::new(AbbrevMemoRef::nil()),
             types: TypeArena::new(),
+            mutation_journal: RefCell::new(TypeMutationJournal::default()),
+            mutation_logging: Cell::new(false),
             compiler_counters_enabled: crate::perf_counters::enabled(),
             // Index 0 is reserved as canonical Mnil; index 1 is the dedicated
             // simple_abbrevs memo ref.
@@ -1619,93 +1689,176 @@ impl TypeContext {
         self.types.len()
     }
 
+    #[inline]
+    fn record_type_mutation(
+        &self,
+        mutation: impl FnOnce() -> TypeMutation,
+        ty: TypeExprRef,
+        kind: crate::perf_counters::TypeMutationKind,
+    ) {
+        if !self.mutation_logging.get() {
+            return;
+        }
+        let mut journal = self.mutation_journal.borrow_mut();
+        if journal.records_type(ty) {
+            journal.entries.push(mutation());
+            if self.compiler_counters_enabled {
+                crate::perf_counters::record_type_mutation(kind);
+            }
+        }
+    }
+
+    #[inline]
+    fn record_mutation(
+        &self,
+        mutation: impl FnOnce() -> TypeMutation,
+        kind: crate::perf_counters::TypeMutationKind,
+    ) {
+        if !self.mutation_logging.get() {
+            return;
+        }
+        self.mutation_journal.borrow_mut().entries.push(mutation());
+        if self.compiler_counters_enabled {
+            crate::perf_counters::record_type_mutation(kind);
+        }
+    }
+
+    #[inline]
+    fn record_row_field_mutation(&self, mutation: impl FnOnce() -> TypeMutation, row: RowFieldRef) {
+        if !self.mutation_logging.get() {
+            return;
+        }
+        let mut journal = self.mutation_journal.borrow_mut();
+        if journal.records_row_field(row) {
+            journal.entries.push(mutation());
+            if self.compiler_counters_enabled {
+                crate::perf_counters::record_type_mutation(
+                    crate::perf_counters::TypeMutationKind::Row,
+                );
+            }
+        }
+    }
+
+    #[inline]
+    fn record_abbrev_mutation(&self, mutation: impl FnOnce() -> TypeMutation, memo: AbbrevMemoRef) {
+        if !self.mutation_logging.get() {
+            return;
+        }
+        let mut journal = self.mutation_journal.borrow_mut();
+        if journal.records_abbrev(memo) {
+            journal.entries.push(mutation());
+            if self.compiler_counters_enabled {
+                crate::perf_counters::record_type_mutation(
+                    crate::perf_counters::TypeMutationKind::Abbrev,
+                );
+            }
+        }
+    }
+
     /// Set the level of a type.
     #[inline]
     pub fn set_level(&self, r: TypeExprRef, level: i32) {
+        self.record_type_mutation(
+            || TypeMutation::TypeLevel(r, self.get_level(r)),
+            r,
+            crate::perf_counters::TypeMutationKind::Level,
+        );
         self.types.get(r).set_level(level);
     }
 
     /// Set the descriptor of a type.
     #[inline]
     pub fn set_desc(&self, r: TypeExprRef, desc: TypeDesc) {
+        self.record_type_mutation(
+            || TypeMutation::TypeDesc(r, self.get_desc(r).0),
+            r,
+            crate::perf_counters::TypeMutationKind::Desc,
+        );
         self.types.get(r).set_desc(desc);
     }
 
-    /// Save mutable type state before a speculative unification.
+    /// Start an OCaml-style speculative mutation trail.
     ///
-    /// OCaml compiler/ml/typecore.ml:3187-3211 and 3321-3329 use
-    /// `Btype.snapshot`/`Btype.backtrack` (with saved Ctype levels) around
-    /// unifications that may fail. Rust keeps type nodes in append-only
-    /// arenas, so this snapshots mutable contents of pre-existing nodes and
-    /// cells, while intentionally leaving newly allocated nodes and lazy
-    /// environment caches alive after restore.
-    pub(crate) fn snapshot_type_state(&self) -> TypeMutationSnapshot {
-        let type_len = self.types.len();
-        let mut type_states = Vec::with_capacity(type_len);
-        for idx in 0..type_len {
-            let ty = TypeExprRef::from_usize(idx);
-            type_states.push((self.get_desc(ty).0, self.get_level(ty)));
+    /// The snapshot is only a journal cursor plus the current type allocation
+    /// frontier. Backtracking replays mutations in reverse. Allocations and
+    /// unrelated lazy caches intentionally remain alive, matching Btype.
+    pub(crate) fn snapshot_type_state(&self) -> TypeMutationSnapshot<'_> {
+        let mut journal = self.mutation_journal.borrow_mut();
+        let id = journal.next_id;
+        journal.next_id += 1;
+        let cursor = journal.entries.len();
+        journal.active.push(ActiveTypeSnapshot {
+            id,
+            type_len: self.types.len(),
+            row_field_len: self.row_fields.borrow().len(),
+            abbrev_len: self.abbrevs.borrow().len(),
+        });
+        let depth = journal.active.len();
+        self.mutation_logging.set(true);
+        if self.compiler_counters_enabled {
+            crate::perf_counters::record_type_mutation_snapshot(depth);
         }
-
-        let row_field_states = self
-            .row_fields
-            .borrow()
-            .iter()
-            .map(|cell| cell.borrow().clone())
-            .collect();
-        let abbrev_states = self
-            .abbrevs
-            .borrow()
-            .iter()
-            .map(|cell| cell.borrow().clone())
-            .collect();
-
         TypeMutationSnapshot {
-            type_states,
-            row_field_states,
-            abbrev_states,
-            memoized_abbrev_refs: self.memoized_abbrev_refs.borrow().clone(),
-            current_abbreviations: self.current_abbreviations.get(),
-            current_level: self.current_level.get(),
-            nongen_level: self.nongen_level.get(),
-            global_level: self.global_level.get(),
-            saved_levels: self.saved_levels.borrow().clone(),
+            journal: &self.mutation_journal,
+            logging: &self.mutation_logging,
+            cursor,
+            id,
+            restored: false,
         }
     }
 
-    /// Restore a snapshot created by `snapshot_type_state`.
-    pub(crate) fn restore_type_state(&self, snapshot: TypeMutationSnapshot) {
-        for (idx, (desc, level)) in snapshot.type_states.into_iter().enumerate() {
-            let ty = TypeExprRef::from_usize(idx);
-            self.set_desc(ty, desc);
-            self.set_level(ty, level);
-        }
-
-        {
-            let row_fields = self.row_fields.borrow();
-            for (idx, field) in snapshot.row_field_states.into_iter().enumerate() {
-                if let Some(cell) = row_fields.get(idx) {
-                    *cell.borrow_mut() = field;
+    /// Backtrack to a mutation-trail cursor.
+    ///
+    /// Restoring an outer snapshot also invalidates every still-live nested
+    /// snapshot. A later restore of one of those descendants is a no-op.
+    pub(crate) fn restore_type_state(&self, mut snapshot: TypeMutationSnapshot<'_>) {
+        let mutations = {
+            let mut journal = self.mutation_journal.borrow_mut();
+            let Some(active_index) = journal
+                .active
+                .iter()
+                .position(|active| active.id == snapshot.id)
+            else {
+                snapshot.restored = true;
+                return;
+            };
+            let mutations = journal.entries.split_off(snapshot.cursor);
+            journal.active.truncate(active_index);
+            if journal.active.is_empty() {
+                journal.entries.clear();
+            }
+            self.mutation_logging.set(!journal.active.is_empty());
+            mutations
+        };
+        let restored = mutations.len();
+        for mutation in mutations.into_iter().rev() {
+            match mutation {
+                TypeMutation::TypeDesc(ty, desc) => self.types.get(ty).set_desc(desc),
+                TypeMutation::TypeLevel(ty, level) => self.types.get(ty).set_level(level),
+                TypeMutation::RowField(row, field) => {
+                    if let Some(cell) = self.row_fields.borrow().get(row.index()) {
+                        *cell.borrow_mut() = field;
+                    }
                 }
+                TypeMutation::AbbrevMemo(memo, value) => {
+                    if let Some(cell) = self.abbrevs.borrow().get(memo.index()) {
+                        *cell.borrow_mut() = value;
+                    }
+                }
+                TypeMutation::MemoizedAbbrevRefs(refs) => {
+                    *self.memoized_abbrev_refs.borrow_mut() = refs;
+                }
+                TypeMutation::CurrentAbbreviations(value) => self.current_abbreviations.set(value),
+                TypeMutation::CurrentLevel(value) => self.current_level.set(value),
+                TypeMutation::NongenLevel(value) => self.nongen_level.set(value),
+                TypeMutation::GlobalLevel(value) => self.global_level.set(value),
+                TypeMutation::SavedLevels(value) => *self.saved_levels.borrow_mut() = value,
             }
         }
-
-        {
-            let abbrevs = self.abbrevs.borrow();
-            for (idx, memo) in snapshot.abbrev_states.into_iter().enumerate() {
-                if let Some(cell) = abbrevs.get(idx) {
-                    *cell.borrow_mut() = memo;
-                }
-            }
+        snapshot.restored = true;
+        if self.compiler_counters_enabled {
+            crate::perf_counters::record_type_mutation_backtrack(restored);
         }
-
-        *self.memoized_abbrev_refs.borrow_mut() = snapshot.memoized_abbrev_refs;
-        self.current_abbreviations
-            .set(snapshot.current_abbreviations);
-        self.current_level.set(snapshot.current_level);
-        self.nongen_level.set(snapshot.nongen_level);
-        self.global_level.set(snapshot.global_level);
-        *self.saved_levels.borrow_mut() = snapshot.saved_levels;
     }
 
     // ========================================================================
@@ -1903,10 +2056,16 @@ impl TypeContext {
         let abbrevs = self.abbrevs.borrow();
         for memo in refs {
             if let Some(cell) = abbrevs.get(memo.index()) {
+                let previous = cell.borrow().clone();
+                self.record_abbrev_mutation(|| TypeMutation::AbbrevMemo(memo, previous), memo);
                 *cell.borrow_mut() = AbbrevMemo::Mnil;
             }
         }
         drop(abbrevs);
+        self.record_mutation(
+            || TypeMutation::MemoizedAbbrevRefs(self.memoized_abbrev_refs.borrow().clone()),
+            crate::perf_counters::TypeMutationKind::Abbrev,
+        );
         self.memoized_abbrev_refs.borrow_mut().clear();
     }
 
@@ -1917,6 +2076,10 @@ impl TypeContext {
 
     /// Set the current abbreviation context.
     pub fn set_current_abbreviations(&self, abbrev: AbbrevMemoRef) {
+        self.record_mutation(
+            || TypeMutation::CurrentAbbreviations(self.current_abbreviations.get()),
+            crate::perf_counters::TypeMutationKind::State,
+        );
         self.current_abbreviations.set(abbrev);
     }
 
@@ -2060,6 +2223,10 @@ impl TypeContext {
         }
         let abbrevs = self.abbrevs.borrow();
         if let Some(cell) = abbrevs.get(memo.index()) {
+            self.record_abbrev_mutation(
+                || TypeMutation::AbbrevMemo(memo, cell.borrow().clone()),
+                memo,
+            );
             *cell.borrow_mut() = AbbrevMemo::Mnil;
         }
     }
@@ -2071,6 +2238,10 @@ impl TypeContext {
         }
         let abbrevs = self.abbrevs.borrow();
         if let Some(cell) = abbrevs.get(memo.index()) {
+            self.record_abbrev_mutation(
+                || TypeMutation::AbbrevMemo(memo, cell.borrow().clone()),
+                memo,
+            );
             *cell.borrow_mut() = value;
         }
     }
@@ -2097,6 +2268,7 @@ impl TypeContext {
             }
 
             let previous = abbrevs[memo_idx].borrow().clone();
+            self.record_abbrev_mutation(|| TypeMutation::AbbrevMemo(memo, previous.clone()), memo);
             let next = if matches!(previous, AbbrevMemo::Mnil) {
                 AbbrevMemoRef::nil()
             } else {
@@ -2113,6 +2285,10 @@ impl TypeContext {
                 next,
             };
         }
+        self.record_mutation(
+            || TypeMutation::MemoizedAbbrevRefs(self.memoized_abbrev_refs.borrow().clone()),
+            crate::perf_counters::TypeMutationKind::Abbrev,
+        );
         self.memoized_abbrev_refs.borrow_mut().push(memo);
     }
 
@@ -2163,6 +2339,10 @@ impl TypeContext {
         }
         let row_fields = self.row_fields.borrow();
         if let Some(cell) = row_fields.get(rf.index()) {
+            self.record_row_field_mutation(
+                || TypeMutation::RowField(rf, cell.borrow().clone()),
+                rf,
+            );
             *cell.borrow_mut() = Some(field);
         }
     }
@@ -2174,6 +2354,10 @@ impl TypeContext {
         }
         let row_fields = self.row_fields.borrow();
         if let Some(cell) = row_fields.get(rf.index()) {
+            self.record_row_field_mutation(
+                || TypeMutation::RowField(rf, cell.borrow().clone()),
+                rf,
+            );
             *cell.borrow_mut() = None;
         }
     }
@@ -2203,6 +2387,10 @@ impl TypeContext {
     /// OCaml's `current_level := level` which ensures fresh copies during
     /// instance_parameterized_type are created at the Tconstr's level.
     pub fn set_current_level(&self, level: i32) {
+        self.record_mutation(
+            || TypeMutation::CurrentLevel(self.current_level.get()),
+            crate::perf_counters::TypeMutationKind::State,
+        );
         self.current_level.set(level);
     }
 
@@ -2281,6 +2469,11 @@ impl TypeContext {
         // current-unit counters after the isolated load completes.
         self.id_gen.restore_current_stamp(id_gen_stamp);
         Ident::set_current_time(local_stamp);
+        self.record_level_state();
+        self.record_mutation(
+            || TypeMutation::GlobalLevel(self.global_level.get()),
+            crate::perf_counters::TypeMutationKind::State,
+        );
         self.current_level.set(current_level);
         self.nongen_level.set(nongen_level);
         self.global_level.set(global_level);
@@ -2522,14 +2715,31 @@ impl TypeContext {
 
     /// Initialize definition level (equivalent of OCaml's `Ctype.init_def`).
     pub fn init_def(&self, level: i32) {
+        self.record_level_state();
         self.current_level.set(level);
         self.nongen_level.set(level);
+    }
+
+    fn record_level_state(&self) {
+        self.record_mutation(
+            || TypeMutation::CurrentLevel(self.current_level.get()),
+            crate::perf_counters::TypeMutationKind::State,
+        );
+        self.record_mutation(
+            || TypeMutation::NongenLevel(self.nongen_level.get()),
+            crate::perf_counters::TypeMutationKind::State,
+        );
+        self.record_mutation(
+            || TypeMutation::SavedLevels(self.saved_levels.borrow().clone()),
+            crate::perf_counters::TypeMutationKind::State,
+        );
     }
 
     /// Begin a new definition scope.
     pub fn begin_def(&self) {
         let current = self.current_level.get();
         let nongen = self.nongen_level.get();
+        self.record_level_state();
         self.saved_levels.borrow_mut().push((current, nongen));
         self.current_level.set(current + 1);
         self.nongen_level.set(current + 1);
@@ -2539,6 +2749,7 @@ impl TypeContext {
     pub fn begin_class_def(&self) {
         let current = self.current_level.get();
         let nongen = self.nongen_level.get();
+        self.record_level_state();
         self.saved_levels.borrow_mut().push((current, nongen));
         self.current_level.set(current + 1);
     }
@@ -2547,12 +2758,16 @@ impl TypeContext {
     pub fn raise_nongen_level(&self) {
         let current = self.current_level.get();
         let nongen = self.nongen_level.get();
+        self.record_level_state();
         self.saved_levels.borrow_mut().push((current, nongen));
         self.nongen_level.set(current);
     }
 
     /// End a definition scope.
     pub fn end_def(&self) {
+        if !self.saved_levels.borrow().is_empty() {
+            self.record_level_state();
+        }
         if let Some((current, nongen)) = self.saved_levels.borrow_mut().pop() {
             self.current_level.set(current);
             self.nongen_level.set(nongen);
@@ -2561,18 +2776,30 @@ impl TypeContext {
 
     /// Reset the global level.
     pub fn reset_global_level(&self) {
+        self.record_mutation(
+            || TypeMutation::GlobalLevel(self.global_level.get()),
+            crate::perf_counters::TypeMutationKind::State,
+        );
         self.global_level.set(self.current_level.get() + 1);
     }
 
     /// Increase the global level and return the old value.
     pub fn increase_global_level(&self) -> i32 {
         let old = self.global_level.get();
+        self.record_mutation(
+            || TypeMutation::GlobalLevel(old),
+            crate::perf_counters::TypeMutationKind::State,
+        );
         self.global_level.set(self.current_level.get());
         old
     }
 
     /// Restore the global level.
     pub fn restore_global_level(&self, level: i32) {
+        self.record_mutation(
+            || TypeMutation::GlobalLevel(self.global_level.get()),
+            crate::perf_counters::TypeMutationKind::State,
+        );
         self.global_level.set(level);
     }
 
@@ -2828,6 +3055,194 @@ mod tests {
             TypeDesc::Tlink(target) => assert_eq!(*target, t1),
             _ => panic!("Expected Tlink after path compression"),
         }
+    }
+
+    #[test]
+    fn mutation_trail_restores_repeated_changes() {
+        let ctx = TypeContext::new(std::sync::Arc::new(IdGenerator::new()));
+        let ty = ctx.new_var(Some("original".to_string()));
+        let level = ctx.get_level(ty);
+        let snapshot = ctx.snapshot_type_state();
+
+        ctx.set_desc(ty, TypeDesc::Tvar(Some("first".to_string())));
+        ctx.set_desc(ty, TypeDesc::Tnil);
+        ctx.set_level(ty, level + 1);
+        ctx.set_level(ty, level + 2);
+        ctx.restore_type_state(snapshot);
+
+        assert!(matches!(&*ctx.get_desc(ty), TypeDesc::Tvar(Some(name)) if name == "original"));
+        assert_eq!(ctx.get_level(ty), level);
+    }
+
+    #[test]
+    fn mutation_trail_supports_nested_snapshots() {
+        let ctx = TypeContext::new(std::sync::Arc::new(IdGenerator::new()));
+        let ty = ctx.new_var(Some("outer".to_string()));
+        let outer = ctx.snapshot_type_state();
+        ctx.set_desc(ty, TypeDesc::Tvar(Some("middle".to_string())));
+
+        let inner = ctx.snapshot_type_state();
+        ctx.set_desc(ty, TypeDesc::Tnil);
+        ctx.begin_def();
+        ctx.restore_type_state(inner);
+        assert!(matches!(&*ctx.get_desc(ty), TypeDesc::Tvar(Some(name)) if name == "middle"));
+        assert_eq!(ctx.current_level(), 0);
+
+        ctx.restore_type_state(outer);
+        assert!(matches!(&*ctx.get_desc(ty), TypeDesc::Tvar(Some(name)) if name == "outer"));
+    }
+
+    #[test]
+    fn mutation_trail_leaves_new_type_allocations_and_their_state_alive() {
+        let ctx = TypeContext::new(std::sync::Arc::new(IdGenerator::new()));
+        let old = ctx.new_var(Some("old".to_string()));
+        let snapshot = ctx.snapshot_type_state();
+        let allocated = ctx.new_var(Some("new".to_string()));
+        ctx.set_desc(allocated, TypeDesc::Tnil);
+        ctx.set_level(allocated, 42);
+        ctx.set_desc(old, TypeDesc::Tnil);
+
+        ctx.restore_type_state(snapshot);
+
+        assert_eq!(ctx.type_expr_count(), 2);
+        assert!(matches!(&*ctx.get_desc(allocated), TypeDesc::Tnil));
+        assert_eq!(ctx.get_level(allocated), 42);
+        assert!(matches!(&*ctx.get_desc(old), TypeDesc::Tvar(Some(name)) if name == "old"));
+    }
+
+    #[test]
+    fn mutation_trail_restores_row_cells() {
+        let ctx = TypeContext::new(std::sync::Arc::new(IdGenerator::new()));
+        let row = ctx.alloc_row_field(Some(RowField::Rpresent(None)));
+        let snapshot = ctx.snapshot_type_state();
+        ctx.set_row_field(row, RowField::Rabsent);
+        let allocated = ctx.alloc_row_field(Some(RowField::Rpresent(None)));
+        ctx.set_row_field(allocated, RowField::Rabsent);
+
+        ctx.restore_type_state(snapshot);
+
+        assert!(matches!(
+            ctx.get_row_field(row),
+            Some(RowField::Rpresent(None))
+        ));
+        assert!(matches!(
+            ctx.get_row_field(allocated),
+            Some(RowField::Rabsent)
+        ));
+    }
+
+    #[test]
+    fn mutation_trail_leaves_new_abbreviation_memos_alive() {
+        let ctx = TypeContext::new(std::sync::Arc::new(IdGenerator::new()));
+        let snapshot = ctx.snapshot_type_state();
+        let memo = ctx.alloc_abbrev_nil();
+        let abbrev = ctx.new_var(None);
+        let expansion = ctx.new_var(None);
+        let path = Path::pident(Ident::create_persistent("Allocated"));
+        ctx.memorize_abbrev_expansion(memo, PrivateFlag::Public, path.clone(), abbrev, expansion);
+
+        ctx.restore_type_state(snapshot);
+
+        assert_eq!(
+            ctx.find_abbrev_expansion(memo, PrivateFlag::Public, &path),
+            Some(expansion)
+        );
+        assert!(ctx.memoized_abbrev_refs.borrow().is_empty());
+    }
+
+    #[test]
+    fn mutation_trail_restores_abbreviation_memos() {
+        let ctx = TypeContext::new(std::sync::Arc::new(IdGenerator::new()));
+        let memo = ctx.alloc_abbrev_nil();
+        let abbrev = ctx.new_var(None);
+        let first = ctx.new_var(None);
+        let second = ctx.new_var(None);
+        let path = Path::pident(Ident::create_persistent("Alias"));
+        ctx.memorize_abbrev_expansion(memo, PrivateFlag::Public, path.clone(), abbrev, first);
+        let snapshot = ctx.snapshot_type_state();
+        ctx.memorize_abbrev_expansion(
+            memo,
+            PrivateFlag::Public,
+            Path::pident(Ident::create_persistent("Other")),
+            abbrev,
+            second,
+        );
+        ctx.clear_abbrev_memos();
+
+        ctx.restore_type_state(snapshot);
+
+        assert_eq!(
+            ctx.find_abbrev_expansion(memo, PrivateFlag::Public, &path),
+            Some(first)
+        );
+        assert_eq!(&*ctx.memoized_abbrev_refs.borrow(), &[memo]);
+    }
+
+    #[test]
+    fn mutation_trail_restores_definition_and_abbreviation_state() {
+        let ctx = TypeContext::new(std::sync::Arc::new(IdGenerator::new()));
+        let initial_levels = ctx.current_def_level_state();
+        let memo = ctx.alloc_abbrev_nil();
+        let snapshot = ctx.snapshot_type_state();
+
+        ctx.set_current_abbreviations(memo);
+        ctx.begin_def();
+        ctx.reset_global_level();
+        assert_ne!(ctx.current_def_level_state(), initial_levels);
+
+        ctx.restore_type_state(snapshot);
+
+        assert_eq!(ctx.current_abbreviations(), AbbrevMemoRef::nil());
+        assert_eq!(ctx.current_def_level_state(), initial_levels);
+    }
+
+    #[test]
+    fn restoring_a_nested_snapshot_does_not_journal_the_restore() {
+        let ctx = TypeContext::new(std::sync::Arc::new(IdGenerator::new()));
+        let ty = ctx.new_var(Some("original".to_string()));
+        let outer = ctx.snapshot_type_state();
+        ctx.set_desc(ty, TypeDesc::Tvar(Some("outer".to_string())));
+        let inner = ctx.snapshot_type_state();
+        ctx.set_desc(ty, TypeDesc::Tnil);
+
+        ctx.restore_type_state(inner);
+
+        assert_eq!(ctx.mutation_journal.borrow().entries.len(), 1);
+        assert!(matches!(&*ctx.get_desc(ty), TypeDesc::Tvar(Some(name)) if name == "outer"));
+        ctx.restore_type_state(outer);
+        assert!(matches!(&*ctx.get_desc(ty), TypeDesc::Tvar(Some(name)) if name == "original"));
+    }
+
+    #[test]
+    fn dropping_an_inner_snapshot_keeps_its_entries_for_outer_backtrack() {
+        let ctx = TypeContext::new(std::sync::Arc::new(IdGenerator::new()));
+        let ty = ctx.new_var(Some("original".to_string()));
+        let outer = ctx.snapshot_type_state();
+        let inner = ctx.snapshot_type_state();
+        ctx.set_desc(ty, TypeDesc::Tnil);
+
+        drop(inner);
+        assert_eq!(ctx.mutation_journal.borrow().entries.len(), 1);
+        ctx.restore_type_state(outer);
+
+        assert!(matches!(&*ctx.get_desc(ty), TypeDesc::Tvar(Some(name)) if name == "original"));
+        assert!(!ctx.mutation_logging.get());
+    }
+
+    #[test]
+    fn restoring_an_outer_snapshot_invalidates_nested_snapshots() {
+        let ctx = TypeContext::new(std::sync::Arc::new(IdGenerator::new()));
+        let ty = ctx.new_var(Some("original".to_string()));
+        let outer = ctx.snapshot_type_state();
+        ctx.set_desc(ty, TypeDesc::Tvar(Some("outer".to_string())));
+        let inner = ctx.snapshot_type_state();
+        ctx.set_desc(ty, TypeDesc::Tnil);
+
+        ctx.restore_type_state(outer);
+        ctx.restore_type_state(inner);
+
+        assert!(matches!(&*ctx.get_desc(ty), TypeDesc::Tvar(Some(name)) if name == "original"));
+        assert!(!ctx.mutation_logging.get());
     }
 
     #[test]
