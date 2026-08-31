@@ -12412,8 +12412,12 @@ fn pressure_minimal_compatible_rows(
         selected
     }
 
+    // Parmatch.check_unused accumulates `pref` with `q :: pref`, so its
+    // compatible rows are newest-first even though cases are visited in source
+    // order (compiler/ml/parmatch.ml:2193-2196, 2252).
     let compatible = previous
         .iter()
+        .rev()
         .filter(|case| pressure_patterns_compatible(case.lhs, query))
         .map(|case| vec![case.lhs.clone()])
         .collect::<Vec<_>>();
@@ -35230,6 +35234,33 @@ mod tests {
 
         assert_pressure_minimum_is_any([&any, &one], &one);
         assert_pressure_minimum_is_any([&one, &any], &one);
+    }
+
+    #[test]
+    fn pressure_equal_minima_keep_the_oldest_row_like_ocaml_pref() {
+        let mut old = pressure_test_pattern(PatternDesc::Tpat_constant(Constant::Int(1)));
+        old.pat_loc = LocIdx(1);
+        let mut new = pressure_test_pattern(PatternDesc::Tpat_constant(Constant::Int(1)));
+        new.pat_loc = LocIdx(2);
+        let query = pressure_test_pattern(PatternDesc::Tpat_constant(Constant::Int(1)));
+        let type_ctx = TypeContext::new(std::sync::Arc::new(IdGenerator::new()));
+        let arena = ParseArena::new();
+        let mut tctx = TypeCheckContext::new(&type_ctx, &arena);
+        let env = crate::types::initial_env(&type_ctx);
+        let previous = [
+            PartialCheckCase {
+                lhs: &old,
+                has_guard: false,
+            },
+            PartialCheckCase {
+                lhs: &new,
+                has_guard: false,
+            },
+        ];
+
+        let rows = pressure_minimal_compatible_rows(&mut tctx, &env, &previous, &query);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0][0].pat_loc, old.pat_loc);
     }
 
     #[test]
