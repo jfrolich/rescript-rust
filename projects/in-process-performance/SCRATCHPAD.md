@@ -2,6 +2,53 @@
 
 This file is for transient measurements, hypotheses, rejected experiments, and slow-file notes. Keep committed facts concise; use temp files under `/tmp` for bulky logs/profiles.
 
+## Raw-Lambda Match-Action Materialization Profile
+
+`RESCRIPT_COMPILER_COUNTERS=1` now attributes recursive `MatchAction::to_raw`
+materialization by caller and module. The clone timer starts after the separate
+footprint walk, so `nanos` excludes counter traversal. `estimated_bytes` is a
+conservative lower bound (`RawLambda` enum nodes only; vector/string/box heap
+storage is excluded).
+
+On the pinned expanded Tella checkout (`66a5edabdbfdbc5dd7496e59ee0573de2a2a1ffa`), a clean release in-process build compiled 3,248 modules and reported:
+
+- `100881` terminal materializations, `6680890` recursively cloned nodes, at least
+  `3099932960` bytes, `753643768ns` aggregate clone time, maximum observed
+  action-handle fanout `433`.
+- The only active caller was `matching.rs`'s non-guarded terminal case in
+  `compile_match` (currently line 8471). `same_actions` did not materialize an
+  action in this corpus.
+- Top modules by cloned nodes began with `Schema__StoryType` (`301519`),
+  `DB__StoryType` (`180929`), `Service__PublicClip` (`132354`), `LayoutDetail`
+  (`123689`), `Schema__EditorEvents` (`117990`), and
+  `Service__PublicClipLegacy` (`87873`). The requested `Layout` module had no
+  recorded terminal action clone despite spending about `51.7ms` in Lambda,
+  so its Lambda cost is outside this call site.
+- Focus modules' representative clone-time runs were noisy under the concurrent
+  counter build but consistently material: `Service__PublicClip` 8-23ms,
+  `Schema__EditorEvents` 9-38ms, and `Service__PublicClipLegacy` 6-16ms.
+  Their node/byte counts were stable at `132354 / >=61.4MB`,
+  `117990 / >=54.7MB`, and `87873 / >=40.8MB`, respectively.
+
+OCaml keeps the terminal action itself at `compiler/ml/matching.ml:2486-2493`;
+case-list transformations therefore preserve immutable Lambda allocation
+identity. It introduces static catches only at the local switch/test boundary
+through `handle_shared` and `share_actions_tree` at
+`compiler/ml/matching.ml:1536-1572`, and through `share_actions_sw` at
+`compiler/ml/matching.ml:1687-1716`. Any retained Rust refactor must preserve
+that boundary and `next_raise_count` order. A whole-match placeholder/finalizer
+was rejected without implementation because it would move catch placement and
+exit allocation relative to those OCaml boundaries.
+
+The next implementation slice should make the internal switch/test action
+store accept shared `MatchAction` handles directly, keeping owned `RawLambda`
+for tests/scrutinees. Terminal compilation can then return an internal action
+leaf; `share_actions_tree`/`share_actions_sw` assign catches/exits before each
+unique action is materialized exactly once. The existing public `RawLambda`
+entry points remain unchanged by fully materializing at those local boundaries.
+This requires an internal matching-result/action type rather than a new public
+`RawLambda` variant or a global `Arc<RawLambda>`.
+
 ## Expanded 3,248-Module Migration History
 
 - The updated Tella corpus has grown to 3,248 compiled modules. Before the current candidate, release in-process builds measured `15.686s +/- 0.118s` over 5 runs, range `15.581s..15.887s`.
