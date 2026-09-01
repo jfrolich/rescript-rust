@@ -1930,7 +1930,7 @@ impl PersistentEnv {
                 // persistent registry knows this opened unit is the flattened
                 // backing head for a selected alias path, share the same
                 // component modtype force with that alias path.
-                let components = crate::types::env_lazy::QualifiedModuleComponents::new_with_child_components_arc_and_value_source_prefix(
+                let components = crate::types::env_lazy::QualifiedModuleComponents::new_with_child_components_arc_and_substitution_source(
                     module_path.clone(),
                     ps.ps_sig.clone(),
                     ahash::AHashMap::new(),
