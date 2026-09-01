@@ -31484,26 +31484,20 @@ fn build_shared_persistent_root_components<'a>(
     }
 
     let pers = pers_env.as_mut()?;
-    // OCaml builds persistent `ps_comps` directly from the loaded signature,
-    // separately from `ps_sig = lazy (Subst.signature identity sign)`
-    // (compiler/ml/env.ml:669-678). `components_of_module_maker` then captures
-    // the selected path and substitution in its EnvLazy thunk
-    // (compiler/ml/env.ml:1472-1489), applying `Subst` when that component view
-    // is forced (compiler/ml/env.ml:1490-1538, compiler/ml/subst.ml:303-309).
-    // In-process signatures are already immutable and internalized in this
-    // TypeContext, so flattened persistent units can use the same shared lazy
-    // view as ordinary persistent roots. Preserve the registered alias source
-    // as the view's substitution scope instead of eagerly copying and rewriting
-    // the complete signature.
-    let source_prefix = pers.qualified_alias_path_for_flattened_head(id.name());
+    if pers
+        .qualified_alias_path_for_flattened_head(id.name())
+        .is_some()
+    {
+        return None;
+    }
+
     let ps = pers.find_pers_struct(id.name(), ctx)?;
     let access_path = Path::pident(Ident::create_persistent(id.name()));
     Some(
-        crate::types::env_lazy::QualifiedModuleComponents::new_with_child_components_arc_and_value_source_prefix(
+        crate::types::env_lazy::QualifiedModuleComponents::new_with_child_components_arc(
             access_path,
             ps.ps_sig.clone(),
             HashMap::new(),
-            source_prefix,
             ctx,
         ),
     )
