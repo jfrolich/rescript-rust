@@ -11,10 +11,7 @@ use crate::ident::Ident;
 use crate::lambda::lam_compat::LetKind;
 use crate::lambda::lam_primitive::{Mutable, Primitive};
 use crate::lambda::lam_util::refine_let;
-use crate::lambda::{
-    Apply, Lambda, LambdaSwitch, PrimInfo, map_lambda_vec_owned, map_snd_lambda_vec_owned,
-    measure_owned_lambda_pass,
-};
+use crate::lambda::{Apply, Lambda, LambdaSwitch, PrimInfo};
 use crate::location::Location;
 
 enum FlattenGroup {
@@ -44,12 +41,6 @@ pub fn deep_flatten_owned(lam: Lambda) -> Lambda {
 
 /// Owned variant using the caller's OCaml-style `Ident.currentstamp`.
 pub fn deep_flatten_owned_with_id_gen(lam: Lambda, id_gen: &IdGenerator) -> Lambda {
-    measure_owned_lambda_pass("deep_flatten", lam, |lam| {
-        deep_flatten_owned_with_id_gen_impl(lam, id_gen)
-    })
-}
-
-fn deep_flatten_owned_with_id_gen_impl(lam: Lambda, id_gen: &IdGenerator) -> Lambda {
     fn lambda_of_groups(bindings: Vec<FlattenGroup>, result: Lambda) -> Lambda {
         // lam_pass_deep_flatten.ml:108 — fold each Single back through
         // `Lam_util.refine_let` so Strict bindings whose RHS is safe to alias
@@ -317,10 +308,10 @@ fn deep_flatten_owned_with_id_gen_impl(lam: Lambda, id_gen: &IdGenerator) -> Lam
                 flatten(acc, *body, id_gen)
             }
             Lambda::Lletrec(bindings, body) => {
-                let bindings =
-                    map_snd_lambda_vec_owned("deep_flatten.flatten.letrec", bindings, |expr| {
-                        aux(expr, id_gen)
-                    });
+                let bindings = bindings
+                    .into_iter()
+                    .map(|(id, expr)| (id, aux(expr, id_gen)))
+                    .collect();
                 acc.push(FlattenGroup::Recursive(bindings));
                 flatten(acc, *body, id_gen)
             }
@@ -341,9 +332,10 @@ fn deep_flatten_owned_with_id_gen_impl(lam: Lambda, id_gen: &IdGenerator) -> Lam
                 lambda_of_groups(groups, result)
             }
             Lambda::Lletrec(bindings, body) => Lambda::letrec(
-                map_snd_lambda_vec_owned("deep_flatten.aux.letrec", bindings, |expr| {
-                    aux(expr, id_gen)
-                }),
+                bindings
+                    .into_iter()
+                    .map(|(id, expr)| (id, aux(expr, id_gen)))
+                    .collect(),
                 aux(*body, id_gen),
             ),
             Lambda::Lsequence(first, second) => {
@@ -352,11 +344,11 @@ fn deep_flatten_owned_with_id_gen_impl(lam: Lambda, id_gen: &IdGenerator) -> Lam
             Lambda::Lvar(_) | Lambda::LglobalModule(_, _) | Lambda::Lconst(_) => lam,
             Lambda::Lapply(apply) => Lambda::Lapply(Apply {
                 ap_func: Box::new(aux(*apply.ap_func, id_gen)),
-                ap_args: map_lambda_vec_owned(
-                    "deep_flatten.aux.apply_args",
-                    apply.ap_args,
-                    |arg| aux(arg, id_gen),
-                ),
+                ap_args: apply
+                    .ap_args
+                    .into_iter()
+                    .map(|arg| aux(arg, id_gen))
+                    .collect(),
                 ap_info: apply.ap_info,
                 ap_transformed_jsx: apply.ap_transformed_jsx,
             }),
@@ -365,43 +357,39 @@ fn deep_flatten_owned_with_id_gen_impl(lam: Lambda, id_gen: &IdGenerator) -> Lam
             }
             Lambda::Lprim(info) => Lambda::prim(
                 info.primitive,
-                map_lambda_vec_owned("deep_flatten.aux.prim_args", info.args, |arg| {
-                    aux(arg, id_gen)
-                }),
+                info.args.into_iter().map(|arg| aux(arg, id_gen)).collect(),
                 info.loc,
             ),
             Lambda::Lswitch(scrutinee, switch) => Lambda::Lswitch(
                 Box::new(aux(*scrutinee, id_gen)),
                 LambdaSwitch {
                     sw_consts_full: switch.sw_consts_full,
-                    sw_consts: map_snd_lambda_vec_owned(
-                        "deep_flatten.aux.switch_consts",
-                        switch.sw_consts,
-                        |lam| aux(lam, id_gen),
-                    ),
+                    sw_consts: switch
+                        .sw_consts
+                        .into_iter()
+                        .map(|(tag, lam)| (tag, aux(lam, id_gen)))
+                        .collect(),
                     sw_blocks_full: switch.sw_blocks_full,
-                    sw_blocks: map_snd_lambda_vec_owned(
-                        "deep_flatten.aux.switch_blocks",
-                        switch.sw_blocks,
-                        |lam| aux(lam, id_gen),
-                    ),
+                    sw_blocks: switch
+                        .sw_blocks
+                        .into_iter()
+                        .map(|(tag, lam)| (tag, aux(lam, id_gen)))
+                        .collect(),
                     sw_failaction: switch.sw_failaction.map(|lam| Box::new(aux(*lam, id_gen))),
                     sw_dispatch: switch.sw_dispatch,
                 },
             ),
             Lambda::LstringSwitch(scrutinee, cases, default) => Lambda::LstringSwitch(
                 Box::new(aux(*scrutinee, id_gen)),
-                map_snd_lambda_vec_owned("deep_flatten.aux.string_switch_cases", cases, |lam| {
-                    aux(lam, id_gen)
-                }),
+                cases
+                    .into_iter()
+                    .map(|(tag, lam)| (tag, aux(lam, id_gen)))
+                    .collect(),
                 default.map(|lam| Box::new(aux(*lam, id_gen))),
             ),
-            Lambda::LstaticRaise(id, args) => Lambda::LstaticRaise(
-                id,
-                map_lambda_vec_owned("deep_flatten.aux.static_raise_args", args, |arg| {
-                    aux(arg, id_gen)
-                }),
-            ),
+            Lambda::LstaticRaise(id, args) => {
+                Lambda::LstaticRaise(id, args.into_iter().map(|arg| aux(arg, id_gen)).collect())
+            }
             Lambda::LstaticCatch(body, ids, handler) => Lambda::LstaticCatch(
                 Box::new(aux(*body, id_gen)),
                 ids,

@@ -17,10 +17,7 @@ use crate::lambda::lam_hit::hit_variable;
 use crate::lambda::lam_primitive::Primitive;
 use crate::lambda::lam_tag_info::TagInfo;
 use crate::lambda::lam_util::field_flatten_get;
-use crate::lambda::{
-    Apply, Lambda, LambdaSwitch, PrimInfo, map_lambda_vec_owned, map_snd_lambda_vec_owned,
-    measure_owned_lambda_pass,
-};
+use crate::lambda::{Apply, Lambda, LambdaSwitch, PrimInfo};
 use crate::location::Location;
 
 /// Rust counterpart to `Lam_compile_env.query_external_id_info` used by
@@ -138,20 +135,18 @@ pub fn simplify_alias_with_external_inline_owned(
     lam: Lambda,
     external_inline: &mut ExternalInlineResolver<'_>,
 ) -> Lambda {
-    measure_owned_lambda_pass("remove_alias", lam, |lam| {
-        let export_idents = std::mem::take(&mut meta.export_idents);
-        let id_gen = meta.id_gen.clone();
-        let result = Simplifier {
-            ident_tbl: &mut meta.ident_tbl,
-            export_idents: &export_idents,
-            id_gen: &id_gen,
-            jsx_preserve: false,
-            external_inline,
-        }
-        .simpl_owned(lam);
-        meta.export_idents = export_idents;
-        result
-    })
+    let export_idents = std::mem::take(&mut meta.export_idents);
+    let id_gen = meta.id_gen.clone();
+    let result = Simplifier {
+        ident_tbl: &mut meta.ident_tbl,
+        export_idents: &export_idents,
+        id_gen: &id_gen,
+        jsx_preserve: false,
+        external_inline,
+    }
+    .simpl_owned(lam);
+    meta.export_idents = export_idents;
+    result
 }
 
 /// Same as [`simplify_alias`] but threads the JSX preservation flag — a port
@@ -184,20 +179,18 @@ pub fn simplify_alias_with_jsx_and_external_inline_owned(
     jsx_preserve: bool,
     external_inline: &mut ExternalInlineResolver<'_>,
 ) -> Lambda {
-    measure_owned_lambda_pass("remove_alias", lam, |lam| {
-        let export_idents = std::mem::take(&mut meta.export_idents);
-        let id_gen = meta.id_gen.clone();
-        let result = Simplifier {
-            ident_tbl: &mut meta.ident_tbl,
-            export_idents: &export_idents,
-            id_gen: &id_gen,
-            jsx_preserve,
-            external_inline,
-        }
-        .simpl_owned(lam);
-        meta.export_idents = export_idents;
-        result
-    })
+    let export_idents = std::mem::take(&mut meta.export_idents);
+    let id_gen = meta.id_gen.clone();
+    let result = Simplifier {
+        ident_tbl: &mut meta.ident_tbl,
+        export_idents: &export_idents,
+        id_gen: &id_gen,
+        jsx_preserve,
+        external_inline,
+    }
+    .simpl_owned(lam);
+    meta.export_idents = export_idents;
+    result
 }
 
 struct Simplifier<'a> {
@@ -239,16 +232,12 @@ impl<'a> Simplifier<'a> {
                     }))
                 ) =>
             {
-                let mut index = 0;
-                let new_args = map_lambda_vec_owned("remove_alias.jsx_args", args, |arg| {
-                    let current = index;
-                    index += 1;
-                    if current == 0 {
-                        arg
-                    } else {
-                        self.simpl_owned(arg)
-                    }
-                });
+                let mut new_args = Vec::with_capacity(args.len());
+                let mut iter = args.into_iter();
+                if let Some(first) = iter.next() {
+                    new_args.push(first);
+                }
+                new_args.extend(iter.map(|arg| self.simpl_owned(arg)));
                 Lambda::prim(primitive, new_args, loc)
             }
 
@@ -311,7 +300,7 @@ impl<'a> Simplifier<'a> {
                 loc,
             }) => Lambda::prim(
                 primitive,
-                map_lambda_vec_owned("remove_alias.prim_args", args, |arg| self.simpl_owned(arg)),
+                args.into_iter().map(|arg| self.simpl_owned(arg)).collect(),
                 loc,
             ),
 
@@ -400,9 +389,10 @@ impl<'a> Simplifier<'a> {
 
             // lam_pass_remove_alias.ml:120-122
             Lambda::Lletrec(bindings, body) => {
-                let bindings = map_snd_lambda_vec_owned("remove_alias.letrec", bindings, |expr| {
-                    self.simpl_owned(expr)
-                });
+                let bindings = bindings
+                    .into_iter()
+                    .map(|(id, expr)| (id, self.simpl_owned(expr)))
+                    .collect();
                 Lambda::letrec(bindings, self.simpl_owned(*body))
             }
 
@@ -440,10 +430,10 @@ impl<'a> Simplifier<'a> {
 
                 match *ap_func {
                     Lambda::Lvar(v) => {
-                        let ap_args =
-                            map_lambda_vec_owned("remove_alias.var_apply_args", ap_args, |arg| {
-                                self.simpl_owned(arg)
-                            });
+                        let ap_args: Vec<Lambda> = ap_args
+                            .into_iter()
+                            .map(|arg| self.simpl_owned(arg))
+                            .collect();
 
                         let func_info = match self.ident_tbl.get(&v) {
                             Some(IdKind::FunctionId {
@@ -530,11 +520,10 @@ impl<'a> Simplifier<'a> {
                         }
                     }
                     Lambda::Lfunction(func) => {
-                        let args = map_lambda_vec_owned(
-                            "remove_alias.direct_function_apply_args",
-                            ap_args,
-                            |arg| self.simpl_owned(arg),
-                        );
+                        let args: Vec<Lambda> = ap_args
+                            .into_iter()
+                            .map(|arg| self.simpl_owned(arg))
+                            .collect();
                         if args.len() == func.params.len() && lfunction_can_be_inlined(&func) {
                             // lam_pass_remove_alias.ml:233-237.
                             let reduced =
@@ -557,9 +546,10 @@ impl<'a> Simplifier<'a> {
                     }
                     func => Lambda::apply(
                         self.simpl_owned(func),
-                        map_lambda_vec_owned("remove_alias.general_apply_args", ap_args, |arg| {
-                            self.simpl_owned(arg)
-                        }),
+                        ap_args
+                            .into_iter()
+                            .map(|arg| self.simpl_owned(arg))
+                            .collect(),
                         ap_info,
                         ap_transformed_jsx,
                     ),
@@ -579,17 +569,17 @@ impl<'a> Simplifier<'a> {
                 self.simpl_owned(*scrut),
                 LambdaSwitch {
                     sw_consts_full: switch.sw_consts_full,
-                    sw_consts: map_snd_lambda_vec_owned(
-                        "remove_alias.switch_consts",
-                        switch.sw_consts,
-                        |expr| self.simpl_owned(expr),
-                    ),
+                    sw_consts: switch
+                        .sw_consts
+                        .into_iter()
+                        .map(|(k, expr)| (k, self.simpl_owned(expr)))
+                        .collect(),
                     sw_blocks_full: switch.sw_blocks_full,
-                    sw_blocks: map_snd_lambda_vec_owned(
-                        "remove_alias.switch_blocks",
-                        switch.sw_blocks,
-                        |expr| self.simpl_owned(expr),
-                    ),
+                    sw_blocks: switch
+                        .sw_blocks
+                        .into_iter()
+                        .map(|(k, expr)| (k, self.simpl_owned(expr)))
+                        .collect(),
                     sw_failaction: switch
                         .sw_failaction
                         .map(|expr| Box::new(self.simpl_owned(*expr))),
@@ -608,20 +598,17 @@ impl<'a> Simplifier<'a> {
                 };
                 Lambda::string_switch(
                     scrut,
-                    map_snd_lambda_vec_owned("remove_alias.string_switch_cases", sw, |value| {
-                        self.simpl_owned(value)
-                    }),
+                    sw.into_iter()
+                        .map(|(k, v)| (k, self.simpl_owned(v)))
+                        .collect(),
                     d.map(|d| Box::new(self.simpl_owned(*d))),
                 )
             }
 
             // lam_pass_remove_alias.ml:278
-            Lambda::LstaticRaise(i, ls) => Lambda::static_raise(
-                i,
-                map_lambda_vec_owned("remove_alias.static_raise_args", ls, |arg| {
-                    self.simpl_owned(arg)
-                }),
-            ),
+            Lambda::LstaticRaise(i, ls) => {
+                Lambda::static_raise(i, ls.into_iter().map(|arg| self.simpl_owned(arg)).collect())
+            }
 
             // lam_pass_remove_alias.ml:279
             Lambda::LstaticCatch(l1, ids, l2) => {

@@ -10,10 +10,7 @@ use crate::lambda::lam_compile_context::LamStats;
 use crate::lambda::lam_eta_conversion::transform_under_supply;
 use crate::lambda::lam_pass_collect::ExternalArityResolver;
 use crate::lambda::lam_primitive::Primitive;
-use crate::lambda::{
-    ApInfo, Apply, ApplyStatus, Lambda, LambdaSwitch, PrimInfo, map_lambda_vec_owned,
-    map_snd_lambda_vec_owned, measure_owned_lambda_pass,
-};
+use crate::lambda::{ApInfo, Apply, ApplyStatus, Lambda, LambdaSwitch, PrimInfo};
 
 /// Direct port of `Lam_pass_alpha_conversion.alpha_conversion`
 /// (lam_pass_alpha_conversion.ml:25-129).
@@ -28,14 +25,12 @@ pub fn alpha_conversion(meta: &LamStats, lam: &Lambda) -> Lambda {
 /// pass result in the backend pipeline, preserving the same case behavior while
 /// avoiding an eager clone of the whole tree before the rebuild.
 pub fn alpha_conversion_owned(meta: &LamStats, lam: Lambda) -> Lambda {
-    measure_owned_lambda_pass("alpha_conversion", lam, |lam| {
-        let mut meta = meta.clone();
-        let mut alpha = Alpha {
-            meta: &mut meta,
-            external_arity: None,
-        };
-        alpha.simpl_owned(lam)
-    })
+    let mut meta = meta.clone();
+    let mut alpha = Alpha {
+        meta: &mut meta,
+        external_arity: None,
+    };
+    alpha.simpl_owned(lam)
 }
 
 pub fn alpha_conversion_with_external_arity_owned(
@@ -43,13 +38,11 @@ pub fn alpha_conversion_with_external_arity_owned(
     lam: Lambda,
     external_arity: &mut ExternalArityResolver<'_>,
 ) -> Lambda {
-    measure_owned_lambda_pass("alpha_conversion", lam, |lam| {
-        let mut alpha = Alpha {
-            meta,
-            external_arity: Some(external_arity),
-        };
-        alpha.simpl_owned(lam)
-    })
+    let mut alpha = Alpha {
+        meta,
+        external_arity: Some(external_arity),
+    };
+    alpha.simpl_owned(lam)
 }
 
 struct Alpha<'a, 'r> {
@@ -143,9 +136,7 @@ impl<'a, 'r> Alpha<'a, 'r> {
         match args_arity.first().copied() {
             None | Some(0) => Lambda::apply(
                 self.simpl_owned(fn_),
-                map_lambda_vec_owned("alpha.apply_args.unknown", args, |arg| {
-                    self.simpl_owned(arg)
-                }),
+                args.into_iter().map(|a| self.simpl_owned(a)).collect(),
                 ap_info,
                 ap_transformed_jsx,
             ),
@@ -156,18 +147,14 @@ impl<'a, 'r> Alpha<'a, 'r> {
                 };
                 Lambda::apply(
                     self.simpl_owned(fn_),
-                    map_lambda_vec_owned("alpha.apply_args.exact", args, |arg| {
-                        self.simpl_owned(arg)
-                    }),
+                    args.into_iter().map(|a| self.simpl_owned(a)).collect(),
                     new_info,
                     ap_transformed_jsx,
                 )
             }
             Some(x) if x > len => {
                 let fn_ = self.simpl_owned(fn_);
-                let args = map_lambda_vec_owned("alpha.apply_args.under", args, |arg| {
-                    self.simpl_owned(arg)
-                });
+                let args = args.into_iter().map(|a| self.simpl_owned(a)).collect();
                 let new_info = ApInfo {
                     status: ApplyStatus::InferFull,
                     ..ap_info
@@ -361,9 +348,10 @@ impl<'a, 'r> Alpha<'a, 'r> {
                 Lambda::let_(str, v, self.simpl_owned(*l1), self.simpl_owned(*l2))
             }
             Lambda::Lletrec(bindings, body) => {
-                let bindings = map_snd_lambda_vec_owned("alpha.letrec", bindings, |value| {
-                    self.simpl_owned(value)
-                });
+                let bindings = bindings
+                    .into_iter()
+                    .map(|(id, e)| (id, self.simpl_owned(e)))
+                    .collect();
                 Lambda::letrec(bindings, self.simpl_owned(*body))
             }
             Lambda::Lprim(PrimInfo {
@@ -372,7 +360,7 @@ impl<'a, 'r> Alpha<'a, 'r> {
                 loc,
             }) => Lambda::prim(
                 primitive,
-                map_lambda_vec_owned("alpha.prim_args", args, |arg| self.simpl_owned(arg)),
+                args.into_iter().map(|a| self.simpl_owned(a)).collect(),
                 loc,
             ),
             Lambda::Lfunction(f) => {
@@ -382,32 +370,31 @@ impl<'a, 'r> Alpha<'a, 'r> {
                 self.simpl_owned(*scrut),
                 LambdaSwitch {
                     sw_consts_full: switch.sw_consts_full,
-                    sw_consts: map_snd_lambda_vec_owned(
-                        "alpha.switch_consts",
-                        switch.sw_consts,
-                        |body| self.simpl_owned(body),
-                    ),
+                    sw_consts: switch
+                        .sw_consts
+                        .into_iter()
+                        .map(|(k, l)| (k, self.simpl_owned(l)))
+                        .collect(),
                     sw_blocks_full: switch.sw_blocks_full,
-                    sw_blocks: map_snd_lambda_vec_owned(
-                        "alpha.switch_blocks",
-                        switch.sw_blocks,
-                        |body| self.simpl_owned(body),
-                    ),
+                    sw_blocks: switch
+                        .sw_blocks
+                        .into_iter()
+                        .map(|(k, l)| (k, self.simpl_owned(l)))
+                        .collect(),
                     sw_failaction: switch.sw_failaction.map(|f| Box::new(self.simpl_owned(*f))),
                     sw_dispatch: switch.sw_dispatch,
                 },
             ),
             Lambda::LstringSwitch(scrut, sw, d) => Lambda::string_switch(
                 self.simpl_owned(*scrut),
-                map_snd_lambda_vec_owned("alpha.string_switch_cases", sw, |body| {
-                    self.simpl_owned(body)
-                }),
+                sw.into_iter()
+                    .map(|(k, v)| (k, self.simpl_owned(v)))
+                    .collect(),
                 d.map(|d| Box::new(self.simpl_owned(*d))),
             ),
-            Lambda::LstaticRaise(i, ls) => Lambda::static_raise(
-                i,
-                map_lambda_vec_owned("alpha.static_raise_args", ls, |arg| self.simpl_owned(arg)),
-            ),
+            Lambda::LstaticRaise(i, ls) => {
+                Lambda::static_raise(i, ls.into_iter().map(|l| self.simpl_owned(l)).collect())
+            }
             Lambda::LstaticCatch(l1, ids, l2) => {
                 Lambda::static_catch(self.simpl_owned(*l1), ids.0, ids.1, self.simpl_owned(*l2))
             }
