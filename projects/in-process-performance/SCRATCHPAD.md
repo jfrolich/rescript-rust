@@ -70,15 +70,20 @@ implemented per declaration. It could not. `components_of_module_maker` forces
 one component thunk, runs `prefix_idents` over the complete signature, then
 uses `List.iter2` to apply `Subst.value_description` and
 `Subst.type_declaration` to every direct item in source order
-(`compiler/ml/env.ml:1516-1559`). `Subst.value_description` copies its type and
-cleans temporary substitutions at `compiler/ml/subst.ml:303-309`;
+(`compiler/ml/env.ml:1475-1546`; `prefix_idents` at line 1489,
+`List.iter2` at line 1492, and the substitutions at lines 1496 and 1502).
+`Subst.value_description` calls
+`type_expr`, whose copy and cleanup boundary is
+`compiler/ml/subst.ml:241-248`, at `compiler/ml/subst.ml:303-309`;
 `Subst.type_declaration` copies parameters, constructor or label payloads, and
 the manifest with one cleanup after that declaration at
-`compiler/ml/subst.ml:245-301`. The same component force derives every
+`compiler/ml/subst.ml:273-301`. The same component force derives every
 constructor and label table. Only child module declarations and child component
-tables remain behind their separate thunks at `compiler/ml/env.ml:1567-1578`.
-Alias strengthening does not move this boundary
-(`compiler/ml/mtype.ml:32-49`, `compiler/ml/mtype.ml:98-102`), and each copied
+tables remain behind their separate thunks: the module-declaration thunk is at
+`compiler/ml/env.ml:1527`, and child components are created and stored at
+`compiler/ml/env.ml:1532-1537`. Alias strengthening does not move this boundary;
+`strengthen_decl` either preserves an alias, creates the selected alias, or
+recursively strengthens the module type at `compiler/ml/mtype.ml:94-98`. Each copied
 type node still allocates through `compiler/ml/btype.ml:46-48`.
 
 The rejected follow-up added per-type `OnceCell` entries and copied only a
@@ -92,11 +97,12 @@ Rust already memoizes a selected component view for its TypeContext: published
 qualified paths use `TypeContext::qualified_module_components_cache`, local
 module bindings use `StoredModuleComponents::cached`, and both reuse the same
 `StructureComponentTables` for later lookups. Probe views intentionally do not
-publish. The remaining repeated work is across independent compilation
-TypeContexts, where `TypeExprRef` handles cannot be shared. Caching that work
-would require the forbidden cross-context declaration sharing or a broad
-persistent cache. No safe exact optimization remained after this audit, so no
-candidate benchmark was run. A required Tella screening attempt also confirmed
+publish. For the profiled publishable flattened-root fallback, the remaining
+copies occur in independent compilation TypeContexts, where `TypeExprRef`
+handles cannot be shared. Caching those copies would require the forbidden
+cross-context declaration sharing or a broad persistent cache. No safe exact
+optimization of that fallback remained after this audit, so no candidate
+benchmark was run. A required Tella screening attempt also confirmed
 that the installed runtime at
 `/Users/jake/dev/tella-fusion/node_modules/@rescript/runtime` lacks the source
 `rescript.json` needed by in-process runtime compilation; the audit stopped
