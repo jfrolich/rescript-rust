@@ -2,6 +2,72 @@
 
 This file is for transient measurements, hypotheses, rejected experiments, and slow-file notes. Keep committed facts concise; use temp files under `/tmp` for bulky logs/profiles.
 
+## Flattened persistent component signatures
+
+On exact starting head `436ec59dd` and pinned Tella
+`66a5edabdbfdbc5dd7496e59ee0573de2a2a1ffa`, release counters attributed
+`55,491` whole-signature copies, `1,459,774` signature items, `8,959,295`
+new `TypeExpr` nodes, and `1,075,115,400` bytes of inline type-node plus handle
+storage. The component fallback at `types/typecore.rs`'s persistent-root signature
+builder alone made `3,493` copies over `171,680` items and allocated `925,777`
+type nodes / `111,093,240` bytes. Freshening forces remained a separate larger
+bucket: `persistent_env_lazy_rename` ran `15,787` times over `622,361` items and
+`type_context_lazy_rename` ran `15,953` times over `425,426` items. Those forces
+were not suppressed or shared across compilation contexts.
+
+The critical-path profile was distributed rather than isolated to one module.
+The largest typecheck times included `Layout__Types` (`553.269ms`),
+`Service__PublicClip` (`381.514ms`), `UI__LayoutPickerStructured` (`278.419ms`),
+`Schema__EditorEvents` (`236.129ms`), and `LayoutDetail` (`230.191ms`). The top
+signature-copy consumers included `TrimTranscriptEditor` (`5,509` items),
+`LayoutDetail` (`4,600`), `Timeline__Scenes` (`4,562`),
+`Page__Story__Edit` (`4,537`), and `Overview__Search` (`4,421`).
+
+The retained boundary follows the reference split:
+
+- `compiler/ml/env.ml:669-678` stores persistent `ps_comps` from the loaded
+  signature separately from lazy `ps_sig`; `compiler/ml/env.ml:1472-1489`
+  captures the environment, substitution, selected path, and module type in an
+  `Env_lazy` component thunk; `compiler/ml/env.ml:1490-1538` applies the
+  component substitution only when that thunk is forced.
+- `compiler/ml/subst.ml:303-309` copies value descriptions through the captured
+  substitution, while `compiler/ml/subst.ml:351-400` freshens signature and
+  module binders at their existing force points. `compiler/ml/mtype.ml:32-49`
+  and `compiler/ml/mtype.ml:98-102` define strengthening and child-module alias
+  shape; `compiler/ml/btype.ml:46-48` is the physical type-node allocation
+  boundary whose identity Rust must preserve.
+- Rust's matching paths are `types/env_lazy.rs:379-1160` for shared component
+  views and forced members, `cmi/persistent_env.rs:1841-1944` for persistent
+  signature/component forcing, `cmi/persistent_env.rs:3457-3501` for signature
+  freshening, `types/context.rs:2618-2683` for context-local rename forces, and
+  `types/typecore.rs:31470-31640` / `types/typecore.rs:32050-32460` for component
+  lookup and eager qualification fallbacks.
+
+The candidate lets registered flattened persistent units use the existing
+shared in-process component view, carrying the alias-table source prefix as the
+view's substitution scope instead of copying and rewriting the complete
+signature. It does not change standalone compilation, force counts, freshening,
+serializer behavior, or cross-context ownership. Counter totals fell to
+`52,002` copies, `1,288,106` items, `8,035,975` type nodes, and `964,317,000`
+node-storage bytes. The targeted fallback fell to `4` copies / `12` items /
+`2,457` nodes / `294,840` bytes, removing `923,320` type-node allocations and
+`110,798,400` bytes globally on that run.
+
+Ten alternating paired 12-worker release `hyperfine` runs against exact base
+`436ec59dd` improved wall time from `4.625s +/- 0.027s`
+(`4.585s..4.660s`) to `4.586s +/- 0.033s` (`4.546s..4.644s`), a `38ms` /
+`0.83%` mean reduction. Mean user CPU fell from `39.489s` to `39.086s` and
+system CPU from `1.987s` to `1.976s`. Mean sampled peak RSS was noisy and did
+not improve (`2,958,945,485` versus `2,966,778,675` bytes). Release typedtree,
+raw Lambda, optimized Lambda, and JavaScript parity were each `610/610`;
+focused JavaScript fixtures were `344/344`; diagnostics were `1432/1432`;
+compiler tests were `1231 passed` / `108 ignored`; rewatch tests were `150
+passed`. Base and candidate clean Tella builds each compiled `3,248` modules and
+had identical SHA-256 manifests for all `5,073` generated JavaScript files. The
+external OCaml Tella parity setup remained unavailable: it stopped after `197`
+dependency modules because `bs-css` could not resolve `Belt`; the exact
+base/candidate Rust manifest comparison covers this candidate.
+
 ## Lookup type-copy memory traffic
 
 On pinned Tella `66a5edabdbfdbc5dd7496e59ee0573de2a2a1ffa`, the
