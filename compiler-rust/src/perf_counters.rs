@@ -98,7 +98,7 @@ static MATCH_ACTION_CLONE_CALLS: AtomicU64 = AtomicU64::new(0);
 static MATCH_ACTION_CLONE_NODES: AtomicU64 = AtomicU64::new(0);
 static MATCH_ACTION_CLONE_BYTES: AtomicU64 = AtomicU64::new(0);
 static MATCH_ACTION_CLONE_NANOS: AtomicU64 = AtomicU64::new(0);
-static MATCH_ACTION_CLONE_MAX_FANOUT: AtomicU64 = AtomicU64::new(0);
+static MATCH_ACTION_CLONE_MAX_REFERENCES: AtomicU64 = AtomicU64::new(0);
 static MATCH_ACTION_CLONE_SITES: OnceLock<
     Mutex<HashMap<(&'static str, u32), MatchActionCloneSite>>,
 > = OnceLock::new();
@@ -197,7 +197,7 @@ struct MatchActionCloneSite {
     nodes: u64,
     bytes: u64,
     nanos: u64,
-    max_fanout: u64,
+    max_references: u64,
 }
 
 #[derive(Clone, Copy, Default)]
@@ -387,7 +387,7 @@ pub fn reset() {
         &MATCH_ACTION_CLONE_NODES,
         &MATCH_ACTION_CLONE_BYTES,
         &MATCH_ACTION_CLONE_NANOS,
-        &MATCH_ACTION_CLONE_MAX_FANOUT,
+        &MATCH_ACTION_CLONE_MAX_REFERENCES,
         &REGISTRY_SNAPSHOTS,
         &REGISTRY_SHARED_ENTRIES_TOTAL,
         &REGISTRY_LOCAL_ENTRIES_TOTAL,
@@ -736,26 +736,26 @@ fn record_current_module_signature_freshen(item_count: usize) {
 /// Record one recursive materialization of a shared match action.
 ///
 /// `bytes` is the estimated owned RawLambda footprint cloned at this site;
-/// `fanout` is the action handle's strong count immediately before cloning.
+/// `references` is the number of Arc handles or logical output uses that require the clone.
 pub(crate) fn record_match_action_clone(
     location: &'static std::panic::Location<'static>,
     nodes: usize,
     bytes: usize,
     elapsed_nanos: u64,
-    fanout: usize,
+    references: usize,
 ) {
     MATCH_ACTION_CLONE_CALLS.fetch_add(1, Ordering::Relaxed);
     MATCH_ACTION_CLONE_NODES.fetch_add(nodes as u64, Ordering::Relaxed);
     MATCH_ACTION_CLONE_BYTES.fetch_add(bytes as u64, Ordering::Relaxed);
     MATCH_ACTION_CLONE_NANOS.fetch_add(elapsed_nanos, Ordering::Relaxed);
-    MATCH_ACTION_CLONE_MAX_FANOUT.fetch_max(fanout as u64, Ordering::Relaxed);
+    MATCH_ACTION_CLONE_MAX_REFERENCES.fetch_max(references as u64, Ordering::Relaxed);
 
     let update = |entry: &mut MatchActionCloneSite| {
         entry.calls += 1;
         entry.nodes += nodes as u64;
         entry.bytes += bytes as u64;
         entry.nanos += elapsed_nanos;
-        entry.max_fanout = entry.max_fanout.max(fanout as u64);
+        entry.max_references = entry.max_references.max(references as u64);
     };
 
     let sites = MATCH_ACTION_CLONE_SITES.get_or_init(|| Mutex::new(HashMap::new()));
@@ -895,12 +895,12 @@ pub fn print_report() {
 
 fn print_match_action_clones() {
     eprintln!(
-        "[compiler-counter] match_action_clones calls={} nodes={} estimated_bytes={} nanos={} max_fanout={}",
+        "[compiler-counter] match_action_clones calls={} nodes={} estimated_bytes={} nanos={} max_references={}",
         MATCH_ACTION_CLONE_CALLS.load(Ordering::Relaxed),
         MATCH_ACTION_CLONE_NODES.load(Ordering::Relaxed),
         MATCH_ACTION_CLONE_BYTES.load(Ordering::Relaxed),
         MATCH_ACTION_CLONE_NANOS.load(Ordering::Relaxed),
-        MATCH_ACTION_CLONE_MAX_FANOUT.load(Ordering::Relaxed),
+        MATCH_ACTION_CLONE_MAX_REFERENCES.load(Ordering::Relaxed),
     );
 
     if let Some(sites) = MATCH_ACTION_CLONE_SITES.get() {
@@ -913,8 +913,8 @@ fn print_match_action_clones() {
         sites.sort_by_key(|(_, site)| std::cmp::Reverse(site.nodes));
         for ((file, line), site) in sites.into_iter().take(12) {
             eprintln!(
-                "[compiler-counter] match_action_clone_site file={file}:{line} calls={} nodes={} estimated_bytes={} nanos={} max_fanout={}",
-                site.calls, site.nodes, site.bytes, site.nanos, site.max_fanout,
+                "[compiler-counter] match_action_clone_site file={file}:{line} calls={} nodes={} estimated_bytes={} nanos={} max_references={}",
+                site.calls, site.nodes, site.bytes, site.nanos, site.max_references,
             );
         }
     }
@@ -929,8 +929,8 @@ fn print_match_action_clones() {
         modules.sort_by_key(|(_, site)| std::cmp::Reverse(site.nodes));
         for (module, site) in modules.into_iter().take(20) {
             eprintln!(
-                "[compiler-counter] module_match_action_clones module={module} calls={} nodes={} estimated_bytes={} nanos={} max_fanout={}",
-                site.calls, site.nodes, site.bytes, site.nanos, site.max_fanout,
+                "[compiler-counter] module_match_action_clones module={module} calls={} nodes={} estimated_bytes={} nanos={} max_references={}",
+                site.calls, site.nodes, site.bytes, site.nanos, site.max_references,
             );
         }
     }
