@@ -79,8 +79,6 @@ static TYPE_ITEM_RESOLVE_FOUND: AtomicU64 = AtomicU64::new(0);
 static SIGNATURE_COPY_CALLS: AtomicU64 = AtomicU64::new(0);
 static SIGNATURE_COPY_ITEMS: AtomicU64 = AtomicU64::new(0);
 static SIGNATURE_COPY_MAX_ITEMS: AtomicU64 = AtomicU64::new(0);
-static SIGNATURE_COPY_TYPE_NODES: AtomicU64 = AtomicU64::new(0);
-static SIGNATURE_COPY_TYPE_NODE_BYTES: AtomicU64 = AtomicU64::new(0);
 static SIGNATURE_COPY_SITES: OnceLock<Mutex<HashMap<(&'static str, u32), SignatureCopySite>>> =
     OnceLock::new();
 static SIGNATURE_QUALIFICATION_KINDS: OnceLock<Mutex<HashMap<&'static str, SignatureCopySite>>> =
@@ -191,8 +189,6 @@ struct SignatureCopySite {
     calls: u64,
     items: u64,
     max_items: u64,
-    type_nodes: u64,
-    type_node_bytes: u64,
 }
 
 #[derive(Clone, Copy, Default)]
@@ -387,8 +383,6 @@ pub fn reset() {
         &SIGNATURE_COPY_CALLS,
         &SIGNATURE_COPY_ITEMS,
         &SIGNATURE_COPY_MAX_ITEMS,
-        &SIGNATURE_COPY_TYPE_NODES,
-        &SIGNATURE_COPY_TYPE_NODE_BYTES,
         &MATCH_ACTION_CLONE_CALLS,
         &MATCH_ACTION_CLONE_NODES,
         &MATCH_ACTION_CLONE_BYTES,
@@ -634,17 +628,10 @@ pub(crate) fn record_type_item_resolve_scan(scanned_items: usize, type_items: us
 pub(crate) fn record_signature_copy(
     location: &'static std::panic::Location<'static>,
     item_count: usize,
-    type_nodes: usize,
 ) {
-    let type_node_bytes = type_nodes.saturating_mul(
-        std::mem::size_of::<crate::types::type_expr::TypeExpr>()
-            + std::mem::size_of::<std::ptr::NonNull<crate::types::type_expr::TypeExpr>>(),
-    );
     SIGNATURE_COPY_CALLS.fetch_add(1, Ordering::Relaxed);
     SIGNATURE_COPY_ITEMS.fetch_add(item_count as u64, Ordering::Relaxed);
     SIGNATURE_COPY_MAX_ITEMS.fetch_max(item_count as u64, Ordering::Relaxed);
-    SIGNATURE_COPY_TYPE_NODES.fetch_add(type_nodes as u64, Ordering::Relaxed);
-    SIGNATURE_COPY_TYPE_NODE_BYTES.fetch_add(type_node_bytes as u64, Ordering::Relaxed);
 
     let sites = SIGNATURE_COPY_SITES.get_or_init(|| Mutex::new(HashMap::new()));
     let mut sites = sites.lock().unwrap();
@@ -654,8 +641,6 @@ pub(crate) fn record_signature_copy(
     entry.calls += 1;
     entry.items += item_count as u64;
     entry.max_items = entry.max_items.max(item_count as u64);
-    entry.type_nodes += type_nodes as u64;
-    entry.type_node_bytes += type_node_bytes as u64;
     record_current_module_signature_copy(item_count);
 }
 
@@ -869,12 +854,10 @@ pub fn print_report() {
         TYPE_ITEM_RESOLVE_FOUND.load(Ordering::Relaxed),
     );
     eprintln!(
-        "[compiler-counter] signature_copies calls={} items={} max_items={} type_nodes={} type_node_bytes={}",
+        "[compiler-counter] signature_copies calls={} items={} max_items={}",
         SIGNATURE_COPY_CALLS.load(Ordering::Relaxed),
         SIGNATURE_COPY_ITEMS.load(Ordering::Relaxed),
         SIGNATURE_COPY_MAX_ITEMS.load(Ordering::Relaxed),
-        SIGNATURE_COPY_TYPE_NODES.load(Ordering::Relaxed),
-        SIGNATURE_COPY_TYPE_NODE_BYTES.load(Ordering::Relaxed),
     );
     print_signature_copy_sites();
     print_signature_qualification_kinds();
@@ -1147,14 +1130,8 @@ fn print_signature_copy_sites() {
 
     for (file, line, counters) in sites.into_iter().take(20) {
         eprintln!(
-            "[compiler-counter] signature_copy_site file={} line={} calls={} items={} max_items={} type_nodes={} type_node_bytes={}",
-            file,
-            line,
-            counters.calls,
-            counters.items,
-            counters.max_items,
-            counters.type_nodes,
-            counters.type_node_bytes,
+            "[compiler-counter] signature_copy_site file={} line={} calls={} items={} max_items={}",
+            file, line, counters.calls, counters.items, counters.max_items,
         );
     }
 }
