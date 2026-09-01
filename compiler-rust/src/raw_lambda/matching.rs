@@ -8820,6 +8820,34 @@ fn approx_present_code(v: &Ident, code: &MatchCode) -> bool {
     }
 }
 
+fn lower_bind_action(v: &Ident, arg: &RawLambda, action: MatchAction) -> MatchCode {
+    match &action.0.kind {
+        MatchActionKind::Bind {
+            kind: LetKind::Alias,
+            id,
+            arg: value,
+            action: body,
+        } => {
+            if approx_present(v, value) {
+                MatchCode::Action(action).bind(LetKind::Alias, v.clone(), arg.clone())
+            } else {
+                lower_bind_action(v, arg, body.clone()).bind(
+                    LetKind::Alias,
+                    id.clone(),
+                    value.clone(),
+                )
+            }
+        }
+        MatchActionKind::Bind { .. } => {
+            MatchCode::Action(action).bind(LetKind::Alias, v.clone(), arg.clone())
+        }
+        MatchActionKind::Raw(RawLambda::Lvar(u)) if u.same(v) && u.name() == "*sth*" => {
+            MatchCode::raw(arg.clone())
+        }
+        MatchActionKind::Raw(_) => MatchCode::raw(lower_bind(v, arg, action.into_raw())),
+    }
+}
+
 /// OCaml `lower_bind` over the owned match-code spine. Terminal actions remain
 /// shared until a branch actually has to be rewritten.
 fn lower_bind_code(v: &Ident, arg: &RawLambda, code: MatchCode) -> MatchCode {
@@ -8879,10 +8907,7 @@ fn lower_bind_code(v: &Ident, arg: &RawLambda, code: MatchCode) -> MatchCode {
                 }
             }
         }
-        MatchCode::Action(action) if matches!(&action.0.kind, MatchActionKind::Raw(RawLambda::Lvar(u)) if u.same(v) && u.name() == "*sth*") => {
-            MatchCode::raw(arg.clone())
-        }
-        MatchCode::Action(action) => MatchCode::raw(lower_bind(v, arg, action.into_raw())),
+        MatchCode::Action(action) => lower_bind_action(v, arg, action),
         other => other.bind(LetKind::Alias, v.clone(), arg.clone()),
     }
 }
