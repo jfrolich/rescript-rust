@@ -19,6 +19,7 @@ use crate::lambda::lam_tag_info::TagInfo;
 use crate::lambda::lam_util::field_flatten_get;
 use crate::lambda::{
     Apply, Lambda, LambdaSwitch, PrimInfo, map_lambda_vec_owned, map_snd_lambda_vec_owned,
+    measure_owned_lambda_pass,
 };
 use crate::location::Location;
 
@@ -137,18 +138,20 @@ pub fn simplify_alias_with_external_inline_owned(
     lam: Lambda,
     external_inline: &mut ExternalInlineResolver<'_>,
 ) -> Lambda {
-    let export_idents = std::mem::take(&mut meta.export_idents);
-    let id_gen = meta.id_gen.clone();
-    let result = Simplifier {
-        ident_tbl: &mut meta.ident_tbl,
-        export_idents: &export_idents,
-        id_gen: &id_gen,
-        jsx_preserve: false,
-        external_inline,
-    }
-    .simpl_owned(lam);
-    meta.export_idents = export_idents;
-    result
+    measure_owned_lambda_pass("remove_alias", lam, |lam| {
+        let export_idents = std::mem::take(&mut meta.export_idents);
+        let id_gen = meta.id_gen.clone();
+        let result = Simplifier {
+            ident_tbl: &mut meta.ident_tbl,
+            export_idents: &export_idents,
+            id_gen: &id_gen,
+            jsx_preserve: false,
+            external_inline,
+        }
+        .simpl_owned(lam);
+        meta.export_idents = export_idents;
+        result
+    })
 }
 
 /// Same as [`simplify_alias`] but threads the JSX preservation flag — a port
@@ -181,18 +184,20 @@ pub fn simplify_alias_with_jsx_and_external_inline_owned(
     jsx_preserve: bool,
     external_inline: &mut ExternalInlineResolver<'_>,
 ) -> Lambda {
-    let export_idents = std::mem::take(&mut meta.export_idents);
-    let id_gen = meta.id_gen.clone();
-    let result = Simplifier {
-        ident_tbl: &mut meta.ident_tbl,
-        export_idents: &export_idents,
-        id_gen: &id_gen,
-        jsx_preserve,
-        external_inline,
-    }
-    .simpl_owned(lam);
-    meta.export_idents = export_idents;
-    result
+    measure_owned_lambda_pass("remove_alias", lam, |lam| {
+        let export_idents = std::mem::take(&mut meta.export_idents);
+        let id_gen = meta.id_gen.clone();
+        let result = Simplifier {
+            ident_tbl: &mut meta.ident_tbl,
+            export_idents: &export_idents,
+            id_gen: &id_gen,
+            jsx_preserve,
+            external_inline,
+        }
+        .simpl_owned(lam);
+        meta.export_idents = export_idents;
+        result
+    })
 }
 
 struct Simplifier<'a> {

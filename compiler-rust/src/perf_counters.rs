@@ -110,6 +110,11 @@ static LAMBDA_VEC_REBUILD_SITES: OnceLock<Mutex<HashMap<&'static str, LambdaVecR
 static MODULE_LAMBDA_VEC_REBUILDS: OnceLock<
     Mutex<HashMap<(String, &'static str), LambdaVecRebuildSite>>,
 > = OnceLock::new();
+static LAMBDA_OWNED_PASSES: OnceLock<Mutex<HashMap<&'static str, LambdaOwnedPassSite>>> =
+    OnceLock::new();
+static MODULE_LAMBDA_OWNED_PASSES: OnceLock<
+    Mutex<HashMap<(String, &'static str), LambdaOwnedPassSite>>,
+> = OnceLock::new();
 
 thread_local! {
     static CURRENT_MODULE: RefCell<Option<String>> = const { RefCell::new(None) };
@@ -221,6 +226,14 @@ struct LambdaVecRebuildSite {
     elements: u64,
     logical_bytes: u64,
     reused_allocations: u64,
+}
+
+#[derive(Clone, Copy, Default)]
+struct LambdaOwnedPassSite {
+    calls: u64,
+    input_nodes: u64,
+    input_logical_bytes: u64,
+    nanos: u64,
 }
 
 /// Thread-local module attribution guard for compiler counters.
@@ -458,6 +471,12 @@ pub fn reset() {
         sites.lock().unwrap().clear();
     }
     if let Some(modules) = MODULE_LAMBDA_VEC_REBUILDS.get() {
+        modules.lock().unwrap().clear();
+    }
+    if let Some(passes) = LAMBDA_OWNED_PASSES.get() {
+        passes.lock().unwrap().clear();
+    }
+    if let Some(modules) = MODULE_LAMBDA_OWNED_PASSES.get() {
         modules.lock().unwrap().clear();
     }
 }
@@ -834,6 +853,39 @@ pub(crate) fn record_lambda_vec_rebuild(
     });
 }
 
+/// Attribute one complete owned Lambda pass to its pass and current module.
+pub(crate) fn record_lambda_owned_pass(
+    pass: &'static str,
+    input_nodes: usize,
+    input_logical_bytes: usize,
+    elapsed_nanos: u64,
+) {
+    let update = |entry: &mut LambdaOwnedPassSite| {
+        entry.calls += 1;
+        entry.input_nodes += input_nodes as u64;
+        entry.input_logical_bytes += input_logical_bytes as u64;
+        entry.nanos += elapsed_nanos;
+    };
+
+    let passes = LAMBDA_OWNED_PASSES.get_or_init(|| Mutex::new(HashMap::new()));
+    update(passes.lock().unwrap().entry(pass).or_default());
+
+    CURRENT_MODULE.with(|current| {
+        let current = current.borrow();
+        let Some(module) = current.as_ref() else {
+            return;
+        };
+        let modules = MODULE_LAMBDA_OWNED_PASSES.get_or_init(|| Mutex::new(HashMap::new()));
+        update(
+            modules
+                .lock()
+                .unwrap()
+                .entry((module.clone(), pass))
+                .or_default(),
+        );
+    });
+}
+
 /// Record a per-worker in-process module-registry snapshot.
 pub(crate) fn record_module_registry_snapshot(
     shared_entries: usize,
@@ -925,6 +977,7 @@ pub fn print_report() {
     print_module_signature_freshens();
     print_match_action_clones();
     print_lambda_vec_rebuilds();
+    print_lambda_owned_passes();
     eprintln!(
         "[compiler-counter] type_mutations desc={} level={} row={} abbrev={} state={} snapshots={} backtracks={} restores={} peak_depth={}",
         TYPE_MUTATION_DESC.load(Ordering::Relaxed),
@@ -949,6 +1002,49 @@ pub fn print_report() {
         REGISTRY_LOCAL_ALIASES_TOTAL.load(Ordering::Relaxed),
         REGISTRY_LOCAL_FALLBACKS_TOTAL.load(Ordering::Relaxed),
     );
+}
+
+fn print_lambda_owned_passes() {
+    if let Some(passes) = LAMBDA_OWNED_PASSES.get() {
+        let mut passes: Vec<_> = passes
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(pass, counters)| (*pass, *counters))
+            .collect();
+        passes.sort_by_key(|(_, counters)| std::cmp::Reverse(counters.nanos));
+        for (pass, counters) in passes {
+            eprintln!(
+                "[compiler-counter] lambda_owned_pass pass={} calls={} input_nodes={} input_logical_bytes={} nanos={}",
+                pass,
+                counters.calls,
+                counters.input_nodes,
+                counters.input_logical_bytes,
+                counters.nanos,
+            );
+        }
+    }
+
+    if let Some(modules) = MODULE_LAMBDA_OWNED_PASSES.get() {
+        let mut modules: Vec<_> = modules
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|((module, pass), counters)| (module.clone(), *pass, *counters))
+            .collect();
+        modules.sort_by_key(|(_, _, counters)| std::cmp::Reverse(counters.nanos));
+        for (module, pass, counters) in modules.into_iter().take(30) {
+            eprintln!(
+                "[compiler-counter] module_lambda_owned_pass module={} pass={} calls={} input_nodes={} input_logical_bytes={} nanos={}",
+                module,
+                pass,
+                counters.calls,
+                counters.input_nodes,
+                counters.input_logical_bytes,
+                counters.nanos,
+            );
+        }
+    }
 }
 
 fn print_lambda_vec_rebuilds() {

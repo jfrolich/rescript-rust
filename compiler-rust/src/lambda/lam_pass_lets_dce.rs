@@ -20,7 +20,7 @@ use crate::lambda::lam_primitive::{Mutable, Primitive};
 use crate::lambda::lam_util::refine_let;
 use crate::lambda::{
     Apply, LFunction, Lambda, LambdaSwitch, PrimInfo, map_lambda_vec_owned,
-    map_snd_lambda_vec_owned,
+    map_snd_lambda_vec_owned, measure_owned_lambda_pass,
 };
 
 /// State held during the recursive pass: substitution table and an inline
@@ -829,9 +829,11 @@ pub fn simplify_lets(lam: &Lambda) -> Lambda {
 /// Owned form of `Lam_pass_lets_dce.simplify_lets`
 /// (compiler/core/lam_pass_lets_dce.ml:216-219).
 pub fn simplify_lets_owned(lam: Lambda) -> Lambda {
-    let occ = collect_occurs(&lam);
-    let mut state = LetsState::new(&occ);
-    lets_helper_owned(&mut state, lam)
+    measure_owned_lambda_pass("lets_dce", lam, |lam| {
+        let occ = collect_occurs(&lam);
+        let mut state = LetsState::new(&occ);
+        lets_helper_owned(&mut state, lam)
+    })
 }
 
 #[cfg(test)]

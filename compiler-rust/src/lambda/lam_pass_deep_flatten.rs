@@ -13,6 +13,7 @@ use crate::lambda::lam_primitive::{Mutable, Primitive};
 use crate::lambda::lam_util::refine_let;
 use crate::lambda::{
     Apply, Lambda, LambdaSwitch, PrimInfo, map_lambda_vec_owned, map_snd_lambda_vec_owned,
+    measure_owned_lambda_pass,
 };
 use crate::location::Location;
 
@@ -43,6 +44,12 @@ pub fn deep_flatten_owned(lam: Lambda) -> Lambda {
 
 /// Owned variant using the caller's OCaml-style `Ident.currentstamp`.
 pub fn deep_flatten_owned_with_id_gen(lam: Lambda, id_gen: &IdGenerator) -> Lambda {
+    measure_owned_lambda_pass("deep_flatten", lam, |lam| {
+        deep_flatten_owned_with_id_gen_impl(lam, id_gen)
+    })
+}
+
+fn deep_flatten_owned_with_id_gen_impl(lam: Lambda, id_gen: &IdGenerator) -> Lambda {
     fn lambda_of_groups(bindings: Vec<FlattenGroup>, result: Lambda) -> Lambda {
         // lam_pass_deep_flatten.ml:108 — fold each Single back through
         // `Lam_util.refine_let` so Strict bindings whose RHS is safe to alias
