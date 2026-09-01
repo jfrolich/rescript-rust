@@ -282,6 +282,18 @@ impl TypeExprRef {
 pub(crate) struct TypeExprRefMap<T> {
     offset: u32,
     values: Vec<Option<T>>,
+    entry_count: usize,
+    insert_count: usize,
+    prepend_count: usize,
+}
+
+#[derive(Clone, Copy)]
+pub(crate) struct TypeExprRefMapStats {
+    pub(crate) entries: usize,
+    pub(crate) inserts: usize,
+    pub(crate) prepends: usize,
+    pub(crate) span: usize,
+    pub(crate) capacity: usize,
 }
 
 impl<T> TypeExprRefMap<T> {
@@ -289,6 +301,9 @@ impl<T> TypeExprRefMap<T> {
         Self {
             offset: 0,
             values: Vec::new(),
+            entry_count: 0,
+            insert_count: 0,
+            prepend_count: 0,
         }
     }
 
@@ -308,15 +323,28 @@ impl<T> TypeExprRefMap<T> {
         self.values.capacity()
     }
 
+    pub(crate) fn stats(&self) -> TypeExprRefMapStats {
+        TypeExprRefMapStats {
+            entries: self.entry_count,
+            inserts: self.insert_count,
+            prepends: self.prepend_count,
+            span: self.values.len(),
+            capacity: self.values.capacity(),
+        }
+    }
+
     #[inline]
     pub(crate) fn insert(&mut self, key: TypeExprRef, value: T) -> Option<T> {
+        self.insert_count += 1;
         if self.values.is_empty() {
             self.offset = key.0;
             self.values.push(Some(value));
+            self.entry_count = 1;
             return None;
         }
 
         if key.0 < self.offset {
+            self.prepend_count += 1;
             let prepend = (self.offset - key.0) as usize;
             let mut values = Vec::with_capacity(self.values.len() + prepend);
             values.resize_with(prepend, || None);
@@ -329,7 +357,11 @@ impl<T> TypeExprRefMap<T> {
         if idx >= self.values.len() {
             self.values.resize_with(idx + 1, || None);
         }
-        self.values[idx].replace(value)
+        let previous = self.values[idx].replace(value);
+        if previous.is_none() {
+            self.entry_count += 1;
+        }
+        previous
     }
 }
 

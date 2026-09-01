@@ -2,6 +2,38 @@
 
 This file is for transient measurements, hypotheses, rejected experiments, and slow-file notes. Keep committed facts concise; use temp files under `/tmp` for bulky logs/profiles.
 
+## Lookup type-copy memory traffic
+
+On pinned Tella `66a5edabdbfdbc5dd7496e59ee0573de2a2a1ffa`, the
+`copy_lookup_type_expr_with_paths` cache copied `10,070,817` non-variable type
+nodes and traversed `7,970,907` vector payload elements at one worker. The
+12-worker counts were effectively identical (`10,061,021` / `7,962,101`). The
+current offset-vector identity map grew by `1,275,473,570` slots and
+`1,352,072,442` capacity slots at one worker; 12-worker growth was again flat
+(`1,275,303,284` / `1,351,899,014`). This is physical `TypeExprRef` identity
+traffic, not structural deduplication work.
+
+A direct borrowed-descriptor copy removed the intermediate
+`CopyTypeExprPlan`/row-plan buffers while preserving source-order recursion,
+placeholder insertion, representatives, row order, path substitution, and
+cache identity. Release typedtree, raw Lambda, optimized Lambda, and JS parity
+were each `610/610`. The candidate was rejected and reverted because ten paired,
+alternating Tella runs were flat: baseline wall `4.742s +/- 0.030s` versus
+candidate `4.757s +/- 0.021s`; user CPU `39.899s` versus `39.926s`; system CPU
+`2.160s` versus `2.166s`; peak RSS means `3,167,551,488` versus
+`3,173,036,851` bytes. This confirms that the 7.97M eliminated temporary payload
+elements were not a retained wall/RSS win and that the identity-map growth is
+the larger direct target.
+
+Final-map instrumentation across all lookup-copy callsites reported `294,365`
+maps, `11,407,075` populated entries, `184,242` prepend events,
+`1,275,453,278` final span slots, and `1,342,960,197` final capacity slots. Two
+record/constructor-label sites dominate: `117,280` maps with only `597,645`
+entries end with `1,126,956,672` span slots. The signature/declaration/module
+wrappers are denser (`132,729` maps, `10,657,523` entries, `95,104,209` span),
+so the data supports a specialized small-inline hybrid rather than replacing
+every map with an always-hashed representation.
+
 ## Raw-Lambda Match-Action Materialization Profile
 
 `RESCRIPT_COMPILER_COUNTERS=1` now attributes recursive `MatchAction::to_raw`
