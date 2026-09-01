@@ -23,7 +23,7 @@ signature-copy consumers included `TrimTranscriptEditor` (`5,509` items),
 `LayoutDetail` (`4,600`), `Timeline__Scenes` (`4,562`),
 `Page__Story__Edit` (`4,537`), and `Overview__Search` (`4,421`).
 
-The retained boundary follows the reference split:
+The reference audit established the boundary a retained implementation must preserve:
 
 - `compiler/ml/env.ml:669-678` stores persistent `ps_comps` from the loaded
   signature separately from lazy `ps_sig`; `compiler/ml/env.ml:1472-1489`
@@ -43,17 +43,28 @@ The retained boundary follows the reference split:
   `types/typecore.rs:31470-31640` / `types/typecore.rs:32050-32460` for component
   lookup and eager qualification fallbacks.
 
-The candidate lets registered flattened persistent units use the existing
-shared in-process component view, carrying the alias-table source prefix as the
-view's substitution scope instead of copying and rewriting the complete
-signature. It does not change standalone compilation, force counts, freshening,
-serializer behavior, or cross-context ownership. Counter totals fell to
-`52,002` copies, `1,288,106` items, `8,035,975` type nodes, and `964,317,000`
-node-storage bytes. The targeted fallback fell to `4` copies / `12` items /
-`2,457` nodes / `294,840` bytes, removing `923,320` type-node allocations and
-`110,798,400` bytes globally on that run.
+A candidate removed the flattened-root exclusion and passed the registered
+alias source to `new_with_child_components_arc_and_value_source_prefix`.
+Temporary counters fell to `52,002` copies, `1,288,106` items, `8,035,975` type
+nodes, and `964,317,000` node-storage bytes. The targeted fallback fell to `4`
+copies / `12` items / `2,457` nodes / `294,840` bytes, removing `923,320`
+type-node allocations and `110,798,400` bytes globally on that run.
 
-Ten alternating paired 12-worker release `hyperfine` runs against exact base
+The candidate was rejected after full exact-head review. The existing
+`QualifiedModuleComponents::value_source_prefix` field is stored but never
+read; `lookup_value_for_access` derives substitutions from `self.access_path()`
+and `TypeContext::alias_sources_for_component_path`, while `lookup_type` still
+returns the raw declaration from the shared signature. The candidate therefore
+did not operationally capture the source prefix it claimed to preserve, yet it
+bypassed the old fallback that deep-copies the signature, rewrites declaration
+paths, and repairs flattened child prefixes. Passing JavaScript hashes and the
+current parity corpus did not establish OCaml-equivalent type identity, path
+shape, mutation, or force order for direct flattened-root access. The behavior
+change was reverted. Any future attempt needs a real per-component
+`Subst.type_declaration` / `Subst.value_description` boundary plus focused
+qualified-alias and exact-flattened-root typedtree/force-order coverage.
+
+Before rejection, ten alternating paired 12-worker release `hyperfine` runs against exact base
 `436ec59dd` improved wall time from `4.625s +/- 0.027s`
 (`4.585s..4.660s`) to `4.586s +/- 0.033s` (`4.546s..4.644s`), a `38ms` /
 `0.83%` mean reduction. Mean user CPU fell from `39.489s` to `39.086s` and
