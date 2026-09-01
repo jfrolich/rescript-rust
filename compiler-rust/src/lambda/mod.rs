@@ -342,7 +342,20 @@ pub(crate) fn measure_owned_lambda_pass(
     result
 }
 
-fn lambda_node_count(lam: &Lambda) -> usize {
+fn moved_smart_constructor_branch(kind: &'static str, branch: Lambda) -> Lambda {
+    if crate::perf_counters::enabled() {
+        let nodes = lambda_node_count(&branch);
+        crate::perf_counters::record_lambda_owned_pass(
+            kind,
+            nodes,
+            nodes * std::mem::size_of::<Lambda>(),
+            0,
+        );
+    }
+    branch
+}
+
+pub(crate) fn lambda_node_count(lam: &Lambda) -> usize {
     let children = match lam {
         Lambda::Lvar(_)
         | Lambda::LglobalModule(_, _)
@@ -622,93 +635,82 @@ impl Lambda {
     }
 
     /// Create a switch using OCaml's `Lam.switch` smart constructor.
-    pub fn switch(scrutinee: Lambda, switch: LambdaSwitch) -> Self {
-        match scrutinee {
-            Lambda::Lconst(Constant::Constructor(tag)) => {
-                let action = switch.sw_consts.iter().find(|(key, _)| matches!(
-                    key,
-                    SwitchKey::Constructor(crate::types::VariantConstructorCase::Constant(candidate))
-                        if candidate == &tag
-                ));
-                action
-                    .map(|(_, branch)| branch.clone())
-                    .or_else(|| switch.sw_failaction.as_deref().cloned())
-                    .unwrap_or_else(|| {
-                        Lambda::Lswitch(
-                            Box::new(Lambda::Lconst(Constant::Constructor(tag))),
-                            switch,
-                        )
-                    })
-            }
-            Lambda::Lconst(constant @ Constant::Int { i, .. }) => switch
+    pub fn switch(scrutinee: Lambda, mut switch: LambdaSwitch) -> Self {
+        enum Action {
+            Const(usize),
+            Block(usize),
+        }
+
+        let action = match &scrutinee {
+            Lambda::Lconst(Constant::Constructor(tag)) => switch
                 .sw_consts
                 .iter()
-                .find(|(key, _)| matches!(key, SwitchKey::Int(value) if *value == i))
-                .map(|(_, branch)| branch.clone())
-                .or_else(|| switch.sw_failaction.as_deref().cloned())
-                .unwrap_or_else(|| Lambda::Lswitch(Box::new(Lambda::Lconst(constant)), switch)),
-            Lambda::Lconst(Constant::Block { tag_info, elements }) => {
-                let runtime = match &tag_info {
+                .position(|(key, _)| matches!(
+                    key,
+                    SwitchKey::Constructor(crate::types::VariantConstructorCase::Constant(candidate))
+                        if candidate == tag
+                ))
+                .map(Action::Const),
+            Lambda::Lconst(Constant::Int { i, .. }) => switch
+                .sw_consts
+                .iter()
+                .position(|(key, _)| matches!(key, SwitchKey::Int(value) if value == i))
+                .map(Action::Const),
+            Lambda::Lconst(Constant::Block { tag_info, .. }) => {
+                let runtime = match tag_info {
                     TagInfo::Constructor { runtime, .. }
-                    | TagInfo::RecordInlined { runtime, .. } => Some(runtime.clone()),
+                    | TagInfo::RecordInlined { runtime, .. } => Some(runtime),
                     _ => None,
                 };
                 switch
                     .sw_blocks
                     .iter()
-                    .find(|(key, _)| matches!(
-                        (key, runtime.as_ref()),
+                    .position(|(key, _)| matches!(
+                        (key, runtime),
                         (
                             SwitchKey::Constructor(crate::types::VariantConstructorCase::Block(candidate)),
                             Some(runtime)
                         ) if &candidate.runtime == runtime
                     ))
-                    .map(|(_, branch)| branch.clone())
-                    .or_else(|| switch.sw_failaction.as_deref().cloned())
-                    .unwrap_or_else(|| {
-                        Lambda::Lswitch(
-                            Box::new(Lambda::Lconst(Constant::Block { tag_info, elements })),
-                            switch,
-                        )
-                    })
+                    .map(Action::Block)
             }
-            other => Lambda::Lswitch(Box::new(other), switch),
-        }
+            _ => return Lambda::Lswitch(Box::new(scrutinee), switch),
+        };
+
+        let branch = match action {
+            Some(Action::Const(index)) => Some(switch.sw_consts.swap_remove(index).1),
+            Some(Action::Block(index)) => Some(switch.sw_blocks.swap_remove(index).1),
+            None => switch.sw_failaction.take().map(|branch| *branch),
+        };
+        branch
+            .map(|branch| moved_smart_constructor_branch("switch_branch_move", branch))
+            .unwrap_or_else(|| Lambda::Lswitch(Box::new(scrutinee), switch))
     }
 
     /// Create a string switch using OCaml's `Lam.stringswitch` smart constructor.
     pub fn string_switch(
         scrutinee: Lambda,
-        cases: Vec<(String, Lambda)>,
-        default: Option<Box<Lambda>>,
+        mut cases: Vec<(String, Lambda)>,
+        mut default: Option<Box<Lambda>>,
     ) -> Self {
-        let matched = |value: &str| {
-            cases
-                .iter()
-                .find(|(tag, _)| tag == value)
-                .map(|(_, branch)| branch.clone())
-                .or_else(|| default.as_deref().cloned())
+        let action = match &scrutinee {
+            Lambda::Lconst(Constant::String {
+                s,
+                delim: None | Some(StringDelim::NoQuotes),
+            })
+            | Lambda::Lconst(Constant::ImmString(s)) => cases.iter().position(|(tag, _)| tag == s),
+            _ => return Lambda::LstringSwitch(Box::new(scrutinee), cases, default),
         };
 
-        match scrutinee {
-            Lambda::Lconst(
-                ref constant @ Constant::String {
-                    ref s,
-                    delim: None | Some(StringDelim::NoQuotes),
-                },
-            ) => matched(s).unwrap_or_else(|| {
-                Lambda::LstringSwitch(Box::new(Lambda::Lconst(constant.clone())), cases, default)
-            }),
-            Lambda::Lconst(ref constant @ Constant::ImmString(ref s)) => {
-                matched(s).unwrap_or_else(|| {
-                    Lambda::LstringSwitch(
-                        Box::new(Lambda::Lconst(constant.clone())),
-                        cases,
-                        default,
-                    )
-                })
-            }
-            other => Lambda::LstringSwitch(Box::new(other), cases, default),
+        match action {
+            Some(index) => moved_smart_constructor_branch(
+                "string_switch_branch_move",
+                cases.swap_remove(index).1,
+            ),
+            None => default
+                .take()
+                .map(|branch| moved_smart_constructor_branch("string_switch_branch_move", *branch))
+                .unwrap_or_else(|| Lambda::LstringSwitch(Box::new(scrutinee), cases, default)),
         }
     }
 
@@ -1620,6 +1622,197 @@ mod tests {
         );
 
         assert!(lambda_eq_approx(&if_expr, &inner_if));
+    }
+
+    #[test]
+    fn switch_moves_selected_branch_storage() {
+        let branch_args = vec![Lambda::unit()];
+        let branch_args_ptr = branch_args.as_ptr();
+        let result = Lambda::switch(
+            Lambda::const_(Constant::int(1)),
+            LambdaSwitch {
+                sw_consts_full: true,
+                sw_consts: vec![(
+                    SwitchKey::Int(1),
+                    Lambda::Lprim(PrimInfo {
+                        primitive: Primitive::Pignore,
+                        args: branch_args,
+                        loc: Location::none(),
+                    }),
+                )],
+                sw_blocks_full: true,
+                sw_blocks: Vec::new(),
+                sw_failaction: None,
+                sw_dispatch: SwitchDispatch::Direct,
+            },
+        );
+
+        let Lambda::Lprim(PrimInfo { args, .. }) = result else {
+            panic!("expected selected primitive branch")
+        };
+        assert_eq!(args.as_ptr(), branch_args_ptr);
+    }
+
+    #[test]
+    fn switch_uses_first_duplicate_key() {
+        let result = Lambda::switch(
+            Lambda::const_(Constant::int(1)),
+            LambdaSwitch {
+                sw_consts_full: true,
+                sw_consts: vec![
+                    (SwitchKey::Int(1), Lambda::const_(Constant::int(10))),
+                    (SwitchKey::Int(1), Lambda::const_(Constant::int(20))),
+                ],
+                sw_blocks_full: true,
+                sw_blocks: Vec::new(),
+                sw_failaction: None,
+                sw_dispatch: SwitchDispatch::Direct,
+            },
+        );
+        assert!(matches!(
+            result,
+            Lambda::Lconst(Constant::Int { i: 10, .. })
+        ));
+    }
+
+    #[test]
+    fn switch_no_match_without_default_preserves_case_order() {
+        let result = Lambda::switch(
+            Lambda::const_(Constant::int(3)),
+            LambdaSwitch {
+                sw_consts_full: false,
+                sw_consts: vec![
+                    (SwitchKey::Int(1), Lambda::const_(Constant::int(10))),
+                    (SwitchKey::Int(2), Lambda::const_(Constant::int(20))),
+                ],
+                sw_blocks_full: true,
+                sw_blocks: Vec::new(),
+                sw_failaction: None,
+                sw_dispatch: SwitchDispatch::Direct,
+            },
+        );
+        let Lambda::Lswitch(_, switch) = result else {
+            panic!("expected unmatched switch")
+        };
+        assert!(matches!(
+            switch.sw_consts.as_slice(),
+            [(SwitchKey::Int(1), _), (SwitchKey::Int(2), _),]
+        ));
+    }
+
+    #[test]
+    fn switch_moves_failaction_storage() {
+        let fail_args = vec![Lambda::unit()];
+        let fail_args_ptr = fail_args.as_ptr();
+        let result = Lambda::switch(
+            Lambda::const_(Constant::int(3)),
+            LambdaSwitch {
+                sw_consts_full: false,
+                sw_consts: Vec::new(),
+                sw_blocks_full: true,
+                sw_blocks: Vec::new(),
+                sw_failaction: Some(Box::new(Lambda::Lprim(PrimInfo {
+                    primitive: Primitive::Pignore,
+                    args: fail_args,
+                    loc: Location::none(),
+                }))),
+                sw_dispatch: SwitchDispatch::Direct,
+            },
+        );
+        let Lambda::Lprim(PrimInfo { args, .. }) = result else {
+            panic!("expected failaction")
+        };
+        assert_eq!(args.as_ptr(), fail_args_ptr);
+    }
+
+    #[test]
+    fn switch_matches_constructor_block_runtime() {
+        let tag_info = TagInfo::constructor("Payload", 1);
+        let TagInfo::Constructor { runtime, .. } = &tag_info else {
+            unreachable!()
+        };
+        let runtime = runtime.clone();
+        let result = Lambda::switch(
+            Lambda::const_(Constant::Block {
+                tag_info,
+                elements: vec![Constant::int(1)],
+            }),
+            LambdaSwitch {
+                sw_consts_full: true,
+                sw_consts: Vec::new(),
+                sw_blocks_full: true,
+                sw_blocks: vec![(
+                    SwitchKey::Constructor(crate::types::VariantConstructorCase::Block(
+                        crate::types::VariantBlock {
+                            runtime,
+                            block_type: None,
+                        },
+                    )),
+                    Lambda::const_(Constant::int(10)),
+                )],
+                sw_failaction: None,
+                sw_dispatch: SwitchDispatch::Direct,
+            },
+        );
+        assert!(matches!(
+            result,
+            Lambda::Lconst(Constant::Int { i: 10, .. })
+        ));
+    }
+
+    #[test]
+    fn string_switch_moves_selected_branch_storage() {
+        let branch_args = vec![Lambda::unit()];
+        let branch_args_ptr = branch_args.as_ptr();
+        let result = Lambda::string_switch(
+            Lambda::const_(Constant::string("selected")),
+            vec![(
+                "selected".to_string(),
+                Lambda::Lprim(PrimInfo {
+                    primitive: Primitive::Pignore,
+                    args: branch_args,
+                    loc: Location::none(),
+                }),
+            )],
+            None,
+        );
+
+        let Lambda::Lprim(PrimInfo { args, .. }) = result else {
+            panic!("expected selected primitive branch")
+        };
+        assert_eq!(args.as_ptr(), branch_args_ptr);
+    }
+
+    #[test]
+    fn string_switch_moves_default_storage() {
+        let default_args = vec![Lambda::unit()];
+        let default_args_ptr = default_args.as_ptr();
+        let result = Lambda::string_switch(
+            Lambda::const_(Constant::string("missing")),
+            Vec::new(),
+            Some(Box::new(Lambda::Lprim(PrimInfo {
+                primitive: Primitive::Pignore,
+                args: default_args,
+                loc: Location::none(),
+            }))),
+        );
+        let Lambda::Lprim(PrimInfo { args, .. }) = result else {
+            panic!("expected default")
+        };
+        assert_eq!(args.as_ptr(), default_args_ptr);
+    }
+
+    #[test]
+    fn string_switch_does_not_fold_quoted_string() {
+        let result = Lambda::string_switch(
+            Lambda::const_(Constant::String {
+                s: "selected".to_string(),
+                delim: Some(StringDelim::Plain),
+            }),
+            vec![("selected".to_string(), Lambda::const_(Constant::int(10)))],
+            None,
+        );
+        assert!(matches!(result, Lambda::LstringSwitch(_, _, _)));
     }
 
     #[test]
