@@ -321,6 +321,91 @@ pub enum DirectionFlag {
     Downto,
 }
 
+pub(crate) fn measure_owned_lambda_pass(
+    pass: &'static str,
+    lam: Lambda,
+    run: impl FnOnce(Lambda) -> Lambda,
+) -> Lambda {
+    if !crate::perf_counters::enabled() {
+        return run(lam);
+    }
+
+    let input_nodes = lambda_node_count(&lam);
+    let started = std::time::Instant::now();
+    let result = run(lam);
+    crate::perf_counters::record_lambda_owned_pass(
+        pass,
+        input_nodes,
+        input_nodes * std::mem::size_of::<Lambda>(),
+        started.elapsed().as_nanos().min(u64::MAX as u128) as u64,
+    );
+    result
+}
+
+fn lambda_node_count(lam: &Lambda) -> usize {
+    let children = match lam {
+        Lambda::Lvar(_)
+        | Lambda::LglobalModule(_, _)
+        | Lambda::Lconst(_)
+        | Lambda::Lbreak
+        | Lambda::Lcontinue => 0,
+        Lambda::Lapply(apply) => {
+            lambda_node_count(&apply.ap_func)
+                + apply.ap_args.iter().map(lambda_node_count).sum::<usize>()
+        }
+        Lambda::Lfunction(function) => lambda_node_count(&function.body),
+        Lambda::Llet(_, _, value, body) => lambda_node_count(value) + lambda_node_count(body),
+        Lambda::Lletrec(bindings, body) => {
+            bindings
+                .iter()
+                .map(|(_, value)| lambda_node_count(value))
+                .sum::<usize>()
+                + lambda_node_count(body)
+        }
+        Lambda::Lprim(prim) => prim.args.iter().map(lambda_node_count).sum(),
+        Lambda::Lswitch(scrutinee, switch) => {
+            lambda_node_count(scrutinee)
+                + switch
+                    .sw_consts
+                    .iter()
+                    .map(|(_, body)| lambda_node_count(body))
+                    .sum::<usize>()
+                + switch
+                    .sw_blocks
+                    .iter()
+                    .map(|(_, body)| lambda_node_count(body))
+                    .sum::<usize>()
+                + switch.sw_failaction.as_deref().map_or(0, lambda_node_count)
+        }
+        Lambda::LstringSwitch(scrutinee, cases, default) => {
+            lambda_node_count(scrutinee)
+                + cases
+                    .iter()
+                    .map(|(_, body)| lambda_node_count(body))
+                    .sum::<usize>()
+                + default.as_deref().map_or(0, lambda_node_count)
+        }
+        Lambda::LstaticRaise(_, args) => args.iter().map(lambda_node_count).sum(),
+        Lambda::LstaticCatch(body, _, handler) | Lambda::LtryWith(body, _, handler) => {
+            lambda_node_count(body) + lambda_node_count(handler)
+        }
+        Lambda::LifThenElse(condition, then_, else_) => {
+            lambda_node_count(condition) + lambda_node_count(then_) + lambda_node_count(else_)
+        }
+        Lambda::Lsequence(first, second)
+        | Lambda::Lwhile(first, second)
+        | Lambda::Lfor_of(_, first, second)
+        | Lambda::Lfor_await_of(_, first, second) => {
+            lambda_node_count(first) + lambda_node_count(second)
+        }
+        Lambda::Lfor(_, start, end, _, body) => {
+            lambda_node_count(start) + lambda_node_count(end) + lambda_node_count(body)
+        }
+        Lambda::Lassign(_, value) => lambda_node_count(value),
+    };
+    1 + children
+}
+
 impl Lambda {
     /// Create a variable reference
     pub fn var(id: Ident) -> Self {

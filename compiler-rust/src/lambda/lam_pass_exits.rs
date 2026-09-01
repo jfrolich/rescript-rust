@@ -14,7 +14,7 @@ use crate::lambda::lam_analysis::{EXIT_INLINE_SIZE, size};
 use crate::lambda::lam_beta_reduce::max_ident_stamp_in_lambda;
 use crate::lambda::lam_compat::LetKind;
 use crate::lambda::lam_subst::subst as lam_subst;
-use crate::lambda::{LFunction, Lambda, LambdaSwitch};
+use crate::lambda::{LFunction, Lambda, LambdaSwitch, measure_owned_lambda_pass};
 
 /// `Lam_exit_count.collection`: occurrence count per exit label
 /// (lam_exit_count.ml:25).
@@ -477,6 +477,12 @@ pub fn simplify_exits(lam: &Lambda, id_gen: &IdGenerator) -> Lambda {
 /// 184-239). Returning the owned input in that case is therefore the same
 /// transformation without a full-tree clone.
 pub fn simplify_exits_owned(lam: Lambda, id_gen: &IdGenerator) -> Lambda {
+    measure_owned_lambda_pass("simplify_exits", lam, |lam| {
+        simplify_exits_owned_impl(lam, id_gen)
+    })
+}
+
+fn simplify_exits_owned_impl(lam: Lambda, id_gen: &IdGenerator) -> Lambda {
     // OCaml always starts with `Lam_exit_count.count_helper` and then
     // `subst_helper` (lam_pass_exits.ml:241-243). Rust keeps the owned
     // no-catch fast path, but records that invariant while doing the same
