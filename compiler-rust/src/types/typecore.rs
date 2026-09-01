@@ -20757,8 +20757,7 @@ fn instantiate_poly_body_for_send(
     for var in vars {
         cache.insert(ctx.repr(*var), ctx.new_var(None));
     }
-    let copied = copy_lookup_type_expr(ctx, body, &mut cache);
-    copied
+    copy_lookup_type_expr(ctx, body, &mut cache)
 }
 
 fn type_send(
@@ -25137,56 +25136,6 @@ fn clone_copy_lookup_path(path: &Path) -> Path {
     path.clone()
 }
 
-#[inline]
-fn insert_copy_lookup_cache(
-    cache: &mut TypeExprRefMap<TypeExprRef>,
-    source: TypeExprRef,
-    copied: TypeExprRef,
-) {
-    if crate::perf_counters::enabled() {
-        let old_len = cache.storage_len();
-        let old_capacity = cache.storage_capacity();
-        cache.insert(source, copied);
-        crate::perf_counters::record_lookup_type_copy_map_growth(
-            cache.storage_len().saturating_sub(old_len),
-            cache.storage_capacity().saturating_sub(old_capacity),
-        );
-    } else {
-        cache.insert(source, copied);
-    }
-}
-
-fn lookup_type_copy_payload_elements(desc: &TypeDesc) -> usize {
-    use crate::types::type_expr::RowField;
-
-    match desc {
-        TypeDesc::Tarrow { args, .. } => args.len(),
-        TypeDesc::Ttuple(types) => types.len(),
-        TypeDesc::Tconstr { args, .. } => args.len(),
-        TypeDesc::Tobject { name, .. } => name.as_ref().map_or(0, |(_, args)| args.len()),
-        TypeDesc::Tvariant(row) => {
-            row.row_fields.len()
-                + row
-                    .row_fields
-                    .iter()
-                    .map(|(_, field)| match field {
-                        RowField::Reither { types, .. } => types.len(),
-                        RowField::Rpresent(_) | RowField::Rabsent => 0,
-                    })
-                    .sum::<usize>()
-                + row.row_name.as_ref().map_or(0, |(_, args)| args.len())
-        }
-        TypeDesc::Tpoly { vars, .. } => vars.len(),
-        TypeDesc::Tpackage { lids, args, .. } => lids.len() + args.len(),
-        TypeDesc::Tvar(_)
-        | TypeDesc::Tfield { .. }
-        | TypeDesc::Tnil
-        | TypeDesc::Tlink(_)
-        | TypeDesc::Tsubst(_)
-        | TypeDesc::Tunivar(_) => 0,
-    }
-}
-
 fn copy_lookup_type_expr_with_paths<TP, MP>(
     ctx: &TypeContext,
     ty: TypeExprRef,
@@ -25270,7 +25219,7 @@ where
         let desc = ctx.borrow_desc(ty);
         if matches!(*desc, TypeDesc::Tvar(_) | TypeDesc::Tunivar(_)) {
             drop(desc);
-            insert_copy_lookup_cache(cache, ty, ty);
+            cache.insert(ty, ty);
             return ty;
         }
     }
@@ -25278,14 +25227,7 @@ where
     let level = ctx.get_level(ty);
     let placeholder = ctx.new_var(None);
     ctx.set_level(placeholder, level);
-    insert_copy_lookup_cache(cache, ty, placeholder);
-
-    if crate::perf_counters::enabled() {
-        let desc = ctx.borrow_desc(ty);
-        crate::perf_counters::record_lookup_type_copy_node(lookup_type_copy_payload_elements(
-            &desc,
-        ));
-    }
+    cache.insert(ty, placeholder);
 
     let plan = {
         let desc = ctx.borrow_desc(ty);
@@ -25449,7 +25391,7 @@ where
                 let copied =
                     copy_lookup_type_expr_with_paths(ctx, target, cache, type_path, module_path);
                 ctx.set_desc(placeholder, TypeDesc::Tlink(copied));
-                insert_copy_lookup_cache(cache, ty, copied);
+                cache.insert(ty, copied);
                 return copied;
             }
             CopyTypeExprPlan::Tsubst(target) => {
@@ -25839,8 +25781,7 @@ pub(crate) fn copy_lookup_type_decl_for_subst(
     ctx: &TypeContext,
 ) -> crate::types::decl::TypeDeclaration {
     let mut cache = TypeExprRefMap::new();
-    let copied = copy_lookup_type_decl(decl, ctx, &mut cache);
-    copied
+    copy_lookup_type_decl(decl, ctx, &mut cache)
 }
 
 fn copy_lookup_value_description_with_paths<TP, MP>(
@@ -25874,14 +25815,13 @@ pub(crate) fn copy_lookup_value_description_for_subst(
     ctx: &TypeContext,
 ) -> crate::types::decl::ValueDescription {
     let mut cache = TypeExprRefMap::new();
-    let copied = copy_lookup_value_description_with_paths(
+    copy_lookup_value_description_with_paths(
         desc,
         ctx,
         &mut cache,
         &clone_copy_lookup_path,
         &clone_copy_lookup_path,
-    );
-    copied
+    )
 }
 
 fn copy_lookup_extension_constructor_with_paths<TP, MP>(
@@ -26295,8 +26235,7 @@ pub(crate) fn copy_lookup_signature_for_subst(
         );
     }
     let mut cache = TypeExprRefMap::new();
-    let copied = copy_lookup_signature(sig_items, ctx, &mut cache);
-    copied
+    copy_lookup_signature(sig_items, ctx, &mut cache)
 }
 
 #[track_caller]
@@ -26317,9 +26256,7 @@ where
         );
     }
     let mut cache = TypeExprRefMap::new();
-    let copied =
-        copy_lookup_signature_with_paths(sig_items, ctx, &mut cache, type_path, module_path);
-    copied
+    copy_lookup_signature_with_paths(sig_items, ctx, &mut cache, type_path, module_path)
 }
 
 #[track_caller]
@@ -26341,15 +26278,14 @@ where
         );
     }
     let mut cache = TypeExprRefMap::new();
-    let copied = copy_lookup_signature_with_paths_and_idents(
+    copy_lookup_signature_with_paths_and_idents(
         sig_items,
         ctx,
         &mut cache,
         type_path,
         module_path,
         Some(new_idents.into_iter()),
-    );
-    copied
+    )
 }
 
 /// Deep-copy a module type, creating new type expression nodes.
@@ -26361,8 +26297,7 @@ pub(crate) fn copy_lookup_module_type_for_subst(
     ctx: &TypeContext,
 ) -> crate::types::decl::ModuleType {
     let mut cache = TypeExprRefMap::new();
-    let copied = copy_lookup_module_type(module_type, ctx, &mut cache);
-    copied
+    copy_lookup_module_type(module_type, ctx, &mut cache)
 }
 
 // ============================================================================

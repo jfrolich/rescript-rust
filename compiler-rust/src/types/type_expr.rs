@@ -371,24 +371,6 @@ impl<T> TypeExprRefMap<T> {
         }
     }
 
-    #[inline]
-    pub(crate) fn storage_len(&self) -> usize {
-        match &self.storage {
-            TypeExprRefMapStorage::Inline { len, .. } => *len,
-            TypeExprRefMapStorage::Dense { values, .. } => values.len(),
-            TypeExprRefMapStorage::Sparse(values) => values.len(),
-        }
-    }
-
-    #[inline]
-    pub(crate) fn storage_capacity(&self) -> usize {
-        match &self.storage {
-            TypeExprRefMapStorage::Inline { .. } => TYPE_EXPR_MAP_INLINE_CAPACITY,
-            TypeExprRefMapStorage::Dense { values, .. } => values.capacity(),
-            TypeExprRefMapStorage::Sparse(values) => values.capacity(),
-        }
-    }
-
     fn dense_from_inline(
         entries: &mut [Option<(TypeExprRef, T)>; TYPE_EXPR_MAP_INLINE_CAPACITY],
         len: usize,
@@ -831,8 +813,10 @@ mod tests {
         }
         assert_eq!(map.entry_count, 12);
         assert_eq!(map.span(), 110_001);
-        assert!(matches!(&map.storage, TypeExprRefMapStorage::Sparse(_)));
-        assert!(map.storage_capacity() < map.span());
+        let TypeExprRefMapStorage::Sparse(values) = &map.storage else {
+            panic!("expected sparse storage");
+        };
+        assert!(values.capacity() < map.span());
     }
 
     #[test]
