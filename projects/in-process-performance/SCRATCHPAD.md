@@ -91,6 +91,47 @@ This is an external baseline-environment blocker, not a candidate output diff;
 the paired baseline/candidate in-process manifest comparison supplies the exact
 3,248-module JS check.
 
+## Lambda owned-pass memory-traffic follow-up
+
+A follow-up on `219cf999d` attributed the sampled Lambda/backend `memmove`
+callers before changing ownership. Env-gated release counters over pinned Tella
+(`66a5edab`, 3,248 compiled modules, one worker) measured the immutable-tree
+input traversed by each owned pass:
+
+- deep flatten: 5,952,715 nodes / 2.762 GB logical node bytes / 364 ms;
+- alias removal: 5,932,879 / 2.753 GB / 329 ms;
+- exit simplification: 5,796,107 / 2.689 GB / 199 ms;
+- alpha conversion: 3,932,547 / 1.825 GB / 204 ms;
+- lets DCE: 1,966,184 / 0.912 GB / 148 ms.
+
+Same-element `Vec::into_iter().map(...).collect()` sites were instrumented with
+source/result pointer checks. Every observed allocation was already reused,
+including 1,780,209 deep-flatten primitive vectors (2,553,445 elements),
+1,180,695 alpha primitive vectors, 851,545 alias-removal primitive vectors,
+980,999 exit primitive vectors, and 538,263 lets-DCE primitive vectors. The
+instrumentation-only wrappers therefore added labels, not an optimization, and
+were reverted.
+
+An owned `Lam.switch`/`Lam.stringswitch` candidate moved a selected branch or
+failaction out of the discarded case vector instead of recursively cloning it.
+This follows `compiler/core/lam.ml:271-329`: first-match order is retained, and
+case order remains untouched when no branch/default matches. Focused tests also
+covered duplicate keys, failaction ownership, constructor block runtime,
+string defaults, and quoted strings. Release parity stayed green for typedtree,
+raw Lambda, and optimized Lambda (`610/610` each), plus focused JS (`344/344`)
+and full JS (`610/610`). A base/candidate Tella comparison compiled 3,248
+modules and matched sorted SHA-256 manifests for all 5,058 generated `.bs.js`
+files.
+
+The real corpus exposed only 107 folded switch branches, totaling 2,917 Lambda
+nodes and about 1.35 MB of logical node bytes that no longer needed cloning.
+Ten alternating pairs were flat/regressive: base wall/user/system averaged
+`4.935s / 40.177s / 2.251s`; candidate averaged
+`5.001s / 40.195s / 2.273s`. Paired base-minus-candidate wall delta was
+`-0.066s` (SD `0.190s`, t = `-1.10`); peak RSS averaged 3.172 GB versus
+3.187 GB. The candidate and all temporary pass/vector instrumentation were
+reverted normally. No Lambda production change was retained from this slice.
+
 ## Expanded 3,248-Module Migration History
 
 - The updated Tella corpus has grown to 3,248 compiled modules. Before the current candidate, release in-process builds measured `15.686s +/- 0.118s` over 5 runs, range `15.581s..15.887s`.
