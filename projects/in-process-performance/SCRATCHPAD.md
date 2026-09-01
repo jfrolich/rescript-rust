@@ -49,6 +49,26 @@ entry points remain unchanged by fully materializing at those local boundaries.
 This requires an internal matching-result/action type rather than a new public
 `RawLambda` variant or a global `Arc<RawLambda>`.
 
+The retained owned-DAG implementation now keeps `If`, `StaticCatch`, and the
+constructor switch forest in `MatchCode`, assigns catches at the same local
+`share_actions_sw` boundary, and delays recursive RawLambda materialization until
+a top-level matrix has been dropped. Terminal `Lambda.bind` chains stay in the
+shared action allocation graph; switch uses are resolved with explicit counts,
+moving single uses and representing repeated uses by tiny static exits. A full
+3,248-module debug counter run at `6e88e82eb` reported `18,018` recursive clone
+calls, `315,196` nodes, and at least `146,250,944` bytes. Node traffic is 95.3%
+lower than the release baseline above; debug nanoseconds are not comparable to
+the baseline release timing. Raw Lambda parity remained 610/610.
+
+A destructive `Mutex<Option<RawLambda>>` terminal leaf experiment briefly
+reported `173,423` nodes, but was rejected as semantically invalid. Two distinct
+bound wrappers can share one terminal leaf and both require materialization; the
+first destructive take made the second panic. The regression is covered by
+`differently_bound_shared_terminal_actions_materialize_independently`. Commit
+`ce79b181f` reverted the experiment. The retained implementation keeps terminal
+actions immutable and obtains the reduction by deferring the owned MatchCode
+forest instead of globally consuming shared leaves.
+
 ## Expanded 3,248-Module Migration History
 
 - The updated Tella corpus has grown to 3,248 compiled modules. Before the current candidate, release in-process builds measured `15.686s +/- 0.118s` over 5 runs, range `15.581s..15.887s`.
