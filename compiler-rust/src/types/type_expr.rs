@@ -330,7 +330,7 @@ impl<T> TypeExprRefMap<T> {
     #[inline]
     fn span(&self) -> usize {
         self.min_key
-            .map_or(0, |min| (self.max_key - min) as usize + 1)
+            .map_or(0, |min| ((self.max_key - min) as usize).saturating_add(1))
     }
 
     #[inline]
@@ -451,7 +451,7 @@ impl<T> TypeExprRefMap<T> {
                     unreachable!();
                 };
                 let min = self.min_key.expect("nonempty type-map bounds");
-                if span <= entry_count * TYPE_EXPR_MAP_DENSE_RATIO {
+                if span <= entry_count.saturating_mul(TYPE_EXPR_MAP_DENSE_RATIO) {
                     self.storage = Self::dense_from_inline(entries, *len, min, span, key, value);
                 } else {
                     self.storage = Self::sparse_from_inline(entries, *len, key, value);
@@ -459,7 +459,7 @@ impl<T> TypeExprRefMap<T> {
             }
             TypeExprRefMapStorage::Dense { offset, values } => {
                 if span > TYPE_EXPR_MAP_MIN_SPARSE_SPAN
-                    && span > entry_count * TYPE_EXPR_MAP_DENSE_RATIO
+                    && span > entry_count.saturating_mul(TYPE_EXPR_MAP_DENSE_RATIO)
                 {
                     let mut sparse = ahash::AHashMap::with_capacity(entry_count);
                     for (idx, slot) in values.iter_mut().enumerate() {
@@ -488,7 +488,7 @@ impl<T> TypeExprRefMap<T> {
             }
             TypeExprRefMapStorage::Sparse(values) => {
                 values.insert(key, value);
-                if entry_count >= 32 && span <= entry_count * 4 {
+                if entry_count >= 32 && span <= entry_count.saturating_mul(4) {
                     let min = self.min_key.expect("nonempty type-map bounds");
                     let mut dense = Vec::with_capacity(span);
                     dense.resize_with(span, || None);
