@@ -80,6 +80,17 @@ baseline-first and candidate-first order: baseline wall/user/system averaged
 `4.704s / 40.108s / 2.181s`; peak RSS was effectively flat at
 `3045.2MiB` versus `3042.8MiB`.
 
+Exact generated-output validation used the same clean 3,248-module Tella build
+for `layout-typecheck-performance` and the candidate. Sorted SHA-256 manifests
+covered 5,048 generated `.js` files under `packages/core/webapp`, excluding
+`node_modules`, Git data, and parity/cache directories; file sets and hashes were
+identical (empty manifest diff). The normal `test_tella_output_parity.sh` OCaml
+setup could not produce its expected snapshot because the external OCaml build
+stopped after 196 dependency modules when `bs-css` could not resolve `Belt`.
+This is an external baseline-environment blocker, not a candidate output diff;
+the paired baseline/candidate in-process manifest comparison supplies the exact
+3,248-module JS check.
+
 ## Expanded 3,248-Module Migration History
 
 - The updated Tella corpus has grown to 3,248 compiled modules. Before the current candidate, release in-process builds measured `15.686s +/- 0.118s` over 5 runs, range `15.581s..15.887s`.
