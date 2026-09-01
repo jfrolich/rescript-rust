@@ -34,6 +34,31 @@ wrappers are denser (`132,729` maps, `10,657,523` entries, `95,104,209` span),
 so the data supports a specialized small-inline hybrid rather than replacing
 every map with an always-hashed representation.
 
+The retained map keeps up to eight exact `(TypeExprRef, value)` entries inline,
+then promotes to dense direct indexing or an `AHashMap` from observed handle
+span. Dense storage demotes when a far outlier would make it sparse, and sparse
+storage can promote when later inserts become dense. Keys remain physical arena
+handles; there is no structural/content deduplication or cross-arena sharing.
+Randomized insert/replace/get/clone tests compare the hybrid against
+`std::collections::HashMap` across mixed transitions. A `VecDeque` alternative
+was rejected: one-worker Tella regressed from `18.92s` to `21.27s`, and three
+12-worker pairs regressed from `4.650s` to `4.910s` with user CPU rising from
+`40.383s` to `42.830s`.
+
+At one worker the retained hybrid reduced lookup-map slot growth from
+`1,275,473,570` to `14,066,351` and capacity growth from `1,352,072,442` to
+`18,241,039`; copied nodes/payload counts stayed exact at
+`10,070,817 / 7,970,907`. Twelve-worker counts were again effectively
+identical. The final ten paired, alternating 12-worker runs improved wall from
+`4.628s +/- 0.033s` (`4.59s..4.71s`) to `4.553s +/- 0.015s`
+(`4.53s..4.59s`), a `75ms` / `1.62%` mean win. Mean user/system CPU fell from
+`40.306s / 2.120s` to `39.697s / 2.069s`; instructions from
+`245.606B` to `244.154B`; cycles from `139.233B` to `137.032B`; peak RSS mean
+from `2,972,113,306` to `2,945,651,507` bytes. Release typedtree, raw Lambda,
+optimized Lambda, and JS parity were each `610/610`; focused JS was `344/344`,
+diagnostics `1432/1432`, and both base/candidate Tella builds compiled 3,248
+modules with identical 5,048-file generated-JS SHA-256 manifests.
+
 ## Raw-Lambda Match-Action Materialization Profile
 
 `RESCRIPT_COMPILER_COUNTERS=1` now attributes recursive `MatchAction::to_raw`
