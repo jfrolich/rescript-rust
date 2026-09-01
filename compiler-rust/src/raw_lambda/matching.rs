@@ -894,45 +894,9 @@ fn le_pats(ps: &[Pattern], qs: &[Pattern]) -> bool {
     }
 }
 
-/// Return the source indices of the minimal elements under `le`.
-///
-/// OCaml's `get_mins` runs `select_rec` twice, consing each survivor before the
-/// next pass (compiler/ml/parmatch.ml:1774-1790). Keep that exact comparison
-/// and reversal order, but retain indices until callers materialize the final
-/// survivors instead of rebuilding growing owned accumulators.
-fn get_min_indices<T>(le: impl Fn(&T, &T) -> bool, ps: &[T]) -> Vec<usize> {
-    fn select_indices<T>(
-        le: &impl Fn(&T, &T) -> bool,
-        ps: &[T],
-        candidates: &[usize],
-    ) -> Vec<usize> {
-        let mut selected = Vec::with_capacity(candidates.len());
-        for (position, &index) in candidates.iter().enumerate() {
-            if !candidates[position + 1..]
-                .iter()
-                .any(|&later| le(&ps[later], &ps[index]))
-            {
-                selected.push(index);
-            }
-        }
-        selected.reverse();
-        selected
-    }
-
-    let source_order: Vec<usize> = (0..ps.len()).collect();
-    let first_pass = select_indices(&le, ps, &source_order);
-    select_indices(&le, ps, &first_pass)
-}
-
+/// Get minimal elements under a partial order `le`.
+/// Equivalent to OCaml's `get_mins`.
 fn get_mins<T: Clone>(le: impl Fn(&T, &T) -> bool, ps: Vec<T>) -> Vec<T> {
-    get_min_indices(le, &ps)
-        .into_iter()
-        .map(|index| ps[index].clone())
-        .collect()
-}
-
-#[cfg(test)]
-fn get_mins_old<T: Clone>(le: impl Fn(&T, &T) -> bool, ps: Vec<T>) -> Vec<T> {
     fn select_rec<T: Clone>(le: &impl Fn(&T, &T) -> bool, r: Vec<T>, ps: &[T]) -> Vec<T> {
         match ps.split_first() {
             None => r,
@@ -947,7 +911,6 @@ fn get_mins_old<T: Clone>(le: impl Fn(&T, &T) -> bool, ps: Vec<T>) -> Vec<T> {
             }
         }
     }
-
     let first_pass = select_rec(&le, Vec::new(), &ps);
     select_rec(&le, Vec::new(), &first_pass)
 }
@@ -3640,10 +3603,8 @@ pub fn what_is_cases(cases: &[Clause]) -> Pattern {
 /// Convert cases to a pattern matrix (taking the minimal rows under le_pats).
 /// Equivalent to OCaml's `as_matrix`.
 pub fn as_matrix(cases: &[Clause]) -> Matrix {
-    get_min_indices(|(a, _): &Clause, (b, _): &Clause| le_pats(a, b), cases)
-        .into_iter()
-        .map(|index| cases[index].0.clone())
-        .collect()
+    let rows: Vec<Vec<Pattern>> = cases.iter().map(|(ps, _)| ps.clone()).collect();
+    get_mins(|a: &Vec<Pattern>, b: &Vec<Pattern>| le_pats(a, b), rows)
 }
 
 /// Prepend a matrix entry to the default environment, skipping empty matrices.
@@ -10899,70 +10860,6 @@ mod tests {
     use crate::context::IdGenerator;
     use crate::types::env::initial_env;
     use crate::types::predef;
-
-    #[derive(Clone, Debug, PartialEq, Eq)]
-    struct OrderedTestRow {
-        key: u16,
-        source: usize,
-    }
-
-    fn assert_get_mins_matches_old(
-        rows: Vec<OrderedTestRow>,
-        le: impl Fn(&OrderedTestRow, &OrderedTestRow) -> bool,
-    ) {
-        use std::cell::RefCell;
-
-        let old_comparisons = RefCell::new(Vec::new());
-        let old = get_mins_old(
-            |a, b| {
-                old_comparisons.borrow_mut().push((a.source, b.source));
-                le(a, b)
-            },
-            rows.clone(),
-        );
-        let new_comparisons = RefCell::new(Vec::new());
-        let new: Vec<_> = get_min_indices(
-            |a, b| {
-                new_comparisons.borrow_mut().push((a.source, b.source));
-                le(a, b)
-            },
-            &rows,
-        )
-        .into_iter()
-        .map(|index| rows[index].clone())
-        .collect();
-
-        assert_eq!(new, old);
-        assert_eq!(new_comparisons.into_inner(), old_comparisons.into_inner());
-    }
-
-    #[test]
-    fn get_min_indices_preserves_two_pass_order_and_duplicate_identity() {
-        for len in [0, 1, 2, 17, 64, 360] {
-            let rows: Vec<_> = (0..len)
-                .map(|source| OrderedTestRow {
-                    key: ((source * 37 + source / 3) % 23) as u16,
-                    source,
-                })
-                .collect();
-            assert_get_mins_matches_old(rows.clone(), |a, b| a.key <= b.key);
-            assert_get_mins_matches_old(rows.clone(), |a, b| a.key & b.key == a.key);
-            assert_get_mins_matches_old(rows, |a, b| {
-                a.key == 0 || (b.key != 0 && b.key % a.key == 0)
-            });
-        }
-
-        assert_get_mins_matches_old(
-            vec![
-                OrderedTestRow { key: 2, source: 0 },
-                OrderedTestRow { key: 1, source: 1 },
-                OrderedTestRow { key: 1, source: 2 },
-                OrderedTestRow { key: 3, source: 3 },
-                OrderedTestRow { key: 1, source: 4 },
-            ],
-            |a, b| a.key <= b.key,
-        );
-    }
 
     #[test]
     fn constructor_cases_use_pattern_env_layout() {
