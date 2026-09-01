@@ -64,7 +64,17 @@ enum MatchActionKind {
 
 impl MatchAction {
     fn new(action: RawLambda) -> Self {
-        Self::from_kind(MatchActionKind::Raw(action))
+        match action {
+            RawLambda::Llet(LetKind::Alias, id, arg, body) => {
+                Self::from_kind(MatchActionKind::Bind {
+                    kind: LetKind::Alias,
+                    id,
+                    arg: *arg,
+                    action: Self::new(*body),
+                })
+            }
+            raw => Self::from_kind(MatchActionKind::Raw(raw)),
+        }
     }
 
     fn from_kind(kind: MatchActionKind) -> Self {
@@ -8844,7 +8854,30 @@ fn lower_bind_action(v: &Ident, arg: &RawLambda, action: MatchAction) -> MatchCo
         MatchActionKind::Raw(RawLambda::Lvar(u)) if u.same(v) && u.name() == "*sth*" => {
             MatchCode::raw(arg.clone())
         }
-        MatchActionKind::Raw(_) => MatchCode::raw(lower_bind(v, arg, action.into_raw())),
+        MatchActionKind::Raw(RawLambda::LifThenElse(condition, ifso, ifnot)) => {
+            let present = (
+                approx_present(v, condition),
+                approx_present(v, ifso),
+                approx_present(v, ifnot),
+            );
+            match present {
+                (false, false, false) => MatchCode::Action(action),
+                (false, true, false) | (false, false, true) => {
+                    MatchCode::raw(lower_bind(v, arg, action.into_raw()))
+                }
+                _ => MatchCode::Action(action).bind(LetKind::Alias, v.clone(), arg.clone()),
+            }
+        }
+        MatchActionKind::Raw(RawLambda::Lswitch(selector, switch, _))
+            if !approx_present(v, selector)
+                && ((switch.sw_consts.len() == 1 && switch.sw_blocks.is_empty())
+                    || (switch.sw_consts.is_empty() && switch.sw_blocks.len() == 1)) =>
+        {
+            MatchCode::raw(lower_bind(v, arg, action.into_raw()))
+        }
+        MatchActionKind::Raw(_) => {
+            MatchCode::Action(action).bind(LetKind::Alias, v.clone(), arg.clone())
+        }
     }
 }
 
