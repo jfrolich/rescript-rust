@@ -91,6 +91,43 @@ This is an external baseline-environment blocker, not a candidate output diff;
 the paired baseline/candidate in-process manifest comparison supplies the exact
 3,248-module JS check.
 
+### JavaScript finish attribution and rejected buffer reuse
+
+Temporary environment-gated instrumentation split the 3,248 JavaScript jobs at
+`219cf999d` into scheduler waits, Lambda optimization, backend passes, printing,
+and writes. The aggregate `12.807s` worker wall consisted of `5.769s` Lambda
+optimization, `5.359s` codegen/printing, `0.929s` writes, and only `0.750s`
+otherwise unattributed work. The earlier `6.007s` apparent JavaScript overhead
+was therefore mostly the existing Lambda optimization bucket, not removable
+scheduler overhead. Queue waits were measured separately, before the worker
+wall timer: `0.364s` handoff, `57.212s` dependency wait, and `1.726s` ready-queue
+wait in aggregate. They overlap across workers and must not be added to CPU or
+wall work.
+
+Inside codegen, the largest aggregate buckets were expression compilation
+`1.836s`, printing `0.914s`, tail-call inlining `0.678s`, external-shadow
+rewriting `0.338s`, record-rest rewriting `0.313s`, and flatten/mark-dead
+`0.299s`. Function free-identifier collection accounted for `0.207s` inside
+the printer; import/export printing accounted for `0.189s`; source-map
+finalization was only `0.007s`. Formatting-buffer instrumentation saw 3,248
+outputs with `16.926MB` initial capacity, `25.907MB` emitted bytes, and
+`39.233MB` final capacity. The total byte volume and the extra whole-program
+scan needed for exact sizing leave little wall-time upside, so no printer sizing
+change was retained.
+
+A narrow record-rest candidate reused the pass's reversed block vectors in
+place instead of allocating fresh vectors for each order reversal. It preserved
+610/610 typedtree, raw Lambda, optimized Lambda, and JavaScript parity, 344/344
+focused JavaScript fixtures, and 1432/1432 diagnostics. Ten paired alternating
+clean Tella runs did not show a credible wall win: base averaged `4.776s`
+(`0.043s` sample SD), candidate `4.794s` (`0.148s` SD), and the paired
+candidate-minus-base mean was `+0.018s` (`0.162s` SD; median `-0.020s`).
+User/system CPU averaged `39.994s/2.204s` versus `40.073s/2.213s`; peak RSS
+averaged `3.171GB` versus `3.167GB`. Sorted SHA-256 manifests contained exactly
+5,048 generated JavaScript files for both and had an empty diff. The candidate
+and all temporary instrumentation were reverted because the result was flat
+and noise-bound.
+
 ## Expanded 3,248-Module Migration History
 
 - The updated Tella corpus has grown to 3,248 compiled modules. Before the current candidate, release in-process builds measured `15.686s +/- 0.118s` over 5 runs, range `15.581s..15.887s`.
