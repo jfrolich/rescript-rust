@@ -20748,7 +20748,6 @@ fn method_name_is_plain_ident(name: &str) -> bool {
     chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
-#[track_caller]
 fn instantiate_poly_body_for_send(
     ctx: &TypeContext,
     body: TypeExprRef,
@@ -20759,7 +20758,6 @@ fn instantiate_poly_body_for_send(
         cache.insert(ctx.repr(*var), ctx.new_var(None));
     }
     let copied = copy_lookup_type_expr(ctx, body, &mut cache);
-    record_copy_lookup_map(ctx, &cache, std::panic::Location::caller());
     copied
 }
 
@@ -25158,16 +25156,6 @@ fn insert_copy_lookup_cache(
     }
 }
 
-fn record_copy_lookup_map(
-    ctx: &TypeContext,
-    cache: &TypeExprRefMap<TypeExprRef>,
-    location: &'static std::panic::Location<'static>,
-) {
-    if ctx.compiler_counters_enabled() {
-        crate::perf_counters::record_lookup_type_copy_map(location, cache.stats());
-    }
-}
-
 fn lookup_type_copy_payload_elements(desc: &TypeDesc) -> usize {
     use crate::types::type_expr::RowField;
 
@@ -25846,14 +25834,12 @@ fn copy_lookup_type_decl(
     )
 }
 
-#[track_caller]
 pub(crate) fn copy_lookup_type_decl_for_subst(
     decl: &crate::types::decl::TypeDeclaration,
     ctx: &TypeContext,
 ) -> crate::types::decl::TypeDeclaration {
     let mut cache = TypeExprRefMap::new();
     let copied = copy_lookup_type_decl(decl, ctx, &mut cache);
-    record_copy_lookup_map(ctx, &cache, std::panic::Location::caller());
     copied
 }
 
@@ -25883,7 +25869,6 @@ where
     }
 }
 
-#[track_caller]
 pub(crate) fn copy_lookup_value_description_for_subst(
     desc: &crate::types::decl::ValueDescription,
     ctx: &TypeContext,
@@ -25896,7 +25881,6 @@ pub(crate) fn copy_lookup_value_description_for_subst(
         &clone_copy_lookup_path,
         &clone_copy_lookup_path,
     );
-    record_copy_lookup_map(ctx, &cache, std::panic::Location::caller());
     copied
 }
 
@@ -26312,7 +26296,6 @@ pub(crate) fn copy_lookup_signature_for_subst(
     }
     let mut cache = TypeExprRefMap::new();
     let copied = copy_lookup_signature(sig_items, ctx, &mut cache);
-    record_copy_lookup_map(ctx, &cache, std::panic::Location::caller());
     copied
 }
 
@@ -26336,7 +26319,6 @@ where
     let mut cache = TypeExprRefMap::new();
     let copied =
         copy_lookup_signature_with_paths(sig_items, ctx, &mut cache, type_path, module_path);
-    record_copy_lookup_map(ctx, &cache, std::panic::Location::caller());
     copied
 }
 
@@ -26367,7 +26349,6 @@ where
         module_path,
         Some(new_idents.into_iter()),
     );
-    record_copy_lookup_map(ctx, &cache, std::panic::Location::caller());
     copied
 }
 
@@ -26375,14 +26356,12 @@ where
 /// Used to avoid in-place modification of shared type expressions
 /// when applying path substitutions (matching OCaml's lazy deep-copy
 /// behavior in `components_of_module_maker` + `Subst.type_declaration`).
-#[track_caller]
 pub(crate) fn copy_lookup_module_type_for_subst(
     module_type: &crate::types::decl::ModuleType,
     ctx: &TypeContext,
 ) -> crate::types::decl::ModuleType {
     let mut cache = TypeExprRefMap::new();
     let copied = copy_lookup_module_type(module_type, ctx, &mut cache);
-    record_copy_lookup_map(ctx, &cache, std::panic::Location::caller());
     copied
 }
 
@@ -28505,7 +28484,6 @@ fn qualify_field_access_arg_alias_paths<'a>(
     });
 }
 
-#[track_caller]
 fn qualify_label_description_paths<'a>(
     label: &mut crate::types::LabelDescription,
     env: &Env,
@@ -28774,7 +28752,6 @@ fn qualify_label_description_paths<'a>(
     let mut copy_cache = TypeExprRefMap::new();
     label.lbl_res = copy_lookup_type_expr(ctx, label.lbl_res, &mut copy_cache);
     label.lbl_arg = copy_lookup_type_expr(ctx, label.lbl_arg, &mut copy_cache);
-    record_copy_lookup_map(ctx, &copy_cache, std::panic::Location::caller());
 
     let res_path = {
         let res_repr = ctx.repr(label.lbl_res);

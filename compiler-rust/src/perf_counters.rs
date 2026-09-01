@@ -133,21 +133,6 @@ static LOOKUP_TYPE_COPY_NODES: AtomicU64 = AtomicU64::new(0);
 static LOOKUP_TYPE_COPY_PAYLOAD_ELEMENTS: AtomicU64 = AtomicU64::new(0);
 static LOOKUP_TYPE_COPY_MAP_SLOTS_GROWN: AtomicU64 = AtomicU64::new(0);
 static LOOKUP_TYPE_COPY_MAP_CAPACITY_GROWN: AtomicU64 = AtomicU64::new(0);
-static LOOKUP_TYPE_COPY_MAPS: OnceLock<Mutex<HashMap<(&'static str, u32), LookupTypeCopyMapSite>>> =
-    OnceLock::new();
-
-#[derive(Clone, Copy, Default)]
-struct LookupTypeCopyMapSite {
-    maps: u64,
-    entries: u64,
-    inserts: u64,
-    prepends: u64,
-    span: u64,
-    capacity: u64,
-    max_entries: u64,
-    max_span: u64,
-}
-
 #[derive(Clone, Copy)]
 pub(crate) enum TypeMutationKind {
     Desc,
@@ -190,25 +175,6 @@ pub(crate) fn record_lookup_type_copy_node(payload_elements: usize) {
 pub(crate) fn record_lookup_type_copy_map_growth(slots: usize, capacity: usize) {
     LOOKUP_TYPE_COPY_MAP_SLOTS_GROWN.fetch_add(slots as u64, Ordering::Relaxed);
     LOOKUP_TYPE_COPY_MAP_CAPACITY_GROWN.fetch_add(capacity as u64, Ordering::Relaxed);
-}
-
-pub(crate) fn record_lookup_type_copy_map(
-    location: &'static std::panic::Location<'static>,
-    stats: crate::types::type_expr::TypeExprRefMapStats,
-) {
-    let sites = LOOKUP_TYPE_COPY_MAPS.get_or_init(|| Mutex::new(HashMap::new()));
-    let mut sites = sites.lock().unwrap();
-    let site = sites
-        .entry((location.file(), location.line()))
-        .or_insert_with(LookupTypeCopyMapSite::default);
-    site.maps += 1;
-    site.entries += stats.entries as u64;
-    site.inserts += stats.inserts as u64;
-    site.prepends += stats.prepends as u64;
-    site.span += stats.span as u64;
-    site.capacity += stats.capacity as u64;
-    site.max_entries = site.max_entries.max(stats.entries as u64);
-    site.max_span = site.max_span.max(stats.span as u64);
 }
 
 /// Lazy lookup buckets tracked by `RESCRIPT_COMPILER_COUNTERS`.
@@ -466,9 +432,6 @@ pub fn reset() {
         counter.store(0, Ordering::Relaxed);
     }
 
-    if let Some(sites) = LOOKUP_TYPE_COPY_MAPS.get() {
-        sites.lock().unwrap().clear();
-    }
     if let Some(sites) = SIGNATURE_COPY_SITES.get() {
         sites.lock().unwrap().clear();
     }
@@ -945,7 +908,6 @@ pub fn print_report() {
         LOOKUP_TYPE_COPY_MAP_SLOTS_GROWN.load(Ordering::Relaxed),
         LOOKUP_TYPE_COPY_MAP_CAPACITY_GROWN.load(Ordering::Relaxed),
     );
-    print_lookup_type_copy_maps();
     eprintln!(
         "[compiler-counter] module_registry_snapshots count={} shared_entries_total={} local_entries_total={} max_shared_entries={} max_local_entries={} local_modules_total={} local_info_total={} local_aliases_total={} local_fallbacks_total={}",
         REGISTRY_SNAPSHOTS.load(Ordering::Relaxed),
@@ -958,33 +920,6 @@ pub fn print_report() {
         REGISTRY_LOCAL_ALIASES_TOTAL.load(Ordering::Relaxed),
         REGISTRY_LOCAL_FALLBACKS_TOTAL.load(Ordering::Relaxed),
     );
-}
-
-fn print_lookup_type_copy_maps() {
-    let Some(sites) = LOOKUP_TYPE_COPY_MAPS.get() else {
-        return;
-    };
-    let mut sites = sites
-        .lock()
-        .unwrap()
-        .iter()
-        .map(|((file, line), site)| (*file, *line, *site))
-        .collect::<Vec<_>>();
-    sites.sort_by(|a, b| b.2.span.cmp(&a.2.span));
-
-    for (file, line, site) in sites.into_iter().take(20) {
-        eprintln!(
-            "[compiler-counter] lookup_type_copy_map_site file={file}:{line} maps={} entries={} inserts={} prepends={} span={} capacity={} max_entries={} max_span={}",
-            site.maps,
-            site.entries,
-            site.inserts,
-            site.prepends,
-            site.span,
-            site.capacity,
-            site.max_entries,
-            site.max_span,
-        );
-    }
 }
 
 fn print_match_action_clones() {
