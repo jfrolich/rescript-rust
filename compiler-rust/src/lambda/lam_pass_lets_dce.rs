@@ -18,7 +18,7 @@ use crate::lambda::lam_pass_count::{OccTbl, UsedInfo, collect_occurs, dummy_info
 use crate::lambda::lam_pass_eliminate_ref::{RealReference, eliminate_ref};
 use crate::lambda::lam_primitive::{Mutable, Primitive};
 use crate::lambda::lam_util::refine_let;
-use crate::lambda::{Apply, LFunction, Lambda, LambdaSwitch, PrimInfo, measure_owned_lambda_pass};
+use crate::lambda::{Apply, LFunction, Lambda, LambdaSwitch, PrimInfo};
 
 /// State held during the recursive pass: substitution table and an inline
 /// string table for downstream `Pstringadd` constant folding. Both mirror
@@ -831,11 +831,9 @@ pub fn simplify_lets(lam: &Lambda) -> Lambda {
 /// Owned form of `Lam_pass_lets_dce.simplify_lets`
 /// (compiler/core/lam_pass_lets_dce.ml:216-219).
 pub fn simplify_lets_owned(lam: Lambda) -> Lambda {
-    measure_owned_lambda_pass("lets_dce", lam, |lam| {
-        let occ = collect_occurs(&lam);
-        let mut state = LetsState::new(&occ);
-        lets_helper_owned(&mut state, lam)
-    })
+    let occ = collect_occurs(&lam);
+    let mut state = LetsState::new(&occ);
+    lets_helper_owned(&mut state, lam)
 }
 
 #[cfg(test)]

@@ -10,9 +10,7 @@ use crate::lambda::lam_compile_context::LamStats;
 use crate::lambda::lam_eta_conversion::transform_under_supply;
 use crate::lambda::lam_pass_collect::ExternalArityResolver;
 use crate::lambda::lam_primitive::Primitive;
-use crate::lambda::{
-    ApInfo, Apply, ApplyStatus, Lambda, LambdaSwitch, PrimInfo, measure_owned_lambda_pass,
-};
+use crate::lambda::{ApInfo, Apply, ApplyStatus, Lambda, LambdaSwitch, PrimInfo};
 
 /// Direct port of `Lam_pass_alpha_conversion.alpha_conversion`
 /// (lam_pass_alpha_conversion.ml:25-129).
@@ -27,14 +25,12 @@ pub fn alpha_conversion(meta: &LamStats, lam: &Lambda) -> Lambda {
 /// pass result in the backend pipeline, preserving the same case behavior while
 /// avoiding an eager clone of the whole tree before the rebuild.
 pub fn alpha_conversion_owned(meta: &LamStats, lam: Lambda) -> Lambda {
-    measure_owned_lambda_pass("alpha_conversion", lam, |lam| {
-        let mut meta = meta.clone();
-        let mut alpha = Alpha {
-            meta: &mut meta,
-            external_arity: None,
-        };
-        alpha.simpl_owned(lam)
-    })
+    let mut meta = meta.clone();
+    let mut alpha = Alpha {
+        meta: &mut meta,
+        external_arity: None,
+    };
+    alpha.simpl_owned(lam)
 }
 
 pub fn alpha_conversion_with_external_arity_owned(
@@ -42,13 +38,11 @@ pub fn alpha_conversion_with_external_arity_owned(
     lam: Lambda,
     external_arity: &mut ExternalArityResolver<'_>,
 ) -> Lambda {
-    measure_owned_lambda_pass("alpha_conversion", lam, |lam| {
-        let mut alpha = Alpha {
-            meta,
-            external_arity: Some(external_arity),
-        };
-        alpha.simpl_owned(lam)
-    })
+    let mut alpha = Alpha {
+        meta,
+        external_arity: Some(external_arity),
+    };
+    alpha.simpl_owned(lam)
 }
 
 struct Alpha<'a, 'r> {
