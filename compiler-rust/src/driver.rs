@@ -14690,43 +14690,41 @@ fn render_js_program(
     output_path: Option<&FsPath>,
     source_file_names: std::sync::Arc<std::collections::HashMap<crate::intern::StrIdx, String>>,
 ) -> (String, Option<String>) {
-    crate::timing::measure_js(crate::timing::JsPhase::Printer, || {
-        let source_path = options.source_filename.as_deref().map(FsPath::new);
-        let source_map_target = output_path.map(FsPath::to_path_buf).or_else(|| {
-            (options.source_map == crate::js_ir::source_map::SourceMapMode::Inline).then(|| {
-                let source = source_path.unwrap_or_else(|| FsPath::new("_none_.res"));
-                source.with_extension("js")
-            })
-        });
-        if let (Some(target), Some(source)) = (source_map_target.as_deref(), source_path) {
-            print_deps_program_with_source_map(
+    let source_path = options.source_filename.as_deref().map(FsPath::new);
+    let source_map_target = output_path.map(FsPath::to_path_buf).or_else(|| {
+        (options.source_map == crate::js_ir::source_map::SourceMapMode::Inline).then(|| {
+            let source = source_path.unwrap_or_else(|| FsPath::new("_none_.res"));
+            source.with_extension("js")
+        })
+    });
+    if let (Some(target), Some(source)) = (source_map_target.as_deref(), source_path) {
+        print_deps_program_with_source_map(
+            program,
+            Some(resolver),
+            file_directives,
+            debug,
+            jsx_preserve,
+            !options.no_version_header,
+            target,
+            source,
+            options.source_map,
+            options.source_map_sources_content,
+            &options.source_map_root,
+            source_file_names,
+        )
+    } else {
+        (
+            print_deps_program_with_directives_and_options(
                 program,
                 Some(resolver),
                 file_directives,
                 debug,
                 jsx_preserve,
                 !options.no_version_header,
-                target,
-                source,
-                options.source_map,
-                options.source_map_sources_content,
-                &options.source_map_root,
-                source_file_names,
-            )
-        } else {
-            (
-                print_deps_program_with_directives_and_options(
-                    program,
-                    Some(resolver),
-                    file_directives,
-                    debug,
-                    jsx_preserve,
-                    !options.no_version_header,
-                ),
-                None,
-            )
-        }
-    })
+            ),
+            None,
+        )
+    }
 }
 
 fn compile_js_program_for_output(
@@ -14814,11 +14812,9 @@ fn compile_js_program_for_output_owned(
 ) {
     let mut collected_possible_required_modules =
         crate::timing::measure(crate::timing::Phase::Codegen, || {
-            crate::timing::measure_js(crate::timing::JsPhase::CollectModules, || {
-                crate::lambda::lam_compile::collect_possible_required_modules_for_lambda(
-                    &lowered_lambda,
-                )
-            })
+            crate::lambda::lam_compile::collect_possible_required_modules_for_lambda(
+                &lowered_lambda,
+            )
         });
     collected_possible_required_modules.extend(possible_required_modules.iter().cloned());
     compile_js_program_for_output_owned_with_collected_modules(
@@ -14856,37 +14852,34 @@ fn compile_js_program_for_output_owned_with_collected_modules(
         precomputed_possible_required_modules = true
     )
     .entered();
-    let mut compiler = crate::timing::measure_js(crate::timing::JsPhase::BackendSetup, || {
-        let mut module_path_resolver = ModulePathResolver::from_compile_options(
-            options.source_filename.as_deref(),
-            output_path,
-            output_module_format,
-            options.package_name.as_deref(),
-            options.runtime_path.as_deref(),
-            persistent_env,
-            options.make_runtime,
-        );
-        for module in &possible_required_modules {
-            if matches!(module.kind, Kind::Ml) && !module.dynamic_import {
-                if let Some(path) =
-                    module_path_resolver.resolve_local_module_fallback_path(module.id.name())
-                {
-                    module_path_resolver.set_module_path_override(module.id.name(), path);
-                }
+    let mut module_path_resolver = ModulePathResolver::from_compile_options(
+        options.source_filename.as_deref(),
+        output_path,
+        output_module_format,
+        options.package_name.as_deref(),
+        options.runtime_path.as_deref(),
+        persistent_env,
+        options.make_runtime,
+    );
+    for module in &possible_required_modules {
+        if matches!(module.kind, Kind::Ml) && !module.dynamic_import {
+            if let Some(path) =
+                module_path_resolver.resolve_local_module_fallback_path(module.id.name())
+            {
+                module_path_resolver.set_module_path_override(module.id.name(), path);
             }
         }
-        let mut compiler = LambdaCompiler::with_module_path_resolver_and_options(
-            Some(module_path_resolver),
-            jsx_preserve,
-            options.check_div_by_zero,
-            options.cross_module_inline,
-        );
-        compiler.set_source_map_enabled(
-            options.source_map != crate::js_ir::source_map::SourceMapMode::None,
-        );
-        compiler.set_hoisted_functions(hoisted_functions.to_vec());
-        compiler
-    });
+    }
+    let mut compiler = LambdaCompiler::with_module_path_resolver_and_options(
+        Some(module_path_resolver),
+        jsx_preserve,
+        options.check_div_by_zero,
+        options.cross_module_inline,
+    );
+    compiler.set_source_map_enabled(
+        options.source_map != crate::js_ir::source_map::SourceMapMode::None,
+    );
+    compiler.set_hoisted_functions(hoisted_functions.to_vec());
     let program = compiler.compile_deps_program_with_collected_possible_required_modules_owned(
         lowered_lambda,
         possible_required_modules,

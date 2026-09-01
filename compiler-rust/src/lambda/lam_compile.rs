@@ -528,10 +528,8 @@ impl LambdaCompiler {
         .entered();
         let mut possible_required_modules =
             crate::timing::measure(crate::timing::Phase::Codegen, || {
-                crate::timing::measure_js(crate::timing::JsPhase::CollectModules, || {
-                    let _phase = info_span!("compiler.lambda_collect_possible_modules").entered();
-                    collect_possible_required_modules_for_lambda(&lam)
-                })
+                let _phase = info_span!("compiler.lambda_collect_possible_modules").entered();
+                collect_possible_required_modules_for_lambda(&lam)
             });
         possible_required_modules.extend(extra_possible_required_modules.iter().cloned());
         self.compile_deps_program_with_collected_possible_required_modules_owned(
@@ -627,25 +625,24 @@ impl LambdaCompiler {
         self.id_gen.set_current_stamp(js_lowering_start_stamp);
         crate::ident::Ident::set_current_time(js_lowering_start_stamp);
         crate::timing::measure(crate::timing::Phase::Codegen, || {
-            let compiled = crate::timing::measure_js(crate::timing::JsPhase::CompileExpr, || {
+            let compiled = {
                 let _phase = info_span!("compiler.lambda_compile_expr").entered();
                 self.compile_expr(&simplified)
-            });
+            };
             let mut block = compiled.prelude;
-            let (exports, name_reservations) =
-                crate::timing::measure_js(crate::timing::JsPhase::Exports, || {
-                    let _phase = info_span!("compiler.lambda_exports").entered();
-                    if let Some(mut exports) = extract_toplevel_exports(compiled.expr, &mut block) {
-                        if block_terminates(&block) {
-                            for value in &mut exports.values {
-                                *value = Expression::undefined(false);
-                            }
+            let (exports, name_reservations) = {
+                let _phase = info_span!("compiler.lambda_exports").entered();
+                if let Some(mut exports) = extract_toplevel_exports(compiled.expr, &mut block) {
+                    if block_terminates(&block) {
+                        for value in &mut exports.values {
+                            *value = Expression::undefined(false);
                         }
-                        self.coerce_toplevel_exports_with_name_reservations(&mut block, exports)
-                    } else {
-                        (vec![], vec![])
                     }
-                });
+                    self.coerce_toplevel_exports_with_name_reservations(&mut block, exports)
+                } else {
+                    (vec![], vec![])
+                }
+            };
             rewrite_toplevel_variable_initializers_through_rewriteable_aliases(
                 &mut block, &exports,
             );
@@ -657,31 +654,31 @@ impl LambdaCompiler {
                 modules: vec![],
                 side_effect,
             };
-            deps = crate::timing::measure_js(crate::timing::JsPhase::Flatten, || {
+            deps = {
                 let _phase = info_span!("compiler.js_pass_flatten").entered();
                 apply_js_flatten_pass(deps)
-            });
-            deps = crate::timing::measure_js(crate::timing::JsPhase::ExternalShadow, || {
+            };
+            deps = {
                 let _phase = info_span!("compiler.js_pass_external_shadow").entered();
                 apply_external_shadow_pass(deps)
-            });
-            deps = crate::timing::measure_js(crate::timing::JsPhase::TailcallInline, || {
+            };
+            deps = {
                 let _phase = info_span!("compiler.js_pass_tailcall_inline").entered();
                 apply_js_tailcall_inline_pass(deps)
-            });
-            deps = crate::timing::measure_js(crate::timing::JsPhase::RecordRest, || {
+            };
+            deps = {
                 let _phase = info_span!("compiler.js_pass_record_rest").entered();
                 apply_js_record_rest_pass(deps)
-            });
-            deps = crate::timing::measure_js(crate::timing::JsPhase::FlattenMarkDead, || {
+            };
+            deps = {
                 let _phase = info_span!("compiler.js_pass_flatten_mark_dead").entered();
                 apply_js_flatten_and_mark_dead_pass(deps, self.jsx_preserve)
-            });
-            deps = crate::timing::measure_js(crate::timing::JsPhase::Shake, || {
+            };
+            deps = {
                 let _phase = info_span!("compiler.js_pass_shake").entered();
                 apply_js_shake_pass(deps)
-            });
-            crate::timing::measure_js(crate::timing::JsPhase::RequiredModules, || {
+            };
+            {
                 let _phase = info_span!("compiler.js_required_modules").entered();
                 let mut required_modules = self.collect_required_module_set(&deps.program.block);
                 populate_required_modules(
@@ -697,7 +694,7 @@ impl LambdaCompiler {
                         &deps.modules,
                     );
                 }
-            });
+            }
             deps
         })
     }

@@ -150,36 +150,6 @@ struct PreJsMsg {
     has_interface: bool,
     is_runtime: bool,
     is_clean: bool,
-    pre_js_ready_at: Option<Instant>,
-    dispatcher_received_at: Option<Instant>,
-    js_ready_at: Option<Instant>,
-    handoff_wait: Duration,
-    dependency_wait: Duration,
-    ready_queue_wait: Duration,
-}
-
-impl PreJsMsg {
-    fn mark_dispatcher_received(&mut self) {
-        if let Some(ready_at) = self.pre_js_ready_at {
-            let now = Instant::now();
-            self.handoff_wait = now.saturating_duration_since(ready_at);
-            self.dispatcher_received_at = Some(now);
-        }
-    }
-
-    fn mark_js_ready(&mut self) {
-        if let Some(received_at) = self.dispatcher_received_at {
-            let now = Instant::now();
-            self.dependency_wait = now.saturating_duration_since(received_at);
-            self.js_ready_at = Some(now);
-        }
-    }
-
-    fn mark_js_dispatched(&mut self) {
-        if let Some(ready_at) = self.js_ready_at {
-            self.ready_queue_wait = Instant::now().saturating_duration_since(ready_at);
-        }
-    }
 }
 
 struct SignatureReadyMsg {
@@ -997,8 +967,7 @@ pub fn compile(
                 );
             }
             while in_flight < capacity && !has_errors {
-                if let Some(mut pre_js_msg) = pop_ready_js(&mut ready_js, &waiting_js_by_dep) {
-                    pre_js_msg.mark_js_dispatched();
+                if let Some(pre_js_msg) = pop_ready_js(&mut ready_js, &waiting_js_by_dep) {
                     if let Some(counters) = scheduler_counters.as_mut() {
                         counters.scheduled_js += 1;
                         if !ready_heap.is_empty() {
@@ -1130,8 +1099,7 @@ pub fn compile(
                             is_clean,
                         );
                     }
-                    WorkerMsg::PreJsReady(mut msg) => {
-                        msg.mark_dispatcher_received();
+                    WorkerMsg::PreJsReady(msg) => {
                         if let Some(counters) = scheduler_counters.as_mut() {
                             counters.pre_js_ready += 1;
                         }
@@ -1144,7 +1112,6 @@ pub fn compile(
                             .cloned()
                             .collect::<Vec<_>>();
                         if pending_deps_for_js.is_empty() {
-                            msg.mark_js_ready();
                             ready_js.push(msg);
                         } else {
                             if let Some(counters) = scheduler_counters.as_mut() {
@@ -1178,8 +1145,7 @@ pub fn compile(
                                 *count -= 1;
                                 if *count == 0 {
                                     pending_js_deps.remove(&waiter);
-                                    if let Some(mut payload) = pending_js_payloads.remove(&waiter) {
-                                        payload.mark_js_ready();
+                                    if let Some(payload) = pending_js_payloads.remove(&waiter) {
                                         ready_js.push(payload);
                                     }
                                 }
@@ -1215,8 +1181,7 @@ pub fn compile(
                                 *count -= 1;
                                 if *count == 0 {
                                     pending_js_deps.remove(&waiter);
-                                    if let Some(mut payload) = pending_js_payloads.remove(&waiter) {
-                                        payload.mark_js_ready();
+                                    if let Some(payload) = pending_js_payloads.remove(&waiter) {
                                         ready_js.push(payload);
                                     }
                                 }
@@ -3438,12 +3403,6 @@ fn compile_module_in_process_to_js_boundary(
         has_interface,
         is_runtime,
         is_clean: false,
-        pre_js_ready_at: module_timing_enabled.then(Instant::now),
-        dispatcher_received_at: None,
-        js_ready_at: None,
-        handoff_wait: Duration::default(),
-        dependency_wait: Duration::default(),
-        ready_queue_wait: Duration::default(),
     })
 }
 
@@ -3497,12 +3456,6 @@ fn finish_in_process_js_inner(
         has_interface,
         is_runtime,
         is_clean: _,
-        pre_js_ready_at: _,
-        dispatcher_received_at: _,
-        js_ready_at: _,
-        handoff_wait,
-        dependency_wait,
-        ready_queue_wait,
     } = pre_js_msg;
     let module_timing_enabled = std::env::var_os("RESCRIPT_MODULE_TIMINGS").is_some();
     let module_timing_start = module_timing_enabled.then(Instant::now);
@@ -3642,41 +3595,16 @@ fn finish_in_process_js_inner(
     if let (Some(start), Some(guard)) = (module_timing_start, module_timing_guard.as_ref()) {
         let timings = guard.snapshot();
         let wall = start.elapsed();
-        let lambda_optimization = timings.lambda_optimization;
         let codegen = timings.codegen;
-        let overhead = wall.saturating_sub(
-            lambda_optimization
-                .saturating_add(codegen)
-                .saturating_add(write_duration),
-        );
-        let js = timings.js;
+        let overhead = wall.saturating_sub(codegen.saturating_add(write_duration));
         eprintln!(
-            "[module-js-timing] module={} package={} handoff_wait_ms={:.3} dependency_wait_ms={:.3} ready_queue_wait_ms={:.3} wall_ms={:.3} lambda_optimization_ms={:.3} codegen_ms={:.3} write_ms={:.3} overhead_ms={:.3} backend_setup_ms={:.3} collect_modules_ms={:.3} compile_expr_ms={:.3} exports_ms={:.3} flatten_ms={:.3} external_shadow_ms={:.3} tailcall_inline_ms={:.3} record_rest_ms={:.3} flatten_mark_dead_ms={:.3} shake_ms={:.3} required_modules_ms={:.3} import_export_ms={:.3} collect_idents_ms={:.3} printer_ms={:.3} source_map_ms={:.3} outputs={}",
+            "[module-js-timing] module={} package={} wall_ms={:.3} codegen_ms={:.3} write_ms={:.3} overhead_ms={:.3} outputs={}",
             module_name,
             package.name,
-            duration_ms(handoff_wait),
-            duration_ms(dependency_wait),
-            duration_ms(ready_queue_wait),
             duration_ms(wall),
-            duration_ms(lambda_optimization),
             duration_ms(codegen),
             duration_ms(write_duration),
             duration_ms(overhead),
-            duration_ms(js.get(rescript_compiler::timing::JsPhase::BackendSetup)),
-            duration_ms(js.get(rescript_compiler::timing::JsPhase::CollectModules)),
-            duration_ms(js.get(rescript_compiler::timing::JsPhase::CompileExpr)),
-            duration_ms(js.get(rescript_compiler::timing::JsPhase::Exports)),
-            duration_ms(js.get(rescript_compiler::timing::JsPhase::Flatten)),
-            duration_ms(js.get(rescript_compiler::timing::JsPhase::ExternalShadow)),
-            duration_ms(js.get(rescript_compiler::timing::JsPhase::TailcallInline)),
-            duration_ms(js.get(rescript_compiler::timing::JsPhase::RecordRest)),
-            duration_ms(js.get(rescript_compiler::timing::JsPhase::FlattenMarkDead)),
-            duration_ms(js.get(rescript_compiler::timing::JsPhase::Shake)),
-            duration_ms(js.get(rescript_compiler::timing::JsPhase::RequiredModules)),
-            duration_ms(js.get(rescript_compiler::timing::JsPhase::ImportExport)),
-            duration_ms(js.get(rescript_compiler::timing::JsPhase::CollectIdents)),
-            duration_ms(js.get(rescript_compiler::timing::JsPhase::Printer)),
-            duration_ms(js.get(rescript_compiler::timing::JsPhase::SourceMap)),
             js_output_count
         );
     }
