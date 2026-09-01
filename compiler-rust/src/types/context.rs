@@ -1827,7 +1827,7 @@ impl TypeContext {
     /// Restoring an outer snapshot also invalidates every still-live nested
     /// snapshot. A later restore of one of those descendants is a no-op.
     pub(crate) fn restore_type_state(&self, mut snapshot: TypeMutationSnapshot<'_>) {
-        let (mutations, target) = {
+        let mutations = {
             let mut journal = self.mutation_journal.borrow_mut();
             let Some(active_index) = journal
                 .active
@@ -1837,33 +1837,32 @@ impl TypeContext {
                 snapshot.restored = true;
                 return;
             };
-            let target = journal.active[active_index];
             let mutations = journal.entries.split_off(snapshot.cursor);
             journal.active.truncate(active_index);
             if journal.active.is_empty() {
                 journal.entries.clear();
             }
             self.mutation_logging.set(!journal.active.is_empty());
-            (mutations, target)
+            mutations
         };
         let mut restored = 0;
         for mutation in mutations.into_iter().rev() {
             match mutation {
-                TypeMutation::TypeDesc(ty, desc) if target.records_type(ty) => {
+                TypeMutation::TypeDesc(ty, desc) => {
                     self.types.get(ty).set_desc(desc);
                     restored += 1;
                 }
-                TypeMutation::TypeLevel(ty, level) if target.records_type(ty) => {
+                TypeMutation::TypeLevel(ty, level) => {
                     self.types.get(ty).set_level(level);
                     restored += 1;
                 }
-                TypeMutation::RowField(row, field) if target.records_row_field(row) => {
+                TypeMutation::RowField(row, field) => {
                     if let Some(cell) = self.row_fields.borrow().get(row.index()) {
                         *cell.borrow_mut() = field;
                         restored += 1;
                     }
                 }
-                TypeMutation::AbbrevMemo(memo, value) if target.records_abbrev(memo) => {
+                TypeMutation::AbbrevMemo(memo, value) => {
                     if let Some(cell) = self.abbrevs.borrow().get(memo.index()) {
                         *cell.borrow_mut() = value;
                         restored += 1;
@@ -1893,10 +1892,6 @@ impl TypeContext {
                     *self.saved_levels.borrow_mut() = value;
                     restored += 1;
                 }
-                TypeMutation::TypeDesc(..)
-                | TypeMutation::TypeLevel(..)
-                | TypeMutation::RowField(..)
-                | TypeMutation::AbbrevMemo(..) => {}
             }
         }
         snapshot.restored = true;
@@ -3258,7 +3253,7 @@ mod tests {
     }
 
     #[test]
-    fn outer_backtrack_skips_committed_mutations_to_post_snapshot_allocations() {
+    fn outer_backtrack_restores_committed_inner_mutations() {
         let ctx = TypeContext::new(std::sync::Arc::new(IdGenerator::new()));
         let pre_type = ctx.new_var(Some("pre".to_string()));
         let pre_row = ctx.alloc_row_field(Some(RowField::Rpresent(None)));
@@ -3331,14 +3326,14 @@ mod tests {
             ctx.find_abbrev_expansion(pre_memo, PrivateFlag::Public, &pre_path),
             Some(pre_expansion)
         );
-        assert!(matches!(&*ctx.get_desc(post_type), TypeDesc::Tnil));
+        assert!(matches!(&*ctx.get_desc(post_type), TypeDesc::Tvar(Some(name)) if name == "post"));
         assert!(matches!(
             ctx.get_row_field(post_row),
-            Some(RowField::Rabsent)
+            Some(RowField::Rpresent(None))
         ));
         assert_eq!(
             ctx.find_abbrev_expansion(post_memo, PrivateFlag::Public, &post_path),
-            Some(post_expansion)
+            None
         );
         assert_eq!(ctx.current_def_level_state(), initial_levels);
         assert_eq!(&*ctx.memoized_abbrev_refs.borrow(), &[pre_memo]);
