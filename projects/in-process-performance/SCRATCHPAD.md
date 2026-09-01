@@ -49,12 +49,14 @@ At one worker the retained hybrid reduced lookup-map slot growth from
 `1,275,473,570` to `14,066,351` and capacity growth from `1,352,072,442` to
 `18,241,039`; copied nodes/payload counts stayed exact at
 `10,070,817 / 7,970,907`. Twelve-worker counts were again effectively
-identical. The final ten paired, alternating 12-worker runs improved wall from
-`4.628s +/- 0.033s` (`4.59s..4.71s`) to `4.553s +/- 0.015s`
-(`4.53s..4.59s`), a `75ms` / `1.62%` mean win. Mean user/system CPU fell from
-`40.306s / 2.120s` to `39.697s / 2.069s`; instructions from
-`245.606B` to `244.154B`; cycles from `139.233B` to `137.032B`; peak RSS mean
-from `2,972,113,306` to `2,945,651,507` bytes. Release typedtree, raw Lambda,
+identical. After removing all profiling probes, the final ten paired,
+alternating 12-worker runs against a clean release build of exact base
+`219cf999d` improved wall from `4.637s +/- 0.023s` (`4.61s..4.68s`) to
+`4.544s +/- 0.015s` (`4.52s..4.58s`), a `93ms` / `2.01%` mean win. Mean
+user/system CPU fell from `40.400s / 2.097s` to `39.645s / 2.054s`;
+instructions from `245.478B` to `244.087B`; cycles from `139.434B` to
+`136.801B`; peak RSS mean from `2,965,302,477` to `2,960,732,979` bytes.
+Release typedtree, raw Lambda,
 optimized Lambda, and JS parity were each `610/610`; focused JS was `344/344`,
 diagnostics `1432/1432`, and both base/candidate Tella builds compiled 3,248
 modules with identical 5,048-file generated-JS SHA-256 manifests.
