@@ -6645,13 +6645,21 @@ fn sarg_make_switch(
     _loc: Location,
     arg: RawLambda,
     cases: &[usize],
-    acts: &[RawLambda],
+    acts: Vec<RawLambda>,
     offset: i32,
     sw_dispatch: Option<crate::lambda::SwitchDispatch>,
 ) -> RawLambda {
+    let mut use_counts = vec![0usize; acts.len()];
+    for &index in cases {
+        use_counts[index] += 1;
+    }
+    let mut acts = acts.into_iter().map(Some).collect::<Vec<_>>();
     let mut l: Vec<(i32, RawLambda)> = Vec::new();
     for i in (0..cases.len()).rev() {
-        l.push((offset + i as i32, acts[cases[i]].clone()));
+        l.push((
+            offset + i as i32,
+            materialize_resolved_action(&mut acts, &use_counts, cases[i]),
+        ));
     }
     l.reverse();
     RawLambda::Lswitch(
@@ -7552,13 +7560,23 @@ fn share_actions_tree_string(
         })
         .collect();
 
-    let d = match d_idx {
-        None => None,
-        Some(idx) => Some(resolved_acts[idx].clone()),
-    };
+    let mut use_counts = vec![0usize; resolved_acts.len()];
+    if let Some(index) = d_idx {
+        use_counts[index] += 1;
+    }
+    for (_, index) in &sw_indices {
+        use_counts[*index] += 1;
+    }
+    let mut resolved_acts = resolved_acts.into_iter().map(Some).collect::<Vec<_>>();
+    let d = d_idx.map(|index| materialize_resolved_action(&mut resolved_acts, &use_counts, index));
     let sw: Vec<(String, RawLambda)> = sw_indices
         .into_iter()
-        .map(|(s, j)| (s, resolved_acts[j].clone()))
+        .map(|(string, index)| {
+            (
+                string,
+                materialize_resolved_action(&mut resolved_acts, &use_counts, index),
+            )
+        })
         .collect();
 
     // Build composed wrapper function
@@ -10609,7 +10627,7 @@ mod tests {
 
     #[test]
     fn match_code_keys_match_raw_make_key_boundaries_and_wrappers() {
-        for depth in [31, 32, 33] {
+        for depth in [15, 16] {
             let mut code = MatchCode::raw(RawLambda::Lconst(crate::lambda::Constant::int(0)));
             for index in 0..depth {
                 code = code.bind(
@@ -10618,7 +10636,17 @@ mod tests {
                     RawLambda::Lconst(crate::lambda::Constant::int(index)),
                 );
             }
-            assert_match_code_key_matches_raw(&code);
+            let code_key = make_key_string_code(&code);
+            let raw_key = make_key_string(&code.clone_to_raw_for_test());
+            assert_eq!(code_key, raw_key);
+            if depth == 15 {
+                assert!(
+                    code_key.is_some(),
+                    "31 charged nodes must remain within MAX_RAW"
+                );
+            } else {
+                assert!(code_key.is_none(), "33 charged nodes must exceed MAX_RAW");
+            }
         }
 
         let alias = Ident::create_local("alias");
