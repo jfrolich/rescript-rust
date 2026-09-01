@@ -3085,6 +3085,62 @@ mod tests {
     }
 
     #[test]
+    fn arena_allocation_keeps_recursive_variant_descriptor_borrow_valid() {
+        let ctx = TypeContext::new(std::sync::Arc::new(IdGenerator::new()));
+        let row_tail = ctx.new_var(Some("tail".to_string()));
+        let recursive = ctx.new_var(None);
+        ctx.set_desc(
+            recursive,
+            TypeDesc::Tvariant(RowDesc {
+                row_fields: vec![
+                    ("First".into(), RowField::Rpresent(Some(recursive))),
+                    (
+                        "Second".into(),
+                        RowField::Reither {
+                            constant: false,
+                            types: vec![row_tail, recursive],
+                            matched: false,
+                            link: RowFieldRef::null(),
+                        },
+                    ),
+                ],
+                row_more: row_tail,
+                row_closed: false,
+                row_fixed: false,
+                row_name: None,
+            }),
+        );
+        let representative_link = ctx.new_link(recursive);
+
+        let borrowed = ctx.borrow_desc(recursive);
+        let first_allocated = ctx.new_var(Some("allocated".to_string()));
+        for _ in 0..4096 {
+            ctx.new_var(None);
+        }
+
+        let TypeDesc::Tvariant(row) = &*borrowed else {
+            panic!("expected recursive variant");
+        };
+        assert_eq!(row.row_fields[0].0.as_str(), "First");
+        assert_eq!(row.row_fields[1].0.as_str(), "Second");
+        assert!(matches!(
+            row.row_fields[0].1,
+            RowField::Rpresent(Some(ty)) if ty == recursive
+        ));
+        assert!(matches!(
+            &row.row_fields[1].1,
+            RowField::Reither { types, .. }
+                if types.as_slice() == [row_tail, recursive]
+        ));
+        assert_eq!(row.row_more, row_tail);
+        assert_eq!(ctx.repr(representative_link), recursive);
+        assert!(matches!(
+            &*ctx.borrow_desc(first_allocated),
+            TypeDesc::Tvar(Some(name)) if name == "allocated"
+        ));
+    }
+
+    #[test]
     fn mutation_trail_restores_repeated_changes() {
         let ctx = TypeContext::new(std::sync::Arc::new(IdGenerator::new()));
         let ty = ctx.new_var(Some("original".to_string()));
