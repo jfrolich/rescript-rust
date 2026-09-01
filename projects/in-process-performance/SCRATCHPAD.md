@@ -55,10 +55,11 @@ constructor switch forest in `MatchCode`, assigns catches at the same local
 a top-level matrix has been dropped. Terminal `Lambda.bind` chains stay in the
 shared action allocation graph; switch uses are resolved with explicit counts,
 moving single uses and representing repeated uses by tiny static exits. A full
-3,248-module debug counter run at `6e88e82eb` reported `18,018` recursive clone
-calls, `315,196` nodes, and at least `146,250,944` bytes. Node traffic is 95.3%
-lower than the release baseline above; debug nanoseconds are not comparable to
-the baseline release timing. Raw Lambda parity remained 610/610.
+3,248-module release counter run at `6761b1aab` reported `18,705` recursive clone
+calls, `316,299` nodes, at least `146,762,736` bytes, and `58,220,054ns` clone
+time. Node traffic is 95.3% lower, estimated copied bytes are 95.3% lower, and
+clone time is 92.3% lower than the release baseline above. Raw Lambda parity
+remained 610/610.
 
 A destructive `Mutex<Option<RawLambda>>` terminal leaf experiment briefly
 reported `173,423` nodes, but was rejected as semantically invalid. Two distinct
@@ -68,6 +69,16 @@ first destructive take made the second panic. The regression is covered by
 `ce79b181f` reverted the experiment. The retained implementation keeps terminal
 actions immutable and obtains the reduction by deferring the owned MatchCode
 forest instead of globally consuming shared leaves.
+
+A paired 10-run release `hyperfine` against `layout-typecheck-performance`
+(`4e48f0d67`) measured the baseline at `4.797s +/- 0.053s` (range
+`4.745s..4.905s`, user/system `40.782s / 2.199s`) and the candidate at
+`4.723s +/- 0.020s` (range `4.697s..4.753s`, user/system
+`40.042s / 2.173s`), a 1.6% wall improvement. A separate 10-pair run alternated
+baseline-first and candidate-first order: baseline wall/user/system averaged
+`4.776s / 40.788s / 2.178s`, candidate averaged
+`4.704s / 40.108s / 2.181s`; peak RSS was effectively flat at
+`3045.2MiB` versus `3042.8MiB`.
 
 ## Expanded 3,248-Module Migration History
 
