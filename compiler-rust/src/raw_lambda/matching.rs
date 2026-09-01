@@ -4729,43 +4729,8 @@ fn split_constr(
     }
 }
 
-#[cfg(test)]
-fn split_constr_old(
-    cls: &[Clause],
-    args: &MatchArgs,
-    def: DefaultEnv,
-    k: Vec<(i32, PmHalfCompiled)>,
-    next_raise: &mut i32,
-) -> (PmHalfCompiledInfo, Vec<(i32, PmHalfCompiled)>) {
-    let group = get_group(&what_is_cases(cls));
-    let (cl, rem) = cls.split_first().expect("split_constr_old: empty cases");
-    if cl.0.first().is_some_and(group) {
-        split_ex_old(
-            group,
-            vec![cl.clone()],
-            Vec::new(),
-            rem,
-            args,
-            def,
-            k,
-            next_raise,
-        )
-    } else {
-        split_noex_old(
-            group,
-            vec![cl.clone()],
-            Vec::new(),
-            rem,
-            args,
-            def,
-            k,
-            next_raise,
-        )
-    }
-}
-
-#[cfg(test)]
-fn split_ex_old(
+/// split_ex: raise constructor rows up.
+fn split_ex(
     group: fn(&Pattern) -> bool,
     yes: Vec<Clause>,
     no: Vec<Clause>,
@@ -4792,67 +4757,72 @@ fn split_ex_old(
                     },
                     k,
                 ),
-                Some((no_cl, no_rem)) if yes.is_empty() => split_noex_old(
-                    group,
-                    vec![no_cl.clone()],
-                    Vec::new(),
-                    no_rem,
-                    args,
-                    def,
-                    k,
-                    next_raise,
-                ),
                 Some((no_cl, no_rem)) => {
-                    let (info, nexts) = split_noex_old(
-                        group,
-                        vec![no_cl.clone()],
-                        Vec::new(),
-                        no_rem,
-                        args,
-                        def.clone(),
-                        k,
-                        next_raise,
-                    );
-                    let idef = bump_raise_count(next_raise, "matching::split_ex_old");
-                    let PmHalfCompiledInfo {
-                        me: next,
-                        matrix,
-                        top_default,
-                    } = info;
-                    let new_def = cons_default(matrix, idef, top_default);
-                    let mut new_nexts = vec![(idef, next)];
-                    new_nexts.extend(nexts);
-                    (
-                        PmHalfCompiledInfo {
-                            me: PmHalfCompiled::Pm(PatternMatching {
-                                cases: yes.clone(),
-                                args: args.clone(),
-                                default: new_def.clone(),
-                            }),
-                            matrix: as_matrix(&yes),
-                            top_default: new_def,
-                        },
-                        new_nexts,
-                    )
+                    if yes.is_empty() {
+                        // Could not succeed in raising up a constr matching up
+                        split_noex(
+                            group,
+                            vec![no_cl.clone()],
+                            Vec::new(),
+                            no_rem,
+                            args,
+                            def,
+                            k,
+                            next_raise,
+                        )
+                    } else {
+                        let (info, nexts) = split_noex(
+                            group,
+                            vec![no_cl.clone()],
+                            Vec::new(),
+                            no_rem,
+                            args,
+                            def.clone(),
+                            k,
+                            next_raise,
+                        );
+                        let idef = bump_raise_count(next_raise, "matching::split_ex");
+                        let PmHalfCompiledInfo {
+                            me: next,
+                            matrix,
+                            top_default,
+                        } = info;
+                        let new_def = cons_default(matrix, idef, top_default);
+                        let mut new_nexts = vec![(idef, next)];
+                        new_nexts.extend(nexts);
+                        (
+                            PmHalfCompiledInfo {
+                                me: PmHalfCompiled::Pm(PatternMatching {
+                                    cases: yes.clone(),
+                                    args: args.clone(),
+                                    default: new_def.clone(),
+                                }),
+                                matrix: as_matrix(&yes),
+                                top_default: new_def,
+                            },
+                            new_nexts,
+                        )
+                    }
                 }
             }
         }
-        Some((cl, rem)) => {
-            if cl.0.first().is_some_and(group) && up_ok(&cl.0, &cl.1, &no) {
-                let mut yes = yes;
-                yes.insert(0, cl.clone());
-                split_ex_old(group, yes, no, rem, args, def, k, next_raise)
-            } else {
-                let mut no = no;
-                no.insert(0, cl.clone());
-                split_ex_old(group, yes, no, rem, args, def, k, next_raise)
+        Some((cl, rem)) => match cl.0.first() {
+            Some(p) if group(p) && up_ok(&cl.0, &cl.1, &no) => {
+                let mut new_yes = yes;
+                new_yes.insert(0, cl.clone());
+                split_ex(group, new_yes, no, rem, args, def, k, next_raise)
             }
-        }
+            _ => {
+                let mut new_no = no;
+                new_no.insert(0, cl.clone());
+                split_ex(group, yes, new_no, rem, args, def, k, next_raise)
+            }
+        },
     }
 }
 
-#[cfg(test)]
-fn split_noex_old(
+/// split_noex: raise non-constructor rows up.
+fn split_noex(
     group: fn(&Pattern) -> bool,
     yes: Vec<Clause>,
     no: Vec<Clause>,
@@ -4869,7 +4839,7 @@ fn split_noex_old(
             match no.split_first() {
                 None => precompile_var(args, yes, def, k, next_raise),
                 Some((no_cl, no_rem)) => {
-                    let (info, nexts) = split_ex_old(
+                    let (info, nexts) = split_ex(
                         group,
                         vec![no_cl.clone()],
                         Vec::new(),
@@ -4879,7 +4849,7 @@ fn split_noex_old(
                         k,
                         next_raise,
                     );
-                    let idef = bump_raise_count(next_raise, "matching::split_noex_old");
+                    let idef = bump_raise_count(next_raise, "matching::split_noex");
                     let PmHalfCompiledInfo {
                         me: next,
                         matrix,
@@ -4899,210 +4869,44 @@ fn split_noex_old(
                 }
             }
         }
-        Some((cl, rem)) if rem.is_empty() && cl.0.iter().all(group_var) && !yes.is_empty() => {
-            let mut no = no;
-            no.insert(0, cl.clone());
-            split_noex_old(group, yes, no, rem, args, def, k, next_raise)
-        }
-        Some((cl, rem)) => {
-            if cl.0.first().is_some_and(|p| !group(p)) && up_ok(&cl.0, &cl.1, &no) {
-                let mut yes = yes;
-                yes.insert(0, cl.clone());
-                split_noex_old(group, yes, no, rem, args, def, k, next_raise)
+        Some((_cl, _rem)) if rest.len() == 1 => {
+            // Check for the special case: last row is all variables and yes is non-empty
+            let cl = &rest[0];
+            if cl.0.iter().all(|p| group_var(p)) && !yes.is_empty() {
+                // This enables an extra division in some frequent cases:
+                // last row is made of variables only
+                let mut new_no = no;
+                new_no.insert(0, cl.clone());
+                split_noex(group, yes, new_no, &[], args, def, k, next_raise)
             } else {
-                let mut no = no;
-                no.insert(0, cl.clone());
-                split_noex_old(group, yes, no, rem, args, def, k, next_raise)
+                // Fall through to normal case
+                let cl = &rest[0];
+                match cl.0.first() {
+                    Some(p) if !group(p) && up_ok(&cl.0, &cl.1, &no) => {
+                        let mut new_yes = yes;
+                        new_yes.insert(0, cl.clone());
+                        split_noex(group, new_yes, no, &[], args, def, k, next_raise)
+                    }
+                    _ => {
+                        let mut new_no = no;
+                        new_no.insert(0, cl.clone());
+                        split_noex(group, yes, new_no, &[], args, def, k, next_raise)
+                    }
+                }
             }
         }
-    }
-}
-
-/// Partition rows into the reversed `yes` and `no` accumulators used by
-/// `split_ex` and `split_noex`.
-///
-/// OCaml accumulates with `cl :: yes` / `cl :: no`, checks `up_ok` against the
-/// current reversed `no`, and calls `List.rev` only after the scan
-/// (compiler/ml/matching.ml:935-975). `VecDeque::push_front` preserves those
-/// ordering and short-circuit boundaries without recursively inserting at the
-/// front of a growing `Vec`.
-fn partition_split_rows(
-    group: fn(&Pattern) -> bool,
-    raise_group: bool,
-    yes: Vec<Clause>,
-    no: Vec<Clause>,
-    rest: &[Clause],
-) -> (Vec<Clause>, Vec<Clause>) {
-    let mut yes: VecDeque<Clause> = yes.into();
-    let mut no: VecDeque<Clause> = no.into();
-
-    for (index, cl) in rest.iter().enumerate() {
-        let is_last = index + 1 == rest.len();
-        if !raise_group && is_last && cl.0.iter().all(group_var) && !yes.is_empty() {
-            no.push_front(cl.clone());
-            break;
-        }
-
-        let can_raise =
-            cl.0.first()
-                .is_some_and(|p| group(p) == raise_group && up_ok_iter(&cl.0, &cl.1, no.iter()));
-        if can_raise {
-            yes.push_front(cl.clone());
-        } else {
-            no.push_front(cl.clone());
-        }
-    }
-
-    (rev_deque_to_vec(yes), rev_deque_to_vec(no))
-}
-
-#[cfg(test)]
-fn partition_split_rows_old(
-    group: fn(&Pattern) -> bool,
-    raise_group: bool,
-    mut yes: Vec<Clause>,
-    mut no: Vec<Clause>,
-    rest: &[Clause],
-) -> (Vec<Clause>, Vec<Clause>) {
-    match rest.split_first() {
-        None => (rev_vec(yes), rev_vec(no)),
-        Some((cl, rem)) => {
-            if !raise_group && rem.is_empty() && cl.0.iter().all(group_var) && !yes.is_empty() {
-                no.insert(0, cl.clone());
-                return partition_split_rows_old(group, raise_group, yes, no, rem);
+        Some((cl, rem)) => match cl.0.first() {
+            Some(p) if !group(p) && up_ok(&cl.0, &cl.1, &no) => {
+                let mut new_yes = yes;
+                new_yes.insert(0, cl.clone());
+                split_noex(group, new_yes, no, rem, args, def, k, next_raise)
             }
-
-            let can_raise =
-                cl.0.first()
-                    .is_some_and(|p| group(p) == raise_group && up_ok(&cl.0, &cl.1, &no));
-            if can_raise {
-                yes.insert(0, cl.clone());
-            } else {
-                no.insert(0, cl.clone());
+            _ => {
+                let mut new_no = no;
+                new_no.insert(0, cl.clone());
+                split_noex(group, yes, new_no, rem, args, def, k, next_raise)
             }
-            partition_split_rows_old(group, raise_group, yes, no, rem)
-        }
-    }
-}
-
-/// split_ex: raise constructor rows up.
-fn split_ex(
-    group: fn(&Pattern) -> bool,
-    yes: Vec<Clause>,
-    no: Vec<Clause>,
-    rest: &[Clause],
-    args: &MatchArgs,
-    def: DefaultEnv,
-    k: Vec<(i32, PmHalfCompiled)>,
-    next_raise: &mut i32,
-) -> (PmHalfCompiledInfo, Vec<(i32, PmHalfCompiled)>) {
-    let (yes, no) = partition_split_rows(group, true, yes, no, rest);
-    match no.split_first() {
-        None => (
-            PmHalfCompiledInfo {
-                me: PmHalfCompiled::Pm(PatternMatching {
-                    cases: yes.clone(),
-                    args: args.clone(),
-                    default: def.clone(),
-                }),
-                matrix: as_matrix(&yes),
-                top_default: def,
-            },
-            k,
-        ),
-        Some((no_cl, no_rem)) => {
-            if yes.is_empty() {
-                // Could not succeed in raising up a constr matching up
-                split_noex(
-                    group,
-                    vec![no_cl.clone()],
-                    Vec::new(),
-                    no_rem,
-                    args,
-                    def,
-                    k,
-                    next_raise,
-                )
-            } else {
-                let (info, nexts) = split_noex(
-                    group,
-                    vec![no_cl.clone()],
-                    Vec::new(),
-                    no_rem,
-                    args,
-                    def.clone(),
-                    k,
-                    next_raise,
-                );
-                let idef = bump_raise_count(next_raise, "matching::split_ex");
-                let PmHalfCompiledInfo {
-                    me: next,
-                    matrix,
-                    top_default,
-                } = info;
-                let new_def = cons_default(matrix, idef, top_default);
-                let mut new_nexts = vec![(idef, next)];
-                new_nexts.extend(nexts);
-                (
-                    PmHalfCompiledInfo {
-                        me: PmHalfCompiled::Pm(PatternMatching {
-                            cases: yes.clone(),
-                            args: args.clone(),
-                            default: new_def.clone(),
-                        }),
-                        matrix: as_matrix(&yes),
-                        top_default: new_def,
-                    },
-                    new_nexts,
-                )
-            }
-        }
-    }
-}
-
-/// split_noex: raise non-constructor rows up.
-fn split_noex(
-    group: fn(&Pattern) -> bool,
-    yes: Vec<Clause>,
-    no: Vec<Clause>,
-    rest: &[Clause],
-    args: &MatchArgs,
-    def: DefaultEnv,
-    k: Vec<(i32, PmHalfCompiled)>,
-    next_raise: &mut i32,
-) -> (PmHalfCompiledInfo, Vec<(i32, PmHalfCompiled)>) {
-    let (yes, no) = partition_split_rows(group, false, yes, no, rest);
-    match no.split_first() {
-        None => precompile_var(args, yes, def, k, next_raise),
-        Some((no_cl, no_rem)) => {
-            let (info, nexts) = split_ex(
-                group,
-                vec![no_cl.clone()],
-                Vec::new(),
-                no_rem,
-                args,
-                def.clone(),
-                k,
-                next_raise,
-            );
-            let idef = bump_raise_count(next_raise, "matching::split_noex");
-            let PmHalfCompiledInfo {
-                me: next,
-                matrix,
-                top_default,
-            } = info;
-            precompile_var(
-                args,
-                yes,
-                cons_default(matrix, idef, top_default),
-                {
-                    let mut new_nexts = vec![(idef, next)];
-                    new_nexts.extend(nexts);
-                    new_nexts
-                },
-                next_raise,
-            )
-        }
+        },
     }
 }
 
@@ -11158,146 +10962,6 @@ mod tests {
             ],
             |a, b| a.key <= b.key,
         );
-    }
-
-    fn partition_test_clause(source: usize, grouped: bool, shared_action: bool) -> Clause {
-        let head = if grouped {
-            make_pat(
-                PatternDesc::Tpat_constant(Constant::Int(source as i64)),
-                TypeExprRef(0),
-                EnvRef(0),
-            )
-        } else {
-            omega()
-        };
-        let action_value = if shared_action { 0 } else { source as i32 };
-        (
-            vec![head],
-            MatchAction::new(RawLambda::Lconst(crate::lambda::Constant::int(
-                action_value,
-            ))),
-        )
-    }
-
-    fn partition_clause_sources(clauses: &[Clause]) -> Vec<i32> {
-        clauses
-            .iter()
-            .map(|(_, action)| match action.clone_to_raw_uninstrumented() {
-                RawLambda::Lconst(crate::lambda::Constant::Int { i, .. }) => i,
-                _ => panic!("unexpected partition test action"),
-            })
-            .collect()
-    }
-
-    #[test]
-    fn iterative_split_partition_matches_recursive_cons_and_reverse() {
-        for len in [1, 2, 17, 64, 227] {
-            for raise_group in [false, true] {
-                for shared_actions in [false, true] {
-                    let clauses: Vec<_> = (0..len)
-                        .map(|source| {
-                            partition_test_clause(source, source % 3 != 1, shared_actions)
-                        })
-                        .collect();
-                    let initial = vec![clauses[0].clone()];
-                    let old = partition_split_rows_old(
-                        group_constant,
-                        raise_group,
-                        initial.clone(),
-                        Vec::new(),
-                        &clauses[1..],
-                    );
-                    let new = partition_split_rows(
-                        group_constant,
-                        raise_group,
-                        initial,
-                        Vec::new(),
-                        &clauses[1..],
-                    );
-
-                    assert_eq!(
-                        partition_clause_sources(&new.0),
-                        partition_clause_sources(&old.0)
-                    );
-                    assert_eq!(
-                        partition_clause_sources(&new.1),
-                        partition_clause_sources(&old.1)
-                    );
-                }
-            }
-        }
-    }
-
-    fn clause_fingerprint((patterns, action): &Clause) -> String {
-        format!("{patterns:?}=>{:?}", action.clone_to_raw_uninstrumented())
-    }
-
-    fn half_compiled_fingerprint(pm: &PmHalfCompiled) -> String {
-        match pm {
-            PmHalfCompiled::Pm(pm) => format!(
-                "Pm(cases=[{}],args={:?},default={:?})",
-                pm.cases
-                    .iter()
-                    .map(clause_fingerprint)
-                    .collect::<Vec<_>>()
-                    .join(","),
-                pm.args.as_slice(),
-                pm.default
-            ),
-            PmHalfCompiled::PmVar(var) => format!(
-                "PmVar(arg={:?},inside={})",
-                var.var_arg,
-                half_compiled_fingerprint(&var.inside)
-            ),
-            PmHalfCompiled::PmOr(_) => panic!("unexpected or-pattern in split differential test"),
-        }
-    }
-
-    fn split_result_fingerprint(
-        info: &PmHalfCompiledInfo,
-        nexts: &[(i32, PmHalfCompiled)],
-    ) -> String {
-        format!(
-            "me={},matrix={:?},top_default={:?},nexts={:?}",
-            half_compiled_fingerprint(&info.me),
-            info.matrix,
-            info.top_default,
-            nexts
-                .iter()
-                .map(|(exit, pm)| (*exit, half_compiled_fingerprint(pm)))
-                .collect::<Vec<_>>()
-        )
-    }
-
-    #[test]
-    fn iterative_split_matches_full_recursive_result_and_exit_order() {
-        let args = MatchArgs::new(vec![(
-            RawLambda::Lvar(Ident::create_local("arg")),
-            LetKind::Strict,
-        )]);
-
-        for len in [1, 2, 8, 16] {
-            for shared_actions in [false, true] {
-                let clauses: Vec<_> = (0..len)
-                    .map(|source| partition_test_clause(source, source % 2 == 0, shared_actions))
-                    .collect();
-                let mut old_next_raise = 100;
-                let old =
-                    split_constr_old(&clauses, &args, Vec::new(), Vec::new(), &mut old_next_raise);
-                let mut new_next_raise = 100;
-                let new =
-                    split_constr(&clauses, &args, Vec::new(), Vec::new(), &mut new_next_raise);
-
-                assert_eq!(new_next_raise, old_next_raise);
-                assert_eq!(
-                    split_result_fingerprint(&new.0, &new.1),
-                    split_result_fingerprint(&old.0, &old.1)
-                );
-                let exits: Vec<_> = new.1.iter().map(|(exit, _)| *exit).collect();
-                let expected: Vec<_> = (101..=new_next_raise).rev().collect();
-                assert_eq!(exits, expected);
-            }
-        }
     }
 
     #[test]
