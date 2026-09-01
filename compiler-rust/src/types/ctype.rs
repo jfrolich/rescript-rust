@@ -2260,14 +2260,16 @@ fn lookup_component_module_sig_type<'a>(
 ) -> Option<(crate::ident::Ident, super::decl::TypeDeclaration)> {
     use super::decl::SignatureItem;
 
-    let mut persistent_env = in_process_module_resolution_env(ctx);
-    // OCaml compiler/ml/env.ml:781-813 resolves both persistent Pident roots
-    // and dotted parents through `ps_comps` / `comp_components`, then reads the
-    // substituted declaration from `comp_types`. Use the same component-table
-    // force point for exact flattened roots; a raw signature scan would bypass
-    // env.ml:1530-1559 `prefix_idents` and `Subst.type_declaration`.
-    if let Some(found) =
-        crate::types::typecore::with_resolved_module_components_for_path_with_cache_mode(
+    if matches!(module_path, Path::Pdot(..) | Path::Papply(..)) {
+        let mut persistent_env = in_process_module_resolution_env(ctx);
+        // OCaml compiler/ml/env.ml:781-793 resolves dotted module descriptors
+        // through `comp_components`, and env.ml:800-813 then reads `comp_types`.
+        // That path may reach persistent `ps_comps` at env.ml:786-788, but it
+        // still does not force env.ml:865-882's `comp_modules` declaration
+        // thunk. Use the in-process persistent env so dotted persistent paths
+        // such as `Layout__Types.Name.t` can be found through component tables
+        // instead of falling back to module-declaration lookup.
+        return crate::types::typecore::with_resolved_module_components_for_path_with_cache_mode(
             module_path,
             env,
             &mut persistent_env,
@@ -2275,13 +2277,11 @@ fn lookup_component_module_sig_type<'a>(
             crate::types::typecore::ComponentLookupApi::FindType,
             |components| {
                 components
-                    .lookup_type(type_name, ctx)
+                    .lookup_type(type_name)
                     .map(|(id, decl)| (id.clone(), decl.clone()))
             },
         )
-        .flatten()
-    {
-        return Some(found);
+        .flatten();
     }
 
     let raw_sig = match module_path {

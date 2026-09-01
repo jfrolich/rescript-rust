@@ -196,27 +196,25 @@ fn build_matching_type_labels(
 }
 
 fn build_constructors_for_name(
-    components: &QualifiedModuleComponents,
+    access_path: &Path,
+    signature: &[SignatureItem],
     constructor_name: &str,
     ctx: &super::context::TypeContext,
 ) -> Vec<ConstructorDescription> {
     let mut constructors = Vec::new();
     let mut runtime_pos = 0i32;
 
-    for item in components.signature.iter() {
+    for item in signature {
         match item {
             SignatureItem::SigValue(_, desc) => {
                 if !matches!(desc.val_kind, ValueKind::ValPrim(_)) {
                     runtime_pos += 1;
                 }
             }
-            SignatureItem::SigType(id, _, _) => {
-                let (_, decl) = components
-                    .lookup_type(id.name(), ctx)
-                    .expect("indexed component type disappeared");
+            SignatureItem::SigType(id, decl, _) => {
                 build_matching_type_constructors(
                     &mut constructors,
-                    components.access_path(),
+                    access_path,
                     id.name(),
                     decl,
                     constructor_name,
@@ -229,8 +227,7 @@ fn build_constructors_for_name(
                 if id.name() != constructor_name {
                     continue;
                 }
-                let ext_path =
-                    Path::pdot_pos(components.access_path().clone(), id.name(), ext_slot);
+                let ext_path = Path::pdot_pos(access_path.clone(), id.name(), ext_slot);
                 let (cstr_args, cstr_arity, cstr_inlined) = match &ext.ext_args {
                     super::decl::ConstructorArguments::CstrTuple(args) => {
                         (args.clone(), args.len() as i32, None)
@@ -270,8 +267,8 @@ fn build_constructors_for_name(
                 };
                 let ext_type_path = crate::cmi::persistent_env::substitute_sig_path(
                     &ext.ext_type_path,
-                    components.signature.as_ref(),
-                    components.access_path(),
+                    signature,
+                    access_path,
                 );
                 let cstr_res = ctx.new_generic_constr(ext_type_path, ext.ext_type_params.clone());
                 constructors.insert(
@@ -302,25 +299,16 @@ fn build_constructors_for_name(
 }
 
 fn build_labels_for_name(
-    components: &QualifiedModuleComponents,
+    access_path: &Path,
+    signature: &[SignatureItem],
     label_name: &str,
     ctx: &super::context::TypeContext,
 ) -> Vec<LabelDescription> {
     let mut labels = Vec::new();
 
-    for item in components.signature.iter() {
-        if let SignatureItem::SigType(id, _, _) = item {
-            let (_, decl) = components
-                .lookup_type(id.name(), ctx)
-                .expect("indexed component type disappeared");
-            build_matching_type_labels(
-                &mut labels,
-                components.access_path(),
-                id.name(),
-                decl,
-                label_name,
-                ctx,
-            );
+    for item in signature {
+        if let SignatureItem::SigType(id, decl, _) = item {
+            build_matching_type_labels(&mut labels, access_path, id.name(), decl, label_name, ctx);
         }
     }
 
@@ -367,7 +355,6 @@ struct StructureComponentTables {
     constructors: RefCell<HashMap<String, Arc<Vec<ConstructorDescription>>>>,
     labels: RefCell<HashMap<String, Arc<Vec<LabelDescription>>>>,
     types: RefCell<HashMap<String, Option<usize>>>,
-    component_types: Option<Vec<OnceCell<Box<(Ident, TypeDeclaration)>>>>,
     types_indexed: Cell<bool>,
     modules: RefCell<HashMap<String, Option<(usize, usize)>>>,
     modules_indexed: Cell<bool>,
@@ -394,7 +381,7 @@ pub(crate) struct QualifiedModuleComponents {
     signature: Arc<Signature>,
     tables: Arc<StructureComponentTables>,
     compiler_counters_enabled: bool,
-    substitution_source_prefix: Option<Arc<Path>>,
+    value_source_prefix: Option<Arc<Path>>,
 }
 
 fn scan_child_component_from_signature(
@@ -498,7 +485,7 @@ impl QualifiedModuleComponents {
         child_components: HashMap<String, (usize, Arc<StoredModuleComponents>)>,
         ctx: &super::context::TypeContext,
     ) -> Self {
-        Self::new_with_child_components_arc_and_substitution_source(
+        Self::new_with_child_components_arc_and_value_source_prefix(
             access_path,
             signature,
             child_components,
@@ -513,7 +500,7 @@ impl QualifiedModuleComponents {
         child_components: HashMap<String, (usize, Arc<StoredModuleComponents>)>,
         ctx: &super::context::TypeContext,
     ) -> Self {
-        Self::new_with_child_components_arc_and_substitution_source_inner(
+        Self::new_with_child_components_arc_and_value_source_prefix_inner(
             access_path,
             signature,
             child_components,
@@ -523,28 +510,28 @@ impl QualifiedModuleComponents {
         )
     }
 
-    pub(crate) fn new_with_child_components_arc_and_substitution_source(
+    pub(crate) fn new_with_child_components_arc_and_value_source_prefix(
         access_path: Path,
         signature: Arc<Signature>,
         child_components: HashMap<String, (usize, Arc<StoredModuleComponents>)>,
-        substitution_source_prefix: Option<Path>,
+        value_source_prefix: Option<Path>,
         ctx: &super::context::TypeContext,
     ) -> Self {
-        Self::new_with_child_components_arc_and_substitution_source_inner(
+        Self::new_with_child_components_arc_and_value_source_prefix_inner(
             access_path,
             signature,
             child_components,
-            substitution_source_prefix,
+            value_source_prefix,
             false,
             ctx,
         )
     }
 
-    fn new_with_child_components_arc_and_substitution_source_inner(
+    fn new_with_child_components_arc_and_value_source_prefix_inner(
         access_path: Path,
         signature: Arc<Signature>,
         child_components: HashMap<String, (usize, Arc<StoredModuleComponents>)>,
-        substitution_source_prefix: Option<Path>,
+        value_source_prefix: Option<Path>,
         child_component_scan_complete: bool,
         ctx: &super::context::TypeContext,
     ) -> Self {
@@ -611,9 +598,6 @@ impl QualifiedModuleComponents {
             .into_iter()
             .map(|(name, component)| (name, Some(component)))
             .collect();
-        let component_types = substitution_source_prefix
-            .as_ref()
-            .map(|_| (0..signature.len()).map(|_| OnceCell::new()).collect());
 
         Self {
             access_path: Arc::new(access_path),
@@ -625,7 +609,6 @@ impl QualifiedModuleComponents {
                 constructors: RefCell::new(HashMap::new()),
                 labels: RefCell::new(HashMap::new()),
                 types: RefCell::new(types),
-                component_types,
                 types_indexed: Cell::new(true),
                 modules: RefCell::new(modules),
                 modules_indexed: Cell::new(true),
@@ -640,7 +623,7 @@ impl QualifiedModuleComponents {
                 }),
             }),
             compiler_counters_enabled: ctx.compiler_counters_enabled(),
-            substitution_source_prefix: substitution_source_prefix.map(Arc::new),
+            value_source_prefix: value_source_prefix.map(Arc::new),
         }
     }
 
@@ -858,41 +841,6 @@ impl QualifiedModuleComponents {
         }
     }
 
-    fn rewrite_copied_component_item(
-        &self,
-        item: SignatureItem,
-        ctx: &super::context::TypeContext,
-    ) -> SignatureItem {
-        let Some(source_prefix) = self.substitution_source_prefix.as_deref() else {
-            return item;
-        };
-        if source_prefix.same(self.access_path()) {
-            return item;
-        }
-
-        // The in-process registry can expose one finalized persistent signature
-        // through both a qualified alias path and its exact flattened unit. OCaml
-        // builds a separate component table for each selected path: env.ml
-        // 1454-1486 captures that path in `prefix_idents`, then env.ml:1530-1559
-        // applies `Subst.value_description` / `Subst.type_declaration` before
-        // publishing the declaration. Rewrite only this copied declaration so
-        // the shared source signature and unforced sibling module signatures
-        // remain untouched.
-        let mut copied = vec![item];
-        crate::cmi::persistent_env::rewrite_sig_by_path_prefix(
-            &copied,
-            source_prefix,
-            self.access_path(),
-            ctx,
-        );
-        crate::cmi::persistent_env::rewrite_sig_paths_by_path_prefix(
-            &mut copied,
-            source_prefix,
-            self.access_path(),
-        );
-        copied.pop().expect("component item copy disappeared")
-    }
-
     pub(crate) fn lookup_value_for_access(
         &self,
         name: &str,
@@ -920,11 +868,6 @@ impl QualifiedModuleComponents {
             self.access_path(),
             ctx,
         );
-        let SignatureItem::SigValue(_, desc) =
-            self.rewrite_copied_component_item(SignatureItem::SigValue(id.clone(), desc), ctx)
-        else {
-            unreachable!("value component rewrite changed item kind")
-        };
         // OCaml compiler/ml/env.ml:1513-1516 memoizes the whole
         // `components_of_module_maker` result, and env.ml:1537 stores the
         // `Subst.value_description` output in `comp_values`. Cache the
@@ -958,7 +901,12 @@ impl QualifiedModuleComponents {
         // signature immutable and forces only the requested constructor bucket,
         // preserving env.ml:1132-1137 lookup semantics without materializing
         // every constructor in large dependency signatures.
-        let built = Arc::new(build_constructors_for_name(self, name, ctx));
+        let built = Arc::new(build_constructors_for_name(
+            self.access_path(),
+            self.signature.as_ref(),
+            name,
+            ctx,
+        ));
         if self.compiler_counters_enabled {
             crate::perf_counters::record_lazy_scan(
                 crate::perf_counters::LazyLookupKind::Constructor,
@@ -989,7 +937,12 @@ impl QualifiedModuleComponents {
         // selected component path. For normal compilation, force just the label
         // bucket requested by typecore.ml:1107-1126-style qualified lookup; this
         // avoids constructing hundreds of unused JSX record labels per module view.
-        let built = Arc::new(build_labels_for_name(self, name, ctx));
+        let built = Arc::new(build_labels_for_name(
+            self.access_path(),
+            self.signature.as_ref(),
+            name,
+            ctx,
+        ));
         if self.compiler_counters_enabled {
             crate::perf_counters::record_lazy_scan(
                 crate::perf_counters::LazyLookupKind::Label,
@@ -1004,43 +957,12 @@ impl QualifiedModuleComponents {
         built
     }
 
-    pub(crate) fn lookup_type(
-        &self,
-        name: &str,
-        ctx: &super::context::TypeContext,
-    ) -> Option<(&Ident, &TypeDeclaration)> {
+    pub(crate) fn lookup_type(&self, name: &str) -> Option<(&Ident, &TypeDeclaration)> {
         let idx = self.cached_type_index(name)?;
-        let SignatureItem::SigType(id, decl, rec_status) = &self.signature[idx] else {
-            return None;
-        };
-        if self.substitution_source_prefix.is_none() {
-            return Some((id, decl));
+        match &self.signature[idx] {
+            SignatureItem::SigType(id, decl, _) => Some((id, decl)),
+            _ => None,
         }
-
-        // `Subst.type_declaration` copies one declaration with one physical
-        // type-expression map and cleans up its temporary links before the next
-        // signature item (compiler/ml/subst.ml:245-301). Keep that allocation
-        // boundary here. The OnceCell is the forced declaration entry in this
-        // component table; repeated lookups reuse its copied nodes, while other
-        // declarations and child signatures stay unforced.
-        let forced = self
-            .tables
-            .component_types
-            .as_ref()
-            .expect("component substitution source has no declaration cells")[idx]
-            .get_or_init(|| {
-                let copied = super::typecore::copy_lookup_type_decl_for_subst(decl, ctx);
-                let rewritten = self.rewrite_copied_component_item(
-                    SignatureItem::SigType(id.clone(), copied, *rec_status),
-                    ctx,
-                );
-                let SignatureItem::SigType(id, decl, _) = rewritten else {
-                    unreachable!("type component rewrite changed item kind")
-                };
-                Box::new((id, decl))
-            });
-        let (id, decl) = forced.as_ref();
-        Some((id, decl))
     }
 
     pub(crate) fn lookup_module(&self, name: &str) -> Option<(usize, &Ident, &ModuleDeclaration)> {
@@ -1482,7 +1404,7 @@ fn build_local_module_components<'a>(
             // this TypeContext, so share that component signature and let the
             // view apply the selected access path lazily to forced items.
             return Some(
-                QualifiedModuleComponents::new_with_child_components_arc_and_substitution_source(
+                QualifiedModuleComponents::new_with_child_components_arc_and_value_source_prefix(
                     access_path.clone(),
                     ps.ps_sig.clone(),
                     HashMap::new(),

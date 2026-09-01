@@ -2148,20 +2148,18 @@ pub(crate) fn resolve_type_constructor_path(
                     {
                         return Some((cached_path, (*decl).clone()));
                     }
-                    components
-                        .lookup_type(type_name, tctx.type_ctx)
-                        .map(|(id, decl)| {
-                            let decl = Arc::new(decl.clone());
-                            tctx.type_ctx.register_resolved_module_type(
-                                env.id(),
-                                &module_path,
-                                type_name,
-                                module_path.clone(),
-                                id.clone(),
-                                decl.clone(),
-                            );
-                            (module_path, (*decl).clone())
-                        })
+                    components.lookup_type(type_name).map(|(id, decl)| {
+                        let decl = Arc::new(decl.clone());
+                        tctx.type_ctx.register_resolved_module_type(
+                            env.id(),
+                            &module_path,
+                            type_name,
+                            module_path.clone(),
+                            id.clone(),
+                            decl.clone(),
+                        );
+                        (module_path, (*decl).clone())
+                    })
                 },
             ) {
                 return (Path::pdot(mod_path, type_name.to_string()), Some(decl));
@@ -29634,7 +29632,7 @@ fn force_type_path_for_lookup_from_type<'a>(
         // sibling in the owning persistent signature.
         let _ =
             with_resolved_module_components_for_path(parent, env, pers_env, ctx, |components| {
-                components.lookup_type(type_name.as_str(), ctx).is_some()
+                components.lookup_type(type_name.as_str()).is_some()
             });
     }
 }
@@ -30374,7 +30372,7 @@ fn lookup_constructor_from_type_descrs<'b>(
     // this type; it does not call env.ml:865-882 `find_module` and therefore
     // does not force the persistent `ps_sig` binder-renaming thunk here.
     let desc = with_resolved_module_components_for_path(parent, env, pers_env, ctx, |components| {
-        let (_, _) = components.lookup_type(type_name.as_str(), ctx)?;
+        let (_, _) = components.lookup_type(type_name.as_str())?;
         let component_type_path = Path::pdot(components.access_path().clone(), type_name.as_str());
         let constructors = components.lookup_constructors(cstr_name, ctx);
         constructors.iter().find_map(|desc| {
@@ -31288,7 +31286,7 @@ fn build_module_components_from_parent_path<'a>(
             let access_path =
                 Path::pdot_pos(parent_access_path, module_name.as_str(), runtime_pos as i32);
             return Some(
-                crate::types::env_lazy::QualifiedModuleComponents::new_with_child_components_arc_and_substitution_source(
+                crate::types::env_lazy::QualifiedModuleComponents::new_with_child_components_arc_and_value_source_prefix(
                     access_path,
                     ps.ps_sig.clone(),
                     HashMap::new(),
@@ -31486,15 +31484,20 @@ fn build_shared_persistent_root_components<'a>(
     }
 
     let pers = pers_env.as_mut()?;
-    let source_prefix = pers.qualified_alias_path_for_flattened_head(id.name());
+    if pers
+        .qualified_alias_path_for_flattened_head(id.name())
+        .is_some()
+    {
+        return None;
+    }
+
     let ps = pers.find_pers_struct(id.name(), ctx)?;
     let access_path = Path::pident(Ident::create_persistent(id.name()));
     Some(
-        crate::types::env_lazy::QualifiedModuleComponents::new_with_child_components_arc_and_substitution_source(
+        crate::types::env_lazy::QualifiedModuleComponents::new_with_child_components_arc(
             access_path,
             ps.ps_sig.clone(),
             HashMap::new(),
-            source_prefix,
             ctx,
         ),
     )
@@ -31879,7 +31882,7 @@ fn lookup_type_in_resolved_path_with_cache_mode<'a>(
         ctx,
         cache_mode,
         |components| {
-            components.lookup_type(type_name, ctx).map(|(id, decl)| {
+            components.lookup_type(type_name).map(|(id, decl)| {
                 let result = (
                     parent_module_path.clone(),
                     id.clone(),
@@ -31920,6 +31923,52 @@ fn lookup_type_decl_in_resolved_path_with_cache_mode<'a>(
         return Some(decl);
     }
 
+    if let Path::Pident(id) = parent_module_path
+        && id.is_persistent()
+    {
+        let find_in_sig = |sig: &crate::types::decl::Signature| {
+            sig.iter().find_map(|item| match item {
+                crate::types::decl::SignatureItem::SigType(sig_id, sig_decl, _)
+                    if sig_id.name() == type_name =>
+                {
+                    Some((sig_id.clone(), Arc::new(sig_decl.clone())))
+                }
+                _ => None,
+            })
+        };
+        let found = ctx
+            .with_raw_module_sig(id.name(), find_in_sig)
+            .flatten()
+            .or_else(|| {
+                pers_env
+                    .as_mut()
+                    .and_then(|pers| pers.find_pers_struct(id.name(), ctx))
+                    .and_then(|ps| find_in_sig(ps.ps_sig.as_ref()))
+            })
+            .or_else(|| {
+                let mut pers = ctx.persistent_env_clone()?;
+                pers.find_pers_struct(id.name(), ctx)
+                    .and_then(|ps| find_in_sig(ps.ps_sig.as_ref()))
+            });
+        if let Some((found_id, decl)) = found {
+            // OCaml compiler/ml/env.ml:781-813 performs descriptor lookup
+            // through the persistent unit's component table. This declaration-
+            // only Rust helper can read the same finalized persistent
+            // signature directly without forcing child-module component views.
+            if cache_mode.publishes() {
+                ctx.register_resolved_module_type(
+                    env.id(),
+                    parent_module_path,
+                    type_name,
+                    parent_module_path.clone(),
+                    found_id,
+                    decl.clone(),
+                );
+            }
+            return Some(decl);
+        }
+    }
+
     with_resolved_module_components_for_path_with_cache_mode(
         parent_module_path,
         env,
@@ -31927,7 +31976,7 @@ fn lookup_type_decl_in_resolved_path_with_cache_mode<'a>(
         ctx,
         cache_mode,
         |components| {
-            components.lookup_type(type_name, ctx).map(|(id, decl)| {
+            components.lookup_type(type_name).map(|(id, decl)| {
                 let decl = Arc::new(decl.clone());
                 // OCaml compiler/ml/env.ml:800-813 type lookup uses component
                 // descriptors from env.ml:781-793; explicit Rust probe callers
@@ -32911,7 +32960,7 @@ fn lookup_type_decl_for_path_with_cache_mode<'a>(
             cache_mode,
             |components| {
                 components
-                    .lookup_type(type_name, ctx)
+                    .lookup_type(type_name)
                     .map(|(_, decl)| Arc::new(decl.clone()))
             },
         )
@@ -33075,7 +33124,7 @@ fn lookup_type_decl_for_path_with_cache_mode<'a>(
             ctx,
             cache_mode,
             |components| {
-                let (_, decl) = match components.lookup_type(type_name.as_str(), ctx) {
+                let (_, decl) = match components.lookup_type(type_name.as_str()) {
                     Some(found) => found,
                     None => return None,
                 };
@@ -33223,20 +33272,18 @@ fn lookup_type_decl_for_path_with_cache_mode<'a>(
                                 ctx,
                                 cache_mode,
                                 |components| {
-                                    components.lookup_type(type_name.as_str(), ctx).map(
-                                        |(_, decl)| {
-                                            let decl = Arc::new(decl.clone());
-                                            if cache_mode.publishes()
-                                                && let Some(cache_key) = cache_key.as_deref()
-                                            {
-                                                ctx.register_resolved_pdot_type(
-                                                    cache_key,
-                                                    decl.clone(),
-                                                );
-                                            }
-                                            decl
-                                        },
-                                    )
+                                    components.lookup_type(type_name.as_str()).map(|(_, decl)| {
+                                        let decl = Arc::new(decl.clone());
+                                        if cache_mode.publishes()
+                                            && let Some(cache_key) = cache_key.as_deref()
+                                        {
+                                            ctx.register_resolved_pdot_type(
+                                                cache_key,
+                                                decl.clone(),
+                                            );
+                                        }
+                                        decl
+                                    })
                                 },
                             )
                         {
