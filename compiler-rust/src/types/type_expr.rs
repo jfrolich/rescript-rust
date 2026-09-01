@@ -299,6 +299,16 @@ impl<T> TypeExprRefMap<T> {
     }
 
     #[inline]
+    pub(crate) fn storage_len(&self) -> usize {
+        self.values.len()
+    }
+
+    #[inline]
+    pub(crate) fn storage_capacity(&self) -> usize {
+        self.values.capacity()
+    }
+
+    #[inline]
     pub(crate) fn insert(&mut self, key: TypeExprRef, value: T) -> Option<T> {
         if self.values.is_empty() {
             self.offset = key.0;

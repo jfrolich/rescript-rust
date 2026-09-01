@@ -25136,6 +25136,56 @@ fn clone_copy_lookup_path(path: &Path) -> Path {
     path.clone()
 }
 
+#[inline]
+fn insert_copy_lookup_cache(
+    cache: &mut TypeExprRefMap<TypeExprRef>,
+    source: TypeExprRef,
+    copied: TypeExprRef,
+) {
+    if crate::perf_counters::enabled() {
+        let old_len = cache.storage_len();
+        let old_capacity = cache.storage_capacity();
+        cache.insert(source, copied);
+        crate::perf_counters::record_lookup_type_copy_map_growth(
+            cache.storage_len().saturating_sub(old_len),
+            cache.storage_capacity().saturating_sub(old_capacity),
+        );
+    } else {
+        cache.insert(source, copied);
+    }
+}
+
+fn lookup_type_copy_payload_elements(desc: &TypeDesc) -> usize {
+    use crate::types::type_expr::RowField;
+
+    match desc {
+        TypeDesc::Tarrow { args, .. } => args.len(),
+        TypeDesc::Ttuple(types) => types.len(),
+        TypeDesc::Tconstr { args, .. } => args.len(),
+        TypeDesc::Tobject { name, .. } => name.as_ref().map_or(0, |(_, args)| args.len()),
+        TypeDesc::Tvariant(row) => {
+            row.row_fields.len()
+                + row
+                    .row_fields
+                    .iter()
+                    .map(|(_, field)| match field {
+                        RowField::Reither { types, .. } => types.len(),
+                        RowField::Rpresent(_) | RowField::Rabsent => 0,
+                    })
+                    .sum::<usize>()
+                + row.row_name.as_ref().map_or(0, |(_, args)| args.len())
+        }
+        TypeDesc::Tpoly { vars, .. } => vars.len(),
+        TypeDesc::Tpackage { lids, args, .. } => lids.len() + args.len(),
+        TypeDesc::Tvar(_)
+        | TypeDesc::Tfield { .. }
+        | TypeDesc::Tnil
+        | TypeDesc::Tlink(_)
+        | TypeDesc::Tsubst(_)
+        | TypeDesc::Tunivar(_) => 0,
+    }
+}
+
 fn copy_lookup_type_expr_with_paths<TP, MP>(
     ctx: &TypeContext,
     ty: TypeExprRef,
@@ -25219,7 +25269,7 @@ where
         let desc = ctx.borrow_desc(ty);
         if matches!(*desc, TypeDesc::Tvar(_) | TypeDesc::Tunivar(_)) {
             drop(desc);
-            cache.insert(ty, ty);
+            insert_copy_lookup_cache(cache, ty, ty);
             return ty;
         }
     }
@@ -25227,7 +25277,14 @@ where
     let level = ctx.get_level(ty);
     let placeholder = ctx.new_var(None);
     ctx.set_level(placeholder, level);
-    cache.insert(ty, placeholder);
+    insert_copy_lookup_cache(cache, ty, placeholder);
+
+    if crate::perf_counters::enabled() {
+        let desc = ctx.borrow_desc(ty);
+        crate::perf_counters::record_lookup_type_copy_node(lookup_type_copy_payload_elements(
+            &desc,
+        ));
+    }
 
     let plan = {
         let desc = ctx.borrow_desc(ty);
@@ -25391,7 +25448,7 @@ where
                 let copied =
                     copy_lookup_type_expr_with_paths(ctx, target, cache, type_path, module_path);
                 ctx.set_desc(placeholder, TypeDesc::Tlink(copied));
-                cache.insert(ty, copied);
+                insert_copy_lookup_cache(cache, ty, copied);
                 return copied;
             }
             CopyTypeExprPlan::Tsubst(target) => {

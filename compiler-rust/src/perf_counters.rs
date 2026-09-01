@@ -129,6 +129,11 @@ static TYPE_MUTATION_BACKTRACKS: AtomicU64 = AtomicU64::new(0);
 static TYPE_MUTATION_RESTORES: AtomicU64 = AtomicU64::new(0);
 static TYPE_MUTATION_PEAK_DEPTH: AtomicU64 = AtomicU64::new(0);
 
+static LOOKUP_TYPE_COPY_NODES: AtomicU64 = AtomicU64::new(0);
+static LOOKUP_TYPE_COPY_PAYLOAD_ELEMENTS: AtomicU64 = AtomicU64::new(0);
+static LOOKUP_TYPE_COPY_MAP_SLOTS_GROWN: AtomicU64 = AtomicU64::new(0);
+static LOOKUP_TYPE_COPY_MAP_CAPACITY_GROWN: AtomicU64 = AtomicU64::new(0);
+
 #[derive(Clone, Copy)]
 pub(crate) enum TypeMutationKind {
     Desc,
@@ -157,6 +162,20 @@ pub(crate) fn record_type_mutation_snapshot(depth: usize) {
 pub(crate) fn record_type_mutation_backtrack(restores: usize) {
     TYPE_MUTATION_BACKTRACKS.fetch_add(1, Ordering::Relaxed);
     TYPE_MUTATION_RESTORES.fetch_add(restores as u64, Ordering::Relaxed);
+}
+
+/// Record one non-variable type node copied by lookup/signature substitution.
+#[inline]
+pub(crate) fn record_lookup_type_copy_node(payload_elements: usize) {
+    LOOKUP_TYPE_COPY_NODES.fetch_add(1, Ordering::Relaxed);
+    LOOKUP_TYPE_COPY_PAYLOAD_ELEMENTS.fetch_add(payload_elements as u64, Ordering::Relaxed);
+}
+
+/// Record backing-vector growth in the physical-identity copy map.
+#[inline]
+pub(crate) fn record_lookup_type_copy_map_growth(slots: usize, capacity: usize) {
+    LOOKUP_TYPE_COPY_MAP_SLOTS_GROWN.fetch_add(slots as u64, Ordering::Relaxed);
+    LOOKUP_TYPE_COPY_MAP_CAPACITY_GROWN.fetch_add(capacity as u64, Ordering::Relaxed);
 }
 
 /// Lazy lookup buckets tracked by `RESCRIPT_COMPILER_COUNTERS`.
@@ -406,6 +425,10 @@ pub fn reset() {
         &TYPE_MUTATION_BACKTRACKS,
         &TYPE_MUTATION_RESTORES,
         &TYPE_MUTATION_PEAK_DEPTH,
+        &LOOKUP_TYPE_COPY_NODES,
+        &LOOKUP_TYPE_COPY_PAYLOAD_ELEMENTS,
+        &LOOKUP_TYPE_COPY_MAP_SLOTS_GROWN,
+        &LOOKUP_TYPE_COPY_MAP_CAPACITY_GROWN,
     ] {
         counter.store(0, Ordering::Relaxed);
     }
@@ -878,6 +901,13 @@ pub fn print_report() {
         TYPE_MUTATION_BACKTRACKS.load(Ordering::Relaxed),
         TYPE_MUTATION_RESTORES.load(Ordering::Relaxed),
         TYPE_MUTATION_PEAK_DEPTH.load(Ordering::Relaxed),
+    );
+    eprintln!(
+        "[compiler-counter] lookup_type_copies nodes={} payload_elements={} map_slots_grown={} map_capacity_grown={}",
+        LOOKUP_TYPE_COPY_NODES.load(Ordering::Relaxed),
+        LOOKUP_TYPE_COPY_PAYLOAD_ELEMENTS.load(Ordering::Relaxed),
+        LOOKUP_TYPE_COPY_MAP_SLOTS_GROWN.load(Ordering::Relaxed),
+        LOOKUP_TYPE_COPY_MAP_CAPACITY_GROWN.load(Ordering::Relaxed),
     );
     eprintln!(
         "[compiler-counter] module_registry_snapshots count={} shared_entries_total={} local_entries_total={} max_shared_entries={} max_local_entries={} local_modules_total={} local_info_total={} local_aliases_total={} local_fallbacks_total={}",
