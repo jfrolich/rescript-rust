@@ -11402,7 +11402,7 @@ mod tests {
     #[test]
     fn reintroduce_fail_updates_code_switch_full_flags() {
         let switch = MatchCodeSwitch {
-            sw_numconsts: 4,
+            sw_numconsts: 3,
             sw_consts_full: true,
             sw_consts: (0..3)
                 .map(|key| {
@@ -11437,7 +11437,7 @@ mod tests {
                 crate::lambda::SwitchKey::Int(0),
                 RawLambda::Lconst(crate::lambda::Constant::int(1)),
             )],
-            sw_numblocks: 4,
+            sw_numblocks: 3,
             sw_blocks_full: true,
             sw_blocks: (0..3)
                 .map(|key| (crate::lambda::SwitchKey::Int(key), make_exit(11)))
