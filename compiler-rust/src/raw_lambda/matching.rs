@@ -40,50 +40,80 @@ use crate::types::type_expr::{RowDesc, RowField, TypeDesc};
 use crate::types::typedtree::Partial;
 use crate::types::typedtree::{Constant, EnvRef, Pattern, PatternDesc};
 
-/// Terminal action shared by pattern-matrix transformations.
+/// Terminal action graph shared by pattern-matrix transformations.
 ///
-/// OCaml case lists preserve the allocation identity of terminal Lambda values.
-/// Only those leaves use `Arc`; control nodes built while compiling the match are
-/// owned by `MatchCode` and are materialized at OCaml's local sharing boundaries.
+/// `Bind` is the delayed representation of OCaml `Lambda.bind` inside a case
+/// action. General match-result control flow remains owned by `MatchCode`.
 #[derive(Clone)]
 struct MatchAction(Arc<MatchActionData>);
 
 struct MatchActionData {
-    action: RawLambda,
+    kind: MatchActionKind,
     normalized_key: OnceLock<Option<String>>,
+}
+
+enum MatchActionKind {
+    Raw(RawLambda),
+    Bind {
+        kind: LetKind,
+        id: Ident,
+        arg: RawLambda,
+        action: MatchAction,
+    },
 }
 
 impl MatchAction {
     fn new(action: RawLambda) -> Self {
+        Self::from_kind(MatchActionKind::Raw(action))
+    }
+
+    fn from_kind(kind: MatchActionKind) -> Self {
         Self(Arc::new(MatchActionData {
-            action,
+            kind,
             normalized_key: OnceLock::new(),
         }))
+    }
+
+    fn clone_to_raw_uninstrumented(&self) -> RawLambda {
+        match &self.0.kind {
+            MatchActionKind::Raw(raw) => raw.clone(),
+            MatchActionKind::Bind {
+                kind,
+                id,
+                arg,
+                action,
+            } => RawLambda::Llet(
+                *kind,
+                id.clone(),
+                Box::new(arg.clone()),
+                Box::new(action.clone_to_raw_uninstrumented()),
+            ),
+        }
     }
 
     #[track_caller]
     fn to_raw(&self) -> RawLambda {
         if crate::perf_counters::enabled() {
-            let (nodes, estimated_bytes) = raw_lambda_clone_footprint(&self.0.action);
-            let fanout = Arc::strong_count(&self.0);
+            let (nodes, estimated_bytes) = match_action_clone_footprint(self);
+            let references = Arc::strong_count(&self.0);
             let started = std::time::Instant::now();
-            let raw = self.0.action.clone();
+            let raw = self.clone_to_raw_uninstrumented();
             crate::perf_counters::record_match_action_clone(
                 std::panic::Location::caller(),
                 nodes,
                 estimated_bytes,
                 started.elapsed().as_nanos().min(u64::MAX as u128) as u64,
-                fanout,
+                references,
             );
             raw
         } else {
-            self.0.action.clone()
+            self.clone_to_raw_uninstrumented()
         }
     }
 
     fn into_raw(self) -> RawLambda {
         match Arc::try_unwrap(self.0) {
-            Ok(data) => data.action,
+            Ok(data) => data.into_raw(),
             Err(shared) => MatchAction(shared).to_raw(),
         }
     }
@@ -91,20 +121,23 @@ impl MatchAction {
     fn normalized_key(&self) -> Option<&str> {
         self.0
             .normalized_key
-            .get_or_init(|| make_key_string(&self.0.action))
+            .get_or_init(|| make_key_string_action(self))
             .as_deref()
     }
 
     fn is_guarded(&self) -> bool {
-        is_guarded(&self.0.action)
+        match &self.0.kind {
+            MatchActionKind::Raw(raw) => is_guarded(raw),
+            MatchActionKind::Bind { action, .. } => action.is_guarded(),
+        }
     }
 
     #[track_caller]
     fn patch_guarded(&self, patch: RawLambda) -> RawLambda {
         if crate::perf_counters::enabled() {
-            let nodes = patch_guarded_clone_nodes(&self.0.action);
+            let nodes = match_action_patch_clone_nodes(self);
             let started = std::time::Instant::now();
-            let raw = patch_guarded(patch, &self.0.action);
+            let raw = self.patch_guarded_uninstrumented(patch);
             crate::perf_counters::record_match_action_clone(
                 std::panic::Location::caller(),
                 nodes,
@@ -114,24 +147,66 @@ impl MatchAction {
             );
             raw
         } else {
-            patch_guarded(patch, &self.0.action)
+            self.patch_guarded_uninstrumented(patch)
+        }
+    }
+
+    fn patch_guarded_uninstrumented(&self, patch: RawLambda) -> RawLambda {
+        match &self.0.kind {
+            MatchActionKind::Raw(raw) => patch_guarded(patch, raw),
+            MatchActionKind::Bind {
+                kind,
+                id,
+                arg,
+                action,
+            } => RawLambda::Llet(
+                *kind,
+                id.clone(),
+                Box::new(arg.clone()),
+                Box::new(action.patch_guarded_uninstrumented(patch)),
+            ),
         }
     }
 
     fn bind(self, kind: LetKind, id: Ident, arg: RawLambda) -> Self {
         match &arg {
             RawLambda::Lvar(v) if v.same(&id) => self,
-            _ => MatchAction::new(RawLambda::Llet(
+            _ => Self::from_kind(MatchActionKind::Bind {
                 kind,
                 id,
-                Box::new(arg),
-                Box::new(self.into_raw()),
-            )),
+                arg,
+                action: self,
+            }),
         }
     }
 
     fn free_variables(&self) -> IdentSet {
-        raw_lambda_free_variables(&self.0.action)
+        match &self.0.kind {
+            MatchActionKind::Raw(raw) => raw_lambda_free_variables(raw),
+            MatchActionKind::Bind {
+                id, arg, action, ..
+            } => {
+                let mut free = raw_lambda_free_variables(arg);
+                let mut action_free = action.free_variables();
+                action_free.remove(id);
+                free.extend(action_free);
+                free
+            }
+        }
+    }
+}
+
+impl MatchActionData {
+    fn into_raw(self) -> RawLambda {
+        match self.kind {
+            MatchActionKind::Raw(raw) => raw,
+            MatchActionKind::Bind {
+                kind,
+                id,
+                arg,
+                action,
+            } => RawLambda::Llet(kind, id, Box::new(arg), Box::new(action.into_raw())),
+        }
     }
 }
 
@@ -237,7 +312,7 @@ impl MatchCode {
 
     fn free_variables(&self) -> IdentSet {
         match self {
-            Self::Action(action) => raw_lambda_free_variables(&action.0.action),
+            Self::Action(action) => action.free_variables(),
             Self::If {
                 condition,
                 ifso,
@@ -275,7 +350,7 @@ impl MatchCode {
     fn clone_to_raw(&self) -> RawLambda {
         fn clone_uninstrumented(code: &MatchCode) -> RawLambda {
             match code {
-                MatchCode::Action(action) => action.0.action.clone(),
+                MatchCode::Action(action) => action.clone_to_raw_uninstrumented(),
                 MatchCode::If {
                     condition,
                     ifso,
@@ -399,11 +474,30 @@ fn raw_lambda_clone_footprint(raw: &RawLambda) -> (usize, usize) {
     (nodes, nodes * std::mem::size_of::<RawLambda>())
 }
 
+fn match_action_clone_footprint(action: &MatchAction) -> (usize, usize) {
+    let nodes = match &action.0.kind {
+        MatchActionKind::Raw(raw) => raw_lambda_clone_footprint(raw).0,
+        MatchActionKind::Bind { arg, action, .. } => {
+            1 + raw_lambda_clone_footprint(arg).0 + match_action_clone_footprint(action).0
+        }
+    };
+    (nodes, nodes * std::mem::size_of::<RawLambda>())
+}
+
+fn match_action_patch_clone_nodes(action: &MatchAction) -> usize {
+    match &action.0.kind {
+        MatchActionKind::Raw(raw) => patch_guarded_clone_nodes(raw),
+        MatchActionKind::Bind { arg, action, .. } => {
+            1 + raw_lambda_clone_footprint(arg).0 + match_action_patch_clone_nodes(action)
+        }
+    }
+}
+
 fn match_code_clone_footprint(code: &MatchCode) -> (usize, usize, usize) {
     fn visit(code: &MatchCode) -> (usize, usize) {
         match code {
             MatchCode::Action(action) => (
-                raw_lambda_clone_footprint(&action.0.action).0,
+                match_action_clone_footprint(action).0,
                 Arc::strong_count(&action.0),
             ),
             MatchCode::If {
@@ -2317,6 +2411,13 @@ fn make_key_string(e: &RawLambda) -> Option<String> {
 
 /// Compute the same structural key as `Lambda.make_key` directly over owned
 /// match code, without materializing shared terminal leaves.
+fn make_key_string_action(action: &MatchAction) -> Option<String> {
+    let mut writer = MakeKeyWriter::new();
+    let mut out = String::with_capacity(128);
+    writer.write_action(action, &mut out)?;
+    Some(out)
+}
+
 fn make_key_string_code(code: &MatchCode) -> Option<String> {
     let mut writer = MakeKeyWriter::new();
     let mut out = String::with_capacity(128);
@@ -2326,6 +2427,7 @@ fn make_key_string_code(code: &MatchCode) -> Option<String> {
 
 enum KeyBody<'a> {
     Raw(&'a RawLambda),
+    Action(&'a MatchAction),
     Code(&'a MatchCode),
 }
 
@@ -2352,13 +2454,33 @@ impl MakeKeyWriter {
         self.write_raw_after_count(e, out)
     }
 
+    fn write_action(&mut self, action: &MatchAction, out: &mut String) -> Option<()> {
+        self.count += 1;
+        if self.count > MAX_RAW {
+            return None;
+        }
+        self.write_action_after_count(action, out)
+    }
+
+    fn write_action_after_count(&mut self, action: &MatchAction, out: &mut String) -> Option<()> {
+        match &action.0.kind {
+            MatchActionKind::Raw(raw) => self.write_raw_after_count(raw, out),
+            MatchActionKind::Bind {
+                kind,
+                id,
+                arg,
+                action,
+            } => self.write_let(*kind, id, arg, KeyBody::Action(action), out),
+        }
+    }
+
     fn write_code(&mut self, code: &MatchCode, out: &mut String) -> Option<()> {
         self.count += 1;
         if self.count > MAX_RAW {
             return None;
         }
         match code {
-            MatchCode::Action(action) => self.write_raw_after_count(&action.0.action, out),
+            MatchCode::Action(action) => self.write_action_after_count(action, out),
             MatchCode::If {
                 condition,
                 ifso,
@@ -2404,6 +2526,7 @@ impl MakeKeyWriter {
     fn write_body(&mut self, body: KeyBody<'_>, out: &mut String) -> Option<()> {
         match body {
             KeyBody::Raw(raw) => self.write_raw(raw, out),
+            KeyBody::Action(action) => self.write_action(action, out),
             KeyBody::Code(code) => self.write_code(code, out),
         }
     }
@@ -2657,8 +2780,11 @@ impl MakeKeyWriter {
 fn same_var_body(body: &KeyBody<'_>, id: &Ident) -> bool {
     match body {
         KeyBody::Raw(RawLambda::Lvar(v)) => v.same(id),
+        KeyBody::Action(action) => {
+            matches!(&action.0.kind, MatchActionKind::Raw(RawLambda::Lvar(v)) if v.same(id))
+        }
         KeyBody::Code(MatchCode::Action(action)) => {
-            matches!(&action.0.action, RawLambda::Lvar(v) if v.same(id))
+            matches!(&action.0.kind, MatchActionKind::Raw(RawLambda::Lvar(v)) if v.same(id))
         }
         _ => false,
     }
@@ -8656,9 +8782,22 @@ fn lower_bind(v: &Ident, arg: &RawLambda, lam: RawLambda) -> RawLambda {
     }
 }
 
+fn approx_present_action(v: &Ident, action: &MatchAction) -> bool {
+    match &action.0.kind {
+        MatchActionKind::Raw(raw) => approx_present(v, raw),
+        MatchActionKind::Bind {
+            kind: LetKind::Alias,
+            arg,
+            action,
+            ..
+        } => approx_present(v, arg) || approx_present_action(v, action),
+        MatchActionKind::Bind { .. } => true,
+    }
+}
+
 fn approx_present_code(v: &Ident, code: &MatchCode) -> bool {
     match code {
-        MatchCode::Action(action) => approx_present(v, &action.0.action),
+        MatchCode::Action(action) => approx_present_action(v, action),
         MatchCode::If {
             condition,
             ifso,
@@ -8737,7 +8876,7 @@ fn lower_bind_code(v: &Ident, arg: &RawLambda, code: MatchCode) -> MatchCode {
                 }
             }
         }
-        MatchCode::Action(action) if matches!(&action.0.action, RawLambda::Lvar(u) if u.same(v) && u.name() == "*sth*") => {
+        MatchCode::Action(action) if matches!(&action.0.kind, MatchActionKind::Raw(RawLambda::Lvar(u)) if u.same(v) && u.name() == "*sth*") => {
             MatchCode::raw(arg.clone())
         }
         MatchCode::Action(action) => MatchCode::raw(lower_bind(v, arg, action.into_raw())),
@@ -10841,6 +10980,45 @@ mod tests {
         assert!(matches!(
             switch.sw_blocks.as_slice(),
             [(_, RawLambda::Lsequence(_, _))]
+        ));
+    }
+
+    #[test]
+    fn terminal_bind_keeps_shared_action_lazy_and_preserves_order() {
+        let terminal = MatchAction::new(RawLambda::Lsequence(
+            Box::new(RawLambda::Lconst(crate::lambda::Constant::int(1))),
+            Box::new(RawLambda::Lconst(crate::lambda::Constant::int(2))),
+        ));
+        let shared_terminal = terminal.clone();
+        let first = Ident::create_local("first");
+        let second = Ident::create_local("second");
+        let bound = terminal
+            .bind(
+                LetKind::Alias,
+                first.clone(),
+                RawLambda::Lconst(crate::lambda::Constant::int(3)),
+            )
+            .bind(
+                LetKind::Alias,
+                second.clone(),
+                RawLambda::Lconst(crate::lambda::Constant::int(4)),
+            );
+
+        let MatchActionKind::Bind {
+            action: first_bind, ..
+        } = &bound.0.kind
+        else {
+            panic!("expected outer delayed bind");
+        };
+        let MatchActionKind::Bind { action: leaf, .. } = &first_bind.0.kind else {
+            panic!("expected inner delayed bind");
+        };
+        assert!(Arc::ptr_eq(&leaf.0, &shared_terminal.0));
+        assert!(matches!(
+            bound.into_raw(),
+            RawLambda::Llet(LetKind::Alias, outer, _, body)
+                if outer.same(&second)
+                    && matches!(body.as_ref(), RawLambda::Llet(LetKind::Alias, inner, _, _) if inner.same(&first))
         ));
     }
 }
