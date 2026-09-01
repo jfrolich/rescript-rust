@@ -99,8 +99,23 @@ impl MatchAction {
         is_guarded(&self.0.action)
     }
 
+    #[track_caller]
     fn patch_guarded(&self, patch: RawLambda) -> RawLambda {
-        patch_guarded(patch, &self.0.action)
+        if crate::perf_counters::enabled() {
+            let nodes = patch_guarded_clone_nodes(&self.0.action);
+            let started = std::time::Instant::now();
+            let raw = patch_guarded(patch, &self.0.action);
+            crate::perf_counters::record_match_action_clone(
+                std::panic::Location::caller(),
+                nodes,
+                nodes * std::mem::size_of::<RawLambda>(),
+                started.elapsed().as_nanos().min(u64::MAX as u128) as u64,
+                Arc::strong_count(&self.0),
+            );
+            raw
+        } else {
+            patch_guarded(patch, &self.0.action)
+        }
     }
 
     fn bind(self, kind: LetKind, id: Ident, arg: RawLambda) -> Self {
@@ -256,93 +271,70 @@ impl MatchCode {
         }
     }
 
+    #[track_caller]
+    fn clone_to_raw(&self) -> RawLambda {
+        fn clone_uninstrumented(code: &MatchCode) -> RawLambda {
+            match code {
+                MatchCode::Action(action) => action.0.action.clone(),
+                MatchCode::If {
+                    condition,
+                    ifso,
+                    ifnot,
+                } => RawLambda::LifThenElse(
+                    Box::new(condition.clone()),
+                    Box::new(clone_uninstrumented(ifso)),
+                    Box::new(clone_uninstrumented(ifnot)),
+                ),
+                MatchCode::StaticCatch {
+                    body,
+                    exit,
+                    handler,
+                } => RawLambda::LstaticCatch(
+                    Box::new(clone_uninstrumented(body)),
+                    exit.clone(),
+                    Box::new(clone_uninstrumented(handler)),
+                ),
+                MatchCode::Bind {
+                    kind,
+                    id,
+                    arg,
+                    body,
+                } => RawLambda::Llet(
+                    *kind,
+                    id.clone(),
+                    Box::new(arg.clone()),
+                    Box::new(clone_uninstrumented(body)),
+                ),
+            }
+        }
+
+        if crate::perf_counters::enabled() {
+            let (nodes, bytes, fanout) = match_code_clone_footprint(self);
+            let started = std::time::Instant::now();
+            let raw = clone_uninstrumented(self);
+            crate::perf_counters::record_match_action_clone(
+                std::panic::Location::caller(),
+                nodes,
+                bytes,
+                started.elapsed().as_nanos().min(u64::MAX as u128) as u64,
+                fanout,
+            );
+            raw
+        } else {
+            clone_uninstrumented(self)
+        }
+    }
+
+    #[cfg(test)]
+    fn clone_to_raw_for_test(&self) -> RawLambda {
+        self.clone_to_raw()
+    }
+
     fn normalized_static_raise(&self) -> Option<(i32, Vec<RawLambda>)> {
-        // Gate on the direct writer first so the MAX_RAW cutoff and every
-        // accepted/rejected Lambda.make_key form stay exact.
-        self.normalized_key()?;
-
-        fn normalize_with_env(
-            expression: &RawLambda,
-            env: &[(Ident, RawLambda)],
-        ) -> Option<RawLambda> {
-            let wrapped = env
-                .iter()
-                .rev()
-                .fold(expression.clone(), |body, (id, value)| {
-                    RawLambda::Llet(
-                        LetKind::Alias,
-                        id.clone(),
-                        Box::new(value.clone()),
-                        Box::new(body),
-                    )
-                });
-            make_key(&wrapped)
+        match make_key(&self.clone_to_raw()) {
+            Some(RawLambda::LstaticRaise(exit, args)) => Some((exit, args)),
+            _ => None,
         }
-
-        fn raw(
-            expression: &RawLambda,
-            env: &mut Vec<(Ident, RawLambda)>,
-        ) -> Option<(i32, Vec<RawLambda>)> {
-            match expression {
-                RawLambda::Llet(LetKind::Alias, id, value, body) => {
-                    let value = normalize_with_env(value, env)?;
-                    env.push((id.clone(), value));
-                    let result = raw(body, env);
-                    env.pop();
-                    result
-                }
-                RawLambda::Llet(LetKind::Strict | LetKind::StrictOpt, id, value, body) if matches!(body.as_ref(), RawLambda::Lvar(var) if var.same(id)) => {
-                    match normalize_with_env(value, env)? {
-                        RawLambda::LstaticRaise(exit, args) => Some((exit, args)),
-                        _ => None,
-                    }
-                }
-                RawLambda::LstaticRaise(exit, args) => Some((
-                    *exit,
-                    args.iter()
-                        .map(|arg| normalize_with_env(arg, env))
-                        .collect::<Option<Vec<_>>>()?,
-                )),
-                _ => None,
-            }
-        }
-
-        fn inspect_code(
-            node: &MatchCode,
-            env: &mut Vec<(Ident, RawLambda)>,
-        ) -> Option<(i32, Vec<RawLambda>)> {
-            match node {
-                MatchCode::Action(action) => raw(&action.0.action, env),
-                MatchCode::Bind {
-                    kind: LetKind::Alias,
-                    id,
-                    arg,
-                    body,
-                } => {
-                    let arg = normalize_with_env(arg, env)?;
-                    env.push((id.clone(), arg));
-                    let result = inspect_code(body, env);
-                    env.pop();
-                    result
-                }
-                MatchCode::Bind {
-                    kind: LetKind::Strict | LetKind::StrictOpt,
-                    id,
-                    arg,
-                    body,
-                } if matches!(body.as_ref(), MatchCode::Action(action) if matches!(&action.0.action, RawLambda::Lvar(var) if var.same(id))) => {
-                    match normalize_with_env(arg, env)? {
-                        RawLambda::LstaticRaise(exit, args) => Some((exit, args)),
-                        _ => None,
-                    }
-                }
-                MatchCode::If { .. } | MatchCode::StaticCatch { .. } | MatchCode::Bind { .. } => {
-                    None
-                }
-            }
-        }
-
-        inspect_code(self, &mut Vec::new())
     }
 }
 
@@ -405,6 +397,55 @@ fn raw_lambda_clone_footprint(raw: &RawLambda) -> (usize, usize) {
     }
     let nodes = nodes(raw);
     (nodes, nodes * std::mem::size_of::<RawLambda>())
+}
+
+fn match_code_clone_footprint(code: &MatchCode) -> (usize, usize, usize) {
+    fn visit(code: &MatchCode) -> (usize, usize) {
+        match code {
+            MatchCode::Action(action) => (
+                raw_lambda_clone_footprint(&action.0.action).0,
+                Arc::strong_count(&action.0),
+            ),
+            MatchCode::If {
+                condition,
+                ifso,
+                ifnot,
+            } => {
+                let (ifso_nodes, ifso_fanout) = visit(ifso);
+                let (ifnot_nodes, ifnot_fanout) = visit(ifnot);
+                (
+                    1 + raw_lambda_clone_footprint(condition).0 + ifso_nodes + ifnot_nodes,
+                    ifso_fanout.max(ifnot_fanout),
+                )
+            }
+            MatchCode::StaticCatch { body, handler, .. } => {
+                let (body_nodes, body_fanout) = visit(body);
+                let (handler_nodes, handler_fanout) = visit(handler);
+                (
+                    1 + body_nodes + handler_nodes,
+                    body_fanout.max(handler_fanout),
+                )
+            }
+            MatchCode::Bind { arg, body, .. } => {
+                let (body_nodes, fanout) = visit(body);
+                (1 + raw_lambda_clone_footprint(arg).0 + body_nodes, fanout)
+            }
+        }
+    }
+    let (nodes, fanout) = visit(code);
+    (nodes, nodes * std::mem::size_of::<RawLambda>(), fanout)
+}
+
+fn patch_guarded_clone_nodes(action: &RawLambda) -> usize {
+    match action {
+        RawLambda::LifThenElse(condition, body, _) => {
+            1 + raw_lambda_clone_footprint(condition).0 + raw_lambda_clone_footprint(body).0
+        }
+        RawLambda::Llet(_, _, value, body) => {
+            1 + raw_lambda_clone_footprint(value).0 + patch_guarded_clone_nodes(body)
+        }
+        _ => panic!("patch_guarded: unexpected lambda"),
+    }
 }
 
 type Clause = (Vec<Pattern>, MatchAction);
@@ -2339,7 +2380,14 @@ impl MakeKeyWriter {
             } => {
                 out.push_str("LstaticCatch(");
                 self.write_code(body, out)?;
-                write!(out, ",{:?},", exit).ok()?;
+                write!(out, ",({},[", exit.0).ok()?;
+                for (index, var) in exit.1.iter().enumerate() {
+                    if index > 0 {
+                        out.push(',');
+                    }
+                    write_ident_key(out, var);
+                }
+                out.push_str("]),");
                 self.write_code(handler, out)?;
                 out.push(')');
                 Some(())
@@ -2830,6 +2878,7 @@ impl MatchCodeStore {
     }
 }
 
+#[track_caller]
 fn materialize_resolved_action(
     resolved_acts: &mut [Option<RawLambda>],
     use_counts: &[usize],
@@ -2845,10 +2894,24 @@ fn materialize_resolved_action(
             .take()
             .expect("single-use resolved action should still be available")
     } else {
-        resolved_acts[idx]
+        let action = resolved_acts[idx]
             .as_ref()
-            .expect("shared resolved action should still be available")
-            .clone()
+            .expect("shared resolved action should still be available");
+        if crate::perf_counters::enabled() {
+            let (nodes, bytes) = raw_lambda_clone_footprint(action);
+            let started = std::time::Instant::now();
+            let cloned = action.clone();
+            crate::perf_counters::record_match_action_clone(
+                std::panic::Location::caller(),
+                nodes,
+                bytes,
+                started.elapsed().as_nanos().min(u64::MAX as u128) as u64,
+                use_counts[idx],
+            );
+            cloned
+        } else {
+            action.clone()
+        }
     }
 }
 
@@ -10535,5 +10598,221 @@ mod tests {
         let raw = RawLambda::Lconst(crate::lambda::Constant::int(7));
 
         assert_eq!(code.normalized_key(), make_key_string(&raw));
+    }
+
+    fn assert_match_code_key_matches_raw(code: &MatchCode) {
+        assert_eq!(
+            make_key_string_code(code),
+            make_key_string(&code.clone_to_raw_for_test())
+        );
+    }
+
+    #[test]
+    fn match_code_keys_match_raw_make_key_boundaries_and_wrappers() {
+        for depth in [31, 32, 33] {
+            let mut code = MatchCode::raw(RawLambda::Lconst(crate::lambda::Constant::int(0)));
+            for index in 0..depth {
+                code = code.bind(
+                    LetKind::Alias,
+                    Ident::create_local(&format!("alias{index}")),
+                    RawLambda::Lconst(crate::lambda::Constant::int(index)),
+                );
+            }
+            assert_match_code_key_matches_raw(&code);
+        }
+
+        let alias = Ident::create_local("alias");
+        let nested_alias = MatchCode::Action(MatchAction::new(RawLambda::Lvar(alias.clone())))
+            .bind(
+                LetKind::Alias,
+                alias,
+                RawLambda::Lconst(crate::lambda::Constant::int(1)),
+            );
+        assert_match_code_key_matches_raw(&nested_alias);
+
+        for kind in [LetKind::Strict, LetKind::StrictOpt] {
+            let id = Ident::create_local("identity");
+            let identity = MatchCode::Bind {
+                kind,
+                id: id.clone(),
+                arg: RawLambda::LstaticRaise(14, Vec::new()),
+                body: Box::new(MatchCode::Action(MatchAction::new(RawLambda::Lvar(id)))),
+            };
+            assert_match_code_key_matches_raw(&identity);
+        }
+
+        let caught = Ident::create_local("caught");
+        let catch = MatchCode::static_catch(
+            MatchCode::raw(RawLambda::LstaticRaise(
+                20,
+                vec![RawLambda::Lvar(caught.clone())],
+            )),
+            (20, vec![caught.clone()]),
+            MatchCode::raw(RawLambda::Lvar(caught)),
+        );
+        assert_match_code_key_matches_raw(&catch);
+
+        let conditional = MatchCode::if_then_else(
+            RawLambda::Lconst(crate::lambda::Constant::int(1)),
+            MatchCode::raw(RawLambda::Lconst(crate::lambda::Constant::int(2))),
+            MatchCode::raw(RawLambda::Lconst(crate::lambda::Constant::int(3))),
+        );
+        assert_match_code_key_matches_raw(&conditional);
+
+        let record = MatchCode::raw(RawLambda::Lprim(RawPrimInfo {
+            primitive: Primitive::Pmakeblock(
+                TagInfo::Record {
+                    fields: vec![("field".to_string(), false)],
+                    logical_field_count: Some(33),
+                    mutable_flag: crate::parser::ast::MutableFlag::Immutable,
+                },
+                Mutable::Immutable,
+            ),
+            args: vec![RawLambda::Lconst(crate::lambda::Constant::int(1))],
+            loc: Location::none(),
+        }));
+        assert_match_code_key_matches_raw(&record);
+
+        let key_none = MatchCode::raw(RawLambda::Lconst(crate::lambda::Constant::String {
+            s: "mutable".to_string(),
+            delim: None,
+        }));
+        assert_match_code_key_matches_raw(&key_none);
+        assert!(make_key_string_code(&key_none).is_none());
+    }
+
+    #[test]
+    fn simple_exit_sharing_reuses_existing_exit_without_handler() {
+        let mut next_raise_count = 50;
+        let (handlers, switch) = direct_switch(
+            vec![
+                MatchCode::raw(RawLambda::LstaticRaise(7, Vec::new())),
+                MatchCode::raw(RawLambda::LstaticRaise(7, Vec::new())),
+            ],
+            &mut next_raise_count,
+        );
+        assert!(handlers.is_empty());
+        assert_eq!(next_raise_count, 50);
+        assert!(switch.sw_consts.iter().all(|(_, action)| {
+            matches!(action, RawLambda::LstaticRaise(7, args) if args.is_empty())
+        }));
+    }
+
+    #[test]
+    fn guarded_patch_and_free_variables_preserve_nested_bind_shape() {
+        let bound = Ident::create_local("bound");
+        let condition = Ident::create_local("condition");
+        let body_var = Ident::create_local("body");
+        let action = MatchAction::new(RawLambda::Llet(
+            LetKind::Alias,
+            bound.clone(),
+            Box::new(RawLambda::Lvar(body_var.clone())),
+            Box::new(RawLambda::LifThenElse(
+                Box::new(RawLambda::Lvar(condition.clone())),
+                Box::new(RawLambda::Lvar(bound)),
+                Box::new(RawLambda::LstaticRaise(0, Vec::new())),
+            )),
+        ));
+        let patch = RawLambda::Lconst(crate::lambda::Constant::int(9));
+        let patched = action.patch_guarded(patch);
+        let free = action.free_variables();
+
+        assert!(free.contains(&condition));
+        assert!(free.contains(&body_var));
+        assert!(matches!(
+            patched,
+            RawLambda::Llet(LetKind::Alias, _, _, body)
+                if matches!(body.as_ref(), RawLambda::LifThenElse(_, _, replacement)
+                    if matches!(replacement.as_ref(), RawLambda::Lconst(_)))
+        ));
+    }
+
+    #[test]
+    fn nested_shared_handlers_materialize_the_full_catch_shape() {
+        fn action(first: i32, second: i32) -> MatchCode {
+            MatchCode::raw(RawLambda::Lsequence(
+                Box::new(RawLambda::Lconst(crate::lambda::Constant::int(first))),
+                Box::new(RawLambda::Lconst(crate::lambda::Constant::int(second))),
+            ))
+        }
+        let mut next_raise_count = 30;
+        let (handlers, switch) = share_match_switch(
+            2,
+            true,
+            vec![
+                (crate::lambda::SwitchKey::Int(0), action(3, 4)),
+                (crate::lambda::SwitchKey::Int(1), action(3, 4)),
+            ],
+            0,
+            true,
+            Vec::new(),
+            Some(action(1, 2)),
+            crate::lambda::SwitchDispatch::Direct,
+            &mut next_raise_count,
+        );
+        let nested = apply_handlers(
+            RawLambda::Lswitch(
+                Box::new(RawLambda::Lconst(crate::lambda::Constant::int(0))),
+                switch,
+                Location::none(),
+            ),
+            handlers,
+        );
+        assert!(matches!(
+            nested,
+            RawLambda::LstaticCatch(outer_body, (32, _), outer_handler)
+                if matches!(outer_body.as_ref(), RawLambda::LstaticCatch(_, (31, _), _))
+                    && matches!(outer_handler.as_ref(), RawLambda::Lsequence(_, _))
+        ));
+    }
+
+    #[test]
+    fn match_switch_preserves_fail_const_block_mapping_and_distinct_keys() {
+        fn action(first: i32, second: i32) -> MatchCode {
+            MatchCode::raw(RawLambda::Lsequence(
+                Box::new(RawLambda::Lconst(crate::lambda::Constant::int(first))),
+                Box::new(RawLambda::Lconst(crate::lambda::Constant::int(second))),
+            ))
+        }
+        let left = MatchCode::if_then_else(
+            RawLambda::Lconst(crate::lambda::Constant::int(0)),
+            action(1, 2),
+            action(3, 4),
+        );
+        let right = MatchCode::if_then_else(
+            RawLambda::Lconst(crate::lambda::Constant::int(1)),
+            action(1, 2),
+            action(3, 4),
+        );
+        assert_ne!(left.normalized_key(), right.normalized_key());
+        assert_match_code_key_matches_raw(&left);
+        assert_match_code_key_matches_raw(&right);
+
+        let mut next_raise_count = 60;
+        let (handlers, switch) = share_match_switch(
+            1,
+            true,
+            vec![(crate::lambda::SwitchKey::Int(0), action(1, 2))],
+            1,
+            true,
+            vec![(crate::lambda::SwitchKey::Int(0), action(3, 4))],
+            Some(action(1, 2)),
+            crate::lambda::SwitchDispatch::Direct,
+            &mut next_raise_count,
+        );
+        assert_eq!(
+            handlers.iter().map(|(exit, _)| *exit).collect::<Vec<_>>(),
+            vec![61]
+        );
+        assert!(
+            matches!(switch.sw_failaction.as_deref(), Some(RawLambda::LstaticRaise(61, args)) if args.is_empty())
+        );
+        assert!(
+            matches!(switch.sw_consts.as_slice(), [(_, RawLambda::LstaticRaise(61, args))] if args.is_empty())
+        );
+        assert!(matches!(
+            switch.sw_blocks.as_slice(),
+            [(_, RawLambda::Lsequence(_, _))]
+        ));
     }
 }
