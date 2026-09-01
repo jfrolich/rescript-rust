@@ -105,6 +105,12 @@ static MATCH_ACTION_CLONE_SITES: OnceLock<
 static MODULE_MATCH_ACTION_CLONES: OnceLock<Mutex<HashMap<String, MatchActionCloneSite>>> =
     OnceLock::new();
 
+static LAMBDA_VEC_REBUILD_SITES: OnceLock<Mutex<HashMap<&'static str, LambdaVecRebuildSite>>> =
+    OnceLock::new();
+static MODULE_LAMBDA_VEC_REBUILDS: OnceLock<
+    Mutex<HashMap<(String, &'static str), LambdaVecRebuildSite>>,
+> = OnceLock::new();
+
 thread_local! {
     static CURRENT_MODULE: RefCell<Option<String>> = const { RefCell::new(None) };
 }
@@ -207,6 +213,14 @@ struct SparseRecordSite {
     skipped: u64,
     labels: u64,
     fields: u64,
+}
+
+#[derive(Clone, Copy, Default)]
+struct LambdaVecRebuildSite {
+    calls: u64,
+    elements: u64,
+    logical_bytes: u64,
+    reused_allocations: u64,
 }
 
 /// Thread-local module attribution guard for compiler counters.
@@ -438,6 +452,12 @@ pub fn reset() {
         sites.lock().unwrap().clear();
     }
     if let Some(modules) = MODULE_MATCH_ACTION_CLONES.get() {
+        modules.lock().unwrap().clear();
+    }
+    if let Some(sites) = LAMBDA_VEC_REBUILD_SITES.get() {
+        sites.lock().unwrap().clear();
+    }
+    if let Some(modules) = MODULE_LAMBDA_VEC_REBUILDS.get() {
         modules.lock().unwrap().clear();
     }
 }
@@ -777,6 +797,43 @@ pub(crate) fn record_match_action_clone(
     });
 }
 
+/// Attribute one owned Lambda vector rebuild to its pass and current module.
+///
+/// `logical_bytes` is the vector element storage traversed by the rebuild. A
+/// reused allocation means `collect` kept the source vector buffer; otherwise
+/// the same bytes were moved into a fresh allocation.
+pub(crate) fn record_lambda_vec_rebuild(
+    site: &'static str,
+    elements: usize,
+    logical_bytes: usize,
+    reused_allocation: bool,
+) {
+    let update = |entry: &mut LambdaVecRebuildSite| {
+        entry.calls += 1;
+        entry.elements += elements as u64;
+        entry.logical_bytes += logical_bytes as u64;
+        entry.reused_allocations += u64::from(reused_allocation);
+    };
+
+    let sites = LAMBDA_VEC_REBUILD_SITES.get_or_init(|| Mutex::new(HashMap::new()));
+    update(sites.lock().unwrap().entry(site).or_default());
+
+    CURRENT_MODULE.with(|current| {
+        let current = current.borrow();
+        let Some(module) = current.as_ref() else {
+            return;
+        };
+        let modules = MODULE_LAMBDA_VEC_REBUILDS.get_or_init(|| Mutex::new(HashMap::new()));
+        update(
+            modules
+                .lock()
+                .unwrap()
+                .entry((module.clone(), site))
+                .or_default(),
+        );
+    });
+}
+
 /// Record a per-worker in-process module-registry snapshot.
 pub(crate) fn record_module_registry_snapshot(
     shared_entries: usize,
@@ -867,6 +924,7 @@ pub fn print_report() {
     print_module_signature_copies();
     print_module_signature_freshens();
     print_match_action_clones();
+    print_lambda_vec_rebuilds();
     eprintln!(
         "[compiler-counter] type_mutations desc={} level={} row={} abbrev={} state={} snapshots={} backtracks={} restores={} peak_depth={}",
         TYPE_MUTATION_DESC.load(Ordering::Relaxed),
@@ -891,6 +949,49 @@ pub fn print_report() {
         REGISTRY_LOCAL_ALIASES_TOTAL.load(Ordering::Relaxed),
         REGISTRY_LOCAL_FALLBACKS_TOTAL.load(Ordering::Relaxed),
     );
+}
+
+fn print_lambda_vec_rebuilds() {
+    if let Some(sites) = LAMBDA_VEC_REBUILD_SITES.get() {
+        let mut sites: Vec<_> = sites
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(site, counters)| (*site, *counters))
+            .collect();
+        sites.sort_by_key(|(_, counters)| std::cmp::Reverse(counters.logical_bytes));
+        for (site, counters) in sites {
+            eprintln!(
+                "[compiler-counter] lambda_vec_rebuild site={} calls={} elements={} logical_bytes={} reused_allocations={}",
+                site,
+                counters.calls,
+                counters.elements,
+                counters.logical_bytes,
+                counters.reused_allocations,
+            );
+        }
+    }
+
+    if let Some(modules) = MODULE_LAMBDA_VEC_REBUILDS.get() {
+        let mut modules: Vec<_> = modules
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|((module, site), counters)| (module.clone(), *site, *counters))
+            .collect();
+        modules.sort_by_key(|(_, _, counters)| std::cmp::Reverse(counters.logical_bytes));
+        for (module, site, counters) in modules.into_iter().take(30) {
+            eprintln!(
+                "[compiler-counter] module_lambda_vec_rebuild module={} site={} calls={} elements={} logical_bytes={} reused_allocations={}",
+                module,
+                site,
+                counters.calls,
+                counters.elements,
+                counters.logical_bytes,
+                counters.reused_allocations,
+            );
+        }
+    }
 }
 
 fn print_match_action_clones() {

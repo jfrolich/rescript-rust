@@ -18,7 +18,10 @@ use crate::lambda::lam_pass_count::{OccTbl, UsedInfo, collect_occurs, dummy_info
 use crate::lambda::lam_pass_eliminate_ref::{RealReference, eliminate_ref};
 use crate::lambda::lam_primitive::{Mutable, Primitive};
 use crate::lambda::lam_util::refine_let;
-use crate::lambda::{Apply, LFunction, Lambda, LambdaSwitch, PrimInfo};
+use crate::lambda::{
+    Apply, LFunction, Lambda, LambdaSwitch, PrimInfo, map_lambda_vec_owned,
+    map_snd_lambda_vec_owned,
+};
 
 /// State held during the recursive pass: substitution table and an inline
 /// string table for downstream `Pstringadd` constant folding. Both mirror
@@ -649,10 +652,9 @@ fn lets_helper_owned(state: &mut LetsState<'_>, lam: Lambda) -> Lambda {
                 }
                 func => {
                     let new_func = lets_helper_owned(state, func);
-                    let new_args = ap_args
-                        .into_iter()
-                        .map(|a| lets_helper_owned(state, a))
-                        .collect();
+                    let new_args = map_lambda_vec_owned("lets_dce.apply_args", ap_args, |arg| {
+                        lets_helper_owned(state, arg)
+                    });
                     Lambda::Lapply(Apply {
                         ap_func: Box::new(new_func),
                         ap_args: new_args,
@@ -673,10 +675,9 @@ fn lets_helper_owned(state: &mut LetsState<'_>, lam: Lambda) -> Lambda {
         Lambda::Lconst(_) | Lambda::LglobalModule(_, _) => lam,
 
         Lambda::Lletrec(bindings, body) => {
-            let new_bindings = bindings
-                .into_iter()
-                .map(|(id, e)| (id, lets_helper_owned(state, e)))
-                .collect();
+            let new_bindings = map_snd_lambda_vec_owned("lets_dce.letrec", bindings, |value| {
+                lets_helper_owned(state, value)
+            });
             let new_body = lets_helper_owned(state, *body);
             Lambda::letrec(new_bindings, new_body)
         }
@@ -707,25 +708,22 @@ fn lets_helper_owned(state: &mut LetsState<'_>, lam: Lambda) -> Lambda {
 
         Lambda::Lprim(prim) => Lambda::prim(
             prim.primitive,
-            prim.args
-                .into_iter()
-                .map(|a| lets_helper_owned(state, a))
-                .collect(),
+            map_lambda_vec_owned("lets_dce.prim_args", prim.args, |arg| {
+                lets_helper_owned(state, arg)
+            }),
             prim.loc,
         ),
 
         Lambda::Lswitch(scrut, sw) => {
             let new_scrut = lets_helper_owned(state, *scrut);
-            let new_consts = sw
-                .sw_consts
-                .into_iter()
-                .map(|(n, e)| (n, lets_helper_owned(state, e)))
-                .collect();
-            let new_blocks = sw
-                .sw_blocks
-                .into_iter()
-                .map(|(n, e)| (n, lets_helper_owned(state, e)))
-                .collect();
+            let new_consts =
+                map_snd_lambda_vec_owned("lets_dce.switch_consts", sw.sw_consts, |body| {
+                    lets_helper_owned(state, body)
+                });
+            let new_blocks =
+                map_snd_lambda_vec_owned("lets_dce.switch_blocks", sw.sw_blocks, |body| {
+                    lets_helper_owned(state, body)
+                });
             let new_failaction = sw
                 .sw_failaction
                 .map(|x| Box::new(lets_helper_owned(state, *x)));
@@ -744,19 +742,19 @@ fn lets_helper_owned(state: &mut LetsState<'_>, lam: Lambda) -> Lambda {
 
         Lambda::LstringSwitch(scrut, cases, default) => {
             let new_scrut = lets_helper_owned(state, *scrut);
-            let new_cases = cases
-                .into_iter()
-                .map(|(s, e)| (s, lets_helper_owned(state, e)))
-                .collect();
+            let new_cases =
+                map_snd_lambda_vec_owned("lets_dce.string_switch_cases", cases, |body| {
+                    lets_helper_owned(state, body)
+                });
             let new_default = default.map(|x| Box::new(lets_helper_owned(state, *x)));
             Lambda::LstringSwitch(Box::new(new_scrut), new_cases, new_default)
         }
 
         Lambda::LstaticRaise(i, args) => Lambda::LstaticRaise(
             i,
-            args.into_iter()
-                .map(|a| lets_helper_owned(state, a))
-                .collect(),
+            map_lambda_vec_owned("lets_dce.static_raise_args", args, |arg| {
+                lets_helper_owned(state, arg)
+            }),
         ),
 
         Lambda::LstaticCatch(l1, label, l2) => {

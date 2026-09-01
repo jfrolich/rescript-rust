@@ -321,6 +321,52 @@ pub enum DirectionFlag {
     Downto,
 }
 
+/// Map an owned Lambda vector while attributing whether `collect` reuses its
+/// allocation. Sites use this during memory-traffic profiling; normal builds
+/// only pay the disabled counter check.
+pub(crate) fn map_lambda_vec_owned(
+    site: &'static str,
+    values: Vec<Lambda>,
+    mut map: impl FnMut(Lambda) -> Lambda,
+) -> Vec<Lambda> {
+    let source_ptr = values.as_ptr();
+    let elements = values.len();
+    let result: Vec<_> = values.into_iter().map(&mut map).collect();
+    if crate::perf_counters::enabled() {
+        crate::perf_counters::record_lambda_vec_rebuild(
+            site,
+            elements,
+            elements * std::mem::size_of::<Lambda>(),
+            result.as_ptr() == source_ptr,
+        );
+    }
+    result
+}
+
+/// Map Lambda values in an owned pair vector with the same allocation
+/// attribution as [`map_lambda_vec_owned`].
+pub(crate) fn map_snd_lambda_vec_owned<K>(
+    site: &'static str,
+    values: Vec<(K, Lambda)>,
+    mut map: impl FnMut(Lambda) -> Lambda,
+) -> Vec<(K, Lambda)> {
+    let source_ptr = values.as_ptr();
+    let elements = values.len();
+    let result: Vec<_> = values
+        .into_iter()
+        .map(|(key, value)| (key, map(value)))
+        .collect();
+    if crate::perf_counters::enabled() {
+        crate::perf_counters::record_lambda_vec_rebuild(
+            site,
+            elements,
+            elements * std::mem::size_of::<(K, Lambda)>(),
+            result.as_ptr() == source_ptr,
+        );
+    }
+    result
+}
+
 impl Lambda {
     /// Create a variable reference
     pub fn var(id: Ident) -> Self {

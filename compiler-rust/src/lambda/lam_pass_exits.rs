@@ -14,7 +14,9 @@ use crate::lambda::lam_analysis::{EXIT_INLINE_SIZE, size};
 use crate::lambda::lam_beta_reduce::max_ident_stamp_in_lambda;
 use crate::lambda::lam_compat::LetKind;
 use crate::lambda::lam_subst::subst as lam_subst;
-use crate::lambda::{LFunction, Lambda, LambdaSwitch};
+use crate::lambda::{
+    LFunction, Lambda, LambdaSwitch, map_lambda_vec_owned, map_snd_lambda_vec_owned,
+};
 
 /// `Lam_exit_count.collection`: occurrence count per exit label
 /// (lam_exit_count.ml:25).
@@ -306,10 +308,9 @@ fn subst_helper_owned(
         }
         // lam_pass_exits.ml:188-200: Lstaticraise (i, ls)
         Lambda::LstaticRaise(i, ls) => {
-            let ls: Vec<Lambda> = ls
-                .into_iter()
-                .map(|l| subst_helper_owned(subst, counts, id_gen, l))
-                .collect();
+            let ls = map_lambda_vec_owned("exits.static_raise_args", ls, |value| {
+                subst_helper_owned(subst, counts, id_gen, value)
+            });
             if let Some((xs, handler)) = subst.get(&i).cloned() {
                 // Rename xs to fresh ys to keep bound variables unique
                 // (lam_pass_exits.ml:193).
@@ -338,11 +339,9 @@ fn subst_helper_owned(
         // lam_pass_exits.ml:202-205
         Lambda::Lapply(apply) => Lambda::apply(
             subst_helper_owned(subst, counts, id_gen, *apply.ap_func),
-            apply
-                .ap_args
-                .into_iter()
-                .map(|arg| subst_helper_owned(subst, counts, id_gen, arg))
-                .collect(),
+            map_lambda_vec_owned("exits.apply_args", apply.ap_args, |arg| {
+                subst_helper_owned(subst, counts, id_gen, arg)
+            }),
             apply.ap_info,
             apply.ap_transformed_jsx,
         ),
@@ -362,10 +361,9 @@ fn subst_helper_owned(
         ),
         // lam_pass_exits.ml:209-210
         Lambda::Lletrec(bindings, body) => Lambda::letrec(
-            bindings
-                .into_iter()
-                .map(|(id, e)| (id, subst_helper_owned(subst, counts, id_gen, e)))
-                .collect(),
+            map_snd_lambda_vec_owned("exits.letrec", bindings, |value| {
+                subst_helper_owned(subst, counts, id_gen, value)
+            }),
             subst_helper_owned(subst, counts, id_gen, *body),
         ),
         // lam_pass_exits.ml:211
@@ -373,10 +371,9 @@ fn subst_helper_owned(
         // lam_pass_exits.ml:212-214
         Lambda::Lprim(info) => Lambda::prim(
             info.primitive,
-            info.args
-                .into_iter()
-                .map(|arg| subst_helper_owned(subst, counts, id_gen, arg))
-                .collect(),
+            map_lambda_vec_owned("exits.prim_args", info.args, |arg| {
+                subst_helper_owned(subst, counts, id_gen, arg)
+            }),
             info.loc,
         ),
         // lam_pass_exits.ml:215-226
@@ -384,17 +381,13 @@ fn subst_helper_owned(
             subst_helper_owned(subst, counts, id_gen, *l),
             LambdaSwitch {
                 sw_consts_full: sw.sw_consts_full,
-                sw_consts: sw
-                    .sw_consts
-                    .into_iter()
-                    .map(|(t, b)| (t, subst_helper_owned(subst, counts, id_gen, b)))
-                    .collect(),
+                sw_consts: map_snd_lambda_vec_owned("exits.switch_consts", sw.sw_consts, |body| {
+                    subst_helper_owned(subst, counts, id_gen, body)
+                }),
                 sw_blocks_full: sw.sw_blocks_full,
-                sw_blocks: sw
-                    .sw_blocks
-                    .into_iter()
-                    .map(|(t, b)| (t, subst_helper_owned(subst, counts, id_gen, b)))
-                    .collect(),
+                sw_blocks: map_snd_lambda_vec_owned("exits.switch_blocks", sw.sw_blocks, |body| {
+                    subst_helper_owned(subst, counts, id_gen, body)
+                }),
                 sw_failaction: sw
                     .sw_failaction
                     .map(|a| Box::new(subst_helper_owned(subst, counts, id_gen, *a))),
@@ -404,9 +397,9 @@ fn subst_helper_owned(
         // lam_pass_exits.ml:227-230
         Lambda::LstringSwitch(l, sw, d) => Lambda::string_switch(
             subst_helper_owned(subst, counts, id_gen, *l),
-            sw.into_iter()
-                .map(|(s, b)| (s, subst_helper_owned(subst, counts, id_gen, b)))
-                .collect(),
+            map_snd_lambda_vec_owned("exits.string_switch_cases", sw, |body| {
+                subst_helper_owned(subst, counts, id_gen, body)
+            }),
             d.map(|a| Box::new(subst_helper_owned(subst, counts, id_gen, *a))),
         ),
         // lam_pass_exits.ml:231
