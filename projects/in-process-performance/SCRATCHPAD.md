@@ -63,7 +63,7 @@ raw Lambda, optimized Lambda, and JavaScript parity were each `610/610`;
 focused JavaScript fixtures were `344/344`; diagnostics were `1432/1432`;
 compiler tests were `1231 passed` / `108 ignored`; rewatch tests were `150
 passed`. Base and candidate clean Tella builds each compiled `3,248` modules and
-had identical SHA-256 manifests for all `5,073` generated JavaScript files. The
+had identical SHA-256 manifests for all `5,048` generated `.js` files. The
 external OCaml Tella parity setup remained unavailable: it stopped after `197`
 dependency modules because `bs-css` could not resolve `Belt`; the exact
 base/candidate Rust manifest comparison covers this candidate.
