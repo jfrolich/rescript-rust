@@ -46,6 +46,7 @@ struct FunctionPrintContext<'a> {
 pub struct JsPrinter {
     /// Output buffer
     output: String,
+    initial_output_capacity: usize,
     /// Current indentation level
     indent: usize,
     /// Matches OCaml's Ext_pp.last_new_line state.
@@ -81,6 +82,7 @@ impl JsPrinter {
     pub fn new() -> Self {
         Self {
             output: String::new(),
+            initial_output_capacity: 0,
             indent: 0,
             last_new_line: false,
             indent_str: "  ",
@@ -100,6 +102,7 @@ impl JsPrinter {
     pub fn with_capacity(capacity: usize) -> Self {
         let mut printer = Self::new();
         printer.output = String::with_capacity(capacity);
+        printer.initial_output_capacity = capacity;
         printer
     }
 
@@ -169,6 +172,11 @@ impl JsPrinter {
 
     /// Get the generated JavaScript code
     pub fn into_output(self) -> String {
+        crate::timing::record_js_output_buffer(
+            self.initial_output_capacity,
+            self.output.len(),
+            self.output.capacity(),
+        );
         self.output
     }
 
@@ -187,6 +195,7 @@ impl JsPrinter {
     fn expression_string_in_current_scope(&self, expr: &Expression, level: u8) -> String {
         let mut printer = Self {
             output: String::new(),
+            initial_output_capacity: 0,
             indent: 0,
             last_new_line: false,
             indent_str: self.indent_str,
@@ -4585,16 +4594,18 @@ fn function_reserved_idents(
     body: &Block,
     function_ident: Option<&Ident>,
 ) -> Vec<Ident> {
-    let mut reserved_idents: Vec<Ident> =
-        free_variables_of_block_with_defined(body, params.iter().cloned())
-            .into_iter()
-            .collect();
-    if let Some(function_ident) = function_ident {
-        reserved_idents.push(function_ident.clone());
-    }
-    reserved_idents.sort();
-    reserved_idents.dedup();
-    reserved_idents
+    crate::timing::measure_js(crate::timing::JsPhase::CollectIdents, || {
+        let mut reserved_idents: Vec<Ident> =
+            free_variables_of_block_with_defined(body, params.iter().cloned())
+                .into_iter()
+                .collect();
+        if let Some(function_ident) = function_ident {
+            reserved_idents.push(function_ident.clone());
+        }
+        reserved_idents.sort();
+        reserved_idents.dedup();
+        reserved_idents
+    })
 }
 
 fn collect_block_idents(block: &Block, stats: &mut JsIdentStats) {

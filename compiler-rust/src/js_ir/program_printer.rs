@@ -77,17 +77,22 @@ impl JsPrinter {
             }
             self.at_least_two_lines();
         }
-        let _printed_imports = self.print_module_imports(&program.modules);
+        let _printed_imports =
+            crate::timing::measure_js(crate::timing::JsPhase::ImportExport, || {
+                self.print_module_imports(&program.modules)
+            });
         self.at_least_two_lines();
         self.reserve_idents_in_current_scope(&program.program.name_reservations);
         self.print_statements(&program.program.block[block_start..], true);
 
         self.at_least_two_lines();
         if !program.program.exports.is_empty() {
-            match self.current_module_format() {
-                ModuleFormat::EsModule => self.print_esmodule_exports(&program.program.exports),
-                ModuleFormat::CommonJs => self.print_commonjs_exports(&program.program.exports),
-            }
+            crate::timing::measure_js(crate::timing::JsPhase::ImportExport, || {
+                match self.current_module_format() {
+                    ModuleFormat::EsModule => self.print_esmodule_exports(&program.program.exports),
+                    ModuleFormat::CommonJs => self.print_commonjs_exports(&program.program.exports),
+                }
+            });
         }
 
         self.newline();
@@ -404,10 +409,12 @@ pub fn print_deps_program_with_source_map(
         .with_source_file_names(source_file_names),
     );
     printer.print_deps_program_with_directives_and_options(program, directives, emit_header);
-    let json = printer
-        .take_source_map_builder()
-        .expect("source map builder installed")
-        .json();
+    let json = crate::timing::measure_js(crate::timing::JsPhase::SourceMap, || {
+        printer
+            .take_source_map_builder()
+            .expect("source map builder installed")
+            .json()
+    });
     let mut output = printer.into_output();
     match mode {
         SourceMapMode::Linked => {

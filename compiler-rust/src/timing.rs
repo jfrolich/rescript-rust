@@ -27,6 +27,86 @@ pub enum Phase {
     Codegen,
 }
 
+/// Detailed JavaScript backend phases. These timings are nested inside the
+/// aggregate Lambda optimization/codegen buckets and therefore are not added
+/// to [`PhaseTimingSnapshot::recorded`].
+#[derive(Clone, Copy)]
+pub enum JsPhase {
+    BackendSetup,
+    CollectModules,
+    CompileExpr,
+    Exports,
+    Flatten,
+    ExternalShadow,
+    TailcallInline,
+    RecordRest,
+    FlattenMarkDead,
+    Shake,
+    RequiredModules,
+    ImportExport,
+    CollectIdents,
+    Printer,
+    SourceMap,
+}
+
+const JS_PHASE_COUNT: usize = 15;
+
+impl JsPhase {
+    const fn index(self) -> usize {
+        self as usize
+    }
+
+    const fn name(self) -> &'static str {
+        match self {
+            Self::BackendSetup => "backend_setup",
+            Self::CollectModules => "collect_modules",
+            Self::CompileExpr => "compile_expr",
+            Self::Exports => "exports",
+            Self::Flatten => "flatten",
+            Self::ExternalShadow => "external_shadow",
+            Self::TailcallInline => "tailcall_inline",
+            Self::RecordRest => "record_rest",
+            Self::FlattenMarkDead => "flatten_mark_dead",
+            Self::Shake => "shake",
+            Self::RequiredModules => "required_modules",
+            Self::ImportExport => "import_export",
+            Self::CollectIdents => "collect_idents",
+            Self::Printer => "printer",
+            Self::SourceMap => "source_map",
+        }
+    }
+
+    const ALL: [Self; JS_PHASE_COUNT] = [
+        Self::BackendSetup,
+        Self::CollectModules,
+        Self::CompileExpr,
+        Self::Exports,
+        Self::Flatten,
+        Self::ExternalShadow,
+        Self::TailcallInline,
+        Self::RecordRest,
+        Self::FlattenMarkDead,
+        Self::Shake,
+        Self::RequiredModules,
+        Self::ImportExport,
+        Self::CollectIdents,
+        Self::Printer,
+        Self::SourceMap,
+    ];
+}
+
+/// Nested JavaScript backend timings.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct JsPhaseTimingSnapshot {
+    nanos: [u64; JS_PHASE_COUNT],
+}
+
+impl JsPhaseTimingSnapshot {
+    pub fn get(self, phase: JsPhase) -> Duration {
+        Duration::from_nanos(self.nanos[phase.index()])
+    }
+}
+
 /// Snapshot of aggregate phase timings.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct PhaseTimingSnapshot {
@@ -44,6 +124,8 @@ pub struct PhaseTimingSnapshot {
     pub gentype: Duration,
     /// Aggregate codegen phase time.
     pub codegen: Duration,
+    /// Nested JavaScript backend phase timings.
+    pub js: JsPhaseTimingSnapshot,
 }
 
 impl PhaseTimingSnapshot {
@@ -70,6 +152,11 @@ static LAMBDA_NS: AtomicU64 = AtomicU64::new(0);
 static LAMBDA_OPT_NS: AtomicU64 = AtomicU64::new(0);
 static GENTYPE_NS: AtomicU64 = AtomicU64::new(0);
 static CODEGEN_NS: AtomicU64 = AtomicU64::new(0);
+static JS_PHASE_NS: [AtomicU64; JS_PHASE_COUNT] = [const { AtomicU64::new(0) }; JS_PHASE_COUNT];
+static JS_OUTPUTS: AtomicU64 = AtomicU64::new(0);
+static JS_OUTPUT_INITIAL_CAPACITY: AtomicU64 = AtomicU64::new(0);
+static JS_OUTPUT_BYTES: AtomicU64 = AtomicU64::new(0);
+static JS_OUTPUT_FINAL_CAPACITY: AtomicU64 = AtomicU64::new(0);
 
 thread_local! {
     static THREAD_TIMINGS: RefCell<Option<ThreadPhaseCounters>> = const { RefCell::new(None) };
@@ -83,6 +170,7 @@ struct ThreadPhaseCounters {
     lambda_optimization_ns: u64,
     gentype_ns: u64,
     codegen_ns: u64,
+    js_nanos: [u64; JS_PHASE_COUNT],
 }
 
 impl ThreadPhaseCounters {
@@ -99,6 +187,11 @@ impl ThreadPhaseCounters {
         }
     }
 
+    fn record_js(&mut self, phase: JsPhase, nanos: u64) {
+        let counter = &mut self.js_nanos[phase.index()];
+        *counter = counter.saturating_add(nanos);
+    }
+
     fn snapshot(self) -> PhaseTimingSnapshot {
         PhaseTimingSnapshot {
             total: Duration::default(),
@@ -108,6 +201,9 @@ impl ThreadPhaseCounters {
             lambda_optimization: Duration::from_nanos(self.lambda_optimization_ns),
             gentype: Duration::from_nanos(self.gentype_ns),
             codegen: Duration::from_nanos(self.codegen_ns),
+            js: JsPhaseTimingSnapshot {
+                nanos: self.js_nanos,
+            },
         }
     }
 }
@@ -209,6 +305,13 @@ pub fn reset() {
     LAMBDA_OPT_NS.store(0, Ordering::Relaxed);
     GENTYPE_NS.store(0, Ordering::Relaxed);
     CODEGEN_NS.store(0, Ordering::Relaxed);
+    for counter in &JS_PHASE_NS {
+        counter.store(0, Ordering::Relaxed);
+    }
+    JS_OUTPUTS.store(0, Ordering::Relaxed);
+    JS_OUTPUT_INITIAL_CAPACITY.store(0, Ordering::Relaxed);
+    JS_OUTPUT_BYTES.store(0, Ordering::Relaxed);
+    JS_OUTPUT_FINAL_CAPACITY.store(0, Ordering::Relaxed);
 
     #[cfg(not(target_arch = "wasm32"))]
     clock::reset_start();
@@ -257,6 +360,57 @@ pub fn measure<T>(phase: Phase, f: impl FnOnce() -> T) -> T {
     }
 }
 
+/// Record elapsed time for a detailed JavaScript backend phase.
+#[inline]
+pub fn record_js(phase: JsPhase, duration: Duration) {
+    if !enabled() {
+        return;
+    }
+
+    let nanos = duration.as_nanos().min(u64::MAX as u128) as u64;
+    JS_PHASE_NS[phase.index()].fetch_add(nanos, Ordering::Relaxed);
+    THREAD_TIMINGS.with(|timings| {
+        if let Some(thread_timings) = timings.borrow_mut().as_mut() {
+            thread_timings.record_js(phase, nanos);
+        }
+    });
+}
+
+/// Measure a detailed JavaScript backend phase.
+#[inline]
+pub fn measure_js<T>(phase: JsPhase, f: impl FnOnce() -> T) -> T {
+    if !enabled() {
+        return f();
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    {
+        f()
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let start = clock::now();
+        let result = f();
+        record_js(phase, start.elapsed());
+        result
+    }
+}
+
+/// Record the initial estimate and final allocation for one JS formatting buffer.
+pub(crate) fn record_js_output_buffer(
+    initial_capacity: usize,
+    bytes: usize,
+    final_capacity: usize,
+) {
+    if !enabled() {
+        return;
+    }
+    JS_OUTPUTS.fetch_add(1, Ordering::Relaxed);
+    JS_OUTPUT_INITIAL_CAPACITY.fetch_add(initial_capacity as u64, Ordering::Relaxed);
+    JS_OUTPUT_BYTES.fetch_add(bytes as u64, Ordering::Relaxed);
+    JS_OUTPUT_FINAL_CAPACITY.fetch_add(final_capacity as u64, Ordering::Relaxed);
+}
+
 /// Return the current aggregate phase timing snapshot.
 pub fn snapshot() -> PhaseTimingSnapshot {
     if !enabled() {
@@ -280,6 +434,9 @@ pub fn snapshot() -> PhaseTimingSnapshot {
         lambda_optimization: Duration::from_nanos(LAMBDA_OPT_NS.load(Ordering::Relaxed)),
         gentype: Duration::from_nanos(GENTYPE_NS.load(Ordering::Relaxed)),
         codegen: Duration::from_nanos(CODEGEN_NS.load(Ordering::Relaxed)),
+        js: JsPhaseTimingSnapshot {
+            nanos: std::array::from_fn(|index| JS_PHASE_NS[index].load(Ordering::Relaxed)),
+        },
     }
 }
 
@@ -304,6 +461,20 @@ pub fn print_report() {
     print_phase("gentype", snapshot.gentype, total);
     print_phase("codegen", snapshot.codegen, total);
     print_phase("overhead", snapshot.overhead(), total);
+    for phase in JsPhase::ALL {
+        print_phase(
+            &format!("js_{}", phase.name()),
+            snapshot.js.get(phase),
+            total,
+        );
+    }
+    eprintln!(
+        "[phase-timing] js_output_buffers outputs={} initial_capacity={} bytes={} final_capacity={}",
+        JS_OUTPUTS.load(Ordering::Relaxed),
+        JS_OUTPUT_INITIAL_CAPACITY.load(Ordering::Relaxed),
+        JS_OUTPUT_BYTES.load(Ordering::Relaxed),
+        JS_OUTPUT_FINAL_CAPACITY.load(Ordering::Relaxed),
+    );
 }
 
 fn print_phase(name: &str, duration: Duration, total: Duration) {
