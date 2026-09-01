@@ -7109,12 +7109,16 @@ fn reintroduce_fail_code(mut switch: MatchCodeSwitch) -> MatchCodeSwitch {
     if count < 3 {
         return switch;
     }
+    let old_const_len = switch.sw_consts.len();
+    let old_block_len = switch.sw_blocks.len();
     switch
         .sw_consts
         .retain(|(_, code)| as_simple_exit_code(code) != Some(exit));
     switch
         .sw_blocks
         .retain(|(_, code)| as_simple_exit_code(code) != Some(exit));
+    switch.sw_consts_full &= switch.sw_consts.len() == old_const_len;
+    switch.sw_blocks_full &= switch.sw_blocks.len() == old_block_len;
     switch.sw_failaction = Some(Box::new(MatchCode::raw(make_exit(exit))));
     switch
 }
@@ -7286,13 +7290,17 @@ pub fn reintroduce_fail(sw: RawLambdaSwitch) -> RawLambdaSwitch {
                 })
                 .collect()
         }
+        let old_const_len = sw.sw_consts.len();
+        let old_block_len = sw.sw_blocks.len();
+        let consts = remove(sw.sw_consts, default);
+        let blocks = remove(sw.sw_blocks, default);
         RawLambdaSwitch {
             sw_numconsts: sw.sw_numconsts,
-            sw_consts_full: sw.sw_consts_full,
-            sw_consts: remove(sw.sw_consts, default),
+            sw_consts_full: sw.sw_consts_full && consts.len() == old_const_len,
+            sw_consts: consts,
             sw_numblocks: sw.sw_numblocks,
-            sw_blocks_full: sw.sw_blocks_full,
-            sw_blocks: remove(sw.sw_blocks, default),
+            sw_blocks_full: sw.sw_blocks_full && blocks.len() == old_block_len,
+            sw_blocks: blocks,
             sw_failaction: Some(Box::new(make_exit(default))),
             sw_dispatch: sw.sw_dispatch,
         }
@@ -9043,6 +9051,25 @@ fn approx_present_code(v: &Ident, code: &MatchCode) -> bool {
     }
 }
 
+#[track_caller]
+fn clone_match_action_value(value: &RawLambda, references: usize) -> RawLambda {
+    if crate::perf_counters::enabled() {
+        let (nodes, bytes) = raw_lambda_clone_footprint(value);
+        let started = std::time::Instant::now();
+        let cloned = value.clone();
+        crate::perf_counters::record_match_action_clone(
+            std::panic::Location::caller(),
+            nodes,
+            bytes,
+            started.elapsed().as_nanos().min(u64::MAX as u128) as u64,
+            references,
+        );
+        cloned
+    } else {
+        value.clone()
+    }
+}
+
 fn lower_bind_action(v: &Ident, arg: &RawLambda, action: MatchAction) -> MatchCode {
     match &action.0.kind {
         MatchActionKind::Bind {
@@ -9057,7 +9084,7 @@ fn lower_bind_action(v: &Ident, arg: &RawLambda, action: MatchAction) -> MatchCo
                 lower_bind_action(v, arg, body.clone()).bind(
                     LetKind::Alias,
                     id.clone(),
-                    value.clone(),
+                    clone_match_action_value(value, Arc::strong_count(&action.0)),
                 )
             }
         }
@@ -11370,5 +11397,58 @@ mod tests {
         let second = second.into_raw();
         assert!(matches!(first, RawLambda::Llet(LetKind::Alias, id, _, _) if id.same(&x)));
         assert!(matches!(second, RawLambda::Llet(LetKind::Alias, id, _, _) if id.same(&y)));
+    }
+
+    #[test]
+    fn reintroduce_fail_updates_code_switch_full_flags() {
+        let switch = MatchCodeSwitch {
+            sw_numconsts: 4,
+            sw_consts_full: true,
+            sw_consts: (0..3)
+                .map(|key| {
+                    (
+                        crate::lambda::SwitchKey::Int(key),
+                        MatchCode::raw(make_exit(9)),
+                    )
+                })
+                .collect(),
+            sw_numblocks: 1,
+            sw_blocks_full: true,
+            sw_blocks: vec![(
+                crate::lambda::SwitchKey::Int(0),
+                MatchCode::raw(RawLambda::Lconst(crate::lambda::Constant::int(1))),
+            )],
+            sw_failaction: None,
+            sw_dispatch: crate::lambda::SwitchDispatch::Direct,
+        };
+        let switch = reintroduce_fail_code(switch);
+        assert!(!switch.sw_consts_full);
+        assert!(switch.sw_blocks_full);
+        assert!(switch.sw_consts.is_empty());
+        assert_eq!(switch.sw_blocks.len(), 1);
+    }
+
+    #[test]
+    fn reintroduce_fail_updates_raw_switch_full_flags() {
+        let switch = RawLambdaSwitch {
+            sw_numconsts: 1,
+            sw_consts_full: true,
+            sw_consts: vec![(
+                crate::lambda::SwitchKey::Int(0),
+                RawLambda::Lconst(crate::lambda::Constant::int(1)),
+            )],
+            sw_numblocks: 4,
+            sw_blocks_full: true,
+            sw_blocks: (0..3)
+                .map(|key| (crate::lambda::SwitchKey::Int(key), make_exit(11)))
+                .collect(),
+            sw_failaction: None,
+            sw_dispatch: crate::lambda::SwitchDispatch::Direct,
+        };
+        let switch = reintroduce_fail(switch);
+        assert!(switch.sw_consts_full);
+        assert!(!switch.sw_blocks_full);
+        assert_eq!(switch.sw_consts.len(), 1);
+        assert!(switch.sw_blocks.is_empty());
     }
 }
