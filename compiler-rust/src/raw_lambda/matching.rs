@@ -111,6 +111,7 @@ impl MatchAction {
         }
     }
 
+    #[track_caller]
     fn into_raw(self) -> RawLambda {
         match Arc::try_unwrap(self.0) {
             Ok(data) => data.into_raw(),
@@ -197,6 +198,7 @@ impl MatchAction {
 }
 
 impl MatchActionData {
+    #[track_caller]
     fn into_raw(self) -> RawLambda {
         match self.kind {
             MatchActionKind::Raw(raw) => raw,
@@ -236,6 +238,7 @@ impl MatchCode {
         Self::Action(MatchAction::new(action))
     }
 
+    #[track_caller]
     fn into_raw(self) -> RawLambda {
         match self {
             Self::Action(action) => action.into_raw(),
