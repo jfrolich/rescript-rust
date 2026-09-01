@@ -120,11 +120,10 @@ fn rewrite_block(block: Block) -> Block {
                     else {
                         unreachable!()
                     };
-                    reversed.reverse();
+                    let tail = reversed.into_iter().rev().collect();
                     let source = rewrite_expression(*source);
-                    let (fields, mut tail) = materialize_fields(&source, fields, reversed);
-                    tail.reverse();
-                    reversed = tail;
+                    let (fields, tail) = materialize_fields(&source, fields, tail);
+                    reversed = tail.into_iter().rev().collect();
                     declaration.value = Some(Expression {
                         desc: ExpressionDesc::RecordRest(fields, Box::new(source)),
                         comment,
@@ -160,18 +159,15 @@ fn rewrite_block(block: Block) -> Block {
                     property: LetKind::Strict,
                     ident_info: IdentInfo::default(),
                 });
-                reversed.reverse();
-                return_block.reserve(reversed.len());
-                return_block.extend(reversed);
-                return_block.reverse();
-                reversed = return_block;
+                let tail = reversed.into_iter().rev().collect::<Vec<_>>();
+                return_block.extend(tail);
+                reversed = return_block.into_iter().rev().collect();
                 reversed.push(declaration);
             }
             desc => reversed.push(Statement { desc, ..statement }),
         }
     }
-    reversed.reverse();
-    reversed
+    reversed.into_iter().rev().collect()
 }
 
 fn rewrite_statement(mut statement: Statement) -> Statement {
