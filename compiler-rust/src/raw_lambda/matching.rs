@@ -11,7 +11,7 @@ use std::collections::HashMap;
 use std::collections::VecDeque;
 use std::fmt::Write as _;
 use std::ops::Deref;
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, OnceLock};
 
 use crate::ident::{Ident, IdentFlags};
 use crate::lambda::LetKind;
@@ -53,7 +53,7 @@ struct MatchActionData {
 }
 
 enum MatchActionKind {
-    Raw(Mutex<Option<RawLambda>>),
+    Raw(RawLambda),
     Bind {
         kind: LetKind,
         id: Ident,
@@ -73,7 +73,7 @@ impl MatchAction {
                     action: Self::new(*body),
                 })
             }
-            raw => Self::from_kind(MatchActionKind::Raw(Mutex::new(Some(raw)))),
+            raw => Self::from_kind(MatchActionKind::Raw(raw)),
         }
     }
 
@@ -86,12 +86,7 @@ impl MatchAction {
 
     fn clone_to_raw_uninstrumented(&self) -> RawLambda {
         match &self.0.kind {
-            MatchActionKind::Raw(raw) => raw
-                .lock()
-                .unwrap()
-                .as_ref()
-                .expect("match action materialized more than once")
-                .clone(),
+            MatchActionKind::Raw(raw) => raw.clone(),
             MatchActionKind::Bind {
                 kind,
                 id,
@@ -130,47 +125,7 @@ impl MatchAction {
     fn into_raw(self) -> RawLambda {
         match Arc::try_unwrap(self.0) {
             Ok(data) => data.into_raw(),
-            Err(shared) => MatchAction(shared).take_to_raw(),
-        }
-    }
-
-    #[track_caller]
-    fn take_to_raw(&self) -> RawLambda {
-        fn take(action: &MatchAction) -> RawLambda {
-            match &action.0.kind {
-                MatchActionKind::Raw(raw) => raw
-                    .lock()
-                    .unwrap()
-                    .take()
-                    .expect("match action materialized more than once"),
-                MatchActionKind::Bind {
-                    kind,
-                    id,
-                    arg,
-                    action,
-                } => RawLambda::Llet(
-                    *kind,
-                    id.clone(),
-                    Box::new(arg.clone()),
-                    Box::new(take(action)),
-                ),
-            }
-        }
-
-        let nodes = match_action_take_clone_nodes(self);
-        if crate::perf_counters::enabled() && nodes > 0 {
-            let started = std::time::Instant::now();
-            let raw = take(self);
-            crate::perf_counters::record_match_action_clone(
-                std::panic::Location::caller(),
-                nodes,
-                nodes * std::mem::size_of::<RawLambda>(),
-                started.elapsed().as_nanos().min(u64::MAX as u128) as u64,
-                Arc::strong_count(&self.0),
-            );
-            raw
-        } else {
-            take(self)
+            Err(shared) => MatchAction(shared).to_raw(),
         }
     }
 
@@ -183,12 +138,7 @@ impl MatchAction {
 
     fn is_guarded(&self) -> bool {
         match &self.0.kind {
-            MatchActionKind::Raw(raw) => is_guarded(
-                raw.lock()
-                    .unwrap()
-                    .as_ref()
-                    .expect("guarded action accessed after materialization"),
-            ),
+            MatchActionKind::Raw(raw) => is_guarded(raw),
             MatchActionKind::Bind { action, .. } => action.is_guarded(),
         }
     }
@@ -214,13 +164,7 @@ impl MatchAction {
 
     fn patch_guarded_uninstrumented(&self, patch: RawLambda) -> RawLambda {
         match &self.0.kind {
-            MatchActionKind::Raw(raw) => patch_guarded(
-                patch,
-                raw.lock()
-                    .unwrap()
-                    .as_ref()
-                    .expect("guarded action patched after materialization"),
-            ),
+            MatchActionKind::Raw(raw) => patch_guarded(patch, raw),
             MatchActionKind::Bind {
                 kind,
                 id,
@@ -249,12 +193,7 @@ impl MatchAction {
 
     fn free_variables(&self) -> IdentSet {
         match &self.0.kind {
-            MatchActionKind::Raw(raw) => raw_lambda_free_variables(
-                raw.lock()
-                    .unwrap()
-                    .as_ref()
-                    .expect("free variables requested after materialization"),
-            ),
+            MatchActionKind::Raw(raw) => raw_lambda_free_variables(raw),
             MatchActionKind::Bind {
                 id, arg, action, ..
             } => {
@@ -272,10 +211,7 @@ impl MatchActionData {
     #[track_caller]
     fn into_raw(self) -> RawLambda {
         match self.kind {
-            MatchActionKind::Raw(raw) => raw
-                .into_inner()
-                .unwrap()
-                .expect("match action materialized more than once"),
+            MatchActionKind::Raw(raw) => raw,
             MatchActionKind::Bind {
                 kind,
                 id,
@@ -553,15 +489,7 @@ fn raw_lambda_clone_footprint(raw: &RawLambda) -> (usize, usize) {
 
 fn match_action_clone_footprint(action: &MatchAction) -> (usize, usize) {
     let nodes = match &action.0.kind {
-        MatchActionKind::Raw(raw) => {
-            raw_lambda_clone_footprint(
-                raw.lock()
-                    .unwrap()
-                    .as_ref()
-                    .expect("match action footprint after materialization"),
-            )
-            .0
-        }
+        MatchActionKind::Raw(raw) => raw_lambda_clone_footprint(raw).0,
         MatchActionKind::Bind { arg, action, .. } => {
             1 + raw_lambda_clone_footprint(arg).0 + match_action_clone_footprint(action).0
         }
@@ -569,23 +497,9 @@ fn match_action_clone_footprint(action: &MatchAction) -> (usize, usize) {
     (nodes, nodes * std::mem::size_of::<RawLambda>())
 }
 
-fn match_action_take_clone_nodes(action: &MatchAction) -> usize {
-    match &action.0.kind {
-        MatchActionKind::Raw(_) => 0,
-        MatchActionKind::Bind { arg, action, .. } => {
-            1 + raw_lambda_clone_footprint(arg).0 + match_action_take_clone_nodes(action)
-        }
-    }
-}
-
 fn match_action_patch_clone_nodes(action: &MatchAction) -> usize {
     match &action.0.kind {
-        MatchActionKind::Raw(raw) => patch_guarded_clone_nodes(
-            raw.lock()
-                .unwrap()
-                .as_ref()
-                .expect("guard patch footprint after materialization"),
-        ),
+        MatchActionKind::Raw(raw) => patch_guarded_clone_nodes(raw),
         MatchActionKind::Bind { arg, action, .. } => {
             1 + raw_lambda_clone_footprint(arg).0 + match_action_patch_clone_nodes(action)
         }
@@ -2563,13 +2477,7 @@ impl MakeKeyWriter {
 
     fn write_action_after_count(&mut self, action: &MatchAction, out: &mut String) -> Option<()> {
         match &action.0.kind {
-            MatchActionKind::Raw(raw) => self.write_raw_after_count(
-                raw.lock()
-                    .unwrap()
-                    .as_ref()
-                    .expect("match action key after materialization"),
-                out,
-            ),
+            MatchActionKind::Raw(raw) => self.write_raw_after_count(raw, out),
             MatchActionKind::Bind {
                 kind,
                 id,
@@ -2886,12 +2794,10 @@ fn same_var_body(body: &KeyBody<'_>, id: &Ident) -> bool {
     match body {
         KeyBody::Raw(RawLambda::Lvar(v)) => v.same(id),
         KeyBody::Action(action) => {
-            matches!(&action.0.kind, MatchActionKind::Raw(raw)
-                if matches!(raw.lock().unwrap().as_ref(), Some(RawLambda::Lvar(v)) if v.same(id)))
+            matches!(&action.0.kind, MatchActionKind::Raw(RawLambda::Lvar(v)) if v.same(id))
         }
         KeyBody::Code(MatchCode::Action(action)) => {
-            matches!(&action.0.kind, MatchActionKind::Raw(raw)
-                if matches!(raw.lock().unwrap().as_ref(), Some(RawLambda::Lvar(v)) if v.same(id)))
+            matches!(&action.0.kind, MatchActionKind::Raw(RawLambda::Lvar(v)) if v.same(id))
         }
         _ => false,
     }
@@ -8891,13 +8797,7 @@ fn lower_bind(v: &Ident, arg: &RawLambda, lam: RawLambda) -> RawLambda {
 
 fn approx_present_action(v: &Ident, action: &MatchAction) -> bool {
     match &action.0.kind {
-        MatchActionKind::Raw(raw) => approx_present(
-            v,
-            raw.lock()
-                .unwrap()
-                .as_ref()
-                .expect("match action presence after materialization"),
-        ),
+        MatchActionKind::Raw(raw) => approx_present(v, raw),
         MatchActionKind::Bind {
             kind: LetKind::Alias,
             arg,
@@ -8951,52 +8851,32 @@ fn lower_bind_action(v: &Ident, arg: &RawLambda, action: MatchAction) -> MatchCo
         MatchActionKind::Bind { .. } => {
             MatchCode::Action(action).bind(LetKind::Alias, v.clone(), arg.clone())
         }
-        MatchActionKind::Raw(raw) => {
-            enum LowerRaw {
-                ReplaceWithArg,
-                Unchanged,
-                RewriteBranch,
-                Bind,
-            }
-            let decision = {
-                let raw = raw.lock().unwrap();
-                let raw = raw
-                    .as_ref()
-                    .expect("lower_bind after match action materialization");
-                match raw {
-                    RawLambda::Lvar(u) if u.same(v) && u.name() == "*sth*" => {
-                        LowerRaw::ReplaceWithArg
-                    }
-                    RawLambda::LifThenElse(condition, ifso, ifnot) => {
-                        match (
-                            approx_present(v, condition),
-                            approx_present(v, ifso),
-                            approx_present(v, ifnot),
-                        ) {
-                            (false, false, false) => LowerRaw::Unchanged,
-                            (false, true, false) | (false, false, true) => LowerRaw::RewriteBranch,
-                            _ => LowerRaw::Bind,
-                        }
-                    }
-                    RawLambda::Lswitch(selector, switch, _)
-                        if !approx_present(v, selector)
-                            && ((switch.sw_consts.len() == 1 && switch.sw_blocks.is_empty())
-                                || (switch.sw_consts.is_empty()
-                                    && switch.sw_blocks.len() == 1)) =>
-                    {
-                        LowerRaw::RewriteBranch
-                    }
-                    _ => LowerRaw::Bind,
+        MatchActionKind::Raw(RawLambda::Lvar(u)) if u.same(v) && u.name() == "*sth*" => {
+            MatchCode::raw(arg.clone())
+        }
+        MatchActionKind::Raw(RawLambda::LifThenElse(condition, ifso, ifnot)) => {
+            let present = (
+                approx_present(v, condition),
+                approx_present(v, ifso),
+                approx_present(v, ifnot),
+            );
+            match present {
+                (false, false, false) => MatchCode::Action(action),
+                (false, true, false) | (false, false, true) => {
+                    MatchCode::raw(lower_bind(v, arg, action.into_raw()))
                 }
-            };
-            match decision {
-                LowerRaw::ReplaceWithArg => MatchCode::raw(arg.clone()),
-                LowerRaw::Unchanged => MatchCode::Action(action),
-                LowerRaw::RewriteBranch => MatchCode::raw(lower_bind(v, arg, action.into_raw())),
-                LowerRaw::Bind => {
-                    MatchCode::Action(action).bind(LetKind::Alias, v.clone(), arg.clone())
-                }
+                _ => MatchCode::Action(action).bind(LetKind::Alias, v.clone(), arg.clone()),
             }
+        }
+        MatchActionKind::Raw(RawLambda::Lswitch(selector, switch, _))
+            if !approx_present(v, selector)
+                && ((switch.sw_consts.len() == 1 && switch.sw_blocks.is_empty())
+                    || (switch.sw_consts.is_empty() && switch.sw_blocks.len() == 1)) =>
+        {
+            MatchCode::raw(lower_bind(v, arg, action.into_raw()))
+        }
+        MatchActionKind::Raw(_) => {
+            MatchCode::Action(action).bind(LetKind::Alias, v.clone(), arg.clone())
         }
     }
 }
