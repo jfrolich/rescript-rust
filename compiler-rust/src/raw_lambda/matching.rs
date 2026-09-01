@@ -11202,4 +11202,29 @@ mod tests {
                     && matches!(body.as_ref(), RawLambda::Llet(LetKind::Alias, inner, _, _) if inner.same(&first))
         ));
     }
+
+    #[test]
+    fn differently_bound_shared_terminal_actions_materialize_independently() {
+        let base = MatchAction::new(RawLambda::Lsequence(
+            Box::new(RawLambda::Lconst(crate::lambda::Constant::int(1))),
+            Box::new(RawLambda::Lconst(crate::lambda::Constant::int(2))),
+        ));
+        let x = Ident::create_local("x");
+        let y = Ident::create_local("y");
+        let first = base.clone().bind(
+            LetKind::Alias,
+            x.clone(),
+            RawLambda::Lconst(crate::lambda::Constant::int(3)),
+        );
+        let second = base.bind(
+            LetKind::Alias,
+            y.clone(),
+            RawLambda::Lconst(crate::lambda::Constant::int(4)),
+        );
+
+        let first = first.into_raw();
+        let second = second.into_raw();
+        assert!(matches!(first, RawLambda::Llet(LetKind::Alias, id, _, _) if id.same(&x)));
+        assert!(matches!(second, RawLambda::Llet(LetKind::Alias, id, _, _) if id.same(&y)));
+    }
 }
