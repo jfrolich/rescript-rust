@@ -60,9 +60,48 @@ bypassed the old fallback that deep-copies the signature, rewrites declaration
 paths, and repairs flattened child prefixes. Passing JavaScript hashes and the
 current parity corpus did not establish OCaml-equivalent type identity, path
 shape, mutation, or force order for direct flattened-root access. The behavior
-change was reverted. Any future attempt needs a real per-component
-`Subst.type_declaration` / `Subst.value_description` boundary plus focused
-qualified-alias and exact-flattened-root typedtree/force-order coverage.
+change was reverted. Any future attempt needs the whole-component
+`prefix_idents` / `Subst.type_declaration` / `Subst.value_description` force
+boundary plus focused qualified-alias and exact-flattened-root
+identity/mutation/order coverage.
+
+A follow-up at exact head `576fecb35` tested whether that boundary could be
+implemented per declaration. It could not. `components_of_module_maker` forces
+one component thunk, runs `prefix_idents` over the complete signature, then
+uses `List.iter2` to apply `Subst.value_description` and
+`Subst.type_declaration` to every direct item in source order
+(`compiler/ml/env.ml:1516-1559`). `Subst.value_description` copies its type and
+cleans temporary substitutions at `compiler/ml/subst.ml:303-309`;
+`Subst.type_declaration` copies parameters, constructor or label payloads, and
+the manifest with one cleanup after that declaration at
+`compiler/ml/subst.ml:245-301`. The same component force derives every
+constructor and label table. Only child module declarations and child component
+tables remain behind their separate thunks at `compiler/ml/env.ml:1567-1578`.
+Alias strengthening does not move this boundary
+(`compiler/ml/mtype.ml:32-49`, `compiler/ml/mtype.ml:98-102`), and each copied
+type node still allocates through `compiler/ml/btype.ml:46-48`.
+
+The rejected follow-up added per-type `OnceCell` entries and copied only a
+requested declaration. It also inspected raw constructor and label names to
+avoid forcing unmatched declarations. That was the opposite of the reference
+whole-component force and would have made declaration identity, mutation, and
+stamp allocation depend on lookup order. The fixture and implementation
+commits were normal-reverted before Tella measurement.
+
+Rust already memoizes a selected component view for its TypeContext: published
+qualified paths use `TypeContext::qualified_module_components_cache`, local
+module bindings use `StoredModuleComponents::cached`, and both reuse the same
+`StructureComponentTables` for later lookups. Probe views intentionally do not
+publish. The remaining repeated work is across independent compilation
+TypeContexts, where `TypeExprRef` handles cannot be shared. Caching that work
+would require the forbidden cross-context declaration sharing or a broad
+persistent cache. No safe exact optimization remained after this audit, so no
+candidate benchmark was run. A required Tella screening attempt also confirmed
+that the installed runtime at
+`/Users/jake/dev/tella-fusion/node_modules/@rescript/runtime` lacks the source
+`rescript.json` needed by in-process runtime compilation; the audit stopped
+before substituting the approved source runtime because the candidate was
+already semantically invalid.
 
 Before rejection, ten alternating paired 12-worker release `hyperfine` runs against exact base
 `436ec59dd` improved wall time from `4.625s +/- 0.027s`
