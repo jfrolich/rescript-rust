@@ -222,6 +222,17 @@ impl MatchActionData {
     }
 }
 
+struct MatchCodeSwitch {
+    sw_numconsts: usize,
+    sw_consts_full: bool,
+    sw_consts: Vec<(crate::lambda::SwitchKey, MatchCode)>,
+    sw_numblocks: usize,
+    sw_blocks_full: bool,
+    sw_blocks: Vec<(crate::lambda::SwitchKey, MatchCode)>,
+    sw_failaction: Option<Box<MatchCode>>,
+    sw_dispatch: crate::lambda::SwitchDispatch,
+}
+
 /// Owned code assembled around shared terminal actions.
 enum MatchCode {
     Action(MatchAction),
@@ -234,6 +245,11 @@ enum MatchCode {
         body: Box<MatchCode>,
         exit: (i32, Vec<Ident>),
         handler: Box<MatchCode>,
+    },
+    Switch {
+        arg: RawLambda,
+        switch: MatchCodeSwitch,
+        loc: Location,
     },
     Bind {
         kind: LetKind,
@@ -269,6 +285,28 @@ impl MatchCode {
                 Box::new(body.into_raw()),
                 exit,
                 Box::new(handler.into_raw()),
+            ),
+            Self::Switch { arg, switch, loc } => RawLambda::Lswitch(
+                Box::new(arg),
+                RawLambdaSwitch {
+                    sw_numconsts: switch.sw_numconsts,
+                    sw_consts_full: switch.sw_consts_full,
+                    sw_consts: switch
+                        .sw_consts
+                        .into_iter()
+                        .map(|(key, code)| (key, code.into_raw()))
+                        .collect(),
+                    sw_numblocks: switch.sw_numblocks,
+                    sw_blocks_full: switch.sw_blocks_full,
+                    sw_blocks: switch
+                        .sw_blocks
+                        .into_iter()
+                        .map(|(key, code)| (key, code.into_raw()))
+                        .collect(),
+                    sw_failaction: switch.sw_failaction.map(|code| Box::new(code.into_raw())),
+                    sw_dispatch: switch.sw_dispatch,
+                },
+                loc,
             ),
             Self::Bind {
                 kind,
@@ -318,7 +356,7 @@ impl MatchCode {
         match self {
             Self::Action(action) => action.is_guarded(),
             Self::If { ifnot, .. } => ifnot.is_guarded(),
-            Self::StaticCatch { .. } => false,
+            Self::StaticCatch { .. } | Self::Switch { .. } => false,
             Self::Bind { body, .. } => body.is_guarded(),
         }
     }
@@ -335,6 +373,19 @@ impl MatchCode {
                 fv.extend(ifso.free_variables());
                 fv.extend(ifnot.free_variables());
                 fv
+            }
+            Self::Switch { arg, switch, .. } => {
+                let mut free = raw_lambda_free_variables(arg);
+                for (_, code) in &switch.sw_consts {
+                    free.extend(code.free_variables());
+                }
+                for (_, code) in &switch.sw_blocks {
+                    free.extend(code.free_variables());
+                }
+                if let Some(code) = &switch.sw_failaction {
+                    free.extend(code.free_variables());
+                }
+                free
             }
             Self::StaticCatch {
                 body,
@@ -372,6 +423,31 @@ impl MatchCode {
                     Box::new(condition.clone()),
                     Box::new(clone_uninstrumented(ifso)),
                     Box::new(clone_uninstrumented(ifnot)),
+                ),
+                MatchCode::Switch { arg, switch, loc } => RawLambda::Lswitch(
+                    Box::new(arg.clone()),
+                    RawLambdaSwitch {
+                        sw_numconsts: switch.sw_numconsts,
+                        sw_consts_full: switch.sw_consts_full,
+                        sw_consts: switch
+                            .sw_consts
+                            .iter()
+                            .map(|(key, code)| (key.clone(), clone_uninstrumented(code)))
+                            .collect(),
+                        sw_numblocks: switch.sw_numblocks,
+                        sw_blocks_full: switch.sw_blocks_full,
+                        sw_blocks: switch
+                            .sw_blocks
+                            .iter()
+                            .map(|(key, code)| (key.clone(), clone_uninstrumented(code)))
+                            .collect(),
+                        sw_failaction: switch
+                            .sw_failaction
+                            .as_ref()
+                            .map(|code| Box::new(clone_uninstrumented(code))),
+                        sw_dispatch: switch.sw_dispatch.clone(),
+                    },
+                    loc.clone(),
                 ),
                 MatchCode::StaticCatch {
                     body,
@@ -524,6 +600,21 @@ fn match_code_clone_footprint(code: &MatchCode) -> (usize, usize, usize) {
                     1 + raw_lambda_clone_footprint(condition).0 + ifso_nodes + ifnot_nodes,
                     ifso_fanout.max(ifnot_fanout),
                 )
+            }
+            MatchCode::Switch { arg, switch, .. } => {
+                let mut nodes = 1 + raw_lambda_clone_footprint(arg).0;
+                let mut references = 0;
+                for (_, code) in switch.sw_consts.iter().chain(&switch.sw_blocks) {
+                    let (code_nodes, code_references) = visit(code);
+                    nodes += code_nodes;
+                    references = references.max(code_references);
+                }
+                if let Some(code) = &switch.sw_failaction {
+                    let (code_nodes, code_references) = visit(code);
+                    nodes += code_nodes;
+                    references = references.max(code_references);
+                }
+                (nodes, references)
             }
             MatchCode::StaticCatch { body, handler, .. } => {
                 let (body_nodes, body_fanout) = visit(body);
@@ -2506,6 +2597,47 @@ impl MakeKeyWriter {
                 out.push(',');
                 self.write_code(ifnot, out)?;
                 out.push(')');
+                Some(())
+            }
+            MatchCode::Switch { arg, switch, loc } => {
+                out.push_str("Lswitch(");
+                self.write_raw(arg, out)?;
+                write!(
+                    out,
+                    ",numc={},fullc={},consts=[",
+                    switch.sw_numconsts, switch.sw_consts_full
+                )
+                .ok()?;
+                for (index, (tag, code)) in switch.sw_consts.iter().enumerate() {
+                    if index > 0 {
+                        out.push(',');
+                    }
+                    write!(out, "{tag}:").ok()?;
+                    self.write_code(code, out)?;
+                }
+                write!(
+                    out,
+                    "],numb={},fullb={},blocks=[",
+                    switch.sw_numblocks, switch.sw_blocks_full
+                )
+                .ok()?;
+                for (index, (tag, code)) in switch.sw_blocks.iter().enumerate() {
+                    if index > 0 {
+                        out.push(',');
+                    }
+                    write!(out, "{tag}:").ok()?;
+                    self.write_code(code, out)?;
+                }
+                out.push_str("],fail=");
+                match &switch.sw_failaction {
+                    None => out.push_str("None"),
+                    Some(code) => {
+                        out.push_str("Some(");
+                        self.write_code(code, out)?;
+                        out.push(')');
+                    }
+                }
+                write!(out, ",names={:?},loc={loc:?})", switch.sw_dispatch).ok()?;
                 Some(())
             }
             MatchCode::StaticCatch {
@@ -6824,6 +6956,50 @@ fn sarg_make_switch(
 // Action sharing for Lswitch argument (OCaml matching.ml lines 1761-1833)
 // ============================================================================
 
+fn as_simple_exit_action(action: &MatchAction) -> Option<i32> {
+    match &action.0.kind {
+        MatchActionKind::Raw(raw) => as_simple_exit(raw),
+        MatchActionKind::Bind {
+            kind: LetKind::Alias,
+            action,
+            ..
+        } => as_simple_exit_action(action),
+        MatchActionKind::Bind { .. } => None,
+    }
+}
+
+fn as_simple_exit_code(code: &MatchCode) -> Option<i32> {
+    match code {
+        MatchCode::Action(action) => as_simple_exit_action(action),
+        MatchCode::Bind {
+            kind: LetKind::Alias,
+            body,
+            ..
+        } => as_simple_exit_code(body),
+        _ => None,
+    }
+}
+
+fn materialize_resolved_code(
+    resolved: &mut [Option<MatchCode>],
+    use_counts: &[usize],
+    index: usize,
+) -> MatchCode {
+    if use_counts[index] == 1 {
+        resolved[index]
+            .take()
+            .expect("single-use match code should still be available")
+    } else {
+        let exit = as_simple_exit_code(
+            resolved[index]
+                .as_ref()
+                .expect("shared match code should still be available"),
+        )
+        .expect("only static exits may have repeated resolved uses");
+        MatchCode::raw(make_exit(exit))
+    }
+}
+
 fn share_match_switch(
     sw_numconsts: usize,
     sw_consts_full: bool,
@@ -6834,7 +7010,7 @@ fn share_match_switch(
     sw_failaction: Option<MatchCode>,
     sw_dispatch: crate::lambda::SwitchDispatch,
     next_raise_count: &mut i32,
-) -> (Vec<(i32, RawLambda)>, RawLambdaSwitch) {
+) -> (Vec<(i32, MatchCode)>, MatchCodeSwitch) {
     let mut store = MatchCodeStore::new();
     let fail = sw_failaction.map(|code| store.store(true, code));
     let consts: Vec<_> = sw_consts
@@ -6851,16 +7027,15 @@ fn share_match_switch(
         .get()
         .into_iter()
         .map(|stored| match stored {
-            StoredMatchCode::Single(code) => code.into_raw(),
-            StoredMatchCode::Shared(code) => {
-                let raw = code.into_raw();
-                let (exit, wrapper) = make_catch_delayed(raw, next_raise_count);
-                let dummy = RawLambda::Lconst(crate::lambda::Constant::int(0));
-                if let RawLambda::LstaticCatch(_, (caught, _), handler) = wrapper(dummy) {
-                    handlers.push((caught, *handler));
+            StoredMatchCode::Single(code) => code,
+            StoredMatchCode::Shared(code) => match as_simple_exit_code(&code) {
+                Some(exit) => MatchCode::raw(make_exit(exit)),
+                None => {
+                    let exit = bump_raise_count(next_raise_count, "matching::share_match_switch");
+                    handlers.push((exit, code));
+                    MatchCode::raw(make_exit(exit))
                 }
-                make_exit(exit)
-            }
+            },
         })
         .collect();
 
@@ -6876,19 +7051,14 @@ fn share_match_switch(
     }
     let mut resolved = resolved.into_iter().map(Some).collect::<Vec<_>>();
 
-    let failaction = fail.map(|index| {
-        Box::new(materialize_resolved_action(
-            &mut resolved,
-            &use_counts,
-            index,
-        ))
-    });
+    let failaction =
+        fail.map(|index| Box::new(materialize_resolved_code(&mut resolved, &use_counts, index)));
     let consts = consts
         .into_iter()
         .map(|(key, index)| {
             (
                 key,
-                materialize_resolved_action(&mut resolved, &use_counts, index),
+                materialize_resolved_code(&mut resolved, &use_counts, index),
             )
         })
         .collect();
@@ -6897,14 +7067,14 @@ fn share_match_switch(
         .map(|(key, index)| {
             (
                 key,
-                materialize_resolved_action(&mut resolved, &use_counts, index),
+                materialize_resolved_code(&mut resolved, &use_counts, index),
             )
         })
         .collect();
 
     (
         handlers,
-        RawLambdaSwitch {
+        MatchCodeSwitch {
             sw_numconsts,
             sw_consts_full,
             sw_consts: consts,
@@ -6915,6 +7085,49 @@ fn share_match_switch(
             sw_dispatch,
         },
     )
+}
+
+fn reintroduce_fail_code(mut switch: MatchCodeSwitch) -> MatchCodeSwitch {
+    if switch.sw_failaction.is_some() {
+        return switch;
+    }
+    let mut counts = HashMap::<i32, usize>::new();
+    for (_, code) in switch.sw_consts.iter().chain(&switch.sw_blocks) {
+        if let Some(exit) = as_simple_exit_code(code) {
+            *counts.entry(exit).or_default() += 1;
+        }
+    }
+    let Some((exit, count)) =
+        counts
+            .into_iter()
+            .max_by(|(left_exit, left_count), (right_exit, right_count)| {
+                left_count.cmp(right_count).then(left_exit.cmp(right_exit))
+            })
+    else {
+        return switch;
+    };
+    if count < 3 {
+        return switch;
+    }
+    switch
+        .sw_consts
+        .retain(|(_, code)| as_simple_exit_code(code) != Some(exit));
+    switch
+        .sw_blocks
+        .retain(|(_, code)| as_simple_exit_code(code) != Some(exit));
+    switch.sw_failaction = Some(Box::new(MatchCode::raw(make_exit(exit))));
+    switch
+}
+
+fn apply_handlers_code(mut code: MatchCode, handlers: Vec<(i32, MatchCode)>) -> MatchCode {
+    for (exit, handler) in handlers {
+        if as_simple_exit_code(&code) == Some(exit) {
+            code = handler;
+        } else {
+            code = MatchCode::static_catch(code, (exit, Vec::new()), handler);
+        }
+    }
+    code
 }
 
 /// Deduplicate switch actions by wrapping shared actions in catch/exit.
@@ -8038,7 +8251,7 @@ fn combine_constructor(
         Vec<Pattern>,
     ),
     next_raise_count: &mut i32,
-) -> (RawLambda, Jumps) {
+) -> (MatchCode, Jumps) {
     let (tag_lambda_list, total1, pats) = c_div;
 
     if matches!(cstr.cstr_kind, crate::types::ConstructorKind::Extension(_)) {
@@ -8082,7 +8295,7 @@ fn combine_constructor(
                 tests.bind(LetKind::Alias, tag, arg)
             }
         };
-        (lambda1.into_raw(), jumps_union(&local_jumps, &total1))
+        (lambda1, jumps_union(&local_jumps, &total1))
     } else {
         // Regular concrete type
         let reference = match cstr.cstr_kind {
@@ -8123,7 +8336,7 @@ fn combine_constructor(
                 .into_iter()
                 .next()
                 .expect("non-empty action list after same-action check");
-            act.into_raw() // Identical actions, no failure
+            act // Identical actions, no failure
         } else {
             let (mut consts, mut nonconsts) = split_cases(actions);
             let is_option = constructor_has_optional_shape(cstr);
@@ -8152,11 +8365,7 @@ fn combine_constructor(
                         loc: loc.clone(),
                     })
                 };
-                RawLambda::LifThenElse(
-                    Box::new(test_arg),
-                    Box::new(act2.into_raw()),
-                    Box::new(act1.into_raw()),
-                )
+                MatchCode::if_then_else(test_arg, act2, act1)
             } else if num_consts == 2
                 && num_nonconsts == 0
                 && consts.len() == 2
@@ -8172,10 +8381,10 @@ fn combine_constructor(
                         _ => {}
                     }
                 }
-                RawLambda::LifThenElse(
-                    Box::new(arg),
-                    Box::new(true_action.expect("true action").into_raw()),
-                    Box::new(false_action.expect("false action").into_raw()),
+                MatchCode::if_then_else(
+                    arg,
+                    true_action.expect("true action"),
+                    false_action.expect("false action"),
                 )
             } else {
                 // Emit a switch. OCaml computes `act0` at
@@ -8212,9 +8421,13 @@ fn combine_constructor(
                     crate::lambda::SwitchDispatch::Variant(matching_facts),
                     next_raise_count,
                 );
-                let sw = reintroduce_fail(sw);
-                let result = RawLambda::Lswitch(Box::new(arg), sw, loc.clone());
-                apply_handlers(result, handlers)
+                let switch = reintroduce_fail_code(sw);
+                let result = MatchCode::Switch {
+                    arg,
+                    switch,
+                    loc: loc.clone(),
+                };
+                apply_handlers_code(result, handlers)
             }
         };
         (lambda1, jumps_union(&local_jumps, &total1))
@@ -8826,7 +9039,7 @@ fn approx_present_code(v: &Ident, code: &MatchCode) -> bool {
             body,
             ..
         } => approx_present(v, arg) || approx_present_code(v, body),
-        MatchCode::StaticCatch { .. } | MatchCode::Bind { .. } => true,
+        MatchCode::StaticCatch { .. } | MatchCode::Switch { .. } | MatchCode::Bind { .. } => true,
     }
 }
 
@@ -8915,6 +9128,31 @@ fn lower_bind_code(v: &Ident, arg: &RawLambda, code: MatchCode) -> MatchCode {
                     ifnot,
                 }
                 .bind(LetKind::Alias, v.clone(), arg.clone()),
+            }
+        }
+        MatchCode::Switch {
+            arg: selector,
+            mut switch,
+            loc,
+        } if !approx_present(v, &selector)
+            && ((switch.sw_consts.len() == 1 && switch.sw_blocks.is_empty())
+                || (switch.sw_consts.is_empty() && switch.sw_blocks.len() == 1)) =>
+        {
+            if switch.sw_consts.len() == 1 {
+                let (key, branch) = switch.sw_consts.pop().unwrap();
+                switch
+                    .sw_consts
+                    .push((key, lower_bind_code(v, arg, branch)));
+            } else {
+                let (key, branch) = switch.sw_blocks.pop().unwrap();
+                switch
+                    .sw_blocks
+                    .push((key, lower_bind_code(v, arg, branch)));
+            }
+            MatchCode::Switch {
+                arg: selector,
+                switch,
+                loc,
             }
         }
         MatchCode::Bind {
@@ -9272,7 +9510,7 @@ fn do_compile_matching(
                         partial,
                         &|ctx, pm| divide_constant(ctx, pm),
                         &|ctx, def, c_div, nrc| {
-                            combine_constant(
+                            let (raw, jumps) = combine_constant(
                                 names.clone(),
                                 loc.clone(),
                                 arg_clone.clone(),
@@ -9282,7 +9520,8 @@ fn do_compile_matching(
                                 def,
                                 materialize_compiled_div(c_div),
                                 nrc,
-                            )
+                            );
+                            (MatchCode::raw(raw), jumps)
                         },
                         ctx,
                         pm,
@@ -9328,7 +9567,7 @@ fn do_compile_matching(
                         partial,
                         &|ctx, pm| divide_array(ctx, pm),
                         &|ctx, def, c_div, nrc| {
-                            combine_array(
+                            let (raw, jumps) = combine_array(
                                 ctx_ref,
                                 names.clone(),
                                 loc.clone(),
@@ -9338,7 +9577,8 @@ fn do_compile_matching(
                                 def,
                                 materialize_compiled_div(c_div),
                                 nrc,
-                            )
+                            );
+                            (MatchCode::raw(raw), jumps)
                         },
                         ctx,
                         pm,
@@ -9358,7 +9598,7 @@ fn do_compile_matching(
                         partial,
                         &move |ctx, pm| divide_variant(ctx_ref, &row_desc, ctx, pm),
                         &|ctx, def, c_div, nrc| {
-                            combine_variant(
+                            let (raw, jumps) = combine_variant(
                                 ctx_ref,
                                 names.clone(),
                                 loc.clone(),
@@ -9369,7 +9609,8 @@ fn do_compile_matching(
                                 def,
                                 materialize_compiled_div(c_div),
                                 nrc,
-                            )
+                            );
+                            (MatchCode::raw(raw), jumps)
                         },
                         ctx,
                         pm,
@@ -9449,7 +9690,7 @@ fn compile_test_wrapper<K: Clone>(
         &DefaultEnv,
         (Vec<(K, MatchCode)>, Jumps, Vec<Pattern>),
         &mut i32,
-    ) -> (RawLambda, Jumps),
+    ) -> (MatchCode, Jumps),
     ctx: &[Ctx],
     pm: &PatternMatching,
     next_raise_count: &mut i32,
@@ -9481,7 +9722,7 @@ fn compile_test_wrapper<K: Clone>(
             let mut next_raise = raise_counter.get();
             let (lambda, jumps) = combine_fn(ctx, &pm.default, c_div, &mut next_raise);
             raise_counter.set(next_raise);
-            Ok((MatchCode::raw(lambda), jumps))
+            Ok((lambda, jumps))
         }
     };
     *next_raise_count = raise_counter.get();
@@ -10666,7 +10907,7 @@ mod tests {
     fn direct_switch(
         actions: Vec<MatchCode>,
         next_raise_count: &mut i32,
-    ) -> (Vec<(i32, RawLambda)>, RawLambdaSwitch) {
+    ) -> (Vec<(i32, MatchCode)>, MatchCodeSwitch) {
         share_match_switch(
             actions.len(),
             true,
@@ -10696,10 +10937,8 @@ mod tests {
         assert!(handlers.is_empty());
         assert_eq!(next_raise_count, 40);
         assert!(matches!(
-            switch.sw_consts.as_slice(),
-            [(_, RawLambda::Lsequence(first, second))]
-                if matches!(first.as_ref(), RawLambda::Lconst(_))
-                    && matches!(second.as_ref(), RawLambda::Lconst(_))
+            switch.sw_consts[0].1.clone_to_raw_for_test(),
+            RawLambda::Lsequence(_, _)
         ));
     }
 
@@ -10716,13 +10955,18 @@ mod tests {
         );
 
         assert_eq!(next_raise_count, 71);
+        assert_eq!(handlers.len(), 1);
+        assert_eq!(handlers[0].0, 71);
         assert!(matches!(
-            handlers.as_slice(),
-            [(71, RawLambda::Lsequence(_, _))]
+            handlers[0].1.clone_to_raw_for_test(),
+            RawLambda::Lsequence(_, _)
         ));
-        assert!(switch.sw_consts.iter().all(|(_, action)| {
-            matches!(action, RawLambda::LstaticRaise(71, args) if args.is_empty())
-        }));
+        assert!(
+            switch
+                .sw_consts
+                .iter()
+                .all(|(_, action)| { as_simple_exit_code(action) == Some(71) })
+        );
     }
 
     #[test]
@@ -10754,12 +10998,19 @@ mod tests {
             handlers.iter().map(|(exit, _)| *exit).collect::<Vec<_>>(),
             vec![9, 10]
         );
-        assert!(
-            matches!(switch.sw_failaction.as_deref(), Some(RawLambda::LstaticRaise(9, args)) if args.is_empty())
+        assert_eq!(
+            switch
+                .sw_failaction
+                .as_deref()
+                .and_then(as_simple_exit_code),
+            Some(9)
         );
-        assert!(switch.sw_consts.iter().all(|(_, action)| {
-            matches!(action, RawLambda::LstaticRaise(10, args) if args.is_empty())
-        }));
+        assert!(
+            switch
+                .sw_consts
+                .iter()
+                .all(|(_, action)| { as_simple_exit_code(action) == Some(10) })
+        );
     }
 
     #[test]
@@ -10780,9 +11031,12 @@ mod tests {
         let (handlers, switch) = direct_switch(vec![nested(), nested()], &mut next_raise_count);
         assert_eq!(handlers.len(), 1);
         assert_eq!(next_raise_count, 101);
-        assert!(switch.sw_consts.iter().all(|(_, action)| {
-            matches!(action, RawLambda::LstaticRaise(101, args) if args.is_empty())
-        }));
+        assert!(
+            switch
+                .sw_consts
+                .iter()
+                .all(|(_, action)| { as_simple_exit_code(action) == Some(101) })
+        );
     }
 
     #[test]
@@ -10925,9 +11179,12 @@ mod tests {
         );
         assert!(handlers.is_empty());
         assert_eq!(next_raise_count, 50);
-        assert!(switch.sw_consts.iter().all(|(_, action)| {
-            matches!(action, RawLambda::LstaticRaise(7, args) if args.is_empty())
-        }));
+        assert!(
+            switch
+                .sw_consts
+                .iter()
+                .all(|(_, action)| { as_simple_exit_code(action) == Some(7) })
+        );
     }
 
     #[test]
@@ -10982,14 +11239,15 @@ mod tests {
             crate::lambda::SwitchDispatch::Direct,
             &mut next_raise_count,
         );
-        let nested = apply_handlers(
-            RawLambda::Lswitch(
-                Box::new(RawLambda::Lconst(crate::lambda::Constant::int(0))),
+        let nested = apply_handlers_code(
+            MatchCode::Switch {
+                arg: RawLambda::Lconst(crate::lambda::Constant::int(0)),
                 switch,
-                Location::none(),
-            ),
+                loc: Location::none(),
+            },
             handlers,
-        );
+        )
+        .into_raw();
         assert!(matches!(
             nested,
             RawLambda::LstaticCatch(outer_body, (32, _), outer_handler)
@@ -11036,15 +11294,17 @@ mod tests {
             handlers.iter().map(|(exit, _)| *exit).collect::<Vec<_>>(),
             vec![61]
         );
-        assert!(
-            matches!(switch.sw_failaction.as_deref(), Some(RawLambda::LstaticRaise(61, args)) if args.is_empty())
+        assert_eq!(
+            switch
+                .sw_failaction
+                .as_deref()
+                .and_then(as_simple_exit_code),
+            Some(61)
         );
-        assert!(
-            matches!(switch.sw_consts.as_slice(), [(_, RawLambda::LstaticRaise(61, args))] if args.is_empty())
-        );
+        assert_eq!(as_simple_exit_code(&switch.sw_consts[0].1), Some(61));
         assert!(matches!(
-            switch.sw_blocks.as_slice(),
-            [(_, RawLambda::Lsequence(_, _))]
+            switch.sw_blocks[0].1.clone_to_raw_for_test(),
+            RawLambda::Lsequence(_, _)
         ));
     }
 
