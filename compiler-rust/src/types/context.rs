@@ -2941,6 +2941,7 @@ impl TypeContext {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use proptest::prelude::*;
 
     #[test]
     fn downstream_id_generator_accessor_keeps_compilation_identity() {
@@ -3111,6 +3112,41 @@ mod tests {
 
         assert!(matches!(&*ctx.get_desc(ty), TypeDesc::Tvar(Some(name)) if name == "original"));
         assert_eq!(ctx.get_level(ty), level);
+    }
+
+    proptest! {
+        #[test]
+        fn mutation_trail_restores_generated_repeated_type_mutations(
+            mutations in prop::collection::vec((0usize..8, any::<bool>(), -10i32..100), 1..128),
+        ) {
+            let ctx = TypeContext::new(std::sync::Arc::new(IdGenerator::new()));
+            let types: Vec<_> = (0..8)
+                .map(|index| ctx.new_var(Some(format!("original-{index}"))))
+                .collect();
+            let original_levels: Vec<_> = types.iter().map(|ty| ctx.get_level(*ty)).collect();
+            let snapshot = ctx.snapshot_type_state();
+
+            for (index, nil, level) in mutations {
+                let ty = types[index];
+                let desc = if nil {
+                    TypeDesc::Tnil
+                } else {
+                    TypeDesc::Tvar(Some(format!("mutated-{index}-{level}")))
+                };
+                ctx.set_desc(ty, desc);
+                ctx.set_level(ty, level);
+            }
+            ctx.restore_type_state(snapshot);
+
+            for (index, ty) in types.into_iter().enumerate() {
+                let expected_name = format!("original-{index}");
+                prop_assert!(matches!(
+                    &*ctx.get_desc(ty),
+                    TypeDesc::Tvar(Some(name)) if name == &expected_name
+                ));
+                prop_assert_eq!(ctx.get_level(ty), original_levels[index]);
+            }
+        }
     }
 
     #[test]
