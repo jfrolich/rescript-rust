@@ -796,7 +796,8 @@ type RecordPatternField = (
     bool,
 );
 
-fn records_args_for_le_pats(
+#[cfg(test)]
+fn records_args_for_le_pats_old(
     l1: &[RecordPatternField],
     l2: &[RecordPatternField],
 ) -> (Vec<Pattern>, Vec<Pattern>) {
@@ -842,6 +843,51 @@ fn records_args_for_le_pats(
     (ps, qs)
 }
 
+/// Compare two sorted record-field streams without materializing aligned rows.
+///
+/// `Parmatch.records_args` inserts `omega` on the side missing each `lbl_pos`
+/// before `le_pats` compares left to right (compiler/ml/parmatch.ml:277-294,
+/// 1754-1770). Preserve that direction and short-circuit order while borrowing
+/// the present field patterns.
+fn records_le_pats(l1: &[RecordPatternField], l2: &[RecordPatternField]) -> bool {
+    let omega = omega();
+    let mut i = 0;
+    let mut j = 0;
+
+    while i < l1.len() || j < l2.len() {
+        let (left, right) = match (l1.get(i), l2.get(j)) {
+            (Some((_, lbl1, p1, _)), Some((_, lbl2, p2, _))) => {
+                if lbl1.lbl_pos < lbl2.lbl_pos {
+                    i += 1;
+                    (p1, &omega)
+                } else if lbl1.lbl_pos > lbl2.lbl_pos {
+                    j += 1;
+                    (&omega, p2)
+                } else {
+                    i += 1;
+                    j += 1;
+                    (p1, p2)
+                }
+            }
+            (Some((_, _, p1, _)), None) => {
+                i += 1;
+                (p1, &omega)
+            }
+            (None, Some((_, _, p2, _))) => {
+                j += 1;
+                (&omega, p2)
+            }
+            (None, None) => break,
+        };
+
+        if !le_pat(left, right) {
+            return false;
+        }
+    }
+
+    true
+}
+
 /// Check if one pattern is less specific than another (le_pat p q means
 /// everything matched by q is also matched by p).
 /// Equivalent to OCaml's `le_pat`.
@@ -873,8 +919,7 @@ fn le_pat(p: &Pattern, q: &Pattern) -> bool {
         (PatternDesc::Tpat_variant(..), PatternDesc::Tpat_variant(..)) => false,
         (PatternDesc::Tpat_tuple(ps), PatternDesc::Tpat_tuple(qs)) => le_pats(ps, qs),
         (PatternDesc::Tpat_record(l1, _, _), PatternDesc::Tpat_record(l2, _, _)) => {
-            let (ps, qs) = records_args_for_le_pats(l1, l2);
-            le_pats(&ps, &qs)
+            records_le_pats(l1, l2)
         }
         (PatternDesc::Tpat_array(ps), PatternDesc::Tpat_array(qs)) => {
             ps.len() == qs.len() && le_pats(ps, qs)
@@ -11298,6 +11343,69 @@ mod tests {
                 assert_eq!(exits, expected);
             }
         }
+    }
+
+    fn record_test_field(pos: i32, pattern: Pattern) -> RecordPatternField {
+        (
+            crate::parse_arena::Located::mknoloc(crate::parse_arena::LidentIdx(0)),
+            LabelDescription {
+                lbl_name: format!("field{pos}"),
+                lbl_res: TypeExprRef(0),
+                lbl_arg: TypeExprRef(0),
+                lbl_mut: MutableFlag::Immutable,
+                lbl_optional: false,
+                lbl_pos: pos,
+                lbl_all: crate::types::decl::LabelArrayRef(0),
+                lbl_repres: RecordRepresentation::RecordRegular,
+                lbl_private: crate::types::asttypes::PrivateFlag::Public,
+                lbl_loc: crate::location::Location::none(),
+                lbl_attributes: Vec::new(),
+            },
+            pattern,
+            false,
+        )
+    }
+
+    fn record_test_pattern(seed: usize) -> Pattern {
+        if seed % 4 == 0 {
+            omega()
+        } else {
+            make_pat(
+                PatternDesc::Tpat_constant(Constant::Int((seed % 7) as i64)),
+                TypeExprRef(0),
+                EnvRef(0),
+            )
+        }
+    }
+
+    fn assert_record_merge_matches_old(l1: &[RecordPatternField], l2: &[RecordPatternField]) {
+        let (ps, qs) = records_args_for_le_pats_old(l1, l2);
+        assert_eq!(records_le_pats(l1, l2), le_pats(&ps, &qs));
+    }
+
+    #[test]
+    fn borrowed_record_merge_matches_aligned_rows_with_gaps() {
+        for width in [0, 1, 17, 64, 227] {
+            let left: Vec<_> = (0..width)
+                .filter(|pos| pos % 2 == 0)
+                .map(|pos| record_test_field(pos as i32, record_test_pattern(pos)))
+                .collect();
+            let right: Vec<_> = (0..width)
+                .filter(|pos| pos % 3 != 1)
+                .map(|pos| record_test_field(pos as i32, record_test_pattern(pos + 3)))
+                .collect();
+            assert_record_merge_matches_old(&left, &right);
+            assert_record_merge_matches_old(&right, &left);
+        }
+    }
+
+    #[test]
+    fn borrowed_record_merge_keeps_omega_direction() {
+        let constant = record_test_field(3, record_test_pattern(1));
+        assert!(!records_le_pats(std::slice::from_ref(&constant), &[]));
+        assert!(records_le_pats(&[], std::slice::from_ref(&constant)));
+        assert_record_merge_matches_old(std::slice::from_ref(&constant), &[]);
+        assert_record_merge_matches_old(&[], std::slice::from_ref(&constant));
     }
 
     #[test]
