@@ -10005,7 +10005,7 @@ pub fn compile_matching(
                 args: MatchArgs::new(vec![(arg, LetKind::Strict)]),
                 default: vec![(vec![vec![omega()]], raise_num)],
             };
-            match compile_match(
+            let compiled = compile_match(
                 ctx_ref,
                 arena,
                 None,
@@ -10013,7 +10013,9 @@ pub fn compile_matching(
                 &start_ctx(1),
                 &pm,
                 next_raise_count,
-            ) {
+            );
+            drop(pm);
+            match compiled {
                 Ok((lambda, total)) => {
                     check_total(&total, lambda.into_raw(), raise_num, handler_fun)
                 }
@@ -10029,7 +10031,7 @@ pub fn compile_matching(
                 args: MatchArgs::new(vec![(arg, LetKind::Strict)]),
                 default: Vec::new(),
             };
-            match compile_match(
+            let compiled = compile_match(
                 ctx_ref,
                 arena,
                 None,
@@ -10037,7 +10039,9 @@ pub fn compile_matching(
                 &start_ctx(1),
                 &pm,
                 next_raise_count,
-            ) {
+            );
+            drop(pm);
+            match compiled {
                 Ok((lambda, total)) => {
                     assert!(jumps_is_empty(&total));
                     lambda.into_raw()
