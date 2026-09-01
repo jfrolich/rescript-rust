@@ -210,18 +210,25 @@ fn build_constructors_for_name(
                     runtime_pos += 1;
                 }
             }
-            SignatureItem::SigType(id, _, _) => {
-                let (_, decl) = components
-                    .lookup_type(id.name(), ctx)
-                    .expect("indexed component type disappeared");
-                build_matching_type_constructors(
-                    &mut constructors,
-                    components.access_path(),
-                    id.name(),
-                    decl,
-                    constructor_name,
-                    ctx,
+            SignatureItem::SigType(id, raw_decl, _) => {
+                let has_matching_constructor = matches!(
+                    &raw_decl.type_kind,
+                    super::decl::TypeKind::TypeVariant(constrs, _)
+                        if constrs.iter().any(|decl| decl.cd_id.name() == constructor_name)
                 );
+                if has_matching_constructor {
+                    let (_, decl) = components
+                        .lookup_type(id.name(), ctx)
+                        .expect("indexed component type disappeared");
+                    build_matching_type_constructors(
+                        &mut constructors,
+                        components.access_path(),
+                        id.name(),
+                        decl,
+                        constructor_name,
+                        ctx,
+                    );
+                }
             }
             SignatureItem::SigTypext(id, ext, _) => {
                 let ext_slot = runtime_pos;
@@ -309,18 +316,25 @@ fn build_labels_for_name(
     let mut labels = Vec::new();
 
     for item in components.signature.iter() {
-        if let SignatureItem::SigType(id, _, _) = item {
-            let (_, decl) = components
-                .lookup_type(id.name(), ctx)
-                .expect("indexed component type disappeared");
-            build_matching_type_labels(
-                &mut labels,
-                components.access_path(),
-                id.name(),
-                decl,
-                label_name,
-                ctx,
+        if let SignatureItem::SigType(id, raw_decl, _) = item {
+            let has_matching_label = matches!(
+                &raw_decl.type_kind,
+                super::decl::TypeKind::TypeRecord(decls, _)
+                    if decls.iter().any(|decl| decl.ld_id.name() == label_name)
             );
+            if has_matching_label {
+                let (_, decl) = components
+                    .lookup_type(id.name(), ctx)
+                    .expect("indexed component type disappeared");
+                build_matching_type_labels(
+                    &mut labels,
+                    components.access_path(),
+                    id.name(),
+                    decl,
+                    label_name,
+                    ctx,
+                );
+            }
         }
     }
 
@@ -1882,5 +1896,122 @@ impl StoredModuleComponents {
             .borrow_mut()
             .insert(arg_path.clone(), substituted.clone());
         Some(substituted)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::IdGenerator;
+    use crate::types::asttypes::PrivateFlag;
+    use crate::types::decl::{RecStatus, TypeKind, TypeRepresentation};
+    use crate::types::type_expr::TypeDesc;
+
+    fn alias_decl(
+        ctx: &super::super::context::TypeContext,
+        source: &Path,
+        name: &str,
+    ) -> TypeDeclaration {
+        let param = ctx.new_generic_var(None);
+        let type_path = Path::pdot(source.clone(), name);
+        TypeDeclaration {
+            type_params: vec![param],
+            type_arity: 1,
+            type_kind: TypeKind::TypeAbstract,
+            type_private: PrivateFlag::Public,
+            type_manifest: Some(ctx.new_generic_constr(type_path.clone(), vec![param])),
+            type_variance: vec![super::super::variance::Variance::full()],
+            type_newtype_level: None,
+            type_loc: crate::location::Location::none(),
+            type_attributes: vec![],
+            type_immediate: false,
+            type_representation: TypeRepresentation::Boxed,
+            type_inlined_types: vec![],
+            type_path: Some(type_path),
+        }
+    }
+
+    #[test]
+    fn exact_root_component_forces_only_requested_declarations() {
+        let ctx = super::super::context::TypeContext::new(std::sync::Arc::new(IdGenerator::new()));
+        let source = Path::pdot(
+            Path::pident(Ident::create_persistent("Namespace")),
+            "Component",
+        );
+        let selected = Path::pident(Ident::create_persistent("Namespace__Component"));
+        let first_id = ctx.create_ident("first");
+        let second_id = ctx.create_ident("second");
+        let signature = vec![
+            SignatureItem::SigType(
+                first_id.clone(),
+                alias_decl(&ctx, &source, first_id.name()),
+                RecStatus::TrecNot,
+            ),
+            SignatureItem::SigType(
+                second_id.clone(),
+                alias_decl(&ctx, &source, second_id.name()),
+                RecStatus::TrecNot,
+            ),
+        ];
+        let source_first_manifest = match &signature[0] {
+            SignatureItem::SigType(_, decl, _) => decl.type_manifest.unwrap(),
+            _ => unreachable!(),
+        };
+        let components =
+            QualifiedModuleComponents::new_with_child_components_arc_and_substitution_source(
+                selected.clone(),
+                Arc::new(signature),
+                HashMap::new(),
+                Some(source.clone()),
+                &ctx,
+            );
+        let forced = components.tables.component_types.as_ref().unwrap();
+
+        assert!(forced.iter().all(|cell| cell.get().is_none()));
+        assert!(components.lookup_constructors("Missing", &ctx).is_empty());
+        assert!(components.lookup_labels("missing", &ctx).is_empty());
+        assert!(forced.iter().all(|cell| cell.get().is_none()));
+
+        let (_, first) = components.lookup_type("first", &ctx).unwrap();
+        assert!(forced[0].get().is_some());
+        assert!(forced[1].get().is_none());
+        let first_manifest = first.type_manifest.unwrap();
+        assert_ne!(first_manifest, source_first_manifest);
+        let TypeDesc::Tconstr { path, args, .. } = &*ctx.get_desc(first_manifest) else {
+            panic!("forced manifest is not a constructor")
+        };
+        assert!(path.same(&Path::pdot(selected.clone(), "first")));
+        assert_eq!(args.as_slice(), first.type_params.as_slice());
+
+        ctx.set_desc(first_manifest, TypeDesc::Tnil);
+        assert!(matches!(*ctx.get_desc(first_manifest), TypeDesc::Tnil));
+        assert!(matches!(
+            &*ctx.get_desc(source_first_manifest),
+            TypeDesc::Tconstr { path, .. } if path.same(&Path::pdot(source.clone(), "first"))
+        ));
+        let (_, first_again) = components.lookup_type("first", &ctx).unwrap();
+        assert_eq!(first_again.type_manifest, Some(first_manifest));
+        assert!(matches!(*ctx.get_desc(first_manifest), TypeDesc::Tnil));
+
+        let (_, second) = components.lookup_type("second", &ctx).unwrap();
+        assert!(forced[1].get().is_some());
+        let second_manifest = second.type_manifest.unwrap();
+        let TypeDesc::Tconstr { path, .. } = &*ctx.get_desc(second_manifest) else {
+            panic!("forced sibling manifest is not a constructor")
+        };
+        assert!(path.same(&Path::pdot(selected.clone(), "second")));
+
+        let reverse =
+            QualifiedModuleComponents::new_with_child_components_arc_and_substitution_source(
+                selected,
+                components.signature_arc(),
+                HashMap::new(),
+                Some(source),
+                &ctx,
+            );
+        let reverse_forced = reverse.tables.component_types.as_ref().unwrap();
+        let _ = reverse.lookup_type("second", &ctx).unwrap();
+        assert!(reverse_forced[0].get().is_none());
+        assert!(reverse_forced[1].get().is_some());
     }
 }
