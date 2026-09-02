@@ -177,18 +177,19 @@ abbreviation-memo side allocations relative to the current recursive copier and
 add risk for little expected gain on `934k` nodes. The one-pass path write
 removes the measured redundant work without changing that allocation mechanism.
 
-Two earlier 30-pair results were discarded after review. The first still reused
-one declaration-copy map in nested module signatures and did not traverse
-`Papply`; the second did not substitute named polymorphic-variant row paths.
-After fixing all three issues and rebuilding exact instrumentation-free binaries,
-the screening pair improved wall time from `4.794239s` to `4.642474s`. Thirty
-new alternating 12-worker pairs, with both binaries using the same source runtime
-from this checkout, measured wall time from `4.666975s` to `4.647813s`:
-`-19.16ms` with an approximate paired 95% interval of
-`-30.32ms..-8.01ms`. User CPU fell by `169.49ms` with an interval of
-`-232.01ms..-106.96ms`; system CPU changed by `+0.43ms`, with its interval
-crossing zero. Total CPU fell by `169.06ms` with an interval of
-`-236.94ms..-101.18ms`. The final wall and total-CPU wins are credible but small.
+Earlier paired results were discarded after successive reviews found incorrect
+nested declaration cleanup, missing `Papply` and named-row substitution, then an
+over-broad child-module cleanup rule. The final implementation distinguishes a
+direct `Sig_module` thunk from a `Sig_module` reached recursively through an
+immediate `Sig_modtype` substitution. After rebuilding exact instrumentation-free
+binaries, its screening pair improved wall time from `4.794064s` to `4.732649s`.
+Fifty new alternating 12-worker pairs, with both binaries using the same source
+runtime from this checkout, measured wall time from `4.680805s` to `4.672236s`:
+`-8.57ms` with an approximate paired 95% interval of
+`-15.97ms..-1.17ms`. User CPU fell by `130.26ms` with an interval of
+`-173.51ms..-87.01ms`; system CPU changed by `+2.46ms`, with its interval
+crossing zero. Total CPU fell by `127.81ms` with an interval of
+`-174.10ms..-81.52ms`. The final wall and total-CPU wins are credible but small.
 
 Release typedtree, raw Lambda, optimized Lambda, and JavaScript parity each
 passed `612/612`; focused JavaScript fixtures passed `344/344`; diagnostics
