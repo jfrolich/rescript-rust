@@ -906,7 +906,7 @@ impl<'a> TypeGraphSerializer<'a> {
 pub fn internalize_pers_struct(pps: Arc<PortablePersStruct>, ctx: &TypeContext) -> PersStruct {
     ctx.import_cmi_longident_names(&pps.cmi_longident_names);
 
-    let sig = internalize_signature(&pps.ps_sig, &pps.type_graph, ctx, false);
+    let sig = internalize_signature(&pps.ps_sig, &pps.type_graph, ctx);
     if pps.raw_ps_sig.is_some() && pps.raw_type_graph.is_some() {
         ctx.register_gentype_portable_raw_module_sig(&pps.ps_name, pps.clone());
     }
@@ -926,7 +926,6 @@ pub(crate) fn internalize_raw_signature(
         pps.raw_ps_sig.as_ref()?,
         pps.raw_type_graph.as_ref()?,
         ctx,
-        true,
     ))
 }
 
@@ -934,7 +933,6 @@ fn internalize_signature(
     portable_sig: &Signature,
     graph: &PortableTypeGraph,
     ctx: &TypeContext,
-    raw: bool,
 ) -> Signature {
     // Phase 1: allocate placeholder TypeExprRefs for all entries.
     let remap: Vec<TypeExprRef> = graph
@@ -951,21 +949,9 @@ fn internalize_signature(
         .collect();
 
     // Phase 2: set descriptors using remapped refs.
-    let mut payload_capacity_bytes = 0;
     for (i, entry) in graph.entries.iter().enumerate() {
         let desc = internalize_desc(&entry.desc, &remap, ctx);
-        if ctx.compiler_counters_enabled() {
-            payload_capacity_bytes += type_desc_payload_capacity_bytes(&desc);
-        }
         ctx.set_desc(remap[i], desc);
-    }
-    if ctx.compiler_counters_enabled() {
-        crate::perf_counters::record_portable_internalize(
-            raw,
-            graph.entries.len(),
-            remap.capacity(),
-            payload_capacity_bytes,
-        );
     }
 
     let layout_remap: Vec<_> = graph
@@ -979,43 +965,6 @@ fn internalize_signature(
     let mut sig = portable_sig.clone();
     remap_signature_refs(&mut sig, &remap, &layout_remap);
     sig
-}
-
-fn type_desc_payload_capacity_bytes(desc: &TypeDesc) -> usize {
-    match desc {
-        TypeDesc::Tvar(name) | TypeDesc::Tunivar(name) => name.as_ref().map_or(0, String::capacity),
-        TypeDesc::Tarrow { args, .. } => args.capacity() * std::mem::size_of::<TypeArg>(),
-        TypeDesc::Ttuple(items) | TypeDesc::Tconstr { args: items, .. } => {
-            items.capacity() * std::mem::size_of::<TypeExprRef>()
-        }
-        TypeDesc::Tobject { name, .. } => name.as_ref().map_or(0, |(_, args)| {
-            args.capacity() * std::mem::size_of::<TypeExprRef>()
-        }),
-        TypeDesc::Tfield { name, .. } => name.capacity(),
-        TypeDesc::Tvariant(row) => {
-            row.row_fields.capacity()
-                * std::mem::size_of::<(crate::types::asttypes::Label, RowField)>()
-                + row
-                    .row_fields
-                    .iter()
-                    .map(|(_, field)| match field {
-                        RowField::Reither { types, .. } => {
-                            types.capacity() * std::mem::size_of::<TypeExprRef>()
-                        }
-                        RowField::Rpresent(_) | RowField::Rabsent => 0,
-                    })
-                    .sum::<usize>()
-                + row.row_name.as_ref().map_or(0, |(_, args)| {
-                    args.capacity() * std::mem::size_of::<TypeExprRef>()
-                })
-        }
-        TypeDesc::Tpoly { vars, .. } => vars.capacity() * std::mem::size_of::<TypeExprRef>(),
-        TypeDesc::Tpackage { lids, args, .. } => {
-            lids.capacity() * std::mem::size_of::<Longident>()
-                + args.capacity() * std::mem::size_of::<TypeExprRef>()
-        }
-        TypeDesc::Tnil | TypeDesc::Tlink(_) | TypeDesc::Tsubst(_) => 0,
-    }
 }
 
 fn internalize_desc(desc: &PortableTypeDesc, remap: &[TypeExprRef], ctx: &TypeContext) -> TypeDesc {
