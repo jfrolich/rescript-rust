@@ -25922,7 +25922,13 @@ where
         },
         crate::types::decl::ModuleType::MtySignature(sig_items) => {
             let copied = if declaration_maps {
-                copy_lookup_signature_with_declaration_maps(sig_items, ctx, type_path, module_path)
+                copy_lookup_signature_with_declaration_maps(
+                    sig_items,
+                    ctx,
+                    type_path,
+                    module_path,
+                    true,
+                )
             } else {
                 copy_lookup_signature_with_paths(sig_items, ctx, cache, type_path, module_path)
             };
@@ -25974,7 +25980,8 @@ fn copy_lookup_signature_item_with_paths<TP, MP>(
     type_path: &TP,
     module_path: &MP,
     new_id: Option<Ident>,
-    declaration_maps: bool,
+    module_declaration_maps: bool,
+    modtype_declaration_maps: bool,
 ) -> crate::types::decl::SignatureItem
 where
     TP: Fn(&Path) -> Path,
@@ -26017,7 +26024,7 @@ where
                         cache,
                         type_path,
                         module_path,
-                        false,
+                        module_declaration_maps,
                     ),
                     md_attributes: md.md_attributes.clone(),
                     md_loc: md.md_loc.clone(),
@@ -26037,7 +26044,7 @@ where
                             cache,
                             type_path,
                             module_path,
-                            declaration_maps,
+                            modtype_declaration_maps,
                         )
                     }),
                     mtd_attributes: mtd.mtd_attributes.clone(),
@@ -26057,6 +26064,7 @@ fn copy_lookup_signature_with_declaration_maps<TP, MP>(
     ctx: &TypeContext,
     type_path: &TP,
     module_path: &MP,
+    substitute_module_declarations: bool,
 ) -> crate::types::decl::Signature
 where
     TP: Fn(&Path) -> Path,
@@ -26072,6 +26080,7 @@ where
             type_path,
             module_path,
             None,
+            substitute_module_declarations,
             true,
         ));
     }
@@ -26105,6 +26114,7 @@ where
                 type_path,
                 module_path,
                 new_id,
+                false,
                 false,
             )
         })
@@ -26311,9 +26321,11 @@ fn copy_component_signature_for_path_subst(
     // `components_of_module_maker` applies `Subst.value_description` or
     // `Subst.type_declaration` to each direct item in `List.iter2` order
     // (compiler/ml/env.ml:1492-1546). Each Subst entry point cleans its
-    // temporary type links before the next declaration, including recursively
-    // nested signatures (compiler/ml/subst.ml:241-309).
-    copy_lookup_signature_with_declaration_maps(sig_items, ctx, &rewrite_path, &rewrite_path)
+    // temporary type links before the next declaration
+    // (compiler/ml/subst.ml:241-309). A direct child module stays on its
+    // separate env.ml:1526-1538 thunk boundary; an immediate module-type
+    // substitution recursively applies these declaration boundaries.
+    copy_lookup_signature_with_declaration_maps(sig_items, ctx, &rewrite_path, &rewrite_path, false)
 }
 
 #[track_caller]
@@ -35795,7 +35807,21 @@ mod tests {
         let flattened = Path::pident(Ident::create_persistent("Namespace__Root"));
         let child_source = Path::pdot(qualified.clone(), "Child");
         let module_sig = component_alias_signature(&ctx, &child_source);
-        let modtype_sig = component_alias_signature(&ctx, &child_source);
+        let mut modtype_sig = component_alias_signature(&ctx, &child_source);
+        let grandchild_source = Path::pdot(child_source.clone(), "Grandchild");
+        modtype_sig.push(crate::types::decl::SignatureItem::SigModule(
+            ctx.create_ident("Grandchild"),
+            crate::types::decl::ModuleDeclaration {
+                md_type: crate::types::decl::ModuleType::MtySignature(component_alias_signature(
+                    &ctx,
+                    &grandchild_source,
+                )),
+                md_attributes: vec![],
+                md_loc: Location::none(),
+                md_path: Some(grandchild_source),
+            },
+            crate::types::decl::RecStatus::TrecNot,
+        ));
         let module_id = ctx.create_ident("Child");
         let modtype_id = ctx.create_ident("ChildType");
         let source = vec![
@@ -35839,6 +35865,19 @@ mod tests {
         // the parent component force (compiler/ml/env.ml:1526-1544).
         assert_component_root_paths(&ctx, module_sig, &child_access, false);
         assert_component_root_paths(&ctx, modtype_sig, &child_access, true);
+        let crate::types::decl::SignatureItem::SigModule(_, grandchild, _) = &modtype_sig[3] else {
+            panic!("nested module-type item is not a module")
+        };
+        let crate::types::decl::ModuleType::MtySignature(grandchild_sig) = &grandchild.md_type
+        else {
+            panic!("nested module-type module has no signature")
+        };
+        assert_component_root_paths(
+            &ctx,
+            grandchild_sig,
+            &Path::pdot(child_access.clone(), "Grandchild"),
+            true,
+        );
 
         let module_roots = component_signature_roots(module_sig);
         let modtype_roots = component_signature_roots(modtype_sig);
