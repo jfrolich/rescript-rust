@@ -5205,7 +5205,11 @@ fn rewrite_module_prefix_in_sig_with_visited(
 /// E.g., with old_prefix=Pdot(Pident("Js"),"Json") and new_prefix=Pident("J"):
 ///   Pdot(Pdot(Pident("Js"),"Json"),"Kind") → Pdot(Pident("J"),"Kind")
 ///   Pdot(Pdot(Pdot(Pident("Js"),"Json"),"Kind"),"t") → Pdot(Pdot(Pident("J"),"Kind"),"t")
-fn rewrite_path_by_path_prefix(path: &Path, old_prefix: &Path, new_prefix: &Path) -> Option<Path> {
+pub(crate) fn rewrite_path_by_path_prefix(
+    path: &Path,
+    old_prefix: &Path,
+    new_prefix: &Path,
+) -> Option<Path> {
     if path.same(old_prefix) {
         return Some(new_prefix.clone());
     }

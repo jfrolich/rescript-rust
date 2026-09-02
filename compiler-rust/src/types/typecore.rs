@@ -25961,6 +25961,82 @@ where
     )
 }
 
+fn copy_lookup_signature_item_with_paths<TP, MP>(
+    item: &crate::types::decl::SignatureItem,
+    ctx: &TypeContext,
+    cache: &mut TypeExprRefMap<TypeExprRef>,
+    type_path: &TP,
+    module_path: &MP,
+    new_id: Option<Ident>,
+) -> crate::types::decl::SignatureItem
+where
+    TP: Fn(&Path) -> Path,
+    MP: Fn(&Path) -> Path,
+{
+    match item {
+        crate::types::decl::SignatureItem::SigValue(id, desc) => {
+            crate::types::decl::SignatureItem::SigValue(
+                new_id.unwrap_or_else(|| id.clone()),
+                copy_lookup_value_description_with_paths(desc, ctx, cache, type_path, module_path),
+            )
+        }
+        crate::types::decl::SignatureItem::SigType(id, decl, rec_status) => {
+            crate::types::decl::SignatureItem::SigType(
+                new_id.unwrap_or_else(|| id.clone()),
+                copy_lookup_type_decl_with_paths(decl, ctx, cache, type_path, module_path),
+                *rec_status,
+            )
+        }
+        crate::types::decl::SignatureItem::SigTypext(id, ext, ext_status) => {
+            crate::types::decl::SignatureItem::SigTypext(
+                new_id.unwrap_or_else(|| id.clone()),
+                copy_lookup_extension_constructor_with_paths(
+                    ext,
+                    ctx,
+                    cache,
+                    type_path,
+                    module_path,
+                ),
+                *ext_status,
+            )
+        }
+        crate::types::decl::SignatureItem::SigModule(id, md, rec_status) => {
+            crate::types::decl::SignatureItem::SigModule(
+                new_id.unwrap_or_else(|| id.clone()),
+                crate::types::decl::ModuleDeclaration {
+                    md_type: copy_lookup_module_type_with_paths(
+                        &md.md_type,
+                        ctx,
+                        cache,
+                        type_path,
+                        module_path,
+                    ),
+                    md_attributes: md.md_attributes.clone(),
+                    md_loc: md.md_loc.clone(),
+                    md_path: md.md_path.as_ref().map(type_path),
+                },
+                *rec_status,
+            )
+        }
+        crate::types::decl::SignatureItem::SigModtype(id, mtd) => {
+            crate::types::decl::SignatureItem::SigModtype(
+                new_id.unwrap_or_else(|| id.clone()),
+                crate::types::decl::ModtypeDeclaration {
+                    mtd_type: mtd.mtd_type.as_ref().map(|mty| {
+                        copy_lookup_module_type_with_paths(mty, ctx, cache, type_path, module_path)
+                    }),
+                    mtd_attributes: mtd.mtd_attributes.clone(),
+                    mtd_loc: mtd.mtd_loc.clone(),
+                },
+            )
+        }
+        crate::types::decl::SignatureItem::SigClass => crate::types::decl::SignatureItem::SigClass,
+        crate::types::decl::SignatureItem::SigClassType => {
+            crate::types::decl::SignatureItem::SigClassType
+        }
+    }
+}
+
 fn copy_lookup_signature_with_paths_and_idents<TP, MP, I>(
     sig_items: &[crate::types::decl::SignatureItem],
     ctx: &TypeContext,
@@ -25981,82 +26057,7 @@ where
                 .as_mut()
                 .and_then(|idents| idents.next())
                 .flatten();
-            match item {
-                crate::types::decl::SignatureItem::SigValue(id, desc) => {
-                    crate::types::decl::SignatureItem::SigValue(
-                        new_id.unwrap_or_else(|| id.clone()),
-                        copy_lookup_value_description_with_paths(
-                            desc,
-                            ctx,
-                            cache,
-                            type_path,
-                            module_path,
-                        ),
-                    )
-                }
-                crate::types::decl::SignatureItem::SigType(id, decl, rec_status) => {
-                    crate::types::decl::SignatureItem::SigType(
-                        new_id.unwrap_or_else(|| id.clone()),
-                        copy_lookup_type_decl_with_paths(decl, ctx, cache, type_path, module_path),
-                        *rec_status,
-                    )
-                }
-                crate::types::decl::SignatureItem::SigTypext(id, ext, ext_status) => {
-                    crate::types::decl::SignatureItem::SigTypext(
-                        new_id.unwrap_or_else(|| id.clone()),
-                        copy_lookup_extension_constructor_with_paths(
-                            ext,
-                            ctx,
-                            cache,
-                            type_path,
-                            module_path,
-                        ),
-                        *ext_status,
-                    )
-                }
-                crate::types::decl::SignatureItem::SigModule(id, md, rec_status) => {
-                    crate::types::decl::SignatureItem::SigModule(
-                        new_id.unwrap_or_else(|| id.clone()),
-                        crate::types::decl::ModuleDeclaration {
-                            md_type: copy_lookup_module_type_with_paths(
-                                &md.md_type,
-                                ctx,
-                                cache,
-                                type_path,
-                                module_path,
-                            ),
-                            md_attributes: md.md_attributes.clone(),
-                            md_loc: md.md_loc.clone(),
-                            md_path: md.md_path.as_ref().map(type_path),
-                        },
-                        *rec_status,
-                    )
-                }
-                crate::types::decl::SignatureItem::SigModtype(id, mtd) => {
-                    crate::types::decl::SignatureItem::SigModtype(
-                        new_id.unwrap_or_else(|| id.clone()),
-                        crate::types::decl::ModtypeDeclaration {
-                            mtd_type: mtd.mtd_type.as_ref().map(|mty| {
-                                copy_lookup_module_type_with_paths(
-                                    mty,
-                                    ctx,
-                                    cache,
-                                    type_path,
-                                    module_path,
-                                )
-                            }),
-                            mtd_attributes: mtd.mtd_attributes.clone(),
-                            mtd_loc: mtd.mtd_loc.clone(),
-                        },
-                    )
-                }
-                crate::types::decl::SignatureItem::SigClass => {
-                    crate::types::decl::SignatureItem::SigClass
-                }
-                crate::types::decl::SignatureItem::SigClassType => {
-                    crate::types::decl::SignatureItem::SigClassType
-                }
-            }
+            copy_lookup_signature_item_with_paths(item, ctx, cache, type_path, module_path, new_id)
         })
         .collect()
 }
@@ -26236,6 +26237,46 @@ pub(crate) fn copy_lookup_signature_for_subst(
     }
     let mut cache = TypeExprRefMap::new();
     copy_lookup_signature(sig_items, ctx, &mut cache)
+}
+
+#[track_caller]
+fn copy_component_signature_for_path_subst(
+    sig_items: &[crate::types::decl::SignatureItem],
+    ctx: &TypeContext,
+    old_prefix: &Path,
+    new_prefix: &Path,
+) -> crate::types::decl::Signature {
+    if old_prefix.same(new_prefix) {
+        return copy_lookup_signature_for_subst(sig_items, ctx);
+    }
+    if ctx.compiler_counters_enabled() {
+        crate::perf_counters::record_signature_copy(
+            std::panic::Location::caller(),
+            sig_items.len(),
+        );
+    }
+    let rewrite_path = |path: &Path| {
+        crate::cmi::persistent_env::rewrite_path_by_path_prefix(path, old_prefix, new_prefix)
+            .unwrap_or_else(|| path.clone())
+    };
+    let mut copied = Vec::with_capacity(sig_items.len());
+    for item in sig_items {
+        // `components_of_module_maker` applies `Subst.value_description` or
+        // `Subst.type_declaration` to each direct item in `List.iter2` order
+        // (compiler/ml/env.ml:1492-1546). Each Subst entry point cleans its
+        // temporary type links before the next declaration
+        // (compiler/ml/subst.ml:241-309), so each direct item owns one map.
+        let mut cache = TypeExprRefMap::new();
+        copied.push(copy_lookup_signature_item_with_paths(
+            item,
+            ctx,
+            &mut cache,
+            &rewrite_path,
+            &rewrite_path,
+            None,
+        ));
+    }
+    copied
 }
 
 #[track_caller]
@@ -32434,37 +32475,25 @@ fn build_module_signature_for_path<'a>(
             } else if let Some(pers) = pers_env.as_mut() {
                 if let Some(ps) = pers.find_pers_struct(id.name(), ctx) {
                     let access_path = Path::pident(Ident::create_persistent(id.name()));
-                    let mut sig = copy_lookup_signature_for_subst(&ps.ps_sig, ctx);
-                    if let Some(qualified_alias_path) =
+                    let sig = if let Some(qualified_alias_path) =
                         pers.qualified_alias_path_for_flattened_head(id.name())
                     {
-                        // OCaml compiler/ml/env.ml:1000-1007 resolves the
-                        // exact persistent unit before alias recovery, then
-                        // env.ml:1530-1538 prefixes component value/type
-                        // descriptions with that selected path via
-                        // compiler/ml/subst.ml:303-309. If the loaded ps_sig
-                        // was already observed through the qualified alias
-                        // (`Belt.Id`), rewrite the whole prefix back to the
-                        // exact unit (`Belt_Id`), not only child-module
-                        // prefixes.
-                        crate::cmi::persistent_env::rewrite_sig_by_path_prefix(
-                            &sig,
-                            &qualified_alias_path,
-                            &access_path,
+                        // OCaml compiler/ml/env.ml:1000-1007 resolves the exact
+                        // persistent unit before alias recovery. env.ml:1492-1546
+                        // then copies each direct declaration through the one
+                        // `prefix_idents` substitution for that component table.
+                        // Write final type and declaration paths under the exact
+                        // unit while copying, rather than walking the fresh graph
+                        // again after every declaration has been materialized.
+                        copy_component_signature_for_path_subst(
+                            &ps.ps_sig,
                             ctx,
-                        );
-                        crate::cmi::persistent_env::rewrite_sig_paths_by_path_prefix(
-                            &mut sig,
                             &qualified_alias_path,
                             &access_path,
-                        );
-                        rewrite_flattened_alias_child_prefixes(
-                            &sig,
-                            &qualified_alias_path,
-                            &access_path,
-                            ctx,
-                        );
-                    }
+                        )
+                    } else {
+                        copy_lookup_signature_for_subst(&ps.ps_sig, ctx)
+                    };
                     Some((access_path, sig))
                 } else {
                     let source_path = Path::pident(id.clone());
@@ -35604,19 +35633,7 @@ mod tests {
         old_prefix: &Path,
         access_path: &Path,
     ) -> crate::types::decl::Signature {
-        let mut copied = copy_lookup_signature_for_subst(source, ctx);
-        crate::cmi::persistent_env::rewrite_sig_by_path_prefix(
-            &copied,
-            old_prefix,
-            access_path,
-            ctx,
-        );
-        crate::cmi::persistent_env::rewrite_sig_paths_by_path_prefix(
-            &mut copied,
-            old_prefix,
-            access_path,
-        );
-        copied
+        copy_component_signature_for_path_subst(source, ctx, old_prefix, access_path)
     }
 
     fn component_signature_roots(
@@ -35642,6 +35659,7 @@ mod tests {
         ctx: &TypeContext,
         signature: &[crate::types::decl::SignatureItem],
         access_path: &Path,
+        has_declaration_cleanup_boundaries: bool,
     ) {
         for (root, name) in component_signature_roots(signature)[..2]
             .iter()
@@ -35662,6 +35680,14 @@ mod tests {
                 .as_ref()
                 .is_some_and(|path| path.same(&Path::pdot(access_path.clone(), "value")))
         );
+        let TypeDesc::Tarrow { args, ret } = &*ctx.get_desc(value.val_type) else {
+            panic!("component value is not an arrow")
+        };
+        if has_declaration_cleanup_boundaries {
+            let roots = component_signature_roots(signature);
+            assert_ne!(args[0].typ, roots[0]);
+            assert_ne!(*ret, roots[1]);
+        }
     }
 
     fn assert_component_copy_order(flattened_first: bool) {
@@ -35692,8 +35718,8 @@ mod tests {
 
         assert_eq!(qualified_order, [0, 1, 2]);
         assert_eq!(flat_order, [0, 1, 2]);
-        assert_component_root_paths(&ctx, &qualified_sig, &qualified);
-        assert_component_root_paths(&ctx, &flat_sig, &flattened);
+        assert_component_root_paths(&ctx, &qualified_sig, &qualified, false);
+        assert_component_root_paths(&ctx, &flat_sig, &flattened, true);
 
         for index in 0..source_roots.len() {
             assert_ne!(source_roots[index], qualified_roots[index]);
