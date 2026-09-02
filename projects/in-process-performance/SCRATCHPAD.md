@@ -124,6 +124,66 @@ external OCaml Tella parity setup remained unavailable: it stopped after `197`
 dependency modules because `bs-css` could not resolve `Belt`; the exact
 base/candidate Rust manifest comparison covers this candidate.
 
+## Portable type internalization traffic
+
+On exact base `56269530990c6e4ca8016c8654d625a52e70ca95` and pinned Tella
+`66a5edabdbfdbc5dd7496e59ee0573de2a2a1ffa`, a one-worker clean release
+in-process build internalized `17,382,703` portable type entries in `58,277`
+calls (`135` raw-signature calls). Temporary counters measured
+`1,668,739,488` bytes of redundant placeholder `TypeDesc` writes,
+`69,530,812` bytes of remap-vector capacity, and `414,293,612` bytes of final
+nested payload-vector capacity. The counters were committed at `4498ddf43` and
+normal-reverted at `dbf71e412` before timing. Existing signature-copy counters
+also attributed `8,970,070` new type nodes / `1,076,408,400` inline node-plus-
+handle bytes to `55,502` `Subst.signature`-style calls. The largest callsite was
+`cmi/persistent_env.rs:3497` with `6,770,618` nodes / `812,474,160` bytes,
+followed by the persistent-root and component paths in `types/typecore.rs` with
+`936,552` / `808,062` nodes.
+
+The retained internalization change derives a checked contiguous remap from the
+current `TypeContext` frontier and allocates each final descriptor directly in
+portable DFS order. It removes the remap allocation and the placeholder write;
+it does not remove any of the `17,382,703` required fresh type-node allocations.
+This preserves the OCaml boundaries: `compiler/ml/subst.ml:241-301` copies a
+whole type declaration in traversal order, `compiler/ml/subst.ml:351-400`
+freshens bound signature identifiers before copying components,
+`compiler/ml/btype.ml:46-48` allocates each physical type node, and
+`compiler/ml/env.ml:669-678` / `compiler/ml/env.ml:1472-1538` keep persistent
+signature and component forcing separate. Rust's matching portable boundary is
+`cmi/portable_types.rs:901-968`; later component freshening remains in
+`cmi/persistent_env.rs:3457-3581` and `types/typecore.rs:25139-26294`.
+
+Future handles cannot escape while the private internalizer is running: the
+signature is cloned/remapped only after every graph entry has been pushed.
+`internalize_desc` only allocates abbreviation memos, cloned descriptor
+payloads/paths, and interned longident names; it never calls a TypeContext type
+constructor. Those allocations use independent storage and no type IDs; row
+cells and variant layouts remain on their existing later paths. Interleaving the
+moved side allocations with final type pushes therefore cannot affect
+`TypeExprRef` identity, `next_type_id` order, mutation snapshots, or force order.
+Checked `usize` addition plus `u32` conversion bounds the contiguous range, and a
+release assertion checks every push returns its predicted index. A focused cycle/sharing test verifies contiguous order, duplicate child
+identity, signature-root order, levels, and mutation isolation between two
+TypeContexts.
+
+The first ten alternating 12-worker pairs used `/usr/bin/time` at 0.01-second
+resolution: wall `4.644s` to `4.628s`, user `39.155s` to `38.926s`, system
+`2.022s` to `2.018s`; sampled maximum RSS means were noisy but moved from
+`2,959,645,082` to `2,928,618,701` bytes. Twenty additional alternating pairs
+used monotonic high-resolution wall timing: wall `4.64053s` to `4.61026s`
+(candidate-minus-base `-30.27ms`, paired approximate 95% CI
+`-41.25ms..-19.29ms`, t=`-5.77`), user `39.3830s` to `39.1635s` (`-219.5ms`,
+CI `-342.3ms..-96.7ms`), and system `2.04785s` to `2.05526s` (flat, CI
+`-11.9ms..+26.7ms`). Across all 30 pairs, wall improved by `25.51ms` (CI
+`-35.67ms..-15.36ms`) and user CPU by `222.65ms` (CI
+`-312.76ms..-132.55ms`). Both exact base and final candidate used the same source
+runtime at `packages/@rescript/runtime`, compiled `3,248` modules, and produced
+identical SHA-256 manifests for exactly `5,048` generated JavaScript files.
+Release typedtree, raw Lambda, optimized Lambda, and JavaScript parity each
+passed `610/610`; focused JavaScript passed `344/344`; diagnostics passed
+`1432/1432`; compiler tests passed `1232` with `108` ignored and rewatch tests
+passed `150`.
+
 ## Lookup type-copy memory traffic
 
 On pinned Tella `66a5edabdbfdbc5dd7496e59ee0573de2a2a1ffa`, the
