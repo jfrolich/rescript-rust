@@ -142,9 +142,11 @@ therefore removes the later `rewrite_sig_by_path_prefix`, declaration-path, and
 child-prefix walks for this fallback. Each direct signature item gets its own
 `TypeExprRefMap`, matching the cleanup after `Subst.value_description`,
 `Subst.type_declaration`, and `Subst.extension_constructor` in
-`compiler/ml/subst.ml:241-309`. Nested `Mty_signature` copies recursively reset
-the map for each nested declaration, and explicit prefix replacement descends
-through both sides of `Papply`, matching `Subst.module_path` at
+`compiler/ml/subst.ml:241-309`. Immediate `Sig_modtype` substitutions recursively
+reset the map for each nested declaration. `Sig_module` keeps the existing child
+module thunk/intermediate sharing boundary rather than copying nested declarations
+as part of the parent force. Explicit prefix replacement descends through both
+sides of `Papply`, matching `Subst.module_path` at
 `compiler/ml/subst.ml:69-76`. Named polymorphic-variant `row_name` paths are
 substituted in the copy plan, matching `compiler/ml/subst.ml:225-234`. The outer
 loop matches
