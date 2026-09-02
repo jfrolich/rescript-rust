@@ -934,24 +934,27 @@ fn internalize_signature(
     graph: &PortableTypeGraph,
     ctx: &TypeContext,
 ) -> Signature {
-    // Phase 1: allocate placeholder TypeExprRefs for all entries.
-    let remap: Vec<TypeExprRef> = graph
-        .entries
-        .iter()
-        .map(|entry| {
-            let level = if entry.level >= GENERIC_LEVEL {
-                GENERIC_LEVEL
-            } else {
-                entry.level
-            };
-            ctx.alloc_type_at_level(TypeDesc::Tvar(None), level)
-        })
-        .collect();
-
-    // Phase 2: set descriptors using remapped refs.
+    // Portable entries already have the DFS allocation order established by
+    // `TypeGraphSerializer::serialize_type`. Allocate their final descriptors
+    // directly at the corresponding contiguous arena indices. This preserves
+    // the fresh per-context identity and traversal order of OCaml's
+    // `Subst.signature` / `newty2` flow (compiler/ml/subst.ml:351-400,
+    // compiler/ml/btype.ml:46-48) without first writing a Tvar placeholder into
+    // every node and keeping a second index vector.
+    let remap = ContiguousTypeRemap::new(ctx.type_expr_count(), graph.entries.len());
     for (i, entry) in graph.entries.iter().enumerate() {
-        let desc = internalize_desc(&entry.desc, &remap, ctx);
-        ctx.set_desc(remap[i], desc);
+        let desc = internalize_desc(&entry.desc, remap, ctx);
+        let level = if entry.level >= GENERIC_LEVEL {
+            GENERIC_LEVEL
+        } else {
+            entry.level
+        };
+        let allocated = ctx.alloc_type_at_level(desc, level);
+        assert_eq!(
+            allocated,
+            remap.get(i),
+            "portable type internalization must allocate one contiguous node per entry"
+        );
     }
 
     let layout_remap: Vec<_> = graph
@@ -961,13 +964,40 @@ fn internalize_signature(
         .map(|layout| ctx.alloc_complete_variant_layout(layout))
         .collect();
 
-    // Phase 3: clone and remap the signature.
     let mut sig = portable_sig.clone();
-    remap_signature_refs(&mut sig, &remap, &layout_remap);
+    remap_signature_refs(&mut sig, remap, &layout_remap);
     sig
 }
 
-fn internalize_desc(desc: &PortableTypeDesc, remap: &[TypeExprRef], ctx: &TypeContext) -> TypeDesc {
+#[derive(Clone, Copy)]
+struct ContiguousTypeRemap {
+    first: usize,
+    len: usize,
+}
+
+impl ContiguousTypeRemap {
+    fn new(first: usize, len: usize) -> Self {
+        first
+            .checked_add(len)
+            .and_then(|end| u32::try_from(end).ok())
+            .expect("type arena index exceeds u32::MAX");
+        Self { first, len }
+    }
+
+    fn get(self, portable_index: usize) -> TypeExprRef {
+        assert!(
+            portable_index < self.len,
+            "portable type index out of bounds"
+        );
+        TypeExprRef::from_usize(self.first + portable_index)
+    }
+}
+
+fn internalize_desc(
+    desc: &PortableTypeDesc,
+    remap: ContiguousTypeRemap,
+    ctx: &TypeContext,
+) -> TypeDesc {
     match desc {
         PortableTypeDesc::Tvar(name) => TypeDesc::Tvar(name.clone()),
         PortableTypeDesc::Tarrow { args, ret } => TypeDesc::Tarrow {
@@ -975,41 +1005,41 @@ fn internalize_desc(desc: &PortableTypeDesc, remap: &[TypeExprRef], ctx: &TypeCo
                 .iter()
                 .map(|(lbl, typ)| TypeArg {
                     lbl: lbl.clone(),
-                    typ: remap[*typ],
+                    typ: remap.get(*typ),
                 })
                 .collect(),
-            ret: remap[*ret],
+            ret: remap.get(*ret),
         },
         PortableTypeDesc::Ttuple(types) => {
-            TypeDesc::Ttuple(types.iter().map(|&i| remap[i]).collect())
+            TypeDesc::Ttuple(types.iter().map(|&i| remap.get(i)).collect())
         }
         PortableTypeDesc::Tconstr { path, args } => TypeDesc::Tconstr {
             path: path.clone(),
-            args: args.iter().map(|&i| remap[i]).collect(),
+            args: args.iter().map(|&i| remap.get(i)).collect(),
             abbrev: ctx.alloc_abbrev_nil(),
         },
         PortableTypeDesc::Tobject { fields, name } => TypeDesc::Tobject {
-            fields: remap[*fields],
+            fields: remap.get(*fields),
             name: name
                 .as_ref()
-                .map(|(p, args)| (p.clone(), args.iter().map(|&i| remap[i]).collect())),
+                .map(|(p, args)| (p.clone(), args.iter().map(|&i| remap.get(i)).collect())),
         },
         PortableTypeDesc::Tfield { name, typ, rest } => TypeDesc::Tfield {
             name: name.clone(),
             kind: FieldKind::Fpresent,
-            typ: remap[*typ],
-            rest: remap[*rest],
+            typ: remap.get(*typ),
+            rest: remap.get(*rest),
         },
         PortableTypeDesc::Tnil => TypeDesc::Tnil,
-        PortableTypeDesc::Tlink(i) => TypeDesc::Tlink(remap[*i]),
-        PortableTypeDesc::Tsubst(i) => TypeDesc::Tsubst(remap[*i]),
+        PortableTypeDesc::Tlink(i) => TypeDesc::Tlink(remap.get(*i)),
+        PortableTypeDesc::Tsubst(i) => TypeDesc::Tsubst(remap.get(*i)),
         PortableTypeDesc::Tvariant(prd) => {
             TypeDesc::Tvariant(internalize_row_desc(prd, remap, ctx))
         }
         PortableTypeDesc::Tunivar(name) => TypeDesc::Tunivar(name.clone()),
         PortableTypeDesc::Tpoly { body, vars } => TypeDesc::Tpoly {
-            body: remap[*body],
-            vars: vars.iter().map(|&i| remap[i]).collect(),
+            body: remap.get(*body),
+            vars: vars.iter().map(|&i| remap.get(i)).collect(),
         },
         PortableTypeDesc::Tpackage { path, lids, args } => TypeDesc::Tpackage {
             path: path.clone(),
@@ -1017,7 +1047,7 @@ fn internalize_desc(desc: &PortableTypeDesc, remap: &[TypeExprRef], ctx: &TypeCo
                 .iter()
                 .map(|lid| internalize_longident(lid, ctx))
                 .collect(),
-            args: args.iter().map(|&i| remap[i]).collect(),
+            args: args.iter().map(|&i| remap.get(i)).collect(),
         },
     }
 }
@@ -1038,7 +1068,7 @@ fn internalize_longident(lid: &PortableLongident, ctx: &TypeContext) -> Longiden
 
 fn internalize_row_desc(
     prd: &PortableRowDesc,
-    remap: &[TypeExprRef],
+    remap: ContiguousTypeRemap,
     ctx: &TypeContext,
 ) -> RowDesc {
     RowDesc {
@@ -1052,30 +1082,30 @@ fn internalize_row_desc(
                 )
             })
             .collect(),
-        row_more: remap[prd.row_more],
+        row_more: remap.get(prd.row_more),
         row_closed: prd.row_closed,
         row_fixed: prd.row_fixed,
         row_name: prd
             .row_name
             .as_ref()
-            .map(|(p, args)| (p.clone(), args.iter().map(|&i| remap[i]).collect())),
+            .map(|(p, args)| (p.clone(), args.iter().map(|&i| remap.get(i)).collect())),
     }
 }
 
 fn internalize_row_field(
     prf: &PortableRowField,
-    remap: &[TypeExprRef],
+    remap: ContiguousTypeRemap,
     _ctx: &TypeContext,
 ) -> RowField {
     match prf {
-        PortableRowField::Rpresent(opt) => RowField::Rpresent(opt.map(|i| remap[i])),
+        PortableRowField::Rpresent(opt) => RowField::Rpresent(opt.map(|i| remap.get(i))),
         PortableRowField::Reither {
             constant,
             types,
             matched,
         } => RowField::Reither {
             constant: *constant,
-            types: types.iter().map(|&i| remap[i]).collect(),
+            types: types.iter().map(|&i| remap.get(i)).collect(),
             matched: *matched,
             link: RowFieldRef::null(),
         },
@@ -1089,7 +1119,7 @@ fn internalize_row_field(
 
 fn remap_signature_refs(
     sig: &mut Signature,
-    remap: &[TypeExprRef],
+    remap: ContiguousTypeRemap,
     layout_remap: &[crate::types::VariantLayoutRef],
 ) {
     for item in sig.iter_mut() {
@@ -1099,7 +1129,7 @@ fn remap_signature_refs(
 
 fn remap_sig_item_refs(
     item: &mut SignatureItem,
-    remap: &[TypeExprRef],
+    remap: ContiguousTypeRemap,
     layout_remap: &[crate::types::VariantLayoutRef],
 ) {
     match item {
@@ -1112,23 +1142,23 @@ fn remap_sig_item_refs(
     }
 }
 
-fn remap_value_desc_refs(vd: &mut ValueDescription, remap: &[TypeExprRef]) {
-    vd.val_type = remap[vd.val_type.index()];
+fn remap_value_desc_refs(vd: &mut ValueDescription, remap: ContiguousTypeRemap) {
+    vd.val_type = remap.get(vd.val_type.index());
 }
 
 fn remap_type_decl_refs(
     td: &mut TypeDeclaration,
-    remap: &[TypeExprRef],
+    remap: ContiguousTypeRemap,
     layout_remap: &[crate::types::VariantLayoutRef],
 ) {
     if let TypeKind::TypeVariant(_, layout_ref) = &mut td.type_kind {
         *layout_ref = layout_remap[layout_ref.0 as usize];
     }
     for p in td.type_params.iter_mut() {
-        *p = remap[p.index()];
+        *p = remap.get(p.index());
     }
     if let Some(ref mut m) = td.type_manifest {
-        *m = remap[m.index()];
+        *m = remap.get(m.index());
     }
     match &mut td.type_kind {
         TypeKind::TypeAbstract | TypeKind::TypeOpen => {}
@@ -1154,15 +1184,15 @@ fn remap_type_decl_refs(
     }
 }
 
-fn remap_label_decl_refs(ld: &mut LabelDeclaration, remap: &[TypeExprRef]) {
-    ld.ld_type = remap[ld.ld_type.index()];
+fn remap_label_decl_refs(ld: &mut LabelDeclaration, remap: ContiguousTypeRemap) {
+    ld.ld_type = remap.get(ld.ld_type.index());
 }
 
-fn remap_ctor_decl_refs(cd: &mut ConstructorDeclaration, remap: &[TypeExprRef]) {
+fn remap_ctor_decl_refs(cd: &mut ConstructorDeclaration, remap: ContiguousTypeRemap) {
     match &mut cd.cd_args {
         ConstructorArguments::CstrTuple(types) => {
             for t in types.iter_mut() {
-                *t = remap[t.index()];
+                *t = remap.get(t.index());
             }
         }
         ConstructorArguments::CstrRecord(labels) => {
@@ -1172,18 +1202,18 @@ fn remap_ctor_decl_refs(cd: &mut ConstructorDeclaration, remap: &[TypeExprRef]) 
         }
     }
     if let Some(ref mut res) = cd.cd_res {
-        *res = remap[res.index()];
+        *res = remap.get(res.index());
     }
 }
 
-fn remap_ext_ctor_refs(ec: &mut ExtensionConstructor, remap: &[TypeExprRef]) {
+fn remap_ext_ctor_refs(ec: &mut ExtensionConstructor, remap: ContiguousTypeRemap) {
     for p in ec.ext_type_params.iter_mut() {
-        *p = remap[p.index()];
+        *p = remap.get(p.index());
     }
     match &mut ec.ext_args {
         ConstructorArguments::CstrTuple(types) => {
             for t in types.iter_mut() {
-                *t = remap[t.index()];
+                *t = remap.get(t.index());
             }
         }
         ConstructorArguments::CstrRecord(labels) => {
@@ -1193,13 +1223,13 @@ fn remap_ext_ctor_refs(ec: &mut ExtensionConstructor, remap: &[TypeExprRef]) {
         }
     }
     if let Some(ref mut ret) = ec.ext_ret_type {
-        *ret = remap[ret.index()];
+        *ret = remap.get(ret.index());
     }
 }
 
 fn remap_module_decl_refs(
     md: &mut ModuleDeclaration,
-    remap: &[TypeExprRef],
+    remap: ContiguousTypeRemap,
     layout_remap: &[crate::types::VariantLayoutRef],
 ) {
     remap_module_type_refs(&mut md.md_type, remap, layout_remap);
@@ -1207,7 +1237,7 @@ fn remap_module_decl_refs(
 
 fn remap_modtype_decl_refs(
     mtd: &mut ModtypeDeclaration,
-    remap: &[TypeExprRef],
+    remap: ContiguousTypeRemap,
     layout_remap: &[crate::types::VariantLayoutRef],
 ) {
     if let Some(ref mut mt) = mtd.mtd_type {
@@ -1217,7 +1247,7 @@ fn remap_modtype_decl_refs(
 
 fn remap_module_type_refs(
     mt: &mut ModuleType,
-    remap: &[TypeExprRef],
+    remap: ContiguousTypeRemap,
     layout_remap: &[crate::types::VariantLayoutRef],
 ) {
     match mt {
@@ -1231,5 +1261,90 @@ fn remap_module_type_refs(
             remap_module_type_refs(result, remap, layout_remap);
         }
         ModuleType::MtyIdent(_) | ModuleType::MtyAlias(_, _) => {}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::context::IdGenerator;
+    use crate::location::Location;
+
+    fn value(name: &str, portable_type: usize) -> SignatureItem {
+        SignatureItem::SigValue(
+            crate::ident::Ident::create_local(name),
+            ValueDescription {
+                val_type: TypeExprRef::from_usize(portable_type),
+                val_kind: ValueKind::ValReg,
+                val_loc: Location::none(),
+                val_attributes: Vec::new(),
+                val_path: None,
+            },
+        )
+    }
+
+    #[test]
+    fn internalization_preserves_contiguous_order_sharing_and_context_local_mutation() {
+        let graph = PortableTypeGraph {
+            entries: vec![
+                PortableTypeEntry {
+                    desc: PortableTypeDesc::Ttuple(vec![1, 1, 2]),
+                    level: 7,
+                },
+                PortableTypeEntry {
+                    desc: PortableTypeDesc::Tvar(Some("a".to_string())),
+                    level: GENERIC_LEVEL,
+                },
+                PortableTypeEntry {
+                    desc: PortableTypeDesc::Tlink(0),
+                    level: 3,
+                },
+            ],
+            variant_layouts: Vec::new(),
+        };
+        let portable_sig = vec![value("cycle", 2), value("tuple", 0)];
+
+        let first_ctx = TypeContext::new(Arc::new(IdGenerator::new()));
+        let first_prefix = first_ctx.new_var(None);
+        let first_sig = internalize_signature(&portable_sig, &graph, &first_ctx);
+        let first_base = first_prefix.index() + 1;
+        let first_root = TypeExprRef::from_usize(first_base);
+        let first_var = TypeExprRef::from_usize(first_base + 1);
+        let first_link = TypeExprRef::from_usize(first_base + 2);
+
+        assert_eq!(first_ctx.type_expr_count(), first_base + 3);
+        assert_eq!(first_ctx.get_level(first_root), 7);
+        assert_eq!(first_ctx.get_level(first_var), GENERIC_LEVEL);
+        assert_eq!(first_ctx.get_level(first_link), 3);
+        match &*first_ctx.get_desc(first_root) {
+            TypeDesc::Ttuple(items) => assert_eq!(items, &[first_var, first_var, first_link]),
+            desc => panic!("expected tuple, got {desc:?}"),
+        }
+        assert!(
+            matches!(&*first_ctx.get_desc(first_link), TypeDesc::Tlink(target) if *target == first_root)
+        );
+        assert!(
+            matches!(&first_sig[0], SignatureItem::SigValue(_, vd) if vd.val_type == first_link)
+        );
+        assert!(
+            matches!(&first_sig[1], SignatureItem::SigValue(_, vd) if vd.val_type == first_root)
+        );
+
+        let second_ctx = TypeContext::new(Arc::new(IdGenerator::new()));
+        second_ctx.new_var(None);
+        let second_sig = internalize_signature(&portable_sig, &graph, &second_ctx);
+        let second_var = match &*second_ctx.get_desc(match &second_sig[1] {
+            SignatureItem::SigValue(_, vd) => vd.val_type,
+            item => panic!("expected value, got {item:?}"),
+        }) {
+            TypeDesc::Ttuple(items) => items[0],
+            desc => panic!("expected tuple, got {desc:?}"),
+        };
+
+        first_ctx.set_desc(first_var, TypeDesc::Tnil);
+        assert!(matches!(&*first_ctx.get_desc(first_var), TypeDesc::Tnil));
+        assert!(
+            matches!(&*second_ctx.get_desc(second_var), TypeDesc::Tvar(Some(name)) if name == "a")
+        );
     }
 }
