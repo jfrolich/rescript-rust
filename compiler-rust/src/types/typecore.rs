@@ -26228,14 +26228,17 @@ pub(crate) fn copy_lookup_signature_for_subst(
     sig_items: &[crate::types::decl::SignatureItem],
     ctx: &TypeContext,
 ) -> crate::types::decl::Signature {
+    let type_count_before = ctx.type_expr_count();
+    let mut cache = TypeExprRefMap::new();
+    let copied = copy_lookup_signature(sig_items, ctx, &mut cache);
     if ctx.compiler_counters_enabled() {
         crate::perf_counters::record_signature_copy(
             std::panic::Location::caller(),
             sig_items.len(),
+            ctx.type_expr_count() - type_count_before,
         );
     }
-    let mut cache = TypeExprRefMap::new();
-    copy_lookup_signature(sig_items, ctx, &mut cache)
+    copied
 }
 
 #[track_caller]
@@ -26249,14 +26252,18 @@ where
     TP: Fn(&Path) -> Path,
     MP: Fn(&Path) -> Path,
 {
+    let type_count_before = ctx.type_expr_count();
+    let mut cache = TypeExprRefMap::new();
+    let copied =
+        copy_lookup_signature_with_paths(sig_items, ctx, &mut cache, type_path, module_path);
     if ctx.compiler_counters_enabled() {
         crate::perf_counters::record_signature_copy(
             std::panic::Location::caller(),
             sig_items.len(),
+            ctx.type_expr_count() - type_count_before,
         );
     }
-    let mut cache = TypeExprRefMap::new();
-    copy_lookup_signature_with_paths(sig_items, ctx, &mut cache, type_path, module_path)
+    copied
 }
 
 #[track_caller]
@@ -26271,21 +26278,24 @@ where
     TP: Fn(&Path) -> Path,
     MP: Fn(&Path) -> Path,
 {
-    if ctx.compiler_counters_enabled() {
-        crate::perf_counters::record_signature_copy(
-            std::panic::Location::caller(),
-            sig_items.len(),
-        );
-    }
+    let type_count_before = ctx.type_expr_count();
     let mut cache = TypeExprRefMap::new();
-    copy_lookup_signature_with_paths_and_idents(
+    let copied = copy_lookup_signature_with_paths_and_idents(
         sig_items,
         ctx,
         &mut cache,
         type_path,
         module_path,
         Some(new_idents.into_iter()),
-    )
+    );
+    if ctx.compiler_counters_enabled() {
+        crate::perf_counters::record_signature_copy(
+            std::panic::Location::caller(),
+            sig_items.len(),
+            ctx.type_expr_count() - type_count_before,
+        );
+    }
+    copied
 }
 
 /// Deep-copy a module type, creating new type expression nodes.
