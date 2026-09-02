@@ -193,10 +193,9 @@ crossing zero. Total CPU fell by `127.81ms` with an interval of
 
 Release typedtree, raw Lambda, optimized Lambda, and JavaScript parity each
 passed `612/612`; focused JavaScript fixtures passed `344/344`; diagnostics
-passed `1,432/1,432`; rewatch tests passed `150/150`. The full compiler test run
-passed `1,233` tests and hit one unrelated parser benchmark threshold flake
-(`benchmark_index`, `1.22x` versus `1.20x`); its isolated locked rerun passed at
-`1.07x`. Exact base and candidate Tella builds each compiled `3,248` modules and
+passed `1,432/1,432`; rewatch tests passed `150/150`. The final full compiler
+test run passed `1,236` tests with `108` ignored. Exact base and candidate Tella
+builds each compiled `3,248` modules and
 produced identical SHA-256 manifests for all `5,048` `.js` files under
 `packages/core/webapp`, excluding `node_modules`. External OCaml Tella output
 parity still stops after `196` modules because `bs-css` cannot resolve `Belt`.
