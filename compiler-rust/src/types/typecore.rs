@@ -26017,7 +26017,7 @@ where
                         cache,
                         type_path,
                         module_path,
-                        declaration_maps,
+                        false,
                     ),
                     md_attributes: md.md_attributes.clone(),
                     md_loc: md.md_loc.clone(),
@@ -35789,7 +35789,7 @@ mod tests {
     }
 
     #[test]
-    fn flattened_component_copy_cleans_nested_module_and_modtype_declarations() {
+    fn flattened_component_copy_preserves_module_thunk_and_cleans_nested_modtype() {
         let ctx = TypeContext::new(std::sync::Arc::new(IdGenerator::new()));
         let qualified = Path::pdot(Path::pident(Ident::create_persistent("Namespace")), "Root");
         let flattened = Path::pident(Ident::create_persistent("Namespace__Root"));
@@ -35834,7 +35834,10 @@ mod tests {
             panic!("child module type does not contain a signature")
         };
         let child_access = Path::pdot(flattened.clone(), "Child");
-        assert_component_root_paths(&ctx, module_sig, &child_access, true);
+        // `components_of_module_maker` keeps child module declarations behind
+        // their own thunk, while module-type declarations are substituted in
+        // the parent component force (compiler/ml/env.ml:1526-1544).
+        assert_component_root_paths(&ctx, module_sig, &child_access, false);
         assert_component_root_paths(&ctx, modtype_sig, &child_access, true);
 
         let module_roots = component_signature_roots(module_sig);
