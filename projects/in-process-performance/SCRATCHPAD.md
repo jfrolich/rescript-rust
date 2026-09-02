@@ -142,7 +142,10 @@ therefore removes the later `rewrite_sig_by_path_prefix`, declaration-path, and
 child-prefix walks for this fallback. Each direct signature item gets its own
 `TypeExprRefMap`, matching the cleanup after `Subst.value_description`,
 `Subst.type_declaration`, and `Subst.extension_constructor` in
-`compiler/ml/subst.ml:241-309`. The outer loop matches
+`compiler/ml/subst.ml:241-309`. Nested `Mty_signature` copies recursively reset
+the map for each nested declaration, and explicit prefix replacement descends
+through both sides of `Papply`, matching `Subst.module_path` at
+`compiler/ml/subst.ml:69-76`. The outer loop matches
 `components_of_module_maker`'s `List.iter2` order in
 `compiler/ml/env.ml:1475-1546`; child module declarations/components retain the
 existing separate thunk and environment-capture paths from
@@ -170,14 +173,17 @@ abbreviation-memo side allocations relative to the current recursive copier and
 add risk for little expected gain on `934k` nodes. The one-pass path write
 removes the measured redundant work without changing that allocation mechanism.
 
-The screening pair improved wall time from `4.769765s` to `4.665595s`. Thirty
-additional alternating 12-worker pairs, with both binaries using the same source
-runtime from this checkout, measured wall time from `4.680113s` to `4.661804s`:
-`-18.31ms` with an approximate paired 95% interval of
-`-29.02ms..-7.59ms`. User CPU fell by `71.91ms`, but its interval crossed zero;
-system CPU increased by `14.38ms` with an interval of `+2.59ms..+26.17ms`.
-Total CPU fell by `57.53ms`, also with an interval crossing zero. The wall win is
-credible but small, and the system-CPU tradeoff is real.
+An earlier 30-pair result was discarded after review found that nested module
+signatures still reused one declaration-copy map and `Papply` paths were not
+traversed. After fixing both issues and rebuilding exact instrumentation-free
+binaries, the screening pair improved wall time from `4.788810s` to `4.698093s`.
+Thirty new alternating 12-worker pairs, with both binaries using the same source
+runtime from this checkout, measured wall time from `4.662336s` to `4.648327s`:
+`-14.01ms` with an approximate paired 95% interval of
+`-25.19ms..-2.83ms`. User CPU fell by `129.04ms` with an interval of
+`-189.58ms..-68.50ms`; system CPU fell by `9.65ms`, with its interval crossing
+zero. Total CPU fell by `138.69ms` with an interval of
+`-203.76ms..-73.62ms`. The final wall and total-CPU wins are credible but small.
 
 Release typedtree, raw Lambda, optimized Lambda, and JavaScript parity each
 passed `612/612`; focused JavaScript fixtures passed `344/344`; diagnostics
