@@ -5225,7 +5225,19 @@ pub(crate) fn rewrite_path_by_path_prefix(
             rewrite_path_by_path_prefix(inner, old_prefix, new_prefix)
                 .map(|new_inner| Path::Pdot(std::sync::Arc::new(new_inner), name.clone(), *pos))
         }
-        _ => None,
+        Path::Papply(functor, argument) => {
+            let new_functor = rewrite_path_by_path_prefix(functor, old_prefix, new_prefix);
+            let new_argument = rewrite_path_by_path_prefix(argument, old_prefix, new_prefix);
+            if new_functor.is_none() && new_argument.is_none() {
+                None
+            } else {
+                Some(Path::papply(
+                    new_functor.unwrap_or_else(|| functor.as_ref().clone()),
+                    new_argument.unwrap_or_else(|| argument.as_ref().clone()),
+                ))
+            }
+        }
+        Path::Pident(_) => None,
     }
 }
 
