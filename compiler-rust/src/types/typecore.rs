@@ -25286,7 +25286,10 @@ where
                 row_more: row.row_more,
                 row_closed: row.row_closed,
                 row_fixed: row.row_fixed,
-                row_name: row.row_name.clone(),
+                row_name: row
+                    .row_name
+                    .as_ref()
+                    .map(|(path, args)| (type_path(path), args.clone())),
             },
             TypeDesc::Tunivar(name) => CopyTypeExprPlan::Tunivar(name.clone()),
             TypeDesc::Tpoly { body, vars } => CopyTypeExprPlan::Tpoly {
@@ -35844,6 +35847,43 @@ mod tests {
         assert!(matches!(
             &*ctx.get_desc(modtype_roots[0]),
             TypeDesc::Tconstr { path, .. } if path.same(&Path::pdot(child_access, "first"))
+        ));
+    }
+
+    #[test]
+    fn flattened_component_copy_rewrites_named_variant_row_paths() {
+        let ctx = TypeContext::new(std::sync::Arc::new(IdGenerator::new()));
+        let qualified = Path::pdot(Path::pident(Ident::create_persistent("Namespace")), "Root");
+        let flattened = Path::pident(Ident::create_persistent("Namespace__Root"));
+        let row_more = ctx.new_generic_var(None);
+        let row = ctx.new_generic_type(TypeDesc::Tvariant(crate::types::type_expr::RowDesc {
+            row_fields: vec![],
+            row_more,
+            row_closed: true,
+            row_fixed: false,
+            row_name: Some((Path::pdot(qualified.clone(), "named"), vec![])),
+        }));
+        let source = vec![crate::types::decl::SignatureItem::SigValue(
+            ctx.create_ident("value"),
+            crate::types::decl::ValueDescription {
+                val_type: row,
+                val_kind: crate::types::decl::ValueKind::ValReg,
+                val_loc: Location::none(),
+                val_attributes: vec![],
+                val_path: Some(Path::pdot(qualified.clone(), "value")),
+            },
+        )];
+
+        let copied = copy_component_alias_signature(&ctx, &source, &qualified, &flattened);
+        let crate::types::decl::SignatureItem::SigValue(_, value) = &copied[0] else {
+            panic!("copied item is not a value")
+        };
+        let TypeDesc::Tvariant(row) = &*ctx.get_desc(value.val_type) else {
+            panic!("copied value is not a variant row")
+        };
+        assert!(matches!(
+            &row.row_name,
+            Some((path, _)) if path.same(&Path::pdot(flattened, "named"))
         ));
     }
 
