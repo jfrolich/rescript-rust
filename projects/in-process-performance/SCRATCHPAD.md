@@ -124,6 +124,71 @@ external OCaml Tella parity setup remained unavailable: it stopped after `197`
 dependency modules because `bs-css` could not resolve `Belt`; the exact
 base/candidate Rust manifest comparison covers this candidate.
 
+### Whole-component path substitution revisit
+
+Exact head `94a400fffb623d10c8e164fd1d1138f47fab5a63` and pinned Tella
+`66a5edabdbfdbc5dd7496e59ee0573de2a2a1ffa` reproduced the flattened-root
+fallback at `types/typecore.rs`'s persistent `Pident` path. A one-worker release
+counter run measured `3,504` signature copies, `172,624` items, `936,552` fresh
+type nodes, and `112,386,240` bytes of inline node-plus-handle storage at that
+site. Aggregate signature-copy traffic was `55,502` calls, `1,460,718` items,
+and `8,970,070` fresh nodes.
+
+The retained implementation keeps the same whole-component call and source-item
+order, but passes the registered qualified source path and requested exact
+persistent path into the type copier. `Path.same`-based prefix substitution is
+applied while each final copied descriptor and declaration path is written. It
+therefore removes the later `rewrite_sig_by_path_prefix`, declaration-path, and
+child-prefix walks for this fallback. Each direct signature item gets its own
+`TypeExprRefMap`, matching the cleanup after `Subst.value_description`,
+`Subst.type_declaration`, and `Subst.extension_constructor` in
+`compiler/ml/subst.ml:241-309`. The outer loop matches
+`components_of_module_maker`'s `List.iter2` order in
+`compiler/ml/env.ml:1475-1546`; child module declarations/components retain the
+existing separate thunk and environment-capture paths from
+`compiler/ml/env.ml:1527-1537`. Constructor and label tables are still derived
+from the completed component signature in that same force. Alias strengthening
+stays at `compiler/ml/mtype.ml:32-49` and `compiler/ml/mtype.ml:94-98`, and every
+fresh node still uses the Rust counterpart of `compiler/ml/btype.ml:46-48`.
+Ordinary no-rewrite copies keep their old fast path.
+
+Temporary counters, removed before timing, measured the candidate at `3,500`
+target-site copies, `172,612` items, `934,264` fresh nodes, and `112,111,680`
+bytes. Aggregate traffic was `55,502` calls, `1,460,718` items, and `8,970,239`
+nodes. The aggregate increase of `169` nodes comes from restoring independent
+per-declaration cleanup; it is not cross-context sharing. The target reduction
+comes from four downstream fallback copies no longer reached after the final
+paths are written during the source DFS. The two full copied-graph rewrite
+walks are gone; the roughly `934k` fresh target nodes remain required and
+context-local.
+
+A direct contiguous final-descriptor planner was considered after the retained
+portable internalizer. It was not added. Portable graphs already carry a
+complete stable index, while a live mutable type graph would need another plan
+walk and temporary descriptor storage before allocation. That would move
+abbreviation-memo side allocations relative to the current recursive copier and
+add risk for little expected gain on `934k` nodes. The one-pass path write
+removes the measured redundant work without changing that allocation mechanism.
+
+The screening pair improved wall time from `4.769765s` to `4.665595s`. Thirty
+additional alternating 12-worker pairs, with both binaries using the same source
+runtime from this checkout, measured wall time from `4.680113s` to `4.661804s`:
+`-18.31ms` with an approximate paired 95% interval of
+`-29.02ms..-7.59ms`. User CPU fell by `71.91ms`, but its interval crossed zero;
+system CPU increased by `14.38ms` with an interval of `+2.59ms..+26.17ms`.
+Total CPU fell by `57.53ms`, also with an interval crossing zero. The wall win is
+credible but small, and the system-CPU tradeoff is real.
+
+Release typedtree, raw Lambda, optimized Lambda, and JavaScript parity each
+passed `612/612`; focused JavaScript fixtures passed `344/344`; diagnostics
+passed `1,432/1,432`; rewatch tests passed `150/150`. The full compiler test run
+passed `1,233` tests and hit one unrelated parser benchmark threshold flake
+(`benchmark_index`, `1.22x` versus `1.20x`); its isolated locked rerun passed at
+`1.07x`. Exact base and candidate Tella builds each compiled `3,248` modules and
+produced identical SHA-256 manifests for all `5,048` `.js` files under
+`packages/core/webapp`, excluding `node_modules`. External OCaml Tella output
+parity still stops after `196` modules because `bs-css` cannot resolve `Belt`.
+
 ## Portable type internalization traffic
 
 On exact base `56269530990c6e4ca8016c8654d625a52e70ca95` and pinned Tella
