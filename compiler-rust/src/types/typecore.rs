@@ -35533,6 +35533,198 @@ mod tests {
         ));
     }
 
+    fn component_alias_decl(
+        ctx: &TypeContext,
+        source: &Path,
+        name: &str,
+    ) -> crate::types::decl::TypeDeclaration {
+        let param = ctx.new_generic_var(None);
+        let type_path = Path::pdot(source.clone(), name);
+        crate::types::decl::TypeDeclaration {
+            type_params: vec![param],
+            type_arity: 1,
+            type_kind: crate::types::decl::TypeKind::TypeAbstract,
+            type_private: crate::types::PrivateFlag::Public,
+            type_manifest: Some(ctx.new_generic_constr(type_path.clone(), vec![param])),
+            type_variance: vec![crate::types::variance::Variance::full()],
+            type_newtype_level: None,
+            type_loc: Location::none(),
+            type_attributes: vec![],
+            type_immediate: false,
+            type_representation: crate::types::TypeRepresentation::Boxed,
+            type_inlined_types: vec![],
+            type_path: Some(type_path),
+        }
+    }
+
+    fn component_alias_signature(
+        ctx: &TypeContext,
+        source: &Path,
+    ) -> crate::types::decl::Signature {
+        let first_id = ctx.create_ident("first");
+        let second_id = ctx.create_ident("second");
+        let first = component_alias_decl(ctx, source, first_id.name());
+        let second = component_alias_decl(ctx, source, second_id.name());
+        let first_manifest = first.type_manifest.unwrap();
+        let second_manifest = second.type_manifest.unwrap();
+        let value_id = ctx.create_ident("value");
+        let value_type = ctx.new_generic_arrow(
+            crate::types::asttypes::ArgLabel::Nolabel,
+            first_manifest,
+            second_manifest,
+            None,
+        );
+        vec![
+            crate::types::decl::SignatureItem::SigType(
+                first_id,
+                first,
+                crate::types::decl::RecStatus::TrecNot,
+            ),
+            crate::types::decl::SignatureItem::SigType(
+                second_id,
+                second,
+                crate::types::decl::RecStatus::TrecNot,
+            ),
+            crate::types::decl::SignatureItem::SigValue(
+                value_id,
+                crate::types::decl::ValueDescription {
+                    val_type: value_type,
+                    val_kind: crate::types::decl::ValueKind::ValReg,
+                    val_loc: Location::none(),
+                    val_attributes: vec![],
+                    val_path: Some(Path::pdot(source.clone(), "value")),
+                },
+            ),
+        ]
+    }
+
+    fn copy_component_alias_signature(
+        ctx: &TypeContext,
+        source: &[crate::types::decl::SignatureItem],
+        old_prefix: &Path,
+        access_path: &Path,
+    ) -> crate::types::decl::Signature {
+        let mut copied = copy_lookup_signature_for_subst(source, ctx);
+        crate::cmi::persistent_env::rewrite_sig_by_path_prefix(
+            &copied,
+            old_prefix,
+            access_path,
+            ctx,
+        );
+        crate::cmi::persistent_env::rewrite_sig_paths_by_path_prefix(
+            &mut copied,
+            old_prefix,
+            access_path,
+        );
+        copied
+    }
+
+    fn component_signature_roots(
+        signature: &[crate::types::decl::SignatureItem],
+    ) -> [TypeExprRef; 3] {
+        let crate::types::decl::SignatureItem::SigType(_, first, _) = &signature[0] else {
+            panic!("first component item is not a type")
+        };
+        let crate::types::decl::SignatureItem::SigType(_, second, _) = &signature[1] else {
+            panic!("second component item is not a type")
+        };
+        let crate::types::decl::SignatureItem::SigValue(_, value) = &signature[2] else {
+            panic!("third component item is not a value")
+        };
+        [
+            first.type_manifest.unwrap(),
+            second.type_manifest.unwrap(),
+            value.val_type,
+        ]
+    }
+
+    fn assert_component_root_paths(
+        ctx: &TypeContext,
+        signature: &[crate::types::decl::SignatureItem],
+        access_path: &Path,
+    ) {
+        for (root, name) in component_signature_roots(signature)[..2]
+            .iter()
+            .zip(["first", "second"])
+        {
+            assert!(matches!(
+                &*ctx.get_desc(*root),
+                TypeDesc::Tconstr { path, .. }
+                    if path.same(&Path::pdot(access_path.clone(), name))
+            ));
+        }
+        let crate::types::decl::SignatureItem::SigValue(_, value) = &signature[2] else {
+            unreachable!()
+        };
+        assert!(
+            value
+                .val_path
+                .as_ref()
+                .is_some_and(|path| path.same(&Path::pdot(access_path.clone(), "value")))
+        );
+    }
+
+    fn assert_component_copy_order(flattened_first: bool) {
+        let ctx = TypeContext::new(std::sync::Arc::new(IdGenerator::new()));
+        let qualified = Path::pdot(Path::pident(Ident::create_persistent("Stdlib")), "Array");
+        let flattened = Path::pident(Ident::create_persistent("Stdlib_Array"));
+        let source = component_alias_signature(&ctx, &qualified);
+        let source_roots = component_signature_roots(&source);
+
+        let copy = |access_path: &Path| {
+            let start = ctx.type_expr_count();
+            let signature = copy_component_alias_signature(&ctx, &source, &qualified, access_path);
+            let roots = component_signature_roots(&signature);
+            let relative = roots.map(|root| root.index() - start);
+            (signature, roots, relative)
+        };
+
+        let ((qualified_sig, qualified_roots, qualified_order), (flat_sig, flat_roots, flat_order)) =
+            if flattened_first {
+                let flat = copy(&flattened);
+                let qualified = copy(&qualified);
+                (qualified, flat)
+            } else {
+                let qualified = copy(&qualified);
+                let flat = copy(&flattened);
+                (qualified, flat)
+            };
+
+        assert_eq!(qualified_order, [0, 1, 2]);
+        assert_eq!(flat_order, [0, 1, 2]);
+        assert_component_root_paths(&ctx, &qualified_sig, &qualified);
+        assert_component_root_paths(&ctx, &flat_sig, &flattened);
+
+        for index in 0..source_roots.len() {
+            assert_ne!(source_roots[index], qualified_roots[index]);
+            assert_ne!(source_roots[index], flat_roots[index]);
+            assert_ne!(qualified_roots[index], flat_roots[index]);
+        }
+
+        ctx.set_desc(qualified_roots[0], TypeDesc::Tnil);
+        assert!(matches!(*ctx.get_desc(qualified_roots[0]), TypeDesc::Tnil));
+        assert!(matches!(
+            &*ctx.get_desc(source_roots[0]),
+            TypeDesc::Tconstr { path, .. }
+                if path.same(&Path::pdot(qualified.clone(), "first"))
+        ));
+        assert!(matches!(
+            &*ctx.get_desc(flat_roots[0]),
+            TypeDesc::Tconstr { path, .. }
+                if path.same(&Path::pdot(flattened.clone(), "first"))
+        ));
+    }
+
+    #[test]
+    fn flattened_component_copy_preserves_identity_mutation_and_qualified_first_order() {
+        assert_component_copy_order(false);
+    }
+
+    #[test]
+    fn flattened_component_copy_preserves_identity_mutation_and_flattened_first_order() {
+        assert_component_copy_order(true);
+    }
+
     #[test]
     fn test_ocaml_hashtbl_hash_string_matches_ocaml() {
         assert_eq!(ocaml_hashtbl_hash_string("_self"), 448_023_825);
