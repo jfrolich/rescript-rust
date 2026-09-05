@@ -57,7 +57,13 @@ provenance['logs']={str(p.relative_to(D)):sha(p) for p in sorted((D/'logs').iter
 provenance['profiles']={p.name:sha(p) for p in sorted(D.glob('sample-D-*.txt'))}
 (OUT/'provenance.json').write_text(json.dumps(provenance, indent=2)+'\n')
 # Keep raw private inventories/backups/profiles local; never put corpus JS in Git.
-shutil.copytree(D, DURABLE, dirs_exist_ok=True, ignore=shutil.ignore_patterns('target'))
+def preserve_copy(src, dst):
+    src, dst = Path(src), Path(dst)
+    if dst.exists() and sha(src) == sha(dst):
+        return str(dst)
+    assert dst.parent.name != 'bin' or not dst.exists(), 'Never overwrite a saved binary'
+    return shutil.copy2(src, dst)
+shutil.copytree(D, DURABLE, dirs_exist_ok=True, ignore=shutil.ignore_patterns('target'), copy_function=preserve_copy)
 shutil.copytree(OUT, DURABLE/'committed-summary', dirs_exist_ok=True)
 shutil.copy2(OUT.parent/'DESCRIPTOR_SNAPSHOT_ATTRIBUTION.md', DURABLE/'DESCRIPTOR_SNAPSHOT_ATTRIBUTION.md')
 (DURABLE/'scripts').mkdir(exist_ok=True)
