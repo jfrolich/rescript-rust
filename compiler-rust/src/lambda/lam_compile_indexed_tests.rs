@@ -122,10 +122,9 @@ fn cmj_reduced_original_argument_reenters_the_indexed_js_continuation() {
     });
     assert_eq!(visited, [argument]);
     assert_eq!(print_expression(&compiled.expr), "7");
-    assert_eq!(
-        compiled.expr.source_loc,
-        Some(Location::new_for_error("caller.res", 10, 20))
-    );
+    // Native successful beta returns compile_lambda(reduced) directly, without
+    // attaching the eliminated caller's location (lam_compile.ml:349-357).
+    assert_eq!(compiled.expr.source_loc, None);
     assert!(compiled.prelude.is_empty());
     assert!(owner.compiler.cmj_arity_cache.is_empty());
     assert_eq!(generator.current_stamp(), 700);
@@ -561,7 +560,7 @@ fn indexed_assign_offset_takes_reference_fast_path_without_child_lowering() {
 
 #[test]
 fn indexed_short_circuit_preserves_distinct_native_nonreturn_continuations() {
-    use crate::lambda::lam_compile_context::{Continuation, TailType};
+    use super::context::{Continuation, TailType};
     for and in [true, false] {
         for mode in 0..4 {
             let generator = Arc::new(IdGenerator::new());
@@ -697,7 +696,7 @@ fn indexed_short_circuit_return_rewrites_once_and_keeps_the_same_continuation() 
 #[test]
 fn indexed_output_keeps_native_finished_and_dummy_append_protocol() {
     use super::output::{Finished, Output};
-    use crate::lambda::lam_compile_context::{Continuation, TailType};
+    use super::context::{Continuation, TailType};
     let first = Output {
         block: vec![Statement::break_()],
         value: Some(Expression::call(

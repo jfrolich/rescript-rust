@@ -166,6 +166,18 @@ The indexed owner uses the native `Js_output` optional-value and True/False/Dumm
 
 Twelve focused indexed-owner tests pass, including all four nonreturn short-circuit modes, declaration metadata/order, a return-continuation rewrite producing JS directly from indexed children, and finished/dummy output behavior. No new full release or benchmark run was made. M6 remains incomplete; native conditional, recursive binding, catch/switch/tail modes and the grouped M5-to-JS entrypoint still need integration. Keep tail-label mutation owner-scoped when wiring the dispatcher; cloning the legacy `ReturnLabel` would not model OCaml's shared mutable return state.
 
+### M6 paused for the measurement task
+
+At the user's reprioritization, implementation stopped with additional native continuation work retained but **not accepted**:
+- Continuation modes now refer to owner-local mutable return-label slots; copying a mode does not copy the return label. Parameter maps use `Ext_ident.compare` ordering (stamp/name, excluding flags), separately from full-flag free-variable sets.
+- Application output carries the original continuation through flattening and CMJ beta results, and implements the native named-tail argument reassignment path. Successful beta no longer assigns the eliminated application's source location to a locationless reduced value (`compiler/core/lam_compile.ml:349-357`); real fallback calls retain their call location.
+- Closed conditional operations implement native probe/recompile order and mode branches (`1459-1606`). Closed let, sequence, try and record-spread operations preserve native continuations and output append semantics.
+- Native output declarations omit Undefined initializers per `compiler/core/js_stmt_make.ml:70-75`.
+
+Validation at pause: `cargo check` passed during construction, and the existing 12 indexed-owner tests passed again under the heavy lock. **New conditional/named-tail/binding-specific tests were not added or run:** that next edit command was cancelled by the pause instruction. The passing 12 tests therefore do not establish coverage of those new operations. No full tests, release rebuilds, benchmark retries, Tella runs or performance measurements were performed in this turn.
+
+Remaining implementation: complete the general all-family dispatcher; test the newly retained continuation/tail/binding paths; finish primitive special cases, recursive function/binding metadata, catch/raise/switch modes and source locations; connect grouped M5 roots through JS passes/dependencies/fatal gate/CMJ export; then obtain independent review and all required correctness gates before any activation or performance claim. The new owner operations remain inactive in production. Compiler/shared-worktree/heavy-test ownership is released for the measurement task; no compiler process is left running.
+
 ## Validation at every checkpoint
 
 - Unit tests for semantic output, source-order traversal, shared-child isolation, and exact rewrite decisions.
