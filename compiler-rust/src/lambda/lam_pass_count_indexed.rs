@@ -180,13 +180,7 @@ pub(crate) fn collect_occurs(
                     && !attr.async_
                     && attr.directive.is_none()
                 {
-                    let reduced = no_names_beta_reduce(
-                        store,
-                        &params,
-                        body,
-                        &args,
-                        hash_capacity,
-                    );
+                    let reduced = no_names_beta_reduce(store, &params, body, &args, hash_capacity);
                     count(store, occ, local, reduced, hash_capacity);
                 } else {
                     count(store, occ, local, function, hash_capacity);
@@ -249,13 +243,7 @@ pub(crate) fn collect_occurs(
     }
 
     let mut occ = OccurrenceTable::default();
-    count(
-        store,
-        &mut occ,
-        &mut LocalTable::new(),
-        root,
-        hash_capacity,
-    );
+    count(store, &mut occ, &mut LocalTable::new(), root, hash_capacity);
     occ
 }
 
@@ -267,6 +255,56 @@ mod tests {
 
     fn id(name: &str, stamp: i32) -> Ident {
         Ident::new(name, stamp, IdentFlags::NONE)
+    }
+
+    #[test]
+    fn nested_scopes_keep_distinct_identity_counts() {
+        let outer = id("value", 1);
+        let inner = id("value", 2);
+        let input = Lambda::let_(
+            LetKind::Strict,
+            outer.clone(),
+            Lambda::const_(Constant::int(0)),
+            Lambda::seq(
+                Lambda::let_(
+                    LetKind::Strict,
+                    inner.clone(),
+                    Lambda::var(outer.clone()),
+                    Lambda::seq(Lambda::var(inner.clone()), Lambda::var(inner.clone())),
+                ),
+                Lambda::var(outer.clone()),
+            ),
+        );
+        let mut store = IndexedLambda::from_lambda(input);
+        let root = store.root();
+        let mut capacity = 32;
+        let occurrences = collect_occurs(&mut store, root, &mut capacity);
+        assert_eq!(occurrences.get(&outer).times, 3);
+        assert!(!occurrences.get(&outer).captured);
+        assert_eq!(occurrences.get(&inner).times, 2);
+        assert!(!occurrences.get(&inner).captured);
+    }
+
+    #[test]
+    fn shared_child_is_counted_for_each_parent_edge() {
+        let value = id("value", 1);
+        let input = Lambda::let_(
+            LetKind::Strict,
+            value.clone(),
+            Lambda::const_(Constant::int(0)),
+            Lambda::var(value.clone()),
+        );
+        let mut store = IndexedLambda::from_lambda(input);
+        let NodeView::Let(kind, id, init, body) = store.view(store.root()) else {
+            panic!("expected let")
+        };
+        let (kind, id, init, body) = (kind, id.clone(), init, body);
+        let body = store.append_sequence(body, body);
+        let root = store.append(NodeSnapshot::Let(kind, id, init, body));
+        let mut capacity = 32;
+        let occurrences = collect_occurs(&mut store, root, &mut capacity);
+        assert_eq!(occurrences.get(&value).times, 2);
+        assert!(!occurrences.get(&value).captured);
     }
 
     #[test]

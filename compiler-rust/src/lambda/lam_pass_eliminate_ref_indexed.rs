@@ -22,9 +22,7 @@ pub(crate) fn eliminate_ref(
                 Ok(node)
             }
         }
-        NodeSnapshot::Prim(Primitive::Pfield(0, _), args, _)
-            if matches!(args.as_slice(), [value] if matches!(store.view(*value), NodeView::Var(id) if id.same(target))) =>
-        {
+        NodeSnapshot::Prim(Primitive::Pfield(0, _), args, _) if matches!(args.as_slice(), [value] if matches!(store.view(*value), NodeView::Var(id) if id.same(target))) => {
             Ok(store.append(NodeSnapshot::Var(target.clone())))
         }
         NodeSnapshot::Function(_, _, _, _) => {
@@ -34,14 +32,12 @@ pub(crate) fn eliminate_ref(
                 Ok(node)
             }
         }
-        NodeSnapshot::Prim(Primitive::Psetfield(0, _), args, _)
-            if matches!(args.as_slice(), [base, _] if matches!(store.view(*base), NodeView::Var(id) if id.same(target))) =>
+        NodeSnapshot::Prim(Primitive::Psetfield(0, _), args, _) if matches!(args.as_slice(), [base, _] if matches!(store.view(*base), NodeView::Var(id) if id.same(target))) =>
         {
             let value = eliminate_ref(store, target, args[1])?;
             Ok(store.append(NodeSnapshot::Assign(target.clone(), value)))
         }
-        NodeSnapshot::Prim(Primitive::Poffsetref(delta), args, loc)
-            if matches!(args.as_slice(), [base] if matches!(store.view(*base), NodeView::Var(id) if id.same(target))) =>
+        NodeSnapshot::Prim(Primitive::Poffsetref(delta), args, loc) if matches!(args.as_slice(), [base] if matches!(store.view(*base), NodeView::Var(id) if id.same(target))) =>
         {
             let variable = store.append(NodeSnapshot::Var(target.clone()));
             let value = append_rebuilt(
@@ -130,7 +126,10 @@ mod tests {
                 ),
             ),
         );
-        assert_eq!(format!("{:#?}", store.materialize_node(result)), format!("{expected:#?}"));
+        assert_eq!(
+            format!("{:#?}", store.materialize_node(result)),
+            format!("{expected:#?}")
+        );
         let Lambda::Lsequence(first, _) = store.materialize_node(result) else {
             panic!("expected sequence")
         };

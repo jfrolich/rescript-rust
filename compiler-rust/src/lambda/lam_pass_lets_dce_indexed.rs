@@ -64,8 +64,7 @@ fn simplify(store: &mut IndexedLambda, state: &mut Lets<'_>, node: NodeId) -> No
             state.substitutions.insert(id, source);
             simplify(store, state, body)
         }
-        NodeSnapshot::Let(LetKind::Strict, id, value, body)
-            if matches!(store.view(value), NodeView::Prim(Primitive::Pmakeblock(_, Mutable::Mutable), args, _) if args.len() == 1) =>
+        NodeSnapshot::Let(LetKind::Strict, id, value, body) if matches!(store.view(value), NodeView::Prim(Primitive::Pmakeblock(_, Mutable::Mutable), args, _) if args.len() == 1) =>
         {
             let NodeSnapshot::Prim(primitive, mut args, loc) = store.snapshot(value) else {
                 unreachable!()
@@ -76,10 +75,8 @@ fn simplify(store: &mut IndexedLambda, state: &mut Lets<'_>, node: NodeId) -> No
             match eliminate_ref(store, &id, body) {
                 Ok(body) => append_refine_let(store, LetKind::Variable, id, init, body),
                 Err(_) => {
-                    let reference = append_rebuilt(
-                        store,
-                        NodeSnapshot::Prim(primitive, vec![init], loc),
-                    );
+                    let reference =
+                        append_rebuilt(store, NodeSnapshot::Prim(primitive, vec![init], loc));
                     append_refine_let(store, LetKind::Strict, id, reference, body)
                 }
             }
@@ -122,17 +119,11 @@ fn simplify(store: &mut IndexedLambda, state: &mut Lets<'_>, node: NodeId) -> No
             if let NodeView::Const(Constant::String { s, delim: None }) = store.view(value) {
                 state.strings.insert(id.clone(), s.clone());
                 let body = simplify(store, state, body);
-                return append_rebuilt(
-                    store,
-                    NodeSnapshot::Let(LetKind::Alias, id, value, body),
-                );
+                return append_rebuilt(store, NodeSnapshot::Let(LetKind::Alias, id, value, body));
             }
             let value = simplify(store, state, value);
             let body = simplify(store, state, body);
-            append_rebuilt(
-                store,
-                NodeSnapshot::Let(LetKind::Alias, id, value, body),
-            )
+            append_rebuilt(store, NodeSnapshot::Let(LetKind::Alias, id, value, body))
         }
         NodeSnapshot::Let(LetKind::StrictOpt, id, value, body) => {
             if !state.used(&id) {
@@ -147,10 +138,8 @@ fn simplify(store: &mut IndexedLambda, state: &mut Lets<'_>, node: NodeId) -> No
                 return match eliminate_ref(store, &id, body) {
                     Ok(body) => append_refine_let(store, LetKind::Variable, id, init, body),
                     Err(_) => {
-                        let reference = append_rebuilt(
-                            store,
-                            NodeSnapshot::Prim(primitive, vec![init], loc),
-                        );
+                        let reference =
+                            append_rebuilt(store, NodeSnapshot::Prim(primitive, vec![init], loc));
                         append_refine_let(store, LetKind::StrictOpt, id, reference, body)
                     }
                 };
@@ -159,10 +148,7 @@ fn simplify(store: &mut IndexedLambda, state: &mut Lets<'_>, node: NodeId) -> No
             if let NodeView::Const(Constant::String { s, delim: None }) = store.view(value) {
                 state.strings.insert(id.clone(), s.clone());
                 let body = simplify(store, state, body);
-                return append_rebuilt(
-                    store,
-                    NodeSnapshot::Let(LetKind::Alias, id, value, body),
-                );
+                return append_rebuilt(store, NodeSnapshot::Let(LetKind::Alias, id, value, body));
             }
             let body = simplify(store, state, body);
             append_refine_let(store, LetKind::StrictOpt, id, value, body)
@@ -183,10 +169,7 @@ fn simplify(store: &mut IndexedLambda, state: &mut Lets<'_>, node: NodeId) -> No
             {
                 state.strings.insert(id.clone(), s.clone());
                 let body = simplify(store, state, body);
-                return append_rebuilt(
-                    store,
-                    NodeSnapshot::Let(LetKind::Alias, id, value, body),
-                );
+                return append_rebuilt(store, NodeSnapshot::Let(LetKind::Alias, id, value, body));
             }
             let body = simplify(store, state, body);
             append_refine_let(store, kind, id, value, body)
@@ -202,13 +185,8 @@ fn simplify(store: &mut IndexedLambda, state: &mut Lets<'_>, node: NodeId) -> No
                 && !attr.async_
                 && attr.directive.is_none()
             {
-                let reduced = no_names_beta_reduce(
-                    store,
-                    &params,
-                    body,
-                    &args,
-                    state.beta_hash_capacity,
-                );
+                let reduced =
+                    no_names_beta_reduce(store, &params, body, &args, state.beta_hash_capacity);
                 return simplify(store, state, reduced);
             }
             let function = simplify(store, state, function);
@@ -249,6 +227,7 @@ fn simplify(store: &mut IndexedLambda, state: &mut Lets<'_>, node: NodeId) -> No
 }
 
 impl IndexedLambdaContext {
+    /// Counts occurrences, eliminates references, and simplifies lets in one store.
     pub fn simplify_lets(&mut self) {
         let root = self.current_root();
         let root = {
@@ -272,6 +251,7 @@ impl IndexedLambdaContext {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::context::IdGenerator;
     use crate::ident::IdentFlags;
     use crate::lambda::lam_compat::SetFieldDbgInfo;
     use crate::lambda::{Constant, FunctionAttribute, Lambda};
@@ -367,6 +347,131 @@ mod tests {
     }
 
     #[test]
+    fn strict_opt_unused_skips_effectful_initializer() {
+        let value = id("value", 1);
+        let result = id("result", 2);
+        let effect = Lambda::prim(
+            Primitive::PjsCall {
+                prim_name: "must_not_run".into(),
+                arg_types: vec![],
+                ffi: crate::lambda::lam_primitive::ExternalFfiSpec {
+                    kind: crate::lambda::lam_primitive::ExternalFfiKind::Default,
+                    spec: None,
+                    obj_params: None,
+                    return_wrapper: crate::lambda::lam_primitive::ExternalReturnWrapper::Identity,
+                    inline_constant: None,
+                },
+                dynamic_import: false,
+                transformed_jsx: false,
+            },
+            vec![],
+            Location::new_for_error("lets.res", 1, 2),
+        );
+        assert_exact(
+            &run(Lambda::let_(
+                LetKind::StrictOpt,
+                value,
+                effect,
+                Lambda::var(result.clone()),
+            )),
+            &Lambda::var(result),
+        );
+    }
+
+    #[test]
+    fn native_int_alias_is_not_reference_small_constant() {
+        let value = id("value", 1);
+        let native = Lambda::const_(Constant::NativeInt {
+            i: 7,
+            comment: None,
+        });
+        let actual = run(Lambda::let_(
+            LetKind::Alias,
+            value.clone(),
+            native.clone(),
+            Lambda::seq(Lambda::var(value.clone()), Lambda::var(value.clone())),
+        ));
+        let expected = Lambda::let_(
+            LetKind::Alias,
+            value.clone(),
+            native,
+            Lambda::seq(Lambda::var(value.clone()), Lambda::var(value)),
+        );
+        assert_exact(&actual, &expected);
+    }
+
+    #[test]
+    fn inlineable_function_beta_reduces_but_async_function_does_not() {
+        let parameter = id("parameter", 1);
+        let call = |attr: FunctionAttribute| {
+            Lambda::apply(
+                Lambda::function_(
+                    1,
+                    vec![parameter.clone()],
+                    Lambda::prim(
+                        Primitive::Paddint,
+                        vec![Lambda::var(parameter.clone()), int(1)],
+                        Location::none(),
+                    ),
+                    attr,
+                ),
+                vec![int(2)],
+                crate::lambda::ApInfo {
+                    loc: Location::new_for_error("lets.res", 3, 4),
+                    inlined: crate::lambda::InlineAttribute::Default,
+                    status: crate::lambda::ApplyStatus::Na,
+                },
+                true,
+            )
+        };
+        assert_exact(
+            &run(call(FunctionAttribute::default())),
+            &Lambda::prim(Primitive::Paddint, vec![int(2), int(1)], Location::none()),
+        );
+        let async_attr = FunctionAttribute {
+            async_: true,
+            ..FunctionAttribute::default()
+        };
+        let async_call = call(async_attr.clone());
+        assert_exact(&run(async_call.clone()), &async_call);
+    }
+
+    #[test]
+    fn recursive_and_control_flow_occurrences_keep_bindings() {
+        let value = id("value", 1);
+        let recursive = id("recursive", 2);
+        let input = Lambda::let_(
+            LetKind::Strict,
+            value.clone(),
+            int(4),
+            Lambda::letrec(
+                vec![(
+                    recursive.clone(),
+                    Lambda::function_(
+                        0,
+                        vec![],
+                        Lambda::if_(
+                            Lambda::const_(Constant::JsTrue),
+                            Lambda::var(value.clone()),
+                            Lambda::var(recursive),
+                        ),
+                        FunctionAttribute::default(),
+                    ),
+                )],
+                Lambda::var(value.clone()),
+            ),
+        );
+        let actual = run(input);
+        let Lambda::Llet(_, actual, _, _) = actual else {
+            panic!("expected retained outer binding")
+        };
+        assert_eq!(
+            (actual.name(), actual.stamp(), actual.flags()),
+            (value.name(), value.stamp(), value.flags())
+        );
+    }
+
+    #[test]
     fn reifies_independent_reference_reads_and_writes() {
         let reference = id("reference", 1);
         let read = || {
@@ -401,6 +506,168 @@ mod tests {
             ),
         );
         assert_exact(&run(input), &expected);
+    }
+
+    #[test]
+    fn full_indexed_sequence_keeps_one_store_generator_and_metadata_roots() {
+        let function = id("function", 1);
+        let attr = FunctionAttribute {
+            inline: crate::lambda::InlineAttribute::Never,
+            ..FunctionAttribute::default()
+        };
+        let input = Lambda::let_(
+            LetKind::Strict,
+            function.clone(),
+            Lambda::function_(2, vec![id("a", 2), id("b", 3)], int(0), attr.clone()),
+            Lambda::apply(
+                Lambda::var(function.clone()),
+                vec![int(1)],
+                crate::lambda::ApInfo {
+                    loc: Location::new_for_error("pipeline.res", 10, 20),
+                    inlined: crate::lambda::InlineAttribute::Default,
+                    status: crate::lambda::ApplyStatus::Na,
+                },
+                true,
+            ),
+        );
+        let generator = IdGenerator::with_start_stamp(200);
+        let mut context = IndexedLambdaContext::from_lambda(input, [function.clone()]);
+        context.collect_info();
+        context.simplify_exits(&generator);
+        context.collect_info();
+        let mut inline = |_: &Ident, _: bool, _: &str| None;
+        context.simplify_alias(&generator, false, &mut inline);
+        context.deep_flatten(&generator);
+        let mut arity = |_: &Ident, _: bool, _: &str| None;
+        context.alpha_conversion_with_external_arity(&generator, &mut arity);
+        context.simplify_lets();
+
+        assert_eq!(generator.current_stamp(), 201);
+        let expected_param = Ident::new("param", 201, IdentFlags::NONE);
+        let expected = Lambda::let_(
+            LetKind::StrictOpt,
+            function.clone(),
+            Lambda::function_(2, vec![id("a", 2), id("b", 3)], int(0), attr),
+            Lambda::function_(
+                1,
+                vec![expected_param.clone()],
+                Lambda::apply(
+                    Lambda::var(function),
+                    vec![int(1), Lambda::var(expected_param.clone())],
+                    crate::lambda::ApInfo {
+                        loc: Location::new_for_error("pipeline.res", 10, 20),
+                        inlined: crate::lambda::InlineAttribute::Default,
+                        status: crate::lambda::ApplyStatus::InferFull,
+                    },
+                    false,
+                ),
+                FunctionAttribute::default(),
+            ),
+        );
+        assert_exact(&context.materialize(), &expected);
+        let Lambda::Llet(_, _, _, eta) = context.materialize() else {
+            panic!("expected let")
+        };
+        let Lambda::Lfunction(eta) = *eta else {
+            panic!("expected eta")
+        };
+        assert_eq!(
+            (
+                eta.params[0].name(),
+                eta.params[0].stamp(),
+                eta.params[0].flags()
+            ),
+            (
+                expected_param.name(),
+                expected_param.stamp(),
+                expected_param.flags()
+            )
+        );
+        assert_eq!(
+            context.storage_measurements(),
+            crate::lambda::indexed::IndexedStorageMeasurements {
+                node_allocations: 24,
+                current_root_edge_visits: 7,
+                current_root_unique_nodes: 8,
+                metadata_unique_nodes: 2,
+                live_unique_nodes: 9,
+                superseded_nodes: 15,
+                hot_node_occupied_bytes: 192,
+                hot_node_capacity_bytes: 256,
+                side_payload_shallow_occupied_bytes: 1920,
+                side_payload_shallow_capacity_bytes: 2496,
+                nested_heap_bytes_included: false,
+                current_live_side_payload_shallow_bytes: 736,
+                metadata_retained_only_side_payload_shallow_bytes: 112,
+                superseded_unreachable_side_payload_shallow_bytes: 1072,
+            }
+        );
+    }
+
+    #[test]
+    fn direct_reference_keeps_mutable_block_after_refine_let() {
+        let reference = Ident::new("reference", 1, IdentFlags::PREDEF_EXN);
+        let input = Lambda::let_(
+            LetKind::Strict,
+            reference.clone(),
+            Lambda::prim(
+                Primitive::Pmakeblock(crate::lambda::TagInfo::Tuple, Mutable::Mutable),
+                vec![int(1)],
+                Location::new_for_error("ref.res", 1, 2),
+            ),
+            Lambda::var(reference.clone()),
+        );
+        let actual = run(input);
+        let Lambda::Lprim(primitive) = actual else {
+            panic!("expected retained reference block")
+        };
+        assert!(matches!(
+            primitive.primitive,
+            Primitive::Pmakeblock(crate::lambda::TagInfo::Tuple, Mutable::Mutable)
+        ));
+        assert_eq!(primitive.loc, Location::new_for_error("ref.res", 1, 2));
+        assert!(matches!(
+            primitive.args.as_slice(),
+            [Lambda::Lconst(Constant::Int { i: 1, .. })]
+        ));
+    }
+
+    #[test]
+    fn shared_reference_reads_are_rewritten_independently() {
+        let reference = id("reference", 1);
+        let input = Lambda::let_(
+            LetKind::Strict,
+            reference.clone(),
+            Lambda::prim(
+                Primitive::Pmakeblock(crate::lambda::TagInfo::Tuple, Mutable::Mutable),
+                vec![int(1)],
+                Location::none(),
+            ),
+            Lambda::prim(
+                Primitive::Pfield(0, FieldDbgInfo::Tuple),
+                vec![Lambda::var(reference.clone())],
+                Location::none(),
+            ),
+        );
+        let mut context = IndexedLambdaContext::from_lambda(input, []);
+        let NodeView::Let(kind, id, value, read) = context.store().view(context.current_root())
+        else {
+            panic!("expected let")
+        };
+        let (kind, id, value, read) = (kind, id.clone(), value, read);
+        let body = context.store_mut().append_sequence(read, read);
+        let root = context
+            .store_mut()
+            .append(NodeSnapshot::Let(kind, id, value, body));
+        context.replace_root(root);
+        context.simplify_lets();
+        let expected = Lambda::let_(
+            LetKind::Variable,
+            reference.clone(),
+            int(1),
+            Lambda::seq(Lambda::var(reference.clone()), Lambda::var(reference)),
+        );
+        assert_exact(&context.materialize(), &expected);
     }
 
     #[test]
