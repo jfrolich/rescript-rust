@@ -22,12 +22,19 @@ for fixture in sorted((ROOT / 'projects/in-process-performance/type-arg-fixtures
             if mode.startswith('-'):
                 cmd.append(mode)
             cmd.append(str(source))
+            js = source.with_suffix('.js')
+            if mode == 'js' and js.exists():
+                js.unlink()  # This exact generated fixture output, never source.
             proc = subprocess.run(cmd, cwd=D, capture_output=True, timeout=10)
             prefix = D / f'{fixture.stem}-{mode}-{variant}'
             prefix.with_suffix('.stdout').write_bytes(proc.stdout)
             prefix.with_suffix('.stderr').write_bytes(proc.stderr)
-            js = source.with_suffix('.js')
-            payload = js.read_bytes() if success and mode == 'js' and js.exists() else proc.stderr
+            if success and mode == 'js':
+                assert proc.returncode == 0 and js.is_file(), 'Missing fresh fixture JS'
+                payload = js.read_bytes()
+                prefix.with_suffix('.js').write_bytes(payload)
+            else:
+                payload = proc.stderr
             outputs[variant] = (proc.returncode, payload)
         valid = outputs['ocaml'] == outputs['rust'] and (outputs['rust'][0] == 0) == success
         results.append(dict(fixture=fixture.name, mode=mode, valid=valid,
