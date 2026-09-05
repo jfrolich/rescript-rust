@@ -346,7 +346,7 @@ pub(crate) fn get_arity(arena: &IndexedLambda, meta: &IndexedLamStats, node: Nod
     get_arity_impl(arena, &meta.ident_tbl, node, &mut lookup)
 }
 
-fn get_arity_external(
+pub(crate) fn get_arity_external(
     arena: &IndexedLambda,
     meta: &mut IndexedLamStats,
     node: NodeId,

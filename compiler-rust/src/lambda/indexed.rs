@@ -1329,7 +1329,7 @@ impl IndexedLambdaContext {
         &mut self.store
     }
 
-    pub(crate) fn alias_parts_mut(
+    pub(crate) fn optimizer_parts_mut(
         &mut self,
     ) -> (&mut IndexedLambda, &mut IndexedLamStats, &mut usize) {
         (
@@ -1337,6 +1337,12 @@ impl IndexedLambdaContext {
             &mut self.metadata,
             &mut self.beta_hash_bucket_count,
         )
+    }
+
+    pub(crate) fn alias_parts_mut(
+        &mut self,
+    ) -> (&mut IndexedLambda, &mut IndexedLamStats, &mut usize) {
+        self.optimizer_parts_mut()
     }
 
     #[cfg(test)]
