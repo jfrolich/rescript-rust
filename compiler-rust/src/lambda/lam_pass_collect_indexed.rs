@@ -8,7 +8,6 @@ use ahash::{AHashMap, AHashSet};
 
 use crate::ident::Ident;
 use crate::lambda::indexed::{IndexedLambda, NodeId, NodeView};
-use crate::lambda::lam_analysis::SMALL_INLINE_SIZE;
 use crate::lambda::lam_arity::Arity;
 use crate::lambda::lam_compat::FieldDbgInfo;
 use crate::lambda::lam_compile_context::{
@@ -17,6 +16,7 @@ use crate::lambda::lam_compile_context::{
 use crate::lambda::lam_constant::Constant;
 use crate::lambda::lam_pass_collect::ExternalArityResolver;
 use crate::lambda::lam_primitive::{Mutable, Primitive};
+#[cfg(test)]
 use crate::lambda::{InlineAttribute, Lambda};
 
 #[derive(Debug, Clone)]
@@ -462,128 +462,6 @@ pub(crate) fn indexed_size(arena: &IndexedLambda, node: NodeId) -> i32 {
     inner(arena, node).unwrap_or(TOO_BIG)
 }
 
-fn indexed_no_side_effects(arena: &IndexedLambda, node: NodeId) -> bool {
-    fn not_zero(arena: &IndexedLambda, node: NodeId) -> bool {
-        matches!(arena.view(node), NodeView::Const(Constant::Int { i, .. }) if *i != 0)
-            || matches!(arena.view(node), NodeView::Const(Constant::NativeInt { i, .. }) if *i != 0)
-            || matches!(arena.view(node), NodeView::Const(Constant::BigInt { value, .. }) if value != "0")
-    }
-    fn pure_primitive(primitive: &Primitive, arena: &IndexedLambda, args: &[NodeId]) -> bool {
-        match primitive {
-            Primitive::Pmodint
-            | Primitive::Pdivint
-            | Primitive::Pdivbigint
-            | Primitive::Pmodbigint => args.get(1).is_some_and(|node| not_zero(arena, *node)),
-            Primitive::PtaggedTemplate
-            | Primitive::PjsApply
-            | Primitive::PjsRuntimeApply
-            | Primitive::PjsCall { .. }
-            | Primitive::PinitMod
-            | Primitive::PupdateMod
-            | Primitive::PjsUnsafeDowngrade { .. }
-            | Primitive::Pdebugger
-            | Primitive::PjsFnMethod
-            | Primitive::Pawait
-            | Primitive::Parraysets
-            | Primitive::Parraysetu
-            | Primitive::Poffsetref(_)
-            | Primitive::Praise
-            | Primitive::Psetfield(_, _) => false,
-            Primitive::PrawJsCode(info) => {
-                use crate::binary_ast::ppx::{
-                    JsExpClassification, JsStmtClassification, classify_js_exp, classify_js_stmt,
-                };
-                if info.is_stmt {
-                    matches!(
-                        classify_js_stmt(&info.code),
-                        JsStmtClassification::JsStmtComment
-                    )
-                } else {
-                    matches!(
-                        classify_js_exp(&info.code),
-                        JsExpClassification::JsFunction { .. }
-                            | JsExpClassification::JsLiteral { .. }
-                    )
-                }
-            }
-            _ => true,
-        }
-    }
-    match arena.view(node) {
-        NodeView::Var(_)
-        | NodeView::Const(_)
-        | NodeView::Function(_, _, _, _)
-        | NodeView::GlobalModule(_, _) => true,
-        NodeView::Prim(primitive, args, _) => {
-            args.iter()
-                .all(|node| indexed_no_side_effects(arena, *node))
-                && pure_primitive(primitive, arena, args)
-        }
-        NodeView::Let(_, _, value, body) | NodeView::Sequence(value, body) => {
-            indexed_no_side_effects(arena, value) && indexed_no_side_effects(arena, body)
-        }
-        NodeView::LetRec(bindings, body) => {
-            bindings
-                .iter()
-                .all(|(_, node)| indexed_no_side_effects(arena, *node))
-                && indexed_no_side_effects(arena, body)
-        }
-        NodeView::TryWith(body, _, handler) => {
-            indexed_no_side_effects(arena, body) && indexed_no_side_effects(arena, handler)
-        }
-        NodeView::IfThenElse(a, b, c) => {
-            indexed_no_side_effects(arena, a)
-                && indexed_no_side_effects(arena, b)
-                && indexed_no_side_effects(arena, c)
-        }
-        NodeView::Apply(function, args, _, _) => {
-            matches!(arena.view(function), NodeView::Prim(Primitive::Pfield(_, FieldDbgInfo::Module { name }), _, _) if name == "from_fun" && args.len() == 1)
-                && indexed_no_side_effects(arena, args[0])
-        }
-        NodeView::Switch { .. }
-        | NodeView::StringSwitch(_, _, _)
-        | NodeView::StaticRaise(_, _)
-        | NodeView::StaticCatch(_, _, _, _)
-        | NodeView::While(_, _)
-        | NodeView::For(_, _, _, _, _)
-        | NodeView::ForOf(_, _, _)
-        | NodeView::ForAwaitOf(_, _, _)
-        | NodeView::Break
-        | NodeView::Continue
-        | NodeView::Assign(_, _) => false,
-    }
-}
-
-fn function_payload_needed(
-    arena: &IndexedLambda,
-    params: &[Ident],
-    body: NodeId,
-    attr: &crate::lambda::FunctionAttribute,
-) -> bool {
-    if attr.async_ || attr.directive.is_some() {
-        return false;
-    }
-    if attr.is_a_functor {
-        return true;
-    }
-    match attr.inline {
-        InlineAttribute::Always => true,
-        InlineAttribute::Never => false,
-        InlineAttribute::Default => {
-            let body_size = indexed_size(arena, body);
-            let parameter_test = match arena.view(body) {
-                NodeView::Switch { scrutinee, .. } | NodeView::IfThenElse(scrutinee, _, _) => {
-                    matches!(arena.view(scrutinee), NodeView::Var(id) if params.iter().any(|param| param == id))
-                }
-                _ => false,
-            };
-            body_size < SMALL_INLINE_SIZE
-                || body_size < 10 && indexed_no_side_effects(arena, body)
-                || parameter_test
-        }
-    }
-}
-
 fn annotate(
     meta: &mut IndexedLamStats,
     rec_flag: RecFlag,
@@ -650,9 +528,8 @@ fn collect_bind(
             );
         }
         NodeView::Var(source) => alias_ident_or_global(meta, id.clone(), source, IndexedIdKind::Na),
-        NodeView::Function(_, params, body, attr) => {
+        NodeView::Function(_, params, body, _) => {
             let params = params.to_vec();
-            let keep_payload = function_payload_needed(arena, &params, body, attr);
             for param in &params {
                 meta.ident_tbl
                     .insert(param.clone(), IndexedIdKind::Parameter);
@@ -661,13 +538,7 @@ fn collect_bind(
                 Some(resolver) => get_arity_external(arena, meta, node, resolver),
                 None => get_arity(arena, meta, node),
             };
-            annotate(
-                meta,
-                rec_flag,
-                id.clone(),
-                arity,
-                keep_payload.then_some(node),
-            );
+            annotate(meta, rec_flag, id.clone(), arity, Some(node));
             collect(arena, meta, body, resolver);
         }
         _ => {
@@ -1228,7 +1099,6 @@ mod tests {
         collect_info(&indexed, &mut indexed_meta, indexed.root());
         for ident in [
             always,
-            never,
             single_rec,
             mutual_a,
             mutual_b,
@@ -1241,10 +1111,21 @@ mod tests {
                 "metadata differs for {ident:?}"
             );
         }
+        assert!(matches!(
+            tree_meta.ident_tbl.get(&never),
+            Some(IdKind::FunctionId { lambda: None, .. })
+        ));
+        assert!(matches!(
+            indexed_meta.ident_tbl.get(&never),
+            Some(IndexedIdKind::FunctionId {
+                lambda: Some(_),
+                ..
+            })
+        ));
     }
 
     #[test]
-    fn inline_retention_gates_match_tree_with_full_payloads() {
+    fn bound_functions_always_retain_node_ids_like_ocaml_collect() {
         fn raw_function(params: Vec<Ident>, body: Lambda, attr: FunctionAttribute) -> Lambda {
             Lambda::Lfunction(crate::lambda::LFunction {
                 arity: params.len() as i32,
@@ -1375,27 +1256,44 @@ mod tests {
         );
         let mut tree_meta = LamStats::new(vec![]);
         tree::collect_info(&mut tree_meta, &lambda);
+        let mut context =
+            crate::lambda::indexed::IndexedLambdaContext::from_lambda(lambda.clone(), []);
+        context.collect_info();
+        context.simplify_exits(&crate::context::IdGenerator::with_start_stamp(100));
+        let retained = context.storage_measurements();
+        assert!(retained.metadata_retained_only_side_payload_shallow_bytes > 0);
         let indexed = IndexedLambda::from_lambda(lambda);
         let mut indexed_meta = IndexedLamStats::new([]);
         collect_info(&indexed, &mut indexed_meta, indexed.root());
-        for (ident, _, expected_payload) in cases {
+        for (ident, function, old_tree_payload) in cases {
             let tree_kind_value = tree_meta.ident_tbl.get(&ident).unwrap();
             let indexed_kind_value = indexed_meta.ident_tbl.get(&ident).unwrap();
-            assert_eq!(
-                tree_kind(tree_kind_value),
-                indexed_kind(&indexed, indexed_kind_value)
-            );
+            if old_tree_payload {
+                assert_eq!(
+                    tree_kind(tree_kind_value),
+                    indexed_kind(&indexed, indexed_kind_value)
+                );
+            } else {
+                // OCaml `lam_pass_collect.ml:34-37,79-89` always stores the
+                // bound function. Current recursive Rust conditionally drops
+                // large/never/async/directive payloads to compensate for tree
+                // cloning; indexed NodeIds do not need that compensation.
+                assert!(matches!(
+                    tree_kind_value,
+                    IdKind::FunctionId { lambda: None, .. }
+                ));
+            }
             let IndexedIdKind::FunctionId { lambda, .. } = indexed_kind_value else {
                 panic!("expected function metadata for {ident:?}")
             };
+            let Some((node, rec_flag)) = lambda else {
+                panic!("indexed collect dropped bound function {ident:?}")
+            };
             assert_eq!(
-                lambda.is_some(),
-                expected_payload,
-                "wrong retention for {ident:?}"
+                format!("{function:#?}"),
+                format!("{:#?}", indexed.materialize_node(*node))
             );
-            if let Some((_, rec_flag)) = lambda {
-                assert!(matches!(rec_flag, RecFlag::NonRec));
-            }
+            assert!(matches!(rec_flag, RecFlag::NonRec));
         }
     }
 

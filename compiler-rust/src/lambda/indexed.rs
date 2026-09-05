@@ -1445,6 +1445,26 @@ mod tests {
     }
 
     #[test]
+    fn shared_child_payload_is_counted_once_in_live_storage() {
+        let mut store = IndexedLambda::from_lambda(Lambda::Lconst(Constant::int(5)));
+        let shared = store.root;
+        let root = store.append_sequence(shared, shared);
+        store.set_root(root);
+        let context = IndexedLambdaContext::from_store(store, []);
+        let metrics = context.storage_measurements();
+        assert_eq!(metrics.current_root_edge_visits, 2);
+        assert_eq!(metrics.current_root_unique_nodes, 2);
+        assert_eq!(
+            metrics.current_live_side_payload_shallow_bytes,
+            std::mem::size_of::<Constant>() + std::mem::size_of::<BinaryPayload>()
+        );
+        assert_eq!(
+            metrics.current_live_side_payload_shallow_bytes,
+            metrics.side_payload_shallow_occupied_bytes
+        );
+    }
+
+    #[test]
     fn shared_child_is_unchanged_by_independent_parent_rewrite() {
         let mut indexed = IndexedLambda::from_lambda(Lambda::Lconst(Constant::int(5)));
         let shared = indexed.root;

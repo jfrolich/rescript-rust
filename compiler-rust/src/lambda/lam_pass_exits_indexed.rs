@@ -845,15 +845,22 @@ fn substitute(
     substitutions: &VariableSubstitution,
     node: NodeId,
 ) -> NodeId {
-    if substitutions.is_empty() {
-        return node;
-    }
     match store.snapshot(node) {
         NodeSnapshot::Var(id) => substitutions.get(&id).copied().unwrap_or(node),
         NodeSnapshot::Const(_)
         | NodeSnapshot::GlobalModule(_, _)
         | NodeSnapshot::Break
         | NodeSnapshot::Continue => node,
+        NodeSnapshot::Apply(function, args, info, _) => {
+            let function = substitute(store, substitutions, function);
+            let args = args
+                .into_iter()
+                .map(|node| substitute(store, substitutions, node))
+                .collect();
+            // OCaml `lam_subst.ml:36-37` calls `Lam.apply` without the
+            // optional JSX argument, so substitution resets it to false.
+            append_rebuilt(store, NodeSnapshot::Apply(function, args, info, false))
+        }
         snapshot => {
             let mapped = map_children(store, snapshot, |store, child| {
                 substitute(store, substitutions, child)
@@ -1377,6 +1384,80 @@ mod tests {
     }
 
     #[test]
+    fn substitution_resets_jsx_and_always_traverses_like_ocaml() {
+        let parameter = id("parameter", 180);
+        let outer_loc = Location::new_for_error("subst.res", 20, 30);
+        let inner_loc = Location::new_for_error("subst.res", 10, 15);
+        let handler = Lambda::Lapply(crate::lambda::Apply {
+            ap_func: Box::new(Lambda::Lvar(id("g", 181))),
+            ap_args: vec![Lambda::Lapply(crate::lambda::Apply {
+                ap_func: Box::new(Lambda::Lvar(id("h", 182))),
+                ap_args: vec![Lambda::Lvar(parameter.clone())],
+                ap_info: crate::lambda::ApInfo {
+                    loc: inner_loc.clone(),
+                    inlined: crate::lambda::InlineAttribute::Never,
+                    status: crate::lambda::ApplyStatus::Uncurry,
+                },
+                ap_transformed_jsx: true,
+            })],
+            ap_info: crate::lambda::ApInfo {
+                loc: outer_loc.clone(),
+                inlined: crate::lambda::InlineAttribute::Always,
+                status: crate::lambda::ApplyStatus::InferFull,
+            },
+            ap_transformed_jsx: true,
+        });
+        let result = simplify_indexed(
+            Lambda::LstaticCatch(
+                Box::new(Lambda::LstaticRaise(93, vec![Lambda::unit()])),
+                (93, vec![parameter]),
+                Box::new(handler),
+            ),
+            200,
+        );
+        let Lambda::Llet(_, _, _, body) = result else {
+            panic!("expected fresh argument let")
+        };
+        let Lambda::Lapply(outer) = *body else {
+            panic!("expected outer application")
+        };
+        assert!(!outer.ap_transformed_jsx);
+        assert_eq!(outer.ap_info.loc, outer_loc);
+        assert_eq!(outer.ap_info.status, crate::lambda::ApplyStatus::InferFull);
+        let [Lambda::Lapply(inner)] = outer.ap_args.as_slice() else {
+            panic!("expected nested application")
+        };
+        assert!(!inner.ap_transformed_jsx);
+        assert_eq!(inner.ap_info.loc, inner_loc);
+        assert_eq!(inner.ap_info.status, crate::lambda::ApplyStatus::Uncurry);
+
+        let raw = Lambda::Lsequence(
+            Box::new(Lambda::Lprim(crate::lambda::PrimInfo {
+                primitive: Primitive::Pnot,
+                args: vec![Lambda::true_()],
+                loc: Location::none(),
+            })),
+            Box::new(Lambda::Lapply(crate::lambda::Apply {
+                ap_func: Box::new(Lambda::Lvar(id("empty", 183))),
+                ap_args: vec![],
+                ap_info: crate::lambda::ApInfo {
+                    loc: Location::none(),
+                    inlined: crate::lambda::InlineAttribute::Default,
+                    status: crate::lambda::ApplyStatus::Na,
+                },
+                ap_transformed_jsx: true,
+            })),
+        );
+        let mut store = IndexedLambda::from_lambda(raw);
+        let root = store.root();
+        let rewritten = substitute(&mut store, &VariableSubstitution::new(), root);
+        let result = store.materialize_node(rewritten);
+        assert!(matches!(result, Lambda::Lsequence(first, second)
+            if matches!(*first, Lambda::Lconst(Constant::JsFalse))
+                && matches!(*second, Lambda::Lapply(ref apply) if !apply.ap_transformed_jsx)));
+    }
+
+    #[test]
     fn direct_and_nested_wrapper_eta_match_reference_order_and_fallback_metadata() {
         let wrappers = [
             Primitive::PnullToOpt,
@@ -1611,6 +1692,33 @@ mod tests {
             0,
         );
         assert!(matches!(result, Lambda::Lconst(Constant::JsTrue)));
+
+        let commented = simplify_indexed(
+            Lambda::Lswitch(
+                Box::new(Lambda::Lconst(Constant::int_with_comment(
+                    1,
+                    crate::lambda::lam_constant::PointerInfo::Some("commented".into()),
+                ))),
+                LambdaSwitch {
+                    sw_consts_full: true,
+                    sw_consts: vec![(
+                        SwitchKey::Constructor(crate::types::VariantConstructorCase::Constant(
+                            VariantTag {
+                                name: "One".into(),
+                                tag_type: Some(VariantTagType::Int(1)),
+                            },
+                        )),
+                        Lambda::true_(),
+                    )],
+                    sw_blocks_full: true,
+                    sw_blocks: vec![],
+                    sw_failaction: Some(Box::new(Lambda::false_())),
+                    sw_dispatch: SwitchDispatch::Direct,
+                },
+            ),
+            0,
+        );
+        assert!(matches!(commented, Lambda::Lconst(Constant::JsFalse)));
 
         for (operation, expected) in [
             (crate::lambda::Comparison::Eq, Constant::JsFalse),
