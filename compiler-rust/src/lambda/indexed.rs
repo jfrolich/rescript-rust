@@ -31,9 +31,13 @@ struct ItemRange {
 
 impl ItemRange {
     fn checked(start: usize, len: usize) -> Self {
+        let end = start
+            .checked_add(len)
+            .and_then(|end| u32::try_from(end).ok())
+            .expect("indexed Lambda side table exceeds u32");
         Self {
             start: u32::try_from(start).expect("indexed Lambda side table exceeds u32"),
-            len: u32::try_from(len).expect("indexed Lambda range exceeds u32"),
+            len: end - start as u32,
         }
     }
 
