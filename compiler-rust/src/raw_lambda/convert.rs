@@ -12771,22 +12771,6 @@ mod tests {
 
     #[test]
     fn sealed_indexed_producer_threads_warning_config_and_observer() {
-        #[derive(Default)]
-        struct Observer(Vec<crate::lambda::lam_compile_main_indexed::IndexedHoistedWarning>);
-        impl crate::lambda::lam_compile_main_indexed::IndexedDiagnosticsObserver for Observer {
-            fn lambda(&mut self, _: &'static str, _: crate::lambda::Lambda) {}
-            fn groups(
-                &mut self,
-                _: Vec<crate::lambda::lam_compile_main_indexed::IndexedDiagnosticGroup>,
-            ) {
-            }
-            fn warning(
-                &mut self,
-                warning: &crate::lambda::lam_compile_main_indexed::IndexedHoistedWarning,
-            ) {
-                self.0.push(warning.clone());
-            }
-        }
         fn compile(
             config: &crate::diagnostics::WarningConfig,
         ) -> (
@@ -12822,7 +12806,7 @@ mod tests {
             };
             let mut inline = |_: &Ident, _: bool, _: &str| None;
             let mut arity = |_: &Ident, _: bool, _: &str| None;
-            let mut observer = Observer::default();
+            let mut warnings = Vec::new();
             let result = crate::lambda::lam_compile_main_indexed::lower_and_optimize_for_pre_js_indexed_with_diagnostics(
                 indexed_raw,
                 vec![export],
@@ -12832,10 +12816,11 @@ mod tests {
                 &mut inline,
                 &mut arity,
                 config,
-                Some(&mut observer),
+                Some(&mut |warning: &crate::lambda::lam_compile_main_indexed::IndexedHoistedWarning| warnings.push(warning.clone())),
+                None,
             )
             .map(|backend| backend.check_fatal_warnings().is_err());
-            (result, observer.0)
+            (result, warnings)
         }
 
         let mut disabled = crate::diagnostics::WarningConfig::new();

@@ -58,6 +58,7 @@ pub(crate) enum IndexedPreJsError {
     HoistedNameCollision {
         name: String,
         loc: crate::location::Location,
+        warnings: Vec<IndexedHoistedWarning>,
     },
     FatalWarnings,
 }
@@ -97,7 +98,6 @@ pub(crate) enum IndexedDiagnosticGroup {
 pub(crate) trait IndexedDiagnosticsObserver {
     fn lambda(&mut self, pass: &'static str, lambda: Lambda);
     fn groups(&mut self, groups: Vec<IndexedDiagnosticGroup>);
-    fn warning(&mut self, _warning: &IndexedHoistedWarning) {}
 }
 
 pub(crate) struct IndexedCmjExports {
@@ -857,7 +857,7 @@ fn add_hoisted_aliases(
     hoisted: &[HoistedFunction],
     id_gen: &IdGenerator,
     warning_config: &WarningConfig,
-    diagnostics: &mut Option<&mut dyn IndexedDiagnosticsObserver>,
+    warning_sink: &mut Option<&mut dyn FnMut(&IndexedHoistedWarning)>,
 ) -> Result<(Vec<HoistedExport>, Vec<IndexedHoistedWarning>), IndexedPreJsError> {
     let group_map = collect_group_bindings(context.store(), groups);
     let exported_modules = context
@@ -885,8 +885,8 @@ fn add_hoisted_aliases(
                 is_error: warning_config.is_error(&warning),
                 warning,
             };
-            if let Some(diagnostics) = diagnostics.as_deref_mut() {
-                diagnostics.warning(&delivered);
+            if let Some(warning_sink) = warning_sink.as_deref_mut() {
+                warning_sink(&delivered);
             }
             warnings.push(delivered);
         }
@@ -934,7 +934,11 @@ fn add_hoisted_aliases(
             } else {
                 item.loc
             };
-            return Err(IndexedPreJsError::HoistedNameCollision { name, loc });
+            return Err(IndexedPreJsError::HoistedNameCollision {
+                name,
+                loc,
+                warnings,
+            });
         }
         let alias_id = id_gen.create(&name);
         let mut access = context
@@ -1088,6 +1092,7 @@ pub(crate) fn lower_and_optimize_for_pre_js_indexed(
         external_arity,
         &WarningConfig::new(),
         None,
+        None,
     )
 }
 
@@ -1100,6 +1105,7 @@ pub(crate) fn lower_and_optimize_for_pre_js_indexed_with_diagnostics(
     external_inline: &mut IndexedExternalInlineResolver<'_>,
     external_arity: &mut ExternalArityResolver<'_>,
     warning_config: &WarningConfig,
+    warning_sink: Option<&mut dyn FnMut(&IndexedHoistedWarning)>,
     diagnostics: Option<&mut dyn IndexedDiagnosticsObserver>,
 ) -> Result<IndexedPreJsBackend, IndexedPreJsError> {
     let (raw, id_gen) = indexed_raw.into_parts();
@@ -1114,6 +1120,7 @@ pub(crate) fn lower_and_optimize_for_pre_js_indexed_with_diagnostics(
         external_inline,
         external_arity,
         warning_config,
+        warning_sink,
         diagnostics,
     )
 }
@@ -1142,6 +1149,7 @@ pub(crate) fn optimize_for_pre_js_indexed(
         external_arity,
         &WarningConfig::new(),
         None,
+        None,
     )
 }
 
@@ -1155,6 +1163,7 @@ pub(crate) fn optimize_for_pre_js_indexed_with_diagnostics(
     external_inline: &mut IndexedExternalInlineResolver<'_>,
     external_arity: &mut ExternalArityResolver<'_>,
     warning_config: &WarningConfig,
+    mut warning_sink: Option<&mut dyn FnMut(&IndexedHoistedWarning)>,
     mut diagnostics: Option<&mut dyn IndexedDiagnosticsObserver>,
 ) -> Result<IndexedPreJsBackend, IndexedPreJsError> {
     fn dump(
@@ -1216,7 +1225,7 @@ pub(crate) fn optimize_for_pre_js_indexed_with_diagnostics(
         hoisted,
         &id_gen,
         warning_config,
-        &mut diagnostics,
+        &mut warning_sink,
     )?;
     let fatal_warnings_pending = hoisted_warnings.iter().any(|warning| warning.is_error);
     let roots = groups
@@ -1973,15 +1982,7 @@ mod tests {
 
     #[test]
     fn hoisted_warning_config_controls_delivery_and_fatal_gate() {
-        #[derive(Default)]
-        struct Observer(Vec<IndexedHoistedWarning>);
-        impl IndexedDiagnosticsObserver for Observer {
-            fn lambda(&mut self, _: &'static str, _: Lambda) {}
-            fn groups(&mut self, _: Vec<IndexedDiagnosticGroup>) {}
-            fn warning(&mut self, warning: &IndexedHoistedWarning) {
-                self.0.push(warning.clone());
-            }
-        }
+        type Observer = Vec<IndexedHoistedWarning>;
         let item = HoistedFunction {
             binding: id("missing", 9),
             path: vec!["Missing".into()],
@@ -2002,38 +2003,39 @@ mod tests {
                 &mut inline,
                 &mut arity,
                 config,
-                Some(observer),
+                Some(&mut |warning: &IndexedHoistedWarning| observer.push(warning.clone())),
+                None,
             )
         };
 
         let mut disabled = WarningConfig::new();
         disabled.parse("-53").unwrap();
-        let mut observer = Observer::default();
+        let mut observer = Observer::new();
         let result = compile(&disabled, &mut observer).unwrap();
         assert!(result.hoisted_warnings().is_empty());
-        assert!(observer.0.is_empty());
+        assert!(observer.is_empty());
 
         let enabled = WarningConfig::new();
-        let mut observer = Observer::default();
+        let mut observer = Observer::new();
         let result = compile(&enabled, &mut observer).unwrap();
-        assert_eq!(observer.0, result.hoisted_warnings());
-        assert_eq!(observer.0[0].warning.number(), 53);
+        assert_eq!(observer, result.hoisted_warnings());
+        assert_eq!(observer[0].warning.number(), 53);
         assert_eq!(
-            observer.0[0].warning.message(),
+            observer[0].warning.message(),
             "the @res.hoistedFunction attribute cannot appear in this context"
         );
-        assert_eq!(observer.0[0].loc, item.loc);
-        assert!(!observer.0[0].is_error);
+        assert_eq!(observer[0].loc, item.loc);
+        assert!(!observer[0].is_error);
 
         let mut fatal = WarningConfig::new();
         fatal.parse_as_error("@53").unwrap();
-        let mut observer = Observer::default();
+        let mut observer = Observer::new();
         let result = compile(&fatal, &mut observer).unwrap();
         assert_eq!(
             result.check_fatal_warnings(),
             Err(IndexedPreJsError::FatalWarnings)
         );
-        assert!(observer.0[0].is_error);
+        assert!(observer[0].is_error);
     }
 
     #[test]
@@ -2084,6 +2086,7 @@ mod tests {
             IndexedPreJsError::HoistedNameCollision {
                 name: "A$make".into(),
                 loc: target_loc,
+                warnings: vec![],
             }
         );
     }
@@ -2124,18 +2127,10 @@ mod tests {
         ];
         let mut export_map = Vec::new();
         let hoisted_loc = Location::new_for_error("nonfunction.res", 3, 7);
-        #[derive(Default)]
-        struct Observer(Vec<IndexedHoistedWarning>);
-        impl IndexedDiagnosticsObserver for Observer {
-            fn lambda(&mut self, _: &'static str, _: Lambda) {}
-            fn groups(&mut self, _: Vec<IndexedDiagnosticGroup>) {}
-            fn warning(&mut self, warning: &IndexedHoistedWarning) {
-                self.0.push(warning.clone());
-            }
-        }
         let missing_loc = Location::new_for_error("nonfunction.res", 1, 2);
-        let mut observer = Observer::default();
-        let mut diagnostics: Option<&mut dyn IndexedDiagnosticsObserver> = Some(&mut observer);
+        let mut observer = Vec::new();
+        let mut warning_sink: Option<&mut dyn FnMut(&IndexedHoistedWarning)> =
+            Some(&mut |warning: &IndexedHoistedWarning| observer.push(warning.clone()));
         let error = add_hoisted_aliases(
             &mut context,
             &mut groups,
@@ -2156,7 +2151,7 @@ mod tests {
             ],
             &IdGenerator::with_start_stamp(10),
             &WarningConfig::new(),
-            &mut diagnostics,
+            &mut warning_sink,
         )
         .unwrap_err();
         assert_eq!(
@@ -2164,15 +2159,16 @@ mod tests {
             IndexedPreJsError::HoistedNameCollision {
                 name: "A$make".into(),
                 loc: hoisted_loc,
+                warnings: observer.clone(),
             }
         );
-        assert_eq!(observer.0.len(), 1);
-        assert_eq!(observer.0[0].loc, missing_loc);
-        assert_eq!(observer.0[0].warning.number(), 53);
+        assert_eq!(observer.len(), 1);
+        assert_eq!(observer[0].loc, missing_loc);
+        assert_eq!(observer[0].warning.number(), 53);
 
-        let mut reverse_observer = Observer::default();
-        let mut reverse_diagnostics: Option<&mut dyn IndexedDiagnosticsObserver> =
-            Some(&mut reverse_observer);
+        let mut reverse_observer = Vec::new();
+        let mut reverse_sink: Option<&mut dyn FnMut(&IndexedHoistedWarning)> =
+            Some(&mut |warning: &IndexedHoistedWarning| reverse_observer.push(warning.clone()));
         let reverse = add_hoisted_aliases(
             &mut context,
             &mut groups,
@@ -2193,16 +2189,17 @@ mod tests {
             ],
             &IdGenerator::with_start_stamp(10),
             &WarningConfig::new(),
-            &mut reverse_diagnostics,
+            &mut reverse_sink,
         );
         assert_eq!(
             reverse.unwrap_err(),
             IndexedPreJsError::HoistedNameCollision {
                 name: "A$make".into(),
                 loc: hoisted_loc,
+                warnings: vec![],
             }
         );
-        assert!(reverse_observer.0.is_empty());
+        assert!(reverse_observer.is_empty());
     }
 
     #[test]
@@ -2295,6 +2292,7 @@ mod tests {
             &mut inline,
             &mut arity,
             &WarningConfig::new(),
+            None,
             Some(&mut observer),
         )
         .unwrap();
