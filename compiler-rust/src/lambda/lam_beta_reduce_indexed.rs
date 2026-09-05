@@ -200,6 +200,25 @@ pub(crate) fn simple_beta_reduce(
     Some(result)
 }
 
+pub(crate) fn no_names_beta_reduce(
+    store: &mut IndexedLambda,
+    params: &[Ident],
+    body: NodeId,
+    args: &[NodeId],
+    hash_capacity: &mut usize,
+) -> NodeId {
+    if let Some(node) = simple_beta_reduce(store, params, body, args, hash_capacity) {
+        return node;
+    }
+    params
+        .iter()
+        .cloned()
+        .zip(args.iter().copied())
+        .fold(body, |body, (param, arg)| {
+            append_refine_let(store, LetKind::Strict, param, arg, body)
+        })
+}
+
 fn rebind(
     store: &mut IndexedLambda,
     map: &mut VariableSubstitution,

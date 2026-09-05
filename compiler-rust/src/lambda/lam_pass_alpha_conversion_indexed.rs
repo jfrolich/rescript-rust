@@ -6,7 +6,7 @@ use crate::ident::Ident;
 use crate::lambda::indexed::{IndexedLambda, IndexedLambdaContext, NodeId, NodeSnapshot, NodeView};
 use crate::lambda::lam_compat::{FieldDbgInfo, LetKind};
 use crate::lambda::lam_constant::Constant;
-use crate::lambda::lam_indexed_helpers::{append_rebuilt, map_children};
+use crate::lambda::lam_indexed_helpers::append_rebuilt;
 use crate::lambda::lam_pass_collect::ExternalArityResolver;
 use crate::lambda::lam_pass_collect_indexed::{IndexedLamStats, get_arity_external};
 use crate::lambda::lam_primitive::Primitive;
@@ -53,10 +53,15 @@ fn transform_under_supply(
     let mut shared = Vec::with_capacity(args.len() + 1);
     shared.push(function);
     shared.extend(args);
+    let mut replacements = vec![None; shared.len()];
+    for index in (0..shared.len()).rev() {
+        if !safe_to_share(store, shared[index]) {
+            replacements[index] = Some(id_gen.create("partial_arg"));
+        }
+    }
     let mut bindings = Vec::new();
-    for node in &mut shared {
-        if !safe_to_share(store, *node) {
-            let id = id_gen.create("partial_arg");
+    for (node, replacement) in shared.iter_mut().zip(replacements) {
+        if let Some(id) = replacement {
             bindings.push((id.clone(), *node));
             *node = store.append(NodeSnapshot::Var(id));
         }
@@ -107,13 +112,15 @@ fn simplify(
             let len = args.len() as i32;
             match arities.first().copied() {
                 None | Some(0) => {
-                    let function = simplify(store, metadata, id_gen, external, function);
+                    // Native OCaml evaluates the `Lam.apply` arguments
+                    // right-to-left; `Ext_list.map` itself runs left-to-right.
                     let args = simplify_many(store, metadata, id_gen, external, args);
+                    let function = simplify(store, metadata, id_gen, external, function);
                     append_rebuilt(store, NodeSnapshot::Apply(function, args, info, jsx))
                 }
                 Some(arity) if arity == len => {
-                    let function = simplify(store, metadata, id_gen, external, function);
                     let args = simplify_many(store, metadata, id_gen, external, args);
+                    let function = simplify(store, metadata, id_gen, external, function);
                     let info = ApInfo {
                         status: ApplyStatus::InferFull,
                         ..info
@@ -131,11 +138,14 @@ fn simplify(
                 }
                 Some(arity) => {
                     let split = arity as usize;
-                    let function = simplify(store, metadata, id_gen, external, function);
-                    let first =
-                        simplify_many(store, metadata, id_gen, external, args[..split].to_vec());
+                    // The outer apply evaluates the rest list before the inner
+                    // apply. The inner apply evaluates its first list before
+                    // its function.
                     let rest =
                         simplify_many(store, metadata, id_gen, external, args[split..].to_vec());
+                    let first =
+                        simplify_many(store, metadata, id_gen, external, args[..split].to_vec());
+                    let function = simplify(store, metadata, id_gen, external, function);
                     let inner_info = ApInfo {
                         status: ApplyStatus::InferFull,
                         ..info.clone()
@@ -148,11 +158,124 @@ fn simplify(
                 }
             }
         }
-        snapshot => {
-            let mapped = map_children(store, snapshot, |store, child| {
-                simplify(store, metadata, id_gen, external, child)
-            });
-            append_rebuilt(store, mapped)
+        NodeSnapshot::Function(arity, params, body, attr) => {
+            let body = simplify(store, metadata, id_gen, external, body);
+            append_rebuilt(store, NodeSnapshot::Function(arity, params, body, attr))
+        }
+        NodeSnapshot::Let(kind, id, value, body) => {
+            let body = simplify(store, metadata, id_gen, external, body);
+            let value = simplify(store, metadata, id_gen, external, value);
+            append_rebuilt(store, NodeSnapshot::Let(kind, id, value, body))
+        }
+        NodeSnapshot::LetRec(bindings, body) => {
+            let bindings = bindings
+                .into_iter()
+                .map(|(id, value)| (id, simplify(store, metadata, id_gen, external, value)))
+                .collect();
+            let body = simplify(store, metadata, id_gen, external, body);
+            append_rebuilt(store, NodeSnapshot::LetRec(bindings, body))
+        }
+        NodeSnapshot::Prim(primitive, args, loc) => {
+            let args = simplify_many(store, metadata, id_gen, external, args);
+            append_rebuilt(store, NodeSnapshot::Prim(primitive, args, loc))
+        }
+        NodeSnapshot::Switch {
+            scrutinee,
+            consts_full,
+            consts,
+            blocks_full,
+            blocks,
+            fail_action,
+            dispatch,
+        } => {
+            let fail_action =
+                fail_action.map(|node| simplify(store, metadata, id_gen, external, node));
+            let blocks = blocks
+                .into_iter()
+                .map(|(key, node)| (key, simplify(store, metadata, id_gen, external, node)))
+                .collect();
+            let consts = consts
+                .into_iter()
+                .map(|(key, node)| (key, simplify(store, metadata, id_gen, external, node)))
+                .collect();
+            let scrutinee = simplify(store, metadata, id_gen, external, scrutinee);
+            append_rebuilt(
+                store,
+                NodeSnapshot::Switch {
+                    scrutinee,
+                    consts_full,
+                    consts,
+                    blocks_full,
+                    blocks,
+                    fail_action,
+                    dispatch,
+                },
+            )
+        }
+        NodeSnapshot::StringSwitch(scrutinee, cases, default) => {
+            let default = default.map(|node| simplify(store, metadata, id_gen, external, node));
+            let cases = cases
+                .into_iter()
+                .map(|(key, node)| (key, simplify(store, metadata, id_gen, external, node)))
+                .collect();
+            let scrutinee = simplify(store, metadata, id_gen, external, scrutinee);
+            append_rebuilt(store, NodeSnapshot::StringSwitch(scrutinee, cases, default))
+        }
+        NodeSnapshot::StaticRaise(exit, args) => {
+            let args = simplify_many(store, metadata, id_gen, external, args);
+            append_rebuilt(store, NodeSnapshot::StaticRaise(exit, args))
+        }
+        NodeSnapshot::StaticCatch(body, exit, params, handler) => {
+            let handler = simplify(store, metadata, id_gen, external, handler);
+            let body = simplify(store, metadata, id_gen, external, body);
+            append_rebuilt(
+                store,
+                NodeSnapshot::StaticCatch(body, exit, params, handler),
+            )
+        }
+        NodeSnapshot::TryWith(body, id, handler) => {
+            let handler = simplify(store, metadata, id_gen, external, handler);
+            let body = simplify(store, metadata, id_gen, external, body);
+            append_rebuilt(store, NodeSnapshot::TryWith(body, id, handler))
+        }
+        NodeSnapshot::IfThenElse(condition, then_node, else_node) => {
+            let else_node = simplify(store, metadata, id_gen, external, else_node);
+            let then_node = simplify(store, metadata, id_gen, external, then_node);
+            let condition = simplify(store, metadata, id_gen, external, condition);
+            append_rebuilt(
+                store,
+                NodeSnapshot::IfThenElse(condition, then_node, else_node),
+            )
+        }
+        NodeSnapshot::Sequence(first, second) => {
+            let second = simplify(store, metadata, id_gen, external, second);
+            let first = simplify(store, metadata, id_gen, external, first);
+            append_rebuilt(store, NodeSnapshot::Sequence(first, second))
+        }
+        NodeSnapshot::While(condition, body) => {
+            let body = simplify(store, metadata, id_gen, external, body);
+            let condition = simplify(store, metadata, id_gen, external, condition);
+            append_rebuilt(store, NodeSnapshot::While(condition, body))
+        }
+        NodeSnapshot::For(id, from, to, direction, body) => {
+            let body = simplify(store, metadata, id_gen, external, body);
+            let to = simplify(store, metadata, id_gen, external, to);
+            let from = simplify(store, metadata, id_gen, external, from);
+            append_rebuilt(store, NodeSnapshot::For(id, from, to, direction, body))
+        }
+        NodeSnapshot::ForOf(id, iterable, body) => {
+            let body = simplify(store, metadata, id_gen, external, body);
+            let iterable = simplify(store, metadata, id_gen, external, iterable);
+            append_rebuilt(store, NodeSnapshot::ForOf(id, iterable, body))
+        }
+        NodeSnapshot::ForAwaitOf(id, iterable, body) => {
+            let body = simplify(store, metadata, id_gen, external, body);
+            let iterable = simplify(store, metadata, id_gen, external, iterable);
+            append_rebuilt(store, NodeSnapshot::ForAwaitOf(id, iterable, body))
+        }
+        NodeSnapshot::Assign(id, value) => {
+            let value = simplify(store, metadata, id_gen, external, value);
+            append_rebuilt(store, NodeSnapshot::Assign(id, value))
         }
     }
 }
@@ -208,81 +331,6 @@ mod tests {
     }
 
     #[test]
-    fn indexed_branches_match_tree_reference_port_without_effectful_eta_bindings() {
-        let function = id("function", 1);
-        let definition = Lambda::function_(
-            2,
-            vec![id("a", 2), id("b", 3)],
-            Lambda::const_(Constant::int(0)),
-            FunctionAttribute::default(),
-        );
-        let input = Lambda::let_(
-            LetKind::Strict,
-            function.clone(),
-            definition,
-            Lambda::seq(
-                apply(
-                    Lambda::var(function.clone()),
-                    vec![],
-                    ApplyStatus::Na,
-                    false,
-                ),
-                Lambda::seq(
-                    apply(
-                        Lambda::var(function.clone()),
-                        vec![Lambda::const_(Constant::int(1))],
-                        ApplyStatus::Na,
-                        true,
-                    ),
-                    Lambda::seq(
-                        apply(
-                            Lambda::var(function.clone()),
-                            vec![
-                                Lambda::const_(Constant::int(1)),
-                                Lambda::const_(Constant::int(2)),
-                            ],
-                            ApplyStatus::Na,
-                            false,
-                        ),
-                        apply(
-                            Lambda::var(function),
-                            vec![
-                                Lambda::const_(Constant::int(1)),
-                                Lambda::const_(Constant::int(2)),
-                                Lambda::const_(Constant::int(3)),
-                            ],
-                            ApplyStatus::Na,
-                            true,
-                        ),
-                    ),
-                ),
-            ),
-        );
-        let mut tree_metadata = crate::lambda::lam_compile_context::LamStats::new(vec![]);
-        crate::lambda::lam_pass_collect::collect_info(&mut tree_metadata, &input);
-        let mut tree_external = |_: &Ident, _: bool, _: &str| None;
-        let expected =
-            crate::lambda::lam_pass_alpha_conversion::alpha_conversion_with_external_arity_owned(
-                &mut tree_metadata,
-                input.clone(),
-                &mut tree_external,
-            );
-        let indexed_generator = IdGenerator::new();
-        let mut context = IndexedLambdaContext::from_lambda(input, []);
-        context.collect_info();
-        let mut indexed_external = |_: &Ident, _: bool, _: &str| None;
-        context.alpha_conversion_with_external_arity(&indexed_generator, &mut indexed_external);
-        assert_eq!(
-            format!("{expected:#?}"),
-            format!("{:#?}", context.materialize())
-        );
-        assert_eq!(
-            indexed_generator.current_stamp(),
-            tree_metadata.id_gen.current_stamp()
-        );
-    }
-
-    #[test]
     fn external_arity_queries_follow_edge_order_and_preserve_location() {
         let module = id("External", 0);
         let location = Location::new_for_error("alpha.res", 10, 20);
@@ -323,8 +371,8 @@ mod tests {
         assert_eq!(
             calls,
             vec![
-                ("External".into(), true, "first".into()),
-                ("External".into(), true, "second".into())
+                ("External".into(), true, "second".into()),
+                ("External".into(), true, "first".into())
             ]
         );
         let Lambda::Lsequence(first, second) = context.materialize() else {
@@ -434,20 +482,20 @@ mod tests {
             LetKind::Strict,
             known,
             Lambda::function_(
-                3,
-                vec![id("a", 3), id("b", 4), id("c", 5)],
+                4,
+                vec![id("a", 3), id("b", 4), id("c", 5), id("d", 6)],
                 Lambda::const_(Constant::int(0)),
                 FunctionAttribute::default(),
             ),
             apply(
                 function_expression,
-                vec![effect("argument")],
+                vec![effect("argument1"), effect("argument2")],
                 ApplyStatus::Na,
                 true,
             ),
         );
         let (actual, frontier) = run(input, 100);
-        assert_eq!(frontier, 104);
+        assert_eq!(frontier, 105);
         let Lambda::Llet(_, _, _, body) = actual else {
             panic!("expected definition")
         };
@@ -456,15 +504,27 @@ mod tests {
         };
         assert_eq!(
             (outer.name(), outer.stamp(), outer.flags()),
+            ("partial_arg", 103, IdentFlags::NONE)
+        );
+        assert!(
+            matches!(&*outer_value, Lambda::Lprim(info) if matches!(&info.primitive, Primitive::PjsCall { prim_name, .. } if prim_name == "argument2"))
+        );
+        let Lambda::Llet(LetKind::Strict, middle_id, middle_value, inner) = *inner else {
+            panic!("expected middle argument binding")
+        };
+        assert_eq!(
+            (middle_id.name(), middle_id.stamp(), middle_id.flags()),
             ("partial_arg", 104, IdentFlags::NONE)
         );
-        assert!(matches!(*outer_value, Lambda::Lprim(_)));
+        assert!(
+            matches!(&*middle_value, Lambda::Lprim(info) if matches!(&info.primitive, Primitive::PjsCall { prim_name, .. } if prim_name == "argument1"))
+        );
         let Lambda::Llet(LetKind::Strict, inner_id, inner_value, eta) = *inner else {
             panic!("expected inner function binding")
         };
         assert_eq!(
             (inner_id.name(), inner_id.stamp(), inner_id.flags()),
-            ("partial_arg", 103, IdentFlags::NONE)
+            ("partial_arg", 105, IdentFlags::NONE)
         );
         assert!(matches!(*inner_value, Lambda::Llet(_, _, _, _)));
         let Lambda::Lfunction(function) = *eta else {
@@ -544,7 +604,7 @@ mod tests {
                 first.params[0].stamp(),
                 first.params[0].flags()
             ),
-            ("param", 51, IdentFlags::NONE)
+            ("param", 52, IdentFlags::NONE)
         );
         assert_eq!(
             (
@@ -552,7 +612,7 @@ mod tests {
                 second.params[0].stamp(),
                 second.params[0].flags()
             ),
-            ("param", 52, IdentFlags::NONE)
+            ("param", 51, IdentFlags::NONE)
         );
     }
 

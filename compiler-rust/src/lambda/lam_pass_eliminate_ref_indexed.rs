@@ -3,7 +3,7 @@
 use crate::ident::Ident;
 use crate::lambda::indexed::{IndexedLambda, NodeId, NodeSnapshot, NodeView};
 use crate::lambda::lam_analysis_indexed::hit_variable;
-use crate::lambda::lam_indexed_helpers::{append_rebuilt, map_children};
+use crate::lambda::lam_indexed_helpers::append_rebuilt;
 use crate::lambda::lam_primitive::Primitive;
 
 #[derive(Debug, Clone, Copy)]
@@ -50,24 +50,161 @@ pub(crate) fn eliminate_ref(
         | NodeSnapshot::GlobalModule(_, _)
         | NodeSnapshot::Break
         | NodeSnapshot::Continue => Ok(node),
-        snapshot => {
-            let mut failure = None;
-            let mapped = map_children(store, snapshot, |store, child| {
-                if failure.is_some() {
-                    return child;
-                }
-                match eliminate_ref(store, target, child) {
-                    Ok(node) => node,
-                    Err(error) => {
-                        failure = Some(error);
-                        child
-                    }
-                }
-            });
-            match failure {
-                Some(error) => Err(error),
-                None => Ok(append_rebuilt(store, mapped)),
-            }
+        NodeSnapshot::Apply(function, args, info, jsx) => {
+            let args = args
+                .into_iter()
+                .map(|node| eliminate_ref(store, target, node))
+                .collect::<Result<Vec<_>, _>>()?;
+            let function = eliminate_ref(store, target, function)?;
+            Ok(append_rebuilt(
+                store,
+                NodeSnapshot::Apply(function, args, info, jsx),
+            ))
+        }
+        NodeSnapshot::Let(kind, id, value, body) => {
+            let body = eliminate_ref(store, target, body)?;
+            let value = eliminate_ref(store, target, value)?;
+            Ok(append_rebuilt(
+                store,
+                NodeSnapshot::Let(kind, id, value, body),
+            ))
+        }
+        NodeSnapshot::LetRec(bindings, body) => {
+            let body = eliminate_ref(store, target, body)?;
+            let bindings = bindings
+                .into_iter()
+                .map(|(id, value)| eliminate_ref(store, target, value).map(|value| (id, value)))
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(append_rebuilt(store, NodeSnapshot::LetRec(bindings, body)))
+        }
+        NodeSnapshot::Prim(primitive, args, loc) => {
+            let args = args
+                .into_iter()
+                .map(|node| eliminate_ref(store, target, node))
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(append_rebuilt(
+                store,
+                NodeSnapshot::Prim(primitive, args, loc),
+            ))
+        }
+        NodeSnapshot::Switch {
+            scrutinee,
+            consts_full,
+            consts,
+            blocks_full,
+            blocks,
+            fail_action,
+            dispatch,
+        } => {
+            let fail_action = fail_action
+                .map(|node| eliminate_ref(store, target, node))
+                .transpose()?;
+            let blocks = blocks
+                .into_iter()
+                .map(|(key, node)| eliminate_ref(store, target, node).map(|node| (key, node)))
+                .collect::<Result<Vec<_>, _>>()?;
+            let consts = consts
+                .into_iter()
+                .map(|(key, node)| eliminate_ref(store, target, node).map(|node| (key, node)))
+                .collect::<Result<Vec<_>, _>>()?;
+            let scrutinee = eliminate_ref(store, target, scrutinee)?;
+            Ok(append_rebuilt(
+                store,
+                NodeSnapshot::Switch {
+                    scrutinee,
+                    consts_full,
+                    consts,
+                    blocks_full,
+                    blocks,
+                    fail_action,
+                    dispatch,
+                },
+            ))
+        }
+        NodeSnapshot::StringSwitch(scrutinee, cases, default) => {
+            let default = default
+                .map(|node| eliminate_ref(store, target, node))
+                .transpose()?;
+            let cases = cases
+                .into_iter()
+                .map(|(key, node)| eliminate_ref(store, target, node).map(|node| (key, node)))
+                .collect::<Result<Vec<_>, _>>()?;
+            let scrutinee = eliminate_ref(store, target, scrutinee)?;
+            Ok(append_rebuilt(
+                store,
+                NodeSnapshot::StringSwitch(scrutinee, cases, default),
+            ))
+        }
+        NodeSnapshot::StaticRaise(exit, args) => {
+            let args = args
+                .into_iter()
+                .map(|node| eliminate_ref(store, target, node))
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(append_rebuilt(store, NodeSnapshot::StaticRaise(exit, args)))
+        }
+        NodeSnapshot::StaticCatch(body, exit, params, handler) => {
+            let handler = eliminate_ref(store, target, handler)?;
+            let body = eliminate_ref(store, target, body)?;
+            Ok(append_rebuilt(
+                store,
+                NodeSnapshot::StaticCatch(body, exit, params, handler),
+            ))
+        }
+        NodeSnapshot::TryWith(body, id, handler) => {
+            let handler = eliminate_ref(store, target, handler)?;
+            let body = eliminate_ref(store, target, body)?;
+            Ok(append_rebuilt(
+                store,
+                NodeSnapshot::TryWith(body, id, handler),
+            ))
+        }
+        NodeSnapshot::IfThenElse(condition, then_node, else_node) => {
+            let else_node = eliminate_ref(store, target, else_node)?;
+            let then_node = eliminate_ref(store, target, then_node)?;
+            let condition = eliminate_ref(store, target, condition)?;
+            Ok(append_rebuilt(
+                store,
+                NodeSnapshot::IfThenElse(condition, then_node, else_node),
+            ))
+        }
+        NodeSnapshot::Sequence(first, second) => {
+            let second = eliminate_ref(store, target, second)?;
+            let first = eliminate_ref(store, target, first)?;
+            Ok(append_rebuilt(store, NodeSnapshot::Sequence(first, second)))
+        }
+        NodeSnapshot::While(condition, body) => {
+            let body = eliminate_ref(store, target, body)?;
+            let condition = eliminate_ref(store, target, condition)?;
+            Ok(append_rebuilt(store, NodeSnapshot::While(condition, body)))
+        }
+        NodeSnapshot::For(id, from, to, direction, body) => {
+            let body = eliminate_ref(store, target, body)?;
+            let to = eliminate_ref(store, target, to)?;
+            let from = eliminate_ref(store, target, from)?;
+            Ok(append_rebuilt(
+                store,
+                NodeSnapshot::For(id, from, to, direction, body),
+            ))
+        }
+        NodeSnapshot::ForOf(id, iterable, body) => {
+            let body = eliminate_ref(store, target, body)?;
+            let iterable = eliminate_ref(store, target, iterable)?;
+            Ok(append_rebuilt(
+                store,
+                NodeSnapshot::ForOf(id, iterable, body),
+            ))
+        }
+        NodeSnapshot::ForAwaitOf(id, iterable, body) => {
+            let body = eliminate_ref(store, target, body)?;
+            let iterable = eliminate_ref(store, target, iterable)?;
+            Ok(append_rebuilt(
+                store,
+                NodeSnapshot::ForAwaitOf(id, iterable, body),
+            ))
+        }
+        NodeSnapshot::Assign(id, value) => {
+            let value = eliminate_ref(store, target, value)?;
+            Ok(append_rebuilt(store, NodeSnapshot::Assign(id, value)))
         }
     }
 }

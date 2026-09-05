@@ -4,9 +4,8 @@ use ahash::AHashMap;
 
 use crate::ident::Ident;
 use crate::lambda::indexed::{IndexedLambda, NodeId, NodeSnapshot, NodeView};
-use crate::lambda::lam_beta_reduce_indexed::simple_beta_reduce;
+use crate::lambda::lam_beta_reduce_indexed::no_names_beta_reduce;
 use crate::lambda::lam_compat::LetKind;
-use crate::lambda::lam_indexed_helpers::append_refine_let;
 use crate::lambda::lam_pass_count::UsedInfo;
 
 #[derive(Default)]
@@ -42,25 +41,6 @@ impl OccurrenceTable {
 }
 
 type LocalTable = AHashMap<Ident, usize>;
-
-fn no_names_beta_reduce(
-    store: &mut IndexedLambda,
-    params: &[Ident],
-    body: NodeId,
-    args: &[NodeId],
-    hash_capacity: &mut usize,
-) -> NodeId {
-    if let Some(node) = simple_beta_reduce(store, params, body, args, hash_capacity) {
-        return node;
-    }
-    params
-        .iter()
-        .cloned()
-        .zip(args.iter().copied())
-        .fold(body, |body, (param, arg)| {
-            append_refine_let(store, LetKind::Strict, param, arg, body)
-        })
-}
 
 pub(crate) fn collect_occurs(
     store: &mut IndexedLambda,
@@ -199,8 +179,11 @@ pub(crate) fn collect_occurs(
                 ..
             } => {
                 if let Some(fail) = fail_action {
-                    count(store, occ, local, fail, hash_capacity);
                     if !consts_full && !blocks_full {
+                        count(store, occ, local, fail, hash_capacity);
+                        count(store, occ, local, fail, hash_capacity);
+                    } else {
+                        assert!(!consts_full || !blocks_full);
                         count(store, occ, local, fail, hash_capacity);
                     }
                 }
@@ -305,6 +288,47 @@ mod tests {
         let occurrences = collect_occurs(&mut store, root, &mut capacity);
         assert_eq!(occurrences.get(&value).times, 2);
         assert!(!occurrences.get(&value).captured);
+    }
+
+    fn switch_default_input(consts_full: bool, blocks_full: bool) -> (Ident, IndexedLambda) {
+        let value = id("value", 1);
+        let input = Lambda::let_(
+            LetKind::Strict,
+            value.clone(),
+            Lambda::const_(Constant::int(0)),
+            Lambda::Lswitch(
+                Box::new(Lambda::const_(Constant::int(0))),
+                crate::lambda::LambdaSwitch {
+                    sw_consts_full: consts_full,
+                    sw_consts: vec![],
+                    sw_blocks_full: blocks_full,
+                    sw_blocks: vec![],
+                    sw_failaction: Some(Box::new(Lambda::var(value.clone()))),
+                    sw_dispatch: SwitchDispatch::Direct,
+                },
+            ),
+        );
+        (value, IndexedLambda::from_lambda(input))
+    }
+
+    #[test]
+    fn one_open_switch_table_counts_default_once() {
+        for (consts_full, blocks_full) in [(true, false), (false, true)] {
+            let (value, mut store) = switch_default_input(consts_full, blocks_full);
+            let root = store.root();
+            let mut capacity = 32;
+            let occurrences = collect_occurs(&mut store, root, &mut capacity);
+            assert_eq!(occurrences.get(&value).times, 1);
+        }
+    }
+
+    #[test]
+    #[should_panic]
+    fn both_full_switch_tables_reject_fail_action() {
+        let (_, mut store) = switch_default_input(true, true);
+        let root = store.root();
+        let mut capacity = 32;
+        collect_occurs(&mut store, root, &mut capacity);
     }
 
     #[test]

@@ -5,10 +5,10 @@ use ahash::AHashMap;
 use crate::ident::Ident;
 use crate::lambda::indexed::{IndexedLambda, IndexedLambdaContext, NodeId, NodeSnapshot, NodeView};
 use crate::lambda::lam_analysis_indexed::no_side_effects;
-use crate::lambda::lam_beta_reduce_indexed::simple_beta_reduce;
+use crate::lambda::lam_beta_reduce_indexed::no_names_beta_reduce;
 use crate::lambda::lam_compat::{FieldDbgInfo, LetKind};
 use crate::lambda::lam_constant::Constant;
-use crate::lambda::lam_indexed_helpers::{append_rebuilt, append_refine_let, map_children};
+use crate::lambda::lam_indexed_helpers::{append_rebuilt, append_refine_let};
 use crate::lambda::lam_pass_count_indexed::{OccurrenceTable, collect_occurs};
 use crate::lambda::lam_pass_eliminate_ref_indexed::eliminate_ref;
 use crate::lambda::lam_primitive::{Mutable, Primitive};
@@ -24,25 +24,6 @@ impl Lets<'_> {
     fn used(&self, id: &Ident) -> bool {
         self.occurrences.get(id).times > 0
     }
-}
-
-fn no_names_beta_reduce(
-    store: &mut IndexedLambda,
-    params: &[Ident],
-    body: NodeId,
-    args: &[NodeId],
-    hash_capacity: &mut usize,
-) -> NodeId {
-    if let Some(node) = simple_beta_reduce(store, params, body, args, hash_capacity) {
-        return node;
-    }
-    params
-        .iter()
-        .cloned()
-        .zip(args.iter().copied())
-        .fold(body, |body, (param, arg)| {
-            append_refine_let(store, LetKind::Strict, param, arg, body)
-        })
 }
 
 fn string_value(store: &IndexedLambda, state: &Lets<'_>, node: NodeId) -> Option<String> {
@@ -121,8 +102,8 @@ fn simplify(store: &mut IndexedLambda, state: &mut Lets<'_>, node: NodeId) -> No
                 let body = simplify(store, state, body);
                 return append_rebuilt(store, NodeSnapshot::Let(LetKind::Alias, id, value, body));
             }
-            let value = simplify(store, state, value);
             let body = simplify(store, state, body);
+            let value = simplify(store, state, value);
             append_rebuilt(store, NodeSnapshot::Let(LetKind::Alias, id, value, body))
         }
         NodeSnapshot::Let(LetKind::StrictOpt, id, value, body) => {
@@ -175,8 +156,8 @@ fn simplify(store: &mut IndexedLambda, state: &mut Lets<'_>, node: NodeId) -> No
             append_refine_let(store, kind, id, value, body)
         }
         NodeSnapshot::Sequence(first, second) => {
-            let first = simplify(store, state, first);
             let second = simplify(store, state, second);
+            let first = simplify(store, state, first);
             append_rebuilt(store, NodeSnapshot::Sequence(first, second))
         }
         NodeSnapshot::Apply(function, args, info, jsx) => {
@@ -189,11 +170,11 @@ fn simplify(store: &mut IndexedLambda, state: &mut Lets<'_>, node: NodeId) -> No
                     no_names_beta_reduce(store, &params, body, &args, state.beta_hash_capacity);
                 return simplify(store, state, reduced);
             }
-            let function = simplify(store, state, function);
             let args = args
                 .into_iter()
                 .map(|node| simplify(store, state, node))
                 .collect();
+            let function = simplify(store, state, function);
             append_rebuilt(store, NodeSnapshot::Apply(function, args, info, jsx))
         }
         NodeSnapshot::Prim(Primitive::Pstringadd, args, loc) if args.len() == 2 => {
@@ -217,11 +198,120 @@ fn simplify(store: &mut IndexedLambda, state: &mut Lets<'_>, node: NodeId) -> No
         | NodeSnapshot::GlobalModule(_, _)
         | NodeSnapshot::Break
         | NodeSnapshot::Continue => node,
-        snapshot => {
-            let mapped = map_children(store, snapshot, |store, child| {
-                simplify(store, state, child)
-            });
-            append_rebuilt(store, mapped)
+        NodeSnapshot::Function(arity, params, body, attr) => {
+            let body = simplify(store, state, body);
+            append_rebuilt(store, NodeSnapshot::Function(arity, params, body, attr))
+        }
+        NodeSnapshot::LetRec(bindings, body) => {
+            let body = simplify(store, state, body);
+            let bindings = bindings
+                .into_iter()
+                .map(|(id, value)| (id, simplify(store, state, value)))
+                .collect();
+            append_rebuilt(store, NodeSnapshot::LetRec(bindings, body))
+        }
+        NodeSnapshot::Prim(primitive, args, loc) => {
+            let args = args
+                .into_iter()
+                .map(|node| simplify(store, state, node))
+                .collect();
+            append_rebuilt(store, NodeSnapshot::Prim(primitive, args, loc))
+        }
+        NodeSnapshot::Switch {
+            scrutinee,
+            consts_full,
+            consts,
+            blocks_full,
+            blocks,
+            fail_action,
+            dispatch,
+        } => {
+            // The `let ... and ...` group in the reference runs left-to-right.
+            let scrutinee = simplify(store, state, scrutinee);
+            let consts = consts
+                .into_iter()
+                .map(|(key, node)| (key, simplify(store, state, node)))
+                .collect();
+            let blocks = blocks
+                .into_iter()
+                .map(|(key, node)| (key, simplify(store, state, node)))
+                .collect();
+            let fail_action = fail_action.map(|node| simplify(store, state, node));
+            append_rebuilt(
+                store,
+                NodeSnapshot::Switch {
+                    scrutinee,
+                    consts_full,
+                    consts,
+                    blocks_full,
+                    blocks,
+                    fail_action,
+                    dispatch,
+                },
+            )
+        }
+        NodeSnapshot::StringSwitch(scrutinee, cases, default) => {
+            let default = default.map(|node| simplify(store, state, node));
+            let cases = cases
+                .into_iter()
+                .map(|(key, node)| (key, simplify(store, state, node)))
+                .collect();
+            let scrutinee = simplify(store, state, scrutinee);
+            append_rebuilt(store, NodeSnapshot::StringSwitch(scrutinee, cases, default))
+        }
+        NodeSnapshot::StaticRaise(exit, args) => {
+            let args = args
+                .into_iter()
+                .map(|node| simplify(store, state, node))
+                .collect();
+            append_rebuilt(store, NodeSnapshot::StaticRaise(exit, args))
+        }
+        NodeSnapshot::StaticCatch(body, exit, params, handler) => {
+            let handler = simplify(store, state, handler);
+            let body = simplify(store, state, body);
+            append_rebuilt(
+                store,
+                NodeSnapshot::StaticCatch(body, exit, params, handler),
+            )
+        }
+        NodeSnapshot::TryWith(body, id, handler) => {
+            let handler = simplify(store, state, handler);
+            let body = simplify(store, state, body);
+            append_rebuilt(store, NodeSnapshot::TryWith(body, id, handler))
+        }
+        NodeSnapshot::IfThenElse(condition, then_node, else_node) => {
+            let else_node = simplify(store, state, else_node);
+            let then_node = simplify(store, state, then_node);
+            let condition = simplify(store, state, condition);
+            append_rebuilt(
+                store,
+                NodeSnapshot::IfThenElse(condition, then_node, else_node),
+            )
+        }
+        NodeSnapshot::While(condition, body) => {
+            let body = simplify(store, state, body);
+            let condition = simplify(store, state, condition);
+            append_rebuilt(store, NodeSnapshot::While(condition, body))
+        }
+        NodeSnapshot::For(id, from, to, direction, body) => {
+            let body = simplify(store, state, body);
+            let to = simplify(store, state, to);
+            let from = simplify(store, state, from);
+            append_rebuilt(store, NodeSnapshot::For(id, from, to, direction, body))
+        }
+        NodeSnapshot::ForOf(id, iterable, body) => {
+            let body = simplify(store, state, body);
+            let iterable = simplify(store, state, iterable);
+            append_rebuilt(store, NodeSnapshot::ForOf(id, iterable, body))
+        }
+        NodeSnapshot::ForAwaitOf(id, iterable, body) => {
+            let body = simplify(store, state, body);
+            let iterable = simplify(store, state, iterable);
+            append_rebuilt(store, NodeSnapshot::ForAwaitOf(id, iterable, body))
+        }
+        NodeSnapshot::Assign(id, value) => {
+            let value = simplify(store, state, value);
+            append_rebuilt(store, NodeSnapshot::Assign(id, value))
         }
     }
 }
