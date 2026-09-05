@@ -4584,16 +4584,19 @@ fn subst_type(
             args: arrow_args,
             ret,
         } => {
-            let new_args = arrow_args
+            // Map types in the original order, but only copy owned labels when
+            // rebuilding the arrow. A no-op substitution returns its original id.
+            let new_types = arrow_args
                 .iter()
-                .map(|arg| {
-                    super::TypeArg::new(arg.label().clone(), subst_type(ctx, params, args, arg.typ))
-                })
+                .map(|arg| subst_type(ctx, params, args, arg.typ))
                 .collect::<Vec<_>>();
             let new_ret = subst_type(ctx, params, args, *ret);
-            if new_args.iter().zip(arrow_args).all(|(a, b)| a.typ == b.typ) && new_ret == *ret {
+            if new_types.iter().zip(arrow_args).all(|(a, b)| *a == b.typ) && new_ret == *ret {
                 ty
             } else {
+                let new_args = arrow_args.iter().zip(new_types)
+                    .map(|(arg, typ)| super::TypeArg::new(arg.label().clone(), typ))
+                    .collect();
                 drop(desc);
                 ctx.new_type(TypeDesc::Tarrow {
                     args: new_args,
@@ -11599,6 +11602,23 @@ mod tests {
             args: labels.iter().map(|l| TypeArg::new(l.clone(), shared)).collect(),
             ret: shared,
         });
+        let unused = ctx.new_generic_var(Some("unused".into()));
+        let replacement = ctx.new_generic_var(Some("replacement".into()));
+        assert_eq!(subst_type_params(&ctx, &[unused], &[replacement], arrow), arrow);
+        let changed = subst_type_params(&ctx, &[shared], &[replacement], arrow);
+        assert_ne!(changed, arrow);
+        let changed_desc = ctx.get_desc(changed);
+        let TypeDesc::Tarrow { args, ret } = &*changed_desc else { panic!("not arrow") };
+        assert_eq!(*ret, replacement);
+        for (arg, expected) in args.iter().zip(&labels) {
+            assert_eq!(arg.typ, replacement);
+            assert_eq!(arg.label(), expected);
+            if let ArgLabel::Labelled(l) | ArgLabel::Optional(l) = arg.label() {
+                assert_eq!(l.loc.loc_start, loc.loc_start);
+                assert_eq!(l.loc.loc_end, loc.loc_end);
+                assert_eq!(l.loc.loc_ghost, loc.loc_ghost);
+            }
+        }
         let copied = copy_type_deep(&ctx, arrow, &mut HashMap::new());
         let desc = ctx.get_desc(copied);
         let TypeDesc::Tarrow { args, ret } = &*desc else { panic!("not arrow") };
