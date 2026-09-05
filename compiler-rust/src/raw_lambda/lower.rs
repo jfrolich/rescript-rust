@@ -20,22 +20,15 @@ use crate::raw_lambda::{RawApply, RawLambda, RawLambdaSwitch};
 const SETTER_SUFFIX: &str = "#=";
 const EXCEPTION_ID_FIELD: &str = "RE_EXN_ID";
 
-struct LoweringContext {
+struct LoweringContext<'a> {
     alias_tbl: HashMap<Ident, Ident>,
     exit_map: HashMap<i32, i32>,
     exported_idents: HashSet<Ident>,
-    id_gen: Arc<IdGenerator>,
+    id_gen: &'a IdGenerator,
 }
 
-impl LoweringContext {
-    fn new(exported_idents: HashSet<Ident>, start_stamp: i32) -> Self {
-        Self::with_id_gen(
-            exported_idents,
-            Arc::new(IdGenerator::with_start_stamp(start_stamp)),
-        )
-    }
-
-    fn with_id_gen(exported_idents: HashSet<Ident>, id_gen: Arc<IdGenerator>) -> Self {
+impl<'a> LoweringContext<'a> {
+    fn with_id_gen(exported_idents: HashSet<Ident>, id_gen: &'a IdGenerator) -> Self {
         Self {
             alias_tbl: HashMap::new(),
             exit_map: HashMap::new(),
@@ -1801,7 +1794,8 @@ fn max_ident_stamp(raw: &RawLambda) -> i32 {
 pub fn lower_to_lambda_with_start_stamp(raw: RawLambda, start_stamp: i32) -> Lambda {
     let mut exported_idents = HashSet::new();
     collect_exported_idents(&raw, &mut exported_idents);
-    LoweringContext::new(exported_idents, start_stamp).lower_lambda(raw)
+    let id_gen = IdGenerator::with_start_stamp(start_stamp);
+    LoweringContext::with_id_gen(exported_idents, &id_gen).lower_lambda(raw)
 }
 
 /// Additive M5 entrypoint for the inactive indexed pipeline. The caller keeps
@@ -1809,7 +1803,7 @@ pub fn lower_to_lambda_with_start_stamp(raw: RawLambda, start_stamp: i32) -> Lam
 pub(crate) fn lower_to_lambda_with_id_gen(raw: RawLambda, id_gen: Arc<IdGenerator>) -> Lambda {
     let mut exported_idents = HashSet::new();
     collect_exported_idents(&raw, &mut exported_idents);
-    LoweringContext::with_id_gen(exported_idents, id_gen).lower_lambda(raw)
+    LoweringContext::with_id_gen(exported_idents, &id_gen).lower_lambda(raw)
 }
 
 pub fn lower_to_lambda(raw: RawLambda) -> Lambda {
@@ -1829,12 +1823,25 @@ mod tests {
     #[test]
     fn shared_generator_entrypoint_preserves_the_caller_owned_stamp_stream() {
         let generator = Arc::new(IdGenerator::with_start_stamp(41));
-        let lowered = lower_to_lambda_with_id_gen(RawLambda::unit(), generator.clone());
+        let exception = Ident::new("caught", 7, crate::ident::IdentFlags::NONE);
+        let lowered = lower_to_lambda_with_id_gen(
+            RawLambda::LtryWith(
+                Box::new(RawLambda::unit()),
+                exception.clone(),
+                Box::new(RawLambda::var(exception)),
+            ),
+            generator.clone(),
+        );
+        let Lambda::LtryWith(_, raw_exception, handler) = lowered else {
+            panic!("expected lowered try-with");
+        };
+        assert_eq!(raw_exception.name(), "raw_caught");
+        assert_eq!(raw_exception.stamp(), 42);
         assert!(matches!(
-            lowered,
-            Lambda::Lconst(Constant::JsUndefined { is_unit: true })
+            *handler,
+            Lambda::Llet(LetKind::StrictOpt, _, _, _)
         ));
-        assert_eq!(generator.create("after_lower").stamp(), 42);
+        assert_eq!(generator.create("after_lower").stamp(), 43);
     }
 
     #[test]
