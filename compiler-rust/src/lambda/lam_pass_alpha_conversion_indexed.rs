@@ -390,6 +390,126 @@ mod tests {
     }
 
     #[test]
+    fn switch_children_follow_native_record_and_call_order() {
+        let module = id("External", 0);
+        let call = |name: &str| {
+            apply(
+                Lambda::prim(
+                    Primitive::Pfield(0, FieldDbgInfo::Module { name: name.into() }),
+                    vec![Lambda::LglobalModule(module.clone(), false)],
+                    Location::none(),
+                ),
+                vec![Lambda::const_(Constant::int(0))],
+                ApplyStatus::Na,
+                false,
+            )
+        };
+        let input = Lambda::Lswitch(
+            Box::new(call("scrutinee")),
+            crate::lambda::LambdaSwitch {
+                sw_consts_full: false,
+                sw_consts: vec![(crate::lambda::SwitchKey::Int(0), call("constant"))],
+                sw_blocks_full: false,
+                sw_blocks: vec![(crate::lambda::SwitchKey::Int(0), call("block"))],
+                sw_failaction: Some(Box::new(call("failure"))),
+                sw_dispatch: crate::lambda::SwitchDispatch::Direct,
+            },
+        );
+        let generator = IdGenerator::new();
+        let mut context = IndexedLambdaContext::from_lambda(input, []);
+        let mut calls = Vec::new();
+        let mut external = |_: &Ident, _: bool, field: &str| {
+            calls.push(field.to_string());
+            Some(ExternalArityInfo::Single(
+                crate::lambda::lam_arity::Arity::info(vec![1], false),
+            ))
+        };
+        context.alpha_conversion_with_external_arity(&generator, &mut external);
+        assert_eq!(calls, vec!["failure", "block", "constant", "scrutinee"]);
+    }
+
+    #[test]
+    fn over_application_freshens_rest_before_first_group() {
+        let outer = id("outer", 1);
+        let inner = id("inner", 2);
+        let input = Lambda::let_(
+            LetKind::Strict,
+            outer.clone(),
+            Lambda::function_(
+                1,
+                vec![id("x", 3)],
+                Lambda::const_(Constant::int(0)),
+                FunctionAttribute::default(),
+            ),
+            Lambda::let_(
+                LetKind::Strict,
+                inner.clone(),
+                Lambda::function_(
+                    2,
+                    vec![id("a", 4), id("b", 5)],
+                    Lambda::const_(Constant::int(0)),
+                    FunctionAttribute::default(),
+                ),
+                apply(
+                    Lambda::var(outer),
+                    vec![
+                        apply(
+                            Lambda::var(inner.clone()),
+                            vec![Lambda::const_(Constant::int(1))],
+                            ApplyStatus::Na,
+                            false,
+                        ),
+                        apply(
+                            Lambda::var(inner),
+                            vec![Lambda::const_(Constant::int(2))],
+                            ApplyStatus::Na,
+                            false,
+                        ),
+                    ],
+                    ApplyStatus::Na,
+                    false,
+                ),
+            ),
+        );
+        let (actual, frontier) = run(input, 50);
+        assert_eq!(frontier, 52);
+        let Lambda::Llet(_, _, _, body) = actual else {
+            panic!("expected outer let")
+        };
+        let Lambda::Llet(_, _, _, body) = *body else {
+            panic!("expected inner let")
+        };
+        let Lambda::Lapply(outer_call) = *body else {
+            panic!("expected outer apply")
+        };
+        let Lambda::Lapply(first_group) = *outer_call.ap_func else {
+            panic!("expected first group")
+        };
+        let Lambda::Lfunction(first_eta) = &first_group.ap_args[0] else {
+            panic!("expected first eta")
+        };
+        let Lambda::Lfunction(rest_eta) = &outer_call.ap_args[0] else {
+            panic!("expected rest eta")
+        };
+        assert_eq!(
+            (
+                first_eta.params[0].name(),
+                first_eta.params[0].stamp(),
+                first_eta.params[0].flags()
+            ),
+            ("param", 52, IdentFlags::NONE)
+        );
+        assert_eq!(
+            (
+                rest_eta.params[0].name(),
+                rest_eta.params[0].stamp(),
+                rest_eta.params[0].flags()
+            ),
+            ("param", 51, IdentFlags::NONE)
+        );
+    }
+
+    #[test]
     fn exact_and_over_application_preserve_status_jsx_and_location() {
         let function = id("function", 1);
         let p = id("p", 2);
