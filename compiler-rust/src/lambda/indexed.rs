@@ -1364,6 +1364,27 @@ impl IndexedLambdaContext {
         &mut self.store
     }
 
+    /// Imports one function body returned by the CMJ resolver into this
+    /// compilation's existing store. JS lowering calls this only after the
+    /// reference eligibility checks and resolver query have selected the
+    /// function for beta reduction.
+    pub(crate) fn import_cmj_function(&mut self, function: LFunction) -> NodeId {
+        self.store.append_compat_lambda(Lambda::Lfunction(function))
+    }
+
+    /// Splits the owner-held state needed by consumer-side indexed beta.
+    /// This deliberately reuses the optimizer's metadata and native hash
+    /// capacity after grouping has consumed `optimizer_root`.
+    pub(crate) fn backend_beta_parts_mut(
+        &mut self,
+    ) -> (&mut IndexedLambda, &mut IndexedLamStats, &mut usize) {
+        (
+            &mut self.store,
+            &mut self.metadata,
+            &mut self.beta_hash_bucket_count,
+        )
+    }
+
     pub(crate) fn optimizer_parts_mut(
         &mut self,
     ) -> (&mut IndexedLambda, &mut IndexedLamStats, &mut usize) {

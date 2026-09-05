@@ -18,6 +18,7 @@ use crate::js_ir::{
     ExpressionDesc, ForDirection, ModuleId, ModulePathResolver, Program, Statement, StatementDesc,
     StringClause, VIdent, VariableDeclaration, block_last_is_terminal, unnest_block,
 };
+use crate::lambda::indexed::{IndexedLambdaContext, NodeId, NodeSnapshot};
 use crate::lambda::js_pass_external_shadow::apply_external_shadow_pass;
 use crate::lambda::js_pass_flatten_and_mark_dead::{
     apply_js_flatten_and_mark_dead_pass, apply_js_flatten_pass,
@@ -31,7 +32,12 @@ use crate::lambda::js_shake::{
 };
 use crate::lambda::lam_analysis;
 use crate::lambda::lam_analysis::lfunction_can_be_inlined;
+use crate::lambda::lam_analysis_indexed::is_closed_with_map as is_closed_with_map_indexed;
 use crate::lambda::lam_arity::Arity;
+use crate::lambda::lam_beta_reduce_indexed::{
+    BetaDiagnostics as IndexedBetaDiagnostics,
+    propagate_beta_reduce_with_map as propagate_beta_reduce_with_map_indexed,
+};
 use crate::lambda::lam_closure::is_closed_with_map;
 use crate::lambda::lam_compat::{LetKind, SetFieldDbgInfo};
 use crate::lambda::lam_compile_context::{Element, ExternalArityInfo, IdKind, LamStats};
@@ -1111,6 +1117,53 @@ impl LambdaCompiler {
             },
             name.as_str(),
         ))
+    }
+
+    /// Imports an eligible CMJ function at the consumer query boundary and
+    /// beta-reduces it against argument IDs already in the owning store.
+    ///
+    /// OCaml performs this after `query_external_id_info` and the
+    /// same-length/inlineability guards in `lam_compile.ml:339-357`. The
+    /// caller must run those guards before calling this method, so rejected
+    /// candidates are never imported merely to inspect their payload.
+    fn import_and_beta_indexed_cmj_function(
+        &mut self,
+        context: &mut IndexedLambdaContext,
+        function: LFunction,
+        args: &[NodeId],
+    ) -> NodeId {
+        assert_eq!(
+            function.params.len(),
+            args.len(),
+            "indexed CMJ beta requires a fully applied function"
+        );
+        assert!(
+            args.iter().all(|arg| context.store().contains(*arg)),
+            "indexed CMJ beta argument is foreign or out of range"
+        );
+
+        let imported = context.import_cmj_function(function);
+        let NodeSnapshot::Function(_, params, body, attr) = context.store().snapshot(imported)
+        else {
+            unreachable!("CMJ function import did not produce an indexed function")
+        };
+        debug_assert!(!attr.async_ && attr.directive.is_none());
+        let exports = AHashSet::new();
+        let (_, parameter_map) =
+            is_closed_with_map_indexed(context.store(), &exports, &params, body);
+        let mut diagnostics = IndexedBetaDiagnostics::default();
+        let (store, metadata, beta_hash_bucket_count) = context.backend_beta_parts_mut();
+        propagate_beta_reduce_with_map_indexed(
+            store,
+            metadata,
+            &parameter_map,
+            &params,
+            body,
+            args,
+            &self.id_gen,
+            beta_hash_bucket_count,
+            &mut diagnostics,
+        )
     }
 
     fn compile_external_field_apply(&mut self, apply: &Apply) -> Option<Compiled> {
