@@ -830,6 +830,17 @@ pub struct RawLambdaDiagnostic {
     pub message: String,
 }
 
+pub(crate) struct IndexedRawLambda {
+    raw: RawLambda,
+    id_gen: std::sync::Arc<IdGenerator>,
+}
+
+impl IndexedRawLambda {
+    pub(crate) fn into_parts(self) -> (RawLambda, std::sync::Arc<IdGenerator>) {
+        (self.raw, self.id_gen)
+    }
+}
+
 enum RawLambdaIdGenerator {
     Owned(IdGenerator),
     Shared(std::sync::Arc<IdGenerator>),
@@ -985,6 +996,13 @@ impl<'a> RawLambdaConverter<'a> {
             hoisted_functions: Vec::new(),
             hoisted_exports: Vec::new(),
         }
+    }
+
+    pub(crate) fn finish_indexed_raw(self, raw: RawLambda) -> IndexedRawLambda {
+        let RawLambdaIdGenerator::Shared(id_gen) = self.id_gen else {
+            panic!("indexed Raw Lambda requires the shared-generator converter")
+        };
+        IndexedRawLambda { raw, id_gen }
     }
 
     #[cfg(test)]
@@ -12680,10 +12698,31 @@ mod tests {
             "Fixture".into(),
         );
         assert!(converter.shares_id_generator(&generator));
-        let converted = converter.fresh_ident("converted");
+        let primitive_type = ctx.new_var(None);
+        let converted = converter.transl_primitive_raw(
+            &crate::types::PrimitiveDescription {
+                prim_name: "%identity".into(),
+                prim_arity: 2,
+                prim_native_name: String::new(),
+                prim_native_float: false,
+                prim_from_constructor: false,
+            },
+            primitive_type,
+            Location::none(),
+        );
+        let RawLambda::Lfunction(function) = converted else {
+            panic!("expected primitive conversion to allocate a wrapper")
+        };
         assert_eq!(
-            (converted.name(), converted.stamp(), converted.flags()),
-            ("converted", 101, crate::ident::IdentFlags::NONE)
+            function
+                .params
+                .iter()
+                .map(|id| (id.name(), id.stamp(), id.flags()))
+                .collect::<Vec<_>>(),
+            vec![
+                ("prim0", 102, crate::ident::IdentFlags::NONE),
+                ("prim1", 101, crate::ident::IdentFlags::NONE),
+            ]
         );
 
         let export = Ident::new("value", 1, crate::ident::IdentFlags::NONE);
@@ -12700,16 +12739,16 @@ mod tests {
             )],
             loc: Location::none(),
         });
+        let indexed_raw = converter.finish_indexed_raw(raw);
         let mut inline = |_: &Ident, _: bool, _: &str| None;
         let mut arity = |_: &Ident, _: bool, _: &str| None;
         let result =
             crate::lambda::lam_compile_main_indexed::lower_and_optimize_for_pre_js_indexed(
-                raw,
+                indexed_raw,
                 vec![export],
                 &[],
                 &AHashSet::new(),
                 false,
-                generator.clone(),
                 &mut inline,
                 &mut arity,
             )
@@ -12720,14 +12759,14 @@ mod tests {
                 result.exports()[0].stamp(),
                 result.exports()[0].flags()
             ),
-            ("value", 103, crate::ident::IdentFlags::NONE)
+            ("value", 104, crate::ident::IdentFlags::NONE)
         );
         let consumer = result.generator().create("consumer");
         assert_eq!(
             (consumer.name(), consumer.stamp(), consumer.flags()),
-            ("consumer", 104, crate::ident::IdentFlags::NONE)
+            ("consumer", 105, crate::ident::IdentFlags::NONE)
         );
-        assert_eq!(generator.current_stamp(), 104);
+        assert_eq!(generator.current_stamp(), 105);
     }
 
     #[test]

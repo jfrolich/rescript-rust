@@ -11,6 +11,7 @@ use ahash::{AHashMap, AHashSet};
 
 use crate::cmi::persistent_env::{CmjExportArity, CmjExportConstant};
 use crate::context::IdGenerator;
+use crate::diagnostics::{Warning, WarningConfig};
 use crate::ident::Ident;
 use crate::js_ir::ModuleId;
 use crate::js_ir::op::Kind;
@@ -58,6 +59,7 @@ pub(crate) enum IndexedPreJsError {
         name: String,
         loc: crate::location::Location,
     },
+    FatalWarnings,
 }
 
 impl std::fmt::Display for IndexedPreJsError {
@@ -69,6 +71,7 @@ impl std::fmt::Display for IndexedPreJsError {
                 formatter,
                 "Cannot hoist this function as `{name}` because that name is already used by a top-level binding."
             ),
+            Self::FatalWarnings => formatter.write_str("Hoisted-function warning treated as error"),
         }
     }
 }
@@ -77,7 +80,8 @@ impl std::fmt::Display for IndexedPreJsError {
 pub(crate) struct IndexedHoistedWarning {
     pub(crate) path: Vec<String>,
     pub(crate) loc: crate::location::Location,
-    pub(crate) attribute: &'static str,
+    pub(crate) warning: Warning,
+    pub(crate) is_error: bool,
 }
 
 /// One owning pre-JS result. All node handles are private and remain paired
@@ -93,6 +97,7 @@ pub(crate) enum IndexedDiagnosticGroup {
 pub(crate) trait IndexedDiagnosticsObserver {
     fn lambda(&mut self, pass: &'static str, lambda: Lambda);
     fn groups(&mut self, groups: Vec<IndexedDiagnosticGroup>);
+    fn warning(&mut self, _warning: &IndexedHoistedWarning) {}
 }
 
 pub(crate) struct IndexedCmjExports {
@@ -415,15 +420,36 @@ fn flatten(
     }
 }
 
-fn pass_free_variables(store: &IndexedLambda, root: NodeId) -> AHashSet<Ident> {
-    fn visit(store: &IndexedLambda, node: NodeId, free: &mut AHashSet<Ident>) {
+fn set_insert(set: &mut Vec<Ident>, id: Ident) -> bool {
+    match set.binary_search_by(|existing| ident_order(existing, &id)) {
+        Ok(_) => false,
+        Err(index) => {
+            set.insert(index, id);
+            true
+        }
+    }
+}
+
+fn set_contains(set: &[Ident], id: &Ident) -> bool {
+    set.binary_search_by(|existing| ident_order(existing, id))
+        .is_ok()
+}
+
+fn set_remove(set: &mut Vec<Ident>, id: &Ident) {
+    if let Ok(index) = set.binary_search_by(|existing| ident_order(existing, id)) {
+        set.remove(index);
+    }
+}
+
+fn pass_free_variables(store: &IndexedLambda, root: NodeId) -> Vec<Ident> {
+    fn visit(store: &IndexedLambda, node: NodeId, free: &mut Vec<Ident>) {
         match store.view(node) {
             NodeView::Var(id) => {
-                free.insert(id.clone());
+                set_insert(free, id.clone());
             }
             NodeView::Assign(id, value) => {
                 visit(store, value, free);
-                free.insert(id.clone());
+                set_insert(free, id.clone());
             }
             NodeView::Apply(function, args, _, _) => {
                 visit(store, function, free);
@@ -434,13 +460,13 @@ fn pass_free_variables(store: &IndexedLambda, root: NodeId) -> AHashSet<Ident> {
             NodeView::Function(_, params, body, _) => {
                 visit(store, body, free);
                 for id in params {
-                    free.remove(id);
+                    set_remove(free, id);
                 }
             }
             NodeView::Let(_, id, value, body) => {
                 visit(store, value, free);
                 visit(store, body, free);
-                free.remove(id);
+                set_remove(free, id);
             }
             NodeView::LetRec(bindings, body) => {
                 visit(store, body, free);
@@ -448,7 +474,7 @@ fn pass_free_variables(store: &IndexedLambda, root: NodeId) -> AHashSet<Ident> {
                     visit(store, *value, free);
                 }
                 for (id, _) in bindings {
-                    free.remove(id);
+                    set_remove(free, id);
                 }
             }
             NodeView::Prim(_, args, _) | NodeView::StaticRaise(_, args) => {
@@ -487,20 +513,20 @@ fn pass_free_variables(store: &IndexedLambda, root: NodeId) -> AHashSet<Ident> {
                 visit(store, body, free);
                 visit(store, handler, free);
                 for id in params {
-                    free.remove(id);
+                    set_remove(free, id);
                 }
             }
             NodeView::TryWith(body, id, handler) => {
                 visit(store, body, free);
                 visit(store, handler, free);
-                free.remove(id);
+                set_remove(free, id);
             }
             NodeView::IfThenElse(a, b, c) | NodeView::For(_, a, b, _, c) => {
                 visit(store, a, free);
                 visit(store, b, free);
                 visit(store, c, free);
                 if let NodeView::For(id, _, _, _, _) = store.view(node) {
-                    free.remove(id);
+                    set_remove(free, id);
                 }
             }
             NodeView::Sequence(a, b) | NodeView::While(a, b) => {
@@ -510,7 +536,7 @@ fn pass_free_variables(store: &IndexedLambda, root: NodeId) -> AHashSet<Ident> {
             NodeView::ForOf(id, iterable, body) | NodeView::ForAwaitOf(id, iterable, body) => {
                 visit(store, iterable, free);
                 visit(store, body, free);
-                free.remove(id);
+                set_remove(free, id);
             }
             NodeView::GlobalModule(_, _)
             | NodeView::Const(_)
@@ -518,7 +544,7 @@ fn pass_free_variables(store: &IndexedLambda, root: NodeId) -> AHashSet<Ident> {
             | NodeView::Continue => {}
         }
     }
-    let mut free = AHashSet::new();
+    let mut free = Vec::new();
     visit(store, root, &mut free);
     free
 }
@@ -530,18 +556,12 @@ fn ident_order(left: &Ident, right: &Ident) -> std::cmp::Ordering {
         .then_with(|| left.flags().bits().cmp(&right.flags().bits()))
 }
 
-fn ordered_idents(set: &AHashSet<Ident>) -> Vec<Ident> {
-    let mut values = set.iter().cloned().collect::<Vec<_>>();
-    values.sort_by(ident_order);
-    values
-}
-
 fn remove_dead_groups(
     store: &IndexedLambda,
     exports: &[Ident],
     groups: Vec<(Option<Ident>, IndexedGroup)>,
 ) -> Vec<(Option<Ident>, IndexedGroup)> {
-    let mut free_by_ident = AHashMap::<Ident, AHashSet<Ident>>::new();
+    let mut free_by_ident = AHashMap::<Ident, Vec<Ident>>::new();
     let mut initial = exports.to_vec();
     for (id, group) in &groups {
         match group {
@@ -562,19 +582,15 @@ fn remove_dead_groups(
             }
             IndexedGroup::Nop(root) => {
                 if !no_side_effects(store, *root) {
-                    for id in ordered_idents(&pass_free_variables(store, *root)) {
+                    for id in pass_free_variables(store, *root) {
                         initial.insert(0, id);
                     }
                 }
             }
         }
     }
-    fn dfs(
-        id: &Ident,
-        free_by_ident: &AHashMap<Ident, AHashSet<Ident>>,
-        visited: &mut AHashSet<Ident>,
-    ) {
-        if id.is_global() || id.is_js() || !visited.insert(id.clone()) {
+    fn dfs(id: &Ident, free_by_ident: &AHashMap<Ident, Vec<Ident>>, visited: &mut Vec<Ident>) {
+        if id.is_global() || id.is_js() || !set_insert(visited, id.clone()) {
             return;
         }
         let free = free_by_ident.get(id).unwrap_or_else(|| {
@@ -584,20 +600,20 @@ fn remove_dead_groups(
                 id.stamp()
             )
         });
-        for dependency in ordered_idents(free) {
-            dfs(&dependency, free_by_ident, visited);
+        for dependency in free {
+            dfs(dependency, free_by_ident, visited);
         }
     }
-    let mut visited = AHashSet::new();
+    let mut visited = Vec::new();
     for id in &initial {
         dfs(id, &free_by_ident, &mut visited);
     }
     groups
         .into_iter()
         .filter_map(|(id, group)| match group {
-            IndexedGroup::Single(_, _) if !visited.contains(id.as_ref().unwrap()) => None,
+            IndexedGroup::Single(_, _) if !set_contains(&visited, id.as_ref().unwrap()) => None,
             IndexedGroup::Recursive(mut bindings) => {
-                bindings.retain(|(id, _)| visited.contains(id));
+                bindings.retain(|(id, _)| set_contains(&visited, id));
                 (!bindings.is_empty()).then_some((id, IndexedGroup::Recursive(bindings)))
             }
             group => Some((id, group)),
@@ -825,6 +841,7 @@ fn add_hoisted_aliases(
     export_map: &mut Vec<(Ident, NodeId)>,
     hoisted: &[HoistedFunction],
     id_gen: &IdGenerator,
+    warning_config: &WarningConfig,
 ) -> Result<(Vec<HoistedExport>, Vec<IndexedHoistedWarning>), IndexedPreJsError> {
     let group_map = collect_group_bindings(context.store(), groups);
     let exported_modules = context
@@ -842,11 +859,17 @@ fn add_hoisted_aliases(
     let mut metadata = Vec::new();
     let mut warnings = Vec::new();
     let misplaced = |warnings: &mut Vec<IndexedHoistedWarning>, item: &HoistedFunction| {
-        warnings.push(IndexedHoistedWarning {
-            path: item.path.clone(),
-            loc: item.loc,
-            attribute: "res.hoistedFunction",
-        });
+        let warning = Warning::MisplacedAttribute {
+            name: "res.hoistedFunction".to_string(),
+        };
+        if warning_config.is_active(&warning) {
+            warnings.push(IndexedHoistedWarning {
+                path: item.path.clone(),
+                loc: item.loc,
+                is_error: warning_config.is_error(&warning),
+                warning,
+            });
+        }
     };
     for item in hoisted {
         let Some((top, fields)) = item.path.split_first() else {
@@ -1027,15 +1050,15 @@ fn collect_required_modules(
 /// optimizer using the same caller-owned generator that the owning result
 /// carries into M6.
 pub(crate) fn lower_and_optimize_for_pre_js_indexed(
-    raw: crate::raw_lambda::RawLambda,
+    indexed_raw: crate::raw_lambda::convert::IndexedRawLambda,
     export_idents: Vec<Ident>,
     hoisted: &[HoistedFunction],
     possible_required_modules: &AHashSet<ModuleId>,
     jsx_preserve: bool,
-    id_gen: Arc<IdGenerator>,
     external_inline: &mut IndexedExternalInlineResolver<'_>,
     external_arity: &mut ExternalArityResolver<'_>,
 ) -> Result<IndexedPreJsBackend, IndexedPreJsError> {
+    let (raw, id_gen) = indexed_raw.into_parts();
     let lambda = crate::raw_lambda::lower::lower_to_lambda_with_id_gen(raw, id_gen.clone());
     optimize_for_pre_js_indexed(
         lambda,
@@ -1071,6 +1094,7 @@ pub(crate) fn optimize_for_pre_js_indexed(
         id_gen,
         external_inline,
         external_arity,
+        &WarningConfig::new(),
         None,
     )
 }
@@ -1084,6 +1108,7 @@ pub(crate) fn optimize_for_pre_js_indexed_with_diagnostics(
     id_gen: Arc<IdGenerator>,
     external_inline: &mut IndexedExternalInlineResolver<'_>,
     external_arity: &mut ExternalArityResolver<'_>,
+    warning_config: &WarningConfig,
     mut diagnostics: Option<&mut dyn IndexedDiagnosticsObserver>,
 ) -> Result<IndexedPreJsBackend, IndexedPreJsError> {
     fn dump(
@@ -1138,8 +1163,22 @@ pub(crate) fn optimize_for_pre_js_indexed_with_diagnostics(
         diagnostics.groups(materialize_diagnostic_groups(&context, &groups));
     }
     let maybe_pure = group_side_effect_reason(context.store(), &groups);
-    let (hoisted_exports, hoisted_warnings) =
-        add_hoisted_aliases(&mut context, &mut groups, &mut export_map, hoisted, &id_gen)?;
+    let (hoisted_exports, hoisted_warnings) = add_hoisted_aliases(
+        &mut context,
+        &mut groups,
+        &mut export_map,
+        hoisted,
+        &id_gen,
+        warning_config,
+    )?;
+    if let Some(diagnostics) = diagnostics.as_deref_mut() {
+        for warning in &hoisted_warnings {
+            diagnostics.warning(warning);
+        }
+    }
+    if hoisted_warnings.iter().any(|warning| warning.is_error) {
+        return Err(IndexedPreJsError::FatalWarnings);
+    }
     let roots = groups
         .iter()
         .flat_map(|(_, group)| group.roots())
@@ -1299,6 +1338,20 @@ mod tests {
         assert!(!js.is_global());
         assert!(js.is_js());
         assert_eq!(js.flags().bits(), 8);
+        for args in [
+            vec![Lambda::var(js.clone()), Lambda::var(id("Math", 0))],
+            vec![Lambda::var(id("Math", 0)), Lambda::var(js.clone())],
+        ] {
+            let context = IndexedLambdaContext::from_lambda(
+                Lambda::prim(Primitive::Pdebugger, args, Location::none()),
+                [],
+            );
+            let groups = vec![(None, IndexedGroup::Nop(context.current_root()))];
+            let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let _ = remove_dead_groups(context.store(), &[], groups);
+            }));
+            assert!(panic.is_err());
+        }
 
         let persistent_without_global_flag = id("localStampZero", 0);
         let context = IndexedLambdaContext::from_lambda(
@@ -1840,10 +1893,77 @@ mod tests {
                 .map(|item| IndexedHoistedWarning {
                     path: item.path.clone(),
                     loc: item.loc,
-                    attribute: "res.hoistedFunction",
+                    warning: Warning::MisplacedAttribute {
+                        name: "res.hoistedFunction".into(),
+                    },
+                    is_error: false,
                 })
                 .collect::<Vec<_>>()
         );
+    }
+
+    #[test]
+    fn hoisted_warning_config_controls_delivery_and_fatal_gate() {
+        #[derive(Default)]
+        struct Observer(Vec<IndexedHoistedWarning>);
+        impl IndexedDiagnosticsObserver for Observer {
+            fn lambda(&mut self, _: &'static str, _: Lambda) {}
+            fn groups(&mut self, _: Vec<IndexedDiagnosticGroup>) {}
+            fn warning(&mut self, warning: &IndexedHoistedWarning) {
+                self.0.push(warning.clone());
+            }
+        }
+        let item = HoistedFunction {
+            binding: id("missing", 9),
+            path: vec!["Missing".into()],
+            loc: Location::new_for_error("warning-config.res", 2, 5),
+            target_loc: Location::none(),
+        };
+        let compile = |config: &WarningConfig, observer: &mut Observer| {
+            let input = module_export(vec![id("value", 1)], vec![Lambda::unit()]);
+            let mut inline = |_: &Ident, _: bool, _: &str| None;
+            let mut arity = |_: &Ident, _: bool, _: &str| None;
+            optimize_for_pre_js_indexed_with_diagnostics(
+                input,
+                vec![id("value", 1)],
+                std::slice::from_ref(&item),
+                &AHashSet::new(),
+                false,
+                Arc::new(IdGenerator::with_start_stamp(10)),
+                &mut inline,
+                &mut arity,
+                config,
+                Some(observer),
+            )
+        };
+
+        let mut disabled = WarningConfig::new();
+        disabled.parse("-53").unwrap();
+        let mut observer = Observer::default();
+        let result = compile(&disabled, &mut observer).unwrap();
+        assert!(result.hoisted_warnings().is_empty());
+        assert!(observer.0.is_empty());
+
+        let enabled = WarningConfig::new();
+        let mut observer = Observer::default();
+        let result = compile(&enabled, &mut observer).unwrap();
+        assert_eq!(observer.0, result.hoisted_warnings());
+        assert_eq!(observer.0[0].warning.number(), 53);
+        assert_eq!(
+            observer.0[0].warning.message(),
+            "the @res.hoistedFunction attribute cannot appear in this context"
+        );
+        assert_eq!(observer.0[0].loc, item.loc);
+        assert!(!observer.0[0].is_error);
+
+        let mut fatal = WarningConfig::new();
+        fatal.parse_as_error("@53").unwrap();
+        let mut observer = Observer::default();
+        assert_eq!(
+            compile(&fatal, &mut observer).err().unwrap(),
+            IndexedPreJsError::FatalWarnings
+        );
+        assert!(observer.0[0].is_error);
     }
 
     #[test]
@@ -1945,6 +2065,7 @@ mod tests {
                 target_loc: Location::new_for_error("nonfunction.res", 20, 30),
             }],
             &IdGenerator::with_start_stamp(10),
+            &WarningConfig::new(),
         )
         .unwrap_err();
         assert_eq!(
@@ -2045,6 +2166,7 @@ mod tests {
             Arc::new(IdGenerator::with_start_stamp(10)),
             &mut inline,
             &mut arity,
+            &WarningConfig::new(),
             Some(&mut observer),
         )
         .unwrap();
@@ -2149,40 +2271,6 @@ mod tests {
                 superseded_unreachable_side_payload_shallow_bytes: 5908,
             }
         );
-    }
-
-    #[test]
-    fn raw_lowering_and_optimizer_share_one_observable_generator_frontier() {
-        let export = id("value", 1);
-        let exception = id("caught", 7);
-        let lowered_shape = module_export(
-            vec![export.clone()],
-            vec![Lambda::LtryWith(
-                Box::new(Lambda::unit()),
-                exception.clone(),
-                Box::new(Lambda::var(exception)),
-            )],
-        );
-        let raw = crate::raw_lambda::RawLambda::from_lowered(lowered_shape);
-        let generator = Arc::new(IdGenerator::with_start_stamp(100));
-        let mut inline = |_: &Ident, _: bool, _: &str| None;
-        let mut arity = |_: &Ident, _: bool, _: &str| None;
-        let result = lower_and_optimize_for_pre_js_indexed(
-            raw,
-            vec![export],
-            &[],
-            &AHashSet::new(),
-            false,
-            generator.clone(),
-            &mut inline,
-            &mut arity,
-        )
-        .unwrap();
-        // Lowering allocates raw_caught/101. Export coercion then allocates
-        // value/102 from the same stream; a fresh M6 consumer ID is 103.
-        assert_eq!(result.exports()[0].stamp(), 102);
-        assert_eq!(result.generator().create("consumer").stamp(), 103);
-        assert_eq!(generator.current_stamp(), 103);
     }
 
     #[test]
