@@ -76,6 +76,15 @@ Then port exit counting, bounded-variable analysis, substitution, and `simplify_
 
 Port `lam_analysis`, closure/hit/util helpers, beta reduction/substitution, alias simplification, and deep flatten. Metadata stores retained `NodeId`s tied to the owning compilation rather than cloned trees. Preserve resolver calls and identifier allocation order. This removes the first major recursive reconstruction cluster.
 
+### M3 status (implemented, inactive)
+
+- Shared indexed smart constructors, source-ordered child rebuilding, `Lam_util.refine_let`, and unconditional general substitution now live in `lam_indexed_helpers.rs`. Indexed exits uses that shared implementation; substitution still resets `ap_transformed_jsx`, while direct pass rebuilding preserves it.
+- `lam_analysis_indexed.rs` ports weighted inline size, side-effect analysis, hit-variable queries, and closure usage statistics over borrowed `NodeId`s. These analyses do not materialize recursive Lambda or count weighted size as an allocation metric.
+- `lam_beta_reduce_indexed.rs` ports simple beta reduction, capture-avoiding bounded-variable freshening, argument evaluation order, usage-map decisions, boxed-option identity wrappers, and metadata registration. Every rename uses the caller's pipeline-wide `IdGenerator`.
+- `lam_pass_remove_alias_indexed.rs` ports metadata-driven field and option simplification, boolean folding, local/direct/cross-module beta reduction, closure/recursion guards, JSX-preserve handling, string-switch scrutinee replacement, and explicit CMJ Lambda import at the external resolver boundary.
+- `lam_pass_deep_flatten_indexed.rs` ports nullable-option temporary introduction, beta-residue handling, named immutable tuple elimination, recursive extraction stopping at the first dependency, sequence flattening, and source-ordered group reconstruction in the same append-only store.
+- Focused tests exercise exact materialized output, application flags and locations, caller identifier frontiers, external resolver order, metadata-driven branches, OCaml recursive extraction where the current tree Rust pass still has reference debt, storage retention, and `collect -> exits -> collect -> alias -> deep_flatten` over one context. Production remains unchanged pending M4-M6.
+
 ### M4: alpha/lets segment
 
 Port arity-driven alpha conversion and eta expansion, occurrence counting, reference elimination, and let DCE. All replacements append to the same store; smart constructors remain behaviorally identical.

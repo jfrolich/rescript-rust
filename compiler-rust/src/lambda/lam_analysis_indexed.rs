@@ -6,6 +6,7 @@ use ahash::AHashSet;
 use crate::ident::Ident;
 use crate::lambda::indexed::{IndexedLambda, NodeId, NodeView};
 use crate::lambda::lam_analysis::is_pure_primitive;
+use crate::lambda::lam_closure::{Position, StatsMap, VarStats};
 use crate::lambda::lam_compat::FieldDbgInfo;
 use crate::lambda::lam_constant::Constant;
 use crate::lambda::lam_primitive::Primitive;
@@ -177,75 +178,164 @@ pub(crate) fn size(store: &IndexedLambda, node: NodeId) -> i32 {
     inner(store, node).unwrap_or(TOO_BIG)
 }
 
-pub(crate) fn is_closed(store: &IndexedLambda, exports: &AHashSet<Ident>, node: NodeId) -> bool {
-    // Kept here for callers that only need the conservative closed predicate.
-    fn walk(
+pub(crate) fn is_closed_with_map(
+    store: &IndexedLambda,
+    exports: &AHashSet<Ident>,
+    params: &[Ident],
+    node: NodeId,
+) -> (bool, StatsMap) {
+    let mut stats: StatsMap = params
+        .iter()
+        .cloned()
+        .map(|id| (id, VarStats::fresh()))
+        .collect();
+    let mut local = exports.clone();
+    fn after(store: &IndexedLambda, node: NodeId, position: Position) -> Position {
+        if position != Position::Begin || no_side_effects(store, node) {
+            position
+        } else {
+            Position::NotBegin
+        }
+    }
+    fn iter(
         store: &IndexedLambda,
         node: NodeId,
-        bound: &mut AHashSet<Ident>,
-        free: &mut Vec<Ident>,
+        position: Position,
+        stats: &mut StatsMap,
+        local: &mut AHashSet<Ident>,
     ) {
         match store.view(node) {
             NodeView::Var(id) => {
-                if !bound.contains(id) && !id.is_global() {
-                    free.push(id.clone());
+                if !local.contains(id) {
+                    stats
+                        .entry(id.clone())
+                        .or_insert_with(VarStats::fresh)
+                        .update(position);
+                }
+            }
+            NodeView::Assign(id, value) => {
+                if !local.contains(id) {
+                    stats
+                        .entry(id.clone())
+                        .or_insert_with(VarStats::fresh)
+                        .update(position);
+                }
+                iter(store, value, position, stats, local);
+            }
+            NodeView::Apply(function, args, _, _) => {
+                iter(store, function, position, stats, local);
+                let position = after(store, function, position);
+                for node in args {
+                    iter(store, *node, position, stats, local);
+                }
+            }
+            NodeView::Prim(_, args, _) => {
+                for node in args {
+                    iter(store, *node, position, stats, local);
                 }
             }
             NodeView::Function(_, params, body, _) => {
-                bound.extend(params.iter().cloned());
-                walk(store, body, bound, free);
+                local.extend(params.iter().cloned());
+                iter(store, body, Position::Sink, stats, local);
             }
             NodeView::Let(_, id, value, body) => {
-                walk(store, value, bound, free);
-                bound.insert(id.clone());
-                walk(store, body, bound, free);
+                iter(store, value, position, stats, local);
+                local.insert(id.clone());
+                iter(store, body, Position::Sink, stats, local);
             }
             NodeView::LetRec(bindings, body) => {
-                bound.extend(bindings.iter().map(|(id, _)| id.clone()));
-                for (_, n) in bindings {
-                    walk(store, *n, bound, free);
+                local.extend(bindings.iter().map(|(id, _)| id.clone()));
+                for (_, node) in bindings {
+                    iter(store, *node, Position::Sink, stats, local);
                 }
-                walk(store, body, bound, free);
+                iter(store, body, Position::Sink, stats, local);
             }
-            snapshot => {
-                let children: Vec<NodeId> = match snapshot {
-                    NodeView::Apply(f, a, _, _) => {
-                        std::iter::once(f).chain(a.iter().copied()).collect()
-                    }
-                    NodeView::Prim(_, a, _) | NodeView::StaticRaise(_, a) => a.to_vec(),
-                    NodeView::StaticCatch(a, _, _, b)
-                    | NodeView::TryWith(a, _, b)
-                    | NodeView::Sequence(a, b)
-                    | NodeView::While(a, b)
-                    | NodeView::ForOf(_, a, b)
-                    | NodeView::ForAwaitOf(_, a, b) => vec![a, b],
-                    NodeView::IfThenElse(a, b, c) | NodeView::For(_, a, b, _, c) => vec![a, b, c],
-                    NodeView::Assign(_, a) => vec![a],
-                    NodeView::Switch {
-                        scrutinee,
-                        consts,
-                        blocks,
-                        fail_action,
-                        ..
-                    } => std::iter::once(scrutinee)
-                        .chain(consts.iter().map(|x| x.1))
-                        .chain(blocks.iter().map(|x| x.1))
-                        .chain(fail_action)
-                        .collect(),
-                    NodeView::StringSwitch(s, c, d) => std::iter::once(s)
-                        .chain(c.iter().map(|x| x.1))
-                        .chain(d)
-                        .collect(),
-                    _ => vec![],
-                };
-                for child in children {
-                    walk(store, child, bound, free);
+            NodeView::Switch {
+                scrutinee,
+                consts_full,
+                blocks_full,
+                consts,
+                blocks,
+                fail_action,
+                ..
+            } => {
+                iter(store, scrutinee, position, stats, local);
+                let next = after(store, scrutinee, position);
+                for (_, n) in consts {
+                    iter(store, *n, next, stats, local);
+                }
+                for (_, n) in blocks {
+                    iter(store, *n, next, stats, local);
+                }
+                if let Some(n) = fail_action {
+                    iter(
+                        store,
+                        n,
+                        if consts_full || blocks_full {
+                            next
+                        } else {
+                            Position::Sink
+                        },
+                        stats,
+                        local,
+                    );
                 }
             }
+            NodeView::StringSwitch(scrutinee, cases, default) => {
+                iter(store, scrutinee, position, stats, local);
+                let next = after(store, scrutinee, position);
+                for (_, n) in cases {
+                    iter(store, *n, next, stats, local);
+                }
+                if let Some(n) = default {
+                    iter(store, n, next, stats, local);
+                }
+            }
+            NodeView::StaticRaise(_, args) => {
+                for n in args {
+                    iter(store, *n, Position::Sink, stats, local);
+                }
+            }
+            NodeView::StaticCatch(body, _, params, handler) => {
+                iter(store, body, Position::Sink, stats, local);
+                local.extend(params.iter().cloned());
+                iter(store, handler, Position::Sink, stats, local);
+            }
+            NodeView::TryWith(body, _, handler) => {
+                iter(store, body, position, stats, local);
+                iter(store, handler, Position::Sink, stats, local);
+            }
+            NodeView::IfThenElse(condition, then_, else_) => {
+                iter(store, condition, position, stats, local);
+                let next = after(store, condition, position);
+                iter(store, then_, next, stats, local);
+                iter(store, else_, next, stats, local);
+            }
+            NodeView::Sequence(a, b) => {
+                iter(store, a, position, stats, local);
+                iter(store, b, Position::Sink, stats, local);
+            }
+            NodeView::While(a, b) => {
+                iter(store, a, Position::Sink, stats, local);
+                iter(store, b, Position::Sink, stats, local);
+            }
+            NodeView::For(id, a, b, _, c) => {
+                local.insert(id.clone());
+                iter(store, a, Position::Sink, stats, local);
+                iter(store, b, Position::Sink, stats, local);
+                iter(store, c, Position::Sink, stats, local);
+            }
+            NodeView::ForOf(id, a, b) | NodeView::ForAwaitOf(id, a, b) => {
+                local.insert(id.clone());
+                iter(store, a, Position::Sink, stats, local);
+                iter(store, b, Position::Sink, stats, local);
+            }
+            NodeView::GlobalModule(_, _)
+            | NodeView::Const(_)
+            | NodeView::Break
+            | NodeView::Continue => {}
         }
     }
-    let mut bound = exports.clone();
-    let mut free = vec![];
-    walk(store, node, &mut bound, &mut free);
-    free.is_empty()
+    iter(store, node, Position::Begin, &mut stats, &mut local);
+    (stats.len() == params.len(), stats)
 }

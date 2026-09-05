@@ -71,7 +71,7 @@ fn flatten(
             if let NodeSnapshot::Prim(
                 primitive @ (Primitive::PnullToOpt | Primitive::PnullUndefinedToOpt),
                 args,
-                loc,
+                _loc,
             ) = store.snapshot(value)
                 && let [arg] = args.as_slice()
             {
@@ -88,7 +88,6 @@ fn flatten(
                 );
                 let inner = store.append(NodeSnapshot::Let(LetKind::Alias, id, wrapped, body));
                 let rewritten = store.append(NodeSnapshot::Let(kind, fresh, *arg, inner));
-                let _ = loc;
                 return flatten(store, groups, rewritten, id_gen);
             }
 

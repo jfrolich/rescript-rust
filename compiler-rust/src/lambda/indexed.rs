@@ -270,6 +270,11 @@ impl IndexedLambda {
         self.nodes.len()
     }
 
+    /// Imports one recursive Lambda payload at an explicit compatibility boundary.
+    pub(crate) fn append_compat_lambda(&mut self, lambda: Lambda) -> NodeId {
+        self.lower(lambda)
+    }
+
     pub(crate) fn node(&self, id: NodeId) -> IndexedNode {
         self.nodes[id.index()]
     }
@@ -1309,6 +1314,10 @@ impl IndexedLambdaContext {
 
     pub(crate) fn store_mut(&mut self) -> &mut IndexedLambda {
         &mut self.store
+    }
+
+    pub(crate) fn store_and_metadata_mut(&mut self) -> (&mut IndexedLambda, &mut IndexedLamStats) {
+        (&mut self.store, &mut self.metadata)
     }
 
     pub(crate) fn current_root(&self) -> NodeId {

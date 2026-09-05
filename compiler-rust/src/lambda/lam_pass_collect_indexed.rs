@@ -107,7 +107,7 @@ fn element_of_node(arena: &IndexedLambda, node: NodeId) -> IndexedElement {
     }
 }
 
-fn kind_of_block(arena: &IndexedLambda, args: &[NodeId]) -> IndexedIdKind {
+pub(crate) fn kind_of_block(arena: &IndexedLambda, args: &[NodeId]) -> IndexedIdKind {
     IndexedIdKind::ImmutableBlock(
         args.iter()
             .map(|node| element_of_node(arena, *node))
