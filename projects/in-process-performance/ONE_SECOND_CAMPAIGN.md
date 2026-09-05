@@ -62,11 +62,27 @@ Each implementation task gets a fresh session. Only one task owns heavy testing 
 
 ## Active work
 
-- Implementation session: `bks-49c42fcf-e0d0-7a32-a2c2-2cc0027aa4df`.
-- Task: begin the actual cross-pass indexed Lambda migration, with explicit producer/pass/consumer boundaries and a buildable, tested storage plus real-pass milestone.
-- Status: started. Private migration foundations are not a production speedup; no performance change has been retained in this campaign yet.
+- Implementation session: `bks-a6a8bd41-ce05-7988-af5b-765ebd313f05`.
+- Task: M2, an owning arena/metadata context with safe split borrows, followed by indexed exit counting, substitution and exit simplification.
+- Status: started after M1's owner explicitly released compiler/heavy-test ownership. Production remains unchanged. No performance change has been retained in this campaign yet.
 - Previous session `bks-4aaf1530-49fa-702d-9ee3-eb34b0afc450` completed and released compiler/heavy-test ownership after rejecting deep-flatten Box/Vec reuse. An intermediate `GroupArena` was also removed because the existing reverse Vec iterator already avoids copying; the wrapper added links and optional entries without removing work.
 - Parent owns this campaign file. The implementation session owns its code, tests and focused measurement documentation.
+
+### Completed inactive indexed foundation, M1
+
+Accepted and pushed at `56ad852fc494922b0287c7cb36910ce1c40f81da`. The implementation adds compact indexed storage, lossless compatibility conversion and a real indexed collect/arity pass. The production optimizer and JS consumer do not use it yet. [INDEXED_LAMBDA.md](INDEXED_LAMBDA.md) records the remaining migration.
+
+Parent review caught incorrect nested-module arity fallthrough; the port and regression tests were fixed. Independent reviewer `bks-0f56b06f-4673-7701-9f08-97ac1dab5c5a` accepted the exact final head with no remaining findings after additional cache-miss, control-flow and function-retention tests. Order checks against a separate traversal model are documented separately from actual metadata/arity/resolver differential tests.
+
+Validation:
+
+- Focused debug tests: 13 passed.
+- Full debug compiler tests: 1,209 passed, 108 ignored. Comptime: 16 passed, 23 ignored. Doctests: 9 passed, 7 ignored.
+- Release compiler build passed at implementation head `24eb1273b`; the later delta contains only tests and documentation. This is not a release test run or an exact-final-head binary claim.
+- Release bsc SHA-256: `03d16966a528a15db169ab37b950ae40a801385093256b789f11afe88ba8a436`.
+- Logs: `/tmp/indexed-m1-final-head-validation.log`, `/tmp/indexed-m1-low-findings-focused.log`, `/tmp/indexed-m1-low-findings-full.log`. The parent checked logs and the binary hash; the read-only reviewer inspected source but could not access these external logs.
+
+No full parity, Tella or timing result is claimed for this inactive milestone. M2 must resolve the immutable arena borrow in metadata, keep handles paired with their owning store, and quantify live versus superseded nodes and payloads. Production integration still requires the contiguous passes and consumer, full correctness gates and measured performance.
 
 ### Rejected deep-flatten trial
 
