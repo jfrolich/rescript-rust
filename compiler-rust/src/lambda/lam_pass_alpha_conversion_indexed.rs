@@ -389,6 +389,192 @@ mod tests {
         assert_eq!(generator.current_stamp(), 10);
     }
 
+    fn function_definition(arity: i32, stamp: i32) -> Lambda {
+        Lambda::function_(
+            arity,
+            (0..arity)
+                .map(|index| id(&format!("p{index}"), stamp + index))
+                .collect(),
+            Lambda::const_(Constant::int(0)),
+            FunctionAttribute::default(),
+        )
+    }
+
+    fn under_call(function: &Ident) -> Lambda {
+        apply(
+            Lambda::var(function.clone()),
+            vec![Lambda::const_(Constant::int(1))],
+            ApplyStatus::Na,
+            false,
+        )
+    }
+
+    fn eta_stamp(lambda: &Lambda) -> i32 {
+        let Lambda::Lfunction(function) = lambda else {
+            panic!("expected eta function")
+        };
+        assert_eq!(function.params.len(), 1);
+        function.params[0].stamp()
+    }
+
+    #[test]
+    fn equal_apply_maps_arguments_left_to_right_before_function() {
+        let outer = id("outer", 1);
+        let inner = id("inner", 2);
+        let function_expression = Lambda::let_(
+            LetKind::Strict,
+            id("side", 3),
+            under_call(&inner),
+            Lambda::var(outer.clone()),
+        );
+        let input = Lambda::let_(
+            LetKind::Strict,
+            outer,
+            function_definition(1, 10),
+            Lambda::let_(
+                LetKind::Strict,
+                inner.clone(),
+                function_definition(2, 20),
+                apply(
+                    function_expression,
+                    vec![under_call(&inner)],
+                    ApplyStatus::Na,
+                    false,
+                ),
+            ),
+        );
+        let (actual, frontier) = run(input, 50);
+        assert_eq!(frontier, 52);
+        let Lambda::Llet(_, _, _, body) = actual else {
+            panic!("expected outer let")
+        };
+        let Lambda::Llet(_, _, _, body) = *body else {
+            panic!("expected inner let")
+        };
+        let Lambda::Lapply(call) = *body else {
+            panic!("expected equal apply")
+        };
+        assert_eq!(eta_stamp(&call.ap_args[0]), 51);
+        let Lambda::Llet(_, _, value, _) = *call.ap_func else {
+            panic!("expected function let")
+        };
+        assert_eq!(eta_stamp(&value), 52);
+    }
+
+    #[test]
+    fn equal_apply_argument_list_map_is_left_to_right() {
+        let outer = id("outer", 1);
+        let inner = id("inner", 2);
+        let input = Lambda::let_(
+            LetKind::Strict,
+            outer.clone(),
+            function_definition(2, 10),
+            Lambda::let_(
+                LetKind::Strict,
+                inner.clone(),
+                function_definition(2, 20),
+                apply(
+                    Lambda::var(outer),
+                    vec![under_call(&inner), under_call(&inner)],
+                    ApplyStatus::Na,
+                    false,
+                ),
+            ),
+        );
+        let (actual, frontier) = run(input, 50);
+        assert_eq!(frontier, 52);
+        let Lambda::Llet(_, _, _, body) = actual else {
+            panic!("expected outer let")
+        };
+        let Lambda::Llet(_, _, _, body) = *body else {
+            panic!("expected inner let")
+        };
+        let Lambda::Lapply(call) = *body else {
+            panic!("expected equal apply")
+        };
+        assert_eq!(eta_stamp(&call.ap_args[0]), 51);
+        assert_eq!(eta_stamp(&call.ap_args[1]), 52);
+    }
+
+    #[test]
+    fn under_apply_simplifies_function_then_argument_before_eta() {
+        let outer = id("outer", 1);
+        let inner = id("inner", 2);
+        let function_expression = Lambda::let_(
+            LetKind::Strict,
+            id("side", 3),
+            under_call(&inner),
+            Lambda::var(outer.clone()),
+        );
+        let input = Lambda::let_(
+            LetKind::Strict,
+            outer,
+            function_definition(3, 10),
+            Lambda::let_(
+                LetKind::Strict,
+                inner.clone(),
+                function_definition(2, 20),
+                apply(
+                    function_expression,
+                    vec![under_call(&inner)],
+                    ApplyStatus::Na,
+                    false,
+                ),
+            ),
+        );
+        let (actual, frontier) = run(input, 50);
+        assert_eq!(frontier, 55);
+        let Lambda::Llet(_, _, _, body) = actual else {
+            panic!("expected outer let")
+        };
+        let Lambda::Llet(_, _, _, body) = *body else {
+            panic!("expected inner let")
+        };
+        let Lambda::Llet(LetKind::Strict, partial, partial_value, eta) = *body else {
+            panic!("expected partial function")
+        };
+        assert_eq!(
+            (partial.name(), partial.stamp(), partial.flags()),
+            ("partial_arg", 55, IdentFlags::NONE)
+        );
+        let Lambda::Llet(_, _, nested_function, _) = *partial_value else {
+            panic!("expected simplified function expression")
+        };
+        assert_eq!(eta_stamp(&nested_function), 51);
+        let Lambda::Lfunction(eta) = *eta else {
+            panic!("expected outer eta")
+        };
+        assert_eq!(eta.params.len(), 2);
+        assert_eq!(eta.params[0].stamp(), 53);
+        assert_eq!(eta.params[1].stamp(), 54);
+        let Lambda::Lapply(call) = *eta.body else {
+            panic!("expected eta call")
+        };
+        assert_eq!(eta_stamp(&call.ap_args[0]), 52);
+    }
+
+    #[test]
+    fn letrec_explicit_binding_map_precedes_body() {
+        let inner = id("inner", 1);
+        let recursive = id("recursive", 2);
+        let input = Lambda::let_(
+            LetKind::Strict,
+            inner.clone(),
+            function_definition(2, 10),
+            Lambda::letrec(vec![(recursive, under_call(&inner))], under_call(&inner)),
+        );
+        let (actual, frontier) = run(input, 50);
+        assert_eq!(frontier, 52);
+        let Lambda::Llet(_, _, _, body) = actual else {
+            panic!("expected let")
+        };
+        let Lambda::Lletrec(bindings, body) = *body else {
+            panic!("expected letrec")
+        };
+        assert_eq!(eta_stamp(&bindings[0].1), 51);
+        assert_eq!(eta_stamp(&body), 52);
+    }
+
     #[test]
     fn switch_children_follow_native_record_and_call_order() {
         let module = id("External", 0);
