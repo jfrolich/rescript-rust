@@ -14,6 +14,7 @@ use crate::lambda::lam_indexed_helpers::{
 };
 use crate::lambda::lam_pass_collect_indexed::{IndexedIdKind, IndexedLamStats, kind_of_block};
 use crate::lambda::lam_primitive::{Mutable, Primitive};
+#[cfg(test)]
 use crate::location::Location;
 
 struct Usage {
@@ -306,13 +307,6 @@ fn rewrite_bounded(
     }
 }
 
-fn boxed_optional(store: &IndexedLambda, node: NodeId) -> bool {
-    matches!(
-        store.view(node),
-        NodeView::Prim(Primitive::PnullToOpt | Primitive::PnullUndefinedToOpt, _, _)
-    )
-}
-
 fn register_kind(store: &IndexedLambda, meta: &mut IndexedLamStats, id: Ident, arg: NodeId) {
     match store.view(arg) {
         NodeView::Prim(Primitive::Pmakeblock(_, Mutable::Immutable), args, _) => {
@@ -358,21 +352,8 @@ fn propagate(
         }
         let fresh = param.rename(id_gen);
         let fresh_var = store.append(NodeSnapshot::Var(fresh.clone()));
-        let (binding, replacement) = if boxed_optional(store, arg) {
-            let binding = append_rebuilt(
-                store,
-                NodeSnapshot::Prim(Primitive::Pidentity, vec![arg], Location::none()),
-            );
-            let replacement = append_rebuilt(
-                store,
-                NodeSnapshot::Prim(Primitive::Pidentity, vec![fresh_var], Location::none()),
-            );
-            (binding, replacement)
-        } else {
-            (arg, fresh_var)
-        };
-        bindings.push((fresh, binding));
-        map.insert(param.clone(), replacement);
+        bindings.push((fresh, arg));
+        map.insert(param.clone(), fresh_var);
         diagnostics.record(store, &map);
     }
     let mut result = rewrite_bounded(store, &mut map, diagnostics, body, id_gen);

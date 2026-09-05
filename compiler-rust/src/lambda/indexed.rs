@@ -1121,6 +1121,11 @@ impl IndexedLambdaContext {
         &self.metadata
     }
 
+    #[cfg(test)]
+    pub(crate) fn metadata_mut(&mut self) -> &mut IndexedLamStats {
+        &mut self.metadata
+    }
+
     /// Materializes the canonical root at the inactive compatibility boundary.
     pub fn materialize(&self) -> Lambda {
         self.store.materialize()
