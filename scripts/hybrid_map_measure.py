@@ -42,6 +42,9 @@ elif mode == 'verify-timing':
                 '@tella-fusion/webapp/packages/tella-std',
                 '@tella-fusion/webapp/node_modules/rescript-webapi']
     metadata = {str(m.T / 'node_modules' / p / 'lib/bs/compiler-info.json') for p in packages}
+    # Written after compilation by sourcedirs.rs:74-77 / build.rs:517-518.
+    # Consumed by editor analysis/reanalyze, not by compiler or build input lookup.
+    metadata.add(str(m.T / 'node_modules/@tella-fusion/webapp/lib/bs/.sourcedirs.json'))
     changed = sorted(p for p in before.keys() | after.keys() if before.get(p) != after.get(p))
     unexpected = [p for p in changed if p not in metadata]
     report = dict(before_count=len(before), after_count=len(after),
