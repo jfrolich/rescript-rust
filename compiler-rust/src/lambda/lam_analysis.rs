@@ -51,7 +51,13 @@ pub fn no_side_effects(lam: &Lambda) -> bool {
             }
 
             // Then check the primitive itself
-            is_pure_primitive(&prim_info.primitive, &prim_info.args)
+            is_pure_primitive(
+                &prim_info.primitive,
+                prim_info.args.get(1).and_then(|arg| match arg {
+                    Lambda::Lconst(constant) => Some(constant),
+                    _ => None,
+                }),
+            )
         }
 
         // Let bindings are pure if both parts are pure
@@ -118,19 +124,12 @@ pub fn no_side_effects(lam: &Lambda) -> bool {
 }
 
 /// Check if a primitive operation is pure (no side effects).
-fn is_pure_primitive(prim: &Primitive, args: &[Lambda]) -> bool {
+pub(crate) fn is_pure_primitive(prim: &Primitive, second_constant: Option<&Constant>) -> bool {
     match prim {
-        Primitive::Pidentity | Primitive::Pignore => {
-            args.first().map(no_side_effects).unwrap_or(true)
-        }
-        // Division can raise division by zero
+        Primitive::Pidentity | Primitive::Pignore => true,
+        // Division can raise division by zero.
         Primitive::Pmodint | Primitive::Pdivint | Primitive::Pdivbigint | Primitive::Pmodbigint => {
-            if args.len() >= 2 {
-                if let Lambda::Lconst(cst) = &args[1] {
-                    return not_zero_constant(cst);
-                }
-            }
-            false
+            second_constant.is_some_and(not_zero_constant)
         }
 
         // Creation and type checking primitives
