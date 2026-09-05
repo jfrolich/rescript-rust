@@ -1,0 +1,310 @@
+commit 08c884be8412d44d4ca32ef76a8792febeae35e8
+Author:     Open Session <jfrolich@gmail.com>
+AuthorDate: Sat Sep 5 23:39:32 2026 +0200
+Commit:     Open Session <jfrolich@gmail.com>
+CommitDate: Sat Sep 5 23:39:32 2026 +0200
+
+    perf: project five descriptor inspections through short borrows
+    
+    Signed-off-by: Open Session <jfrolich@gmail.com>
+
+diff --git a/compiler-rust/src/types/ctype.rs b/compiler-rust/src/types/ctype.rs
+index c92e2481d..9f8ab3c95 100644
+--- a/compiler-rust/src/types/ctype.rs
++++ b/compiler-rust/src/types/ctype.rs
+@@ -8530,7 +8530,7 @@ pub fn lower_args<'a>(ctx: &'a TypeContext, env: &Env, ty: TypeExprRef) -> (Vec<
+             return (pending_type_lookup_paths, pending_type_expansion_paths);
+         }
+         let arrow = {
+-            let desc = ctx.get_desc(expanded);
++            let desc = ctx.borrow_desc(expanded);
+             if let TypeDesc::Tarrow { args, ret } = &*desc {
+                 Some((args.iter().map(|arg| arg.typ).collect::<Vec<_>>(), *ret))
+             } else {
+@@ -9922,16 +9922,15 @@ fn subst_identity_copy_rec(
+         return cached;
+     }
+ 
+-    let desc = ctx.get_desc(ty);
+-    match &*desc {
++    let returns_identity = {
++        let desc = ctx.borrow_desc(ty);
++        matches!(&*desc, TypeDesc::Tvar(_) | TypeDesc::Tunivar(_) | TypeDesc::Tnil)
++    };
++    match returns_identity {
+         // OCaml Subst.typexp returns identity for Tvar/Tunivar
+         // (when not for_saving and id >= 0)
+-        TypeDesc::Tvar(_) | TypeDesc::Tunivar(_) | TypeDesc::Tnil => {
+-            drop(desc);
+-            ty
+-        }
+-        _ => {
+-            drop(desc);
++        true => ty,
++        false => {
+             // OCaml Subst.typexp creates a generic-level stub (`newgenvar`) for
+             // every non-variable node. Keeping this at current_level allows the
+             // copied manifest to be reused and mutated by later unification.
+@@ -11584,6 +11583,172 @@ mod tests {
+         ));
+     }
+ 
++    #[test]
++    fn snapshot_projection_owned_nary_stages_preserve_metadata() {
++        use crate::types::{ArgLabel, TypeArg};
++        use crate::location::{Location, Position};
++        use crate::intern::StrIdx;
++        let ctx = TypeContext::new(std::sync::Arc::new(IdGenerator::new()));
++        let shared = ctx.new_generic_var(Some("shared".into()));
++        let loc = Location {
++            loc_start: Position::new(StrIdx(11), 2, 7, 9),
++            loc_end: Position::new(StrIdx(12), 3, 17, 21),
++            loc_ghost: true,
++        };
++        let arrow = ctx.new_generic_type(TypeDesc::Tarrow {
++            args: vec![TypeArg::unlabeled(shared),
++                TypeArg::new(ArgLabel::labelled("named", loc), shared),
++                TypeArg::new(ArgLabel::optional("optional", loc), shared)], ret: shared,
++        });
++        let (declared, declared_ret) = {
++            let desc = ctx.borrow_desc(arrow);
++            let TypeDesc::Tarrow { args, ret } = &*desc else { panic!("arrow") };
++            (args.clone(), *ret)
++        };
++        let instanced = instance(&ctx, arrow);
++        let (mut parameters, ret) = {
++            let desc = ctx.borrow_desc(instanced);
++            let TypeDesc::Tarrow { args, ret } = &*desc else { panic!("instance arrow") };
++            (args.clone(), *ret)
++        };
++        ctx.set_desc(arrow, TypeDesc::Tnil);
++        ctx.set_desc(instanced, TypeDesc::Tnil);
++        assert_eq!(declared_ret, shared);
++        assert_ne!(ret, shared);
++        for (stage, expected_type) in [(&declared, shared), (&parameters, ret)] {
++            assert_eq!(stage.len(), 3);
++            assert!(matches!(stage[0].label(), ArgLabel::Nolabel));
++            for (index, expected_name) in [(1, "named"), (2, "optional")] {
++                let label = match (index, stage[index].label()) {
++                    (1, ArgLabel::Labelled(label)) | (2, ArgLabel::Optional(label)) => label,
++                    _ => panic!("label kind"),
++                };
++                assert_eq!(label.txt, expected_name);
++                for (actual, expected) in [(label.loc.loc_start, loc.loc_start), (label.loc.loc_end, loc.loc_end)] {
++                    assert_eq!(actual.file_name, expected.file_name);
++                    assert_eq!(actual.line, expected.line);
++                    assert_eq!(actual.bol, expected.bol);
++                    assert_eq!(actual.cnum, expected.cnum);
++                }
++                assert_eq!(label.loc.loc_ghost, loc.loc_ghost);
++            }
++            assert!(stage.iter().all(|a| a.typ == expected_type));
++        }
++        parameters[1] = TypeArg::unlabeled(ctx.new_var(None));
++        assert!(matches!(declared[1].label(), ArgLabel::Labelled(label) if label.txt == "named"));
++        assert_eq!(declared[1].typ, shared);
++    }
++
++    #[test]
++    fn snapshot_projection_lower_args_alias_lookup_order() {
++        use crate::types::TypeArg;
++        let ctx = TypeContext::new(std::sync::Arc::new(IdGenerator::new()));
++        let mut env = Env::empty();
++        let module_id = Ident::create_local("M");
++        let path = Path::pdot(Path::pident(module_id.clone()), "t".to_string());
++        let int = ctx.new_constr(crate::types::predef::path_int(), vec![]);
++        env.add_module(module_id, module_with_t(Ident::create_local("t"), manifest_decl(int, Some(path.clone()))));
++        let arg = ctx.new_constr(path.clone(), vec![]);
++        ctx.set_level(arg, ctx.current_level() + 10);
++        let ret = ctx.new_var(None);
++        let arrow = ctx.new_type(TypeDesc::Tarrow { args: vec![TypeArg::unlabeled(arg)], ret });
++        let alias_id = Ident::create_local("function_alias");
++        env.add_type(alias_id.clone(), manifest_decl(arrow, None));
++        let alias = ctx.new_constr(Path::pident(alias_id), vec![]);
++        let (lookups, expansions) = lower_args(&ctx, &env, alias);
++        assert_eq!(lookups.len(), 1);
++        assert!(lookups[0].same(&path));
++        assert_eq!(expansions.len(), 2);
++        assert!(expansions[0].same(&path));
++        assert!(expansions[1].same(&crate::types::predef::path_int()), "{:?}", expansions);
++        ctx.set_desc(arg, TypeDesc::Tnil);
++        ctx.set_desc(arrow, TypeDesc::Tnil);
++    }
++
++    #[test]
++    fn snapshot_projection_subst_identity_and_cyclic_stub() {
++        let ctx = TypeContext::new(std::sync::Arc::new(IdGenerator::new()));
++        let variable = ctx.new_var(Some("variable".into()));
++        let universal = ctx.new_type(TypeDesc::Tunivar(Some("universal".into())));
++        let nil = ctx.new_type(TypeDesc::Tnil);
++        for ty in [variable, universal, nil] {
++            assert_eq!(subst_identity_copy(&ctx, ty), ty);
++        }
++        let cycle = ctx.new_generic_var(None);
++        ctx.set_desc(cycle, TypeDesc::Ttuple(vec![variable, cycle, variable]));
++        let copied = subst_identity_copy_many(&ctx, &[cycle, cycle]);
++        assert_eq!(copied[0], copied[1]);
++        assert_ne!(copied[0], cycle);
++        assert_eq!(ctx.get_level(copied[0]), GENERIC_LEVEL);
++        {
++            let desc = ctx.borrow_desc(copied[0]);
++            let TypeDesc::Ttuple(children) = &*desc else { panic!("tuple") };
++            assert_eq!(children.as_slice(), &[variable, copied[0], variable]);
++        }
++        ctx.set_desc(copied[0], TypeDesc::Tnil);
++        let desc = ctx.borrow_desc(cycle);
++        let TypeDesc::Ttuple(children) = &*desc else { panic!("source tuple") };
++        assert_eq!(children.as_slice(), &[variable, cycle, variable]);
++    }
++
++    #[test]
++    fn snapshot_projection_subst_row_metadata_and_shared_cycle() {
++        use crate::types::type_expr::RowField;
++        let ctx = TypeContext::new(std::sync::Arc::new(IdGenerator::new()));
++        let cycle = ctx.new_generic_var(None);
++        let more = ctx.new_generic_var(Some("more".into()));
++        let path = Path::pident(Ident::create_persistent("RowName"));
++        ctx.set_desc(cycle, TypeDesc::Tvariant(RowDesc {
++            row_fields: vec![("Z".into(), RowField::Rpresent(Some(cycle))),
++                             ("A".into(), RowField::Rpresent(None))],
++            row_more: more,
++            row_closed: true,
++            row_fixed: false,
++            row_name: Some((path.clone(), vec![cycle, more])),
++        }));
++        let copied = subst_identity_copy(&ctx, cycle);
++        assert_ne!(copied, cycle);
++        {
++            let desc = ctx.borrow_desc(copied);
++            let TypeDesc::Tvariant(row) = &*desc else { panic!("row") };
++            assert!(row.row_closed);
++            assert!(!row.row_fixed);
++            assert_eq!(row.row_fields.len(), 2);
++            assert_eq!(row.row_fields[0].0.as_str(), "Z");
++            assert_eq!(row.row_fields[1].0.as_str(), "A");
++            assert!(matches!(row.row_fields[0].1, RowField::Rpresent(Some(t)) if ctx.repr(t) == copied));
++            assert!(matches!(row.row_fields[1].1, RowField::Rpresent(None)));
++            let (name, args) = row.row_name.as_ref().expect("name");
++            assert!(name.same(&path));
++            assert_eq!(ctx.repr(args[0]), copied);
++            let marker = ctx.borrow_desc(args[1]);
++            let TypeDesc::Ttuple(children) = &*marker else { panic!("row marker tuple") };
++            assert_eq!(children.as_slice(), &[row.row_more, copied]);
++            assert_ne!(row.row_more, more);
++        }
++        ctx.set_desc(copied, TypeDesc::Tnil);
++        assert!(matches!(&*ctx.borrow_desc(cycle), TypeDesc::Tvariant(_)));
++        assert!(matches!(&*ctx.borrow_desc(more), TypeDesc::Tvar(Some(name)) if name == "more"));
++    }
++
++    #[test]
++    fn snapshot_projection_lower_args_cyclic_arrow_mutates_after_projection() {
++        use crate::types::TypeArg;
++        let ctx = TypeContext::new(std::sync::Arc::new(IdGenerator::new()));
++        let env = Env::empty();
++        let first = ctx.new_generic_var(Some("first".into()));
++        let second = ctx.new_generic_var(Some("second".into()));
++        let arrow = ctx.new_generic_var(None);
++        ctx.set_desc(arrow, TypeDesc::Tarrow {
++            args: vec![TypeArg::unlabeled(first), TypeArg::unlabeled(second)], ret: arrow,
++        });
++        let paths = lower_args(&ctx, &env, arrow);
++        assert!(paths.0.is_empty() && paths.1.is_empty());
++        assert_eq!(ctx.get_level(first), ctx.current_level());
++        assert_eq!(ctx.get_level(second), ctx.current_level());
++        ctx.set_desc(arrow, TypeDesc::Tnil);
++    }
++
+     #[test]
+     fn type_arg_nary_copy_preserves_labels_and_shared_type_identity() {
+         use crate::types::ArgLabel;
+diff --git a/compiler-rust/src/types/typecore.rs b/compiler-rust/src/types/typecore.rs
+index ad0273091..c66fbd825 100644
+--- a/compiler-rust/src/types/typecore.rs
++++ b/compiler-rust/src/types/typecore.rs
+@@ -9865,7 +9865,10 @@ fn type_application(
+     // compiler/ml/typecore.ml:4049-4069: a total call of an unknown
+     // function commits it to one n-ary arrow matching the complete call site.
+     let uncommitted_funct_ty = crate::types::ctype::expand_head(ctx, env, typed_funct.exp_type);
+-    if total_app && matches!(&*ctx.get_desc(uncommitted_funct_ty), TypeDesc::Tvar(_)) {
++    if total_app && {
++        let desc = ctx.borrow_desc(uncommitted_funct_ty);
++        matches!(&*desc, TypeDesc::Tvar(_))
++    } {
+         let params = args
+             .iter()
+             .map(|(label, _)| {
+@@ -9895,19 +9898,22 @@ fn type_application(
+     // thunks are retained and forced in declaration order.
+     let expanded_funct_ty = crate::types::ctype::expand_head(ctx, env, typed_funct.exp_type);
+     let function_level = ctx.get_level(ctx.repr(expanded_funct_ty));
+-    let (declared_params, declared_ret) = match &*ctx.get_desc(expanded_funct_ty) {
+-        TypeDesc::Tarrow { args, ret } => (args.clone(), *ret),
+-        TypeDesc::Tvar(_) => {
+-            return Err(TypeCoreError::ApplyNonFunction {
+-                loc: funct.pexp_loc,
+-                typ: expanded_funct_ty,
+-            });
+-        }
+-        _ => {
+-            return Err(TypeCoreError::ApplyNonFunction {
+-                loc: funct.pexp_loc,
+-                typ: expanded_funct_ty,
+-            });
++    let (declared_params, declared_ret) = {
++        let desc = ctx.borrow_desc(expanded_funct_ty);
++        match &*desc {
++            TypeDesc::Tarrow { args, ret } => (args.clone(), *ret),
++            TypeDesc::Tvar(_) => {
++                return Err(TypeCoreError::ApplyNonFunction {
++                    loc: funct.pexp_loc,
++                    typ: expanded_funct_ty,
++                });
++            }
++            _ => {
++                return Err(TypeCoreError::ApplyNonFunction {
++                    loc: funct.pexp_loc,
++                    typ: expanded_funct_ty,
++                });
++            }
+         }
+     };
+     let expanded_inst_ty = crate::types::ctype::expand_head(
+@@ -9915,11 +9921,14 @@ fn type_application(
+         env,
+         crate::types::instance(ctx, typed_funct.exp_type),
+     );
+-    let (inst_params, inst_ret) = match &*ctx.get_desc(expanded_inst_ty) {
+-        TypeDesc::Tarrow { args, ret } if args.len() == declared_params.len() => {
+-            (args.clone(), *ret)
++    let (inst_params, inst_ret) = {
++        let desc = ctx.borrow_desc(expanded_inst_ty);
++        match &*desc {
++            TypeDesc::Tarrow { args, ret } if args.len() == declared_params.len() => {
++                (args.clone(), *ret)
++            }
++            _ => unreachable!("instancing a declared n-ary arrow preserves its shape"),
+         }
+-        _ => unreachable!("instancing a declared n-ary arrow preserves its shape"),
+     };
+     let function_arity = declared_params.len();
+     if total_app && args.len() > function_arity {
+diff --git a/projects/in-process-performance/snapshot-projections-fixtures/SnapshotProjections.res b/projects/in-process-performance/snapshot-projections-fixtures/SnapshotProjections.res
+new file mode 100644
+index 000000000..3b7ce681c
+--- /dev/null
++++ b/projects/in-process-performance/snapshot-projections-fixtures/SnapshotProjections.res
+@@ -0,0 +1,13 @@
++let inferred = (fn, value) => fn(value, ~named=value)
++let choose = (value, ~named, ~optional=?) => {
++  ignore(named)
++  ignore(optional)
++  value
++}
++let integer = inferred((value, ~named) => value + named, 3)
++let text = choose("first", ~optional="third", ~named="second")
++let partial = choose(~named=4, ...)
++let completed = partial(5)
++type alias<'a> = ('a, ~named: 'a, ~optional: 'a=?) => 'a
++let viaAlias = (fn: alias<int>) => fn(8, ~named=9)
++let result = viaAlias(choose)
