@@ -63,7 +63,7 @@ Each implementation task gets a fresh session. Only one task owns heavy testing 
 ## Active work
 
 - M3 implementation session `bks-f4716114-50d4-71a7-9e32-5e376b22b74b` completed and explicitly released compiler/shared-worktree/heavy-test ownership.
-- Next task: M4, indexed alpha conversion and let simplification, in a fresh implementation session.
+- Active task: M4, indexed alpha conversion and let simplification, in fresh implementation session `bks-bb9d19d9-0007-715b-a420-03bce7fe0492`. This session is the sole compiler/heavy-test owner.
 - The indexed pipeline remains inactive. M3 extracted a shared primitive-purity helper in active code and validated its output parity. No measured performance gain has been retained in this campaign yet.
 - Previous session `bks-4aaf1530-49fa-702d-9ee3-eb34b0afc450` completed and released compiler/heavy-test ownership after rejecting deep-flatten Box/Vec reuse. An intermediate `GroupArena` was also removed because the existing reverse Vec iterator already avoids copying; the wrapper added links and optional entries without removing work.
 - Parent owns this campaign file. The implementation session owns its code, tests and focused measurement documentation.
