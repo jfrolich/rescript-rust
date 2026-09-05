@@ -1073,6 +1073,9 @@ pub struct IndexedStorageMeasurements {
 /// the same-store contract used by the compiler's other index arenas.
 pub struct IndexedLambdaContext {
     store: IndexedLambda,
+    /// Present only during the single-tree optimizer phase. Grouping consumes
+    /// this authority; backend groups then become the only live program roots.
+    optimizer_root: Option<NodeId>,
     metadata: IndexedLamStats,
     /// Roots retained by the grouped pre-JS result after coercion. The
     /// canonical optimizer root remains `store.root`; these immutable roots
@@ -1088,8 +1091,11 @@ pub struct IndexedLambdaContext {
 impl IndexedLambdaContext {
     /// Creates one compilation-owned store and metadata context.
     pub fn from_lambda(lambda: Lambda, exports: impl IntoIterator<Item = Ident>) -> Self {
+        let store = IndexedLambda::from_lambda(lambda);
+        let optimizer_root = Some(store.root());
         Self {
-            store: IndexedLambda::from_lambda(lambda),
+            store,
+            optimizer_root,
             metadata: IndexedLamStats::new(exports),
             backend_roots: Vec::new(),
             beta_hash_bucket_count: 32,
@@ -1105,8 +1111,10 @@ impl IndexedLambdaContext {
         store: IndexedLambda,
         exports: impl IntoIterator<Item = Ident>,
     ) -> Self {
+        let optimizer_root = Some(store.root());
         Self {
             store,
+            optimizer_root,
             metadata: IndexedLamStats::new(exports),
             backend_roots: Vec::new(),
             beta_hash_bucket_count: 32,
@@ -1142,7 +1150,7 @@ impl IndexedLambdaContext {
 
     /// Materializes the canonical root at the inactive compatibility boundary.
     pub fn materialize(&self) -> Lambda {
-        self.store.materialize()
+        self.store.materialize_node(self.current_root())
     }
 
     /// Returns all hot-node allocations, including superseded generations.
@@ -1250,13 +1258,9 @@ impl IndexedLambdaContext {
         }
         let mut current = AHashSet::new();
         let mut current_edges = 0;
-        walk(
-            &self.store,
-            self.store.root(),
-            &mut current,
-            &mut current_edges,
-            true,
-        );
+        if let Some(root) = self.optimizer_root {
+            walk(&self.store, root, &mut current, &mut current_edges, true);
+        }
         let mut metadata = AHashSet::new();
         let mut ignored_edges = 0;
         for root in self.metadata.retained_roots() {
@@ -1387,7 +1391,8 @@ impl IndexedLambdaContext {
     }
 
     pub(crate) fn current_root(&self) -> NodeId {
-        self.store.root()
+        self.optimizer_root
+            .expect("indexed Lambda optimizer root was consumed by grouping")
     }
 
     pub(crate) fn register_backend_roots(&mut self, roots: impl IntoIterator<Item = NodeId>) {
@@ -1396,12 +1401,9 @@ impl IndexedLambdaContext {
             roots.iter().all(|root| self.store.contains(*root)),
             "indexed Lambda backend root is out of range"
         );
-        if let Some(root) = roots.first().copied() {
-            // Coercion ends the single-tree optimizer phase. The first real
-            // grouped root becomes canonical; the remaining group/export roots
-            // stay in the owner-scoped backend root set.
-            self.store.set_root(root);
-        }
+        // Coercion consumes the single-tree program authority even for an
+        // empty module. No group RHS is mislabeled as a whole program root.
+        self.optimizer_root = None;
         self.backend_roots = roots;
     }
 
@@ -1411,7 +1413,12 @@ impl IndexedLambdaContext {
     }
 
     pub(crate) fn replace_root(&mut self, root: NodeId) {
+        assert!(
+            self.optimizer_root.is_some(),
+            "cannot replace a consumed optimizer root"
+        );
         self.store.set_root(root);
+        self.optimizer_root = Some(root);
     }
 
     #[cfg(test)]
@@ -1436,8 +1443,16 @@ mod tests {
     }
     fn assert_round_trip(lambda: Lambda) {
         let expected = format!("{lambda:#?}");
-        let indexed = IndexedLambda::from_lambda(lambda);
+        let indexed = IndexedLambda::from_lambda(lambda.clone());
         assert_eq!(expected, format!("{:#?}", indexed.materialize()));
+
+        let context = IndexedLambdaContext::from_lambda(lambda.clone(), []);
+        let mut indexed_sexp = Vec::new();
+        crate::lambda::sexp_lambda::print_indexed_context(&context, true, &mut indexed_sexp)
+            .unwrap();
+        let mut recursive_sexp = Vec::new();
+        crate::lambda::sexp_lambda::print_lambda_with_locs(&lambda, &mut recursive_sexp).unwrap();
+        assert_eq!(indexed_sexp, recursive_sexp);
     }
 
     #[test]

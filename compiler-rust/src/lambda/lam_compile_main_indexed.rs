@@ -54,13 +54,47 @@ impl IndexedGroup {
 pub(crate) enum IndexedPreJsError {
     DuplicateExport(String),
     MissingExportBlock,
-    HoistedNameCollision(String),
+    HoistedNameCollision {
+        name: String,
+        loc: crate::location::Location,
+    },
+}
+
+impl std::fmt::Display for IndexedPreJsError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::DuplicateExport(name) => write!(formatter, "Duplicate export `{name}`"),
+            Self::MissingExportBlock => formatter.write_str("Missing final export block"),
+            Self::HoistedNameCollision { name, .. } => write!(
+                formatter,
+                "Cannot hoist this function as `{name}` because that name is already used by a top-level binding."
+            ),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct IndexedHoistedWarning {
+    pub(crate) path: Vec<String>,
+    pub(crate) loc: crate::location::Location,
+    pub(crate) attribute: &'static str,
 }
 
 /// One owning pre-JS result. All node handles are private and remain paired
 /// with `context`; M6 can add owner-scoped JS traversal methods without
 /// exposing a caller-provided root. The same generator is retained for later
 /// JS temporaries.
+pub(crate) enum IndexedDiagnosticGroup {
+    Single(LetKind, Ident, Lambda),
+    Recursive(Vec<(Ident, Lambda)>),
+    Nop(Lambda),
+}
+
+pub(crate) trait IndexedDiagnosticsObserver {
+    fn lambda(&mut self, pass: &'static str, lambda: Lambda);
+    fn groups(&mut self, groups: Vec<IndexedDiagnosticGroup>);
+}
+
 pub(crate) struct IndexedCmjExports {
     pub(crate) arities: AHashMap<String, CmjExportArity>,
     pub(crate) constants: AHashMap<String, CmjExportConstant>,
@@ -76,10 +110,35 @@ pub(crate) struct IndexedPreJsBackend {
     /// before dependency effects are added.
     maybe_pure: Option<String>,
     id_gen: Arc<IdGenerator>,
-    rejected_hoisted_paths: Vec<Vec<String>>,
+    hoisted_warnings: Vec<IndexedHoistedWarning>,
     /// Selected CMJ payloads remain owner-paired. Only the explicit CMJ
     /// serializer boundary materializes these roots.
     cmj_inline_roots: Vec<(String, NodeId)>,
+}
+
+fn materialize_diagnostic_groups(
+    context: &IndexedLambdaContext,
+    groups: &[(Option<Ident>, IndexedGroup)],
+) -> Vec<IndexedDiagnosticGroup> {
+    groups
+        .iter()
+        .map(|(id, group)| match group {
+            IndexedGroup::Single(kind, root) => IndexedDiagnosticGroup::Single(
+                *kind,
+                id.as_ref().unwrap().clone(),
+                context.store().materialize_node(*root),
+            ),
+            IndexedGroup::Recursive(bindings) => IndexedDiagnosticGroup::Recursive(
+                bindings
+                    .iter()
+                    .map(|(id, root)| (id.clone(), context.store().materialize_node(*root)))
+                    .collect(),
+            ),
+            IndexedGroup::Nop(root) => {
+                IndexedDiagnosticGroup::Nop(context.store().materialize_node(*root))
+            }
+        })
+        .collect()
 }
 
 impl IndexedPreJsBackend {
@@ -93,6 +152,10 @@ impl IndexedPreJsBackend {
 
     pub(crate) fn maybe_pure(&self) -> Option<&str> {
         self.maybe_pure.as_deref()
+    }
+
+    pub(crate) fn hoisted_warnings(&self) -> &[IndexedHoistedWarning] {
+        &self.hoisted_warnings
     }
 
     pub(crate) fn storage_measurements(
@@ -264,65 +327,6 @@ impl IndexedPreJsBackend {
             .find_map(|(id, root)| id.same(export).then_some(*root))
     }
 
-    pub(crate) fn print_grouped_intermediate(
-        &self,
-        with_locs: bool,
-        out: &mut impl std::io::Write,
-    ) -> std::io::Result<()> {
-        writeln!(out, "(indexed-groups")?;
-        write!(out, " (exports")?;
-        for id in &self.context.metadata().exports {
-            write!(
-                out,
-                " ({} {} {} {})",
-                id.name(),
-                id.stamp(),
-                id.is_global(),
-                id.is_predef_exn()
-            )?;
-        }
-        writeln!(out, ")")?;
-        for (id, group) in &self.groups {
-            match group {
-                IndexedGroup::Single(kind, root) => {
-                    let id = id.as_ref().unwrap();
-                    writeln!(out, " (single {:?} {} {})", kind, id.name(), id.stamp())?;
-                    crate::lambda::sexp_lambda::print_indexed_node(
-                        self.context.store(),
-                        *root,
-                        with_locs,
-                        out,
-                    )?;
-                }
-                IndexedGroup::Recursive(bindings) => {
-                    write!(out, " (recursive")?;
-                    for (id, _) in bindings {
-                        write!(out, " ({} {})", id.name(), id.stamp())?;
-                    }
-                    writeln!(out, ")")?;
-                    for (_, root) in bindings {
-                        crate::lambda::sexp_lambda::print_indexed_node(
-                            self.context.store(),
-                            *root,
-                            with_locs,
-                            out,
-                        )?;
-                    }
-                }
-                IndexedGroup::Nop(root) => {
-                    writeln!(out, " (nop)")?;
-                    crate::lambda::sexp_lambda::print_indexed_node(
-                        self.context.store(),
-                        *root,
-                        with_locs,
-                        out,
-                    )?;
-                }
-            }
-        }
-        writeln!(out, ")")
-    }
-
     #[cfg(test)]
     fn materialize_groups(&self) -> Vec<(Option<Ident>, Lambda)> {
         self.groups
@@ -350,7 +354,7 @@ impl IndexedPreJsBackend {
     }
 
     #[cfg(test)]
-    fn exports(&self) -> &[Ident] {
+    pub(crate) fn exports(&self) -> &[Ident] {
         &self.context.metadata().exports
     }
 
@@ -523,10 +527,7 @@ fn ident_order(left: &Ident, right: &Ident) -> std::cmp::Ordering {
     left.stamp()
         .cmp(&right.stamp())
         .then_with(|| left.name().cmp(right.name()))
-        .then_with(|| {
-            let bits = |id: &Ident| id.is_global() as u8 + 2 * id.is_predef_exn() as u8;
-            bits(left).cmp(&bits(right))
-        })
+        .then_with(|| left.flags().bits().cmp(&right.flags().bits()))
 }
 
 fn ordered_idents(set: &AHashSet<Ident>) -> Vec<Ident> {
@@ -573,7 +574,7 @@ fn remove_dead_groups(
         free_by_ident: &AHashMap<Ident, AHashSet<Ident>>,
         visited: &mut AHashSet<Ident>,
     ) {
-        if id.is_global() || !visited.insert(id.clone()) {
+        if id.is_global() || id.is_js() || !visited.insert(id.clone()) {
             return;
         }
         let free = free_by_ident.get(id).unwrap_or_else(|| {
@@ -824,7 +825,7 @@ fn add_hoisted_aliases(
     export_map: &mut Vec<(Ident, NodeId)>,
     hoisted: &[HoistedFunction],
     id_gen: &IdGenerator,
-) -> Result<(Vec<HoistedExport>, Vec<Vec<String>>), IndexedPreJsError> {
+) -> Result<(Vec<HoistedExport>, Vec<IndexedHoistedWarning>), IndexedPreJsError> {
     let group_map = collect_group_bindings(context.store(), groups);
     let exported_modules = context
         .metadata()
@@ -839,29 +840,36 @@ fn add_hoisted_aliases(
         .collect::<AHashSet<_>>();
     let mut aliases = Vec::new();
     let mut metadata = Vec::new();
-    let mut rejected = Vec::new();
+    let mut warnings = Vec::new();
+    let misplaced = |warnings: &mut Vec<IndexedHoistedWarning>, item: &HoistedFunction| {
+        warnings.push(IndexedHoistedWarning {
+            path: item.path.clone(),
+            loc: item.loc,
+            attribute: "res.hoistedFunction",
+        });
+    };
     for item in hoisted {
         let Some((top, fields)) = item.path.split_first() else {
-            rejected.push(item.path.clone());
+            misplaced(&mut warnings, item);
             continue;
         };
         let Some(top_id) = exported_modules.get(top) else {
-            rejected.push(item.path.clone());
+            misplaced(&mut warnings, item);
             continue;
         };
         let Some(module) = group_map.get(top_id).copied() else {
-            rejected.push(item.path.clone());
+            misplaced(&mut warnings, item);
             continue;
         };
         let mut positions = Vec::new();
         let Some((target, Some(target_id))) =
             find_path(context.store(), &group_map, module, fields, &mut positions)
         else {
-            rejected.push(item.path.clone());
+            misplaced(&mut warnings, item);
             continue;
         };
         if !target_id.same(&item.binding) {
-            rejected.push(item.path.clone());
+            misplaced(&mut warnings, item);
             continue;
         }
         let name = item
@@ -878,7 +886,12 @@ fn add_hoisted_aliases(
             .join("$");
         let js_name = crate::js_ir::printer::convert_ident_name(&name);
         if !occupied.insert(js_name) {
-            return Err(IndexedPreJsError::HoistedNameCollision(name));
+            let loc = if matches!(context.store().view(target), NodeView::Function(_, _, _, _)) {
+                item.target_loc
+            } else {
+                item.loc
+            };
+            return Err(IndexedPreJsError::HoistedNameCollision { name, loc });
         }
         let alias_id = id_gen.create(&name);
         let mut access = context
@@ -913,7 +926,7 @@ fn add_hoisted_aliases(
             },
         );
     }
-    Ok((metadata, rejected))
+    Ok((metadata, warnings))
 }
 
 fn collect_required_modules(
@@ -1049,33 +1062,83 @@ pub(crate) fn optimize_for_pre_js_indexed(
     external_inline: &mut IndexedExternalInlineResolver<'_>,
     external_arity: &mut ExternalArityResolver<'_>,
 ) -> Result<IndexedPreJsBackend, IndexedPreJsError> {
+    optimize_for_pre_js_indexed_with_diagnostics(
+        lambda,
+        export_idents,
+        hoisted,
+        possible_required_modules,
+        jsx_preserve,
+        id_gen,
+        external_inline,
+        external_arity,
+        None,
+    )
+}
+
+pub(crate) fn optimize_for_pre_js_indexed_with_diagnostics(
+    lambda: Lambda,
+    export_idents: Vec<Ident>,
+    hoisted: &[HoistedFunction],
+    possible_required_modules: &AHashSet<ModuleId>,
+    jsx_preserve: bool,
+    id_gen: Arc<IdGenerator>,
+    external_inline: &mut IndexedExternalInlineResolver<'_>,
+    external_arity: &mut ExternalArityResolver<'_>,
+    mut diagnostics: Option<&mut dyn IndexedDiagnosticsObserver>,
+) -> Result<IndexedPreJsBackend, IndexedPreJsError> {
+    fn dump(
+        diagnostics: &mut Option<&mut dyn IndexedDiagnosticsObserver>,
+        pass: &'static str,
+        context: &IndexedLambdaContext,
+    ) {
+        if let Some(diagnostics) = diagnostics.as_deref_mut() {
+            diagnostics.lambda(pass, context.materialize());
+        }
+    }
+
     let mut context = IndexedLambdaContext::from_lambda(lambda, export_idents);
+    dump(&mut diagnostics, "initial", &context);
     // `Lam_convert.convert` records possible modules before optimizer erasure
     // (`lam_compile_main.ml:278`, `lam_convert.ml:357-474`).
     let mut required =
         collect_required_modules(context.store(), std::iter::once(context.current_root()));
     required.extend(possible_required_modules.iter().cloned());
     context.deep_flatten(&id_gen);
+    dump(&mut diagnostics, "flatten0", &context);
     context.collect_info_with_external_arity(external_arity);
+    dump(&mut diagnostics, "flatten1", &context);
     context.simplify_exits(&id_gen);
+    dump(&mut diagnostics, "simplify_exits", &context);
+    context.collect_info_with_external_arity(external_arity);
+    context.simplify_alias(&id_gen, jsx_preserve, external_inline);
+    dump(&mut diagnostics, "simplify_alias", &context);
+    context.deep_flatten(&id_gen);
+    dump(&mut diagnostics, "flatten2", &context);
     context.collect_info_with_external_arity(external_arity);
     context.simplify_alias(&id_gen, jsx_preserve, external_inline);
     context.deep_flatten(&id_gen);
     context.collect_info_with_external_arity(external_arity);
-    context.simplify_alias(&id_gen, jsx_preserve, external_inline);
-    context.deep_flatten(&id_gen);
-    context.collect_info_with_external_arity(external_arity);
+    dump(&mut diagnostics, "alpha_before", &context);
     context.alpha_conversion_with_external_arity(&id_gen, external_arity);
+    dump(&mut diagnostics, "alpha_after", &context);
     context.simplify_exits(&id_gen);
     context.collect_info_with_external_arity(external_arity);
+    dump(&mut diagnostics, "simplify_alias_before", &context);
     context.simplify_alias(&id_gen, jsx_preserve, external_inline);
+    dump(&mut diagnostics, "alpha_conversion", &context);
     context.alpha_conversion_with_external_arity(&id_gen, external_arity);
+    dump(&mut diagnostics, "before-simplify_lets", &context);
     context.simplify_lets();
+    dump(&mut diagnostics, "before-simplify-exits", &context);
     context.simplify_exits(&id_gen);
+    dump(&mut diagnostics, "simplify_lets", &context);
 
     let (mut groups, mut export_map) = coerce_and_group(&mut context, &id_gen, external_arity)?;
+    if let Some(diagnostics) = diagnostics.as_deref_mut() {
+        diagnostics.groups(materialize_diagnostic_groups(&context, &groups));
+    }
     let maybe_pure = group_side_effect_reason(context.store(), &groups);
-    let (hoisted_exports, rejected_hoisted_paths) =
+    let (hoisted_exports, hoisted_warnings) =
         add_hoisted_aliases(&mut context, &mut groups, &mut export_map, hoisted, &id_gen)?;
     let roots = groups
         .iter()
@@ -1091,7 +1154,7 @@ pub(crate) fn optimize_for_pre_js_indexed(
         possible_required_modules: required,
         maybe_pure,
         id_gen,
-        rejected_hoisted_paths,
+        hoisted_warnings,
         cmj_inline_roots: Vec::new(),
     })
 }
@@ -1221,6 +1284,21 @@ mod tests {
         );
         let groups = vec![(None, IndexedGroup::Nop(context.current_root()))];
         assert_eq!(remove_dead_groups(context.store(), &[], groups).len(), 1);
+
+        let js = Ident::create_js("Math");
+        let context = IndexedLambdaContext::from_lambda(
+            Lambda::prim(
+                Primitive::Pdebugger,
+                vec![Lambda::var(js.clone())],
+                Location::none(),
+            ),
+            [],
+        );
+        let groups = vec![(None, IndexedGroup::Nop(context.current_root()))];
+        assert_eq!(remove_dead_groups(context.store(), &[], groups).len(), 1);
+        assert!(!js.is_global());
+        assert!(js.is_js());
+        assert_eq!(js.flags().bits(), 8);
 
         let persistent_without_global_flag = id("localStampZero", 0);
         let context = IndexedLambdaContext::from_lambda(
@@ -1428,7 +1506,7 @@ mod tests {
             Arc::new(IdGenerator::with_start_stamp(20)),
         )
         .unwrap();
-        assert!(result.rejected_hoisted_paths.is_empty());
+        assert!(result.hoisted_warnings.is_empty());
         assert_eq!(
             result.hoisted_exports(),
             &[HoistedExport {
@@ -1507,7 +1585,7 @@ mod tests {
             crate::lambda::indexed::IndexedStorageMeasurements {
                 node_allocations: 26,
                 current_root_edge_visits: 0,
-                current_root_unique_nodes: 1,
+                current_root_unique_nodes: 0,
                 metadata_unique_nodes: 0,
                 backend_unique_nodes: 1,
                 live_unique_nodes: 1,
@@ -1517,8 +1595,8 @@ mod tests {
                 side_payload_shallow_occupied_bytes: 6628,
                 side_payload_shallow_capacity_bytes: 8896,
                 nested_heap_bytes_included: false,
-                current_live_side_payload_shallow_bytes: 184,
-                backend_retained_only_side_payload_shallow_bytes: 0,
+                current_live_side_payload_shallow_bytes: 0,
+                backend_retained_only_side_payload_shallow_bytes: 184,
                 metadata_retained_only_side_payload_shallow_bytes: 0,
                 superseded_unreachable_side_payload_shallow_bytes: 6444,
             }
@@ -1659,7 +1737,7 @@ mod tests {
             possible_required_modules: AHashSet::new(),
             maybe_pure: None,
             id_gen: generator,
-            rejected_hoisted_paths: vec![],
+            hoisted_warnings: vec![],
             cmj_inline_roots: vec![],
         };
         let mut trace = Vec::new();
@@ -1696,6 +1774,79 @@ mod tests {
     }
 
     #[test]
+    fn every_misplaced_hoisted_gate_retains_warning_variant_and_location() {
+        let binding = id("make", 2);
+        let module = id("A", 1);
+        let no_group = Ident::new("NoGroup", 0, IdentFlags::GLOBAL);
+        let module_value = Lambda::prim(
+            Primitive::Pmakeblock(TagInfo::Module(vec!["make".into()]), Mutable::Immutable),
+            vec![Lambda::var(binding.clone())],
+            Location::none(),
+        );
+        let input = Lambda::let_(
+            LetKind::Strict,
+            binding.clone(),
+            Lambda::function_(0, vec![], Lambda::unit(), Default::default()),
+            Lambda::let_(
+                LetKind::Strict,
+                module.clone(),
+                module_value,
+                module_export(
+                    vec![module.clone(), no_group.clone()],
+                    vec![Lambda::var(module), Lambda::var(no_group)],
+                ),
+            ),
+        );
+        let locations = (0..5)
+            .map(|index| Location::new_for_error("warnings.res", index, index + 1))
+            .collect::<Vec<_>>();
+        let items = vec![
+            HoistedFunction {
+                binding: binding.clone(),
+                path: vec![],
+                loc: locations[0],
+                target_loc: Location::none(),
+            },
+            HoistedFunction {
+                binding: binding.clone(),
+                path: vec!["Missing".into(), "make".into()],
+                loc: locations[1],
+                target_loc: Location::none(),
+            },
+            HoistedFunction {
+                binding: binding.clone(),
+                path: vec!["NoGroup".into(), "make".into()],
+                loc: locations[2],
+                target_loc: Location::none(),
+            },
+            HoistedFunction {
+                binding: binding.clone(),
+                path: vec!["A".into(), "absent".into()],
+                loc: locations[3],
+                target_loc: Location::none(),
+            },
+            HoistedFunction {
+                binding: id("wrong", 99),
+                path: vec!["A".into(), "make".into()],
+                loc: locations[4],
+                target_loc: Location::none(),
+            },
+        ];
+        let result = run(input, &items, Arc::new(IdGenerator::with_start_stamp(100))).unwrap();
+        assert_eq!(
+            result.hoisted_warnings,
+            items
+                .iter()
+                .map(|item| IndexedHoistedWarning {
+                    path: item.path.clone(),
+                    loc: item.loc,
+                    attribute: "res.hoistedFunction",
+                })
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
     fn hoisted_name_collision_preserves_the_reference_error_gate() {
         let binding = id("make", 2);
         let module = id("A", 1);
@@ -1724,11 +1875,13 @@ mod tests {
                 ),
             ),
         );
+        let hoisted_loc = Location::new_for_error("hoisted.res", 1, 2);
+        let target_loc = Location::new_for_error("hoisted.res", 10, 20);
         let hoisted = HoistedFunction {
             binding,
             path: vec!["A".into(), "make".into()],
-            loc: Location::none(),
-            target_loc: Location::none(),
+            loc: hoisted_loc,
+            target_loc,
         };
         assert_eq!(
             run(
@@ -1738,7 +1891,68 @@ mod tests {
             )
             .err()
             .unwrap(),
-            IndexedPreJsError::HoistedNameCollision("A$make".into())
+            IndexedPreJsError::HoistedNameCollision {
+                name: "A$make".into(),
+                loc: target_loc,
+            }
+        );
+    }
+
+    #[test]
+    fn hoisted_nonfunction_collision_uses_attribute_location() {
+        let binding = id("make", 2);
+        let module = id("A", 1);
+        let occupied = id("A$make", 3);
+        let mut context = IndexedLambdaContext::from_lambda(Lambda::unit(), [module.clone()]);
+        let target = context
+            .store_mut()
+            .append_compat_lambda(Lambda::const_(Constant::int(1)));
+        let target_var = context
+            .store_mut()
+            .append(NodeSnapshot::Var(binding.clone()));
+        let module_root = context.store_mut().append(NodeSnapshot::Prim(
+            Primitive::Pmakeblock(TagInfo::Module(vec!["make".into()]), Mutable::Immutable),
+            vec![target_var],
+            Location::none(),
+        ));
+        let occupied_root = context
+            .store_mut()
+            .append_compat_lambda(Lambda::const_(Constant::int(2)));
+        let mut groups = vec![
+            (
+                Some(binding.clone()),
+                IndexedGroup::Single(LetKind::Strict, target),
+            ),
+            (
+                Some(module),
+                IndexedGroup::Single(LetKind::Strict, module_root),
+            ),
+            (
+                Some(occupied),
+                IndexedGroup::Single(LetKind::Strict, occupied_root),
+            ),
+        ];
+        let mut export_map = Vec::new();
+        let hoisted_loc = Location::new_for_error("nonfunction.res", 3, 7);
+        let error = add_hoisted_aliases(
+            &mut context,
+            &mut groups,
+            &mut export_map,
+            &[HoistedFunction {
+                binding,
+                path: vec!["A".into(), "make".into()],
+                loc: hoisted_loc,
+                target_loc: Location::new_for_error("nonfunction.res", 20, 30),
+            }],
+            &IdGenerator::with_start_stamp(10),
+        )
+        .unwrap_err();
+        assert_eq!(
+            error,
+            IndexedPreJsError::HoistedNameCollision {
+                name: "A$make".into(),
+                loc: hoisted_loc,
+            }
         );
     }
 
@@ -1804,17 +2018,136 @@ mod tests {
     }
 
     #[test]
-    fn grouped_intermediate_prints_exact_export_flags_without_a_tree() {
+    fn diagnostics_observer_receives_every_reference_pass_label_and_groups() {
+        #[derive(Default)]
+        struct Observer {
+            labels: Vec<&'static str>,
+            groups: usize,
+        }
+        impl IndexedDiagnosticsObserver for Observer {
+            fn lambda(&mut self, pass: &'static str, _lambda: Lambda) {
+                self.labels.push(pass);
+            }
+            fn groups(&mut self, groups: Vec<IndexedDiagnosticGroup>) {
+                self.groups = groups.len();
+            }
+        }
+        let input = module_export(vec![id("value", 1)], vec![Lambda::unit()]);
+        let mut inline = |_: &Ident, _: bool, _: &str| None;
+        let mut arity = |_: &Ident, _: bool, _: &str| None;
+        let mut observer = Observer::default();
+        optimize_for_pre_js_indexed_with_diagnostics(
+            input,
+            vec![id("value", 1)],
+            &[],
+            &AHashSet::new(),
+            false,
+            Arc::new(IdGenerator::with_start_stamp(10)),
+            &mut inline,
+            &mut arity,
+            Some(&mut observer),
+        )
+        .unwrap();
+        assert_eq!(
+            observer.labels,
+            vec![
+                "initial",
+                "flatten0",
+                "flatten1",
+                "simplify_exits",
+                "simplify_alias",
+                "flatten2",
+                "alpha_before",
+                "alpha_after",
+                "simplify_alias_before",
+                "alpha_conversion",
+                "before-simplify_lets",
+                "before-simplify-exits",
+                "simplify_lets",
+            ]
+        );
+        assert_eq!(observer.groups, 1);
+    }
+
+    #[test]
+    fn diagnostic_group_materialization_preserves_every_group_kind() {
+        let exotic = Ident::new("\\\"odd-name\"", 1, IdentFlags::GLOBAL);
+        let recursive = id("recursive", 2);
+        let mut context = IndexedLambdaContext::from_lambda(Lambda::unit(), []);
+        let single = context.store_mut().append_compat_lambda(Lambda::prim(
+            Primitive::Pidentity,
+            vec![Lambda::var(exotic.clone())],
+            Location::new_for_error("groups.res", 4, 8),
+        ));
+        let rec_root = context.store_mut().append_compat_lambda(Lambda::function_(
+            0,
+            vec![],
+            Lambda::unit(),
+            Default::default(),
+        ));
+        let nop = context.store_mut().append_compat_lambda(Lambda::Lbreak);
+        let groups = vec![
+            (
+                Some(exotic.clone()),
+                IndexedGroup::Single(LetKind::Alias, single),
+            ),
+            (
+                None,
+                IndexedGroup::Recursive(vec![(recursive.clone(), rec_root)]),
+            ),
+            (None, IndexedGroup::Nop(nop)),
+        ];
+        let materialized = materialize_diagnostic_groups(&context, &groups);
+        match &materialized[..] {
+            [
+                IndexedDiagnosticGroup::Single(LetKind::Alias, id, Lambda::Lprim(info)),
+                IndexedDiagnosticGroup::Recursive(bindings),
+                IndexedDiagnosticGroup::Nop(Lambda::Lbreak),
+            ] => {
+                assert_eq!(
+                    (id.name(), id.stamp(), id.is_global()),
+                    ("\\\"odd-name\"", 1, true)
+                );
+                assert_eq!(info.loc, Location::new_for_error("groups.res", 4, 8));
+                assert_eq!(bindings[0].0, recursive);
+            }
+            _ => panic!("unexpected diagnostic groups"),
+        }
+    }
+
+    #[test]
+    fn empty_grouped_output_consumes_the_optimizer_root_authority() {
         let export = Ident::new("value", 1, IdentFlags::GLOBAL);
         let input = module_export(vec![export.clone()], vec![Lambda::var(export)]);
         let result = run(input, &[], Arc::new(IdGenerator::with_start_stamp(2))).unwrap();
-        let mut indexed = Vec::new();
-        result
-            .print_grouped_intermediate(true, &mut indexed)
-            .unwrap();
+        assert!(result.groups.is_empty());
+        assert!(result.context.backend_roots().is_empty());
+        assert!(
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let _ = result.context.materialize();
+            }))
+            .is_err()
+        );
         assert_eq!(
-            String::from_utf8(indexed).unwrap(),
-            "(indexed-groups\n (exports (value 1 true false))\n)\n"
+            result.storage_measurements(),
+            crate::lambda::indexed::IndexedStorageMeasurements {
+                node_allocations: 14,
+                current_root_edge_visits: 0,
+                current_root_unique_nodes: 0,
+                metadata_unique_nodes: 0,
+                backend_unique_nodes: 0,
+                live_unique_nodes: 0,
+                superseded_nodes: 14,
+                hot_node_occupied_bytes: 112,
+                hot_node_capacity_bytes: 128,
+                side_payload_shallow_occupied_bytes: 5908,
+                side_payload_shallow_capacity_bytes: 7360,
+                nested_heap_bytes_included: false,
+                current_live_side_payload_shallow_bytes: 0,
+                backend_retained_only_side_payload_shallow_bytes: 0,
+                metadata_retained_only_side_payload_shallow_bytes: 0,
+                superseded_unreachable_side_payload_shallow_bytes: 5908,
+            }
         );
     }
 
