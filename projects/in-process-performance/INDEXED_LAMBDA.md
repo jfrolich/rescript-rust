@@ -40,8 +40,8 @@ The compatibility materializer uses the root-directed semantic traversal, not ar
 - Add complete lossless owned `Lambda -> IndexedLambda` conversion and compatibility `NodeId -> Lambda` materialization.
 - Add semantic round-trip tests covering every node family and preserving switch/case/binding order.
 - Add tests that deliberately share one child index between two parents, rewrite one parent path by appending nodes, and prove the other parent and shared child remain unchanged. Assert semantic materialized results, not pointer identity.
-- Port `Lam_pass_collect.collect_info` and its arity queries to borrowed indexed access. Its Lambda-bearing identifier metadata stores arena IDs tied to the owner lifetime instead of eagerly materializing function bodies, option payloads, or block elements.
-- Differential tests run indexed collect/arity against the existing tree implementation across node variants, ordered children, and deliberately shared children.
+- Port `Lam_pass_collect.collect_info` and its arity queries to borrowed indexed access. Its Lambda-bearing identifier metadata stores `NodeId`s paired with the stats lookup arena instead of eagerly materializing function bodies, option payloads, or block elements.
+- Differential tests run indexed collect/arity against the existing tree implementation across node variants and metadata outcomes. Separate deterministic model checks cover ordered and deliberately shared child edges.
 - Keep the production pipeline unchanged. A tree -> indexed -> tree boundary around one read-only pass would be unamortized conversion overhead and is not a production milestone.
 
 M1 is an inactive, buildable, regression-tested migration foundation. It makes no wall-time claim. Production integration waits until enough contiguous rewriting passes and the consumer use the same store without an intermediate recursive materialization.
@@ -52,7 +52,7 @@ Implemented at `f2f755257` / `a299a3f4c`:
 
 - `lambda/indexed.rs` owns the 8-byte hot node tags, checked `u32` payload/range/index insertion, per-kind cold payload tables, source-ordered side tables, full owned conversion, and compatibility materialization.
 - `lambda/lam_pass_collect_indexed.rs` directly traverses indexed nodes for collect and arity analysis. `IndexedLamStats<'arena>` owns no recursive Lambda payload: its option/block/function metadata keeps `NodeId`s and a borrowed lookup context. This keeps the arena alive but is not compile-time arena branding for individual IDs. External arity cache/resolver calls preserve the existing order.
-- Differential tests compare tree and indexed metadata, arity, and visited-edge order, including repeated visits through a deliberately shared child. Storage tests cover every Lambda node family, case/binding ordering, compact handle sizes, and independent parent rewrites over a shared immutable child.
+- Differential tests compare the actual tree and indexed collectors' metadata, arity results, retained payloads/recursion flags, and external resolver/cache call order. A separate deterministic traversal model checks indexed visited-edge order, including repeated visits through a deliberately shared child; it does not instrument the existing recursive collector. Storage tests cover every Lambda node family, case/binding ordering, compact handle sizes, and independent parent rewrites over a shared immutable child.
 - Production `lam_compile_main`, driver ownership, and JS lowering remain unchanged. There is no performance claim and no Tella timing for this inactive foundation.
 
 ### M2: exits segment (next handoff)
