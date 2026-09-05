@@ -437,6 +437,76 @@ mod tests {
     }
 
     #[test]
+    fn occurrence_and_let_beta_share_native_hash_capacity() {
+        let params = (0..65)
+            .map(|index| id(&format!("p{index}"), index + 1))
+            .collect::<Vec<_>>();
+        let input = Lambda::apply(
+            Lambda::function_(
+                65,
+                params.clone(),
+                Lambda::prim(
+                    Primitive::Paddint,
+                    vec![
+                        Lambda::var(params[0].clone()),
+                        Lambda::var(params[0].clone()),
+                    ],
+                    Location::none(),
+                ),
+                FunctionAttribute::default(),
+            ),
+            (0..65).map(int).collect(),
+            crate::lambda::ApInfo {
+                loc: Location::none(),
+                inlined: crate::lambda::InlineAttribute::Default,
+                status: crate::lambda::ApplyStatus::Na,
+            },
+            false,
+        );
+        let mut context = IndexedLambdaContext::from_lambda(input, []);
+        context.simplify_lets();
+        let (_, _, capacity) = context.optimizer_parts_mut();
+        assert_eq!(*capacity, 64);
+        assert_exact(
+            &context.materialize(),
+            &Lambda::prim(Primitive::Paddint, vec![int(0), int(0)], Location::none()),
+        );
+    }
+
+    #[test]
+    fn smart_control_flow_runs_after_child_simplification() {
+        let value = id("value", 1);
+        let input = Lambda::LifThenElse(
+            Box::new(Lambda::const_(Constant::JsTrue)),
+            Box::new(Lambda::let_(
+                LetKind::Alias,
+                value.clone(),
+                int(9),
+                Lambda::var(value),
+            )),
+            Box::new(Lambda::prim(
+                Primitive::PjsCall {
+                    prim_name: "unselected".into(),
+                    arg_types: vec![],
+                    ffi: crate::lambda::lam_primitive::ExternalFfiSpec {
+                        kind: crate::lambda::lam_primitive::ExternalFfiKind::Default,
+                        spec: None,
+                        obj_params: None,
+                        return_wrapper:
+                            crate::lambda::lam_primitive::ExternalReturnWrapper::Identity,
+                        inline_constant: None,
+                    },
+                    dynamic_import: false,
+                    transformed_jsx: false,
+                },
+                vec![],
+                Location::none(),
+            )),
+        );
+        assert_exact(&run(input), &int(9));
+    }
+
+    #[test]
     fn recursive_and_control_flow_occurrences_keep_bindings() {
         let value = id("value", 1);
         let recursive = id("recursive", 2);
