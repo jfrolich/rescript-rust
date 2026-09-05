@@ -662,6 +662,161 @@ impl IndexedLambda {
         }
     }
 
+    fn node_side_payload_shallow_bytes(&self, node: NodeId) -> usize {
+        let range_bytes = |range: ItemRange, item_size: usize| range.len as usize * item_size;
+        match self.node(node) {
+            IndexedNode::Var(_) => std::mem::size_of::<Ident>(),
+            IndexedNode::GlobalModule(_) => std::mem::size_of::<GlobalPayload>(),
+            IndexedNode::Const(_) => std::mem::size_of::<Constant>(),
+            IndexedNode::Apply(index) => {
+                let payload = &self.applies[index as usize];
+                std::mem::size_of::<ApplyPayload>()
+                    + range_bytes(payload.1, std::mem::size_of::<NodeId>())
+            }
+            IndexedNode::Function(index) => {
+                let payload = &self.functions[index as usize];
+                std::mem::size_of::<FunctionPayload>()
+                    + range_bytes(payload.1, std::mem::size_of::<Ident>())
+            }
+            IndexedNode::Let(_) => std::mem::size_of::<LetPayload>(),
+            IndexedNode::LetRec(index) => {
+                let payload = &self.letrecs[index as usize];
+                std::mem::size_of::<LetRecPayload>()
+                    + range_bytes(payload.0, std::mem::size_of::<(Ident, NodeId)>())
+            }
+            IndexedNode::Prim(index) => {
+                let payload = &self.prims[index as usize];
+                std::mem::size_of::<PrimPayload>()
+                    + range_bytes(payload.1, std::mem::size_of::<NodeId>())
+            }
+            IndexedNode::Switch(index) => {
+                let payload = &self.switches[index as usize];
+                std::mem::size_of::<SwitchPayload>()
+                    + range_bytes(payload.consts, std::mem::size_of::<(SwitchKey, NodeId)>())
+                    + range_bytes(payload.blocks, std::mem::size_of::<(SwitchKey, NodeId)>())
+            }
+            IndexedNode::StringSwitch(index) => {
+                let payload = &self.string_switches[index as usize];
+                std::mem::size_of::<StringSwitchPayload>()
+                    + range_bytes(payload.1, std::mem::size_of::<(String, NodeId)>())
+            }
+            IndexedNode::StaticRaise(index) => {
+                let payload = &self.static_raises[index as usize];
+                std::mem::size_of::<StaticRaisePayload>()
+                    + range_bytes(payload.1, std::mem::size_of::<NodeId>())
+            }
+            IndexedNode::StaticCatch(index) => {
+                let payload = &self.static_catches[index as usize];
+                std::mem::size_of::<StaticCatchPayload>()
+                    + range_bytes(payload.2, std::mem::size_of::<Ident>())
+            }
+            IndexedNode::TryWith(_) => std::mem::size_of::<TryWithPayload>(),
+            IndexedNode::IfThenElse(_) => std::mem::size_of::<TernaryPayload>(),
+            IndexedNode::Sequence(_) | IndexedNode::While(_) => {
+                std::mem::size_of::<BinaryPayload>()
+            }
+            IndexedNode::Break | IndexedNode::Continue => 0,
+            IndexedNode::For(_) => std::mem::size_of::<ForPayload>(),
+            IndexedNode::ForOf(_) | IndexedNode::ForAwaitOf(_) => {
+                std::mem::size_of::<ForOfPayload>()
+            }
+            IndexedNode::Assign(_) => std::mem::size_of::<AssignPayload>(),
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn reachable_unique_nodes(&self, roots: &[NodeId]) -> usize {
+        fn visit(store: &IndexedLambda, node: NodeId, seen: &mut AHashSet<NodeId>) {
+            if !seen.insert(node) {
+                return;
+            }
+            let mut child = |node| visit(store, node, seen);
+            match store.view(node) {
+                NodeView::Apply(function, args, _, _) => {
+                    child(function);
+                    for node in args {
+                        child(*node);
+                    }
+                }
+                NodeView::Function(_, _, body, _) => child(body),
+                NodeView::Let(_, _, value, body) => {
+                    child(value);
+                    child(body);
+                }
+                NodeView::LetRec(bindings, body) => {
+                    for (_, node) in bindings {
+                        child(*node);
+                    }
+                    child(body);
+                }
+                NodeView::Prim(_, args, _) | NodeView::StaticRaise(_, args) => {
+                    for node in args {
+                        child(*node);
+                    }
+                }
+                NodeView::Switch {
+                    scrutinee,
+                    consts,
+                    blocks,
+                    fail_action,
+                    ..
+                } => {
+                    child(scrutinee);
+                    for (_, node) in consts {
+                        child(*node);
+                    }
+                    for (_, node) in blocks {
+                        child(*node);
+                    }
+                    if let Some(node) = fail_action {
+                        child(node);
+                    }
+                }
+                NodeView::StringSwitch(scrutinee, cases, default) => {
+                    child(scrutinee);
+                    for (_, node) in cases {
+                        child(*node);
+                    }
+                    if let Some(node) = default {
+                        child(node);
+                    }
+                }
+                NodeView::StaticCatch(body, _, _, handler)
+                | NodeView::TryWith(body, _, handler) => {
+                    child(body);
+                    child(handler);
+                }
+                NodeView::IfThenElse(a, b, c) | NodeView::For(_, a, b, _, c) => {
+                    child(a);
+                    child(b);
+                    child(c);
+                }
+                NodeView::Sequence(a, b)
+                | NodeView::While(a, b)
+                | NodeView::ForOf(_, a, b)
+                | NodeView::ForAwaitOf(_, a, b) => {
+                    child(a);
+                    child(b);
+                }
+                NodeView::Assign(_, value) => child(value),
+                NodeView::Var(_)
+                | NodeView::GlobalModule(_, _)
+                | NodeView::Const(_)
+                | NodeView::Break
+                | NodeView::Continue => {}
+            }
+        }
+        let mut seen = AHashSet::new();
+        for root in roots {
+            assert!(
+                self.contains(*root),
+                "indexed Lambda diagnostic root is out of range"
+            );
+            visit(self, *root, &mut seen);
+        }
+        seen.len()
+    }
+
     pub(crate) fn contains(&self, node: NodeId) -> bool {
         node.index() < self.nodes.len()
     }
@@ -894,6 +1049,12 @@ pub struct IndexedStorageMeasurements {
     pub side_payload_shallow_capacity_bytes: usize,
     /// Always false until exhaustive nested-allocation accounting is implemented.
     pub nested_heap_bytes_included: bool,
+    /// Shallow side-payload bytes reachable from the current root.
+    pub current_live_side_payload_shallow_bytes: usize,
+    /// Shallow side-payload bytes reachable only through metadata roots.
+    pub metadata_retained_only_side_payload_shallow_bytes: usize,
+    /// Shallow side-payload bytes unreachable from current and metadata roots.
+    pub superseded_unreachable_side_payload_shallow_bytes: usize,
 }
 
 /// Owns the canonical indexed root, its append-only store, and every metadata
@@ -904,6 +1065,8 @@ pub struct IndexedStorageMeasurements {
 pub struct IndexedLambdaContext {
     store: IndexedLambda,
     metadata: IndexedLamStats,
+    #[cfg(test)]
+    substitution_table_peak_unique_nodes: usize,
 }
 
 impl IndexedLambdaContext {
@@ -912,6 +1075,8 @@ impl IndexedLambdaContext {
         Self {
             store: IndexedLambda::from_lambda(lambda),
             metadata: IndexedLamStats::new(exports),
+            #[cfg(test)]
+            substitution_table_peak_unique_nodes: 0,
         }
     }
 
@@ -923,6 +1088,7 @@ impl IndexedLambdaContext {
         Self {
             store,
             metadata: IndexedLamStats::new(exports),
+            substitution_table_peak_unique_nodes: 0,
         }
     }
 
@@ -1097,6 +1263,27 @@ impl IndexedLambdaContext {
         let (side_occupied, side_capacity) = tables
             .into_iter()
             .fold((0, 0), |(ao, ac), (o, c)| (ao + o, ac + c));
+        let payload_bytes = |nodes: &AHashSet<NodeId>| {
+            nodes
+                .iter()
+                .map(|node| self.store.node_side_payload_shallow_bytes(*node))
+                .sum::<usize>()
+        };
+        let metadata_only = metadata
+            .difference(&current)
+            .copied()
+            .collect::<AHashSet<_>>();
+        let unreachable = (0..self.store.nodes.len())
+            .map(|index| NodeId(index as u32))
+            .filter(|node| !live.contains(node))
+            .collect::<AHashSet<_>>();
+        let current_payload = payload_bytes(&current);
+        let metadata_only_payload = payload_bytes(&metadata_only);
+        let unreachable_payload = payload_bytes(&unreachable);
+        debug_assert_eq!(
+            current_payload + metadata_only_payload + unreachable_payload,
+            side_occupied
+        );
         IndexedStorageMeasurements {
             node_allocations: self.store.nodes.len(),
             current_root_edge_visits: current_edges,
@@ -1110,6 +1297,9 @@ impl IndexedLambdaContext {
             side_payload_shallow_occupied_bytes: side_occupied,
             side_payload_shallow_capacity_bytes: side_capacity,
             nested_heap_bytes_included: false,
+            current_live_side_payload_shallow_bytes: current_payload,
+            metadata_retained_only_side_payload_shallow_bytes: metadata_only_payload,
+            superseded_unreachable_side_payload_shallow_bytes: unreachable_payload,
         }
     }
 
@@ -1127,6 +1317,16 @@ impl IndexedLambdaContext {
 
     pub(crate) fn replace_root(&mut self, root: NodeId) {
         self.store.set_root(root);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn record_substitution_table_peak(&mut self, peak: usize) {
+        self.substitution_table_peak_unique_nodes = peak;
+    }
+
+    #[cfg(test)]
+    pub(crate) fn substitution_table_peak_unique_nodes(&self) -> usize {
+        self.substitution_table_peak_unique_nodes
     }
 }
 
