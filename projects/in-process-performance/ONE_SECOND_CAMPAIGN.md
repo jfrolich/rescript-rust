@@ -62,9 +62,9 @@ Each implementation task gets a fresh session. Only one task owns heavy testing 
 
 ## Active work
 
-- Implementation session: `bks-f4716114-50d4-71a7-9e32-5e376b22b74b`.
-- Task: M3, indexed alias simplification, beta reduction and deep flatten, with their shared analysis and constructor helpers.
-- Status: started after M2's owner explicitly released compiler/heavy-test ownership. Production remains unchanged. No performance change has been retained in this campaign yet.
+- M3 implementation session `bks-f4716114-50d4-71a7-9e32-5e376b22b74b` completed and explicitly released compiler/shared-worktree/heavy-test ownership.
+- Next task: M4, indexed alpha conversion and let simplification, in a fresh implementation session.
+- The indexed pipeline remains inactive. M3 extracted a shared primitive-purity helper in active code and validated its output parity. No measured performance gain has been retained in this campaign yet.
 - Previous session `bks-4aaf1530-49fa-702d-9ee3-eb34b0afc450` completed and released compiler/heavy-test ownership after rejecting deep-flatten Box/Vec reuse. An intermediate `GroupArena` was also removed because the existing reverse Vec iterator already avoids copying; the wrapper added links and optional entries without removing work.
 - Parent owns this campaign file. The implementation session owns its code, tests and focused measurement documentation.
 
@@ -100,6 +100,25 @@ Reviewer `bks-b2aa52a4-ccb0-7f38-bd42-3206710a2648` accepted the exact final hea
 Retention measurements partition shallow payload storage into current-root live, metadata-retained-only and unreachable storage, counting shared payloads once. A test-only observer measures temporary substitution-table root reachability. Neither is a total deep-heap or total peak-memory measurement. Repeated rewrites can retain superseded generations; lower wall time has not been established.
 
 This acceptance is limited to inactive M2. It does not establish release-test, full parity, Tella or performance acceptance. The production optimizer, driver and JS consumer remain unchanged.
+
+### Completed inactive indexed alias/beta/deep-flatten, M3
+
+Accepted at `d7af23efdf7a40f53220882f3c7fa1b80afa8a68`. Shared indexed constructors and substitution support real deep flatten, beta reduction, alias simplification and their analysis queries in one owning context. Every pass uses the caller's pipeline-wide identifier generator. External CMJ Lambda import remains an explicit compatibility boundary.
+
+Reviewer `bks-dbfe3094-1852-7075-89fa-956776c91056` rejected the intermediate boxed-nullable identity compensation, incomplete tests and wrong inlining predicate order. All three findings were closed at the final head. Earlier parent review also corrected randomized unused-argument ordering and a duplicate size analysis that omitted logical sparse fields. The implementation now reproduces native `Hash_ident` hashing, bucket traversal, resizing and retained capacity, including failed beta attempts. Native OCaml reference vectors cover initial, resized and repeated calls.
+
+Parent verification at the accepted clean head confirmed:
+
+- Full default debug compiler tests: 1,245 passed, 108 ignored. Comptime: 16 passed, 23 ignored. Doctests: 9 passed, 7 ignored. Focused indexed tests: 49 passed.
+- Release compiler and rewatch builds passed. These were builds, not release test runs.
+- Release non-external output parity: optimized Lambda 610/610; JavaScript fixtures 344/344 and snapshots 610/610; diagnostics 1,431/1,431.
+- Release bsc SHA-256: `8cb1673e5ab0d0f2ef95085e025cec57d54cb3756d88018285c557dc3ae51968`.
+- Release rewatch SHA-256: `592e4e5fe1e9b02f5f09173c01b646dd40e3470fff15944cf993b0efe2c252cd`.
+- Logs: `/tmp/indexed-m3-rereview-full-tests.log`, `/tmp/indexed-m3-rereview-release-compiler-build.log`, `/tmp/indexed-m3-rereview-release-rewatch-build.log`, `/tmp/indexed-m3-review-fixes-focused.log`, `/tmp/indexed-m3-final-optimized-lambda-parity.log`, `/tmp/indexed-m3-final-js-parity.log`, `/tmp/indexed-m3-final-diagnostic-parity.log`.
+
+The reviewer audited source without running builds or tests. Parent verification checked logs, hashes and Git state. This accepts inactive M3 and the behavior-preserving active purity-helper extraction, not production integration or a performance gain. No external Tella parity or timing was run. The historical external OCaml `bs-css`/`Belt` blocker remains unresolved.
+
+Coverage is not exhaustive. Debug-tree comparisons cover the exercised fields, but custom `Ident::Debug` omits some identifier flags. Remaining test gaps include in-range `Na`, allocating-constant and unknown-record field fallbacks, external-specific async/directive/arity rejection, and separate null/undefined `NormalOptional` cases. These did not expose source mismatches in review. Substitution-table peak assertions remain partial reachability checks, not total peak-heap measurements.
 
 ### Rejected deep-flatten trial
 
