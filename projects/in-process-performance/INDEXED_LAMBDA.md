@@ -27,7 +27,7 @@ The initial representation consists of:
 - A dense `Vec<IndexedNode>` containing only a discriminant and compact scalar/index fields.
 - Per-kind cold payload vectors for values that enlarge uncommon variants: constants, apply metadata, function metadata/parameters, primitives/locations, switch metadata, and strings.
 - Contiguous side arrays for ordered child `NodeId`s, recursive bindings, keyed switch cases, and string-switch cases. Ranges are `(start: u32, len: u32)` and preserve insertion/source order.
-- A root `NodeId` and explicit arena-bound borrowed APIs (`node`, `children`, `bindings`, switch-case access). Opaque IDs are interpreted only through their owning `IndexedLambda`; Lambda-bearing metadata carries the owner lifetime rather than eagerly materializing trees or allowing IDs to cross stores. Callers do not retain payload references while appending nodes.
+- A root `NodeId` and explicit context-paired borrowed APIs (`node`, `children`, `bindings`, switch-case access). M1 does not brand each `NodeId` with an arena: callers must interpret it only through the `IndexedLambda` from which it came. `IndexedLamStats<'arena>` keeps that arena alive and supplies the paired lookup context, but cannot reject a foreign store's numerically valid ID. Callers do not retain payload references while appending nodes.
 
 Children are inserted before parents during the initial conversion, giving postorder locality without changing semantic traversal. Passes must traverse children in the exact order of their OCaml counterparts rather than relying on physical node order. Sharing is explicit: two parent payloads may name the same `NodeId`. Rewrites do not mutate a shared child in place; they return replacement roots, so independent occurrences remain independently rewritable unless a pass deliberately reuses a result.
 
@@ -51,13 +51,15 @@ M1 is an inactive, buildable, regression-tested migration foundation. It makes n
 Implemented at `f2f755257` / `a299a3f4c`:
 
 - `lambda/indexed.rs` owns the 8-byte hot node tags, checked `u32` payload/range/index insertion, per-kind cold payload tables, source-ordered side tables, full owned conversion, and compatibility materialization.
-- `lambda/lam_pass_collect_indexed.rs` directly traverses indexed nodes for collect and arity analysis. `IndexedLamStats<'arena>` owns no recursive Lambda payload: its option/block/function metadata keeps `NodeId`s and an arena lifetime. External arity cache/resolver calls preserve the existing order.
+- `lambda/lam_pass_collect_indexed.rs` directly traverses indexed nodes for collect and arity analysis. `IndexedLamStats<'arena>` owns no recursive Lambda payload: its option/block/function metadata keeps `NodeId`s and a borrowed lookup context. This keeps the arena alive but is not compile-time arena branding for individual IDs. External arity cache/resolver calls preserve the existing order.
 - Differential tests compare tree and indexed metadata, arity, and visited-edge order, including repeated visits through a deliberately shared child. Storage tests cover every Lambda node family, case/binding ordering, compact handle sizes, and independent parent rewrites over a shared immutable child.
 - Production `lam_compile_main`, driver ownership, and JS lowering remain unchanged. There is no performance claim and no Tella timing for this inactive foundation.
 
 ### M2: exits segment (next handoff)
 
-Port exit counting, bounded-variable analysis, substitution, and `simplify_exits`. Keep handler roots as `NodeId`s in substitution tables. The first integration candidate must include enough contiguous work to avoid an unamortized round trip: initial deep flatten (or direct indexed lowering at its output), collect, exits, and the following collect should share one store. Before retaining that candidate, count reachable roots plus superseded nodes/payload bytes and determine whether unchanged-node reuse offsets retained rewrite generations. Keep production unchanged if the candidate still materializes before its consumer.
+First introduce an owning `IndexedLambdaContext` (or equivalent split-field design) for the arena and ID-bearing metadata. M1's `IndexedLamStats<'arena>` immutably borrows the arena, so it cannot coexist with `&mut` appends during exits. M2 must support safe split borrows of storage and metadata without `RefCell`, `unsafe`, whole-store cloning, or retaining payload references across append calls. This context is also the boundary for enforcing or checking the same-store `NodeId` contract more strongly.
+
+Then port exit counting, bounded-variable analysis, substitution, and `simplify_exits`. Keep handler roots as `NodeId`s in substitution tables. The first integration candidate must include enough contiguous work to avoid an unamortized round trip: initial deep flatten (or direct indexed lowering at its output), collect, exits, and the following collect should share one store. Before retaining that candidate, count reachable roots plus superseded nodes/payload bytes and determine whether unchanged-node reuse offsets retained rewrite generations. Keep production unchanged if the candidate still materializes before its consumer.
 
 ### M3: alias/deep-flatten segment
 
