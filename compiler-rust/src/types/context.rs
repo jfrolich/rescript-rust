@@ -2249,6 +2249,13 @@ impl TypeContext {
         self.id_gen.current_stamp()
     }
 
+    /// Shares the compilation's identifier stream with additive downstream
+    /// stages. M5's inactive indexed path uses this instead of reconstructing
+    /// a fresh generator from a scanned stamp frontier.
+    pub(crate) fn id_generator(&self) -> Arc<IdGenerator> {
+        Arc::clone(&self.id_gen)
+    }
+
     pub(crate) fn current_def_level_state(&self) -> (i32, i32, i32, usize) {
         (
             self.current_level.get(),
@@ -2668,6 +2675,16 @@ impl TypeContext {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn downstream_id_generator_accessor_keeps_compilation_identity() {
+        let generator = Arc::new(IdGenerator::with_start_stamp(17));
+        let ctx = TypeContext::new(generator.clone());
+        let downstream = ctx.id_generator();
+        assert!(Arc::ptr_eq(&generator, &downstream));
+        assert_eq!(downstream.create("downstream").stamp(), 18);
+        assert_eq!(ctx.current_stamp(), 18);
+    }
 
     #[test]
     fn test_new_var() {

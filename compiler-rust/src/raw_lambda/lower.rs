@@ -5,6 +5,7 @@
 //! point in `driver.rs`.
 
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
 use crate::context::IdGenerator;
 use crate::ident::Ident;
@@ -23,16 +24,23 @@ struct LoweringContext {
     alias_tbl: HashMap<Ident, Ident>,
     exit_map: HashMap<i32, i32>,
     exported_idents: HashSet<Ident>,
-    id_gen: IdGenerator,
+    id_gen: Arc<IdGenerator>,
 }
 
 impl LoweringContext {
     fn new(exported_idents: HashSet<Ident>, start_stamp: i32) -> Self {
+        Self::with_id_gen(
+            exported_idents,
+            Arc::new(IdGenerator::with_start_stamp(start_stamp)),
+        )
+    }
+
+    fn with_id_gen(exported_idents: HashSet<Ident>, id_gen: Arc<IdGenerator>) -> Self {
         Self {
             alias_tbl: HashMap::new(),
             exit_map: HashMap::new(),
             exported_idents,
-            id_gen: IdGenerator::with_start_stamp(start_stamp),
+            id_gen,
         }
     }
 
@@ -1796,6 +1804,14 @@ pub fn lower_to_lambda_with_start_stamp(raw: RawLambda, start_stamp: i32) -> Lam
     LoweringContext::new(exported_idents, start_stamp).lower_lambda(raw)
 }
 
+/// Additive M5 entrypoint for the inactive indexed pipeline. The caller keeps
+/// this exact generator through optimization and later JS lowering.
+pub(crate) fn lower_to_lambda_with_id_gen(raw: RawLambda, id_gen: Arc<IdGenerator>) -> Lambda {
+    let mut exported_idents = HashSet::new();
+    collect_exported_idents(&raw, &mut exported_idents);
+    LoweringContext::with_id_gen(exported_idents, id_gen).lower_lambda(raw)
+}
+
 pub fn lower_to_lambda(raw: RawLambda) -> Lambda {
     let start_stamp = max_ident_stamp(&raw);
     lower_to_lambda_with_start_stamp(raw, start_stamp)
@@ -1809,6 +1825,17 @@ mod tests {
     use crate::lambda::lam_compat::LetKind;
     use crate::lambda::lam_constant::{ConstructorRuntimeTag, ConstructorTag, StringDelim};
     use crate::lambda::lam_primitive::{ExternalFfiKind, JsRawInfo, Mutable};
+
+    #[test]
+    fn shared_generator_entrypoint_preserves_the_caller_owned_stamp_stream() {
+        let generator = Arc::new(IdGenerator::with_start_stamp(41));
+        let lowered = lower_to_lambda_with_id_gen(RawLambda::unit(), generator.clone());
+        assert!(matches!(
+            lowered,
+            Lambda::Lconst(Constant::JsUndefined { is_unit: true })
+        ));
+        assert_eq!(generator.create("after_lower").stamp(), 42);
+    }
 
     #[test]
     fn lowers_unit_constructor_pointer_to_unit_constant() {
