@@ -49,8 +49,8 @@ All eight screening builds and all 48 prescribed paired builds exited zero, comp
 
 Paired E-minus-control differences, 95% Student-t intervals with seven degrees of freedom:
 
-- D/E serial: −102.06ms [−196.69, −7.43], a 0.522% mean reduction. Seven of eight pairs improve. This cohort supports a small serial gain; the interval narrowly excludes zero.
-- D/E parallel: −24.16ms [−59.89, +11.57], a 0.492% point estimate improvement. Two pairs regress. The parallel result is **inconclusive**, not proof of zero benefit or a slowdown.
+- D/E serial: −102.06ms [−196.69, −7.43], a 0.522% mean reduction. Seven of eight pairs improve; pair 8 regresses +85.380708ms. This cohort supports a small serial gain; the interval narrowly excludes zero.
+- D/E parallel: −24.16ms [−59.89, +11.57], a 0.492% point estimate improvement. Pairs 1 and 4 regress +34.050750ms and +9.051793ms. Parallel mean user plus system CPU increases 81.25ms despite the lower wall point estimate; no parallel CPU reduction is claimed. The parallel result is **inconclusive**, not proof of zero benefit or a slowdown.
 - Separate A/E parallel: +230.71ms [+193.37, +268.06], E 4.964% slower. E loses all eight pairs. This is a current same-toolchain historical-stack comparison, not isolated attribution to the five projections.
 
 Screening stayed separate: D/E means were 19.238079/19.064831s at w1 and 4.912922/4.827921s at w12. SDs were .234686/.018760s and .004658/.032833s; ranges were 19.072131–19.404027/19.051566–19.078096s and 4.909628–4.916215/4.804705–4.851138s. Its larger parallel point estimate does not replace the fixed paired interval.
@@ -71,7 +71,7 @@ Reproduction uses scripts/snapshot_projections_{gates,fixtures,runtime,prepare,m
 
 ## Completed disposition
 
-Normal signed-off revert 9c24683a75ec32c6ed1865344b5c991694811f76 removes only candidate 08c884be8. Compiler and rewatch source now match D, 5dc38ba2154e158d43436ada2142a13eef9f2c8c, exactly. A targeted cargo check passes after restoration. Full gates were not repeated for unchanged D source; the gate results above belong to E. Existing target/release executables remain E build artifacts, not a claim of rebuilt D binaries. Immutable D and E copies are separately labeled and hash-verified.
+Normal signed-off revert 9c24683a75ec32c6ed1865344b5c991694811f76 removes only candidate 08c884be8. Compiler and rewatch source now match D, 5dc38ba2154e158d43436ada2142a13eef9f2c8c, exactly. A targeted cargo check passes after restoration. Full gates were not repeated for unchanged D source; the gate results above belong to E. Ordinary target/release bsc and rewatch were subsequently restored from verified immutable D controls, without changing those controls or rerunning gates/timing. Restored hashes are a5ed9a622e3b787a8dae0cb5228a5eb5717849314d0af40c05f9689c6a6788af and 5fe8158df5d3201d4cf07fd962cf61b22edf63874b03bfd5328e1fe16f47c3c4. Immutable E evidence remains separately labeled and unchanged. This is executable restoration, not a new D build.
 
 Tella remains pinned with exactly the original 18 gen.ts modifications, individually restored and hash-verified. All 414 compiler/rewatch files are verified against the restored D archive. No heavy process or profiler remains. Candidate code/tests/fixture remain recoverable at 08c884be8 and in saved candidate.patch/candidate-source.tar. The fixture reproduction script reads the exact historical source if the normal revert removed its path; it does not silently skip the new fixture.
 
