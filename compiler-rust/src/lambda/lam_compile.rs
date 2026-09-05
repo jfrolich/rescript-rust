@@ -289,7 +289,7 @@ fn cmj_export_arity_to_external(info: CmjExportArity) -> ExternalArityInfo {
 
 /// Lambda compiler to JS IR.
 pub struct LambdaCompiler {
-    pub(crate) id_gen: IdGenerator,
+    pub(crate) id_gen: Arc<IdGenerator>,
     pub(crate) module_path_resolver: Option<ModulePathResolver>,
     pub(crate) jsx_preserve: bool,
     pub(crate) check_div_by_zero: bool,
@@ -397,7 +397,7 @@ impl LambdaCompiler {
     /// Create a new compiler.
     pub fn new() -> Self {
         Self {
-            id_gen: IdGenerator::new(),
+            id_gen: Arc::new(IdGenerator::new()),
             module_path_resolver: None,
             jsx_preserve: false,
             check_div_by_zero: true,
@@ -422,6 +422,23 @@ impl LambdaCompiler {
         }
     }
 
+    pub(crate) fn with_shared_generator_and_options(
+        id_gen: Arc<IdGenerator>,
+        module_path_resolver: Option<ModulePathResolver>,
+        jsx_preserve: bool,
+        check_div_by_zero: bool,
+        cross_module_inline: bool,
+    ) -> Self {
+        let mut compiler = Self::with_module_path_resolver_and_options(
+            module_path_resolver,
+            jsx_preserve,
+            check_div_by_zero,
+            cross_module_inline,
+        );
+        compiler.id_gen = id_gen;
+        compiler
+    }
+
     /// Create a compiler with module import resolution context.
     pub fn with_module_path_resolver(module_path_resolver: Option<ModulePathResolver>) -> Self {
         Self::with_module_path_resolver_and_jsx_preserve(module_path_resolver, false)
@@ -443,7 +460,7 @@ impl LambdaCompiler {
         cross_module_inline: bool,
     ) -> Self {
         Self {
-            id_gen: IdGenerator::new(),
+            id_gen: Arc::new(IdGenerator::new()),
             module_path_resolver,
             jsx_preserve,
             check_div_by_zero,
