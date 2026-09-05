@@ -151,10 +151,14 @@ pub(crate) fn simple_beta_reduce(
             })
             .collect()
     }
-    let mut result = match store.snapshot(body) {
+    let (mut result, fold_order) = match store.snapshot(body) {
         NodeSnapshot::Prim(primitive, body_args, loc) => {
+            let fold_order = reference_fold_order(params, hash_capacity);
             let body_args = replace(store, &indices, &mut usages, &body_args)?;
-            append_rebuilt(store, NodeSnapshot::Prim(primitive, body_args, loc))
+            (
+                append_rebuilt(store, NodeSnapshot::Prim(primitive, body_args, loc)),
+                fold_order,
+            )
         }
         NodeSnapshot::Apply(function, body_args, info, _)
             if match store.view(function) {
@@ -165,6 +169,7 @@ pub(crate) fn simple_beta_reduce(
                 _ => false,
             } =>
         {
+            let fold_order = reference_fold_order(params, hash_capacity);
             let body_args = replace(store, &indices, &mut usages, &body_args)?;
             let function = if let NodeView::Var(id) = store.view(function) {
                 match indices.get(id).map(|index| &mut usages[*index]) {
@@ -178,11 +183,14 @@ pub(crate) fn simple_beta_reduce(
             } else {
                 function
             };
-            append_rebuilt(store, NodeSnapshot::Apply(function, body_args, info, false))
+            (
+                append_rebuilt(store, NodeSnapshot::Apply(function, body_args, info, false)),
+                fold_order,
+            )
         }
         _ => return None,
     };
-    for index in reference_fold_order(params, hash_capacity) {
+    for index in fold_order {
         let usage = &usages[index];
         if !usage.used {
             result = append_rebuilt(store, NodeSnapshot::Sequence(usage.node, result));
@@ -480,6 +488,31 @@ mod tests {
             current = *rest;
         }
         assert_eq!(names, vec!["c", "b"]);
+    }
+
+    #[test]
+    fn failed_simple_reduction_retains_reference_resize_capacity() {
+        let params = ids(1, 65);
+        let body = crate::lambda::Lambda::prim(
+            Primitive::Paddint,
+            vec![
+                crate::lambda::Lambda::var(params[0].clone()),
+                crate::lambda::Lambda::var(params[0].clone()),
+            ],
+            Location::none(),
+        );
+        let mut store = IndexedLambda::from_lambda(body);
+        let root = store.root();
+        let args: Vec<_> = (0..65)
+            .map(|i| {
+                store.append_compat_lambda(crate::lambda::Lambda::const_(
+                    crate::lambda::Constant::int(i),
+                ))
+            })
+            .collect();
+        let mut capacity = 32;
+        assert!(simple_beta_reduce(&mut store, &params, root, &args, &mut capacity).is_none());
+        assert_eq!(capacity, 64);
     }
 
     #[test]
