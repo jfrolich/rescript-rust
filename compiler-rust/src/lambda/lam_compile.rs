@@ -8330,3 +8330,7 @@ mod tests;
 #[cfg(test)]
 #[path = "lam_compile_allocator_tests.rs"]
 mod allocator_tests;
+
+#[cfg(test)]
+#[path = "lam_compile_input_js_tests.rs"]
+mod input_js_tests;

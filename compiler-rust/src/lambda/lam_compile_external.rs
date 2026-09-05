@@ -4,14 +4,15 @@
 //! Extracted from `lam_compile.rs` for organization.
 
 use super::js_exp_make::{
-    eta_wrapped_args_match_params, external_polyvar_int_dispatch, external_polyvar_string_dispatch,
-    int_expr, is_nullish_literal, is_optional_block, is_pure_subexpression,
+    external_polyvar_int_dispatch, external_polyvar_string_dispatch, int_expr,
+    is_nullish_literal, is_optional_block, is_pure_subexpression,
     js_expr_no_side_effects, js_seq, poly_var_tag_access, poly_var_value_access,
     remove_pure_subexpression, runtime_member_for_eta_wrapped_primitive, string_switch_iife,
 };
 use super::lam_compile::{
     Compiled, ExternalModuleCacheKey, LambdaCompiler, call_info_of_apply_status,
 };
+use super::lam_compile_input::{FunctionInput, LambdaInput, LambdaInputView};
 use crate::ident::Ident;
 use crate::js_ir::op::{
     IdentInfo, ImportAttributes as JsImportAttributes, Kind, Number, PropertyName, UsedStats,
@@ -274,17 +275,33 @@ impl LambdaCompiler {
         &self,
         func: &crate::lambda::LFunction,
     ) -> Option<Expression> {
+        self.compile_eta_wrapped_runtime_alias_input(FunctionInput {
+            arity: func.arity,
+            params: &func.params,
+            body: (&func.body).into(),
+            attr: &func.attr,
+        })
+    }
+
+    pub(crate) fn compile_eta_wrapped_runtime_alias_input(
+        &self,
+        func: FunctionInput<'_>,
+    ) -> Option<Expression> {
         if func.attr.one_unit_arg || func.attr.async_ || func.attr.directive.is_some() {
             return None;
         }
 
-        let Lambda::Lprim(info) = func.body.as_ref() else {
+        let LambdaInputView::Prim(primitive, args, _) = func.body.view() else {
             return None;
         };
-        if !eta_wrapped_args_match_params(&func.params, &info.args) {
+        if func.params.len() != args.len()
+            || !func.params.iter().zip(args.iter()).all(|(param, arg)| {
+                matches!(arg.view(), LambdaInputView::Var(id) if id.same(param))
+            })
+        {
             return None;
         }
-        let (module_name, member) = runtime_member_for_eta_wrapped_primitive(&info.primitive)?;
+        let (module_name, member) = runtime_member_for_eta_wrapped_primitive(primitive)?;
         Some(self.runtime_member_expr(module_name, member))
     }
 
@@ -292,14 +309,21 @@ impl LambdaCompiler {
         &mut self,
         lam: &Lambda,
     ) -> Option<Expression> {
+        self.try_compile_identity_module_return_input(lam.into())
+    }
+
+    pub(crate) fn try_compile_identity_module_return_input(
+        &mut self,
+        lam: LambdaInput<'_>,
+    ) -> Option<Expression> {
         let mut module_target_var: Option<Ident> = None;
         let mut module_target_global: Option<(Ident, bool)> = None;
         let mut alias_chain = Vec::new();
         let mut cursor = lam;
 
-        let mut note_target = |target: &Lambda| -> Option<()> {
-            match target {
-                Lambda::Lvar(id) => {
+        let mut note_target = |target: LambdaInput<'_>| -> Option<()> {
+            match target.view() {
+                LambdaInputView::Var(id) => {
                     if module_target_global.is_some()
                         || module_target_var
                             .as_ref()
@@ -310,17 +334,17 @@ impl LambdaCompiler {
                     module_target_var.get_or_insert_with(|| id.clone());
                     Some(())
                 }
-                Lambda::LglobalModule(id, dynamic_import) => {
+                LambdaInputView::GlobalModule(id, dynamic_import) => {
                     if module_target_var.is_some()
                         || module_target_global.as_ref().is_some_and(
                             |(current_id, current_dynamic_import)| {
-                                !current_id.same(id) || *current_dynamic_import != *dynamic_import
+                                !current_id.same(id) || *current_dynamic_import != dynamic_import
                             },
                         )
                     {
                         return None;
                     }
-                    module_target_global.get_or_insert_with(|| (id.clone(), *dynamic_import));
+                    module_target_global.get_or_insert_with(|| (id.clone(), dynamic_import));
                     Some(())
                 }
                 _ => None,
@@ -328,43 +352,43 @@ impl LambdaCompiler {
         };
 
         loop {
-            match cursor {
-                Lambda::Llet(kind, alias_id, value, body)
+            match cursor.view() {
+                LambdaInputView::Let(kind, alias_id, value, body)
                     if matches!(kind, LetKind::Alias | LetKind::Strict | LetKind::StrictOpt) =>
                 {
-                    let Lambda::Lprim(info) = value.as_ref() else {
+                    let LambdaInputView::Prim(primitive, args, _) = value.view() else {
                         return None;
                     };
-                    let Primitive::Pfield(index, FieldDbgInfo::Module { name }) = &info.primitive
-                    else {
+                    let Primitive::Pfield(index, FieldDbgInfo::Module { name }) = primitive else {
                         return None;
                     };
-                    let [target] = info.args.as_slice() else {
+                    if args.len() != 1 {
                         return None;
-                    };
+                    }
+                    let target = args.first()?;
                     note_target(target)?;
 
                     alias_chain.push((alias_id.clone(), *index, name.clone()));
-                    cursor = body.as_ref();
+                    cursor = body;
                 }
-                Lambda::Lprim(info) => {
+                LambdaInputView::Prim(primitive, args, _) => {
                     let Primitive::Pmakeblock(TagInfo::Module(fields), Mutable::Immutable) =
-                        &info.primitive
+                        primitive
                     else {
                         return None;
                     };
-                    if alias_chain.len() != fields.len() || info.args.len() != fields.len() {
+                    if alias_chain.len() != fields.len() || args.len() != fields.len() {
                         // The simplifier can inline the alias chain into the final
                         // Pmakeblock args, so only the final runtime field count is exact.
-                        if info.args.len() != fields.len() {
+                        if args.len() != fields.len() {
                             return None;
                         }
                     }
 
-                    for (position, arg) in info.args.iter().enumerate() {
+                    for (position, arg) in args.iter().enumerate() {
                         let expected_field = &fields[position];
-                        match arg {
-                            Lambda::Lvar(arg_id) => {
+                        match arg.view() {
+                            LambdaInputView::Var(arg_id) => {
                                 let Some((_, field_index, field_name)) = alias_chain
                                     .iter()
                                     .find(|(alias_id, _, _)| alias_id.same(arg_id))
@@ -375,21 +399,21 @@ impl LambdaCompiler {
                                     return None;
                                 }
                             }
-                            Lambda::Lprim(crate::lambda::PrimInfo {
-                                primitive:
-                                    Primitive::Pfield(
-                                        field_index,
-                                        FieldDbgInfo::Module { name: field_name },
-                                    ),
+                            LambdaInputView::Prim(
+                                Primitive::Pfield(
+                                    field_index,
+                                    FieldDbgInfo::Module { name: field_name },
+                                ),
                                 args,
-                                ..
-                            }) => {
+                                _,
+                            ) => {
                                 if *field_index != position as i32 || field_name != expected_field {
                                     return None;
                                 }
-                                let [target] = args.as_slice() else {
+                                if args.len() != 1 {
                                     return None;
-                                };
+                                }
+                                let target = args.first()?;
                                 note_target(target)?;
                             }
                             _ => return None,

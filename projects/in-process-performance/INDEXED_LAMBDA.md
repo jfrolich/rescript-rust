@@ -128,6 +128,20 @@ Checkpoints `1aafdbd3a` and `1dc615ca5` implement the owner-private mutable CMJ 
 
 Focused tests cover same-store argument reuse, shared-generator allocation, successful beta without an arity query, and rejected-function arity fallback. One test materializes the reduced result at a test-only compatibility boundary before invoking the old recursive compiler. This does not prove direct indexed JS consumption and is not M6 acceptance. The common consumer must call `prepare_indexed_external_field_apply`, recursively compile `Reduced(NodeId)` without materialization, and complete every Lambda family before activation.
 
+### M6 shared JS helper checkpoint (not a consumer completion)
+
+The recursive primitive caller now delegates final JS emission to `compile_primitive_js`, which accepts only JS expressions, the already-ordered prelude and primitive metadata. Its hoisted external-field descriptor lookup accepts borrowed recursive/indexed inputs and still runs before argument compilation (`compiler/core/lam_compile.ml:284-302`, `1734-1757`). Eta runtime aliases and identity-module returns also use common borrowed input readers with thin recursive production wrappers. These readers never materialize indexed subtrees. They do not own mutable recursion.
+
+Three direct JS helper tests cover indexed identity-module reads with explicit identifier name/stamp/all-flags and dynamic-import checks, indexed eta guards, and primitive JS emission retaining the prelude and the actual shared dynamic-import generator. The initial inline identity fixture was folded by the existing producer smart constructor before reaching the tested helper; the fixture now constructs that consumer shape explicitly. This is helper coverage, not the required sealed producer-to-JS test.
+
+Validation under the heavy-test lock:
+- Debug default compiler tests: 1315 library passed / 108 ignored, 16 comptime passed / 23 ignored, 9 doctests passed / 7 ignored; binaries included.
+- Release compiler and rewatch builds passed. Release rewatch tests: 150 passed.
+- Release parity: typedtree 610/610, raw Lambda 610/610, optimized Lambda 610/610, focused JS 344/344, JS snapshots 610/610, diagnostics 1431/1431.
+- **Release default compiler tests are not green.** `parser::benchmark::tests::benchmark_index` failed its 1.20x threshold at 1.26x, then 1.23x on one full-suite retry. Both attempts had 1314 library tests passing and 108 ignored; the failure stops later targets. No threshold or test suppression was changed. Logs: `/tmp/m6-consumer-release-tests.log` and `/tmp/m6-consumer-release-tests-retry.log`.
+
+Mutable `NodeId` recursion, actual application-site CMJ `Reduced` consumption, all control-flow families and the sealed M5-to-JS boundary remain unimplemented. These results validate the active helper refactor only. There is no M6 acceptance, activation, Tella run or speed claim.
+
 ## Validation at every checkpoint
 
 - Unit tests for semantic output, source-order traversal, shared-child isolation, and exact rewrite decisions.
