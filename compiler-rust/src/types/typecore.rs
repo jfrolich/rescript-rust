@@ -9865,10 +9865,7 @@ fn type_application(
     // compiler/ml/typecore.ml:4049-4069: a total call of an unknown
     // function commits it to one n-ary arrow matching the complete call site.
     let uncommitted_funct_ty = crate::types::ctype::expand_head(ctx, env, typed_funct.exp_type);
-    if total_app && {
-        let desc = ctx.borrow_desc(uncommitted_funct_ty);
-        matches!(&*desc, TypeDesc::Tvar(_))
-    } {
+    if total_app && matches!(&*ctx.get_desc(uncommitted_funct_ty), TypeDesc::Tvar(_)) {
         let params = args
             .iter()
             .map(|(label, _)| {
@@ -9898,22 +9895,19 @@ fn type_application(
     // thunks are retained and forced in declaration order.
     let expanded_funct_ty = crate::types::ctype::expand_head(ctx, env, typed_funct.exp_type);
     let function_level = ctx.get_level(ctx.repr(expanded_funct_ty));
-    let (declared_params, declared_ret) = {
-        let desc = ctx.borrow_desc(expanded_funct_ty);
-        match &*desc {
-            TypeDesc::Tarrow { args, ret } => (args.clone(), *ret),
-            TypeDesc::Tvar(_) => {
-                return Err(TypeCoreError::ApplyNonFunction {
-                    loc: funct.pexp_loc,
-                    typ: expanded_funct_ty,
-                });
-            }
-            _ => {
-                return Err(TypeCoreError::ApplyNonFunction {
-                    loc: funct.pexp_loc,
-                    typ: expanded_funct_ty,
-                });
-            }
+    let (declared_params, declared_ret) = match &*ctx.get_desc(expanded_funct_ty) {
+        TypeDesc::Tarrow { args, ret } => (args.clone(), *ret),
+        TypeDesc::Tvar(_) => {
+            return Err(TypeCoreError::ApplyNonFunction {
+                loc: funct.pexp_loc,
+                typ: expanded_funct_ty,
+            });
+        }
+        _ => {
+            return Err(TypeCoreError::ApplyNonFunction {
+                loc: funct.pexp_loc,
+                typ: expanded_funct_ty,
+            });
         }
     };
     let expanded_inst_ty = crate::types::ctype::expand_head(
@@ -9921,14 +9915,11 @@ fn type_application(
         env,
         crate::types::instance(ctx, typed_funct.exp_type),
     );
-    let (inst_params, inst_ret) = {
-        let desc = ctx.borrow_desc(expanded_inst_ty);
-        match &*desc {
-            TypeDesc::Tarrow { args, ret } if args.len() == declared_params.len() => {
-                (args.clone(), *ret)
-            }
-            _ => unreachable!("instancing a declared n-ary arrow preserves its shape"),
+    let (inst_params, inst_ret) = match &*ctx.get_desc(expanded_inst_ty) {
+        TypeDesc::Tarrow { args, ret } if args.len() == declared_params.len() => {
+            (args.clone(), *ret)
         }
+        _ => unreachable!("instancing a declared n-ary arrow preserves its shape"),
     };
     let function_arity = declared_params.len();
     if total_app && args.len() > function_arity {
