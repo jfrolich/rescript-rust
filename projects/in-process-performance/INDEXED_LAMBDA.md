@@ -46,9 +46,18 @@ The compatibility materializer uses the root-directed semantic traversal, not ar
 
 M1 is an inactive, buildable, regression-tested migration foundation. It makes no wall-time claim. Production integration waits until enough contiguous rewriting passes and the consumer use the same store without an intermediate recursive materialization.
 
-### M2: exits segment
+### M1 status (implemented, inactive)
 
-Port exit counting, bounded-variable analysis, substitution, and `simplify_exits`. Keep handler roots as `NodeId`s in substitution tables. The same indexed store then survives collect -> exits -> collect without materialization.
+Implemented at `f2f755257` / `a299a3f4c`:
+
+- `lambda/indexed.rs` owns the 8-byte hot node tags, checked `u32` payload/range/index insertion, per-kind cold payload tables, source-ordered side tables, full owned conversion, and compatibility materialization.
+- `lambda/lam_pass_collect_indexed.rs` directly traverses indexed nodes for collect and arity analysis. `IndexedLamStats<'arena>` owns no recursive Lambda payload: its option/block/function metadata keeps `NodeId`s and an arena lifetime. External arity cache/resolver calls preserve the existing order.
+- Differential tests compare tree and indexed metadata, arity, and visited-edge order, including repeated visits through a deliberately shared child. Storage tests cover every Lambda node family, case/binding ordering, compact handle sizes, and independent parent rewrites over a shared immutable child.
+- Production `lam_compile_main`, driver ownership, and JS lowering remain unchanged. There is no performance claim and no Tella timing for this inactive foundation.
+
+### M2: exits segment (next handoff)
+
+Port exit counting, bounded-variable analysis, substitution, and `simplify_exits`. Keep handler roots as `NodeId`s in substitution tables. The first integration candidate must include enough contiguous work to avoid an unamortized round trip: initial deep flatten (or direct indexed lowering at its output), collect, exits, and the following collect should share one store. Before retaining that candidate, count reachable roots plus superseded nodes/payload bytes and determine whether unchanged-node reuse offsets retained rewrite generations. Keep production unchanged if the candidate still materializes before its consumer.
 
 ### M3: alias/deep-flatten segment
 
