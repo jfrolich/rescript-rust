@@ -150,6 +150,14 @@ The same owner also lowers primitive operands left-to-right through the shared J
 
 Focused check and four indexed-owner tests pass. Tests now compile an actual CMJ `Reduced` original argument and an imported beta-reduced try node to JS through the same indexed continuation, checking physical argument ID reuse, source locations, beta/JS stamps and explicit flags, generator Arc identity, rejection without import, arity-query-before-argument timing, and native call visit order. The fixture continuation is intentionally closed over the moved families; a full general dispatcher, remaining control-flow modes, grouped M5 entrypoint and full acceptance validation are still pending. This is substantive application-path progress, not M6 completion. No release benchmark retry or full release gate cycle was run for this checkpoint.
 
+### M6 closed function/loop operations (continuing)
+
+The mutable owner now lowers function bodies through an explicit return continuation and loops through explicit value/effect continuations. It handles while, inclusive/exclusive range, for-of/for-await-of, labeled break/continue, and assignment including the native offset fast path. Function scope enter/leave is shared with the legacy compiler; no store borrow crosses body compilation and function attributes/parameter flags remain intact.
+
+Order follows the OCaml source rather than legacy Rust ordering: range finish is compiled before start in the native tuple (`compiler/core/lam_compile.ml:1268`), and unused for-of binders are allocated before iterable compilation (`1311-1316`, `1334-1339`). For-of reuses M5's full-flag free-variable set semantics, not identity-only membership. Loop/assignment expression results retain `E.unit`'s `is_unit=true`.
+
+Nine indexed-owner tests now pass, including direct JS loop shapes, original full-flag identifiers versus unused binders, exact placeholder/iterable allocation order, range handle selection/order, lazy/shared labels and function control-state restoration. The focused `lambda::lam_compile` run passes 372 tests with 73 ignored. The general dispatcher and remaining return/assign/effect/catch/switch/group integration remain pending. These closed continuations are not an unsupported-family fallback and do not materialize indexed nodes.
+
 ## Validation at every checkpoint
 
 - Unit tests for semantic output, source-order traversal, shared-child isolation, and exact rewrite decisions.

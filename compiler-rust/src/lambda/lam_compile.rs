@@ -324,6 +324,15 @@ impl std::ops::Deref for LambdaIdGenerator {
     }
 }
 
+struct SavedFunctionScope {
+    switch_depth: i32,
+    loop_stack: Vec<crate::lambda::lam_compile_context::LoopFrame>,
+    static_handlers: Vec<StaticHandler>,
+    static_jump_handlers: Vec<StaticJumpHandler>,
+    fallthrough_return_handlers: Vec<FallthroughReturnHandler>,
+    try_body_depth: usize,
+}
+
 /// Lambda compiler to JS IR.
 pub struct LambdaCompiler {
     pub(crate) id_gen: LambdaIdGenerator,
@@ -1845,21 +1854,30 @@ impl LambdaCompiler {
         // Lam_compile_context.empty_handler_map`, `switch_depth = 0`, and
         // `loop_stack = []`. Staticcatch jump tables cannot cross function
         // boundaries, so the Rust handler stacks must be cleared here too.
-        let saved_switch_depth = std::mem::replace(&mut self.switch_depth, 0);
-        let saved_loop_stack = std::mem::take(&mut self.loop_stack);
-        let saved_static_handlers = std::mem::take(&mut self.static_handlers);
-        let saved_static_jump_handlers = std::mem::take(&mut self.static_jump_handlers);
-        let saved_fallthrough_return_handlers =
-            std::mem::take(&mut self.fallthrough_return_handlers);
-        let saved_try_body_depth = std::mem::replace(&mut self.try_body_depth, 0);
+        let saved = self.enter_function_scope();
         let result = f(self);
-        self.switch_depth = saved_switch_depth;
-        self.loop_stack = saved_loop_stack;
-        self.static_handlers = saved_static_handlers;
-        self.static_jump_handlers = saved_static_jump_handlers;
-        self.fallthrough_return_handlers = saved_fallthrough_return_handlers;
-        self.try_body_depth = saved_try_body_depth;
+        self.leave_function_scope(saved);
         result
+    }
+
+    fn enter_function_scope(&mut self) -> SavedFunctionScope {
+        SavedFunctionScope {
+            switch_depth: std::mem::replace(&mut self.switch_depth, 0),
+            loop_stack: std::mem::take(&mut self.loop_stack),
+            static_handlers: std::mem::take(&mut self.static_handlers),
+            static_jump_handlers: std::mem::take(&mut self.static_jump_handlers),
+            fallthrough_return_handlers: std::mem::take(&mut self.fallthrough_return_handlers),
+            try_body_depth: std::mem::replace(&mut self.try_body_depth, 0),
+        }
+    }
+
+    fn leave_function_scope(&mut self, saved: SavedFunctionScope) {
+        self.switch_depth = saved.switch_depth;
+        self.loop_stack = saved.loop_stack;
+        self.static_handlers = saved.static_handlers;
+        self.static_jump_handlers = saved.static_jump_handlers;
+        self.fallthrough_return_handlers = saved.fallthrough_return_handlers;
+        self.try_body_depth = saved.try_body_depth;
     }
 
     /// Run `f` with a fresh `loop_label_counter`. Mirrors OCaml's

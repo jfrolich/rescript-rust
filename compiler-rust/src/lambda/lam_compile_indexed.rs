@@ -320,3 +320,6 @@ impl<'a> IndexedJsConsumer<'a> {
 #[cfg(test)]
 #[path = "lam_compile_indexed_tests.rs"]
 mod tests;
+
+#[path = "lam_compile_indexed_control.rs"]
+mod control;

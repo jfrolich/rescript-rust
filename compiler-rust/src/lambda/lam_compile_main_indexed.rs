@@ -447,6 +447,14 @@ fn set_remove(set: &mut Vec<Ident>, id: &Ident) {
     }
 }
 
+/// `Set_ident.mem (Lam_free_variables.pass_free_variables body) id`, including
+/// flags. JS for-of lowering and DCE must use the same native set semantics.
+pub(crate) fn has_free_variable(store: &IndexedLambda, root: NodeId, id: &Ident) -> bool {
+    pass_free_variables(store, root)
+        .binary_search_by(|existing| ident_order(existing, id))
+        .is_ok()
+}
+
 fn pass_free_variables(store: &IndexedLambda, root: NodeId) -> Vec<Ident> {
     fn visit(store: &IndexedLambda, node: NodeId, free: &mut Vec<Ident>) {
         match store.view(node) {
