@@ -1,0 +1,37 @@
+#!/usr/bin/env python3
+"""Exact OCaml/candidate comparisons on isolated TypeArg fixtures; 10s per call."""
+import json
+from pathlib import Path
+import shutil
+import subprocess
+
+ROOT = Path(__file__).resolve().parents[1]
+D = Path('/tmp/rescript-type-arg-experiment/fixtures')
+D.mkdir(parents=True, exist_ok=True)
+compilers = {'ocaml': ROOT / '_build/install/default/bin/bsc',
+             'rust': ROOT / 'compiler-rust/target/release/bsc'}
+results = []
+for fixture in sorted((ROOT / 'projects/in-process-performance/type-arg-fixtures').glob('*.res')):
+    source = D / fixture.name
+    shutil.copy2(fixture, source)
+    success = fixture.stem == 'TypeArgStorage'
+    for mode in (['-dtyped-sexp', '-dtyped-sexp-locs', '-drawlambda', '-dlambda-sexp', 'js'] if success else ['diagnostic']):
+        outputs = {}
+        for variant, compiler in compilers.items():
+            cmd = [str(compiler), '-I', str(ROOT / 'packages/@rescript/runtime/lib/ocaml')]
+            if mode.startswith('-'):
+                cmd.append(mode)
+            cmd.append(str(source))
+            proc = subprocess.run(cmd, cwd=D, capture_output=True, timeout=10)
+            prefix = D / f'{fixture.stem}-{mode}-{variant}'
+            prefix.with_suffix('.stdout').write_bytes(proc.stdout)
+            prefix.with_suffix('.stderr').write_bytes(proc.stderr)
+            js = source.with_suffix('.js')
+            payload = js.read_bytes() if success and mode == 'js' and js.exists() else proc.stderr
+            outputs[variant] = (proc.returncode, payload)
+        valid = outputs['ocaml'] == outputs['rust'] and (outputs['rust'][0] == 0) == success
+        results.append(dict(fixture=fixture.name, mode=mode, valid=valid,
+                            exits={k: v[0] for k, v in outputs.items()}))
+        print(results[-1], flush=True)
+(D / 'results.json').write_text(json.dumps(results, indent=2))
+assert all(r['valid'] for r in results), 'Preserved differing outputs; no normalization'
