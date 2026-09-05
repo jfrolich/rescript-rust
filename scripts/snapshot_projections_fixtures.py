@@ -13,9 +13,15 @@ compilers = {'ocaml': ROOT / '_build/install/default/bin/bsc',
              'control': Path('/tmp/rescript-type-arg-experiment/bin/bsc-D')}
 results = []
 for fixture in sorted([*(ROOT / 'projects/in-process-performance/type-arg-fixtures').glob('*.res'),
-                       *(ROOT / 'projects/in-process-performance/snapshot-projections-fixtures').glob('*.res')]):
+                       ROOT / 'projects/in-process-performance/snapshot-projections-fixtures/SnapshotProjections.res']):
     source = D / fixture.name
-    shutil.copy2(fixture, source)
+    if fixture.exists():
+        shutil.copy2(fixture, source)
+    else:
+        # The candidate was normally reverted. Preserve its exact fixture in
+        # history rather than silently dropping it from reproduction.
+        source.write_bytes(subprocess.check_output(['git', 'show',
+            '08c884be8412d44d4ca32ef76a8792febeae35e8:' + fixture.relative_to(ROOT).as_posix()]))
     success = fixture.stem in ['TypeArgStorage', 'SnapshotProjections']
     for mode in (['-dtyped-sexp', '-dtyped-sexp-locs', '-drawlambda', '-dlambda-sexp', 'js'] if success else ['diagnostic']):
         outputs = {}

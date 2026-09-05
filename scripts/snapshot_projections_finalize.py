@@ -52,6 +52,8 @@ provenance.update(reviewed_source=SOURCE, report_head=cmd('git','rev-parse','HEA
     source_file_count=len(source_hashes), source_manifest_sha256=sha(D/'source-hashes.json'),
     restored_generated_count=len(backups), artifact_root=str(DURABLE),
     production_source=VERIFY_SOURCE, candidate_rejected=restored,
+    timing_head='706fa1f2f',
+    restored_source_manifest_sha256=sha(D/'restored-source-hashes.json') if restored else None,
     tool_failures=['Initial setup tool returned after its 10s timeout; lockf/Python continued and completed. No setup or timing rerun.',
                    'Skill read tool rejected outside-workspace path; bash read succeeded.',
                    'Test-development failures preserved in focused logs; no production detour.',
