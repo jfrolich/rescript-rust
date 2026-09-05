@@ -45,6 +45,9 @@ pub(crate) enum IndexedIdKind {
 /// Identifier metadata for one indexed compilation. Raw IDs are interpreted only
 /// by owner-scoped context entrypoints; this table deliberately carries no arena borrow.
 pub(crate) struct IndexedLamStats {
+    /// Ordered exports from `Translmod.transl_implementation`. The set below
+    /// serves membership checks, while coercion and CMJ export preserve this list.
+    pub exports: Vec<Ident>,
     pub export_idents: AHashSet<Ident>,
     pub ident_tbl: AHashMap<Ident, IndexedIdKind>,
     pub external_arities: ExternalArityTable,
@@ -54,8 +57,10 @@ pub(crate) struct IndexedLamStats {
 
 impl IndexedLamStats {
     pub(crate) fn new(exports: impl IntoIterator<Item = Ident>) -> Self {
+        let exports = exports.into_iter().collect::<Vec<_>>();
         Self {
-            export_idents: exports.into_iter().collect(),
+            export_idents: exports.iter().cloned().collect(),
+            exports,
             ident_tbl: AHashMap::new(),
             external_arities: ExternalArityTable::default(),
             #[cfg(test)]

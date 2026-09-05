@@ -750,6 +750,7 @@ mod tests {
                 current_root_edge_visits: 7,
                 current_root_unique_nodes: 8,
                 metadata_unique_nodes: 2,
+                backend_unique_nodes: 0,
                 live_unique_nodes: 9,
                 superseded_nodes: 15,
                 hot_node_occupied_bytes: 192,
@@ -758,6 +759,7 @@ mod tests {
                 side_payload_shallow_capacity_bytes: 2496,
                 nested_heap_bytes_included: false,
                 current_live_side_payload_shallow_bytes: 736,
+                backend_retained_only_side_payload_shallow_bytes: 0,
                 metadata_retained_only_side_payload_shallow_bytes: 112,
                 superseded_unreachable_side_payload_shallow_bytes: 1072,
             }

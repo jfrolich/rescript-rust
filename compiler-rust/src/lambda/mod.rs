@@ -43,6 +43,7 @@ pub mod lam_compile_const;
 pub mod lam_compile_context;
 pub mod lam_compile_external;
 pub mod lam_compile_main;
+pub(crate) mod lam_compile_main_indexed;
 pub mod lam_compile_primitive;
 pub mod lam_compile_variant;
 pub mod lam_constant;

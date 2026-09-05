@@ -1080,13 +1080,25 @@ fn indexed_lambda(
     }
 }
 
+pub(crate) fn print_indexed_node(
+    store: &crate::lambda::indexed::IndexedLambda,
+    node: crate::lambda::indexed::NodeId,
+    with_locs: bool,
+    out: &mut impl Write,
+) -> std::io::Result<()> {
+    writeln!(
+        out,
+        "{}",
+        indexed_lambda(store, node, with_locs).to_string()
+    )
+}
+
 pub(crate) fn print_indexed_context(
     context: &crate::lambda::indexed::IndexedLambdaContext,
     with_locs: bool,
     out: &mut impl Write,
 ) -> std::io::Result<()> {
-    let sexp = indexed_lambda(context.store(), context.current_root(), with_locs);
-    writeln!(out, "{}", sexp.to_string())
+    print_indexed_node(context.store(), context.current_root(), with_locs, out)
 }
 
 /// Print lambda as sexp (without locations)

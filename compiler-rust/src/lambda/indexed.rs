@@ -1034,10 +1034,11 @@ pub struct IndexedStorageMeasurements {
     pub current_root_edge_visits: usize,
     /// Unique nodes reachable from the canonical current root.
     pub current_root_unique_nodes: usize,
-    /// Unique nodes reachable from metadata roots, before unioning with the
-    /// current root.
+    /// Unique nodes reachable from identifier metadata roots.
     pub metadata_unique_nodes: usize,
-    /// Unique union of current-root and metadata-root reachability.
+    /// Unique nodes reachable from grouped backend and export-map roots.
+    pub backend_unique_nodes: usize,
+    /// Unique union of current-root, backend-root, and metadata reachability.
     pub live_unique_nodes: usize,
     /// Allocated nodes outside the live union.
     pub superseded_nodes: usize,
@@ -1056,9 +1057,12 @@ pub struct IndexedStorageMeasurements {
     pub nested_heap_bytes_included: bool,
     /// Shallow side-payload bytes reachable from the current root.
     pub current_live_side_payload_shallow_bytes: usize,
-    /// Shallow side-payload bytes reachable only through metadata roots.
+    /// Shallow side-payload bytes reachable through backend roots but not the
+    /// canonical grouped root.
+    pub backend_retained_only_side_payload_shallow_bytes: usize,
+    /// Shallow side-payload bytes reachable only through identifier metadata.
     pub metadata_retained_only_side_payload_shallow_bytes: usize,
-    /// Shallow side-payload bytes unreachable from current and metadata roots.
+    /// Shallow side-payload bytes unreachable from current, backend, and metadata roots.
     pub superseded_unreachable_side_payload_shallow_bytes: usize,
 }
 
@@ -1070,6 +1074,10 @@ pub struct IndexedStorageMeasurements {
 pub struct IndexedLambdaContext {
     store: IndexedLambda,
     metadata: IndexedLamStats,
+    /// Roots retained by the grouped pre-JS result after coercion. The
+    /// canonical optimizer root remains `store.root`; these immutable roots
+    /// are a single-owner view over the same store, not another mutation API.
+    backend_roots: Vec<NodeId>,
     beta_hash_bucket_count: usize,
     #[cfg(test)]
     substitution_table_peak_unique_nodes: usize,
@@ -1083,6 +1091,7 @@ impl IndexedLambdaContext {
         Self {
             store: IndexedLambda::from_lambda(lambda),
             metadata: IndexedLamStats::new(exports),
+            backend_roots: Vec::new(),
             beta_hash_bucket_count: 32,
             #[cfg(test)]
             substitution_table_peak_unique_nodes: 0,
@@ -1099,6 +1108,7 @@ impl IndexedLambdaContext {
         Self {
             store,
             metadata: IndexedLamStats::new(exports),
+            backend_roots: Vec::new(),
             beta_hash_bucket_count: 32,
             substitution_table_peak_unique_nodes: 0,
             beta_substitution_peak_unique_nodes: 0,
@@ -1123,6 +1133,10 @@ impl IndexedLambdaContext {
 
     #[cfg(test)]
     pub(crate) fn metadata_mut(&mut self) -> &mut IndexedLamStats {
+        &mut self.metadata
+    }
+
+    pub(crate) fn metadata_mut_for_backend(&mut self) -> &mut IndexedLamStats {
         &mut self.metadata
     }
 
@@ -1252,7 +1266,16 @@ impl IndexedLambdaContext {
             );
             walk(&self.store, root, &mut metadata, &mut ignored_edges, false);
         }
+        let mut backend = AHashSet::new();
+        for root in self.backend_roots.iter().copied() {
+            assert!(
+                self.store.contains(root),
+                "indexed Lambda backend root is out of range"
+            );
+            walk(&self.store, root, &mut backend, &mut ignored_edges, false);
+        }
         let mut live = current.clone();
+        live.extend(backend.iter().copied());
         live.extend(metadata.iter().copied());
         let tables = [
             bytes(&self.store.idents),
@@ -1287,8 +1310,13 @@ impl IndexedLambdaContext {
                 .map(|node| self.store.node_side_payload_shallow_bytes(*node))
                 .sum::<usize>()
         };
+        let backend_only = backend
+            .difference(&current)
+            .copied()
+            .collect::<AHashSet<_>>();
         let metadata_only = metadata
             .difference(&current)
+            .filter(|node| !backend.contains(node))
             .copied()
             .collect::<AHashSet<_>>();
         let unreachable = (0..self.store.nodes.len())
@@ -1296,10 +1324,11 @@ impl IndexedLambdaContext {
             .filter(|node| !live.contains(node))
             .collect::<AHashSet<_>>();
         let current_payload = payload_bytes(&current);
+        let backend_only_payload = payload_bytes(&backend_only);
         let metadata_only_payload = payload_bytes(&metadata_only);
         let unreachable_payload = payload_bytes(&unreachable);
         debug_assert_eq!(
-            current_payload + metadata_only_payload + unreachable_payload,
+            current_payload + backend_only_payload + metadata_only_payload + unreachable_payload,
             side_occupied
         );
         IndexedStorageMeasurements {
@@ -1307,6 +1336,7 @@ impl IndexedLambdaContext {
             current_root_edge_visits: current_edges,
             current_root_unique_nodes: current.len(),
             metadata_unique_nodes: metadata.len(),
+            backend_unique_nodes: backend.len(),
             live_unique_nodes: live.len(),
             superseded_nodes: self.store.nodes.len() - live.len(),
             hot_node_occupied_bytes: self.store.nodes.len() * std::mem::size_of::<IndexedNode>(),
@@ -1316,6 +1346,7 @@ impl IndexedLambdaContext {
             side_payload_shallow_capacity_bytes: side_capacity,
             nested_heap_bytes_included: false,
             current_live_side_payload_shallow_bytes: current_payload,
+            backend_retained_only_side_payload_shallow_bytes: backend_only_payload,
             metadata_retained_only_side_payload_shallow_bytes: metadata_only_payload,
             superseded_unreachable_side_payload_shallow_bytes: unreachable_payload,
         }
@@ -1357,6 +1388,26 @@ impl IndexedLambdaContext {
 
     pub(crate) fn current_root(&self) -> NodeId {
         self.store.root()
+    }
+
+    pub(crate) fn register_backend_roots(&mut self, roots: impl IntoIterator<Item = NodeId>) {
+        let roots = roots.into_iter().collect::<Vec<_>>();
+        assert!(
+            roots.iter().all(|root| self.store.contains(*root)),
+            "indexed Lambda backend root is out of range"
+        );
+        if let Some(root) = roots.first().copied() {
+            // Coercion ends the single-tree optimizer phase. The first real
+            // grouped root becomes canonical; the remaining group/export roots
+            // stay in the owner-scoped backend root set.
+            self.store.set_root(root);
+        }
+        self.backend_roots = roots;
+    }
+
+    #[cfg(test)]
+    pub(crate) fn backend_roots(&self) -> &[NodeId] {
+        &self.backend_roots
     }
 
     pub(crate) fn replace_root(&mut self, root: NodeId) {

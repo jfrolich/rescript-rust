@@ -121,6 +121,10 @@ pub(crate) fn no_side_effects(store: &IndexedLambda, node: NodeId) -> bool {
     }
 }
 
+pub(crate) fn is_closed(store: &IndexedLambda, node: NodeId) -> bool {
+    is_closed_with_map(store, &AHashSet::new(), &[], node).0
+}
+
 pub(crate) fn is_closed_with_map(
     store: &IndexedLambda,
     exports: &AHashSet<Ident>,
