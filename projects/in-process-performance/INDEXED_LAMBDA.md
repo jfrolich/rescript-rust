@@ -122,6 +122,12 @@ Focused tests cover exact list/set/map coercion outcomes, right-to-left identifi
 
 Port `LambdaCompiler` and helper APIs to borrowed indexed access. Preserve recursive-binding dependency order, catch/switch label state, loop state, temporary identifier allocation, CMJ external lookup behavior, and source locations. Remove the normal production compatibility materialization. Recursive Lambda remains only at explicit CMJ/debug compatibility boundaries until those formats are separately migrated.
 
+### M6 status (unfinished continuation)
+
+Checkpoints `1aafdbd3a` and `1dc615ca5` implement the owner-private mutable CMJ beta boundary, not the full consumer. `LambdaCompiler` takes a shallow application snapshot, releases the store borrow, queries the existing CMJ Lambda cache, checks the recursive function header, and only then imports an eligible function into the same store. Indexed beta receives the original argument `NodeId`s, context-retained metadata and native beta hash capacity, and the compiler's shared generator. Rejected candidates proceed to the arity query without importing the function.
+
+Focused tests cover same-store argument reuse, shared-generator allocation, successful beta without an arity query, and rejected-function arity fallback. One test materializes the reduced result at a test-only compatibility boundary before invoking the old recursive compiler. This does not prove direct indexed JS consumption and is not M6 acceptance. The common consumer must call `prepare_indexed_external_field_apply`, recursively compile `Reduced(NodeId)` without materialization, and complete every Lambda family before activation.
+
 ## Validation at every checkpoint
 
 - Unit tests for semantic output, source-order traversal, shared-child isolation, and exact rewrite decisions.
