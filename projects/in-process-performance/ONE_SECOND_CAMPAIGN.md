@@ -64,8 +64,9 @@ Each implementation task gets a fresh session. Only one task owns heavy testing 
 
 - M3 implementation session `bks-f4716114-50d4-71a7-9e32-5e376b22b74b` completed and explicitly released compiler/shared-worktree/heavy-test ownership.
 - M4 implementation session `bks-bb9d19d9-0007-715b-a420-03bce7fe0492` completed and explicitly released compiler/shared-worktree/heavy-test ownership.
-- Active task: M5, indexed exports, optimizer sequencing and in-process ownership, in fresh implementation session `bks-aaf59a2b-a59b-739a-a6ae-af214f2678fb`. This session is the sole compiler/heavy-test owner.
-- The indexed pipeline remains inactive. M3 extracted a shared primitive-purity helper in active code and validated its output parity. No measured performance gain has been retained in this campaign yet.
+- M5 implementation session `bks-aaf59a2b-a59b-739a-a6ae-af214f2678fb` completed and explicitly released compiler/shared-worktree/heavy-test ownership.
+- Next task: M6, the indexed JS consumer, in a fresh implementation session. No compiler/heavy-test owner is assigned during this handoff.
+- The indexed pipeline remains inactive. M3's shared primitive-purity helper and M5's identifier flags and legacy generator representation affect active code; their output parity passed. No measured performance gain has been retained in this campaign yet.
 - Previous session `bks-4aaf1530-49fa-702d-9ee3-eb34b0afc450` completed and released compiler/heavy-test ownership after rejecting deep-flatten Box/Vec reuse. An intermediate `GroupArena` was also removed because the existing reverse Vec iterator already avoids copying; the wrapper added links and optional entries without removing work.
 - Parent owns this campaign file. The implementation session owns its code, tests and focused measurement documentation.
 
@@ -137,6 +138,24 @@ Reviewer `bks-39ccf69c-9858-7134-bdc9-b38b87d0a4e0` audited every branch in the 
 - Executed native oracle source and output: `/tmp/indexed-m4-ocaml-alpha-oracle.ml` and `/tmp/indexed-m4-ocaml-alpha-oracle.log`. The initial `utop` attempt failed because its library was unavailable; the linked executable supplied the evidence. Temporary repository source and Dune changes were removed.
 
 The reviewer inspected source and the oracle without running builds or tests. The tests are not exhaustive over every leaf combination or identifier flag. This accepts inactive M4 only. No new release-test, output-parity, Tella-manifest or timing result is claimed. The production optimizer and JS consumer still use recursive Lambda; M5 and M6 remain necessary before activation and performance validation.
+
+### Completed inactive indexed exports and ownership, M5
+
+Accepted at `2ace324d1c229fedfc4e7907d07745bab61ba132`. The candidate runs the contiguous optimizer sequence in one store, then retains grouped/export/CMJ roots in an owning pre-JS result. A sealed Raw-Lambda producer carries the same compilation-wide identifier generator through conversion, lowering, optimization, coercion and the later-consumer boundary. Grouping consumes the optional optimizer root, including for empty output. No group RHS stands in for the whole program.
+
+Reviewer `bks-e555ec17-d5fe-7670-82fa-b7b1e57eb530` rejected intermediate revisions and found no remaining source issues at the accepted head. Fixes distinguish full-flag `Set_ident` free variables from identity-based `Hash_set_ident` visited membership, preserve JS/object flags, and retain exact hoisted collision locations. A lightweight warning sink delivers warnings in source order, including before a later error, without enabling debug-only per-pass materialization. The sealed producer path honors caller warning configuration. Fatal warnings remain pending until an explicit post-JS/dependency, pre-effect/CMJ gate that M6 must invoke. Optional debug captures use established Lambda/group representations and the reference pass labels; direct indexed sexp printing remains available.
+
+Parent verification confirmed the clean head, final logs and binary hashes:
+
+- Full default debug compiler tests: 1,307 passed, 108 ignored. Both binary test targets passed with zero tests. Comptime: 16 passed, 23 ignored. Doctests: 9 passed, 7 ignored.
+- An earlier full run failed `small_untagged_object_value_switches_keep_ocaml_runtime_guards` with a temporary-identifier mismatch. The owner reported an isolated pass; the parent verified the final full default rerun passed. No unrelated fix was made. This does not establish that the intermittent failure is resolved.
+- Exact-head release compiler and rewatch builds passed. These were not release test suites.
+- Release non-external parity: typedtree 610/610, raw Lambda 610/610, optimized Lambda 610/610, focused JS 344/344, JS snapshots 610/610, diagnostics 1,431/1,431.
+- Release bsc SHA-256: `d1c1d47ddc12587c27cee54ec960a9a84954cc1eafe5e8b6ab8d7eeab9265069`.
+- Release rewatch SHA-256: `63725c768a9365f30808cb0d57b48b774467306aae09672f76087f33779ef96f`.
+- Logs: `/tmp/indexed-m5-final-clean-full-default-tests.log`, `/tmp/indexed-m5-final-head-release-compiler-build.log`, `/tmp/indexed-m5-final-head-release-rewatch-build.log`, and `/tmp/indexed-m5-final-release-{typedtree-parity,raw-lambda-parity,optimized-lambda-parity,js-parity,diagnostic-parity}.log`.
+
+The reviewer inspected source only. These parity runs validate the still-recursive production path and active helper changes, not the inactive indexed pipeline end to end. M5 acceptance does not establish release-test, external Tella, manifest or timing results. The owner released all compiler/shared-worktree/heavy-test ownership. M6 must port the JS consumer without a final recursive-tree conversion before activation can be considered.
 
 ### Rejected deep-flatten trial
 
