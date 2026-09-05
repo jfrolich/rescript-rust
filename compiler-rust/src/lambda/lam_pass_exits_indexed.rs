@@ -1396,9 +1396,13 @@ mod tests {
         );
 
         let first = context.storage_measurements();
+        assert_eq!(first.node_allocations, 11);
         assert_eq!(first.node_allocations, context.node_count());
-        assert!(first.current_root_edge_visits >= first.current_root_unique_nodes - 1);
-        assert!(first.metadata_unique_nodes > 0);
+        assert_eq!(first.current_root_edge_visits, 5);
+        assert_eq!(first.current_root_unique_nodes, 6);
+        assert_eq!(first.metadata_unique_nodes, 4);
+        assert_eq!(first.live_unique_nodes, 6);
+        assert_eq!(first.superseded_nodes, 5);
         assert_eq!(
             first.superseded_nodes,
             first.node_allocations - first.live_unique_nodes
