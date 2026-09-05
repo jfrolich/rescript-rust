@@ -29,6 +29,7 @@ pub mod js_pass_record_rest;
 pub mod js_pass_tailcall_inline;
 pub mod js_shake;
 pub mod js_stmt_make;
+pub mod indexed;
 pub mod lam_analysis;
 pub mod lam_arity;
 pub mod lam_beta_reduce;
