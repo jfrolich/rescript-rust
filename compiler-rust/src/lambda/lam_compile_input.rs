@@ -28,6 +28,12 @@ impl<'a> From<&'a Lambda> for LambdaInput<'a> {
     }
 }
 
+impl<'a> From<&'a Box<Lambda>> for LambdaInput<'a> {
+    fn from(value: &'a Box<Lambda>) -> Self {
+        Self::Recursive(value)
+    }
+}
+
 #[derive(Clone, Copy)]
 pub(crate) enum LambdaInputs<'a> {
     Recursive(&'a [Lambda]),
@@ -532,5 +538,19 @@ impl<'a> LambdaInput<'a> {
     }
     pub(crate) fn is_apply_status(self, status: ApplyStatus) -> bool {
         matches!(self.view(),LambdaInputView::Apply(a) if a.info.status==status)
+    }
+
+    pub(crate) fn is_top_level_tail(self) -> bool {
+        matches!(
+            self.view(),
+            LambdaInputView::Let(..)
+                | LambdaInputView::LetRec(..)
+                | LambdaInputView::Sequence(..)
+                | LambdaInputView::Prim(
+                    Primitive::Pmakeblock(crate::lambda::TagInfo::ModuleExport(_), _),
+                    _,
+                    _
+                )
+        )
     }
 }
