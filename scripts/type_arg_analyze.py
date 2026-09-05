@@ -37,3 +37,22 @@ for w in [1, 12]:
     result[str(w)] = group
 (D / 'timing-summary.json').write_text(json.dumps(result, indent=2))
 print(json.dumps(result, indent=2))
+
+# Separate census population from timing and never sum it with snapshot traffic.
+import re
+probe_rows = []
+for line in (D / 'logs/type-arg-probe.log').read_text().splitlines():
+    match = re.fullmatch(r'TYPE_ARG_PROBE retained=(\[.*?\]) snapshots=(\[.*?\])', line)
+    if match:
+        probe_rows.append([json.loads(match[1]), json.loads(match[2])])
+keys = ['arrows', 'arguments', 'hot_capacity_bytes', 'cold_boxes', 'cold_box_bytes',
+        'owned_string_capacity_bytes', 'nonempty_strings', 'optional']
+probe = dict(contexts=len(probe_rows),
+    scope='Retained arena arrows at context destruction, summed across lifetimes; snapshots are cumulative get_desc logical clone requests only. Not all context storage, peak or all allocations.')
+for index, group in enumerate(['retained', 'snapshots']):
+    values = dict(zip(keys, [sum(row[index][i] for row in probe_rows) for i in range(8)]))
+    values['total_hot_cold_string_bytes'] = sum(values[k] for k in
+        ['hot_capacity_bytes', 'cold_box_bytes', 'owned_string_capacity_bytes'])
+    values['filename_additional_owned_bytes'] = 0
+    probe[group] = values
+(D / 'storage-summary.json').write_text(json.dumps(probe, indent=2))

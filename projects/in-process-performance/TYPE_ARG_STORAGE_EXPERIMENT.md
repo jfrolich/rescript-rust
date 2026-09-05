@@ -27,7 +27,7 @@ All heavy commands use /usr/bin/lockf -k /tmp/rescript-tella-heavy.lock /bin/bas
 
 Source 5dc38ba2154e158d43436ada2142a13eef9f2c8c is frozen. Independent read-only reviewer bks-52275976-2a5c-7d56-abd7-171b46031403 found an avoidable cold allocation at two no-op substitution sites. Fixed by traversing type handles in the same existing order, then building labels only for changed arrows. The extra small handle vector on changed paths is a measurement risk. Re-review found no further source-level finding. No snapshot API expansion or unrelated algorithm change.
 
-Four focused default tests pass. Seven standalone exact OCaml comparisons pass, including typedtree locations, raw/optimized Lambda, JS and wrong-label/arity diagnostics. The successful fixture covers generic/labeled/optional/n-ary and nested arrows plus record spread with unchanged and substituted arrow fields. No expected-output normalization.
+Four focused default tests pass. Six standalone exact OCaml comparisons pass, including typedtree locations, raw/optimized Lambda and wrong-label/arity diagnostics. The original seven-pass claim is retracted: the original JS check compared empty stderr rather than emitted JS. The corrected JS check fails, as detailed below. The successful fixture covers generic/labeled/optional/n-ary and nested arrows plus record spread with unchanged and substituted arrow fields. No expected-output normalization.
 
 Final default and release compiler suites each report 1337 lib, 16 comptime and 9 doc tests passed; ignored 108/23/7; bins zero. Rewatch release 150 passed. The initial c6278e795 runs and final 5dc38ba21 runs have separate logs. Both release harnesses reported benchmark_index ok without threshold changes. Successful stdout was captured by Cargo, so actual ratio/times are unavailable. Required binaries and index fixture exist; no repeat was made just to expose stdout. This is not evidence that TypeArg fixes parser benchmark instability.
 
@@ -37,8 +37,55 @@ Release parity passes 610 typedtrees, 610 raw Lambda, 610 optimized Lambda, 344 
 
 Archived 5dc38ba21 release/default rewatch only, with per-context counters and a destruction census. Normal compiler source/binaries never contain instrumentation. 3511 contexts; probe build exits 0 and matches 5048 JS files and the required digest.
 
-Context-destruction retained arrow storage summed across lifetimes: 5,135,539 arrows / 8,209,181 arguments; 135,943,648 hot vector capacity bytes + 92,339,928 cold box bytes + 10,713,799 owned string capacity bytes = 238,997,375 bytes. There are 1,282,499 cold boxes/nonempty strings, including 467,703 optional labels. NoLabel has no box. File names remain StrIdx handles in locations, so no filename strings are separately owned by labels or counted twice here.
+Arena-arrow payloads retained at context destruction, summed across lifetimes: 5,135,539 arrows / 8,209,181 arguments; 135,943,648 hot vector capacity bytes + 92,339,928 cold box bytes + 10,713,799 owned string capacity bytes = 238,997,375 bytes. There are 1,282,499 cold boxes/nonempty strings, including 467,703 optional labels. NoLabel has no box. File names remain StrIdx handles in locations, so no filename strings are separately owned by labels or counted twice here.
 
-Cumulative get_desc arrow snapshots: 5,042,791 arrows / 8,271,164 arguments; 132,338,624 hot bytes + 96,930,000 cold box bytes + 10,913,683 string bytes = 240,182,307 requested bytes. These snapshot clones allocate 1,346,250 cold boxes plus their nonempty strings. This is a measured allocation subset, not an exhaustive count of every transient TypeArg/Vec creation. Retained-at-destruction sums are not simultaneous peak, cumulative all-allocation traffic or DRAM traffic. The two populations overlap over time and must not be added as total allocations. Allocator metadata/rounding and separately owned filename arenas are excluded. Peak process RSS comes from uninstrumented timings.
+Cumulative get_desc arrow snapshots: 5,042,791 arrows / 8,271,164 arguments; 132,338,624 hot bytes + 96,930,000 cold box bytes + 10,913,683 string bytes = 240,182,307 requested bytes. These snapshot shapes imply 1,346,250 logical cold-box clone requests plus their nonempty strings. These are not allocator-intercepted calls. This is a measured allocation subset, not an exhaustive count of every transient TypeArg/Vec creation. Retained-at-destruction sums are not simultaneous peak, cumulative all-allocation traffic or DRAM traffic. The two populations overlap over time and must not be added as total allocations. Allocator metadata/rounding and separately owned filename arenas are excluded. Peak process RSS comes from uninstrumented timings.
 
 Repro scripts and all raw private logs/inventories stay in the dedicated artifact directory. Before timing, freeze a separate inventory after all tests and selected C clean. No timing samples yet at this documentation checkpoint.
+
+
+## Fixed cohort result
+
+All 32 prescribed builds exited 0, compiled 3248 modules and produced 5048 JS files with the required digest. No excluded or additional samples. Screening had eight builds with the same count/hash and remains separate.
+
+| Variant / workers | Wall mean ± SD, seconds | Median | Min–max | User / system, seconds | Mean peak RSS, GB |
+|---|---:|---:|---:|---:|---:|
+| C / 1 | 20.040806 ± .115167 | 20.074060 | 19.767503–20.136503 | 19.09875 / .86250 | 2.08353 |
+| D / 1 | 19.961624 ± .121632 | 19.981096 | 19.731313–20.104589 | 19.03000 / .85750 | 2.08471 |
+| C / 12 | 4.956757 ± .048697 | 4.953509 | 4.907526–5.036602 | 40.42125 / 2.10375 | 3.01567 |
+| D / 12 | 4.907486 ± .039427 | 4.908891 | 4.844735–4.966733 | 39.91125 / 2.09375 | 3.02957 |
+
+Eight paired D-minus-C differences per worker mode, 95% Student-t intervals with seven degrees of freedom:
+
+- w1: −79.18ms [−129.53, −28.84], 0.395% lower mean wall time. All eight differences favored D.
+- w12: −49.27ms [−93.86, −4.68], 0.994% lower mean wall time. Two pairs regressed 33.74ms and 7.29ms. The interval only narrowly excludes zero; confidence in repeatability beyond this cohort is limited.
+
+Screening means C/D were 19.543/19.629s at w1 and 5.019/4.907s at w12. Screening's serial direction disagreed with confirmation. No samples were added to resolve this disagreement. The warm-filesystem paired design does not eliminate scheduling, frequency or temporal drift. Load averages are preserved per confirmation sample. Final AC power was connected; pmset reported no recorded thermal/performance warning, not continuous power telemetry.
+
+Retired instructions C→D were 252.922B→252.238B at w1 and 253.453B→252.967B at w12. Cycles were 81.159B→80.622B and 140.657B→138.957B. Mean peak RSS INCREASED by 1.18MB serial and 13.90MB parallel. The smaller 16-byte TypeArg and reduced retained arrow capacity did not produce a measured whole-process memory reduction. No DRAM-bandwidth claim is supported.
+
+This is a small isolated candidate gain over current C, not a fresh A comparison, new global best or one-second result. The hybrid map remains untouched and experimental. No M6 work occurred.
+
+## Corrected standalone JS validation and remaining blockers
+
+After timing and inventory verification, the parent identified the fixture harness's stale-output/fallback risk. The first strict fresh-file fix failed because standalone bsc emits JavaScript to stdout when no package output flag is supplied. That failure is preserved. The next correction requires fresh, nonempty JS stdout from each process and saves variant-specific .js files. It revealed an exact output difference: Rust places `let text = "first"` before the curried/project functions, whereas OCaml places it after `integer`. The corrected harness remains red; no normalization or expected-output rebaseline was made.
+
+One untimed immutable C compilation produces byte-identical JS to D, SHA-256 `0e379e0f23dc45ed2a5d5540fd3dbed526b2094d73b47bd6a4524684d1006aaf`. OCaml is `8e0f739734e387cfa499217ae46cdf90f3199fbf6cbf75ab1fde46e1047ae802`. This establishes preexisting control debt, not an excuse to call parity passed. Node runtime assertions pass for all three outputs, including generic selection, optional application, nested arrows and record-spread projection; runtime success does not replace exact JS parity.
+
+Both original false-pass evidence and subsequent failed validations are retained. The compiler source and .res fixtures were unchanged during the entire timing cohort. No timing or release benchmark was repeated because of this harness correction.
+
+Full acceptance is NOT met: external OCaml Tella compilation still fails on missing Belt, and the standalone exact JS fixture has preexisting declaration-order debt. The normal internal suites passed as reported above; successful benchmark_index stdout was hidden, so no ratio or parser-speed attribution is claimed. Retain TypeArg only as a reviewed, measured experimental candidate pending the parent's decision. No production retention or merge permission follows.
+
+## Inventory, restoration and durable evidence
+
+The pre-gate inventory has 92 classified changes: eleven external compiler-info outputs, fifty compiler-test compiler-info outputs reached through the existing rescript symlink, 28 Cargo incremental lock paths and the three new experiment fixtures. No new source mirrors appeared in this run; existing mirrors were included. All raw inventories and this exact path classification are preserved.
+
+A separate pre-timing inventory after all tests and selected C clean had 41,577 paths; post-timing had 41,589. Verification before fixture-harness edits found only the exact eleven compiler-info files and webapp/lib/bs/.sourcedirs.json, with no unexpected changes. Nothing was broadly excluded by extension or directory. All eighteen preexisting gen.ts modifications match their individual backups byte-for-byte; Tella remains at 66a5edabdbfdbc5dd7496e59ee0573de2a2a1ffa with exactly those modifications.
+
+[Raw cohort](type-arg-5dc38/runs.jsonl), [statistics](type-arg-5dc38/timing-summary.json), [storage census](type-arg-5dc38/storage-summary.json), [provenance and log hashes](type-arg-5dc38/provenance.json), [corrected fixture verdicts](type-arg-5dc38/fixture-results.json). Reproduce fixed-order analysis and census totals with `python3 scripts/type_arg_analyze.py`. Reproduce fresh fixture checks with `python3 scripts/type_arg_fixtures.py`; its current exact JS failure is intentional evidence, not a passing check.
+
+Raw logs, manifests, input inventories, backups, restored archived source and immutable binaries are preserved locally in `/Users/jake/.opensession/artifacts/rescript-performance-20260905/type-arg/`. No private corpus source or JS was committed or uploaded. Temporary working evidence also remains under `/tmp/rescript-type-arg-experiment/`.
+
+Candidate bsc SHA-256: `a5ed9a622e3b787a8dae0cb5228a5eb5717849314d0af40c05f9689c6a6788af`. Candidate rewatch: `5fe8158df5d3201d4cf07fd962cf61b22edf63874b03bfd5328e1fe16f47c3c4`. Control hashes are unchanged. Reviewed/measured compiler source is exactly 5dc38ba2154e158d43436ada2142a13eef9f2c8c; later commits are fixture harness/scripts/evidence only. Archive instrumentation has been removed from the archived source; its patch and probe binary remain separate.
+
+No push, PR edit, merge, other worker or background process was started. At handoff all compiler/shared-worktree/heavy-test ownership is explicitly released. M6 stays paused; this session takes no next optimization task.

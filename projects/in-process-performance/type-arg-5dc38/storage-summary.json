@@ -1,0 +1,28 @@
+{
+  "contexts": 3511,
+  "scope": "Retained arena arrows at context destruction, summed across lifetimes; snapshots are cumulative get_desc logical clone requests only. Not all context storage, peak or all allocations.",
+  "retained": {
+    "arrows": 5135539,
+    "arguments": 8209181,
+    "hot_capacity_bytes": 135943648,
+    "cold_boxes": 1282499,
+    "cold_box_bytes": 92339928,
+    "owned_string_capacity_bytes": 10713799,
+    "nonempty_strings": 1282499,
+    "optional": 467703,
+    "total_hot_cold_string_bytes": 238997375,
+    "filename_additional_owned_bytes": 0
+  },
+  "snapshots": {
+    "arrows": 5042791,
+    "arguments": 8271164,
+    "hot_capacity_bytes": 132338624,
+    "cold_boxes": 1346250,
+    "cold_box_bytes": 96930000,
+    "owned_string_capacity_bytes": 10913683,
+    "nonempty_strings": 1346250,
+    "optional": 640448,
+    "total_hot_cold_string_bytes": 240182307,
+    "filename_additional_owned_bytes": 0
+  }
+}
