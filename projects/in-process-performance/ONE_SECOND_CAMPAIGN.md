@@ -65,7 +65,7 @@ Each implementation task gets a fresh session. Only one task owns heavy testing 
 - M3 implementation session `bks-f4716114-50d4-71a7-9e32-5e376b22b74b` completed and explicitly released compiler/shared-worktree/heavy-test ownership.
 - M4 implementation session `bks-bb9d19d9-0007-715b-a420-03bce7fe0492` completed and explicitly released compiler/shared-worktree/heavy-test ownership.
 - M5 implementation session `bks-aaf59a2b-a59b-739a-a6ae-af214f2678fb` completed and explicitly released compiler/shared-worktree/heavy-test ownership.
-- Next task: M6, the indexed JS consumer, in a fresh implementation session. No compiler/heavy-test owner is assigned during this handoff.
+- Active task: M6, the indexed JS consumer, in fresh implementation session `bks-72bab2fa-4087-7d0b-9976-74b1ae764ea5`. This session is the sole compiler/shared-worktree/heavy-test owner. It must preserve the delayed post-JS fatal-warning gate and avoid a final recursive-tree conversion to the old consumer.
 - The indexed pipeline remains inactive. M3's shared primitive-purity helper and M5's identifier flags and legacy generator representation affect active code; their output parity passed. No measured performance gain has been retained in this campaign yet.
 - Previous session `bks-4aaf1530-49fa-702d-9ee3-eb34b0afc450` completed and released compiler/heavy-test ownership after rejecting deep-flatten Box/Vec reuse. An intermediate `GroupArena` was also removed because the existing reverse Vec iterator already avoids copying; the wrapper added links and optional entries without removing work.
 - Parent owns this campaign file. The implementation session owns its code, tests and focused measurement documentation.
