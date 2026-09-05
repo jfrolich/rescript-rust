@@ -484,10 +484,10 @@ pub fn translate_arrow_type(
             let mut next_rev_deps = rev_arg_deps;
             let mut next_rev_args = rev_args;
             for arg in args {
-                let (label, typ) = match remove_option(ctx, &arg.lbl, &arg.typ) {
+                let (label, typ) = match remove_option(ctx, arg.label(), &arg.typ) {
                     Some((lbl, typ)) => (Label::OptLabel(lbl), typ),
-                    None if matches!(arg.lbl, ArgLabel::Nolabel) => (Label::Nolabel, arg.typ),
-                    None => (Label::Label(label_name(&arg.lbl)), arg.typ),
+                    None if matches!(arg.label(), ArgLabel::Nolabel) => (Label::Nolabel, arg.typ),
+                    None => (Label::Label(label_name(arg.label())), arg.typ),
                 };
                 let Translation {
                     dependencies,

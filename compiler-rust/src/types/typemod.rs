@@ -3034,7 +3034,7 @@ fn expand_record_spread_label(
                     .iter()
                     .map(|arg| {
                         crate::types::TypeArg::new(
-                            arg.lbl.clone(),
+                            arg.label().clone(),
                             substitute_type_params(ctx, arg.typ, params, args, cache),
                         )
                     })
@@ -6240,7 +6240,7 @@ fn type_exprs_equal_for_abbrev_recursion(
         ) => {
             left_args.len() == right_args.len()
                 && left_args.iter().zip(&right_args).all(|(left, right)| {
-                    arg_labels_equal_for_abbrev_recursion(&left.lbl, &right.lbl)
+                    arg_labels_equal_for_abbrev_recursion(left.label(), right.label())
                         && type_exprs_equal_for_abbrev_recursion(ctx, left.typ, right.typ, seen)
                 })
                 && type_exprs_equal_for_abbrev_recursion(ctx, left_ret, right_ret, seen)
