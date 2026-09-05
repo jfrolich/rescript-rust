@@ -12,6 +12,10 @@ use crate::lambda::{
     PrimInfo, Primitive, SwitchDispatch, SwitchKey,
 };
 use crate::location::Location;
+use crate::lambda::lam_pass_collect::ExternalArityResolver;
+use crate::lambda::lam_pass_collect_indexed::{
+    IndexedLamStats, collect_info, collect_info_with_external_arity,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[repr(transparent)]
@@ -198,8 +202,12 @@ impl IndexedLambda {
         }
     }
 
-    pub fn root(&self) -> NodeId {
+    pub(crate) fn root(&self) -> NodeId {
         self.root
+    }
+    fn set_root(&mut self, root: NodeId) {
+        assert!(root.index() < self.nodes.len(), "indexed Lambda root is foreign or out of range");
+        self.root = root;
     }
     pub fn node_count(&self) -> usize {
         self.nodes.len()
@@ -422,6 +430,10 @@ impl IndexedLambda {
         }
     }
 
+    pub(crate) fn contains(&self, node: NodeId) -> bool {
+        node.index() < self.nodes.len()
+    }
+
     fn push_node(&mut self, node: IndexedNode) -> NodeId {
         let id = NodeId(u32::try_from(self.nodes.len()).expect("indexed Lambda exceeds u32 nodes"));
         self.nodes.push(node);
@@ -615,6 +627,69 @@ impl IndexedLambda {
                 payload_node!(assigns, AssignPayload(id, value), Assign)
             }
         }
+    }
+}
+
+/// Owns the canonical indexed root, its append-only store, and every metadata
+/// table containing IDs into that store. Public pass entrypoints operate on
+/// the current root only, so callers cannot accidentally pair a raw `NodeId`
+/// from another compilation with this store. Private recursive helpers follow
+/// the same-store contract used by the compiler's other index arenas.
+pub struct IndexedLambdaContext {
+    store: IndexedLambda,
+    metadata: IndexedLamStats,
+}
+
+impl IndexedLambdaContext {
+    pub fn from_lambda(
+        lambda: Lambda,
+        exports: impl IntoIterator<Item = Ident>,
+    ) -> Self {
+        Self {
+            store: IndexedLambda::from_lambda(lambda),
+            metadata: IndexedLamStats::new(exports),
+        }
+    }
+
+    pub fn collect_info(&mut self) {
+        let root = self.store.root();
+        collect_info(&self.store, &mut self.metadata, root);
+    }
+
+    pub fn collect_info_with_external_arity(
+        &mut self,
+        resolver: &mut ExternalArityResolver<'_>,
+    ) {
+        let root = self.store.root();
+        collect_info_with_external_arity(&self.store, &mut self.metadata, root, resolver);
+    }
+
+    pub fn metadata(&self) -> &IndexedLamStats {
+        &self.metadata
+    }
+
+    pub fn materialize(&self) -> Lambda {
+        self.store.materialize()
+    }
+
+    pub fn node_count(&self) -> usize {
+        self.store.node_count()
+    }
+
+    pub(crate) fn store(&self) -> &IndexedLambda {
+        &self.store
+    }
+
+    pub(crate) fn store_mut(&mut self) -> &mut IndexedLambda {
+        &mut self.store
+    }
+
+    pub(crate) fn current_root(&self) -> NodeId {
+        self.store.root()
+    }
+
+    pub(crate) fn replace_root(&mut self, root: NodeId) {
+        self.store.set_root(root);
     }
 }
 

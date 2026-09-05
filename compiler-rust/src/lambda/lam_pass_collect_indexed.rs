@@ -2,7 +2,7 @@
 //!
 //! This module is intentionally not wired into production yet. It exercises
 //! the real collect/arity algorithm against [`IndexedLambda`] while keeping
-//! Lambda-bearing metadata as [`NodeId`] values paired with a borrowed arena.
+//! Lambda-bearing metadata as [`NodeId`] values owned by the same compilation context.
 
 use ahash::{AHashMap, AHashSet};
 
@@ -42,10 +42,9 @@ pub enum IndexedIdKind {
     Na,
 }
 
-/// Keeps the lookup arena alive. `NodeId` itself is not arena-branded, so the
-/// caller must not mix IDs from another store.
-pub struct IndexedLamStats<'arena> {
-    arena: &'arena IndexedLambda,
+/// Identifier metadata for one indexed compilation. Raw IDs are interpreted only
+/// by owner-scoped context entrypoints; this table deliberately carries no arena borrow.
+pub struct IndexedLamStats {
     pub export_idents: AHashSet<Ident>,
     pub ident_tbl: AHashMap<Ident, IndexedIdKind>,
     pub external_arities: ExternalArityTable,
@@ -53,20 +52,15 @@ pub struct IndexedLamStats<'arena> {
     visited: Vec<NodeId>,
 }
 
-impl<'arena> IndexedLamStats<'arena> {
-    pub fn new(arena: &'arena IndexedLambda, exports: impl IntoIterator<Item = Ident>) -> Self {
+impl IndexedLamStats {
+    pub fn new(exports: impl IntoIterator<Item = Ident>) -> Self {
         Self {
-            arena,
             export_idents: exports.into_iter().collect(),
             ident_tbl: AHashMap::new(),
             external_arities: ExternalArityTable::default(),
             #[cfg(test)]
             visited: vec![],
         }
-    }
-
-    pub fn arena(&self) -> &'arena IndexedLambda {
-        self.arena
     }
 }
 
@@ -94,7 +88,7 @@ fn kind_of_block(arena: &IndexedLambda, args: &[NodeId]) -> IndexedIdKind {
 }
 
 fn alias_ident_or_global(
-    meta: &mut IndexedLamStats<'_>,
+    meta: &mut IndexedLamStats,
     target: Ident,
     source: &Ident,
     source_kind: IndexedIdKind,
@@ -317,19 +311,19 @@ where
     }
 }
 
-pub fn get_arity(meta: &IndexedLamStats<'_>, node: NodeId) -> Arity {
+pub(crate) fn get_arity(arena: &IndexedLambda, meta: &IndexedLamStats, node: NodeId) -> Arity {
     let mut lookup = |module: &Ident, dynamic: bool, field: &str| {
         cached_external(&meta.external_arities, module, dynamic, field)
     };
-    get_arity_impl(meta.arena, &meta.ident_tbl, node, &mut lookup)
+    get_arity_impl(arena, &meta.ident_tbl, node, &mut lookup)
 }
 
 fn get_arity_external(
-    meta: &mut IndexedLamStats<'_>,
+    arena: &IndexedLambda,
+    meta: &mut IndexedLamStats,
     node: NodeId,
     resolver: &mut ExternalArityResolver<'_>,
 ) -> Arity {
-    let arena = meta.arena;
     let table = &meta.ident_tbl;
     let external = &mut meta.external_arities;
     let mut lookup = |module: &Ident, dynamic: bool, field: &str| {
@@ -563,7 +557,7 @@ fn function_payload_needed(
 }
 
 fn annotate(
-    meta: &mut IndexedLamStats<'_>,
+    meta: &mut IndexedLamStats,
     rec_flag: RecFlag,
     id: Ident,
     arity: Arity,
@@ -579,31 +573,32 @@ fn annotate(
 }
 
 fn collect_bind(
-    meta: &mut IndexedLamStats<'_>,
+    arena: &IndexedLambda,
+    meta: &mut IndexedLamStats,
     rec_flag: RecFlag,
     id: &Ident,
     node: NodeId,
     resolver: &mut Option<&mut ExternalArityResolver<'_>>,
 ) {
-    match meta.arena.view(node) {
+    match arena.view(node) {
         NodeView::Const(value) => {
             meta.ident_tbl
                 .insert(id.clone(), IndexedIdKind::Constant(value.clone()));
         }
         NodeView::Prim(Primitive::Pmakeblock(_, Mutable::Immutable), args, _) => {
             meta.ident_tbl
-                .insert(id.clone(), kind_of_block(meta.arena, args));
+                .insert(id.clone(), kind_of_block(arena, args));
             for arg in args {
-                collect(meta, *arg, resolver);
+                collect(arena, meta, *arg, resolver);
             }
         }
         NodeView::Prim(Primitive::Psome | Primitive::PsomeNotNest, [arg], _) => {
             meta.ident_tbl
                 .insert(id.clone(), IndexedIdKind::NormalOptional(*arg));
-            collect(meta, *arg, resolver);
+            collect(arena, meta, *arg, resolver);
         }
         NodeView::Prim(Primitive::PnullToOpt, [arg], _)
-            if matches!(meta.arena.view(*arg), NodeView::Var(_)) =>
+            if matches!(arena.view(*arg), NodeView::Var(_)) =>
         {
             meta.ident_tbl.insert(
                 id.clone(),
@@ -611,7 +606,7 @@ fn collect_bind(
             );
         }
         NodeView::Prim(Primitive::PnullUndefinedToOpt, [arg], _)
-            if matches!(meta.arena.view(*arg), NodeView::Var(_)) =>
+            if matches!(arena.view(*arg), NodeView::Var(_)) =>
         {
             meta.ident_tbl.insert(
                 id.clone(),
@@ -629,14 +624,14 @@ fn collect_bind(
         NodeView::Var(source) => alias_ident_or_global(meta, id.clone(), source, IndexedIdKind::Na),
         NodeView::Function(_, params, body, attr) => {
             let params = params.to_vec();
-            let keep_payload = function_payload_needed(meta.arena, &params, body, attr);
+            let keep_payload = function_payload_needed(arena, &params, body, attr);
             for param in &params {
                 meta.ident_tbl
                     .insert(param.clone(), IndexedIdKind::Parameter);
             }
             let arity = match resolver.as_deref_mut() {
-                Some(resolver) => get_arity_external(meta, node, resolver),
-                None => get_arity(meta, node),
+                Some(resolver) => get_arity_external(arena, meta, node, resolver),
+                None => get_arity(arena, meta, node),
             };
             annotate(
                 meta,
@@ -645,14 +640,14 @@ fn collect_bind(
                 arity,
                 keep_payload.then_some(node),
             );
-            collect(meta, body, resolver);
+            collect(arena, meta, body, resolver);
         }
         _ => {
-            collect(meta, node, resolver);
+            collect(arena, meta, node, resolver);
             if meta.export_idents.contains(id) {
                 let arity = match resolver.as_deref_mut() {
-                    Some(resolver) => get_arity_external(meta, node, resolver),
-                    None => get_arity(meta, node),
+                    Some(resolver) => get_arity_external(arena, meta, node, resolver),
+                    None => get_arity(arena, meta, node),
                 };
                 annotate(meta, rec_flag, id.clone(), arity, Some(node));
             }
@@ -661,22 +656,23 @@ fn collect_bind(
 }
 
 fn collect(
-    meta: &mut IndexedLamStats<'_>,
+    arena: &IndexedLambda,
+    meta: &mut IndexedLamStats,
     node: NodeId,
     resolver: &mut Option<&mut ExternalArityResolver<'_>>,
 ) {
     #[cfg(test)]
     meta.visited.push(node);
-    match meta.arena.view(node) {
+    match arena.view(node) {
         NodeView::Const(_)
         | NodeView::Var(_)
         | NodeView::GlobalModule(_, _)
         | NodeView::Break
         | NodeView::Continue => {}
         NodeView::Apply(function, args, _, _) => {
-            collect(meta, function, resolver);
+            collect(arena, meta, function, resolver);
             for arg in args {
-                collect(meta, *arg, resolver);
+                collect(arena, meta, *arg, resolver);
             }
         }
         NodeView::Function(_, params, body, _) => {
@@ -684,12 +680,12 @@ fn collect(
             for param in params {
                 meta.ident_tbl.insert(param, IndexedIdKind::Parameter);
             }
-            collect(meta, body, resolver);
+            collect(arena, meta, body, resolver);
         }
         NodeView::Let(_, id, value, body) => {
             let id = id.clone();
-            collect_bind(meta, RecFlag::NonRec, &id, value, resolver);
-            collect(meta, body, resolver);
+            collect_bind(arena, meta, RecFlag::NonRec, &id, value, resolver);
+            collect(arena, meta, body, resolver);
         }
         NodeView::LetRec(bindings, body) => {
             let bindings = bindings.to_vec();
@@ -699,13 +695,13 @@ fn collect(
                 RecFlag::Rec
             };
             for (id, value) in bindings {
-                collect_bind(meta, rec_flag, &id, value, resolver);
+                collect_bind(arena, meta, rec_flag, &id, value, resolver);
             }
-            collect(meta, body, resolver);
+            collect(arena, meta, body, resolver);
         }
         NodeView::Prim(_, args, _) | NodeView::StaticRaise(_, args) => {
             for arg in args {
-                collect(meta, *arg, resolver);
+                collect(arena, meta, *arg, resolver);
             }
         }
         NodeView::Switch {
@@ -715,56 +711,57 @@ fn collect(
             fail_action,
             ..
         } => {
-            collect(meta, scrutinee, resolver);
+            collect(arena, meta, scrutinee, resolver);
             for (_, body) in consts {
-                collect(meta, *body, resolver);
+                collect(arena, meta, *body, resolver);
             }
             for (_, body) in blocks {
-                collect(meta, *body, resolver);
+                collect(arena, meta, *body, resolver);
             }
             if let Some(fail) = fail_action {
-                collect(meta, fail, resolver);
+                collect(arena, meta, fail, resolver);
             }
         }
         NodeView::StringSwitch(scrutinee, cases, default) => {
-            collect(meta, scrutinee, resolver);
+            collect(arena, meta, scrutinee, resolver);
             for (_, body) in cases {
-                collect(meta, *body, resolver);
+                collect(arena, meta, *body, resolver);
             }
             if let Some(default) = default {
-                collect(meta, default, resolver);
+                collect(arena, meta, default, resolver);
             }
         }
         NodeView::StaticCatch(body, _, _, handler) | NodeView::TryWith(body, _, handler) => {
-            collect(meta, body, resolver);
-            collect(meta, handler, resolver);
+            collect(arena, meta, body, resolver);
+            collect(arena, meta, handler, resolver);
         }
         NodeView::IfThenElse(a, b, c) | NodeView::For(_, a, b, _, c) => {
-            collect(meta, a, resolver);
-            collect(meta, b, resolver);
-            collect(meta, c, resolver);
+            collect(arena, meta, a, resolver);
+            collect(arena, meta, b, resolver);
+            collect(arena, meta, c, resolver);
         }
         NodeView::Sequence(a, b)
         | NodeView::While(a, b)
         | NodeView::ForOf(_, a, b)
         | NodeView::ForAwaitOf(_, a, b) => {
-            collect(meta, a, resolver);
-            collect(meta, b, resolver);
+            collect(arena, meta, a, resolver);
+            collect(arena, meta, b, resolver);
         }
-        NodeView::Assign(_, value) => collect(meta, value, resolver),
+        NodeView::Assign(_, value) => collect(arena, meta, value, resolver),
     }
 }
 
-pub fn collect_info(meta: &mut IndexedLamStats<'_>, root: NodeId) {
-    collect(meta, root, &mut None);
+pub(crate) fn collect_info(arena: &IndexedLambda, meta: &mut IndexedLamStats, root: NodeId) {
+    collect(arena, meta, root, &mut None);
 }
 
-pub fn collect_info_with_external_arity(
-    meta: &mut IndexedLamStats<'_>,
+pub(crate) fn collect_info_with_external_arity(
+    arena: &IndexedLambda,
+    meta: &mut IndexedLamStats,
     root: NodeId,
     resolver: &mut ExternalArityResolver<'_>,
 ) {
-    collect(meta, root, &mut Some(resolver));
+    collect(arena, meta, root, &mut Some(resolver));
 }
 
 #[cfg(test)]
@@ -1005,8 +1002,8 @@ mod tests {
         let mut tree_meta = LamStats::new(exports.clone());
         tree::collect_info(&mut tree_meta, &lambda);
         let indexed = IndexedLambda::from_lambda(lambda);
-        let mut indexed_meta = IndexedLamStats::new(&indexed, exports);
-        collect_info(&mut indexed_meta, indexed.root());
+        let mut indexed_meta = IndexedLamStats::new(exports);
+        collect_info(&indexed, &mut indexed_meta, indexed.root());
         let mut expected = tree_meta
             .ident_tbl
             .iter()
@@ -1028,7 +1025,7 @@ mod tests {
         assert_eq!(expected_order, actual_order);
         assert_eq!(
             tree::get_arity(&tree_meta, &indexed.materialize()),
-            get_arity(&indexed_meta, indexed.root())
+            get_arity(&indexed, &indexed_meta, indexed.root())
         );
     }
 
@@ -1047,9 +1044,9 @@ mod tests {
             tree::collect_info(&mut tree_meta, &lambda);
             let expected = tree::get_arity(&tree_meta, &lambda);
             let indexed = IndexedLambda::from_lambda(lambda);
-            let mut indexed_meta = IndexedLamStats::new(&indexed, []);
-            collect_info(&mut indexed_meta, indexed.root());
-            assert_eq!(expected, get_arity(&indexed_meta, indexed.root()));
+            let mut indexed_meta = IndexedLamStats::new([]);
+            collect_info(&indexed, &mut indexed_meta, indexed.root());
+            assert_eq!(expected, get_arity(&indexed, &indexed_meta, indexed.root()));
         }
         let apply_info = crate::lambda::ApInfo {
             loc: Location::none(),
@@ -1199,8 +1196,8 @@ mod tests {
         let mut tree_meta = LamStats::new(vec![]);
         tree::collect_info(&mut tree_meta, &lambda);
         let indexed = IndexedLambda::from_lambda(lambda);
-        let mut indexed_meta = IndexedLamStats::new(&indexed, []);
-        collect_info(&mut indexed_meta, indexed.root());
+        let mut indexed_meta = IndexedLamStats::new([]);
+        collect_info(&indexed, &mut indexed_meta, indexed.root());
         for ident in [
             always,
             never,
@@ -1351,8 +1348,8 @@ mod tests {
         let mut tree_meta = LamStats::new(vec![]);
         tree::collect_info(&mut tree_meta, &lambda);
         let indexed = IndexedLambda::from_lambda(lambda);
-        let mut indexed_meta = IndexedLamStats::new(&indexed, []);
-        collect_info(&mut indexed_meta, indexed.root());
+        let mut indexed_meta = IndexedLamStats::new([]);
+        collect_info(&indexed, &mut indexed_meta, indexed.root());
         for (ident, _, expected_payload) in cases {
             let tree_kind_value = tree_meta.ident_tbl.get(&ident).unwrap();
             let indexed_kind_value = indexed_meta.ident_tbl.get(&ident).unwrap();
@@ -1419,8 +1416,8 @@ mod tests {
         let mut tree_meta = LamStats::new(vec![]);
         tree::collect_info(&mut tree_meta, &lambda);
         let indexed = IndexedLambda::from_lambda(lambda);
-        let mut indexed_meta = IndexedLamStats::new(&indexed, []);
-        collect_info(&mut indexed_meta, indexed.root());
+        let mut indexed_meta = IndexedLamStats::new([]);
+        collect_info(&indexed, &mut indexed_meta, indexed.root());
         for ident in [assigned, for_bound, for_of_bound, for_await_bound] {
             let expected = tree_meta.ident_tbl.get(&ident).unwrap();
             let actual = indexed_meta.ident_tbl.get(&ident).unwrap();
@@ -1451,11 +1448,11 @@ mod tests {
         tree::collect_info_with_external_arity(&mut tree_meta, &lambda, &mut tree_resolver);
 
         let indexed = IndexedLambda::from_lambda(lambda);
-        let mut indexed_meta = IndexedLamStats::new(&indexed, [exported.clone()]);
+        let mut indexed_meta = IndexedLamStats::new([exported.clone()]);
         let mut indexed_resolver = |_: &Ident, _: bool, _: &str| {
             Some(ExternalArityInfo::Single(Arity::info(vec![2], false)))
         };
-        collect_info_with_external_arity(&mut indexed_meta, indexed.root(), &mut indexed_resolver);
+        collect_info_with_external_arity(&indexed, &mut indexed_meta, indexed.root(), &mut indexed_resolver);
         assert_eq!(
             tree_kind(tree_meta.ident_tbl.get(&exported).unwrap()),
             indexed_kind(&indexed, indexed_meta.ident_tbl.get(&exported).unwrap())
@@ -1510,8 +1507,8 @@ mod tests {
             indexed_calls.push((module.name().to_string(), dynamic, field.to_string()));
             None
         };
-        let mut indexed_meta = IndexedLamStats::new(&indexed, exports);
-        collect_info_with_external_arity(&mut indexed_meta, indexed.root(), &mut indexed_resolver);
+        let mut indexed_meta = IndexedLamStats::new(exports);
+        collect_info_with_external_arity(&indexed, &mut indexed_meta, indexed.root(), &mut indexed_resolver);
         assert_eq!(tree_calls, indexed_calls);
         assert_eq!(
             indexed_calls,
@@ -1596,8 +1593,8 @@ mod tests {
             indexed_calls.push((module.name().to_string(), dynamic, field.to_string()));
             Some(resolved(dynamic))
         };
-        let mut indexed_meta = IndexedLamStats::new(&indexed, exports.clone());
-        collect_info_with_external_arity(&mut indexed_meta, indexed.root(), &mut indexed_resolver);
+        let mut indexed_meta = IndexedLamStats::new(exports.clone());
+        collect_info_with_external_arity(&indexed, &mut indexed_meta, indexed.root(), &mut indexed_resolver);
 
         assert_eq!(tree_calls, indexed_calls);
         assert_eq!(
@@ -1624,8 +1621,8 @@ mod tests {
         let materialized = indexed.materialize_node(root);
         let mut expected = vec![];
         tree_collect_order(&materialized, &mut expected);
-        let mut meta = IndexedLamStats::new(&indexed, []);
-        collect_info(&mut meta, root);
+        let mut meta = IndexedLamStats::new([]);
+        collect_info(&indexed, &mut meta, root);
         assert_eq!(meta.visited, vec![root, shared, shared]);
         let actual = meta
             .visited
