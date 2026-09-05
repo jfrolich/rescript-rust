@@ -5,21 +5,23 @@
 //! are compatibility boundaries for the staged migration and are not used by
 //! the production pipeline yet.
 
+use ahash::AHashSet;
+
 use crate::ident::Ident;
 use crate::lambda::lam_compat::LetKind;
+use crate::lambda::lam_pass_collect::ExternalArityResolver;
+use crate::lambda::lam_pass_collect_indexed::{
+    IndexedLamStats, collect_info, collect_info_with_external_arity,
+};
 use crate::lambda::{
     ApInfo, Apply, Constant, DirectionFlag, FunctionAttribute, LFunction, Lambda, LambdaSwitch,
     PrimInfo, Primitive, SwitchDispatch, SwitchKey,
 };
 use crate::location::Location;
-use crate::lambda::lam_pass_collect::ExternalArityResolver;
-use crate::lambda::lam_pass_collect_indexed::{
-    IndexedLamStats, collect_info, collect_info_with_external_arity,
-};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[repr(transparent)]
-pub struct NodeId(u32);
+pub(crate) struct NodeId(u32);
 
 impl NodeId {
     pub fn index(self) -> usize {
@@ -53,7 +55,7 @@ impl ItemRange {
 
 /// Compact hot node. Each integer indexes the matching cold payload vector.
 #[derive(Debug, Clone, Copy)]
-pub enum IndexedNode {
+pub(crate) enum IndexedNode {
     Var(u32),
     GlobalModule(u32),
     Const(u32),
@@ -78,12 +80,19 @@ pub enum IndexedNode {
     Assign(u32),
 }
 
+#[derive(Clone)]
 struct GlobalPayload(Ident, bool);
+#[derive(Clone)]
 struct ApplyPayload(NodeId, ItemRange, ApInfo, bool);
+#[derive(Clone)]
 struct FunctionPayload(i32, ItemRange, NodeId, FunctionAttribute);
+#[derive(Clone)]
 struct LetPayload(LetKind, Ident, NodeId, NodeId);
+#[derive(Clone)]
 struct LetRecPayload(ItemRange, NodeId);
+#[derive(Clone)]
 struct PrimPayload(Primitive, ItemRange, Location);
+#[derive(Clone)]
 struct SwitchPayload {
     scrutinee: NodeId,
     consts_full: bool,
@@ -93,19 +102,28 @@ struct SwitchPayload {
     fail_action: Option<NodeId>,
     dispatch: SwitchDispatch,
 }
+#[derive(Clone)]
 struct StringSwitchPayload(NodeId, ItemRange, Option<NodeId>);
+#[derive(Clone)]
 struct StaticRaisePayload(i32, ItemRange);
+#[derive(Clone)]
 struct StaticCatchPayload(NodeId, i32, ItemRange, NodeId);
+#[derive(Clone)]
 struct TryWithPayload(NodeId, Ident, NodeId);
+#[derive(Clone)]
 struct TernaryPayload(NodeId, NodeId, NodeId);
+#[derive(Clone)]
 struct BinaryPayload(NodeId, NodeId);
+#[derive(Clone)]
 struct ForPayload(Ident, NodeId, NodeId, DirectionFlag, NodeId);
+#[derive(Clone)]
 struct ForOfPayload(Ident, NodeId, NodeId);
+#[derive(Clone)]
 struct AssignPayload(Ident, NodeId);
 
 /// Borrowed semantic view. Slices retain the source order recorded by the
 /// producer; traversals must not infer order from node allocation.
-pub enum NodeView<'a> {
+pub(crate) enum NodeView<'a> {
     Var(&'a Ident),
     GlobalModule(&'a Ident, bool),
     Const(&'a Constant),
@@ -138,8 +156,44 @@ pub enum NodeView<'a> {
     Assign(&'a Ident, NodeId),
 }
 
+/// Short-lived owned snapshot used by append-only rewrites. It clones only
+/// one node's metadata and child IDs, never a recursive Lambda subtree.
+#[derive(Clone)]
+pub(crate) enum NodeSnapshot {
+    Var(Ident),
+    GlobalModule(Ident, bool),
+    Const(Constant),
+    Apply(NodeId, Vec<NodeId>, ApInfo, bool),
+    Function(i32, Vec<Ident>, NodeId, FunctionAttribute),
+    Let(LetKind, Ident, NodeId, NodeId),
+    LetRec(Vec<(Ident, NodeId)>, NodeId),
+    Prim(Primitive, Vec<NodeId>, Location),
+    Switch {
+        scrutinee: NodeId,
+        consts_full: bool,
+        consts: Vec<(SwitchKey, NodeId)>,
+        blocks_full: bool,
+        blocks: Vec<(SwitchKey, NodeId)>,
+        fail_action: Option<NodeId>,
+        dispatch: SwitchDispatch,
+    },
+    StringSwitch(NodeId, Vec<(String, NodeId)>, Option<NodeId>),
+    StaticRaise(i32, Vec<NodeId>),
+    StaticCatch(NodeId, i32, Vec<Ident>, NodeId),
+    TryWith(NodeId, Ident, NodeId),
+    IfThenElse(NodeId, NodeId, NodeId),
+    Sequence(NodeId, NodeId),
+    Break,
+    Continue,
+    While(NodeId, NodeId),
+    For(Ident, NodeId, NodeId, DirectionFlag, NodeId),
+    ForOf(Ident, NodeId, NodeId),
+    ForAwaitOf(Ident, NodeId, NodeId),
+    Assign(Ident, NodeId),
+}
+
 /// Opaque node IDs are interpreted only through this owning store.
-pub struct IndexedLambda {
+pub(crate) struct IndexedLambda {
     root: NodeId,
     nodes: Vec<IndexedNode>,
     idents: Vec<Ident>,
@@ -167,7 +221,7 @@ pub struct IndexedLambda {
 }
 
 impl IndexedLambda {
-    pub fn from_lambda(lambda: Lambda) -> Self {
+    pub(crate) fn from_lambda(lambda: Lambda) -> Self {
         let mut store = Self::empty();
         store.root = store.lower(lambda);
         store
@@ -205,19 +259,22 @@ impl IndexedLambda {
     pub(crate) fn root(&self) -> NodeId {
         self.root
     }
-    fn set_root(&mut self, root: NodeId) {
-        assert!(root.index() < self.nodes.len(), "indexed Lambda root is foreign or out of range");
+    pub(crate) fn set_root(&mut self, root: NodeId) {
+        assert!(
+            root.index() < self.nodes.len(),
+            "indexed Lambda root is foreign or out of range"
+        );
         self.root = root;
     }
-    pub fn node_count(&self) -> usize {
+    pub(crate) fn node_count(&self) -> usize {
         self.nodes.len()
     }
 
-    pub fn node(&self, id: NodeId) -> IndexedNode {
+    pub(crate) fn node(&self, id: NodeId) -> IndexedNode {
         self.nodes[id.index()]
     }
 
-    pub fn view(&self, id: NodeId) -> NodeView<'_> {
+    pub(crate) fn view(&self, id: NodeId) -> NodeView<'_> {
         match self.node(id) {
             IndexedNode::Var(i) => NodeView::Var(&self.idents[i as usize]),
             IndexedNode::GlobalModule(i) => {
@@ -306,11 +363,11 @@ impl IndexedLambda {
         }
     }
 
-    pub fn materialize(&self) -> Lambda {
+    pub(crate) fn materialize(&self) -> Lambda {
         self.materialize_node(self.root)
     }
 
-    pub fn materialize_node(&self, id: NodeId) -> Lambda {
+    pub(crate) fn materialize_node(&self, id: NodeId) -> Lambda {
         match self.view(id) {
             NodeView::Var(id) => Lambda::Lvar(id.clone()),
             NodeView::GlobalModule(id, dynamic) => Lambda::LglobalModule(id.clone(), dynamic),
@@ -426,6 +483,181 @@ impl IndexedLambda {
             ),
             NodeView::Assign(ident, value) => {
                 Lambda::Lassign(ident.clone(), Box::new(self.materialize_node(value)))
+            }
+        }
+    }
+
+    pub(crate) fn snapshot(&self, id: NodeId) -> NodeSnapshot {
+        match self.view(id) {
+            NodeView::Var(id) => NodeSnapshot::Var(id.clone()),
+            NodeView::GlobalModule(id, dynamic) => NodeSnapshot::GlobalModule(id.clone(), dynamic),
+            NodeView::Const(value) => NodeSnapshot::Const(value.clone()),
+            NodeView::Apply(function, args, info, jsx) => {
+                NodeSnapshot::Apply(function, args.to_vec(), info.clone(), jsx)
+            }
+            NodeView::Function(arity, params, body, attr) => {
+                NodeSnapshot::Function(arity, params.to_vec(), body, attr.clone())
+            }
+            NodeView::Let(kind, id, value, body) => {
+                NodeSnapshot::Let(kind, id.clone(), value, body)
+            }
+            NodeView::LetRec(bindings, body) => NodeSnapshot::LetRec(bindings.to_vec(), body),
+            NodeView::Prim(primitive, args, loc) => {
+                NodeSnapshot::Prim(primitive.clone(), args.to_vec(), loc.clone())
+            }
+            NodeView::Switch {
+                scrutinee,
+                consts_full,
+                consts,
+                blocks_full,
+                blocks,
+                fail_action,
+                dispatch,
+            } => NodeSnapshot::Switch {
+                scrutinee,
+                consts_full,
+                consts: consts.to_vec(),
+                blocks_full,
+                blocks: blocks.to_vec(),
+                fail_action,
+                dispatch: dispatch.clone(),
+            },
+            NodeView::StringSwitch(scrutinee, cases, default) => {
+                NodeSnapshot::StringSwitch(scrutinee, cases.to_vec(), default)
+            }
+            NodeView::StaticRaise(exit, args) => NodeSnapshot::StaticRaise(exit, args.to_vec()),
+            NodeView::StaticCatch(body, exit, params, handler) => {
+                NodeSnapshot::StaticCatch(body, exit, params.to_vec(), handler)
+            }
+            NodeView::TryWith(body, id, handler) => {
+                NodeSnapshot::TryWith(body, id.clone(), handler)
+            }
+            NodeView::IfThenElse(a, b, c) => NodeSnapshot::IfThenElse(a, b, c),
+            NodeView::Sequence(a, b) => NodeSnapshot::Sequence(a, b),
+            NodeView::Break => NodeSnapshot::Break,
+            NodeView::Continue => NodeSnapshot::Continue,
+            NodeView::While(a, b) => NodeSnapshot::While(a, b),
+            NodeView::For(id, start, end, direction, body) => {
+                NodeSnapshot::For(id.clone(), start, end, direction, body)
+            }
+            NodeView::ForOf(id, iterable, body) => NodeSnapshot::ForOf(id.clone(), iterable, body),
+            NodeView::ForAwaitOf(id, iterable, body) => {
+                NodeSnapshot::ForAwaitOf(id.clone(), iterable, body)
+            }
+            NodeView::Assign(id, value) => NodeSnapshot::Assign(id.clone(), value),
+        }
+    }
+
+    pub(crate) fn append(&mut self, node: NodeSnapshot) -> NodeId {
+        macro_rules! payload_node {
+            ($table:ident, $payload:expr, $variant:ident) => {{
+                let index = Self::push_payload(&mut self.$table, $payload);
+                self.push_node(IndexedNode::$variant(index))
+            }};
+        }
+        match node {
+            NodeSnapshot::Var(id) => payload_node!(idents, id, Var),
+            NodeSnapshot::GlobalModule(id, dynamic) => {
+                payload_node!(globals, GlobalPayload(id, dynamic), GlobalModule)
+            }
+            NodeSnapshot::Const(value) => payload_node!(constants, value, Const),
+            NodeSnapshot::Apply(function, args, info, jsx) => {
+                let args = self.push_children(args);
+                payload_node!(applies, ApplyPayload(function, args, info, jsx), Apply)
+            }
+            NodeSnapshot::Function(arity, params, body, attr) => {
+                let params = self.push_idents(params);
+                payload_node!(
+                    functions,
+                    FunctionPayload(arity, params, body, attr),
+                    Function
+                )
+            }
+            NodeSnapshot::Let(kind, id, value, body) => {
+                payload_node!(lets, LetPayload(kind, id, value, body), Let)
+            }
+            NodeSnapshot::LetRec(bindings, body) => {
+                let start = self.bindings.len();
+                self.bindings.extend(bindings);
+                let range = ItemRange::checked(start, self.bindings.len() - start);
+                payload_node!(letrecs, LetRecPayload(range, body), LetRec)
+            }
+            NodeSnapshot::Prim(primitive, args, loc) => {
+                let args = self.push_children(args);
+                payload_node!(prims, PrimPayload(primitive, args, loc), Prim)
+            }
+            NodeSnapshot::Switch {
+                scrutinee,
+                consts_full,
+                consts,
+                blocks_full,
+                blocks,
+                fail_action,
+                dispatch,
+            } => {
+                let start = self.switch_cases.len();
+                self.switch_cases.extend(consts);
+                let consts = ItemRange::checked(start, self.switch_cases.len() - start);
+                let start = self.switch_cases.len();
+                self.switch_cases.extend(blocks);
+                let blocks = ItemRange::checked(start, self.switch_cases.len() - start);
+                payload_node!(
+                    switches,
+                    SwitchPayload {
+                        scrutinee,
+                        consts_full,
+                        consts,
+                        blocks_full,
+                        blocks,
+                        fail_action,
+                        dispatch
+                    },
+                    Switch
+                )
+            }
+            NodeSnapshot::StringSwitch(scrutinee, cases, default) => {
+                let start = self.string_cases.len();
+                self.string_cases.extend(cases);
+                let cases = ItemRange::checked(start, self.string_cases.len() - start);
+                payload_node!(
+                    string_switches,
+                    StringSwitchPayload(scrutinee, cases, default),
+                    StringSwitch
+                )
+            }
+            NodeSnapshot::StaticRaise(exit, args) => {
+                let args = self.push_children(args);
+                payload_node!(static_raises, StaticRaisePayload(exit, args), StaticRaise)
+            }
+            NodeSnapshot::StaticCatch(body, exit, params, handler) => {
+                let params = self.push_idents(params);
+                payload_node!(
+                    static_catches,
+                    StaticCatchPayload(body, exit, params, handler),
+                    StaticCatch
+                )
+            }
+            NodeSnapshot::TryWith(body, id, handler) => {
+                payload_node!(try_withs, TryWithPayload(body, id, handler), TryWith)
+            }
+            NodeSnapshot::IfThenElse(a, b, c) => {
+                payload_node!(ternaries, TernaryPayload(a, b, c), IfThenElse)
+            }
+            NodeSnapshot::Sequence(a, b) => payload_node!(binaries, BinaryPayload(a, b), Sequence),
+            NodeSnapshot::Break => self.push_node(IndexedNode::Break),
+            NodeSnapshot::Continue => self.push_node(IndexedNode::Continue),
+            NodeSnapshot::While(a, b) => payload_node!(binaries, BinaryPayload(a, b), While),
+            NodeSnapshot::For(id, start, end, direction, body) => {
+                payload_node!(fors, ForPayload(id, start, end, direction, body), For)
+            }
+            NodeSnapshot::ForOf(id, iterable, body) => {
+                payload_node!(for_ofs, ForOfPayload(id, iterable, body), ForOf)
+            }
+            NodeSnapshot::ForAwaitOf(id, iterable, body) => {
+                payload_node!(for_ofs, ForOfPayload(id, iterable, body), ForAwaitOf)
+            }
+            NodeSnapshot::Assign(id, value) => {
+                payload_node!(assigns, AssignPayload(id, value), Assign)
             }
         }
     }
@@ -630,6 +862,40 @@ impl IndexedLambda {
     }
 }
 
+/// Root-directed occupancy report for the append-only indexed store.
+/// `lam_analysis::size` is deliberately not used: it is a weighted inline
+/// heuristic rather than a node, edge, or byte count.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct IndexedStorageMeasurements {
+    /// Number of hot-node allocations retained in the append-only store.
+    pub node_allocations: usize,
+    /// Semantic child edges visited from the current root, including repeated
+    /// visits through shared nodes.
+    pub current_root_edge_visits: usize,
+    /// Unique nodes reachable from the canonical current root.
+    pub current_root_unique_nodes: usize,
+    /// Unique nodes reachable from metadata roots, before unioning with the
+    /// current root.
+    pub metadata_unique_nodes: usize,
+    /// Unique union of current-root and metadata-root reachability.
+    pub live_unique_nodes: usize,
+    /// Allocated nodes outside the live union.
+    pub superseded_nodes: usize,
+    /// Occupied bytes in the dense hot-node vector.
+    pub hot_node_occupied_bytes: usize,
+    /// Allocated capacity bytes in the dense hot-node vector.
+    pub hot_node_capacity_bytes: usize,
+    /// Shallow bytes occupied by side-table elements. Heap allocations nested
+    /// inside `Ident`, `Constant`, `Primitive`, locations, and strings are
+    /// intentionally excluded rather than reported as an underestimated deep
+    /// total.
+    pub side_payload_shallow_occupied_bytes: usize,
+    /// Allocated capacity bytes for all side-table vectors, excluding nested heaps.
+    pub side_payload_shallow_capacity_bytes: usize,
+    /// Always false until exhaustive nested-allocation accounting is implemented.
+    pub nested_heap_bytes_included: bool,
+}
+
 /// Owns the canonical indexed root, its append-only store, and every metadata
 /// table containing IDs into that store. Public pass entrypoints operate on
 /// the current root only, so callers cannot accidentally pair a raw `NodeId`
@@ -641,39 +907,210 @@ pub struct IndexedLambdaContext {
 }
 
 impl IndexedLambdaContext {
-    pub fn from_lambda(
-        lambda: Lambda,
-        exports: impl IntoIterator<Item = Ident>,
-    ) -> Self {
+    /// Creates one compilation-owned store and metadata context.
+    pub fn from_lambda(lambda: Lambda, exports: impl IntoIterator<Item = Ident>) -> Self {
         Self {
             store: IndexedLambda::from_lambda(lambda),
             metadata: IndexedLamStats::new(exports),
         }
     }
 
+    #[cfg(test)]
+    pub(crate) fn from_store(
+        store: IndexedLambda,
+        exports: impl IntoIterator<Item = Ident>,
+    ) -> Self {
+        Self {
+            store,
+            metadata: IndexedLamStats::new(exports),
+        }
+    }
+
+    /// Collects identifier metadata from the canonical current root.
     pub fn collect_info(&mut self) {
         let root = self.store.root();
         collect_info(&self.store, &mut self.metadata, root);
     }
 
-    pub fn collect_info_with_external_arity(
-        &mut self,
-        resolver: &mut ExternalArityResolver<'_>,
-    ) {
+    /// Collects metadata while resolving external arities in reference order.
+    pub fn collect_info_with_external_arity(&mut self, resolver: &mut ExternalArityResolver<'_>) {
         let root = self.store.root();
         collect_info_with_external_arity(&self.store, &mut self.metadata, root, resolver);
     }
 
-    pub fn metadata(&self) -> &IndexedLamStats {
+    pub(crate) fn metadata(&self) -> &IndexedLamStats {
         &self.metadata
     }
 
+    /// Materializes the canonical root at the inactive compatibility boundary.
     pub fn materialize(&self) -> Lambda {
         self.store.materialize()
     }
 
+    /// Returns all hot-node allocations, including superseded generations.
     pub fn node_count(&self) -> usize {
         self.store.node_count()
+    }
+
+    /// Measures current, metadata-retained, and superseded arena storage.
+    pub fn storage_measurements(&self) -> IndexedStorageMeasurements {
+        fn walk(
+            store: &IndexedLambda,
+            node: NodeId,
+            unique: &mut AHashSet<NodeId>,
+            edges: &mut usize,
+            count_repeated_edges: bool,
+        ) {
+            let first_visit = unique.insert(node);
+            if !first_visit && !count_repeated_edges {
+                return;
+            }
+            let mut child = |node| {
+                *edges += 1;
+                walk(store, node, unique, edges, count_repeated_edges);
+            };
+            match store.view(node) {
+                NodeView::Apply(function, args, _, _) => {
+                    child(function);
+                    for node in args {
+                        child(*node);
+                    }
+                }
+                NodeView::Function(_, _, body, _) => child(body),
+                NodeView::Let(_, _, value, body) => {
+                    child(value);
+                    child(body);
+                }
+                NodeView::LetRec(bindings, body) => {
+                    for (_, node) in bindings {
+                        child(*node);
+                    }
+                    child(body);
+                }
+                NodeView::Prim(_, args, _) | NodeView::StaticRaise(_, args) => {
+                    for node in args {
+                        child(*node);
+                    }
+                }
+                NodeView::Switch {
+                    scrutinee,
+                    consts,
+                    blocks,
+                    fail_action,
+                    ..
+                } => {
+                    child(scrutinee);
+                    for (_, node) in consts {
+                        child(*node);
+                    }
+                    for (_, node) in blocks {
+                        child(*node);
+                    }
+                    if let Some(node) = fail_action {
+                        child(node);
+                    }
+                }
+                NodeView::StringSwitch(scrutinee, cases, default) => {
+                    child(scrutinee);
+                    for (_, node) in cases {
+                        child(*node);
+                    }
+                    if let Some(node) = default {
+                        child(node);
+                    }
+                }
+                NodeView::StaticCatch(body, _, _, handler)
+                | NodeView::TryWith(body, _, handler) => {
+                    child(body);
+                    child(handler);
+                }
+                NodeView::IfThenElse(a, b, c) | NodeView::For(_, a, b, _, c) => {
+                    child(a);
+                    child(b);
+                    child(c);
+                }
+                NodeView::Sequence(a, b)
+                | NodeView::While(a, b)
+                | NodeView::ForOf(_, a, b)
+                | NodeView::ForAwaitOf(_, a, b) => {
+                    child(a);
+                    child(b);
+                }
+                NodeView::Assign(_, value) => child(value),
+                NodeView::Var(_)
+                | NodeView::GlobalModule(_, _)
+                | NodeView::Const(_)
+                | NodeView::Break
+                | NodeView::Continue => {}
+            }
+        }
+        fn bytes<T>(values: &Vec<T>) -> (usize, usize) {
+            (
+                values.len() * std::mem::size_of::<T>(),
+                values.capacity() * std::mem::size_of::<T>(),
+            )
+        }
+        let mut current = AHashSet::new();
+        let mut current_edges = 0;
+        walk(
+            &self.store,
+            self.store.root(),
+            &mut current,
+            &mut current_edges,
+            true,
+        );
+        let mut metadata = AHashSet::new();
+        let mut ignored_edges = 0;
+        for root in self.metadata.retained_roots() {
+            assert!(
+                self.store.contains(root),
+                "indexed Lambda metadata root is out of range"
+            );
+            walk(&self.store, root, &mut metadata, &mut ignored_edges, false);
+        }
+        let mut live = current.clone();
+        live.extend(metadata.iter().copied());
+        let tables = [
+            bytes(&self.store.idents),
+            bytes(&self.store.constants),
+            bytes(&self.store.globals),
+            bytes(&self.store.applies),
+            bytes(&self.store.functions),
+            bytes(&self.store.lets),
+            bytes(&self.store.letrecs),
+            bytes(&self.store.prims),
+            bytes(&self.store.switches),
+            bytes(&self.store.string_switches),
+            bytes(&self.store.static_raises),
+            bytes(&self.store.static_catches),
+            bytes(&self.store.try_withs),
+            bytes(&self.store.ternaries),
+            bytes(&self.store.binaries),
+            bytes(&self.store.fors),
+            bytes(&self.store.for_ofs),
+            bytes(&self.store.assigns),
+            bytes(&self.store.children),
+            bytes(&self.store.bindings),
+            bytes(&self.store.switch_cases),
+            bytes(&self.store.string_cases),
+        ];
+        let (side_occupied, side_capacity) = tables
+            .into_iter()
+            .fold((0, 0), |(ao, ac), (o, c)| (ao + o, ac + c));
+        IndexedStorageMeasurements {
+            node_allocations: self.store.nodes.len(),
+            current_root_edge_visits: current_edges,
+            current_root_unique_nodes: current.len(),
+            metadata_unique_nodes: metadata.len(),
+            live_unique_nodes: live.len(),
+            superseded_nodes: self.store.nodes.len() - live.len(),
+            hot_node_occupied_bytes: self.store.nodes.len() * std::mem::size_of::<IndexedNode>(),
+            hot_node_capacity_bytes: self.store.nodes.capacity()
+                * std::mem::size_of::<IndexedNode>(),
+            side_payload_shallow_occupied_bytes: side_occupied,
+            side_payload_shallow_capacity_bytes: side_capacity,
+            nested_heap_bytes_included: false,
+        }
     }
 
     pub(crate) fn store(&self) -> &IndexedLambda {

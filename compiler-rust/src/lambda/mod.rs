@@ -55,6 +55,7 @@ pub mod lam_pass_count;
 pub mod lam_pass_deep_flatten;
 pub mod lam_pass_eliminate_ref;
 pub mod lam_pass_exits;
+pub mod lam_pass_exits_indexed;
 pub mod lam_pass_lets_dce;
 pub mod lam_pass_remove_alias;
 pub mod lam_primitive;

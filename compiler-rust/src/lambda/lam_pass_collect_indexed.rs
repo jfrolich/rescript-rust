@@ -20,13 +20,13 @@ use crate::lambda::lam_primitive::{Mutable, Primitive};
 use crate::lambda::{InlineAttribute, Lambda};
 
 #[derive(Debug, Clone)]
-pub enum IndexedElement {
+pub(crate) enum IndexedElement {
     Na,
     SimpleForm(NodeId),
 }
 
 #[derive(Debug, Clone)]
-pub enum IndexedIdKind {
+pub(crate) enum IndexedIdKind {
     NormalOptional(NodeId),
     OptionalBlock(NodeId, BoxedNullable),
     ImmutableBlock(Vec<IndexedElement>),
@@ -44,7 +44,7 @@ pub enum IndexedIdKind {
 
 /// Identifier metadata for one indexed compilation. Raw IDs are interpreted only
 /// by owner-scoped context entrypoints; this table deliberately carries no arena borrow.
-pub struct IndexedLamStats {
+pub(crate) struct IndexedLamStats {
     pub export_idents: AHashSet<Ident>,
     pub ident_tbl: AHashMap<Ident, IndexedIdKind>,
     pub external_arities: ExternalArityTable,
@@ -53,7 +53,7 @@ pub struct IndexedLamStats {
 }
 
 impl IndexedLamStats {
-    pub fn new(exports: impl IntoIterator<Item = Ident>) -> Self {
+    pub(crate) fn new(exports: impl IntoIterator<Item = Ident>) -> Self {
         Self {
             export_idents: exports.into_iter().collect(),
             ident_tbl: AHashMap::new(),
@@ -61,6 +61,34 @@ impl IndexedLamStats {
             #[cfg(test)]
             visited: vec![],
         }
+    }
+
+    pub(crate) fn retained_roots(&self) -> impl Iterator<Item = NodeId> + '_ {
+        self.ident_tbl.values().flat_map(|kind| {
+            let mut roots = Vec::new();
+            match kind {
+                IndexedIdKind::NormalOptional(node) | IndexedIdKind::OptionalBlock(node, _) => {
+                    roots.push(*node);
+                }
+                IndexedIdKind::ImmutableBlock(elements) | IndexedIdKind::MutableBlock(elements) => {
+                    roots.extend(elements.iter().filter_map(|element| match element {
+                        IndexedElement::SimpleForm(node) => Some(*node),
+                        IndexedElement::Na => None,
+                    }));
+                }
+                IndexedIdKind::FunctionId {
+                    lambda: Some((node, _)),
+                    ..
+                } => roots.push(*node),
+                IndexedIdKind::Constant(_)
+                | IndexedIdKind::Module(_)
+                | IndexedIdKind::FunctionId { lambda: None, .. }
+                | IndexedIdKind::Exception
+                | IndexedIdKind::Parameter
+                | IndexedIdKind::Na => {}
+            }
+            roots
+        })
     }
 }
 
@@ -332,7 +360,7 @@ fn get_arity_external(
     get_arity_impl(arena, table, node, &mut lookup)
 }
 
-fn indexed_size(arena: &IndexedLambda, node: NodeId) -> i32 {
+pub(crate) fn indexed_size(arena: &IndexedLambda, node: NodeId) -> i32 {
     const TOO_BIG: i32 = 1000;
     fn constant_size(constant: &Constant) -> i32 {
         match constant {
@@ -1452,7 +1480,12 @@ mod tests {
         let mut indexed_resolver = |_: &Ident, _: bool, _: &str| {
             Some(ExternalArityInfo::Single(Arity::info(vec![2], false)))
         };
-        collect_info_with_external_arity(&indexed, &mut indexed_meta, indexed.root(), &mut indexed_resolver);
+        collect_info_with_external_arity(
+            &indexed,
+            &mut indexed_meta,
+            indexed.root(),
+            &mut indexed_resolver,
+        );
         assert_eq!(
             tree_kind(tree_meta.ident_tbl.get(&exported).unwrap()),
             indexed_kind(&indexed, indexed_meta.ident_tbl.get(&exported).unwrap())
@@ -1508,7 +1541,12 @@ mod tests {
             None
         };
         let mut indexed_meta = IndexedLamStats::new(exports);
-        collect_info_with_external_arity(&indexed, &mut indexed_meta, indexed.root(), &mut indexed_resolver);
+        collect_info_with_external_arity(
+            &indexed,
+            &mut indexed_meta,
+            indexed.root(),
+            &mut indexed_resolver,
+        );
         assert_eq!(tree_calls, indexed_calls);
         assert_eq!(
             indexed_calls,
@@ -1594,7 +1632,12 @@ mod tests {
             Some(resolved(dynamic))
         };
         let mut indexed_meta = IndexedLamStats::new(exports.clone());
-        collect_info_with_external_arity(&indexed, &mut indexed_meta, indexed.root(), &mut indexed_resolver);
+        collect_info_with_external_arity(
+            &indexed,
+            &mut indexed_meta,
+            indexed.root(),
+            &mut indexed_resolver,
+        );
 
         assert_eq!(tree_calls, indexed_calls);
         assert_eq!(
