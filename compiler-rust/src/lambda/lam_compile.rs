@@ -2656,6 +2656,15 @@ impl LambdaCompiler {
     ) -> Compiled {
         let lhs_compiled = self.compile_expr(lhs);
         let rhs_compiled = self.compile_expr(rhs);
+        self.compile_short_circuit_js(op, lhs_compiled, rhs_compiled)
+    }
+
+    fn compile_short_circuit_js(
+        &mut self,
+        op: ShortCircuitOp,
+        lhs_compiled: Compiled,
+        rhs_compiled: Compiled,
+    ) -> Compiled {
         let mut prelude = lhs_compiled.prelude;
 
         if rhs_compiled.prelude.is_empty() {
@@ -8334,3 +8343,6 @@ mod allocator_tests;
 #[cfg(test)]
 #[path = "lam_compile_input_js_tests.rs"]
 mod input_js_tests;
+
+#[path = "lam_compile_indexed.rs"]
+mod indexed_consumer;

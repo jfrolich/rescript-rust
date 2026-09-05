@@ -142,6 +142,14 @@ Validation under the heavy-test lock:
 
 Mutable `NodeId` recursion, actual application-site CMJ `Reduced` consumption, all control-flow families and the sealed M5-to-JS boundary remain unimplemented. These results validate the active helper refactor only. There is no M6 acceptance, activation, Tella run or speed claim.
 
+### M6 mutable application owner (continuing)
+
+`lam_compile_indexed.rs` now holds the mutable compiler/context pair and lowers indexed applications directly. Closed operations take explicit child continuations receiving that same owner and a `NodeId`. Actual application lowering invokes the retained CMJ preparation boundary and immediately dispatches `Reduced(NodeId)` through that continuation. Normal calls and rejected CMJ calls compile arguments right-to-left while emitting operands/preludes in source order (`compiler/core/lam_compile.ml:358-389`, `1647-1656`). Nested `App_na` flattening uses indexed `append_rebuilt`, retaining original argument handles, application metadata and the returned smart-constructor root.
+
+The same owner also lowers primitive operands left-to-right through the shared JS emitter (`Ext_list.split_map`, `compiler/ext/ext_list.ml:643-670`), handles short-circuit and dynamic-import branches, and has a NeedValue try/Assign continuation boundary. Short-circuit scalar JS emission is shared with the legacy caller. No indexed subtree is materialized.
+
+Focused check and four indexed-owner tests pass. Tests now compile an actual CMJ `Reduced` original argument and an imported beta-reduced try node to JS through the same indexed continuation, checking physical argument ID reuse, source locations, beta/JS stamps and explicit flags, generator Arc identity, rejection without import, arity-query-before-argument timing, and native call visit order. The fixture continuation is intentionally closed over the moved families; a full general dispatcher, remaining control-flow modes, grouped M5 entrypoint and full acceptance validation are still pending. This is substantive application-path progress, not M6 completion. No release benchmark retry or full release gate cycle was run for this checkpoint.
+
 ## Validation at every checkpoint
 
 - Unit tests for semantic output, source-order traversal, shared-child isolation, and exact rewrite decisions.
