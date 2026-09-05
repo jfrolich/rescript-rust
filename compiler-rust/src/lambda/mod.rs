@@ -22,6 +22,7 @@
 //! - [`print`] - Pretty printing for debugging
 //! - [`compile_context`] - Compilation context for Lambda to JS IR
 
+pub mod indexed;
 pub mod js_exp_make;
 pub mod js_pass_external_shadow;
 pub mod js_pass_flatten_and_mark_dead;
@@ -29,7 +30,6 @@ pub mod js_pass_record_rest;
 pub mod js_pass_tailcall_inline;
 pub mod js_shake;
 pub mod js_stmt_make;
-pub mod indexed;
 pub mod lam_analysis;
 pub mod lam_arity;
 pub mod lam_beta_reduce;
@@ -50,6 +50,7 @@ pub mod lam_free_variables;
 pub mod lam_hit;
 pub mod lam_pass_alpha_conversion;
 pub mod lam_pass_collect;
+pub mod lam_pass_collect_indexed;
 pub mod lam_pass_count;
 pub mod lam_pass_deep_flatten;
 pub mod lam_pass_eliminate_ref;
