@@ -1,0 +1,110 @@
+--- a/compiler-rust/src/types/context.rs
++++ b/compiler-rust/src/types/context.rs
+@@ -278,6 +278,7 @@
+ 
+     /// Type expression storage. Uses UnsafeCell-based arena for zero-copy access.
+     types: TypeArena,
++    descriptor_probe: Cell<std::collections::BTreeMap<(&'static str, u32, u32, &'static str), [u64; 8]>>,
+ 
+     /// Cached value of `RESCRIPT_COMPILER_COUNTERS` for hot-path probes.
+     compiler_counters_enabled: bool,
+@@ -544,6 +545,7 @@
+             previous_env_id: Cell::new(0),
+             current_abbreviations: Cell::new(AbbrevMemoRef::nil()),
+             types: TypeArena::new(),
++            descriptor_probe: Cell::new(std::collections::BTreeMap::new()),
+             compiler_counters_enabled: crate::perf_counters::enabled(),
+             // Index 0 is reserved as canonical Mnil; index 1 is the dedicated
+             // simple_abbrevs memo ref.
+@@ -1595,8 +1597,16 @@
+     /// Returns a cloned snapshot to avoid RefCell borrow conflicts when
+     /// the desc is held across function calls that may modify the same node.
+     #[inline]
++    #[track_caller]
+     pub fn get_desc(&self, r: TypeExprRef) -> TypeDescSnapshot {
+-        TypeDescSnapshot(self.types.get(r).desc().clone())
++        let desc = self.types.get(r).desc();
++        let caller = std::panic::Location::caller();
++        let (variant, costs) = descriptor_clone_cost(&desc);
++        let mut counters = self.descriptor_probe.take();
++        let row = counters.entry((caller.file(), caller.line(), caller.column(), variant)).or_default();
++        for (total, n) in row.iter_mut().zip(costs) { *total += n; }
++        self.descriptor_probe.set(counters);
++        TypeDescSnapshot(desc.clone())
+     }
+ 
+     /// Borrow the descriptor of a type without cloning it.
+@@ -2846,3 +2856,73 @@
+         }
+     }
+ }
++
++// Calls, inline bytes, Vec requests/bytes, String requests/bytes, Box requests/bytes.
++fn descriptor_vec<T>(v: &[T], n: &mut [u64; 8]) {
++    if !v.is_empty() { n[2] += 1; n[3] += std::mem::size_of_val(v) as u64; }
++}
++fn descriptor_string(s: &str, n: &mut [u64; 8]) {
++    if !s.is_empty() { n[4] += 1; n[5] += s.len() as u64; }
++}
++fn descriptor_box<T>(n: &mut [u64; 8]) { n[6] += 1; n[7] += std::mem::size_of::<T>() as u64; }
++fn descriptor_lid(lid: &crate::parser::longident::Longident, n: &mut [u64; 8]) {
++    use crate::parser::longident::Longident;
++    match lid {
++        Longident::Lident(_) => (),
++        Longident::Ldot(p, _) => { descriptor_box::<Longident>(n); descriptor_lid(p, n); }
++        Longident::Lapply(a, b) => {
++            descriptor_box::<Longident>(n); descriptor_lid(a, n);
++            descriptor_box::<Longident>(n); descriptor_lid(b, n);
++        }
++    }
++}
++fn descriptor_clone_cost(d: &TypeDesc) -> (&'static str, [u64; 8]) {
++    let mut n = [0; 8]; n[0] = 1; n[1] = std::mem::size_of::<TypeDesc>() as u64;
++    let variant = match d {
++        TypeDesc::Tvar(s) => { if let Some(s) = s { descriptor_string(s, &mut n); } "Tvar" }
++        TypeDesc::Tunivar(s) => { if let Some(s) = s { descriptor_string(s, &mut n); } "Tunivar" }
++        TypeDesc::Tarrow { args, .. } => {
++            descriptor_vec(args, &mut n);
++            for a in args { match a.label() {
++                ArgLabel::Nolabel => (),
++                ArgLabel::Labelled(l) | ArgLabel::Optional(l) => {
++                    descriptor_box::<ArgLabel>(&mut n); descriptor_string(&l.txt, &mut n);
++                }
++            }} "Tarrow"
++        }
++        TypeDesc::Ttuple(v) => { descriptor_vec(v, &mut n); "Ttuple" }
++        TypeDesc::Tconstr { args, .. } => { descriptor_vec(args, &mut n); "Tconstr" }
++        TypeDesc::Tobject { name, .. } => {
++            if let Some((_, v)) = name { descriptor_vec(v, &mut n); } "Tobject"
++        }
++        TypeDesc::Tfield { name, .. } => { descriptor_string(name, &mut n); "Tfield" }
++        TypeDesc::Tnil => "Tnil",
++        TypeDesc::Tlink(_) => "Tlink",
++        TypeDesc::Tsubst(_) => "Tsubst",
++        TypeDesc::Tvariant(row) => {
++            descriptor_vec(&row.row_fields, &mut n);
++            for (_, field) in &row.row_fields {
++                if let RowField::Reither { types, .. } = field { descriptor_vec(types, &mut n); }
++            }
++            if let Some((_, v)) = &row.row_name { descriptor_vec(v, &mut n); } "Tvariant"
++        }
++        TypeDesc::Tpoly { vars, .. } => { descriptor_vec(vars, &mut n); "Tpoly" }
++        TypeDesc::Tpackage { lids, args, .. } => {
++            descriptor_vec(lids, &mut n); descriptor_vec(args, &mut n);
++            for lid in lids { descriptor_lid(lid, &mut n); } "Tpackage"
++        }
++    };
++    (variant, n)
++}
++impl Drop for TypeContext {
++    fn drop(&mut self) {
++        let rows = self.descriptor_probe.take();
++        // One stderr lock per context prevents interleaved records. No shared counters.
++        use std::io::Write;
++        let stderr = std::io::stderr(); let mut out = stderr.lock();
++        writeln!(out, "DESC_CONTEXT {}", rows.len()).unwrap();
++        for ((file, line, col, variant), n) in rows {
++            writeln!(out, "DESC_SNAPSHOT\t{}\t{}\t{}\t{}\t{:?}", file, line, col, variant, n).unwrap();
++        }
++    }
++}

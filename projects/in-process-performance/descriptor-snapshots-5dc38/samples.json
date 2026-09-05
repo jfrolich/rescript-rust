@@ -1,0 +1,382 @@
+{
+  "1": {
+    "worker_samples": 16496,
+    "exclusive_total": 16496,
+    "exclusive_top": [
+      [
+        "_platform_memmove",
+        2287
+      ],
+      [
+        "mi_free",
+        709
+      ],
+      [
+        "write",
+        506
+      ],
+      [
+        "mi_malloc_aligned",
+        487
+      ],
+      [
+        "__open",
+        287
+      ],
+      [
+        "_$LT$alloc..vec..Vec$LT$T$C$A$GT$$u20$as$u20$core..clone..Clone$GT$::clone::h860eba90cd79840d",
+        281
+      ],
+      [
+        "_$LT$bitmaps..bitmap..Iter$LT$Size$GT$$u20$as$u20$core..iter..traits..iterator..Iterator$GT$::next::hba68b6888308276f",
+        255
+      ],
+      [
+        "core::ptr::drop_in_place$LT$rescript_compiler..types..type_expr..TypeDesc$GT$::h8a5013667ceafbbe",
+        227
+      ],
+      [
+        "rescript_compiler::types::context::TypeContext::repr::hdaaaff526084aa9b",
+        226
+      ],
+      [
+        "core::ptr::drop_in_place$LT$rescript_compiler..types..path..Path$GT$::hda4f3753a5da0674",
+        203
+      ],
+      [
+        "DYLD-STUB$$memcpy",
+        203
+      ],
+      [
+        "rescript_compiler::types::context::TypeContext::alloc_type::h1b32f125fb1d4bfe",
+        186
+      ],
+      [
+        "__psynch_cvwait",
+        176
+      ],
+      [
+        "OUTLINED_FUNCTION_28",
+        174
+      ],
+      [
+        "_$LT$alloc..vec..Vec$LT$T$C$A$GT$$u20$as$u20$core..clone..Clone$GT$::clone::h210dc078e8bb2d2a",
+        174
+      ],
+      [
+        "_$LT$smol_str..SmolStr$u20$as$u20$core..cmp..PartialEq$GT$::eq::hac1dfb25bacb6c97",
+        160
+      ],
+      [
+        "_$LT$core..hash..sip..Hasher$LT$S$GT$$u20$as$u20$core..hash..Hasher$GT$::write::h0ae52eef18f76c71",
+        160
+      ],
+      [
+        "rescript_compiler::cmi::portable_types::internalize_signature::hd50cb9086bd65e03",
+        136
+      ],
+      [
+        "madvise",
+        132
+      ],
+      [
+        "OUTLINED_FUNCTION_15",
+        131
+      ],
+      [
+        "rescript_compiler::parser::expr::parse_binary_expr::h3eea2165b6ed7f83",
+        130
+      ],
+      [
+        "_$LT$rescript_compiler..types..path..Path$u20$as$u20$core..hash..Hash$GT$::hash::hdcb04f43779fe191",
+        128
+      ],
+      [
+        "OUTLINED_FUNCTION_51",
+        124
+      ],
+      [
+        "_$LT$rescript_compiler..types..type_expr..TypeDesc$u20$as$u20$core..clone..Clone$GT$::clone::hc06b45d7e5759338",
+        121
+      ],
+      [
+        "rescript_compiler::types::context::TypeContext::alloc_abbrev::h288afa701d745cc1",
+        121
+      ],
+      [
+        "_$LT$rescript_compiler..types..decl..TypeDeclaration$u20$as$u20$core..clone..Clone$GT$::clone::h0967ce3b943ddc34",
+        112
+      ],
+      [
+        "_$LT$rescript_compiler..js_ir..Expression$u20$as$u20$core..clone..Clone$GT$::clone::h74baf12e230bc74c",
+        111
+      ],
+      [
+        "close",
+        110
+      ],
+      [
+        "semaphore_wait_trap",
+        109
+      ],
+      [
+        "im_rc::nodes::hamt::hash_key::h0da27c63a36a5e64",
+        99
+      ],
+      [
+        "_platform_memcmp",
+        99
+      ],
+      [
+        "_mi_malloc_generic",
+        93
+      ],
+      [
+        "rescript_compiler::types::path::Path::same::hf8deadfa3a118ece",
+        91
+      ],
+      [
+        "hashbrown::map::HashMap$LT$K$C$V$C$S$C$A$GT$::insert::h85d73b75157bb9b5",
+        91
+      ],
+      [
+        "hashbrown::raw::RawTable$LT$T$C$A$GT$::reserve_rehash::h217cbdbda68c1f1c",
+        84
+      ],
+      [
+        "__getattrlist",
+        83
+      ],
+      [
+        "read",
+        78
+      ],
+      [
+        "rescript_compiler::types::ctype::copy_type_cached::h48424223600dc0c9",
+        75
+      ],
+      [
+        "_$LT$rescript_compiler..types..typedtree..Pattern$u20$as$u20$core..clone..Clone$GT$::clone::h7a9d94e34263288d",
+        75
+      ],
+      [
+        "_$LT$rescript_compiler..raw_lambda..RawLambda$u20$as$u20$core..clone..Clone$GT$::clone::h25b5a7631abd8273",
+        73
+      ]
+    ],
+    "inclusive_union": {
+      "substitute_type_expr_path": 170,
+      "type_application": 5052,
+      "unify": 2623,
+      "deep_occur": 68,
+      "mi_malloc": 1161,
+      "TypeDesc$u20$as$u20$core..clone..Clone": 204,
+      "_platform_memmove": 2287,
+      "mi_free": 720,
+      "rewrite_type_expr_by_path_prefix": 112
+    },
+    "selected_exclusive": {
+      "TypeDesc$u20$as$u20$core..clone..Clone": 121,
+      "type_application": 59,
+      "lower_args": 0,
+      "deep_occur": 10,
+      "substitute_type_expr_path": 13,
+      "rewrite_type_expr_by_path_prefix": 8,
+      "unify": 98,
+      "_platform_memmove": 2287,
+      "mi_malloc": 580,
+      "mi_free": 711
+    },
+    "allocator_exclusive": 1637
+  },
+  "12": {
+    "worker_samples": 49883,
+    "exclusive_total": 49883,
+    "exclusive_top": [
+      [
+        "_platform_memmove",
+        5634
+      ],
+      [
+        "__psynch_cvwait",
+        4232
+      ],
+      [
+        "swtch_pri",
+        2665
+      ],
+      [
+        "mi_free",
+        1835
+      ],
+      [
+        "mi_malloc_aligned",
+        1186
+      ],
+      [
+        "_$LT$alloc..vec..Vec$LT$T$C$A$GT$$u20$as$u20$core..clone..Clone$GT$::clone::h860eba90cd79840d",
+        985
+      ],
+      [
+        "_$LT$bitmaps..bitmap..Iter$LT$Size$GT$$u20$as$u20$core..iter..traits..iterator..Iterator$GT$::next::hba68b6888308276f",
+        923
+      ],
+      [
+        "rescript_compiler::types::context::TypeContext::repr::hdaaaff526084aa9b",
+        685
+      ],
+      [
+        "rescript_compiler::types::context::TypeContext::alloc_type::h1b32f125fb1d4bfe",
+        544
+      ],
+      [
+        "__open",
+        519
+      ],
+      [
+        "core::ptr::drop_in_place$LT$rescript_compiler..types..path..Path$GT$::hda4f3753a5da0674",
+        498
+      ],
+      [
+        "core::ptr::drop_in_place$LT$rescript_compiler..types..type_expr..TypeDesc$GT$::h8a5013667ceafbbe",
+        480
+      ],
+      [
+        "_$LT$rescript_compiler..types..type_expr..TypeDesc$u20$as$u20$core..clone..Clone$GT$::clone::hc06b45d7e5759338",
+        419
+      ],
+      [
+        "madvise",
+        417
+      ],
+      [
+        "_$LT$alloc..vec..Vec$LT$T$C$A$GT$$u20$as$u20$core..clone..Clone$GT$::clone::h210dc078e8bb2d2a",
+        387
+      ],
+      [
+        "_$LT$rescript_compiler..cmi..persistent_env..PersistentEnv$u20$as$u20$core..clone..Clone$GT$::clone::hdc898b52b3ceeebe",
+        387
+      ],
+      [
+        "rescript_compiler::cmi::portable_types::internalize_signature::hd50cb9086bd65e03",
+        375
+      ],
+      [
+        "_$LT$rescript_compiler..types..path..Path$u20$as$u20$core..hash..Hash$GT$::hash::hdcb04f43779fe191",
+        359
+      ],
+      [
+        "_$LT$ahash..random_state..DefaultRandomSource$u20$as$u20$ahash..random_state..RandomSource$GT$::gen_hasher_seed::heea035490f50a675",
+        346
+      ],
+      [
+        "_$LT$rescript_compiler..js_ir..Expression$u20$as$u20$core..clone..Clone$GT$::clone::h74baf12e230bc74c",
+        327
+      ],
+      [
+        "_$LT$smol_str..SmolStr$u20$as$u20$core..cmp..PartialEq$GT$::eq::hac1dfb25bacb6c97",
+        323
+      ],
+      [
+        "_$LT$rescript_compiler..types..decl..TypeDeclaration$u20$as$u20$core..clone..Clone$GT$::clone::h0967ce3b943ddc34",
+        297
+      ],
+      [
+        "OUTLINED_FUNCTION_15",
+        291
+      ],
+      [
+        "_$LT$core..hash..sip..Hasher$LT$S$GT$$u20$as$u20$core..hash..Hasher$GT$::write::h0ae52eef18f76c71",
+        279
+      ],
+      [
+        "DYLD-STUB$$memcpy",
+        277
+      ],
+      [
+        "im_rc::nodes::hamt::hash_key::h0da27c63a36a5e64",
+        275
+      ],
+      [
+        "write",
+        269
+      ],
+      [
+        "__psynch_mutexwait",
+        260
+      ],
+      [
+        "_$LT$rescript_compiler..types..typedtree..PatternDesc$u20$as$u20$core..clone..Clone$GT$::clone::hb32a6fc45da4e918",
+        247
+      ],
+      [
+        "rescript_compiler::parser::expr::parse_binary_expr::h3eea2165b6ed7f83",
+        245
+      ],
+      [
+        "OUTLINED_FUNCTION_51",
+        236
+      ],
+      [
+        "mi_theap_malloc_zero_aligned_at_generic",
+        228
+      ],
+      [
+        "smol_str::Repr::new::h54f57cd76fcf5d1e",
+        225
+      ],
+      [
+        "_platform_memcmp",
+        221
+      ],
+      [
+        "_mi_malloc_generic",
+        215
+      ],
+      [
+        "OUTLINED_FUNCTION_28",
+        213
+      ],
+      [
+        "_$LT$rescript_compiler..raw_lambda..RawLambda$u20$as$u20$core..clone..Clone$GT$::clone::h25b5a7631abd8273",
+        209
+      ],
+      [
+        "rescript_compiler::cmi::persistent_env::build_subst_maps::hc8e6dd50ac74ab24",
+        205
+      ],
+      [
+        "im_rc::hash::map::HashMap$LT$K$C$V$C$S$GT$::get::h192743a1ee753f5c",
+        203
+      ],
+      [
+        "mi_page_free_list_extend",
+        200
+      ]
+    ],
+    "inclusive_union": {
+      "unify": 6981,
+      "mi_malloc": 3007,
+      "_platform_memmove": 5634,
+      "type_application": 14303,
+      "mi_free": 1876,
+      "rewrite_type_expr_by_path_prefix": 210,
+      "substitute_type_expr_path": 372,
+      "TypeDesc$u20$as$u20$core..clone..Clone": 646,
+      "deep_occur": 192
+    },
+    "selected_exclusive": {
+      "TypeDesc$u20$as$u20$core..clone..Clone": 419,
+      "type_application": 174,
+      "lower_args": 0,
+      "deep_occur": 31,
+      "substitute_type_expr_path": 29,
+      "rewrite_type_expr_by_path_prefix": 18,
+      "unify": 245,
+      "_platform_memmove": 5634,
+      "mi_malloc": 1401,
+      "mi_free": 1840
+    },
+    "allocator_exclusive": 4361
+  }
+}
