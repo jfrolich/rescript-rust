@@ -72,7 +72,7 @@ Each implementation task gets a fresh session. Only one task owns heavy testing 
 
 ### Fresh measurement priority
 
-The user requested another measurement session to find the largest-impact opportunities using data-driven design. The historical 4.5-4.6s result remains the result to beat. No new performance gain has been demonstrated, and inactive M6 checkpoints do not change that.
+The user requested another measurement session to find the largest-impact opportunities using data-driven design. Fresh session `bks-15ec12cd-4569-737e-a07a-c200a134f9b7` is the sole measurement/instrumentation/heavy-test owner; it owns `MEASUREMENT_REBASELINE.md` and reproducibility artifacts. M6's compiler owner remains paused. The historical 4.5-4.6s result remains the result to beat. No new performance gain has been demonstrated, and inactive M6 checkpoints do not change that.
 
 Reproduce the optimized `fb4497659` baseline and current production source under the same pinned corpus, toolchain, runtime, clean policy and timing boundaries. Measure serial and parallel builds separately. Use immutable saved binaries, preset alternating comparisons, output manifests and explicit uncertainty. Then profile the best reproducible baseline, including phase time, critical path, CPU scaling and allocation/data-layout costs. Rank opportunities by measured headroom and correctness risk, not by ease of implementation or the amount of work already invested in M6. Historical profiles are hypotheses to verify, not new evidence.
 
