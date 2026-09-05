@@ -278,48 +278,231 @@ impl TypeExprRef {
 /// reference node shape is compiler/ml/types.ml:22 and allocation path is
 /// compiler/ml/btype.ml:46-48. The storage avoids hashing for short-lived
 /// copy/substitution caches.
+const TYPE_EXPR_MAP_INLINE_CAPACITY: usize = 8;
+const TYPE_EXPR_MAP_DENSE_RATIO: usize = 8;
+const TYPE_EXPR_MAP_MIN_SPARSE_SPAN: usize = 256;
+
+#[derive(Debug, Clone)]
+enum TypeExprRefMapStorage<T> {
+    Inline {
+        entries: [Option<(TypeExprRef, T)>; TYPE_EXPR_MAP_INLINE_CAPACITY],
+        len: usize,
+    },
+    Dense {
+        offset: u32,
+        values: Vec<Option<T>>,
+    },
+    Sparse(ahash::AHashMap<TypeExprRef, T>),
+}
+
+/// Identity-exact hybrid storage for short-lived type-copy maps.
+///
+/// Most record-label copies touch only a handful of far-apart arena handles,
+/// while signature freshening touches hundreds of mostly dense handles. Keep
+/// the common tiny case inline, then select dense or sparse storage from the
+/// observed handle span. A later outlier can demote dense storage to sparse;
+/// sufficiently dense sparse storage can promote once to direct indexing.
 #[derive(Debug, Clone)]
 pub(crate) struct TypeExprRefMap<T> {
-    offset: u32,
-    values: Vec<Option<T>>,
+    storage: TypeExprRefMapStorage<T>,
+    entry_count: usize,
+    min_key: Option<u32>,
+    max_key: u32,
 }
 
 impl<T> TypeExprRefMap<T> {
+    fn empty_inline() -> TypeExprRefMapStorage<T> {
+        TypeExprRefMapStorage::Inline {
+            entries: std::array::from_fn(|_| None),
+            len: 0,
+        }
+    }
+
     pub(crate) fn new() -> Self {
         Self {
-            offset: 0,
-            values: Vec::new(),
+            storage: Self::empty_inline(),
+            entry_count: 0,
+            min_key: None,
+            max_key: 0,
         }
+    }
+
+    #[inline]
+    fn span(&self) -> usize {
+        self.min_key
+            .map_or(0, |min| ((self.max_key - min) as usize).saturating_add(1))
+    }
+
+    #[inline]
+    fn record_new_key(&mut self, key: TypeExprRef) {
+        match self.min_key {
+            None => {
+                self.min_key = Some(key.0);
+                self.max_key = key.0;
+            }
+            Some(min) => {
+                if key.0 < min {
+                    self.min_key = Some(key.0);
+                }
+                self.max_key = self.max_key.max(key.0);
+            }
+        }
+        self.entry_count += 1;
     }
 
     #[inline]
     pub(crate) fn get(&self, key: TypeExprRef) -> Option<&T> {
-        let idx = key.0.checked_sub(self.offset)? as usize;
-        self.values.get(idx)?.as_ref()
+        match &self.storage {
+            TypeExprRefMapStorage::Inline { entries, len } => {
+                for entry in &entries[..*len] {
+                    if let Some((stored, value)) = entry
+                        && *stored == key
+                    {
+                        return Some(value);
+                    }
+                }
+                None
+            }
+            TypeExprRefMapStorage::Dense { offset, values } => {
+                let idx = key.0.checked_sub(*offset)? as usize;
+                values.get(idx)?.as_ref()
+            }
+            TypeExprRefMapStorage::Sparse(values) => values.get(&key),
+        }
+    }
+
+    fn dense_from_inline(
+        entries: &mut [Option<(TypeExprRef, T)>; TYPE_EXPR_MAP_INLINE_CAPACITY],
+        len: usize,
+        min: u32,
+        span: usize,
+        key: TypeExprRef,
+        value: T,
+    ) -> TypeExprRefMapStorage<T> {
+        let mut values = Vec::with_capacity(span);
+        values.resize_with(span, || None);
+        for entry in entries.iter_mut().take(len) {
+            let (stored, stored_value) = entry.take().expect("occupied inline type-map slot");
+            values[(stored.0 - min) as usize] = Some(stored_value);
+        }
+        values[(key.0 - min) as usize] = Some(value);
+        TypeExprRefMapStorage::Dense {
+            offset: min,
+            values,
+        }
+    }
+
+    fn sparse_from_inline(
+        entries: &mut [Option<(TypeExprRef, T)>; TYPE_EXPR_MAP_INLINE_CAPACITY],
+        len: usize,
+        key: TypeExprRef,
+        value: T,
+    ) -> TypeExprRefMapStorage<T> {
+        let mut values = ahash::AHashMap::with_capacity(len + 1);
+        for entry in entries.iter_mut().take(len) {
+            let (stored, stored_value) = entry.take().expect("occupied inline type-map slot");
+            values.insert(stored, stored_value);
+        }
+        values.insert(key, value);
+        TypeExprRefMapStorage::Sparse(values)
     }
 
     #[inline]
     pub(crate) fn insert(&mut self, key: TypeExprRef, value: T) -> Option<T> {
-        if self.values.is_empty() {
-            self.offset = key.0;
-            self.values.push(Some(value));
-            return None;
+        match &mut self.storage {
+            TypeExprRefMapStorage::Inline { entries, len } => {
+                for entry in entries.iter_mut().take(*len) {
+                    let (stored, stored_value) =
+                        entry.as_mut().expect("occupied inline type-map slot");
+                    if *stored == key {
+                        return Some(std::mem::replace(stored_value, value));
+                    }
+                }
+                if *len < TYPE_EXPR_MAP_INLINE_CAPACITY {
+                    entries[*len] = Some((key, value));
+                    *len += 1;
+                    self.record_new_key(key);
+                    return None;
+                }
+            }
+            TypeExprRefMapStorage::Dense { offset, values } => {
+                if let Some(idx) = key.0.checked_sub(*offset).map(|idx| idx as usize)
+                    && let Some(slot) = values.get_mut(idx)
+                    && slot.is_some()
+                {
+                    return slot.replace(value);
+                }
+            }
+            TypeExprRefMapStorage::Sparse(values) => {
+                if let Some(stored) = values.get_mut(&key) {
+                    return Some(std::mem::replace(stored, value));
+                }
+            }
         }
 
-        if key.0 < self.offset {
-            let prepend = (self.offset - key.0) as usize;
-            let mut values = Vec::with_capacity(self.values.len() + prepend);
-            values.resize_with(prepend, || None);
-            values.append(&mut self.values);
-            self.values = values;
-            self.offset = key.0;
-        }
+        self.record_new_key(key);
+        let span = self.span();
+        let entry_count = self.entry_count;
 
-        let idx = (key.0 - self.offset) as usize;
-        if idx >= self.values.len() {
-            self.values.resize_with(idx + 1, || None);
+        match &mut self.storage {
+            TypeExprRefMapStorage::Inline { .. } => {
+                let mut old = std::mem::replace(&mut self.storage, Self::empty_inline());
+                let TypeExprRefMapStorage::Inline { entries, len } = &mut old else {
+                    unreachable!();
+                };
+                let min = self.min_key.expect("nonempty type-map bounds");
+                if span <= entry_count.saturating_mul(TYPE_EXPR_MAP_DENSE_RATIO) {
+                    self.storage = Self::dense_from_inline(entries, *len, min, span, key, value);
+                } else {
+                    self.storage = Self::sparse_from_inline(entries, *len, key, value);
+                }
+            }
+            TypeExprRefMapStorage::Dense { offset, values } => {
+                if span > TYPE_EXPR_MAP_MIN_SPARSE_SPAN
+                    && span > entry_count.saturating_mul(TYPE_EXPR_MAP_DENSE_RATIO)
+                {
+                    let mut sparse = ahash::AHashMap::with_capacity(entry_count);
+                    for (idx, slot) in values.iter_mut().enumerate() {
+                        if let Some(stored_value) = slot.take() {
+                            sparse.insert(TypeExprRef(*offset + idx as u32), stored_value);
+                        }
+                    }
+                    sparse.insert(key, value);
+                    self.storage = TypeExprRefMapStorage::Sparse(sparse);
+                } else {
+                    let min = self.min_key.expect("nonempty type-map bounds");
+                    if min < *offset {
+                        let prepend = (*offset - min) as usize;
+                        let mut copied = Vec::with_capacity(values.len() + prepend);
+                        copied.resize_with(prepend, || None);
+                        copied.append(values);
+                        *values = copied;
+                        *offset = min;
+                    }
+                    let idx = (key.0 - *offset) as usize;
+                    if idx >= values.len() {
+                        values.resize_with(idx + 1, || None);
+                    }
+                    values[idx] = Some(value);
+                }
+            }
+            TypeExprRefMapStorage::Sparse(values) => {
+                values.insert(key, value);
+                if entry_count >= 32 && span <= entry_count.saturating_mul(4) {
+                    let min = self.min_key.expect("nonempty type-map bounds");
+                    let mut dense = Vec::with_capacity(span);
+                    dense.resize_with(span, || None);
+                    for (stored, stored_value) in values.drain() {
+                        dense[(stored.0 - min) as usize] = Some(stored_value);
+                    }
+                    self.storage = TypeExprRefMapStorage::Dense {
+                        offset: min,
+                        values: dense,
+                    };
+                }
+            }
         }
-        self.values[idx].replace(value)
+        None
     }
 }
 
@@ -604,6 +787,186 @@ mod tests {
         let arg = TypeArg::unlabeled(TypeExprRef(1));
         assert!(matches!(arg.lbl, ArgLabel::Nolabel));
         assert_eq!(arg.typ, TypeExprRef(1));
+    }
+
+    #[test]
+    fn type_expr_ref_map_preserves_replace_and_clone_semantics() {
+        let mut map = TypeExprRefMap::new();
+        assert_eq!(map.insert(TypeExprRef(42), 1), None);
+        assert_eq!(map.insert(TypeExprRef(42), 2), Some(1));
+        assert_eq!(map.get(TypeExprRef(42)), Some(&2));
+
+        let cloned = map.clone();
+        assert_eq!(cloned.get(TypeExprRef(42)), Some(&2));
+        assert_eq!(cloned.entry_count, 1);
+    }
+
+    #[test]
+    fn type_expr_ref_map_keeps_far_apart_small_maps_sparse() {
+        let mut map = TypeExprRefMap::new();
+        for index in 0..12 {
+            let key = TypeExprRef(index * 10_000);
+            assert_eq!(map.insert(key, index), None);
+        }
+        for index in 0..12 {
+            assert_eq!(map.get(TypeExprRef(index * 10_000)), Some(&index));
+        }
+        assert_eq!(map.entry_count, 12);
+        assert_eq!(map.span(), 110_001);
+        let TypeExprRefMapStorage::Sparse(values) = &map.storage else {
+            panic!("expected sparse storage");
+        };
+        assert!(values.capacity() < map.span());
+    }
+
+    #[test]
+    fn type_expr_ref_map_promotes_dense_runs_and_demotes_for_outliers() {
+        let mut map = TypeExprRefMap::new();
+        for index in 100..140 {
+            assert_eq!(map.insert(TypeExprRef(index), index), None);
+        }
+        assert!(matches!(&map.storage, TypeExprRefMapStorage::Dense { .. }));
+        assert_eq!(map.get(TypeExprRef(123)), Some(&123));
+
+        assert_eq!(map.insert(TypeExprRef(100_000), 100_000), None);
+        assert_eq!(map.entry_count, 41);
+        assert!(matches!(&map.storage, TypeExprRefMapStorage::Sparse(_)));
+        assert_eq!(map.get(TypeExprRef(100)), Some(&100));
+        assert_eq!(map.get(TypeExprRef(100_000)), Some(&100_000));
+    }
+
+    #[test]
+    fn type_expr_ref_map_matches_std_map_across_mixed_transitions() {
+        let mut map = TypeExprRefMap::new();
+        let mut expected = std::collections::HashMap::new();
+        let mut state = 0x9e37_79b9_u32;
+
+        for step in 0..5_000_u32 {
+            state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            let key = match step % 4 {
+                0 => state % 128,
+                1 => 100_000 + state % 256,
+                2 => 1_000_000 - state % 512,
+                _ => state % 1_000_000,
+            };
+            let value = state ^ step;
+            assert_eq!(
+                map.insert(TypeExprRef(key), value),
+                expected.insert(key, value)
+            );
+
+            let probe = state.rotate_left(11) % 1_000_256;
+            assert_eq!(map.get(TypeExprRef(probe)), expected.get(&probe));
+            assert_eq!(map.get(TypeExprRef(key)), expected.get(&key));
+
+            if step % 317 == 0 {
+                let cloned = map.clone();
+                for (&stored, value) in &expected {
+                    assert_eq!(cloned.get(TypeExprRef(stored)), Some(value));
+                }
+            }
+        }
+        assert_eq!(map.entry_count, expected.len());
+    }
+
+    #[test]
+    fn type_expr_ref_map_bounds_and_sparse_promotion() {
+        let mut map = TypeExprRefMap::new();
+        for key in [0, u32::MAX, 1, u32::MAX - 1, 2, 3, 4, 5, 6] {
+            assert_eq!(map.insert(TypeExprRef(key), key), None);
+            assert_eq!(map.get(TypeExprRef(key)), Some(&key));
+        }
+        assert!(matches!(map.storage, TypeExprRefMapStorage::Sparse(_)));
+        assert_eq!(map.get(TypeExprRef(u32::MAX - 2)), None);
+        // Reset/reuse is assignment in the current API; there is no clear method.
+        map = TypeExprRefMap::default();
+        for key in (100..109).rev() {
+            map.insert(TypeExprRef(key), key);
+        }
+        assert!(matches!(map.storage, TypeExprRefMapStorage::Dense { .. }));
+        map.insert(TypeExprRef(99), 99);
+        assert_eq!(map.get(TypeExprRef(98)), None);
+        assert_eq!(map.get(TypeExprRef(110)), None);
+        map.insert(TypeExprRef(300), 300);
+        assert!(matches!(map.storage, TypeExprRefMapStorage::Dense { .. }));
+        map.insert(TypeExprRef(400), 400);
+        assert!(matches!(map.storage, TypeExprRefMapStorage::Sparse(_)));
+        for key in 99..401 {
+            map.insert(TypeExprRef(key), key);
+        }
+        assert!(matches!(map.storage, TypeExprRefMapStorage::Dense { .. }));
+        let mut cloned = map.clone();
+        cloned.insert(TypeExprRef(99), 0);
+        for key in 99..401 {
+            assert_eq!(map.get(TypeExprRef(key)), Some(&key));
+        }
+    }
+
+    #[test]
+    fn type_expr_ref_map_drops_owned_values_once() {
+        struct Owned<'a>(&'a std::cell::Cell<usize>);
+        impl Drop for Owned<'_> {
+            fn drop(&mut self) {
+                self.0.set(self.0.get() + 1);
+            }
+        }
+        let drops = std::cell::Cell::new(0);
+        let mut map = TypeExprRefMap::new();
+        for key in 100..140 {
+            map.insert(TypeExprRef(key), Owned(&drops));
+        }
+        map.insert(TypeExprRef(500), Owned(&drops));
+        for key in 140..500 {
+            map.insert(TypeExprRef(key), Owned(&drops));
+        }
+        assert_eq!(drops.get(), 0);
+        let old = map.insert(TypeExprRef(100), Owned(&drops));
+        assert_eq!(drops.get(), 0);
+        drop(old);
+        assert_eq!(drops.get(), 1);
+        drop(map);
+        assert_eq!(drops.get(), 402);
+    }
+
+    #[test]
+    fn type_expr_ref_map_copy_fixture_preserves_cycles_and_identity() {
+        use crate::context::IdGenerator;
+        use crate::types::{
+            TypeContext,
+            decl::{ValueDescription, ValueKind},
+        };
+        let ctx = TypeContext::new(std::sync::Arc::new(IdGenerator::new()));
+        let shared = ctx.new_var(None);
+        let distinct = ctx.new_var(None);
+        let cycle = ctx.new_var(None);
+        let mut items = vec![shared, shared, distinct, cycle];
+        // Force widely separated physical keys without allocating a huge arena.
+        for _ in 0..12 {
+            for _ in 0..300 {
+                ctx.new_var(None);
+            }
+            items.push(ctx.new_var(None));
+        }
+        ctx.set_desc(cycle, TypeDesc::Ttuple(items.clone()));
+        let value = ValueDescription {
+            val_type: cycle,
+            val_kind: ValueKind::ValReg,
+            val_loc: crate::location::Location::none(),
+            val_attributes: vec![],
+            val_path: None,
+        };
+        let copied = crate::types::typecore::copy_lookup_value_description_for_subst(&value, &ctx);
+        assert_ne!(copied.val_type, cycle);
+        let desc = ctx.get_desc(copied.val_type);
+        let TypeDesc::Ttuple(actual) = &*desc else {
+            panic!("tuple expected")
+        };
+        assert_eq!(actual[0], shared);
+        assert_eq!(actual[1], shared);
+        assert_eq!(actual[2], distinct);
+        assert_ne!(actual[0], actual[2]);
+        assert_eq!(actual[3], copied.val_type);
+        assert_eq!(&actual[4..], &items[4..]);
     }
 
     #[test]
