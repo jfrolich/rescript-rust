@@ -72,11 +72,17 @@ Each implementation task gets a fresh session. Only one task owns heavy testing 
 
 ### Fresh measurement priority
 
-The user requested another measurement session to find the largest-impact opportunities using data-driven design. Fresh session `bks-15ec12cd-4569-737e-a07a-c200a134f9b7` is the sole measurement/instrumentation/heavy-test owner; it owns `MEASUREMENT_REBASELINE.md` and reproducibility artifacts. M6's compiler owner remains paused. The historical 4.5-4.6s result remains the result to beat. No new performance gain has been demonstrated, and inactive M6 checkpoints do not change that.
+The user requested another measurement session to find the largest-impact opportunities using data-driven design. Fresh session `bks-15ec12cd-4569-737e-a07a-c200a134f9b7` completed measurement at `39c5d0077` and explicitly released all ownership with a clean worktree and no running processes. M6's compiler owner remains paused. The report and reproducibility artifacts are in `MEASUREMENT_REBASELINE.md` and `measurement-542/`. The historical 4.5-4.6s result remains the result to beat. No new performance gain has been demonstrated, and inactive M6 checkpoints do not change that.
 
 Reproduce the optimized `fb4497659` baseline and current production source under the same pinned corpus, toolchain, runtime, clean policy and timing boundaries. Measure serial and parallel builds separately. Use immutable saved binaries, preset alternating comparisons, output manifests and explicit uncertainty. Then profile the best reproducible baseline, including phase time, critical path, CPU scaling and allocation/data-layout costs. Rank opportunities by measured headroom and correctness risk, not by ease of implementation or the amount of work already invested in M6. Historical profiles are hypotheses to verify, not new evidence.
 
-M6 remains paused, incomplete and inactive. Its general dispatcher, all-family coverage, grouped integration and final validation are still missing. Resume or redirect implementation only after the new evidence identifies the highest-impact next experiment.
+M6 remains paused, incomplete and inactive. Its general dispatcher, all-family coverage, grouped integration and final validation are still missing.
+
+Fresh paired results: optimized source A = **19.0288s serial / 4.65115s at 12 workers**; current source B = **20.2044s / 5.00862s**. Eight pairs per mode give B-minus-A **+1.17556s [1.11811, 1.23301] / +0.35748s [0.33007, 0.38489]**. Parent independently recomputed these statistics, verified all 32 paired runs had 3,248 compiled modules and one identical 5,048-file manifest, matched committed raw rows to local originals, verified all four immutable executable hashes/read-only permissions, and checked exact restoration of the 18 pre-existing generated files. This is a same-toolchain source comparison, not a new optimization gain or full compiler acceptance.
+
+Typechecking is the largest measured family (8.095s serial on A). Fresh diagnostics point to map/copy/storage work: 36.9M type-node allocations, 33.2M descriptor clone calls and 80B type arguments, 84.4% unlabeled. Those are allocation/call/layout measurements, not peak live heap or physical memory traffic. Worker tuning produced only a separately confirmed 28ms improvement with more memory. The signature-DAG trace is not a hardware floor.
+
+The next bounded implementation experiment is the existing identity-exact hybrid `TypeExprRefMap` representation on current B, with map length/span/capacity evidence and an isolated comparison. The whole A/B gap does not establish this map's gain. Recovery toward the old fast stack must not be presented as beating it. Compact hot/cold `TypeArg` storage is the next measured new-speed hypothesis beyond A; its timing benefit is unproven. Do not resume M6 by inertia or silently integrate the historical 70-commit stack.
 
 ### Completed inactive indexed foundation, M1
 
