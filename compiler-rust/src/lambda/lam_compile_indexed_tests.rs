@@ -558,3 +558,180 @@ fn indexed_assign_offset_takes_reference_fast_path_without_child_lowering() {
     let js = print_block(&compiled.prelude);
     assert!(js.contains("counter = counter + 1 | 0"), "{js}");
 }
+
+#[test]
+fn indexed_short_circuit_preserves_distinct_native_nonreturn_continuations() {
+    use crate::lambda::lam_compile_context::{Continuation, TailType};
+    for and in [true, false] {
+        for mode in 0..4 {
+            let generator = Arc::new(IdGenerator::new());
+            generator.set_current_stamp(1000);
+            let mut compiler = LambdaCompiler::with_shared_generator_and_options(
+                Arc::clone(&generator),
+                None,
+                false,
+                true,
+                false,
+            );
+            let branch = |name| {
+                Lambda::LtryWith(
+                    Box::new(Lambda::var(Ident::new(
+                        name,
+                        if name == "left" { 51 } else { 52 },
+                        IdentFlags::NONE,
+                    ))),
+                    Ident::new("exn", 53, IdentFlags::NONE),
+                    Box::new(Lambda::false_()),
+                )
+            };
+            let mut context = IndexedLambdaContext::from_lambda(
+                Lambda::Lprim(PrimInfo {
+                    primitive: if and {
+                        Primitive::Psequand
+                    } else {
+                        Primitive::Psequor
+                    },
+                    args: vec![branch("left"), branch("right")],
+                    loc: Location::none(),
+                }),
+                [],
+            );
+            let root = context.current_root();
+            let target = Ident::new("result", 54, IdentFlags::JS_OBJECT);
+            let continuation = match mode {
+                0 => Continuation::NeedValue(TailType::NotTail),
+                1 => Continuation::EffectCall(TailType::NotTail),
+                2 => Continuation::Declare(LetKind::Alias, target.clone()),
+                _ => Continuation::Assign(target.clone()),
+            };
+            let mut owner = IndexedJsConsumer::new(&mut compiler, &mut context);
+            let output = owner.short_circuit_nonreturn(root, &continuation, &mut expression);
+            assert_eq!(output.finished, super::output::Finished::False);
+            assert_eq!(output.value.is_some(), mode < 2);
+            assert_eq!(
+                generator.current_stamp(),
+                if mode < 2 { 1003 } else { 1002 }
+            );
+            if mode < 3 {
+                let declaration_index = if mode < 2 && and { 0 } else { 2 };
+                let StatementDesc::Variable(decl) = &output.block[declaration_index].desc else {
+                    panic!("declaration")
+                };
+                assert_eq!(decl.property, LetKind::Variable);
+                if mode < 2 {
+                    assert_eq!(decl.ident.stamp(), 1003);
+                } else {
+                    assert_eq!(decl.ident.stamp(), target.stamp());
+                    assert_eq!(decl.ident.flags(), target.flags());
+                }
+            }
+            let js = print_block(&output.block);
+            assert!(js.contains("if"), "{js}");
+            if mode == 3 {
+                assert!(js.contains("else"), "{js}");
+            }
+        }
+    }
+}
+
+#[test]
+fn indexed_short_circuit_return_rewrites_once_and_keeps_the_same_continuation() {
+    use super::output::Output;
+    for and in [true, false] {
+        let mut compiler = LambdaCompiler::new();
+        let mut context = IndexedLambdaContext::from_lambda(
+            Lambda::Lprim(PrimInfo {
+                primitive: if and {
+                    Primitive::Psequand
+                } else {
+                    Primitive::Psequor
+                },
+                args: vec![
+                    Lambda::var(Ident::new("left", 41, IdentFlags::NONE)),
+                    Lambda::var(Ident::new("right", 42, IdentFlags::NONE)),
+                ],
+                loc: Location::none(),
+            }),
+            [],
+        );
+        let root = context.current_root();
+        let (left, right) = match context.store().view(root) {
+            NodeView::Prim(_, [left, right], _) => (*left, *right),
+            _ => unreachable!(),
+        };
+        let mut owner = IndexedJsConsumer::new(&mut compiler, &mut context);
+        let mut visits = 0;
+        let output = owner.short_circuit_return(root, &mut |owner, rewritten| {
+            visits += 1;
+            let NodeView::IfThenElse(condition, then_, else_) =
+                owner.context.store().view(rewritten)
+            else {
+                panic!("native Lam.if_")
+            };
+            assert_eq!(condition, left);
+            assert_eq!(if and { then_ } else { else_ }, right);
+            let default = if and { else_ } else { then_ };
+            assert!(
+                matches!(
+                    owner.context.store().view(default),
+                    NodeView::Const(Constant::JsFalse)
+                ) == and
+            );
+            // This fixture's return continuation deliberately has no tail-call
+            // target. It emits JS from indexed children, never recursive Lambda.
+            let cond = expression(owner, condition).expr;
+            let then_ = expression(owner, then_).expr;
+            let else_ = expression(owner, else_).expr;
+            Output {
+                block: vec![Statement::return_(Expression::cond(cond, then_, else_))],
+                value: None,
+                finished: super::output::Finished::True,
+            }
+        });
+        assert_eq!(visits, 1);
+        assert_eq!(output.finished, super::output::Finished::True);
+        assert!(print_block(&output.block).contains("return"));
+    }
+}
+
+#[test]
+fn indexed_output_keeps_native_finished_and_dummy_append_protocol() {
+    use super::output::{Finished, Output};
+    use crate::lambda::lam_compile_context::{Continuation, TailType};
+    let first = Output {
+        block: vec![Statement::break_()],
+        value: Some(Expression::call(
+            Expression::var(Ident::create_persistent("unreachable")),
+            vec![],
+            CallInfo::default(),
+        )),
+        finished: Finished::True,
+    };
+    let second = Output::of_block_and_expression(
+        &Continuation::NeedValue(TailType::NotTail),
+        vec![],
+        Expression::string("tail"),
+    );
+    let joined = first.append(second);
+    let (block, should_break) = joined.into_break_block();
+    assert!(!should_break);
+    assert_eq!(block.len(), 1);
+    assert!(matches!(block[0].desc, StatementDesc::Break(None)));
+    let mut forced = false;
+    let effect = Output::of_expression(
+        &Continuation::EffectCall(TailType::NotTail),
+        Expression::bool(true),
+        || {
+            forced = true;
+            true
+        },
+    );
+    assert!(forced);
+    assert_eq!(effect.finished, Finished::Dummy);
+    let value = Output::of_expression(
+        &Continuation::NeedValue(TailType::NotTail),
+        Expression::bool(true),
+        || panic!("forced lazy purity outside EffectCall"),
+    );
+    assert_eq!(value.append(effect).finished, Finished::False);
+}

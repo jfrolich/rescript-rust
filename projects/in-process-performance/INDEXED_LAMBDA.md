@@ -158,6 +158,14 @@ Order follows the OCaml source rather than legacy Rust ordering: range finish is
 
 Nine indexed-owner tests now pass, including direct JS loop shapes, original full-flag identifiers versus unused binders, exact placeholder/iterable allocation order, range handle selection/order, lazy/shared labels and function control-state restoration. The focused `lambda::lam_compile` run passes 372 tests with 73 ignored. The general dispatcher and remaining return/assign/effect/catch/switch/group integration remain pending. These closed continuations are not an unsupported-family fallback and do not materialize indexed nodes.
 
+### M6 native short-circuit/output modes (continuing)
+
+Indexed short-circuit lowering now distinguishes the native NeedValue/Effect, Declare, Assign and return paths (`compiler/core/lam_compile.ml:1137-1220`). It no longer calls the legacy NeedValue-only scalar helper: that helper does not preserve the native sequand declaration-before-left-prelude order or Variable binding metadata. Return lowering uses indexed `Lam.if_` smart construction (`lam.ml:628-631`) and dispatches its returned ID in the same continuation. No argument/body materialization is involved.
+
+The indexed owner uses the native `Js_output` optional-value and True/False/Dummy finished protocol from `compiler/core/js_output.ml:28-143`; it does not infer completion by rescanning generated statements. This protocol is currently connected to the short-circuit mode operations and will support the remaining general dispatcher. It preserves lazy purity checking, finished-output append, dummy-output append and break-block behavior.
+
+Twelve focused indexed-owner tests pass, including all four nonreturn short-circuit modes, declaration metadata/order, a return-continuation rewrite producing JS directly from indexed children, and finished/dummy output behavior. No new full release or benchmark run was made. M6 remains incomplete; native conditional, recursive binding, catch/switch/tail modes and the grouped M5-to-JS entrypoint still need integration. Keep tail-label mutation owner-scoped when wiring the dispatcher; cloning the legacy `ReturnLabel` would not model OCaml's shared mutable return state.
+
 ## Validation at every checkpoint
 
 - Unit tests for semantic output, source-order traversal, shared-child isolation, and exact rewrite decisions.

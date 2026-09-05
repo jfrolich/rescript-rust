@@ -172,18 +172,7 @@ impl<'a> IndexedJsConsumer<'a> {
             return self.import(node, count, loc, lower);
         }
         if count == 2 && matches!(primitive, Primitive::Psequand | Primitive::Psequor) {
-            let (lhs, rhs) = match self.context.store().view(node) {
-                NodeView::Prim(_, args, _) => (args[0], args[1]),
-                _ => unreachable!(),
-            };
-            let lhs = lower(self, lhs);
-            let rhs = lower(self, rhs);
-            let op = if matches!(primitive, Primitive::Psequand) {
-                ShortCircuitOp::And
-            } else {
-                ShortCircuitOp::Or
-            };
-            return self.compiler.compile_short_circuit_js(op, lhs, rhs);
+            return self.short_circuit_value(node, lower);
         }
         {
             let NodeView::Prim(primitive, nodes, _) = self.context.store().view(node) else {
@@ -323,3 +312,8 @@ mod tests;
 
 #[path = "lam_compile_indexed_control.rs"]
 mod control;
+
+#[path = "lam_compile_indexed_output.rs"]
+mod output;
+#[path = "lam_compile_indexed_short_circuit.rs"]
+mod short_circuit;
