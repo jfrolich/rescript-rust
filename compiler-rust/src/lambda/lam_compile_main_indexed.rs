@@ -119,6 +119,7 @@ pub(crate) struct IndexedPreJsBackend {
     /// Selected CMJ payloads remain owner-paired. Only the explicit CMJ
     /// serializer boundary materializes these roots.
     cmj_inline_roots: Vec<(String, NodeId)>,
+    fatal_warnings_pending: bool,
 }
 
 fn materialize_diagnostic_groups(
@@ -161,6 +162,16 @@ impl IndexedPreJsBackend {
 
     pub(crate) fn hoisted_warnings(&self) -> &[IndexedHoistedWarning] {
         &self.hoisted_warnings
+    }
+
+    /// M6 calls this after JS lowering and required-module collection, directly
+    /// before effect/CMJ export, matching `Warnings.check_fatal`.
+    pub(crate) fn check_fatal_warnings(&self) -> Result<(), IndexedPreJsError> {
+        if self.fatal_warnings_pending {
+            Err(IndexedPreJsError::FatalWarnings)
+        } else {
+            Ok(())
+        }
     }
 
     pub(crate) fn storage_measurements(
@@ -430,11 +441,6 @@ fn set_insert(set: &mut Vec<Ident>, id: Ident) -> bool {
     }
 }
 
-fn set_contains(set: &[Ident], id: &Ident) -> bool {
-    set.binary_search_by(|existing| ident_order(existing, id))
-        .is_ok()
-}
-
 fn set_remove(set: &mut Vec<Ident>, id: &Ident) {
     if let Ok(index) = set.binary_search_by(|existing| ident_order(existing, id)) {
         set.remove(index);
@@ -561,20 +567,20 @@ fn remove_dead_groups(
     exports: &[Ident],
     groups: Vec<(Option<Ident>, IndexedGroup)>,
 ) -> Vec<(Option<Ident>, IndexedGroup)> {
-    let mut free_by_ident = AHashMap::<Ident, Vec<Ident>>::new();
+    let mut free_by_ident = Vec::<(Ident, Vec<Ident>)>::new();
     let mut initial = exports.to_vec();
     for (id, group) in &groups {
         match group {
             IndexedGroup::Single(kind, root) => {
                 let id = id.as_ref().expect("single group has an identifier");
-                free_by_ident.insert(id.clone(), pass_free_variables(store, *root));
+                free_by_ident.push((id.clone(), pass_free_variables(store, *root)));
                 if matches!(kind, LetKind::Strict | LetKind::Variable) {
                     initial.insert(0, id.clone());
                 }
             }
             IndexedGroup::Recursive(bindings) => {
                 for (id, value) in bindings {
-                    free_by_ident.insert(id.clone(), pass_free_variables(store, *value));
+                    free_by_ident.push((id.clone(), pass_free_variables(store, *value)));
                     if !matches!(store.view(*value), NodeView::Function(_, _, _, _)) {
                         initial.insert(0, id.clone());
                     }
@@ -589,17 +595,22 @@ fn remove_dead_groups(
             }
         }
     }
-    fn dfs(id: &Ident, free_by_ident: &AHashMap<Ident, Vec<Ident>>, visited: &mut Vec<Ident>) {
-        if id.is_global() || id.is_js() || !set_insert(visited, id.clone()) {
+    fn dfs(id: &Ident, free_by_ident: &[(Ident, Vec<Ident>)], visited: &mut Vec<Ident>) {
+        if id.is_global() || id.is_js() || visited.iter().any(|seen| seen.same(id)) {
             return;
         }
-        let free = free_by_ident.get(id).unwrap_or_else(|| {
-            panic!(
-                "indexed Lam_dce missing local binding {}/{}",
-                id.name(),
-                id.stamp()
-            )
-        });
+        visited.push(id.clone());
+        let free = free_by_ident
+            .iter()
+            .rev()
+            .find_map(|(key, free)| key.same(id).then_some(free))
+            .unwrap_or_else(|| {
+                panic!(
+                    "indexed Lam_dce missing local binding {}/{}",
+                    id.name(),
+                    id.stamp()
+                )
+            });
         for dependency in free {
             dfs(dependency, free_by_ident, visited);
         }
@@ -611,9 +622,13 @@ fn remove_dead_groups(
     groups
         .into_iter()
         .filter_map(|(id, group)| match group {
-            IndexedGroup::Single(_, _) if !set_contains(&visited, id.as_ref().unwrap()) => None,
+            IndexedGroup::Single(_, _)
+                if !visited.iter().any(|seen| seen.same(id.as_ref().unwrap())) =>
+            {
+                None
+            }
             IndexedGroup::Recursive(mut bindings) => {
-                bindings.retain(|(id, _)| set_contains(&visited, id));
+                bindings.retain(|(id, _)| visited.iter().any(|seen| seen.same(id)));
                 (!bindings.is_empty()).then_some((id, IndexedGroup::Recursive(bindings)))
             }
             group => Some((id, group)),
@@ -842,6 +857,7 @@ fn add_hoisted_aliases(
     hoisted: &[HoistedFunction],
     id_gen: &IdGenerator,
     warning_config: &WarningConfig,
+    diagnostics: &mut Option<&mut dyn IndexedDiagnosticsObserver>,
 ) -> Result<(Vec<HoistedExport>, Vec<IndexedHoistedWarning>), IndexedPreJsError> {
     let group_map = collect_group_bindings(context.store(), groups);
     let exported_modules = context
@@ -858,17 +874,21 @@ fn add_hoisted_aliases(
     let mut aliases = Vec::new();
     let mut metadata = Vec::new();
     let mut warnings = Vec::new();
-    let misplaced = |warnings: &mut Vec<IndexedHoistedWarning>, item: &HoistedFunction| {
+    let mut misplaced = |warnings: &mut Vec<IndexedHoistedWarning>, item: &HoistedFunction| {
         let warning = Warning::MisplacedAttribute {
             name: "res.hoistedFunction".to_string(),
         };
         if warning_config.is_active(&warning) {
-            warnings.push(IndexedHoistedWarning {
+            let delivered = IndexedHoistedWarning {
                 path: item.path.clone(),
                 loc: item.loc,
                 is_error: warning_config.is_error(&warning),
                 warning,
-            });
+            };
+            if let Some(diagnostics) = diagnostics.as_deref_mut() {
+                diagnostics.warning(&delivered);
+            }
+            warnings.push(delivered);
         }
     };
     for item in hoisted {
@@ -1058,9 +1078,33 @@ pub(crate) fn lower_and_optimize_for_pre_js_indexed(
     external_inline: &mut IndexedExternalInlineResolver<'_>,
     external_arity: &mut ExternalArityResolver<'_>,
 ) -> Result<IndexedPreJsBackend, IndexedPreJsError> {
+    lower_and_optimize_for_pre_js_indexed_with_diagnostics(
+        indexed_raw,
+        export_idents,
+        hoisted,
+        possible_required_modules,
+        jsx_preserve,
+        external_inline,
+        external_arity,
+        &WarningConfig::new(),
+        None,
+    )
+}
+
+pub(crate) fn lower_and_optimize_for_pre_js_indexed_with_diagnostics(
+    indexed_raw: crate::raw_lambda::convert::IndexedRawLambda,
+    export_idents: Vec<Ident>,
+    hoisted: &[HoistedFunction],
+    possible_required_modules: &AHashSet<ModuleId>,
+    jsx_preserve: bool,
+    external_inline: &mut IndexedExternalInlineResolver<'_>,
+    external_arity: &mut ExternalArityResolver<'_>,
+    warning_config: &WarningConfig,
+    diagnostics: Option<&mut dyn IndexedDiagnosticsObserver>,
+) -> Result<IndexedPreJsBackend, IndexedPreJsError> {
     let (raw, id_gen) = indexed_raw.into_parts();
     let lambda = crate::raw_lambda::lower::lower_to_lambda_with_id_gen(raw, id_gen.clone());
-    optimize_for_pre_js_indexed(
+    optimize_for_pre_js_indexed_with_diagnostics(
         lambda,
         export_idents,
         hoisted,
@@ -1069,6 +1113,8 @@ pub(crate) fn lower_and_optimize_for_pre_js_indexed(
         id_gen,
         external_inline,
         external_arity,
+        warning_config,
+        diagnostics,
     )
 }
 
@@ -1170,15 +1216,9 @@ pub(crate) fn optimize_for_pre_js_indexed_with_diagnostics(
         hoisted,
         &id_gen,
         warning_config,
+        &mut diagnostics,
     )?;
-    if let Some(diagnostics) = diagnostics.as_deref_mut() {
-        for warning in &hoisted_warnings {
-            diagnostics.warning(warning);
-        }
-    }
-    if hoisted_warnings.iter().any(|warning| warning.is_error) {
-        return Err(IndexedPreJsError::FatalWarnings);
-    }
+    let fatal_warnings_pending = hoisted_warnings.iter().any(|warning| warning.is_error);
     let roots = groups
         .iter()
         .flat_map(|(_, group)| group.roots())
@@ -1195,6 +1235,7 @@ pub(crate) fn optimize_for_pre_js_indexed_with_diagnostics(
         id_gen,
         hoisted_warnings,
         cmj_inline_roots: Vec::new(),
+        fatal_warnings_pending,
     })
 }
 
@@ -1399,6 +1440,33 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["first", "second"]
         );
+    }
+
+    #[test]
+    fn dce_visited_membership_uses_ident_same_while_free_sets_keep_flags() {
+        for (binding, export) in [
+            (
+                Ident::new("nonzero", 7, IdentFlags::GLOBAL),
+                Ident::new("different", 7, IdentFlags::NONE),
+            ),
+            (
+                Ident::new("stampzero", 0, IdentFlags::PREDEF_EXN),
+                Ident::new("stampzero", 0, IdentFlags::NONE),
+            ),
+        ] {
+            assert!(binding.same(&export));
+            let mut context = IndexedLambdaContext::from_lambda(Lambda::unit(), []);
+            let root = context
+                .store_mut()
+                .append_compat_lambda(Lambda::const_(Constant::int(1)));
+            let groups = vec![(
+                Some(binding.clone()),
+                IndexedGroup::Single(LetKind::Alias, root),
+            )];
+            let kept = remove_dead_groups(context.store(), &[export], groups);
+            assert_eq!(kept.len(), 1);
+            assert_eq!(kept[0].0.as_ref().unwrap().flags(), binding.flags());
+        }
     }
 
     #[test]
@@ -1792,6 +1860,7 @@ mod tests {
             id_gen: generator,
             hoisted_warnings: vec![],
             cmj_inline_roots: vec![],
+            fatal_warnings_pending: false,
         };
         let mut trace = Vec::new();
         let values = {
@@ -1959,9 +2028,10 @@ mod tests {
         let mut fatal = WarningConfig::new();
         fatal.parse_as_error("@53").unwrap();
         let mut observer = Observer::default();
+        let result = compile(&fatal, &mut observer).unwrap();
         assert_eq!(
-            compile(&fatal, &mut observer).err().unwrap(),
-            IndexedPreJsError::FatalWarnings
+            result.check_fatal_warnings(),
+            Err(IndexedPreJsError::FatalWarnings)
         );
         assert!(observer.0[0].is_error);
     }
@@ -2054,18 +2124,39 @@ mod tests {
         ];
         let mut export_map = Vec::new();
         let hoisted_loc = Location::new_for_error("nonfunction.res", 3, 7);
+        #[derive(Default)]
+        struct Observer(Vec<IndexedHoistedWarning>);
+        impl IndexedDiagnosticsObserver for Observer {
+            fn lambda(&mut self, _: &'static str, _: Lambda) {}
+            fn groups(&mut self, _: Vec<IndexedDiagnosticGroup>) {}
+            fn warning(&mut self, warning: &IndexedHoistedWarning) {
+                self.0.push(warning.clone());
+            }
+        }
+        let missing_loc = Location::new_for_error("nonfunction.res", 1, 2);
+        let mut observer = Observer::default();
+        let mut diagnostics: Option<&mut dyn IndexedDiagnosticsObserver> = Some(&mut observer);
         let error = add_hoisted_aliases(
             &mut context,
             &mut groups,
             &mut export_map,
-            &[HoistedFunction {
-                binding,
-                path: vec!["A".into(), "make".into()],
-                loc: hoisted_loc,
-                target_loc: Location::new_for_error("nonfunction.res", 20, 30),
-            }],
+            &[
+                HoistedFunction {
+                    binding: id("missing", 99),
+                    path: vec!["Missing".into()],
+                    loc: missing_loc,
+                    target_loc: Location::none(),
+                },
+                HoistedFunction {
+                    binding: binding.clone(),
+                    path: vec!["A".into(), "make".into()],
+                    loc: hoisted_loc,
+                    target_loc: Location::new_for_error("nonfunction.res", 20, 30),
+                },
+            ],
             &IdGenerator::with_start_stamp(10),
             &WarningConfig::new(),
+            &mut diagnostics,
         )
         .unwrap_err();
         assert_eq!(
@@ -2075,6 +2166,43 @@ mod tests {
                 loc: hoisted_loc,
             }
         );
+        assert_eq!(observer.0.len(), 1);
+        assert_eq!(observer.0[0].loc, missing_loc);
+        assert_eq!(observer.0[0].warning.number(), 53);
+
+        let mut reverse_observer = Observer::default();
+        let mut reverse_diagnostics: Option<&mut dyn IndexedDiagnosticsObserver> =
+            Some(&mut reverse_observer);
+        let reverse = add_hoisted_aliases(
+            &mut context,
+            &mut groups,
+            &mut export_map,
+            &[
+                HoistedFunction {
+                    binding,
+                    path: vec!["A".into(), "make".into()],
+                    loc: hoisted_loc,
+                    target_loc: Location::new_for_error("nonfunction.res", 20, 30),
+                },
+                HoistedFunction {
+                    binding: id("missing", 99),
+                    path: vec!["Missing".into()],
+                    loc: missing_loc,
+                    target_loc: Location::none(),
+                },
+            ],
+            &IdGenerator::with_start_stamp(10),
+            &WarningConfig::new(),
+            &mut reverse_diagnostics,
+        );
+        assert_eq!(
+            reverse.unwrap_err(),
+            IndexedPreJsError::HoistedNameCollision {
+                name: "A$make".into(),
+                loc: hoisted_loc,
+            }
+        );
+        assert!(reverse_observer.0.is_empty());
     }
 
     #[test]

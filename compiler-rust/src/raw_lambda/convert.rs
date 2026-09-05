@@ -12770,6 +12770,90 @@ mod tests {
     }
 
     #[test]
+    fn sealed_indexed_producer_threads_warning_config_and_observer() {
+        #[derive(Default)]
+        struct Observer(Vec<crate::lambda::lam_compile_main_indexed::IndexedHoistedWarning>);
+        impl crate::lambda::lam_compile_main_indexed::IndexedDiagnosticsObserver for Observer {
+            fn lambda(&mut self, _: &'static str, _: crate::lambda::Lambda) {}
+            fn groups(
+                &mut self,
+                _: Vec<crate::lambda::lam_compile_main_indexed::IndexedDiagnosticGroup>,
+            ) {
+            }
+            fn warning(
+                &mut self,
+                warning: &crate::lambda::lam_compile_main_indexed::IndexedHoistedWarning,
+            ) {
+                self.0.push(warning.clone());
+            }
+        }
+        fn compile(
+            config: &crate::diagnostics::WarningConfig,
+        ) -> (
+            Result<bool, crate::lambda::lam_compile_main_indexed::IndexedPreJsError>,
+            Vec<crate::lambda::lam_compile_main_indexed::IndexedHoistedWarning>,
+        ) {
+            let arena = ParseArena::new();
+            let generator = std::sync::Arc::new(IdGenerator::with_start_stamp(20));
+            let ctx = TypeContext::new(generator.clone());
+            let env = initial_env(&ctx);
+            let converter = RawLambdaConverter::with_id_generator_and_unit_name(
+                &arena,
+                &ctx,
+                &env,
+                generator,
+                "Fixture".into(),
+            );
+            let export = Ident::new("value", 1, IdentFlags::NONE);
+            let raw = RawLambda::prim(
+                Primitive::Pmakeblock(
+                    crate::lambda::TagInfo::ModuleExport(vec![export.clone()]),
+                    crate::lambda::lam_primitive::Mutable::Immutable,
+                ),
+                vec![RawLambda::unit()],
+                Location::none(),
+            );
+            let indexed_raw = converter.finish_indexed_raw(raw);
+            let hoisted = crate::lambda::HoistedFunction {
+                binding: Ident::new("missing", 9, IdentFlags::NONE),
+                path: vec!["Missing".into()],
+                loc: Location::new_for_error("sealed-warning.res", 2, 4),
+                target_loc: Location::none(),
+            };
+            let mut inline = |_: &Ident, _: bool, _: &str| None;
+            let mut arity = |_: &Ident, _: bool, _: &str| None;
+            let mut observer = Observer::default();
+            let result = crate::lambda::lam_compile_main_indexed::lower_and_optimize_for_pre_js_indexed_with_diagnostics(
+                indexed_raw,
+                vec![export],
+                &[hoisted],
+                &AHashSet::new(),
+                false,
+                &mut inline,
+                &mut arity,
+                config,
+                Some(&mut observer),
+            )
+            .map(|backend| backend.check_fatal_warnings().is_err());
+            (result, observer.0)
+        }
+
+        let mut disabled = crate::diagnostics::WarningConfig::new();
+        disabled.parse("-53").unwrap();
+        let (result, warnings) = compile(&disabled);
+        assert!(!result.unwrap());
+        assert!(warnings.is_empty());
+
+        let mut fatal = crate::diagnostics::WarningConfig::new();
+        fatal.parse_as_error("@53").unwrap();
+        let (result, warnings) = compile(&fatal);
+        assert!(result.unwrap());
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].is_error);
+        assert_eq!(warnings[0].warning.number(), 53);
+    }
+
+    #[test]
     fn sync_matching_stamps_advances_raw_converter_after_matching_allocations() {
         let arena = ParseArena::new();
         let id_gen = IdGenerator::with_start_stamp(100);
