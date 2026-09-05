@@ -4,7 +4,7 @@
 
 Replace the recursive owned `lambda::Lambda` tree with compilation-owned indexed storage that remains canonical across optimized-Lambda passes and is consumed directly by JS lowering. This is a storage and ownership migration, not a new optimizer. The OCaml pass order, branch order, source-order child lists, smart-constructor behavior, identifier allocation, metadata updates, diagnostics, CMJ boundaries, dumps, source maps, and JavaScript output remain unchanged.
 
-The current Rust pipeline repeatedly consumes and rebuilds `Box<Lambda>` and `Vec<Lambda>` trees. The target representation allocates each optimized-Lambda node once in a module-local store and addresses it with a `u32` index. Rewrites append replacement nodes and return a new root in the same store. Old nodes remain valid for metadata and substitutions that intentionally retain an earlier expression. No per-node `Rc`/`Arc`, `unsafe`, structural deduplication, placeholder nodes, or output-mode behavior is permitted.
+The current Rust pipeline repeatedly consumes and rebuilds `Box<Lambda>` and `Vec<Lambda>` trees. The target representation allocates optimized-Lambda nodes in a module-local store and addresses them with checked `u32` indices. Rewrites return roots for independently allocated replacement nodes and reuse unchanged immutable node IDs where semantics permit. Old nodes remain valid only while metadata or substitutions intentionally retain them. Each pass must track reachable live nodes versus retained superseded nodes and payload bytes; blindly appending a complete new graph per pass could worsen peak RSS and is not an acceptable endpoint. Reclamation or compaction requires separate evidence and must not change identity or traversal. No per-node `Rc`/`Arc`, `unsafe`, structural deduplication, placeholder nodes, or output-mode behavior is permitted.
 
 ## Whole-path ownership
 
@@ -27,7 +27,7 @@ The initial representation consists of:
 - A dense `Vec<IndexedNode>` containing only a discriminant and compact scalar/index fields.
 - Per-kind cold payload vectors for values that enlarge uncommon variants: constants, apply metadata, function metadata/parameters, primitives/locations, switch metadata, and strings.
 - Contiguous side arrays for ordered child `NodeId`s, recursive bindings, keyed switch cases, and string-switch cases. Ranges are `(start: u32, len: u32)` and preserve insertion/source order.
-- A root `NodeId` and explicit borrowed APIs (`node`, `children`, `bindings`, switch-case access). Callers do not retain references while appending nodes.
+- A root `NodeId` and explicit arena-bound borrowed APIs (`node`, `children`, `bindings`, switch-case access). Opaque IDs are interpreted only through their owning `IndexedLambda`; Lambda-bearing metadata carries the owner lifetime rather than eagerly materializing trees or allowing IDs to cross stores. Callers do not retain payload references while appending nodes.
 
 Children are inserted before parents during the initial conversion, giving postorder locality without changing semantic traversal. Passes must traverse children in the exact order of their OCaml counterparts rather than relying on physical node order. Sharing is explicit: two parent payloads may name the same `NodeId`. Rewrites do not mutate a shared child in place; they return replacement roots, so independent occurrences remain independently rewritable unless a pass deliberately reuses a result.
 
@@ -40,10 +40,11 @@ The compatibility materializer uses the root-directed semantic traversal, not ar
 - Add complete lossless owned `Lambda -> IndexedLambda` conversion and compatibility `NodeId -> Lambda` materialization.
 - Add semantic round-trip tests covering every node family and preserving switch/case/binding order.
 - Add tests that deliberately share one child index between two parents, rewrite one parent path by appending nodes, and prove the other parent and shared child remain unchanged. Assert semantic materialized results, not pointer identity.
-- Port `Lam_pass_collect.collect_info` and its arity queries to borrowed indexed access.
-- In the production pipeline, convert once after the initial existing deep-flatten, run the first collect over the indexed representation, and materialize once at the next still-recursive pass boundary.
+- Port `Lam_pass_collect.collect_info` and its arity queries to borrowed indexed access. Its Lambda-bearing identifier metadata stores arena IDs tied to the owner lifetime instead of eagerly materializing function bodies, option payloads, or block elements.
+- Differential tests run indexed collect/arity against the existing tree implementation across node variants, ordered children, and deliberately shared children.
+- Keep the production pipeline unchanged. A tree -> indexed -> tree boundary around one read-only pass would be unamortized conversion overhead and is not a production milestone.
 
-M1 is a buildable regression-tested migration checkpoint. It is not expected to improve wall time because the temporary compatibility materialization remains. No performance claim is valid until production retains indexed storage across multiple rewriting passes and into JS lowering.
+M1 is an inactive, buildable, regression-tested migration foundation. It makes no wall-time claim. Production integration waits until enough contiguous rewriting passes and the consumer use the same store without an intermediate recursive materialization.
 
 ### M2: exits segment
 
@@ -71,7 +72,7 @@ Port `LambdaCompiler` and helper APIs to borrowed indexed access. Preserve recur
 - Debug and release compiler builds under the shared heavy-work lock.
 - Focused pass tests with 5-10 second compiler/test timeouts.
 - Before production retention: release compiler and rewatch tests; full typedtree, raw Lambda, optimized Lambda, JavaScript, diagnostics, and focused JS parity; pinned Tella full clean build; exact generated-JS manifest comparison excluding `node_modules`; preservation of the pre-existing generated Tella modifications.
-- Instrumented allocation and visited-node counters, if added, count actual store insertion and traversal events and are removed before authoritative timing.
+- Instrumented allocation and visited-node counters, if added, count actual store insertion and traversal events and are removed before authoritative timing. Track reachable live nodes, superseded nodes retained by metadata/substitutions, and side-payload bytes before choosing an append/reuse/reclamation policy.
 - Performance measurement only after correctness, with separately saved instrumentation-free binaries and fixed-count alternating one-worker/twelve-worker clean builds. Conversion overhead is reported rather than hidden.
 
 ## Non-goals and rejected shortcuts
