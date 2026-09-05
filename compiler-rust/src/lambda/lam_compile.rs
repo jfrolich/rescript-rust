@@ -79,6 +79,21 @@ pub(crate) struct Compiled {
     pub(crate) expr: Expression,
 }
 
+/// Owner-private result of inspecting one indexed external-field application.
+/// The fallback keeps only scalar metadata and same-store IDs across resolver
+/// calls; it never owns a recursive copy of an indexed child.
+enum PreparedIndexedExternalApply {
+    Reduced(NodeId),
+    Call {
+        module: ModuleId,
+        field_name: String,
+        args: Vec<NodeId>,
+        info: ApInfo,
+        transformed_jsx: bool,
+        known_arity: Option<Arity>,
+    },
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct StaticHandler {
     pub(crate) label: i32,
@@ -1164,6 +1179,72 @@ impl LambdaCompiler {
             beta_hash_bucket_count,
             &mut diagnostics,
         )
+    }
+
+    /// Performs the mutable part of indexed external-call lowering.
+    ///
+    /// The initial store inspection ends before the CMJ resolver is queried.
+    /// A selected function is then imported into the same store and reduced
+    /// with the original argument IDs. If the function is absent or rejected,
+    /// the arity query runs afterwards, matching `lam_compile.ml:339-383`.
+    fn prepare_indexed_external_field_apply(
+        &mut self,
+        context: &mut IndexedLambdaContext,
+        application: NodeId,
+    ) -> Option<PreparedIndexedExternalApply> {
+        let (module, field_name, args, info, transformed_jsx) = {
+            let NodeSnapshot::Apply(function, args, info, transformed_jsx) =
+                context.store().snapshot(application)
+            else {
+                return None;
+            };
+            let NodeSnapshot::Prim(
+                Primitive::Pfield(_, crate::lambda::FieldDbgInfo::Module { name }),
+                field_args,
+                _,
+            ) = context.store().snapshot(function)
+            else {
+                return None;
+            };
+            let [base] = field_args.as_slice() else {
+                return None;
+            };
+            let NodeSnapshot::GlobalModule(id, dynamic_import) = context.store().snapshot(*base)
+            else {
+                return None;
+            };
+            (
+                ModuleId {
+                    id,
+                    kind: Kind::Ml,
+                    dynamic_import,
+                },
+                name,
+                args,
+                info,
+                transformed_jsx,
+            )
+        };
+
+        if let Some(Lambda::Lfunction(function)) =
+            self.resolve_cmj_module_field_lambda(&module, &field_name)
+            && function.params.len() == args.len()
+            && lfunction_can_be_inlined(&function)
+        {
+            let reduced =
+                self.import_and_beta_indexed_cmj_function(context, function, args.as_slice());
+            return Some(PreparedIndexedExternalApply::Reduced(reduced));
+        }
+
+        let known_arity = self.resolve_cmj_module_field_arity(&module, &field_name);
+        Some(PreparedIndexedExternalApply::Call {
+            module,
+            field_name,
+            args,
+            info,
+            transformed_jsx,
+            known_arity,
+        })
     }
 
     fn compile_external_field_apply(&mut self, apply: &Apply) -> Option<Compiled> {
