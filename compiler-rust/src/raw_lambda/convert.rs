@@ -830,6 +830,22 @@ pub struct RawLambdaDiagnostic {
     pub message: String,
 }
 
+enum RawLambdaIdGenerator {
+    Owned(IdGenerator),
+    Shared(std::sync::Arc<IdGenerator>),
+}
+
+impl std::ops::Deref for RawLambdaIdGenerator {
+    type Target = IdGenerator;
+
+    fn deref(&self) -> &Self::Target {
+        match self {
+            Self::Owned(generator) => generator,
+            Self::Shared(generator) => generator,
+        }
+    }
+}
+
 /// Converter from typedtree to raw lambda.
 pub struct RawLambdaConverter<'a> {
     arena: &'a ParseArena,
@@ -837,7 +853,7 @@ pub struct RawLambdaConverter<'a> {
     env: &'a crate::types::env::Env,
     persistent_env: Option<crate::cmi::persistent_env::PersistentEnv>,
     possible_required_modules: AHashSet<ModuleId>,
-    id_gen: IdGenerator,
+    id_gen: RawLambdaIdGenerator,
     next_static_raise: i32,
     next_negative_raise: i32,
     unit_name: String,
@@ -865,7 +881,7 @@ impl<'a> RawLambdaConverter<'a> {
             env,
             persistent_env: None,
             possible_required_modules: AHashSet::new(),
-            id_gen: IdGenerator::new(),
+            id_gen: RawLambdaIdGenerator::Owned(IdGenerator::new()),
             next_static_raise: 0,
             next_negative_raise: 0,
             unit_name: String::new(),
@@ -894,7 +910,7 @@ impl<'a> RawLambdaConverter<'a> {
             env,
             persistent_env: None,
             possible_required_modules: AHashSet::new(),
-            id_gen: IdGenerator::with_start_stamp(start_stamp),
+            id_gen: RawLambdaIdGenerator::Owned(IdGenerator::with_start_stamp(start_stamp)),
             next_static_raise: 0,
             next_negative_raise: 0,
             unit_name: String::new(),
@@ -924,7 +940,7 @@ impl<'a> RawLambdaConverter<'a> {
             env,
             persistent_env: None,
             possible_required_modules: AHashSet::new(),
-            id_gen: IdGenerator::with_start_stamp(start_stamp),
+            id_gen: RawLambdaIdGenerator::Owned(IdGenerator::with_start_stamp(start_stamp)),
             next_static_raise: 0,
             next_negative_raise: 0,
             unit_name,
@@ -938,6 +954,42 @@ impl<'a> RawLambdaConverter<'a> {
             hoisted_functions: Vec::new(),
             hoisted_exports: Vec::new(),
         }
+    }
+
+    /// Create the inactive indexed producer with the compilation-wide
+    /// identifier stream. Legacy constructors above retain stack-owned generators.
+    pub(crate) fn with_id_generator_and_unit_name(
+        arena: &'a ParseArena,
+        type_ctx: &'a TypeContext,
+        env: &'a crate::types::env::Env,
+        id_gen: std::sync::Arc<IdGenerator>,
+        unit_name: String,
+    ) -> Self {
+        Self {
+            arena,
+            type_ctx,
+            env,
+            persistent_env: None,
+            possible_required_modules: AHashSet::new(),
+            id_gen: RawLambdaIdGenerator::Shared(id_gen),
+            next_static_raise: 0,
+            next_negative_raise: 0,
+            unit_name,
+            no_assert_false: false,
+            noassert: false,
+            diagnostic: None,
+            warnings: Vec::new(),
+            warning_config: WarningConfig::new(),
+            suppress_inlined_attribute_check: 0,
+            preserve_expanded_sparse_records: false,
+            hoisted_functions: Vec::new(),
+            hoisted_exports: Vec::new(),
+        }
+    }
+
+    #[cfg(test)]
+    fn shares_id_generator(&self, generator: &std::sync::Arc<IdGenerator>) -> bool {
+        matches!(&self.id_gen, RawLambdaIdGenerator::Shared(owned) if std::sync::Arc::ptr_eq(owned, generator))
     }
 
     pub fn set_persistent_env(
@@ -12612,6 +12664,70 @@ mod tests {
         assert!(second_params.is_empty());
         assert_eq!(else_exit_id(&second_case), Some(2));
         assert_eq!(else_exit_id(&last_case), Some(1));
+    }
+
+    #[test]
+    fn indexed_producer_uses_one_generator_through_convert_lower_coerce_and_consumer() {
+        let arena = ParseArena::new();
+        let generator = std::sync::Arc::new(IdGenerator::with_start_stamp(100));
+        let ctx = TypeContext::new(generator.clone());
+        let env = initial_env(&ctx);
+        let mut converter = RawLambdaConverter::with_id_generator_and_unit_name(
+            &arena,
+            &ctx,
+            &env,
+            ctx.id_generator(),
+            "Fixture".into(),
+        );
+        assert!(converter.shares_id_generator(&generator));
+        let converted = converter.fresh_ident("converted");
+        assert_eq!(
+            (converted.name(), converted.stamp(), converted.flags()),
+            ("converted", 101, crate::ident::IdentFlags::NONE)
+        );
+
+        let export = Ident::new("value", 1, crate::ident::IdentFlags::NONE);
+        let caught = Ident::new("caught", 7, crate::ident::IdentFlags::NONE);
+        let raw = RawLambda::Lprim(RawPrimInfo {
+            primitive: Primitive::Pmakeblock(
+                crate::lambda::TagInfo::ModuleExport(vec![export.clone()]),
+                crate::lambda::lam_primitive::Mutable::Immutable,
+            ),
+            args: vec![RawLambda::LtryWith(
+                Box::new(RawLambda::unit()),
+                caught.clone(),
+                Box::new(RawLambda::var(caught)),
+            )],
+            loc: Location::none(),
+        });
+        let mut inline = |_: &Ident, _: bool, _: &str| None;
+        let mut arity = |_: &Ident, _: bool, _: &str| None;
+        let result =
+            crate::lambda::lam_compile_main_indexed::lower_and_optimize_for_pre_js_indexed(
+                raw,
+                vec![export],
+                &[],
+                &AHashSet::new(),
+                false,
+                generator.clone(),
+                &mut inline,
+                &mut arity,
+            )
+            .unwrap();
+        assert_eq!(
+            (
+                result.exports()[0].name(),
+                result.exports()[0].stamp(),
+                result.exports()[0].flags()
+            ),
+            ("value", 103, crate::ident::IdentFlags::NONE)
+        );
+        let consumer = result.generator().create("consumer");
+        assert_eq!(
+            (consumer.name(), consumer.stamp(), consumer.flags()),
+            ("consumer", 104, crate::ident::IdentFlags::NONE)
+        );
+        assert_eq!(generator.current_stamp(), 104);
     }
 
     #[test]
