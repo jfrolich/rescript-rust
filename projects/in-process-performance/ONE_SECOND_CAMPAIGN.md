@@ -65,7 +65,7 @@ Each implementation task gets a fresh session. Only one task owns heavy testing 
 - M3 implementation session `bks-f4716114-50d4-71a7-9e32-5e376b22b74b` completed and explicitly released compiler/shared-worktree/heavy-test ownership.
 - M4 implementation session `bks-bb9d19d9-0007-715b-a420-03bce7fe0492` completed and explicitly released compiler/shared-worktree/heavy-test ownership.
 - M5 implementation session `bks-aaf59a2b-a59b-739a-a6ae-af214f2678fb` completed and explicitly released compiler/shared-worktree/heavy-test ownership.
-- Active task: M6, the indexed JS consumer, in fresh implementation session `bks-72bab2fa-4087-7d0b-9976-74b1ae764ea5`. This session is the sole compiler/shared-worktree/heavy-test owner. It must preserve the delayed post-JS fatal-warning gate and avoid a final recursive-tree conversion to the old consumer.
+- M6 remains unfinished. Initial owner `bks-72bab2fa-4087-7d0b-9976-74b1ae764ea5` reached its context limit and explicitly released compiler/shared-worktree/heavy-test ownership at `14e0dfa00bd7aee8d3d5ea9c64742cf566b71246`. A fresh continuation owner will complete the same task, not start another milestone.
 - The indexed pipeline remains inactive. M3's shared primitive-purity helper and M5's identifier flags and legacy generator representation affect active code; their output parity passed. No measured performance gain has been retained in this campaign yet.
 - Previous session `bks-4aaf1530-49fa-702d-9ee3-eb34b0afc450` completed and released compiler/heavy-test ownership after rejecting deep-flatten Box/Vec reuse. An intermediate `GroupArena` was also removed because the existing reverse Vec iterator already avoids copying; the wrapper added links and optional entries without removing work.
 - Parent owns this campaign file. The implementation session owns its code, tests and focused measurement documentation.
@@ -156,6 +156,16 @@ Parent verification confirmed the clean head, final logs and binary hashes:
 - Logs: `/tmp/indexed-m5-final-clean-full-default-tests.log`, `/tmp/indexed-m5-final-head-release-compiler-build.log`, `/tmp/indexed-m5-final-head-release-rewatch-build.log`, and `/tmp/indexed-m5-final-release-{typedtree-parity,raw-lambda-parity,optimized-lambda-parity,js-parity,diagnostic-parity}.log`.
 
 The reviewer inspected source only. These parity runs validate the still-recursive production path and active helper changes, not the inactive indexed pipeline end to end. M5 acceptance does not establish release-test, external Tella, manifest or timing results. The owner released all compiler/shared-worktree/heavy-test ownership. M6 must port the JS consumer without a final recursive-tree conversion before activation can be considered.
+
+### Unfinished M6 checkpoint and continuation
+
+Checkpoint `14e0dfa00bd7aee8d3d5ea9c64742cf566b71246` adds borrowed recursive/indexed cursors and child/binding/case adapters. It also corrects the JS compiler's generator storage to `Owned(IdGenerator) | Shared(Arc<IdGenerator>)`. Legacy constructors remain stack-owned; the indexed constructor accepts the real shared stream without creating a dummy generator first. Parent verification found a passing cargo check and two filtered allocator tests in `/tmp/indexed-m6-cursor-check.log` and `/tmp/indexed-m6-allocator-tests.log`. These are not full M6 validation or acceptance. The remote branch already contains this checkpoint; that does not imply acceptance. The owner reports no push invocation, and the parent has not established which external actor advanced the remote.
+
+The full common consumer refactor is not implemented. The initial owner released a clean worktree after unsuccessful partial attempts. `/tmp/indexed-m6-common-consumer-wave2.patch` is reference material only, not a patch to apply wholesale: it includes prohibited indexed-argument materialization during CMJ beta and incomplete control-flow APIs.
+
+The continuation must solve consumer-side CMJ beta with mutable access to the owning indexed context. Inspect an application through a short-lived view, release the borrow, resolve and import the CMJ body at the actual query boundary into the same store, then run indexed beta/substitution with argument IDs and the same generator. Do not preload CMJs, skip inlining or materialize indexed call arguments. Immutable cursors remain useful for read-only helpers but cannot by themselves support this mutation boundary.
+
+Remaining work covers the actual expression, return/effect/assignment, recursive-binding, catch/raise, loop, switch, primitive/external and metadata traversal APIs. Then compile grouped roots directly, run JS passes and dependency resolution, invoke the delayed fatal-warning gate before effect/CMJ work, and test the sealed producer-to-JS path. No unsupported-family fallback or final conversion to the recursive consumer is acceptable.
 
 ### Rejected deep-flatten trial
 
