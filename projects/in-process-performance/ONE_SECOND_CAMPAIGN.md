@@ -92,6 +92,8 @@ Parent read the full gate logs: default compiler 1,334 library tests plus both b
 
 The next bounded research step is compact hot/cold `TypeArg` storage, with all label names/locations and physical type references preserved, measured against an immutable current control. Fresh owner `bks-fb2a0e85-f454-79be-9857-52c9cb1ece14` has sole compiler/shared-worktree/heavy-test ownership for that experiment; map owner `bks-5f227324-a8e2-75b0-bbb0-f33135ca210e` has released. It must not claim recovery as a new best result or clear the existing blockers by implication. M6 stays paused.
 
+Initial TypeArg source candidate `c6278e79535d2b672d455b02559a5c0a7249353b` uses a private optional owned label box, borrowed access and the original Debug shape across ten scoped Rust files. Owner reports cargo check and four focused tests passing. Fresh independent read-only reviewer `bks-52275976-2a5c-7d56-abd7-171b46031403` found no semantic/parity defect but raised a P2 performance issue: `subst_type` and `substitute_type_params` allocate and discard cold-label replacements when substitution leaves the type unchanged. Parent delivered the finding and authorized a narrow correction plus regression tests before timing; re-review is pending. No TypeArg performance result or full acceptance is established.
+
 Raw binaries, logs, manifests and backups from both measurements were preserved locally under `/Users/jake/.opensession/artifacts/rescript-performance-20260905/{measurement-542,hybrid-map-8311}` (202 and 138 files respectively), with per-file SHA-256 inventories. Disposable source/build directories were not copied. These organization-controlled copies avoid depending solely on `/tmp`; nothing was uploaded to a public host.
 
 ### Completed inactive indexed foundation, M1
