@@ -287,9 +287,25 @@ fn cmj_export_arity_to_external(info: CmjExportArity) -> ExternalArityInfo {
     }
 }
 
+pub(crate) enum LambdaIdGenerator {
+    Owned(IdGenerator),
+    Shared(Arc<IdGenerator>),
+}
+
+impl std::ops::Deref for LambdaIdGenerator {
+    type Target = IdGenerator;
+
+    fn deref(&self) -> &Self::Target {
+        match self {
+            Self::Owned(generator) => generator,
+            Self::Shared(generator) => generator,
+        }
+    }
+}
+
 /// Lambda compiler to JS IR.
 pub struct LambdaCompiler {
-    pub(crate) id_gen: Arc<IdGenerator>,
+    pub(crate) id_gen: LambdaIdGenerator,
     pub(crate) module_path_resolver: Option<ModulePathResolver>,
     pub(crate) jsx_preserve: bool,
     pub(crate) check_div_by_zero: bool,
@@ -396,12 +412,28 @@ impl LambdaCompiler {
 
     /// Create a new compiler.
     pub fn new() -> Self {
+        Self::with_generator_and_options(
+            LambdaIdGenerator::Owned(IdGenerator::new()),
+            None,
+            false,
+            true,
+            false,
+        )
+    }
+
+    fn with_generator_and_options(
+        id_gen: LambdaIdGenerator,
+        module_path_resolver: Option<ModulePathResolver>,
+        jsx_preserve: bool,
+        check_div_by_zero: bool,
+        cross_module_inline: bool,
+    ) -> Self {
         Self {
-            id_gen: Arc::new(IdGenerator::new()),
-            module_path_resolver: None,
-            jsx_preserve: false,
-            check_div_by_zero: true,
-            cross_module_inline: false,
+            id_gen,
+            module_path_resolver,
+            jsx_preserve,
+            check_div_by_zero,
+            cross_module_inline,
             source_map_enabled: false,
             cmj_constant_cache: HashMap::new(),
             cmj_arity_cache: HashMap::new(),
@@ -429,14 +461,13 @@ impl LambdaCompiler {
         check_div_by_zero: bool,
         cross_module_inline: bool,
     ) -> Self {
-        let mut compiler = Self::with_module_path_resolver_and_options(
+        Self::with_generator_and_options(
+            LambdaIdGenerator::Shared(id_gen),
             module_path_resolver,
             jsx_preserve,
             check_div_by_zero,
             cross_module_inline,
-        );
-        compiler.id_gen = id_gen;
-        compiler
+        )
     }
 
     /// Create a compiler with module import resolution context.
@@ -459,30 +490,13 @@ impl LambdaCompiler {
         check_div_by_zero: bool,
         cross_module_inline: bool,
     ) -> Self {
-        Self {
-            id_gen: Arc::new(IdGenerator::new()),
+        Self::with_generator_and_options(
+            LambdaIdGenerator::Owned(IdGenerator::new()),
             module_path_resolver,
             jsx_preserve,
             check_div_by_zero,
             cross_module_inline,
-            source_map_enabled: false,
-            cmj_constant_cache: HashMap::new(),
-            cmj_arity_cache: HashMap::new(),
-            cmj_lambda_cache: HashMap::new(),
-            cmj_export_constants: AHashMap::new(),
-            cmj_export_arities: AHashMap::new(),
-            hoisted_functions: Vec::new(),
-            external_module_ids: HashMap::new(),
-            static_handlers: Vec::new(),
-            static_jump_handlers: Vec::new(),
-            fallthrough_return_handlers: Vec::new(),
-            return_unit_stack: Vec::new(),
-            try_body_depth: 0,
-            switch_depth: 0,
-            loop_stack: Vec::new(),
-            loop_label_counter: std::rc::Rc::new(std::cell::Cell::new(0)),
-            diagnostic: None,
-        }
+        )
     }
 
     pub fn set_hoisted_functions(&mut self, hoisted: Vec<crate::lambda::HoistedFunction>) {
@@ -1116,7 +1130,7 @@ impl LambdaCompiler {
                 let reduced =
                     crate::lambda::lam_beta_reduce::propagate_beta_reduce_with_map_and_meta_and_id_gen(
                         &mut ident_tbl,
-                        &self.id_gen,
+                        &*self.id_gen,
                         &param_map,
                         &func.params,
                         &func.body,
@@ -1227,7 +1241,7 @@ impl LambdaCompiler {
             }
         }
 
-        aux(&self.id_gen, func, arity.extract_arity(), args)
+        aux(&*self.id_gen, func, arity.extract_arity(), args)
     }
 
     fn try_statement(&self, body: Block, exn: &Ident, handler: Block) -> Statement {
@@ -8178,3 +8192,7 @@ pub(crate) fn pointer_info_comment_text(comment: Option<&PointerInfo>) -> Option
 #[cfg(test)]
 #[path = "lam_compile_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "lam_compile_allocator_tests.rs"]
+mod allocator_tests;

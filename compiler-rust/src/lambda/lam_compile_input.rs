@@ -1,8 +1,8 @@
 //! Borrowed input facade for the recursive and indexed Lambda stores.
 //!
 //! JS lowering uses this cursor so the indexed optimizer result remains canonical
-//! through the consumer. The cursor is always paired with its store; no raw
-//! `NodeId` crosses this module's boundary.
+//! through the consumer. Indexed cursors carry their lookup store and obey the
+//! owner-scoped same-store contract; this is not compile-time arena branding.
 
 use crate::ident::Ident;
 use crate::lambda::indexed::{IndexedLambda, NodeId, NodeView};
