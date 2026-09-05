@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 import shutil
 import subprocess
+import sys
 import tarfile
 D = Path('/tmp/rescript-snapshot-projections-experiment')
 OUT = Path('projects/in-process-performance/snapshot-projections-08c884')
@@ -15,8 +16,13 @@ def sha(p):
     return hashlib.sha256(p.read_bytes()).hexdigest()
 def cmd(*args):
     return subprocess.check_output(args).decode().strip()
+restored = '--restored' in sys.argv
+VERIFY_SOURCE = '5dc38ba2154e158d43436ada2142a13eef9f2c8c' if restored else SOURCE
 source_hashes = {}
-archive = subprocess.check_output(['git', 'archive', SOURCE, 'compiler-rust', 'rewatch'])
+archive = subprocess.check_output(['git', 'archive', VERIFY_SOURCE, 'compiler-rust', 'rewatch'])
+if not restored:
+    (D / 'candidate-source.tar').write_bytes(archive)
+    (D / 'candidate.patch').write_bytes(subprocess.check_output(['git', 'show', '--format=fuller', SOURCE]))
 with tarfile.open(fileobj=io.BytesIO(archive)) as tar:
     for member in tar:
         if not member.isfile():
@@ -24,7 +30,7 @@ with tarfile.open(fileobj=io.BytesIO(archive)) as tar:
         data = tar.extractfile(member).read()
         assert Path(member.name).read_bytes() == data, member.name
         source_hashes[member.name] = hashlib.sha256(data).hexdigest()
-(D / 'source-hashes.json').write_text(json.dumps(source_hashes, sort_keys=True))
+(D / ('restored-source-hashes.json' if restored else 'source-hashes.json')).write_text(json.dumps(source_hashes, sort_keys=True))
 binaries = json.loads((D / 'binary-hashes.json').read_text())
 for name, expected in binaries.items():
     p = D / 'bin' / name
@@ -45,6 +51,12 @@ provenance = json.loads((D / 'provenance-before-timing.json').read_text())
 provenance.update(reviewed_source=SOURCE, report_head=cmd('git','rev-parse','HEAD'),
     source_file_count=len(source_hashes), source_manifest_sha256=sha(D/'source-hashes.json'),
     restored_generated_count=len(backups), artifact_root=str(DURABLE),
+    production_source=VERIFY_SOURCE, candidate_rejected=restored,
+    tool_failures=['Initial setup tool returned after its 10s timeout; lockf/Python continued and completed. No setup or timing rerun.',
+                   'Skill read tool rejected outside-workspace path; bash read succeeded.',
+                   'Test-development failures preserved in focused logs; no production detour.',
+                   'Post-cohort pre-gate classification initially missed two try-lock Cargo fingerprints; exact entries added, no inventory or cohort rerun.',
+                   'A summary glob included JS manifest JSON; exact hyperfine paths used instead. No samples rerun.'],
     logs={str(p.relative_to(D)):sha(p) for p in sorted((D/'logs').iterdir()) if p.is_file()},
     power=cmd('pmset','-g','batt'), thermal=cmd('pmset','-g','therm'))
 (D / 'provenance.json').write_text(json.dumps(provenance, indent=2))
@@ -54,6 +66,10 @@ for name in ['runs.jsonl','screen-runs.jsonl','timing-summary.json','binary-hash
              'timing-input-verification-after.json']:
     shutil.copy2(D/name, OUT/name)
 shutil.copy2(D/'fixtures/results.json', OUT/'fixture-results.json')
+shutil.copy2(D/'runtime-results.json', OUT/'runtime-results.json')
+shutil.copy2(D/'candidate.patch', OUT/'candidate.patch')
+if restored:
+    shutil.copy2(D/'restored-source-hashes.json', OUT/'restored-source-hashes.json')
 # Raw corpus JS, input paths/hashes, generated backups and all failures stay local.
 def preserve_copy(src, dst):
     src, dst = Path(src), Path(dst)
