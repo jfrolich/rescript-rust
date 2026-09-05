@@ -8,7 +8,6 @@ use crate::lambda::indexed::{IndexedLambda, NodeId, NodeView};
 use crate::lambda::lam_analysis::is_pure_primitive;
 use crate::lambda::lam_closure::{Position, StatsMap, VarStats};
 use crate::lambda::lam_compat::FieldDbgInfo;
-use crate::lambda::lam_constant::Constant;
 use crate::lambda::lam_primitive::Primitive;
 
 pub(crate) fn hit_variable(store: &IndexedLambda, target: &Ident, node: NodeId) -> bool {
@@ -120,62 +119,6 @@ pub(crate) fn no_side_effects(store: &IndexedLambda, node: NodeId) -> bool {
         | NodeView::ForAwaitOf(_, _, _)
         | NodeView::Assign(_, _) => false,
     }
-}
-
-const TOO_BIG: i32 = 1000;
-
-pub(crate) fn size(store: &IndexedLambda, node: NodeId) -> i32 {
-    fn constant_size(constant: &Constant) -> i32 {
-        match constant {
-            Constant::Some(value) => constant_size(value),
-            Constant::Block { elements, .. } => elements.iter().map(constant_size).sum(),
-            _ => 1,
-        }
-    }
-    fn inner(store: &IndexedLambda, node: NodeId) -> Option<i32> {
-        let sum = |nodes: &[NodeId], initial: i32| -> Option<i32> {
-            nodes
-                .iter()
-                .try_fold(initial, |acc, node| Some(acc + inner(store, *node)?))
-        };
-        match store.view(node) {
-            NodeView::Var(_) | NodeView::GlobalModule(_, _) => Some(1),
-            NodeView::Const(value) => Some(constant_size(value)),
-            NodeView::Let(_, _, a, b) => Some(1 + inner(store, a)? + inner(store, b)?),
-            NodeView::LetRec(_, _) => None,
-            NodeView::Prim(Primitive::Pfield(_, FieldDbgInfo::Module { .. }), [base], _)
-                if matches!(
-                    store.view(*base),
-                    NodeView::GlobalModule(_, _) | NodeView::Var(_)
-                ) =>
-            {
-                Some(1)
-            }
-            NodeView::Prim(Primitive::Praise | Primitive::PisNotNone, [arg], _) => {
-                inner(store, *arg)
-            }
-            NodeView::Prim(Primitive::PrawJsCode(_), _, _) => None,
-            NodeView::Prim(_, args, _) => sum(args, 1),
-            NodeView::Apply(function, args, _, _) => sum(args, inner(store, function)?),
-            NodeView::Function(_, _, body, _) => inner(store, body),
-            NodeView::StaticRaise(_, args) => sum(args, 1),
-            NodeView::IfThenElse(a, b, c) => {
-                Some(1 + inner(store, a)? + inner(store, b)? + inner(store, c)?)
-            }
-            NodeView::Sequence(a, b) => Some(inner(store, a)? + inner(store, b)?),
-            NodeView::Break | NodeView::Continue => Some(1),
-            NodeView::Assign(_, value) => Some(1 + inner(store, value)?),
-            NodeView::Switch { .. }
-            | NodeView::StringSwitch(_, _, _)
-            | NodeView::StaticCatch(_, _, _, _)
-            | NodeView::TryWith(_, _, _)
-            | NodeView::While(_, _)
-            | NodeView::For(_, _, _, _, _)
-            | NodeView::ForOf(_, _, _)
-            | NodeView::ForAwaitOf(_, _, _) => None,
-        }
-    }
-    inner(store, node).unwrap_or(TOO_BIG)
 }
 
 pub(crate) fn is_closed_with_map(

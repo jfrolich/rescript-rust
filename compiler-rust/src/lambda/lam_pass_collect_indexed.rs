@@ -1573,3 +1573,54 @@ mod tests {
         assert_eq!(expected, actual);
     }
 }
+
+#[cfg(test)]
+mod indexed_size_sparse_tests {
+    use super::*;
+    use crate::lambda::lam_primitive::{ExternalArgAttr, ExternalObjLabel, ExternalObjSpec};
+    use crate::lambda::{Constant, Lambda, TagInfo};
+    use crate::location::Location;
+    use crate::parser::ast::MutableFlag;
+
+    fn sparse_tag() -> TagInfo {
+        TagInfo::Record {
+            fields: (0..6).map(|i| (format!("f{i}"), false)).collect(),
+            logical_field_count: Some(6),
+            mutable_flag: MutableFlag::Immutable,
+        }
+    }
+
+    #[test]
+    fn weighted_size_counts_omitted_record_and_object_fields() {
+        let constant = Lambda::const_(Constant::Block {
+            tag_info: sparse_tag(),
+            elements: vec![Constant::int(1)],
+        });
+        let store = IndexedLambda::from_lambda(constant);
+        assert_eq!(indexed_size(&store, store.root()), 6);
+
+        let block = Lambda::prim(
+            Primitive::Pmakeblock(sparse_tag(), Mutable::Immutable),
+            vec![Lambda::const_(Constant::int(1))],
+            Location::none(),
+        );
+        let store = IndexedLambda::from_lambda(block);
+        assert_eq!(indexed_size(&store, store.root()), 7);
+
+        let params = (0..6)
+            .map(|i| ExternalObjSpec {
+                obj_arg_type: ExternalArgAttr::Nothing,
+                obj_arg_label: ExternalObjLabel::Label {
+                    name: format!("f{i}"),
+                },
+            })
+            .collect();
+        let object = Lambda::prim(
+            Primitive::PjsObjectCreate(params),
+            vec![Lambda::const_(Constant::int(1))],
+            Location::none(),
+        );
+        let store = IndexedLambda::from_lambda(object);
+        assert_eq!(indexed_size(&store, store.root()), 7);
+    }
+}

@@ -21,27 +21,124 @@ struct Usage {
     used: bool,
 }
 
+#[derive(Default)]
+pub(crate) struct BetaDiagnostics {
+    #[cfg(test)]
+    pub(crate) substitution_peak_unique_nodes: usize,
+}
+
+impl BetaDiagnostics {
+    fn record(&mut self, store: &IndexedLambda, map: &VariableSubstitution) {
+        #[cfg(test)]
+        {
+            let roots = map.values().copied().collect::<Vec<_>>();
+            self.substitution_peak_unique_nodes = self
+                .substitution_peak_unique_nodes
+                .max(store.reachable_unique_nodes(&roots));
+        }
+        #[cfg(not(test))]
+        let _ = (store, map);
+    }
+}
+
+fn mix(mut h: u32, mut d: u32) -> u32 {
+    d = d.wrapping_mul(0xcc9e2d51);
+    d = d.rotate_left(15);
+    d = d.wrapping_mul(0x1b873593);
+    h ^= d;
+    h.rotate_left(13).wrapping_mul(5).wrapping_add(0xe6546b64)
+}
+fn finish(mut h: u32) -> u32 {
+    h ^= h >> 16;
+    h = h.wrapping_mul(0x85ebca6b);
+    h ^= h >> 13;
+    h = h.wrapping_mul(0xc2b2ae35);
+    h ^= h >> 16;
+    h & 0x3fff_ffff
+}
+fn ident_hash(id: &Ident) -> u32 {
+    if id.stamp() != 0 {
+        // The native C stub's `MIX(h, d)` receives OCaml's tagged 64-bit
+        // `value d`; its macro shifts/multiplies that width before truncating
+        // into the 32-bit accumulator.
+        let mut tagged = (id.stamp() as u64).wrapping_mul(2).wrapping_add(1);
+        tagged = tagged.wrapping_mul(0xcc9e2d51);
+        tagged = (tagged << 15) | (tagged >> 17);
+        tagged = tagged.wrapping_mul(0x1b873593);
+        let mut h = tagged as u32;
+        h = h.rotate_left(13);
+        h = h.wrapping_mul(5).wrapping_add(0xe6546b64);
+        return finish(h);
+    }
+    let bytes = id.name().as_bytes();
+    let mut h = 0;
+    let mut i = 0;
+    while i + 4 <= bytes.len() {
+        h = mix(
+            h,
+            u32::from_le_bytes([bytes[i], bytes[i + 1], bytes[i + 2], bytes[i + 3]]),
+        );
+        i += 4;
+    }
+    if i < bytes.len() {
+        let mut word = 0;
+        for (shift, byte) in bytes[i..].iter().enumerate() {
+            word |= (*byte as u32) << (shift * 8);
+        }
+        h = mix(h, word);
+    }
+    finish(h ^ bytes.len() as u32)
+}
+
+/// Reproduces `Hash_ident` bucket traversal, including retained resize capacity.
+fn reference_fold_order(params: &[Ident], capacity: &mut usize) -> Vec<usize> {
+    let mut buckets: Vec<Vec<usize>> = vec![Vec::new(); (*capacity).max(32).next_power_of_two()];
+    for (entry, id) in params.iter().enumerate() {
+        let bucket = (ident_hash(id) as usize) & (buckets.len() - 1);
+        buckets[bucket].insert(0, entry);
+        if entry + 1 > buckets.len() << 1 {
+            let mut resized = vec![Vec::new(); buckets.len() * 2];
+            for old in &buckets {
+                for &index in old {
+                    let bucket = (ident_hash(&params[index]) as usize) & (resized.len() - 1);
+                    resized[bucket].push(index);
+                }
+            }
+            buckets = resized;
+        }
+    }
+    *capacity = buckets.len();
+    buckets.into_iter().flatten().collect()
+}
+
 pub(crate) fn simple_beta_reduce(
     store: &mut IndexedLambda,
     params: &[Ident],
     body: NodeId,
     args: &[NodeId],
+    hash_capacity: &mut usize,
 ) -> Option<NodeId> {
-    let mut usages: AHashMap<Ident, Usage> = params
+    let indices: AHashMap<Ident, usize> = params
         .iter()
         .cloned()
-        .zip(args.iter().copied())
-        .map(|(id, node)| (id, Usage { node, used: false }))
+        .enumerate()
+        .map(|(i, id)| (id, i))
+        .collect();
+    let mut usages: Vec<Usage> = args
+        .iter()
+        .copied()
+        .map(|node| Usage { node, used: false })
         .collect();
     fn replace(
         store: &IndexedLambda,
-        usages: &mut AHashMap<Ident, Usage>,
+        indices: &AHashMap<Ident, usize>,
+        usages: &mut [Usage],
         nodes: &[NodeId],
     ) -> Option<Vec<NodeId>> {
         nodes
             .iter()
             .map(|node| match store.view(*node) {
-                NodeView::Var(id) => match usages.get_mut(id) {
+                NodeView::Var(id) => match indices.get(id).map(|index| &mut usages[*index]) {
                     Some(usage) if !usage.used => {
                         usage.used = true;
                         Some(usage.node)
@@ -56,23 +153,21 @@ pub(crate) fn simple_beta_reduce(
     }
     let mut result = match store.snapshot(body) {
         NodeSnapshot::Prim(primitive, body_args, loc) => {
-            let body_args = replace(store, &mut usages, &body_args)?;
+            let body_args = replace(store, &indices, &mut usages, &body_args)?;
             append_rebuilt(store, NodeSnapshot::Prim(primitive, body_args, loc))
         }
         NodeSnapshot::Apply(function, body_args, info, _)
-            if {
-                match store.view(function) {
-                    NodeView::Var(_) => true,
-                    NodeView::Prim(Primitive::Pfield(_, _), [base], _) => {
-                        matches!(store.view(*base), NodeView::GlobalModule(_, _))
-                    }
-                    _ => false,
+            if match store.view(function) {
+                NodeView::Var(_) => true,
+                NodeView::Prim(Primitive::Pfield(_, _), [base], _) => {
+                    matches!(store.view(*base), NodeView::GlobalModule(_, _))
                 }
+                _ => false,
             } =>
         {
-            let body_args = replace(store, &mut usages, &body_args)?;
+            let body_args = replace(store, &indices, &mut usages, &body_args)?;
             let function = if let NodeView::Var(id) = store.view(function) {
-                match usages.get_mut(id) {
+                match indices.get(id).map(|index| &mut usages[*index]) {
                     Some(usage) if !usage.used => {
                         usage.used = true;
                         usage.node
@@ -83,12 +178,12 @@ pub(crate) fn simple_beta_reduce(
             } else {
                 function
             };
-            // `Lam.apply` default resets transformed JSX in simple beta reduction.
             append_rebuilt(store, NodeSnapshot::Apply(function, body_args, info, false))
         }
         _ => return None,
     };
-    for usage in usages.values() {
+    for index in reference_fold_order(params, hash_capacity) {
+        let usage = &usages[index];
         if !usage.used {
             result = append_rebuilt(store, NodeSnapshot::Sequence(usage.node, result));
         }
@@ -99,18 +194,21 @@ pub(crate) fn simple_beta_reduce(
 fn rebind(
     store: &mut IndexedLambda,
     map: &mut VariableSubstitution,
+    diagnostics: &mut BetaDiagnostics,
     id_gen: &IdGenerator,
     id: &Ident,
 ) -> Ident {
     let fresh = id.rename(id_gen);
     let var = store.append(NodeSnapshot::Var(fresh.clone()));
     map.insert(id.clone(), var);
+    diagnostics.record(store, map);
     fresh
 }
 
 fn rewrite_bounded(
     store: &mut IndexedLambda,
     map: &mut VariableSubstitution,
+    diagnostics: &mut BetaDiagnostics,
     node: NodeId,
     id_gen: &IdGenerator,
 ) -> NodeId {
@@ -121,67 +219,67 @@ fn rewrite_bounded(
         | NodeSnapshot::Break
         | NodeSnapshot::Continue => node,
         NodeSnapshot::Let(kind, id, value, body) => {
-            let id = rebind(store, map, id_gen, &id);
-            let value = rewrite_bounded(store, map, value, id_gen);
-            let body = rewrite_bounded(store, map, body, id_gen);
+            let id = rebind(store, map, diagnostics, id_gen, &id);
+            let value = rewrite_bounded(store, map, diagnostics, value, id_gen);
+            let body = rewrite_bounded(store, map, diagnostics, body, id_gen);
             append_rebuilt(store, NodeSnapshot::Let(kind, id, value, body))
         }
         NodeSnapshot::LetRec(bindings, body) => {
             let fresh: Vec<_> = bindings
                 .iter()
-                .map(|(id, _)| rebind(store, map, id_gen, id))
+                .map(|(id, _)| rebind(store, map, diagnostics, id_gen, id))
                 .collect();
             let bindings = fresh
                 .into_iter()
                 .zip(bindings)
                 .map(|(id, (_, value))| {
-                    let value = rewrite_bounded(store, map, value, id_gen);
+                    let value = rewrite_bounded(store, map, diagnostics, value, id_gen);
                     (id, value)
                 })
                 .collect();
-            let body = rewrite_bounded(store, map, body, id_gen);
+            let body = rewrite_bounded(store, map, diagnostics, body, id_gen);
             append_rebuilt(store, NodeSnapshot::LetRec(bindings, body))
         }
         NodeSnapshot::Function(arity, params, body, attr) => {
             let params = params
                 .iter()
-                .map(|id| rebind(store, map, id_gen, id))
+                .map(|id| rebind(store, map, diagnostics, id_gen, id))
                 .collect();
-            let body = rewrite_bounded(store, map, body, id_gen);
+            let body = rewrite_bounded(store, map, diagnostics, body, id_gen);
             append_rebuilt(store, NodeSnapshot::Function(arity, params, body, attr))
         }
         NodeSnapshot::StaticCatch(body, exit, params, handler) => {
-            let body = rewrite_bounded(store, map, body, id_gen);
+            let body = rewrite_bounded(store, map, diagnostics, body, id_gen);
             let params = params
                 .iter()
-                .map(|id| rebind(store, map, id_gen, id))
+                .map(|id| rebind(store, map, diagnostics, id_gen, id))
                 .collect();
-            let handler = rewrite_bounded(store, map, handler, id_gen);
+            let handler = rewrite_bounded(store, map, diagnostics, handler, id_gen);
             append_rebuilt(
                 store,
                 NodeSnapshot::StaticCatch(body, exit, params, handler),
             )
         }
         NodeSnapshot::TryWith(body, id, handler) => {
-            let body = rewrite_bounded(store, map, body, id_gen);
-            let id = rebind(store, map, id_gen, &id);
-            let handler = rewrite_bounded(store, map, handler, id_gen);
+            let body = rewrite_bounded(store, map, diagnostics, body, id_gen);
+            let id = rebind(store, map, diagnostics, id_gen, &id);
+            let handler = rewrite_bounded(store, map, diagnostics, handler, id_gen);
             append_rebuilt(store, NodeSnapshot::TryWith(body, id, handler))
         }
         NodeSnapshot::For(id, from, to, direction, body) => {
-            let id = rebind(store, map, id_gen, &id);
+            let id = rebind(store, map, diagnostics, id_gen, &id);
             // Preserve `lam_bounded_vars.ml`'s two traversals of `l1`.
-            let first_from = rewrite_bounded(store, map, from, id_gen);
-            let to = rewrite_bounded(store, map, to, id_gen);
-            let body = rewrite_bounded(store, map, body, id_gen);
-            let from = rewrite_bounded(store, map, first_from, id_gen);
+            let first_from = rewrite_bounded(store, map, diagnostics, from, id_gen);
+            let to = rewrite_bounded(store, map, diagnostics, to, id_gen);
+            let body = rewrite_bounded(store, map, diagnostics, body, id_gen);
+            let from = rewrite_bounded(store, map, diagnostics, first_from, id_gen);
             append_rebuilt(store, NodeSnapshot::For(id, from, to, direction, body))
         }
         NodeSnapshot::ForOf(id, iterable, body) | NodeSnapshot::ForAwaitOf(id, iterable, body) => {
             let await_ = matches!(store.snapshot(node), NodeSnapshot::ForAwaitOf(_, _, _));
-            let id = rebind(store, map, id_gen, &id);
-            let iterable = rewrite_bounded(store, map, iterable, id_gen);
-            let body = rewrite_bounded(store, map, body, id_gen);
+            let id = rebind(store, map, diagnostics, id_gen, &id);
+            let iterable = rewrite_bounded(store, map, diagnostics, iterable, id_gen);
+            let body = rewrite_bounded(store, map, diagnostics, body, id_gen);
             append_rebuilt(
                 store,
                 if await_ {
@@ -193,7 +291,7 @@ fn rewrite_bounded(
         }
         snapshot => {
             let mapped = map_children(store, snapshot, |store, child| {
-                rewrite_bounded(store, map, child, id_gen)
+                rewrite_bounded(store, map, diagnostics, child, id_gen)
             });
             append_rebuilt(store, mapped)
         }
@@ -228,8 +326,10 @@ fn propagate(
     body: NodeId,
     args: &[NodeId],
     id_gen: &IdGenerator,
+    hash_capacity: &mut usize,
+    diagnostics: &mut BetaDiagnostics,
 ) -> NodeId {
-    if let Some(result) = simple_beta_reduce(store, params, body, args) {
+    if let Some(result) = simple_beta_reduce(store, params, body, args, hash_capacity) {
         return result;
     }
     let mut bindings = Vec::new();
@@ -245,6 +345,7 @@ fn propagate(
             });
         if direct {
             map.insert(param.clone(), arg);
+            diagnostics.record(store, &map);
             continue;
         }
         let fresh = param.rename(id_gen);
@@ -264,8 +365,9 @@ fn propagate(
         };
         bindings.push((fresh, binding));
         map.insert(param.clone(), replacement);
+        diagnostics.record(store, &map);
     }
-    let mut result = rewrite_bounded(store, &mut map, body, id_gen);
+    let mut result = rewrite_bounded(store, &mut map, diagnostics, body, id_gen);
     for (id, arg) in bindings.into_iter().rev() {
         register_kind(store, meta, id.clone(), arg);
         result = append_refine_let(store, LetKind::Strict, id, arg, result);
@@ -280,8 +382,20 @@ pub(crate) fn propagate_beta_reduce(
     body: NodeId,
     args: &[NodeId],
     id_gen: &IdGenerator,
+    hash_capacity: &mut usize,
+    diagnostics: &mut BetaDiagnostics,
 ) -> NodeId {
-    propagate(store, meta, None, params, body, args, id_gen)
+    propagate(
+        store,
+        meta,
+        None,
+        params,
+        body,
+        args,
+        id_gen,
+        hash_capacity,
+        diagnostics,
+    )
 }
 
 pub(crate) fn propagate_beta_reduce_with_map(
@@ -292,6 +406,100 @@ pub(crate) fn propagate_beta_reduce_with_map(
     body: NodeId,
     args: &[NodeId],
     id_gen: &IdGenerator,
+    hash_capacity: &mut usize,
+    diagnostics: &mut BetaDiagnostics,
 ) -> NodeId {
-    propagate(store, meta, Some(stats), params, body, args, id_gen)
+    propagate(
+        store,
+        meta,
+        Some(stats),
+        params,
+        body,
+        args,
+        id_gen,
+        hash_capacity,
+        diagnostics,
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ident::IdentFlags;
+
+    fn ids(start: i32, count: usize) -> Vec<Ident> {
+        (0..count)
+            .map(|i| Ident::new(format!("p{i}"), start + i as i32, IdentFlags::NONE))
+            .collect()
+    }
+
+    fn effect(name: &str) -> crate::lambda::Lambda {
+        crate::lambda::Lambda::prim(
+            Primitive::PjsCall {
+                prim_name: name.into(),
+                arg_types: vec![],
+                ffi: crate::lambda::lam_primitive::ExternalFfiSpec {
+                    kind: crate::lambda::lam_primitive::ExternalFfiKind::Default,
+                    spec: None,
+                    obj_params: None,
+                    return_wrapper: crate::lambda::lam_primitive::ExternalReturnWrapper::Identity,
+                    inline_constant: None,
+                },
+                dynamic_import: false,
+                transformed_jsx: false,
+            },
+            vec![],
+            Location::none(),
+        )
+    }
+
+    #[test]
+    fn unused_effectful_arguments_follow_reference_hash_fold_order() {
+        let params = ids(1, 3);
+        let body = crate::lambda::Lambda::prim(
+            Primitive::Pidentity,
+            vec![crate::lambda::Lambda::var(params[0].clone())],
+            Location::none(),
+        );
+        let mut store = IndexedLambda::from_lambda(body);
+        let root = store.root();
+        let args: Vec<_> = ["a", "b", "c"]
+            .into_iter()
+            .map(|name| store.append_compat_lambda(effect(name)))
+            .collect();
+        let mut capacity = 32;
+        let reduced = simple_beta_reduce(&mut store, &params, root, &args, &mut capacity).unwrap();
+        let mut names = Vec::new();
+        let mut current = store.materialize_node(reduced);
+        while let crate::lambda::Lambda::Lsequence(first, rest) = current {
+            if let crate::lambda::Lambda::Lprim(info) = *first
+                && let Primitive::PjsCall { prim_name, .. } = info.primitive
+            {
+                names.push(prim_name);
+            }
+            current = *rest;
+        }
+        assert_eq!(names, vec!["c", "b"]);
+    }
+
+    #[test]
+    fn hash_ident_fold_order_preserves_collisions_resize_and_clear_capacity() {
+        let mut capacity = 32;
+        assert_eq!(
+            reference_fold_order(&ids(1, 6), &mut capacity),
+            vec![3, 1, 5, 2, 4, 0]
+        );
+        let expected = vec![
+            13, 65, 0, 32, 50, 3, 42, 58, 57, 64, 39, 28, 34, 49, 4, 30, 25, 23, 20, 1, 61, 69, 8,
+            6, 37, 47, 18, 38, 46, 5, 9, 66, 60, 52, 55, 56, 54, 31, 59, 14, 16, 53, 45, 63, 27,
+            29, 21, 24, 11, 44, 12, 40, 36, 33, 10, 62, 48, 51, 35, 68, 26, 22, 15, 67, 43, 41, 2,
+            19, 17, 7,
+        ];
+        assert_eq!(reference_fold_order(&ids(7, 70), &mut capacity), expected);
+        assert_eq!(capacity, 64);
+        assert_eq!(
+            reference_fold_order(&ids(77, 6), &mut capacity),
+            vec![0, 2, 4, 5, 1, 3]
+        );
+    }
 }

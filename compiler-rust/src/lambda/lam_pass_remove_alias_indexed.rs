@@ -3,15 +3,14 @@
 use crate::context::IdGenerator;
 use crate::ident::Ident;
 use crate::lambda::indexed::{IndexedLambda, IndexedLambdaContext, NodeId, NodeSnapshot, NodeView};
-use crate::lambda::lam_analysis_indexed::{
-    hit_variable, is_closed_with_map, no_side_effects, size,
-};
+use crate::lambda::lam_analysis_indexed::{hit_variable, is_closed_with_map, no_side_effects};
 use crate::lambda::lam_beta_reduce_indexed::{
-    propagate_beta_reduce, propagate_beta_reduce_with_map,
+    BetaDiagnostics, propagate_beta_reduce, propagate_beta_reduce_with_map,
 };
 use crate::lambda::lam_compat::FieldDbgInfo;
 use crate::lambda::lam_compile_context::BoxedNullable;
 use crate::lambda::lam_indexed_helpers::append_rebuilt;
+use crate::lambda::lam_pass_collect_indexed::indexed_size;
 use crate::lambda::lam_pass_collect_indexed::{IndexedElement, IndexedIdKind, IndexedLamStats};
 use crate::lambda::lam_primitive::Primitive;
 use crate::lambda::{InlineAttribute, Lambda, TagInfo};
@@ -122,7 +121,7 @@ fn inline_allowed(
         InlineAttribute::Always => true,
         InlineAttribute::Never => false,
         InlineAttribute::Default => {
-            let body_size = size(store, body);
+            let body_size = indexed_size(store, body);
             body_size < 5
                 || (args
                     .iter()
@@ -155,7 +154,7 @@ fn inline_allowed(
                                     dispatch,
                                 },
                             );
-                            size(store, reduced) < 5
+                            indexed_size(store, reduced) < 5
                         }
                     }
                     NodeSnapshot::IfThenElse(condition, then_, else_) => {
@@ -165,7 +164,7 @@ fn inline_allowed(
                         } else {
                             let reduced =
                                 append_rebuilt(store, NodeSnapshot::IfThenElse(*arg, then_, else_));
-                            size(store, reduced) < 5
+                            indexed_size(store, reduced) < 5
                         }
                     }
                     _ => false,
@@ -178,6 +177,8 @@ struct Simplifier<'a> {
     store: &'a mut IndexedLambda,
     meta: &'a mut IndexedLamStats,
     id_gen: &'a IdGenerator,
+    beta_hash_bucket_count: &'a mut usize,
+    beta_diagnostics: &'a mut BetaDiagnostics,
     jsx_preserve: bool,
     external: &'a mut IndexedExternalInlineResolver<'a>,
 }
@@ -432,7 +433,7 @@ impl Simplifier<'_> {
             let (module, dynamic, name) = (module.clone(), dynamic, name.clone());
             if let Some(lambda) = (self.external)(&module, dynamic, &name) {
                 let imported = self.store.append_compat_lambda(lambda);
-                if let NodeSnapshot::Function(_,params,body,attr)=self.store.snapshot(imported) && params.len()==args.len() && !attr.async_ && attr.directive.is_none() && args.iter().all(|arg| !matches!(self.store.view(*arg),NodeView::Var(id) if matches!(self.meta.ident_tbl.get(id),Some(IndexedIdKind::Parameter)))) { let reduced=propagate_beta_reduce(self.store,self.meta,&params,body,&args,self.id_gen); return self.simpl(reduced); }
+                if let NodeSnapshot::Function(_,params,body,attr)=self.store.snapshot(imported) && params.len()==args.len() && !attr.async_ && attr.directive.is_none() && args.iter().all(|arg| !matches!(self.store.view(*arg),NodeView::Var(id) if matches!(self.meta.ident_tbl.get(id),Some(IndexedIdKind::Parameter)))) { let reduced=propagate_beta_reduce(self.store,self.meta,&params,body,&args,self.id_gen,self.beta_hash_bucket_count,self.beta_diagnostics); return self.simpl(reduced); }
             }
         }
         if let NodeView::Var(id) = self.store.view(function) {
@@ -463,6 +464,8 @@ impl Simplifier<'_> {
                         body,
                         &args,
                         self.id_gen,
+                        self.beta_hash_bucket_count,
+                        self.beta_diagnostics,
                     );
                     return self.simpl(reduced);
                 }
@@ -480,6 +483,8 @@ impl Simplifier<'_> {
                                     body,
                                     &args,
                                     self.id_gen,
+                                    self.beta_hash_bucket_count,
+                                    self.beta_diagnostics,
                                 );
                             }
                             crate::lambda::lam_compile_context::RecFlag::SelfRec => {}
@@ -494,6 +499,8 @@ impl Simplifier<'_> {
                                     body,
                                     &args,
                                     self.id_gen,
+                                    self.beta_hash_bucket_count,
+                                    self.beta_diagnostics,
                                 );
                                 return self.simpl(reduced);
                             }
@@ -510,8 +517,16 @@ impl Simplifier<'_> {
             && !attr.async_
             && attr.directive.is_none()
         {
-            let reduced =
-                propagate_beta_reduce(self.store, self.meta, &params, body, &args, self.id_gen);
+            let reduced = propagate_beta_reduce(
+                self.store,
+                self.meta,
+                &params,
+                body,
+                &args,
+                self.id_gen,
+                self.beta_hash_bucket_count,
+                self.beta_diagnostics,
+            );
             return self.simpl(reduced);
         }
         let function = self.simpl(function);
@@ -531,16 +546,23 @@ impl IndexedLambdaContext {
         external: &mut IndexedExternalInlineResolver<'_>,
     ) {
         let root = self.current_root();
-        let (store, meta) = self.store_and_metadata_mut();
-        let root = Simplifier {
-            store,
-            meta,
-            id_gen,
-            jsx_preserve,
-            external,
-        }
-        .simpl(root);
+        let mut beta_diagnostics = BetaDiagnostics::default();
+        let root = {
+            let (store, meta, beta_hash_bucket_count) = self.alias_parts_mut();
+            Simplifier {
+                store,
+                meta,
+                id_gen,
+                beta_hash_bucket_count,
+                beta_diagnostics: &mut beta_diagnostics,
+                jsx_preserve,
+                external,
+            }
+            .simpl(root)
+        };
         self.replace_root(root);
+        #[cfg(test)]
+        self.record_beta_substitution_peak(beta_diagnostics.substitution_peak_unique_nodes);
     }
 }
 
@@ -573,13 +595,17 @@ mod tests {
             ap_transformed_jsx: jsx,
         })
     }
-    fn run(input: Lambda, start: i32) -> (Lambda, i32) {
+    fn run(input: Lambda, start: i32) -> (Lambda, i32, usize) {
         let generator = IdGenerator::with_start_stamp(start);
         let mut context = IndexedLambdaContext::from_lambda(input, []);
         context.collect_info();
         let mut external = |_: &Ident, _: bool, _: &str| None;
         context.simplify_alias(&generator, false, &mut external);
-        (context.materialize(), generator.current_stamp())
+        (
+            context.materialize(),
+            generator.current_stamp(),
+            context.beta_substitution_peak_unique_nodes(),
+        )
     }
 
     #[test]
@@ -600,7 +626,7 @@ mod tests {
             vec![int(4)],
             true,
         );
-        let (result, frontier) = run(input, 20);
+        let (result, frontier, _) = run(input, 20);
         assert!(
             matches!(result, Lambda::Lapply(Apply { ap_transformed_jsx: false, ap_args, .. }) if matches!(ap_args.as_slice(), [Lambda::Lconst(Constant::Int { i: 4, .. })]))
         );
@@ -639,8 +665,9 @@ mod tests {
             vec![argument],
             false,
         );
-        let (result, frontier) = run(input, 100);
+        let (result, frontier, substitution_peak) = run(input, 100);
         assert_eq!(frontier, 102);
+        assert!(substitution_peak >= 2);
         let text = format!("{result:#?}");
         assert!(text.contains("x/101"));
         assert!(text.contains("local/102"));
@@ -690,7 +717,7 @@ mod tests {
                 ),
             ),
         );
-        let (result, frontier) = run(input, 20);
+        let (result, frontier, _) = run(input, 20);
         let text = format!("{result:#?}");
         assert!(text.contains("i: 7"));
         assert!(text.contains("i: 8"));

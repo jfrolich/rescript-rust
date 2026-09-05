@@ -1070,8 +1070,11 @@ pub struct IndexedStorageMeasurements {
 pub struct IndexedLambdaContext {
     store: IndexedLambda,
     metadata: IndexedLamStats,
+    beta_hash_bucket_count: usize,
     #[cfg(test)]
     substitution_table_peak_unique_nodes: usize,
+    #[cfg(test)]
+    beta_substitution_peak_unique_nodes: usize,
 }
 
 impl IndexedLambdaContext {
@@ -1080,8 +1083,11 @@ impl IndexedLambdaContext {
         Self {
             store: IndexedLambda::from_lambda(lambda),
             metadata: IndexedLamStats::new(exports),
+            beta_hash_bucket_count: 32,
             #[cfg(test)]
             substitution_table_peak_unique_nodes: 0,
+            #[cfg(test)]
+            beta_substitution_peak_unique_nodes: 0,
         }
     }
 
@@ -1093,7 +1099,9 @@ impl IndexedLambdaContext {
         Self {
             store,
             metadata: IndexedLamStats::new(exports),
+            beta_hash_bucket_count: 32,
             substitution_table_peak_unique_nodes: 0,
+            beta_substitution_peak_unique_nodes: 0,
         }
     }
 
@@ -1316,8 +1324,24 @@ impl IndexedLambdaContext {
         &mut self.store
     }
 
-    pub(crate) fn store_and_metadata_mut(&mut self) -> (&mut IndexedLambda, &mut IndexedLamStats) {
-        (&mut self.store, &mut self.metadata)
+    pub(crate) fn alias_parts_mut(
+        &mut self,
+    ) -> (&mut IndexedLambda, &mut IndexedLamStats, &mut usize) {
+        (
+            &mut self.store,
+            &mut self.metadata,
+            &mut self.beta_hash_bucket_count,
+        )
+    }
+
+    #[cfg(test)]
+    pub(crate) fn record_beta_substitution_peak(&mut self, peak: usize) {
+        self.beta_substitution_peak_unique_nodes = peak;
+    }
+
+    #[cfg(test)]
+    pub(crate) fn beta_substitution_peak_unique_nodes(&self) -> usize {
+        self.beta_substitution_peak_unique_nodes
     }
 
     pub(crate) fn current_root(&self) -> NodeId {

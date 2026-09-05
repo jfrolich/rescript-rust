@@ -870,3 +870,48 @@ mod tests {
         ));
     }
 }
+
+#[cfg(test)]
+mod indexed_helper_extraction_tests {
+    use super::*;
+    use crate::location::Location;
+
+    fn effect() -> Lambda {
+        Lambda::prim(Primitive::Pdebugger, vec![], Location::none())
+    }
+
+    #[test]
+    fn scalar_primitive_helper_keeps_argument_purity_gate() {
+        for primitive in [Primitive::Pidentity, Primitive::Pignore] {
+            assert!(!no_side_effects(&Lambda::prim(
+                primitive,
+                vec![effect()],
+                Location::none()
+            )));
+        }
+        assert!(!no_side_effects(&Lambda::prim(
+            Primitive::Pdivint,
+            vec![
+                Lambda::const_(Constant::int(1)),
+                Lambda::var(Ident::create_local("d"))
+            ],
+            Location::none(),
+        )));
+        assert!(!no_side_effects(&Lambda::prim(
+            Primitive::Pdivint,
+            vec![
+                Lambda::const_(Constant::int(1)),
+                Lambda::const_(Constant::int(0))
+            ],
+            Location::none(),
+        )));
+        assert!(no_side_effects(&Lambda::prim(
+            Primitive::Pdivint,
+            vec![
+                Lambda::const_(Constant::int(1)),
+                Lambda::const_(Constant::int(2))
+            ],
+            Location::none(),
+        )));
+    }
+}
