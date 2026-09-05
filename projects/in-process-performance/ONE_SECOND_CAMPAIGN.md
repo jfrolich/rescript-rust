@@ -62,9 +62,9 @@ Each implementation task gets a fresh session. Only one task owns heavy testing 
 
 ## Active work
 
-- Implementation session: `bks-a6a8bd41-ce05-7988-af5b-765ebd313f05`.
-- Task: M2, an owning arena/metadata context with safe split borrows, followed by indexed exit counting, substitution and exit simplification.
-- Status: started after M1's owner explicitly released compiler/heavy-test ownership. Production remains unchanged. No performance change has been retained in this campaign yet.
+- Implementation session: `bks-f4716114-50d4-71a7-9e32-5e376b22b74b`.
+- Task: M3, indexed alias simplification, beta reduction and deep flatten, with their shared analysis and constructor helpers.
+- Status: started after M2's owner explicitly released compiler/heavy-test ownership. Production remains unchanged. No performance change has been retained in this campaign yet.
 - Previous session `bks-4aaf1530-49fa-702d-9ee3-eb34b0afc450` completed and released compiler/heavy-test ownership after rejecting deep-flatten Box/Vec reuse. An intermediate `GroupArena` was also removed because the existing reverse Vec iterator already avoids copying; the wrapper added links and optional entries without removing work.
 - Parent owns this campaign file. The implementation session owns its code, tests and focused measurement documentation.
 
@@ -82,7 +82,24 @@ Validation:
 - Release bsc SHA-256: `03d16966a528a15db169ab37b950ae40a801385093256b789f11afe88ba8a436`.
 - Logs: `/tmp/indexed-m1-final-head-validation.log`, `/tmp/indexed-m1-low-findings-focused.log`, `/tmp/indexed-m1-low-findings-full.log`. The parent checked logs and the binary hash; the read-only reviewer inspected source but could not access these external logs.
 
-No full parity, Tella or timing result is claimed for this inactive milestone. M2 must resolve the immutable arena borrow in metadata, keep handles paired with their owning store, and quantify live versus superseded nodes and payloads. Production integration still requires the contiguous passes and consumer, full correctness gates and measured performance.
+No full parity, Tella or timing result is claimed for this inactive milestone. Its immutable metadata borrow and incomplete reference behavior were addressed during M2 below. Production integration still requires the contiguous passes and consumer, full correctness gates and measured performance.
+
+### Completed inactive indexed exits, M2
+
+Accepted at `981542736860551bbab78c1ed69e6f43112e9c1f`. An owning context now keeps the arena, canonical root and metadata together. Indexed exit counting, substitution and simplification operate on that store without recursive Lambda conversion. The context exposes no public pass taking a caller-supplied raw node ID.
+
+Independent reviews rejected the intermediate implementations. Fixes cover unsupported switch constants, wrapper eta reduction, no-catch traversal, constructor truthiness/comparison, integer-tag switches and payload accounting. The final review also removed the old Rust function-retention compensation: indexed collection retains every bound function as OCaml does. Substitution always traverses, including an empty map, and resets transformed-JSX metadata; direct exit simplification preserves it. Tests distinguish these reference behaviors from known debt in the unchanged recursive Rust helpers rather than normalizing away differences.
+
+Reviewer `bks-b2aa52a4-ccb0-7f38-bd42-3206710a2648` accepted the exact final head with no remaining findings. Parent verification confirmed:
+
+- Full default debug tests: 1,222 compiler tests passed, 108 ignored; comptime 16 passed, 23 ignored; doctests 9 passed, 7 ignored.
+- Focused indexed exits: 12 passed. Indexed collect: 9 passed.
+- Release compiler build passed. bsc SHA-256: `f050628eac5108c83c34948fcc3da56ad473941a50de91912b213cd28d4eba9f`. The executable hash stayed unchanged across these inactive-code fixes; the build logs record recompilation.
+- Logs: `/tmp/indexed-m2-review2-full-tests.log`, `/tmp/indexed-m2-review2-release-build.log`, `/tmp/indexed-m2-review2-exits.log`, `/tmp/indexed-m2-review2-collect.log`.
+
+Retention measurements partition shallow payload storage into current-root live, metadata-retained-only and unreachable storage, counting shared payloads once. A test-only observer measures temporary substitution-table root reachability. Neither is a total deep-heap or total peak-memory measurement. Repeated rewrites can retain superseded generations; lower wall time has not been established.
+
+This acceptance is limited to inactive M2. It does not establish release-test, full parity, Tella or performance acceptance. The production optimizer, driver and JS consumer remain unchanged.
 
 ### Rejected deep-flatten trial
 
