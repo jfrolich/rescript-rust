@@ -63,7 +63,8 @@ Each implementation task gets a fresh session. Only one task owns heavy testing 
 ## Active work
 
 - M3 implementation session `bks-f4716114-50d4-71a7-9e32-5e376b22b74b` completed and explicitly released compiler/shared-worktree/heavy-test ownership.
-- Active task: M4, indexed alpha conversion and let simplification, in fresh implementation session `bks-bb9d19d9-0007-715b-a420-03bce7fe0492`. This session is the sole compiler/heavy-test owner.
+- M4 implementation session `bks-bb9d19d9-0007-715b-a420-03bce7fe0492` completed and explicitly released compiler/shared-worktree/heavy-test ownership.
+- Next task: M5, indexed exports, optimizer sequencing and in-process ownership, in a fresh implementation session.
 - The indexed pipeline remains inactive. M3 extracted a shared primitive-purity helper in active code and validated its output parity. No measured performance gain has been retained in this campaign yet.
 - Previous session `bks-4aaf1530-49fa-702d-9ee3-eb34b0afc450` completed and released compiler/heavy-test ownership after rejecting deep-flatten Box/Vec reuse. An intermediate `GroupArena` was also removed because the existing reverse Vec iterator already avoids copying; the wrapper added links and optional entries without removing work.
 - Parent owns this campaign file. The implementation session owns its code, tests and focused measurement documentation.
@@ -119,6 +120,23 @@ Parent verification at the accepted clean head confirmed:
 The reviewer audited source without running builds or tests. Parent verification checked logs, hashes and Git state. This accepts inactive M3 and the behavior-preserving active purity-helper extraction, not production integration or a performance gain. No external Tella parity or timing was run. The historical external OCaml `bs-css`/`Belt` blocker remains unresolved.
 
 Coverage is not exhaustive. Debug-tree comparisons cover the exercised fields, but custom `Ident::Debug` omits some identifier flags. Remaining test gaps include in-range `Na`, allocating-constant and unknown-record field fallbacks, external-specific async/directive/arity rejection, and separate null/undefined `NormalOptional` cases. These did not expose source mismatches in review. Substitution-table peak assertions remain partial reachability checks, not total peak-heap measurements.
+
+### Completed inactive indexed alpha/lets, M4
+
+Accepted at `79453b29b355784ace2b50b6a86c018c51704ba8`. Indexed alpha conversion, eta expansion, occurrence counting, reference elimination and let simplification now operate in the owning store. Count and lets share the context-retained native beta hash capacity. The one-store test covers the contiguous indexed passes with the same caller-provided identifier generator and includes metadata-retained storage.
+
+Parent review found incorrect eta identifier allocation and a broader traversal-order mismatch. The final implementation follows each OCaml boundary separately. Eta's fold-right callback allocates right-to-left, while its binding list remains in source order. Native constructor arguments can evaluate right-to-left; explicit `let` and list-map boundaries retain their reference order. A linked OCaml alpha oracle confirmed sibling freshening: from frontier 1002, the second under-application received identifiers 1003/1004, then the first received 1005/1006. Tests also cover application, letrec, list-map and switch-record boundaries. Count preserves its explicit source-order traversal and the invalid both-full switch assertion.
+
+Reviewer `bks-39ccf69c-9858-7134-bdc9-b38b87d0a4e0` audited every branch in the four new passes and accepted the exact clean head with no remaining findings. Parent verification confirmed:
+
+- Full default debug compiler tests: 1,277 passed, 108 ignored. Comptime: 16 passed, 23 ignored. Doctests: 9 passed, 7 ignored.
+- The all-indexed checkpoint passed 75 tests before the final alpha boundary additions. The later focused alpha suite passed 12 tests; the final full default suite includes those additions.
+- Exact-head release compiler build passed. This was not a release test run.
+- Release bsc SHA-256: `beeeaf11f8a67eba11b222a09ceb053c7740f645062bd0e1e27194cf16ff92ae`.
+- Logs: `/tmp/indexed-m4-full-default-tests.log`, `/tmp/indexed-m4-release-compiler-build.log`, `/tmp/indexed-m4-order-focused.log`, `/tmp/indexed-m4-alpha-boundaries.log`.
+- Executed native oracle source and output: `/tmp/indexed-m4-ocaml-alpha-oracle.ml` and `/tmp/indexed-m4-ocaml-alpha-oracle.log`. The initial `utop` attempt failed because its library was unavailable; the linked executable supplied the evidence. Temporary repository source and Dune changes were removed.
+
+The reviewer inspected source and the oracle without running builds or tests. The tests are not exhaustive over every leaf combination or identifier flag. This accepts inactive M4 only. No new release-test, output-parity, Tella-manifest or timing result is claimed. The production optimizer and JS consumer still use recursive Lambda; M5 and M6 remain necessary before activation and performance validation.
 
 ### Rejected deep-flatten trial
 
