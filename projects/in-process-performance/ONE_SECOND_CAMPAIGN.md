@@ -113,6 +113,8 @@ The standalone fixture's original seven-pass claim was invalid: its JS mode comp
 
 See [TYPE_ARG_STORAGE_EXPERIMENT.md](TYPE_ARG_STORAGE_EXPERIMENT.md) and `type-arg-5dc38/` for the complete evidence. Private raw copies are under `/Users/jake/.opensession/artifacts/rescript-performance-20260905/type-arg/`. No TypeArg owner remains active. Further measurement should target the much larger descriptor-copy work before another representation is chosen; no further optimization is authorized by this result alone.
 
+Fresh measurement owner `bks-6cfd619b-e1ae-704f-9bc7-adf03b873edf` has sole shared-worktree/heavy ownership to attribute `get_desc` snapshot copying by descriptor variant and source callsite. This is archive-only instrumentation and source analysis against immutable D, not another production refactor. It must distinguish inspect-only reads from snapshots required across mutation, count genuinely owned nested payload without duplicating shared data, report instrumentation overhead, and propose the next bounded change from measured costs. Normal compiler/rewatch source stays at `5dc38ba21`; M6 remains paused.
+
 Raw binaries, logs, manifests and backups from both measurements were preserved locally under `/Users/jake/.opensession/artifacts/rescript-performance-20260905/{measurement-542,hybrid-map-8311}` (202 and 138 files respectively), with per-file SHA-256 inventories. Disposable source/build directories were not copied. These organization-controlled copies avoid depending solely on `/tmp`; nothing was uploaded to a public host.
 
 ### Completed inactive indexed foundation, M1
