@@ -1219,6 +1219,217 @@ mod tests {
     }
 
     #[test]
+    fn inline_retention_gates_match_tree_with_full_payloads() {
+        fn raw_function(params: Vec<Ident>, body: Lambda, attr: FunctionAttribute) -> Lambda {
+            Lambda::Lfunction(crate::lambda::LFunction {
+                arity: params.len() as i32,
+                params,
+                body: Box::new(body),
+                attr,
+            })
+        }
+        fn sequences(count: i32) -> Lambda {
+            (1..count).fold(Lambda::Lconst(Constant::int(0)), |body, n| {
+                Lambda::Lsequence(Box::new(Lambda::Lconst(Constant::int(n))), Box::new(body))
+            })
+        }
+        let param = id("param", 60);
+        let parameter_switch = Lambda::Lswitch(
+            Box::new(Lambda::Lvar(param.clone())),
+            LambdaSwitch {
+                sw_consts_full: true,
+                sw_consts: vec![(SwitchKey::Int(0), Lambda::Lconst(Constant::int(0)))],
+                sw_blocks_full: true,
+                sw_blocks: vec![],
+                sw_failaction: None,
+                sw_dispatch: SwitchDispatch::Direct,
+            },
+        );
+        let impure_medium = Lambda::Lsequence(
+            Box::new(Lambda::Lassign(
+                id("mutable", 61),
+                Box::new(Lambda::Lconst(Constant::int(0))),
+            )),
+            Box::new(sequences(3)),
+        );
+        let mut async_attr = FunctionAttribute {
+            inline: crate::lambda::InlineAttribute::Always,
+            ..FunctionAttribute::default()
+        };
+        async_attr.async_ = true;
+        let directive_attr = FunctionAttribute {
+            inline: crate::lambda::InlineAttribute::Always,
+            directive: Some("use server".into()),
+            ..FunctionAttribute::default()
+        };
+        let functor_attr = FunctionAttribute {
+            inline: crate::lambda::InlineAttribute::Never,
+            is_a_functor: true,
+            ..FunctionAttribute::default()
+        };
+        let cases = vec![
+            (
+                id("always", 70),
+                raw_function(
+                    vec![],
+                    sequences(12),
+                    FunctionAttribute {
+                        inline: crate::lambda::InlineAttribute::Always,
+                        ..FunctionAttribute::default()
+                    },
+                ),
+                true,
+            ),
+            (
+                id("never", 71),
+                raw_function(
+                    vec![],
+                    Lambda::Lconst(Constant::int(0)),
+                    FunctionAttribute {
+                        inline: crate::lambda::InlineAttribute::Never,
+                        ..FunctionAttribute::default()
+                    },
+                ),
+                false,
+            ),
+            (
+                id("defaultSmall", 72),
+                raw_function(
+                    vec![],
+                    Lambda::Lconst(Constant::int(0)),
+                    FunctionAttribute::default(),
+                ),
+                true,
+            ),
+            (
+                id("defaultPureMedium", 73),
+                raw_function(vec![], sequences(6), FunctionAttribute::default()),
+                true,
+            ),
+            (
+                id("defaultPureLarge", 74),
+                raw_function(vec![], sequences(12), FunctionAttribute::default()),
+                false,
+            ),
+            (
+                id("defaultImpureMedium", 75),
+                raw_function(vec![], impure_medium, FunctionAttribute::default()),
+                false,
+            ),
+            (
+                id("parameterDriven", 76),
+                raw_function(vec![param], parameter_switch, FunctionAttribute::default()),
+                true,
+            ),
+            (
+                id("asyncAlways", 77),
+                raw_function(vec![], Lambda::Lconst(Constant::int(0)), async_attr),
+                false,
+            ),
+            (
+                id("directiveAlways", 78),
+                raw_function(vec![], Lambda::Lconst(Constant::int(0)), directive_attr),
+                false,
+            ),
+            (
+                id("functorNever", 79),
+                raw_function(vec![], Lambda::Lconst(Constant::int(0)), functor_attr),
+                true,
+            ),
+        ];
+        let lambda = cases.iter().rev().fold(
+            Lambda::Lconst(Constant::int(0)),
+            |body, (ident, function, _)| {
+                Lambda::Llet(
+                    crate::lambda::LetKind::Strict,
+                    ident.clone(),
+                    Box::new(function.clone()),
+                    Box::new(body),
+                )
+            },
+        );
+        let mut tree_meta = LamStats::new(vec![]);
+        tree::collect_info(&mut tree_meta, &lambda);
+        let indexed = IndexedLambda::from_lambda(lambda);
+        let mut indexed_meta = IndexedLamStats::new(&indexed, []);
+        collect_info(&mut indexed_meta, indexed.root());
+        for (ident, _, expected_payload) in cases {
+            let tree_kind_value = tree_meta.ident_tbl.get(&ident).unwrap();
+            let indexed_kind_value = indexed_meta.ident_tbl.get(&ident).unwrap();
+            assert_eq!(
+                tree_kind(tree_kind_value),
+                indexed_kind(&indexed, indexed_kind_value)
+            );
+            let IndexedIdKind::FunctionId { lambda, .. } = indexed_kind_value else {
+                panic!("expected function metadata for {ident:?}")
+            };
+            assert_eq!(
+                lambda.is_some(),
+                expected_payload,
+                "wrong retention for {ident:?}"
+            );
+            if let Some((_, rec_flag)) = lambda {
+                assert!(matches!(rec_flag, RecFlag::NonRec));
+            }
+        }
+    }
+
+    #[test]
+    fn collect_reaches_bindings_under_loop_and_assignment_arms() {
+        let assigned = id("assigned", 40);
+        let for_bound = id("forBound", 41);
+        let for_of_bound = id("forOfBound", 42);
+        let for_await_bound = id("forAwaitBound", 43);
+        let loop_id = id("loop", 44);
+        let binding = |ident: Ident, value: i32| {
+            Lambda::Llet(
+                crate::lambda::LetKind::Strict,
+                ident.clone(),
+                Box::new(Lambda::Lconst(Constant::int(value))),
+                Box::new(Lambda::Lvar(ident)),
+            )
+        };
+        let lambda = Lambda::Lsequence(
+            Box::new(Lambda::Lassign(
+                id("target", 45),
+                Box::new(binding(assigned.clone(), 1)),
+            )),
+            Box::new(Lambda::Lsequence(
+                Box::new(Lambda::Lfor(
+                    loop_id.clone(),
+                    Box::new(Lambda::Lconst(Constant::int(0))),
+                    Box::new(Lambda::Lconst(Constant::int(1))),
+                    crate::lambda::DirectionFlag::Upto,
+                    Box::new(binding(for_bound.clone(), 2)),
+                )),
+                Box::new(Lambda::Lsequence(
+                    Box::new(Lambda::Lfor_of(
+                        loop_id.clone(),
+                        Box::new(Lambda::Lvar(loop_id.clone())),
+                        Box::new(binding(for_of_bound.clone(), 3)),
+                    )),
+                    Box::new(Lambda::Lfor_await_of(
+                        loop_id.clone(),
+                        Box::new(Lambda::Lvar(loop_id)),
+                        Box::new(binding(for_await_bound.clone(), 4)),
+                    )),
+                )),
+            )),
+        );
+        let mut tree_meta = LamStats::new(vec![]);
+        tree::collect_info(&mut tree_meta, &lambda);
+        let indexed = IndexedLambda::from_lambda(lambda);
+        let mut indexed_meta = IndexedLamStats::new(&indexed, []);
+        collect_info(&mut indexed_meta, indexed.root());
+        for ident in [assigned, for_bound, for_of_bound, for_await_bound] {
+            let expected = tree_meta.ident_tbl.get(&ident).unwrap();
+            let actual = indexed_meta.ident_tbl.get(&ident).unwrap();
+            assert_eq!(tree_kind(expected), indexed_kind(&indexed, actual));
+            assert!(matches!(actual, IndexedIdKind::Constant(_)));
+        }
+    }
+
+    #[test]
     fn external_arity_lookup_matches_tree_collect() {
         let module = id("Dependency", 1);
         let exported = id("exported", 2);
@@ -1248,6 +1459,66 @@ mod tests {
         assert_eq!(
             tree_kind(tree_meta.ident_tbl.get(&exported).unwrap()),
             indexed_kind(&indexed, indexed_meta.ident_tbl.get(&exported).unwrap())
+        );
+    }
+
+    #[test]
+    fn cached_external_misses_do_not_reresolve_and_keep_import_modes_separate() {
+        fn field(module: Ident, dynamic: bool) -> Lambda {
+            Lambda::Lprim(crate::lambda::PrimInfo {
+                primitive: Primitive::Pfield(
+                    0,
+                    FieldDbgInfo::Module {
+                        name: "missing".into(),
+                    },
+                ),
+                args: vec![Lambda::LglobalModule(module, dynamic)],
+                loc: Location::none(),
+            })
+        }
+        let static_one = id("staticOne", 50);
+        let static_two = id("staticTwo", 51);
+        let dynamic = id("dynamic", 52);
+        let module = id("Dependency", 53);
+        let lambda = Lambda::Llet(
+            crate::lambda::LetKind::Strict,
+            static_one.clone(),
+            Box::new(field(module.clone(), false)),
+            Box::new(Lambda::Llet(
+                crate::lambda::LetKind::Strict,
+                static_two.clone(),
+                Box::new(field(module.clone(), false)),
+                Box::new(Lambda::Llet(
+                    crate::lambda::LetKind::Strict,
+                    dynamic.clone(),
+                    Box::new(field(module, true)),
+                    Box::new(Lambda::Lvar(dynamic.clone())),
+                )),
+            )),
+        );
+        let exports = vec![static_one, static_two, dynamic];
+        let mut tree_calls = vec![];
+        let mut tree_resolver = |module: &Ident, dynamic: bool, field: &str| {
+            tree_calls.push((module.name().to_string(), dynamic, field.to_string()));
+            None
+        };
+        let mut tree_meta = LamStats::new(exports.clone());
+        tree::collect_info_with_external_arity(&mut tree_meta, &lambda, &mut tree_resolver);
+        let indexed = IndexedLambda::from_lambda(lambda);
+        let mut indexed_calls = vec![];
+        let mut indexed_resolver = |module: &Ident, dynamic: bool, field: &str| {
+            indexed_calls.push((module.name().to_string(), dynamic, field.to_string()));
+            None
+        };
+        let mut indexed_meta = IndexedLamStats::new(&indexed, exports);
+        collect_info_with_external_arity(&mut indexed_meta, indexed.root(), &mut indexed_resolver);
+        assert_eq!(tree_calls, indexed_calls);
+        assert_eq!(
+            indexed_calls,
+            vec![
+                ("Dependency".into(), false, "missing".into()),
+                ("Dependency".into(), true, "missing".into()),
+            ]
         );
     }
 
