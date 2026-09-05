@@ -62,13 +62,13 @@ Each implementation task gets a fresh session. Only one task owns heavy testing 
 
 ## Active work
 
-- Implementation session: `bks-4aaf1530-49fa-702d-9ee3-eb34b0afc450`.
-- Task: establish current-branch release baselines and per-pass evidence, then evaluate owned Box/Vec reuse in `lam_pass_deep_flatten.rs`.
-- Status: candidate built; fixed-count paired measurement and correctness validation remain incomplete. No retained performance gain.
-- This candidate is a limited ownership change, not the planned end-to-end indexed Lambda representation. An intermediate `GroupArena` was removed during review because the existing reverse Vec iterator already avoids copying; the wrapper added links and optional entries without removing work.
+- Implementation session: `bks-49c42fcf-e0d0-7a32-a2c2-2cc0027aa4df`.
+- Task: begin the actual cross-pass indexed Lambda migration, with explicit producer/pass/consumer boundaries and a buildable, tested storage plus real-pass milestone.
+- Status: started. Private migration foundations are not a production speedup; no performance change has been retained in this campaign yet.
+- Previous session `bks-4aaf1530-49fa-702d-9ee3-eb34b0afc450` completed and released compiler/heavy-test ownership after rejecting deep-flatten Box/Vec reuse. An intermediate `GroupArena` was also removed because the existing reverse Vec iterator already avoids copying; the wrapper added links and optional entries without removing work.
 - Parent owns this campaign file. The implementation session owns its code, tests and focused measurement documentation.
 
-### Current-branch evidence, before retention
+### Rejected deep-flatten trial
 
 Artifacts: `/tmp/tella-lambda-arena-a023e8adc/`. The release base is `636fe1965`, whose compiler/rewatch source matches `a023e8adc`. The saved base binary SHA-256 values are `4b68d9fbbc0f40d052399bc1a10903701235d3cb431bb270ef9c4120142e479d` for bsc and `95c919fc8745ac69dd920b5e1e04eb5336fc5c3c7da98abee8d0ac1e41eb5a55` for rewatch. The fixed runtime is this campaign worktree's `packages/@rescript/runtime`.
 
@@ -81,6 +81,15 @@ Five-run hyperfine screening with cleanup outside timing gave:
 | 1 worker | 19.989s / 0.185s | 20.092s / 0.096s |
 | 12 workers | 5.078s / 0.160s | 5.047s / 0.108s |
 
-These separate batches do not establish a gain. The earlier 23.172s / 5.294s screening timed cleanup plus compilation and is not comparable with build-only results. Authoritative paired measurements must use high-resolution elapsed time, preserve per-build logs, verify the complete corpus, and retain the preset sample counts. Do not infer a small improvement from centisecond-rounded `/usr/bin/time` wall values or extend a run until it becomes significant.
+These separate screening batches did not establish a gain. The earlier 23.172s / 5.294s screening timed cleanup plus compilation and is not comparable with build-only results. The completed authoritative experiment instead used eight alternating pairs per worker count, `perf_counter_ns` wall time, and cleanup/hashing outside the interval.
+
+| Mode | Base mean / SD | Candidate mean / SD | Paired delta, 95% t interval |
+| --- | ---: | ---: | ---: |
+| 1 worker | 20.1791s / 0.0186s | 20.2691s / 0.0511s | +90.0ms, +42.4 to +137.7ms |
+| 12 workers | 5.0029s / 0.0320s | 5.0245s / 0.0338s | +21.6ms, -19.4 to +62.6ms |
+
+All 32 builds reported 3,248 compiled modules and matching 5,048-file JavaScript manifests. Full CPU/RSS/range data is in [SCRATCHPAD.md](SCRATCHPAD.md#rejected-deep-flatten-ownership-reuse-a023e8adc-compiler-source), committed in `526f2ef0f` with follow-up wording in `12bb54e07`. Independent artifact review confirmed the rejection, and the parent separately reproduced the CSV statistics and binary hashes. Compiler source and release target binaries were restored to the exact base. Full compiler/parity/diagnostic gates were not run for this rejected candidate; output hashes alone are not full correctness acceptance.
+
+The result rejects this specific candidate. It does not establish that all within-pass allocation reuse fails, or that cross-pass indices will improve performance. The next indexed representation is still a hypothesis requiring full integration, correctness validation and measurement.
 
 Continue after each completed task with the next evidence-supported task. Stop claiming progress when only proposals exist. If one second remains beyond measured headroom, say so while reporting actual retained improvements.
