@@ -11942,4 +11942,29 @@ mod tests {
         assert_eq!(probe.2.type_manifest,first.type_manifest);
     }
 
+
+    #[test]
+    fn ownership_into_owned_moves_unique_storage_and_copies_shared_containers() {
+        use crate::types::decl::TypeDeclarationRef;
+        let ctx = TypeContext::new(std::sync::Arc::new(IdGenerator::new()));
+        let manifest = ctx.new_generic_var(None);
+        let mut decl = manifest_decl(manifest,None);
+        decl.type_params.push(manifest);
+        let data = decl.type_params.as_ptr();
+        let unique = TypeDeclarationRef::Shared(std::sync::Arc::new(decl)).into_owned();
+        assert_eq!(data,unique.type_params.as_ptr());
+        let shared = std::sync::Arc::new(unique);
+        let mut copied = TypeDeclarationRef::Shared(shared.clone()).into_owned();
+        assert_ne!(shared.type_params.as_ptr(),copied.type_params.as_ptr());
+        assert_eq!(shared.type_params,copied.type_params);
+        copied.type_params.clear();
+        assert_eq!(shared.type_params,vec![manifest]);
+        let borrowed = TypeDeclarationRef::Borrowed(&shared).into_owned();
+        assert_ne!(shared.type_params.as_ptr(),borrowed.type_params.as_ptr());
+        let data = borrowed.type_params.as_ptr();
+        let moved = TypeDeclarationRef::owned(borrowed).into_owned();
+        assert_eq!(data,moved.type_params.as_ptr());
+        assert!(std::mem::size_of::<TypeDeclarationRef<'_>>() <= 16);
+    }
+
 }

@@ -6523,4 +6523,46 @@ mod resolution_view_tests {
         assert!(!original.view.prepared_cached_alias_rewrites.contains("Other"));
         assert!(cold.view.prepared_cached_alias_rewrites.contains("Other"));
     }
+
+    #[test]
+    fn registration_and_hiding_detach_on_their_first_write() {
+        let mut original = PersistentEnv::new();
+        original.register_in_memory_module("M", InMemoryModuleInfo::new(
+            PathBuf::from("M.res"), true, HashMap::new(), false,
+        ));
+        let mut registered = original.clone();
+        registered.register_in_memory_module("N", InMemoryModuleInfo::new(
+            PathBuf::from("N.res"), false, HashMap::new(), false,
+        ));
+        assert!(!Arc::ptr_eq(&original.view, &registered.view));
+        assert!(original.in_memory_info("N").is_none());
+        assert!(registered.in_memory_info("N").is_some());
+        let mut hidden = original.clone();
+        hidden.unregister_in_memory_signature("M");
+        assert!(!Arc::ptr_eq(&original.view, &hidden.view));
+        assert!(original.in_memory_info("M").is_some());
+        assert!(hidden.in_memory_info("M").is_none());
+        assert!(Arc::ptr_eq(&original.cache, &hidden.cache));
+        assert!(Arc::ptr_eq(&original.last_error, &registered.last_error));
+        assert!(Arc::ptr_eq(&original.crc_units, &registered.crc_units));
+    }
+
+    #[test]
+    fn portable_override_first_write_keeps_backing_graph_shared() {
+        let portable = Arc::new(PortablePersStruct {
+            ps_name: "Portable".to_string(), ps_filename: "Portable.res".to_string(),
+            ps_sig: vec![], raw_ps_sig: None, cmi_longident_names: vec![],
+            type_graph: portable_types::PortableTypeGraph {entries:vec![],variant_layouts:vec![]},
+            raw_type_graph: None, fingerprint: 0,
+        });
+        let mut original = PersistentEnv::new();
+        original.view_mut().portable_cache_overrides.insert("Portable".to_string(),portable.clone());
+        let mut query = original.clone();
+        query.view_mut().portable_cache_overrides.insert("Other".to_string(),portable.clone());
+        assert!(!Arc::ptr_eq(&original.view,&query.view));
+        assert!(!original.view.portable_cache_overrides.contains_key("Other"));
+        assert!(Arc::ptr_eq(&original.view.portable_cache_overrides["Portable"],&query.view.portable_cache_overrides["Portable"]));
+        assert!(Arc::ptr_eq(&portable,&query.view.portable_cache_overrides["Other"]));
+    }
+
 }

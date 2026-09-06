@@ -8,7 +8,7 @@ use std::collections::HashSet;
 use crate::types::context::TypeContext;
 use crate::types::decl::{
     Attribute, ConstructorArguments, ConstructorDescription, INTERNAL_OPTIONAL_ATTR_NAME,
-    TypeDeclaration, TypeKind,
+    TypeKind,
 };
 use crate::types::env::Env;
 use crate::types::path::Path;
@@ -451,6 +451,7 @@ pub(crate) fn type_is_builtin_object(ctx: &TypeContext, env: &Env, ty: TypeExprR
 
 #[cfg(test)]
 mod tests {
+    use crate::types::decl::TypeDeclaration;
     use super::*;
     use crate::context::IdGenerator;
     use crate::ident::Ident;
