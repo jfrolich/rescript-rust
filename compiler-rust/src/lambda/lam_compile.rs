@@ -18,6 +18,7 @@ use crate::js_ir::{
     ExpressionDesc, ForDirection, ModuleId, ModulePathResolver, Program, Statement, StatementDesc,
     StringClause, VIdent, VariableDeclaration, block_last_is_terminal, unnest_block,
 };
+use crate::lambda::indexed::{IndexedLambdaContext, NodeId, NodeSnapshot};
 use crate::lambda::js_pass_external_shadow::apply_external_shadow_pass;
 use crate::lambda::js_pass_flatten_and_mark_dead::{
     apply_js_flatten_and_mark_dead_pass, apply_js_flatten_pass,
@@ -31,7 +32,12 @@ use crate::lambda::js_shake::{
 };
 use crate::lambda::lam_analysis;
 use crate::lambda::lam_analysis::lfunction_can_be_inlined;
+use crate::lambda::lam_analysis_indexed::is_closed_with_map as is_closed_with_map_indexed;
 use crate::lambda::lam_arity::Arity;
+use crate::lambda::lam_beta_reduce_indexed::{
+    BetaDiagnostics as IndexedBetaDiagnostics,
+    propagate_beta_reduce_with_map as propagate_beta_reduce_with_map_indexed,
+};
 use crate::lambda::lam_closure::is_closed_with_map;
 use crate::lambda::lam_compat::{LetKind, SetFieldDbgInfo};
 use crate::lambda::lam_compile_context::{Element, ExternalArityInfo, IdKind, LamStats};
@@ -71,6 +77,21 @@ use super::lam_compile_variant::{empty_switch_case_clause, stable_group_switch_c
 pub(crate) struct Compiled {
     pub(crate) prelude: Block,
     pub(crate) expr: Expression,
+}
+
+/// Owner-private result of inspecting one indexed external-field application.
+/// The fallback keeps only scalar metadata and same-store IDs across resolver
+/// calls; it never owns a recursive copy of an indexed child.
+enum PreparedIndexedExternalApply {
+    Reduced(NodeId),
+    Call {
+        module: ModuleId,
+        field_name: String,
+        args: Vec<NodeId>,
+        info: ApInfo,
+        transformed_jsx: bool,
+        known_arity: Option<Arity>,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -287,9 +308,34 @@ fn cmj_export_arity_to_external(info: CmjExportArity) -> ExternalArityInfo {
     }
 }
 
+pub(crate) enum LambdaIdGenerator {
+    Owned(IdGenerator),
+    Shared(Arc<IdGenerator>),
+}
+
+impl std::ops::Deref for LambdaIdGenerator {
+    type Target = IdGenerator;
+
+    fn deref(&self) -> &Self::Target {
+        match self {
+            Self::Owned(generator) => generator,
+            Self::Shared(generator) => generator,
+        }
+    }
+}
+
+struct SavedFunctionScope {
+    switch_depth: i32,
+    loop_stack: Vec<crate::lambda::lam_compile_context::LoopFrame>,
+    static_handlers: Vec<StaticHandler>,
+    static_jump_handlers: Vec<StaticJumpHandler>,
+    fallthrough_return_handlers: Vec<FallthroughReturnHandler>,
+    try_body_depth: usize,
+}
+
 /// Lambda compiler to JS IR.
 pub struct LambdaCompiler {
-    pub(crate) id_gen: IdGenerator,
+    pub(crate) id_gen: LambdaIdGenerator,
     pub(crate) module_path_resolver: Option<ModulePathResolver>,
     pub(crate) jsx_preserve: bool,
     pub(crate) check_div_by_zero: bool,
@@ -396,54 +442,24 @@ impl LambdaCompiler {
 
     /// Create a new compiler.
     pub fn new() -> Self {
-        Self {
-            id_gen: IdGenerator::new(),
-            module_path_resolver: None,
-            jsx_preserve: false,
-            check_div_by_zero: true,
-            cross_module_inline: false,
-            source_map_enabled: false,
-            cmj_constant_cache: HashMap::new(),
-            cmj_arity_cache: HashMap::new(),
-            cmj_lambda_cache: HashMap::new(),
-            cmj_export_constants: AHashMap::new(),
-            cmj_export_arities: AHashMap::new(),
-            hoisted_functions: Vec::new(),
-            external_module_ids: HashMap::new(),
-            static_handlers: Vec::new(),
-            static_jump_handlers: Vec::new(),
-            fallthrough_return_handlers: Vec::new(),
-            return_unit_stack: Vec::new(),
-            try_body_depth: 0,
-            switch_depth: 0,
-            loop_stack: Vec::new(),
-            loop_label_counter: std::rc::Rc::new(std::cell::Cell::new(0)),
-            diagnostic: None,
-        }
+        Self::with_generator_and_options(
+            LambdaIdGenerator::Owned(IdGenerator::new()),
+            None,
+            false,
+            true,
+            false,
+        )
     }
 
-    /// Create a compiler with module import resolution context.
-    pub fn with_module_path_resolver(module_path_resolver: Option<ModulePathResolver>) -> Self {
-        Self::with_module_path_resolver_and_jsx_preserve(module_path_resolver, false)
-    }
-
-    /// Create a compiler with module import resolution context and JSX-preserve mode.
-    pub fn with_module_path_resolver_and_jsx_preserve(
-        module_path_resolver: Option<ModulePathResolver>,
-        jsx_preserve: bool,
-    ) -> Self {
-        Self::with_module_path_resolver_and_options(module_path_resolver, jsx_preserve, true, false)
-    }
-
-    /// Create a compiler with the JS-backend options that affect lowering.
-    pub fn with_module_path_resolver_and_options(
+    fn with_generator_and_options(
+        id_gen: LambdaIdGenerator,
         module_path_resolver: Option<ModulePathResolver>,
         jsx_preserve: bool,
         check_div_by_zero: bool,
         cross_module_inline: bool,
     ) -> Self {
         Self {
-            id_gen: IdGenerator::new(),
+            id_gen,
             module_path_resolver,
             jsx_preserve,
             check_div_by_zero,
@@ -466,6 +482,51 @@ impl LambdaCompiler {
             loop_label_counter: std::rc::Rc::new(std::cell::Cell::new(0)),
             diagnostic: None,
         }
+    }
+
+    pub(crate) fn with_shared_generator_and_options(
+        id_gen: Arc<IdGenerator>,
+        module_path_resolver: Option<ModulePathResolver>,
+        jsx_preserve: bool,
+        check_div_by_zero: bool,
+        cross_module_inline: bool,
+    ) -> Self {
+        Self::with_generator_and_options(
+            LambdaIdGenerator::Shared(id_gen),
+            module_path_resolver,
+            jsx_preserve,
+            check_div_by_zero,
+            cross_module_inline,
+        )
+    }
+
+    /// Create a compiler with module import resolution context.
+    pub fn with_module_path_resolver(module_path_resolver: Option<ModulePathResolver>) -> Self {
+        Self::with_module_path_resolver_and_jsx_preserve(module_path_resolver, false)
+    }
+
+    /// Create a compiler with module import resolution context and JSX-preserve mode.
+    pub fn with_module_path_resolver_and_jsx_preserve(
+        module_path_resolver: Option<ModulePathResolver>,
+        jsx_preserve: bool,
+    ) -> Self {
+        Self::with_module_path_resolver_and_options(module_path_resolver, jsx_preserve, true, false)
+    }
+
+    /// Create a compiler with the JS-backend options that affect lowering.
+    pub fn with_module_path_resolver_and_options(
+        module_path_resolver: Option<ModulePathResolver>,
+        jsx_preserve: bool,
+        check_div_by_zero: bool,
+        cross_module_inline: bool,
+    ) -> Self {
+        Self::with_generator_and_options(
+            LambdaIdGenerator::Owned(IdGenerator::new()),
+            module_path_resolver,
+            jsx_preserve,
+            check_div_by_zero,
+            cross_module_inline,
+        )
     }
 
     pub fn set_hoisted_functions(&mut self, hoisted: Vec<crate::lambda::HoistedFunction>) {
@@ -1082,6 +1143,119 @@ impl LambdaCompiler {
         ))
     }
 
+    /// Imports an eligible CMJ function at the consumer query boundary and
+    /// beta-reduces it against argument IDs already in the owning store.
+    ///
+    /// OCaml performs this after `query_external_id_info` and the
+    /// same-length/inlineability guards in `lam_compile.ml:339-357`. The
+    /// caller must run those guards before calling this method, so rejected
+    /// candidates are never imported merely to inspect their payload.
+    fn import_and_beta_indexed_cmj_function(
+        &mut self,
+        context: &mut IndexedLambdaContext,
+        function: LFunction,
+        args: &[NodeId],
+    ) -> NodeId {
+        assert_eq!(
+            function.params.len(),
+            args.len(),
+            "indexed CMJ beta requires a fully applied function"
+        );
+        assert!(
+            args.iter().all(|arg| context.store().contains(*arg)),
+            "indexed CMJ beta argument is foreign or out of range"
+        );
+
+        let imported = context.import_cmj_function(function);
+        let NodeSnapshot::Function(_, params, body, attr) = context.store().snapshot(imported)
+        else {
+            unreachable!("CMJ function import did not produce an indexed function")
+        };
+        debug_assert!(!attr.async_ && attr.directive.is_none());
+        let exports = AHashSet::new();
+        let (_, parameter_map) =
+            is_closed_with_map_indexed(context.store(), &exports, &params, body);
+        let mut diagnostics = IndexedBetaDiagnostics::default();
+        let (store, metadata, beta_hash_bucket_count) = context.backend_beta_parts_mut();
+        propagate_beta_reduce_with_map_indexed(
+            store,
+            metadata,
+            &parameter_map,
+            &params,
+            body,
+            args,
+            &self.id_gen,
+            beta_hash_bucket_count,
+            &mut diagnostics,
+        )
+    }
+
+    /// Performs the mutable part of indexed external-call lowering.
+    ///
+    /// The initial store inspection ends before the CMJ resolver is queried.
+    /// A selected function is then imported into the same store and reduced
+    /// with the original argument IDs. If the function is absent or rejected,
+    /// the arity query runs afterwards, matching `lam_compile.ml:339-383`.
+    fn prepare_indexed_external_field_apply(
+        &mut self,
+        context: &mut IndexedLambdaContext,
+        application: NodeId,
+    ) -> Option<PreparedIndexedExternalApply> {
+        let (module, field_name, args, info, transformed_jsx) = {
+            let NodeSnapshot::Apply(function, args, info, transformed_jsx) =
+                context.store().snapshot(application)
+            else {
+                return None;
+            };
+            let NodeSnapshot::Prim(
+                Primitive::Pfield(_, crate::lambda::FieldDbgInfo::Module { name }),
+                field_args,
+                _,
+            ) = context.store().snapshot(function)
+            else {
+                return None;
+            };
+            let [base] = field_args.as_slice() else {
+                return None;
+            };
+            let NodeSnapshot::GlobalModule(id, dynamic_import) = context.store().snapshot(*base)
+            else {
+                return None;
+            };
+            (
+                ModuleId {
+                    id,
+                    kind: Kind::Ml,
+                    dynamic_import,
+                },
+                name,
+                args,
+                info,
+                transformed_jsx,
+            )
+        };
+
+        if let Some(Lambda::Lfunction(function)) =
+            self.resolve_cmj_module_field_lambda(&module, &field_name)
+            && function.params.len() == args.len()
+            && lfunction_can_be_inlined(&function)
+        {
+            let reduced =
+                self.import_and_beta_indexed_cmj_function(context, function, args.as_slice());
+            return Some(PreparedIndexedExternalApply::Reduced(reduced));
+        }
+
+        let known_arity = self.resolve_cmj_module_field_arity(&module, &field_name);
+        Some(PreparedIndexedExternalApply::Call {
+            module,
+            field_name,
+            args,
+            info,
+            transformed_jsx,
+            known_arity,
+        })
+    }
+
     fn compile_external_field_apply(&mut self, apply: &Apply) -> Option<Compiled> {
         let (module, field_name) = self.module_field_apply_target(&apply.ap_func)?;
 
@@ -1099,7 +1273,7 @@ impl LambdaCompiler {
                 let reduced =
                     crate::lambda::lam_beta_reduce::propagate_beta_reduce_with_map_and_meta_and_id_gen(
                         &mut ident_tbl,
-                        &self.id_gen,
+                        &*self.id_gen,
                         &param_map,
                         &func.params,
                         &func.body,
@@ -1210,7 +1384,7 @@ impl LambdaCompiler {
             }
         }
 
-        aux(&self.id_gen, func, arity.extract_arity(), args)
+        aux(&*self.id_gen, func, arity.extract_arity(), args)
     }
 
     fn try_statement(&self, body: Block, exn: &Ident, handler: Block) -> Statement {
@@ -1680,21 +1854,30 @@ impl LambdaCompiler {
         // Lam_compile_context.empty_handler_map`, `switch_depth = 0`, and
         // `loop_stack = []`. Staticcatch jump tables cannot cross function
         // boundaries, so the Rust handler stacks must be cleared here too.
-        let saved_switch_depth = std::mem::replace(&mut self.switch_depth, 0);
-        let saved_loop_stack = std::mem::take(&mut self.loop_stack);
-        let saved_static_handlers = std::mem::take(&mut self.static_handlers);
-        let saved_static_jump_handlers = std::mem::take(&mut self.static_jump_handlers);
-        let saved_fallthrough_return_handlers =
-            std::mem::take(&mut self.fallthrough_return_handlers);
-        let saved_try_body_depth = std::mem::replace(&mut self.try_body_depth, 0);
+        let saved = self.enter_function_scope();
         let result = f(self);
-        self.switch_depth = saved_switch_depth;
-        self.loop_stack = saved_loop_stack;
-        self.static_handlers = saved_static_handlers;
-        self.static_jump_handlers = saved_static_jump_handlers;
-        self.fallthrough_return_handlers = saved_fallthrough_return_handlers;
-        self.try_body_depth = saved_try_body_depth;
+        self.leave_function_scope(saved);
         result
+    }
+
+    fn enter_function_scope(&mut self) -> SavedFunctionScope {
+        SavedFunctionScope {
+            switch_depth: std::mem::replace(&mut self.switch_depth, 0),
+            loop_stack: std::mem::take(&mut self.loop_stack),
+            static_handlers: std::mem::take(&mut self.static_handlers),
+            static_jump_handlers: std::mem::take(&mut self.static_jump_handlers),
+            fallthrough_return_handlers: std::mem::take(&mut self.fallthrough_return_handlers),
+            try_body_depth: std::mem::replace(&mut self.try_body_depth, 0),
+        }
+    }
+
+    fn leave_function_scope(&mut self, saved: SavedFunctionScope) {
+        self.switch_depth = saved.switch_depth;
+        self.loop_stack = saved.loop_stack;
+        self.static_handlers = saved.static_handlers;
+        self.static_jump_handlers = saved.static_jump_handlers;
+        self.fallthrough_return_handlers = saved.fallthrough_return_handlers;
+        self.try_body_depth = saved.try_body_depth;
     }
 
     /// Run `f` with a fresh `loop_label_counter`. Mirrors OCaml's
@@ -2491,6 +2674,15 @@ impl LambdaCompiler {
     ) -> Compiled {
         let lhs_compiled = self.compile_expr(lhs);
         let rhs_compiled = self.compile_expr(rhs);
+        self.compile_short_circuit_js(op, lhs_compiled, rhs_compiled)
+    }
+
+    fn compile_short_circuit_js(
+        &mut self,
+        op: ShortCircuitOp,
+        lhs_compiled: Compiled,
+        rhs_compiled: Compiled,
+    ) -> Compiled {
         let mut prelude = lhs_compiled.prelude;
 
         if rhs_compiled.prelude.is_empty() {
@@ -8161,3 +8353,14 @@ pub(crate) fn pointer_info_comment_text(comment: Option<&PointerInfo>) -> Option
 #[cfg(test)]
 #[path = "lam_compile_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "lam_compile_allocator_tests.rs"]
+mod allocator_tests;
+
+#[cfg(test)]
+#[path = "lam_compile_input_js_tests.rs"]
+mod input_js_tests;
+
+#[path = "lam_compile_indexed.rs"]
+mod indexed_consumer;

@@ -1,0 +1,112 @@
+# Env/component ownership experiment
+
+## Selected question
+
+Can one compilation-owned component representation eliminate repeated lookup transport, declaration copying and signature reconstruction while preserving native Env behavior?
+
+This is the first larger hypothesis selected from the architecture round, not an accepted optimization. The fresh profiles place substantial work in Env across typechecking and Raw. They do not separate required graph work from removable ownership overhead. The isolated copy-function diagnostic did not establish a large map-only target. Historical mutation journaling and contiguous internalization have prior small or flat full-build results.
+
+## First checkpoint: prove the boundary
+
+Before changing production code, document the current and proposed owners, identities, lifetimes, mutation points and query/force state transitions. Attribute complete component construction and descriptor-query lifetimes, including setup and destruction outside the inner lookup, repeated same-identity queries, copied declaration/override state and retained roots. Use a bounded separately preregistered archive-only probe if existing evidence cannot answer this. Report the actual cost of `Layout__Types` through this boundary, without treating its typecheck delta as proof of cause.
+
+The diagnostic must not count shared Arc-backed registry maps as deep copies, equate outer calls with unique objects, add overlapping nested durations or infer DRAM/allocator bytes from logical payload. Source review must identify which copies preserve independent mutable graph identities. Parent reviews this checkpoint before implementation activation. If no material removable work is established, close this hypothesis with evidence; do not switch tasks or manufacture a reason to keep a large patch.
+
+## Intended implementation scope
+
+- Own forced component descriptors and lookup state within the compilation context. Build final required substituted component state once at the existing native force boundary.
+- Give repeated queries stable handles or short borrows into that state where legal. Release guards before forcing, mutation, recursion or calls that can grow the relevant owner.
+- Replace the old redundant transport/reconstruction path when the new path is activated. Do not retain a compatibility facade that secretly repeats the same copies.
+- Preserve the raw/canonical signature views that GenType, CMJ and diagnostics actually require. Avoid keeping extra whole graphs alive just to simplify ownership.
+- Keep existing shared registry storage and intentional sparse large-record/label representations. A compact index can avoid repeated materialization only if every native-visible allocation, identity and force remains at the correct boundary.
+
+Starting Rust paths include `ctype.rs::resolve_type_item_through_env`, `typecore.rs::lookup_type_in_resolved_path` and signature qualification, `env_lazy.rs::StoredModuleComponents`/`QualifiedModuleComponents`, and `cmi/persistent_env.rs`. These are investigation boundaries, not permission to rewrite unrelated parser, backend or type algorithms.
+
+## Native contract
+
+Read the checked-in code before implementation:
+
+- `compiler/ml/env.ml:781-813`, `865-914`, `1091-1100`: descriptor queries, module forcing, normalization and qualified value lookup are distinct APIs.
+- `compiler/ml/env.ml:1415-1585`: alias scraping, prefix substitution and the whole-component construction pass. Iterate in native order, including runtime positions and the evolving captured Env.
+- `compiler/ml/subst.ml:130-165`, `303-400`: copy identities, recursive stubs and per-declaration cleanup.
+- `compiler/ml/mtype.ml`: alias strengthening and its effect on type versus value descriptions.
+- `compiler/ml/datarepr.ml`: constructor/label graph sharing, allocation and metadata. Indexing is not permission to delay visible work or eagerly clone every large JSX label payload.
+
+First parent-component force remains whole-component. Module-declaration substitution thunks, child-component thunks and modtype substitution/cleanup remain distinct. Child thunks capture the Env at their exact signature-item position. Probe queries must not accidentally enter a stronger force path. Preserve identifier allocation, type-node physical identity, row/abbreviation independence, full metadata and all public outputs. Native tuple/constructor syntax is not proof of left-to-right evaluation.
+
+No per-declaration laziness, signature-content/spelling heuristics, force suppression, output-mode semantics, structural type deduplication, serializer normalization, new unsafe code, new per-node Rc/Arc or global mutable instrumentation. Existing context-local interior-mutability mechanisms must model actual ownership, not bypass borrow conflicts.
+
+## Review and acceptance
+
+One fresh owner handles this scope. Preregister diagnostics and the later fixed D/candidate release cohort before observing their outcomes. Keep serial and parallel results separate and compare with the historical optimized control when making a new-best claim. Do not add samples to resolve uncertainty.
+
+Add direct native-contract tests for captured Env, alias shadowing, repeated lookup identity, recursive modules/types, primitive runtime positions, constructor/label duplicate ordering, independent row/abbreviation mutation, separate module/modtype cleanup, lazy child force order and large sparse records. Exercise actual production callers, not only a modeled helper. Full default and release compiler/rewatch tests, release builds, typedtree/raw/optimized/JS/error parity and exact new fixtures precede retention. Use successful-test output for the planned parser benchmark run; no retry-until-green or threshold changes.
+
+Both inherited exact-JS blockers remain visible. Internal passes and unchanged Tella output do not waive them or authorize production acceptance. Preserve the fixed Tella pin and eighteen original modifications, complete manifests, immutable controls, raw failed attempts and durable evidence. Restore only this candidate if rejected, never sibling work. No push, PR operation or merge by the owner. Parent maintains the sole draft PR.
+
+## Boundary review, first source checkpoint
+
+Owner `bks-9b72b0de-396c-7d5f-a662-e90f9799f817`, examined clean `bb288cbcd53cf27372137617bd28c60fac6ff4b8`. Compiler and rewatch source have no diff from D. Ordinary release hashes still match D (`a5ed9a622e3b787a8dae0cb5228a5eb5717849314d0af40c05f9689c6a6788af` bsc, `5fe8158df5d3201d4cf07fd962cf61b22edf63874b03bfd5328e1fe16f47c3c4` rescript). No production activation, diagnostic build, Tella mutation or new timing occurred during this source checkpoint.
+
+This is **not yet the complete attribution checkpoint**. The source establishes removable transport operations but not their material cost. Existing samples cannot fill the missing same-identity and complete-lifetime accounting. Production approval should wait for that accounting. The diagnostic plan below is registered before any new diagnostic outcomes.
+
+### Current owners and lifetime boundaries
+
+| Owner / identity | Creation and query | Mutation and release |
+|---|---|---|
+| `PersistentEnv` wrapper in `TypecoreContext`, with another wrapper in `TypeContext` | `driver.rs:15004-15021` creates from the registry and loads implicit opens. `typecore.rs:1326-1327` clones into `TypeContext`. Ctype's `in_process_module_resolution_env` clones that wrapper before lookup, even if the resolved-type cache will hit. Raw receives another clone at `driver.rs:15222-15223`. | Local alias preparation, overrides and hidden-module membership belong to each wrapper. The loaded-structure cache, error and CRC state are shared. A temporary query wrapper drops on every exit from `resolve_type_item_through_env`, including early return. The context wrapper is not the sole owner of the shared persistent cache. `clear_persistent_env_for_park` exists, but a source search found no call; its comment is not evidence that normal teardown invokes it. |
+| `Env` snapshots, identified by `Env::id()` | `Env::clone` assigns a new id; `clone_preserve_id` keeps it. `IdTbl` and `TycompTbl` use persistent maps and shared opened layers, not whole copied binding tables. `add_module_with_component_context` captures the seed before inserting the module and bumping the id (`env.rs:1251-1274`). | Binding changes produce new persistent-map state. Snapshot clones still copy `functor_args` and GADT-instance vectors and reset derived alias caches. Captured seeds keep previous binding roots alive. Ordinary Env cloning must not be counted as deep declaration copying. |
+| `StoredModuleComponents` | Each binding owns a shared stored thunk. The thunk owns boxed seed Env, access path, owned module declaration, optional parent signature Arc and separate OnceCells for components and functor state (`env_lazy.rs:1686-1700`). | `with_components` reuses a populated cell; otherwise it constructs a temporary image. Real APIs publish the image, probes do not. An unpublished image is destroyed after the callback. The seed/module/parent fields remain present after a successful force; OnceCell publication does not release them. Actual last-owner timing is unmeasured. |
+| `QualifiedModuleComponents` | A view shares access path, signature and `StructureComponentTables` through existing Arcs (`env_lazy.rs:351-385`). Local stored thunks and the context's qualified-component cache can retain images. | Name tables and qualified declarations populate through existing interior mutability. Cloning the view does not copy its signature graph or tables. Child thunks can retain the parent signature and earlier Env roots. The context cache's callback borrows its map until the callback returns (`context.rs:947-962`); a new owner cannot carry that guard into insertion or recursive forcing. |
+| Resolved type transport | `lookup_type_in_resolved_path_with_cache_mode` first checks `(env.id(), parent path, name)`. Misses clone the selected declaration container into an Arc; hits clone that Arc. `resolve_type_item_through_env` then clones the contained declaration into an owned return value (`ctype.rs:2381-2394`). | Its vectors, record/variant declaration payloads, attributes and inlined-type containers are owned copies. `TypeExprRef` members still address the same type nodes. Optional alias strengthening performs another wrapper clone and can allocate a new manifest. Those necessary manifest mutations are distinct from unmodified transport. |
+
+`PersistentEnv`'s derived clone (`cmi/persistent_env.rs:592-664`) shares its cache, load paths, renamed signatures, registry maps, errors and CRC table. Its owned clone candidates are `compiling_module`, the three override maps, `hidden_modules`, `prepared_cached_alias_rewrites`, and `AliasPrefixRewrites.local`. Portable override values themselves are Arcs; cloning their map does not internalize the portable graph. String lengths, map elements and declaration vector capacities are logical payload measures, not allocator bytes or DRAM traffic.
+
+There are more retained declaration roots than the final component signature alone. Local construction registers declarations by name and stamp, captures working Env snapshots, and passes the qualified parent signature into child thunks (`env_lazy.rs:1577-1675`). Context resolved-type and qualified-module caches retain additional descriptors. Their roots may share type nodes. Counting each root as a separate reachable graph would overstate retained storage.
+
+### Query and construction transitions
+
+1. Ctype's descriptor query creates a resolution wrapper before entering the resolved-type cache. A cache hit therefore avoids graph construction but not that wrapper's creation/drop or the owned result clone. The optional alias-target query creates another wrapper. The caller may consume only a few declaration fields, but that is not permission to revive the rejected five-projection experiment.
+2. `ComponentLookupApi` explicitly separates module, descriptor, type, modtype, open and probe calls (`typecore.rs:31291-31343`). Only `ProbeModuleDescr` disables publication and alias-signature forcing. A probe can reuse already-published state; its cold miss can build temporary state. Do not silently memoize those misses or promote their API.
+3. Component lookup tries a local stored thunk, then the context component cache, then parent/functor/persistent/general construction (`typecore.rs:31365-31419`). A direct persistent type query has an additional raw-signature scan path (`31595-31650`). This must be included in the diagnostic; measuring only `build_local_module_components` misses it.
+4. Local construction resolves a raw signature, copies/qualifies it, applies parent substitution, walks raw/qualified items to build captured child Envs, then constructs tables (`env_lazy.rs:1378-1678`). The persistent alias fast path instead shares `ps_sig` and creates a view. Required alias scraping can force a module declaration or persistent renamed signature. These paths cannot be collapsed merely because their printed access paths match.
+5. `lookup_value_for_access` deep-copies and substitutes a value on its first name lookup, then caches it. Constructor and label first-name queries scan the signature and allocate selected buckets (`env_lazy.rs:846-951`). Module declaration forcing has its own local/context/registered-alias reuse path (`1014` onward), separate from child component construction. A new component image must replace these redundant construction routes, not wrap them.
+
+### Native obligations that constrain the proposed change
+
+Line references below describe checked-in code, rather than assuming older comments are exact. Generic qualified value lookup is at `env.ml:1062-1073`; `lookup_value` selects it at `1101`.
+
+- `env.ml:781-813` reads descriptor/type tables. `865-914` separately forces module declarations and normalizes paths. A descriptor lookup may force a parent table and its alias scrape, but must not force the selected child module declaration merely to access its component thunk.
+- `components_of_module_maker` performs the whole signature pass. `prefix_idents` computes complete substitution and runtime paths first. Each type invokes `Subst.type_declaration`, row naming, constructor construction and label construction before storing the original declaration into the evolving Env. Each module creates two distinct thunks before adding the original module to that Env. Modtype substitution runs at parent construction, not at the child module-declaration boundary.
+- `subst.ml:245-247`, `273-300`, `303-324` clean up per type-expression/declaration/extension operation. `130-165` records temporary physical substitutions and recursive stubs. Rust's `copy_lookup_signature_for_subst` currently creates one map and passes it across signature items (`typecore.rs:25748-25846`, `26011-26023`). A final-image design must not copy that shape blindly into a single native substitution scope. This is a source discrepancy requiring explicit sharing tests, not a measured optimization opportunity by itself.
+- `mtype.ml:41-102` leaves values unchanged while strengthening appropriate type manifests and module declarations. A query return that only needs to inspect a cached type must not repeat strengthening; moving strengthening to construction requires proof that the captured alias target and Env match.
+- `datarepr.ml:137-188` allocates a shared ordinary constructor result before traversal. The explicit recursive call processes the tail before current constructor payload construction. `254-276` creates one `lbl_all` array and shared label result for the record. Current Rust per-name builders allocate selected results independently (`env_lazy.rs:34-192`). A name-to-index table alone cannot establish native graph sharing. The replacement must allocate native-visible graphs once, preserve duplicate bucket order, and represent large label arrays without duplicating hundreds of payloads per index entry.
+
+### Proposed ownership shape, conditional on attribution
+
+Use one compilation-owned component store with owner-paired component/entry handles. Each entry represents one native thunk, with its captured Env, substitution, raw module input and explicit unforced/forced result. Separate entries represent module-declaration thunks and child-component thunks; modtype substitution retains its own cleanup boundary. Existing shared registry inputs stay shared. Do not introduce another global component cache.
+
+On first real parent force, scrape the alias at the existing API boundary, compute complete prefix substitution, then build final value/type/constructor/label/modtype tables in native order. Module entries retain unforced declaration and child thunk handles. A repeated query obtains a short borrow or a small result containing an owner-paired handle, not a cloned `PersistentEnv` and declaration container. Mutation paths request an explicit owned/native copy only where semantics require independent state. This requires threading the resolution owner through current Ctype/Env callers; borrowing the entire current RefCell across recursion is not a solution.
+
+Export/GenType/CMJ/raw/canonical consumers still need signature views. Before dropping raw inputs after force, inventory every consumer and retained root. Prefer projecting existing entries where valid, but do not recreate full signatures at every lookup or retain a second whole graph merely to simplify the API. Exact release points and recursive forcing/error behavior remain design work; this paragraph is not an approved implementation specification.
+
+### Registered bounded diagnostic, not acceptance timing
+
+Register one archive-only diagnostic experiment on D, with exactly four complete builds in order D w1, probe w1, D w12, probe w12. No A repeat, hyperfine screening, acceptance cohort or profile extension. The adjacent control estimates single-run instrumentation overhead only. Use the existing immutable D executables and a separately built archived D probe with explicit TypeContext-owned accounting. No mutable process-global/thread-local counters or instrumentation calls into stronger lookup APIs.
+
+Instrumentation must cover these observations before running:
+
+- Full resolution scope from before wrapper clone to after its destruction, with a separate child timer for wrapper clone/drop and owned declaration transport. Exclude caller-owned returned declaration lifetime from the scope, then record its known ownership destination separately rather than pretending the resolver drops it.
+- Outermost query/construction elapsed union and separately labeled nested scopes. Record wrapper clone/drop, raw resolve, qualification, final table assembly, first-name value/constructor/label work and temporary-image destruction. Do not sum inclusive timers. Report timer overhead through D/probe process metrics rather than subtracting an assumed per-call cost.
+- Requests keyed by context identity, Env id, structural Path identity, name and API; resolved component identities keyed by a context-local monotonic token attached to the archived component object. Never use printed path equality or reusable raw addresses as proof of same identity. Separate same-key requests, resolved-cache hits, same-component queries, cold builds, unpublished probe builds and alias/module-declaration forces.
+- At actual wrapper clone sites, count owned override/hidden/prepared-alias entries and logical string/container payload. Count shared map handles separately. At actual declaration clone sites, count owned vector/record/variant/inlined/attribute payload and copied handles separately from newly allocated type nodes. No fresh blanket type-descriptor census.
+- Record construction input/output node-allocation deltas, raw/qualified signature roots and module/child thunk retention at creation, force, phase exit and context teardown. Assign stable context-local signature/thunk tokens for root accounting without keeping extra owning Arcs in the probe. Shared roots are not unique graphs, endpoint capacities are not peak live heap, and context teardown coverage must be implemented rather than inferred from the unused park helper.
+- Attribute contexts by source module at setup, including `Layout__Types`, and report that module's query/construction union alongside whole typecheck and Raw phase elapsed. If it is absent, the diagnostic is incomplete. The historical 324.070ms typecheck gap is not an Env budget.
+
+Run only after probe source review, counter invariants and short fixture checks. Preserve archive originals, patch, separately built executable, raw per-context records, all failures and SHA inventories in organization-controlled durable storage. Build and run through the heavy lock. Notify parent to stop edits before resolved source/runtime/dependency inventory. Apply the existing exact eleven compiler-info plus `.sourcedirs` writer policy, pin/backup/restore all eighteen original Tella files, and require exit 0, 3248 modules and the fixed 5048-JS digest for every full build. No retry to replace failed observations. Keep normal D source and binaries unchanged.
+
+### Tests required before production approval
+
+Direct production-call fixtures must cover repeated returned type-node identity, same spelling with different local Env bindings, captured Env before/after alias shadowing, recursive types/modules, primitive runtime positions, duplicate constructor/label bucket order, shared ordinary constructor result and label-array identity, independent row/abbreviation mutation across declarations, separate module/modtype cleanup, cold/warm/probe/child force traces and sparse large-record access. Export/GenType/raw/canonical tests must show the same required views without hidden whole-signature reconstruction. Syntax, typedtree, raw, optimized, exact standalone nonempty JS, diagnostics and external gates remain required.
+
+Decision at this checkpoint: request parent review of the source boundary and diagnostic plan, **not production activation**. Material removable cost, complete teardown accounting and actual `Layout__Types` attribution remain unknown. The hypothesis is neither accepted nor falsified. No performance claim or source-correctness gate has been earned by this source-only review.

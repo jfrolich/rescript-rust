@@ -1,0 +1,19 @@
+{
+  "before_count": 41978,
+  "after_count": 41990,
+  "generated_metadata": [
+    "/Users/jake/dev/tella-fusion/node_modules/@jfrolich/ppx-spice/lib/bs/compiler-info.json",
+    "/Users/jake/dev/tella-fusion/node_modules/@rescript/belt/lib/bs/compiler-info.json",
+    "/Users/jake/dev/tella-fusion/node_modules/@rescript/react/lib/bs/compiler-info.json",
+    "/Users/jake/dev/tella-fusion/node_modules/@tella-fusion/webapp/lib/bs/.sourcedirs.json",
+    "/Users/jake/dev/tella-fusion/node_modules/@tella-fusion/webapp/lib/bs/compiler-info.json",
+    "/Users/jake/dev/tella-fusion/node_modules/@tella-fusion/webapp/node_modules/rescript-webapi/lib/bs/compiler-info.json",
+    "/Users/jake/dev/tella-fusion/node_modules/@tella-fusion/webapp/packages/tella-std/lib/bs/compiler-info.json",
+    "/Users/jake/dev/tella-fusion/node_modules/bs-css-dom/lib/bs/compiler-info.json",
+    "/Users/jake/dev/tella-fusion/node_modules/bs-css/lib/bs/compiler-info.json",
+    "/Users/jake/dev/tella-fusion/node_modules/rescript-debounce-react/lib/bs/compiler-info.json",
+    "/Users/jake/dev/tella-fusion/node_modules/rescript-debounce/lib/bs/compiler-info.json",
+    "/Users/jake/dev/tella-fusion/node_modules/rescript-nodejs/lib/bs/compiler-info.json"
+  ],
+  "unexpected": []
+}

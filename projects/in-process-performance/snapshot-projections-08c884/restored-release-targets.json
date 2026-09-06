@@ -1,0 +1,16 @@
+[
+  {
+    "target": "/Users/jake/.opensession/worktrees/rescript-compiler-can-you-do-a-torough-look/compiler-rust/target/release/bsc",
+    "previous_sha256": "cc1fed85b54b36b3f1dbea9f6104baca7a0d26b45727bb3940dae9bd14ffeac7",
+    "restored_sha256": "a5ed9a622e3b787a8dae0cb5228a5eb5717849314d0af40c05f9689c6a6788af",
+    "control": "/tmp/rescript-type-arg-experiment/bin/bsc-D",
+    "control_unchanged_readonly": true
+  },
+  {
+    "target": "/Users/jake/.opensession/worktrees/rescript-compiler-can-you-do-a-torough-look/rewatch/target/release/rescript",
+    "previous_sha256": "3398d2ef48f0be2acd0a003ff2bd6d6f99905c208639eb6bb1b12c4c3cb66068",
+    "restored_sha256": "5fe8158df5d3201d4cf07fd962cf61b22edf63874b03bfd5328e1fe16f47c3c4",
+    "control": "/tmp/rescript-type-arg-experiment/bin/rescript-D",
+    "control_unchanged_readonly": true
+  }
+]

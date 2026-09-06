@@ -836,6 +836,23 @@ mod tests {
     use crate::lambda::lam_constant::{Constant, StringDelim};
 
     #[test]
+    fn indexed_printer_matches_recursive_output_without_materializing_for_print() {
+        let id = crate::ident::Ident::new("value", 7, crate::ident::IdentFlags::GLOBAL);
+        let location = crate::location::Location::new_for_error("printer.res", 3, 9);
+        let lambda = crate::lambda::Lambda::prim(
+            crate::lambda::Primitive::Pidentity,
+            vec![crate::lambda::Lambda::var(id)],
+            location,
+        );
+        let context = crate::lambda::indexed::IndexedLambdaContext::from_lambda(lambda.clone(), []);
+        let mut indexed = Vec::new();
+        super::print_indexed_context(&context, true, &mut indexed).unwrap();
+        let mut recursive = Vec::new();
+        super::print_lambda_with_locs(&lambda, &mut recursive).unwrap();
+        assert_eq!(indexed, recursive);
+    }
+
+    #[test]
     fn prints_semantic_constructor_switch_keys() {
         let constant_key = crate::lambda::SwitchKey::Constructor(
             crate::types::VariantConstructorCase::Constant(crate::types::VariantTag {
@@ -908,7 +925,181 @@ mod tests {
     }
 }
 
-// Public API
+fn indexed_lambda(
+    store: &crate::lambda::indexed::IndexedLambda,
+    node: crate::lambda::indexed::NodeId,
+    with_locs: bool,
+) -> Sexp {
+    use crate::lambda::indexed::NodeView;
+    let child = |node| indexed_lambda(store, node, with_locs);
+    match store.view(node) {
+        NodeView::Var(id) => Sexp::list(vec![Sexp::atom("Lvar"), ident(id)]),
+        NodeView::GlobalModule(id, dynamic) => Sexp::list(vec![
+            Sexp::atom("Lglobal_module"),
+            ident(id),
+            bool_sexp(dynamic),
+        ]),
+        NodeView::Const(value) => Sexp::list(vec![Sexp::atom("Lconst"), constant(value)]),
+        NodeView::Apply(function, args, info, jsx) => Sexp::list(vec![
+            Sexp::atom("Lapply"),
+            child(function),
+            Sexp::list(args.iter().map(|node| child(*node)).collect()),
+            ap_info_sexp(info, with_locs),
+            bool_sexp(jsx),
+        ]),
+        NodeView::Function(arity, params, body, attr) => Sexp::list(vec![
+            Sexp::atom("Lfunction"),
+            int(arity),
+            Sexp::list(params.iter().map(ident).collect()),
+            child(body),
+            function_attribute(attr),
+        ]),
+        NodeView::Let(kind, id, value, body) => Sexp::list(vec![
+            Sexp::atom("Llet"),
+            let_kind(&kind),
+            ident(id),
+            child(value),
+            child(body),
+        ]),
+        NodeView::LetRec(bindings, body) => Sexp::list(vec![
+            Sexp::atom("Lletrec"),
+            Sexp::list(
+                bindings
+                    .iter()
+                    .map(|(id, node)| Sexp::list(vec![ident(id), child(*node)]))
+                    .collect(),
+            ),
+            child(body),
+        ]),
+        NodeView::Prim(prim, args, _) => Sexp::list(vec![
+            Sexp::atom("Lprim"),
+            primitive(prim, with_locs),
+            Sexp::list(args.iter().map(|node| child(*node)).collect()),
+        ]),
+        NodeView::Switch {
+            scrutinee,
+            consts_full,
+            consts,
+            blocks_full,
+            blocks,
+            fail_action,
+            dispatch,
+        } => {
+            let switch = Sexp::list(vec![
+                Sexp::atom("lambda_switch"),
+                Sexp::list(vec![Sexp::atom("sw_consts_full"), bool_sexp(consts_full)]),
+                Sexp::list(vec![
+                    Sexp::atom("sw_consts"),
+                    Sexp::list(
+                        consts
+                            .iter()
+                            .map(|(key, node)| Sexp::list(vec![switch_key(key), child(*node)]))
+                            .collect(),
+                    ),
+                ]),
+                Sexp::list(vec![Sexp::atom("sw_blocks_full"), bool_sexp(blocks_full)]),
+                Sexp::list(vec![
+                    Sexp::atom("sw_blocks"),
+                    Sexp::list(
+                        blocks
+                            .iter()
+                            .map(|(key, node)| Sexp::list(vec![switch_key(key), child(*node)]))
+                            .collect(),
+                    ),
+                ]),
+                Sexp::list(vec![
+                    Sexp::atom("sw_failaction"),
+                    match fail_action {
+                        None => Sexp::atom("None"),
+                        Some(node) => Sexp::list(vec![Sexp::atom("Some"), child(node)]),
+                    },
+                ]),
+                Sexp::list(vec![Sexp::atom("sw_dispatch"), switch_dispatch(dispatch)]),
+            ]);
+            Sexp::list(vec![Sexp::atom("Lswitch"), child(scrutinee), switch])
+        }
+        NodeView::StringSwitch(scrutinee, cases, default) => Sexp::list(vec![
+            Sexp::atom("Lstringswitch"),
+            child(scrutinee),
+            Sexp::list(
+                cases
+                    .iter()
+                    .map(|(key, node)| Sexp::list(vec![string(key), child(*node)]))
+                    .collect(),
+            ),
+            match default {
+                None => Sexp::atom("None"),
+                Some(node) => Sexp::list(vec![Sexp::atom("Some"), child(node)]),
+            },
+        ]),
+        NodeView::StaticRaise(exit, args) => Sexp::list(vec![
+            Sexp::atom("Lstaticraise"),
+            int(exit),
+            Sexp::list(args.iter().map(|node| child(*node)).collect()),
+        ]),
+        NodeView::StaticCatch(body, exit, params, handler) => Sexp::list(vec![
+            Sexp::atom("Lstaticcatch"),
+            child(body),
+            int(exit),
+            Sexp::list(params.iter().map(ident).collect()),
+            child(handler),
+        ]),
+        NodeView::TryWith(body, exn, handler) => Sexp::list(vec![
+            Sexp::atom("Ltrywith"),
+            child(body),
+            ident(exn),
+            child(handler),
+        ]),
+        NodeView::IfThenElse(cond, then_, else_) => Sexp::list(vec![
+            Sexp::atom("Lifthenelse"),
+            child(cond),
+            child(then_),
+            child(else_),
+        ]),
+        NodeView::Sequence(first, second) => {
+            Sexp::list(vec![Sexp::atom("Lsequence"), child(first), child(second)])
+        }
+        NodeView::While(cond, body) => {
+            Sexp::list(vec![Sexp::atom("Lwhile"), child(cond), child(body)])
+        }
+        NodeView::For(id, start, end, direction, body) => Sexp::list(vec![
+            Sexp::atom("Lfor"),
+            ident(id),
+            child(start),
+            child(end),
+            direction_flag(&direction),
+            child(body),
+        ]),
+        NodeView::ForOf(..) => Sexp::list(vec![Sexp::atom("Lfor_of")]),
+        NodeView::ForAwaitOf(..) => Sexp::list(vec![Sexp::atom("Lfor_await_of")]),
+        NodeView::Break => Sexp::list(vec![Sexp::atom("Lbreak")]),
+        NodeView::Continue => Sexp::list(vec![Sexp::atom("Lcontinue")]),
+        NodeView::Assign(id, value) => {
+            Sexp::list(vec![Sexp::atom("Lassign"), ident(id), child(value)])
+        }
+    }
+}
+
+pub(crate) fn print_indexed_node(
+    store: &crate::lambda::indexed::IndexedLambda,
+    node: crate::lambda::indexed::NodeId,
+    with_locs: bool,
+    out: &mut impl Write,
+) -> std::io::Result<()> {
+    writeln!(
+        out,
+        "{}",
+        indexed_lambda(store, node, with_locs).to_string()
+    )
+}
+
+pub(crate) fn print_indexed_context(
+    context: &crate::lambda::indexed::IndexedLambdaContext,
+    with_locs: bool,
+    out: &mut impl Write,
+) -> std::io::Result<()> {
+    print_indexed_node(context.store(), context.current_root(), with_locs, out)
+}
 
 /// Print lambda as sexp (without locations)
 pub fn print_lambda(lam: &Lambda, out: &mut impl Write) -> std::io::Result<()> {

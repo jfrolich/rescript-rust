@@ -1,0 +1,26 @@
+{
+  "results": [
+    {
+      "command": "/usr/bin/time -lp /tmp/rescript-type-arg-experiment/bin/rescript-D build --in-process --no-timing true /Users/jake/dev/tella-fusion/packages/core/webapp > /tmp/rescript-type-arg-experiment/logs/screen-D-w1-current.log 2>&1",
+      "mean": 19.62895695612,
+      "stddev": 0.0015840959665530448,
+      "median": 19.62895695612,
+      "user": 18.6858869,
+      "system": 0.8649481800000001,
+      "min": 19.62783683112,
+      "max": 19.63007708112,
+      "times": [
+        19.63007708112,
+        19.62783683112
+      ],
+      "memory_usage_byte": [
+        2098003968,
+        2098003968
+      ],
+      "exit_codes": [
+        0,
+        0
+      ]
+    }
+  ]
+}

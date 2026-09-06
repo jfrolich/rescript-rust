@@ -1,0 +1,32 @@
+[
+  {
+    "fixture": "SnapshotProjections",
+    "variant": "ocaml",
+    "exit": 0
+  },
+  {
+    "fixture": "SnapshotProjections",
+    "variant": "rust",
+    "exit": 0
+  },
+  {
+    "fixture": "SnapshotProjections",
+    "variant": "control",
+    "exit": 0
+  },
+  {
+    "fixture": "TypeArgStorage",
+    "variant": "ocaml",
+    "exit": 0
+  },
+  {
+    "fixture": "TypeArgStorage",
+    "variant": "rust",
+    "exit": 0
+  },
+  {
+    "fixture": "TypeArgStorage",
+    "variant": "control",
+    "exit": 0
+  }
+]

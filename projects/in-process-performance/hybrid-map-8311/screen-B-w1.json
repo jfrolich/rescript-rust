@@ -1,0 +1,26 @@
+{
+  "results": [
+    {
+      "command": "/tmp/rescript-hybrid-map-experiment/bin/rescript-B build --in-process --no-timing true /Users/jake/dev/tella-fusion/packages/core/webapp",
+      "mean": 20.277851671460002,
+      "stddev": 0.505947452377234,
+      "median": 20.277851671460002,
+      "user": 18.87795254,
+      "system": 0.98490094,
+      "min": 19.920092796960002,
+      "max": 20.635610545960002,
+      "times": [
+        20.635610545960002,
+        19.920092796960002
+      ],
+      "memory_usage_byte": [
+        1659207680,
+        2080931840
+      ],
+      "exit_codes": [
+        0,
+        0
+      ]
+    }
+  ]
+}

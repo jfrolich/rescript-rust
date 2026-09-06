@@ -530,7 +530,7 @@ fn sexp_type_expr_body_inline(
             let mut items = vec![Sexp::atom("Tarrow")];
             for arg in args {
                 items.push(Sexp::list(vec![
-                    sexp_type_arg_label(&arg.lbl),
+                    sexp_type_arg_label(arg.label()),
                     sexp_type_expr_inline(arena, ctx, state, arg.typ),
                 ]));
             }

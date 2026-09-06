@@ -3674,7 +3674,7 @@ fn subtype_rec(
             && args1
                 .iter()
                 .zip(args2)
-                .all(|(a1, a2)| a1.lbl.same_label(&a2.lbl)) =>
+                .all(|(a1, a2)| a1.label().same_label(a2.label())) =>
         {
             for (arg1, arg2) in args1.iter().zip(args2) {
                 let mut arg_trace = trace.to_vec();
@@ -4584,16 +4584,19 @@ fn subst_type(
             args: arrow_args,
             ret,
         } => {
-            let new_args = arrow_args
+            // Map types in the original order, but only copy owned labels when
+            // rebuilding the arrow. A no-op substitution returns its original id.
+            let new_types = arrow_args
                 .iter()
-                .map(|arg| {
-                    super::TypeArg::new(arg.lbl.clone(), subst_type(ctx, params, args, arg.typ))
-                })
+                .map(|arg| subst_type(ctx, params, args, arg.typ))
                 .collect::<Vec<_>>();
             let new_ret = subst_type(ctx, params, args, *ret);
-            if new_args.iter().zip(arrow_args).all(|(a, b)| a.typ == b.typ) && new_ret == *ret {
+            if new_types.iter().zip(arrow_args).all(|(a, b)| *a == b.typ) && new_ret == *ret {
                 ty
             } else {
+                let new_args = arrow_args.iter().zip(new_types)
+                    .map(|(arg, typ)| super::TypeArg::new(arg.label().clone(), typ))
+                    .collect();
                 drop(desc);
                 ctx.new_type(TypeDesc::Tarrow {
                     args: new_args,
@@ -5266,9 +5269,9 @@ fn unify_types<'a>(
             },
         ) if args1.len() == args2.len()
             && args1.iter().zip(args2).all(|(a1, a2)| {
-                a1.lbl.same_label(&a2.lbl)
+                a1.label().same_label(a2.label())
                     || (state.mode == UnifyMode::Pattern
-                        && !(a1.lbl.is_optional() || a2.lbl.is_optional()))
+                        && !(a1.label().is_optional() || a2.label().is_optional()))
             }) =>
         {
             let original_desc1 = (*desc1).clone();
@@ -7059,7 +7062,7 @@ fn moregen(
             && args1
                 .iter()
                 .zip(args2)
-                .all(|(a1, a2)| a1.lbl.same_label(&a2.lbl)) =>
+                .all(|(a1, a2)| a1.label().same_label(a2.label())) =>
         {
             let args1 = args1.clone();
             let args2 = args2.clone();
@@ -8042,7 +8045,7 @@ fn equal_type_exprs_without_renaming_rec(
             && left_args
                 .iter()
                 .zip(right_args)
-                .all(|(a, b)| a.lbl.same_label(&b.lbl)) =>
+                .all(|(a, b)| a.label().same_label(b.label())) =>
         {
             let left_args = left_args.clone();
             let right_args = right_args.clone();
@@ -8904,9 +8907,8 @@ fn copy_sep_inner(
         TypeDesc::Tarrow { args, ret } => TypeDesc::Tarrow {
             args: args
                 .into_iter()
-                .map(|arg| super::type_expr::TypeArg {
-                    lbl: arg.lbl,
-                    typ: copy_sep_inner(
+                .map(|mut arg| {
+                    arg.typ = copy_sep_inner(
                         ctx,
                         arg.typ,
                         fixed,
@@ -8914,7 +8916,8 @@ fn copy_sep_inner(
                         bound,
                         &visited_for_children,
                         delayed_copy,
-                    ),
+                    );
+                    arg
                 })
                 .collect(),
             ret: copy_sep_inner(
@@ -9500,9 +9503,9 @@ pub fn copy_type_deep(
             drop(desc);
             let new_args = args
                 .into_iter()
-                .map(|arg| crate::types::type_expr::TypeArg {
-                    lbl: arg.lbl,
-                    typ: copy_type_deep(ctx, arg.typ, cache),
+                .map(|mut arg| {
+                    arg.typ = copy_type_deep(ctx, arg.typ, cache);
+                    arg
                 })
                 .collect();
             let new_ret = copy_type_deep(ctx, ret, cache);
@@ -9955,15 +9958,15 @@ fn subst_identity_copy_rec(
                     drop(desc);
                     let args = args
                         .into_iter()
-                        .map(|arg| crate::types::type_expr::TypeArg {
-                            lbl: arg.lbl,
-                            typ: subst_identity_copy_rec(
+                        .map(|mut arg| {
+                            arg.typ = subst_identity_copy_rec(
                                 ctx,
                                 arg.typ,
                                 reopen_closed_variant_rows,
                                 seen,
                                 row_more_markers,
-                            ),
+                            );
+                            arg
                         })
                         .collect();
                     let ret = subst_identity_copy_rec(
@@ -10512,9 +10515,9 @@ pub(crate) fn copy_type_cached(
                 CopyAction::Arrow { args, ret } => {
                     let args = args
                         .into_iter()
-                        .map(|arg| crate::types::type_expr::TypeArg {
-                            lbl: arg.lbl,
-                            typ: copy_type_cached(ctx, arg.typ, cache),
+                        .map(|mut arg| {
+                            arg.typ = copy_type_cached(ctx, arg.typ, cache);
+                            arg
                         })
                         .collect();
                     let ret = copy_type_cached(ctx, ret, cache);
@@ -10903,7 +10906,7 @@ pub fn split_arrow_with_label(
             ret,
         })
     };
-    Some((arg.lbl.clone(), arg.typ, remaining))
+    Some((arg.label().clone(), arg.typ, remaining))
 }
 
 /// Extract the inner type from option<T>, returning T.
@@ -11238,10 +11241,10 @@ fn nondep_type_rec<'a>(
             let args = args
                 .iter()
                 .map(|arg| {
-                    Some(super::type_expr::TypeArg {
-                        lbl: arg.lbl.clone(),
-                        typ: nondep_type_rec(ctx, env, mid, arg.typ, cache)?,
-                    })
+                    Some(super::type_expr::TypeArg::new(
+                        arg.label().clone(),
+                        nondep_type_rec(ctx, env, mid, arg.typ, cache)?,
+                    ))
                 })
                 .collect::<Option<Vec<_>>>()?;
             let ret = nondep_type_rec(ctx, env, mid, *ret, cache)?;
@@ -11579,6 +11582,61 @@ mod tests {
             &*ctx.get_desc(ty),
             TypeDesc::Tconstr { path, .. } if path.same(expected)
         ));
+    }
+
+    #[test]
+    fn type_arg_nary_copy_preserves_labels_and_shared_type_identity() {
+        use crate::types::ArgLabel;
+        use crate::types::type_expr::TypeArg;
+        use crate::location::{Location, Position};
+        use crate::intern::StrIdx;
+        let ctx = TypeContext::new(std::sync::Arc::new(IdGenerator::new()));
+        let shared = ctx.new_generic_var(Some("a".into()));
+        let loc = Location {
+            loc_start: Position::new(StrIdx(31), 2, 10, 12),
+            loc_end: Position::new(StrIdx(32), 4, 25, 29),
+            loc_ghost: true,
+        };
+        let labels = [ArgLabel::Nolabel, ArgLabel::labelled("x", loc), ArgLabel::optional("y", loc)];
+        let arrow = ctx.new_type(TypeDesc::Tarrow {
+            args: labels.iter().map(|l| TypeArg::new(l.clone(), shared)).collect(),
+            ret: shared,
+        });
+        let unused = ctx.new_generic_var(Some("unused".into()));
+        let replacement = ctx.new_generic_var(Some("replacement".into()));
+        assert_eq!(subst_type_params(&ctx, &[unused], &[replacement], arrow), arrow);
+        let changed = subst_type_params(&ctx, &[shared], &[replacement], arrow);
+        assert_ne!(changed, arrow);
+        let changed_desc = ctx.get_desc(changed);
+        let TypeDesc::Tarrow { args, ret } = &*changed_desc else { panic!("not arrow") };
+        assert_eq!(*ret, replacement);
+        for (arg, expected) in args.iter().zip(&labels) {
+            assert_eq!(arg.typ, replacement);
+            assert_eq!(arg.label(), expected);
+            if let ArgLabel::Labelled(l) | ArgLabel::Optional(l) = arg.label() {
+                assert_eq!(l.loc.loc_start, loc.loc_start);
+                assert_eq!(l.loc.loc_end, loc.loc_end);
+                assert_eq!(l.loc.loc_ghost, loc.loc_ghost);
+            }
+        }
+        let copied = copy_type_deep(&ctx, arrow, &mut HashMap::new());
+        let desc = ctx.get_desc(copied);
+        let TypeDesc::Tarrow { args, ret } = &*desc else { panic!("not arrow") };
+        assert_eq!(args.len(), 3);
+        assert_ne!(*ret, shared);
+        for (arg, expected) in args.iter().zip(&labels) {
+            assert_eq!(arg.typ, *ret);
+            assert_eq!(arg.label(), expected);
+            if let ArgLabel::Labelled(l) | ArgLabel::Optional(l) = arg.label() {
+                assert_eq!(l.loc.loc_start, loc.loc_start);
+                assert_eq!(l.loc.loc_end, loc.loc_end);
+                assert_eq!(l.loc.loc_ghost, loc.loc_ghost);
+            }
+        }
+        let original = ctx.get_desc(arrow);
+        let TypeDesc::Tarrow { args, ret } = &*original else { panic!("not arrow") };
+        assert_eq!(*ret, shared);
+        assert!(args.iter().all(|arg| arg.typ == shared));
     }
 
     #[test]

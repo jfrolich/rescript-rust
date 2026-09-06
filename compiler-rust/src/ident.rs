@@ -49,6 +49,10 @@ impl IdentFlags {
     pub const GLOBAL: Self = Self(1);
     /// Identifier is a predefined exception.
     pub const PREDEF_EXN: Self = Self(2);
+    /// Identifier denotes a hard-coded JavaScript API binding.
+    pub const JS: Self = Self(8);
+    /// Identifier denotes a JavaScript object binding.
+    pub const JS_OBJECT: Self = Self(32);
 
     /// Check if the global flag is set.
     #[inline]
@@ -60,6 +64,16 @@ impl IdentFlags {
     #[inline]
     pub fn is_predef_exn(self) -> bool {
         self.0 & Self::PREDEF_EXN.0 != 0
+    }
+
+    #[inline]
+    pub fn is_js(self) -> bool {
+        self.0 & Self::JS.0 != 0
+    }
+
+    #[inline]
+    pub(crate) fn bits(self) -> u8 {
+        self.0
     }
 
     /// Set the global flag.
@@ -77,7 +91,7 @@ impl IdentFlags {
     /// Create from raw bits (truncating any unknown bits).
     #[inline]
     pub fn from_bits_truncate(bits: u8) -> Self {
-        Self(bits & 0x03) // Only keep known flags: GLOBAL (1) and PREDEF_EXN (2)
+        Self(bits & 0x2b)
     }
 }
 
@@ -227,6 +241,15 @@ impl Ident {
         self.flags.is_predef_exn()
     }
 
+    #[inline]
+    pub fn is_js(&self) -> bool {
+        self.flags.is_js()
+    }
+
+    pub fn create_js(name: impl Into<SmolStr>) -> Self {
+        Self::new(name, 0, IdentFlags::JS)
+    }
+
     /// Get the binding time (same as stamp).
     #[inline]
     pub fn binding_time(&self) -> i32 {
@@ -373,6 +396,18 @@ pub fn new_ident_table<T>() -> IdentTable<T> {
 mod tests {
     use super::*;
     use crate::context::IdGenerator;
+
+    #[test]
+    fn javascript_flags_preserve_reference_bits_and_identity() {
+        let js = Ident::create_js("Math");
+        let global = Ident::new("Math", 0, IdentFlags::GLOBAL);
+        assert!(js.is_js());
+        assert!(!js.is_global());
+        assert_eq!(js.flags().bits(), 8);
+        assert!(global.is_global());
+        assert_eq!(IdentFlags::from_bits_truncate(8), IdentFlags::JS);
+        assert_eq!(IdentFlags::from_bits_truncate(32), IdentFlags::JS_OBJECT);
+    }
 
     #[test]
     fn test_create_persistent() {

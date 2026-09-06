@@ -15,6 +15,7 @@ use super::js_exp_make::{
     runtime_compare_call_args, runtime_member_for_eta_wrapped_primitive, strict_eq_int, to_int32,
 };
 use super::lam_compile::{Compiled, LambdaCompiler, call_info_of_apply_status};
+use super::lam_compile_input::{LambdaInputView, LambdaInputs};
 use crate::ident::Ident;
 use crate::js_ir::op::{LengthObject, MutableFlag, Number, PropertyName};
 use crate::js_ir::{
@@ -38,49 +39,12 @@ impl LambdaCompiler {
             return self.compile_import_primitive(loc, args);
         }
 
-        // compiler/core/lam_compile.ml:293-325: nested module field reads may
-        // name a flat root export recorded in the dependency CMJ.
-        fn external_field_path<'a>(
-            prim: &'a Primitive,
-            args: &'a [Lambda],
-            segments: &mut Vec<String>,
-        ) -> Option<(&'a Ident, bool)> {
-            let Primitive::Pfield(_, FieldDbgInfo::Module { name }) = prim else {
-                return None;
-            };
-            segments.push(name.clone());
-            match args {
-                [Lambda::LglobalModule(id, dynamic_import)] => Some((id, *dynamic_import)),
-                [Lambda::Lprim(info)] => external_field_path(&info.primitive, &info.args, segments),
-                _ => None,
-            }
-        }
-        if matches!(prim, Primitive::Pfield(_, FieldDbgInfo::Module { .. })) {
-            let mut reversed = Vec::new();
-            if let Some((id, dynamic_import)) = external_field_path(prim, args, &mut reversed) {
-                reversed.reverse();
-                if reversed.len() >= 2
-                    && let Some(export_name) =
-                        self.module_path_resolver.as_ref().and_then(|resolver| {
-                            resolver.module_cmj_hoisted_export(id.name(), &reversed)
-                        })
-                {
-                    return Compiled {
-                        prelude: Vec::new(),
-                        expr: Expression::qualified(
-                            crate::js_ir::ModuleId {
-                                id: id.clone(),
-                                kind: crate::js_ir::Kind::Ml,
-                                dynamic_import,
-                            },
-                            Some(export_name),
-                        ),
-                    };
-                }
-            }
+        if let Some(compiled) =
+            self.compile_hoisted_external_field(prim, LambdaInputs::Recursive(args))
+        {
+            return compiled;
         }
 
-        use Primitive::*;
         let mut prelude = vec![];
         let mut compiled_args = Vec::new();
         for arg in args {
@@ -88,7 +52,70 @@ impl LambdaCompiler {
             prelude.extend(compiled.prelude);
             compiled_args.push(compiled.expr);
         }
+        self.compile_primitive_js(prim, compiled_args, prelude, loc)
+    }
 
+    /// Descriptor lookup happens before argument compilation, as in
+    /// compiler/core/lam_compile.ml:284-302 and 1734-1757. The cursor is used
+    /// only during this read; no store borrow crosses recursive compilation.
+    pub(crate) fn compile_hoisted_external_field(
+        &mut self,
+        prim: &Primitive,
+        args: LambdaInputs<'_>,
+    ) -> Option<Compiled> {
+        fn external_field_path<'a>(
+            prim: &'a Primitive,
+            args: LambdaInputs<'a>,
+            segments: &mut Vec<String>,
+        ) -> Option<(&'a Ident, bool)> {
+            let Primitive::Pfield(_, FieldDbgInfo::Module { name }) = prim else {
+                return None;
+            };
+            segments.push(name.clone());
+            if args.len() != 1 {
+                return None;
+            }
+            match args.first()?.view() {
+                LambdaInputView::GlobalModule(id, dynamic_import) => Some((id, dynamic_import)),
+                LambdaInputView::Prim(prim, args, _) => external_field_path(prim, args, segments),
+                _ => None,
+            }
+        }
+        let mut reversed = Vec::new();
+        let (id, dynamic_import) = external_field_path(prim, args, &mut reversed)?;
+        if reversed.len() < 2 {
+            return None;
+        }
+        reversed.reverse();
+        let export_name = self
+            .module_path_resolver
+            .as_ref()?
+            .module_cmj_hoisted_export(id.name(), &reversed)?;
+        Some(Compiled {
+            prelude: Vec::new(),
+            expr: Expression::qualified(
+                crate::js_ir::ModuleId {
+                    id: id.clone(),
+                    kind: crate::js_ir::Kind::Ml,
+                    dynamic_import,
+                },
+                Some(export_name),
+            ),
+        })
+    }
+
+    /// Lower already-compiled arguments. The recursive or indexed caller owns
+    /// traversal and releases Lambda-store borrows before invoking this helper.
+    /// This is the Js_of_lam_primitive boundary in
+    /// compiler/core/lam_compile_primitive.ml, not a Lambda compatibility step.
+    pub(crate) fn compile_primitive_js(
+        &mut self,
+        prim: &Primitive,
+        compiled_args: Vec<Expression>,
+        mut prelude: Block,
+        loc: &Location,
+    ) -> Compiled {
+        use Primitive::*;
         let expr = match prim {
             Pstringlength => Expression::length(compiled_args[0].clone(), LengthObject::String),
             Parraylength => Expression::length(compiled_args[0].clone(), LengthObject::Array),
