@@ -6606,4 +6606,93 @@ mod resolution_view_tests {
             &query.view.portable_cache_overrides["Other"]
         ));
     }
+
+    #[test]
+    fn source_fallback_resets_private_preparation_and_merges_real_aliases() {
+        let dir = tempfile::tempdir().expect("fixture directory");
+        let leaf = dir.path().join("Leaf.res");
+        let backing = dir.path().join("Backing.res");
+        let unit = dir.path().join("AliasUnit.res");
+        std::fs::write(&leaf, "let value = 1\n").unwrap();
+        std::fs::write(&backing, "module Child = Leaf\n").unwrap();
+        std::fs::write(
+            &unit,
+            "module Alias = Backing.Child\nlet value = Alias.value\n",
+        )
+        .unwrap();
+        let mut original = PersistentEnv::new();
+        original.set_in_process_mode(true);
+        original.set_nopervasives(true);
+        for (name, path) in [
+            ("Leaf", leaf),
+            ("Backing", backing),
+            ("AliasUnit", unit.clone()),
+        ] {
+            original
+                .view_mut()
+                .source_fallback_path_overrides
+                .insert(name.to_string(), path);
+        }
+        original
+            .view_mut()
+            .prepared_cached_alias_rewrites
+            .insert("AlreadyPrepared".to_string());
+        original.cache_insert("Cycle".to_string(), None);
+        let first = original.clone();
+        let second = original.clone();
+        let ctx1 = TypeContext::new(Arc::new(IdGenerator::new()));
+        let ctx2 = TypeContext::new(Arc::new(IdGenerator::new()));
+        let (sig1, fallback1) = first
+            .typecheck_source_signature(&unit, &ctx1)
+            .expect("first fallback");
+        let (sig2, fallback2) = second
+            .typecheck_source_signature(&unit, &ctx2)
+            .expect("second fallback");
+        assert_eq!(sig1.len(), sig2.len());
+        assert!(
+            sig1.iter()
+                .any(|item| matches!(item,SignatureItem::SigModule(id,_,_) if id.name()=="Alias"))
+        );
+        assert!(!Arc::ptr_eq(&first.cache, &fallback1.cache));
+        assert!(!Arc::ptr_eq(&fallback1.cache, &fallback2.cache));
+        assert_eq!(
+            fallback1.source_fallback_depth,
+            first.source_fallback_depth + 1
+        );
+        assert!(fallback1.cache_contains_key("Cycle"));
+        assert!(
+            !fallback1
+                .view
+                .prepared_cached_alias_rewrites
+                .contains("AlreadyPrepared")
+        );
+        assert!(
+            original
+                .view
+                .prepared_cached_alias_rewrites
+                .contains("AlreadyPrepared")
+        );
+        assert!(fallback1.view.alias_prefix_rewrites.get("Leaf").is_some());
+        assert!(fallback2.view.alias_prefix_rewrites.get("Leaf").is_some());
+        assert!(original.view.alias_prefix_rewrites.get("Leaf").is_none());
+        assert!(!original.cache_contains_key("Leaf"));
+        assert!(Arc::ptr_eq(&original.view, &first.view));
+        assert!(Arc::ptr_eq(&original.view, &second.view));
+
+        // Neither direct fallback populated the parent cache with type nodes.
+        // The merge uses a third context only while that cache is still empty
+        // apart from its cycle placeholder; no cross-context handles are read.
+        let ctx3 = TypeContext::new(Arc::new(IdGenerator::new()));
+        let mut merged = original.clone();
+        let loaded = merged
+            .load_module_from_source_path_fallback("AliasUnit", &ctx3)
+            .expect("merge fallback");
+        assert_eq!(loaded.ps_name, "AliasUnit");
+        assert!(merged.view.alias_prefix_rewrites.get("Leaf").is_some());
+        assert!(original.view.alias_prefix_rewrites.get("Leaf").is_none());
+        assert!(Arc::ptr_eq(&original.cache, &merged.cache));
+        assert!(original.cache_contains_key("Leaf"));
+        assert!(Arc::ptr_eq(&original.last_error, &merged.last_error));
+        assert!(Arc::ptr_eq(&original.crc_units, &merged.crc_units));
+    }
 }
