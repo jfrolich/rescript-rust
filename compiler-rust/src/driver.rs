@@ -11359,29 +11359,7 @@ struct PreJsDiscriminatorTrace {
     raw_max_stamp: i32,
     raw_lambda: String,
     lowered_lambda: String,
-}
-
-#[cfg(test)]
-thread_local! {
-    static PRE_JS_DISCRIMINATOR_TRACE: std::cell::RefCell<Option<PreJsDiscriminatorTrace>> =
-        const { std::cell::RefCell::new(None) };
-}
-
-#[cfg(test)]
-fn begin_pre_js_discriminator_trace() {
-    PRE_JS_DISCRIMINATOR_TRACE.with(|trace| {
-        *trace.borrow_mut() = Some(PreJsDiscriminatorTrace::default());
-    });
-}
-
-#[cfg(test)]
-fn take_pre_js_discriminator_trace() -> PreJsDiscriminatorTrace {
-    PRE_JS_DISCRIMINATOR_TRACE.with(|trace| {
-        trace
-            .borrow_mut()
-            .take()
-            .expect("pre-JS discriminator trace was not enabled")
-    })
+    js_program: String,
 }
 
 /// Compile ReScript source to JavaScript.
@@ -11394,6 +11372,35 @@ pub fn compile_source_to_js_with_options(
     source: &str,
     filename: &str,
     options: &CompilerOptions,
+) -> Result<String> {
+    compile_source_to_js_with_options_inner(
+        source,
+        filename,
+        options,
+        #[cfg(test)]
+        None,
+    )
+}
+
+#[cfg(test)]
+fn compile_source_to_js_with_trace(
+    source: &str,
+    filename: &str,
+    trace: &mut PreJsDiscriminatorTrace,
+) -> Result<String> {
+    compile_source_to_js_with_options_inner(
+        source,
+        filename,
+        &CompilerOptions::default(),
+        Some(trace),
+    )
+}
+
+fn compile_source_to_js_with_options_inner(
+    source: &str,
+    filename: &str,
+    options: &CompilerOptions,
+    #[cfg(test)] mut discriminator_trace: Option<&mut PreJsDiscriminatorTrace>,
 ) -> Result<String> {
     // Parse
     let mut parser = Parser::new(filename, source);
@@ -11830,14 +11837,12 @@ pub fn compile_source_to_js_with_options(
     }
 
     #[cfg(test)]
-    PRE_JS_DISCRIMINATOR_TRACE.with(|trace| {
-        if let Some(trace) = trace.borrow_mut().as_mut() {
-            trace.type_context_stamp = type_ctx.current_stamp();
-            trace.raw_converter_stamp = raw_lambda_current_stamp;
-            trace.raw_max_stamp = crate::raw_lambda::lower::max_ident_stamp_for_test(&raw_lambda);
-            trace.raw_lambda = format!("{raw_lambda:#?}");
-        }
-    });
+    if let Some(trace) = discriminator_trace.as_deref_mut() {
+        trace.type_context_stamp = type_ctx.current_stamp();
+        trace.raw_converter_stamp = raw_lambda_current_stamp;
+        trace.raw_max_stamp = crate::raw_lambda::lower::max_ident_stamp_for_test(&raw_lambda);
+        trace.raw_lambda = format!("{raw_lambda:#?}");
+    }
 
     let lowered_lambda = crate::raw_lambda::lower::lower_to_lambda_with_start_stamp(
         raw_lambda,
@@ -11845,11 +11850,9 @@ pub fn compile_source_to_js_with_options(
     );
 
     #[cfg(test)]
-    PRE_JS_DISCRIMINATOR_TRACE.with(|trace| {
-        if let Some(trace) = trace.borrow_mut().as_mut() {
-            trace.lowered_lambda = format!("{lowered_lambda:#?}");
-        }
-    });
+    if let Some(trace) = discriminator_trace.as_deref_mut() {
+        trace.lowered_lambda = format!("{lowered_lambda:#?}");
+    }
 
     if options.dump_lambda_sexp || options.dump_lambda_sexp_locs {
         if options.dump_lambda_sexp {
@@ -11907,6 +11910,10 @@ pub fn compile_source_to_js_with_options(
         &lowered_lambda,
         &possible_required_modules,
     );
+    #[cfg(test)]
+    if let Some(trace) = discriminator_trace.as_deref_mut() {
+        trace.js_program = format!("{program:#?}");
+    }
     if let Some(diagnostic) = compiler.take_diagnostic() {
         return Err(UserDiagnostic::new(
             format_compiler_error_report_from_location(
@@ -16007,10 +16014,13 @@ let makeUpdater = initialValue => {
         for (case, tls_start) in CASES {
             let observation = std::thread::spawn(move || {
                 Ident::set_current_time(tls_start);
-                super::begin_pre_js_discriminator_trace();
-                let output = super::compile_source_to_js(SOURCE, "hooks_settings_reduced.res")
-                    .expect("reduced Hooks stamp discriminator should compile");
-                let trace = super::take_pre_js_discriminator_trace();
+                let mut trace = super::PreJsDiscriminatorTrace::default();
+                let output = super::compile_source_to_js_with_trace(
+                    SOURCE,
+                    "hooks_settings_reduced.res",
+                    &mut trace,
+                )
+                .expect("reduced Hooks stamp discriminator should compile");
                 (case, tls_start, trace, output)
             })
             .join()
@@ -16022,12 +16032,13 @@ let makeUpdater = initialValue => {
         // assertion still leaves the first execution evidence in test output.
         for (case, tls_start, trace, output) in &observations {
             eprintln!(
-                "[hooks-prejs-discriminator] case={case} tls_start={tls_start} type_context_stamp={} raw_converter_stamp={} raw_max_stamp={}\n[raw]\n{}\n[lowered]\n{}\n[js]\n{}",
+                "[hooks-prejs-discriminator] case={case} tls_start={tls_start} type_context_stamp={} raw_converter_stamp={} raw_max_stamp={}\n[raw]\n{}\n[lowered]\n{}\n[js-ir]\n{}\n[js]\n{}",
                 trace.type_context_stamp,
                 trace.raw_converter_stamp,
                 trace.raw_max_stamp,
                 trace.raw_lambda,
                 trace.lowered_lambda,
+                trace.js_program,
                 output
             );
         }
