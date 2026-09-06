@@ -4,7 +4,6 @@ import hashlib
 import json
 import os
 from pathlib import Path
-import runpy
 import shutil
 import subprocess
 import sys
@@ -99,276 +98,267 @@ def require_approval():
     approval = json.loads(APPROVAL.read_text())
     assert approval["approved_plan_sha256"] == m.sha(m.D / "plan.json")
     assert approval["approved_binary_sha256"] == m.sha(m.D / "binary-provenance.json")
-    assert approval["approved_prep_head"] == command("git", "rev-parse", "HEAD")
+    assert approval["approved_runner_head"] == command("git", "rev-parse", "HEAD")
+    assert approval["approved_runner_sha256"] == m.sha(Path(__file__))
     assert approval["allow_timed_full_builds"] is True
     assert os.environ.get("ENV_OWNERSHIP_HEAVY_LOCK") == "1"
 
 
-def write_inventory(label):
-    payload = {"inputs": m.inputs(), "source": source_inventory(), "symlinks": links()}
-    path = m.D / f"inventory-{label}.json"
-    assert not path.exists()
-    path.write_text(json.dumps(payload, sort_keys=True))
-    return payload
+def capture_inventory():
+    return {"inputs": m.inputs(), "source": source_inventory(), "symlinks": links()}
 
 
-def verify_inventory(label):
-    before = json.loads((m.D / "inventory-before.json").read_text())
-    after = write_inventory(label)
-    changed = sorted(
-        path
-        for path in before["inputs"].keys() | after["inputs"].keys()
-        if before["inputs"].get(path) != after["inputs"].get(path)
-    )
-    allowed = generated_metadata_paths()
-    report = {
-        "before_count": len(before["inputs"]),
-        "after_count": len(after["inputs"]),
-        "changed": changed,
-        "generated_metadata": [path for path in changed if path in allowed],
-        "unexpected": [path for path in changed if path not in allowed],
-        "source_equal": before["source"] == after["source"],
-        "symlinks_equal": before["symlinks"] == after["symlinks"],
-    }
-    output = m.D / f"inventory-verification-{label}.json"
-    output.write_text(json.dumps(report, indent=2))
-    assert not report["unexpected"] and report["source_equal"] and report["symlinks_equal"]
+def compare_inventory(before, current, expect_metadata):
+    metadata = generated_metadata_paths()
+    baseline_metadata = metadata & before["inputs"].keys()
+    current_metadata = metadata & current["inputs"].keys()
+    changed = {path for path in before["inputs"].keys() | current["inputs"].keys() if before["inputs"].get(path) != current["inputs"].get(path)}
+    report = {"before_count":len(before["inputs"]),"current_count":len(current["inputs"]),"baseline_metadata_present":sorted(baseline_metadata),"current_metadata_present":sorted(current_metadata),"expected_metadata_present":sorted(metadata if expect_metadata else set()),"unexpected":sorted(changed-metadata),"source_equal":before["source"]==current["source"],"symlinks_equal":before["symlinks"]==current["symlinks"]}
+    report["valid"] = not baseline_metadata and current_metadata == (metadata if expect_metadata else set()) and not report["unexpected"] and report["source_equal"] and report["symlinks_equal"]
+    return report
 
 
-def validate_screen(variant, workers):
-    require_approval()
-    verify_binaries()
-    assert os.environ.get("ENV_OWNERSHIP_HEAVY_LOCK") == "1"
-    rows_path = m.D / "screen-runs.jsonl"
-    rows = [json.loads(line) for line in rows_path.read_text().splitlines()] if rows_path.exists() else []
-    repetition = 1 + sum(row["variant"] == variant and row["workers"] == workers for row in rows)
-    assert repetition <= 2
-    current = m.D / f"logs/screen-{variant}-w{workers}-current.log"
-    saved = m.D / f"logs/screen-{variant}-w{workers}-{repetition}.log"
-    assert not saved.exists()
-    saved.write_bytes(current.read_bytes())
-    count, digest, manifest = m.outputs()
-    manifest_path = m.D / f"screen-{variant}-w{workers}-{repetition}-js.json"
-    manifest_path.write_text(json.dumps(manifest, sort_keys=True))
-    text = current.read_text(errors="replace")
-    metrics = {}
+def verify_inventory_state(label, expect_metadata):
+    before=json.loads((m.D/"inventory-before.json").read_text());current=capture_inventory()
+    snapshot=m.D/f"inventory-{label}.json";report_path=m.D/f"inventory-verification-{label}.json"
+    assert not snapshot.exists() and not report_path.exists()
+    snapshot.write_text(json.dumps(current,sort_keys=True));report=compare_inventory(before,current,expect_metadata);report_path.write_text(json.dumps(report,indent=2))
+    assert report["valid"],"Input/source/symlink drift; preserve evidence and stop"
+    return report
+
+
+def parse_required_metrics(text):
+    import re
+    metrics={}
     for line in text.splitlines():
-        import re
-        match = re.match(r"\s*(user|sys|real)\s+([\d.]+)$", line)
-        if match:
-            metrics[match.group(1)] = float(match.group(2))
-        for key in ["maximum resident set size", "instructions retired", "cycles elapsed", "peak memory footprint"]:
-            if line.strip().endswith(key):
-                metrics[key] = int(line.split()[0])
-    row = {
-        "stage": "screen", "variant": variant, "workers": workers,
-        "repetition": repetition, "exit": 0, "load_after": os.getloadavg(),
-        "js_count": count, "js_sha256": digest,
-        "compiled_3248": "Compiled 3248 modules" in text, **metrics,
-    }
-    with rows_path.open("a") as output:
-        output.write(json.dumps(row) + "\n")
-    assert count == 5048 and digest == EXPECTED_OUTPUT and row["compiled_3248"]
+        match=re.match(r"\s*(user|sys|real)\s+([\d.]+)$",line)
+        if match: metrics[match.group(1)]=float(match.group(2))
+        for key in ["maximum resident set size","instructions retired","cycles elapsed","peak memory footprint"]:
+            if line.strip().endswith(key):metrics[key]=int(line.split()[0])
+    missing=sorted({"real","user","sys","maximum resident set size","instructions retired","cycles elapsed"}-metrics.keys())
+    if missing:raise RuntimeError(f"Missing required /usr/bin/time metrics: {missing}")
+    return metrics
+
+
+def verify_ordered_rows(plan,screens,rows):
+    expected_screen=[tuple(row) for row in plan["screen_order"]]
+    expected_runs=[("paired",row[0],row[2],row[3],row[1]) for row in plan["paired_order"]]+[("historical",row[0],row[1],row[2],row[3]) for row in plan["historical_order"]]
+    actual_screen=[(row["variant"],row["workers"],row["repetition"]) for row in screens]
+    actual_runs=[(row["stage"],row["pair"],row["position"],row["variant"],row["workers"]) for row in rows]
+    if actual_screen!=expected_screen or actual_runs!=expected_runs:raise RuntimeError("Recorded cohort order differs from fixed plan")
+
+
+def finalize_screen(variant,workers,repetition,driver):
+    name=f"screen-{variant}-w{workers}-{repetition}";row={"stage":"screen","variant":variant,"workers":workers,"repetition":repetition,"driver":driver}
+    try:
+        process_path=m.D/f"logs/{name}-build.process.json"
+        if process_path.is_file():row.update(json.loads(process_path.read_text()))
+        log_path=m.D/f"logs/{name}-build.log";text=log_path.read_text(errors="replace") if log_path.is_file() else ""
+        row.update(parse_required_metrics(text));count,digest,manifest=m.outputs();(m.D/f"{name}-js.json").write_text(json.dumps(manifest,sort_keys=True))
+        row.update(js_count=count,js_sha256=digest,compiled_3248="Compiled 3248 modules" in text)
+        if row.get("exit")!=0 or row.get("timeout") or row.get("error"):raise RuntimeError(f"Screen build failed; preserve {name}")
+        if count!=5048 or digest!=EXPECTED_OUTPUT or not row["compiled_3248"]:raise RuntimeError(f"Screen output mismatch; preserve {name}")
+    except BaseException as exc:row["attempt_error"]=repr(exc);raise
+    finally:
+        with (m.D/"screen-runs.jsonl").open("a") as output:output.write(json.dumps(row)+"\n")
+        print(json.dumps(row),flush=True)
+
+
+def screen_child(variant,workers,repetition):
+    import time
+    name=f"screen-{variant}-w{workers}-{repetition}-build";env=m.env(variant,workers);prefix=m.D/f"logs/{name}"
+    start=time.perf_counter_ns();load=os.getloadavg();process=None;stdout=stderr=b"";error=None
+    try:
+        # This child stays in Hyperfine's process group. The outer bounded driver
+        # owns the sole 600-second timeout and kills that whole group, avoiding
+        # a nested setsid process that could survive its wrapper.
+        process=subprocess.Popen(["/usr/bin/time","-lp"]+m.command(variant),env=env,stdout=subprocess.PIPE,stderr=subprocess.PIPE)
+        stdout,stderr=process.communicate()
+    except BaseException as exc:error=exc
+    row={"command":["/usr/bin/time","-lp"]+m.command(variant),"wall_ns":time.perf_counter_ns()-start,"load_before":load,"exit":process.returncode if process else None,"timeout":False,"error":repr(error) if error else None}
+    Path(str(prefix)+".stdout").write_bytes(stdout);Path(str(prefix)+".stderr").write_bytes(stderr);Path(str(prefix)+".log").write_bytes(stdout+stderr);Path(str(prefix)+".process.json").write_text(json.dumps(row,indent=2))
+    if row["exit"]!=0 or row["timeout"] or row["error"]:raise SystemExit(row["exit"] or 124)
 
 
 def restore_tella():
     restore_backups(m.T, m.D / "backups", json.loads((m.D / "backups.json").read_text()), m.sha)
 
 
-def timed_attempt(stage, pair, position, variant, workers):
-    name = f"{stage}-{pair}-{position}-{variant}-w{workers}"
-    clean, _ = bounded(
-        [str(m.D / f"bin/rescript-{variant}"), "clean", str(m.WEB)],
-        m.env(variant, workers), m.D / f"logs/{name}-clean", 120,
-    )
-    if clean["exit"] != 0 or clean["timeout"] or clean["error"]:
-        raise RuntimeError(f"Clean failed; preserve {name}")
-    load = os.getloadavg()
-    process, log = bounded(
-        ["/usr/bin/time", "-lp"] + m.command(variant),
-        m.env(variant, workers), m.D / f"logs/{name}", 600,
-    )
-    text = log.decode(errors="replace")
-    metrics = {}
-    for line in text.splitlines():
-        import re
-        match = re.match(r"\s*(user|sys|real)\s+([\d.]+)$", line)
-        if match:
-            metrics[match.group(1)] = float(match.group(2))
-        for key in ["maximum resident set size", "instructions retired", "cycles elapsed", "peak memory footprint"]:
-            if line.strip().endswith(key):
-                metrics[key] = int(line.split()[0])
-    count, digest, manifest = m.outputs()
-    (m.D / f"{name}-js.json").write_text(json.dumps(manifest, sort_keys=True))
-    row = {
-        "stage": stage, "pair": pair, "position": position, "variant": variant,
-        "workers": workers, "load": load, "compiled_3248": "Compiled 3248 modules" in text,
-        "js_count": count, "js_sha256": digest, **process, **metrics,
-    }
-    with (m.D / "runs.jsonl").open("a") as output:
-        output.write(json.dumps(row) + "\n")
-    print(json.dumps(row), flush=True)
-    if process["exit"] != 0 or process["timeout"] or process["error"]:
-        raise RuntimeError(f"Build failed; preserve {name}")
-    if count != 5048 or digest != EXPECTED_OUTPUT or not row["compiled_3248"]:
-        raise RuntimeError(f"Output mismatch; preserve {name}")
+def timed_attempt(stage,pair,position,variant,workers):
+    name=f"{stage}-{pair}-{position}-{variant}-w{workers}";row={"stage":stage,"pair":pair,"position":position,"variant":variant,"workers":workers,"phase":"clean"}
+    try:
+        clean,_=bounded([str(m.D/f"bin/rescript-{variant}"),"clean",str(m.WEB)],m.env(variant,workers),m.D/f"logs/{name}-clean",120);row["clean"]=clean
+        if clean["exit"]!=0 or clean["timeout"] or clean["error"]:raise RuntimeError(f"Clean failed; preserve {name}")
+        row["phase"]="build";row["load_before"]=os.getloadavg();process,log=bounded(["/usr/bin/time","-lp"]+m.command(variant),m.env(variant,workers),m.D/f"logs/{name}",600);row.update(process)
+        text=log.decode(errors="replace");row.update(parse_required_metrics(text))
+        if process["exit"]!=0 or process["timeout"] or process["error"]:raise RuntimeError(f"Build failed; preserve {name}")
+        row["phase"]="outputs";count,digest,manifest=m.outputs();(m.D/f"{name}-js.json").write_text(json.dumps(manifest,sort_keys=True));row.update(js_count=count,js_sha256=digest,compiled_3248="Compiled 3248 modules" in text)
+        if count!=5048 or digest!=EXPECTED_OUTPUT or not row["compiled_3248"]:raise RuntimeError(f"Output mismatch; preserve {name}")
+        row["phase"]="complete"
+    except BaseException as exc:row["attempt_error"]=repr(exc);raise
+    finally:
+        with (m.D/"runs.jsonl").open("a") as output:output.write(json.dumps(row)+"\n")
+        print(json.dumps(row),flush=True)
 
 
-mode = sys.argv[1]
-if mode == "prepare":
-    assert not m.D.exists()
-    (m.D / "bin").mkdir(parents=True)
-    (m.D / "logs").mkdir()
-    sources = {
-        "bsc-A": CONTROL / "bsc-A", "rescript-A": CONTROL / "rescript-A",
-        "bsc-D": CONTROL / "bsc-D", "rescript-D": CONTROL / "rescript-D",
-        "bsc-C": CANDIDATE / "bsc", "rescript-C": CANDIDATE / "rescript",
-    }
-    for name, source in sources.items():
-        assert m.sha(source) == EXPECTED_BINARIES[name]
-        shutil.copy2(source, m.D / "bin" / name)
-        (m.D / "bin" / name).chmod(0o555)
-    (m.D / "binary-hashes.json").write_text(json.dumps(EXPECTED_BINARIES, indent=2))
-    binary_provenance = {
-        "sources": SOURCES,
-        "pairs": {
-            "A": ["bsc-A", "rescript-A"],
-            "D": ["bsc-D", "rescript-D"],
-            "C": ["bsc-C", "rescript-C"],
-        },
-        "candidate_release_build": {
-            "head": SOURCES["C-release-build"],
-            "commands": [
-                ["cargo", "build", "--locked", "--manifest-path", "compiler-rust/Cargo.toml", "--release"],
-                ["cargo", "build", "--locked", "--manifest-path", "rewatch/Cargo.toml", "--release"],
+
+def main():
+    if len(sys.argv)<2:raise SystemExit("Fixed runner mode required")
+    mode = sys.argv[1]
+    if mode == "prepare":
+        assert not m.D.exists()
+        (m.D / "bin").mkdir(parents=True)
+        (m.D / "logs").mkdir()
+        sources = {
+            "bsc-A": CONTROL / "bsc-A", "rescript-A": CONTROL / "rescript-A",
+            "bsc-D": CONTROL / "bsc-D", "rescript-D": CONTROL / "rescript-D",
+            "bsc-C": CANDIDATE / "bsc", "rescript-C": CANDIDATE / "rescript",
+        }
+        for name, source in sources.items():
+            assert m.sha(source) == EXPECTED_BINARIES[name]
+            shutil.copy2(source, m.D / "bin" / name)
+            (m.D / "bin" / name).chmod(0o555)
+        (m.D / "binary-hashes.json").write_text(json.dumps(EXPECTED_BINARIES, indent=2))
+        binary_provenance = {
+            "sources": SOURCES,
+            "pairs": {
+                "A": ["bsc-A", "rescript-A"],
+                "D": ["bsc-D", "rescript-D"],
+                "C": ["bsc-C", "rescript-C"],
+            },
+            "candidate_release_build": {
+                "head": SOURCES["C-release-build"],
+                "commands": [
+                    ["cargo", "build", "--locked", "--manifest-path", "compiler-rust/Cargo.toml", "--release"],
+                    ["cargo", "build", "--locked", "--manifest-path", "rewatch/Cargo.toml", "--release"],
+                ],
+                "RUSTFLAGS": None,
+                "features": "default",
+            },
+            "ordinary_release_bsc_excluded": {
+                "sha256": "7f3e605c37473be2d1b172930a21eb95a9b7a2f007ae24cecaca7d52fbd6f1ce",
+                "reason": "Rewritten by cargo test --release at test-only head 0e448cb49; not the coherent release-build artifact pair.",
+            },
+            "hashes": EXPECTED_BINARIES,
+        }
+        (m.D / "binary-provenance.json").write_text(json.dumps(binary_provenance, indent=2))
+        plan = {
+            "counts": EXPECTED_PLAN,
+            "screen_order": [[variant, workers, repetition] for workers in [1, 12] for variant in ["D", "C"] for repetition in [1, 2]],
+            "paired_order": [
+                [pair, workers, position, variant]
+                for pair in range(1, 9)
+                for workers in ([1, 12] if pair % 2 else [12, 1])
+                for position, variant in enumerate((["D", "C"] if pair % 2 else ["C", "D"]), 1)
             ],
+            "historical_order": [
+                [pair, position, variant, 12]
+                for pair in range(1, 9)
+                for position, variant in enumerate((["A", "C"] if pair % 2 else ["C", "A"]), 1)
+            ],
+            "output": {"modules": 3248, "js_files": 5048, "js_sha256": EXPECTED_OUTPUT},
+            "bounds_seconds": {"clean": 120, "build": 600},
+            "screens": "Four separate hyperfine invocations, two runs per D/C x w1/w12 cell.",
+            "lock": "/tmp/rescript-tella-heavy.lock",
+            "no_extensions_exclusions_pooling_or_retries": True,
+        }
+        assert len(plan["screen_order"]) == 8 and len(plan["paired_order"]) == 32 and len(plan["historical_order"]) == 16
+        (m.D / "plan.json").write_text(json.dumps(plan, indent=2))
+        runtime_setup = json.loads((ENV_ROOT / "runtime-mirror-setup.json").read_text())
+        assert len(runtime_setup) == 156
+        for row in runtime_setup:
+            assert m.sha(Path(row["source"])) == row["sha256"]
+            assert m.sha(Path(row["mirror"])) == row["sha256"]
+        backups = json.loads((ARTIFACTS / "architecture-round/backups.json").read_text())
+        assert len(backups) == 18
+        assert set(command("git", "-C", str(m.T), "diff", "--name-only").splitlines()) == set(backups)
+        for path, digest in backups.items():
+            source = m.T / path
+            assert m.sha(source) == digest
+            destination = m.D / "backups" / path
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(source, destination)
+        (m.D / "backups.json").write_text(json.dumps(backups, sort_keys=True))
+        provenance = {
+            "prep_head": command("git", "rev-parse", "HEAD"),
+            "branch": command("git", "branch", "--show-current"),
+            "rustc": command("/Users/jake/.cargo/bin/rustc", "-Vv"),
+            "cargo": command("/Users/jake/.cargo/bin/cargo", "-V"),
+            "node": command("node", "-v"),
+            "runtime": str(ROOT / "packages/@rescript/runtime"),
+            "runtime_mirror_entries_verified": len(runtime_setup),
+            "tella_head": command("git", "-C", str(m.T), "rev-parse", "HEAD"),
+            "tella_status": command("git", "-C", str(m.T), "status", "--porcelain"),
             "RUSTFLAGS": None,
             "features": "default",
-        },
-        "ordinary_release_bsc_excluded": {
-            "sha256": "7f3e605c37473be2d1b172930a21eb95a9b7a2f007ae24cecaca7d52fbd6f1ce",
-            "reason": "Rewritten by cargo test --release at test-only head 0e448cb49; not the coherent release-build artifact pair.",
-        },
-        "hashes": EXPECTED_BINARIES,
-    }
-    (m.D / "binary-provenance.json").write_text(json.dumps(binary_provenance, indent=2))
-    plan = {
-        "counts": EXPECTED_PLAN,
-        "screen_order": [[variant, workers, repetition] for workers in [1, 12] for variant in ["D", "C"] for repetition in [1, 2]],
-        "paired_order": [
-            [pair, workers, position, variant]
-            for pair in range(1, 9)
-            for workers in ([1, 12] if pair % 2 else [12, 1])
-            for position, variant in enumerate((["D", "C"] if pair % 2 else ["C", "D"]), 1)
-        ],
-        "historical_order": [
-            [pair, position, variant, 12]
-            for pair in range(1, 9)
-            for position, variant in enumerate((["A", "C"] if pair % 2 else ["C", "A"]), 1)
-        ],
-        "output": {"modules": 3248, "js_files": 5048, "js_sha256": EXPECTED_OUTPUT},
-        "bounds_seconds": {"clean": 120, "build": 600},
-        "screens": "Four separate hyperfine invocations, two runs per D/C x w1/w12 cell.",
-        "lock": "/tmp/rescript-tella-heavy.lock",
-        "no_extensions_exclusions_pooling_or_retries": True,
-    }
-    assert len(plan["screen_order"]) == 8 and len(plan["paired_order"]) == 32 and len(plan["historical_order"]) == 16
-    (m.D / "plan.json").write_text(json.dumps(plan, indent=2))
-    runtime_setup = json.loads((ENV_ROOT / "runtime-mirror-setup.json").read_text())
-    assert len(runtime_setup) == 156
-    for row in runtime_setup:
-        assert m.sha(Path(row["source"])) == row["sha256"]
-        assert m.sha(Path(row["mirror"])) == row["sha256"]
-    backups = json.loads((ARTIFACTS / "architecture-round/backups.json").read_text())
-    assert len(backups) == 18
-    assert set(command("git", "-C", str(m.T), "diff", "--name-only").splitlines()) == set(backups)
-    for path, digest in backups.items():
-        source = m.T / path
-        assert m.sha(source) == digest
-        destination = m.D / "backups" / path
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(source, destination)
-    (m.D / "backups.json").write_text(json.dumps(backups, sort_keys=True))
-    provenance = {
-        "prep_head": command("git", "rev-parse", "HEAD"),
-        "branch": command("git", "branch", "--show-current"),
-        "rustc": command("/Users/jake/.cargo/bin/rustc", "-Vv"),
-        "cargo": command("/Users/jake/.cargo/bin/cargo", "-V"),
-        "node": command("node", "-v"),
-        "runtime": str(ROOT / "packages/@rescript/runtime"),
-        "runtime_mirror_entries_verified": len(runtime_setup),
-        "tella_head": command("git", "-C", str(m.T), "rev-parse", "HEAD"),
-        "tella_status": command("git", "-C", str(m.T), "status", "--porcelain"),
-        "RUSTFLAGS": None,
-        "features": "default",
-        "commands": {variant: m.command(variant) for variant in ["A", "D", "C"]},
-        "environment": {
-            f"{variant}-w{workers}": {
-                key: m.env(variant, workers)[key]
-                for key in ["RESCRIPT_BSC_EXE", "RESCRIPT_RUNTIME", "RAYON_NUM_THREADS"]
-            }
-            for variant in ["A", "D", "C"] for workers in [1, 12]
-        },
-    }
-    (m.D / "provenance.json").write_text(json.dumps(provenance, indent=2))
-    print(json.dumps({"plan_sha256": m.sha(m.D / "plan.json"), "binary_provenance_sha256": m.sha(m.D / "binary-provenance.json"), "prep_head": provenance["prep_head"]}))
-elif mode == "freeze-inputs":
-    require_approval()
-    verify_binaries()
-    assert not (m.D / "inventory-before.json").exists()
-    clean, _ = bounded([str(m.D / "bin/rescript-D"), "clean", str(m.WEB)], m.env("D", 1), m.D / "logs/freeze-input-clean", 120)
-    assert clean["exit"] == 0 and not clean["timeout"] and clean["error"] is None
-    write_inventory("before")
-elif mode == "screen-validate":
-    validate_screen(sys.argv[2], int(sys.argv[3]))
-elif mode == "screen":
-    require_approval()
-    verify_binaries()
-    assert (m.D / "inventory-before.json").is_file()
-    assert not (m.D / "screen-runs.jsonl").exists()
-    def body():
-        for workers in [1, 12]:
-            for variant in ["D", "C"]:
-                command_text = "/usr/bin/time -lp " + " ".join(m.command(variant)) + f" > {m.D}/logs/screen-{variant}-w{workers}-current.log 2>&1"
-                hyperfine = [
-                    "hyperfine", "--runs", "2",
-                    "--prepare", f"{m.D}/bin/rescript-{variant} clean {m.WEB}",
-                    "--conclude", f"python3 {Path(__file__).resolve()} screen-validate {variant} {workers}",
-                    "--export-json", str(m.D / f"screen-{variant}-w{workers}.json"), command_text,
-                ]
-                result, _ = bounded(hyperfine, m.env(variant, workers), m.D / f"logs/screen-{variant}-w{workers}-driver", 600)
-                assert result["exit"] == 0 and not result["timeout"] and result["error"] is None
-    guarded(body, lambda: verify_inventory("after-screen"), restore_tella, m.D / "screen-failure.json")
-elif mode == "paired":
-    require_approval()
-    verify_binaries()
-    assert len((m.D / "screen-runs.jsonl").read_text().splitlines()) == 8
-    assert not (m.D / "runs.jsonl").exists()
-    def body():
-        for pair in range(1, 9):
-            for workers in ([1, 12] if pair % 2 else [12, 1]):
-                for position, variant in enumerate((["D", "C"] if pair % 2 else ["C", "D"]), 1):
-                    timed_attempt("paired", pair, position, variant, workers)
-    guarded(body, lambda: verify_inventory("after-paired"), restore_tella, m.D / "paired-failure.json")
-elif mode == "historical":
-    require_approval()
-    verify_binaries()
-    rows = [json.loads(line) for line in (m.D / "runs.jsonl").read_text().splitlines()]
-    assert len(rows) == 32 and all(row["stage"] == "paired" for row in rows)
-    def body():
-        for pair in range(1, 9):
-            for position, variant in enumerate((["A", "C"] if pair % 2 else ["C", "A"]), 1):
-                timed_attempt("historical", pair, position, variant, 12)
-    guarded(body, lambda: verify_inventory("after-historical"), restore_tella, m.D / "historical-failure.json")
-elif mode == "verify-final":
-    require_approval()
-    verify_binaries()
-    screens = [json.loads(line) for line in (m.D / "screen-runs.jsonl").read_text().splitlines()]
-    rows = [json.loads(line) for line in (m.D / "runs.jsonl").read_text().splitlines()]
-    assert len(screens) == 8 and len(rows) == 48
-    assert sum(row["stage"] == "paired" for row in rows) == 32
-    assert sum(row["stage"] == "historical" for row in rows) == 16
-    assert all(row["js_count"] == 5048 and row["js_sha256"] == EXPECTED_OUTPUT and row["compiled_3248"] for row in screens + rows)
-    verify_inventory("final")
-else:
-    runpy.run_path(str(Path(__file__).with_name("measurement_rebaseline.py")), run_name="__main__")
+            "commands": {variant: m.command(variant) for variant in ["A", "D", "C"]},
+            "environment": {
+                f"{variant}-w{workers}": {
+                    key: m.env(variant, workers)[key]
+                    for key in ["RESCRIPT_BSC_EXE", "RESCRIPT_RUNTIME", "RAYON_NUM_THREADS"]
+                }
+                for variant in ["A", "D", "C"] for workers in [1, 12]
+            },
+        }
+        (m.D / "provenance.json").write_text(json.dumps(provenance, indent=2))
+        print(json.dumps({"plan_sha256": m.sha(m.D / "plan.json"), "binary_provenance_sha256": m.sha(m.D / "binary-provenance.json"), "prep_head": provenance["prep_head"]}))
+    elif mode == "freeze-inputs":
+        require_approval()
+        verify_binaries()
+        assert not (m.D / "inventory-before.json").exists()
+        clean, _ = bounded([str(m.D / "bin/rescript-D"), "clean", str(m.WEB)], m.env("D", 1), m.D / "logs/freeze-input-clean", 120)
+        assert clean["exit"] == 0 and not clean["timeout"] and clean["error"] is None
+        before=capture_inventory();assert compare_inventory(before,before,False)["valid"]
+        (m.D/"inventory-before.json").write_text(json.dumps(before,sort_keys=True))
+    elif mode == "screen-child":
+        require_approval();screen_child(sys.argv[2],int(sys.argv[3]),int(sys.argv[4]))
+    elif mode == "screen":
+        require_approval()
+        verify_binaries()
+        assert (m.D/"inventory-before.json").is_file() and not (m.D/"screen-runs.jsonl").exists();verify_inventory_state("pre-screen",False)
+        def body():
+            for workers in [1,12]:
+                for variant in ["D","C"]:
+                    for repetition in [1,2]:
+                        name=f"screen-{variant}-w{workers}-{repetition}";clean,_=bounded([str(m.D/f"bin/rescript-{variant}"),"clean",str(m.WEB)],m.env(variant,workers),m.D/f"logs/{name}-clean",120)
+                        if clean["exit"]!=0 or clean["timeout"] or clean["error"]:
+                            with (m.D/"screen-runs.jsonl").open("a") as output:output.write(json.dumps({"stage":"screen","variant":variant,"workers":workers,"repetition":repetition,"phase":"clean","clean":clean,"attempt_error":"Clean failed"})+"\n")
+                            raise RuntimeError(f"Clean failed; preserve {name}")
+                        hyperfine=["hyperfine","--runs","1","--warmup","0","--export-json",str(m.D/f"{name}-hyperfine.json"),f"python3 {Path(__file__).resolve()} screen-child {variant} {workers} {repetition}"]
+                        driver,_=bounded(hyperfine,m.env(variant,workers),m.D/f"logs/{name}-hyperfine",600);finalize_screen(variant,workers,repetition,driver)
+        guarded(body,lambda:verify_inventory_state("after-screen",True),restore_tella,m.D/"screen-failure.json")
+    elif mode == "paired":
+        require_approval()
+        verify_binaries()
+        assert len((m.D / "screen-runs.jsonl").read_text().splitlines()) == 8
+        assert not (m.D/"runs.jsonl").exists();verify_inventory_state("pre-paired",True)
+        def body():
+            for pair in range(1, 9):
+                for workers in ([1, 12] if pair % 2 else [12, 1]):
+                    for position, variant in enumerate((["D", "C"] if pair % 2 else ["C", "D"]), 1):
+                        timed_attempt("paired", pair, position, variant, workers)
+        guarded(body, lambda: verify_inventory_state("after-paired",True), restore_tella, m.D / "paired-failure.json")
+    elif mode == "historical":
+        require_approval()
+        verify_binaries()
+        rows = [json.loads(line) for line in (m.D / "runs.jsonl").read_text().splitlines()]
+        assert len(rows)==32 and all(row["stage"]=="paired" for row in rows);verify_inventory_state("pre-historical",True)
+        def body():
+            for pair in range(1, 9):
+                for position, variant in enumerate((["A", "C"] if pair % 2 else ["C", "A"]), 1):
+                    timed_attempt("historical", pair, position, variant, 12)
+        guarded(body, lambda: verify_inventory_state("after-historical",True), restore_tella, m.D / "historical-failure.json")
+    elif mode == "verify-final":
+        require_approval()
+        verify_binaries()
+        screens = [json.loads(line) for line in (m.D / "screen-runs.jsonl").read_text().splitlines()]
+        rows = [json.loads(line) for line in (m.D / "runs.jsonl").read_text().splitlines()]
+        assert len(screens)==8 and len(rows)==48;verify_ordered_rows(json.loads((m.D/"plan.json").read_text()),screens,rows)
+        assert all(row["js_count"]==5048 and row["js_sha256"]==EXPECTED_OUTPUT and row["compiled_3248"] for row in screens+rows)
+        required={"real","user","sys","maximum resident set size","instructions retired","cycles elapsed"};assert all(required<=row.keys() for row in screens+rows)
+        verify_inventory_state("final",True)
+    else:
+        raise SystemExit("Unknown mode; refusing to run outside the fixed 56-build plan")
+
+if __name__=="__main__":
+    main()
