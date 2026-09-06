@@ -11351,6 +11351,39 @@ fn generated_type_var_name(idx: usize) -> String {
     }
 }
 
+#[cfg(test)]
+#[derive(Clone, Debug, Default)]
+struct PreJsDiscriminatorTrace {
+    type_context_stamp: i32,
+    raw_converter_stamp: i32,
+    raw_max_stamp: i32,
+    raw_lambda: String,
+    lowered_lambda: String,
+}
+
+#[cfg(test)]
+thread_local! {
+    static PRE_JS_DISCRIMINATOR_TRACE: std::cell::RefCell<Option<PreJsDiscriminatorTrace>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+fn begin_pre_js_discriminator_trace() {
+    PRE_JS_DISCRIMINATOR_TRACE.with(|trace| {
+        *trace.borrow_mut() = Some(PreJsDiscriminatorTrace::default());
+    });
+}
+
+#[cfg(test)]
+fn take_pre_js_discriminator_trace() -> PreJsDiscriminatorTrace {
+    PRE_JS_DISCRIMINATOR_TRACE.with(|trace| {
+        trace
+            .borrow_mut()
+            .take()
+            .expect("pre-JS discriminator trace was not enabled")
+    })
+}
+
 /// Compile ReScript source to JavaScript.
 pub fn compile_source_to_js(source: &str, filename: &str) -> Result<String> {
     compile_source_to_js_with_options(source, filename, &CompilerOptions::default())
@@ -11796,10 +11829,27 @@ pub fn compile_source_to_js_with_options(
         }
     }
 
+    #[cfg(test)]
+    PRE_JS_DISCRIMINATOR_TRACE.with(|trace| {
+        if let Some(trace) = trace.borrow_mut().as_mut() {
+            trace.type_context_stamp = type_ctx.current_stamp();
+            trace.raw_converter_stamp = raw_lambda_current_stamp;
+            trace.raw_max_stamp = crate::raw_lambda::lower::max_ident_stamp_for_test(&raw_lambda);
+            trace.raw_lambda = format!("{raw_lambda:#?}");
+        }
+    });
+
     let lowered_lambda = crate::raw_lambda::lower::lower_to_lambda_with_start_stamp(
         raw_lambda,
         raw_lambda_current_stamp,
     );
+
+    #[cfg(test)]
+    PRE_JS_DISCRIMINATOR_TRACE.with(|trace| {
+        if let Some(trace) = trace.borrow_mut().as_mut() {
+            trace.lowered_lambda = format!("{lowered_lambda:#?}");
+        }
+    });
 
     if options.dump_lambda_sexp || options.dump_lambda_sexp_locs {
         if options.dump_lambda_sexp {
@@ -15932,6 +15982,77 @@ let optional = (~x=?, ()) => x
             .expect("optional-default functions should compile");
         assert!(output.contains("function labelled"));
         assert!(output.contains("function optional"));
+    }
+
+    #[test]
+    fn tuple_let_before_nested_optional_default_keeps_stamp_ownership() {
+        const SOURCE: &str = r#"
+let pair = x => (x, _ => ())
+
+let makeUpdater = initialValue => {
+  let (state, setState) = pair(0)
+  let (value, setValue) = pair(initialValue)
+  let updateValue = (~persist=true, newValue) => {
+    if persist {
+      setState(newValue)
+    }
+    setValue(value)
+  }
+  (state, value, updateValue)
+}
+"#;
+        const CASES: [(&str, i32); 2] = [("fresh_worker_tls", 1000), ("reused_worker_tls", 8192)];
+
+        let mut observations = Vec::new();
+        for (case, tls_start) in CASES {
+            let observation = std::thread::spawn(move || {
+                Ident::set_current_time(tls_start);
+                super::begin_pre_js_discriminator_trace();
+                let output = super::compile_source_to_js(SOURCE, "hooks_settings_reduced.res")
+                    .expect("reduced Hooks stamp discriminator should compile");
+                let trace = super::take_pre_js_discriminator_trace();
+                (case, tls_start, trace, output)
+            })
+            .join()
+            .expect("owned discriminator thread should not panic");
+            observations.push(observation);
+        }
+
+        // Preserve both complete traces before checking any invariant so a red
+        // assertion still leaves the first execution evidence in test output.
+        for (case, tls_start, trace, output) in &observations {
+            eprintln!(
+                "[hooks-prejs-discriminator] case={case} tls_start={tls_start} type_context_stamp={} raw_converter_stamp={} raw_max_stamp={}\n[raw]\n{}\n[lowered]\n{}\n[js]\n{}",
+                trace.type_context_stamp,
+                trace.raw_converter_stamp,
+                trace.raw_max_stamp,
+                trace.raw_lambda,
+                trace.lowered_lambda,
+                output
+            );
+        }
+
+        for (case, _, trace, output) in observations {
+            assert!(
+                trace.raw_max_stamp <= trace.raw_converter_stamp,
+                "{case}: RawLambda contains an identifier above the reported raw stamp (raw_max={}, reported={}, type_context={})",
+                trace.raw_max_stamp,
+                trace.raw_converter_stamp,
+                trace.type_context_stamp
+            );
+            assert!(
+                trace.raw_lambda.contains("*opt_persist*"),
+                "{case}: raw function lost the optional source parameter"
+            );
+            assert!(
+                trace.lowered_lambda.contains("persistOpt"),
+                "{case}: optional renaming or a downstream identity collision lost persistOpt"
+            );
+            assert!(
+                output.contains("(persistOpt, newValue)"),
+                "{case}: JS-visible optional parameter was remapped"
+            );
+        }
     }
 
     #[test]

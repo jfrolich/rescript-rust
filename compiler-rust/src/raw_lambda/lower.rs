@@ -1791,6 +1791,11 @@ fn max_ident_stamp(raw: &RawLambda) -> i32 {
     max_stamp
 }
 
+#[cfg(test)]
+pub(crate) fn max_ident_stamp_for_test(raw: &RawLambda) -> i32 {
+    max_ident_stamp(raw)
+}
+
 pub fn lower_to_lambda_with_start_stamp(raw: RawLambda, start_stamp: i32) -> Lambda {
     let mut exported_idents = HashSet::new();
     collect_exported_idents(&raw, &mut exported_idents);
