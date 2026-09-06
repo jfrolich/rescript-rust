@@ -72,3 +72,12 @@ Parent reviewed and authorized deletion of exactly 4474 disposable release-cache
 Read-only capacity inspection found only an additional 810 MiB historical experiment cache, insufficient evidence of enough space to finish the remaining default build and tests. The preserved old worktree's compiler and rewatch target directories occupy about 24 GiB and 3.5 GiB respectively. They remain untouched and outside the cleanup authorization. Further cleanup there requires explicit permission, or the user can provide additional free disk space. The exact remaining build-space requirement is unknown.
 
 The candidate remains experimental and unaccepted. Fixed timing is registered but has not been authorized or run. The implementation owner retains the task while capacity is resolved; M6 remains paused. No one-second or speedup claim is justified.
+
+
+## User-approved cache cleanup and resumed validation
+
+The user approved removing disposable files from the old worktree's Cargo targets while preserving executables, source and evidence. Under the shared heavy-work lock, parent checked that no compiler/build process was active, inventoried regular non-executable intermediates under the two targets' debug/release `deps` and `incremental` directories, and removed exactly 53302 files. No directories, source files, executable files, dSYM bundles or benchmark evidence were removed. All six top-level executable hashes remained unchanged. Both worktrees' tracked files remained unchanged.
+
+The audit is preserved at `env-ownership/candidate/user-approved-old-cargo-cleanup.json`. Free space after cleanup was 26175324 KiB, about 25 GiB. Logical unlinked sizes include filesystem sharing and are not the reclaimed-space measurement.
+
+The previous worker remained parked and quarantined with a stored disk-full error even after cleanup. Steering it failed twice. Parent assigned continuation of this same task to `bks-a8d0beb6-b792-7038-a6a5-163fb72dcdf0`, now the sole compiler/shared/heavy owner. The old worker must not run concurrently. The replacement starts with a separately recorded default rewatch build recovery, then the unstarted default test targets. It must preserve the original ENOSPC attempt, all failed release/parser/external/TypeArg gates, and unchanged compiler profiles. No completed parser benchmark or full release suite is to be repeated. Timing remains unauthorized pending validation and parent eligibility review.
