@@ -293,3 +293,7 @@ After explicitly inventoried disposable-cache cleanup, the default compiler buil
 
 
 The user subsequently approved old-target cache cleanup. Parent removed 53302 inventoried non-executable Cargo intermediates, preserved executables/source/evidence and left about 25 GiB free. Validation is resuming under replacement owner `bks-a8d0beb6-b792-7038-a6a5-163fb72dcdf0` because the parked previous worker remains quarantined after the disk-full error. The optimization is still unaccepted and untimed; prior failures remain recorded.
+
+### Query-ownership default gates complete
+
+The capacity-recovery default rewatch build and every previously unstarted default compiler/rewatch test target passed once with unchanged flags. Runtime mirrors, Tella originals, old-worktree status, target links and preserved candidate binaries were reverified. No timing started: release parser/full-suite, external missing-`Belt` and standalone TypeArg blockers remain red, so parent eligibility review is still required. See [ENV_COMPONENT_OWNERSHIP.md](ENV_COMPONENT_OWNERSHIP.md#default-validation-completed-after-capacity-recovery).

@@ -19,7 +19,10 @@ def run(name,args,timeout=600):
  with (D/'gates.jsonl').open('a') as out:out.write(json.dumps(dict(name=name,**result))+'\n')
  print(name,result['exit'],result['timeout'],flush=True)
  return result['exit'] if not result['timeout'] else 124
-if phase.endswith('build'):
+if phase=='default-rewatch-recovery':
+ code=run('gate-default-rewatch-capacity-recovery',['cargo','build','--locked','--manifest-path','rewatch/Cargo.toml'])
+ if code:raise SystemExit('Capacity-recovery build failed; preserved')
+elif phase.endswith('build'):
  release=phase.startswith('release')
  for crate in ['compiler-rust','rewatch']:
   code=run(f'gate-{phase}-{crate}',['cargo','build','--locked','--manifest-path',f'{crate}/Cargo.toml']+(['--release'] if release else []))
@@ -45,4 +48,4 @@ elif phase=='parity':
   assert after==(D/'old-worktree-status-before-gates.txt').read_bytes(),'Old worktree changed; preserve and investigate'
  guarded(parity,verify,restore,D/'gate-parity-failure.json')
 
-else:raise SystemExit('release-build|default-build|release-tests|default-tests|parity')
+else:raise SystemExit('release-build|default-build|default-rewatch-recovery|release-tests|default-tests|parity')

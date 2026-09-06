@@ -293,3 +293,21 @@ Parent authorized the exact 4474-file disposable release-cache inventory, SHA256
 Default profile settings stayed unchanged. The default compiler build passed, then default rewatch failed with **ENOSPC**, including tracing-opentelemetry, serde_ignored, fs2, serde_path_to_error, oxc_parser, rayon and boa output writes. The attempt was preserved and not retried. About 131 MiB remains free; the new debug cache occupies 3.0 GiB. Default tests have not started. No optimization/debug/incremental setting was changed and no gate category is silently omitted. Parent acknowledged the blocker and requested stopping build/test launches while inspecting a separate safe capacity route. No deletion beyond the authorized 4474 files has occurred; exact remaining code-generation space is unknown.
 
 No candidate performance cohort has started or been declared eligible. Release/parser, external and TypeArg failures remain red; default validation is incomplete. The candidate is experimental, not an accepted optimization. This session retains ownership while capacity is resolved.
+
+## Default validation completed after capacity recovery
+
+At source head `02e8f4be1f4719d93da4042ecd42e62b8d3d931d`, the separately registered default rewatch capacity-recovery build passed under the global heavy-work lock. It used `cargo build --locked --manifest-path rewatch/Cargo.toml`, the unchanged default `unoptimized + debuginfo` profile, no `RUSTFLAGS`, the existing Env-ownership target, and the runner's 600-second owned-process-group bound. The original ENOSPC build record remains intact and red; it was not overwritten or reclassified.
+
+The previously unstarted default targets then each ran once with `--show-output` and passed:
+
+- compiler `--lib`: 1345 passed, 108 ignored;
+- compiler `--bins`: both binary targets completed with zero tests;
+- compiler `--test comptime_tests`: 16 passed, 23 ignored;
+- compiler `--doc`: 9 passed, 7 ignored;
+- rewatch: 150 library tests passed; main and documentation targets completed with zero tests.
+
+Every process exited zero without timeout. The helper now exposes a dedicated `default-rewatch-recovery` phase so recovery cannot rerun the already-passed compiler build or overwrite the failed rewatch attempt. Durable commands, process metadata, stdout/stderr hashes, counts and preservation checks are in `candidate/default-validation-summary.json`, SHA256 `7cf62e9efae1ff72842e0457f80b6855183be565da46e64ccae80bdf9c681375`.
+
+Post-gate verification found all 156 runtime source mirrors equal to their recorded main sources, all eighteen Tella originals equal to preserved backups at pin `66a5edabdbfdbc5dd7496e59ee0573de2a2a1ffa`, and the old worktree status equal to its pre-gate baseline. The Env target links remain scoped to `env-ownership/probe-source/rewatch/target`. Preserved candidate release executables remain `88c8a9338abefba9681cc4f4d7d39228a28b47039ee7928ac2f81f9b26b0f4fe` for bsc and `5e149f9e75826404726fca8e4701f0525fca85c4f77cd17b6110d58df3dd3549` for rewatch. About 20.8 GiB remained available after the gates. No timing process started.
+
+Default validation is now complete and green, but the candidate is not production-accepted or automatically timing-eligible. The original full release-library failure, both release parser threshold failures, external OCaml missing-`Belt` failure and standalone TypeArg JavaScript ordering mismatch remain red and unwaived. Parent must decide whether those known blockers permit the preregistered experimental timing cohort. There is still no measured candidate speedup, production claim or one-second forecast.
