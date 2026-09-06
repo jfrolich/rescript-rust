@@ -98,3 +98,14 @@ The preregistered 56-build comparison may proceed as an **experimental measureme
 One preflight discrepancy remains explicit: the ordinary release bsc hashes to `7f3e605c37473be2d1b172930a21eb95a9b7a2f007ae24cecaca7d52fbd6f1ce`, while the preserved candidate bsc hashes to `88c8a9338abefba9681cc4f4d7d39228a28b47039ee7928ac2f81f9b26b0f4fe`. Parent verified both files; they are not interchangeable without provenance. The owner must establish which build and validation used each artifact and freeze the justified executable pair. Do not overwrite either or rerun parser benchmarks to resolve this.
 
 No full timing attempt is authorized until that preflight is complete and parent explicitly acknowledges the input freeze. The fixed counts, separate historical A comparison, output digest checks and no-extra-run rules remain unchanged. No new diagnostic cohort, compiler redesign or performance forecast is requested.
+
+
+## Artifact attribution corrected before launch
+
+The provenance investigation corrected an earlier parent assumption. Saved standalone candidate fixtures invoked ordinary release bsc `7f3e`, not preserved release-build bsc `88c8`. The parity marker also records `7f3e` with rewatch `5e149`. Parent verified the eleven saved fixture-command hashes, build/test process records, binary hashes and test-only source changes. The ordinary bsc modification falls within the later release-test window. This explains the artifact history, not the byte-level difference between executables.
+
+Before qualifying `88c8` for measurement, parent authorized one new exact-artifact EnvOwnership check against the already saved native and `7f3e` outputs. It does not rerun either reference compiler, any parser benchmark or a failed suite. Both binaries remain preserved. The in-process rewatch executable remains `5e149` throughout.
+
+The initial timing script at `cff25d1a1d5080733a53a02823b2f6623787fc70` is not approved. Review requested removal of its unapproved legacy-mode fallback, stricter metadata-addition checks, pre-stage input verification, real screen process outcomes and wall times, failure-row preservation, required process metrics and exact ordered-plan validation. The owner will test these with fake commands before requesting approval again. No full timing run or input freeze has occurred.
+
+Parent verified the prepared six binary copies and fixed 56-slot order. The chat report truncated the plan digest by one character, causing a literal-match audit to fail. The unchanged durable preparation manifest contains the correct digest `23acd6664905e03aaed4dc13579551dc6ff5ba62f9140530e81a2b3b7207fe9e`; the follow-up audit passed against that manifest without changing or regenerating the plan.
