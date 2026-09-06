@@ -1291,6 +1291,32 @@ impl<'a> RawLambdaConverter<'a> {
         lambda
     }
 
+    fn for_let_with_synced_stamps(
+        &mut self,
+        loc: Location,
+        param: RawLambda,
+        pat: &Pattern,
+        body: RawLambda,
+    ) -> RawLambda {
+        // Native Translcore calls Matching.for_let while both modules allocate
+        // from the same Ident.currentstamp (compiler/ml/translcore.ml:1071;
+        // compiler/ext/ident.ml:26-58). Publish Matching's TypeContext-backed
+        // allocations back to the raw converter at the same boundary as the
+        // other Matching entry points below.
+        self.sync_matching_stamps();
+        let lambda = full_matching::for_let(
+            self.type_ctx,
+            self.arena,
+            loc,
+            param,
+            pat,
+            body,
+            &mut self.next_static_raise,
+        );
+        self.sync_matching_stamps();
+        lambda
+    }
+
     fn for_function_with_synced_stamps(
         &mut self,
         loc: Location,
@@ -10935,14 +10961,11 @@ impl<'a> RawLambdaConverter<'a> {
                         };
                         acc = RawLambda::let_(kind, id, value, acc);
                     } else if self.is_irrefutable_pattern(&binding.vb_pat) {
-                        acc = full_matching::for_let(
-                            self.type_ctx,
-                            self.arena,
+                        acc = self.for_let_with_synced_stamps(
                             self.loc(binding.vb_pat.pat_loc),
                             value,
                             &binding.vb_pat,
                             acc,
-                            &mut self.next_static_raise,
                         );
                     }
                 }
@@ -10992,14 +11015,11 @@ impl<'a> RawLambdaConverter<'a> {
                             &value,
                             binding.vb_expr.exp_loc,
                         );
-                        full_matching::for_let(
-                            self.type_ctx,
-                            self.arena,
+                        self.for_let_with_synced_stamps(
                             self.loc(binding.vb_pat.pat_loc),
                             value,
                             &binding.vb_pat,
                             acc,
-                            &mut self.next_static_raise,
                         )
                     })
                 }

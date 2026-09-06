@@ -16055,9 +16055,15 @@ let makeUpdater = initialValue => {
                 trace.raw_lambda.contains("*opt_persist*"),
                 "{case}: raw function lost the optional source parameter"
             );
+            let expected_optional = format!("persistOpt/{}", trace.raw_max_stamp + 1);
+            let colliding_match = format!("match/{}", trace.raw_max_stamp + 1);
             assert!(
-                trace.lowered_lambda.contains("persistOpt"),
-                "{case}: optional renaming or a downstream identity collision lost persistOpt"
+                trace.lowered_lambda.contains(&expected_optional),
+                "{case}: optional rename did not allocate immediately above the RawLambda maximum"
+            );
+            assert!(
+                !trace.lowered_lambda.contains(&colliding_match),
+                "{case}: fresh optional identifier reused a match stamp"
             );
             assert!(
                 output.contains("(persistOpt, newValue)"),
