@@ -82,7 +82,7 @@ Current typechecking differs by623.8ms serial; Raw/lowering differs by253.6ms. T
 
 ### Whole-duration samples and their limits
 
-All four uninstrumented control profile builds passed full output checks. Requested35s/15s windows exceed actual child lifetimes. Header launch-to-sampling timestamps miss51ms A w1,33ms D w1,33ms D w12 and35ms A w12 at startup. No end timestamp or uniform active-CPU coverage is supplied by sample; no claim of gap-free coverage follows. The sampler completed naturally after process exit.
+All four uninstrumented control profile builds passed full output checks. Requested35s/15s windows exceed actual child lifetimes. Header Date/Time minus process Launch Time is51ms A w1,33ms D w1,33ms D w12 and35ms A w12. These header offsets do not establish the exact first sampled instant or startup gap. No end timestamp or uniform active-CPU coverage is supplied by sample; no claim of gap-free coverage follows. The sampler completed naturally after process exit.
 
 | Cell | Observed child duration, s | Wrapper including symbolication, s | Worker samples | Explicit wait/yield samples |
 |---|---:|---:|---:|---:|

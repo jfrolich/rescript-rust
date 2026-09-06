@@ -25,3 +25,19 @@ The selected implementation gets a fresh bounded owner, exact-head independent r
 Keep the fixed Tella pin and all 18 original modifications. Every measured full build must compile 3248 modules and reproduce the same 5048-file JS digest. Preserve failed attempts and narrowly classify generated outputs. Do not extend samples to resolve an inconvenient interval. Keep raw evidence in organization-controlled durable storage, not public uploads.
 
 The inherited external missing-Belt and standalone JS declaration-order blockers remain explicit. Research eligibility, source equivalence, passing internal gates and production acceptance remain separate decisions.
+
+## Completed research and measurement
+
+See [COMPILER_PERFORMANCE_RESEARCH.md](COMPILER_PERFORMANCE_RESEARCH.md) for the eleven public sources, reading limits and corrected native contracts. Parent checked the actual Lambda-to-Lam stage, the different journal rules for type nodes and mutable cells, Sampson's toy benchmark conditions and Roofline's DRAM definition. Native and public-source reviewers completed their read-only tasks.
+
+Measurement owner `bks-86001e17-97c6-78b7-b1c7-6d0030a78065` completed and released ownership at clean `4ab1a7c29be9ac758d7e673dd252a2d3b81bba60`. [ARCHITECTURE_BENCHMARKS.md](ARCHITECTURE_BENCHMARKS.md) contains the full protocol, data and limitations. Fixed A/D means were 18.265164/19.200754s at project w1 and 4.600557/4.856618s at w12. D lost every pair; the paired parallel gap was 256.06ms with CI [244.54, 267.58]. This is a source-stack comparison, not an optimization result.
+
+The actual copy-function probe counted 9.591M entries, 575403 cache hits and 5.944M outer scopes. Its 416.53ms serial scope time includes instrumentation but excludes cache creation/destruction. It is not a complete instantiation cost or upper bound. Together with the modest instancing sample family, it does not support choosing a map-only rewrite as the principal speed effort. The earlier descriptor census omitted the direct CopyAction payload clones, which this probe measured separately.
+
+Parent independently verified all 178 durable evidence hashes, compact committed summaries, the 52 full-build output checks, raw per-context graph accounting, all 414 restored archive/current source files, immutable controls and ordinary D executables, four exact 12-addition input inventories, 472 runtime hashes and Tella's pin/status/18 original modified-file bytes. Paired row order and statistics were independently recomputed. Parallel sampling severely perturbed execution; header offsets are not exact first-sample coverage measurements. No new benchmark or full-gate run was performed during this verification.
+
+## Selected next hypothesis
+
+Proceed with a bounded **Env/component ownership refactor**, starting with complete lookup/construction lifetime attribution and a native-contract design checkpoint. The Env family has substantial sampled breadth across typechecking and Raw, unlike the narrow copy-function hypothesis. This supports investigating a larger boundary, not a predicted speedup. See [ENV_COMPONENT_OWNERSHIP.md](ENV_COMPONENT_OWNERSHIP.md).
+
+The implementation must remove demonstrated repeated transport/construction work through one compilation-owned component representation, not merely add another cache or rename a signature wrapper. Preserve the mandatory native first-force pass and distinct child/module-declaration/modtype thunks. If the initial accounting shows no material removable work, stop this hypothesis with the evidence rather than force a large patch or switch silently to another task. Otherwise carry it through implementation, independent review, full gates and fixed release timing. M6 remains paused; no backend redesign is selected.
