@@ -297,3 +297,6 @@ The user subsequently approved old-target cache cleanup. Parent removed 53302 in
 ### Query-ownership default gates complete
 
 The capacity-recovery default rewatch build and every previously unstarted default compiler/rewatch test target passed once with unchanged flags. Runtime mirrors, Tella originals, old-worktree status, target links and preserved candidate binaries were reverified. No timing started: release parser/full-suite, external missing-`Belt` and standalone TypeArg blockers remain red, so parent eligibility review is still required. See [ENV_COMPONENT_OWNERSHIP.md](ENV_COMPONENT_OWNERSHIP.md#default-validation-completed-after-capacity-recovery).
+
+
+Parent verified the completed default gates and permits the preregistered comparison as experimental timing only, subject to executable-provenance and frozen-input preflight. The ordinary and preserved bsc binaries have different hashes and must be accounted for before launch. Existing red gates remain unwaived; neither a timing result nor passing default tests constitutes production acceptance. No candidate timing has run yet.
