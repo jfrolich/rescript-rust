@@ -2443,7 +2443,10 @@ fn resolve_type_item_through_env<'a>(
                 ) {
                     target_decl.type_private = PrivateFlag::Public;
                 }
-                return Some((id.clone(), super::decl::TypeDeclarationRef::owned(target_decl)));
+                return Some((
+                    id.clone(),
+                    super::decl::TypeDeclarationRef::owned(target_decl),
+                ));
             }
             let raw_module_path = alias_target_for_strengthening
                 .as_ref()
@@ -2457,7 +2460,14 @@ fn resolve_type_item_through_env<'a>(
         if let Some(target_path) = alias_target_for_strengthening.as_ref() {
             return Some((
                 id.clone(),
-                super::decl::TypeDeclarationRef::owned(strengthen_type_decl_for_module_access_path(ctx, target_path, &id, &resolved_decl)),
+                super::decl::TypeDeclarationRef::owned(
+                    strengthen_type_decl_for_module_access_path(
+                        ctx,
+                        target_path,
+                        &id,
+                        &resolved_decl,
+                    ),
+                ),
             ));
         }
         return Some((id, resolved_decl));
@@ -11896,14 +11906,21 @@ mod tests {
         let parent = Path::pident(Ident::create_persistent("Ownership"));
         let path = Path::pdot(parent.clone(), "t");
         let manifest = ctx.new_generic_var(None);
-        ctx.register_raw_module_sig("Ownership", std::sync::Arc::new(vec![
-            SignatureItem::SigType(Ident::create_local("t"), manifest_decl(manifest, Some(path.clone())), RecStatus::TrecNot),
-        ]));
+        ctx.register_raw_module_sig(
+            "Ownership",
+            std::sync::Arc::new(vec![SignatureItem::SigType(
+                Ident::create_local("t"),
+                manifest_decl(manifest, Some(path.clone())),
+                RecStatus::TrecNot,
+            )]),
+        );
         let before = ctx.type_expr_count();
         let first = lookup_type_decl_for_path(&ctx, &env, &path).expect("cold lookup");
         let second = lookup_type_decl_for_path(&ctx, &env, &path).expect("warm lookup");
         match (&first, &second) {
-            (TypeDeclarationRef::Shared(a), TypeDeclarationRef::Shared(b)) => assert!(std::sync::Arc::ptr_eq(a,b)),
+            (TypeDeclarationRef::Shared(a), TypeDeclarationRef::Shared(b)) => {
+                assert!(std::sync::Arc::ptr_eq(a, b))
+            }
             _ => panic!("persistent lookup should retain its cached declaration"),
         }
         assert_eq!(first.type_manifest, Some(manifest));
@@ -11919,7 +11936,9 @@ mod tests {
         // Keep that sharing while independently owning writable metadata.
         assert_eq!(owned.type_params[0], manifest);
         ctx.set_desc(manifest, TypeDesc::Tvar(Some("shared".to_string())));
-        assert!(matches!(&*ctx.get_desc(first.type_manifest.unwrap()), TypeDesc::Tvar(Some(name)) if name == "shared"));
+        assert!(
+            matches!(&*ctx.get_desc(first.type_manifest.unwrap()), TypeDesc::Tvar(Some(name)) if name == "shared")
+        );
     }
 
     #[test]
@@ -11928,43 +11947,56 @@ mod tests {
         let env = Env::empty();
         let parent = Path::pident(Ident::create_persistent("ProbeOwnership"));
         let manifest = ctx.new_generic_var(None);
-        ctx.register_raw_module_sig("ProbeOwnership", std::sync::Arc::new(vec![
-            SignatureItem::SigType(Ident::create_local("t"), manifest_decl(manifest, None), RecStatus::TrecNot),
-        ]));
+        ctx.register_raw_module_sig(
+            "ProbeOwnership",
+            std::sync::Arc::new(vec![SignatureItem::SigType(
+                Ident::create_local("t"),
+                manifest_decl(manifest, None),
+                RecStatus::TrecNot,
+            )]),
+        );
         let mut pers = None;
-        let probe = super::super::typecore::lookup_type_in_resolved_path_for_probe(&parent,"t",&env,&mut pers,&ctx).expect("probe");
-        assert!(ctx.find_resolved_module_type(env.id(),&parent,"t").is_none());
-        let path = Path::pdot(parent.clone(),"t");
-        let first = lookup_type_decl_for_path(&ctx,&env,&path).expect("real lookup");
-        assert!(ctx.find_resolved_module_type(env.id(),&parent,"t").is_some());
-        let second = lookup_type_decl_for_path(&ctx,&env,&path).expect("lookup while previous result is live");
-        assert_eq!(first.type_manifest,second.type_manifest);
-        assert_eq!(probe.2.type_manifest,first.type_manifest);
+        let probe = super::super::typecore::lookup_type_in_resolved_path_for_probe(
+            &parent, "t", &env, &mut pers, &ctx,
+        )
+        .expect("probe");
+        assert!(
+            ctx.find_resolved_module_type(env.id(), &parent, "t")
+                .is_none()
+        );
+        let path = Path::pdot(parent.clone(), "t");
+        let first = lookup_type_decl_for_path(&ctx, &env, &path).expect("real lookup");
+        assert!(
+            ctx.find_resolved_module_type(env.id(), &parent, "t")
+                .is_some()
+        );
+        let second = lookup_type_decl_for_path(&ctx, &env, &path)
+            .expect("lookup while previous result is live");
+        assert_eq!(first.type_manifest, second.type_manifest);
+        assert_eq!(probe.2.type_manifest, first.type_manifest);
     }
-
 
     #[test]
     fn ownership_into_owned_moves_unique_storage_and_copies_shared_containers() {
         use crate::types::decl::TypeDeclarationRef;
         let ctx = TypeContext::new(std::sync::Arc::new(IdGenerator::new()));
         let manifest = ctx.new_generic_var(None);
-        let mut decl = manifest_decl(manifest,None);
+        let mut decl = manifest_decl(manifest, None);
         decl.type_params.push(manifest);
         let data = decl.type_params.as_ptr();
         let unique = TypeDeclarationRef::Shared(std::sync::Arc::new(decl)).into_owned();
-        assert_eq!(data,unique.type_params.as_ptr());
+        assert_eq!(data, unique.type_params.as_ptr());
         let shared = std::sync::Arc::new(unique);
         let mut copied = TypeDeclarationRef::Shared(shared.clone()).into_owned();
-        assert_ne!(shared.type_params.as_ptr(),copied.type_params.as_ptr());
-        assert_eq!(shared.type_params,copied.type_params);
+        assert_ne!(shared.type_params.as_ptr(), copied.type_params.as_ptr());
+        assert_eq!(shared.type_params, copied.type_params);
         copied.type_params.clear();
-        assert_eq!(shared.type_params,vec![manifest]);
+        assert_eq!(shared.type_params, vec![manifest]);
         let borrowed = TypeDeclarationRef::Borrowed(&shared).into_owned();
-        assert_ne!(shared.type_params.as_ptr(),borrowed.type_params.as_ptr());
+        assert_ne!(shared.type_params.as_ptr(), borrowed.type_params.as_ptr());
         let data = borrowed.type_params.as_ptr();
         let moved = TypeDeclarationRef::owned(borrowed).into_owned();
-        assert_eq!(data,moved.type_params.as_ptr());
+        assert_eq!(data, moved.type_params.as_ptr());
         assert!(std::mem::size_of::<TypeDeclarationRef<'_>>() <= 16);
     }
-
 }

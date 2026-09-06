@@ -6477,12 +6477,21 @@ mod resolution_view_tests {
             "Original",
             InMemoryModuleInfo::new(PathBuf::from("original.res"), true, HashMap::new(), false),
         );
-        original.view_mut().source_fallback_path_overrides
+        original
+            .view_mut()
+            .source_fallback_path_overrides
             .insert("Source".to_string(), PathBuf::from("source.res"));
-        original.view_mut().hidden_modules.insert("Hidden".to_string());
-        original.view_mut().prepared_cached_alias_rewrites.insert("Prepared".to_string());
+        original
+            .view_mut()
+            .hidden_modules
+            .insert("Hidden".to_string());
+        original
+            .view_mut()
+            .prepared_cached_alias_rewrites
+            .insert("Prepared".to_string());
         original.view_mut().alias_prefix_rewrites.insert_if_absent(
-            "Backing".to_string(), Path::pident(Ident::create_persistent("Selected")),
+            "Backing".to_string(),
+            Path::pident(Ident::create_persistent("Selected")),
         );
         let mut query = original.clone();
         assert!(Arc::ptr_eq(&original.view, &query.view));
@@ -6500,7 +6509,12 @@ mod resolution_view_tests {
         assert_eq!(original.view.source_fallback_path_overrides.len(), 1);
         assert_eq!(original.view.in_memory_module_overrides.len(), 1);
         assert!(original.view.hidden_modules.contains("Hidden"));
-        assert!(original.view.prepared_cached_alias_rewrites.contains("Prepared"));
+        assert!(
+            original
+                .view
+                .prepared_cached_alias_rewrites
+                .contains("Prepared")
+        );
         assert!(original.view.alias_prefix_rewrites.get("Backing").is_some());
         // Existing persistent cache, diagnostics and CRC identities stay shared.
         assert!(Arc::ptr_eq(&original.cache, &query.cache));
@@ -6513,27 +6527,36 @@ mod resolution_view_tests {
         let ctx = TypeContext::new(Arc::new(IdGenerator::new()));
         let mut original = PersistentEnv::new();
         original.register_in_memory_signature("M", vec![], "M.res", &ctx);
-        let ps = original.find_pers_struct("M", &ctx).expect("registered module");
+        let ps = original
+            .find_pers_struct("M", &ctx)
+            .expect("registered module");
         let mut warm = original.clone();
         warm.prepare_cached_pers_struct("M", &ps, &ctx);
         assert!(Arc::ptr_eq(&original.view, &warm.view));
         let mut cold = original.clone();
         cold.prepare_cached_pers_struct("Other", &ps, &ctx);
         assert!(!Arc::ptr_eq(&original.view, &cold.view));
-        assert!(!original.view.prepared_cached_alias_rewrites.contains("Other"));
+        assert!(
+            !original
+                .view
+                .prepared_cached_alias_rewrites
+                .contains("Other")
+        );
         assert!(cold.view.prepared_cached_alias_rewrites.contains("Other"));
     }
 
     #[test]
     fn registration_and_hiding_detach_on_their_first_write() {
         let mut original = PersistentEnv::new();
-        original.register_in_memory_module("M", InMemoryModuleInfo::new(
-            PathBuf::from("M.res"), true, HashMap::new(), false,
-        ));
+        original.register_in_memory_module(
+            "M",
+            InMemoryModuleInfo::new(PathBuf::from("M.res"), true, HashMap::new(), false),
+        );
         let mut registered = original.clone();
-        registered.register_in_memory_module("N", InMemoryModuleInfo::new(
-            PathBuf::from("N.res"), false, HashMap::new(), false,
-        ));
+        registered.register_in_memory_module(
+            "N",
+            InMemoryModuleInfo::new(PathBuf::from("N.res"), false, HashMap::new(), false),
+        );
         assert!(!Arc::ptr_eq(&original.view, &registered.view));
         assert!(original.in_memory_info("N").is_none());
         assert!(registered.in_memory_info("N").is_some());
@@ -6550,19 +6573,37 @@ mod resolution_view_tests {
     #[test]
     fn portable_override_first_write_keeps_backing_graph_shared() {
         let portable = Arc::new(PortablePersStruct {
-            ps_name: "Portable".to_string(), ps_filename: "Portable.res".to_string(),
-            ps_sig: vec![], raw_ps_sig: None, cmi_longident_names: vec![],
-            type_graph: portable_types::PortableTypeGraph {entries:vec![],variant_layouts:vec![]},
-            raw_type_graph: None, fingerprint: 0,
+            ps_name: "Portable".to_string(),
+            ps_filename: "Portable.res".to_string(),
+            ps_sig: vec![],
+            raw_ps_sig: None,
+            cmi_longident_names: vec![],
+            type_graph: portable_types::PortableTypeGraph {
+                entries: vec![],
+                variant_layouts: vec![],
+            },
+            raw_type_graph: None,
+            fingerprint: 0,
         });
         let mut original = PersistentEnv::new();
-        original.view_mut().portable_cache_overrides.insert("Portable".to_string(),portable.clone());
+        original
+            .view_mut()
+            .portable_cache_overrides
+            .insert("Portable".to_string(), portable.clone());
         let mut query = original.clone();
-        query.view_mut().portable_cache_overrides.insert("Other".to_string(),portable.clone());
-        assert!(!Arc::ptr_eq(&original.view,&query.view));
+        query
+            .view_mut()
+            .portable_cache_overrides
+            .insert("Other".to_string(), portable.clone());
+        assert!(!Arc::ptr_eq(&original.view, &query.view));
         assert!(!original.view.portable_cache_overrides.contains_key("Other"));
-        assert!(Arc::ptr_eq(&original.view.portable_cache_overrides["Portable"],&query.view.portable_cache_overrides["Portable"]));
-        assert!(Arc::ptr_eq(&portable,&query.view.portable_cache_overrides["Other"]));
+        assert!(Arc::ptr_eq(
+            &original.view.portable_cache_overrides["Portable"],
+            &query.view.portable_cache_overrides["Portable"]
+        ));
+        assert!(Arc::ptr_eq(
+            &portable,
+            &query.view.portable_cache_overrides["Other"]
+        ));
     }
-
 }

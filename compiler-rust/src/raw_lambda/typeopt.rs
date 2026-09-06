@@ -383,7 +383,11 @@ pub(crate) fn find_type_decl_pub<'a>(
     find_type_decl(ctx, env, path)
 }
 
-fn find_type_decl<'a>(ctx: &'a TypeContext, env: &'a Env, path: &Path) -> Option<crate::types::decl::TypeDeclarationRef<'a>> {
+fn find_type_decl<'a>(
+    ctx: &'a TypeContext,
+    env: &'a Env,
+    path: &Path,
+) -> Option<crate::types::decl::TypeDeclarationRef<'a>> {
     match path {
         Path::Pident(id) if !id.is_persistent() && id.stamp() != 0 => {
             crate::types::ctype::lookup_type_decl_for_path(ctx, env, path)
@@ -399,7 +403,11 @@ fn find_type_decl<'a>(ctx: &'a TypeContext, env: &'a Env, path: &Path) -> Option
                     ctx.find_type_decl_by_path(&path.name())
                         .map(|decl| crate::types::decl::TypeDeclarationRef::owned(decl.clone()))
                 })
-                .or_else(|| env.lookup_type(path).ok().map(crate::types::decl::TypeDeclarationRef::Borrowed))
+                .or_else(|| {
+                    env.lookup_type(path)
+                        .ok()
+                        .map(crate::types::decl::TypeDeclarationRef::Borrowed)
+                })
         }
         _ => crate::types::ctype::lookup_type_decl_for_path(ctx, env, path)
             .or_else(|| {
@@ -410,7 +418,11 @@ fn find_type_decl<'a>(ctx: &'a TypeContext, env: &'a Env, path: &Path) -> Option
                 ctx.find_type_decl_by_path(&path.name())
                     .map(|decl| crate::types::decl::TypeDeclarationRef::owned(decl.clone()))
             })
-            .or_else(|| env.lookup_type(path).ok().map(crate::types::decl::TypeDeclarationRef::Borrowed)),
+            .or_else(|| {
+                env.lookup_type(path)
+                    .ok()
+                    .map(crate::types::decl::TypeDeclarationRef::Borrowed)
+            }),
     }
 }
 
