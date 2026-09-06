@@ -283,3 +283,10 @@ The selected larger hypothesis is [Env/component ownership](ENV_COMPONENT_OWNERS
 ### Env measurements and candidate implementation
 
 The Env diagnostic is complete and independently verified. See [ENV_COMPONENT_OWNERSHIP.md](ENV_COMPONENT_OWNERSHIP.md) for four exact-output builds and interpretation limits, and [ARCHITECTURE_PERFORMANCE_ROUND.md](ARCHITECTURE_PERFORMANCE_ROUND.md) for the parent decision. Repeated cached-query transport is established; the whole-component-image rewrite is not justified by these measurements. The same owner is authorized to implement resolution-view and declaration-result ownership, starting with direct tests of mutable returns and isolated loader-view state. Existing construction/force semantics stay outside this candidate. No additional diagnostic cohort is requested. Exact-head review, full gates and fixed release timing precede optimization retention; one second remains unproven.
+
+
+### Query ownership validation and capacity blocker
+
+The candidate is integrated and independently source-reviewed through `9d6a4a0b72f6f69724bb49816853fe77e3089399`, including the corrected fallback-cache isolation test. Release builds and internal typed/raw/optimized/JavaScript/diagnostic parity passed. The initial release library gate remains red: 48 functional instances passed a separately registered recovery after missing native artifacts were built, while two parser thresholds remain failed and were not retried. External missing-Belt and the existing standalone TypeArg JavaScript-order mismatch remain unwaived. Fresh EnvOwnership syntax, IR, JavaScript and runtime assertions passed.
+
+After explicitly inventoried disposable-cache cleanup, the default compiler build passed but default rewatch failed with ENOSPC. Default tests have not started, and launches are stopped pending additional safe disk capacity. Protected old-worktree targets remain untouched. See [the detailed checkpoint](ARCHITECTURE_PERFORMANCE_ROUND.md#integrated-query-ownership-reviewed-validation-blocked-by-disk-capacity). No candidate performance timing has run; this remains an unaccepted experiment and the one-second target is unproven.
