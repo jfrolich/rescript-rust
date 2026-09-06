@@ -139,3 +139,106 @@ Preserved preparation failures are the initial module-visibility patch assertion
 - Declaration counters cover parameter/argument handles, record/variant/inlined containers and attribute string/pair payload. Wrapper counters cover owned map/set entries, key strings and source-override path bytes, while registry/portable/metadata references stay classified as shared. They do not provide allocator capacity/traffic, full nested representation-string bytes or a complete graph-size estimate. No logical count is a DRAM measurement.
 
 The new runner uses main's runtime explicitly, preserves all eighteen Tella originals, verifies immutable controls, and freezes resolved dependency/runtime input hashes, main tracked-source hashes and symlink targets before exactly D1/P1/D12/P12. Existing module timing is enabled equally on all four diagnostic builds. Parent must acknowledge the exact patch and stop edits before the frozen window. The only allowed input differences remain the eleven previously proven compiler-info paths and `.sourcedirs`; source/symlink equality is also required. Full production gates and performance acceptance remain unearned.
+
+## Measured boundary checkpoint
+
+The approved fixed four-build diagnostic completed at main `95323bb48e2e72dd5df53b68b56bda73c406fca4`. Exactly D w1, P w1, D w12, P w12 ran. Every build exited zero, compiled 3248 modules and reproduced 5048 JavaScript files with digest `1cacd5cfb9604df30e204f3d8a419e4e433afa96e3f81d23ea54764af86f1d49`. No full attempt failed, repeated or was excluded. These are diagnostic comparisons, not candidate acceptance timing.
+
+### Process cost and instrumentation limits
+
+| Diagnostic | Wall s | User / sys s | Peak RSS bytes | Instructions | Cycles |
+|---|---:|---:|---:|---:|---:|
+| D w1 |19.276664|17.66 / 0.86|2074394624|253048330434|80164918615|
+| P w1 |23.890263|21.68 / 1.90|2088599552|346937612932|101207309038|
+| D w12 |4.799025|40.96 / 2.18|3034710016|253693320319|141720308406|
+| P w12 |5.738344|45.02 / 3.97|2989752320|348343352870|162200909543|
+
+Single-run probe overhead is +4.613599s serial and +0.939319s parallel, with +93.889B/+94.650B instructions. Root census alone records 2.253487s serial and 9.293125s summed parallel. Its traversal, retained weak allocation headers, diagnostic keys, timers and logging are measurement work. Do not subtract this once from an inclusive compiler timer to predict a saving, fit a confidence interval to four rows, or pool these with earlier cohorts.
+
+All 3511 probe context records satisfy query-request = unique-key + repeat-key, component-request = unique-key + repeat-key, and summed exclusive scope durations = outer scope union. Both modes retain all records. Parallel scope times are sums of worker elapsed time, not wall or CPU time.
+
+### Repetition and actual owned transport
+
+Counts below are serial. Parallel agrees except four additional context-wrapper clones, four additional memory-override entries, eleven prepared-alias entries and 289 key bytes. The scheduling difference remains in raw data.
+
+- 2,228,083 type queries, 368,646 unique context/Env/path/name/API keys and 1,859,437 repeated keys. The existing resolved-type cache hits 1,871,290 times. API-separated keys explain why a cache hit is not identical to a repeated diagnostic key.
+- 1,194,232 Ctype resolver calls. The main returned-declaration clone executes 1,184,353 times. Across the selected resolver/cache-insertion sites, 1,540,973 owned declaration clones occur. These copy declaration containers, not the referenced type graph.
+- Selected clones request 12,877,206 regular record-label entries, 4,285,804 constructor entries, 1,513,505 constructor argument handles, 2,015,604 parameter handles and the same number of variance elements. Observed attributes include 97,490,064 name bytes and 841,679,308 payload string bytes. This is cumulative logical requested content, not simultaneous memory, capacity or measured traffic. Inline constructor/inlined record attributes and representation strings are not exhaustively byte-accounted.
+- 3,708,035 actual `TypeContext::persistent_env_clone` calls. Owned state totals 3,707,114 memory-override entries, 329,516 portable-override entries, 51,820 local alias entries, 11,628,889 prepared-alias set entries and 253,395,881 owned key bytes. Hidden/source override counts are zero. Portable values and module metadata stay shared; three registry fields per wrapper are recorded as shared fields, not copied registry maps.
+- 110,998 stored-thunk requests contain 92,982 cached reads, 17,740 real builds and 276 unpublished probe builds. The latter must not be memoized. There are 78,992 table assemblies over 2,675,569 signature items, but these are not proven duplicate constructions of the same native thunk.
+- All 65,217 observed selected-value queries are first-name builds. This does **not** establish repeated selected-value reconstruction inside one shared table. Constructor queries have 9,835 first-bucket builds among 38,428 requests; labels have 1,836 among 3,661. Their build time is small.
+
+The first three serial declaration-transport consumers are `TextOverlayLineBackground` 40.065ms, `TextOverlayLineBackground__Test` 32.148ms and `ViewportOverlays` 32.014ms. This concentration neither authorizes file-specific behavior nor identifies a parallel critical path.
+
+### Measured scopes
+
+| Scope | Calls w1 | Inclusive ms w1 | Exclusive ms w1 | Inclusive summed ms w12 |
+|---|---:|---:|---:|---:|
+| Outermost union |6258432|5790.468|5790.468|12311.392|
+| Ctype resolver |1194232|2654.073|781.993|5438.898|
+| Actual context-wrapper clone |3708035|321.014|321.014|1155.161|
+| Instrumentation wrapper payload scan |3708035|466.193|466.193|796.813|
+| Resolver wrapper acquisition |2370209|679.699|186.993|1541.030|
+| Resolver-local wrapper release |2370209|94.302|94.302|370.333|
+| Main returned-declaration clone |1184353|339.206|339.206|657.398|
+| Alias-strengthening query |1184353|527.933|117.992|1198.019|
+| Local component construction |18016|374.066|182.171|801.808|
+| Signature qualification |15863|101.965|44.868|214.113|
+| Signature copy |23178|139.374|139.374|304.362|
+| Final table assembly |78992|365.085|365.085|719.382|
+| Module-declaration force |10793|74.776|74.776|153.812|
+| First selected-value build |65217|120.180|120.180|275.370|
+| First constructor bucket |9835|3.657|3.657|7.930|
+| First label bucket |1836|0.614|0.614|1.060|
+
+The actual clone timer excludes the explicit wrapper payload walk. The main declaration timer excludes its subsequent payload census. Those two scopes plus the separately timed resolver-local release total 754.522ms serial. They are disjoint observed scopes, **not total ownership cost, an upper bound or a removable budget**. Other copies/releases and caller-owned lifetimes are missing; not all wrapper calls belong to the selected resolver; independent declaration copies can be required; instrumentation changes execution.
+
+Construction node deltas are 2,366,206 for local component construction, 17,650 for table assembly, 372,125 for module-declaration forcing, 345,831 for first value builds, 11,317 for constructor buckets and 2,088 for label buckets. They overlap through nested calls and must not be added. These counts do not justify removing required substitution graphs or treating current per-name allocation boundaries as native semantics.
+
+### Actual Layout__Types coverage
+
+| Scope | D w1 ms | P w1 ms | D w12 ms | P w12 ms |
+|---|---:|---:|---:|---:|
+| Typecheck |549.708|576.278|1421.286|1018.096|
+| Raw/lowering |139.064|141.584|306.246|260.167|
+| Module wall |700.182|733.995|1753.444|1326.474|
+
+P's lower parallel module time despite a slower full process demonstrates scheduling perturbation, not a gain. All measured Env scopes in this module total 39.249ms serial across typecheck/Raw, with 20.307ms inclusive in the resolver. The main declaration clone is 7.781ms, all context-wrapper clones 0.480ms, resolver-local wrapper release 0.088ms and local component construction 1.106ms. This weakens the claim that the measured boundary explains the historical 324.070ms A/D typecheck gap. It is not a bound on every operation one might classify as Env; call coverage is explicitly limited.
+
+The module makes 3239 type queries, 2489 repeat-key requests and 2506 cache hits; 4741 resolver entries include early exits before a qualified query. Its root endpoints agree in both modes:
+
+| Endpoint | Envs | Stored thunks | Forced stored thunks | Component tables | Observed signature roots | Signature items |
+|---|---:|---:|---:|---:|---:|---:|
+| Setup |90|89|0|3|3|156|
+| After typecheck |685|118|19|42|47|868|
+| Pre-JS exit |706|145|45|70|86|1267|
+| Context drop entry |705|145|45|70|86|1267|
+
+### Retention and lifecycle findings
+
+Across all serial context-drop endpoints, the selected census sees 351,426 stored thunks, 16,216 forced stored thunks, 77,172 component tables and 111,324 observed signature roots containing 3,605,674 items. These are sums over separate context endpoints, **not simultaneous heap occupancy**. Tables also come from non-stored-thunk paths. The largest signature-root set is 485 serial and 486 parallel. The three driver endpoints cover 3355 implementation contexts; all 3511 contexts have a drop endpoint, including interface contexts without those driver checkpoints.
+
+The source retains seed Env, owned raw module declaration and parent signature fields after stored-thunk force. Endpoint growth shows continued roots through Raw; it does not prove those inputs are dead. Inline `MtySignature`, functor results, persistent loader contents and external result owners remain outside this census. There is no exhaustive last-owner accounting.
+
+Context-field teardown totals 946.712ms serial and 3783.773ms summed parallel, after explicit probe-container cleanup of 5.132ms/32.958ms. It includes all production TypeContext fields, not just components. Weak-header retention and instrumented allocation history can still affect it. Local unpublished-image handle release is only 0.007ms/0.012ms, not a missing large cost.
+
+### Design decision requested
+
+**The evidence supports continuing the ownership investigation, but does not by itself justify activating the proposed complete-image rewrite.** The demonstrated target is owned transport around cached type queries. Repeated same-identity whole-component reconstruction is not established; neither the 1.54M declaration count nor 841MB logical attribute content establishes that a larger image will be faster. The 23–25% earlier sampled Env family cannot be used as a reclaimable budget.
+
+The source-aligned ownership shape to consider remains:
+
+1. A compilation-owned resolution state separates shared registry/internalized inputs from loader-view overrides, hidden modules and alias preparation. Capture view identity with Env identity. Do not globally merge mutation/alias effects merely to avoid wrapper copying. Thread this owner through actual Ctype/Env/typecore/Raw callers rather than adding another cache before the old cloned wrapper.
+2. Env bindings address owner-paired native component thunks. Child-component and module-declaration entries remain distinct. Each holds original input, prefix substitution and the Env captured at the exact item position. Whole parent construction follows `env.ml` with per-declaration `Subst` cleanup and native constructor/label sharing. Probe reads do not publish a real entry.
+3. Repeated type lookup returns a selected component/type-entry handle, not an Arc wrapping a copied declaration followed by another owned declaration clone. Read-only consumers take short projections; mutations/strengthening retain native copy and manifest-allocation boundaries. Guards end before forcing, recursion, graph mutation or owner growth. Cross-compilation handles are invalid.
+4. Direct final descriptor construction should remove an old reconstruction path only when that path is shown redundant. Export/GenType/CMJ/raw/canonical views keep their required identities and lifetime. Do not discard raw inputs until all readers and captured thunks are independent, recreate full signatures per query, or eagerly duplicate sparse large-label payloads.
+
+There are two unresolved design obligations before production approval: enumerate which owned resolver returns are inspection-only versus subsequently mutated, and define the loader-view transitions so removing wrapper clones does not merge independent override/alias state. They can be resolved from source and direct tests; no additional diagnostic cohort is proposed. Broader whole-image construction must be justified through that native API design, not clone-volume ranking. It can increase immediate allocations compared with today's Rust per-name paths and offset transport savings.
+
+Parent should accept or reject this ownership direction with these limits, then require the exact owner/handle/mutation contract before activation. A facade that still invokes old transport is not completion. The task must not drift into Layout, maps, parser or backend work. Required production tests remain captured Env/alias shadowing, recursion, primitive positions, duplicate buckets, physical repeated-lookup identity, row/abbreviation independence, per-declaration cleanup, separate module/modtype forcing, child/probe traces, sparse labels and export/debug views. Full gates, independent exact-head review and the fixed D/candidate plus historical A comparisons remain necessary. No speedup or one-second feasibility is claimed; inherited external missing-Belt and standalone exact-JS ordering blockers remain unwaived.
+
+### Verification and preservation
+
+Frozen inputs were 42310 before and 42322 after. Exactly the eleven proven compiler-info outputs and `.sourcedirs` were added. All tracked main files and resolved symlink targets were equal. New runtime mirrors were included; no old-root manifest was reused. All eighteen original Tella bytes, backups, pin and modified-file set are restored. Immutable control/probe hashes and unchanged D production source were rechecked before report edits. One supplemental restoration assertion used a mistyped handwritten pin; its failure is documented separately and corrected against the approved runner. It caused no cohort or inventory rerun.
+
+Raw stdout/stderr/process metadata, clean logs, JS manifests, scope/root records, source inventories and exact patch are durable under `env-ownership`. Compiler target caches are excluded from evidence; preserved source/patch/binaries reproduce the probe. No probe/build process remains. The archived source is explicitly instrumented and preserved; normal main compiler/rewatch source stays D. This is the measured checkpoint, not completion of an accepted production optimization. Ownership remains with this session pending parent's decision.

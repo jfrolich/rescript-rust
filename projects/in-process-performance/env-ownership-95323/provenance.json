@@ -1,0 +1,55 @@
+{
+  "root": "/Users/jake/checkouts/rescript-rust",
+  "head": "b6fbd703b9e93413f9a469ece8aa0f9054937e90",
+  "rustc": "rustc 1.93.1 (01f6ddf75 2026-02-11)\nbinary: rustc\ncommit-hash: 01f6ddf7588f42ae2d7eb0a2f21d44e8e96674cf\ncommit-date: 2026-02-11\nhost: aarch64-apple-darwin\nrelease: 1.93.1\nLLVM version: 21.1.8",
+  "cargo": "cargo 1.93.1 (083ac5135 2025-12-15)",
+  "node": "v22.22.0",
+  "runtime": "/Users/jake/checkouts/rescript-rust/packages/@rescript/runtime",
+  "features": "default",
+  "RUSTFLAGS": "unset",
+  "tella_status": "M packages/core/webapp/src/backend/Service__AutoLayoutRun.gen.ts\n M packages/core/webapp/src/backend/Service__PublicBackground.gen.ts\n M packages/core/webapp/src/backend/Service__PublicBatchEdit.gen.ts\n M packages/core/webapp/src/backend/Service__PublicCaptions.gen.ts\n M packages/core/webapp/src/backend/Service__PublicClip.gen.ts\n M packages/core/webapp/src/backend/Service__PublicLibrary.gen.ts\n M packages/core/webapp/src/backend/Service__PublicPlaylist.gen.ts\n M packages/core/webapp/src/backend/Service__PublicPlaylistGroup.gen.ts\n M packages/core/webapp/src/backend/Service__PublicSource.gen.ts\n M packages/core/webapp/src/backend/Service__PublicTag.gen.ts\n M packages/core/webapp/src/backend/Service__PublicVideo.gen.ts\n M packages/core/webapp/src/backend/Service__PublicVideo__Create.gen.ts\n M packages/core/webapp/src/backend/Service__PublicVideo__Timeline.gen.ts\n M packages/core/webapp/src/backend/Service__PublicWebhook.gen.ts\n M packages/core/webapp/src/backend/Service__StoryInvite.gen.ts\n M packages/core/webapp/src/bindings/AWS__DocumentClient.gen.ts\n M packages/core/webapp/src/bindings/AnalyticsNode.gen.ts\n M packages/core/webapp/src/ssr/Page__Stories__SSR.gen.ts",
+  "commands": {
+    "D": [
+      "/Users/jake/.opensession/artifacts/rescript-performance-20260905/env-ownership/runs/bin/rescript-D",
+      "build",
+      "--in-process",
+      "--no-timing",
+      "true",
+      "/Users/jake/dev/tella-fusion/packages/core/webapp"
+    ],
+    "P": [
+      "/Users/jake/.opensession/artifacts/rescript-performance-20260905/env-ownership/runs/bin/rescript-P",
+      "build",
+      "--in-process",
+      "--no-timing",
+      "true",
+      "/Users/jake/dev/tella-fusion/packages/core/webapp"
+    ]
+  },
+  "environment": {
+    "D1": {
+      "RESCRIPT_BSC_EXE": "/Users/jake/.opensession/artifacts/rescript-performance-20260905/env-ownership/runs/bin/bsc-D",
+      "RESCRIPT_RUNTIME": "/Users/jake/checkouts/rescript-rust/packages/@rescript/runtime",
+      "RAYON_NUM_THREADS": "1",
+      "RESCRIPT_MODULE_TIMINGS": "1"
+    },
+    "D12": {
+      "RESCRIPT_BSC_EXE": "/Users/jake/.opensession/artifacts/rescript-performance-20260905/env-ownership/runs/bin/bsc-D",
+      "RESCRIPT_RUNTIME": "/Users/jake/checkouts/rescript-rust/packages/@rescript/runtime",
+      "RAYON_NUM_THREADS": "12",
+      "RESCRIPT_MODULE_TIMINGS": "1"
+    },
+    "P1": {
+      "RESCRIPT_BSC_EXE": "/Users/jake/.opensession/artifacts/rescript-performance-20260905/env-ownership/runs/bin/bsc-P",
+      "RESCRIPT_RUNTIME": "/Users/jake/checkouts/rescript-rust/packages/@rescript/runtime",
+      "RAYON_NUM_THREADS": "1",
+      "RESCRIPT_MODULE_TIMINGS": "1"
+    },
+    "P12": {
+      "RESCRIPT_BSC_EXE": "/Users/jake/.opensession/artifacts/rescript-performance-20260905/env-ownership/runs/bin/bsc-P",
+      "RESCRIPT_RUNTIME": "/Users/jake/checkouts/rescript-rust/packages/@rescript/runtime",
+      "RAYON_NUM_THREADS": "12",
+      "RESCRIPT_MODULE_TIMINGS": "1"
+    }
+  }
+}
