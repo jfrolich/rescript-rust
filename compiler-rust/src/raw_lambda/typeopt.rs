@@ -375,42 +375,42 @@ fn type_is_builtin_path_but_option(path: &Path) -> BuiltinPathTest {
     }
 }
 
-pub(crate) fn find_type_decl_pub(
-    ctx: &TypeContext,
-    env: &Env,
+pub(crate) fn find_type_decl_pub<'a>(
+    ctx: &'a TypeContext,
+    env: &'a Env,
     path: &Path,
-) -> Option<TypeDeclaration> {
+) -> Option<crate::types::decl::TypeDeclarationRef<'a>> {
     find_type_decl(ctx, env, path)
 }
 
-fn find_type_decl(ctx: &TypeContext, env: &Env, path: &Path) -> Option<TypeDeclaration> {
+fn find_type_decl<'a>(ctx: &'a TypeContext, env: &'a Env, path: &Path) -> Option<crate::types::decl::TypeDeclarationRef<'a>> {
     match path {
         Path::Pident(id) if !id.is_persistent() && id.stamp() != 0 => {
-            crate::types::ctype::lookup_type_decl_for_path_pub(ctx, env, path)
+            crate::types::ctype::lookup_type_decl_for_path(ctx, env, path)
                 .or_else(|| {
                     ctx.find_type_decl_by_stamp(id.stamp())
-                        .map(|decl| decl.clone())
+                        .map(|decl| crate::types::decl::TypeDeclarationRef::owned(decl.clone()))
                 })
                 .or_else(|| {
                     ctx.find_resolved_pdot_type(&path.name())
-                        .map(|decl| (*decl).clone())
+                        .map(crate::types::decl::TypeDeclarationRef::Shared)
                 })
                 .or_else(|| {
                     ctx.find_type_decl_by_path(&path.name())
-                        .map(|decl| decl.clone())
+                        .map(|decl| crate::types::decl::TypeDeclarationRef::owned(decl.clone()))
                 })
-                .or_else(|| env.lookup_type(path).ok().cloned())
+                .or_else(|| env.lookup_type(path).ok().map(crate::types::decl::TypeDeclarationRef::Borrowed))
         }
-        _ => crate::types::ctype::lookup_type_decl_for_path_pub(ctx, env, path)
+        _ => crate::types::ctype::lookup_type_decl_for_path(ctx, env, path)
             .or_else(|| {
                 ctx.find_resolved_pdot_type(&path.name())
-                    .map(|decl| (*decl).clone())
+                    .map(crate::types::decl::TypeDeclarationRef::Shared)
             })
             .or_else(|| {
                 ctx.find_type_decl_by_path(&path.name())
-                    .map(|decl| decl.clone())
+                    .map(|decl| crate::types::decl::TypeDeclarationRef::owned(decl.clone()))
             })
-            .or_else(|| env.lookup_type(path).ok().cloned()),
+            .or_else(|| env.lookup_type(path).ok().map(crate::types::decl::TypeDeclarationRef::Borrowed)),
     }
 }
 

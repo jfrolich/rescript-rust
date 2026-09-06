@@ -4816,7 +4816,7 @@ fn check_type_declaration_coherence(
     }
 
     let Some(expected_decl) =
-        crate::types::ctype::lookup_type_decl_for_path_pub(ctx, env, &manifest_path)
+        crate::types::ctype::lookup_type_decl_for_path(ctx, env, &manifest_path)
     else {
         return Ok(());
     };
