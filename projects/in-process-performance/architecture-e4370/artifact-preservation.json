@@ -1,0 +1,7 @@
+{
+  "root": "/Users/jake/.opensession/artifacts/rescript-performance-20260905/architecture-round",
+  "files": 178,
+  "inventory_sha256": "1b74d765ee3d12705ffe0fc7c6c15085b76aaa572253b6eb988de5d1bc2f32ce",
+  "restoration_sha256": "d9bd08634adf02726692bc0d952f0ef6dd95a836ee5cab7c8a7b1ce426efaf25",
+  "excluded": "probe-source extracted tree and Cargo target, represented by tar, patch, source hashes and separate saved rescript-P"
+}

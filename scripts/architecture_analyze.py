@@ -38,7 +38,8 @@ for v in ('A','D'):
         prefix='js_' if line.startswith('[module-js') else ''
         modules[name].update({prefix+k:float(value) for k,value in fields.items()})
     result['phases'][key]=dict(phases=phases,modules=modules)
-    stack=[]; role='other'; exclusive=defaultdict(Counter);semantic=defaultdict(Counter); mechanism=defaultdict(Counter);total=Counter()
+    stack=[]; role='other'; exclusive=defaultdict(Counter);semantic=defaultdict(Counter); mechanism=defaultdict(Counter);total=Counter(); unions=defaultdict(Counter)
+    union_patterns={'resolve_type_item':'resolve_type_item_through_env','copy_type':'copy_type_cached','persistent_clone':'PersistentEnv$u20$as$u20$core..clone','env_lazy':'env_lazy','internalize':'internalize_signature','raw':'raw_lambda','type_context_snapshot':'snapshot_type_state'}
     def finish():
       depth,count,name,children=stack.pop()
       residual=count-children
@@ -50,6 +51,9 @@ for v in ('A','D'):
         wait=any(p in leaf for p in ('__ulock_wait','__psynch_cvwait','__psynch_mutexwait','semaphore_wait','__semwait_signal','kevent','mach_msg2_trap','__workq_kernreturn','swtch_pri','thread_switch'))
         mech=('blocking' if wait else 'allocator' if leaf.startswith(('mi_','_mi_')) else 'memory_copy' if any(p in leaf for p in ('memmove','memcpy','memset','bzero')) else 'refcount' if 'Arc' in leaf and any(p in leaf for p in ('clone','drop','release')) else 'drop' if 'drop' in leaf else 'other_running_or_unknown')
         mechanism[role][mech]+=residual
+        if not wait:
+          for union,pattern in union_patterns.items():
+            if pattern in chain:unions[role][union]+=residual
         # Assign once using nearest named semantic ancestor. Mechanisms remain a separate partition.
         family='other'
         if wait: family='blocking'
@@ -79,7 +83,7 @@ for v in ('A','D'):
       stack.append([depth,count,name,0])
     while stack:finish()
     assert all(sum(exclusive[k].values())==n==sum(semantic[k].values())==sum(mechanism[k].values()) for k,n in total.items())
-    result['samples'][key]=dict(total=total,semantic=semantic,mechanism=mechanism,exclusive_top={k:c.most_common(60) for k,c in exclusive.items()})
+    result['samples'][key]=dict(total=total,semantic=semantic,mechanism=mechanism,nonadditive_running_unions=unions,exclusive_top={k:c.most_common(60) for k,c in exclusive.items()})
 (D/'analysis.json').write_text(json.dumps(result,indent=2)+'\n')
 print(json.dumps({k:v for k,v in result.items() if k not in ('phases','samples','screens')},indent=2))
 for key,r in result['phases'].items():print(key,r['phases'])
