@@ -46,6 +46,7 @@ class CandidateMeasureTests(unittest.TestCase):
             executable.write_text("#!/bin/sh\nif [ \"$1\" = clean ]; then exit 0; fi\necho fake failure >&2\nexit 7\n")
             executable.chmod(0o755)
             candidate.m.D = root
+            (root / "inventory-before.json").write_text(json.dumps({"inputs": {}, "source": {}, "symlinks": {}}))
             candidate.m.command = lambda variant: [str(executable), "build"]
             candidate.m.env = lambda variant, workers: os.environ.copy()
             try:
@@ -68,6 +69,7 @@ class CandidateMeasureTests(unittest.TestCase):
             executable.write_text("#!/bin/sh\nif [ \"$1\" = clean ]; then exit 0; fi\necho 'Compiled 3248 modules'\nexit 0\n")
             executable.chmod(0o755)
             candidate.m.D = root
+            (root / "inventory-before.json").write_text(json.dumps({"inputs": {}, "source": {}, "symlinks": {}}))
             candidate.m.command = lambda variant: [str(executable), "build"]
             candidate.m.env = lambda variant, workers: os.environ.copy()
             candidate.m.outputs = lambda: (_ for _ in ()).throw(OSError("hash failed"))
@@ -79,12 +81,53 @@ class CandidateMeasureTests(unittest.TestCase):
                 self.assertIn("hash failed", row["attempt_error"])
                 driver = {"exit": 9, "timeout": False, "error": None}
                 with self.assertRaises(RuntimeError):
-                    candidate.finalize_screen("X", 1, 1, driver)
+                    candidate.finalize_screen("D", 1, 1, driver)
                 screen = json.loads((root / "screen-runs.jsonl").read_text().splitlines()[0])
                 self.assertEqual(screen["driver"]["exit"], 9)
                 self.assertIn("attempt_error", screen)
             finally:
                 candidate.m.D, candidate.m.command, candidate.m.env, candidate.m.outputs = old_dir, old_command, old_env, old_outputs
+
+    def test_outer_timeout_preserves_partial_screen_output_without_orphan(self):
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            fake = root / "hang.sh"
+            pid_path = root / "child.pid"
+            fake.write_text(f"#!/bin/sh\necho $$ > {pid_path}\necho partial-before-hang\nsleep 30\n")
+            fake.chmod(0o755)
+            prefix = root / "screen-child"
+            code = (
+                "import os,sys;sys.path.insert(0," + repr(str(SCRIPT.parent)) + ");"
+                "import env_ownership_candidate_measure as c;"
+                "c.run_screen_process([" + repr(str(fake)) + "],os.environ.copy()," + repr(str(prefix)) + ")"
+            )
+            driver, _ = candidate.bounded(
+                ["python3", "-c", code], os.environ.copy(), root / "outer-driver", 0.3,
+            )
+            self.assertTrue(driver["timeout"])
+            self.assertIn(b"partial-before-hang", Path(str(prefix) + ".stdout").read_bytes())
+            self.assertTrue(Path(str(prefix) + ".started.json").is_file())
+            self.assertFalse(Path(str(prefix) + ".process.json").exists())
+            child_pid = pid_path.read_text().strip()
+            live = subprocess.run(["ps", "-p", child_pid, "-o", "pid="], capture_output=True, timeout=5)
+            self.assertEqual(live.stdout.strip(), b"")
+
+    def test_screen_slot_rejects_invalid_or_existing_slot(self):
+        old_dir = candidate.m.D
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            candidate.m.D = root
+            try:
+                with self.assertRaises(RuntimeError):
+                    candidate.validate_screen_slot("A", 1, 1)
+                (root / "inventory-before.json").write_text("{}")
+                self.assertEqual(candidate.validate_screen_slot("D", 12, 2), "screen-D-w12-2")
+                prefix = root / "slot"
+                Path(str(prefix) + ".started.json").write_text("{}")
+                with self.assertRaises(RuntimeError):
+                    candidate.run_screen_process(["/usr/bin/true"], os.environ.copy(), prefix)
+            finally:
+                candidate.m.D = old_dir
 
     def test_ordered_plan_rejects_reordering(self):
         plan = {"screen_order": [["D", 1, 1], ["C", 1, 1]], "paired_order": [[1, 1, 1, "D"]], "historical_order": [[1, 1, "A", 12]]}

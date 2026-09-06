@@ -148,36 +148,110 @@ def verify_ordered_rows(plan,screens,rows):
     if actual_screen!=expected_screen or actual_runs!=expected_runs:raise RuntimeError("Recorded cohort order differs from fixed plan")
 
 
-def finalize_screen(variant,workers,repetition,driver):
-    name=f"screen-{variant}-w{workers}-{repetition}";row={"stage":"screen","variant":variant,"workers":workers,"repetition":repetition,"driver":driver}
-    try:
-        process_path=m.D/f"logs/{name}-build.process.json"
-        if process_path.is_file():row.update(json.loads(process_path.read_text()))
-        log_path=m.D/f"logs/{name}-build.log";text=log_path.read_text(errors="replace") if log_path.is_file() else ""
-        row.update(parse_required_metrics(text));count,digest,manifest=m.outputs();(m.D/f"{name}-js.json").write_text(json.dumps(manifest,sort_keys=True))
-        row.update(js_count=count,js_sha256=digest,compiled_3248="Compiled 3248 modules" in text)
-        if row.get("exit")!=0 or row.get("timeout") or row.get("error"):raise RuntimeError(f"Screen build failed; preserve {name}")
-        if count!=5048 or digest!=EXPECTED_OUTPUT or not row["compiled_3248"]:raise RuntimeError(f"Screen output mismatch; preserve {name}")
-    except BaseException as exc:row["attempt_error"]=repr(exc);raise
-    finally:
-        with (m.D/"screen-runs.jsonl").open("a") as output:output.write(json.dumps(row)+"\n")
-        print(json.dumps(row),flush=True)
+def append_screen_row(row):
+    with (m.D / "screen-runs.jsonl").open("a") as output:
+        output.write(json.dumps(row) + "\n")
+    print(json.dumps(row), flush=True)
 
 
-def screen_child(variant,workers,repetition):
+def validate_screen_slot(variant, workers, repetition):
+    if variant not in ("D", "C") or workers not in (1, 12) or repetition not in (1, 2):
+        raise RuntimeError("Screen child is outside the fixed plan")
+    if not (m.D / "inventory-before.json").is_file():
+        raise RuntimeError("Frozen baseline is required before a screen child")
+    return f"screen-{variant}-w{workers}-{repetition}"
+
+
+def run_screen_process(process_command, env, prefix):
     import time
-    name=f"screen-{variant}-w{workers}-{repetition}-build";env=m.env(variant,workers);prefix=m.D/f"logs/{name}"
-    start=time.perf_counter_ns();load=os.getloadavg();process=None;stdout=stderr=b"";error=None
+    prefix = Path(prefix)
+    started_path = Path(str(prefix) + ".started.json")
+    process_path = Path(str(prefix) + ".process.json")
+    stdout_path = Path(str(prefix) + ".stdout")
+    stderr_path = Path(str(prefix) + ".stderr")
+    for path in (started_path, process_path, stdout_path, stderr_path):
+        if path.exists():
+            raise RuntimeError(f"Screen slot already started: {path}")
+    started_path.write_text(json.dumps({
+        "command": process_command,
+        "load_before": os.getloadavg(),
+        "perf_counter_ns_before": time.perf_counter_ns(),
+    }, indent=2))
+    start = time.perf_counter_ns()
+    process = None
+    error = None
+    # Open durable streams before launch. This process remains in the outer
+    # bounded Hyperfine group, so a driver timeout kills every descendant while
+    # preserving output already written to these files.
+    with stdout_path.open("wb") as stdout, stderr_path.open("wb") as stderr:
+        try:
+            process = subprocess.Popen(process_command, env=env, stdout=stdout, stderr=stderr)
+            process.wait()
+        except BaseException as exc:
+            error = exc
+    row = {
+        "command": process_command,
+        "wall_ns": time.perf_counter_ns() - start,
+        "exit": process.returncode if process else None,
+        "timeout": False,
+        "error": repr(error) if error else None,
+    }
+    process_path.write_text(json.dumps(row, indent=2))
+    if row["exit"] != 0 or row["error"]:
+        raise RuntimeError("Screen child failed")
+    return row
+
+
+def screen_child(variant, workers, repetition):
+    name = validate_screen_slot(variant, workers, repetition)
+    run_screen_process(
+        ["/usr/bin/time", "-lp"] + m.command(variant),
+        m.env(variant, workers),
+        m.D / f"logs/{name}-build",
+    )
+
+
+def finalize_screen(variant, workers, repetition, driver):
+    name = validate_screen_slot(variant, workers, repetition)
+    row = {
+        "stage": "screen", "variant": variant, "workers": workers,
+        "repetition": repetition, "driver": driver,
+    }
     try:
-        # This child stays in Hyperfine's process group. The outer bounded driver
-        # owns the sole 600-second timeout and kills that whole group, avoiding
-        # a nested setsid process that could survive its wrapper.
-        process=subprocess.Popen(["/usr/bin/time","-lp"]+m.command(variant),env=env,stdout=subprocess.PIPE,stderr=subprocess.PIPE)
-        stdout,stderr=process.communicate()
-    except BaseException as exc:error=exc
-    row={"command":["/usr/bin/time","-lp"]+m.command(variant),"wall_ns":time.perf_counter_ns()-start,"load_before":load,"exit":process.returncode if process else None,"timeout":False,"error":repr(error) if error else None}
-    Path(str(prefix)+".stdout").write_bytes(stdout);Path(str(prefix)+".stderr").write_bytes(stderr);Path(str(prefix)+".log").write_bytes(stdout+stderr);Path(str(prefix)+".process.json").write_text(json.dumps(row,indent=2))
-    if row["exit"]!=0 or row["timeout"] or row["error"]:raise SystemExit(row["exit"] or 124)
+        if driver.get("exit") != 0 or driver.get("timeout") or driver.get("error"):
+            raise RuntimeError(f"Hyperfine driver failed; preserve {name}")
+        process_path = m.D / f"logs/{name}-build.process.json"
+        if not process_path.is_file():
+            raise RuntimeError(f"Screen child record missing; preserve partial streams for {name}")
+        row.update(json.loads(process_path.read_text()))
+        stdout_path = m.D / f"logs/{name}-build.stdout"
+        stderr_path = m.D / f"logs/{name}-build.stderr"
+        text = stdout_path.read_text(errors="replace") + stderr_path.read_text(errors="replace")
+        row.update(parse_required_metrics(text))
+        if row.get("exit") != 0 or row.get("timeout") or row.get("error"):
+            raise RuntimeError(f"Screen build failed; preserve {name}")
+        count, digest, manifest = m.outputs()
+        (m.D / f"{name}-js.json").write_text(json.dumps(manifest, sort_keys=True))
+        row.update(
+            js_count=count, js_sha256=digest,
+            compiled_3248="Compiled 3248 modules" in text,
+        )
+        if count != 5048 or digest != EXPECTED_OUTPUT or not row["compiled_3248"]:
+            raise RuntimeError(f"Screen output mismatch; preserve {name}")
+    except BaseException as exc:
+        row["attempt_error"] = repr(exc)
+        raise
+    finally:
+        append_screen_row(row)
+
+
+def record_screen_setup_failure(variant, workers, repetition, phase, details, exc):
+    row = {
+        "stage": "screen", "variant": variant, "workers": workers,
+        "repetition": repetition, "phase": phase, phase: details,
+        "attempt_error": repr(exc),
+    }
+    append_screen_row(row)
 
 
 def restore_tella():
@@ -311,21 +385,44 @@ def main():
         before=capture_inventory();assert compare_inventory(before,before,False)["valid"]
         (m.D/"inventory-before.json").write_text(json.dumps(before,sort_keys=True))
     elif mode == "screen-child":
-        require_approval();screen_child(sys.argv[2],int(sys.argv[3]),int(sys.argv[4]))
+        require_approval()
+        verify_binaries()
+        screen_child(sys.argv[2], int(sys.argv[3]), int(sys.argv[4]))
     elif mode == "screen":
         require_approval()
         verify_binaries()
         assert (m.D/"inventory-before.json").is_file() and not (m.D/"screen-runs.jsonl").exists();verify_inventory_state("pre-screen",False)
         def body():
-            for workers in [1,12]:
-                for variant in ["D","C"]:
-                    for repetition in [1,2]:
-                        name=f"screen-{variant}-w{workers}-{repetition}";clean,_=bounded([str(m.D/f"bin/rescript-{variant}"),"clean",str(m.WEB)],m.env(variant,workers),m.D/f"logs/{name}-clean",120)
-                        if clean["exit"]!=0 or clean["timeout"] or clean["error"]:
-                            with (m.D/"screen-runs.jsonl").open("a") as output:output.write(json.dumps({"stage":"screen","variant":variant,"workers":workers,"repetition":repetition,"phase":"clean","clean":clean,"attempt_error":"Clean failed"})+"\n")
-                            raise RuntimeError(f"Clean failed; preserve {name}")
-                        hyperfine=["hyperfine","--runs","1","--warmup","0","--export-json",str(m.D/f"{name}-hyperfine.json"),f"python3 {Path(__file__).resolve()} screen-child {variant} {workers} {repetition}"]
-                        driver,_=bounded(hyperfine,m.env(variant,workers),m.D/f"logs/{name}-hyperfine",600);finalize_screen(variant,workers,repetition,driver)
+            for workers in [1, 12]:
+                for variant in ["D", "C"]:
+                    for repetition in [1, 2]:
+                        name = validate_screen_slot(variant, workers, repetition)
+                        clean = None
+                        try:
+                            clean, _ = bounded(
+                                [str(m.D / f"bin/rescript-{variant}"), "clean", str(m.WEB)],
+                                m.env(variant, workers), m.D / f"logs/{name}-clean", 120,
+                            )
+                            if clean["exit"] != 0 or clean["timeout"] or clean["error"]:
+                                raise RuntimeError(f"Clean failed; preserve {name}")
+                        except BaseException as exc:
+                            record_screen_setup_failure(variant, workers, repetition, "clean", clean, exc)
+                            raise
+                        hyperfine = [
+                            "hyperfine", "--runs", "1", "--warmup", "0",
+                            "--export-json", str(m.D / f"{name}-hyperfine.json"),
+                            f"python3 {Path(__file__).resolve()} screen-child {variant} {workers} {repetition}",
+                        ]
+                        driver = None
+                        try:
+                            driver, _ = bounded(
+                                hyperfine, m.env(variant, workers),
+                                m.D / f"logs/{name}-hyperfine", 600,
+                            )
+                        except BaseException as exc:
+                            record_screen_setup_failure(variant, workers, repetition, "driver", driver, exc)
+                            raise
+                        finalize_screen(variant, workers, repetition, driver)
         guarded(body,lambda:verify_inventory_state("after-screen",True),restore_tella,m.D/"screen-failure.json")
     elif mode == "paired":
         require_approval()
@@ -355,7 +452,10 @@ def main():
         rows = [json.loads(line) for line in (m.D / "runs.jsonl").read_text().splitlines()]
         assert len(screens)==8 and len(rows)==48;verify_ordered_rows(json.loads((m.D/"plan.json").read_text()),screens,rows)
         assert all(row["js_count"]==5048 and row["js_sha256"]==EXPECTED_OUTPUT and row["compiled_3248"] for row in screens+rows)
-        required={"real","user","sys","maximum resident set size","instructions retired","cycles elapsed"};assert all(required<=row.keys() for row in screens+rows)
+        required = {"real", "user", "sys", "maximum resident set size", "instructions retired", "cycles elapsed"}
+        assert all(required <= row.keys() for row in screens + rows)
+        assert all(not row.get("attempt_error") and row.get("exit") == 0 and not row.get("timeout") and not row.get("error") for row in screens + rows)
+        assert all(screen.get("driver", {}).get("exit") == 0 and not screen["driver"].get("timeout") and not screen["driver"].get("error") for screen in screens)
         verify_inventory_state("final",True)
     else:
         raise SystemExit("Unknown mode; refusing to run outside the fixed 56-build plan")
