@@ -6655,17 +6655,22 @@ mod resolution_view_tests {
         );
         assert!(!Arc::ptr_eq(&first.cache, &fallback1.cache));
         assert!(!Arc::ptr_eq(&fallback1.cache, &fallback2.cache));
-        assert_eq!(
-            fallback1.source_fallback_depth,
-            first.source_fallback_depth + 1
-        );
-        assert!(fallback1.cache_contains_key("Cycle"));
-        assert!(
-            !fallback1
-                .view
-                .prepared_cached_alias_rewrites
-                .contains("AlreadyPrepared")
-        );
+        for fallback in [&fallback1, &fallback2] {
+            assert_eq!(
+                fallback.source_fallback_depth,
+                original.source_fallback_depth + 1
+            );
+            {
+                let cache = fallback.cache.lock().unwrap();
+                assert!(matches!(cache.get("Cycle"), Some(None)));
+            }
+            assert!(
+                !fallback
+                    .view
+                    .prepared_cached_alias_rewrites
+                    .contains("AlreadyPrepared")
+            );
+        }
         assert!(
             original
                 .view
@@ -6682,6 +6687,11 @@ mod resolution_view_tests {
         // Neither direct fallback populated the parent cache with type nodes.
         // The merge uses a third context only while that cache is still empty
         // apart from its cycle placeholder; no cross-context handles are read.
+        {
+            let cache = original.cache.lock().unwrap();
+            assert_eq!(cache.len(), 1);
+            assert!(matches!(cache.get("Cycle"), Some(None)));
+        }
         let ctx3 = TypeContext::new(Arc::new(IdGenerator::new()));
         let mut merged = original.clone();
         let loaded = merged
