@@ -3,6 +3,7 @@
 import os
 os.environ['MEASUREMENT_DIR']='/Users/jake/.opensession/artifacts/rescript-performance-20260905/env-ownership/runs'
 import measurement_rebaseline as m
+import env_ownership_runner as safe
 import json,shutil,subprocess,sys
 from pathlib import Path
 R=Path('/Users/jake/checkouts/rescript-rust');D=m.D.parent;assert Path.cwd()==R and m.ROOT==R
@@ -50,15 +51,19 @@ elif mode=='run':
  assert (D/'parent-probe-approval.txt').exists(),'Exact probe approval required'
  assert not (m.D/'runs.jsonl').exists() and not (m.D/'inputs-before.json').exists(),'Never replace full attempts'
  for name,h in json.loads((m.D/'binary-hashes.json').read_text()).items():assert m.sha(m.D/'bin'/name)==h
- m.clean('D',1)
- before=m.inputs();sources=source_inventory();symlinks=links()
- for name,data in [('inputs-before',before),('source-before',sources),('symlinks-before',symlinks)]:
-  (m.D/f'{name}.json').write_text(json.dumps(data,sort_keys=True))
- try:
+ state = {}
+ def body():
+  safe.clean(m,'D',1,'initial-clean')
+  before=m.inputs();sources=source_inventory();symlinks=links()
+  state.update(before=before,sources=sources,symlinks=symlinks)
+  for name,data in [('inputs-before',before),('source-before',sources),('symlinks-before',symlinks)]:
+   (m.D/f'{name}.json').write_text(json.dumps(data,sort_keys=True))
   for pos,(v,w) in enumerate([('D',1),('P',1),('D',12),('P',12)],1):
-   row=m.run('env',1,pos,v,w)
-   assert row['js_sha256']=='1cacd5cfb9604df30e204f3d8a419e4e433afa96e3f81d23ea54764af86f1d49'
- finally:
+   safe.attempt(m,pos,v,w)
+ def verify():
+  if not state:
+   raise RuntimeError('No complete pre-inventory; original setup failure retained')
+  before=state['before'];sources=state['sources'];symlinks=state['symlinks']
   after=m.inputs();after_sources=source_inventory();after_links=links()
   for name,data in [('inputs-after',after),('source-after',after_sources),('symlinks-after',after_links)]:
    (m.D/f'{name}.json').write_text(json.dumps(data,sort_keys=True))
@@ -67,8 +72,8 @@ elif mode=='run':
   unexpected=[p for p in changed if p not in allowed]
   report={'before_count':len(before),'after_count':len(after),'changed':changed,'unexpected':unexpected,'source_equal':sources==after_sources,'symlinks_equal':symlinks==after_links}
   (m.D/'verification.json').write_text(json.dumps(report,indent=2));print(report)
-  for path,digest in json.loads((m.D/'backups.json').read_text()).items():
-   backup=m.D/'backups'/path;assert m.sha(backup)==digest
-   if m.sha(m.T/path)!=digest:shutil.copy2(backup,m.T/path)
- assert not unexpected and sources==after_sources and symlinks==after_links
+  assert not unexpected and sources==after_sources and symlinks==after_links
+ def restore():
+  safe.restore_backups(m.T,m.D/'backups',json.loads((m.D/'backups.json').read_text()),m.sha)
+ safe.guarded(body,verify,restore,m.D/'failure.json')
 else:raise SystemExit('prepare|run')
