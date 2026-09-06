@@ -303,3 +303,14 @@ Parent verified the completed default gates and permits the preregistered compar
 
 
 The fixed ownership experiment stopped at build 39 of 56 after a candidate serial build emitted different bytes for `Hooks__Settings.bs.js`. The preceding 38 builds matched; no replacement or remaining historical builds were launched. Parent verified the raw records and unchanged inputs. There is no completed-cohort performance result. Output variation must be explained before further performance claims; one second remains unproven.
+
+
+## Identifier collision fixed and internally validated
+
+Commit `a59f271c7437b9b6f3568cab44b56851f079a07a` synchronizes both let-pattern matching calls through the existing allocation boundary. Parent reviewed the exact source against native `Translcore`/`Ident` and checked the saved post-fix executable and traces. Both reduced cases now report raw maximum 1019 and allocate `persistOpt/1020`, rather than reusing `match/1018`. Every focused regression assertion passed. This is a verified fix for the reproduced freshness defect, not proof of the precise remapping in the original Hooks build.
+
+New release compiler and rewatch builds passed. Parent verified the new artifact and log hashes for typedtree, raw Lambda and optimized Lambda parity at 610/610 each, focused JavaScript at 344/344, JavaScript snapshots at 610/610 and diagnostics at 1431/1431. The new release executables were copied into `env-ownership/postfix-validation/preserved-release` with a separate verified manifest. All six immutable timing controls and all eighteen Tella original files and backups still match their recorded hashes.
+
+A preservation failure remains documented. The ordinary `7f3e…` compiler used for earlier correctness checks was overwritten by the release rebuild before the parent's explicit copy instruction arrived. Its prior hash and logs survive, but no exact executable copy was recovered. Preservation of the prior release parser is also unverified. Neither a rebuild nor the separately preserved `88c8…` executable can repair that historical artifact gap.
+
+The 39/56 timing cohort stays closed. Earlier red gates remain unwaived. No new Tella build or timing was run, no candidate speedup is established, and the one-second target remains unmet. The focused correctness task is complete; another measurement round requires separate authorization and a new protocol.
