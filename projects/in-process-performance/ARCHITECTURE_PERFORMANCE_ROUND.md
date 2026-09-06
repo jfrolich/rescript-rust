@@ -109,3 +109,16 @@ Before qualifying `88c8` for measurement, parent authorized one new exact-artifa
 The initial timing script at `cff25d1a1d5080733a53a02823b2f6623787fc70` is not approved. Review requested removal of its unapproved legacy-mode fallback, stricter metadata-addition checks, pre-stage input verification, real screen process outcomes and wall times, failure-row preservation, required process metrics and exact ordered-plan validation. The owner will test these with fake commands before requesting approval again. No full timing run or input freeze has occurred.
 
 Parent verified the prepared six binary copies and fixed 56-slot order. The chat report truncated the plan digest by one character, causing a literal-match audit to fail. The unchanged durable preparation manifest contains the correct digest `23acd6664905e03aaed4dc13579551dc6ff5ba62f9140530e81a2b3b7207fe9e`; the follow-up audit passed against that manifest without changing or regenerating the plan.
+
+
+## Fixed cohort stopped on output mismatch
+
+The runner and exact `88c8` executable completed preflight. Parent verified all 29 qualification-manifest entries, the four successful compiler invocations and native-matching JS/typed/raw/optimized output, plus the actual Node runtime assertions. Parent then independently recomputed the frozen 42451 input hashes, 8716 tracked-source hashes and 550 resolved links before authorizing the fixed experiment at `ebf59e7e09664de295ca85b56f28e64bb84e26e7`.
+
+The cohort stopped at build 39 of 56. Eight screens and the first thirty paired builds matched the required output. The next candidate serial build, pair 8 position 1, exited zero and compiled 3248 modules into 5048 JS files, but its output digest differed. Exactly one file changed, `src/frontend/Hooks__Settings.bs.js`. Its required hash is `7639a4ba61b1ba5e922ac1b7d5530ad48652be9629a32ab2e6f7026b4d5cbb95`; the failing hash is `3fa8b761f0fdd0004dff6b6998606e53d3deb35fdcd27a38c9a909ead47021a9`. The remaining serial control and all sixteen historical builds were not launched. There are no replacement runs or exclusions.
+
+Parent audited all 39 build and clean process records, eight single-run Hyperfine records, raw metrics, exact plan prefix and all 39 output manifests. Live outputs reproduce the saved failure digest without recompilation. A fresh post-failure audit matched the saved 42463-input inventory, with only the twelve permitted metadata additions; tracked source, resolved links, six binaries, Tella's eighteen originals/pin/status and the old worktree remained unchanged.
+
+This experiment is closed and incomplete. It supplies no completed-cohort speedup or production-acceptance result. Existing release/parser, external-reference and TypeArg failures remain unwaived. The sole owner is preserving the actual failing output and investigating the source of this variation. Whether the ownership candidate caused or exposed it is not yet established. No compiler replay or source fix is authorized at this checkpoint.
+
+Evidence is in `env-ownership/candidate-timing/cohort-stop-summary.json` and `parent-cohort-closure.json`. The source freeze was lifted for documentation only after the live preservation audit; compiler, scripts and Tella inputs remain untouched.

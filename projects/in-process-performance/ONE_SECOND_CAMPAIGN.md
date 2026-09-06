@@ -300,3 +300,6 @@ The capacity-recovery default rewatch build and every previously unstarted defau
 
 
 Parent verified the completed default gates and permits the preregistered comparison as experimental timing only, subject to executable-provenance and frozen-input preflight. The ordinary and preserved bsc binaries have different hashes and must be accounted for before launch. Existing red gates remain unwaived; neither a timing result nor passing default tests constitutes production acceptance. No candidate timing has run yet.
+
+
+The fixed ownership experiment stopped at build 39 of 56 after a candidate serial build emitted different bytes for `Hooks__Settings.bs.js`. The preceding 38 builds matched; no replacement or remaining historical builds were launched. Parent verified the raw records and unchanged inputs. There is no completed-cohort performance result. Output variation must be explained before further performance claims; one second remains unproven.
