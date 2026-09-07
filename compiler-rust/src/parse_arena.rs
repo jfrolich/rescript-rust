@@ -39,27 +39,6 @@ use crate::parser::ast::{
 };
 use crate::parser::longident::Longident;
 
-/// Key for position deduplication.
-/// Two positions with the same (file_name, line, bol, cnum) are the same position.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-struct PosKey {
-    file_name: StrIdx,
-    line: i32,
-    bol: i32,
-    cnum: i32,
-}
-
-impl PosKey {
-    fn from_position(pos: &Position) -> Self {
-        Self {
-            file_name: pos.file_name,
-            line: pos.line,
-            bol: pos.bol,
-            cnum: pos.cnum,
-        }
-    }
-}
-
 // Re-export StrIdx for convenience
 pub use crate::intern::StrIdx;
 
@@ -601,8 +580,6 @@ pub struct ParseArena {
     static_pat_from_variant_spread_attr_str: StrIdx,
     /// Pre-allocated static longidents used by `%external` rewrite helpers.
     static_ppx_lidents: StaticPpxLidents,
-    /// Position deduplication table - maps position content to its index.
-    position_dedup: HashMap<PosKey, PosIdx>,
     /// Simple Lident deduplication table - maps StrIdx to its LidentIdx.
     /// This enables sharing of common identifiers like "()", "::", etc.
     lident_dedup: HashMap<StrIdx, LidentIdx>,
@@ -967,7 +944,6 @@ impl Default for ParseArena {
             static_constructor_from_spread_attr_str,
             static_pat_from_variant_spread_attr_str,
             static_ppx_lidents,
-            position_dedup: HashMap::new(),
             lident_dedup,
             longident_shareable_strs: HashSet::new(),
             ldot_prefix_idx_table,
@@ -1125,32 +1101,7 @@ impl ParseArena {
     /// PosIdx through code paths (reference sharing), not by value deduplication.
     pub fn push_position(&mut self, pos: Position) -> PosIdx {
         self.record_position_file_name(pos.file_name);
-        let key = PosKey::from_position(&pos);
-        let idx = self.positions.push(pos);
-        // Register in dedup table only if not already there (for lookup purposes)
-        self.position_dedup.entry(key).or_insert(idx);
-        idx
-    }
-
-    /// Get the index of a position if it exists in the dedup table.
-    /// Returns None if this position content hasn't been seen before.
-    #[allow(dead_code)]
-    pub fn get_position_idx(&self, pos: &Position) -> Option<PosIdx> {
-        let key = PosKey::from_position(pos);
-        self.position_dedup.get(&key).copied()
-    }
-
-    /// Push a position with deduplication - reuses an existing index if the position
-    /// content matches.
-    pub fn push_position_dedup(&mut self, pos: Position) -> PosIdx {
-        self.record_position_file_name(pos.file_name);
-        let key = PosKey::from_position(&pos);
-        if let Some(&idx) = self.position_dedup.get(&key) {
-            return idx;
-        }
-        let idx = self.positions.push(pos);
-        self.position_dedup.insert(key, idx);
-        idx
+        self.positions.push(pos)
     }
 
     /// Push a position from components.
@@ -3079,6 +3030,34 @@ mod tests {
         assert_ne!(idx2, idx3);
 
         assert_eq!(arena.position_count(), base_count + 3);
+    }
+
+    #[test]
+    fn test_push_position_preserves_fresh_identity_and_shared_handles() {
+        let mut arena = ParseArena::new();
+        let file_name = arena.intern("generated.res");
+        let position = Position::new(file_name, 2, 10, 15);
+        let base_count = arena.position_count();
+
+        let first = arena.push_position(position);
+        let from_components = arena.push_pos(file_name, 2, 10, 15);
+        let second = arena.push_position(position);
+        for (offset, idx) in [first, from_components, second].into_iter().enumerate() {
+            assert_eq!(idx, PosIdx((base_count + offset) as u32));
+            assert_eq!(arena.get_position(idx), &position);
+        }
+
+        let shared = arena.mk_loc(first, first);
+        let distinct = arena.mk_loc(first, second);
+        assert_eq!(arena.get_location(shared).loc_start, first);
+        assert_eq!(arena.get_location(shared).loc_end, first);
+        assert_eq!(arena.get_location(distinct).loc_start, first);
+        assert_eq!(arena.get_location(distinct).loc_end, second);
+        assert_eq!(arena.position_count(), base_count + 3);
+        assert_eq!(
+            arena.source_file_names().get(&file_name).map(String::as_str),
+            Some("generated.res")
+        );
     }
 
     #[test]

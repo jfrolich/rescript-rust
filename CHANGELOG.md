@@ -51,6 +51,8 @@
 
 #### :house: Internal
 
+- Remove the unused position-content index and its lookup/deduplication methods from the experimental Rust parser arena. Position handles remain identity-based. https://github.com/jfrolich/rescript-rust/pull/20
+
 - Revert unaccepted Rust compiler Env ownership and type-storage experiments while preserving the identifier-freshness fix. https://github.com/jfrolich/rescript-rust/pull/20
 
 - Give nominal variants one canonical runtime layout: compute their JavaScript representation once after typing each declaration, replace positional constructor tags with semantic runtime descriptors, and make construction, matching, coercion, printing, diagnostics, and GenType consume the stored representation instead of reinterpreting annotations. Pattern matching keeps occurrence-specific plans local without adding another Lambda or Lam expression form. https://github.com/rescript-lang/rescript/pull/8579
