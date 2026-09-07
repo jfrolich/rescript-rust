@@ -27,12 +27,12 @@ Before production changes, use one archive-only instrumented source tree and one
 
 The counters will separate four kinds of work:
 
-1. `get_desc` snapshots in `unify_types`, `deep_occur_rec`, `generalize_rec`, and `link_type`, with calls and descriptor variant.
-2. Payload copied by those snapshots: vector element counts, path component counts, strings, row fields, and row-name arguments. These are logical copied items, not bytes or live heap.
+1. `get_desc` snapshots in `unify_types`, `deep_occur_rec`, and `generalize_rec`, with calls and descriptor variant.
+2. Payload copied by those snapshots: top-level vector elements, row fields, row payload type handles, and row-name argument handles. The probe deliberately excludes nested metadata size: `Path` clones share `Arc` nodes, and it does not traverse strings or longidents solely for accounting. These are logical copied items, not bytes or live heap.
 3. Copies required for native-equivalent rollback in `unify_types`, counted separately from read-only inspection.
 4. `iter_type_expr` payload materialization, with calls and copied immediate-child handles, row fields, and owned metadata that no callback reads.
 
-Use owner-local `Instant` scopes only around the complete selected operation, plus a no-timer counter lane if the timer perturbs the build materially. Report inclusive operation time separately from copy bookkeeping. Do not extrapolate sample counts or logical items to wall time. Preserve the first run and every setup failure. Run under `/usr/bin/lockf -k /tmp/rescript-tella-heavy.lock`.
+Use owner-local `Instant` scopes around descriptor cloning or the existing child-materialization operation. Record calls and time separately by descriptor variant or materialization kind in the same fixed run. Update counters only after each timed region. Report clone/materialization self-time separately from bookkeeping. These timers exclude snapshot destruction and later branch payload clones, so they are neither a full descriptor lifetime cost nor a veto on all copy/drop traffic. Do not extrapolate sample counts or logical items to wall time. Preserve the first run and every setup failure. Run under `/usr/bin/lockf -k /tmp/rescript-tella-heavy.lock`.
 
 ## Candidate design gate
 
