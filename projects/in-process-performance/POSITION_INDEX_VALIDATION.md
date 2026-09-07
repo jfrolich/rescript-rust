@@ -2,7 +2,7 @@
 
 ## Disposition
 
-The candidate remains on draft [jfrolich/rescript-rust#20](https://github.com/jfrolich/rescript-rust/pull/20). Main remains `d98b8b9430045d40d08ed89dd75174b5669fa829`. No measured speedup or one-second result is established.
+The candidate remains on draft [jfrolich/rescript-rust#20](https://github.com/jfrolich/rescript-rust/pull/20). Main remains `d98b8b9430045d40d08ed89dd75174b5669fa829`. A later user-authorized comparison measured a small speedup, documented in [POSITION_INDEX_PERFORMANCE.md](POSITION_INDEX_PERFORMANCE.md). The one-second target remains unmet.
 
 `f1d11bfa71de2fb408de14b16bb8f188b130f317` removes the unused parser position-content index and adds the fresh-identity regression test. `eba0277be2065fa85df2816fcb3fb07032cfbc18` corrects three stale rustdoc lines. Independent source review passed. Removing two public experimental Rust methods is an explicit API change; absence of repository callers does not rule out external clients.
 
@@ -38,7 +38,7 @@ The **one initial clean ran once and exited zero**. Its input check then failed:
 
 Read-only attribution afterward established that all 510 removed files were byte-identical to surviving sources in the same packages. Post-clean inputs exactly match the prior clean baseline. Compiler source, heads, status, symlinks and binary hashes were unchanged; the 18 protected `.gen.ts` files and four protected untracked files retained their hashes and mtimes. The clean process group was reaped. This explains the failed gate but does not retroactively broaden its allowance.
 
-A future comparison needs a new preregistration that distinguishes generated source copies from authored inputs before execution. There are no candidate timing samples to analyze or pool with historical results.
+A future comparison needs a new preregistration that distinguishes generated source copies from authored inputs before execution. This stopped cohort contains no candidate timing samples. The separately authorized second comparison and its timing samples are documented in the performance report.
 
 ## Organization-controlled evidence
 

@@ -70,3 +70,8 @@ Add a regression test for equal-content `push_position` calls, mixed insertion A
 
 
 The selected map removal and identity regression test are implemented. The focused release test passed, with 1 test run and 1,454 filtered out. The first test launch failed before Cargo started because the non-login PATH omitted Cargo; the corrected launch and both logs are retained in `position-index-validation`. Exact-head release validation at `eba0277be` is complete: core gates passed, while syntax and legacy AST0 remain red and external native validation is blocked. The fresh comparison stopped at its initial clean/input-preservation gate, before any qualification or timed build. See [POSITION_INDEX_VALIDATION.md](POSITION_INDEX_VALIDATION.md) for the results, control provenance loss, and failed-freeze evidence. No performance acceptance is claimed.
+
+
+## Completed fixed comparison
+
+The user-authorized second comparison completed all 32 timed builds with exact JavaScript output. Independent audit found a 1.08% parallel improvement, 4.829113s to 4.777105s, and a 1.84% serial improvement, 19.680941s to 19.318480s. Paired 95% intervals exclude zero in both modes. See [POSITION_INDEX_PERFORMANCE.md](POSITION_INDEX_PERFORMANCE.md) for the full statistics, original stopped cohort, qualification timestamp-repair amendment and retained correctness limitations. Main remains untouched; the one-second target is unmet. The next task is a trace-backed type-checker performance investigation, not another broad audit or automatic signature-copy fusion.
