@@ -51,3 +51,41 @@ Do not add descriptor interning, `Rc` or `Arc` per type node, unsafe pointers, s
 Add unit tests for cyclic links, recursive variants, diamonds, failed structural unification restoration, object fields, package arguments, and callback mutation. Include a discriminator where an earlier row callback mutates a later row field and `row_more`; the later resolution must observe that mutation. Then build release compiler and Rewatch binaries and run typedtree, raw Lambda, optimized Lambda, JavaScript, external JavaScript, and error parity with release artifacts. Existing red syntax and AST0 gates and the external native blocker remain unwaived.
 
 A successful candidate still requires a new sealed paired comparison against the immutable position-index candidate binaries. Parallel and serial cohorts stay separate, with the existing fixed Tella input and output safeguards. No old cohort can be pooled or rerun.
+
+## Completed diagnostic
+
+The registered serial diagnostic completed exactly once. It compiled 3,248 project modules and 107 runtime sources, emitted 5,048 JavaScript files with the required `1cacd5cfb9604df30e204f3d8a419e4e433afa96e3f81d23ea54764af86f1d49` digest, and produced 16,775 counter records: five lanes for each of 3,355 compilation contexts. The instrumented build took 19.114471959 seconds. That wall time is perturbed and is not comparable to the earlier uninstrumented release cohort.
+
+The parent independently checked the process count, process-group cleanup, all four inventories, 12 generated metadata paths, the 510-row generated-source ledger, four protected untracked files, 18 protected generated files, all sealed dependencies, all 414 original and 414 probe source files, and the live JavaScript output. The audit passed. The immutable evidence is under the organization-controlled `simplify-and-speed/type-desc-read-copy-diagnostic` artifact, especially `provenance/parent-counter-analysis.json` and `provenance/parent-postrun-audit.json`.
+
+| Lane | Calls | Timed operation self-time | Logical copied payload |
+|---|---:|---:|---:|
+| `unify_read` | 6,230,958 | 113.765 ms | 4,233,087 vector items; 369,957 row fields |
+| `deep_occur_read` | 4,927,592 | 86.791 ms | 2,327,951 vector items; 63,610 row fields |
+| `generalize_read` | 545,545 | 10.072 ms | 317,155 vector items; 41,568 row fields |
+| `required_rollback` | 158,811 | 3.231 ms | 182,316 vector items; 62,112 row fields |
+| `iter_materialize` | 14,826,666 | 250.128 ms | 11,222,109 child handles; 750,128 row fields |
+
+The three descriptor-read lanes total 210.627 ms. Descriptor reads plus child materialization total 460.755 ms, arithmetically 2.41% of this one instrumented wall time. Neither number is a removable-work estimate. Every interval includes two timer reads across millions of very short operations, while excluding snapshot destruction and payload clones performed later by individual branches.
+
+The kind split makes the limit concrete:
+
+- `iter_materialize` spent 50.507 ms across 3,500,775 `None` visits that copied no payload. Its 192.363 ms across 11,069,760 `Many` visits includes the stable child-handle snapshot needed to release the `RefCell` borrow before callbacks. Arrow traversal already drops labels and copies only `TypeExprRef` handles. Tuple, constructor, package and poly traversal likewise copy only handles.
+- Variant child materialization accounted for 6.546 ms across 211,377 visits. Replacing it with an eager flattened collector is invalid: native traversal resolves each row field after earlier callbacks and observes `row_more` after field callbacks.
+- `deep_occur_read` constructor snapshots accounted for 76.147 ms across 4,287,590 calls. The lane copied 2,327,951 vector items across those constructor calls and all other descriptor kinds, so at least 1.96 million constructor calls were nullary. The timing does not isolate argument-vector allocation from timer, borrow, match, `Path` `Arc` increment or drop costs.
+- `generalize_read` constructor snapshots accounted for 7.818 ms across 443,467 calls. A narrow implementation could borrow the descriptor, copy only `AbbrevMemoRef`, release the borrow, and then use the existing staged child traversal. This would avoid cloning an unused path and argument vector before `iter_type_expr` snapshots the required child handles, but 7.818 ms is only an instrumented upper bound and is not material.
+- `unify_read` accounted for 113.765 ms across both input descriptors and all branches. A branch-specific inspection enum could avoid unused fields, but unification deliberately owns stable values across recursive mutation and must retain the first descriptor for native-equivalent failure restoration. The separate rollback lane confirms 3.231 ms of measured work that is required, not removable.
+
+## Materiality disposition
+
+The evidence does not justify a production refactor at this boundary.
+
+The broad candidates are disproportionate to their measured ceilings. Replacing `unify_types` snapshots with a branch inspection enum would restructure the mutation and rollback control flow for at most 113.765 ms of timer-contaminated clone self-time. Replacing `iter_type_expr` ownership would target work that is predominantly required handle stabilization and would risk `RefCell` conflicts or changed row-mutation observation. Neither is a credible route to a material clean-build improvement from this evidence.
+
+The coherent narrow candidate is the `generalize_rec` constructor probe described above, but its entire measured constructor-snapshot interval is 7.818 ms in a 19.114-second perturbed build. `deep_occur_rec` could similarly copy only constructor arguments, but that retains its dominant vector copy; borrowing those arguments across recursive `repr` and traversal would require a new aliasing and mutation proof for cycles. The diagnostic cannot attribute enough removable cost to either change to pass the production gate.
+
+Therefore no compiler code, descriptor representation, traversal API or ownership model is changed. A future investigation may revisit this only with new evidence that separates timer overhead, allocation and destruction and proves a larger owner-local budget. It must still retain stable child handles where callbacks can mutate, the exact unification rollback descriptor, and native staged row behavior.
+
+## Preserved protocol history
+
+The preparation record is intentionally not sanitized. Bytes for one pre-kind-counter runner version were overwritten before sealing; its recorded hash and the surviving source, patch and binary versions remain, with the loss disclosed in `provenance/runner-version-loss.json`. The first sealed runner was rejected before execution because its input and process-lifetime guards were incomplete, and that version is preserved. The first admitted outer wrapper then failed before launching the runner because shell `noclobber` rejected a second redirection to its newly created capture file. Its empty log and exit status 1 are preserved. The parent verified that this was a zero-launch failure, recorded the correction, and used the same still-unconsumed sealed slot once. No diagnostic workload was retried or replaced.
