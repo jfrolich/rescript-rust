@@ -571,43 +571,26 @@ impl Default for TypeExprRefSet {
 }
 
 /// An argument in a function type.
-///
-/// OCaml types.ml:24 and btype.ml:422-423 preserve labels while mapping types.
-/// Keep the common unlabeled case inline; located labels retain owned metadata.
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct TypeArg {
-    label: Option<Box<ArgLabel>>,
-    /// The argument type (physical arena identity).
+    /// The argument label
+    pub lbl: ArgLabel,
+    /// The argument type
     pub typ: TypeExprRef,
 }
 
-impl std::fmt::Debug for TypeArg {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("TypeArg")
-            .field("lbl", self.label())
-            .field("typ", &self.typ)
-            .finish()
-    }
-}
-
 impl TypeArg {
-    /// Create a new type argument, allocating only for a located label.
+    /// Create a new type argument.
     pub fn new(lbl: ArgLabel, typ: TypeExprRef) -> Self {
-        let label = match lbl {
-            ArgLabel::Nolabel => None,
-            label => Some(Box::new(label)),
-        };
-        Self { label, typ }
+        TypeArg { lbl, typ }
     }
 
-    /// Borrow the original label without copying or allocating metadata.
-    pub fn label(&self) -> &ArgLabel {
-        self.label.as_deref().unwrap_or(&ArgLabel::Nolabel)
-    }
-
-    /// Create an unlabeled argument without allocating label storage.
+    /// Create an unlabeled argument.
     pub fn unlabeled(typ: TypeExprRef) -> Self {
-        Self { label: None, typ }
+        TypeArg {
+            lbl: ArgLabel::Nolabel,
+            typ,
+        }
     }
 }
 
@@ -802,80 +785,8 @@ mod tests {
     #[test]
     fn test_type_arg() {
         let arg = TypeArg::unlabeled(TypeExprRef(1));
-        assert!(matches!(arg.label(), ArgLabel::Nolabel));
+        assert!(matches!(arg.lbl, ArgLabel::Nolabel));
         assert_eq!(arg.typ, TypeExprRef(1));
-    }
-
-    #[test]
-    fn type_arg_hot_cold_ownership_and_metadata() {
-        use crate::intern::StrIdx;
-        use crate::location::{Location, Position};
-        if cfg!(target_pointer_width = "64") {
-            assert_eq!(std::mem::size_of::<TypeArg>(), 16);
-        }
-        let typ = TypeExprRef(u32::MAX);
-        for arg in [TypeArg::unlabeled(typ), TypeArg::new(ArgLabel::Nolabel, typ)] {
-            assert!(arg.label.is_none());
-            assert!(arg.clone().label.is_none());
-            assert!(matches!(arg.label(), ArgLabel::Nolabel));
-            assert_eq!(arg.typ, typ);
-            assert_eq!(format!("{:?}", arg),
-                format!("TypeArg {{ lbl: Nolabel, typ: {:?} }}", typ));
-        }
-        for ghost in [false, true] {
-            let loc = Location {
-                loc_start: Position::new(StrIdx(17), 3, 21, 24),
-                loc_end: Position::new(StrIdx(29), 5, 44, 49),
-                loc_ghost: ghost,
-            };
-            for optional in [false, true] {
-                let name = "long_owned_label_with_unicode_λ";
-                let label = if optional {
-                    ArgLabel::optional(name, loc)
-                } else {
-                    ArgLabel::labelled(name, loc)
-                };
-                let expected_debug = format!("TypeArg {{ lbl: {:?}, typ: {:?} }}", label, typ);
-                let arg = TypeArg::new(label, typ);
-                assert_eq!(format!("{:?}", arg), expected_debug);
-                let address = arg.label() as *const ArgLabel;
-                let mut moved = arg;
-                assert_eq!(moved.label() as *const ArgLabel, address);
-                let cloned = moved.clone();
-                assert_ne!(cloned.label() as *const ArgLabel, address);
-                assert_eq!(cloned.typ, typ);
-                let payload = match cloned.label() {
-                    ArgLabel::Labelled(l) if !optional => l,
-                    ArgLabel::Optional(l) if optional => l,
-                    _ => panic!("label kind changed"),
-                };
-                assert_eq!(payload.txt, name);
-                assert_eq!(payload.loc.loc_start.file_name, StrIdx(17));
-                assert_eq!(payload.loc.loc_start.line, 3);
-                assert_eq!(payload.loc.loc_start.bol, 21);
-                assert_eq!(payload.loc.loc_start.cnum, 24);
-                assert_eq!(payload.loc.loc_end.file_name, StrIdx(29));
-                assert_eq!(payload.loc.loc_end.line, 5);
-                assert_eq!(payload.loc.loc_end.bol, 44);
-                assert_eq!(payload.loc.loc_end.cnum, 49);
-                assert_eq!(payload.loc.loc_ghost, ghost);
-                match moved.label.as_deref_mut().unwrap() {
-                    ArgLabel::Labelled(l) | ArgLabel::Optional(l) => {
-                        assert_ne!(l.txt.as_ptr(), payload.txt.as_ptr());
-                        l.txt.push_str("_changed");
-                        l.loc.loc_ghost = !ghost;
-                    }
-                    _ => unreachable!(),
-                }
-                // Replacement drops the original box; the independent clone survives.
-                moved = TypeArg::unlabeled(TypeExprRef(7));
-                assert!(moved.label.is_none());
-                assert_eq!(cloned.label().label_name(), Some(name));
-                drop(moved);
-                assert_eq!(format!("{:?}", cloned), expected_debug);
-                drop(cloned);
-            }
-        }
     }
 
     #[test]

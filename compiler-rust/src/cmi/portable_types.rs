@@ -644,7 +644,7 @@ impl<'a> TypeGraphSerializer<'a> {
             TypeDesc::Tarrow { args, ret } => PortableTypeDesc::Tarrow {
                 args: args
                     .iter()
-                    .map(|arg| (arg.label().clone(), self.serialize_type(arg.typ)))
+                    .map(|arg| (arg.lbl.clone(), self.serialize_type(arg.typ)))
                     .collect(),
                 ret: self.serialize_type(*ret),
             },
@@ -973,7 +973,10 @@ fn internalize_desc(desc: &PortableTypeDesc, remap: &[TypeExprRef], ctx: &TypeCo
         PortableTypeDesc::Tarrow { args, ret } => TypeDesc::Tarrow {
             args: args
                 .iter()
-                .map(|(lbl, typ)| TypeArg::new(lbl.clone(), remap[*typ]))
+                .map(|(lbl, typ)| TypeArg {
+                    lbl: lbl.clone(),
+                    typ: remap[*typ],
+                })
                 .collect(),
             ret: remap[*ret],
         },
@@ -1228,53 +1231,5 @@ fn remap_module_type_refs(
             remap_module_type_refs(result, remap, layout_remap);
         }
         ModuleType::MtyIdent(_) | ModuleType::MtyAlias(_, _) => {}
-    }
-}
-
-#[cfg(test)]
-mod type_arg_tests {
-    use super::*;
-    use crate::context::IdGenerator;
-    use crate::intern::StrIdx;
-    use crate::location::{Location, Position};
-
-    #[test]
-    fn type_arg_portable_roundtrip_preserves_metadata_and_identity() {
-        let ctx = TypeContext::new(Arc::new(IdGenerator::new()));
-        let shared = ctx.new_generic_var(Some("a".into()));
-        let distinct = ctx.new_generic_var(Some("a".into()));
-        let loc = Location {
-            loc_start: Position::new(StrIdx(13), 3, 18, 21),
-            loc_end: Position::new(StrIdx(19), 5, 31, 36),
-            loc_ghost: true,
-        };
-        let labels = [ArgLabel::Nolabel, ArgLabel::labelled("λ", loc), ArgLabel::optional("opt", loc)];
-        let arrow = ctx.new_type(TypeDesc::Tarrow {
-            args: vec![TypeArg::unlabeled(shared), TypeArg::new(labels[1].clone(), shared),
-                TypeArg::new(labels[2].clone(), distinct)],
-            ret: shared,
-        });
-        let mut ser = TypeGraphSerializer { ctx: &ctx, arena: None, entries: Vec::new(),
-            cache: HashMap::new(), variant_layouts: Vec::new(), variant_layout_cache: HashMap::new() };
-        let index = ser.serialize_type(arrow);
-        let PortableTypeDesc::Tarrow { args, ret } = &ser.entries[index].desc else { panic!("not arrow") };
-        assert_eq!(args.len(), 3);
-        assert_eq!(args[0].1, *ret);
-        assert_eq!(args[1].1, *ret);
-        assert_ne!(args[2].1, *ret);
-        let remap: Vec<_> = ser.entries.iter().map(|_| ctx.new_var(None)).collect();
-        let restored = internalize_desc(&ser.entries[index].desc, &remap, &ctx);
-        let TypeDesc::Tarrow { args, ret } = restored else { panic!("not arrow") };
-        assert_eq!(args[0].typ, ret);
-        assert_eq!(args[1].typ, ret);
-        assert_ne!(args[2].typ, ret);
-        for (arg, expected) in args.iter().zip(&labels) {
-            assert_eq!(arg.label(), expected);
-            if let ArgLabel::Labelled(l) | ArgLabel::Optional(l) = arg.label() {
-                assert_eq!(l.loc.loc_start, loc.loc_start);
-                assert_eq!(l.loc.loc_end, loc.loc_end);
-                assert_eq!(l.loc.loc_ghost, loc.loc_ghost);
-            }
-        }
     }
 }

@@ -9618,7 +9618,7 @@ fn type_application(
                 TypeDesc::Tarrow { args, ret } => {
                     if args
                         .iter()
-                        .any(|arg| same_label_name(arg.label(), arena, label))
+                        .any(|arg| same_label_name(&arg.lbl, arena, label))
                     {
                         return true;
                     }
@@ -9947,7 +9947,7 @@ fn type_application(
     let mut ignored: Vec<OmittedArrow> = Vec::new();
 
     for (param, inst_param) in declared_params.iter().zip(&inst_params) {
-        let label_name = param.label().label_name().unwrap_or("");
+        let label_name = param.lbl.label_name().unwrap_or("");
         if let Some(match_index) =
             extract_label_index(args, &remaining_args, label_name, tctx.arena)
         {
@@ -9955,7 +9955,7 @@ fn type_application(
             let (call_label, arg_expr_idx) = &args[arg_index];
             let arg_expr = tctx.arena.get_expr(*arg_expr_idx);
             let call_is_optional = call_label.is_optional();
-            if !param.label().is_optional() && call_is_optional {
+            if !param.lbl.is_optional() && call_is_optional {
                 tctx.report_warning(
                     arg_expr.pexp_loc,
                     Warning::NonoptionalLabel {
@@ -9963,12 +9963,12 @@ fn type_application(
                     },
                 );
             }
-            let expected_arg_ty = if param.label().is_optional() && !call_is_optional {
+            let expected_arg_ty = if param.lbl.is_optional() && !call_is_optional {
                 crate::types::ctype::extract_option_type(ctx, param.typ).unwrap_or(param.typ)
             } else {
                 param.typ
             };
-            let unify_arg_ty = if param.label().is_optional() && !call_is_optional {
+            let unify_arg_ty = if param.lbl.is_optional() && !call_is_optional {
                 crate::types::ctype::extract_option_type(ctx, inst_param.typ)
                     .unwrap_or(inst_param.typ)
             } else {
@@ -9985,7 +9985,7 @@ fn type_application(
                         arg_expr,
                     )
                 }
-            } else if param.label().is_optional()
+            } else if param.lbl.is_optional()
                 && !call_is_optional
                 && matches!(function_arg_context, TypeClashContext::FunctionCall)
             {
@@ -10007,33 +10007,33 @@ fn type_application(
                 )
             };
             argument_thunks.push(ApplyArgThunk::Provided {
-                label: apply_arg_label_for_param(param.label(), call_label, tctx.arena),
+                label: apply_arg_label_for_param(&param.lbl, call_label, tctx.arena),
                 expr: arg_expr,
                 expected_ty: expected_arg_ty,
                 unify_ty: unify_arg_ty,
                 context: arg_context,
-                enforce_optional: param.label().is_optional() && !call_is_optional,
+                enforce_optional: param.lbl.is_optional() && !call_is_optional,
                 skip_post_unify: is_ignore_fn,
             });
-        } else if param.label().is_optional() && (total_app || has_nolabel_arg(args, &remaining_args)) {
+        } else if param.lbl.is_optional() && (total_app || has_nolabel_arg(args, &remaining_args)) {
             ignored.push(OmittedArrow {
-                label: param.label().clone(),
+                label: param.lbl.clone(),
                 arg_ty: param.typ,
                 level: function_level,
             });
             argument_thunks.push(ApplyArgThunk::SynthOptionalNone {
-                label: param.label().clone(),
+                label: param.lbl.clone(),
                 option_ty: crate::types::instance(ctx, param.typ),
             });
         } else {
             omitted.push(OmittedArrow {
-                label: param.label().clone(),
+                label: param.lbl.clone(),
                 arg_ty: param.typ,
                 level: function_level,
             });
             if !remaining_args.is_empty() {
                 argument_thunks.push(ApplyArgThunk::Omitted {
-                    label: param.label().clone(),
+                    label: param.lbl.clone(),
                 });
             }
         }
@@ -11626,7 +11626,7 @@ fn type_exprs_may_unify_without_alloc(
                 && left_args
                     .iter()
                     .zip(right_args)
-                    .all(|(a, b)| a.label().same_label(b.label())) =>
+                    .all(|(a, b)| a.lbl.same_label(&b.lbl)) =>
             {
                 let left_args = left_args.clone();
                 let right_args = right_args.clone();
@@ -16563,7 +16563,7 @@ fn type_function_nary(
     };
     if let Some((expected_args, expected_ret)) = expected_arrow {
         for (index, (param, label)) in params.iter().zip(&labels).enumerate() {
-            if !label.same_label(expected_args[index].label()) {
+            if !label.same_label(&expected_args[index].lbl) {
                 let remainder = ctx.new_type(TypeDesc::Tarrow {
                     args: expected_args[index..].to_vec(),
                     ret: expected_ret,
@@ -25093,15 +25093,17 @@ where
             CopyTypeExprPlan::Tarrow { args, ret } => {
                 let args = args
                     .into_iter()
-                    .map(|mut arg| {
-                        arg.typ = copy_lookup_type_expr_with_paths(
-                            ctx,
-                            arg.typ,
-                            cache,
-                            type_path,
-                            module_path,
-                        );
-                        arg
+                    .map(|arg| {
+                        TypeArg::new(
+                            arg.lbl,
+                            copy_lookup_type_expr_with_paths(
+                                ctx,
+                                arg.typ,
+                                cache,
+                                type_path,
+                                module_path,
+                            ),
+                        )
                     })
                     .collect();
                 let ret = copy_lookup_type_expr_with_paths(ctx, ret, cache, type_path, module_path);

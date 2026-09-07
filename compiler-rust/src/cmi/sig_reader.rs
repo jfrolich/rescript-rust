@@ -864,7 +864,7 @@ impl<'a> SigReadContext<'a> {
         let fields = &value.as_block().1;
         let lbl = read_arg_label(self.ctx, &fields[0]);
         let typ = self.read_type_expr(&fields[1]);
-        TypeArg::new(lbl, typ)
+        TypeArg { lbl, typ }
     }
 
     /// Read a row_desc record.

@@ -10681,7 +10681,7 @@ fn collect_expected_function_arguments(
 
         match &*type_ctx.get_desc(repr) {
             TypeDesc::Tarrow { args: params, ret } => {
-                args.extend(params.iter().map(|arg| (arg.label().clone(), arg.typ)));
+                args.extend(params.iter().map(|arg| (arg.lbl.clone(), arg.typ)));
                 current = *ret;
             }
             TypeDesc::Tlink(next) | TypeDesc::Tsubst(next) => current = *next,
@@ -10966,7 +10966,7 @@ fn collect_function_arg_labels(
 
         match &*type_ctx.get_desc(current) {
             TypeDesc::Tarrow { args, ret } => {
-                labels.extend(args.iter().map(|arg| arg.label().clone()));
+                labels.extend(args.iter().map(|arg| arg.lbl.clone()));
                 current = *ret;
             }
             _ => break,
@@ -11280,8 +11280,8 @@ impl<'a> TypeExprPrinter<'a> {
             .iter()
             .map(|arg| {
                 (
-                    self.format_arrow_arg(arg.label(), arg.typ),
-                    !matches!(arg.label(), TypeArgLabel::Nolabel),
+                    self.format_arrow_arg(&arg.lbl, arg.typ),
+                    !matches!(arg.lbl, TypeArgLabel::Nolabel),
                 )
             })
             .collect::<Vec<_>>();

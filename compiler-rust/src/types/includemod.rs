@@ -1165,7 +1165,7 @@ impl<'a> TypeExprErrorPrinter<'a> {
         };
         let args = params
             .iter()
-            .map(|arg| self.format_arrow_arg(arg.label(), arg.typ))
+            .map(|arg| self.format_arrow_arg(&arg.lbl, arg.typ))
             .collect::<Vec<_>>();
         let ret = self.format(ret);
         if args.len() == 1 {
@@ -2495,7 +2495,7 @@ fn find_arity_mismatch(
         if !impl_args
             .iter()
             .zip(&sig_args)
-            .all(|(impl_arg, sig_arg)| impl_arg.label().same_label(sig_arg.label()))
+            .all(|(impl_arg, sig_arg)| impl_arg.lbl.same_label(&sig_arg.lbl))
         {
             return None;
         }
@@ -4278,7 +4278,7 @@ fn type_exprs_equal_for_inclusion_inner(
         ) => {
             impl_args.len() == sig_args.len()
                 && impl_args.iter().zip(sig_args).all(|(impl_arg, sig_arg)| {
-                    arg_labels_equal(impl_arg.label(), sig_arg.label())
+                    arg_labels_equal(&impl_arg.lbl, &sig_arg.lbl)
                         && type_exprs_equal_for_inclusion_inner(
                             type_ctx,
                             env,
