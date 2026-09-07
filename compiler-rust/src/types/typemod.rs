@@ -3030,19 +3030,18 @@ fn expand_record_spread_label(
                 args: arrow_args,
                 ret,
             } => {
-                let new_args = arrow_args
+                // Preserve substitution order; no-op arrows need no new labels.
+                let new_types = arrow_args
                     .iter()
-                    .map(|arg| {
-                        crate::types::TypeArg::new(
-                            arg.lbl.clone(),
-                            substitute_type_params(ctx, arg.typ, params, args, cache),
-                        )
-                    })
+                    .map(|arg| substitute_type_params(ctx, arg.typ, params, args, cache))
                     .collect::<Vec<_>>();
                 let new_ret = substitute_type_params(ctx, *ret, params, args, cache);
-                if new_args.iter().zip(arrow_args).all(|(a, b)| a.typ == b.typ) && new_ret == *ret {
+                if new_types.iter().zip(arrow_args).all(|(a, b)| *a == b.typ) && new_ret == *ret {
                     ty
                 } else {
+                    let new_args = arrow_args.iter().zip(new_types)
+                        .map(|(arg, typ)| crate::types::TypeArg::new(arg.label().clone(), typ))
+                        .collect();
                     with_original_level(
                         ctx,
                         ty,
@@ -4817,7 +4816,7 @@ fn check_type_declaration_coherence(
     }
 
     let Some(expected_decl) =
-        crate::types::ctype::lookup_type_decl_for_path_pub(ctx, env, &manifest_path)
+        crate::types::ctype::lookup_type_decl_for_path(ctx, env, &manifest_path)
     else {
         return Ok(());
     };
@@ -6240,7 +6239,7 @@ fn type_exprs_equal_for_abbrev_recursion(
         ) => {
             left_args.len() == right_args.len()
                 && left_args.iter().zip(&right_args).all(|(left, right)| {
-                    arg_labels_equal_for_abbrev_recursion(&left.lbl, &right.lbl)
+                    arg_labels_equal_for_abbrev_recursion(left.label(), right.label())
                         && type_exprs_equal_for_abbrev_recursion(ctx, left.typ, right.typ, seen)
                 })
                 && type_exprs_equal_for_abbrev_recursion(ctx, left_ret, right_ret, seen)
