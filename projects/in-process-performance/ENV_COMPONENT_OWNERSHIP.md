@@ -1,5 +1,7 @@
 # Env/component ownership experiment
 
+Current rollback proposal: the compiler implementation described below is removed on `revert-unaccepted-performance`. Historical evidence is retained. See [rollback scope and validation](ROLLBACK_UNACCEPTED_EXPERIMENTS.md). Main is unchanged until the PR is merged.
+
 ## Selected question
 
 Can one compilation-owned component representation eliminate repeated lookup transport, declaration copying and signature reconstruction while preserving native Env behavior?

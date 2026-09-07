@@ -314,3 +314,8 @@ New release compiler and rewatch builds passed. Parent verified the new artifact
 A preservation failure remains documented. The ordinary `7f3e…` compiler used for earlier correctness checks was overwritten by the release rebuild before the parent's explicit copy instruction arrived. Its prior hash and logs survive, but no exact executable copy was recovered. Preservation of the prior release parser is also unverified. Neither a rebuild nor the separately preserved `88c8…` executable can repair that historical artifact gap.
 
 The 39/56 timing cohort stays closed. Earlier red gates remain unwaived. No new Tella build or timing was run, no candidate speedup is established, and the one-second target remains unmet. The focused correctness task is complete; another measurement round requires separate authorization and a new protocol.
+
+
+## Rollback proposal
+
+At the user's request, `revert-unaccepted-performance` removes the unaccepted Env ownership, TypeArg storage and hybrid-map restoration experiments while preserving the identifier-freshness fix. Release internal parity passes. Main has not been changed or rewritten by this rollback. Historical A is not an ancestor of main, so the earlier A/D comparison does not establish a main-branch regression. See [scope, source-equivalence check and validation](ROLLBACK_UNACCEPTED_EXPERIMENTS.md). No new performance result is claimed.

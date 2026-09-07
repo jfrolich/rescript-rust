@@ -1,5 +1,7 @@
 # TypeArg storage experiment
 
+Current rollback proposal: the compiler implementation described below is removed on `revert-unaccepted-performance`. Historical evidence is retained. See [rollback scope and validation](ROLLBACK_UNACCEPTED_EXPERIMENTS.md). Main is unchanged until the PR is merged.
+
 Owner: bks-fb2a0e85-f454-79be-9857-52c9cb1ece14. Start: clean 8ad31ffe0 on can-you-do-a-torough-look. Sole compiler/worktree/heavy-test ownership. Hybrid map stays experimental and unchanged; M6 stays paused. No push or PR edits.
 
 ## Preregistration

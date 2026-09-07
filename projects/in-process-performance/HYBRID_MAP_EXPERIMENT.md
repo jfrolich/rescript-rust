@@ -1,5 +1,7 @@
 # Hybrid map experiment
 
+Current rollback proposal: the compiler implementation described below is removed on `revert-unaccepted-performance`. Historical evidence is retained. See [rollback scope and validation](ROLLBACK_UNACCEPTED_EXPERIMENTS.md). Main is unchanged until the PR is merged.
+
 Owner: session bks-5f227324-a8e2-75b0-bbb0-f33135ca210e. Starting clean head `16caa9a93`. M6 remains paused. No campaign edits, push or PR actions.
 
 ## Preregistration
