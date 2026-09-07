@@ -90,43 +90,6 @@ pub struct TypeDeclaration {
     pub type_path: Option<super::path::Path>,
 }
 
-/// A lookup result that keeps an existing component declaration shared.
-///
-/// This owns no new type graph. Borrowed Env declarations and already-cached
-/// component Arcs can be inspected without copying their metadata containers.
-/// Call `into_owned` at a boundary that mutates or transfers the declaration.
-pub(crate) enum TypeDeclarationRef<'a> {
-    Borrowed(&'a TypeDeclaration),
-    Shared(std::sync::Arc<TypeDeclaration>),
-    Owned(Box<TypeDeclaration>),
-}
-
-impl TypeDeclarationRef<'_> {
-    pub(crate) fn owned(decl: TypeDeclaration) -> Self {
-        Self::Owned(Box::new(decl))
-    }
-
-    pub(crate) fn into_owned(self) -> TypeDeclaration {
-        match self {
-            Self::Borrowed(decl) => decl.clone(),
-            Self::Shared(decl) => std::sync::Arc::unwrap_or_clone(decl),
-            Self::Owned(decl) => *decl,
-        }
-    }
-}
-
-impl std::ops::Deref for TypeDeclarationRef<'_> {
-    type Target = TypeDeclaration;
-
-    fn deref(&self) -> &Self::Target {
-        match self {
-            Self::Borrowed(decl) => decl,
-            Self::Shared(decl) => decl,
-            Self::Owned(decl) => decl,
-        }
-    }
-}
-
 /// An inlined type representation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TypeInlinedType {

@@ -587,35 +587,6 @@ impl ModuleRegistry {
     }
 }
 
-/// Private loader-view state. A PersistentEnv clone shares this coarse snapshot
-/// until its first write; mutable overrides and alias preparation never leak to
-/// sibling views. Type graphs and the existing shared registry caches are not
-/// copied here. This is container ownership, not a new component/force cache.
-#[derive(Clone)]
-struct ResolutionView {
-    /// Alias prefix rewrites: flattened_name -> qualified_path.
-    /// Populated when loading a CMI that has MtyAlias submodules
-    /// (e.g., Stdlib.cmi has module JSON = Stdlib_JSON, so we record
-    /// "Stdlib_JSON" → Pdot(Pident("Stdlib"), "JSON")).
-    alias_prefix_rewrites: AliasPrefixRewrites,
-    /// The module currently being compiled, used to skip self-opens.
-    compiling_module: Option<String>,
-    in_memory_module_overrides: HashMap<String, InMemoryModuleInfo>,
-    source_fallback_path_overrides: HashMap<String, PathBuf>,
-    portable_cache_overrides: HashMap<String, Arc<PortablePersStruct>>,
-    /// Modules hidden from this worker environment. Used when the current
-    /// module's transient signature must be removed before raw/JS compilation
-    /// without copy-on-writing the shared in-process registry maps.
-    hidden_modules: HashSet<String>,
-    /// Cache entries whose alias-rewrite side effects have already been
-    /// applied to this PersistentEnv. OCaml's persistent structures keep lazy
-    /// module components in the environment table (`compiler/ml/env.ml:711-746,
-    /// 1516-1605`); Rust shares loaded structures across env clones, so each
-    /// env still has to rebuild its local flattened-alias table when it first
-    /// observes a cached signature.
-    prepared_cached_alias_rewrites: HashSet<String>,
-}
-
 /// Persistent environment for module loading.
 #[derive(Clone)]
 pub struct PersistentEnv {
@@ -633,12 +604,19 @@ pub struct PersistentEnv {
     /// Keep lookup paths normalized while preserving the load-path spelling
     /// that should appear in diagnostics.
     load_path_display: Arc<Vec<PathBuf>>,
+    /// Alias prefix rewrites: flattened_name -> qualified_path.
+    /// Populated when loading a CMI that has MtyAlias submodules
+    /// (e.g., Stdlib.cmi has module JSON = Stdlib_JSON, so we record
+    /// "Stdlib_JSON" → Pdot(Pident("Stdlib"), "JSON")).
+    alias_prefix_rewrites: AliasPrefixRewrites,
     /// Additional modules opened implicitly from `-open` flags.
     open_modules: Arc<Vec<String>>,
     /// Default JSX version from CLI flags, if any.
     jsx_version: Option<i32>,
     /// Whether the current compilation uses `-nopervasives`.
     nopervasives: bool,
+    /// The module currently being compiled, used to skip self-opens.
+    compiling_module: Option<String>,
     /// Cache of renamed signatures (matching OCaml's lazy Subst.signature).
     /// Each module's signature is renamed once and cached here.
     renamed_sig_cache: Arc<HashMap<String, Arc<Signature>>>,
@@ -647,6 +625,7 @@ pub struct PersistentEnv {
     /// is resolved from memory instead of from `.ast`/`.cmj` files on disk.
     /// Shared through the build registry so worker snapshots do not clone it.
     in_memory_modules: SharedRegistryMap<InMemoryModuleInfo>,
+    in_memory_module_overrides: HashMap<String, InMemoryModuleInfo>,
     /// When true, all module resolution uses the in-memory registry only.
     /// Disk fallbacks (`.ast`, `.cmj`, `.cmi` probes) are skipped entirely.
     in_process_mode: bool,
@@ -655,6 +634,7 @@ pub struct PersistentEnv {
     /// has its source path, the module is type-checked from source on the fly.
     /// Shared through the build registry so worker snapshots do not clone it.
     source_fallback_paths: SharedRegistryMap<PathBuf>,
+    source_fallback_path_overrides: HashMap<String, PathBuf>,
     /// Current depth of source-fallback recursion. Each `typecheck_source_signature`
     /// call increments this. Used to prevent stack overflow from deep dependency chains.
     source_fallback_depth: usize,
@@ -662,11 +642,22 @@ pub struct PersistentEnv {
     /// type graphs that are internalized into the current TypeContext on first access
     /// via `find_pers_struct`. Populated by `from_registry()`.
     portable_cache: SharedRegistryMap<Arc<PortablePersStruct>>,
+    portable_cache_overrides: HashMap<String, Arc<PortablePersStruct>>,
+    /// Modules hidden from this worker environment. Used when the current
+    /// module's transient signature must be removed before raw/JS compilation
+    /// without copy-on-writing the shared in-process registry maps.
+    hidden_modules: HashSet<String>,
+    /// Cache entries whose alias-rewrite side effects have already been
+    /// applied to this PersistentEnv. OCaml's persistent structures keep lazy
+    /// module components in the environment table (`compiler/ml/env.ml:711-746,
+    /// 1516-1605`); Rust shares loaded structures across env clones, so each
+    /// env still has to rebuild its local flattened-alias table when it first
+    /// observes a cached signature.
+    prepared_cached_alias_rewrites: HashSet<String>,
     /// First persistent-loader error observed through any clone of this env.
     last_error: Arc<Mutex<Option<PersistentEnvError>>>,
     /// Consistency table for imported CMI digests, matching OCaml `Consistbl`.
     crc_units: Arc<Mutex<HashMap<String, (Vec<u8>, String)>>>,
-    view: Arc<ResolutionView>,
 }
 
 /// Errors reported by OCaml's `Env` persistent interface loader.
@@ -709,36 +700,30 @@ fn should_register_lazy_raw_sig(name: &str, alias_rewrites: &AliasPrefixRewrites
 }
 
 impl PersistentEnv {
-    fn view_mut(&mut self) -> &mut ResolutionView {
-        Arc::make_mut(&mut self.view)
-    }
-
     /// Create a new persistent environment with no load paths.
     pub fn new() -> Self {
         PersistentEnv {
             cache: Arc::new(Mutex::new(HashMap::new())),
             load_path: Arc::new(Vec::new()),
             load_path_display: Arc::new(Vec::new()),
+            alias_prefix_rewrites: AliasPrefixRewrites::new(),
             open_modules: Arc::new(Vec::new()),
             jsx_version: None,
             nopervasives: false,
+            compiling_module: None,
             renamed_sig_cache: Arc::new(HashMap::new()),
             in_memory_modules: SharedRegistryMap::default(),
+            in_memory_module_overrides: HashMap::new(),
             in_process_mode: false,
             source_fallback_paths: SharedRegistryMap::default(),
+            source_fallback_path_overrides: HashMap::new(),
             source_fallback_depth: 0,
             portable_cache: SharedRegistryMap::default(),
+            portable_cache_overrides: HashMap::new(),
+            hidden_modules: HashSet::new(),
+            prepared_cached_alias_rewrites: HashSet::new(),
             last_error: Arc::new(Mutex::new(None)),
             crc_units: Arc::new(Mutex::new(HashMap::new())),
-            view: Arc::new(ResolutionView {
-                alias_prefix_rewrites: AliasPrefixRewrites::new(),
-                compiling_module: None,
-                in_memory_module_overrides: HashMap::new(),
-                source_fallback_path_overrides: HashMap::new(),
-                portable_cache_overrides: HashMap::new(),
-                hidden_modules: HashSet::new(),
-                prepared_cached_alias_rewrites: HashSet::new(),
-            }),
         }
     }
 
@@ -749,29 +734,27 @@ impl PersistentEnv {
             cache: Arc::new(Mutex::new(HashMap::new())),
             load_path: Arc::new(Vec::new()),
             load_path_display: Arc::new(Vec::new()),
+            alias_prefix_rewrites: AliasPrefixRewrites::from_base(
+                registry.alias_rewrites.clone(),
+                registry.local_alias_rewrites.clone(),
+            ),
             open_modules: Arc::new(Vec::new()),
             jsx_version: None,
             nopervasives: false,
+            compiling_module: None,
             renamed_sig_cache: Arc::new(HashMap::new()),
             in_memory_modules: registry.module_info.clone(),
+            in_memory_module_overrides: registry.local_module_info.clone(),
             in_process_mode: true,
             source_fallback_paths: registry.source_fallback_paths.clone(),
+            source_fallback_path_overrides: registry.local_source_fallback_paths.clone(),
             source_fallback_depth: 0,
             portable_cache: registry.cached_modules.clone(),
+            portable_cache_overrides: registry.local_cached_modules.clone(),
+            hidden_modules: HashSet::new(),
+            prepared_cached_alias_rewrites: HashSet::new(),
             last_error: Arc::new(Mutex::new(None)),
             crc_units: Arc::new(Mutex::new(HashMap::new())),
-            view: Arc::new(ResolutionView {
-                alias_prefix_rewrites: AliasPrefixRewrites::from_base(
-                    registry.alias_rewrites.clone(),
-                    registry.local_alias_rewrites.clone(),
-                ),
-                compiling_module: None,
-                in_memory_module_overrides: registry.local_module_info.clone(),
-                source_fallback_path_overrides: registry.local_source_fallback_paths.clone(),
-                portable_cache_overrides: registry.local_cached_modules.clone(),
-                hidden_modules: HashSet::new(),
-                prepared_cached_alias_rewrites: HashSet::new(),
-            }),
         }
     }
 
@@ -836,7 +819,7 @@ impl PersistentEnv {
     }
 
     fn cache_lookup_entry(&self, name: &str) -> Option<(String, Option<Arc<PersStruct>>)> {
-        if self.view.hidden_modules.contains(name) {
+        if self.hidden_modules.contains(name) {
             return Some((name.to_string(), None));
         }
         let cache = self.cache.lock().unwrap();
@@ -861,14 +844,14 @@ impl PersistentEnv {
     }
 
     fn in_memory_info(&self, name: &str) -> Option<InMemoryModuleInfo> {
-        if let Some(key) = resolve_first_char_case_key(&self.view.in_memory_module_overrides, name) {
-            if self.view.hidden_modules.contains(key) {
+        if let Some(key) = resolve_first_char_case_key(&self.in_memory_module_overrides, name) {
+            if self.hidden_modules.contains(key) {
                 return None;
             }
-            return self.view.in_memory_module_overrides.get(key).cloned();
+            return self.in_memory_module_overrides.get(key).cloned();
         }
         let (key, info) = self.in_memory_modules.get_case_cloned(name)?;
-        if self.view.hidden_modules.contains(&key) {
+        if self.hidden_modules.contains(&key) {
             return None;
         }
         Some(info)
@@ -879,15 +862,15 @@ impl PersistentEnv {
         name: &str,
         mut f: impl FnMut(&InMemoryModuleInfo) -> R,
     ) -> Option<R> {
-        if let Some(key) = resolve_first_char_case_key(&self.view.in_memory_module_overrides, name) {
-            if self.view.hidden_modules.contains(key) {
+        if let Some(key) = resolve_first_char_case_key(&self.in_memory_module_overrides, name) {
+            if self.hidden_modules.contains(key) {
                 return None;
             }
-            return self.view.in_memory_module_overrides.get(key).map(|info| f(info));
+            return self.in_memory_module_overrides.get(key).map(|info| f(info));
         }
         self.in_memory_modules
             .get_case_with(name, |key, info| {
-                if self.view.hidden_modules.contains(key) {
+                if self.hidden_modules.contains(key) {
                     None
                 } else {
                     Some(f(info))
@@ -897,8 +880,9 @@ impl PersistentEnv {
     }
 
     fn portable_cache_entry(&self, name: &str) -> Option<(String, Arc<PortablePersStruct>)> {
-        if let Some(key) = resolve_first_char_case_key(&self.view.portable_cache_overrides, name) {
-            return self.view.portable_cache_overrides
+        if let Some(key) = resolve_first_char_case_key(&self.portable_cache_overrides, name) {
+            return self
+                .portable_cache_overrides
                 .get(key)
                 .cloned()
                 .map(|portable| (key.to_string(), portable));
@@ -907,8 +891,9 @@ impl PersistentEnv {
     }
 
     fn source_fallback_path_entry(&self, name: &str) -> Option<(String, PathBuf)> {
-        if let Some(key) = resolve_first_char_case_key(&self.view.source_fallback_path_overrides, name) {
-            return self.view.source_fallback_path_overrides
+        if let Some(key) = resolve_first_char_case_key(&self.source_fallback_path_overrides, name) {
+            return self
+                .source_fallback_path_overrides
                 .get(key)
                 .cloned()
                 .map(|path| (key.to_string(), path));
@@ -934,7 +919,7 @@ impl PersistentEnv {
             .cache_lookup(module_name)
             .and_then(|opt| opt)
             .map(|ps| portable_types::serialize_pers_struct(ps.as_ref(), ctx, arena));
-        (portable, self.view.alias_prefix_rewrites.local_clone())
+        (portable, self.alias_prefix_rewrites.local_clone())
     }
 
     /// Extract all currently-cached modules as portable structs, plus the full
@@ -960,7 +945,7 @@ impl PersistentEnv {
                 })
             })
             .collect();
-        (portables, self.view.alias_prefix_rewrites.to_hash_map())
+        (portables, self.alias_prefix_rewrites.to_hash_map())
     }
 
     /// Set the load path (list of directories to search for .cmi files).
@@ -987,11 +972,11 @@ impl PersistentEnv {
     }
 
     pub fn set_compiling_module(&mut self, module_name: Option<String>) {
-        self.view_mut().compiling_module = module_name;
+        self.compiling_module = module_name;
     }
 
     pub fn is_compiling_module(&self, module_name: &str) -> bool {
-        self.view.compiling_module
+        self.compiling_module
             .as_deref()
             .is_some_and(|compiling| compiling == module_name)
     }
@@ -1014,12 +999,12 @@ impl PersistentEnv {
     /// Example: if cache has `"Stdlib_JSON" -> Stdlib.JSON`, returns `["Stdlib_JSON"]`
     /// when queried with `Stdlib.JSON`.
     pub fn flattened_alias_heads_for_path(&self, qualified_path: &Path) -> Vec<String> {
-        self.view.alias_prefix_rewrites
+        self.alias_prefix_rewrites
             .flattened_alias_heads_for_path(qualified_path)
     }
 
     pub fn qualified_alias_path_for_flattened_head(&self, flat_head: &str) -> Option<Path> {
-        self.view.alias_prefix_rewrites.get(flat_head)
+        self.alias_prefix_rewrites.get(flat_head)
     }
 
     pub fn has_known_module_without_loading(&self, name: &str) -> bool {
@@ -1057,7 +1042,7 @@ impl PersistentEnv {
             if let Some(ps) = cached.as_ref() {
                 self.prepare_cached_pers_struct(&cache_key, ps, ctx);
             } else if self.in_process_mode
-                && !self.view.hidden_modules.contains(&cache_key)
+                && !self.hidden_modules.contains(&cache_key)
                 && (self.portable_cache_entry(name).is_some()
                     || self.in_memory_info(name).is_some())
             {
@@ -1086,30 +1071,31 @@ impl PersistentEnv {
             if debug_pers {
                 eprintln!("[pers] portable {name} key={portable_key}");
             }
-            if self.view.hidden_modules.contains(&portable_key) {
+            if self.hidden_modules.contains(&portable_key) {
                 return None;
             }
             let ps = Arc::new(portable_types::internalize_pers_struct(portable, ctx));
             let module_path = Path::Pident(Ident::create_persistent(&portable_key));
-            let effective_module_path = self.view.alias_prefix_rewrites
+            let effective_module_path = self
+                .alias_prefix_rewrites
                 .get(&portable_key)
                 .unwrap_or_else(|| module_path.clone());
             collect_alias_rewrites(
                 &ps.ps_sig,
                 &effective_module_path,
-                &mut self.view_mut().alias_prefix_rewrites,
+                &mut self.alias_prefix_rewrites,
             );
             register_sig_types_recursive(&ps.ps_sig, &effective_module_path, ctx, &self.load_path);
             if !effective_module_path.same(&module_path) {
                 register_sig_types_recursive(&ps.ps_sig, &module_path, ctx, &self.load_path);
             }
             register_types_by_stamp_in_signature_recursive(&ps.ps_sig, ctx);
-            if should_register_lazy_raw_sig(&portable_key, &self.view.alias_prefix_rewrites)
+            if should_register_lazy_raw_sig(&portable_key, &self.alias_prefix_rewrites)
                 && !ctx.has_raw_module_sig(&portable_key)
             {
                 ctx.register_raw_module_sig(&portable_key, ps.ps_sig.clone());
             }
-            self.view_mut().prepared_cached_alias_rewrites
+            self.prepared_cached_alias_rewrites
                 .insert(portable_key.clone());
             self.cache_insert(portable_key, Some(ps.clone()));
             return Some(ps);
@@ -1122,7 +1108,8 @@ impl PersistentEnv {
         // implementation as if a persistent `.cmi` already existed; if an
         // interface was published above, the portable-cache branch has already
         // returned it.
-        if self.view.compiling_module
+        if self
+            .compiling_module
             .as_deref()
             .is_some_and(|compiling| compiling == name)
         {
@@ -1143,9 +1130,9 @@ impl PersistentEnv {
         // Try to load from disk
         let result = self.load_module(&load_name, ctx).map(Arc::new);
         if let Some(ps) = result.as_ref() {
-            self.view_mut().prepared_cached_alias_rewrites
+            self.prepared_cached_alias_rewrites
                 .insert(load_name.clone());
-            if should_register_lazy_raw_sig(&load_name, &self.view.alias_prefix_rewrites)
+            if should_register_lazy_raw_sig(&load_name, &self.alias_prefix_rewrites)
                 && !ctx.has_raw_module_sig(&load_name)
             {
                 ctx.register_raw_module_sig(&load_name, ps.ps_sig.clone());
@@ -1156,16 +1143,19 @@ impl PersistentEnv {
     }
 
     fn prepare_cached_pers_struct(&mut self, cache_key: &str, ps: &PersStruct, ctx: &TypeContext) {
-        if !self.view.prepared_cached_alias_rewrites.contains(cache_key) {
-            self.view_mut().prepared_cached_alias_rewrites.insert(cache_key.to_string());
+        if self
+            .prepared_cached_alias_rewrites
+            .insert(cache_key.to_string())
+        {
             let module_path = Path::Pident(Ident::create_persistent(cache_key));
-            let effective_module_path = self.view.alias_prefix_rewrites
+            let effective_module_path = self
+                .alias_prefix_rewrites
                 .get(cache_key)
                 .unwrap_or_else(|| module_path.clone());
             collect_alias_rewrites(
                 &ps.ps_sig,
                 &effective_module_path,
-                &mut self.view_mut().alias_prefix_rewrites,
+                &mut self.alias_prefix_rewrites,
             );
             // Reusing a worker `TypeContext` clears short-name and stamp-keyed
             // declaration tables at unit boundaries because OCaml resets local
@@ -1180,7 +1170,7 @@ impl PersistentEnv {
             register_types_by_stamp_in_signature_recursive(&ps.ps_sig, ctx);
         }
 
-        if should_register_lazy_raw_sig(cache_key, &self.view.alias_prefix_rewrites)
+        if should_register_lazy_raw_sig(cache_key, &self.alias_prefix_rewrites)
             && !ctx.has_raw_module_sig(cache_key)
         {
             ctx.register_raw_module_sig(cache_key, ps.ps_sig.clone());
@@ -1210,17 +1200,18 @@ impl PersistentEnv {
         // lazily when env.ml:1513-1530 builds module components, not by rewriting
         // the cached persistent unit signature during load.
 
-        let effective_module_path = self.view.alias_prefix_rewrites
+        let effective_module_path = self
+            .alias_prefix_rewrites
             .get(name)
             .unwrap_or_else(|| module_path.clone());
         collect_alias_rewrites(
             &signature,
             &effective_module_path,
-            &mut self.view_mut().alias_prefix_rewrites,
+            &mut self.alias_prefix_rewrites,
         );
         register_sig_types_recursive(&signature, &effective_module_path, ctx, &self.load_path);
         let signature = Arc::new(signature);
-        if should_register_lazy_raw_sig(name, &self.view.alias_prefix_rewrites) {
+        if should_register_lazy_raw_sig(name, &self.alias_prefix_rewrites) {
             ctx.register_raw_module_sig(name, signature.clone());
         }
 
@@ -1496,31 +1487,29 @@ impl PersistentEnv {
             cache: Arc::new(Mutex::new(placeholders)),
             load_path: self.load_path.clone(),
             load_path_display: self.load_path_display.clone(),
+            alias_prefix_rewrites: self.alias_prefix_rewrites.clone(),
             open_modules: self.open_modules.clone(),
             jsx_version: self.jsx_version,
             nopervasives: self.nopervasives,
+            compiling_module: self.compiling_module.clone(),
             renamed_sig_cache: Arc::new(HashMap::new()),
             in_memory_modules: self.in_memory_modules.clone(),
+            in_memory_module_overrides: self.in_memory_module_overrides.clone(),
             in_process_mode: self.in_process_mode,
             source_fallback_paths: self.source_fallback_paths.clone(),
+            source_fallback_path_overrides: self.source_fallback_path_overrides.clone(),
             source_fallback_depth: self.source_fallback_depth + 1,
             portable_cache: self.portable_cache.clone(),
+            portable_cache_overrides: self.portable_cache_overrides.clone(),
+            hidden_modules: self.hidden_modules.clone(),
+            prepared_cached_alias_rewrites: HashSet::new(),
             last_error: self.last_error.clone(),
             crc_units: self.crc_units.clone(),
-            view: Arc::new(ResolutionView {
-                alias_prefix_rewrites: self.view.alias_prefix_rewrites.clone(),
-                compiling_module: self.view.compiling_module.clone(),
-                in_memory_module_overrides: self.view.in_memory_module_overrides.clone(),
-                source_fallback_path_overrides: self.view.source_fallback_path_overrides.clone(),
-                portable_cache_overrides: self.view.portable_cache_overrides.clone(),
-                hidden_modules: self.view.hidden_modules.clone(),
-                prepared_cached_alias_rewrites: HashSet::new(),
-            }),
         };
         let mut env = initial_env(ctx);
         let open_modules = fallback_pers.open_modules.clone();
         let nopervasives = fallback_pers.nopervasives;
-        let compiling_module = fallback_pers.view.compiling_module.clone();
+        let compiling_module = fallback_pers.compiling_module.clone();
         load_pervasives(
             &mut fallback_pers,
             &mut env,
@@ -1643,8 +1632,8 @@ impl PersistentEnv {
         }
 
         let (signature, fallback_pers) = self.typecheck_source_signature(preferred_path, ctx)?;
-        self.view_mut().alias_prefix_rewrites
-            .extend_missing(fallback_pers.view.alias_prefix_rewrites.local_clone());
+        self.alias_prefix_rewrites
+            .extend_missing(fallback_pers.alias_prefix_rewrites.local_clone());
         let fallback_entries = fallback_pers
             .cache
             .lock()
@@ -1681,7 +1670,7 @@ impl PersistentEnv {
             log::debug!(
                 "in-process module '{}' not found in registry; alias rewrite: {:?}",
                 name,
-                self.view.alias_prefix_rewrites.get(name)
+                self.alias_prefix_rewrites.get(name)
             );
             return None;
         }
@@ -1739,8 +1728,8 @@ impl PersistentEnv {
         let (signature, fallback_pers) = self.typecheck_source_signature(&source_path, ctx)?;
 
         // Merge any modules the fallback discovered
-        self.view_mut().alias_prefix_rewrites
-            .extend_missing(fallback_pers.view.alias_prefix_rewrites.local_clone());
+        self.alias_prefix_rewrites
+            .extend_missing(fallback_pers.alias_prefix_rewrites.local_clone());
         let fallback_entries = fallback_pers
             .cache
             .lock()
@@ -1986,8 +1975,8 @@ impl PersistentEnv {
     /// `resolve_module_source_path`, `module_cmj_is_pure`, and runtime
     /// detection can resolve from memory instead of probing disk.
     pub fn register_in_memory_module(&mut self, name: &str, info: InMemoryModuleInfo) {
-        self.view_mut().hidden_modules.remove(name);
-        self.view_mut().in_memory_module_overrides
+        self.hidden_modules.remove(name);
+        self.in_memory_module_overrides
             .insert(name.to_string(), info);
     }
 
@@ -2010,7 +1999,7 @@ impl PersistentEnv {
             source_filename.to_string(),
             ctx,
         );
-        self.view_mut().hidden_modules.remove(name);
+        self.hidden_modules.remove(name);
         self.cache_insert(name.to_string(), Some(Arc::new(ps)));
         // Invalidate any cached renamed sig so it gets re-derived
         Arc::make_mut(&mut self.renamed_sig_cache).remove(name);
@@ -2026,7 +2015,7 @@ impl PersistentEnv {
     pub fn unregister_in_memory_signature(&mut self, name: &str) {
         self.cache_remove(name);
         Arc::make_mut(&mut self.renamed_sig_cache).remove(name);
-        self.view_mut().hidden_modules.insert(name.to_string());
+        self.hidden_modules.insert(name.to_string());
     }
 
     /// Register a namespace module's alias signature directly into the cache
@@ -2069,14 +2058,14 @@ impl PersistentEnv {
 
         // Record alias rewrites (e.g., "Foo-MyApp" → Pdot(Pident("MyApp"), "Foo"))
         let module_path = Path::Pident(Ident::create_persistent(namespace_name));
-        collect_alias_rewrites(&sig_items, &module_path, &mut self.view_mut().alias_prefix_rewrites);
+        collect_alias_rewrites(&sig_items, &module_path, &mut self.alias_prefix_rewrites);
 
         let ps = PersStruct {
             ps_name: namespace_name.to_string(),
             ps_sig: Arc::new(sig_items),
             ps_filename: format!("{}.mlmap", namespace_name),
         };
-        self.view_mut().hidden_modules.remove(namespace_name);
+        self.hidden_modules.remove(namespace_name);
         self.cache_insert(namespace_name.to_string(), Some(Arc::new(ps)));
         Arc::make_mut(&mut self.renamed_sig_cache).remove(namespace_name);
     }
@@ -2173,7 +2162,7 @@ mod cmj_export_tests {
         env.set_in_process_mode(true);
         env.set_nopervasives(true);
         env.add_load_path(load_path);
-        env.view_mut().source_fallback_path_overrides
+        env.source_fallback_path_overrides
             .insert("Foo".to_string(), source_path);
 
         let loaded = env
@@ -6461,248 +6450,5 @@ fn add_signature_to_env_with_options(
             opened_module_components,
             opened_modtypes,
         );
-    }
-}
-
-#[cfg(test)]
-mod resolution_view_tests {
-    use super::*;
-    use crate::context::IdGenerator;
-
-    #[test]
-    fn cloned_views_share_reads_but_isolate_every_owned_overlay() {
-        let mut original = PersistentEnv::new();
-        original.set_compiling_module(Some("Original".to_string()));
-        original.register_in_memory_module(
-            "Original",
-            InMemoryModuleInfo::new(PathBuf::from("original.res"), true, HashMap::new(), false),
-        );
-        original
-            .view_mut()
-            .source_fallback_path_overrides
-            .insert("Source".to_string(), PathBuf::from("source.res"));
-        original
-            .view_mut()
-            .hidden_modules
-            .insert("Hidden".to_string());
-        original
-            .view_mut()
-            .prepared_cached_alias_rewrites
-            .insert("Prepared".to_string());
-        original.view_mut().alias_prefix_rewrites.insert_if_absent(
-            "Backing".to_string(),
-            Path::pident(Ident::create_persistent("Selected")),
-        );
-        let mut query = original.clone();
-        assert!(Arc::ptr_eq(&original.view, &query.view));
-        assert!(query.is_compiling_module("Original"));
-        assert!(Arc::ptr_eq(&original.view, &query.view));
-
-        query.set_compiling_module(Some("Query".to_string()));
-        query.view_mut().source_fallback_path_overrides.clear();
-        query.view_mut().in_memory_module_overrides.clear();
-        query.view_mut().hidden_modules.clear();
-        query.view_mut().prepared_cached_alias_rewrites.clear();
-        query.view_mut().alias_prefix_rewrites.local.clear();
-        assert!(!Arc::ptr_eq(&original.view, &query.view));
-        assert!(original.is_compiling_module("Original"));
-        assert_eq!(original.view.source_fallback_path_overrides.len(), 1);
-        assert_eq!(original.view.in_memory_module_overrides.len(), 1);
-        assert!(original.view.hidden_modules.contains("Hidden"));
-        assert!(
-            original
-                .view
-                .prepared_cached_alias_rewrites
-                .contains("Prepared")
-        );
-        assert!(original.view.alias_prefix_rewrites.get("Backing").is_some());
-        // Existing persistent cache, diagnostics and CRC identities stay shared.
-        assert!(Arc::ptr_eq(&original.cache, &query.cache));
-        assert!(Arc::ptr_eq(&original.last_error, &query.last_error));
-        assert!(Arc::ptr_eq(&original.crc_units, &query.crc_units));
-    }
-
-    #[test]
-    fn warm_preparation_keeps_view_shared_and_cold_preparation_stays_private() {
-        let ctx = TypeContext::new(Arc::new(IdGenerator::new()));
-        let mut original = PersistentEnv::new();
-        original.register_in_memory_signature("M", vec![], "M.res", &ctx);
-        let ps = original
-            .find_pers_struct("M", &ctx)
-            .expect("registered module");
-        let mut warm = original.clone();
-        warm.prepare_cached_pers_struct("M", &ps, &ctx);
-        assert!(Arc::ptr_eq(&original.view, &warm.view));
-        let mut cold = original.clone();
-        cold.prepare_cached_pers_struct("Other", &ps, &ctx);
-        assert!(!Arc::ptr_eq(&original.view, &cold.view));
-        assert!(
-            !original
-                .view
-                .prepared_cached_alias_rewrites
-                .contains("Other")
-        );
-        assert!(cold.view.prepared_cached_alias_rewrites.contains("Other"));
-    }
-
-    #[test]
-    fn registration_and_hiding_detach_on_their_first_write() {
-        let mut original = PersistentEnv::new();
-        original.register_in_memory_module(
-            "M",
-            InMemoryModuleInfo::new(PathBuf::from("M.res"), true, HashMap::new(), false),
-        );
-        let mut registered = original.clone();
-        registered.register_in_memory_module(
-            "N",
-            InMemoryModuleInfo::new(PathBuf::from("N.res"), false, HashMap::new(), false),
-        );
-        assert!(!Arc::ptr_eq(&original.view, &registered.view));
-        assert!(original.in_memory_info("N").is_none());
-        assert!(registered.in_memory_info("N").is_some());
-        let mut hidden = original.clone();
-        hidden.unregister_in_memory_signature("M");
-        assert!(!Arc::ptr_eq(&original.view, &hidden.view));
-        assert!(original.in_memory_info("M").is_some());
-        assert!(hidden.in_memory_info("M").is_none());
-        assert!(Arc::ptr_eq(&original.cache, &hidden.cache));
-        assert!(Arc::ptr_eq(&original.last_error, &registered.last_error));
-        assert!(Arc::ptr_eq(&original.crc_units, &registered.crc_units));
-    }
-
-    #[test]
-    fn portable_override_first_write_keeps_backing_graph_shared() {
-        let portable = Arc::new(PortablePersStruct {
-            ps_name: "Portable".to_string(),
-            ps_filename: "Portable.res".to_string(),
-            ps_sig: vec![],
-            raw_ps_sig: None,
-            cmi_longident_names: vec![],
-            type_graph: portable_types::PortableTypeGraph {
-                entries: vec![],
-                variant_layouts: vec![],
-            },
-            raw_type_graph: None,
-            fingerprint: 0,
-        });
-        let mut original = PersistentEnv::new();
-        original
-            .view_mut()
-            .portable_cache_overrides
-            .insert("Portable".to_string(), portable.clone());
-        let mut query = original.clone();
-        query
-            .view_mut()
-            .portable_cache_overrides
-            .insert("Other".to_string(), portable.clone());
-        assert!(!Arc::ptr_eq(&original.view, &query.view));
-        assert!(!original.view.portable_cache_overrides.contains_key("Other"));
-        assert!(Arc::ptr_eq(
-            &original.view.portable_cache_overrides["Portable"],
-            &query.view.portable_cache_overrides["Portable"]
-        ));
-        assert!(Arc::ptr_eq(
-            &portable,
-            &query.view.portable_cache_overrides["Other"]
-        ));
-    }
-
-    #[test]
-    fn source_fallback_resets_private_preparation_and_merges_real_aliases() {
-        let dir = tempfile::tempdir().expect("fixture directory");
-        let leaf = dir.path().join("Leaf.res");
-        let backing = dir.path().join("Backing.res");
-        let unit = dir.path().join("AliasUnit.res");
-        std::fs::write(&leaf, "let value = 1\n").unwrap();
-        std::fs::write(&backing, "module Child = Leaf\n").unwrap();
-        std::fs::write(
-            &unit,
-            "module Alias = Backing.Child\nlet value = Alias.value\n",
-        )
-        .unwrap();
-        let mut original = PersistentEnv::new();
-        original.set_in_process_mode(true);
-        original.set_nopervasives(true);
-        for (name, path) in [
-            ("Leaf", leaf),
-            ("Backing", backing),
-            ("AliasUnit", unit.clone()),
-        ] {
-            original
-                .view_mut()
-                .source_fallback_path_overrides
-                .insert(name.to_string(), path);
-        }
-        original
-            .view_mut()
-            .prepared_cached_alias_rewrites
-            .insert("AlreadyPrepared".to_string());
-        original.cache_insert("Cycle".to_string(), None);
-        let first = original.clone();
-        let second = original.clone();
-        let ctx1 = TypeContext::new(Arc::new(IdGenerator::new()));
-        let ctx2 = TypeContext::new(Arc::new(IdGenerator::new()));
-        let (sig1, fallback1) = first
-            .typecheck_source_signature(&unit, &ctx1)
-            .expect("first fallback");
-        let (sig2, fallback2) = second
-            .typecheck_source_signature(&unit, &ctx2)
-            .expect("second fallback");
-        assert_eq!(sig1.len(), sig2.len());
-        assert!(
-            sig1.iter()
-                .any(|item| matches!(item,SignatureItem::SigModule(id,_,_) if id.name()=="Alias"))
-        );
-        assert!(!Arc::ptr_eq(&first.cache, &fallback1.cache));
-        assert!(!Arc::ptr_eq(&fallback1.cache, &fallback2.cache));
-        for fallback in [&fallback1, &fallback2] {
-            assert_eq!(
-                fallback.source_fallback_depth,
-                original.source_fallback_depth + 1
-            );
-            {
-                let cache = fallback.cache.lock().unwrap();
-                assert!(matches!(cache.get("Cycle"), Some(None)));
-            }
-            assert!(
-                !fallback
-                    .view
-                    .prepared_cached_alias_rewrites
-                    .contains("AlreadyPrepared")
-            );
-        }
-        assert!(
-            original
-                .view
-                .prepared_cached_alias_rewrites
-                .contains("AlreadyPrepared")
-        );
-        assert!(fallback1.view.alias_prefix_rewrites.get("Leaf").is_some());
-        assert!(fallback2.view.alias_prefix_rewrites.get("Leaf").is_some());
-        assert!(original.view.alias_prefix_rewrites.get("Leaf").is_none());
-        assert!(!original.cache_contains_key("Leaf"));
-        assert!(Arc::ptr_eq(&original.view, &first.view));
-        assert!(Arc::ptr_eq(&original.view, &second.view));
-
-        // Neither direct fallback populated the parent cache with type nodes.
-        // The merge uses a third context only while that cache is still empty
-        // apart from its cycle placeholder; no cross-context handles are read.
-        {
-            let cache = original.cache.lock().unwrap();
-            assert_eq!(cache.len(), 1);
-            assert!(matches!(cache.get("Cycle"), Some(None)));
-        }
-        let ctx3 = TypeContext::new(Arc::new(IdGenerator::new()));
-        let mut merged = original.clone();
-        let loaded = merged
-            .load_module_from_source_path_fallback("AliasUnit", &ctx3)
-            .expect("merge fallback");
-        assert_eq!(loaded.ps_name, "AliasUnit");
-        assert!(merged.view.alias_prefix_rewrites.get("Leaf").is_some());
-        assert!(original.view.alias_prefix_rewrites.get("Leaf").is_none());
-        assert!(Arc::ptr_eq(&original.cache, &merged.cache));
-        assert!(original.cache_contains_key("Leaf"));
-        assert!(Arc::ptr_eq(&original.last_error, &merged.last_error));
-        assert!(Arc::ptr_eq(&original.crc_units, &merged.crc_units));
     }
 }

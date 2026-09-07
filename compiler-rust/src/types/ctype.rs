@@ -476,13 +476,13 @@ fn is_instantiable(env: &Env, path: &Path) -> bool {
     }
 }
 
-pub(crate) fn lookup_type_decl_for_path<'a>(
+fn lookup_type_decl_for_path<'a>(
     ctx: &'a TypeContext,
     env: &'a Env,
     path: &Path,
-) -> Option<super::decl::TypeDeclarationRef<'a>> {
+) -> Option<std::borrow::Cow<'a, super::decl::TypeDeclaration>> {
     if let Some(decl) = env.find_local_constraint(path) {
-        return Some(super::decl::TypeDeclarationRef::Borrowed(decl));
+        return Some(std::borrow::Cow::Borrowed(decl));
     }
 
     // Try direct env lookup. For qualified paths, only accept exact
@@ -501,7 +501,7 @@ pub(crate) fn lookup_type_decl_for_path<'a>(
                 .is_some_and(|decl_path| decl_path.same(path)),
         };
         if exact_lookup {
-            return Some(super::decl::TypeDeclarationRef::Borrowed(decl));
+            return Some(std::borrow::Cow::Borrowed(decl));
         }
     }
 
@@ -511,11 +511,11 @@ pub(crate) fn lookup_type_decl_for_path<'a>(
     // persistent structures. Prefer the env/component path here so lookups like
     // `Js.Types.tagged_t` do not eagerly read `Js.cmi`.
     if let Some(decl) = resolve_type_through_env(ctx, env, path, true) {
-        return Some(decl);
+        return Some(std::borrow::Cow::Owned(decl));
     }
 
     if let Some(decl) = resolve_type_through_modules(ctx, path) {
-        return Some(super::decl::TypeDeclarationRef::owned(decl));
+        return Some(std::borrow::Cow::Owned(decl));
     }
 
     None
@@ -526,7 +526,7 @@ pub(crate) fn lookup_type_decl_for_path_pub(
     env: &Env,
     path: &Path,
 ) -> Option<super::decl::TypeDeclaration> {
-    lookup_type_decl_for_path(ctx, env, path).map(super::decl::TypeDeclarationRef::into_owned)
+    lookup_type_decl_for_path(ctx, env, path).map(std::borrow::Cow::into_owned)
 }
 
 fn get_level(ctx: &TypeContext, env: &Env, path: &Path) -> i32 {
@@ -2372,7 +2372,7 @@ fn resolve_type_item_through_env<'a>(
     env: &super::env::Env,
     path: &Path,
     strengthen_alias_types: bool,
-) -> Option<(crate::ident::Ident, super::decl::TypeDeclarationRef<'a>)> {
+) -> Option<(crate::ident::Ident, super::decl::TypeDeclaration)> {
     let (module_path, type_name) = match path {
         Path::Pdot(parent, name, _) => (parent.as_ref(), name.as_str()),
         _ => return None,
@@ -2391,7 +2391,7 @@ fn resolve_type_item_through_env<'a>(
         // `lookup_type_in_resolved_path` already reads from the cached
         // env_lazy-qualified module view. Keep that declaration graph shared
         // instead of re-copying it on every lookup.
-        let resolved_decl = super::decl::TypeDeclarationRef::Shared(decl);
+        let resolved_decl = (*decl).clone();
         // OCaml compiler/ml/env.ml:1438-1444 scrapes `Mty_alias` by looking
         // up the target module with `path`, compiler/ml/mtype.ml:55-70 then
         // strengthens abstract types to that alias target, and
@@ -2443,10 +2443,7 @@ fn resolve_type_item_through_env<'a>(
                 ) {
                     target_decl.type_private = PrivateFlag::Public;
                 }
-                return Some((
-                    id.clone(),
-                    super::decl::TypeDeclarationRef::owned(target_decl),
-                ));
+                return Some((id.clone(), target_decl));
             }
             let raw_module_path = alias_target_for_strengthening
                 .as_ref()
@@ -2454,20 +2451,13 @@ fn resolve_type_item_through_env<'a>(
             if let Some((raw_id, raw_decl)) =
                 lookup_raw_module_sig_type(ctx, env, raw_module_path, type_name)
             {
-                return Some((raw_id, super::decl::TypeDeclarationRef::owned(raw_decl)));
+                return Some((raw_id, raw_decl));
             }
         }
         if let Some(target_path) = alias_target_for_strengthening.as_ref() {
             return Some((
                 id.clone(),
-                super::decl::TypeDeclarationRef::owned(
-                    strengthen_type_decl_for_module_access_path(
-                        ctx,
-                        target_path,
-                        &id,
-                        &resolved_decl,
-                    ),
-                ),
+                strengthen_type_decl_for_module_access_path(ctx, target_path, &id, &resolved_decl),
             ));
         }
         return Some((id, resolved_decl));
@@ -2480,7 +2470,6 @@ fn resolve_type_item_through_env<'a>(
     // item. Keep that item id here; allocating a fresh `t` would advance the
     // global stamp clock at a lookup point where OCaml only inspects.
     resolve_type_item_through_modules(ctx, path)
-        .map(|(id, decl)| (id, super::decl::TypeDeclarationRef::owned(decl)))
 }
 
 fn resolve_type_through_env<'a>(
@@ -2488,7 +2477,7 @@ fn resolve_type_through_env<'a>(
     env: &super::env::Env,
     path: &Path,
     strengthen_alias_types: bool,
-) -> Option<super::decl::TypeDeclarationRef<'a>> {
+) -> Option<super::decl::TypeDeclaration> {
     resolve_type_item_through_env(ctx, env, path, strengthen_alias_types).map(|(_, decl)| decl)
 }
 
@@ -11896,107 +11885,5 @@ mod tests {
             &*ctx.get_desc(original_manifest),
             TypeDesc::Tconstr { path, .. } if matches!(path, crate::types::Path::Pident(id) if id.name() == "u")
         ));
-    }
-
-    #[test]
-    fn ownership_lookup_keeps_cached_identity_and_owned_mutation_is_private() {
-        use crate::types::decl::TypeDeclarationRef;
-        let ctx = TypeContext::new(std::sync::Arc::new(IdGenerator::new()));
-        let env = Env::empty();
-        let parent = Path::pident(Ident::create_persistent("Ownership"));
-        let path = Path::pdot(parent.clone(), "t");
-        let manifest = ctx.new_generic_var(None);
-        ctx.register_raw_module_sig(
-            "Ownership",
-            std::sync::Arc::new(vec![SignatureItem::SigType(
-                Ident::create_local("t"),
-                manifest_decl(manifest, Some(path.clone())),
-                RecStatus::TrecNot,
-            )]),
-        );
-        let before = ctx.type_expr_count();
-        let first = lookup_type_decl_for_path(&ctx, &env, &path).expect("cold lookup");
-        let second = lookup_type_decl_for_path(&ctx, &env, &path).expect("warm lookup");
-        match (&first, &second) {
-            (TypeDeclarationRef::Shared(a), TypeDeclarationRef::Shared(b)) => {
-                assert!(std::sync::Arc::ptr_eq(a, b))
-            }
-            _ => panic!("persistent lookup should retain its cached declaration"),
-        }
-        assert_eq!(first.type_manifest, Some(manifest));
-        assert_eq!(ctx.type_expr_count(), before);
-        let mut owned = second.into_owned();
-        owned.type_private = PrivateFlag::Private;
-        owned.type_params.push(manifest);
-        owned.type_manifest = None;
-        assert_eq!(first.type_private, PrivateFlag::Public);
-        assert!(first.type_params.is_empty());
-        assert_eq!(first.type_manifest, Some(manifest));
-        // The previous shallow container clone also shared TypeExprRef nodes.
-        // Keep that sharing while independently owning writable metadata.
-        assert_eq!(owned.type_params[0], manifest);
-        ctx.set_desc(manifest, TypeDesc::Tvar(Some("shared".to_string())));
-        assert!(
-            matches!(&*ctx.get_desc(first.type_manifest.unwrap()), TypeDesc::Tvar(Some(name)) if name == "shared")
-        );
-    }
-
-    #[test]
-    fn ownership_probe_does_not_publish_and_live_result_allows_recursive_lookup() {
-        let ctx = TypeContext::new(std::sync::Arc::new(IdGenerator::new()));
-        let env = Env::empty();
-        let parent = Path::pident(Ident::create_persistent("ProbeOwnership"));
-        let manifest = ctx.new_generic_var(None);
-        ctx.register_raw_module_sig(
-            "ProbeOwnership",
-            std::sync::Arc::new(vec![SignatureItem::SigType(
-                Ident::create_local("t"),
-                manifest_decl(manifest, None),
-                RecStatus::TrecNot,
-            )]),
-        );
-        let mut pers = None;
-        let probe = super::super::typecore::lookup_type_in_resolved_path_for_probe(
-            &parent, "t", &env, &mut pers, &ctx,
-        )
-        .expect("probe");
-        assert!(
-            ctx.find_resolved_module_type(env.id(), &parent, "t")
-                .is_none()
-        );
-        let path = Path::pdot(parent.clone(), "t");
-        let first = lookup_type_decl_for_path(&ctx, &env, &path).expect("real lookup");
-        assert!(
-            ctx.find_resolved_module_type(env.id(), &parent, "t")
-                .is_some()
-        );
-        let second = lookup_type_decl_for_path(&ctx, &env, &path)
-            .expect("lookup while previous result is live");
-        assert_eq!(first.type_manifest, second.type_manifest);
-        assert_eq!(probe.2.type_manifest, first.type_manifest);
-    }
-
-    #[test]
-    fn ownership_into_owned_moves_unique_storage_and_copies_shared_containers() {
-        use crate::types::decl::TypeDeclarationRef;
-        let ctx = TypeContext::new(std::sync::Arc::new(IdGenerator::new()));
-        let manifest = ctx.new_generic_var(None);
-        let mut decl = manifest_decl(manifest, None);
-        decl.type_params.push(manifest);
-        let data = decl.type_params.as_ptr();
-        let unique = TypeDeclarationRef::Shared(std::sync::Arc::new(decl)).into_owned();
-        assert_eq!(data, unique.type_params.as_ptr());
-        let shared = std::sync::Arc::new(unique);
-        let mut copied = TypeDeclarationRef::Shared(shared.clone()).into_owned();
-        assert_ne!(shared.type_params.as_ptr(), copied.type_params.as_ptr());
-        assert_eq!(shared.type_params, copied.type_params);
-        copied.type_params.clear();
-        assert_eq!(shared.type_params, vec![manifest]);
-        let borrowed = TypeDeclarationRef::Borrowed(&shared).into_owned();
-        assert_ne!(shared.type_params.as_ptr(), borrowed.type_params.as_ptr());
-        let data = borrowed.type_params.as_ptr();
-        let moved = TypeDeclarationRef::owned(borrowed).into_owned();
-        assert_eq!(data, moved.type_params.as_ptr());
-        assert!(std::mem::size_of::<TypeDeclarationRef<'_>>() <= 16);
     }
 }

@@ -6872,7 +6872,7 @@ fn get_variant_constructors_from_env(
         // declaration metadata (compiler/ml/parmatch.ml:975-984). The helper
         // below is Rust's Env.find_type-equivalent, so do not require its
         // returned `type_path` to be textually identical to the query.
-        let fallback_decl = ctype::lookup_type_decl_for_path(ctx_ref, env, path);
+        let fallback_decl = ctype::lookup_type_decl_for_path_pub(ctx_ref, env, path);
 
         if let Some(decl) = env_decl {
             match &decl.type_kind {
