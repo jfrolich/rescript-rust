@@ -37,12 +37,33 @@ Update the existing PR with the design, implementation, correctness evidence and
 
 ## Evidence checkpoint and final selection gate
 
-The source audit now covers17 bounded review/reconciliation areas, including active bootstrap and Lambda helpers found by fresh coverage review. Three independent checking passes validated coverage/schema, ownership/native semantics and materiality/ranking. Full reports, 27 conditional/deferred/correctness entries and the acceptance matrix remain in organization-controlled `simplify-and-speed` artifacts.
+The source audit now covers 17 bounded review/reconciliation areas, including active bootstrap and Lambda helpers found by fresh coverage review. Three independent checking passes validated coverage/schema, ownership/native semantics and materiality/ranking. Full reports, 27 conditional/deferred/correctness entries and the acceptance matrix remain in organization-controlled `simplify-and-speed` artifacts.
 
-All five current-main diagnostics completed once with the required output. Serial observations are typecheck8.402s, Raw/Lambda2.535s, optimization1.451s, parse1.983s and4.237s outside the phase timers. Parallel values are thread sums and sampling is late-biased. The prominent signature-copy family was checked against real ownership: portable, raw, freshened, GenType and publication views have simultaneous native users. Their logical copy counts do not authorize fusion/elision.
+All five current-main diagnostics completed once with the required output. Serial observations are typecheck 8.402s, Raw/Lambda 2.535s, optimization 1.451s, parse 1.983s and 4.237s outside the phase timers. Parallel values are thread sums and sampling is late-biased. The prominent signature-copy family was checked against real ownership: portable, raw, freshened, GenType and publication views have simultaneous native users. Their logical copy counts do not authorize fusion/elision.
 
 The first implementation shortlist is S02-1 unused position-content index removal; S10-1 producer-owned exports replacing Raw rediscovery; S07-2 single identifier owner replacing reconciliation-only state/scans. Before choosing, run exactly one targeted non-sampling serial release diagnostic in an instrumented archive. Count position-map operations and deterministic sampled map self-time without extrapolating it into a budget. Exactly time whole export/identifier reconciliation scans and visited nodes by module. Preserve allocation, force, output and input contracts; no new mutable global/TLS probe state.
 
 Choose one directly removable cost after migration risk. If export/identity scans are material, introduce the producer artifact first and migrate identity ownership only under its own proof. If those scans are negligible, remove the proven unused parser index first and judge its release effect by a fixed before/after comparison. No further broad profiling round, cache layering, or speculative unsafe representation rewrite is planned.
 
 Larger Env, copy-window, Parmatch and artifact-lifecycle designs remain a documented roadmap with strict prerequisites. They are not folded into this first implementation. Inclusion's depth-success cutoff and discarded arbitrary PPX output remain separate correctness investigations. No performance result closes those limitations. Main is untouched; implementation stays on this branch and PR.
+
+
+## Selected implementation: remove the unused position index
+
+The single targeted release diagnostic completed with the required 3,248 project modules, 107 runtime modules and exact 5,048-file output. Its sealed preregistration is `7b8cbf6e2da918d7e5f2fe318b0e536f1453e668c52fdf01eaaa4d8749cf77ae`. The parent independently checked source and binary hashes, input preservation, output manifests and the 18 protected originals. Evidence is in the organization-controlled `simplify-and-speed/removable-work` artifacts.
+
+Across project and runtime compilation, the probe observed:
+
+| Mechanism | Work observed | Instrumented time |
+|---|---:|---:|
+| Position-content index | 7,287,211 writes, 4,330,455 insertions, 2,956,756 existing-key writes | 7.188 ms across 121,967 sampled operations only |
+| Raw export rediscovery | 2,025,747 visited nodes | 24.371 ms |
+| Five identifier-reconciliation scans | 11,318,345 visited nodes | 66.675 ms |
+
+The sampled position time is not extrapolated. Tree timings include counters, and none of these values predicts the eventual clean-build improvement. The index maintained 6,255,731 capacity slots cumulatively across arenas, not simultaneously live memory. Export and identifier scans do not justify the larger ownership migrations as the first performance change.
+
+S02-1 is selected because every position-content index write maintains state with no repository consumer. The implementation deletes `PosKey`, `ParseArena.position_dedup`, its initialization and writes, and the unused `get_position_idx` / `push_position_dedup` methods. The experimental Rust library exposes these methods publicly, so their removal is an explicit Rust API change. Repository search does not establish that no external client exists. ReScript syntax and CLI behavior are unchanged.
+
+`push_position` will still record the filename and append exactly one fresh arena entry. `push_pos`, `PosIdx` reuse, position/location ordering, string identity and serialization remain unchanged. This follows the reference propagation in `compiler/syntax/src/res_parser.ml:65-95` and its lookahead restoration at `165-198`; content equality does not replace physical sharing.
+
+Add a regression test for equal-content `push_position` calls, mixed insertion APIs, stable sequential indices, shared position handles in locations, and filename preservation. Then build normal release compiler/Rewatch artifacts with no probe fields, run affected parser and full compiler parity gates, and preserve the exact candidate binaries. Finally preregister a fresh fixed main/candidate comparison with parallel and serial results separate. Existing failed gates remain disclosed. The change is a candidate until correctness and performance validation finish; the one-second target remains unmet.
