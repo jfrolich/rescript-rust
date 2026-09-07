@@ -33,3 +33,16 @@ Implement the selected design on this branch in coherent signed commits, with te
 Preregister a fresh before/after release comparison with matched inputs and output verification, parallel performance primary and serial reported separately. Require fewer architectural concepts or less duplicated state/work as well as a credible runtime benefit. Reject a slower or inconclusive performance candidate rather than pushing it to main. A verified native correctness fix is evaluated separately and never hidden by a performance rollback.
 
 Update the existing PR with the design, implementation, correctness evidence and measured outcome. Do not merge without explicit user authorization. The one-second target remains a goal, not a promise from an unmeasured refactor.
+
+
+## Evidence checkpoint and final selection gate
+
+The source audit now covers17 bounded review/reconciliation areas, including active bootstrap and Lambda helpers found by fresh coverage review. Three independent checking passes validated coverage/schema, ownership/native semantics and materiality/ranking. Full reports, 27 conditional/deferred/correctness entries and the acceptance matrix remain in organization-controlled `simplify-and-speed` artifacts.
+
+All five current-main diagnostics completed once with the required output. Serial observations are typecheck8.402s, Raw/Lambda2.535s, optimization1.451s, parse1.983s and4.237s outside the phase timers. Parallel values are thread sums and sampling is late-biased. The prominent signature-copy family was checked against real ownership: portable, raw, freshened, GenType and publication views have simultaneous native users. Their logical copy counts do not authorize fusion/elision.
+
+The first implementation shortlist is S02-1 unused position-content index removal; S10-1 producer-owned exports replacing Raw rediscovery; S07-2 single identifier owner replacing reconciliation-only state/scans. Before choosing, run exactly one targeted non-sampling serial release diagnostic in an instrumented archive. Count position-map operations and deterministic sampled map self-time without extrapolating it into a budget. Exactly time whole export/identifier reconciliation scans and visited nodes by module. Preserve allocation, force, output and input contracts; no new mutable global/TLS probe state.
+
+Choose one directly removable cost after migration risk. If export/identity scans are material, introduce the producer artifact first and migrate identity ownership only under its own proof. If those scans are negligible, remove the proven unused parser index first and judge its release effect by a fixed before/after comparison. No further broad profiling round, cache layering, or speculative unsafe representation rewrite is planned.
+
+Larger Env, copy-window, Parmatch and artifact-lifecycle designs remain a documented roadmap with strict prerequisites. They are not folded into this first implementation. Inclusion's depth-success cutoff and discarded arbitrary PPX output remain separate correctness investigations. No performance result closes those limitations. Main is untouched; implementation stays on this branch and PR.
