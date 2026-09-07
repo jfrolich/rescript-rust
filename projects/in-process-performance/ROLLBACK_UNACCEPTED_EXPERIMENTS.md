@@ -1,5 +1,7 @@
 # Rollback of unaccepted performance experiments
 
+**Recommendation after fresh timing: do not merge this aggregate rollback.** It was 5.90% slower in parallel and 7.61% slower serially than current main, with identical JavaScript. Both variants preserve the identifier fix. See [the completed comparison](../compiler-rewrite/ROLLBACK_COMPARISON_RESULTS.md).
+
 Rollback PR: [jfrolich/rescript-rust#20](https://github.com/jfrolich/rescript-rust/pull/20), targeting `ocaml-to-rust-rewrite`.
 
 This branch removes three experimental compiler changes through new revert commits. It does not rewrite `ocaml-to-rust-rewrite`, merge a PR, or roll back the verified identifier-freshness fix.

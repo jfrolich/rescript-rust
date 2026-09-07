@@ -319,3 +319,10 @@ The 39/56 timing cohort stays closed. Earlier red gates remain unwaived. No new 
 ## Rollback proposal
 
 At the user's request, `revert-unaccepted-performance` removes the unaccepted Env ownership, TypeArg storage and hybrid-map restoration experiments while preserving the identifier-freshness fix. Release internal parity passes. Main has not been changed or rewritten by this rollback. Historical A is not an ancestor of main, so the earlier A/D comparison does not establish a main-branch regression. See [scope, source-equivalence check and validation](ROLLBACK_UNACCEPTED_EXPERIMENTS.md). No new performance result is claimed.
+
+
+## Fresh main-versus-rollback decision
+
+The user-requested fixed comparison completed 32 builds, eight pairs per worker mode, with identical output throughout. Current main averaged 4.7759s at w12 versus rollback's 5.0576s. The rollback penalty was 281.7ms, with a 95% paired t interval of 217.5–345.9ms. Serial means were 20.2464s and 21.7880s, a 1.5415s penalty with interval 1.3285–1.7546s. Rollback lost every pair in both modes.
+
+Keep current main; do not merge the aggregate rollback PR for performance. Both variants retain the identifier correctness fix. This is a fresh comparison against actual main, not historical A. Parent independently verified the records, outputs, statistics and final live input preservation. Main and PR merge state remain unchanged. See [results and supervision limitations](../compiler-rewrite/ROLLBACK_COMPARISON_RESULTS.md). No one-second claim or blanket acceptance of individual experiments follows.
