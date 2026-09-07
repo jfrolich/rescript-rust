@@ -423,9 +423,9 @@ impl SpiceCache {
 /// - Lightweight handles: indices are 4 bytes, cheap to copy/compare
 /// - Identity for marshalling: same index = same object
 ///
-/// This arena deduplicates positions by content - two positions with the same
-/// (file_name, line, bol, cnum) will get the same index. This matches OCaml's
-/// behavior where the same position captured at different times gets shared.
+/// Each position insertion gets a fresh index. Position identity is shared only
+/// when parser state or an AST node reuses an existing `PosIdx`, matching how
+/// OCaml propagates existing position values by reference.
 #[derive(Debug)]
 pub struct ParseArena {
     /// Arena of positions (returns PosIdx).
