@@ -2,7 +2,7 @@
 
 ## Starting point
 
-Keep main untouched and work on the existing feature branch and jfrolich/rescript-rust#20. Commit `1c02247de` undoes the rejected rollback on this branch. Compiler and Rewatch source again match main `d98b8b943`; no new optimization is implemented yet. The identifier-freshness fix stays intact.
+Keep main untouched and work on the existing feature branch and jfrolich/rescript-rust#20. Commit `1c02247de` undoes the rejected rollback on this branch. At that restoration checkpoint, compiler and Rewatch source matched main `d98b8b943`; the selected implementation and its later validation are recorded below. The identifier-freshness fix stays intact.
 
 The latest fixed comparison measured main at 4.7759s parallel and 20.2464s serial. Rolling back the three storage/ownership changes was slower in every pair. Historical A is a separate branch, not evidence that main regressed. Existing reports and failed attempts remain intact.
 
@@ -69,4 +69,4 @@ S02-1 is selected because every position-content index write maintains state wit
 Add a regression test for equal-content `push_position` calls, mixed insertion APIs, stable sequential indices, shared position handles in locations, and filename preservation. Then build normal release compiler/Rewatch artifacts with no probe fields, run affected parser and full compiler parity gates, and preserve the exact candidate binaries. Finally preregister a fresh fixed main/candidate comparison with parallel and serial results separate. Existing failed gates remain disclosed. The change is a candidate until correctness and performance validation finish; the one-second target remains unmet.
 
 
-The selected map removal and identity regression test are implemented. The focused release test passed, with 1 test run and 1,454 filtered out. The first test launch failed before Cargo started because the non-login PATH omitted Cargo; the corrected launch and both logs are retained in `position-index-validation`. Full release builds, parser/compiler parity and the fixed before/after comparison are still pending. No performance acceptance is claimed from this focused test.
+The selected map removal and identity regression test are implemented. The focused release test passed, with 1 test run and 1,454 filtered out. The first test launch failed before Cargo started because the non-login PATH omitted Cargo; the corrected launch and both logs are retained in `position-index-validation`. Exact-head release validation at `eba0277be` is complete: core gates passed, while syntax and legacy AST0 remain red and external native validation is blocked. The fresh comparison stopped at its initial clean/input-preservation gate, before any qualification or timed build. See [POSITION_INDEX_VALIDATION.md](POSITION_INDEX_VALIDATION.md) for the results, control provenance loss, and failed-freeze evidence. No performance acceptance is claimed.
