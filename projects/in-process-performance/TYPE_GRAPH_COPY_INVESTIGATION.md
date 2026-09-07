@@ -17,7 +17,7 @@ The Rust ownership mismatch is concrete:
 - `iter_type_expr` at `compiler-rust/src/types/btype.rs:298-368` releases the borrow by materializing owned payloads. It clones argument vectors, tuple vectors, constructor vectors, object-name vectors, polymorphic-variable vectors, package vectors, and a complete `RowDesc`.
 - `unify_types` at `compiler-rust/src/types/ctype.rs:5110-5847` needs selected owned fields before recursive mutation, but starts by cloning both complete descriptors. Some branches then clone payloads or the first descriptor again for failure restoration.
 
-The OCaml owner is different. `compiler/ml/btype.ml:255-278` matches the descriptor by reference and visits immediate children in place. `compiler/ml/ctype.ml:2270-2445` reads `t1'.desc` and `t2'.desc` directly, retaining only `d1` for the exact restoration boundary around `unify3`. `compiler/ml/ctype.ml:493-500` generalizes by borrowing the constructor abbreviation and then traversing immediate children. Native code does not construct read-only descriptor snapshots.
+The OCaml owner is different. `compiler/ml/btype.ml:255-278` matches the descriptor by reference and visits immediate children in place. `compiler/ml/ctype.ml:2175-2324` implements `unify3`: it reads `d1` and `d2` at lines 2178-2179, then restores `t1'.desc` in the failure handler at lines 2322-2324. `compiler/ml/ctype.ml:493-500` generalizes by borrowing the constructor abbreviation and then traversing immediate children. Native code does not construct read-only descriptor snapshots.
 
 A blanket borrowed accessor is not a valid Rust fix. Recursive callbacks can path-compress or mutate nodes, and holding a `RefCell` borrow across those calls can panic on cycles. The proposed mechanism must first copy only the stable handles and scalar fields required by the selected branch, release the borrow, and then recurse. Required fresh type copies and native rollback descriptors stay intact.
 
@@ -40,7 +40,7 @@ Retain a production change only if the diagnostic shows material read-only copy 
 
 - Match a borrowed descriptor once.
 - Copy only `TypeExprRef`, `AbbrevMemoRef`, flags, and branch-required labels or paths.
-- For generic graph walking, append child handles in native order while borrowed, then release the borrow before callbacks.
+- For immutable descriptor lists, copy only child handles in native order, then release the borrow before callbacks. Variant rows must remain staged: resolve each `row_field_repr` after prior callbacks, inspect `repr(row_more)` after all field callbacks, and call `row_more` only after `iter_row`, matching `compiler/ml/btype.ml:237-271`.
 - Keep the exact `d1` rollback copy where OCaml restores `t1'.desc` after failed unification.
 - Keep `CopyCache`, fresh generic-node allocation, row-copy markers, substitution windows, `repr` compression, and allocation order unchanged.
 
@@ -48,6 +48,6 @@ Do not add descriptor interning, `Rc` or `Arc` per type node, unsafe pointers, s
 
 ## Validation if the gate passes
 
-Add unit tests for cyclic links, recursive variants, diamonds, failed structural unification restoration, object fields, package arguments, and callback mutation after child collection. Then build release compiler and Rewatch binaries and run typedtree, raw Lambda, optimized Lambda, JavaScript, external JavaScript, and error parity with release artifacts. Existing red syntax and AST0 gates and the external native blocker remain unwaived.
+Add unit tests for cyclic links, recursive variants, diamonds, failed structural unification restoration, object fields, package arguments, and callback mutation. Include a discriminator where an earlier row callback mutates a later row field and `row_more`; the later resolution must observe that mutation. Then build release compiler and Rewatch binaries and run typedtree, raw Lambda, optimized Lambda, JavaScript, external JavaScript, and error parity with release artifacts. Existing red syntax and AST0 gates and the external native blocker remain unwaived.
 
 A successful candidate still requires a new sealed paired comparison against the immutable position-index candidate binaries. Parallel and serial cohorts stay separate, with the existing fixed Tella input and output safeguards. No old cohort can be pooled or rerun.
