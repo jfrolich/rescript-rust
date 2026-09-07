@@ -132,7 +132,7 @@ def prepare():
   shutil.copy2(p,D/'bin'/n);(D/'bin'/n).chmod(0o555)
  (D/'binary-hashes.json').write_text(json.dumps({n:{'original':m.sha(ORIG[n]),'copy':m.sha(D/'bin'/n)} for n in HASH},indent=2))
  heads={'main_checkout':cmd('git','-C',str(MAIN),'rev-parse','HEAD'),'rollback_worktree':cmd('git','-C',str(W),'rev-parse','HEAD'),'tella':cmd('git','-C',str(m.T),'rev-parse','HEAD'),'main_binary_source':'a59f271c7437b9b6f3568cab44b56851f079a07a','rollback_binary_source':'24875256e'}
- if heads['main_checkout']!='d98b8b9430045d40d08ed89dd75174b5669fa829' or heads['rollback_worktree']!='65a3f342f385580134aeb0e1a539e4db5032f2c5' or heads['tella']!='66a5edabdbfdbc5dd7496e59ee0573de2a2a1ffa':raise RuntimeError('head mismatch')
+ if heads['main_checkout']!='d98b8b9430045d40d08ed89dd75174b5669fa829' or heads['tella']!='66a5edabdbfdbc5dd7496e59ee0573de2a2a1ffa' or cmd('git','-C',str(W),'branch','--show-current')!='revert-unaccepted-performance' or subprocess.run(['git','-C',str(W),'merge-base','--is-ancestor','65a3f342f385580134aeb0e1a539e4db5032f2c5',heads['rollback_worktree']]).returncode!=0:raise RuntimeError('head or branch mismatch')
  old=json.loads((OLD/'backups.json').read_text());modified=cmd('git','-C',str(m.T),'diff','--name-only').splitlines()
  if len(old)!=18 or set(old)!=set(modified):raise RuntimeError('protected generated set mismatch')
  for rel,digest in old.items():
