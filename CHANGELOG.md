@@ -51,6 +51,8 @@
 
 #### :house: Internal
 
+- Revert unaccepted Rust compiler Env ownership and type-storage experiments while preserving the identifier-freshness fix. https://github.com/jfrolich/rescript-rust/pull/20
+
 - Give nominal variants one canonical runtime layout: compute their JavaScript representation once after typing each declaration, replace positional constructor tags with semantic runtime descriptors, and make construction, matching, coercion, printing, diagnostics, and GenType consume the stored representation instead of reinterpreting annotations. Pattern matching keeps occurrence-specific plans local without adding another Lambda or Lam expression form. https://github.com/rescript-lang/rescript/pull/8579
 - Sync the platform npm package's compiler binaries (`packages/@rescript/<platform>/bin`) via dune promotion on every `dune build`, instead of Makefile/CI copy steps that only ran when make did: a plain `dune build` can no longer leave `cli/*.js` and the test harnesses running a stale compiler. https://github.com/rescript-lang/rescript/pull/8560
 - Remove unused compiler IR definitions, modules, helpers, error variants, and Typedtree fields. https://github.com/rescript-lang/rescript/pull/8551 https://github.com/rescript-lang/rescript/pull/8555

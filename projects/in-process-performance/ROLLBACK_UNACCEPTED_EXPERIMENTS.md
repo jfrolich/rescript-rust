@@ -1,5 +1,7 @@
 # Rollback of unaccepted performance experiments
 
+Rollback PR: [jfrolich/rescript-rust#20](https://github.com/jfrolich/rescript-rust/pull/20), targeting `ocaml-to-rust-rewrite`.
+
 This branch removes three experimental compiler changes through new revert commits. It does not rewrite `ocaml-to-rust-rewrite`, merge a PR, or roll back the verified identifier-freshness fix.
 
 ## Scope
