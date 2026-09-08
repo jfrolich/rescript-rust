@@ -2,7 +2,7 @@
 
 ## Scope
 
-This investigation covers one boundary in the full-clean in-process build: the lifetime of one module from Rewatch dispatch through compiler return, signature publication, pre-JS handoff, JavaScript metadata publication, output writing, and completion. It will attribute work outside the named compiler phase timers and determine which part, if any, extends the observed parallel dependency tail.
+This investigation covers one boundary in the full-clean in-process build: module work from Rewatch dispatch through compiler return, signature publication, pre-JS handoff, JavaScript metadata publication, output writing, and completion. It measures work outside named compiler phase timers and determines which observed artifact boundary, if any, extends the parallel dependency tail. It is not a whole-AST lifetime or last-owner study.
 
 It does not change compiler semantics or scheduling policy. It does not assume the 4.237-second serial phase gap is destruction, I/O, locking, allocation, or removable work. It also does not treat idle slots as proof of a scheduler bug.
 
@@ -31,7 +31,7 @@ Pre-JS records will cover:
 - the returned driver's in-body elapsed time and the enclosing Rewatch call elapsed time;
 - Rewatch required-module derivation, pre-JS message send, coordinator receive, and JS dispatch/start.
 
-The difference between enclosing driver-call elapsed and returned in-body elapsed will be named `unclassified_call_residual`. It is not an exact destruction timer. It includes call entry/return, result construction, instrumentation, and implicit local drops. Instrumentation will not move drops or result-field construction to isolate this value.
+The difference between enclosing driver-call elapsed and returned in-body elapsed will be named `unclassified_call_residual`. It is not an exact destruction timer. It includes call entry/return, result construction, instrumentation, and implicit drops of call-local owners. Instrumentation will not move drops or result-field construction to isolate this value. Rewatch's stored-AST snapshot clones a map of `Arc` values; dropping that snapshot does not drop the `ParseArena` values still retained by `BuildCommandState`. Registry snapshots likewise are not established last owners. Those retained lifetimes and later build teardown are outside this window and remain unattributed. The moved lifecycle event/DAG buffers are explicitly dropped and timed after their post-compile flush. Concretely, `rewatch/src/build/build_types.rs:153-156` stores each parsed payload behind `Arc`, `BuildCommandState.stored_asts` owns the persistent table at `build_types.rs:233`, and `snapshot_stored_asts` clones that table at `build_types.rs:538-540`; the compile-local clone is created at `rewatch/src/build/compile.rs:1130`. The build API returns `BuildCommandState` from `rewatch/src/build.rs`, so the probe does not observe its last-owner teardown.
 
 JavaScript records will cover Rewatch setup, driver persistent-environment setup, JS compile, path checks, metadata-hook send, rendering plus explicit nonrecursive JS disposal, driver body/call elapsed, fallback publication if used, write, post-build, completion send, coordinator receive, and registry apply. The existing Lambda-optimization phase delta is nested inside JS compile and will never be added to it.
 
@@ -39,11 +39,11 @@ Only O(1) sizes already available from owners may be recorded, such as type aren
 
 ## Reconciliation and dependency analysis
 
-For every module, sequential child intervals must fit within their enclosing call interval. Nested named phase times remain annotations, not additive siblings. The analyzer will reject negative residuals, impossible timestamp order, missing release classification, duplicate terminal events, and child sums larger than their registered parent apart from a stated clock-resolution tolerance.
+For every module, non-overlapping child intervals must fit within their enclosing body interval with no tolerance. Nested named phase times remain annotations, not additive siblings. The analyzer rejects every negative numeric duration, impossible timestamp order, malformed/unknown/duplicate/missing fields or records, incomplete module sets, missing release/readiness classification, and child sums larger than their registered parent.
 
 The serial report will reconcile module lifecycle intervals with the global timing window without adding overlapping pre-JS, JS, and named phase totals. The parallel report will keep summed worker intervals separate from elapsed build time.
 
-Critical-path analysis will use actual signature dependency edges and the recorded `needed_modules` metadata edges. It will replay the observed release and dispatch rules. For each dependent it will separate artifact wait, coordinator handling, ready-queue delay, and worker-start delay. Removing a measured owner is worth considering only if the replay shows that owner lies on the w12 tail and its serial or parallel budget is large enough to justify a coherent refactor.
+Artifact-chain analysis uses actual signature dependency edges, recorded `needed_modules` metadata edges, and explicit scheduler-visible readiness batch endpoints. For each work item it separates ready-to-dispatch delay from dispatch-to-worker-start delay and reconstructs only the observed artifact-release blocker chain. It does not replay owner removal, model CPU/resource capacity, or claim a speedup. Source follow-up is warranted only for an observed budget of hundreds of milliseconds on the parallel artifact tail or seconds in serial aggregate; any production candidate still requires separate C/N benchmarking.
 
 ## Implementation gate
 
