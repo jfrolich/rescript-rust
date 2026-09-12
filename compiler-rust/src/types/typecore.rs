@@ -35,7 +35,7 @@ use crate::parser::ast::{
     Pattern as ParsedPattern, PexpApply, RecFlag,
 };
 use crate::parser::longident::Longident;
-use crate::types::type_expr::TypeExprRefSet;
+use crate::types::type_expr::{StoredTypeDesc, TypeExprRefSet};
 use crate::types::typedtree::{
     ApplyArg, ArrowArg, Constant, EnvRef, ExpExtra, Expression, ExpressionDesc, FunctionParam,
     ModuleExpr, ModuleExprDesc, ModuleType, ModuleTypeConstraint, ModuleTypeDesc, PatExtra,
@@ -8594,7 +8594,7 @@ fn lower_args_manifest_needs_component_force(
     let manifest = ctx.repr(manifest);
     let desc = ctx.borrow_desc(manifest);
     match &*desc {
-        TypeDesc::Tconstr { path, args, .. } => {
+        StoredTypeDesc::Tconstr { path, args, .. } => {
             let path = path.clone();
             let has_args = !args.is_empty();
             drop(desc);
@@ -8670,7 +8670,7 @@ fn force_lower_args_type_lookup_paths(
 
         let desc = ctx.borrow_desc(ty);
         match &*desc {
-            TypeDesc::Tconstr { path, args, .. } => {
+            StoredTypeDesc::Tconstr { path, args, .. } => {
                 let path = path.clone();
                 let args = args.clone();
                 drop(desc);
@@ -8684,23 +8684,23 @@ fn force_lower_args_type_lookup_paths(
                     visit_manifest(tctx, env, arg, seen);
                 }
             }
-            TypeDesc::Tarrow { args, ret } => {
-                let args = args.clone();
+            StoredTypeDesc::Tarrow { args, ret } => {
+                let args = *args;
                 let ret = *ret;
                 drop(desc);
-                for arg in args {
-                    visit_manifest(tctx, env, arg.typ, seen);
+                for typ in ctx.type_arg_refs(args) {
+                    visit_manifest(tctx, env, typ, seen);
                 }
                 visit_manifest(tctx, env, ret, seen);
             }
-            TypeDesc::Ttuple(items) => {
+            StoredTypeDesc::Ttuple(items) => {
                 let items = items.clone();
                 drop(desc);
                 for item in items {
                     visit_manifest(tctx, env, item, seen);
                 }
             }
-            TypeDesc::Tobject { fields, name } => {
+            StoredTypeDesc::Tobject { fields, name } => {
                 let fields = *fields;
                 let name_args = name.as_ref().map(|(_, args)| args.clone());
                 drop(desc);
@@ -8711,19 +8711,19 @@ fn force_lower_args_type_lookup_paths(
                     }
                 }
             }
-            TypeDesc::Tfield { typ, rest, .. } => {
+            StoredTypeDesc::Tfield { typ, rest, .. } => {
                 let typ = *typ;
                 let rest = *rest;
                 drop(desc);
                 visit_manifest(tctx, env, typ, seen);
                 visit_manifest(tctx, env, rest, seen);
             }
-            TypeDesc::Tlink(inner) | TypeDesc::Tsubst(inner) => {
+            StoredTypeDesc::Tlink(inner) | StoredTypeDesc::Tsubst(inner) => {
                 let inner = *inner;
                 drop(desc);
                 visit_manifest(tctx, env, inner, seen);
             }
-            TypeDesc::Tvariant(row) => {
+            StoredTypeDesc::Tvariant(row) => {
                 let row = row.clone();
                 drop(desc);
                 if let Some((_, args)) = &row.row_name {
@@ -8744,7 +8744,7 @@ fn force_lower_args_type_lookup_paths(
                     }
                 }
             }
-            TypeDesc::Tpoly { body, vars } => {
+            StoredTypeDesc::Tpoly { body, vars } => {
                 let body = *body;
                 let vars = vars.clone();
                 drop(desc);
@@ -8753,14 +8753,14 @@ fn force_lower_args_type_lookup_paths(
                     visit_manifest(tctx, env, var, seen);
                 }
             }
-            TypeDesc::Tpackage { args, .. } => {
+            StoredTypeDesc::Tpackage { args, .. } => {
                 let args = args.clone();
                 drop(desc);
                 for arg in args {
                     visit_manifest(tctx, env, arg, seen);
                 }
             }
-            TypeDesc::Tvar(_) | TypeDesc::Tunivar(_) | TypeDesc::Tnil => {}
+            StoredTypeDesc::Tvar(_) | StoredTypeDesc::Tunivar(_) | StoredTypeDesc::Tnil => {}
         }
     }
 
@@ -21710,24 +21710,24 @@ fn check_inlined_record_escape(
     {
         let desc = ctx.borrow_desc(ty);
         match (recarg, &*desc) {
-            (RecArg::Rejected, TypeDesc::Tconstr { path, .. }) => {
+            (RecArg::Rejected, StoredTypeDesc::Tconstr { path, .. }) => {
                 if path.is_constructor_typath() {
                     return Err(TypeCoreError::InlinedRecordEscape { loc });
                 }
                 return Ok(());
             }
-            (RecArg::Rejected, TypeDesc::Tlink(_)) => {}
+            (RecArg::Rejected, StoredTypeDesc::Tlink(_)) => {}
             (RecArg::Rejected, _) => return Ok(()),
-            (RecArg::Required, TypeDesc::Tconstr { path, .. }) => {
+            (RecArg::Required, StoredTypeDesc::Tconstr { path, .. }) => {
                 if !path.is_constructor_typath() {
                     return Err(TypeCoreError::InlinedRecordEscape { loc });
                 }
                 return Ok(());
             }
-            (RecArg::Required, TypeDesc::Tvar(_)) => {
+            (RecArg::Required, StoredTypeDesc::Tvar(_)) => {
                 return Err(TypeCoreError::InlinedRecordEscape { loc });
             }
-            (RecArg::Required, TypeDesc::Tlink(_)) => {}
+            (RecArg::Required, StoredTypeDesc::Tlink(_)) => {}
             (RecArg::Required, _) => return Ok(()),
             (RecArg::Allowed, _) => return Ok(()),
         }
@@ -21736,14 +21736,14 @@ fn check_inlined_record_escape(
     let repr = ctx.repr(ty);
     let desc = ctx.borrow_desc(repr);
     let is_recarg = match &*desc {
-        TypeDesc::Tconstr { path, .. } => path.is_constructor_typath(),
+        StoredTypeDesc::Tconstr { path, .. } => path.is_constructor_typath(),
         _ => false,
     };
     let escapes = match (is_recarg, recarg, &*desc) {
         (_, RecArg::Allowed, _) => false,
         (true, RecArg::Required, _) | (false, RecArg::Rejected, _) => false,
         (true, RecArg::Rejected, _)
-        | (false, RecArg::Required, TypeDesc::Tvar(_) | TypeDesc::Tconstr { .. }) => true,
+        | (false, RecArg::Required, StoredTypeDesc::Tvar(_) | StoredTypeDesc::Tconstr { .. }) => true,
         (false, RecArg::Required, _) => false,
     };
 
@@ -25003,7 +25003,7 @@ where
     // ahead of OCaml's typedtree stamp stream when copying shared row variables.
     {
         let desc = ctx.borrow_desc(ty);
-        if matches!(*desc, TypeDesc::Tvar(_) | TypeDesc::Tunivar(_)) {
+        if matches!(*desc, StoredTypeDesc::Tvar(_) | StoredTypeDesc::Tunivar(_)) {
             drop(desc);
             cache.insert(ty, ty);
             return ty;
@@ -25018,21 +25018,21 @@ where
     let plan = {
         let desc = ctx.borrow_desc(ty);
         match &*desc {
-            TypeDesc::Tvar(name) => CopyTypeExprPlan::Tvar(name.clone()),
-            TypeDesc::Tarrow { args, ret } => CopyTypeExprPlan::Tarrow {
-                args: args.clone(),
+            StoredTypeDesc::Tvar(name) => CopyTypeExprPlan::Tvar(name.clone()),
+            StoredTypeDesc::Tarrow { args, ret } => CopyTypeExprPlan::Tarrow {
+                args: ctx.type_args_snapshot(*args),
                 ret: *ret,
             },
-            TypeDesc::Ttuple(types) => CopyTypeExprPlan::Ttuple(types.clone()),
-            TypeDesc::Tconstr { path, args, .. } => CopyTypeExprPlan::Tconstr {
+            StoredTypeDesc::Ttuple(types) => CopyTypeExprPlan::Ttuple(types.clone()),
+            StoredTypeDesc::Tconstr { path, args, .. } => CopyTypeExprPlan::Tconstr {
                 path: type_path(path),
                 args: args.clone(),
             },
-            TypeDesc::Tobject { fields, name } => CopyTypeExprPlan::Tobject {
+            StoredTypeDesc::Tobject { fields, name } => CopyTypeExprPlan::Tobject {
                 fields: *fields,
                 name: name.clone(),
             },
-            TypeDesc::Tfield {
+            StoredTypeDesc::Tfield {
                 name,
                 kind,
                 typ,
@@ -25043,10 +25043,10 @@ where
                 typ: *typ,
                 rest: *rest,
             },
-            TypeDesc::Tnil => CopyTypeExprPlan::Tnil,
-            TypeDesc::Tlink(target) => CopyTypeExprPlan::Tlink(*target),
-            TypeDesc::Tsubst(target) => CopyTypeExprPlan::Tsubst(*target),
-            TypeDesc::Tvariant(row) => CopyTypeExprPlan::Tvariant {
+            StoredTypeDesc::Tnil => CopyTypeExprPlan::Tnil,
+            StoredTypeDesc::Tlink(target) => CopyTypeExprPlan::Tlink(*target),
+            StoredTypeDesc::Tsubst(target) => CopyTypeExprPlan::Tsubst(*target),
+            StoredTypeDesc::Tvariant(row) => CopyTypeExprPlan::Tvariant {
                 row_fields: row
                     .row_fields
                     .iter()
@@ -25074,12 +25074,12 @@ where
                 row_fixed: row.row_fixed,
                 row_name: row.row_name.clone(),
             },
-            TypeDesc::Tunivar(name) => CopyTypeExprPlan::Tunivar(name.clone()),
-            TypeDesc::Tpoly { body, vars } => CopyTypeExprPlan::Tpoly {
+            StoredTypeDesc::Tunivar(name) => CopyTypeExprPlan::Tunivar(name.clone()),
+            StoredTypeDesc::Tpoly { body, vars } => CopyTypeExprPlan::Tpoly {
                 body: *body,
                 vars: vars.clone(),
             },
-            TypeDesc::Tpackage { path, lids, args } => CopyTypeExprPlan::Tpackage {
+            StoredTypeDesc::Tpackage { path, lids, args } => CopyTypeExprPlan::Tpackage {
                 path: type_path(path),
                 lids: lids.clone(),
                 args: args.clone(),
@@ -29194,12 +29194,12 @@ fn cached_record_label_descriptions_info_for_constr(
         let next = {
             let desc = ctx.borrow_desc(current);
             match &*desc {
-                TypeDesc::Tconstr { path, .. } => {
+                StoredTypeDesc::Tconstr { path, .. } => {
                     let labels = ctx.get_record_label_descriptions(path)?;
                     let summary = ctx.get_record_label_description_summary(path)?;
                     return Some(RecordLabelDescriptionsInfo { labels, summary });
                 }
-                TypeDesc::Tlink(target) | TypeDesc::Tsubst(target) => Some(*target),
+                StoredTypeDesc::Tlink(target) | StoredTypeDesc::Tsubst(target) => Some(*target),
                 _ => return None,
             }
         };

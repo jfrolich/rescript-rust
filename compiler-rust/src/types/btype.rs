@@ -16,7 +16,7 @@ use super::decl::{ConstructorArguments, TypeKind};
 use super::path::Path;
 use super::type_expr::{
     AbbrevMemo, AbbrevMemoRef, GENERIC_LEVEL, LOWEST_LEVEL, PIVOT_LEVEL, RowDesc, RowField,
-    RowFieldRef, TypeDesc, TypeExprRef,
+    RowFieldRef, StoredTypeDesc as TypeDesc, TypeExprRef,
 };
 use std::borrow::Cow;
 
@@ -308,6 +308,7 @@ where
         Variant(RowDesc, TypeExprRef),
         Object(TypeExprRef, Option<Vec<TypeExprRef>>),
         Poly(TypeExprRef, Vec<TypeExprRef>),
+        Arrow(super::type_expr::TypeArgRange, TypeExprRef),
     }
 
     let children = {
@@ -315,11 +316,7 @@ where
         match &*desc {
             TypeDesc::Tvar(_) => Children::None,
             // compiler/ml/btype.ml:258-260 visits every n-ary parameter, then the return.
-            TypeDesc::Tarrow { args, ret } => {
-                let mut children = args.iter().map(|arg| arg.typ).collect::<Vec<_>>();
-                children.push(*ret);
-                Children::Many(children)
-            }
+            TypeDesc::Tarrow { args, ret } => Children::Arrow(*args, *ret),
             TypeDesc::Ttuple(types) => Children::Many(types.clone()),
             TypeDesc::Tconstr { args, .. } => Children::Many(args.clone()),
             TypeDesc::Tobject { fields, name, .. } => {
@@ -371,6 +368,12 @@ where
             for v in vars {
                 f(v);
             }
+        }
+        Children::Arrow(args, ret) => {
+            for typ in ctx.type_arg_refs(args) {
+                f(typ);
+            }
+            f(ret);
         }
     }
 }

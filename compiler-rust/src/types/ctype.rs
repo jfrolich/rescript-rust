@@ -29,8 +29,8 @@ use super::decl::LabelDeclaration;
 use super::env::Env;
 use super::path::Path;
 use super::type_expr::{
-    AbbrevMemo, AbbrevMemoRef, FieldKind, GENERIC_LEVEL, RowDesc, RowField, TypeDesc, TypeExprRef,
-    TypeExprRefSet,
+    AbbrevMemo, AbbrevMemoRef, FieldKind, GENERIC_LEVEL, RowDesc, RowField, StoredTypeDesc,
+    TypeDesc, TypeExprRef, TypeExprRefSet,
 };
 use super::variance::{Variance, VarianceFlag};
 use crate::ident::Ident;
@@ -631,7 +631,7 @@ fn local_non_recursive_abbrev(
         let ty = ctx.repr(ty);
         let desc = ctx.borrow_desc(ty);
         match &*desc {
-            TypeDesc::Tconstr { path, args, .. } => {
+            StoredTypeDesc::Tconstr { path, args, .. } => {
                 if path.same(source) {
                     return false;
                 }
@@ -855,7 +855,7 @@ pub fn occurs(ctx: &TypeContext, needle: TypeExprRef, haystack: TypeExprRef) -> 
         // for regular expression-mode occurs checks.
         let should_recurse = {
             let desc = ctx.borrow_desc(haystack);
-            !matches!(&*desc, TypeDesc::Tobject { .. } | TypeDesc::Tvariant(_))
+            !matches!(&*desc, StoredTypeDesc::Tobject { .. } | StoredTypeDesc::Tvariant(_))
         };
         if !should_recurse {
             return false;
@@ -898,13 +898,13 @@ fn occur_univar(ctx: &TypeContext, env: &Env, ty: TypeExprRef) -> TypeResult<()>
 
         let desc = ctx.borrow_desc(ty);
         match &*desc {
-            TypeDesc::Tunivar(_) => {
+            StoredTypeDesc::Tunivar(_) => {
                 if !bound.contains(&ty) {
                     return Err(TypeError::Unify(vec![(ty, ctx.new_var(None))]));
                 }
                 Ok(())
             }
-            TypeDesc::Tpoly { body, vars } => {
+            StoredTypeDesc::Tpoly { body, vars } => {
                 let body = *body;
                 let vars = vars.clone();
                 drop(desc);
@@ -916,8 +916,8 @@ fn occur_univar(ctx: &TypeContext, env: &Env, ty: TypeExprRef) -> TypeResult<()>
                 *bound = old_bound;
                 result
             }
-            TypeDesc::Tconstr { args, .. } if args.is_empty() => Ok(()),
-            TypeDesc::Tconstr { path, args, .. } => {
+            StoredTypeDesc::Tconstr { args, .. } if args.is_empty() => Ok(()),
+            StoredTypeDesc::Tconstr { path, args, .. } => {
                 let path = path.clone();
                 let args = args.clone();
                 drop(desc);
@@ -999,11 +999,11 @@ pub fn type_contains_variant(ctx: &TypeContext, ty: TypeExprRef) -> bool {
     let ty = ctx.repr(ty);
     let desc = ctx.borrow_desc(ty);
     match &*desc {
-        TypeDesc::Tvariant(_) => true,
-        TypeDesc::Tconstr { args, .. } => args
+        StoredTypeDesc::Tvariant(_) => true,
+        StoredTypeDesc::Tconstr { args, .. } => args
             .iter()
             .copied()
-            .any(|arg| matches!(&*ctx.borrow_desc(ctx.repr(arg)), TypeDesc::Tvariant(_))),
+            .any(|arg| matches!(&*ctx.borrow_desc(ctx.repr(arg)), StoredTypeDesc::Tvariant(_))),
         _ => false,
     }
 }
@@ -1022,14 +1022,14 @@ pub fn link_type(ctx: &TypeContext, t1: TypeExprRef, t2: TypeExprRef) {
     let source_name = {
         let desc = ctx.borrow_desc(t1_repr);
         match &*desc {
-            TypeDesc::Tvar(name) => Some(name.clone()),
+            StoredTypeDesc::Tvar(name) => Some(name.clone()),
             _ => None,
         }
     };
     let target_name = {
         let desc = ctx.borrow_desc(t2_repr);
         match &*desc {
-            TypeDesc::Tvar(name) => Some(name.clone()),
+            StoredTypeDesc::Tvar(name) => Some(name.clone()),
             _ => None,
         }
     };
@@ -1108,7 +1108,7 @@ fn update_level_expand_with_lookup_capture<'a>(
     if level < current {
         let desc = ctx.borrow_desc(ty);
         match &*desc {
-            TypeDesc::Tconstr { path, .. } => {
+            StoredTypeDesc::Tconstr { path, .. } => {
                 let path = path.clone();
                 // OCaml compiler/ml/ctype.ml:695 calls `get_level env p`
                 // here. Keep the same lookup side effects even when the
@@ -1141,7 +1141,7 @@ fn update_level_expand_with_lookup_capture<'a>(
                                 let m_level = ctx.get_level(m);
                                 let m_desc = ctx.borrow_desc(m);
                                 m_level != crate::types::type_expr::GENERIC_LEVEL
-                                    && matches!(&*m_desc, TypeDesc::Tconstr { path: mp, .. }
+                                    && matches!(&*m_desc, StoredTypeDesc::Tconstr { path: mp, .. }
                                         if matches!(mp, Path::Pident(id)
                                             if id.stamp() != 0 && !is_predef_type_name(id.name())))
                             })
@@ -1209,7 +1209,7 @@ fn update_level_expand_with_lookup_capture<'a>(
                     );
                 });
             }
-            TypeDesc::Tobject {
+            StoredTypeDesc::Tobject {
                 fields,
                 name: Some((path, _)),
             } => {
@@ -1247,7 +1247,7 @@ fn update_level_expand_with_lookup_capture<'a>(
                     );
                 });
             }
-            TypeDesc::Tvariant(row) => {
+            StoredTypeDesc::Tvariant(row) => {
                 let row = row.clone();
                 drop(desc);
                 let mut row = row_repr(ctx, &row);
@@ -2838,7 +2838,7 @@ fn try_expand_head_with_mode<'a>(
     let ty = ctx.repr(ty);
     let desc = ctx.borrow_desc(ty);
     match &*desc {
-        TypeDesc::Tconstr { path, args, abbrev } => {
+        StoredTypeDesc::Tconstr { path, args, abbrev } => {
             // OCaml runs check_abbrev_env from expand_abbrev_gen, which is only
             // reached for Tconstr heads (try_expand_once pattern-matches first).
             // Matching that behavior avoids clearing simple_abbrevs on non-constr
@@ -2875,7 +2875,7 @@ fn try_expand_head_with_mode<'a>(
                     let desc = ctx.borrow_desc(cached_repr);
                     matches!(
                         &*desc,
-                        TypeDesc::Tconstr {
+                        StoredTypeDesc::Tconstr {
                             path: cached_path, ..
                         } if cached_path.same(&path)
                     )
@@ -2980,7 +2980,7 @@ fn try_expand_head_with_mode<'a>(
                         let manifest_desc = ctx.borrow_desc(manifest);
                         matches!(
                             &*manifest_desc,
-                            TypeDesc::Tconstr {
+                            StoredTypeDesc::Tconstr {
                                 path: manifest_path, ..
                             } if manifest_path.same(&path)
                         )
@@ -3072,7 +3072,7 @@ fn try_expand_head_with_mode<'a>(
                         let manifest_desc = ctx.borrow_desc(manifest_repr);
                         matches!(
                             &*manifest_desc,
-                            TypeDesc::Tconstr {
+                            StoredTypeDesc::Tconstr {
                                 path: manifest_path,
                                 args: manifest_args,
                                 ..
@@ -5114,12 +5114,12 @@ fn unify_types<'a>(
         let desc1 = ctx.borrow_desc(t1);
         let desc2 = ctx.borrow_desc(t2);
         if let (
-            TypeDesc::Tconstr {
+            StoredTypeDesc::Tconstr {
                 path: path1,
                 args: args1,
                 abbrev: abbrev1,
             },
-            TypeDesc::Tconstr {
+            StoredTypeDesc::Tconstr {
                 path: path2,
                 args: args2,
                 abbrev: abbrev2,
@@ -10356,7 +10356,7 @@ pub(crate) fn copy_type_cached(
     // if row_more currently carries a temporary marker, reuse the
     // already-registered variant copy directly.
     if ctx.get_level(ty) == GENERIC_LEVEL {
-        if let TypeDesc::Tvariant(row0) = &*ctx.borrow_desc(ty) {
+        if let StoredTypeDesc::Tvariant(row0) = &*ctx.borrow_desc(ty) {
             let row = row_repr_ref(ctx, row0);
             let row = row.as_ref();
             let more = ctx.repr(row.row_more);
@@ -10428,44 +10428,44 @@ pub(crate) fn copy_type_cached(
             }
         });
 
-        if let TypeDesc::Tlink(target) | TypeDesc::Tsubst(target) = &*desc {
+        if let StoredTypeDesc::Tlink(target) | StoredTypeDesc::Tsubst(target) = &*desc {
             CopyAction::Link(*target)
         } else if let Some(forget_level) = partial_forget_level {
             CopyAction::Forget(forget_level)
         } else if level != GENERIC_LEVEL {
             match &*desc {
                 // OCaml's copy returns identity for all non-generic type nodes.
-                TypeDesc::Tvar(_)
-                | TypeDesc::Tunivar(_)
-                | TypeDesc::Ttuple(_)
-                | TypeDesc::Tobject { .. }
-                | TypeDesc::Tvariant(_)
-                | TypeDesc::Tpoly { .. }
-                | TypeDesc::Tpackage { .. }
-                | TypeDesc::Tarrow { .. }
-                | TypeDesc::Tfield { .. }
-                | TypeDesc::Tnil
-                | TypeDesc::Tconstr { .. } => CopyAction::ReturnSelf,
-                TypeDesc::Tlink(target) | TypeDesc::Tsubst(target) => CopyAction::Link(*target),
+                StoredTypeDesc::Tvar(_)
+                | StoredTypeDesc::Tunivar(_)
+                | StoredTypeDesc::Ttuple(_)
+                | StoredTypeDesc::Tobject { .. }
+                | StoredTypeDesc::Tvariant(_)
+                | StoredTypeDesc::Tpoly { .. }
+                | StoredTypeDesc::Tpackage { .. }
+                | StoredTypeDesc::Tarrow { .. }
+                | StoredTypeDesc::Tfield { .. }
+                | StoredTypeDesc::Tnil
+                | StoredTypeDesc::Tconstr { .. } => CopyAction::ReturnSelf,
+                StoredTypeDesc::Tlink(target) | StoredTypeDesc::Tsubst(target) => CopyAction::Link(*target),
             }
         } else {
             match &*desc {
-                TypeDesc::Tvar(_) => CopyAction::NewVar(None),
-                TypeDesc::Tunivar(name) => CopyAction::NewUnivar(name.clone()),
-                TypeDesc::Tarrow { args, ret } => CopyAction::Arrow {
-                    args: args.clone(),
+                StoredTypeDesc::Tvar(_) => CopyAction::NewVar(None),
+                StoredTypeDesc::Tunivar(name) => CopyAction::NewUnivar(name.clone()),
+                StoredTypeDesc::Tarrow { args, ret } => CopyAction::Arrow {
+                    args: ctx.type_args_snapshot(*args),
                     ret: *ret,
                 },
-                TypeDesc::Ttuple(types) => CopyAction::Tuple(types.clone()),
-                TypeDesc::Tconstr { path, args, .. } => CopyAction::Constr {
+                StoredTypeDesc::Ttuple(types) => CopyAction::Tuple(types.clone()),
+                StoredTypeDesc::Tconstr { path, args, .. } => CopyAction::Constr {
                     path: path.clone(),
                     args: args.clone(),
                 },
-                TypeDesc::Tobject { fields, name } => CopyAction::Object {
+                StoredTypeDesc::Tobject { fields, name } => CopyAction::Object {
                     fields: *fields,
                     name: name.clone(),
                 },
-                TypeDesc::Tfield {
+                StoredTypeDesc::Tfield {
                     name,
                     kind,
                     typ,
@@ -10482,18 +10482,18 @@ pub(crate) fn copy_type_cached(
                         }
                     }
                 }
-                TypeDesc::Tnil => CopyAction::Nil,
-                TypeDesc::Tpoly { body, vars } => CopyAction::Poly {
+                StoredTypeDesc::Tnil => CopyAction::Nil,
+                StoredTypeDesc::Tpoly { body, vars } => CopyAction::Poly {
                     body: *body,
                     vars: vars.clone(),
                 },
-                TypeDesc::Tvariant(row) => CopyAction::Variant(row.clone()),
-                TypeDesc::Tpackage { path, lids, args } => CopyAction::Package {
+                StoredTypeDesc::Tvariant(row) => CopyAction::Variant(row.clone()),
+                StoredTypeDesc::Tpackage { path, lids, args } => CopyAction::Package {
                     path: path.clone(),
                     lids: lids.clone(),
                     args: args.clone(),
                 },
-                TypeDesc::Tlink(target) | TypeDesc::Tsubst(target) => CopyAction::Link(*target),
+                StoredTypeDesc::Tlink(target) | StoredTypeDesc::Tsubst(target) => CopyAction::Link(*target),
             }
         }
     };
@@ -10857,7 +10857,7 @@ fn copy_row_cached(
 /// Check if a type is a function type.
 pub fn is_function(ctx: &TypeContext, ty: TypeExprRef) -> bool {
     let ty = ctx.repr(ty);
-    matches!(*ctx.borrow_desc(ty), TypeDesc::Tarrow { .. })
+    matches!(*ctx.borrow_desc(ty), StoredTypeDesc::Tarrow { .. })
 }
 
 /// Get the arity of a function type (number of arguments).
@@ -10865,7 +10865,7 @@ pub fn function_arity(ctx: &TypeContext, ty: TypeExprRef) -> usize {
     let ty = ctx.repr(ty);
     let desc = ctx.borrow_desc(ty);
     match &*desc {
-        TypeDesc::Tarrow { args, ret } => {
+        StoredTypeDesc::Tarrow { args, ret } => {
             let count = args.len();
             let ret = *ret;
             drop(desc);
@@ -10880,7 +10880,7 @@ pub fn split_arrow(ctx: &TypeContext, ty: TypeExprRef) -> Option<(TypeExprRef, T
     let ty = ctx.repr(ty);
     let desc = ctx.borrow_desc(ty);
     let (args, ret) = match &*desc {
-        TypeDesc::Tarrow { args, ret } => (args.clone(), *ret),
+        StoredTypeDesc::Tarrow { args, ret } => (ctx.type_args_snapshot(*args), *ret),
         _ => return None,
     };
     drop(desc);
@@ -10904,7 +10904,7 @@ pub fn split_arrow_with_label(
     let ty = ctx.repr(ty);
     let desc = ctx.borrow_desc(ty);
     let (args, ret) = match &*desc {
-        TypeDesc::Tarrow { args, ret } => (args.clone(), *ret),
+        StoredTypeDesc::Tarrow { args, ret } => (ctx.type_args_snapshot(*args), *ret),
         _ => return None,
     };
     drop(desc);
@@ -10926,7 +10926,7 @@ pub fn extract_option_type(ctx: &TypeContext, ty: TypeExprRef) -> Option<TypeExp
     let ty = ctx.repr(ty);
     let desc = ctx.borrow_desc(ty);
     match &*desc {
-        TypeDesc::Tconstr { path, args, .. } => {
+        StoredTypeDesc::Tconstr { path, args, .. } => {
             if path.head_name() == "option" && args.len() == 1 {
                 Some(args[0])
             } else {
@@ -10942,7 +10942,7 @@ pub fn tuple_elements(ctx: &TypeContext, ty: TypeExprRef) -> Option<Vec<TypeExpr
     let ty = ctx.repr(ty);
     let desc = ctx.borrow_desc(ty);
     match &*desc {
-        TypeDesc::Ttuple(types) => Some(types.clone()),
+        StoredTypeDesc::Ttuple(types) => Some(types.clone()),
         _ => None,
     }
 }

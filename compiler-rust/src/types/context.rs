@@ -95,6 +95,35 @@ impl Deref for TypeDescSnapshot {
     }
 }
 
+pub(crate) struct TypeArgRefIter<'a> {
+    ctx: &'a TypeContext,
+    next: u32,
+    end: u32,
+}
+
+impl Iterator for TypeArgRefIter<'_> {
+    type Item = TypeExprRef;
+
+    #[inline]
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.next == self.end {
+            return None;
+        }
+        let index = self.next as usize;
+        self.next += 1;
+        // The aggregate borrow ends before the handle is yielded to caller
+        // code, so recursive traversal may allocate another arrow payload.
+        Some(self.ctx.type_args.borrow()[index].typ)
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        let remaining = (self.end - self.next) as usize;
+        (remaining, Some(remaining))
+    }
+}
+
+impl ExactSizeIterator for TypeArgRefIter<'_> {}
+
 /// Snapshot of mutable type-checker state for OCaml-style failed-unify
 /// backtracking.
 pub(crate) struct TypeMutationSnapshot {
@@ -1410,11 +1439,19 @@ impl TypeContext {
         }
     }
 
-    fn type_args_snapshot(&self, range: TypeArgRange) -> Vec<TypeArg> {
+    pub(crate) fn type_args_snapshot(&self, range: TypeArgRange) -> Vec<TypeArg> {
         let storage = self.type_args.borrow();
         let start = range.start as usize;
         let end = start + range.len as usize;
         storage[start..end].to_vec()
+    }
+
+    pub(crate) fn type_arg_refs(&self, range: TypeArgRange) -> TypeArgRefIter<'_> {
+        TypeArgRefIter {
+            ctx: self,
+            next: range.start,
+            end: range.start + range.len,
+        }
     }
 
     /// Create a new type at a specific level.
@@ -1652,14 +1689,13 @@ impl TypeContext {
         })
     }
 
-    /// Get a descriptor snapshot for legacy leaf readers.
+    /// Borrow the internal descriptor without materializing owned payloads.
     ///
-    /// Arrow payloads must be materialized before the caller can recurse or
-    /// allocate, so this deliberately has the same safe snapshot semantics as
-    /// `get_desc` rather than exposing the aggregate storage borrow.
+    /// Callers must copy a pooled arrow range and drop this node borrow before
+    /// recursive, callback, or allocating work.
     #[inline]
-    pub fn borrow_desc(&self, r: TypeExprRef) -> TypeDescSnapshot {
-        self.get_desc(r)
+    pub(crate) fn borrow_desc(&self, r: TypeExprRef) -> std::cell::Ref<'_, StoredTypeDesc> {
+        self.types.get(r).stored_desc()
     }
 
     /// Get the level of a type.
@@ -2927,6 +2963,29 @@ mod tests {
         assert_eq!(args[1].typ, shared);
         assert_eq!(args[2].typ, cycle);
         assert_eq!(*ret, empty);
+    }
+
+    #[test]
+    fn arrow_type_ref_iterator_allows_reentrant_context_allocation() {
+        let ctx = TypeContext::new(Arc::new(IdGenerator::new()));
+        let first = ctx.new_var(None);
+        let second = ctx.new_var(None);
+        let ret = ctx.new_var(None);
+        let arrow = ctx.new_type(TypeDesc::Tarrow {
+            args: vec![TypeArg::unlabeled(first), TypeArg::unlabeled(second)],
+            ret,
+        });
+        let range = match &*ctx.types.get(arrow).stored_desc() {
+            StoredTypeDesc::Tarrow { args, .. } => *args,
+            _ => panic!("arrow expected"),
+        };
+
+        let mut visited = Vec::new();
+        for typ in ctx.type_arg_refs(range) {
+            visited.push(typ);
+            ctx.new_arrow_simple(typ, ret);
+        }
+        assert_eq!(visited, vec![first, second]);
     }
 
     #[test]

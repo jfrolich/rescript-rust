@@ -25,7 +25,7 @@ use crate::parser::ast::{
 use crate::parser::longident::Longident;
 use crate::types::Variance as TypesVariance;
 use crate::types::env::Env;
-use crate::types::type_expr::{LOWEST_LEVEL, TypeExprRef, TypeExprRefSet};
+use crate::types::type_expr::{LOWEST_LEVEL, StoredTypeDesc, TypeExprRef, TypeExprRefSet};
 use crate::types::typecore::{
     TypeCheckContext, TypeCoreError, resolve_type_constructor_path, transl_type, transl_type_fixed,
     type_binding, type_exp, type_expression,
@@ -3993,7 +3993,7 @@ fn check_nonrecursive_gadt_enter_type(
 }
 
 fn type_is_tvar_without_repr(ctx: &crate::types::context::TypeContext, ty: TypeExprRef) -> bool {
-    matches!(*ctx.borrow_desc(ty), TypeDesc::Tvar(_))
+    matches!(*ctx.borrow_desc(ty), StoredTypeDesc::Tvar(_))
 }
 
 fn collect_free_type_variables(
@@ -4006,7 +4006,7 @@ fn collect_free_type_variables(
     if !visited.insert(ty) {
         return;
     }
-    if matches!(*ctx.borrow_desc(ty), TypeDesc::Tvar(_)) {
+    if matches!(*ctx.borrow_desc(ty), StoredTypeDesc::Tvar(_)) {
         result.insert(ty);
         return;
     }
@@ -13528,14 +13528,14 @@ fn check_usage_of_path_of_substituted_item(
         let action = {
             let desc = tctx.type_ctx.borrow_desc(ty);
             match &*desc {
-                TypeDesc::Tconstr { path, args, .. } => {
+                StoredTypeDesc::Tconstr { path, args, .. } => {
                     TypeAction::Path(path.clone(), args.clone())
                 }
-                TypeDesc::Tpackage { path, args, .. } => {
+                StoredTypeDesc::Tpackage { path, args, .. } => {
                     TypeAction::Path(path.clone(), args.clone())
                 }
-                TypeDesc::Tobject { fields, name } => TypeAction::Object(*fields, name.clone()),
-                TypeDesc::Tvariant(row) => TypeAction::Variant(row.clone()),
+                StoredTypeDesc::Tobject { fields, name } => TypeAction::Object(*fields, name.clone()),
+                StoredTypeDesc::Tvariant(row) => TypeAction::Variant(row.clone()),
                 _ => {
                     let mut children = Vec::new();
                     crate::types::btype::iter_type_expr(tctx.type_ctx, ty, |child| {

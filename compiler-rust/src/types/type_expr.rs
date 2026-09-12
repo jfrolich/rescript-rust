@@ -47,6 +47,18 @@ pub(crate) struct TypeArgRange {
     pub(crate) len: u32,
 }
 
+impl TypeArgRange {
+    #[inline]
+    pub(crate) fn len(self) -> usize {
+        self.len as usize
+    }
+
+    #[inline]
+    pub(crate) fn is_empty(self) -> bool {
+        self.len == 0
+    }
+}
+
 /// Internal descriptor storage. This mirrors `TypeDesc`, replacing only the
 /// arrow argument owner with a compact context-local range. Keeping a flat enum
 /// avoids adding an outer discriminant to every type node.
@@ -132,7 +144,7 @@ impl TypeExpr {
     /// # Panics
     ///
     /// Panics if the descriptor is currently borrowed mutably.
-    pub fn desc(&self) -> TypeDesc {
+    pub(crate) fn desc(&self) -> TypeDesc {
         self.desc.borrow().to_non_arrow()
     }
 
@@ -141,7 +153,7 @@ impl TypeExpr {
     }
 
     /// Set a descriptor on a standalone type expression.
-    pub fn set_desc(&self, desc: TypeDesc) {
+    pub(crate) fn set_desc(&self, desc: TypeDesc) {
         *self.desc.borrow_mut() = StoredTypeDesc::from_non_arrow(desc);
     }
 
