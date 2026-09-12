@@ -23,7 +23,7 @@ use super::env::Env;
 use super::path::Path;
 use super::type_expr::{
     AbbrevMemo, AbbrevMemoRef, FieldKind, FieldKindRef, GENERIC_LEVEL, RowDesc, RowField,
-    RowFieldRef, TypeArg, TypeDesc, TypeExpr, TypeExprRef,
+    RowFieldRef, StoredTypeDesc, TypeArg, TypeArgRange, TypeDesc, TypeExpr, TypeExprRef,
 };
 use super::typedtree::EnvRef;
 use crate::context::IdGenerator;
@@ -84,9 +84,6 @@ impl TypeArena {
     }
 }
 
-/// Type alias for the desc borrow returned by get_desc().
-pub type TypeDescRef<'a> = std::cell::Ref<'a, TypeDesc>;
-
 /// Cloned snapshot of a type descriptor, for cases where the caller
 /// needs to hold the desc while also mutating the same type node.
 pub struct TypeDescSnapshot(TypeDesc);
@@ -101,7 +98,7 @@ impl Deref for TypeDescSnapshot {
 /// Snapshot of mutable type-checker state for OCaml-style failed-unify
 /// backtracking.
 pub(crate) struct TypeMutationSnapshot {
-    type_states: Vec<(TypeDesc, i32)>,
+    type_states: Vec<(StoredTypeDesc, i32)>,
     row_field_states: Vec<Option<RowField>>,
     abbrev_states: Vec<AbbrevMemo>,
     memoized_abbrev_refs: Vec<AbbrevMemoRef>,
@@ -278,6 +275,10 @@ pub struct TypeContext {
 
     /// Type expression storage. Uses UnsafeCell-based arena for zero-copy access.
     types: TypeArena,
+
+    /// Append-only storage for immutable published arrow-argument sequences.
+    /// Located label payloads are reclaimed with the owning context.
+    type_args: RefCell<Vec<TypeArg>>,
 
     /// Cached value of `RESCRIPT_COMPILER_COUNTERS` for hot-path probes.
     compiler_counters_enabled: bool,
@@ -544,6 +545,7 @@ impl TypeContext {
             previous_env_id: Cell::new(0),
             current_abbreviations: Cell::new(AbbrevMemoRef::nil()),
             types: TypeArena::new(),
+            type_args: RefCell::new(Vec::new()),
             compiler_counters_enabled: crate::perf_counters::enabled(),
             // Index 0 is reserved as canonical Mnil; index 1 is the dedicated
             // simple_abbrevs memo ref.
@@ -1384,8 +1386,35 @@ impl TypeContext {
         // A n-ary arrow owns exactly the parameters supplied by its syntax
         // node. Its return type may itself be an arrow (a sequential
         // application such as `f(a)(b)`); never flatten that nested boundary.
+        let desc = self.store_desc(desc);
         let id = self.id_gen.next_type_id();
-        self.types.push(TypeExpr::new(desc, level, id))
+        self.types.push(TypeExpr::new_stored(desc, level, id))
+    }
+
+    fn store_desc(&self, desc: TypeDesc) -> StoredTypeDesc {
+        match desc {
+            TypeDesc::Tarrow { args, ret } => {
+                // The sequence is fully built before borrowing aggregate
+                // storage, so no mapping callback can re-enter this RefCell.
+                let mut storage = self.type_args.borrow_mut();
+                let start =
+                    u32::try_from(storage.len()).expect("type argument storage exceeds u32::MAX");
+                let len = u32::try_from(args.len()).expect("arrow argument count exceeds u32::MAX");
+                storage.extend(args);
+                StoredTypeDesc::Tarrow {
+                    args: TypeArgRange { start, len },
+                    ret,
+                }
+            }
+            desc => StoredTypeDesc::from_non_arrow(desc),
+        }
+    }
+
+    fn type_args_snapshot(&self, range: TypeArgRange) -> Vec<TypeArg> {
+        let storage = self.type_args.borrow();
+        let start = range.start as usize;
+        let end = start + range.len as usize;
+        storage[start..end].to_vec()
     }
 
     /// Create a new type at a specific level.
@@ -1427,21 +1456,51 @@ impl TypeContext {
         arity: Option<i32>,
     ) -> TypeExprRef {
         let _ = arity;
-        let mut args = vec![TypeArg::new(arg_label, arg_type)];
-        let ret = {
-            let desc = self.get_desc(self.repr(ret_type));
+        self.alloc_arrow_with_head(
+            TypeArg::new(arg_label, arg_type),
+            ret_type,
+            self.current_level.get(),
+        )
+    }
+
+    fn alloc_arrow_with_head(
+        &self,
+        head: TypeArg,
+        ret_type: TypeExprRef,
+        level: i32,
+    ) -> TypeExprRef {
+        let ret_repr = self.repr(ret_type);
+        let (tail, ret) = {
+            let desc = self.types.get(ret_repr).stored_desc();
             match &*desc {
-                TypeDesc::Tarrow {
-                    args: ret_args,
-                    ret,
-                } => {
-                    args.extend(ret_args.iter().cloned());
-                    *ret
+                StoredTypeDesc::Tarrow { args, ret } => {
+                    (Some(self.type_args_snapshot(*args)), *ret)
                 }
-                _ => ret_type,
+                _ => (None, ret_type),
             }
         };
-        self.new_type(TypeDesc::Tarrow { args, ret })
+
+        // The optional tail snapshot is complete before the mutable aggregate
+        // borrow. The overwhelmingly common unary case appends directly and
+        // never constructs a temporary Vec.
+        let args = {
+            let mut storage = self.type_args.borrow_mut();
+            let start =
+                u32::try_from(storage.len()).expect("type argument storage exceeds u32::MAX");
+            storage.push(head);
+            if let Some(tail) = tail {
+                storage.extend(tail);
+            }
+            let len = u32::try_from(storage.len() - start as usize)
+                .expect("arrow argument count exceeds u32::MAX");
+            TypeArgRange { start, len }
+        };
+        let id = self.id_gen.next_type_id();
+        self.types.push(TypeExpr::new_stored(
+            StoredTypeDesc::Tarrow { args, ret },
+            level,
+            id,
+        ))
     }
 
     /// Create an unlabeled arrow type.
@@ -1550,21 +1609,7 @@ impl TypeContext {
         arity: Option<i32>,
     ) -> TypeExprRef {
         let _ = arity;
-        let mut args = vec![TypeArg::new(arg_label, arg_type)];
-        let ret = {
-            let desc = self.get_desc(self.repr(ret_type));
-            match &*desc {
-                TypeDesc::Tarrow {
-                    args: ret_args,
-                    ret,
-                } => {
-                    args.extend(ret_args.iter().cloned());
-                    *ret
-                }
-                _ => ret_type,
-            }
-        };
-        self.new_generic_type(TypeDesc::Tarrow { args, ret })
+        self.alloc_arrow_with_head(TypeArg::new(arg_label, arg_type), ret_type, GENERIC_LEVEL)
     }
 
     /// Create a link type (for unification).
@@ -1596,16 +1641,25 @@ impl TypeContext {
     /// the desc is held across function calls that may modify the same node.
     #[inline]
     pub fn get_desc(&self, r: TypeExprRef) -> TypeDescSnapshot {
-        TypeDescSnapshot(self.types.get(r).desc().clone())
+        let desc = self.types.get(r).stored_desc();
+        TypeDescSnapshot(match &*desc {
+            StoredTypeDesc::Tarrow { args, ret } => TypeDesc::Tarrow {
+                // Snapshot before returning to any recursive/callback caller.
+                args: self.type_args_snapshot(*args),
+                ret: *ret,
+            },
+            desc => desc.to_non_arrow(),
+        })
     }
 
-    /// Borrow the descriptor of a type without cloning it.
+    /// Get a descriptor snapshot for legacy leaf readers.
     ///
-    /// Prefer this in short read-only hot paths. Use `get_desc()` when the
-    /// descriptor must be held across code that may mutate the same type node.
+    /// Arrow payloads must be materialized before the caller can recurse or
+    /// allocate, so this deliberately has the same safe snapshot semantics as
+    /// `get_desc` rather than exposing the aggregate storage borrow.
     #[inline]
-    pub fn borrow_desc(&self, r: TypeExprRef) -> TypeDescRef<'_> {
-        self.types.get(r).desc()
+    pub fn borrow_desc(&self, r: TypeExprRef) -> TypeDescSnapshot {
+        self.get_desc(r)
     }
 
     /// Get the level of a type.
@@ -1628,7 +1682,8 @@ impl TypeContext {
     /// Set the descriptor of a type.
     #[inline]
     pub fn set_desc(&self, r: TypeExprRef, desc: TypeDesc) {
-        self.types.get(r).set_desc(desc);
+        let desc = self.store_desc(desc);
+        self.types.get(r).set_stored_desc(desc);
     }
 
     /// Save mutable type state before a speculative unification.
@@ -1644,7 +1699,7 @@ impl TypeContext {
         let mut type_states = Vec::with_capacity(type_len);
         for idx in 0..type_len {
             let ty = TypeExprRef::from_usize(idx);
-            type_states.push((self.get_desc(ty).0, self.get_level(ty)));
+            type_states.push((self.types.get(ty).stored_desc().clone(), self.get_level(ty)));
         }
 
         let row_field_states = self
@@ -1677,7 +1732,7 @@ impl TypeContext {
     pub(crate) fn restore_type_state(&self, snapshot: TypeMutationSnapshot) {
         for (idx, (desc, level)) in snapshot.type_states.into_iter().enumerate() {
             let ty = TypeExprRef::from_usize(idx);
-            self.set_desc(ty, desc);
+            self.types.get(ty).set_stored_desc(desc);
             self.set_level(ty, level);
         }
 
@@ -2615,10 +2670,10 @@ impl TypeContext {
         // Fast path: check if t is already a representative (no link).
         // This avoids any allocation for the common case.
         let first_next = {
-            let desc = self.borrow_desc(t);
+            let desc = self.types.get(t).stored_desc();
             match &*desc {
-                TypeDesc::Tlink(next) => *next,
-                TypeDesc::Tfield {
+                StoredTypeDesc::Tlink(next) => *next,
+                StoredTypeDesc::Tfield {
                     kind: FieldKind::Fabsent,
                     rest,
                     ..
@@ -2637,10 +2692,10 @@ impl TypeContext {
         let mut current = first_next;
         for _ in 0..10_000 {
             let next = {
-                let desc = self.borrow_desc(current);
+                let desc = self.types.get(current).stored_desc();
                 match &*desc {
-                    TypeDesc::Tlink(next) => Some(*next),
-                    TypeDesc::Tfield {
+                    StoredTypeDesc::Tlink(next) => Some(*next),
+                    StoredTypeDesc::Tfield {
                         kind: FieldKind::Fabsent,
                         rest,
                         ..
@@ -2828,6 +2883,133 @@ mod tests {
             TypeDesc::Tlink(target) => assert_eq!(*target, t1),
             _ => panic!("Expected Tlink after path compression"),
         }
+    }
+
+    #[test]
+    fn pooled_arrow_arguments_preserve_empty_labels_order_sharing_and_cycles() {
+        use crate::location::Location;
+
+        let ctx = TypeContext::new(Arc::new(IdGenerator::new()));
+        let shared = ctx.new_var(None);
+        let cycle = ctx.new_var(None);
+        let empty = ctx.new_type(TypeDesc::Tarrow {
+            args: Vec::new(),
+            ret: shared,
+        });
+        let labelled = ArgLabel::labelled("first", Location::none());
+        ctx.set_desc(
+            cycle,
+            TypeDesc::Tarrow {
+                args: vec![
+                    TypeArg::new(labelled.clone(), shared),
+                    TypeArg::unlabeled(shared),
+                    TypeArg::unlabeled(cycle),
+                ],
+                ret: empty,
+            },
+        );
+
+        let empty_desc = ctx.get_desc(empty);
+        let TypeDesc::Tarrow { args, ret } = &*empty_desc else {
+            panic!("empty arrow expected")
+        };
+        assert!(args.is_empty());
+        assert_eq!(*ret, shared);
+
+        let cycle_desc = ctx.get_desc(cycle);
+        let TypeDesc::Tarrow { args, ret } = &*cycle_desc else {
+            panic!("cyclic arrow expected")
+        };
+        assert_eq!(args.len(), 3);
+        assert_eq!(args[0].label(), &labelled);
+        assert!(matches!(args[1].label(), ArgLabel::Nolabel));
+        assert_eq!(args[0].typ, shared);
+        assert_eq!(args[1].typ, shared);
+        assert_eq!(args[2].typ, cycle);
+        assert_eq!(*ret, empty);
+    }
+
+    #[test]
+    fn arrow_backtrack_restores_range_without_reappending_payload() {
+        let ctx = TypeContext::new(Arc::new(IdGenerator::new()));
+        let arg = ctx.new_var(None);
+        let ret = ctx.new_var(None);
+        let arrow = ctx.new_arrow_simple(arg, ret);
+        let original_range = match &*ctx.types.get(arrow).stored_desc() {
+            StoredTypeDesc::Tarrow { args, .. } => *args,
+            _ => panic!("arrow expected"),
+        };
+        let snapshot = ctx.snapshot_type_state();
+        ctx.set_desc(
+            arrow,
+            TypeDesc::Tarrow {
+                args: vec![TypeArg::unlabeled(ret), TypeArg::unlabeled(arg)],
+                ret: arg,
+            },
+        );
+        let stored_after_replacement = ctx.type_args.borrow().len();
+        ctx.restore_type_state(snapshot);
+        let restored_range = match &*ctx.types.get(arrow).stored_desc() {
+            StoredTypeDesc::Tarrow { args, .. } => *args,
+            _ => panic!("arrow expected"),
+        };
+        assert_eq!(restored_range, original_range);
+        assert_eq!(ctx.type_args.borrow().len(), stored_after_replacement);
+    }
+
+    #[test]
+    fn arrow_export_and_import_remap_into_target_context_storage() {
+        use crate::location::Location;
+
+        let source = TypeContext::new(Arc::new(IdGenerator::new()));
+        let source_arg = source.new_var(None);
+        let source_ret = source.new_var(None);
+        let source_arrow = source.new_type(TypeDesc::Tarrow {
+            args: vec![TypeArg::new(
+                ArgLabel::optional("value", Location::none()),
+                source_arg,
+            )],
+            ret: source_ret,
+        });
+        let exported = source.get_desc(source_arrow);
+        let TypeDesc::Tarrow { args, .. } = &*exported else {
+            panic!("source arrow expected")
+        };
+
+        let target = TypeContext::new(Arc::new(IdGenerator::new()));
+        let _target_offset = target.new_var(None);
+        let target_arg = target.new_var(None);
+        let target_ret = target.new_var(None);
+        let imported = target.new_type(TypeDesc::Tarrow {
+            args: args
+                .iter()
+                .map(|arg| TypeArg::new(arg.label().clone(), target_arg))
+                .collect(),
+            ret: target_ret,
+        });
+        let imported_desc = target.get_desc(imported);
+        let TypeDesc::Tarrow { args, ret } = &*imported_desc else {
+            panic!("target arrow expected")
+        };
+        assert_eq!(args.len(), 1);
+        assert_eq!(
+            args[0].label(),
+            &ArgLabel::optional("value", Location::none())
+        );
+        assert_eq!(args[0].typ, target_arg);
+        assert_eq!(*ret, target_ret);
+        assert_ne!(args[0].typ, source_arg);
+    }
+
+    #[test]
+    fn type_payload_storage_sizes_are_stable() {
+        if cfg!(target_pointer_width = "64") {
+            assert_eq!(std::mem::size_of::<TypeDesc>(), 96);
+            assert_eq!(std::mem::size_of::<StoredTypeDesc>(), 96);
+            assert_eq!(std::mem::size_of::<TypeExpr>(), 112);
+            assert_eq!(std::mem::size_of::<TypeArg>(), 16);
+        }
+        assert_eq!(std::mem::size_of::<TypeArgRange>(), 8);
     }
 
     #[test]

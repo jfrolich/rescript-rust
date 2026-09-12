@@ -12,7 +12,7 @@ pub fn extract_from_type_expr(type_params: &[TypeExpr]) -> Vec<String> {
     let mut so_far = Vec::new();
 
     for type_expr in type_params {
-        match &*type_expr.desc() {
+        match &type_expr.desc() {
             TypeDesc::Tvar(Some(s)) => {
                 let type_name = s.clone();
                 so_far.push(type_name);

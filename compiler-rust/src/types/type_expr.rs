@@ -39,6 +39,56 @@ pub const LOWEST_LEVEL: i32 = 0;
 /// Pivot level for traversal marking.
 pub const PIVOT_LEVEL: i32 = (2 * LOWEST_LEVEL) - 1;
 
+/// A compact range into the owning `TypeContext`'s append-only arrow-argument
+/// storage. The range is meaningful only in that context.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) struct TypeArgRange {
+    pub(crate) start: u32,
+    pub(crate) len: u32,
+}
+
+/// Internal descriptor storage. This mirrors `TypeDesc`, replacing only the
+/// arrow argument owner with a compact context-local range. Keeping a flat enum
+/// avoids adding an outer discriminant to every type node.
+#[derive(Debug, Clone)]
+pub(crate) enum StoredTypeDesc {
+    Tvar(Option<String>),
+    Tarrow {
+        args: TypeArgRange,
+        ret: TypeExprRef,
+    },
+    Ttuple(Vec<TypeExprRef>),
+    Tconstr {
+        path: Path,
+        args: Vec<TypeExprRef>,
+        abbrev: AbbrevMemoRef,
+    },
+    Tobject {
+        fields: TypeExprRef,
+        name: ObjectName,
+    },
+    Tfield {
+        name: String,
+        kind: FieldKind,
+        typ: TypeExprRef,
+        rest: TypeExprRef,
+    },
+    Tnil,
+    Tlink(TypeExprRef),
+    Tsubst(TypeExprRef),
+    Tvariant(RowDesc),
+    Tunivar(Option<String>),
+    Tpoly {
+        body: TypeExprRef,
+        vars: Vec<TypeExprRef>,
+    },
+    Tpackage {
+        path: Path,
+        lids: Vec<Longident>,
+        args: Vec<TypeExprRef>,
+    },
+}
+
 /// A type expression.
 ///
 /// This is the core type representation used throughout the type checker.
@@ -52,7 +102,7 @@ pub const PIVOT_LEVEL: i32 = (2 * LOWEST_LEVEL) - 1;
 #[derive(Debug)]
 pub struct TypeExpr {
     /// The type descriptor. Uses `RefCell` for unification.
-    desc: RefCell<TypeDesc>,
+    desc: RefCell<StoredTypeDesc>,
     /// The binding level. Uses `Cell` for generalization.
     level: Cell<i32>,
     /// Unique identifier for this type expression.
@@ -61,7 +111,15 @@ pub struct TypeExpr {
 
 impl TypeExpr {
     /// Create a new type expression.
-    pub fn new(desc: TypeDesc, level: i32, id: i32) -> Self {
+    pub(crate) fn new(desc: TypeDesc, level: i32, id: i32) -> Self {
+        TypeExpr {
+            desc: RefCell::new(StoredTypeDesc::from_non_arrow(desc)),
+            level: Cell::new(level),
+            id,
+        }
+    }
+
+    pub(crate) fn new_stored(desc: StoredTypeDesc, level: i32, id: i32) -> Self {
         TypeExpr {
             desc: RefCell::new(desc),
             level: Cell::new(level),
@@ -74,21 +132,20 @@ impl TypeExpr {
     /// # Panics
     ///
     /// Panics if the descriptor is currently borrowed mutably.
-    pub fn desc(&self) -> std::cell::Ref<'_, TypeDesc> {
+    pub fn desc(&self) -> TypeDesc {
+        self.desc.borrow().to_non_arrow()
+    }
+
+    pub(crate) fn stored_desc(&self) -> std::cell::Ref<'_, StoredTypeDesc> {
         self.desc.borrow()
     }
 
-    /// Get a mutable reference to the type descriptor.
-    ///
-    /// # Panics
-    ///
-    /// Panics if the descriptor is currently borrowed.
-    pub fn desc_mut(&self) -> std::cell::RefMut<'_, TypeDesc> {
-        self.desc.borrow_mut()
+    /// Set a descriptor on a standalone type expression.
+    pub fn set_desc(&self, desc: TypeDesc) {
+        *self.desc.borrow_mut() = StoredTypeDesc::from_non_arrow(desc);
     }
 
-    /// Set the type descriptor.
-    pub fn set_desc(&self, desc: TypeDesc) {
+    pub(crate) fn set_stored_desc(&self, desc: StoredTypeDesc) {
         *self.desc.borrow_mut() = desc;
     }
 
@@ -114,17 +171,17 @@ impl TypeExpr {
 
     /// Check if this is a type variable.
     pub fn is_var(&self) -> bool {
-        matches!(*self.desc.borrow(), TypeDesc::Tvar(_))
+        matches!(&*self.desc.borrow(), StoredTypeDesc::Tvar(_))
     }
 
     /// Check if this is a universal type variable.
     pub fn is_univar(&self) -> bool {
-        matches!(*self.desc.borrow(), TypeDesc::Tunivar(_))
+        matches!(&*self.desc.borrow(), StoredTypeDesc::Tunivar(_))
     }
 
     /// Check if this is a type constructor application.
     pub fn is_constr(&self) -> bool {
-        matches!(*self.desc.borrow(), TypeDesc::Tconstr { .. })
+        matches!(&*self.desc.borrow(), StoredTypeDesc::Tconstr { .. })
     }
 }
 
@@ -237,6 +294,82 @@ pub enum TypeDesc {
         /// Type arguments
         args: Vec<TypeExprRef>,
     },
+}
+
+impl StoredTypeDesc {
+    pub(crate) fn from_non_arrow(desc: TypeDesc) -> Self {
+        match desc {
+            TypeDesc::Tvar(name) => Self::Tvar(name),
+            TypeDesc::Tarrow { .. } => {
+                panic!("arrow descriptors require context-owned argument storage")
+            }
+            TypeDesc::Ttuple(types) => Self::Ttuple(types),
+            TypeDesc::Tconstr { path, args, abbrev } => Self::Tconstr { path, args, abbrev },
+            TypeDesc::Tobject { fields, name } => Self::Tobject { fields, name },
+            TypeDesc::Tfield {
+                name,
+                kind,
+                typ,
+                rest,
+            } => Self::Tfield {
+                name,
+                kind,
+                typ,
+                rest,
+            },
+            TypeDesc::Tnil => Self::Tnil,
+            TypeDesc::Tlink(ty) => Self::Tlink(ty),
+            TypeDesc::Tsubst(ty) => Self::Tsubst(ty),
+            TypeDesc::Tvariant(row) => Self::Tvariant(row),
+            TypeDesc::Tunivar(name) => Self::Tunivar(name),
+            TypeDesc::Tpoly { body, vars } => Self::Tpoly { body, vars },
+            TypeDesc::Tpackage { path, lids, args } => Self::Tpackage { path, lids, args },
+        }
+    }
+
+    pub(crate) fn to_non_arrow(&self) -> TypeDesc {
+        match self {
+            Self::Tvar(name) => TypeDesc::Tvar(name.clone()),
+            Self::Tarrow { .. } => {
+                panic!("pooled arrow descriptors require TypeContext::get_desc")
+            }
+            Self::Ttuple(types) => TypeDesc::Ttuple(types.clone()),
+            Self::Tconstr { path, args, abbrev } => TypeDesc::Tconstr {
+                path: path.clone(),
+                args: args.clone(),
+                abbrev: *abbrev,
+            },
+            Self::Tobject { fields, name } => TypeDesc::Tobject {
+                fields: *fields,
+                name: name.clone(),
+            },
+            Self::Tfield {
+                name,
+                kind,
+                typ,
+                rest,
+            } => TypeDesc::Tfield {
+                name: name.clone(),
+                kind: kind.clone(),
+                typ: *typ,
+                rest: *rest,
+            },
+            Self::Tnil => TypeDesc::Tnil,
+            Self::Tlink(ty) => TypeDesc::Tlink(*ty),
+            Self::Tsubst(ty) => TypeDesc::Tsubst(*ty),
+            Self::Tvariant(row) => TypeDesc::Tvariant(row.clone()),
+            Self::Tunivar(name) => TypeDesc::Tunivar(name.clone()),
+            Self::Tpoly { body, vars } => TypeDesc::Tpoly {
+                body: *body,
+                vars: vars.clone(),
+            },
+            Self::Tpackage { path, lids, args } => TypeDesc::Tpackage {
+                path: path.clone(),
+                lids: lids.clone(),
+                args: args.clone(),
+            },
+        }
+    }
 }
 
 /// A reference to a type expression.
@@ -786,7 +919,7 @@ mod tests {
         assert_eq!(ty.level(), GENERIC_LEVEL);
 
         ty.set_desc(TypeDesc::Tnil);
-        assert!(matches!(*ty.desc(), TypeDesc::Tnil));
+        assert!(matches!(ty.desc(), TypeDesc::Tnil));
     }
 
     #[test]

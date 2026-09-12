@@ -30,6 +30,12 @@ Acceptance uses a new normal-release C/N cohort with eight counterbalanced pairs
 
 Parent alone pushes this branch and manages its pull request. Every new commit includes DCO sign-off and `Co-authored-by: Jaap Frolich <jfrolich@gmail.com>`. No merge or default-branch push is authorized.
 
-## Status
+## Implementation status
 
-Baseline archived. Implementation and a new measurement cohort are not yet complete. No new performance result is claimed.
+The first source prototype stores published `Tarrow` argument sequences in one append-only `TypeContext` vector and keeps only an 8-byte start/length range in each internal descriptor. The external `TypeDesc` and `TypeContext` construction boundary remains unchanged: exports snapshot labels and handles from the source context, while imports and copies publish a new range in the target context. The direct low-level `TypeExpr::new` constructor is now crate-private and `TypeExpr::desc` returns an owned descriptor; context-managed code already uses `TypeExprRef` plus `TypeContext`. Unary `new_arrow`/`new_generic_arrow` append directly without first allocating an argument `Vec`; builders that already supply a `Vec` still allocate and free that temporary.
+
+The internal and external descriptor enums are both 96 bytes on 64-bit targets, `TypeExpr` remains 112 bytes, and `TypeArg` remains 16 bytes. Focused tests cover empty argument ranges, exact labels/order/shared handles, cycles, snapshot/backtrack range restoration, and cross-context remapping. Published labels now live until `TypeContext` destruction even if their descriptor is overwritten; this may increase peak memory and must be reported with the controlled build result. All storage is still reclaimed within the build process and measured cleanup boundary.
+
+The normal-release control built from clean `75d1ac49daf49ecf85009d8a4c7381643843bd4c` is archived under `/Users/jake/.opensession/artifacts/rescript-performance-20260912/type-payload-storage/control-bin/`; hashes and toolchain/build provenance are in `control-build/provenance.txt`.
+
+A new measurement cohort is not yet complete. No new performance result is claimed, and the arrow prototype alone is not performance acceptance.
