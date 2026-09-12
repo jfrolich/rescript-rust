@@ -46,4 +46,19 @@ The existing Tella dependency symlink `node_modules/@rescript/belt/node_modules/
 
 A canonical archived Python entry now owns the lockf re-exec, bytecode environment, exclusive command/log/exit capture, and validation of earlier outer captures. It invokes the existing runner in the same process, retaining its deadline and descendant supervision instead of introducing another process tree. Fifty protocol tests passed, including seven actual lockf/re-exec tests with a fake inner runner; those tests do not compile Tella.
 
-A valid fresh fixed comparison is still required before extending the payload family. No new performance result is claimed, and the arrow prototype alone is not performance acceptance.
+## Completed arrow-only comparison
+
+`comparison-arrow-v3-5` completed its original 34-stage schedule: two qualifications and 32 timed builds, eight counterbalanced pairs per mode. Parent independent audit verified all 100 child process records and absent groups, canonical outer captures, 137 input inventories, all 510 ledger rows per inventory, 24 protected files, both archived qualification outputs and all 34 matching 5048-file JavaScript manifests. Sources and binaries stayed sealed. Two external shell/path errors never entered the cohort or consumed a slot; parent zero-launch audits authorized the original unattempted slots. The explicit stage-2 authorization is preserved despite a worker transcript-visibility gap. Parent directly executed stages 10–33 and analysis.
+
+| Mode | Control mean ± SD | Candidate mean ± SD | Min–max control / candidate | Paired candidate−control 95% CI |
+| --- | --- | --- | --- | --- |
+| Parallel, 12 workers | 4.779277 ± 0.045850s | 4.769424 ± 0.037044s | 4.719559–4.875899 / 4.736069–4.851970s | −0.062088 to +0.042383s |
+| Serial, 1 worker | 18.145647 ± 0.149108s | 18.341646 ± 0.114378s | 17.976400–18.396278 / 18.211902–18.514997s | +0.099661 to +0.292337s |
+
+Parallel mean improves only **0.206%**, with four of eight candidate wins and a paired interval spanning zero. Serial regresses **1.080%**, with one of eight candidate wins. This is not the required 10% improvement. Arrow-only storage is not accepted or promoted as a performance optimization.
+
+Mean process peak footprints were 2,856,262,896 / 2,849,715,431 bytes for parallel control/candidate and 1,885,818,791 / 1,886,592,929 bytes for serial. Mean maximum RSS was 2,882,048,000 / 2,877,775,872 bytes parallel and 1,919,870,976 / 1,916,323,840 bytes serial. Neither measure establishes a material memory reduction. The prototype still leaves every type node at 112 bytes.
+
+Raw evidence is in `comparison-arrow-v3-5/summary.json` and `provenance/parent-independent-audit.json`. The first read-only audit parser failed on macOS `time -p` field order; its original helper and failure disclosure are retained. The corrected, prewritten audit passed without rerunning workloads. This cohort is closed permanently; no sample was replaced or excluded and no earlier timings were pooled.
+
+The substantial-improvement goal remains unmet. Continue the same storage task with a coherent representation change rather than retaining this flat arrow-only result as a win. Keep the archived candidate/control and completed evidence intact.
