@@ -710,6 +710,32 @@ mod tests {
     }
 
     #[test]
+    fn iter_arrow_releases_node_borrow_and_preserves_original_sequence() {
+        use crate::types::type_expr::{TypeArg, TypeDesc as PublicTypeDesc};
+
+        let ctx = TypeContext::new(std::sync::Arc::new(IdGenerator::new()));
+        let first = ctx.new_var(None);
+        let second = ctx.new_var(None);
+        let ret = ctx.new_var(None);
+        let arrow = ctx.new_type(PublicTypeDesc::Tarrow {
+            args: vec![TypeArg::unlabeled(first), TypeArg::unlabeled(second)],
+            ret,
+        });
+
+        let mut visited = Vec::new();
+        iter_type_expr(&ctx, arrow, |typ| {
+            if visited.is_empty() {
+                ctx.set_desc(arrow, PublicTypeDesc::Tnil);
+                ctx.new_arrow_simple(typ, ret);
+            }
+            visited.push(typ);
+        });
+
+        assert_eq!(visited, vec![first, second, ret]);
+        assert!(matches!(*ctx.borrow_desc(arrow), TypeDesc::Tnil));
+    }
+
+    #[test]
     fn test_iter_type_expr_arrow() {
         let id_gen = IdGenerator::new();
         let ctx = TypeContext::new(std::sync::Arc::new(id_gen));

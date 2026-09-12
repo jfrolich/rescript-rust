@@ -95,6 +95,17 @@ impl Deref for TypeDescSnapshot {
     }
 }
 
+fn checked_type_arg_range(start: usize, len: usize) -> Option<TypeArgRange> {
+    let end = start.checked_add(len)?;
+    if end > u32::MAX as usize {
+        return None;
+    }
+    Some(TypeArgRange {
+        start: u32::try_from(start).ok()?,
+        len: u32::try_from(len).ok()?,
+    })
+}
+
 pub(crate) struct TypeArgRefIter<'a> {
     ctx: &'a TypeContext,
     next: u32,
@@ -1426,14 +1437,10 @@ impl TypeContext {
                 // The sequence is fully built before borrowing aggregate
                 // storage, so no mapping callback can re-enter this RefCell.
                 let mut storage = self.type_args.borrow_mut();
-                let start =
-                    u32::try_from(storage.len()).expect("type argument storage exceeds u32::MAX");
-                let len = u32::try_from(args.len()).expect("arrow argument count exceeds u32::MAX");
+                let range = checked_type_arg_range(storage.len(), args.len())
+                    .expect("type argument storage exceeds u32::MAX");
                 storage.extend(args);
-                StoredTypeDesc::Tarrow {
-                    args: TypeArgRange { start, len },
-                    ret,
-                }
+                StoredTypeDesc::Tarrow { args: range, ret }
             }
             desc => StoredTypeDesc::from_non_arrow(desc),
         }
@@ -1442,7 +1449,10 @@ impl TypeContext {
     pub(crate) fn type_args_snapshot(&self, range: TypeArgRange) -> Vec<TypeArg> {
         let storage = self.type_args.borrow();
         let start = range.start as usize;
-        let end = start + range.len as usize;
+        let end = range
+            .start
+            .checked_add(range.len)
+            .expect("validated type argument range") as usize;
         storage[start..end].to_vec()
     }
 
@@ -1450,7 +1460,10 @@ impl TypeContext {
         TypeArgRefIter {
             ctx: self,
             next: range.start,
-            end: range.start + range.len,
+            end: range
+                .start
+                .checked_add(range.len)
+                .expect("validated type argument range"),
         }
     }
 
@@ -1522,15 +1535,17 @@ impl TypeContext {
         // never constructs a temporary Vec.
         let args = {
             let mut storage = self.type_args.borrow_mut();
-            let start =
-                u32::try_from(storage.len()).expect("type argument storage exceeds u32::MAX");
+            let tail_len = tail.as_ref().map_or(0, Vec::len);
+            let len = 1usize
+                .checked_add(tail_len)
+                .expect("arrow argument count exceeds usize::MAX");
+            let range = checked_type_arg_range(storage.len(), len)
+                .expect("type argument storage exceeds u32::MAX");
             storage.push(head);
             if let Some(tail) = tail {
                 storage.extend(tail);
             }
-            let len = u32::try_from(storage.len() - start as usize)
-                .expect("arrow argument count exceeds u32::MAX");
-            TypeArgRange { start, len }
+            range
         };
         let id = self.id_gen.next_type_id();
         self.types.push(TypeExpr::new_stored(
@@ -2919,6 +2934,28 @@ mod tests {
             TypeDesc::Tlink(target) => assert_eq!(*target, t1),
             _ => panic!("Expected Tlink after path compression"),
         }
+    }
+
+    #[test]
+    fn type_argument_range_bounds_validate_combined_end() {
+        let max = u32::MAX as usize;
+        assert_eq!(
+            checked_type_arg_range(max - 2, 2),
+            Some(TypeArgRange {
+                start: u32::MAX - 2,
+                len: 2,
+            })
+        );
+        assert_eq!(
+            checked_type_arg_range(max, 0),
+            Some(TypeArgRange {
+                start: u32::MAX,
+                len: 0,
+            })
+        );
+        assert_eq!(checked_type_arg_range(max, 1), None);
+        assert_eq!(checked_type_arg_range(max - 1, 2), None);
+        assert_eq!(checked_type_arg_range(usize::MAX, 1), None);
     }
 
     #[test]
