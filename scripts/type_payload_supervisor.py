@@ -32,7 +32,7 @@ def handle_interrupts():
 @contextlib.contextmanager
 def cleanup_without_reentrant_interrupts():
     previous = {sig: signal.signal(sig, signal.SIG_IGN)
-                for sig in (signal.SIGINT, signal.SIGTERM)}
+                for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGALRM)}
     try:
         yield
     finally:
