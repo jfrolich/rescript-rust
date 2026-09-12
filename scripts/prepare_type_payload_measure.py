@@ -36,7 +36,7 @@ def copy_new(source, target):
         raise RuntimeError('archive copy mismatch: ' + str(target))
 
 
-def prepare(name, candidate_dir, candidate_head):
+def prepare(name, candidate_dir, candidate_head, baseline_delta=None):
     if not re.fullmatch(r'comparison-[a-z0-9-]+', name):
         raise ValueError('use a fresh comparison-name within the campaign')
     if not re.fullmatch(r'[0-9a-f]{40}', candidate_head):
@@ -145,19 +145,30 @@ def prepare(name, candidate_dir, candidate_head):
         inventory = inputs.Inventory(root)
         inventory.verify_protected()
         baseline = inventory.snapshot()
-        if len(baseline['inputs']) != 42463:
+        # Retain the first observation even if preparation validation fails.
+        supervisor.publish(root / 'baseline.json', baseline)
+        prior_path = BASIS / 'inventory-final.json'
+        prior = inputs.load(prior_path)
+        approval = inputs.load(baseline_delta) if baseline_delta is not None else None
+        expected_count = approval['new_count'] if approval is not None else 42463
+        if len(baseline['inputs']) != expected_count:
             raise RuntimeError('unexpected baseline input count: ' + str(len(baseline['inputs'])))
-        prior = inputs.load(BASIS / 'inventory-final.json')
+        if approval is not None:
+            if inputs.sha(prior_path) != approval['prior_inventory_sha256']:
+                raise RuntimeError('historical inventory basis changed')
+            copy_new(Path(baseline_delta), root / 'provenance/approved-pre-cohort-delta.json')
         previous_inputs, _ = inputs.classify_copies(prior['inputs'], inventory.ledger)
         current_inputs, _ = inputs.classify_copies(baseline['inputs'], inventory.ledger)
         for path in inventory.metadata():
             previous_inputs.pop(path, None)
             current_inputs.pop(path, None)
-        if previous_inputs != current_inputs:
-            changed = sorted(path for path in previous_inputs.keys() | current_inputs.keys()
-                             if previous_inputs.get(path) != current_inputs.get(path))
-            raise RuntimeError('Tella/runtime inputs differ from preserved baseline: ' + repr(changed))
-        supervisor.publish(root / 'baseline.json', baseline)
+        delta = [{'path': path, 'resolved': str(Path(path).resolve()),
+                  'old': previous_inputs.get(path), 'new': current_inputs.get(path)}
+                 for path in sorted(previous_inputs.keys() | current_inputs.keys())
+                 if previous_inputs.get(path) != current_inputs.get(path)]
+        if delta != (approval['rows'] if approval is not None else []):
+            raise RuntimeError('inputs differ from the exact approved pre-cohort baseline delta')
+        supervisor.publish(root / 'provenance/historical-input-delta.json', delta)
         verdict = inventory.compare(baseline, baseline, inventory.metadata(), True)
         if not verdict['valid']:
             raise RuntimeError('initial inventory verification failed: ' + repr(verdict))
@@ -195,8 +206,9 @@ def main():
     parser.add_argument('name')
     parser.add_argument('--candidate-dir', type=Path, required=True)
     parser.add_argument('--candidate-head', required=True)
+    parser.add_argument('--baseline-delta', type=Path)
     args = parser.parse_args()
-    print(prepare(args.name, args.candidate_dir, args.candidate_head))
+    print(prepare(args.name, args.candidate_dir, args.candidate_head, args.baseline_delta))
 
 
 if __name__ == '__main__':
