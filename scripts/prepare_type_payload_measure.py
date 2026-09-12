@@ -140,7 +140,8 @@ def prepare(name, candidate_dir, candidate_head, baseline_delta=None):
                            stdout=stream, check=True)
         for name in ('type_payload_inputs.py', 'type_payload_supervisor.py', 'type_payload_measure.py',
                      'prepare_type_payload_measure.py', 'test_prepare_type_payload_measure.py',
-                     'test_type_payload_measure.py', 'test_type_payload_supervisor.py'):
+                     'test_type_payload_measure.py', 'test_type_payload_supervisor.py',
+                     'type_payload_run_stage.py', 'test_type_payload_run_stage.py'):
             copy_new(worktree / 'scripts' / name, root / 'protocol' / name)
         inventory = inputs.Inventory(root)
         inventory.verify_protected()
