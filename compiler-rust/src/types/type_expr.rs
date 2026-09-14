@@ -27,8 +27,9 @@ use super::asttypes::{ArgLabel, Label, PrivateFlag};
 use super::path::Path;
 use crate::parser::longident::Longident;
 use serde::{Deserialize, Serialize};
-use std::cell::{Cell, RefCell};
+use std::cell::Cell;
 use std::hash::{Hash, Hasher};
+use std::num::NonZeroU32;
 
 /// The generic level for fully polymorphic types.
 pub const GENERIC_LEVEL: i32 = 100_000_000;
@@ -59,46 +60,106 @@ impl TypeArgRange {
     }
 }
 
-/// Internal descriptor storage. This mirrors `TypeDesc`, replacing only the
-/// arrow argument owner with a compact context-local range. Keeping a flat enum
-/// avoids adding an outer discriminant to every type node.
-#[derive(Debug, Clone)]
+/// A compact range into the owning `TypeContext`'s append-only type-reference
+/// storage. The range is meaningful only in that context.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) struct TypeRefRange {
+    pub(crate) start: u32,
+    pub(crate) len: u32,
+}
+
+macro_rules! payload_ref {
+    ($name:ident) => {
+        #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+        pub(crate) struct $name(NonZeroU32);
+
+        impl $name {
+            #[inline]
+            pub(crate) fn from_index(index: usize) -> Self {
+                let one_based = u32::try_from(index)
+                    .ok()
+                    .and_then(|index| index.checked_add(1))
+                    .and_then(NonZeroU32::new)
+                    .expect("type payload index exceeds u32::MAX");
+                Self(one_based)
+            }
+
+            #[inline]
+            pub(crate) fn index(self) -> usize {
+                (self.0.get() - 1) as usize
+            }
+        }
+    };
+}
+
+payload_ref!(TypeNameRef);
+payload_ref!(ConstrPayloadRef);
+payload_ref!(ObjectNamePayloadRef);
+payload_ref!(FieldPayloadRef);
+payload_ref!(RowPayloadRef);
+payload_ref!(PackagePayloadRef);
+
+#[derive(Debug)]
+pub(crate) struct ConstrPayload {
+    pub(crate) path: Path,
+    pub(crate) args: TypeRefRange,
+    pub(crate) abbrev: AbbrevMemoRef,
+}
+
+#[derive(Debug)]
+pub(crate) struct ObjectNamePayload {
+    pub(crate) path: Path,
+    pub(crate) args: TypeRefRange,
+}
+
+#[derive(Debug)]
+pub(crate) struct FieldPayload {
+    pub(crate) name: String,
+    pub(crate) kind: FieldKind,
+}
+
+#[derive(Debug)]
+pub(crate) struct RowPayload {
+    pub(crate) row: RowDesc,
+}
+
+#[derive(Debug)]
+pub(crate) struct PackagePayload {
+    pub(crate) path: Path,
+    pub(crate) lids: Vec<Longident>,
+    pub(crate) args: TypeRefRange,
+}
+
+/// Compact internal descriptor storage. Larger immutable payloads are owned by
+/// the `TypeContext`; every variant remains a strongly typed, valid state.
+#[derive(Debug, Clone, Copy)]
 pub(crate) enum StoredTypeDesc {
-    Tvar(Option<String>),
+    Tvar(Option<TypeNameRef>),
     Tarrow {
         args: TypeArgRange,
         ret: TypeExprRef,
     },
-    Ttuple(Vec<TypeExprRef>),
-    Tconstr {
-        path: Path,
-        args: Vec<TypeExprRef>,
-        abbrev: AbbrevMemoRef,
-    },
+    Ttuple(TypeRefRange),
+    Tconstr(ConstrPayloadRef),
     Tobject {
         fields: TypeExprRef,
-        name: ObjectName,
+        name: Option<ObjectNamePayloadRef>,
     },
     Tfield {
-        name: String,
-        kind: FieldKind,
+        payload: FieldPayloadRef,
         typ: TypeExprRef,
         rest: TypeExprRef,
     },
     Tnil,
     Tlink(TypeExprRef),
     Tsubst(TypeExprRef),
-    Tvariant(RowDesc),
-    Tunivar(Option<String>),
+    Tvariant(RowPayloadRef),
+    Tunivar(Option<TypeNameRef>),
     Tpoly {
         body: TypeExprRef,
-        vars: Vec<TypeExprRef>,
+        vars: TypeRefRange,
     },
-    Tpackage {
-        path: Path,
-        lids: Vec<Longident>,
-        args: Vec<TypeExprRef>,
-    },
+    Tpackage(PackagePayloadRef),
 }
 
 /// A type expression.
@@ -113,8 +174,8 @@ pub(crate) enum StoredTypeDesc {
 /// - `id`: A unique identifier for this type expression
 #[derive(Debug)]
 pub struct TypeExpr {
-    /// The type descriptor. Uses `RefCell` for unification.
-    desc: RefCell<StoredTypeDesc>,
+    /// Compact copyable type descriptor, mutated by unification.
+    desc: Cell<StoredTypeDesc>,
     /// The binding level. Uses `Cell` for generalization.
     level: Cell<i32>,
     /// Unique identifier for this type expression.
@@ -122,43 +183,22 @@ pub struct TypeExpr {
 }
 
 impl TypeExpr {
-    /// Create a new type expression.
-    pub(crate) fn new(desc: TypeDesc, level: i32, id: i32) -> Self {
-        TypeExpr {
-            desc: RefCell::new(StoredTypeDesc::from_non_arrow(desc)),
-            level: Cell::new(level),
-            id,
-        }
-    }
-
     pub(crate) fn new_stored(desc: StoredTypeDesc, level: i32, id: i32) -> Self {
         TypeExpr {
-            desc: RefCell::new(desc),
+            desc: Cell::new(desc),
             level: Cell::new(level),
             id,
         }
     }
 
-    /// Get the type descriptor.
-    ///
-    /// # Panics
-    ///
-    /// Panics if the descriptor is currently borrowed mutably.
-    pub(crate) fn desc(&self) -> TypeDesc {
-        self.desc.borrow().to_non_arrow()
+    #[inline]
+    pub(crate) fn stored_desc(&self) -> StoredTypeDesc {
+        self.desc.get()
     }
 
-    pub(crate) fn stored_desc(&self) -> std::cell::Ref<'_, StoredTypeDesc> {
-        self.desc.borrow()
-    }
-
-    /// Set a descriptor on a standalone type expression.
-    pub(crate) fn set_desc(&self, desc: TypeDesc) {
-        *self.desc.borrow_mut() = StoredTypeDesc::from_non_arrow(desc);
-    }
-
+    #[inline]
     pub(crate) fn set_stored_desc(&self, desc: StoredTypeDesc) {
-        *self.desc.borrow_mut() = desc;
+        self.desc.set(desc);
     }
 
     /// Get the binding level.
@@ -183,17 +223,17 @@ impl TypeExpr {
 
     /// Check if this is a type variable.
     pub fn is_var(&self) -> bool {
-        matches!(&*self.desc.borrow(), StoredTypeDesc::Tvar(_))
+        matches!(self.desc.get(), StoredTypeDesc::Tvar(_))
     }
 
     /// Check if this is a universal type variable.
     pub fn is_univar(&self) -> bool {
-        matches!(&*self.desc.borrow(), StoredTypeDesc::Tunivar(_))
+        matches!(self.desc.get(), StoredTypeDesc::Tunivar(_))
     }
 
     /// Check if this is a type constructor application.
     pub fn is_constr(&self) -> bool {
-        matches!(&*self.desc.borrow(), StoredTypeDesc::Tconstr { .. })
+        matches!(self.desc.get(), StoredTypeDesc::Tconstr(_))
     }
 }
 
@@ -306,82 +346,6 @@ pub enum TypeDesc {
         /// Type arguments
         args: Vec<TypeExprRef>,
     },
-}
-
-impl StoredTypeDesc {
-    pub(crate) fn from_non_arrow(desc: TypeDesc) -> Self {
-        match desc {
-            TypeDesc::Tvar(name) => Self::Tvar(name),
-            TypeDesc::Tarrow { .. } => {
-                panic!("arrow descriptors require context-owned argument storage")
-            }
-            TypeDesc::Ttuple(types) => Self::Ttuple(types),
-            TypeDesc::Tconstr { path, args, abbrev } => Self::Tconstr { path, args, abbrev },
-            TypeDesc::Tobject { fields, name } => Self::Tobject { fields, name },
-            TypeDesc::Tfield {
-                name,
-                kind,
-                typ,
-                rest,
-            } => Self::Tfield {
-                name,
-                kind,
-                typ,
-                rest,
-            },
-            TypeDesc::Tnil => Self::Tnil,
-            TypeDesc::Tlink(ty) => Self::Tlink(ty),
-            TypeDesc::Tsubst(ty) => Self::Tsubst(ty),
-            TypeDesc::Tvariant(row) => Self::Tvariant(row),
-            TypeDesc::Tunivar(name) => Self::Tunivar(name),
-            TypeDesc::Tpoly { body, vars } => Self::Tpoly { body, vars },
-            TypeDesc::Tpackage { path, lids, args } => Self::Tpackage { path, lids, args },
-        }
-    }
-
-    pub(crate) fn to_non_arrow(&self) -> TypeDesc {
-        match self {
-            Self::Tvar(name) => TypeDesc::Tvar(name.clone()),
-            Self::Tarrow { .. } => {
-                panic!("pooled arrow descriptors require TypeContext::get_desc")
-            }
-            Self::Ttuple(types) => TypeDesc::Ttuple(types.clone()),
-            Self::Tconstr { path, args, abbrev } => TypeDesc::Tconstr {
-                path: path.clone(),
-                args: args.clone(),
-                abbrev: *abbrev,
-            },
-            Self::Tobject { fields, name } => TypeDesc::Tobject {
-                fields: *fields,
-                name: name.clone(),
-            },
-            Self::Tfield {
-                name,
-                kind,
-                typ,
-                rest,
-            } => TypeDesc::Tfield {
-                name: name.clone(),
-                kind: kind.clone(),
-                typ: *typ,
-                rest: *rest,
-            },
-            Self::Tnil => TypeDesc::Tnil,
-            Self::Tlink(ty) => TypeDesc::Tlink(*ty),
-            Self::Tsubst(ty) => TypeDesc::Tsubst(*ty),
-            Self::Tvariant(row) => TypeDesc::Tvariant(row.clone()),
-            Self::Tunivar(name) => TypeDesc::Tunivar(name.clone()),
-            Self::Tpoly { body, vars } => TypeDesc::Tpoly {
-                body: *body,
-                vars: vars.clone(),
-            },
-            Self::Tpackage { path, lids, args } => TypeDesc::Tpackage {
-                path: path.clone(),
-                lids: lids.clone(),
-                args: args.clone(),
-            },
-        }
-    }
 }
 
 /// A reference to a type expression.
@@ -917,7 +881,7 @@ mod tests {
 
     #[test]
     fn test_type_expr_creation() {
-        let ty = TypeExpr::new(TypeDesc::Tvar(Some("a".to_string())), GENERIC_LEVEL, 1);
+        let ty = TypeExpr::new_stored(StoredTypeDesc::Tvar(None), GENERIC_LEVEL, 1);
         assert_eq!(ty.id(), 1);
         assert_eq!(ty.level(), GENERIC_LEVEL);
         assert!(ty.is_generic());
@@ -926,22 +890,32 @@ mod tests {
 
     #[test]
     fn test_type_expr_mutation() {
-        let ty = TypeExpr::new(TypeDesc::Tvar(None), 0, 1);
+        let ty = TypeExpr::new_stored(StoredTypeDesc::Tvar(None), 0, 1);
         ty.set_level(GENERIC_LEVEL);
         assert_eq!(ty.level(), GENERIC_LEVEL);
 
-        ty.set_desc(TypeDesc::Tnil);
-        assert!(matches!(ty.desc(), TypeDesc::Tnil));
+        ty.set_stored_desc(StoredTypeDesc::Tnil);
+        assert!(matches!(ty.stored_desc(), StoredTypeDesc::Tnil));
     }
 
     #[test]
     fn test_type_expr_equality() {
-        let ty1 = TypeExpr::new(TypeDesc::Tvar(None), 0, 1);
-        let ty2 = TypeExpr::new(TypeDesc::Tvar(None), 0, 1);
-        let ty3 = TypeExpr::new(TypeDesc::Tvar(None), 0, 2);
+        let ty1 = TypeExpr::new_stored(StoredTypeDesc::Tvar(None), 0, 1);
+        let ty2 = TypeExpr::new_stored(StoredTypeDesc::Tvar(None), 0, 1);
+        let ty3 = TypeExpr::new_stored(StoredTypeDesc::Tvar(None), 0, 2);
 
         assert_eq!(ty1, ty2); // Same id
         assert_ne!(ty1, ty3); // Different id
+    }
+
+    #[test]
+    fn compact_internal_type_layout() {
+        if cfg!(target_pointer_width = "64") {
+            assert_eq!(std::mem::size_of::<StoredTypeDesc>(), 16);
+            assert_eq!(std::mem::size_of::<TypeExpr>(), 24);
+        }
+        assert_eq!(std::mem::size_of::<TypeExprRef>(), 4);
+        assert_eq!(std::mem::size_of::<TypeRefRange>(), 8);
     }
 
     #[test]
@@ -959,13 +933,18 @@ mod tests {
             assert_eq!(std::mem::size_of::<TypeArg>(), 16);
         }
         let typ = TypeExprRef(u32::MAX);
-        for arg in [TypeArg::unlabeled(typ), TypeArg::new(ArgLabel::Nolabel, typ)] {
+        for arg in [
+            TypeArg::unlabeled(typ),
+            TypeArg::new(ArgLabel::Nolabel, typ),
+        ] {
             assert!(arg.label.is_none());
             assert!(arg.clone().label.is_none());
             assert!(matches!(arg.label(), ArgLabel::Nolabel));
             assert_eq!(arg.typ, typ);
-            assert_eq!(format!("{:?}", arg),
-                format!("TypeArg {{ lbl: Nolabel, typ: {:?} }}", typ));
+            assert_eq!(
+                format!("{:?}", arg),
+                format!("TypeArg {{ lbl: Nolabel, typ: {:?} }}", typ)
+            );
         }
         for ghost in [false, true] {
             let loc = Location {

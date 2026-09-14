@@ -22,8 +22,11 @@ use super::asttypes::{ArgLabel, PrivateFlag};
 use super::env::Env;
 use super::path::Path;
 use super::type_expr::{
-    AbbrevMemo, AbbrevMemoRef, FieldKind, FieldKindRef, GENERIC_LEVEL, RowDesc, RowField,
-    RowFieldRef, StoredTypeDesc, TypeArg, TypeArgRange, TypeDesc, TypeExpr, TypeExprRef,
+    AbbrevMemo, AbbrevMemoRef, ConstrPayload, ConstrPayloadRef, FieldKind, FieldKindRef,
+    FieldPayload, FieldPayloadRef, GENERIC_LEVEL, ObjectNamePayload, ObjectNamePayloadRef,
+    PackagePayload, PackagePayloadRef, RowDesc, RowField, RowFieldRef, RowPayload, RowPayloadRef,
+    StoredTypeDesc, TypeArg, TypeArgRange, TypeDesc, TypeExpr, TypeExprRef, TypeNameRef,
+    TypeRefRange,
 };
 use super::typedtree::EnvRef;
 use crate::context::IdGenerator;
@@ -88,6 +91,15 @@ impl TypeArena {
 /// needs to hold the desc while also mutating the same type node.
 pub struct TypeDescSnapshot(TypeDesc);
 
+pub(crate) struct StoredTypeDescSnapshot(StoredTypeDesc);
+
+impl Deref for StoredTypeDescSnapshot {
+    type Target = StoredTypeDesc;
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
 impl Deref for TypeDescSnapshot {
     type Target = TypeDesc;
     fn deref(&self) -> &Self::Target {
@@ -95,15 +107,22 @@ impl Deref for TypeDescSnapshot {
     }
 }
 
-fn checked_type_arg_range(start: usize, len: usize) -> Option<TypeArgRange> {
+fn checked_range(start: usize, len: usize) -> Option<(u32, u32)> {
     let end = start.checked_add(len)?;
     if end > u32::MAX as usize {
         return None;
     }
-    Some(TypeArgRange {
-        start: u32::try_from(start).ok()?,
-        len: u32::try_from(len).ok()?,
-    })
+    Some((u32::try_from(start).ok()?, u32::try_from(len).ok()?))
+}
+
+fn checked_type_arg_range(start: usize, len: usize) -> Option<TypeArgRange> {
+    let (start, len) = checked_range(start, len)?;
+    Some(TypeArgRange { start, len })
+}
+
+fn checked_type_ref_range(start: usize, len: usize) -> Option<TypeRefRange> {
+    let (start, len) = checked_range(start, len)?;
+    Some(TypeRefRange { start, len })
 }
 
 pub(crate) struct TypeArgRefIter<'a> {
@@ -134,6 +153,33 @@ impl Iterator for TypeArgRefIter<'_> {
 }
 
 impl ExactSizeIterator for TypeArgRefIter<'_> {}
+
+pub(crate) struct TypeRefIter<'a> {
+    ctx: &'a TypeContext,
+    next: u32,
+    end: u32,
+}
+
+impl Iterator for TypeRefIter<'_> {
+    type Item = TypeExprRef;
+
+    #[inline]
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.next == self.end {
+            return None;
+        }
+        let index = self.next as usize;
+        self.next += 1;
+        Some(self.ctx.type_refs.borrow()[index])
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        let remaining = (self.end - self.next) as usize;
+        (remaining, Some(remaining))
+    }
+}
+
+impl ExactSizeIterator for TypeRefIter<'_> {}
 
 /// Snapshot of mutable type-checker state for OCaml-style failed-unify
 /// backtracking.
@@ -319,6 +365,14 @@ pub struct TypeContext {
     /// Append-only storage for immutable published arrow-argument sequences.
     /// Located label payloads are reclaimed with the owning context.
     type_args: RefCell<Vec<TypeArg>>,
+    /// Shared append-only storage for immutable type-reference sequences.
+    type_refs: RefCell<Vec<TypeExprRef>>,
+    type_names: RefCell<Vec<String>>,
+    constr_payloads: RefCell<Vec<ConstrPayload>>,
+    object_name_payloads: RefCell<Vec<ObjectNamePayload>>,
+    field_payloads: RefCell<Vec<FieldPayload>>,
+    row_payloads: RefCell<Vec<RowPayload>>,
+    package_payloads: RefCell<Vec<PackagePayload>>,
 
     /// Cached value of `RESCRIPT_COMPILER_COUNTERS` for hot-path probes.
     compiler_counters_enabled: bool,
@@ -586,6 +640,13 @@ impl TypeContext {
             current_abbreviations: Cell::new(AbbrevMemoRef::nil()),
             types: TypeArena::new(),
             type_args: RefCell::new(Vec::new()),
+            type_refs: RefCell::new(Vec::new()),
+            type_names: RefCell::new(Vec::new()),
+            constr_payloads: RefCell::new(Vec::new()),
+            object_name_payloads: RefCell::new(Vec::new()),
+            field_payloads: RefCell::new(Vec::new()),
+            row_payloads: RefCell::new(Vec::new()),
+            package_payloads: RefCell::new(Vec::new()),
             compiler_counters_enabled: crate::perf_counters::enabled(),
             // Index 0 is reserved as canonical Mnil; index 1 is the dedicated
             // simple_abbrevs memo ref.
@@ -1431,18 +1492,83 @@ impl TypeContext {
         self.types.push(TypeExpr::new_stored(desc, level, id))
     }
 
+    fn store_type_refs(&self, refs: Vec<TypeExprRef>) -> TypeRefRange {
+        let mut storage = self.type_refs.borrow_mut();
+        let range = checked_type_ref_range(storage.len(), refs.len())
+            .expect("type reference storage exceeds u32::MAX");
+        storage.extend(refs);
+        range
+    }
+
+    fn store_name(&self, name: Option<String>) -> Option<TypeNameRef> {
+        name.map(|name| {
+            let mut storage = self.type_names.borrow_mut();
+            let reference = TypeNameRef::from_index(storage.len());
+            storage.push(name);
+            reference
+        })
+    }
+
     fn store_desc(&self, desc: TypeDesc) -> StoredTypeDesc {
         match desc {
+            TypeDesc::Tvar(name) => StoredTypeDesc::Tvar(self.store_name(name)),
             TypeDesc::Tarrow { args, ret } => {
-                // The sequence is fully built before borrowing aggregate
-                // storage, so no mapping callback can re-enter this RefCell.
                 let mut storage = self.type_args.borrow_mut();
                 let range = checked_type_arg_range(storage.len(), args.len())
                     .expect("type argument storage exceeds u32::MAX");
                 storage.extend(args);
                 StoredTypeDesc::Tarrow { args: range, ret }
             }
-            desc => StoredTypeDesc::from_non_arrow(desc),
+            TypeDesc::Ttuple(types) => StoredTypeDesc::Ttuple(self.store_type_refs(types)),
+            TypeDesc::Tconstr { path, args, abbrev } => {
+                let args = self.store_type_refs(args);
+                let mut storage = self.constr_payloads.borrow_mut();
+                let reference = ConstrPayloadRef::from_index(storage.len());
+                storage.push(ConstrPayload { path, args, abbrev });
+                StoredTypeDesc::Tconstr(reference)
+            }
+            TypeDesc::Tobject { fields, name } => {
+                let name = name.map(|(path, args)| {
+                    let args = self.store_type_refs(args);
+                    let mut storage = self.object_name_payloads.borrow_mut();
+                    let reference = ObjectNamePayloadRef::from_index(storage.len());
+                    storage.push(ObjectNamePayload { path, args });
+                    reference
+                });
+                StoredTypeDesc::Tobject { fields, name }
+            }
+            TypeDesc::Tfield {
+                name,
+                kind,
+                typ,
+                rest,
+            } => {
+                let mut storage = self.field_payloads.borrow_mut();
+                let payload = FieldPayloadRef::from_index(storage.len());
+                storage.push(FieldPayload { name, kind });
+                StoredTypeDesc::Tfield { payload, typ, rest }
+            }
+            TypeDesc::Tnil => StoredTypeDesc::Tnil,
+            TypeDesc::Tlink(ty) => StoredTypeDesc::Tlink(ty),
+            TypeDesc::Tsubst(ty) => StoredTypeDesc::Tsubst(ty),
+            TypeDesc::Tvariant(row) => {
+                let mut storage = self.row_payloads.borrow_mut();
+                let reference = RowPayloadRef::from_index(storage.len());
+                storage.push(RowPayload { row });
+                StoredTypeDesc::Tvariant(reference)
+            }
+            TypeDesc::Tunivar(name) => StoredTypeDesc::Tunivar(self.store_name(name)),
+            TypeDesc::Tpoly { body, vars } => StoredTypeDesc::Tpoly {
+                body,
+                vars: self.store_type_refs(vars),
+            },
+            TypeDesc::Tpackage { path, lids, args } => {
+                let args = self.store_type_refs(args);
+                let mut storage = self.package_payloads.borrow_mut();
+                let reference = PackagePayloadRef::from_index(storage.len());
+                storage.push(PackagePayload { path, lids, args });
+                StoredTypeDesc::Tpackage(reference)
+            }
         }
     }
 
@@ -1465,6 +1591,126 @@ impl TypeContext {
                 .checked_add(range.len)
                 .expect("validated type argument range"),
         }
+    }
+
+    pub(crate) fn type_refs_snapshot(&self, range: TypeRefRange) -> Vec<TypeExprRef> {
+        let storage = self.type_refs.borrow();
+        let start = range.start as usize;
+        let end = range
+            .start
+            .checked_add(range.len)
+            .expect("validated type reference range") as usize;
+        storage[start..end].to_vec()
+    }
+
+    pub(crate) fn type_ref_iter(&self, range: TypeRefRange) -> TypeRefIter<'_> {
+        TypeRefIter {
+            ctx: self,
+            next: range.start,
+            end: range
+                .start
+                .checked_add(range.len)
+                .expect("validated type reference range"),
+        }
+    }
+
+    pub(crate) fn type_name(&self, reference: TypeNameRef) -> std::cell::Ref<'_, str> {
+        std::cell::Ref::map(self.type_names.borrow(), |storage| {
+            storage[reference.index()].as_str()
+        })
+    }
+
+    pub(crate) fn type_name_snapshot(&self, reference: Option<TypeNameRef>) -> Option<String> {
+        reference.map(|reference| self.type_name(reference).to_string())
+    }
+
+    pub(crate) fn object_name_snapshot(
+        &self,
+        reference: Option<ObjectNamePayloadRef>,
+    ) -> super::type_expr::ObjectName {
+        reference.map(|reference| {
+            let payload = self.object_name_payload(reference);
+            (payload.path.clone(), self.type_refs_snapshot(payload.args))
+        })
+    }
+
+    pub(crate) fn constr_payload(
+        &self,
+        reference: ConstrPayloadRef,
+    ) -> std::cell::Ref<'_, ConstrPayload> {
+        std::cell::Ref::map(self.constr_payloads.borrow(), |storage| {
+            &storage[reference.index()]
+        })
+    }
+
+    pub(crate) fn constr_snapshot(
+        &self,
+        reference: ConstrPayloadRef,
+    ) -> (Path, Vec<TypeExprRef>, AbbrevMemoRef) {
+        let payload = self.constr_payload(reference);
+        (
+            payload.path.clone(),
+            self.type_refs_snapshot(payload.args),
+            payload.abbrev,
+        )
+    }
+
+    pub(crate) fn object_name_payload(
+        &self,
+        reference: ObjectNamePayloadRef,
+    ) -> std::cell::Ref<'_, ObjectNamePayload> {
+        std::cell::Ref::map(self.object_name_payloads.borrow(), |storage| {
+            &storage[reference.index()]
+        })
+    }
+
+    pub(crate) fn field_payload(
+        &self,
+        reference: FieldPayloadRef,
+    ) -> std::cell::Ref<'_, FieldPayload> {
+        std::cell::Ref::map(self.field_payloads.borrow(), |storage| {
+            &storage[reference.index()]
+        })
+    }
+
+    pub(crate) fn field_snapshot(&self, reference: FieldPayloadRef) -> (String, FieldKind) {
+        let payload = self.field_payload(reference);
+        (payload.name.clone(), payload.kind.clone())
+    }
+
+    pub(crate) fn row_payload(&self, reference: RowPayloadRef) -> std::cell::Ref<'_, RowPayload> {
+        std::cell::Ref::map(self.row_payloads.borrow(), |storage| {
+            &storage[reference.index()]
+        })
+    }
+
+    pub(crate) fn row_snapshot(&self, reference: RowPayloadRef) -> RowDesc {
+        self.row_payload(reference).row.clone()
+    }
+
+    pub(crate) fn package_payload(
+        &self,
+        reference: PackagePayloadRef,
+    ) -> std::cell::Ref<'_, PackagePayload> {
+        std::cell::Ref::map(self.package_payloads.borrow(), |storage| {
+            &storage[reference.index()]
+        })
+    }
+
+    pub(crate) fn package_snapshot(
+        &self,
+        reference: PackagePayloadRef,
+    ) -> (
+        Path,
+        Vec<crate::parser::longident::Longident>,
+        Vec<TypeExprRef>,
+    ) {
+        let payload = self.package_payload(reference);
+        (
+            payload.path.clone(),
+            payload.lids.clone(),
+            self.type_refs_snapshot(payload.args),
+        )
     }
 
     /// Create a new type at a specific level.
@@ -1520,14 +1766,9 @@ impl TypeContext {
         level: i32,
     ) -> TypeExprRef {
         let ret_repr = self.repr(ret_type);
-        let (tail, ret) = {
-            let desc = self.types.get(ret_repr).stored_desc();
-            match &*desc {
-                StoredTypeDesc::Tarrow { args, ret } => {
-                    (Some(self.type_args_snapshot(*args)), *ret)
-                }
-                _ => (None, ret_type),
-            }
+        let (tail, ret) = match self.types.get(ret_repr).stored_desc() {
+            StoredTypeDesc::Tarrow { args, ret } => (Some(self.type_args_snapshot(args)), ret),
+            _ => (None, ret_type),
         };
 
         // The optional tail snapshot is complete before the mutable aggregate
@@ -1688,29 +1929,74 @@ impl TypeContext {
     // Type Access
     // ========================================================================
 
-    /// Get the descriptor of a type.
-    /// Returns a cloned snapshot to avoid RefCell borrow conflicts when
-    /// the desc is held across function calls that may modify the same node.
+    /// Get an owned descriptor snapshot for public construction and export
+    /// boundaries. Internal hot readers use the compact descriptor and payload
+    /// accessors instead.
     #[inline]
     pub fn get_desc(&self, r: TypeExprRef) -> TypeDescSnapshot {
         let desc = self.types.get(r).stored_desc();
-        TypeDescSnapshot(match &*desc {
+        let desc = match desc {
+            StoredTypeDesc::Tvar(name) => {
+                TypeDesc::Tvar(name.map(|name| self.type_name(name).to_string()))
+            }
             StoredTypeDesc::Tarrow { args, ret } => TypeDesc::Tarrow {
-                // Snapshot before returning to any recursive/callback caller.
-                args: self.type_args_snapshot(*args),
-                ret: *ret,
+                args: self.type_args_snapshot(args),
+                ret,
             },
-            desc => desc.to_non_arrow(),
-        })
+            StoredTypeDesc::Ttuple(types) => TypeDesc::Ttuple(self.type_refs_snapshot(types)),
+            StoredTypeDesc::Tconstr(reference) => {
+                let payload = self.constr_payload(reference);
+                TypeDesc::Tconstr {
+                    path: payload.path.clone(),
+                    args: self.type_refs_snapshot(payload.args),
+                    abbrev: payload.abbrev,
+                }
+            }
+            StoredTypeDesc::Tobject { fields, name } => TypeDesc::Tobject {
+                fields,
+                name: name.map(|reference| {
+                    let payload = self.object_name_payload(reference);
+                    (payload.path.clone(), self.type_refs_snapshot(payload.args))
+                }),
+            },
+            StoredTypeDesc::Tfield { payload, typ, rest } => {
+                let payload = self.field_payload(payload);
+                TypeDesc::Tfield {
+                    name: payload.name.clone(),
+                    kind: payload.kind.clone(),
+                    typ,
+                    rest,
+                }
+            }
+            StoredTypeDesc::Tnil => TypeDesc::Tnil,
+            StoredTypeDesc::Tlink(ty) => TypeDesc::Tlink(ty),
+            StoredTypeDesc::Tsubst(ty) => TypeDesc::Tsubst(ty),
+            StoredTypeDesc::Tvariant(reference) => {
+                TypeDesc::Tvariant(self.row_payload(reference).row.clone())
+            }
+            StoredTypeDesc::Tunivar(name) => {
+                TypeDesc::Tunivar(name.map(|name| self.type_name(name).to_string()))
+            }
+            StoredTypeDesc::Tpoly { body, vars } => TypeDesc::Tpoly {
+                body,
+                vars: self.type_refs_snapshot(vars),
+            },
+            StoredTypeDesc::Tpackage(reference) => {
+                let payload = self.package_payload(reference);
+                TypeDesc::Tpackage {
+                    path: payload.path.clone(),
+                    lids: payload.lids.clone(),
+                    args: self.type_refs_snapshot(payload.args),
+                }
+            }
+        };
+        TypeDescSnapshot(desc)
     }
 
-    /// Borrow the internal descriptor without materializing owned payloads.
-    ///
-    /// Callers must copy a pooled arrow range and drop this node borrow before
-    /// recursive, callback, or allocating work.
+    /// Read the compact descriptor without borrowing the type node.
     #[inline]
-    pub(crate) fn borrow_desc(&self, r: TypeExprRef) -> std::cell::Ref<'_, StoredTypeDesc> {
-        self.types.get(r).stored_desc()
+    pub(crate) fn borrow_desc(&self, r: TypeExprRef) -> StoredTypeDescSnapshot {
+        StoredTypeDescSnapshot(self.types.get(r).stored_desc())
     }
 
     /// Get the level of a type.
@@ -1750,7 +2036,7 @@ impl TypeContext {
         let mut type_states = Vec::with_capacity(type_len);
         for idx in 0..type_len {
             let ty = TypeExprRef::from_usize(idx);
-            type_states.push((self.types.get(ty).stored_desc().clone(), self.get_level(ty)));
+            type_states.push((self.types.get(ty).stored_desc(), self.get_level(ty)));
         }
 
         let row_field_states = self
@@ -2712,6 +2998,18 @@ impl TypeContext {
     // Type Representative (Union-Find)
     // ========================================================================
 
+    fn repr_next(&self, desc: StoredTypeDesc) -> Option<TypeExprRef> {
+        match desc {
+            StoredTypeDesc::Tlink(next) => Some(next),
+            StoredTypeDesc::Tfield { payload, rest, .. }
+                if matches!(self.field_payload(payload).kind, FieldKind::Fabsent) =>
+            {
+                Some(rest)
+            }
+            _ => None,
+        }
+    }
+
     /// Get the representative of a type (follow Tlink chains).
     ///
     /// This uses path compression to update intermediate links
@@ -2720,17 +3018,8 @@ impl TypeContext {
     pub fn repr(&self, t: TypeExprRef) -> TypeExprRef {
         // Fast path: check if t is already a representative (no link).
         // This avoids any allocation for the common case.
-        let first_next = {
-            let desc = self.types.get(t).stored_desc();
-            match &*desc {
-                StoredTypeDesc::Tlink(next) => *next,
-                StoredTypeDesc::Tfield {
-                    kind: FieldKind::Fabsent,
-                    rest,
-                    ..
-                } => *rest,
-                _ => return t,
-            }
+        let Some(first_next) = self.repr_next(self.types.get(t).stored_desc()) else {
+            return t;
         };
 
         // Follow chain to the end, collecting nodes for path compression.
@@ -2742,18 +3031,7 @@ impl TypeContext {
 
         let mut current = first_next;
         for _ in 0..10_000 {
-            let next = {
-                let desc = self.types.get(current).stored_desc();
-                match &*desc {
-                    StoredTypeDesc::Tlink(next) => Some(*next),
-                    StoredTypeDesc::Tfield {
-                        kind: FieldKind::Fabsent,
-                        rest,
-                        ..
-                    } => Some(*rest),
-                    _ => None,
-                }
-            };
+            let next = self.repr_next(self.types.get(current).stored_desc());
             match next {
                 Some(next_ref) => {
                     if chain_len < 32 {
@@ -2956,6 +3234,15 @@ mod tests {
         assert_eq!(checked_type_arg_range(max, 1), None);
         assert_eq!(checked_type_arg_range(max - 1, 2), None);
         assert_eq!(checked_type_arg_range(usize::MAX, 1), None);
+        assert_eq!(
+            checked_type_ref_range(max - 2, 2),
+            Some(TypeRefRange {
+                start: u32::MAX - 2,
+                len: 2,
+            })
+        );
+        assert_eq!(checked_type_ref_range(max, 1), None);
+        assert_eq!(checked_type_ref_range(usize::MAX, 1), None);
     }
 
     #[test]
@@ -3012,8 +3299,8 @@ mod tests {
             args: vec![TypeArg::unlabeled(first), TypeArg::unlabeled(second)],
             ret,
         });
-        let range = match &*ctx.types.get(arrow).stored_desc() {
-            StoredTypeDesc::Tarrow { args, .. } => *args,
+        let range = match ctx.types.get(arrow).stored_desc() {
+            StoredTypeDesc::Tarrow { args, .. } => args,
             _ => panic!("arrow expected"),
         };
 
@@ -3031,8 +3318,8 @@ mod tests {
         let arg = ctx.new_var(None);
         let ret = ctx.new_var(None);
         let arrow = ctx.new_arrow_simple(arg, ret);
-        let original_range = match &*ctx.types.get(arrow).stored_desc() {
-            StoredTypeDesc::Tarrow { args, .. } => *args,
+        let original_range = match ctx.types.get(arrow).stored_desc() {
+            StoredTypeDesc::Tarrow { args, .. } => args,
             _ => panic!("arrow expected"),
         };
         let snapshot = ctx.snapshot_type_state();
@@ -3045,8 +3332,8 @@ mod tests {
         );
         let stored_after_replacement = ctx.type_args.borrow().len();
         ctx.restore_type_state(snapshot);
-        let restored_range = match &*ctx.types.get(arrow).stored_desc() {
-            StoredTypeDesc::Tarrow { args, .. } => *args,
+        let restored_range = match ctx.types.get(arrow).stored_desc() {
+            StoredTypeDesc::Tarrow { args, .. } => args,
             _ => panic!("arrow expected"),
         };
         assert_eq!(restored_range, original_range);
@@ -3101,11 +3388,92 @@ mod tests {
     fn type_payload_storage_sizes_are_stable() {
         if cfg!(target_pointer_width = "64") {
             assert_eq!(std::mem::size_of::<TypeDesc>(), 96);
-            assert_eq!(std::mem::size_of::<StoredTypeDesc>(), 96);
-            assert_eq!(std::mem::size_of::<TypeExpr>(), 112);
+            assert_eq!(std::mem::size_of::<StoredTypeDesc>(), 16);
+            assert_eq!(std::mem::size_of::<TypeExpr>(), 24);
             assert_eq!(std::mem::size_of::<TypeArg>(), 16);
         }
         assert_eq!(std::mem::size_of::<TypeArgRange>(), 8);
+        assert_eq!(std::mem::size_of::<TypeRefRange>(), 8);
+    }
+
+    #[test]
+    fn compact_payloads_round_trip_all_descriptor_variants() {
+        let ctx = TypeContext::new(Arc::new(IdGenerator::new()));
+        let a = ctx.new_var(Some("a".to_string()));
+        let b = ctx.new_univar(Some("b".to_string()));
+        let nil = ctx.new_type(TypeDesc::Tnil);
+        let arrow = ctx.new_type(TypeDesc::Tarrow {
+            args: vec![TypeArg::unlabeled(a)],
+            ret: b,
+        });
+        let tuple = ctx.new_tuple(vec![a, b]);
+        let constr = ctx.new_constr(super::super::predef::path_option(), vec![a]);
+        let object = ctx.new_type(TypeDesc::Tobject {
+            fields: nil,
+            name: Some((super::super::predef::path_int(), vec![a, b])),
+        });
+        let field = ctx.new_type(TypeDesc::Tfield {
+            name: "method".to_string(),
+            kind: FieldKind::Fpresent,
+            typ: a,
+            rest: nil,
+        });
+        let link = ctx.new_link(a);
+        let subst = ctx.new_type(TypeDesc::Tsubst(b));
+        let variant = ctx.new_variant(RowDesc {
+            row_fields: vec![("Tag".into(), RowField::Rpresent(Some(a)))],
+            row_more: b,
+            row_closed: true,
+            row_fixed: false,
+            row_name: Some((super::super::predef::path_option(), vec![a])),
+        });
+        let poly = ctx.new_poly(a, vec![b]);
+        let package = ctx.new_type(TypeDesc::Tpackage {
+            path: super::super::predef::path_int(),
+            lids: vec![],
+            args: vec![a, b],
+        });
+
+        assert!(matches!(&*ctx.get_desc(a), TypeDesc::Tvar(Some(name)) if name == "a"));
+        assert!(matches!(&*ctx.get_desc(b), TypeDesc::Tunivar(Some(name)) if name == "b"));
+        assert!(matches!(&*ctx.get_desc(nil), TypeDesc::Tnil));
+        assert!(
+            matches!(&*ctx.get_desc(arrow), TypeDesc::Tarrow { args, ret } if args[0].typ == a && *ret == b)
+        );
+        assert!(matches!(&*ctx.get_desc(tuple), TypeDesc::Ttuple(items) if items == &[a, b]));
+        assert!(matches!(&*ctx.get_desc(constr), TypeDesc::Tconstr { args, .. } if args == &[a]));
+        assert!(
+            matches!(&*ctx.get_desc(object), TypeDesc::Tobject { fields, name: Some((_, args)) } if *fields == nil && args == &[a, b])
+        );
+        assert!(
+            matches!(&*ctx.get_desc(field), TypeDesc::Tfield { name, kind: FieldKind::Fpresent, typ, rest } if name == "method" && *typ == a && *rest == nil)
+        );
+        assert!(matches!(&*ctx.get_desc(link), TypeDesc::Tlink(target) if *target == a));
+        assert!(matches!(&*ctx.get_desc(subst), TypeDesc::Tsubst(target) if *target == b));
+        assert!(
+            matches!(&*ctx.get_desc(variant), TypeDesc::Tvariant(row) if row.row_more == b && row.row_fields.len() == 1)
+        );
+        assert!(
+            matches!(&*ctx.get_desc(poly), TypeDesc::Tpoly { body, vars } if *body == a && vars == &[b])
+        );
+        assert!(
+            matches!(&*ctx.get_desc(package), TypeDesc::Tpackage { args, .. } if args == &[a, b])
+        );
+    }
+
+    #[test]
+    fn compact_pool_accounting_tracks_retained_replaced_payloads() {
+        let ctx = TypeContext::new(Arc::new(IdGenerator::new()));
+        let a = ctx.new_var(Some("a".to_string()));
+        let b = ctx.new_var(None);
+        let tuple = ctx.new_tuple(vec![a, b]);
+        let refs_before = ctx.type_refs.borrow().len();
+        let names_before = ctx.type_names.borrow().len();
+        ctx.set_desc(tuple, TypeDesc::Tlink(a));
+        assert_eq!(ctx.type_refs.borrow().len(), refs_before);
+        assert_eq!(ctx.type_names.borrow().len(), names_before);
+        assert!(ctx.type_refs.borrow().capacity() >= refs_before);
+        assert!(ctx.type_names.borrow().capacity() >= names_before);
     }
 
     #[test]

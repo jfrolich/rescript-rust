@@ -5,27 +5,8 @@ use std::collections::BTreeSet;
 
 use crate::gentype::gen_type_common::{ArgType, Field, Function, Ident, Payload, Type, Variant};
 use crate::types::context::TypeContext;
-use crate::types::type_expr::{TypeDesc, TypeExpr, TypeExprRef};
+use crate::types::type_expr::{TypeDesc, TypeExprRef};
 use crate::types::typedtree::{TypedCoreType, TypedCoreTypeDesc};
-
-pub fn extract_from_type_expr(type_params: &[TypeExpr]) -> Vec<String> {
-    let mut so_far = Vec::new();
-
-    for type_expr in type_params {
-        match &type_expr.desc() {
-            TypeDesc::Tvar(Some(s)) => {
-                let type_name = s.clone();
-                so_far.push(type_name);
-            }
-            TypeDesc::Tlink(_) => {
-                // see if we need to collect more type vars here: t as 'a
-            }
-            _ => panic!("assert false"),
-        }
-    }
-
-    so_far
-}
 
 pub fn extract_from_type_expr_refs(ctx: &TypeContext, type_params: &[TypeExprRef]) -> Vec<String> {
     // Mirrors compiler/gentype/TypeVars.ml:3-13 at the Types.type_expr

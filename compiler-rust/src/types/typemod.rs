@@ -3039,7 +3039,9 @@ fn expand_record_spread_label(
                 if new_types.iter().zip(arrow_args).all(|(a, b)| *a == b.typ) && new_ret == *ret {
                     ty
                 } else {
-                    let new_args = arrow_args.iter().zip(new_types)
+                    let new_args = arrow_args
+                        .iter()
+                        .zip(new_types)
                         .map(|(arg, typ)| crate::types::TypeArg::new(arg.label().clone(), typ))
                         .collect();
                     with_original_level(
@@ -13528,14 +13530,20 @@ fn check_usage_of_path_of_substituted_item(
         let action = {
             let desc = tctx.type_ctx.borrow_desc(ty);
             match &*desc {
-                StoredTypeDesc::Tconstr { path, args, .. } => {
-                    TypeAction::Path(path.clone(), args.clone())
+                StoredTypeDesc::Tconstr(payload) => {
+                    let (path, args, _) = tctx.type_ctx.constr_snapshot(*payload);
+                    TypeAction::Path(path, args)
                 }
-                StoredTypeDesc::Tpackage { path, args, .. } => {
-                    TypeAction::Path(path.clone(), args.clone())
+                StoredTypeDesc::Tpackage(payload) => {
+                    let (path, _, args) = tctx.type_ctx.package_snapshot(*payload);
+                    TypeAction::Path(path, args)
                 }
-                StoredTypeDesc::Tobject { fields, name } => TypeAction::Object(*fields, name.clone()),
-                StoredTypeDesc::Tvariant(row) => TypeAction::Variant(row.clone()),
+                StoredTypeDesc::Tobject { fields, name } => {
+                    TypeAction::Object(*fields, tctx.type_ctx.object_name_snapshot(*name))
+                }
+                StoredTypeDesc::Tvariant(row) => {
+                    TypeAction::Variant(tctx.type_ctx.row_snapshot(*row))
+                }
                 _ => {
                     let mut children = Vec::new();
                     crate::types::btype::iter_type_expr(tctx.type_ctx, ty, |child| {

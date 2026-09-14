@@ -631,15 +631,17 @@ fn local_non_recursive_abbrev(
         let ty = ctx.repr(ty);
         let desc = ctx.borrow_desc(ty);
         match &*desc {
-            StoredTypeDesc::Tconstr { path, args, .. } => {
-                if path.same(source) {
+            StoredTypeDesc::Tconstr(payload) => {
+                let payload = ctx.constr_payload(*payload);
+                if payload.path.same(source) {
                     return false;
                 }
-                if !strict && is_contractive(ctx, env, path) {
+                if !strict && is_contractive(ctx, env, &payload.path) {
                     return true;
                 }
-                let path = path.clone();
-                let args = args.clone();
+                let path = payload.path.clone();
+                let args = ctx.type_refs_snapshot(payload.args);
+                drop(payload);
                 drop(desc);
 
                 if !visited.insert(ty) {
@@ -855,7 +857,10 @@ pub fn occurs(ctx: &TypeContext, needle: TypeExprRef, haystack: TypeExprRef) -> 
         // for regular expression-mode occurs checks.
         let should_recurse = {
             let desc = ctx.borrow_desc(haystack);
-            !matches!(&*desc, StoredTypeDesc::Tobject { .. } | StoredTypeDesc::Tvariant(_))
+            !matches!(
+                &*desc,
+                StoredTypeDesc::Tobject { .. } | StoredTypeDesc::Tvariant(_)
+            )
         };
         if !should_recurse {
             return false;
@@ -906,7 +911,7 @@ fn occur_univar(ctx: &TypeContext, env: &Env, ty: TypeExprRef) -> TypeResult<()>
             }
             StoredTypeDesc::Tpoly { body, vars } => {
                 let body = *body;
-                let vars = vars.clone();
+                let vars = ctx.type_refs_snapshot(*vars);
                 drop(desc);
                 let old_bound = bound.clone();
                 for var in vars {
@@ -916,11 +921,15 @@ fn occur_univar(ctx: &TypeContext, env: &Env, ty: TypeExprRef) -> TypeResult<()>
                 *bound = old_bound;
                 result
             }
-            StoredTypeDesc::Tconstr { args, .. } if args.is_empty() => Ok(()),
-            StoredTypeDesc::Tconstr { path, args, .. } => {
-                let path = path.clone();
-                let args = args.clone();
+            StoredTypeDesc::Tconstr(payload) => {
+                let payload = ctx.constr_payload(*payload);
+                let path = payload.path.clone();
+                let args = ctx.type_refs_snapshot(payload.args);
+                drop(payload);
                 drop(desc);
+                if args.is_empty() {
+                    return Ok(());
+                }
                 if let Some(decl) = lookup_type_decl_for_path(ctx, env, &path) {
                     for (arg, variance) in args.iter().zip(decl.type_variance.iter()) {
                         if variance.mem(VarianceFlag::MayPos) || variance.mem(VarianceFlag::MayNeg)
@@ -1000,10 +1009,15 @@ pub fn type_contains_variant(ctx: &TypeContext, ty: TypeExprRef) -> bool {
     let desc = ctx.borrow_desc(ty);
     match &*desc {
         StoredTypeDesc::Tvariant(_) => true,
-        StoredTypeDesc::Tconstr { args, .. } => args
-            .iter()
-            .copied()
-            .any(|arg| matches!(&*ctx.borrow_desc(ctx.repr(arg)), StoredTypeDesc::Tvariant(_))),
+        StoredTypeDesc::Tconstr(payload) => {
+            let args = ctx.constr_payload(*payload).args;
+            ctx.type_ref_iter(args).any(|arg| {
+                matches!(
+                    &*ctx.borrow_desc(ctx.repr(arg)),
+                    StoredTypeDesc::Tvariant(_)
+                )
+            })
+        }
         _ => false,
     }
 }
@@ -1022,14 +1036,14 @@ pub fn link_type(ctx: &TypeContext, t1: TypeExprRef, t2: TypeExprRef) {
     let source_name = {
         let desc = ctx.borrow_desc(t1_repr);
         match &*desc {
-            StoredTypeDesc::Tvar(name) => Some(name.clone()),
+            StoredTypeDesc::Tvar(name) => Some(ctx.type_name_snapshot(*name)),
             _ => None,
         }
     };
     let target_name = {
         let desc = ctx.borrow_desc(t2_repr);
         match &*desc {
-            StoredTypeDesc::Tvar(name) => Some(name.clone()),
+            StoredTypeDesc::Tvar(name) => Some(ctx.type_name_snapshot(*name)),
             _ => None,
         }
     };
@@ -1108,8 +1122,8 @@ fn update_level_expand_with_lookup_capture<'a>(
     if level < current {
         let desc = ctx.borrow_desc(ty);
         match &*desc {
-            StoredTypeDesc::Tconstr { path, .. } => {
-                let path = path.clone();
+            StoredTypeDesc::Tconstr(payload) => {
+                let path = ctx.constr_payload(*payload).path.clone();
                 // OCaml compiler/ml/ctype.ml:695 calls `get_level env p`
                 // here. Keep the same lookup side effects even when the
                 // numeric result falls back to `Path.binding_time`.
@@ -1141,8 +1155,8 @@ fn update_level_expand_with_lookup_capture<'a>(
                                 let m_level = ctx.get_level(m);
                                 let m_desc = ctx.borrow_desc(m);
                                 m_level != crate::types::type_expr::GENERIC_LEVEL
-                                    && matches!(&*m_desc, StoredTypeDesc::Tconstr { path: mp, .. }
-                                        if matches!(mp, Path::Pident(id)
+                                    && matches!(&*m_desc, StoredTypeDesc::Tconstr(payload)
+                                        if matches!(&ctx.constr_payload(*payload).path, Path::Pident(id)
                                             if id.stamp() != 0 && !is_predef_type_name(id.name())))
                             })
                         });
@@ -1211,10 +1225,10 @@ fn update_level_expand_with_lookup_capture<'a>(
             }
             StoredTypeDesc::Tobject {
                 fields,
-                name: Some((path, _)),
+                name: Some(name),
             } => {
                 let fields = *fields;
-                let path = path.clone();
+                let path = ctx.object_name_payload(*name).path.clone();
                 // OCaml compiler/ml/ctype.ml:720-722 clears a named object
                 // row before lowering when `get_level env p` is above the
                 // target level. The `get_level` call is observable because
@@ -1248,7 +1262,7 @@ fn update_level_expand_with_lookup_capture<'a>(
                 });
             }
             StoredTypeDesc::Tvariant(row) => {
-                let row = row.clone();
+                let row = ctx.row_payload(*row).row.clone();
                 drop(desc);
                 let mut row = row_repr(ctx, &row);
                 // OCaml compiler/ml/ctype.ml:723-730 checks the polymorphic
@@ -2838,17 +2852,13 @@ fn try_expand_head_with_mode<'a>(
     let ty = ctx.repr(ty);
     let desc = ctx.borrow_desc(ty);
     match &*desc {
-        StoredTypeDesc::Tconstr { path, args, abbrev } => {
+        StoredTypeDesc::Tconstr(payload) => {
             // OCaml runs check_abbrev_env from expand_abbrev_gen, which is only
             // reached for Tconstr heads (try_expand_once pattern-matches first).
-            // Matching that behavior avoids clearing simple_abbrevs on non-constr
-            // expand_head calls.
             ctx.check_abbrev_env(env);
 
-            let args = args.clone();
-            let path = path.clone();
-            let orig_abbrev = *abbrev;
-            let lookup_abbrev = proper_abbrevs(ctx, &path, &args, *abbrev);
+            let (path, args, orig_abbrev) = ctx.constr_snapshot(*payload);
+            let lookup_abbrev = proper_abbrevs(ctx, &path, &args, orig_abbrev);
             // Try stamp-based lookup first (most precise, handles CMI-loaded types)
             let stamp = match &path {
                 Path::Pident(id) if id.stamp() != 0 => Some(id.stamp()),
@@ -2875,9 +2885,8 @@ fn try_expand_head_with_mode<'a>(
                     let desc = ctx.borrow_desc(cached_repr);
                     matches!(
                         &*desc,
-                        StoredTypeDesc::Tconstr {
-                            path: cached_path, ..
-                        } if cached_path.same(&path)
+                        StoredTypeDesc::Tconstr(payload)
+                            if ctx.constr_payload(*payload).path.same(&path)
                     )
                 };
                 if !(cached_repr == ty || stale_same_path) {
@@ -2980,9 +2989,8 @@ fn try_expand_head_with_mode<'a>(
                         let manifest_desc = ctx.borrow_desc(manifest);
                         matches!(
                             &*manifest_desc,
-                            StoredTypeDesc::Tconstr {
-                                path: manifest_path, ..
-                            } if manifest_path.same(&path)
+                            StoredTypeDesc::Tconstr(payload)
+                                if ctx.constr_payload(*payload).path.same(&path)
                         )
                     });
                     let alias_backed_parent = match &path {
@@ -3072,12 +3080,12 @@ fn try_expand_head_with_mode<'a>(
                         let manifest_desc = ctx.borrow_desc(manifest_repr);
                         matches!(
                             &*manifest_desc,
-                            StoredTypeDesc::Tconstr {
-                                path: manifest_path,
-                                args: manifest_args,
-                                ..
-                            } if manifest_path.same(&path)
-                                && manifest_args.len() == args.len()
+                            StoredTypeDesc::Tconstr(payload)
+                                if {
+                                    let payload = ctx.constr_payload(*payload);
+                                    payload.path.same(&path)
+                                        && payload.args.len as usize == args.len()
+                                }
                                 && matches!(decl.type_kind, crate::types::TypeKind::TypeAbstract)
                         )
                     };
@@ -4605,7 +4613,9 @@ fn subst_type(
             if new_types.iter().zip(arrow_args).all(|(a, b)| *a == b.typ) && new_ret == *ret {
                 ty
             } else {
-                let new_args = arrow_args.iter().zip(new_types)
+                let new_args = arrow_args
+                    .iter()
+                    .zip(new_types)
                     .map(|(arg, typ)| super::TypeArg::new(arg.label().clone(), typ))
                     .collect();
                 drop(desc);
@@ -5113,24 +5123,18 @@ fn unify_types<'a>(
     {
         let desc1 = ctx.borrow_desc(t1);
         let desc2 = ctx.borrow_desc(t2);
-        if let (
-            StoredTypeDesc::Tconstr {
-                path: path1,
-                args: args1,
-                abbrev: abbrev1,
-            },
-            StoredTypeDesc::Tconstr {
-                path: path2,
-                args: args2,
-                abbrev: abbrev2,
-            },
-        ) = (&*desc1, &*desc2)
+        if let (StoredTypeDesc::Tconstr(payload1), StoredTypeDesc::Tconstr(payload2)) =
+            (&*desc1, &*desc2)
         {
-            let same_nullary_no_cached_expansion = args1.is_empty()
-                && args2.is_empty()
-                && path1.same(path2)
-                && !(has_cached_expansion(ctx, path1, *abbrev1)
-                    || has_cached_expansion(ctx, path2, *abbrev2));
+            let payload1 = ctx.constr_payload(*payload1);
+            let payload2 = ctx.constr_payload(*payload2);
+            let same_nullary_no_cached_expansion = payload1.args.len == 0
+                && payload2.args.len == 0
+                && payload1.path.same(&payload2.path)
+                && !(has_cached_expansion(ctx, &payload1.path, payload1.abbrev)
+                    || has_cached_expansion(ctx, &payload2.path, payload2.abbrev));
+            drop(payload1);
+            drop(payload2);
             if same_nullary_no_cached_expansion {
                 drop(desc1);
                 drop(desc2);
@@ -10357,7 +10361,8 @@ pub(crate) fn copy_type_cached(
     // already-registered variant copy directly.
     if ctx.get_level(ty) == GENERIC_LEVEL {
         if let StoredTypeDesc::Tvariant(row0) = &*ctx.borrow_desc(ty) {
-            let row = row_repr_ref(ctx, row0);
+            let row0 = ctx.row_payload(*row0);
+            let row = row_repr_ref(ctx, &row0.row);
             let row = row.as_ref();
             let more = ctx.repr(row.row_more);
             if let Some(marker) = cache.row_more_markers.get(&more).copied() {
@@ -10441,42 +10446,42 @@ pub(crate) fn copy_type_cached(
                 | StoredTypeDesc::Tobject { .. }
                 | StoredTypeDesc::Tvariant(_)
                 | StoredTypeDesc::Tpoly { .. }
-                | StoredTypeDesc::Tpackage { .. }
+                | StoredTypeDesc::Tpackage(_)
                 | StoredTypeDesc::Tarrow { .. }
                 | StoredTypeDesc::Tfield { .. }
                 | StoredTypeDesc::Tnil
-                | StoredTypeDesc::Tconstr { .. } => CopyAction::ReturnSelf,
-                StoredTypeDesc::Tlink(target) | StoredTypeDesc::Tsubst(target) => CopyAction::Link(*target),
+                | StoredTypeDesc::Tconstr(_) => CopyAction::ReturnSelf,
+                StoredTypeDesc::Tlink(target) | StoredTypeDesc::Tsubst(target) => {
+                    CopyAction::Link(*target)
+                }
             }
         } else {
             match &*desc {
                 StoredTypeDesc::Tvar(_) => CopyAction::NewVar(None),
-                StoredTypeDesc::Tunivar(name) => CopyAction::NewUnivar(name.clone()),
+                StoredTypeDesc::Tunivar(name) => {
+                    CopyAction::NewUnivar(ctx.type_name_snapshot(*name))
+                }
                 StoredTypeDesc::Tarrow { args, ret } => CopyAction::Arrow {
                     args: ctx.type_args_snapshot(*args),
                     ret: *ret,
                 },
-                StoredTypeDesc::Ttuple(types) => CopyAction::Tuple(types.clone()),
-                StoredTypeDesc::Tconstr { path, args, .. } => CopyAction::Constr {
-                    path: path.clone(),
-                    args: args.clone(),
-                },
+                StoredTypeDesc::Ttuple(types) => CopyAction::Tuple(ctx.type_refs_snapshot(*types)),
+                StoredTypeDesc::Tconstr(payload) => {
+                    let (path, args, _) = ctx.constr_snapshot(*payload);
+                    CopyAction::Constr { path, args }
+                }
                 StoredTypeDesc::Tobject { fields, name } => CopyAction::Object {
                     fields: *fields,
-                    name: name.clone(),
+                    name: ctx.object_name_snapshot(*name),
                 },
-                StoredTypeDesc::Tfield {
-                    name,
-                    kind,
-                    typ,
-                    rest,
-                } => {
+                StoredTypeDesc::Tfield { payload, typ, rest } => {
+                    let (name, kind) = ctx.field_snapshot(*payload);
                     if matches!(kind, crate::types::type_expr::FieldKind::Fabsent) {
                         CopyAction::Link(*rest)
                     } else {
                         CopyAction::Field {
-                            name: name.clone(),
-                            kind: kind.clone(),
+                            name,
+                            kind,
                             typ: *typ,
                             rest: *rest,
                         }
@@ -10485,15 +10490,16 @@ pub(crate) fn copy_type_cached(
                 StoredTypeDesc::Tnil => CopyAction::Nil,
                 StoredTypeDesc::Tpoly { body, vars } => CopyAction::Poly {
                     body: *body,
-                    vars: vars.clone(),
+                    vars: ctx.type_refs_snapshot(*vars),
                 },
-                StoredTypeDesc::Tvariant(row) => CopyAction::Variant(row.clone()),
-                StoredTypeDesc::Tpackage { path, lids, args } => CopyAction::Package {
-                    path: path.clone(),
-                    lids: lids.clone(),
-                    args: args.clone(),
-                },
-                StoredTypeDesc::Tlink(target) | StoredTypeDesc::Tsubst(target) => CopyAction::Link(*target),
+                StoredTypeDesc::Tvariant(row) => CopyAction::Variant(ctx.row_snapshot(*row)),
+                StoredTypeDesc::Tpackage(payload) => {
+                    let (path, lids, args) = ctx.package_snapshot(*payload);
+                    CopyAction::Package { path, lids, args }
+                }
+                StoredTypeDesc::Tlink(target) | StoredTypeDesc::Tsubst(target) => {
+                    CopyAction::Link(*target)
+                }
             }
         }
     };
@@ -10926,9 +10932,10 @@ pub fn extract_option_type(ctx: &TypeContext, ty: TypeExprRef) -> Option<TypeExp
     let ty = ctx.repr(ty);
     let desc = ctx.borrow_desc(ty);
     match &*desc {
-        StoredTypeDesc::Tconstr { path, args, .. } => {
-            if path.head_name() == "option" && args.len() == 1 {
-                Some(args[0])
+        StoredTypeDesc::Tconstr(payload) => {
+            let payload = ctx.constr_payload(*payload);
+            if payload.path.head_name() == "option" && payload.args.len == 1 {
+                ctx.type_ref_iter(payload.args).next()
             } else {
                 None
             }
@@ -10942,7 +10949,7 @@ pub fn tuple_elements(ctx: &TypeContext, ty: TypeExprRef) -> Option<Vec<TypeExpr
     let ty = ctx.repr(ty);
     let desc = ctx.borrow_desc(ty);
     match &*desc {
-        StoredTypeDesc::Ttuple(types) => Some(types.clone()),
+        StoredTypeDesc::Ttuple(types) => Some(ctx.type_refs_snapshot(*types)),
         _ => None,
     }
 }
@@ -11597,10 +11604,10 @@ mod tests {
 
     #[test]
     fn type_arg_nary_copy_preserves_labels_and_shared_type_identity() {
+        use crate::intern::StrIdx;
+        use crate::location::{Location, Position};
         use crate::types::ArgLabel;
         use crate::types::type_expr::TypeArg;
-        use crate::location::{Location, Position};
-        use crate::intern::StrIdx;
         let ctx = TypeContext::new(std::sync::Arc::new(IdGenerator::new()));
         let shared = ctx.new_generic_var(Some("a".into()));
         let loc = Location {
@@ -11608,18 +11615,30 @@ mod tests {
             loc_end: Position::new(StrIdx(32), 4, 25, 29),
             loc_ghost: true,
         };
-        let labels = [ArgLabel::Nolabel, ArgLabel::labelled("x", loc), ArgLabel::optional("y", loc)];
+        let labels = [
+            ArgLabel::Nolabel,
+            ArgLabel::labelled("x", loc),
+            ArgLabel::optional("y", loc),
+        ];
         let arrow = ctx.new_type(TypeDesc::Tarrow {
-            args: labels.iter().map(|l| TypeArg::new(l.clone(), shared)).collect(),
+            args: labels
+                .iter()
+                .map(|l| TypeArg::new(l.clone(), shared))
+                .collect(),
             ret: shared,
         });
         let unused = ctx.new_generic_var(Some("unused".into()));
         let replacement = ctx.new_generic_var(Some("replacement".into()));
-        assert_eq!(subst_type_params(&ctx, &[unused], &[replacement], arrow), arrow);
+        assert_eq!(
+            subst_type_params(&ctx, &[unused], &[replacement], arrow),
+            arrow
+        );
         let changed = subst_type_params(&ctx, &[shared], &[replacement], arrow);
         assert_ne!(changed, arrow);
         let changed_desc = ctx.get_desc(changed);
-        let TypeDesc::Tarrow { args, ret } = &*changed_desc else { panic!("not arrow") };
+        let TypeDesc::Tarrow { args, ret } = &*changed_desc else {
+            panic!("not arrow")
+        };
         assert_eq!(*ret, replacement);
         for (arg, expected) in args.iter().zip(&labels) {
             assert_eq!(arg.typ, replacement);
@@ -11632,7 +11651,9 @@ mod tests {
         }
         let copied = copy_type_deep(&ctx, arrow, &mut HashMap::new());
         let desc = ctx.get_desc(copied);
-        let TypeDesc::Tarrow { args, ret } = &*desc else { panic!("not arrow") };
+        let TypeDesc::Tarrow { args, ret } = &*desc else {
+            panic!("not arrow")
+        };
         assert_eq!(args.len(), 3);
         assert_ne!(*ret, shared);
         for (arg, expected) in args.iter().zip(&labels) {
@@ -11645,7 +11666,9 @@ mod tests {
             }
         }
         let original = ctx.get_desc(arrow);
-        let TypeDesc::Tarrow { args, ret } = &*original else { panic!("not arrow") };
+        let TypeDesc::Tarrow { args, ret } = &*original else {
+            panic!("not arrow")
+        };
         assert_eq!(*ret, shared);
         assert!(args.iter().all(|arg| arg.typ == shared));
     }
