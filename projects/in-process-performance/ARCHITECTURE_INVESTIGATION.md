@@ -783,6 +783,14 @@ active).
 6. Re-measure after each retained step with the fixed protocol; re-derive the
    §1 table. Stop and re-plan if serial work is not below ~10 s after 2–3.
 
+Re-sequencing after step 1 (2026-09-16): a call-graph sample of the serial
+build attributes ~23 % of the worker window to per-module teardown of
+dependency state (`Env`, component caches, `TypeContext`), ~13 % to `Arc`
+refcount traffic inside those drops, ~8 % to `find_pers_struct` and ~6 % to
+the prelude `open_module`, against ~3 % for `TypeDesc` clone/drop. A is
+therefore taken before B, scoped per worker thread so it needs no `Sync`
+nodes; see [THREAD_TYPE_STORE.md](THREAD_TYPE_STORE.md).
+
 Expected trajectory (serial work → parallel wall on this machine, with
 inflation improving from 2.1× toward 1.3×): 19 s / 4.6 s → after 1–2: ~13 s /
 ~2.9 s → after 3: ~9 s / ~1.9 s → after 4: ~6.5 s / ~1.4 s → after 5:

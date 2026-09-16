@@ -94,6 +94,7 @@ Performance engineering for clean in-process builds through `rewatch` and the Ru
 |----------|-------------|
 | [PLAN.md](./in-process-performance/PLAN.md) | Scope, success criteria, priority order, and benchmark command |
 | [ARCHITECTURE_INVESTIGATION.md](./in-process-performance/ARCHITECTURE_INVESTIGATION.md) | Stage-by-stage algorithms and data representations, fresh Tella profile, the three-constraint budget for a <1s clean build, and ranked architectural changes |
+| [THREAD_TYPE_STORE.md](./in-process-performance/THREAD_TYPE_STORE.md) | Per-thread persistent type store (proposal A without the POD-node prerequisite): profile evidence, OCaml reference semantics, ownership model, invariants, and staged landing plan |
 | [RALPH_TODO.md](./in-process-performance/RALPH_TODO.md) | Active performance checklist and validation gates |
 | [SCRATCHPAD.md](./in-process-performance/SCRATCHPAD.md) | Current measurements, slow-file notes, retained ideas, and rejected experiments |
 
