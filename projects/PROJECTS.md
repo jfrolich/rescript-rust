@@ -93,6 +93,7 @@ Performance engineering for clean in-process builds through `rewatch` and the Ru
 | Document | Description |
 |----------|-------------|
 | [PLAN.md](./in-process-performance/PLAN.md) | Scope, success criteria, priority order, and benchmark command |
+| [ARCHITECTURE_INVESTIGATION.md](./in-process-performance/ARCHITECTURE_INVESTIGATION.md) | Stage-by-stage algorithms and data representations, fresh Tella profile, the three-constraint budget for a <1s clean build, and ranked architectural changes |
 | [RALPH_TODO.md](./in-process-performance/RALPH_TODO.md) | Active performance checklist and validation gates |
 | [SCRATCHPAD.md](./in-process-performance/SCRATCHPAD.md) | Current measurements, slow-file notes, retained ideas, and rejected experiments |
 
