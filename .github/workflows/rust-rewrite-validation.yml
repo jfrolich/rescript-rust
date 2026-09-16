@@ -1,0 +1,77 @@
+name: Rust rewrite validation
+
+on:
+  pull_request:
+    branches:
+      - ocaml-to-rust-rewrite
+      - type-mutation-journal
+      - layout-typecheck-performance
+
+permissions:
+  contents: read
+
+concurrency:
+  group: rust-rewrite-validation-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  release-parity:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    env:
+      RUST_BACKTRACE: "1"
+      OCAMLRUNPARAM: b
+    steps:
+      - uses: actions/checkout@v6
+
+      # This is the toolchain used by the release parity measurements. The
+      # crate's minimum supported version is not the validation toolchain.
+      - uses: dtolnay/rust-toolchain@1.93.1
+
+      - uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            compiler-rust/target
+            rewatch/target
+          key: rewrite-release-${{ runner.os }}-${{ hashFiles('compiler-rust/Cargo.lock', 'rewatch/Cargo.lock') }}-${{ github.sha }}
+          restore-keys: |
+            rewrite-release-${{ runner.os }}-${{ hashFiles('compiler-rust/Cargo.lock', 'rewatch/Cargo.lock') }}-
+
+      - uses: ./.github/actions/setup-node
+      - uses: ./.github/actions/setup-linux-dependencies
+      - uses: ./.github/actions/setup-ocaml
+        with:
+          compiler: "5.3.0"
+          os: ubuntu-24.04
+          cache-prefix: opam-rewrite-validation-v1
+
+      - name: Build native reference compiler and libraries
+        run: opam exec -- make lib
+
+      - name: Build release Rust compiler and build system
+        run: |
+          cargo build --release --locked --manifest-path compiler-rust/Cargo.toml
+          cargo build --release --locked --manifest-path rewatch/Cargo.toml
+
+      - name: Test release Rust compiler
+        run: cargo test --release --locked --manifest-path compiler-rust/Cargo.toml
+
+      - name: Test release build system
+        run: cargo test --release --locked --manifest-path rewatch/Cargo.toml
+
+      - name: Typedtree parity
+        run: ./scripts/test_typedtree_parity.sh --release
+
+      - name: Raw Lambda parity
+        run: ./scripts/test_lambda_parity.sh --release --raw
+
+      - name: Optimized Lambda parity
+        run: ./scripts/test_lambda_parity.sh --release
+
+      - name: JavaScript output parity
+        run: ./scripts/test_js_output_parity.sh --release
+
+      - name: Diagnostic parity
+        run: ./scripts/test_error_output_parity.sh --release
