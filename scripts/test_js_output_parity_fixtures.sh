@@ -450,6 +450,9 @@ compare_case() {
             echo "OCaml output: $ocaml_out"
             echo "Rust output:  $rust_out"
             echo ""
+            echo "--- Generated files in output and source directories"
+            find "$ocaml_dir" "$rust_dir" "$ocaml_source_dir" "$rust_source_dir" -type f | sort
+            echo ""
             echo "--- OCaml compiler output"
             cat "$ocaml_log"
             echo ""
@@ -509,8 +512,8 @@ echo "  cache:  $CACHE_DIR"
 if [[ "$fail" -gt 0 ]]; then
     echo ""
     echo -e "${BOLD}${RED}Failures:${RESET}"
-    echo -e "$failed_files" | grep -v '^$' | head -30
-    first_failed=$(find "$CACHE_DIR/diffs" -type f -name '*.diff' | sort | head -1)
+    echo -e "$failed_files" | grep -v '^$' | sed -n '1,30p'
+    first_failed=$(find "$CACHE_DIR/diffs" -type f -name '*.diff' | sort | sed -n '1p')
     if [[ -n "$first_failed" && -f "$first_failed" ]]; then
         echo ""
         echo -e "${BOLD}First diff:${RESET} $first_failed"
