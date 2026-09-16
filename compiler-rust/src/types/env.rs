@@ -640,8 +640,36 @@ impl<T: Clone> Default for TycompTbl<T> {
 ///
 /// This tracks all bindings visible during type checking.
 /// The environment is immutable - extending it creates a new environment.
-/// Global counter for unique Env IDs.
-static NEXT_ENV_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+/// Process-wide allocator of per-thread Env id blocks.
+///
+/// Env ids only need to be unique; they are compared for equality (abbreviation
+/// memo validity, `TypeContext` lookup-cache keys) and never ordered. Every
+/// `Env` mutation allocates a fresh id, which in an in-process build happens
+/// millions of times from every worker thread at once. A single shared
+/// counter turns each mutation into a contended cache-line transfer, so each
+/// thread instead claims a 2^40-id block once and hands out ids from that
+/// block without touching shared memory.
+static NEXT_ENV_ID_BLOCK: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+const ENV_ID_BLOCK_SHIFT: u32 = 40;
+
+thread_local! {
+    /// Next id to hand out on this thread; `0` means no block claimed yet.
+    static NEXT_ENV_ID: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+#[inline]
+fn next_env_id() -> u64 {
+    NEXT_ENV_ID.with(|next| {
+        let mut id = next.get();
+        if id == 0 {
+            let block = NEXT_ENV_ID_BLOCK.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            id = block << ENV_ID_BLOCK_SHIFT;
+        }
+        next.set(id + 1);
+        id
+    })
+}
 
 #[derive(Debug)]
 pub struct Env {
@@ -728,7 +756,7 @@ impl Clone for Env {
             // Keep clone-induced env changes visible to abbreviation caching by
             // default. Callers that are only snapshotting the same logical env
             // must opt into `clone_preserve_id()`.
-            id: NEXT_ENV_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+            id: next_env_id(),
             values: self.values.clone(),
             types: self.types.clone(),
             constrs: self.constrs.clone(),
@@ -765,7 +793,7 @@ impl Env {
     /// Create an empty environment.
     pub fn empty() -> Self {
         Env {
-            id: NEXT_ENV_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+            id: next_env_id(),
             values: IdTbl::new(),
             types: IdTbl::new(),
             constrs: TycompTbl::new(),
@@ -824,7 +852,7 @@ impl Env {
 
     /// Mark this environment as changed.
     fn bump_id(&mut self) {
-        self.id = NEXT_ENV_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.id = next_env_id();
     }
 
     fn invalidate_module_alias_caches(&self) {
