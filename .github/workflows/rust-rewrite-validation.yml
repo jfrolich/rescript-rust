@@ -20,9 +20,13 @@ jobs:
     timeout-minutes: 90
     env:
       RUST_BACKTRACE: "1"
-      OCAMLRUNPARAM: b
     steps:
       - uses: actions/checkout@v6
+
+      - name: Test parity failure reporting
+        run: |
+          python3 scripts/test_js_output_fixture_reporting.py
+          python3 scripts/test_typedtree_parity_exit.py
 
       # This is the toolchain used by the release parity measurements. The
       # crate's minimum supported version is not the validation toolchain.
@@ -75,15 +79,15 @@ jobs:
 
       - name: Typedtree parity
         if: ${{ !cancelled() && steps.fixtures.outcome == 'success' }}
-        run: ./scripts/test_typedtree_parity.sh --release
+        run: ./scripts/test_typedtree_parity.sh --release --parallel 2
 
       - name: Raw Lambda parity
         if: ${{ !cancelled() && steps.fixtures.outcome == 'success' }}
-        run: ./scripts/test_lambda_parity.sh --release --raw
+        run: ./scripts/test_lambda_parity.sh --release --raw --parallel 2
 
       - name: Optimized Lambda parity
         if: ${{ !cancelled() && steps.fixtures.outcome == 'success' }}
-        run: ./scripts/test_lambda_parity.sh --release
+        run: ./scripts/test_lambda_parity.sh --release --parallel 2
 
       - name: JavaScript output parity
         if: ${{ !cancelled() && steps.fixtures.outcome == 'success' }}
@@ -91,7 +95,8 @@ jobs:
 
       - name: Diagnostic parity
         if: ${{ !cancelled() && steps.fixtures.outcome == 'success' }}
-        run: ./scripts/test_error_output_parity.sh --release
+        # Compare normal user-facing errors, not runtime-specific backtraces.
+        run: env -u OCAMLRUNPARAM -u RUST_BACKTRACE ./scripts/test_error_output_parity.sh --release
 
       # Keep successful build artifacts even when a later assertion fails.
       # The job still fails; this only avoids rebuilding unchanged code.
@@ -104,3 +109,13 @@ jobs:
             compiler-rust/target
             rewatch/target
           key: ${{ steps.rust-cache.outputs.cache-primary-key }}
+
+      - name: Preserve failed parity diagnostics
+        if: ${{ failure() }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: parity-diagnostics-${{ github.event.pull_request.number }}
+          path: .parity-cache
+          include-hidden-files: true
+          if-no-files-found: ignore
+          retention-days: 7
