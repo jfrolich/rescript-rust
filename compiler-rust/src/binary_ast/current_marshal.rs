@@ -821,7 +821,7 @@ impl Marshal for Constant {
             }
             Constant::String(s, delim) => {
                 w.write_block_header(2, 2);
-                if std::env::var("DEBUG_CONST_SHARE").is_ok()
+                if w.debug_const_share
                     && matches!(s.as_ref(), "None" | "Mic" | "Camera")
                 {
                     eprintln!(

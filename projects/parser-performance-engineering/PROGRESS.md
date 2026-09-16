@@ -8,6 +8,65 @@
 
 ---
 
+## September 2026: CI timing follow-up
+
+The benchmarks in `parser/benchmark.rs` measure subprocess startup, parsing,
+built-in PPX, and binary serialization—not parsing alone. Profiling the release
+`Css_Legacy_Core` pipeline found 158 of 2,377 sampled stacks inside
+`std::env::_var`, including debug-option lookups in position/location writers.
+
+`MarshalWriter` now captures `DEBUG_MARSHAL` and `DEBUG_CONST_SHARE` once per
+writer (both constructors), rather than polling the environment for every node.
+The flags still control tracing only, including the existing presence-based
+behavior for empty and `"0"` values. No process-global cache, identity/sharing
+change, normalization, traversal change, or benchmark threshold change is used.
+The reference output route remains `compiler/depends/binary_ast.ml:49-66`:
+extract dependencies and serialize the AST with `output_value`.
+
+### Local subprocess measurements
+
+macOS arm64, ordinary release build, before source `94e6a4864`, 50 Hyperfine runs
+per command with three warmups and no shell. Both Rust binaries and OCaml inherit
+the same `RUST_BACKTRACE=1` environment, use the same input path and `-bs-ast`
+arguments, and run under the shared heavy-work lock. All observations are kept.
+Times below are **mean ± standard deviation [minimum, maximum]**, in milliseconds.
+
+| Fixture | Before | After | Native OCaml |
+| --- | --- | --- | --- |
+| Arnold | 9.112 ± 0.273 [8.749, 10.172] | 8.357 ± 0.231 [7.957, 9.017] | 10.344 ± 2.427 [8.139, 17.281] |
+| Css_Legacy_Core | 11.648 ± 3.381 [10.253, 29.979] | 9.726 ± 0.289 [9.319, 10.492] | 10.614 ± 0.328 [9.972, 11.669] |
+| index | 9.445 ± 0.308 [8.971, 10.666] | 8.829 ± 0.249 [8.378, 9.398] | 9.253 ± 0.356 [8.725, 10.197] |
+
+The CSS control outlier inflates its mean reduction; do not interpret that mean
+as a reliable 16% gain. These are local subprocess measurements, not a Linux CI
+pass or an end-to-end Tella performance claim. An earlier exploratory command
+added an `env` executable only to its backtrace case; that comparison is confounded
+by the extra exec and is **not evidence of backtrace overhead**.
+
+### Validation and remaining limits
+
+- Release compiler and Rewatch builds pass.
+- Compiler tests: 1,358 library tests passed (108 ignored), one CLI test passed,
+  16 integration tests passed (23 ignored), nine doctests passed (seven ignored).
+- Core parser parity: 1,231/1,231 sexp-with-locations, 1,209 post-PPX checks
+  (22 reference skips), 1,196 binary checks (35 reference skips), zero differences
+  or parse failures. The warning fixture passes.
+- The full parser script still exits 1 on its 12 existing Spice differences.
+  All 12 Rust fixture outputs are byte-identical between the retained baseline
+  binary and candidate; this change does not fix those differences.
+- JavaScript: 344/344 focused fixtures and 610/610 corpus files.
+- Diagnostics: 1,431/1,431. Debug-flag subprocess regression passes, including
+  unchanged AST bytes with tracing enabled. All three measured fixture ASTs
+  also match the retained baseline byte-for-byte.
+- Linux CI acceptance remains pending; the 1.20× assertions are unchanged.
+  External Tella parity was not repeated (its prior native run was blocked by
+  missing Belt and a new run requires a fresh protected-input audit).
+
+Commands, source/binary provenance, samples, all timing observations, and logs:
+`/Users/jake/.opensession/artifacts/pr10-parser-timing-20260916T184334Z`.
+
+---
+
 ## Overall Progress
 
 | Tier | Description | Status | Progress |
