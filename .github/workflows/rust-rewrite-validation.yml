@@ -61,6 +61,9 @@ jobs:
           cargo build --release --locked --manifest-path compiler-rust/Cargo.toml
           cargo build --release --locked --manifest-path rewatch/Cargo.toml
 
+      - name: Compare exact CLI output filenames
+        run: python3 scripts/test_bsc_output_filenames.py
+
       - name: Build native test corpus for compiler unit fixtures
         id: fixtures
         run: |
