@@ -15046,6 +15046,7 @@ pub fn compile_preprocessed_structure_in_process_until_js(
         module_name
     );
     let env_setup_span = info_span!("compiler.env_setup").entered();
+    let env_setup_start = crate::timing::enabled().then(std::time::Instant::now);
     crate::ident::Ident::set_current_time(OCAML_NON_PREDEF_STAMP_START);
     let id_gen = IdGenerator::with_start_stamp(OCAML_NON_PREDEF_STAMP_START);
     let _ = id_gen.next_stamp();
@@ -15077,6 +15078,9 @@ pub fn compile_preprocessed_structure_in_process_until_js(
 
     tctx.set_persistent_env(pers_env);
     drop(env_setup_span);
+    if let Some(start) = env_setup_start {
+        crate::timing::record(crate::timing::Phase::EnvSetup, start.elapsed());
+    }
 
     let (typed_structure, final_env) =
         crate::timing::measure(crate::timing::Phase::Typecheck, || {
@@ -15086,6 +15090,10 @@ pub fn compile_preprocessed_structure_in_process_until_js(
         })?;
 
     let mut inferred_implementation_coercion = None;
+    // Interface matching, non-generalizable checks and signature
+    // normalization are part of OCaml's `type_implementation`
+    // (compiler/ml/typemod.ml:1740-1788); account for them as typecheck.
+    let signature_prepare_start = crate::timing::enabled().then(std::time::Instant::now);
     let mut published_signature = {
         let _phase = info_span!("compiler.signature_prepare").entered();
         if has_interface {
@@ -15126,6 +15134,9 @@ pub fn compile_preprocessed_structure_in_process_until_js(
 
         simple_signature
     };
+    if let Some(start) = signature_prepare_start {
+        crate::timing::record(crate::timing::Phase::Typecheck, start.elapsed());
+    }
 
     // OCaml saves the inferred `.cmi` only in the no-interface branch before
     // Lambda translation mutates any shared type nodes
@@ -15144,6 +15155,7 @@ pub fn compile_preprocessed_structure_in_process_until_js(
         )
     } else {
         let _phase = info_span!("compiler.signature_extract").entered();
+        let signature_publish_start = crate::timing::enabled().then(std::time::Instant::now);
         let mut internal_env = tctx
             .persistent_env
             .take()
@@ -15201,6 +15213,9 @@ pub fn compile_preprocessed_structure_in_process_until_js(
         // (compiler/ml/typeopt.ml:40-88; compiler/ml/matching.ml:1259-1267).
         // `finish_preprocessed_structure_in_process_from_js_boundary` hides it
         // again before JS module-path probing.
+        if let Some(start) = signature_publish_start {
+            crate::timing::record(crate::timing::Phase::SignaturePublish, start.elapsed());
+        }
         (pers_struct, new_alias_rewrites, internal_env)
     };
     if !has_interface && let Some(hook) = signature_ready.as_deref_mut() {
