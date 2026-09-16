@@ -146,6 +146,53 @@ pub(crate) enum LayoutState {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct LayoutRef(pub(crate) u32);
 
+impl LayoutRef {
+    #[inline]
+    pub(crate) fn from_usize(idx: usize) -> Self {
+        let raw = u32::try_from(idx).expect("variant layout index exceeds u32::MAX");
+        assert!(
+            raw & super::type_expr::STORE_REF_TAG == 0,
+            "local variant layout index collides with the store tag"
+        );
+        Self(raw)
+    }
+
+    /// Reference to the `idx`-th complete layout of the per-thread store.
+    #[inline]
+    pub(crate) fn from_store_index(idx: usize) -> Self {
+        let raw = u32::try_from(idx).expect("variant layout store index exceeds u32::MAX");
+        assert!(
+            raw & super::type_expr::STORE_REF_TAG == 0,
+            "variant layout store index exceeds the tag range"
+        );
+        Self(raw | super::type_expr::STORE_REF_TAG)
+    }
+
+    /// Whether this layout lives in the per-thread store.
+    #[inline]
+    pub(crate) fn is_store(self) -> bool {
+        self.0 & super::type_expr::STORE_REF_TAG != 0
+    }
+
+    #[inline]
+    pub(crate) fn index(self) -> usize {
+        debug_assert!(
+            !self.is_store(),
+            "store variant layout used as a local index"
+        );
+        self.0 as usize
+    }
+
+    #[inline]
+    pub(crate) fn store_index(self) -> usize {
+        debug_assert!(
+            self.is_store(),
+            "local variant layout used as a store index"
+        );
+        (self.0 & !super::type_expr::STORE_REF_TAG) as usize
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ConstructorReference {
     pub variant: LayoutRef,

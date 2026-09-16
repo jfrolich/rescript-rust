@@ -41,13 +41,13 @@ use std::sync::Arc;
 /// - `typed_arena::Arena<TypeExpr>` gives stable addresses for allocated nodes
 /// - The pointer Vec only grows (push), never shrinks or reorders
 /// - Individual TypeExpr.desc RefCells are independent
-struct TypeArena {
+pub(crate) struct TypeArena {
     arena: typed_arena::Arena<TypeExpr>,
     types: std::cell::UnsafeCell<Vec<NonNull<TypeExpr>>>,
 }
 
 impl TypeArena {
-    fn new() -> Self {
+    pub(crate) fn new() -> Self {
         TypeArena {
             arena: typed_arena::Arena::new(),
             types: std::cell::UnsafeCell::new(Vec::new()),
@@ -56,16 +56,28 @@ impl TypeArena {
 
     #[inline]
     fn get(&self, r: TypeExprRef) -> &TypeExpr {
-        // Safety: `r` is an arena index returned by `push`, and `types` only
-        // grows append-only after the pointed `TypeExpr` has been arena
+        self.get_at(r.index())
+    }
+
+    /// Node at raw arena position `idx` (local index or store index; the
+    /// caller has already stripped the store tag).
+    #[inline]
+    pub(crate) fn get_at(&self, idx: usize) -> &TypeExpr {
+        // Safety: `idx` is an arena index returned by `push_raw`, and `types`
+        // only grows append-only after the pointed `TypeExpr` has been arena
         // allocated.
         unsafe {
             let types = &*self.types.get();
-            types[r.index()].as_ref()
+            types[idx].as_ref()
         }
     }
 
     fn push(&self, ty: TypeExpr) -> TypeExprRef {
+        TypeExprRef::from_usize(self.push_raw(ty))
+    }
+
+    /// Append a node and return its raw arena position.
+    pub(crate) fn push_raw(&self, ty: TypeExpr) -> usize {
         let ptr = NonNull::from(self.arena.alloc(ty));
         // Safety: `types` is an append-only side table of stable arena
         // pointers. `UnsafeCell` is used so `TypeContext` can allocate through
@@ -74,11 +86,11 @@ impl TypeArena {
             let types = &mut *self.types.get();
             let idx = types.len();
             types.push(ptr);
-            TypeExprRef::from_usize(idx)
+            idx
         }
     }
 
-    fn len(&self) -> usize {
+    pub(crate) fn len(&self) -> usize {
         // Safety: immutable length read from the append-only side table.
         unsafe { (*self.types.get()).len() }
     }
@@ -104,6 +116,8 @@ pub(crate) struct TypeMutationSnapshot {
     type_states: Vec<(TypeDesc, i32)>,
     row_field_states: Vec<Option<RowField>>,
     abbrev_states: Vec<AbbrevMemo>,
+    store_abbrev_overlay: super::thread_store::PagedOverlay<AbbrevMemo>,
+    store_row_field_overlay: super::thread_store::PagedOverlay<Option<RowField>>,
     memoized_abbrev_refs: Vec<AbbrevMemoRef>,
     current_abbreviations: AbbrevMemoRef,
     current_level: i32,
@@ -278,6 +292,16 @@ pub struct TypeContext {
 
     /// Type expression storage. Uses UnsafeCell-based arena for zero-copy access.
     types: TypeArena,
+
+    /// Exclusive lease of the worker's persistent arena for this compilation.
+    /// Returned on drop; overlapping contexts get independent stores.
+    store: super::thread_store::StoreLease,
+    /// This compilation's writes to abbreviation memo cells of store nodes;
+    /// unset cells read the store's initial `Mnil`, matching a fresh process
+    /// (`compiler/ml/subst.ml:173-177`).
+    store_abbrev_overlay: RefCell<super::thread_store::PagedOverlay<AbbrevMemo>>,
+    /// This compilation's writes to row field cells of store rows.
+    store_row_field_overlay: RefCell<super::thread_store::PagedOverlay<Option<RowField>>>,
 
     /// Cached value of `RESCRIPT_COMPILER_COUNTERS` for hot-path probes.
     compiler_counters_enabled: bool,
@@ -544,6 +568,9 @@ impl TypeContext {
             previous_env_id: Cell::new(0),
             current_abbreviations: Cell::new(AbbrevMemoRef::nil()),
             types: TypeArena::new(),
+            store: super::thread_store::current(),
+            store_abbrev_overlay: RefCell::new(super::thread_store::PagedOverlay::new()),
+            store_row_field_overlay: RefCell::new(super::thread_store::PagedOverlay::new()),
             compiler_counters_enabled: crate::perf_counters::enabled(),
             // Index 0 is reserved as canonical Mnil; index 1 is the dedicated
             // simple_abbrevs memo ref.
@@ -608,7 +635,7 @@ impl TypeContext {
 
     pub fn pending_variant_layout(&self) -> super::variant_runtime::LayoutRef {
         let mut layouts = self.variant_layouts.borrow_mut();
-        let layout_ref = super::variant_runtime::LayoutRef(layouts.len() as u32);
+        let layout_ref = super::variant_runtime::LayoutRef::from_usize(layouts.len());
         layouts.push(RefCell::new(super::variant_runtime::LayoutState::Pending));
         layout_ref
     }
@@ -627,8 +654,12 @@ impl TypeContext {
         layout_ref: super::variant_runtime::LayoutRef,
         layout: super::variant_runtime::Layout,
     ) {
+        assert!(
+            !layout_ref.is_store(),
+            "variant layouts in the thread store are complete on allocation"
+        );
         let layouts = self.variant_layouts.borrow();
-        let Some(state) = layouts.get(layout_ref.0 as usize) else {
+        let Some(state) = layouts.get(layout_ref.index()) else {
             panic!("variant layout reference belongs to another TypeContext")
         };
         let mut state = state.borrow_mut();
@@ -648,8 +679,11 @@ impl TypeContext {
         layout_ref: super::variant_runtime::LayoutRef,
         read: impl FnOnce(&super::variant_runtime::Layout) -> R,
     ) -> R {
+        if layout_ref.is_store() {
+            return self.store.with_variant_layout(layout_ref, read);
+        }
         let layouts = self.variant_layouts.borrow();
-        let Some(state) = layouts.get(layout_ref.0 as usize) else {
+        let Some(state) = layouts.get(layout_ref.index()) else {
             panic!("variant layout reference belongs to another TypeContext")
         };
         match &*state.borrow() {
@@ -1591,12 +1625,20 @@ impl TypeContext {
     // Type Access
     // ========================================================================
 
-    /// Get the descriptor of a type.
-    /// Returns a cloned snapshot to avoid RefCell borrow conflicts when
-    /// the desc is held across function calls that may modify the same node.
+    /// The node behind `r`, in this compilation's arena or the thread store.
+    #[inline]
+    fn node(&self, r: TypeExprRef) -> &TypeExpr {
+        if r.is_store() {
+            self.store.node(r)
+        } else {
+            self.types.get(r)
+        }
+    }
+
+    /// Clone the descriptor so callers can hold it across node mutations.
     #[inline]
     pub fn get_desc(&self, r: TypeExprRef) -> TypeDescSnapshot {
-        TypeDescSnapshot(self.types.get(r).desc().clone())
+        TypeDescSnapshot(self.node(r).desc().clone())
     }
 
     /// Borrow the descriptor of a type without cloning it.
@@ -1605,13 +1647,13 @@ impl TypeContext {
     /// descriptor must be held across code that may mutate the same type node.
     #[inline]
     pub fn borrow_desc(&self, r: TypeExprRef) -> TypeDescRef<'_> {
-        self.types.get(r).desc()
+        self.node(r).desc()
     }
 
     /// Get the level of a type.
     #[inline]
     pub fn get_level(&self, r: TypeExprRef) -> i32 {
-        self.types.get(r).level()
+        self.node(r).level()
     }
 
     /// Number of allocated type expressions.
@@ -1622,13 +1664,19 @@ impl TypeContext {
     /// Set the level of a type.
     #[inline]
     pub fn set_level(&self, r: TypeExprRef, level: i32) {
-        self.types.get(r).set_level(level);
+        // Store nodes are generic; only mark/unmark traversal pairs that
+        // restore the level before returning may pass through here.
+        self.node(r).set_level(level);
     }
 
     /// Set the descriptor of a type.
     #[inline]
     pub fn set_desc(&self, r: TypeExprRef, desc: TypeDesc) {
-        self.types.get(r).set_desc(desc);
+        assert!(
+            !r.is_store(),
+            "thread store type node mutated; generic persistent nodes are copied before unification (compiler/ml/ctype.ml:725-765)"
+        );
+        self.node(r).set_desc(desc);
     }
 
     /// Save mutable type state before a speculative unification.
@@ -1664,6 +1712,8 @@ impl TypeContext {
             type_states,
             row_field_states,
             abbrev_states,
+            store_abbrev_overlay: self.store_abbrev_overlay.borrow().clone(),
+            store_row_field_overlay: self.store_row_field_overlay.borrow().clone(),
             memoized_abbrev_refs: self.memoized_abbrev_refs.borrow().clone(),
             current_abbreviations: self.current_abbreviations.get(),
             current_level: self.current_level.get(),
@@ -1699,6 +1749,8 @@ impl TypeContext {
             }
         }
 
+        *self.store_abbrev_overlay.borrow_mut() = snapshot.store_abbrev_overlay;
+        *self.store_row_field_overlay.borrow_mut() = snapshot.store_row_field_overlay;
         *self.memoized_abbrev_refs.borrow_mut() = snapshot.memoized_abbrev_refs;
         self.current_abbreviations
             .set(snapshot.current_abbreviations);
@@ -1900,14 +1952,41 @@ impl TypeContext {
     /// Clear all per-node abbreviation memo chains (OCaml cleanup_abbrev).
     pub fn clear_abbrev_memos(&self) {
         let refs = self.memoized_abbrev_refs.borrow().clone();
-        let abbrevs = self.abbrevs.borrow();
         for memo in refs {
-            if let Some(cell) = abbrevs.get(memo.index()) {
-                *cell.borrow_mut() = AbbrevMemo::Mnil;
-            }
+            self.write_abbrev(memo, AbbrevMemo::Mnil);
         }
-        drop(abbrevs);
         self.memoized_abbrev_refs.borrow_mut().clear();
+    }
+
+    /// Current value of a memo cell: this compilation's overlay for store
+    /// cells, the local table otherwise. Missing cells read as `Mnil`.
+    fn read_abbrev(&self, memo: AbbrevMemoRef) -> AbbrevMemo {
+        if memo.is_store() {
+            if let Some(value) = self.store_abbrev_overlay.borrow().get(memo.store_index()) {
+                return value.clone();
+            }
+            return self.store.abbrev(memo);
+        }
+        let abbrevs = self.abbrevs.borrow();
+        abbrevs
+            .get(memo.index())
+            .map(|cell| cell.borrow().clone())
+            .unwrap_or(AbbrevMemo::Mnil)
+    }
+
+    /// Write a memo cell; store cells are written to this compilation's
+    /// overlay only. Missing local cells are ignored.
+    fn write_abbrev(&self, memo: AbbrevMemoRef, value: AbbrevMemo) {
+        if memo.is_store() {
+            self.store_abbrev_overlay
+                .borrow_mut()
+                .set(memo.store_index(), value);
+            return;
+        }
+        let abbrevs = self.abbrevs.borrow();
+        if let Some(cell) = abbrevs.get(memo.index()) {
+            *cell.borrow_mut() = value;
+        }
     }
 
     /// Get the current abbreviation context (set during subst_with_memo).
@@ -1929,13 +2008,7 @@ impl TypeContext {
     ) -> Option<TypeExprRef> {
         let mut current = memo;
         for _ in 0..128 {
-            let node = {
-                let abbrevs = self.abbrevs.borrow();
-                abbrevs
-                    .get(current.index())
-                    .map(|cell| cell.borrow().clone())
-                    .unwrap_or(AbbrevMemo::Mnil)
-            };
+            let node = self.read_abbrev(current);
             match node {
                 AbbrevMemo::Mnil => return None,
                 AbbrevMemo::Mcons {
@@ -1964,13 +2037,7 @@ impl TypeContext {
     pub fn find_abbrev_repr(&self, memo: AbbrevMemoRef, path: &Path) -> Option<TypeExprRef> {
         let mut current = memo;
         for _ in 0..128 {
-            let node = {
-                let abbrevs = self.abbrevs.borrow();
-                abbrevs
-                    .get(current.index())
-                    .map(|cell| cell.borrow().clone())
-                    .unwrap_or(AbbrevMemo::Mnil)
-            };
+            let node = self.read_abbrev(current);
             match node {
                 AbbrevMemo::Mnil => return None,
                 AbbrevMemo::Mcons {
@@ -1997,11 +2064,7 @@ impl TypeContext {
 
     /// Snapshot an abbreviation memo node.
     pub fn get_abbrev_memo(&self, memo: AbbrevMemoRef) -> AbbrevMemo {
-        let abbrevs = self.abbrevs.borrow();
-        abbrevs
-            .get(memo.index())
-            .map(|cell| cell.borrow().clone())
-            .unwrap_or(AbbrevMemo::Mnil)
+        self.read_abbrev(memo)
     }
 
     /// Debug snapshot of an abbreviation memo chain.
@@ -2058,10 +2121,7 @@ impl TypeContext {
         if memo == AbbrevMemoRef::nil() {
             return;
         }
-        let abbrevs = self.abbrevs.borrow();
-        if let Some(cell) = abbrevs.get(memo.index()) {
-            *cell.borrow_mut() = AbbrevMemo::Mnil;
-        }
+        self.write_abbrev(memo, AbbrevMemo::Mnil);
     }
 
     /// Overwrite a per-node abbreviation memo chain with a saved snapshot.
@@ -2069,10 +2129,7 @@ impl TypeContext {
         if memo == AbbrevMemoRef::nil() {
             return;
         }
-        let abbrevs = self.abbrevs.borrow();
-        if let Some(cell) = abbrevs.get(memo.index()) {
-            *cell.borrow_mut() = value;
-        }
+        self.write_abbrev(memo, value);
     }
 
     /// Prepend a cached abbreviation expansion to a node-local memo chain.
@@ -2086,6 +2143,27 @@ impl TypeContext {
     ) {
         // Nil is a shared sentinel and must not be mutated.
         if memo == AbbrevMemoRef::nil() {
+            return;
+        }
+
+        if memo.is_store() {
+            let previous = self.read_abbrev(memo);
+            let next = if matches!(previous, AbbrevMemo::Mnil) {
+                AbbrevMemoRef::nil()
+            } else {
+                self.alloc_abbrev(previous)
+            };
+            self.write_abbrev(
+                memo,
+                AbbrevMemo::Mcons {
+                    private_flag,
+                    path,
+                    abbrev,
+                    expansion,
+                    next,
+                },
+            );
+            self.memoized_abbrev_refs.borrow_mut().push(memo);
             return;
         }
 
@@ -2150,6 +2228,12 @@ impl TypeContext {
         if rf.is_null() {
             return None;
         }
+        if rf.is_store() {
+            if let Some(value) = self.store_row_field_overlay.borrow().get(rf.store_index()) {
+                return value.clone();
+            }
+            return self.store.row_field(rf);
+        }
         let row_fields = self.row_fields.borrow();
         row_fields
             .get(rf.index())
@@ -2161,6 +2245,12 @@ impl TypeContext {
         if rf.is_null() {
             return;
         }
+        if rf.is_store() {
+            self.store_row_field_overlay
+                .borrow_mut()
+                .set(rf.store_index(), Some(field));
+            return;
+        }
         let row_fields = self.row_fields.borrow();
         if let Some(cell) = row_fields.get(rf.index()) {
             *cell.borrow_mut() = Some(field);
@@ -2170,6 +2260,12 @@ impl TypeContext {
     /// Clear the value stored in a row field reference.
     pub fn clear_row_field(&self, rf: RowFieldRef) {
         if rf.is_null() {
+            return;
+        }
+        if rf.is_store() {
+            self.store_row_field_overlay
+                .borrow_mut()
+                .set(rf.store_index(), None);
             return;
         }
         let row_fields = self.row_fields.borrow();
@@ -2793,6 +2889,48 @@ mod tests {
             ctx.component_paths_for_alias_source(&spelling_only_source)
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn store_access_and_overlay_backtracking() {
+        let ctx = TypeContext::new(Arc::new(IdGenerator::new()));
+        let local = ctx.new_var(None);
+        let stored = ctx.store.alloc_type(TypeDesc::Tnil, GENERIC_LEVEL);
+        assert!(matches!(*ctx.borrow_desc(stored), TypeDesc::Tnil));
+        assert_eq!(ctx.get_level(stored), GENERIC_LEVEL);
+        assert_eq!(ctx.repr(stored), stored);
+        let link = ctx.new_link(stored);
+        assert_eq!(ctx.repr(link), stored);
+        assert_ne!(local, stored);
+
+        let memo = ctx.store.alloc_abbrev(AbbrevMemo::Mnil);
+        let row = ctx.store.alloc_row_field(Some(RowField::Rabsent));
+        let snapshot = ctx.snapshot_type_state();
+        ctx.restore_abbrev_memo(memo, AbbrevMemo::Mlink(AbbrevMemoRef::nil()));
+        ctx.set_row_field(row, RowField::Rpresent(Some(local)));
+        assert!(matches!(ctx.get_abbrev_memo(memo), AbbrevMemo::Mlink(_)));
+        assert!(matches!(ctx.get_row_field(row), Some(RowField::Rpresent(Some(t))) if t == local));
+        assert!(matches!(ctx.store.abbrev(memo), AbbrevMemo::Mnil));
+        assert!(matches!(ctx.store.row_field(row), Some(RowField::Rabsent)));
+        ctx.restore_type_state(snapshot);
+        assert!(matches!(ctx.get_abbrev_memo(memo), AbbrevMemo::Mnil));
+        assert!(matches!(ctx.get_row_field(row), Some(RowField::Rabsent)));
+
+        ctx.clear_row_field(row);
+        assert!(ctx.get_row_field(row).is_none());
+        assert!(matches!(ctx.store.row_field(row), Some(RowField::Rabsent)));
+        ctx.memoized_abbrev_refs.borrow_mut().push(memo);
+        ctx.restore_abbrev_memo(memo, AbbrevMemo::Mlink(AbbrevMemoRef::nil()));
+        ctx.clear_abbrev_memos();
+        assert!(matches!(ctx.get_abbrev_memo(memo), AbbrevMemo::Mnil));
+    }
+
+    #[test]
+    #[should_panic(expected = "thread store type node mutated")]
+    fn store_descriptor_is_immutable() {
+        let ctx = TypeContext::new(Arc::new(IdGenerator::new()));
+        let ty = ctx.store.alloc_type(TypeDesc::Tnil, GENERIC_LEVEL);
+        ctx.set_desc(ty, TypeDesc::Tvar(None));
     }
 
     #[test]

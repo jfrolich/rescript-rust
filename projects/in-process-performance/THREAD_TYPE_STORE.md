@@ -48,11 +48,11 @@ component tables are shared; every mutable per-unit table stays per module.
   `compiler/ml/env.ml:1516-1585` (`components_of_module_maker`): the
   consumer-visible substituted copies are made when a component table is
   forced. They are per `(path, mty, sub)`, not per unit.
-- `compiler/ml/ctype.ml:100-131` (`copy`/`instance`): generic-level nodes
+- `compiler/ml/ctype.ml:725-765` (`copy`/`instance`): generic-level nodes
   are always copied before unification, so persistent nodes are never
   linked. `Tsubst` markers are the one in-place write OCaml makes on them,
   and Rust already keeps that state in `CopyCache` instead.
-- `compiler/ml/subst.ml:80-86`: abbreviation memos are reset to `Mnil` when
+- `compiler/ml/subst.ml:173-177`: abbreviation memos are reset to `Mnil` when
   a signature is saved, so a fresh process starts with empty memos. Memo
   state must therefore stay per module for one-process-per-file parity.
 
@@ -74,7 +74,7 @@ worker thread
     └── comps:       (module path, alias source) -> QualifiedModuleComponents
 module compile (TypeContext, dropped at the pre-JS boundary)
     ├── types:       TypeArena           local nodes, as today
-    ├── store:       Rc<ThreadTypeStore> handle (one Rc per context, not per node)
+    ├── store:       StoreLease (exclusive Box, returned to worker slot on drop)
     ├── overlays:    store abbrev / row-field / field-kind cells written by
     │                this module, indexed by store cell index
     └── every existing per-unit table, unchanged
@@ -86,12 +86,18 @@ module compile (TypeContext, dropped at the pre-JS boundary)
 `from_usize`) stays local-only and asserts the tag is clear.
 
 Nothing in `InProcessPreJsCompileResult` references type nodes, so the
-handle never crosses threads; the store is `!Send` by construction.
+lease never crosses threads; the store is `!Send` by construction.
+
+The worker slot transfers exclusive ownership into each `TypeContext`, not
+an `Rc`/`Arc`. Overlapping contexts get independent stores; the outer context
+returns its store when it finishes. A panicking compilation discards its
+store because traversal marks may not have been restored. This also avoids
+reference counting and keeps mutable level marking exclusive.
 
 ## Invariants
 
-1. Store nodes are generic-level and never `set_desc`/`link_type`ed. A
-   `debug_assert!` in `TypeContext::set_desc` and the link path enforces
+1. Store nodes are generic-level and never `set_desc`/`link_type`ed. An
+   `assert!` in `TypeContext::set_desc` and the link path enforces
    it; the debug typedtree/lambda suites are the check.
 2. `set_level` on a store node is allowed only for the mark/unmark
    traversal pairs that already restore the level before returning.
@@ -99,8 +105,9 @@ handle never crosses threads; the store is `!Send` by construction.
    read through the module overlay: unset means the store's initial value.
    Writes go to the overlay only. `clear_abbrev_memos`/snapshot-backtrack
    operate on the overlay plus local cells.
-4. `TypeExprRefMap` keys are either all-store or all-local in the dense
-   path; mixed key sets use the sparse path. `snapshot_type_state` covers
+4. `TypeExprRefMap` selects sparse storage for mixed store/local key spans
+   beyond its inline capacity. `TypeExprRefSet` keeps separate dense spans
+   so the store tag cannot trigger a multi-gigabyte allocation. `snapshot_type_state` covers
    local nodes and overlays only.
 5. Store ident stamps come from a range that no per-unit counter reaches
    (`LOCAL_IDENT_COUNTER` is swapped in while the store builds components
@@ -142,3 +149,73 @@ plus the debug `./scripts/test_typedtree_parity.sh --quick` and
 
 Proposal B (POD nodes) remains the follow-up for the remaining clone and
 memmove share; with the store in place its `Sync` requirement disappears.
+
+## Stage 1 implementation status
+
+Tagged handles, an exclusively leased worker-store skeleton, local memo/row
+write overlays, snapshot/backtrack support, and mixed-identity map/set tests
+are implemented. Production imports still allocate **only local nodes**;
+there is no dependency reuse or claimed speedup yet. The stored-node paths
+are exercised directly by unit tests, not by the ordinary parity corpus.
+
+Before enabling stage 2, audit every direct handle index use (including
+serializer identity tables), identifier freshness, graph closure (no local
+references in a retained graph), level-mark restoration on error, and build
+scope/invalidation on worker pools reused by watch mode. Passing stage-1
+parity does not establish these invariants for real imported signatures.
+Store entries keyed by pointer identity must retain the corresponding owner;
+a naked address is not a lifetime-safe cache key.
+
+### Validation
+
+- Release compiler and rewatch builds: pass.
+- Direct unit tests (`cargo test --manifest-path compiler-rust/Cargo.toml
+  --lib store`): 17/17, including 9 new store/tag/overlay tests.
+- Release JS parity: 344/344 focused fixtures and 610/610 corpus files.
+- Release diagnostic parity: 1431/1431.
+- Debug typedtree and optimized-lambda parity: 610/610 each. Typedtree
+  caches were cleared before the authoritative run.
+- Formatting of touched Rust modules and `git diff --check`: pass.
+- **External OCaml/Rust JS parity remains blocked**, not passed:
+  `test_js_output_parity.sh --release --with-external` exits 2 during the
+  OCaml reference build because `bs-css/src/Css_AtomicTypes.res` cannot
+  resolve `Belt`. This also occurred before stage 1. Retried with
+  `TELLA_BUILD_DIR` set to the benchmark webapp package; same failure.
+- Separate candidate-versus-baseline Tella check: both clean builds parsed
+  3,249 files and compiled 3,248 modules; all 4,880 `.bs.js` files present
+  under the webapp (excluding `node_modules`) had identical SHA-256 hashes.
+  This is **not** a substitute for the blocked OCaml comparison. The count
+  is lower than the historical 5,048 inventory, but equal for both current
+  arms. Tella remains at `66a5edabdbfdbc5dd7496e59ee0573de2a2a1ffa`, and the
+  binary diff of its 18 pre-existing tracked modifications is unchanged.
+
+### Clean-build overhead screen
+
+Baseline: `7f6eceaef` (before this stage), exported with `git archive` into
+an isolated build directory. Candidate: this stage's changes. Both use
+release compiler/rewatch binaries and the same runtime. Hardware reported
+by `sysctl`: **Apple M4, 4 performance + 6 efficiency cores**; 12 workers is
+an oversubscribed setting, not a count of physical cores.
+
+Each timed invocation is a fresh `rescript build --in-process --no-timing
+true` process, preceded by `rescript clean` via hyperfine `--prepare`.
+`RESCRIPT_RUNTIME` points to this worktree's runtime; `RESCRIPT_BSC_EXE`
+selects the matching arm. QoS and timing/counter flags are unset. The whole
+sequence holds `/tmp/rescript-tella-heavy.lock`, with no compiler builds or
+parity runs in parallel. No compiler results are persisted between runs.
+
+| Workers / samples per arm | Baseline mean ± SD | Stage 1 mean ± SD | Baseline min–max | Stage 1 min–max |
+|---|---:|---:|---:|---:|
+| 12 / 12 | 4.884 ± 0.425 s | 4.839 ± 0.123 s | 4.619–5.796 s | 4.694–5.006 s |
+| 1 / 3 | 18.903 ± 0.102 s | 18.759 ± 0.037 s | 18.817–19.015 s | 18.731–18.801 s |
+
+For 12 workers: A/B/A/B blocks, six runs and one warmup per block. For one
+worker: A/B, three runs and one warmup per arm. Raw hyperfine results:
+[`clean-w12.json`](thread-store-stage1/clean-w12.json),
+[`clean-w1.json`](thread-store-stage1/clean-w1.json).
+
+This screen does not show a material slowdown, but it is **not evidence of
+an architectural speedup**: baseline parallel runs contain outliers and
+pooled medians are 4.721 s baseline / 4.788 s candidate. Stage 2 is needed
+to remove repeated imports. External reference parity must also be repaired
+and rerun before treating the store as a validated performance improvement.

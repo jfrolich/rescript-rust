@@ -239,18 +239,13 @@ pub enum TypeDesc {
     },
 }
 
-/// A reference to a type expression.
-///
-/// Intentional Rust performance representation for OCaml type-node identity.
-///
-/// OCaml stores a type node as `{mutable desc; mutable level; id}`
-/// (compiler/ml/types.ml:22) and relies on physical identity plus the `id`.
-/// Rust keeps that identity as an arena index instead of a pointer-shaped
-/// object handle.
-///
-/// In the arena-based design, this is an index or pointer.
-/// Type arenas are dense and far below `u32::MAX`; keeping the handle compact
-/// reduces typedtree and type descriptor memory traffic.
+/// Top bit distinguishes worker-store indices from compilation-local indices.
+pub(crate) const STORE_REF_TAG: u32 = 1 << 31;
+
+/// Compact physical identity for a type node, matching OCaml `type_expr`
+/// identity (`compiler/ml/types.ml:22`, `compiler/ml/btype.ml:46-48`).
+/// The top bit selects the worker store; remaining bits index its arena or
+/// the compilation-local arena. No structural equality or deduplication.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct TypeExprRef(pub u32);
 
@@ -262,12 +257,49 @@ impl TypeExprRef {
 
     #[inline]
     pub(crate) fn from_usize(idx: usize) -> Self {
-        Self(u32::try_from(idx).expect("type arena index exceeds u32::MAX"))
+        let raw = u32::try_from(idx).expect("type arena index exceeds u32::MAX");
+        assert!(
+            raw & STORE_REF_TAG == 0,
+            "local type arena index collides with the store tag"
+        );
+        Self(raw)
     }
 
+    /// Reference to the `idx`-th node of the per-thread store.
+    #[inline]
+    pub(crate) fn from_store_index(idx: usize) -> Self {
+        let raw = u32::try_from(idx).expect("type store index exceeds u32::MAX");
+        assert!(
+            raw & STORE_REF_TAG == 0,
+            "type store index exceeds the tag range"
+        );
+        Self(raw | STORE_REF_TAG)
+    }
+
+    /// Whether this node lives in the per-thread store.
+    #[inline]
+    pub(crate) fn is_store(self) -> bool {
+        self.0 & STORE_REF_TAG != 0
+    }
+
+    /// Index into the compilation-local arena.
     #[inline]
     pub(crate) fn index(self) -> usize {
+        debug_assert!(
+            !self.is_store(),
+            "store type reference used as a local index"
+        );
         self.0 as usize
+    }
+
+    /// Index into the per-thread store arena.
+    #[inline]
+    pub(crate) fn store_index(self) -> usize {
+        debug_assert!(
+            self.is_store(),
+            "local type reference used as a store index"
+        );
+        (self.0 & !STORE_REF_TAG) as usize
     }
 }
 
@@ -518,28 +550,45 @@ impl<T> Default for TypeExprRefMap<T> {
 /// It replaces short-lived `HashSet<TypeExprRef>` visited tables in hot
 /// type traversals without changing OCaml physical-sharing semantics from
 /// compiler/ml/types.ml:22.
-#[derive(Debug, Clone)]
-pub(crate) struct TypeExprRefSet {
+#[derive(Debug, Clone, Default)]
+struct DenseTypeExprRefSet {
     offset: u32,
     values: Vec<u8>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct TypeExprRefSet {
+    local: DenseTypeExprRefSet,
+    // A separate span prevents the store tag from creating a 2 GiB gap.
+    store: Option<Box<DenseTypeExprRefSet>>,
 }
 
 impl TypeExprRefSet {
     pub(crate) fn new() -> Self {
         Self {
-            offset: 0,
-            values: Vec::new(),
+            local: DenseTypeExprRefSet::default(),
+            store: None,
         }
     }
 
     #[inline]
     pub(crate) fn insert(&mut self, key: TypeExprRef) -> bool {
+        if key.is_store() {
+            self.store.get_or_insert_with(Default::default).insert(key)
+        } else {
+            self.local.insert(key)
+        }
+    }
+}
+
+impl DenseTypeExprRefSet {
+    #[inline]
+    fn insert(&mut self, key: TypeExprRef) -> bool {
         if self.values.is_empty() {
             self.offset = key.0;
             self.values.push(1);
             return true;
         }
-
         if key.0 < self.offset {
             let prepend = (self.offset - key.0) as usize;
             let mut values = Vec::with_capacity(self.values.len() + prepend);
@@ -548,12 +597,10 @@ impl TypeExprRefSet {
             self.values = values;
             self.offset = key.0;
         }
-
         let idx = (key.0 - self.offset) as usize;
         if idx >= self.values.len() {
             self.values.resize(idx + 1, 0);
         }
-
         let slot = &mut self.values[idx];
         if *slot == 0 {
             *slot = 1;
@@ -640,12 +687,41 @@ impl AbbrevMemoRef {
 
     #[inline]
     pub(crate) fn from_usize(idx: usize) -> Self {
-        Self(u32::try_from(idx).expect("abbrev memo arena index exceeds u32::MAX"))
+        let raw = u32::try_from(idx).expect("abbrev memo arena index exceeds u32::MAX");
+        assert!(
+            raw & STORE_REF_TAG == 0,
+            "local abbrev memo index collides with the store tag"
+        );
+        Self(raw)
+    }
+
+    /// Reference to the `idx`-th abbreviation memo cell of the per-thread store.
+    #[inline]
+    pub(crate) fn from_store_index(idx: usize) -> Self {
+        let raw = u32::try_from(idx).expect("abbrev memo store index exceeds u32::MAX");
+        assert!(
+            raw & STORE_REF_TAG == 0,
+            "abbrev memo store index exceeds the tag range"
+        );
+        Self(raw | STORE_REF_TAG)
+    }
+
+    /// Whether this memo cell belongs to a per-thread store node.
+    #[inline]
+    pub(crate) fn is_store(self) -> bool {
+        self.0 & STORE_REF_TAG != 0
     }
 
     #[inline]
     pub(crate) fn index(self) -> usize {
+        debug_assert!(!self.is_store(), "store abbrev memo used as a local index");
         self.0 as usize
+    }
+
+    #[inline]
+    pub(crate) fn store_index(self) -> usize {
+        debug_assert!(self.is_store(), "local abbrev memo used as a store index");
+        (self.0 & !STORE_REF_TAG) as usize
     }
 }
 
@@ -674,7 +750,23 @@ pub struct FieldKindRef(pub u32);
 impl FieldKindRef {
     #[inline]
     pub(crate) fn from_usize(idx: usize) -> Self {
-        Self(u32::try_from(idx).expect("field kind arena index exceeds u32::MAX"))
+        let raw = u32::try_from(idx).expect("field kind arena index exceeds u32::MAX");
+        assert!(
+            raw & STORE_REF_TAG == 0,
+            "local field kind index collides with the store tag"
+        );
+        Self(raw)
+    }
+
+    /// Reference to the `idx`-th field kind cell of the per-thread store.
+    #[inline]
+    pub(crate) fn from_store_index(idx: usize) -> Self {
+        let raw = u32::try_from(idx).expect("field kind store index exceeds u32::MAX");
+        assert!(
+            raw & STORE_REF_TAG == 0,
+            "field kind store index exceeds the tag range"
+        );
+        Self(raw | STORE_REF_TAG)
     }
 }
 
@@ -730,12 +822,46 @@ impl RowFieldRef {
 
     #[inline]
     pub(crate) fn from_usize(idx: usize) -> Self {
-        Self(u32::try_from(idx).expect("row field arena index exceeds u32::MAX"))
+        let raw = u32::try_from(idx).expect("row field arena index exceeds u32::MAX");
+        assert!(
+            raw & STORE_REF_TAG == 0,
+            "local row field index collides with the store tag"
+        );
+        Self(raw)
+    }
+
+    /// Reference to the `idx`-th row field cell of the per-thread store.
+    #[inline]
+    pub(crate) fn from_store_index(idx: usize) -> Self {
+        let raw = u32::try_from(idx).expect("row field store index exceeds u32::MAX");
+        assert!(
+            raw < STORE_REF_TAG - 1,
+            "row field store index collides with null sentinel"
+        );
+        assert!(
+            raw & STORE_REF_TAG == 0,
+            "row field store index exceeds the tag range"
+        );
+        Self(raw | STORE_REF_TAG)
+    }
+
+    /// Whether this cell belongs to a per-thread store row. The null
+    /// sentinel also has the top bit set and is excluded.
+    #[inline]
+    pub(crate) fn is_store(self) -> bool {
+        self.0 & STORE_REF_TAG != 0 && !self.is_null()
     }
 
     #[inline]
     pub(crate) fn index(self) -> usize {
+        debug_assert!(!self.is_store(), "store row field used as a local index");
         self.0 as usize
+    }
+
+    #[inline]
+    pub(crate) fn store_index(self) -> usize {
+        debug_assert!(self.is_store(), "local row field used as a store index");
+        (self.0 & !STORE_REF_TAG) as usize
     }
 }
 
@@ -769,6 +895,68 @@ pub enum TypeDescSer {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn store_tags_preserve_identity_and_sentinels() {
+        for index in [0, 1, 255, 256, 10_000] {
+            let local = TypeExprRef::from_usize(index);
+            let store = TypeExprRef::from_store_index(index);
+            assert!(!local.is_store());
+            assert!(store.is_store());
+            assert_eq!(local.index(), index);
+            assert_eq!(store.store_index(), index);
+            assert_ne!(local, store);
+            assert_eq!(AbbrevMemoRef::from_store_index(index).store_index(), index);
+            assert_eq!(RowFieldRef::from_store_index(index).store_index(), index);
+            assert_eq!(
+                FieldKindRef::from_store_index(index).0,
+                STORE_REF_TAG | index as u32
+            );
+        }
+        assert!(!RowFieldRef::null().is_store());
+        assert!(!RowFieldRef::from_store_index(0).is_null());
+        assert_ne!(AbbrevMemoRef::nil(), AbbrevMemoRef::from_store_index(0));
+        assert_eq!(std::mem::size_of::<TypeExprRef>(), 4);
+    }
+
+    #[test]
+    #[should_panic(expected = "collides with the store tag")]
+    fn local_index_cannot_use_store_bit() {
+        TypeExprRef::from_usize(STORE_REF_TAG as usize);
+    }
+
+    #[test]
+    #[should_panic(expected = "null sentinel")]
+    fn store_row_index_cannot_use_null_sentinel() {
+        RowFieldRef::from_store_index((STORE_REF_TAG - 1) as usize);
+    }
+
+    #[test]
+    fn mixed_store_local_maps_and_sets_stay_small() {
+        for store_first in [false, true] {
+            let mut map = TypeExprRefMap::new();
+            let mut set = TypeExprRefSet::new();
+            for store in [store_first, !store_first] {
+                for index in 0..40 {
+                    let key = if store {
+                        TypeExprRef::from_store_index(index)
+                    } else {
+                        TypeExprRef::from_usize(index)
+                    };
+                    assert!(set.insert(key));
+                    assert!(!set.insert(key));
+                    assert_eq!(map.insert(key, store), None);
+                }
+            }
+            for index in 0..40 {
+                assert_eq!(map.get(TypeExprRef::from_store_index(index)), Some(&true));
+                assert_eq!(map.get(TypeExprRef::from_usize(index)), Some(&false));
+            }
+            assert!(matches!(map.storage, TypeExprRefMapStorage::Sparse(_)));
+            assert_eq!(set.local.values.len(), 40);
+            assert_eq!(set.store.as_ref().unwrap().values.len(), 40);
+        }
+    }
 
     #[test]
     fn test_type_expr_creation() {
@@ -814,13 +1002,18 @@ mod tests {
             assert_eq!(std::mem::size_of::<TypeArg>(), 16);
         }
         let typ = TypeExprRef(u32::MAX);
-        for arg in [TypeArg::unlabeled(typ), TypeArg::new(ArgLabel::Nolabel, typ)] {
+        for arg in [
+            TypeArg::unlabeled(typ),
+            TypeArg::new(ArgLabel::Nolabel, typ),
+        ] {
             assert!(arg.label.is_none());
             assert!(arg.clone().label.is_none());
             assert!(matches!(arg.label(), ArgLabel::Nolabel));
             assert_eq!(arg.typ, typ);
-            assert_eq!(format!("{:?}", arg),
-                format!("TypeArg {{ lbl: Nolabel, typ: {:?} }}", typ));
+            assert_eq!(
+                format!("{:?}", arg),
+                format!("TypeArg {{ lbl: Nolabel, typ: {:?} }}", typ)
+            );
         }
         for ghost in [false, true] {
             let loc = Location {
