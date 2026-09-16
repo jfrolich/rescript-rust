@@ -7,6 +7,7 @@ pub mod logs;
 pub mod namespaces;
 pub mod packages;
 pub mod parse;
+pub mod qos;
 pub mod read_compile_state;
 
 use self::parse::parser_args;

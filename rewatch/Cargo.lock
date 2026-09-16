@@ -2289,6 +2289,7 @@ dependencies = [
  "futures",
  "futures-timer",
  "indicatif",
+ "libc",
  "log",
  "mimalloc",
  "notify",

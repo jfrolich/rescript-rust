@@ -5,6 +5,7 @@ mod dependency_cycle;
 use super::build_types::*;
 use super::logs;
 use super::packages;
+use super::qos;
 use crate::config;
 use crate::config::Config;
 use crate::helpers;
@@ -206,6 +207,7 @@ struct InProcessSchedulerHooks {
 #[derive(Default)]
 struct InProcessSchedulerCounters {
     scheduled_typecheck: usize,
+    critical_scheduled: usize,
     scheduled_js: usize,
     signature_ready: usize,
     pre_js_ready: usize,
@@ -255,9 +257,11 @@ impl InProcessSchedulerCounters {
 
     fn print_report(&self, capacity: usize) {
         eprintln!(
-            "[scheduler-counter] capacity={} scheduled_typecheck={} scheduled_js={} signature_ready={} pre_js_ready={} completed={} js_scheduled_while_typecheck_ready={} max_ready_typecheck={} max_ready_js={} max_pending_js={} max_in_flight={} blocked_events_with_idle_slots={} max_idle_slots={} dispatcher_wait_ms={:.3} idle_slot_wait_ms={:.3}",
+            "[scheduler-counter] capacity={} critical_slots={} scheduled_typecheck={} critical_scheduled={} scheduled_js={} signature_ready={} pre_js_ready={} completed={} js_scheduled_while_typecheck_ready={} max_ready_typecheck={} max_ready_js={} max_pending_js={} max_in_flight={} blocked_events_with_idle_slots={} max_idle_slots={} dispatcher_wait_ms={:.3} idle_slot_wait_ms={:.3}",
             capacity,
+            qos::critical_slots(),
             self.scheduled_typecheck,
+            self.critical_scheduled,
             self.scheduled_js,
             self.signature_ready,
             self.pre_js_ready,
@@ -490,7 +494,9 @@ fn compile_one(
     dump_typed_sexp: bool,
     parent_span: Span,
     in_process_hooks: Option<InProcessSchedulerHooks>,
+    placement: qos::UnitClass,
 ) -> WorkerMsg {
+    let _placement = qos::UnitPlacementGuard::enter(placement);
     let module = build_state.get_module(module_name).unwrap();
     let package = build_state
         .get_package(&module.package_name)
@@ -954,6 +960,11 @@ pub fn compile(
     let mut scheduler_counters = (in_process_mode
         && std::env::var_os("RESCRIPT_SCHEDULER_COUNTERS").is_some())
     .then(InProcessSchedulerCounters::default);
+    // Critical-path placement: the highest-priority ready typecheck units get
+    // performance-core QoS, at most one per performance core at a time.
+    let critical_slots = if in_process_mode { qos::critical_slots() } else { 0 };
+    let mut critical_in_flight: usize = 0;
+    let mut critical_modules: AHashSet<String> = AHashSet::new();
 
     rayon::in_place_scope(|scope| {
         let mut in_flight: usize = 0;
@@ -1015,6 +1026,16 @@ pub fn compile(
                 let tx = tx.clone();
                 let inc_ref = &inc;
                 in_flight += 1;
+                let placement = if critical_in_flight < critical_slots {
+                    critical_in_flight += 1;
+                    critical_modules.insert(module_name.clone());
+                    if let Some(counters) = scheduler_counters.as_mut() {
+                        counters.critical_scheduled += 1;
+                    }
+                    qos::UnitClass::Critical
+                } else {
+                    qos::UnitClass::Default
+                };
                 if let Some(counters) = scheduler_counters.as_mut() {
                     counters.observe_queues(
                         ready_heap.len(),
@@ -1043,6 +1064,7 @@ pub fn compile(
                         dump_typed_sexp,
                         parent_span,
                         in_process_hooks,
+                        placement,
                     );
                     if show_progress && matches!(msg, WorkerMsg::Completed(_)) {
                         inc_ref();
@@ -1105,6 +1127,9 @@ pub fn compile(
                         }
                         in_flight -= 1;
                         let module_name = msg.module_name.clone();
+                        if critical_modules.remove(&module_name) {
+                            critical_in_flight -= 1;
+                        }
                         let pending_deps_for_js = msg
                             .needed_modules
                             .iter()
@@ -1157,6 +1182,9 @@ pub fn compile(
                             counters.completed += 1;
                         }
                         in_flight -= 1;
+                        if critical_modules.remove(&msg.module_name) {
+                            critical_in_flight -= 1;
+                        }
                         if in_process_mode {
                             apply_pending_registry_updates(
                                 build_command_state_ref,
@@ -3419,6 +3447,7 @@ fn finish_in_process_js(
     registry_snapshot: ModuleRegistry,
     metadata_tx: &mpsc::Sender<WorkerMsg>,
 ) -> CompletionMsg {
+    let _placement = qos::UnitPlacementGuard::enter(qos::UnitClass::Background);
     let module_name = pre_js_msg.module_name.clone();
     let is_clean = pre_js_msg.is_clean;
     let result = finish_in_process_js_inner(
