@@ -66,17 +66,19 @@ affected and by the semantic contract they must preserve. Numbers marked
      critical-path work: the fresh profile shows inflation is *uniform*
      across unrelated phases, i.e. mostly efficiency-core heterogeneity, and
      the chain head `Layout__Types` runs 2.55× slower under parallel load.
-   - **F. Pipeline the frontend into the DAG and mmap the frozen store** so
-     the runtime and dependency packages cost nothing per build.
+   - **F. Pipeline the frontend into the DAG** so parse and typecheck
+     overlap and `.resi` signatures unblock dependents first.
 
 4. **Honest trajectory.** A+B+C+E are the only changes with a plausible
-   multi-second effect and they compound (B makes A serializable and
-   mmap-able; A removes the work C would otherwise cache; B and E attack the
-   same inflation). With all of A–F landed, the arithmetic in §1 lands around
-   1.3–1.7 s for a clean build on this machine; 1 s additionally needs the
-   persisted store (F) and a critical chain under 1 s, which follows from A–C
-   making the chain modules 2–3× faster. Anything less than the full stack
-   stops at ~2.5–3 s.
+   multi-second effect and they compound (B makes A `Sync` and cheap to
+   build; A removes the work C would otherwise cache; B and E attack the
+   same inflation). The target is a *clean* build: nothing from a previous
+   build may be reused, so every second has to come out of the work itself
+   or out of the chain. With all of A–F landed, the arithmetic in §1 lands
+   around 1.3–1.7 s on this machine; 1 s additionally needs the critical
+   chain under 1 s on performance cores, which follows from A–C making the
+   chain modules 2–3× faster plus E.5 placement. Anything less than the full
+   stack stops at ~2.5–3 s.
 
 ## 1. The budget
 
@@ -626,7 +628,7 @@ core placement.
 **Effect.** Inflation 2.1× → ~1.4× is plausible with 1–4 plus B; item 5
 attacks the chain directly. None of these change compiler semantics.
 
-### F. Frontend pipelining and a persisted, mmap-able package store
+### F. Frontend pipelining
 
 1. **Pipeline parse → typecheck.** Enqueue a module's pre-JS unit as soon as
    its own file and all its dependencies are parsed (dependency names are
@@ -637,14 +639,12 @@ attacks the chain directly. None of these change compiler semantics.
    published before the implementation is typechecked (already); make sure
    the scheduler prioritises `.resi` typecheck units above everything, since
    each unblocks dependents at near-zero cost.
-3. **Persisted frozen store.** Once A+B exist, the frozen store is POD
-   arrays: write it to `<package>/lib/bs/package.rsigpack` and mmap it on the
-   next build (the [PACKAGE_SIGNATURE_STORE.md](PACKAGE_SIGNATURE_STORE.md)
-   design, but now zero-decode). The runtime (107 modules), `@rescript/react`,
-   `rescript-webapi`, `bs-css`, `tella-std` (225 dependency modules) and,
-   later, unchanged project modules cost nothing. The same file is the
-   foundation for sub-100 ms incremental rebuilds, which the campaign has
-   deliberately not optimised yet.
+3. **Not in scope: a persisted store.** The benchmark is a clean build, so
+   reusing a previous build's frozen store, mmap-ed signatures, or cached
+   JS is not a valid lever here. The runtime (107 modules) and the 225
+   dependency modules must be compiled inside the 1 s like everything else;
+   they are cheap only because A/C make them cheap, not because they are
+   remembered.
 
 ### G. Measurement as a feature
 
@@ -774,21 +774,22 @@ active).
    and de-risk everything after by making the chain and the residual visible.
 2. **B** (weeks, one owner): POD nodes + interners + `Copy` descriptors.
    Land behind the full parity suites. This is the prerequisite for A's
-   `Sync` store and for F.3, and the single largest serial-work reduction.
+   `Sync` store and the single largest serial-work reduction.
 3. **A + C** (weeks): frozen shared store, prelude env, delete string
    registries. A and C are the same boundary (`find_pers_struct` →
    component forcing) and should be one design.
 4. **D** (weeks): finish M6, then direct indexed lowering, then indexed JS IR.
-5. **F** (days–weeks): pipelining, `.resi` priority, mmap store.
+5. **F** (days): pipelining, `.resi` priority.
 6. Re-measure after each retained step with the fixed protocol; re-derive the
    §1 table. Stop and re-plan if serial work is not below ~10 s after 2–3.
 
 Expected trajectory (serial work → parallel wall on this machine, with
 inflation improving from 2.1× toward 1.3×): 19 s / 4.6 s → after 1–2: ~13 s /
 ~2.9 s → after 3: ~9 s / ~1.9 s → after 4: ~6.5 s / ~1.4 s → after 5:
-~5.5 s / ~1.1–1.3 s. One second requires all of it plus the persisted
-dependency store; it is a full-stack representation change, not a tuning
-exercise.
+~5.5 s / ~1.1–1.3 s. One second requires all of it plus a sub-second
+critical chain on performance cores; it is a full-stack representation
+change, not a tuning exercise, and nothing may be carried over from a
+previous build.
 
 ## 7. What not to do (from the rejected experiments)
 
