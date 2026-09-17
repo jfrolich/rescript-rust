@@ -8,6 +8,15 @@ large enough to matter for a `<1s` clean build of the pinned Tella webapp
 (3,248 modules, 5,048 generated JS files, 16.6 MB of ReScript source in 3,023
 `.res` files, only 55 `.resi` files).
 
+**Implementation audit correction (2026-09-17):** OCaml resets persistent
+Env caches and reinitializes identifier stamps for each unit
+(`compiler/core/res_compmisc.ml:35,49`). Raw dependency storage can be shared
+with local mutation overlays, but forced component binders cannot simply be
+retained across units. `link_type` can legitimately reach dependency nodes,
+and stamp changes can reorder generated JS through SCC hashing. See the
+[corrected store design](THREAD_TYPE_STORE.md#corrected-stamp-policy-for-stages-3-and-4).
+The original A/C estimates remain hypotheses, not validated savings.
+
 This document does not claim any speedup. It ranks changes by measured work
 affected and by the semantic contract they must preserve. Numbers marked
 *(measured 2026-09)* come from the previous campaign's fixed-protocol runs
@@ -39,7 +48,8 @@ affected and by the semantic contract they must preserve. Numbers marked
    re-internalized copies of dependency signatures** that every one of the
    3,248 modules rebuilds from scratch (`Stdlib`, `Pervasives`, `TellaStd`,
    `Belt`, …). OCaml's node is 4 words, its descriptor is pattern-matched in
-   place, and its persistent-structure table is shared for the whole process.
+   place, and its persistent-structure table is shared within a compilation
+   (then cleared by `Res_compmisc.init_path`).
 
 3. **The largest real levers, in order:**
    - **A. A frozen, shared, process-wide dependency type store** (Sorbet
@@ -47,8 +57,9 @@ affected and by the semantic contract they must preserve. Numbers marked
      module's signature once as immutable POD nodes; consumers reference them
      directly through a two-level `TypeExprRef`. Removes 17.4 M allocations,
      0.7 s of internalization, the per-module `register_sig_types_*` walks,
-     and most of the 3 GB RSS that drives parallel inflation. Semantically it
-     is exactly OCaml's single-process `persistent_structures` table.
+     and some of the 3 GB RSS that drives parallel inflation. This is a Rust
+     storage optimization; per-unit mutation and substitution behavior must
+     still follow OCaml's compilation lifecycle.
    - **B. POD type nodes** (no heap pointers inside `TypeDesc`: interned
      `PathId`, argument ranges into a side vector, interned labels), so
      `get_desc` is a 16–24 B copy, arena drop is O(1), and `Path.same` is an
@@ -263,7 +274,7 @@ Representation, Rust vs OCaml:
 | Reading a descriptor | pattern match on the record, zero copy | `get_desc` clones (33 M/build) or `borrow_desc` (RefCell guard) |
 | Node handle | pointer | `TypeExprRef(u32)` into arena (good) |
 | Path equality | structural recursion on shared pointers | structural recursion on `Arc` chains + `SmolStr` compares |
-| Persistent structures | one process-wide table, unmarshalled once | re-internalized into every module's arena (17.4 M nodes/build) |
+| Persistent structures | process-wide table, cleared between compilation units | re-internalized into every module's arena (17.4 M nodes/build) |
 | Env tables | `Ident.tbl` AVL over `Ident` | `im_rc::HashMap<String, …>` + `Arc<T>` per binding |
 | Marking during traversal | flips `level` sign in place | side maps / snapshots |
 
@@ -284,8 +295,8 @@ with `usize` indices, fingerprints it, stores it in the registry as
 placeholder node per entry then fills descriptors (direct contiguous
 allocation was measured as a ~30 ms parallel gain). 58 K internalizations per
 build, 0.73 s serial inclusive, 1.66 s summed at 12 workers. In OCaml this
-step is `input_value` of a `.cmi` — a C loop at ~10–20 ns/word — and, within
-one process, done once.
+step is `input_value` of a `.cmi` — a C loop at ~10–20 ns/word — and is
+memoized until the persistent cache is reset for the next compilation.
 
 ### 2.6 Typedtree → RawLambda → Lambda (`raw_lambda/convert.rs`, `matching.rs`, `lower.rs`)
 
@@ -390,18 +401,20 @@ process-wide, index-addressed, POD type table). All three separate
 with `publish once into a process-wide append-only frozen arena`. A
 `TypeExprRef` becomes two-level: a high bit (or id range) selects the shared
 store vs. the compilation-local arena. `ctx.borrow_desc` / `get_level`
-branch on that bit. Shared nodes are immutable; the three kinds of state
-OCaml *does* write into persistent nodes move to per-compilation overlays
+branch on that bit. Shared backing nodes are immutable; the state
+OCaml writes into dependency nodes moves to per-compilation overlays
 keyed by shared node id:
 
 1. `abbrev` memos on `Tconstr` — already an index into `ctx.abbrevs` in
    Rust; shared nodes get a lazily created local `AbbrevMemoRef` through an
    overlay map (memo hits stay per-compilation, so typedtree sharing is
    unchanged).
-2. Level marking during traversals (`mark_type`, occurs checks, printing) —
-   shared nodes are all `generic_level`; use a local mark bitset.
-3. `link_type` — never legitimately applied to a generic persistent node;
-   assert it.
+2. Levels — use a local scalar overlay for traversal marks **and** ordinary
+   level changes; a bitset cannot represent both.
+3. Descriptors — `link_type` legitimately reaches dependency declaration
+   nodes (`btype.ml:633-651`, `ctype.ml:2118-2127`). Preserve the write and
+   physical handle identity in a local descriptor overlay, never suppress it.
+4. Row-field cells — isolate their mutable links in the local overlay too.
 
 Publishing a module = the producer's `serialize_pers_struct` walk, but
 emitting POD nodes directly into the shared store (the same DFS order and
@@ -409,13 +422,13 @@ first-visit ids it emits today) instead of a portable vector that each
 consumer re-walks. `find_pers_struct` then returns a `PersStruct` whose
 signature items carry shared refs; nothing is allocated in the consumer.
 
-**Why it is OCaml-faithful.** OCaml's `Env.persistent_structures` is one
-process-wide table; every unit compiled in that process shares those nodes.
-Today's per-module internalization is the *deviation* (it corresponds to
-one `bsc` process per file). Component forcing (`components_of_module_maker`)
-still happens per `(env, sub, path, mty)` in the consumer and still produces
-consumer-local substituted copies — that force order and copy depth do not
-change. Only the source graph they copy from is shared.
+**Required OCaml contract.** `Res_compmisc.init_path` clears persistent
+structures between units, and `initial_env` reinitializes stamps. Sharing
+immutable raw storage must preserve that per-unit behavior. Component
+forcing (`components_of_module_maker`) still happens per
+`(env, sub, path, mty)` in the consumer and produces consumer-local
+substituted views; force order, binder allocation, and copy depth must not
+change. Only their immutable source storage is shared.
 
 **Evidence.** 17.4 M of 36.9 M node allocations (47 %); 58 K internalizations;
 0.73 s serial / 1.66 s summed parallel inside internalization alone; plus the
@@ -508,17 +521,18 @@ raw/optimized/JS/diagnostic parity suites.
 
 ### C. Once-per-package prelude Env; delete the Rust-only type registries
 
-**Borrowed from:** OCaml itself (single process, single `persistent_structures`,
-functional `Env` shared by extension); rustc's "prelude" and `Steal`
-ownership at phase boundaries.
+**Borrowed from:** OCaml's functional `Env` shared by extension; rustc's
+"prelude" and `Steal` ownership at phase boundaries. Cross-unit storage reuse
+is an optimization, not what OCaml's reset-cache lifecycle already does.
 
 **Mechanism.**
 1. Build the initial environment (`initial_env` + `open Pervasives` + `open
    Stdlib` + every `-open` from the package's `compiler-flags`) **once per
    package configuration** into a frozen `PreludeEnv` whose tables are the
-   same `im_rc` HAMTs; each module clones it in O(1) and extends it. With A in
-   place its component views point at shared nodes; without A this alone
-   still removes the three largest per-module internalizations.
+   same `im_rc` HAMTs; each module extends its immutable layers. This requires
+   factoring unit-local forced substitution views from shared templates:
+   cached tables must not retain another unit's binders or mutation overlays.
+   A plain O(1) clone of today's fully forced Env is not sufficient.
 2. Delete `type_decl_store`, `type_decl_by_stamp`, `type_decl_by_path`,
    `type_decl_by_exact_path`, `type_item_by_path`, `missing_type_item_by_path`,
    `resolved_pdot_type_cache` and the `register_sig_types_*` walks that fill
@@ -538,9 +552,9 @@ and walks nested submodules; `Stdlib` is ~100 submodules. The same
 dependency components (`ReactEvent.*`, `Jotai.Atom`, `TellaStd.*`, …) are
 re-qualified hundreds of times across modules. Env family is 23–25 % of
 samples across typecheck *and* raw lowering. OCaml builds a persistent
-unit's components once per process from `Env.empty`/`Subst.identity`
-(`env.ml:669-678`), so a shared forced component view is the reference
-semantics, not a new cache.
+unit's components from `Env.empty`/`Subst.identity` (`env.ml:669-678`),
+but clears them at the next compilation's `init_path`. That construction
+root alone does not establish cross-unit binder or mutation independence.
 
 **Effect.** Serial: −1.5 to −2.5 s (the whole per-module tax plus the
 repeated qualification work). Inflation: removes one contended atomic
@@ -549,14 +563,16 @@ Chain: every module starts typechecking without the prelude tax.
 
 **Contract.** The implicit opens' components must be forced in the same
 order and with the same captured env/subst as `res_compmisc.ml:48-63` +
-`env.ml:1874-1877`; a frozen prelude forces them once (as one OCaml process
-would). Lookup fallbacks currently served by the string registries must be
+`env.ml:1874-1877`, including per-unit binder identities and stamp
+consumption. A frozen template must not skip those effects. Lookup fallbacks
+currently served by the string registries must be
 proven unreachable or re-expressed as Env/component lookups — this is
 parity-debt removal, so it may briefly move parity numbers; per AGENTS.md,
 verified OCaml-aligned changes are kept and the fallout is fixed forward.
 
-**Size.** Medium. Mostly deletion plus a `PreludeEnv` cache in
-`rewatch` keyed by `(package, compiler flags, dependency fingerprint)`.
+**Size.** Substantial: separate shared templates from unit-local lazy
+substitution views, then remove redundant registries. The original "mostly
+deletion plus a cache" estimate understated the ownership work.
 
 ### D. Backend on indexed arenas, end to end
 
@@ -694,7 +710,7 @@ payload drops.
 modules (80 %) finish their pre-JS unit in under 5 ms serial. Together they
 spend 2.40 s in typecheck and **1.63 s in untimed setup/teardown** — for the
 typical Tella module, roughly 40 % of its cost is the fixed per-module
-prelude/registry/drop work that OCaml pays once per process, plus the
+prelude/registry/drop work, plus the
 warm-up part of typechecking (first lookups into freshly internalized
 `Stdlib`/`TellaStd` components). This is the quantitative case for §4.C.
 
@@ -760,10 +776,10 @@ qualification of persistent roots: 11,005 calls / 133 K items, dominated by
 the *same* dependency components re-qualified in module after module
 (`Jotai.Atom` 438×, `ReactEvent.Mouse` 319×, `BaseUI.Tooltip` 301×,
 `ReactEvent.Pointer` 267×, `TellaStd.Response` 171×, …). In OCaml, a
-persistent unit's components are built once per process from `Env.empty`
-and `Subst.identity` (`env.ml:669-678`, `1707`), independent of the
-consuming module — which is precisely why §4.A/C can share forced dependency
-components across modules without changing semantics. Sparse records: 10,421
+persistent unit's components are built from `Env.empty` and `Subst.identity`
+(`env.ml:669-678`, `1707`), but `Res_compmisc.init_path` resets that cache
+between units. §4.A/C must therefore preserve per-unit substitution and
+force effects while sharing context-independent storage. Sparse records: 10,421
 large records, 4.74 M logical labels vs 35 K populated fields (already
 active).
 

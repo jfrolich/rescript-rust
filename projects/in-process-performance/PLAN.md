@@ -35,9 +35,12 @@ The current implementation is tracked in
 **within a single clean build**, with no persisted compiler results. Stage 1
 adds tagged handles, worker-store ownership, and mutation overlays. Stage 2
 now internalizes eligible dependency graphs once per worker (measured at
-4.421 s with 12 workers, versus 4.699 s baseline). Stage 3a adds identifier
-continuity; shared component tables, prelude layers, and registry reuse remain
-in progress. The older
+4.421 s with 12 workers, versus 4.699 s baseline). The attempted stage-3
+identifier continuity was rejected: OCaml reinitializes identifiers per unit,
+and stamp-hashed SCC traversal makes continuity change JS output order.
+Shared component templates, per-unit forced views, prelude layers, and
+registry reuse remain in progress. See the corrected stamp policy in the
+store design before implementing those stages. The older
 `PACKAGE_SIGNATURE_STORE.md` persisted-store proposal is outside this goal.
 
 ## Top 10 Improvements

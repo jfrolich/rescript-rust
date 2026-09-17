@@ -33,8 +33,8 @@ The earlier worker-local `TypeContext` reuse experiment
 (`projects/shared-interfaces/PROGRESS.md`) is *not* what this is: that
 reused the whole mutable context, including stamp-keyed declaration
 registries whose keys collide when stamps reset per unit. Here only
-immutable, generic-level dependency graphs and their once-per-process
-component tables are shared; every mutable per-unit table stays per module.
+immutable, generic-level dependency storage is shared; every mutable per-unit
+table and forced substitution view stays per module.
 
 ## OCaml reference semantics
 
@@ -48,17 +48,25 @@ component tables are shared; every mutable per-unit table stays per module.
   `compiler/ml/env.ml:1516-1585` (`components_of_module_maker`): the
   consumer-visible substituted copies are made when a component table is
   forced. They are per `(path, mty, sub)`, not per unit.
-- `compiler/ml/ctype.ml:725-765` (`copy`/`instance`): generic-level nodes
-  are always copied before unification, so persistent nodes are never
-  linked. `Tsubst` markers are the one in-place write OCaml makes on them,
-  and Rust already keeps that state in `CopyCache` instead.
+- `compiler/ml/ctype.ml:725-765` (`copy`/`instance`) copies generic schemes
+  at ordinary use sites, but this does **not** make every dependency node
+  immutable during typing. Nullary constructor unification
+  (`compiler/ml/ctype.ml:2118-2127`) and declaration coercion can still
+  reach `Btype.link_type` (`compiler/ml/btype.ml:633-651`). Those writes
+  must remain observable within the compilation; Rust isolates them in
+  descriptor/level overlays rather than suppressing them. `Tsubst`
+  traversal markers are already represented separately in `CopyCache`.
 - `compiler/ml/subst.ml:173-177`: abbreviation memos are reset to `Mnil` when
   a signature is saved, so a fresh process starts with empty memos. Memo
   state must therefore stay per module for one-process-per-file parity.
 
 Today's per-module internalization corresponds to one `bsc` process per
-file. Sharing forced dependency state across the modules compiled on one
-thread is closer to the reference process model, not further from it.
+file. The **raw, unforced** dependency graph can use shared immutable storage
+with compilation-local writes. This does not authorize sharing forced
+components unchanged between units: `compiler/core/res_compmisc.ml:35`
+resets Env caches, and `initial_env` at line 49 calls `Ident.reinit`.
+Per-unit substitution identity and force effects must still match that
+reference lifecycle.
 
 ## Ownership model
 
@@ -69,14 +77,14 @@ worker thread
     ├── abbrevs:     Vec<AbbrevMemo>     initial (Mnil) values only
     ├── row_fields / field_kinds / variant_layouts   initial values only
     ├── id_gen:      per-thread node ids, disjoint from module-local ids
-    ├── stamps:      per-thread ident stamp range, disjoint from unit stamps
+    ├── stamps:      no retained per-unit binder allocation stream
     ├── pers:        portable-struct identity -> Arc<PersStruct> (store refs)
-    └── comps:       (module path, alias source) -> QualifiedModuleComponents
+    └── future:      context-independent component/prelude templates (not enabled)
 module compile (TypeContext, dropped at the pre-JS boundary)
     ├── types:       TypeArena           local nodes, as today
     ├── store:       StoreLease (exclusive Box, returned to worker slot on drop)
-    ├── overlays:    store abbrev / row-field / field-kind cells written by
-    │                this module, indexed by store cell index
+    ├── overlays:    store descriptor / level / abbrev / row-field writes
+    │                made by this module, indexed by store node/cell index
     └── every existing per-unit table, unchanged
 ```
 
@@ -90,34 +98,37 @@ lease never crosses threads; the store is `!Send` by construction.
 
 The worker slot transfers exclusive ownership into each `TypeContext`, not
 an `Rc`/`Arc`. Overlapping contexts get independent stores; the outer context
-returns its store when it finishes. A panicking compilation discards its
-store because traversal marks may not have been restored. This also avoids
-reference counting and keeps mutable level marking exclusive.
+returns its store when it finishes. A panicking compilation defensively
+discards its store. Descriptor, level, row, and abbreviation writes are
+compilation-local, so even a normal diagnostic return cannot leak mutations.
+The lease also avoids node reference counting.
 
 ## Invariants
 
-1. Store nodes are generic-level and never `set_desc`/`link_type`ed. An
-   `assert!` in `TypeContext::set_desc` and the link path enforces
-   it; the debug typedtree/lambda suites are the check.
-2. `set_level` on a store node is allowed only for the mark/unmark
-   traversal pairs that already restore the level before returning.
-3. Abbrev memos, row-field cells and field-kind cells of store nodes are
-   read through the module overlay: unset means the store's initial value.
+1. Backing store nodes remain unchanged. `set_desc`/`link_type` on a stored
+   handle update this compilation's descriptor overlay while preserving the
+   handle's physical identity. `repr` and `instance` see those writes.
+2. `set_level` on a stored handle writes its level overlay, including both
+   traversal marks and normal level lowering. An interrupted traversal cannot
+   leave the next compilation with a marked dependency graph.
+3. Abbrev memos and row-field cells of store nodes are read through the
+   module overlay: unset means the store's initial value.
    Writes go to the overlay only. `clear_abbrev_memos`/snapshot-backtrack
    operate on the overlay plus local cells.
 4. `TypeExprRefMap` selects sparse storage for mixed store/local key spans
    beyond its inline capacity. `TypeExprRefSet` keeps separate dense spans
    so the store tag cannot trigger a multi-gigabyte allocation. `snapshot_type_state` covers
-   local nodes and overlays only.
-5. Store ident stamps come from a range that no per-unit counter reaches
-   (`LOCAL_IDENT_COUNTER` is swapped in while the store builds components
-   and restored afterwards). Stamp-keyed per-unit registries
-   (`type_decl_by_stamp` and friends) are never shared.
+   local nodes and overlays only, including descriptor writes made before
+   and after the snapshot.
+5. In-process unit identifier counters restart as in OCaml's
+   `Res_compmisc.initial_env` / `Ident.reinit`. Forced component binders must
+   not be retained as if they belonged to a later unit. Stamp-keyed per-unit
+   registries (`type_decl_by_stamp` and friends) are not yet shared.
 6. Store entries are keyed by portable-struct identity (`Arc::as_ptr`),
    so a module republished in watch mode never aliases a stale graph.
-7. Component tables are stored only when their construction did not read
-   the module's `Env` (persistent roots, `env.ml:669-678`); local
-   components keep today's per-module path.
+7. Component tables currently stay per module. Future shared templates must
+   not read a unit's `Env` or retain its forced substitution results; an
+   `Env.empty` construction root alone does not prove binder independence.
 
 ## Stages
 
@@ -137,11 +148,13 @@ plus the debug `./scripts/test_typedtree_parity.sh --quick` and
    on the shared signature (they fill per-unit tables). Measure: expect
    `internalize` and the `TypeContext` node drops to fall out of the
    serial profile.
-3. **Shared component tables and the prelude.** `QualifiedModuleComponents`
-   for persistent roots move to the store; `open_module` for `Pervasives`,
-   `Stdlib` and `-open` roots reuses them, and the opened prelude `Env` is
-   cached per thread and per open-configuration. Measure: `open_module`,
-   `freshen`, `insert_module_stamp_subst`, and the `Env`/component drops.
+3. **Shared component templates and the prelude (design correction needed).**
+   Factor context-independent tables from per-unit forced substitution views
+   in `QualifiedModuleComponents`. Reuse immutable lookup/prelude layers only
+   where their handles and binders are independent of the unit. Preserve
+   unit-local thunk identity, force order, and stamp allocation; see the
+   corrected stamp policy below. Measure `open_module`, `freshen`,
+   `insert_module_stamp_subst`, and the `Env`/component drops.
 4. **Per-unit registries** (`type_decl_store`, `type_decl_by_stamp`,
    `type_decl_by_path`, …) are the remaining per-module walk over shared
    signatures. Route consumers through `Env`/component lookup
@@ -227,12 +240,10 @@ Commits `a9c5748ba`, `4e964922c`, `82b69fbd4`, `ad389b2a4`.
 - `find_pers_struct` internalizes a portable persistent struct into the
   worker store the first time any compilation on the thread needs it; later
   compilations share the graph and the `Arc<PersStruct>`. Store `Tconstr`
-  memo cells and `Tpackage` longident names are store-owned; `repr` never
-  path-compresses a store link; `set_level` asserts that a store node only
-  moves between generic and marked-generic; `link_type` drops the
-  persistent-to-local memo link that `unify3` would make through the
-  raw-declaration coercion path and still fails if a persistent type variable
-  would be bound (the two OCaml sites are cited in the code).
+  memo cells and `Tpackage` longident names are store-owned. The initial
+  implementation suppressed stored-source links and restricted level writes;
+  that was not equivalent to OCaml. The mutation-isolation correction below
+  replaces those restrictions with descriptor/level overlays.
 - Shareability: a graph is shared when every non-`Tlink` entry is at
   `generic_level` and no `Tsubst` remains. `Tlink` levels are dead state
   (`compiler/ml/btype.ml:107-115`, `compiler/ml/ctype.ml:488-503`). On the
@@ -281,31 +292,84 @@ per unit), `build_local_module_components` 2.2 %, `TypeContext`/`Env`
 teardown 10 %. Stage 3 targets the component and prelude blocks; stage 4 the
 registries and teardown.
 
-### Stamp policy for stages 3 and 4
+### Corrected stamp policy for stages 3 and 4
 
-Shared component tables create identifiers when forced (`Subst.signature`
-renames bound identifiers, `compiler/ml/subst.ml:358-364`). OCaml's
-`Ident.currentstamp` is seeded once per process (`compiler/ml/predef.ml:450`)
-and never reset between units, so a multi-unit process hands every unit
-stamps that continue from the previous unit and shares the forced
-persistent state between them. The in-process build will therefore continue
-stamps per worker thread instead of restarting each unit at
-`OCAML_NON_PREDEF_STAMP_START`. Standalone `bsc` (one unit per process)
-is unchanged; in-process typedtree dumps of the second and later units on a
-thread will show offset stamps; JS output does not depend on absolute stamp
-values (naming is scope-ordered) and is checked by the Tella hash comparison.
+The original plan incorrectly inferred a thread-continuous stamp stream
+from the one-time initialization in `compiler/ml/predef.ml:450`. The actual
+entry point calls `Ident.reinit` (`compiler/core/res_compmisc.ml:49`), and
+`init_path` resets persistent Env caches (line 35). Absolute stamp values
+also affect JS order: `compiler/core/lam_scc.ml:73-89` iterates stamp-hashed
+tables, mirrored by `raw_lambda/lower.rs::binding_dependencies`.
 
-### Stage 3a: worker identifier continuity
+Commit `58fa9f81d` tried continuity and passed the local gates and one Tella
+comparison. A subsequent build with different worker scheduling reordered
+`inputProperty_encodeJson` and `inputProperty_decode` in
+`Service__McpTools.bs.js`. This is a byte-parity failure, not an acceptable
+optimization. Commit `9d80fd78e` restores the reference per-unit reset.
+The initial single-run validation was insufficient to detect this.
 
-In-process entry points now start above the preceding unit's identifier
-watermark. A scope guard records both identifier counters on success,
-diagnostic return, and unwinding. A bounded stamp epoch discards the worker
-store before restarting the counter, well below `generic_level`. This is a
-prerequisite for retaining freshly substituted component binders; it does
-**not** enable shared component tables or prelude environments yet.
+Stages 3/4 must share **unforced templates and context-independent indexes**,
+not blindly retain a forced component table with another unit's binders.
+Force results need unit-local substitution identity and the reference stamp
+consumption/order. Replaying arbitrary global side effects or renumbering
+backend identifiers after typing is not an acceptable fix. The proposed
+whole-table/prelude cache remains unimplemented until this ownership and
+substitution boundary is represented explicitly.
 
-Validation: release compiler/rewatch builds; two stamp tests (continuity,
-epoch discard, diagnostic return, and unwind); JS 344 focused fixtures plus
-610/610 corpus files; diagnostics 1431/1431. Under the heavy-build lock, the
-stage-2 baseline and stage-3a candidate each produced 4,880 webapp JS files,
-with no hash differences. No speedup is claimed for stamp continuity.
+### Mutation isolation correction before stage 3b
+
+The stage-2 `link_type` early return was not justified by the reference:
+`Btype.link_type` writes `Tlink` even for a dependency declaration reached
+without instancing. The stored handle now has the same `repr`, descriptor,
+level, and name-propagation behavior as a local handle. Descriptor writes
+allocate a compilation-owned overlay node on first write; level writes use
+a separate sparse scalar overlay, so marking does not clone descriptors.
+The immutable backing node is never changed. Snapshot/backtrack covers both
+already-overlaid nodes and nodes first written after the snapshot. Path
+compression uses the same overlay; already-direct links need no write.
+
+This is a correctness prerequisite, not an additional claimed optimization.
+In particular, shared component thunks must not retain a result built from
+another unit's descriptor/row/level overlays. `Subst.typexp` deliberately
+shares `Tvar`/`Tunivar` nodes (`compiler/ml/subst.ml:130-141`); serializing and
+re-importing a forced signature would break that sharing, so it is not a
+valid shortcut to stage 3b. Its construction context and per-unit effects
+still need explicit ownership before component/prelude reuse is enabled.
+
+#### Mutation-isolation validation and overhead screen
+
+Implementation: `48c23780f`. Release compiler/rewatch and debug builds pass;
+20 store-filtered unit tests pass, including stored-source link visibility,
+name propagation, level writes, path compression, and failed-unify rollback.
+Release JS: 344 focused fixtures and 610/610 corpus files. Diagnostics:
+1431/1431. Debug typedtree and lambda: 610/610 each, with typedtree caches
+cleared before the run. The external reference gate still exits 2 because
+OCaml cannot resolve `Belt` from `bs-css`; it does not reach comparison.
+
+After restoring per-unit stamps, all 4,880 webapp JS files match the stage-2
+baseline. The final one-worker candidate outputs also match the 12-worker
+baseline. Tella's 18 pre-existing `.gen.ts` modifications remain byte-for-byte
+unchanged. No compiler results are persisted between clean builds.
+
+Baseline: stage-2 release binaries saved before the stamp experiment
+(`7843d130e` source state). Candidate: descriptor/level overlays with the
+reference per-unit stamp reset. Same Apple M4 / 4P+6E and heavy-lock protocol
+as stage 2; no concurrent compiler builds or parity runs. At 12 workers:
+A/B/A/B blocks, six runs plus one warmup per block. At one worker: A/B,
+three runs plus one warmup per arm. Hyperfine `--prepare` cleans before each
+fresh build process; instrumentation and QoS knobs are unset.
+
+| Workers / samples per arm | Baseline mean ± SD | Corrected store mean ± SD | Baseline min–max | Corrected min–max |
+|---|---:|---:|---:|---:|
+| 12 / 12 | 4.424 ± 0.025 s | 4.432 ± 0.046 s | 4.382–4.460 s | 4.356–4.524 s |
+| 1 / 3 | 17.746 ± 0.076 s | 17.632 ± 0.052 s | 17.688–17.832 s | 17.600–17.692 s |
+
+The correction has no clear material performance cost in this screen
+(+0.2% parallel, −0.6% serial); it is not a claimed speedup. Hyperfine flagged
+parallel candidate outliers and a slower first serial candidate sample.
+Raw results: [12 workers](thread-store-mutation-isolation/clean-w12.json),
+[1 worker](thread-store-mutation-isolation/clean-w1.json).
+
+**Remaining:** stage 3's template/forced-view ownership refactor, prelude
+sharing, and stage 4's registry removal/reuse. These are not implemented by
+this correction; the sub-second target remains unmet.
