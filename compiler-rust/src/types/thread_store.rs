@@ -22,12 +22,43 @@ use super::type_expr::{
     TypeExprRef,
 };
 use super::variant_runtime::{Layout, LayoutRef};
+use crate::cmi::persistent_env::PersStruct;
+use crate::cmi::portable_types::PortablePersStruct;
+use crate::intern::StrIdx;
 use std::cell::{Cell, RefCell};
+use std::collections::HashMap;
 use std::ops::Deref;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 /// First node id handed out by a store. Compilation-local ids start at the
 /// `IdGenerator` base and never reach this range in practice.
 const STORE_TYPE_ID_BASE: i32 = 1 << 30;
+
+/// First synthetic longident component index owned by a store. Compilation
+/// contexts hand out `0xF000_0000..`; parse arenas count from zero.
+const STORE_LONGIDENT_IDX_BASE: u32 = 0xE000_0000;
+
+/// Build generation. `begin_build` bumps it once per `rescript build`; a
+/// worker whose store was filled during an earlier build (watch mode) drops
+/// that store and starts empty, so no store outlives the build that published
+/// the signatures it holds and long-running processes do not accumulate every
+/// republished graph.
+static BUILD_GENERATION: AtomicU64 = AtomicU64::new(0);
+
+/// Start a new build: stores filled by earlier builds are discarded on their
+/// next lease.
+pub fn begin_build() {
+    BUILD_GENERATION.fetch_add(1, Ordering::SeqCst);
+}
+
+/// Dependency signature internalized once into the store.
+struct PersEntry {
+    /// Keeps the portable struct alive so its address cannot be reused as a
+    /// key for a different graph.
+    _owner: Arc<PortablePersStruct>,
+    ps: Arc<PersStruct>,
+}
 
 /// Shared dependency state for one worker thread.
 pub(crate) struct ThreadTypeStore {
@@ -40,6 +71,14 @@ pub(crate) struct ThreadTypeStore {
     field_kinds: RefCell<Vec<Option<FieldKind>>>,
     variant_layouts: RefCell<Vec<Layout>>,
     next_type_id: Cell<i32>,
+    /// Internalized dependency signatures keyed by the identity of the
+    /// portable struct they were built from (`compiler/ml/env.ml:669-678`:
+    /// one `persistent_structures` entry per read unit).
+    pers: RefCell<HashMap<usize, PersEntry>>,
+    /// Synthetic longident component names used by store `Tpackage` nodes.
+    longident_names: RefCell<HashMap<u32, String>>,
+    next_longident_idx: Cell<u32>,
+    generation: u64,
 }
 
 impl ThreadTypeStore {
@@ -51,7 +90,52 @@ impl ThreadTypeStore {
             field_kinds: RefCell::new(Vec::new()),
             variant_layouts: RefCell::new(Vec::new()),
             next_type_id: Cell::new(STORE_TYPE_ID_BASE),
+            pers: RefCell::new(HashMap::new()),
+            longident_names: RefCell::new(HashMap::new()),
+            next_longident_idx: Cell::new(STORE_LONGIDENT_IDX_BASE),
+            generation: BUILD_GENERATION.load(Ordering::SeqCst),
         }
+    }
+
+    /// The shared internalization of `pps`, if this thread already built one.
+    pub(crate) fn pers_struct(&self, pps: &Arc<PortablePersStruct>) -> Option<Arc<PersStruct>> {
+        self.pers
+            .borrow()
+            .get(&(Arc::as_ptr(pps) as usize))
+            .map(|entry| entry.ps.clone())
+    }
+
+    /// Record the shared internalization of `pps`.
+    pub(crate) fn insert_pers_struct(&self, pps: Arc<PortablePersStruct>, ps: Arc<PersStruct>) {
+        self.pers
+            .borrow_mut()
+            .insert(Arc::as_ptr(&pps) as usize, PersEntry { _owner: pps, ps });
+    }
+
+    pub(crate) fn pers_struct_count(&self) -> usize {
+        self.pers.borrow().len()
+    }
+
+    /// Intern a longident component name for a store node.
+    pub(crate) fn intern_longident_name(&self, name: &str) -> StrIdx {
+        let raw = self.next_longident_idx.get();
+        self.next_longident_idx.set(raw + 1);
+        self.longident_names
+            .borrow_mut()
+            .insert(raw, name.to_string());
+        StrIdx::from_raw(raw)
+    }
+
+    pub(crate) fn longident_name(&self, idx: StrIdx) -> Option<String> {
+        self.longident_names.borrow().get(&idx.raw()).cloned()
+    }
+
+    pub(crate) fn snapshot_longident_names(&self) -> Vec<(u32, String)> {
+        self.longident_names
+            .borrow()
+            .iter()
+            .map(|(raw, name)| (*raw, name.clone()))
+            .collect()
     }
 
     #[inline]
@@ -156,11 +240,13 @@ impl Drop for StoreLease {
 }
 
 pub(crate) fn current() -> StoreLease {
-    StoreLease(Some(THREAD_TYPE_STORE.with(|slot| {
-        slot.borrow_mut()
-            .take()
-            .unwrap_or_else(|| Box::new(ThreadTypeStore::new()))
-    })))
+    let generation = BUILD_GENERATION.load(Ordering::SeqCst);
+    StoreLease(Some(THREAD_TYPE_STORE.with(
+        |slot| match slot.borrow_mut().take() {
+            Some(store) if store.generation == generation => store,
+            _ => Box::new(ThreadTypeStore::new()),
+        },
+    )))
 }
 
 const OVERLAY_PAGE: usize = 256;
@@ -234,6 +320,20 @@ mod tests {
             let reused = current();
             assert_eq!(reused.type_count(), 1);
             assert!(matches!(*reused.node(outer_ty).desc(), TypeDesc::Tnil));
+        })
+        .join()
+        .unwrap();
+    }
+
+    #[test]
+    fn new_build_generation_discards_the_worker_store() {
+        std::thread::spawn(|| {
+            let lease = current();
+            lease.alloc_type(TypeDesc::Tnil, GENERIC_LEVEL);
+            drop(lease);
+            assert_eq!(current().type_count(), 1);
+            begin_build();
+            assert_eq!(current().type_count(), 0);
         })
         .join()
         .unwrap();

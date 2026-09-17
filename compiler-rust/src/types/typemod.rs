@@ -8079,7 +8079,7 @@ fn type_expr_uses_path(
         path_matches: &dyn Fn(&Path) -> bool,
         seen: &mut TypeExprRefSet,
     ) -> bool {
-        if ty == TypeExprRef::null() || ty.index() >= ctx.type_expr_count() || !seen.insert(ty) {
+        if ty == TypeExprRef::null() || !ctx.contains_type_ref(ty) || !seen.insert(ty) {
             return false;
         }
 

@@ -28,8 +28,10 @@ use crate::types::decl::{
     TypeInlinedType, TypeKind, ValueDescription, ValueKind,
 };
 use crate::types::path::Path;
+use crate::types::thread_store::ThreadTypeStore;
 use crate::types::type_expr::{
-    FieldKind, GENERIC_LEVEL, RowDesc, RowField, RowFieldRef, TypeArg, TypeDesc, TypeExprRef,
+    AbbrevMemo, AbbrevMemoRef, FieldKind, GENERIC_LEVEL, RowDesc, RowField, RowFieldRef, TypeArg,
+    TypeDesc, TypeExprRef,
 };
 
 use super::persistent_env::PersStruct;
@@ -901,21 +903,108 @@ impl<'a> TypeGraphSerializer<'a> {
 // Deserialization: PortablePersStruct + TypeContext -> PersStruct
 // ============================================================================
 
-/// Load a PortablePersStruct into the current TypeContext, producing a PersStruct
-/// with valid TypeExprRefs.
-pub fn internalize_pers_struct(pps: Arc<PortablePersStruct>, ctx: &TypeContext) -> PersStruct {
-    ctx.import_cmi_longident_names(&pps.cmi_longident_names);
+/// Where internalized type nodes and their side cells are allocated: the
+/// compilation-local arena, or the worker store shared by every compilation
+/// on the thread.
+pub(crate) trait TypeNodeSink {
+    fn abbrev_nil(&self) -> AbbrevMemoRef;
+    fn longident_name(&self, name: &str) -> crate::intern::StrIdx;
+}
 
-    let sig = internalize_signature(&pps.ps_sig, &pps.type_graph, ctx);
+impl TypeNodeSink for TypeContext {
+    fn abbrev_nil(&self) -> AbbrevMemoRef {
+        self.alloc_abbrev_nil()
+    }
+
+    fn longident_name(&self, name: &str) -> crate::intern::StrIdx {
+        self.intern_cmi_longident_name(name)
+    }
+}
+
+impl TypeNodeSink for ThreadTypeStore {
+    fn abbrev_nil(&self) -> AbbrevMemoRef {
+        self.alloc_abbrev(AbbrevMemo::Mnil)
+    }
+
+    fn longident_name(&self, name: &str) -> crate::intern::StrIdx {
+        self.intern_longident_name(name)
+    }
+}
+
+/// Whether a portable graph can live in the worker store. OCaml saves every
+/// persistent node at `generic_level` (`Subst.typexp ~for_saving`,
+/// `compiler/ml/subst.ml:160-163`) and never leaves `Tsubst` markers behind;
+/// a graph that does not satisfy that is internalized locally so the
+/// exclusive-mutation invariant of the store holds trivially.
+fn graph_is_shareable(graph: &PortableTypeGraph) -> bool {
+    graph.entries.iter().all(|entry| {
+        entry.level >= GENERIC_LEVEL && !matches!(entry.desc, PortableTypeDesc::Tsubst(_))
+    })
+}
+
+/// Load a PortablePersStruct for the current compilation.
+///
+/// The dependency graph is internalized once per worker thread into the
+/// store (`compiler/ml/env.ml:669-678`: one `persistent_structures` entry per
+/// process) and shared by every later compilation on that thread; per-unit
+/// side tables (`cmi_longident_names`, GenType raw signatures) are still
+/// filled for each compilation.
+pub fn internalize_pers_struct(pps: Arc<PortablePersStruct>, ctx: &TypeContext) -> Arc<PersStruct> {
+    ctx.import_cmi_longident_names(&pps.cmi_longident_names);
     if pps.raw_ps_sig.is_some() && pps.raw_type_graph.is_some() {
         ctx.register_gentype_portable_raw_module_sig(&pps.ps_name, pps.clone());
     }
 
-    PersStruct {
+    let store = ctx.thread_store();
+    if let Some(ps) = store.pers_struct(&pps) {
+        return ps;
+    }
+
+    let sig = if graph_is_shareable(&pps.type_graph) {
+        internalize_signature_into_store(&pps.ps_sig, &pps.type_graph, store)
+    } else {
+        internalize_signature(&pps.ps_sig, &pps.type_graph, ctx)
+    };
+    let ps = Arc::new(PersStruct {
         ps_name: pps.ps_name.clone(),
         ps_sig: Arc::new(sig),
         ps_filename: pps.ps_filename.clone(),
+    });
+    if graph_is_shareable(&pps.type_graph) {
+        store.insert_pers_struct(pps, ps.clone());
     }
+    ps
+}
+
+/// Internalize a graph into the worker store. Store nodes are complete on
+/// allocation: their indices are known before any node is pushed because the
+/// store arena is append-only and nothing else allocates while this runs.
+fn internalize_signature_into_store(
+    portable_sig: &Signature,
+    graph: &PortableTypeGraph,
+    store: &ThreadTypeStore,
+) -> Signature {
+    let base = store.type_count();
+    let remap: Vec<TypeExprRef> = (0..graph.entries.len())
+        .map(|i| TypeExprRef::from_store_index(base + i))
+        .collect();
+    for (i, entry) in graph.entries.iter().enumerate() {
+        let desc = internalize_desc(&entry.desc, &remap, store);
+        let allocated = store.alloc_type(desc, GENERIC_LEVEL);
+        assert_eq!(
+            allocated, remap[i],
+            "thread store arena grew during internalization"
+        );
+    }
+    let layout_remap: Vec<_> = graph
+        .variant_layouts
+        .iter()
+        .cloned()
+        .map(|layout| store.alloc_complete_variant_layout(layout))
+        .collect();
+    let mut sig = portable_sig.clone();
+    remap_signature_refs(&mut sig, &remap, &layout_remap);
+    sig
 }
 
 pub(crate) fn internalize_raw_signature(
@@ -967,7 +1056,11 @@ fn internalize_signature(
     sig
 }
 
-fn internalize_desc(desc: &PortableTypeDesc, remap: &[TypeExprRef], ctx: &TypeContext) -> TypeDesc {
+fn internalize_desc<S: TypeNodeSink>(
+    desc: &PortableTypeDesc,
+    remap: &[TypeExprRef],
+    ctx: &S,
+) -> TypeDesc {
     match desc {
         PortableTypeDesc::Tvar(name) => TypeDesc::Tvar(name.clone()),
         PortableTypeDesc::Tarrow { args, ret } => TypeDesc::Tarrow {
@@ -983,7 +1076,7 @@ fn internalize_desc(desc: &PortableTypeDesc, remap: &[TypeExprRef], ctx: &TypeCo
         PortableTypeDesc::Tconstr { path, args } => TypeDesc::Tconstr {
             path: path.clone(),
             args: args.iter().map(|&i| remap[i]).collect(),
-            abbrev: ctx.alloc_abbrev_nil(),
+            abbrev: ctx.abbrev_nil(),
         },
         PortableTypeDesc::Tobject { fields, name } => TypeDesc::Tobject {
             fields: remap[*fields],
@@ -1019,12 +1112,12 @@ fn internalize_desc(desc: &PortableTypeDesc, remap: &[TypeExprRef], ctx: &TypeCo
     }
 }
 
-fn internalize_longident(lid: &PortableLongident, ctx: &TypeContext) -> Longident {
+fn internalize_longident<S: TypeNodeSink>(lid: &PortableLongident, ctx: &S) -> Longident {
     match lid {
-        PortableLongident::Lident(name) => Longident::Lident(ctx.intern_cmi_longident_name(name)),
+        PortableLongident::Lident(name) => Longident::Lident(ctx.longident_name(name)),
         PortableLongident::Ldot(prefix, name) => Longident::Ldot(
             Box::new(internalize_longident(prefix, ctx)),
-            ctx.intern_cmi_longident_name(name),
+            ctx.longident_name(name),
         ),
         PortableLongident::Lapply(functor, arg) => Longident::Lapply(
             Box::new(internalize_longident(functor, ctx)),
@@ -1033,10 +1126,10 @@ fn internalize_longident(lid: &PortableLongident, ctx: &TypeContext) -> Longiden
     }
 }
 
-fn internalize_row_desc(
+fn internalize_row_desc<S: TypeNodeSink>(
     prd: &PortableRowDesc,
     remap: &[TypeExprRef],
-    ctx: &TypeContext,
+    ctx: &S,
 ) -> RowDesc {
     RowDesc {
         row_fields: prd
@@ -1059,10 +1152,10 @@ fn internalize_row_desc(
     }
 }
 
-fn internalize_row_field(
+fn internalize_row_field<S: TypeNodeSink>(
     prf: &PortableRowField,
     remap: &[TypeExprRef],
-    _ctx: &TypeContext,
+    _ctx: &S,
 ) -> RowField {
     match prf {
         PortableRowField::Rpresent(opt) => RowField::Rpresent(opt.map(|i| remap[i])),
@@ -1248,23 +1341,40 @@ mod type_arg_tests {
             loc_end: Position::new(StrIdx(19), 5, 31, 36),
             loc_ghost: true,
         };
-        let labels = [ArgLabel::Nolabel, ArgLabel::labelled("λ", loc), ArgLabel::optional("opt", loc)];
+        let labels = [
+            ArgLabel::Nolabel,
+            ArgLabel::labelled("λ", loc),
+            ArgLabel::optional("opt", loc),
+        ];
         let arrow = ctx.new_type(TypeDesc::Tarrow {
-            args: vec![TypeArg::unlabeled(shared), TypeArg::new(labels[1].clone(), shared),
-                TypeArg::new(labels[2].clone(), distinct)],
+            args: vec![
+                TypeArg::unlabeled(shared),
+                TypeArg::new(labels[1].clone(), shared),
+                TypeArg::new(labels[2].clone(), distinct),
+            ],
             ret: shared,
         });
-        let mut ser = TypeGraphSerializer { ctx: &ctx, arena: None, entries: Vec::new(),
-            cache: HashMap::new(), variant_layouts: Vec::new(), variant_layout_cache: HashMap::new() };
+        let mut ser = TypeGraphSerializer {
+            ctx: &ctx,
+            arena: None,
+            entries: Vec::new(),
+            cache: HashMap::new(),
+            variant_layouts: Vec::new(),
+            variant_layout_cache: HashMap::new(),
+        };
         let index = ser.serialize_type(arrow);
-        let PortableTypeDesc::Tarrow { args, ret } = &ser.entries[index].desc else { panic!("not arrow") };
+        let PortableTypeDesc::Tarrow { args, ret } = &ser.entries[index].desc else {
+            panic!("not arrow")
+        };
         assert_eq!(args.len(), 3);
         assert_eq!(args[0].1, *ret);
         assert_eq!(args[1].1, *ret);
         assert_ne!(args[2].1, *ret);
         let remap: Vec<_> = ser.entries.iter().map(|_| ctx.new_var(None)).collect();
         let restored = internalize_desc(&ser.entries[index].desc, &remap, &ctx);
-        let TypeDesc::Tarrow { args, ret } = restored else { panic!("not arrow") };
+        let TypeDesc::Tarrow { args, ret } = restored else {
+            panic!("not arrow")
+        };
         assert_eq!(args[0].typ, ret);
         assert_eq!(args[1].typ, ret);
         assert_ne!(args[2].typ, ret);

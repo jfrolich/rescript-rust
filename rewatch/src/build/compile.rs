@@ -820,6 +820,9 @@ pub fn compile(
     if build_state.build_mode().is_in_process() {
         build_state.purge_deleted_modules(&build_state.build_state.deleted_modules.clone());
         build_state.clear_gentype_contexts();
+        // Worker type stores hold dependency graphs published by this build
+        // only; a new build starts every worker from an empty store.
+        rescript_compiler::types::thread_store::begin_build();
     }
 
     // In --in-process mode, synthesize namespace module signatures in memory

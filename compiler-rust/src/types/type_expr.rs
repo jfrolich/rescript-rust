@@ -301,6 +301,13 @@ impl TypeExprRef {
         );
         (self.0 & !STORE_REF_TAG) as usize
     }
+
+    /// Identity key for visited sets and side tables: unique across the local
+    /// arena and the store, never an arena position.
+    #[inline]
+    pub(crate) fn key(self) -> usize {
+        self.0 as usize
+    }
 }
 
 /// Intentional Rust performance representation for short-lived type-node maps.

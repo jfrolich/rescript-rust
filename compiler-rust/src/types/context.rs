@@ -22,8 +22,8 @@ use super::asttypes::{ArgLabel, PrivateFlag};
 use super::env::Env;
 use super::path::Path;
 use super::type_expr::{
-    AbbrevMemo, AbbrevMemoRef, FieldKind, FieldKindRef, GENERIC_LEVEL, RowDesc, RowField,
-    RowFieldRef, TypeArg, TypeDesc, TypeExpr, TypeExprRef,
+    AbbrevMemo, AbbrevMemoRef, FieldKind, FieldKindRef, GENERIC_LEVEL, PIVOT_LEVEL, RowDesc,
+    RowField, RowFieldRef, TypeArg, TypeDesc, TypeExpr, TypeExprRef,
 };
 use super::typedtree::EnvRef;
 use crate::context::IdGenerator;
@@ -738,7 +738,26 @@ impl TypeContext {
     }
 
     pub(crate) fn cmi_longident_component_name(&self, idx: StrIdx) -> Option<String> {
-        self.cmi_longident_names.borrow().get(&idx.raw()).cloned()
+        self.cmi_longident_names
+            .borrow()
+            .get(&idx.raw())
+            .cloned()
+            .or_else(|| self.store.longident_name(idx))
+    }
+
+    /// The worker's persistent store leased by this compilation.
+    pub(crate) fn thread_store(&self) -> &super::thread_store::ThreadTypeStore {
+        &self.store
+    }
+
+    /// Whether `r` names an allocated node of this compilation's arena or of
+    /// the worker store.
+    pub fn contains_type_ref(&self, r: TypeExprRef) -> bool {
+        if r.is_store() {
+            r.store_index() < self.store.type_count()
+        } else {
+            r.index() < self.types.len()
+        }
     }
 
     /// Resolve a Longident component StrIdx to string, checking CMI synthetic
@@ -748,15 +767,12 @@ impl TypeContext {
         arena: &crate::parse_arena::ParseArena,
         idx: StrIdx,
     ) -> String {
-        self.cmi_longident_names
-            .borrow()
-            .get(&idx.raw())
-            .cloned()
+        self.cmi_longident_component_name(idx)
             .unwrap_or_else(|| arena.get_string(idx).to_string())
     }
 
     pub fn resolve_cmi_longident_component(&self, idx: StrIdx) -> Option<String> {
-        self.cmi_longident_names.borrow().get(&idx.raw()).cloned()
+        self.cmi_longident_component_name(idx)
     }
 
     pub(crate) fn register_arena_longident_names(&self, arena: &crate::parse_arena::ParseArena) {
@@ -770,21 +786,21 @@ impl TypeContext {
     }
 
     pub(crate) fn resolve_any_longident_component(&self, idx: StrIdx) -> Option<String> {
-        self.cmi_longident_names
-            .borrow()
-            .get(&idx.raw())
-            .cloned()
+        self.cmi_longident_component_name(idx)
             .or_else(|| self.arena_longident_names.borrow().get(&idx.raw()).cloned())
     }
 
     /// Snapshot synthetic CMI longident component names so portable signatures
     /// can move across TypeContexts without losing the side table.
     pub fn snapshot_cmi_longident_names(&self) -> Vec<(u32, String)> {
-        self.cmi_longident_names
+        let mut names: Vec<(u32, String)> = self
+            .cmi_longident_names
             .borrow()
             .iter()
             .map(|(raw, name)| (*raw, name.clone()))
-            .collect()
+            .collect();
+        names.extend(self.store.snapshot_longident_names());
+        names
     }
 
     /// Import synthetic CMI longident names from a portable signature.
@@ -1666,6 +1682,10 @@ impl TypeContext {
     pub fn set_level(&self, r: TypeExprRef, level: i32) {
         // Store nodes are generic; only mark/unmark traversal pairs that
         // restore the level before returning may pass through here.
+        assert!(
+            !r.is_store() || level == GENERIC_LEVEL || level == PIVOT_LEVEL - GENERIC_LEVEL,
+            "thread store type node level lowered; generic persistent nodes are instanced before unification (compiler/ml/ctype.ml:725-765)"
+        );
         self.node(r).set_level(level);
     }
 
@@ -2756,10 +2776,12 @@ impl TypeContext {
             }
         }
 
-        // Path compression: relink all traversed nodes to the representative.
+        // Path compression: relink all traversed nodes to the representative
+        // (OCaml `Btype.repr_link`). Store links already point at a fixed
+        // representative and are never rewritten.
         for i in 0..chain_len {
             let node = chain[i];
-            if node != current {
+            if node != current && !node.is_store() {
                 self.set_desc(node, TypeDesc::Tlink(current));
             }
         }

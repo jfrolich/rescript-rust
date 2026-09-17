@@ -1089,7 +1089,7 @@ impl PersistentEnv {
             if self.view.hidden_modules.contains(&portable_key) {
                 return None;
             }
-            let ps = Arc::new(portable_types::internalize_pers_struct(portable, ctx));
+            let ps = portable_types::internalize_pers_struct(portable, ctx);
             let module_path = Path::Pident(Ident::create_persistent(&portable_key));
             let effective_module_path = self.view.alias_prefix_rewrites
                 .get(&portable_key)
@@ -4373,7 +4373,7 @@ fn substitute_type_expr_path(
     let mut work_stack = vec![initial_ty_ref];
 
     while let Some(ty_ref) = work_stack.pop() {
-        if !visited.insert(ty_ref.index()) {
+        if !visited.insert(ty_ref.key()) {
             continue; // Already visited (cycle detection)
         }
 
@@ -4712,7 +4712,7 @@ fn rewrite_type_expr_prefix(
     ctx: &TypeContext,
     visited: &mut HashSet<usize>,
 ) {
-    if !visited.insert(ty_ref.index()) {
+    if !visited.insert(ty_ref.key()) {
         return; // Already visited (cycle detection)
     }
 
@@ -5375,7 +5375,7 @@ fn rewrite_type_expr_by_path_prefix(
     ctx: &TypeContext,
     visited: &mut HashSet<usize>,
 ) {
-    if !visited.insert(ty_ref.index()) {
+    if !visited.insert(ty_ref.key()) {
         return;
     }
 
@@ -5489,7 +5489,7 @@ fn rewrite_type_expr_by_path_prefixes(
     ctx: &TypeContext,
     visited: &mut HashSet<usize>,
 ) {
-    if !visited.insert(ty_ref.index()) {
+    if !visited.insert(ty_ref.key()) {
         return;
     }
 
