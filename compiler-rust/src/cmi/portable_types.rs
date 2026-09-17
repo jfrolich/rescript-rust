@@ -931,15 +931,27 @@ impl TypeNodeSink for ThreadTypeStore {
     }
 }
 
-/// Whether a portable graph can live in the worker store. OCaml saves every
-/// persistent node at `generic_level` (`Subst.typexp ~for_saving`,
-/// `compiler/ml/subst.ml:160-163`) and never leaves `Tsubst` markers behind;
-/// a graph that does not satisfy that is internalized locally so the
+/// Whether a portable graph entry keeps the store's generic-level invariant.
+///
+/// OCaml saves every persistent node at `generic_level` (`Subst.typexp
+/// ~for_saving`, `compiler/ml/subst.ml:160-163`) and never leaves `Tsubst`
+/// markers behind. `Tlink` nodes carry whatever level they had before
+/// `link_type` (`compiler/ml/btype.ml:107-115` reads through them and
+/// `compiler/ml/ctype.ml:488-503` generalizes only representatives), so their
+/// level is dead state and does not disqualify a graph.
+fn entry_is_shareable(entry: &PortableTypeEntry) -> bool {
+    match entry.desc {
+        PortableTypeDesc::Tlink(_) => true,
+        PortableTypeDesc::Tsubst(_) => false,
+        _ => entry.level >= GENERIC_LEVEL,
+    }
+}
+
+/// Whether a portable graph can live in the worker store; a graph that does
+/// not satisfy the generic-level invariant is internalized locally so the
 /// exclusive-mutation invariant of the store holds trivially.
 fn graph_is_shareable(graph: &PortableTypeGraph) -> bool {
-    graph.entries.iter().all(|entry| {
-        entry.level >= GENERIC_LEVEL && !matches!(entry.desc, PortableTypeDesc::Tsubst(_))
-    })
+    graph.entries.iter().all(entry_is_shareable)
 }
 
 /// Load a PortablePersStruct for the current compilation.
@@ -960,7 +972,57 @@ pub fn internalize_pers_struct(pps: Arc<PortablePersStruct>, ctx: &TypeContext) 
         return ps;
     }
 
-    let sig = if graph_is_shareable(&pps.type_graph) {
+    let shareable = graph_is_shareable(&pps.type_graph);
+    if std::env::var_os("RUST_DEBUG_STORE").is_some() {
+        let non_generic = pps
+            .type_graph
+            .entries
+            .iter()
+            .filter(|entry| !entry_is_shareable(entry))
+            .count();
+        let mut kinds = std::collections::BTreeMap::new();
+        for entry in pps
+            .type_graph
+            .entries
+            .iter()
+            .filter(|entry| !entry_is_shareable(entry))
+        {
+            let kind = match entry.desc {
+                PortableTypeDesc::Tvar(_) => "Tvar",
+                PortableTypeDesc::Tarrow { .. } => "Tarrow",
+                PortableTypeDesc::Ttuple(_) => "Ttuple",
+                PortableTypeDesc::Tconstr { .. } => "Tconstr",
+                PortableTypeDesc::Tobject { .. } => "Tobject",
+                PortableTypeDesc::Tfield { .. } => "Tfield",
+                PortableTypeDesc::Tnil => "Tnil",
+                PortableTypeDesc::Tlink(_) => "Tlink",
+                PortableTypeDesc::Tsubst(_) => "Tsubst",
+                PortableTypeDesc::Tvariant(_) => "Tvariant",
+                PortableTypeDesc::Tunivar(_) => "Tunivar",
+                PortableTypeDesc::Tpoly { .. } => "Tpoly",
+                PortableTypeDesc::Tpackage { .. } => "Tpackage",
+            };
+            *kinds
+                .entry(format!("{kind}@{}", entry.level))
+                .or_insert(0usize) += 1;
+        }
+        if non_generic > 0 {
+            eprintln!("[store] non-shareable kinds {}: {kinds:?}", pps.ps_name);
+        }
+        let tsubst = pps
+            .type_graph
+            .entries
+            .iter()
+            .filter(|entry| matches!(entry.desc, PortableTypeDesc::Tsubst(_)))
+            .count();
+        eprintln!(
+            "[store] internalize {} entries={} shareable={shareable} non_generic={non_generic} tsubst={tsubst} store_types={}",
+            pps.ps_name,
+            pps.type_graph.entries.len(),
+            store.type_count()
+        );
+    }
+    let sig = if shareable {
         internalize_signature_into_store(&pps.ps_sig, &pps.type_graph, store)
     } else {
         internalize_signature(&pps.ps_sig, &pps.type_graph, ctx)
@@ -970,7 +1032,7 @@ pub fn internalize_pers_struct(pps: Arc<PortablePersStruct>, ctx: &TypeContext) 
         ps_sig: Arc::new(sig),
         ps_filename: pps.ps_filename.clone(),
     });
-    if graph_is_shareable(&pps.type_graph) {
+    if shareable {
         store.insert_pers_struct(pps, ps.clone());
     }
     ps
