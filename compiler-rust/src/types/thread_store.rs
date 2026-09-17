@@ -53,65 +53,6 @@ pub fn begin_build() {
     BUILD_GENERATION.fetch_add(1, Ordering::SeqCst);
 }
 
-// Identifier stamps a unit compiled on this thread must stay above.
-//
-// OCaml seeds `Ident.currentstamp` once per process
-// (`compiler/ml/predef.ml:450`) and never resets it between the units that
-// process compiles, so persistent state forced while compiling one unit
-// (`Subst.signature` renames bound identifiers,
-// `compiler/ml/subst.ml:358-364`) can never collide with a later unit's
-// local stamps. A worker thread plays that role here: every unit continues
-// from the previous unit's last stamp (and type level, `Ctype.init_def
-// (Ident.current_time ())`, `compiler/ml/typemod.ml:1683`). One unit per
-// process, as in standalone `bsc`, is unchanged.
-thread_local! {
-    static UNIT_STAMP_WATERMARK: Cell<i32> = const { Cell::new(0) };
-    static THREAD_EPOCH: Cell<u64> = const { Cell::new(0) };
-}
-
-/// Stamps above this start a fresh epoch on the thread: the store is
-/// discarded (its identifiers would collide with the restarted counter) and
-/// the counter restarts, as if a new process had begun. Type levels are
-/// coupled to stamps and must stay far below `GENERIC_LEVEL`.
-const UNIT_STAMP_BUDGET: i32 = 1 << 25;
-
-/// First stamp for a unit starting now on this thread; `process_start` is the
-/// value a fresh process would use.
-pub fn unit_start_stamp(process_start: i32) -> i32 {
-    let watermark = UNIT_STAMP_WATERMARK.with(Cell::get);
-    if watermark >= UNIT_STAMP_BUDGET {
-        THREAD_EPOCH.with(|epoch| epoch.set(epoch.get() + 1));
-        UNIT_STAMP_WATERMARK.with(|watermark| watermark.set(0));
-        return process_start;
-    }
-    process_start.max(watermark)
-}
-
-/// Publish identifier consumption on every exit, including a diagnostic return.
-/// This guard must be declared after the context so it drops before its store
-/// lease can be returned to the worker.
-pub(crate) struct UnitStampGuard<'a>(&'a super::context::TypeContext);
-
-impl<'a> UnitStampGuard<'a> {
-    pub(crate) fn new(ctx: &'a super::context::TypeContext) -> Self {
-        Self(ctx)
-    }
-}
-
-impl Drop for UnitStampGuard<'_> {
-    fn drop(&mut self) {
-        note_unit_end_stamp(
-            self.0
-                .current_stamp()
-                .max(crate::ident::Ident::current_local_stamp()),
-        );
-    }
-}
-
-fn note_unit_end_stamp(stamp: i32) {
-    UNIT_STAMP_WATERMARK.with(|watermark| watermark.set(watermark.get().max(stamp)));
-}
-
 /// Dependency signature internalized once into the store.
 struct PersEntry {
     /// Keeps the portable struct alive so its address cannot be reused as a
@@ -146,7 +87,6 @@ pub(crate) struct ThreadTypeStore {
     longident_names: RefCell<HashMap<u32, String>>,
     next_longident_idx: Cell<u32>,
     generation: u64,
-    epoch: u64,
 }
 
 impl ThreadTypeStore {
@@ -164,7 +104,6 @@ impl ThreadTypeStore {
             longident_names: RefCell::new(HashMap::new()),
             next_longident_idx: Cell::new(STORE_LONGIDENT_IDX_BASE),
             generation: BUILD_GENERATION.load(Ordering::SeqCst),
-            epoch: THREAD_EPOCH.with(Cell::get),
         }
     }
 
@@ -336,10 +275,9 @@ impl Drop for StoreLease {
 
 pub(crate) fn current() -> StoreLease {
     let generation = BUILD_GENERATION.load(Ordering::SeqCst);
-    let epoch = THREAD_EPOCH.with(Cell::get);
     StoreLease(Some(THREAD_TYPE_STORE.with(
         |slot| match slot.borrow_mut().take() {
-            Some(store) if store.generation == generation && store.epoch == epoch => store,
+            Some(store) if store.generation == generation => store,
             _ => Box::new(ThreadTypeStore::new()),
         },
     )))
@@ -430,55 +368,6 @@ mod tests {
             assert_eq!(current().type_count(), 1);
             begin_build();
             assert_eq!(current().type_count(), 0);
-        })
-        .join()
-        .unwrap();
-    }
-
-    #[test]
-    fn unit_stamps_continue_and_exhaustion_starts_a_new_epoch() {
-        std::thread::spawn(|| {
-            assert_eq!(unit_start_stamp(999), 999);
-            note_unit_end_stamp(5_000);
-            assert_eq!(unit_start_stamp(999), 5_000);
-            let lease = current();
-            lease.alloc_type(TypeDesc::Tnil, GENERIC_LEVEL);
-            drop(lease);
-            note_unit_end_stamp(UNIT_STAMP_BUDGET);
-            assert_eq!(unit_start_stamp(999), 999);
-            assert_eq!(current().type_count(), 0);
-        })
-        .join()
-        .unwrap();
-    }
-
-    #[test]
-    fn unit_stamps_publish_on_error_and_unwind() {
-        std::thread::spawn(|| {
-            fn fail_unit() -> Result<(), ()> {
-                let ctx = crate::types::TypeContext::new(Arc::new(
-                    crate::context::IdGenerator::with_start_stamp(unit_start_stamp(999)),
-                ));
-                let _stamps = UnitStampGuard::new(&ctx);
-                ctx.set_current_time(10_000);
-                crate::ident::Ident::set_current_time(12_000);
-                Err(())?;
-                Ok(())
-            }
-            assert_eq!(fail_unit(), Err(()));
-            assert_eq!(unit_start_stamp(999), 12_000);
-            assert!(
-                std::panic::catch_unwind(|| {
-                    let ctx = crate::types::TypeContext::new(Arc::new(
-                        crate::context::IdGenerator::with_start_stamp(unit_start_stamp(999)),
-                    ));
-                    let _stamps = UnitStampGuard::new(&ctx);
-                    ctx.set_current_time(15_000);
-                    panic!("failed unit");
-                })
-                .is_err()
-            );
-            assert_eq!(unit_start_stamp(999), 15_000);
         })
         .join()
         .unwrap();
