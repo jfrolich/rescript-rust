@@ -861,7 +861,8 @@ impl PersistentEnv {
     }
 
     fn in_memory_info(&self, name: &str) -> Option<InMemoryModuleInfo> {
-        if let Some(key) = resolve_first_char_case_key(&self.view.in_memory_module_overrides, name) {
+        if let Some(key) = resolve_first_char_case_key(&self.view.in_memory_module_overrides, name)
+        {
             if self.view.hidden_modules.contains(key) {
                 return None;
             }
@@ -879,11 +880,16 @@ impl PersistentEnv {
         name: &str,
         mut f: impl FnMut(&InMemoryModuleInfo) -> R,
     ) -> Option<R> {
-        if let Some(key) = resolve_first_char_case_key(&self.view.in_memory_module_overrides, name) {
+        if let Some(key) = resolve_first_char_case_key(&self.view.in_memory_module_overrides, name)
+        {
             if self.view.hidden_modules.contains(key) {
                 return None;
             }
-            return self.view.in_memory_module_overrides.get(key).map(|info| f(info));
+            return self
+                .view
+                .in_memory_module_overrides
+                .get(key)
+                .map(|info| f(info));
         }
         self.in_memory_modules
             .get_case_with(name, |key, info| {
@@ -898,7 +904,9 @@ impl PersistentEnv {
 
     fn portable_cache_entry(&self, name: &str) -> Option<(String, Arc<PortablePersStruct>)> {
         if let Some(key) = resolve_first_char_case_key(&self.view.portable_cache_overrides, name) {
-            return self.view.portable_cache_overrides
+            return self
+                .view
+                .portable_cache_overrides
                 .get(key)
                 .cloned()
                 .map(|portable| (key.to_string(), portable));
@@ -907,8 +915,12 @@ impl PersistentEnv {
     }
 
     fn source_fallback_path_entry(&self, name: &str) -> Option<(String, PathBuf)> {
-        if let Some(key) = resolve_first_char_case_key(&self.view.source_fallback_path_overrides, name) {
-            return self.view.source_fallback_path_overrides
+        if let Some(key) =
+            resolve_first_char_case_key(&self.view.source_fallback_path_overrides, name)
+        {
+            return self
+                .view
+                .source_fallback_path_overrides
                 .get(key)
                 .cloned()
                 .map(|path| (key.to_string(), path));
@@ -991,7 +1003,8 @@ impl PersistentEnv {
     }
 
     pub fn is_compiling_module(&self, module_name: &str) -> bool {
-        self.view.compiling_module
+        self.view
+            .compiling_module
             .as_deref()
             .is_some_and(|compiling| compiling == module_name)
     }
@@ -1014,7 +1027,8 @@ impl PersistentEnv {
     /// Example: if cache has `"Stdlib_JSON" -> Stdlib.JSON`, returns `["Stdlib_JSON"]`
     /// when queried with `Stdlib.JSON`.
     pub fn flattened_alias_heads_for_path(&self, qualified_path: &Path) -> Vec<String> {
-        self.view.alias_prefix_rewrites
+        self.view
+            .alias_prefix_rewrites
             .flattened_alias_heads_for_path(qualified_path)
     }
 
@@ -1091,7 +1105,9 @@ impl PersistentEnv {
             }
             let ps = portable_types::internalize_pers_struct(portable, ctx);
             let module_path = Path::Pident(Ident::create_persistent(&portable_key));
-            let effective_module_path = self.view.alias_prefix_rewrites
+            let effective_module_path = self
+                .view
+                .alias_prefix_rewrites
                 .get(&portable_key)
                 .unwrap_or_else(|| module_path.clone());
             collect_alias_rewrites(
@@ -1099,17 +1115,19 @@ impl PersistentEnv {
                 &effective_module_path,
                 &mut self.view_mut().alias_prefix_rewrites,
             );
-            register_sig_types_recursive(&ps.ps_sig, &effective_module_path, ctx, &self.load_path);
+            let shared = ctx.thread_store().owns_signature(&ps.ps_sig);
+            register_sig_types_recursive(&ps.ps_sig, &effective_module_path, ctx, shared);
             if !effective_module_path.same(&module_path) {
-                register_sig_types_recursive(&ps.ps_sig, &module_path, ctx, &self.load_path);
+                register_sig_types_recursive(&ps.ps_sig, &module_path, ctx, shared);
             }
-            register_types_by_stamp_in_signature_recursive(&ps.ps_sig, ctx);
+            register_types_by_stamp_in_signature_recursive(&ps.ps_sig, ctx, shared);
             if should_register_lazy_raw_sig(&portable_key, &self.view.alias_prefix_rewrites)
                 && !ctx.has_raw_module_sig(&portable_key)
             {
                 ctx.register_raw_module_sig(&portable_key, ps.ps_sig.clone());
             }
-            self.view_mut().prepared_cached_alias_rewrites
+            self.view_mut()
+                .prepared_cached_alias_rewrites
                 .insert(portable_key.clone());
             self.cache_insert(portable_key, Some(ps.clone()));
             return Some(ps);
@@ -1122,7 +1140,9 @@ impl PersistentEnv {
         // implementation as if a persistent `.cmi` already existed; if an
         // interface was published above, the portable-cache branch has already
         // returned it.
-        if self.view.compiling_module
+        if self
+            .view
+            .compiling_module
             .as_deref()
             .is_some_and(|compiling| compiling == name)
         {
@@ -1143,7 +1163,8 @@ impl PersistentEnv {
         // Try to load from disk
         let result = self.load_module(&load_name, ctx).map(Arc::new);
         if let Some(ps) = result.as_ref() {
-            self.view_mut().prepared_cached_alias_rewrites
+            self.view_mut()
+                .prepared_cached_alias_rewrites
                 .insert(load_name.clone());
             if should_register_lazy_raw_sig(&load_name, &self.view.alias_prefix_rewrites)
                 && !ctx.has_raw_module_sig(&load_name)
@@ -1157,9 +1178,13 @@ impl PersistentEnv {
 
     fn prepare_cached_pers_struct(&mut self, cache_key: &str, ps: &PersStruct, ctx: &TypeContext) {
         if !self.view.prepared_cached_alias_rewrites.contains(cache_key) {
-            self.view_mut().prepared_cached_alias_rewrites.insert(cache_key.to_string());
+            self.view_mut()
+                .prepared_cached_alias_rewrites
+                .insert(cache_key.to_string());
             let module_path = Path::Pident(Ident::create_persistent(cache_key));
-            let effective_module_path = self.view.alias_prefix_rewrites
+            let effective_module_path = self
+                .view
+                .alias_prefix_rewrites
                 .get(cache_key)
                 .unwrap_or_else(|| module_path.clone());
             collect_alias_rewrites(
@@ -1173,11 +1198,12 @@ impl PersistentEnv {
             // has to re-install this module's declarations for the current unit;
             // OCaml exposes the same ps_sig through the persistent table
             // (`compiler/ml/env.ml:711-746`) without re-reading the CMI.
-            register_sig_types_recursive(&ps.ps_sig, &effective_module_path, ctx, &self.load_path);
+            let shared = ctx.thread_store().owns_signature(&ps.ps_sig);
+            register_sig_types_recursive(&ps.ps_sig, &effective_module_path, ctx, shared);
             if !effective_module_path.same(&module_path) {
-                register_sig_types_recursive(&ps.ps_sig, &module_path, ctx, &self.load_path);
+                register_sig_types_recursive(&ps.ps_sig, &module_path, ctx, shared);
             }
-            register_types_by_stamp_in_signature_recursive(&ps.ps_sig, ctx);
+            register_types_by_stamp_in_signature_recursive(&ps.ps_sig, ctx, shared);
         }
 
         if should_register_lazy_raw_sig(cache_key, &self.view.alias_prefix_rewrites)
@@ -1210,7 +1236,9 @@ impl PersistentEnv {
         // lazily when env.ml:1513-1530 builds module components, not by rewriting
         // the cached persistent unit signature during load.
 
-        let effective_module_path = self.view.alias_prefix_rewrites
+        let effective_module_path = self
+            .view
+            .alias_prefix_rewrites
             .get(name)
             .unwrap_or_else(|| module_path.clone());
         collect_alias_rewrites(
@@ -1218,7 +1246,7 @@ impl PersistentEnv {
             &effective_module_path,
             &mut self.view_mut().alias_prefix_rewrites,
         );
-        register_sig_types_recursive(&signature, &effective_module_path, ctx, &self.load_path);
+        register_sig_types_recursive(&signature, &effective_module_path, ctx, false);
         let signature = Arc::new(signature);
         if should_register_lazy_raw_sig(name, &self.view.alias_prefix_rewrites) {
             ctx.register_raw_module_sig(name, signature.clone());
@@ -1643,7 +1671,8 @@ impl PersistentEnv {
         }
 
         let (signature, fallback_pers) = self.typecheck_source_signature(preferred_path, ctx)?;
-        self.view_mut().alias_prefix_rewrites
+        self.view_mut()
+            .alias_prefix_rewrites
             .extend_missing(fallback_pers.view.alias_prefix_rewrites.local_clone());
         let fallback_entries = fallback_pers
             .cache
@@ -1739,7 +1768,8 @@ impl PersistentEnv {
         let (signature, fallback_pers) = self.typecheck_source_signature(&source_path, ctx)?;
 
         // Merge any modules the fallback discovered
-        self.view_mut().alias_prefix_rewrites
+        self.view_mut()
+            .alias_prefix_rewrites
             .extend_missing(fallback_pers.view.alias_prefix_rewrites.local_clone());
         let fallback_entries = fallback_pers
             .cache
@@ -1987,7 +2017,8 @@ impl PersistentEnv {
     /// detection can resolve from memory instead of probing disk.
     pub fn register_in_memory_module(&mut self, name: &str, info: InMemoryModuleInfo) {
         self.view_mut().hidden_modules.remove(name);
-        self.view_mut().in_memory_module_overrides
+        self.view_mut()
+            .in_memory_module_overrides
             .insert(name.to_string(), info);
     }
 
@@ -2069,7 +2100,11 @@ impl PersistentEnv {
 
         // Record alias rewrites (e.g., "Foo-MyApp" → Pdot(Pident("MyApp"), "Foo"))
         let module_path = Path::Pident(Ident::create_persistent(namespace_name));
-        collect_alias_rewrites(&sig_items, &module_path, &mut self.view_mut().alias_prefix_rewrites);
+        collect_alias_rewrites(
+            &sig_items,
+            &module_path,
+            &mut self.view_mut().alias_prefix_rewrites,
+        );
 
         let ps = PersStruct {
             ps_name: namespace_name.to_string(),
@@ -2111,16 +2146,23 @@ impl PersistentEnv {
 /// `module_path` is the path to the module containing this signature
 /// (e.g., `Pident(Js)` or `Pdot(Pident(Js), "Promise")`).
 /// `load_path` is used to resolve module aliases by loading CMI files.
+/// Install the type declarations of a loaded signature in this unit's
+/// registries. `shared` says the signature is owned by the worker store, so
+/// the `Arc` handles can be shared across compilations instead of cloned.
 fn register_sig_types_recursive<'a>(
     sig: &Signature,
     module_path: &Path,
     ctx: &'a TypeContext,
-    _load_path: &[PathBuf],
+    shared: bool,
 ) {
     for item in sig {
         match item {
             SignatureItem::SigType(id, decl, _) => {
-                let decl = Arc::new(decl.clone());
+                let decl = if shared {
+                    ctx.thread_store().shared_type_decl(decl)
+                } else {
+                    Arc::new(decl.clone())
+                };
                 ctx.register_shared_type_decl(id.name(), decl.clone());
                 // Also register by stamp for precise lookup when name is ambiguous (e.g., "t")
                 if id.stamp() != 0 {
@@ -2136,7 +2178,7 @@ fn register_sig_types_recursive<'a>(
                 match &md.md_type {
                     ModuleType::MtySignature(sub_sig) => {
                         // Recurse into sub-module signatures with extended path
-                        register_sig_types_recursive(sub_sig, &sub_path, ctx, _load_path);
+                        register_sig_types_recursive(sub_sig, &sub_path, ctx, shared);
                     }
                     // Match OCaml's lazy persistent-module behavior: don't eagerly
                     // load aliased CMIs here just to pre-register their nested types.
@@ -2173,7 +2215,8 @@ mod cmj_export_tests {
         env.set_in_process_mode(true);
         env.set_nopervasives(true);
         env.add_load_path(load_path);
-        env.view_mut().source_fallback_path_overrides
+        env.view_mut()
+            .source_fallback_path_overrides
             .insert("Foo".to_string(), source_path);
 
         let loaded = env
@@ -3100,20 +3143,31 @@ fn decode_cmj_list<T>(
 /// during type unification, even when the type comes from a deeply nested module.
 pub(crate) fn register_types_by_stamp_recursive(md_type: &ModuleType, ctx: &TypeContext) {
     if let ModuleType::MtySignature(sig) = md_type {
-        register_types_by_stamp_in_signature_recursive(sig, ctx);
+        register_types_by_stamp_in_signature_recursive(sig, ctx, false);
     }
 }
 
-fn register_types_by_stamp_in_signature_recursive(sig: &Signature, ctx: &TypeContext) {
+fn register_types_by_stamp_in_signature_recursive(
+    sig: &Signature,
+    ctx: &TypeContext,
+    shared: bool,
+) {
     for item in sig {
         match item {
             SignatureItem::SigType(id, decl, _) => {
                 if id.stamp() != 0 {
-                    ctx.register_type_decl_by_stamp(id.stamp(), decl.clone());
+                    let decl = if shared {
+                        ctx.thread_store().shared_type_decl(decl)
+                    } else {
+                        Arc::new(decl.clone())
+                    };
+                    ctx.register_shared_type_decl_by_stamp(id.stamp(), decl);
                 }
             }
             SignatureItem::SigModule(_, md, _) => {
-                register_types_by_stamp_recursive(&md.md_type, ctx);
+                if let ModuleType::MtySignature(sub_sig) = &md.md_type {
+                    register_types_by_stamp_in_signature_recursive(sub_sig, ctx, shared);
+                }
             }
             _ => {}
         }

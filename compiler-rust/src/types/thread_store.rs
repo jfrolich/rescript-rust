@@ -17,6 +17,7 @@
 //! Design: `projects/in-process-performance/THREAD_TYPE_STORE.md`.
 
 use super::context::TypeArena;
+use super::decl::{Signature, TypeDeclaration};
 use super::type_expr::{
     AbbrevMemo, AbbrevMemoRef, FieldKind, FieldKindRef, RowField, RowFieldRef, TypeDesc, TypeExpr,
     TypeExprRef,
@@ -26,7 +27,7 @@ use crate::cmi::persistent_env::PersStruct;
 use crate::cmi::portable_types::PortablePersStruct;
 use crate::intern::StrIdx;
 use std::cell::{Cell, RefCell};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::ops::Deref;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -75,6 +76,13 @@ pub(crate) struct ThreadTypeStore {
     /// portable struct they were built from (`compiler/ml/env.ml:669-678`:
     /// one `persistent_structures` entry per read unit).
     pers: RefCell<HashMap<usize, PersEntry>>,
+    /// Signatures retained by `pers`; their items keep one address for the
+    /// life of the store.
+    shared_signatures: RefCell<HashSet<usize>>,
+    /// One `Arc` per declaration of a store-owned signature, keyed by the
+    /// declaration's address, so per-unit registries share an allocation
+    /// instead of cloning every dependency declaration for every compilation.
+    type_decl_arcs: RefCell<HashMap<usize, Arc<TypeDeclaration>>>,
     /// Synthetic longident component names used by store `Tpackage` nodes.
     longident_names: RefCell<HashMap<u32, String>>,
     next_longident_idx: Cell<u32>,
@@ -91,6 +99,8 @@ impl ThreadTypeStore {
             variant_layouts: RefCell::new(Vec::new()),
             next_type_id: Cell::new(STORE_TYPE_ID_BASE),
             pers: RefCell::new(HashMap::new()),
+            shared_signatures: RefCell::new(HashSet::new()),
+            type_decl_arcs: RefCell::new(HashMap::new()),
             longident_names: RefCell::new(HashMap::new()),
             next_longident_idx: Cell::new(STORE_LONGIDENT_IDX_BASE),
             generation: BUILD_GENERATION.load(Ordering::SeqCst),
@@ -107,9 +117,33 @@ impl ThreadTypeStore {
 
     /// Record the shared internalization of `pps`.
     pub(crate) fn insert_pers_struct(&self, pps: Arc<PortablePersStruct>, ps: Arc<PersStruct>) {
+        self.shared_signatures
+            .borrow_mut()
+            .insert(Arc::as_ptr(&ps.ps_sig) as usize);
         self.pers
             .borrow_mut()
             .insert(Arc::as_ptr(&pps) as usize, PersEntry { _owner: pps, ps });
+    }
+
+    /// Whether `sig` is retained by this store, so references into its items
+    /// stay valid for the store's lifetime.
+    pub(crate) fn owns_signature(&self, sig: &Arc<Signature>) -> bool {
+        self.shared_signatures
+            .borrow()
+            .contains(&(Arc::as_ptr(sig) as usize))
+    }
+
+    /// Shared handle for a declaration that lives inside a store-owned
+    /// signature (`owns_signature` must hold for its root). Equal in content to
+    /// `Arc::new(decl.clone())`; allocated once per store.
+    pub(crate) fn shared_type_decl(&self, decl: &TypeDeclaration) -> Arc<TypeDeclaration> {
+        let key = decl as *const TypeDeclaration as usize;
+        if let Some(shared) = self.type_decl_arcs.borrow().get(&key) {
+            return shared.clone();
+        }
+        let shared = Arc::new(decl.clone());
+        self.type_decl_arcs.borrow_mut().insert(key, shared.clone());
+        shared
     }
 
     pub(crate) fn pers_struct_count(&self) -> usize {
