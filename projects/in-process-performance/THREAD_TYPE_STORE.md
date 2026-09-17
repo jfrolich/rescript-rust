@@ -219,3 +219,78 @@ an architectural speedup**: baseline parallel runs contain outliers and
 pooled medians are 4.721 s baseline / 4.788 s candidate. Stage 2 is needed
 to remove repeated imports. External reference parity must also be repaired
 and rerun before treating the store as a validated performance improvement.
+
+## Stage 2 implementation status
+
+Commits `a9c5748ba`, `4e964922c`, `82b69fbd4`, `ad389b2a4`.
+
+- `find_pers_struct` internalizes a portable persistent struct into the
+  worker store the first time any compilation on the thread needs it; later
+  compilations share the graph and the `Arc<PersStruct>`. Store `Tconstr`
+  memo cells and `Tpackage` longident names are store-owned; `repr` never
+  path-compresses a store link; `set_level` asserts that a store node only
+  moves between generic and marked-generic; `link_type` drops the
+  persistent-to-local memo link that `unify3` would make through the
+  raw-declaration coercion path and still fails if a persistent type variable
+  would be bound (the two OCaml sites are cited in the code).
+- Shareability: a graph is shared when every non-`Tlink` entry is at
+  `generic_level` and no `Tsubst` remains. `Tlink` levels are dead state
+  (`compiler/ml/btype.ml:107-115`, `compiler/ml/ctype.ml:488-503`). On the
+  Tella build 1,101 of 1,274 first-time internalizations share; the 173
+  fallbacks are polymorphic-variant rows published at non-generic levels
+  (`RUST_DEBUG_STORE=1` lists them) and are internalized locally as before.
+- Per-unit registries receive one shared `Arc<TypeDeclaration>` per
+  declaration of a store-owned signature instead of a fresh clone.
+- Rewatch bumps the store generation per build; watch mode never reuses a
+  store across builds.
+
+### Validation
+
+Release unless noted: JS 610/610 plus 344 focused fixtures; diagnostics
+1431/1431; debug typedtree 610/610; debug lambda 610/610; 18 store-filtered
+unit tests. Tella clean build: 3,248 modules, 4,880 `.bs.js` files, all
+byte-identical to a build with the stage-1 binaries. External OCaml/Rust
+parity remains blocked on the pre-existing `bs-css`/`Belt` failure in the
+OCaml reference build.
+
+### Clean-build measurements
+
+Same protocol as stage 1 (Apple M4, 4P+6E; A/B/A/B blocks at 12 workers,
+A/B at one worker; `rescript clean` in `--prepare`; heavy lock held; no
+concurrent builds). Baseline: the stage-1 head `dce149c78`.
+
+| Workers / samples per arm | Baseline mean ± SD | Stage 2 mean ± SD | Change |
+|---|---:|---:|---:|
+| 12 / 12 | 4.699 ± 0.032 s | 4.421 ± 0.036 s | −5.9 % |
+| 1 / 3 | 18.888 ± 0.067 s | 17.603 ± 0.058 s | −6.8 % |
+
+Raw hyperfine results: [`clean-w12.json`](thread-store-stage2/clean-w12.json),
+[`clean-w1.json`](thread-store-stage2/clean-w1.json).
+
+Before the `Tlink` rule the same build measured 18.807 s serial (−1.7 %):
+only 416 of 42,730 internalizations reached the store.
+
+### Where the serial time sits after stage 2
+
+`sample` of the one-worker build before the `Tlink` rule (worker thread,
+7,604 samples): `find_pers_struct` 9.0 % (local `internalize_signature`
+3.4 %, registry walks 4.6 %), `normalize_path_full_inner` 6.3 % (per-unit
+freshening of dependency signatures, i.e. OCaml's once-per-process `ps_sig`
+force), `load_pervasives` 5.3 % (opened layers of the implicit prelude rebuilt
+per unit), `build_local_module_components` 2.2 %, `TypeContext`/`Env`
+teardown 10 %. Stage 3 targets the component and prelude blocks; stage 4 the
+registries and teardown.
+
+### Stamp policy for stages 3 and 4
+
+Shared component tables create identifiers when forced (`Subst.signature`
+renames bound identifiers, `compiler/ml/subst.ml:358-364`). OCaml's
+`Ident.currentstamp` is seeded once per process (`compiler/ml/predef.ml:450`)
+and never reset between units, so a multi-unit process hands every unit
+stamps that continue from the previous unit and shares the forced
+persistent state between them. The in-process build will therefore continue
+stamps per worker thread instead of restarting each unit at
+`OCAML_NON_PREDEF_STAMP_START`. Standalone `bsc` (one unit per process)
+is unchanged; in-process typedtree dumps of the second and later units on a
+thread will show offset stamps; JS output does not depend on absolute stamp
+values (naming is scope-ordered) and is checked by the Tella hash comparison.
