@@ -1017,6 +1017,24 @@ pub fn type_contains_variant(ctx: &TypeContext, ty: TypeExprRef) -> bool {
 /// This makes `t1` point to `t2`, effectively making them the same type.
 /// The level of `t2` is updated to be the minimum of both levels.
 pub fn link_type(ctx: &TypeContext, t1: TypeExprRef, t2: TypeExprRef) {
+    if t1.is_store() {
+        // `t1` is a generic node of a dependency signature shared by every
+        // compilation on this worker thread. OCaml's `unify3`
+        // (compiler/ml/ctype.ml:2270-2296) reaches such nodes only through
+        // paths that unify declaration types without instancing them
+        // (`subtype_rec` record/variant coercion, ctype.ml:3570-3640) and
+        // links the persistent node to its local counterpart as a memo of
+        // structural agreement; in a one-unit process that alias is harmless,
+        // across units it would dangle. The memo is redundant for generic
+        // nodes (every later use copies them, ctype.ml:725-765), so it is
+        // dropped here. Binding a persistent type variable would change the
+        // shared scheme and is an invariant violation.
+        assert!(
+            !matches!(*ctx.borrow_desc(t1), TypeDesc::Tvar(_)),
+            "thread store type variable bound by unification; generic persistent schemes are instanced first (compiler/ml/ctype.ml:725-765)"
+        );
+        return;
+    }
     let t1_repr = ctx.repr(t1);
     let t2_repr = ctx.repr(t2);
     let source_name = {
@@ -4605,7 +4623,9 @@ fn subst_type(
             if new_types.iter().zip(arrow_args).all(|(a, b)| *a == b.typ) && new_ret == *ret {
                 ty
             } else {
-                let new_args = arrow_args.iter().zip(new_types)
+                let new_args = arrow_args
+                    .iter()
+                    .zip(new_types)
                     .map(|(arg, typ)| super::TypeArg::new(arg.label().clone(), typ))
                     .collect();
                 drop(desc);
@@ -11597,10 +11617,10 @@ mod tests {
 
     #[test]
     fn type_arg_nary_copy_preserves_labels_and_shared_type_identity() {
+        use crate::intern::StrIdx;
+        use crate::location::{Location, Position};
         use crate::types::ArgLabel;
         use crate::types::type_expr::TypeArg;
-        use crate::location::{Location, Position};
-        use crate::intern::StrIdx;
         let ctx = TypeContext::new(std::sync::Arc::new(IdGenerator::new()));
         let shared = ctx.new_generic_var(Some("a".into()));
         let loc = Location {
@@ -11608,18 +11628,30 @@ mod tests {
             loc_end: Position::new(StrIdx(32), 4, 25, 29),
             loc_ghost: true,
         };
-        let labels = [ArgLabel::Nolabel, ArgLabel::labelled("x", loc), ArgLabel::optional("y", loc)];
+        let labels = [
+            ArgLabel::Nolabel,
+            ArgLabel::labelled("x", loc),
+            ArgLabel::optional("y", loc),
+        ];
         let arrow = ctx.new_type(TypeDesc::Tarrow {
-            args: labels.iter().map(|l| TypeArg::new(l.clone(), shared)).collect(),
+            args: labels
+                .iter()
+                .map(|l| TypeArg::new(l.clone(), shared))
+                .collect(),
             ret: shared,
         });
         let unused = ctx.new_generic_var(Some("unused".into()));
         let replacement = ctx.new_generic_var(Some("replacement".into()));
-        assert_eq!(subst_type_params(&ctx, &[unused], &[replacement], arrow), arrow);
+        assert_eq!(
+            subst_type_params(&ctx, &[unused], &[replacement], arrow),
+            arrow
+        );
         let changed = subst_type_params(&ctx, &[shared], &[replacement], arrow);
         assert_ne!(changed, arrow);
         let changed_desc = ctx.get_desc(changed);
-        let TypeDesc::Tarrow { args, ret } = &*changed_desc else { panic!("not arrow") };
+        let TypeDesc::Tarrow { args, ret } = &*changed_desc else {
+            panic!("not arrow")
+        };
         assert_eq!(*ret, replacement);
         for (arg, expected) in args.iter().zip(&labels) {
             assert_eq!(arg.typ, replacement);
@@ -11632,7 +11664,9 @@ mod tests {
         }
         let copied = copy_type_deep(&ctx, arrow, &mut HashMap::new());
         let desc = ctx.get_desc(copied);
-        let TypeDesc::Tarrow { args, ret } = &*desc else { panic!("not arrow") };
+        let TypeDesc::Tarrow { args, ret } = &*desc else {
+            panic!("not arrow")
+        };
         assert_eq!(args.len(), 3);
         assert_ne!(*ret, shared);
         for (arg, expected) in args.iter().zip(&labels) {
@@ -11645,7 +11679,9 @@ mod tests {
             }
         }
         let original = ctx.get_desc(arrow);
-        let TypeDesc::Tarrow { args, ret } = &*original else { panic!("not arrow") };
+        let TypeDesc::Tarrow { args, ret } = &*original else {
+            panic!("not arrow")
+        };
         assert_eq!(*ret, shared);
         assert!(args.iter().all(|arg| arg.typ == shared));
     }
