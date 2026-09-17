@@ -33,8 +33,11 @@ The highest-leverage work is removing whole classes of repeated work, not polish
 The current implementation is tracked in
 [`THREAD_TYPE_STORE.md`](THREAD_TYPE_STORE.md): reuse dependency graphs only
 **within a single clean build**, with no persisted compiler results. Stage 1
-adds tagged handles, worker-store ownership, and mutation overlays; actual
-store-backed imports are not enabled yet. The older
+adds tagged handles, worker-store ownership, and mutation overlays. Stage 2
+now internalizes eligible dependency graphs once per worker (measured at
+4.421 s with 12 workers, versus 4.699 s baseline). Stage 3a adds identifier
+continuity; shared component tables, prelude layers, and registry reuse remain
+in progress. The older
 `PACKAGE_SIGNATURE_STORE.md` persisted-store proposal is outside this goal.
 
 ## Top 10 Improvements

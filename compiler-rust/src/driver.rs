@@ -15047,10 +15047,13 @@ pub fn compile_preprocessed_structure_in_process_until_js(
     );
     let env_setup_span = info_span!("compiler.env_setup").entered();
     let env_setup_start = crate::timing::enabled().then(std::time::Instant::now);
-    crate::ident::Ident::set_current_time(OCAML_NON_PREDEF_STAMP_START);
-    let id_gen = IdGenerator::with_start_stamp(OCAML_NON_PREDEF_STAMP_START);
+    let unit_start_stamp =
+        crate::types::thread_store::unit_start_stamp(OCAML_NON_PREDEF_STAMP_START);
+    crate::ident::Ident::set_current_time(unit_start_stamp);
+    let id_gen = IdGenerator::with_start_stamp(unit_start_stamp);
     let _ = id_gen.next_stamp();
     let type_ctx = TypeContext::new(std::sync::Arc::new(id_gen));
+    let _unit_stamps = crate::types::thread_store::UnitStampGuard::new(&type_ctx);
     let mut tctx = TypeCheckContext::new(&type_ctx, arena);
     tctx.experimental_let_unwrap = options.experimental_let_unwrap || file_config.let_unwrap;
     tctx.transparent_modules = options.transparent_modules;
@@ -15652,10 +15655,13 @@ pub fn typecheck_preprocessed_signature_in_process(
     let frontend_warning_specs =
         ppx::collect_leading_builtin_warning_signature_attribute_specs(signature, arena);
 
-    crate::ident::Ident::set_current_time(OCAML_NON_PREDEF_STAMP_START);
-    let id_gen = IdGenerator::with_start_stamp(OCAML_NON_PREDEF_STAMP_START);
+    let unit_start_stamp =
+        crate::types::thread_store::unit_start_stamp(OCAML_NON_PREDEF_STAMP_START);
+    crate::ident::Ident::set_current_time(unit_start_stamp);
+    let id_gen = IdGenerator::with_start_stamp(unit_start_stamp);
     let _ = id_gen.next_stamp();
     let type_ctx = TypeContext::new(std::sync::Arc::new(id_gen));
+    let _unit_stamps = crate::types::thread_store::UnitStampGuard::new(&type_ctx);
     let mut tctx = TypeCheckContext::new(&type_ctx, arena);
     tctx.experimental_let_unwrap = options.experimental_let_unwrap || file_config.let_unwrap;
     tctx.transparent_modules = options.transparent_modules;
@@ -15787,10 +15793,13 @@ pub fn typecheck_implementation_in_process(
         ppx::collect_leading_builtin_warning_attribute_specs(&structure, parser.arena());
     parser.arena_mut().reserve_typecheck_synthetic_capacity();
 
-    crate::ident::Ident::set_current_time(OCAML_NON_PREDEF_STAMP_START);
-    let id_gen = IdGenerator::with_start_stamp(OCAML_NON_PREDEF_STAMP_START);
+    let unit_start_stamp =
+        crate::types::thread_store::unit_start_stamp(OCAML_NON_PREDEF_STAMP_START);
+    crate::ident::Ident::set_current_time(unit_start_stamp);
+    let id_gen = IdGenerator::with_start_stamp(unit_start_stamp);
     let _ = id_gen.next_stamp();
     let type_ctx = TypeContext::new(std::sync::Arc::new(id_gen));
+    let _unit_stamps = crate::types::thread_store::UnitStampGuard::new(&type_ctx);
     crate::types::typecore::prepare_typecheck_arena(parser.arena_mut());
     let mut tctx = TypeCheckContext::new(&type_ctx, parser.arena());
     tctx.experimental_let_unwrap = options.experimental_let_unwrap || file_config.let_unwrap;

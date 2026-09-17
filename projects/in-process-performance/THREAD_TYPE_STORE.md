@@ -294,3 +294,18 @@ stamps per worker thread instead of restarting each unit at
 is unchanged; in-process typedtree dumps of the second and later units on a
 thread will show offset stamps; JS output does not depend on absolute stamp
 values (naming is scope-ordered) and is checked by the Tella hash comparison.
+
+### Stage 3a: worker identifier continuity
+
+In-process entry points now start above the preceding unit's identifier
+watermark. A scope guard records both identifier counters on success,
+diagnostic return, and unwinding. A bounded stamp epoch discards the worker
+store before restarting the counter, well below `generic_level`. This is a
+prerequisite for retaining freshly substituted component binders; it does
+**not** enable shared component tables or prelude environments yet.
+
+Validation: release compiler/rewatch builds; two stamp tests (continuity,
+epoch discard, diagnostic return, and unwind); JS 344 focused fixtures plus
+610/610 corpus files; diagnostics 1431/1431. Under the heavy-build lock, the
+stage-2 baseline and stage-3a candidate each produced 4,880 webapp JS files,
+with no hash differences. No speedup is claimed for stamp continuity.
