@@ -29,6 +29,8 @@
 
 #### :bug: Bug fix
 
+- Preserve unification links and type-level changes when the Rust in-process compiler reuses dependency signatures, while isolating those mutations between compilation units. https://github.com/jfrolich/rescript-rust/pull/21
+
 - Fix formatter breaking the opening brace of a functor module type's result signature onto a new line (e.g. `module Make: Pattern => {`). https://github.com/rescript-lang/rescript/pull/8519
 - Fix argument evaluation order when a function call is inlined: the beta reducer stacked argument bindings in reverse parameter order, so the last argument was evaluated first when arguments could not be substituted directly. https://github.com/rescript-lang/rescript/pull/8572
 - Preserve parentheses around multiplication, division, and modulo expressions used as exponents. https://github.com/rescript-lang/rescript/pull/8550

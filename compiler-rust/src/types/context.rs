@@ -22,8 +22,8 @@ use super::asttypes::{ArgLabel, PrivateFlag};
 use super::env::Env;
 use super::path::Path;
 use super::type_expr::{
-    AbbrevMemo, AbbrevMemoRef, FieldKind, FieldKindRef, GENERIC_LEVEL, PIVOT_LEVEL, RowDesc,
-    RowField, RowFieldRef, TypeArg, TypeDesc, TypeExpr, TypeExprRef,
+    AbbrevMemo, AbbrevMemoRef, FieldKind, FieldKindRef, GENERIC_LEVEL, RowDesc, RowField,
+    RowFieldRef, TypeArg, TypeDesc, TypeExpr, TypeExprRef,
 };
 use super::typedtree::EnvRef;
 use crate::context::IdGenerator;
@@ -114,6 +114,9 @@ impl Deref for TypeDescSnapshot {
 /// backtracking.
 pub(crate) struct TypeMutationSnapshot {
     type_states: Vec<(TypeDesc, i32)>,
+    store_desc_states: Vec<TypeDesc>,
+    store_desc_overlay: super::thread_store::PagedOverlay<usize>,
+    store_level_overlay: super::thread_store::PagedOverlay<i32>,
     row_field_states: Vec<Option<RowField>>,
     abbrev_states: Vec<AbbrevMemo>,
     store_abbrev_overlay: super::thread_store::PagedOverlay<AbbrevMemo>,
@@ -296,6 +299,14 @@ pub struct TypeContext {
     /// Exclusive lease of the worker's persistent arena for this compilation.
     /// Returned on drop; overlapping contexts get independent stores.
     store: super::thread_store::StoreLease,
+    /// Descriptor writes preserve the stored handle's physical identity, but
+    /// live only for this compilation. The append-only arena keeps descriptor
+    /// borrows valid while another stored node is written.
+    store_descs: TypeArena,
+    store_desc_overlay: RefCell<super::thread_store::PagedOverlay<usize>>,
+    /// Level marking and lowering are also compilation-local, including on
+    /// diagnostic exits that do not finish a mark/unmark traversal.
+    store_level_overlay: RefCell<super::thread_store::PagedOverlay<i32>>,
     /// This compilation's writes to abbreviation memo cells of store nodes;
     /// unset cells read the store's initial `Mnil`, matching a fresh process
     /// (`compiler/ml/subst.ml:173-177`).
@@ -569,6 +580,9 @@ impl TypeContext {
             current_abbreviations: Cell::new(AbbrevMemoRef::nil()),
             types: TypeArena::new(),
             store: super::thread_store::current(),
+            store_descs: TypeArena::new(),
+            store_desc_overlay: RefCell::new(super::thread_store::PagedOverlay::new()),
+            store_level_overlay: RefCell::new(super::thread_store::PagedOverlay::new()),
             store_abbrev_overlay: RefCell::new(super::thread_store::PagedOverlay::new()),
             store_row_field_overlay: RefCell::new(super::thread_store::PagedOverlay::new()),
             compiler_counters_enabled: crate::perf_counters::enabled(),
@@ -1645,6 +1659,9 @@ impl TypeContext {
     #[inline]
     fn node(&self, r: TypeExprRef) -> &TypeExpr {
         if r.is_store() {
+            if let Some(index) = self.store_desc_overlay.borrow().get(r.store_index()) {
+                return self.store_descs.get_at(*index);
+            }
             self.store.node(r)
         } else {
             self.types.get(r)
@@ -1669,7 +1686,15 @@ impl TypeContext {
     /// Get the level of a type.
     #[inline]
     pub fn get_level(&self, r: TypeExprRef) -> i32 {
-        self.node(r).level()
+        if r.is_store() {
+            return self
+                .store_level_overlay
+                .borrow()
+                .get(r.store_index())
+                .copied()
+                .unwrap_or_else(|| self.store.node(r).level());
+        }
+        self.types.get(r).level()
     }
 
     /// Number of allocated type expressions.
@@ -1680,23 +1705,38 @@ impl TypeContext {
     /// Set the level of a type.
     #[inline]
     pub fn set_level(&self, r: TypeExprRef, level: i32) {
-        // Store nodes are generic; only mark/unmark traversal pairs that
-        // restore the level before returning may pass through here.
-        assert!(
-            !r.is_store() || level == GENERIC_LEVEL || level == PIVOT_LEVEL - GENERIC_LEVEL,
-            "thread store type node level lowered; generic persistent nodes are instanced before unification (compiler/ml/ctype.ml:725-765)"
-        );
-        self.node(r).set_level(level);
+        if r.is_store() {
+            self.store_level_overlay
+                .borrow_mut()
+                .set(r.store_index(), level);
+        } else {
+            self.types.get(r).set_level(level);
+        }
     }
 
-    /// Set the descriptor of a type.
+    /// Set the descriptor without changing the immutable dependency graph.
     #[inline]
     pub fn set_desc(&self, r: TypeExprRef, desc: TypeDesc) {
-        assert!(
-            !r.is_store(),
-            "thread store type node mutated; generic persistent nodes are copied before unification (compiler/ml/ctype.ml:725-765)"
-        );
-        self.node(r).set_desc(desc);
+        if r.is_store() {
+            let index = self
+                .store_desc_overlay
+                .borrow()
+                .get(r.store_index())
+                .copied();
+            if let Some(index) = index {
+                self.store_descs.get_at(index).set_desc(desc);
+            } else {
+                let original = self.store.node(r);
+                let index =
+                    self.store_descs
+                        .push_raw(TypeExpr::new(desc, original.level(), original.id()));
+                self.store_desc_overlay
+                    .borrow_mut()
+                    .set(r.store_index(), index);
+            }
+        } else {
+            self.types.get(r).set_desc(desc);
+        }
     }
 
     /// Save mutable type state before a speculative unification.
@@ -1730,6 +1770,11 @@ impl TypeContext {
 
         TypeMutationSnapshot {
             type_states,
+            store_desc_states: (0..self.store_descs.len())
+                .map(|index| self.store_descs.get_at(index).desc().clone())
+                .collect(),
+            store_desc_overlay: self.store_desc_overlay.borrow().clone(),
+            store_level_overlay: self.store_level_overlay.borrow().clone(),
             row_field_states,
             abbrev_states,
             store_abbrev_overlay: self.store_abbrev_overlay.borrow().clone(),
@@ -1769,6 +1814,11 @@ impl TypeContext {
             }
         }
 
+        for (index, desc) in snapshot.store_desc_states.into_iter().enumerate() {
+            self.store_descs.get_at(index).set_desc(desc);
+        }
+        *self.store_desc_overlay.borrow_mut() = snapshot.store_desc_overlay;
+        *self.store_level_overlay.borrow_mut() = snapshot.store_level_overlay;
         *self.store_abbrev_overlay.borrow_mut() = snapshot.store_abbrev_overlay;
         *self.store_row_field_overlay.borrow_mut() = snapshot.store_row_field_overlay;
         *self.memoized_abbrev_refs.borrow_mut() = snapshot.memoized_abbrev_refs;
@@ -2777,12 +2827,18 @@ impl TypeContext {
         }
 
         // Path compression: relink all traversed nodes to the representative
-        // (OCaml `Btype.repr_link`). Store links already point at a fixed
-        // representative and are never rewritten.
+        // (OCaml `Btype.repr_link`). Stored handles use compilation-local
+        // descriptor overlays, just like ordinary unification writes.
         for i in 0..chain_len {
             let node = chain[i];
-            if node != current && !node.is_store() {
-                self.set_desc(node, TypeDesc::Tlink(current));
+            if node != current {
+                // A direct link already points at the representative. OCaml
+                // btype.ml:107-115 does not log/write it (`compress = false`).
+                let direct =
+                    matches!(*self.borrow_desc(node), TypeDesc::Tlink(target) if target == current);
+                if !direct {
+                    self.set_desc(node, TypeDesc::Tlink(current));
+                }
             }
         }
 
@@ -2948,11 +3004,82 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "thread store type node mutated")]
-    fn store_descriptor_is_immutable() {
+    fn store_descriptor_and_level_writes_are_isolated_and_backtracked() {
         let ctx = TypeContext::new(Arc::new(IdGenerator::new()));
         let ty = ctx.store.alloc_type(TypeDesc::Tnil, GENERIC_LEVEL);
-        ctx.set_desc(ty, TypeDesc::Tvar(None));
+        let untouched = ctx.store.alloc_type(TypeDesc::Tvar(None), GENERIC_LEVEL);
+        let initial = ctx.snapshot_type_state();
+        ctx.set_desc(ty, TypeDesc::Tvar(Some("stored".into())));
+        ctx.set_level(ty, 12);
+        let changed = ctx.snapshot_type_state();
+        let local = ctx.new_var(None);
+        super::super::ctype::link_type(&ctx, ty, local);
+        assert_eq!(ctx.repr(ty), local);
+        assert_eq!(ctx.get_level(ty), 12);
+        assert!(
+            matches!(*ctx.borrow_desc(local), TypeDesc::Tvar(Some(ref name)) if name == "stored")
+        );
+        ctx.set_desc(untouched, TypeDesc::Tlink(local));
+        ctx.set_level(untouched, 5);
+        assert!(matches!(*ctx.store.node(ty).desc(), TypeDesc::Tnil));
+        assert_eq!(ctx.store.node(ty).level(), GENERIC_LEVEL);
+        ctx.restore_type_state(changed);
+        assert!(matches!(*ctx.borrow_desc(ty), TypeDesc::Tvar(Some(ref name)) if name == "stored"));
+        assert_eq!(ctx.get_level(ty), 12);
+        assert!(matches!(*ctx.borrow_desc(untouched), TypeDesc::Tvar(None)));
+        assert_eq!(ctx.get_level(untouched), GENERIC_LEVEL);
+        ctx.restore_type_state(initial);
+        assert!(matches!(*ctx.borrow_desc(ty), TypeDesc::Tnil));
+        assert_eq!(ctx.get_level(ty), GENERIC_LEVEL);
+        // Writing after rollback cannot reuse a descriptor from the abandoned
+        // snapshot (its arena allocation intentionally remains alive).
+        ctx.set_desc(ty, TypeDesc::Ttuple(vec![local]));
+        assert!(matches!(*ctx.borrow_desc(ty), TypeDesc::Ttuple(ref ts) if ts == &[local]));
+    }
+
+    #[test]
+    fn failed_unification_restores_stored_constructor_links() {
+        use super::super::ctype::{UnifyState, unify};
+        let ctx = TypeContext::new(Arc::new(IdGenerator::new()));
+        let int_path = super::super::predef::path_int();
+        let stored_int = ctx.store.alloc_type(
+            TypeDesc::Tconstr {
+                path: int_path.clone(),
+                args: vec![],
+                abbrev: ctx.store.alloc_abbrev(AbbrevMemo::Mnil),
+            },
+            GENERIC_LEVEL,
+        );
+        let local_int = ctx.new_constr(int_path, vec![]);
+        let left_bool = ctx.new_constr(super::super::predef::path_bool(), vec![]);
+        let right_string = ctx.new_constr(super::super::predef::path_string(), vec![]);
+        let left = ctx.new_tuple(vec![stored_int, left_bool]);
+        let right = ctx.new_tuple(vec![local_int, right_string]);
+        let snapshot = ctx.snapshot_type_state();
+        let mut state = UnifyState::new();
+        assert!(unify(&ctx, &mut state, left, right).is_err());
+        // The first tuple element unified before the second element failed.
+        // Skipping stored-source links would incorrectly leave it unchanged.
+        assert_eq!(ctx.repr(stored_int), local_int);
+        ctx.restore_type_state(snapshot);
+        assert_eq!(ctx.repr(stored_int), stored_int);
+        assert_eq!(ctx.get_level(stored_int), GENERIC_LEVEL);
+        assert!(matches!(
+            *ctx.store.node(stored_int).desc(),
+            TypeDesc::Tconstr { .. }
+        ));
+    }
+
+    #[test]
+    fn store_links_compress_without_mutating_dependencies() {
+        let ctx = TypeContext::new(Arc::new(IdGenerator::new()));
+        let target = ctx.new_var(None);
+        let middle = ctx.new_link(target);
+        let stored = ctx.store.alloc_type(TypeDesc::Tnil, GENERIC_LEVEL);
+        super::super::ctype::link_type(&ctx, stored, middle);
+        assert_eq!(ctx.repr(stored), target);
+        assert!(matches!(*ctx.borrow_desc(stored), TypeDesc::Tlink(t) if t == target));
+        assert!(matches!(*ctx.store.node(stored).desc(), TypeDesc::Tnil));
     }
 
     #[test]

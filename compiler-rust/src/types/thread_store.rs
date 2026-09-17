@@ -1,14 +1,13 @@
 //! Per-thread persistent type store.
 //!
-//! OCaml keeps one process-wide `persistent_structures` table
-//! (`compiler/ml/env.ml:669-678`): every unit compiled in a process shares
-//! the type nodes of the signatures it read and the component tables built
-//! from them. The Rust in-process build compiles many units per process, so
-//! internalizing every dependency signature into each unit's `TypeContext`
-//! is the deviation, not the reference behaviour. This module owns the
-//! shared, generic-level dependency graphs for one worker thread; each
-//! compilation keeps its own mutable arena and overlays its own writes to
-//! the store's memo/row cells (`TypeContext`).
+//! OCaml's `persistent_structures` table (`compiler/ml/env.ml:669-678`)
+//! shares loaded signatures within a compilation, but `Res_compmisc.init_path`
+//! resets it between units (`compiler/core/res_compmisc.ml:35`). The Rust
+//! in-process build avoids re-internalizing immutable raw dependency storage
+//! for every unit on a worker. Each compilation isolates descriptor, level,
+//! memo and row writes in `TypeContext` overlays; forced component binders and
+//! substitution state remain unit-local, matching `initial_env`'s identifier
+//! reset (`compiler/core/res_compmisc.ml:49`).
 //!
 //! References into the store carry `type_expr::STORE_REF_TAG`. The store is
 //! `!Send` by construction and is only reached through the exclusive owned lease a

@@ -1017,24 +1017,10 @@ pub fn type_contains_variant(ctx: &TypeContext, ty: TypeExprRef) -> bool {
 /// This makes `t1` point to `t2`, effectively making them the same type.
 /// The level of `t2` is updated to be the minimum of both levels.
 pub fn link_type(ctx: &TypeContext, t1: TypeExprRef, t2: TypeExprRef) {
-    if t1.is_store() {
-        // `t1` is a generic node of a dependency signature shared by every
-        // compilation on this worker thread. OCaml's `unify3`
-        // (compiler/ml/ctype.ml:2270-2296) reaches such nodes only through
-        // paths that unify declaration types without instancing them
-        // (`subtype_rec` record/variant coercion, ctype.ml:3570-3640) and
-        // links the persistent node to its local counterpart as a memo of
-        // structural agreement; in a one-unit process that alias is harmless,
-        // across units it would dangle. The memo is redundant for generic
-        // nodes (every later use copies them, ctype.ml:725-765), so it is
-        // dropped here. Binding a persistent type variable would change the
-        // shared scheme and is an invariant violation.
-        assert!(
-            !matches!(*ctx.borrow_desc(t1), TypeDesc::Tvar(_)),
-            "thread store type variable bound by unification; generic persistent schemes are instanced first (compiler/ml/ctype.ml:725-765)"
-        );
-        return;
-    }
+    // OCaml btype.ml:633-651 performs this mutation even for dependency
+    // declaration nodes (e.g. ctype.ml:2118-2127 and record coercion). The
+    // context overlays stored-node writes for this compilation; do not skip
+    // the link, since later repr/instance calls must observe it.
     let t1_repr = ctx.repr(t1);
     let t2_repr = ctx.repr(t2);
     let source_name = {
