@@ -2,6 +2,95 @@
 
 This file is for transient measurements, hypotheses, rejected experiments, and slow-file notes. Keep committed facts concise; use temp files under `/tmp` for bulky logs/profiles.
 
+## Raw-Lambda Match-Action Materialization Profile
+
+`RESCRIPT_COMPILER_COUNTERS=1` now attributes recursive `MatchAction::to_raw`
+materialization by caller and module. The clone timer starts after the separate
+footprint walk, so `nanos` excludes counter traversal. `estimated_bytes` is a
+conservative lower bound (`RawLambda` enum nodes only; vector/string/box heap
+storage is excluded).
+
+On the pinned expanded Tella checkout (`66a5edabdbfdbc5dd7496e59ee0573de2a2a1ffa`), a clean release in-process build compiled 3,248 modules and reported:
+
+- `100881` terminal materializations, `6680890` recursively cloned nodes, at least
+  `3099932960` bytes, `753643768ns` aggregate clone time, maximum observed
+  action-handle fanout `433`.
+- The only active caller was `matching.rs`'s non-guarded terminal case in
+  `compile_match` (currently line 8471). `same_actions` did not materialize an
+  action in this corpus.
+- Top modules by cloned nodes began with `Schema__StoryType` (`301519`),
+  `DB__StoryType` (`180929`), `Service__PublicClip` (`132354`), `LayoutDetail`
+  (`123689`), `Schema__EditorEvents` (`117990`), and
+  `Service__PublicClipLegacy` (`87873`). The requested `Layout` module had no
+  recorded terminal action clone despite spending about `51.7ms` in Lambda,
+  so its Lambda cost is outside this call site.
+- Focus modules' representative clone-time runs were noisy under the concurrent
+  counter build but consistently material: `Service__PublicClip` 8-23ms,
+  `Schema__EditorEvents` 9-38ms, and `Service__PublicClipLegacy` 6-16ms.
+  Their node/byte counts were stable at `132354 / >=61.4MB`,
+  `117990 / >=54.7MB`, and `87873 / >=40.8MB`, respectively.
+
+OCaml keeps the terminal action itself at `compiler/ml/matching.ml:2486-2493`;
+case-list transformations therefore preserve immutable Lambda allocation
+identity. It introduces static catches only at the local switch/test boundary
+through `handle_shared` and `share_actions_tree` at
+`compiler/ml/matching.ml:1536-1572`, and through `share_actions_sw` at
+`compiler/ml/matching.ml:1687-1716`. Any retained Rust refactor must preserve
+that boundary and `next_raise_count` order. A whole-match placeholder/finalizer
+was rejected without implementation because it would move catch placement and
+exit allocation relative to those OCaml boundaries.
+
+The next implementation slice should make the internal switch/test action
+store accept shared `MatchAction` handles directly, keeping owned `RawLambda`
+for tests/scrutinees. Terminal compilation can then return an internal action
+leaf; `share_actions_tree`/`share_actions_sw` assign catches/exits before each
+unique action is materialized exactly once. The existing public `RawLambda`
+entry points remain unchanged by fully materializing at those local boundaries.
+This requires an internal matching-result/action type rather than a new public
+`RawLambda` variant or a global `Arc<RawLambda>`.
+
+The retained owned-DAG implementation now keeps `If`, `StaticCatch`, and the
+constructor switch forest in `MatchCode`, assigns catches at the same local
+`share_actions_sw` boundary, and delays recursive RawLambda materialization until
+a top-level matrix has been dropped. Terminal `Lambda.bind` chains stay in the
+shared action allocation graph; switch uses are resolved with explicit counts,
+moving single uses and representing repeated uses by tiny static exits. A full
+3,248-module release counter run at `6761b1aab` reported `18,705` recursive clone
+calls, `316,299` nodes, at least `146,762,736` bytes, and `58,220,054ns` clone
+time. Node traffic is 95.3% lower, estimated copied bytes are 95.3% lower, and
+clone time is 92.3% lower than the release baseline above. Raw Lambda parity
+remained 610/610.
+
+A destructive `Mutex<Option<RawLambda>>` terminal leaf experiment briefly
+reported `173,423` nodes, but was rejected as semantically invalid. Two distinct
+bound wrappers can share one terminal leaf and both require materialization; the
+first destructive take made the second panic. The regression is covered by
+`differently_bound_shared_terminal_actions_materialize_independently`. Commit
+`ce79b181f` reverted the experiment. The retained implementation keeps terminal
+actions immutable and obtains the reduction by deferring the owned MatchCode
+forest instead of globally consuming shared leaves.
+
+A paired 10-run release `hyperfine` against `layout-typecheck-performance`
+(`4e48f0d67`) measured the baseline at `4.797s +/- 0.053s` (range
+`4.745s..4.905s`, user/system `40.782s / 2.199s`) and the candidate at
+`4.723s +/- 0.020s` (range `4.697s..4.753s`, user/system
+`40.042s / 2.173s`), a 1.6% wall improvement. A separate 10-pair run alternated
+baseline-first and candidate-first order: baseline wall/user/system averaged
+`4.776s / 40.788s / 2.178s`, candidate averaged
+`4.704s / 40.108s / 2.181s`; peak RSS was effectively flat at
+`3045.2MiB` versus `3042.8MiB`.
+
+Exact generated-output validation used the same clean 3,248-module Tella build
+for `layout-typecheck-performance` and the candidate. Sorted SHA-256 manifests
+covered 5,048 generated `.js` files under `packages/core/webapp`, excluding
+`node_modules`, Git data, and parity/cache directories; file sets and hashes were
+identical (empty manifest diff). The normal `test_tella_output_parity.sh` OCaml
+setup could not produce its expected snapshot because the external OCaml build
+stopped after 196 dependency modules when `bs-css` could not resolve `Belt`.
+This is an external baseline-environment blocker, not a candidate output diff;
+the paired baseline/candidate in-process manifest comparison supplies the exact
+3,248-module JS check.
+
 ## Expanded 3,248-Module Migration History
 
 - The updated Tella corpus has grown to 3,248 compiled modules. Before the current candidate, release in-process builds measured `15.686s +/- 0.118s` over 5 runs, range `15.581s..15.887s`.
@@ -246,6 +335,7 @@ Conclusion: for the current Tella shape, JS finish is visible but not the main b
 - Adaptive full per-kind signature indexes reduced value/type/module scanned items by roughly 16-18%, but disabled-counter Tella `hyperfine` regressed to `3.009s +/- 0.067s` over 20 runs, so it was reverted.
 - Converting current `lookup_module_in_resolved_path` callers to shared `Arc<ModuleDeclaration>` avoided owned declaration clones but regressed Tella `hyperfine` to `3.380s +/- 0.077s` over 20 runs. The extra shared-pointer path did not remove enough downstream work, so it was reverted.
 - Capping JS finishing to `capacity / 4` workers while typecheck work was ready reduced aggressive JS scheduling but increased idle-slot wait in the counter run (`444.377ms` vs the retained `202.217ms`) and regressed Tella `hyperfine` to `3.078s +/- 0.044s` over 20 runs, compared with an immediately measured retained baseline of `3.056s +/- 0.014s` over 10 runs. The scheduler needs a smarter policy than a fixed JS cap.
+- An unlock-aware alternating scheduler kept immediate priority only for JS jobs with actual waiters in `waiting_js_by_dep`; when both typecheck and zero-unlock JS were ready it alternated one typecheck with one JS, starting with typecheck. On pinned 3,248-module Tella at 16 workers, 12-run release `hyperfine` was statistically flat: retained `4.769s +/- 0.028s` (`4.741s..4.827s`, user/system `41.071s / 2.207s`, mean RSS `3,199,131,648` bytes) versus candidate `4.766s +/- 0.016s` (`4.742s..4.789s`, user/system `41.200s / 2.211s`, mean RSS `3,195,125,760` bytes). The candidate-minus-baseline wall delta was `-0.003s` (`-0.064%`) with an approximate 95% interval of `-0.021s..+0.015s`. At 10 workers, five measured runs slightly favored retained (`4.780s +/- 0.019s`) over candidate (`4.790s +/- 0.011s`). Candidate counters reported `zero_unlock_js_deferred=2922`, `zero_unlock_js_admitted=2952`, `unlocking_js_admitted=296`, `zero_unlock_alternations=2921`, mean/max admission-to-signature latency `10.563ms / 839.176ms`, and lower idle-slot wait (`55.073ms` versus `93.111ms`), but that queue-shape change did not produce a credible wall-time win and user CPU increased. All 3,248 modules compiled and 5,058 generated JS files were byte-identical to the parent build. The policy was fully reverted rather than retained.
 - Storing cached qualified module-component views behind one outer `Arc` reduced the number of handle clones on cache hits, but Tella `hyperfine` did not improve (`3.314s +/- 0.856s` over 20 runs, best `3.090s`, with one large outlier). It was reverted because it only reduced cache-hit bookkeeping, not the underlying semantic work.
 - Skipping row-field sorting for already-sorted large polymorphic-variant rows produced a plausible Tella timing (`3.033s +/- 0.032s` over 20 runs, best `2.992s`) but regressed JS output parity to `659/660` by changing `src/js_re_test.res` output. It was reverted; the rebuilt retained binary returned to `660/660`.
 - Borrowed iterators for record-label environment lookup removed temporary `Vec<&LabelDescription>` allocations in hot disambiguation paths and passed JS output parity plus a clean Tella compile, but did not improve Tella `hyperfine` (`2.958s +/- 0.074s` over 20 runs, with outliers) versus the retained same-session baseline (`2.954s +/- 0.019s` over 10 runs). It was reverted because the allocation skip was not on the wall-clock path.

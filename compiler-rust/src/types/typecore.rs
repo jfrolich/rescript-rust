@@ -12217,6 +12217,214 @@ fn opaque_dict_patterns(arena: &ParseArena, pattern: &Pattern) -> Pattern {
     opaque
 }
 
+fn pressure_record_pattern_args(
+    left: &[PressureRecordField],
+    right: &[PressureRecordField],
+) -> (Vec<Pattern>, Vec<Pattern>) {
+    let mut left_args = Vec::with_capacity(left.len().max(right.len()));
+    let mut right_args = Vec::with_capacity(left.len().max(right.len()));
+    let (mut left_index, mut right_index) = (0, 0);
+    while left_index < left.len() || right_index < right.len() {
+        match (left.get(left_index), right.get(right_index)) {
+            (None, Some((_, _, right_pattern, _))) => {
+                left_args.push(pressure_matrix_omega_pat());
+                right_args.push(right_pattern.clone());
+                right_index += 1;
+            }
+            (Some((_, _, left_pattern, _)), None) => {
+                left_args.push(left_pattern.clone());
+                right_args.push(pressure_matrix_omega_pat());
+                left_index += 1;
+            }
+            (Some((_, left_label, left_pattern, _)), Some((_, right_label, right_pattern, _))) => {
+                match left_label.lbl_pos.cmp(&right_label.lbl_pos) {
+                    Ordering::Less => {
+                        left_args.push(left_pattern.clone());
+                        right_args.push(pressure_matrix_omega_pat());
+                        left_index += 1;
+                    }
+                    Ordering::Greater => {
+                        left_args.push(pressure_matrix_omega_pat());
+                        right_args.push(right_pattern.clone());
+                        right_index += 1;
+                    }
+                    Ordering::Equal => {
+                        left_args.push(left_pattern.clone());
+                        right_args.push(right_pattern.clone());
+                        left_index += 1;
+                        right_index += 1;
+                    }
+                }
+            }
+            (None, None) => break,
+        }
+    }
+    (left_args, right_args)
+}
+
+fn pressure_patterns_compatible(left: &Pattern, right: &Pattern) -> bool {
+    match (&left.pat_desc, &right.pat_desc) {
+        (PatternDesc::Tpat_any | PatternDesc::Tpat_var(_, _), _)
+        | (_, PatternDesc::Tpat_any | PatternDesc::Tpat_var(_, _)) => true,
+        (PatternDesc::Tpat_alias(inner, _, _), _) => pressure_patterns_compatible(inner, right),
+        (_, PatternDesc::Tpat_alias(inner, _, _)) => pressure_patterns_compatible(left, inner),
+        (PatternDesc::Tpat_or(a, b, _), _) => {
+            pressure_patterns_compatible(a, right) || pressure_patterns_compatible(b, right)
+        }
+        (_, PatternDesc::Tpat_or(a, b, _)) => {
+            pressure_patterns_compatible(left, a) || pressure_patterns_compatible(left, b)
+        }
+        (
+            PatternDesc::Tpat_construct(_, left_constructor, left_args),
+            PatternDesc::Tpat_construct(_, right_constructor, right_args),
+        ) => {
+            crate::types::same_constructor(left_constructor, right_constructor)
+                && pressure_pattern_lists_compatible(left_args, right_args)
+        }
+        (
+            PatternDesc::Tpat_variant(left_label, left_arg, _),
+            PatternDesc::Tpat_variant(right_label, right_arg, _),
+        ) => {
+            left_label == right_label
+                && match (left_arg, right_arg) {
+                    (None, None) => true,
+                    (Some(left), Some(right)) => pressure_patterns_compatible(left, right),
+                    (None, Some(_)) | (Some(_), None) => false,
+                }
+        }
+        (PatternDesc::Tpat_constant(left), PatternDesc::Tpat_constant(right)) => {
+            constants_equal(left, right)
+        }
+        (PatternDesc::Tpat_tuple(left), PatternDesc::Tpat_tuple(right)) => {
+            pressure_pattern_lists_compatible(left, right)
+        }
+        (PatternDesc::Tpat_record(left, _, _), PatternDesc::Tpat_record(right, _, _)) => {
+            let (left, right) = pressure_record_pattern_args(left, right);
+            pressure_pattern_lists_compatible(&left, &right)
+        }
+        (PatternDesc::Tpat_array(left), PatternDesc::Tpat_array(right)) => {
+            left.len() == right.len() && pressure_pattern_lists_compatible(left, right)
+        }
+        // OCaml compiler/ml/parmatch.ml:303-326 returns false for every
+        // remaining pair of typed pattern constructors.
+        _ => false,
+    }
+}
+
+fn pressure_pattern_lists_compatible(left: &[Pattern], right: &[Pattern]) -> bool {
+    left.len() == right.len()
+        && left
+            .iter()
+            .zip(right)
+            .all(|(left, right)| pressure_patterns_compatible(left, right))
+}
+
+fn pressure_pattern_le(
+    tctx: &mut TypeCheckContext<'_>,
+    env: &Env,
+    left: &Pattern,
+    right: &Pattern,
+) -> bool {
+    match (&left.pat_desc, &right.pat_desc) {
+        (PatternDesc::Tpat_any | PatternDesc::Tpat_var(_, _), _) => true,
+        (PatternDesc::Tpat_alias(inner, _, _), _) => pressure_pattern_le(tctx, env, inner, right),
+        (_, PatternDesc::Tpat_alias(inner, _, _)) => pressure_pattern_le(tctx, env, left, inner),
+        (PatternDesc::Tpat_constant(left), PatternDesc::Tpat_constant(right)) => {
+            constants_equal(left, right)
+        }
+        (
+            PatternDesc::Tpat_construct(_, left_constructor, left_args),
+            PatternDesc::Tpat_construct(_, right_constructor, right_args),
+        ) => {
+            crate::types::same_constructor(left_constructor, right_constructor)
+                && pressure_pattern_lists_le(tctx, env, left_args, right_args)
+        }
+        (
+            PatternDesc::Tpat_variant(left_label, Some(left), _),
+            PatternDesc::Tpat_variant(right_label, Some(right), _),
+        ) => left_label == right_label && pressure_pattern_le(tctx, env, left, right),
+        (
+            PatternDesc::Tpat_variant(left_label, None, _),
+            PatternDesc::Tpat_variant(right_label, None, _),
+        ) => left_label == right_label,
+        (PatternDesc::Tpat_variant(_, _, _), PatternDesc::Tpat_variant(_, _, _)) => false,
+        (PatternDesc::Tpat_tuple(left), PatternDesc::Tpat_tuple(right)) => {
+            pressure_pattern_lists_le(tctx, env, left, right)
+        }
+        (PatternDesc::Tpat_record(left, _, _), PatternDesc::Tpat_record(right, _, _)) => {
+            // OCaml compiler/ml/parmatch.ml:1767-1769 aligns the sorted
+            // record fields with omega before applying le_pats.
+            let (left, right) = pressure_record_pattern_args(left, right);
+            pressure_pattern_lists_le(tctx, env, &left, &right)
+        }
+        (PatternDesc::Tpat_array(left), PatternDesc::Tpat_array(right))
+            if left.len() == right.len() =>
+        {
+            pressure_pattern_lists_le(tctx, env, left, right)
+        }
+        _ => pressure_matrix_satisfiables(tctx, env, &[vec![left.clone()]], vec![right.clone()])
+            .is_empty(),
+    }
+}
+
+fn pressure_pattern_lists_le(
+    tctx: &mut TypeCheckContext<'_>,
+    env: &Env,
+    left: &[Pattern],
+    right: &[Pattern],
+) -> bool {
+    debug_assert_eq!(left.len(), right.len());
+    // OCaml Parmatch.le_pats returns true when either list ends. Typed
+    // constructor and tuple rows have equal arity, while arrays check it at
+    // the caller, so unequal lengths only indicate a broken invariant here.
+    left.iter()
+        .zip(right)
+        .all(|(left, right)| pressure_pattern_le(tctx, env, left, right))
+}
+
+fn pressure_minimal_compatible_rows(
+    tctx: &mut TypeCheckContext<'_>,
+    env: &Env,
+    previous: &[PartialCheckCase<'_>],
+    query: &Pattern,
+) -> Vec<Vec<Pattern>> {
+    fn select(
+        tctx: &mut TypeCheckContext<'_>,
+        env: &Env,
+        rows: Vec<Vec<Pattern>>,
+    ) -> Vec<Vec<Pattern>> {
+        let mut selected = Vec::new();
+        for (index, row) in rows.iter().enumerate() {
+            let dominated = rows[index + 1..].iter().any(|candidate| {
+                candidate
+                    .iter()
+                    .zip(row)
+                    .all(|(left, right)| pressure_pattern_le(tctx, env, left, right))
+            });
+            if !dominated {
+                selected.push(row.clone());
+            }
+        }
+        // Parmatch.select_rec prepends each survivor. Reverse once rather than
+        // shifting the Vec on every insertion. The first pass then lets the
+        // second pass check rows that originally appeared earlier.
+        selected.reverse();
+        selected
+    }
+
+    // Parmatch.check_unused accumulates `pref` with `q :: pref`, so its
+    // compatible rows are newest-first even though cases are visited in source
+    // order (compiler/ml/parmatch.ml:2193-2196, 2252).
+    let compatible = previous
+        .iter()
+        .rev()
+        .filter(|case| pressure_patterns_compatible(case.lhs, query))
+        .map(|case| vec![case.lhs.clone()])
+        .collect::<Vec<_>>();
+    let selected = select(tctx, env, compatible);
+    select(tctx, env, selected)
+}
+
 fn report_unused_match_cases<'case>(
     tctx: &mut TypeCheckContext<'_>,
     env: &Env,
@@ -12344,13 +12552,19 @@ fn report_unused_match_cases<'case>(
                 || previous_unguarded_cases
                     .iter()
                     .any(|previous| typed_pattern_contains_dict_pattern(tctx.arena, previous.lhs));
-            let previous = previous_unguarded_cases
-                .iter()
-                .filter(|previous| {
-                    !contains_dict || !typed_pattern_contains_dict_pattern(tctx.arena, previous.lhs)
-                })
-                .map(|previous| vec![previous.lhs.clone()])
-                .collect::<Vec<_>>();
+            // OCaml Parmatch.check_unused first keeps only rows compatible
+            // with the query and then removes rows subsumed by another row
+            // (compiler/ml/parmatch.ml:1779-1786, 2193-2196).
+            let previous =
+                pressure_minimal_compatible_rows(tctx, env, &previous_unguarded_cases, &case.c_lhs)
+                    .into_iter()
+                    .filter(|row| {
+                        !contains_dict
+                            || !row.iter().any(|pattern| {
+                                typed_pattern_contains_dict_pattern(tctx.arena, pattern)
+                            })
+                    })
+                    .collect::<Vec<_>>();
             let query = if contains_dict {
                 opaque_dict_patterns(tctx.arena, &case.c_lhs)
             } else {
@@ -34933,6 +35147,150 @@ mod tests {
     use super::*;
     use crate::context::IdGenerator;
     use std::borrow::Cow;
+
+    fn pressure_test_pattern(desc: PatternDesc) -> Pattern {
+        Pattern::new(
+            desc,
+            LocIdx::none(),
+            TypeExprRef::null(),
+            EnvRef(0),
+            Attributes::new(),
+        )
+    }
+
+    #[test]
+    fn pressure_compatibility_matches_ocaml_pattern_shapes() {
+        let one = pressure_test_pattern(PatternDesc::Tpat_constant(Constant::Int(1)));
+        let two = pressure_test_pattern(PatternDesc::Tpat_constant(Constant::Int(2)));
+        let any = pressure_test_pattern(PatternDesc::Tpat_any);
+        let either = pressure_test_pattern(PatternDesc::Tpat_or(
+            Box::new(one.clone()),
+            Box::new(two.clone()),
+            None,
+        ));
+
+        assert!(pressure_patterns_compatible(&any, &one));
+        assert!(pressure_patterns_compatible(&either, &two));
+        assert!(!pressure_patterns_compatible(&one, &two));
+        assert!(!pressure_patterns_compatible(
+            &pressure_test_pattern(PatternDesc::Tpat_array(vec![one.clone()])),
+            &pressure_test_pattern(PatternDesc::Tpat_array(vec![one, two])),
+        ));
+    }
+
+    fn pressure_test_record(fields: Vec<(i32, Pattern)>) -> Pattern {
+        pressure_test_pattern(PatternDesc::Tpat_record(
+            fields
+                .into_iter()
+                .map(|(position, pattern)| {
+                    let name = format!("field{position}");
+                    (
+                        Located::new(
+                            crate::parse_arena::LidentIdx(position as u32),
+                            LocIdx::none(),
+                        ),
+                        crate::types::LabelDescription {
+                            lbl_name: name,
+                            lbl_res: TypeExprRef::null(),
+                            lbl_arg: TypeExprRef::null(),
+                            lbl_mut: crate::types::MutableFlag::Immutable,
+                            lbl_optional: false,
+                            lbl_pos: position,
+                            lbl_all: crate::types::LabelArrayRef(0),
+                            lbl_repres: crate::types::RecordRepresentation::RecordRegular,
+                            lbl_private: crate::types::PrivateFlag::Public,
+                            lbl_loc: Location::none(),
+                            lbl_attributes: Vec::new(),
+                        },
+                        pattern,
+                        false,
+                    )
+                })
+                .collect(),
+            crate::parser::ast::ClosedFlag::Closed,
+            None,
+        ))
+    }
+
+    fn assert_pressure_minimum_is_any(previous_patterns: [&Pattern; 2], query: &Pattern) {
+        let type_ctx = TypeContext::new(std::sync::Arc::new(IdGenerator::new()));
+        let arena = ParseArena::new();
+        let mut tctx = TypeCheckContext::new(&type_ctx, &arena);
+        let env = crate::types::initial_env(&type_ctx);
+        let previous = previous_patterns.map(|lhs| PartialCheckCase {
+            lhs,
+            has_guard: false,
+        });
+
+        let rows = pressure_minimal_compatible_rows(&mut tctx, &env, &previous, query);
+        assert_eq!(rows.len(), 1);
+        assert!(matches!(rows[0][0].pat_desc, PatternDesc::Tpat_any));
+    }
+
+    #[test]
+    fn pressure_minima_remove_subsumed_rows_in_both_orders() {
+        let one = pressure_test_pattern(PatternDesc::Tpat_constant(Constant::Int(1)));
+        let any = pressure_test_pattern(PatternDesc::Tpat_any);
+
+        assert_pressure_minimum_is_any([&any, &one], &one);
+        assert_pressure_minimum_is_any([&one, &any], &one);
+    }
+
+    #[test]
+    fn pressure_equal_minima_keep_the_oldest_row_like_ocaml_pref() {
+        let mut old = pressure_test_pattern(PatternDesc::Tpat_constant(Constant::Int(1)));
+        old.pat_loc = LocIdx(1);
+        let mut new = pressure_test_pattern(PatternDesc::Tpat_constant(Constant::Int(1)));
+        new.pat_loc = LocIdx(2);
+        let query = pressure_test_pattern(PatternDesc::Tpat_constant(Constant::Int(1)));
+        let type_ctx = TypeContext::new(std::sync::Arc::new(IdGenerator::new()));
+        let arena = ParseArena::new();
+        let mut tctx = TypeCheckContext::new(&type_ctx, &arena);
+        let env = crate::types::initial_env(&type_ctx);
+        let previous = [
+            PartialCheckCase {
+                lhs: &old,
+                has_guard: false,
+            },
+            PartialCheckCase {
+                lhs: &new,
+                has_guard: false,
+            },
+        ];
+
+        let rows = pressure_minimal_compatible_rows(&mut tctx, &env, &previous, &query);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0][0].pat_loc, old.pat_loc);
+    }
+
+    #[test]
+    fn pressure_record_minima_align_missing_fields_with_omega_in_both_orders() {
+        let any = pressure_test_pattern(PatternDesc::Tpat_any);
+        let one = pressure_test_pattern(PatternDesc::Tpat_constant(Constant::Int(1)));
+        let two = pressure_test_pattern(PatternDesc::Tpat_constant(Constant::Int(2)));
+        let broad = pressure_test_record(vec![(0, any)]);
+        let narrow = pressure_test_record(vec![(0, one), (1, two)]);
+
+        for previous_patterns in [[&broad, &narrow], [&narrow, &broad]] {
+            let type_ctx = TypeContext::new(std::sync::Arc::new(IdGenerator::new()));
+            let arena = ParseArena::new();
+            let mut tctx = TypeCheckContext::new(&type_ctx, &arena);
+            let env = crate::types::initial_env(&type_ctx);
+            let previous = previous_patterns.map(|lhs| PartialCheckCase {
+                lhs,
+                has_guard: false,
+            });
+
+            let rows = pressure_minimal_compatible_rows(&mut tctx, &env, &previous, &narrow);
+            assert_eq!(rows.len(), 1);
+            let PatternDesc::Tpat_record(fields, _, _) = &rows[0][0].pat_desc else {
+                panic!("expected the broader record row");
+            };
+            assert_eq!(fields.len(), 1);
+            assert_eq!(fields[0].1.lbl_pos, 0);
+            assert!(matches!(fields[0].2.pat_desc, PatternDesc::Tpat_any));
+        }
+    }
 
     #[test]
     fn value_usage_marks_all_declarations_with_the_same_key() {
