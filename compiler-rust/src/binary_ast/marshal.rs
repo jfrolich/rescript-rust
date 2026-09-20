@@ -122,6 +122,10 @@ impl PrimListShareKind {
 
 #[derive(Debug)]
 pub struct MarshalWriter<'a> {
+    /// Debug tracing is configured once per serialization, not per AST node.
+    debug_marshal: bool,
+    pub(super) debug_const_share: bool,
+
     /// The output buffer containing encoded data
     buffer: Vec<u8>,
 
@@ -307,6 +311,8 @@ impl<'a> MarshalWriter<'a> {
     /// Create a new MarshalWriter
     pub fn new() -> Self {
         Self {
+            debug_marshal: std::env::var("DEBUG_MARSHAL").is_ok(),
+            debug_const_share: std::env::var("DEBUG_CONST_SHARE").is_ok(),
             buffer: Vec::with_capacity(4096),
             obj_table: HashMap::new(),
             str_idx_table: HashMap::new(),
@@ -358,6 +364,8 @@ impl<'a> MarshalWriter<'a> {
     /// Create a new MarshalWriter with expected capacity
     pub fn with_capacity(capacity: usize) -> Self {
         Self {
+            debug_marshal: std::env::var("DEBUG_MARSHAL").is_ok(),
+            debug_const_share: std::env::var("DEBUG_CONST_SHARE").is_ok(),
             buffer: Vec::with_capacity(capacity),
             obj_table: HashMap::new(),
             str_idx_table: HashMap::new(),
@@ -891,7 +899,7 @@ impl<'a> MarshalWriter<'a> {
         if let Some(&obj_idx) = self.position_idx_table.get(&idx) {
             let d = self.obj_counter - obj_idx;
             // DEBUG
-            if std::env::var("DEBUG_MARSHAL").is_ok() {
+            if self.debug_marshal {
                 let pos = self.get_arena().get_position(idx);
                 eprintln!(
                     "SHARE PosIdx({}) at obj_counter={}, obj_idx={}, dist={}, pos=({},{},{})",
@@ -918,7 +926,7 @@ impl<'a> MarshalWriter<'a> {
 
         // Record for future sharing
         // DEBUG
-        if std::env::var("DEBUG_MARSHAL").is_ok() {
+        if self.debug_marshal {
             eprintln!(
                 "WRITE PosIdx({}) at obj_idx={}, pos=({},{},{})",
                 idx.0, obj_idx, pos.line, pos.bol, pos.cnum
@@ -955,7 +963,7 @@ impl<'a> MarshalWriter<'a> {
         // Write the Location block
         self.write_block_header(0, 3);
         // DEBUG
-        if std::env::var("DEBUG_MARSHAL").is_ok() {
+        if self.debug_marshal {
             let start = self.get_arena().get_position(loc.loc_start);
             let end = self.get_arena().get_position(loc.loc_end);
             eprintln!(

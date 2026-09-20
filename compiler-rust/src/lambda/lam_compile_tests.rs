@@ -10412,9 +10412,9 @@ fn recursive_self_tailcalls_rename_params_before_loop_assignments() {
 #[test]
 fn recursive_self_tailcalls_preserve_ocaml_loop_ordering() {
     let mut compiler = LambdaCompiler::new();
-    let f = Ident::create_local("f");
-    let n = Ident::create_local("n");
-    let acc = Ident::create_local("acc");
+    let f = compiler.id_gen.create("f");
+    let n = compiler.id_gen.create("n");
+    let acc = compiler.id_gen.create("acc");
     let body = Lambda::if_(
         Lambda::var(n.clone()),
         Lambda::Lapply(Apply {
@@ -10427,7 +10427,7 @@ fn recursive_self_tailcalls_preserve_ocaml_loop_ordering() {
                 ),
                 Lambda::function_(
                     1,
-                    vec![Ident::create_local("param")],
+                    vec![compiler.id_gen.create("param")],
                     Lambda::var(acc.clone()),
                     FunctionAttribute::default(),
                 ),
@@ -10454,20 +10454,27 @@ fn recursive_self_tailcalls_preserve_ocaml_loop_ordering() {
         Lambda::unit(),
     );
 
+    // compile_expr is an internal entry point: unlike compile_program, it
+    // does not seed the lowering generator from the input Lambda. Construct
+    // this fixture with that same generator, as OCaml's Ext_ident.create does.
+    assert!(
+        compiler.id_gen.current_stamp()
+            >= crate::lambda::lam_beta_reduce::max_ident_stamp_in_lambda(&lam)
+    );
     let compiled = compiler.compile_expr(&lam);
     let rendered = print_block(&compiled.prelude);
     let alias_start = rendered
         .find("let acc = _acc;")
-        .expect("expected acc alias in loop body");
+        .unwrap_or_else(|| panic!("expected acc alias in loop body:\n{rendered}"));
     let alias_next = rendered
         .find("let n = _n;")
-        .expect("expected n alias in loop body");
+        .unwrap_or_else(|| panic!("expected n alias in loop body:\n{rendered}"));
     let assign_start = rendered
         .find("_acc =")
-        .expect("expected acc reassignment in loop body");
+        .unwrap_or_else(|| panic!("expected acc reassignment in loop body:\n{rendered}"));
     let assign_next = rendered
         .find("_n =")
-        .expect("expected n reassignment in loop body");
+        .unwrap_or_else(|| panic!("expected n reassignment in loop body:\n{rendered}"));
 
     assert!(
         alias_start < alias_next,

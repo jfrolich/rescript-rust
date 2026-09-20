@@ -108,6 +108,46 @@ static REGISTRY_LOCAL_INFO_TOTAL: AtomicU64 = AtomicU64::new(0);
 static REGISTRY_LOCAL_ALIASES_TOTAL: AtomicU64 = AtomicU64::new(0);
 static REGISTRY_LOCAL_FALLBACKS_TOTAL: AtomicU64 = AtomicU64::new(0);
 
+static TYPE_MUTATION_DESC: AtomicU64 = AtomicU64::new(0);
+static TYPE_MUTATION_LEVEL: AtomicU64 = AtomicU64::new(0);
+static TYPE_MUTATION_ROW: AtomicU64 = AtomicU64::new(0);
+static TYPE_MUTATION_ABBREV: AtomicU64 = AtomicU64::new(0);
+static TYPE_MUTATION_STATE: AtomicU64 = AtomicU64::new(0);
+static TYPE_MUTATION_SNAPSHOTS: AtomicU64 = AtomicU64::new(0);
+static TYPE_MUTATION_BACKTRACKS: AtomicU64 = AtomicU64::new(0);
+static TYPE_MUTATION_RESTORES: AtomicU64 = AtomicU64::new(0);
+static TYPE_MUTATION_PEAK_DEPTH: AtomicU64 = AtomicU64::new(0);
+
+#[derive(Clone, Copy)]
+pub(crate) enum TypeMutationKind {
+    Desc,
+    Level,
+    Row,
+    Abbrev,
+    State,
+}
+
+pub(crate) fn record_type_mutation(kind: TypeMutationKind) {
+    let counter = match kind {
+        TypeMutationKind::Desc => &TYPE_MUTATION_DESC,
+        TypeMutationKind::Level => &TYPE_MUTATION_LEVEL,
+        TypeMutationKind::Row => &TYPE_MUTATION_ROW,
+        TypeMutationKind::Abbrev => &TYPE_MUTATION_ABBREV,
+        TypeMutationKind::State => &TYPE_MUTATION_STATE,
+    };
+    counter.fetch_add(1, Ordering::Relaxed);
+}
+
+pub(crate) fn record_type_mutation_snapshot(depth: usize) {
+    TYPE_MUTATION_SNAPSHOTS.fetch_add(1, Ordering::Relaxed);
+    TYPE_MUTATION_PEAK_DEPTH.fetch_max(depth as u64, Ordering::Relaxed);
+}
+
+pub(crate) fn record_type_mutation_backtrack(restores: usize) {
+    TYPE_MUTATION_BACKTRACKS.fetch_add(1, Ordering::Relaxed);
+    TYPE_MUTATION_RESTORES.fetch_add(restores as u64, Ordering::Relaxed);
+}
+
 /// Lazy lookup buckets tracked by `RESCRIPT_COMPILER_COUNTERS`.
 #[derive(Clone, Copy)]
 pub(crate) enum LazyLookupKind {
@@ -332,6 +372,15 @@ pub fn reset() {
         &REGISTRY_LOCAL_INFO_TOTAL,
         &REGISTRY_LOCAL_ALIASES_TOTAL,
         &REGISTRY_LOCAL_FALLBACKS_TOTAL,
+        &TYPE_MUTATION_DESC,
+        &TYPE_MUTATION_LEVEL,
+        &TYPE_MUTATION_ROW,
+        &TYPE_MUTATION_ABBREV,
+        &TYPE_MUTATION_STATE,
+        &TYPE_MUTATION_SNAPSHOTS,
+        &TYPE_MUTATION_BACKTRACKS,
+        &TYPE_MUTATION_RESTORES,
+        &TYPE_MUTATION_PEAK_DEPTH,
     ] {
         counter.store(0, Ordering::Relaxed);
     }
@@ -742,6 +791,18 @@ pub fn print_report() {
     print_signature_freshen_names();
     print_module_signature_copies();
     print_module_signature_freshens();
+    eprintln!(
+        "[compiler-counter] type_mutations desc={} level={} row={} abbrev={} state={} snapshots={} backtracks={} restores={} peak_depth={}",
+        TYPE_MUTATION_DESC.load(Ordering::Relaxed),
+        TYPE_MUTATION_LEVEL.load(Ordering::Relaxed),
+        TYPE_MUTATION_ROW.load(Ordering::Relaxed),
+        TYPE_MUTATION_ABBREV.load(Ordering::Relaxed),
+        TYPE_MUTATION_STATE.load(Ordering::Relaxed),
+        TYPE_MUTATION_SNAPSHOTS.load(Ordering::Relaxed),
+        TYPE_MUTATION_BACKTRACKS.load(Ordering::Relaxed),
+        TYPE_MUTATION_RESTORES.load(Ordering::Relaxed),
+        TYPE_MUTATION_PEAK_DEPTH.load(Ordering::Relaxed),
+    );
     eprintln!(
         "[compiler-counter] module_registry_snapshots count={} shared_entries_total={} local_entries_total={} max_shared_entries={} max_local_entries={} local_modules_total={} local_info_total={} local_aliases_total={} local_fallbacks_total={}",
         REGISTRY_SNAPSHOTS.load(Ordering::Relaxed),

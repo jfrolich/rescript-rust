@@ -681,12 +681,7 @@ fn write_outputs(
     if !opts.package_outputs.is_empty() {
         for spec in &opts.package_outputs {
             if let Some((format, dir, suffix)) = parse_package_output(spec) {
-                let module_name = module_name_for_file(
-                    source_path,
-                    opts.namespace.as_deref(),
-                    opts.module_name.as_deref(),
-                );
-                let out_path = Path::new(&dir).join(format!("{module_name}{suffix}"));
+                let out_path = package_output_path(source_path, &dir, &suffix);
                 let mut output_opts = compiler_opts.clone();
                 output_opts.output_path = Some(out_path.clone());
                 output_opts.output_module_format = Some(format);
@@ -828,12 +823,7 @@ fn write_precompiled_outputs(source_path: &Path, js: &str, opts: &Options) -> Re
     if !opts.package_outputs.is_empty() {
         for spec in &opts.package_outputs {
             if let Some((_format, dir, suffix)) = parse_package_output(spec) {
-                let module_name = module_name_for_file(
-                    source_path,
-                    opts.namespace.as_deref(),
-                    opts.module_name.as_deref(),
-                );
-                let out_path = Path::new(&dir).join(format!("{module_name}{suffix}"));
+                let out_path = package_output_path(source_path, &dir, &suffix);
                 if let Some(parent) = out_path.parent() {
                     fs::create_dir_all(parent)?;
                 }
@@ -886,30 +876,35 @@ fn parse_module_format(module_system: &str) -> Option<ModuleFormat> {
     }
 }
 
-fn module_name_for_file(path: &Path, ns: Option<&str>, override_name: Option<&str>) -> String {
-    if let Some(name) = override_name {
-        return name.to_string();
-    }
-    let stem = path
+// compiler/core/lam_compile_main.ml:484-492 uses the output-prefix basename,
+// not the capitalized module identity. Ext_namespace.change_ext_ns_suffix
+// (compiler/ext/ext_namespace.ml:33-35) strips only the last namespace suffix.
+fn package_output_path(source_path: &Path, directory: &str, suffix: &str) -> PathBuf {
+    let stem = source_path
         .file_stem()
         .and_then(|s| s.to_str())
         .unwrap_or("Module");
-    let base = if let Some(ns) = ns {
-        if ns.is_empty() {
-            stem.to_string()
-        } else {
-            format!("{stem}-{ns}")
-        }
-    } else {
-        stem.to_string()
-    };
-    capitalize(&base)
+    let basename = stem.rsplit_once('-').map_or(stem, |(base, _)| base);
+    Path::new(directory).join(format!("{basename}{suffix}"))
 }
 
-fn capitalize(s: &str) -> String {
-    let mut chars = s.chars();
-    match chars.next() {
-        None => String::new(),
-        Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn package_outputs_preserve_source_case_and_strip_namespace_suffix() {
+        for (source, expected) in [
+            ("src/lower_case.res", "out/lower_case.mjs"),
+            ("src/mixedCase.res", "out/mixedCase.mjs"),
+            ("src/UpperCase.res", "out/UpperCase.mjs"),
+            ("src/lower_case-Namespace.res", "out/lower_case.mjs"),
+            ("src/first-part-Namespace.res", "out/first-part.mjs"),
+        ] {
+            assert_eq!(
+                package_output_path(Path::new(source), "out", ".mjs"),
+                Path::new(expected)
+            );
+        }
     }
 }

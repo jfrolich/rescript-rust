@@ -1,0 +1,126 @@
+name: Rust rewrite validation
+
+on:
+  pull_request:
+    branches:
+      - ocaml-to-rust-rewrite
+      - type-mutation-journal
+      - layout-typecheck-performance
+
+permissions:
+  contents: read
+
+concurrency:
+  group: rust-rewrite-validation-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  release-parity:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    env:
+      RUST_BACKTRACE: "1"
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Test parity failure reporting
+        run: |
+          python3 scripts/test_js_output_fixture_reporting.py
+          python3 scripts/test_typedtree_parity_exit.py
+
+      # This is the toolchain used by the release parity measurements. The
+      # crate's minimum supported version is not the validation toolchain.
+      - uses: dtolnay/rust-toolchain@1.93.1
+
+      - uses: actions/cache/restore@v5
+        id: rust-cache
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            compiler-rust/target
+            rewatch/target
+          key: rewrite-release-${{ runner.os }}-${{ hashFiles('compiler-rust/Cargo.lock', 'rewatch/Cargo.lock') }}-${{ github.sha }}
+          restore-keys: |
+            rewrite-release-${{ runner.os }}-${{ hashFiles('compiler-rust/Cargo.lock', 'rewatch/Cargo.lock') }}-
+
+      - uses: ./.github/actions/setup-node
+      - uses: ./.github/actions/setup-linux-dependencies
+      - uses: ./.github/actions/setup-ocaml
+        with:
+          compiler: "5.3.0"
+          os: ubuntu-24.04
+          cache-prefix: opam-rewrite-validation-v1
+
+      - name: Build native reference compiler and libraries
+        run: opam exec -- make lib
+
+      - name: Build release Rust compiler and build system
+        id: rust-build
+        run: |
+          cargo build --release --locked --manifest-path compiler-rust/Cargo.toml
+          cargo build --release --locked --manifest-path rewatch/Cargo.toml
+
+      - name: Compare exact CLI output filenames and marshal debug output
+        run: |
+          python3 scripts/test_bsc_output_filenames.py
+          python3 scripts/test_marshal_debug_flags.py
+
+      - name: Build native test corpus for compiler unit fixtures
+        id: fixtures
+        run: |
+          RESCRIPT_BSC_EXE="$PWD/_build/install/default/bin/bsc" \
+          RESCRIPT_RUNTIME="$PWD/packages/@rescript/runtime" \
+            ./rewatch/target/release/rescript build tests/tests
+
+      # The suite includes subprocess timing assertions. Run tests serially so
+      # those benchmarks do not compete with one another for CPU time.
+      - name: Test release Rust compiler
+        run: cargo test --release --locked --manifest-path compiler-rust/Cargo.toml -- --test-threads=1
+
+      - name: Test release build system
+        if: ${{ !cancelled() && steps.fixtures.outcome == 'success' }}
+        run: cargo test --release --locked --manifest-path rewatch/Cargo.toml
+
+      - name: Typedtree parity
+        if: ${{ !cancelled() && steps.fixtures.outcome == 'success' }}
+        run: ./scripts/test_typedtree_parity.sh --release --parallel 2
+
+      - name: Raw Lambda parity
+        if: ${{ !cancelled() && steps.fixtures.outcome == 'success' }}
+        run: ./scripts/test_lambda_parity.sh --release --raw --parallel 2
+
+      - name: Optimized Lambda parity
+        if: ${{ !cancelled() && steps.fixtures.outcome == 'success' }}
+        run: ./scripts/test_lambda_parity.sh --release --parallel 2
+
+      - name: JavaScript output parity
+        if: ${{ !cancelled() && steps.fixtures.outcome == 'success' }}
+        run: ./scripts/test_js_output_parity.sh --release
+
+      - name: Diagnostic parity
+        if: ${{ !cancelled() && steps.fixtures.outcome == 'success' }}
+        # Compare normal user-facing errors, not runtime-specific backtraces.
+        run: env -u OCAMLRUNPARAM -u RUST_BACKTRACE ./scripts/test_error_output_parity.sh --release
+
+      # Keep successful build artifacts even when a later assertion fails.
+      # The job still fails; this only avoids rebuilding unchanged code.
+      - uses: actions/cache/save@v5
+        if: ${{ !cancelled() && steps.rust-build.outcome == 'success' && steps.rust-cache.outputs.cache-hit != 'true' }}
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            compiler-rust/target
+            rewatch/target
+          key: ${{ steps.rust-cache.outputs.cache-primary-key }}
+
+      - name: Preserve failed parity diagnostics
+        if: ${{ failure() }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: parity-diagnostics-${{ github.event.pull_request.number }}
+          path: .parity-cache
+          include-hidden-files: true
+          if-no-files-found: ignore
+          retention-days: 7

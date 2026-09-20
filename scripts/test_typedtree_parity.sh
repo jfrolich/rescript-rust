@@ -736,6 +736,11 @@ if [[ "$RUST_AVAILABLE" == "true" && -n "$PARITY_FAILURES" && "$PARITY_FAIL" -gt
 fi
 
 # Calculate and display parity percentage
+# A matching subset is not a successful parity run when either compiler failed.
+if [[ "$OCAML_FAIL" -gt 0 || ("$RUST_AVAILABLE" == "true" && ("$RUST_FAIL" -gt 0 || "$PARITY_FAIL" -gt 0)) ]]; then
+    exit 1
+fi
+
 if [[ "$RUST_AVAILABLE" == "true" ]]; then
     # Only count files where both compilers succeeded
     BOTH_SUCCEEDED=$((PARITY_PASS + PARITY_FAIL))
