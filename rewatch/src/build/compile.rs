@@ -3392,7 +3392,7 @@ fn compile_module_in_process_to_js_boundary(
         let recorded = timings.recorded();
         let overhead = wall.saturating_sub(recorded);
         eprintln!(
-            "[module-timing] module={} package={} wall_ms={:.3} parse_ms={:.3} env_setup_ms={:.3} typecheck_ms={:.3} signature_publish_ms={:.3} lambda_ms={:.3} lambda_optimization_ms={:.3} gentype_ms={:.3} codegen_ms={:.3} overhead_ms={:.3}",
+            "[module-timing] module={} package={} wall_ms={:.3} parse_ms={:.3} env_setup_ms={:.3} typecheck_ms={:.3} signature_publish_ms={:.3} lambda_ms={:.3} lambda_optimization_ms={:.3} gentype_ms={:.3} codegen_ms={:.3} overhead_ms={:.3} end_epoch_ms={:.3}",
             module_name,
             package.name,
             duration_ms(wall),
@@ -3404,7 +3404,11 @@ fn compile_module_in_process_to_js_boundary(
             duration_ms(lambda_optimization),
             duration_ms(gentype),
             duration_ms(codegen),
-            duration_ms(overhead)
+            duration_ms(overhead),
+            // Wall-clock end, so profiler samples can be attributed to one module.
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0.0, |elapsed| elapsed.as_secs_f64() * 1000.0)
         );
     }
 

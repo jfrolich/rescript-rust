@@ -111,6 +111,7 @@ struct Options {
     noassert: bool,
     transparent_modules: bool,
     no_builtin_ppx: bool,
+    builtin_spice_ppx: bool,
     external_ppxs: Vec<String>,
     gentype: bool,
     gentype_flags: rescript_compiler::gentype::config::FlagState,
@@ -285,6 +286,9 @@ fn run() -> Result<()> {
                 // parses -noassert into Clflags.noassert.
                 "-noassert" => opts.noassert = true,
                 "-bs-no-builtin-ppx" => opts.no_builtin_ppx = true,
+                // Run the configured in-process Spice mapper, as rewatch does
+                // when a project selects the Spice PPX (used for profiling).
+                "-bs-builtin-spice-ppx" => opts.builtin_spice_ppx = true,
                 "-bs-gentype" => opts.gentype = true,
                 // Mirrors compiler/bsc/rescript_compiler_main.ml:300-343.
                 "-bs-gentype-module" => {
@@ -468,7 +472,7 @@ fn run() -> Result<()> {
         transparent_modules: opts.transparent_modules,
         no_builtin_ppx: opts.no_builtin_ppx,
         // Standalone -ppx commands run externally, not through the in-process mapper.
-        spice_ppx: false,
+        spice_ppx: opts.builtin_spice_ppx,
         external_ppxs: opts.external_ppxs.clone(),
         nopervasives: opts.nopervasives,
         module_name: opts.module_name.clone(),
