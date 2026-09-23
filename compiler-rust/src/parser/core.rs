@@ -175,9 +175,11 @@ pub mod recover {
         }
 
         // Case 2: should abort list parse
+        // OCaml `skip_tokens_and_maybe_retry` (compiler/syntax/src/res_core.ml:1354-1365)
+        // consumes the token before retrying; retrying in place recurses forever.
         if should_abort_list_parse(p) {
-            // If current token can start our grammar, retry without advancing
             if is_start_of_grammar(&p.token) {
+                p.next();
                 return true;
             }
             return false;

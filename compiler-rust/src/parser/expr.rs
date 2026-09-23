@@ -4326,7 +4326,7 @@ fn parse_expr_block(p: &mut Parser<'_>) -> Expression {
     // This allows should_abort_list_parse to detect } as a block terminator
     p.leave_breadcrumb(Grammar::ExprBlock);
     // Parse the block body - this handles building the proper nesting for let/module/open/exception
-    let body = parse_block_body(p);
+    let body = parse_block_body_first(p);
 
     p.eat_breadcrumb();
     // Don't expect Rbrace here - caller will do that
@@ -4346,7 +4346,7 @@ fn parse_block_expr(p: &mut Parser<'_>, start_pos_idx: PosIdx) -> Expression {
     // OCaml: leave_breadcrumb ExprBlock - critical for error recovery
     p.leave_breadcrumb(Grammar::ExprBlock);
     // Parse the block body - this handles building the proper nesting for let/module/open/exception
-    let body = parse_block_body(p);
+    let body = parse_block_body_first(p);
 
     p.eat_breadcrumb();
     p.expect(Token::Rbrace);
@@ -4373,6 +4373,21 @@ fn parse_block_expr(p: &mut Parser<'_>, start_pos_idx: PosIdx) -> Expression {
 /// Returns None if the block is empty, Some(expr) otherwise.
 /// This properly nests let/module/open/exception with their continuation as the body.
 fn parse_block_body(p: &mut Parser<'_>) -> Option<Expression> {
+    // Continuation items: OCaml only continues a block when
+    // `Grammar.is_block_expr_start` holds (compiler/syntax/src/res_core.ml:3630-3650),
+    // and that predicate excludes `type` (res_grammar.ml:266-273). Only the first
+    // item of a block reaches the `Typ` branch of `parse_expr_block_item`.
+    while p.token == Token::Semicolon {
+        p.next();
+    }
+    if !grammar::is_block_expr_start(&p.token) {
+        return None;
+    }
+    parse_block_body_first(p)
+}
+
+/// First item of a block: OCaml `parse_expr_block` parses one item unconditionally.
+fn parse_block_body_first(p: &mut Parser<'_>) -> Option<Expression> {
     // Skip leading semicolons
     while p.token == Token::Semicolon {
         p.next();
@@ -4443,9 +4458,7 @@ fn parse_block_body(p: &mut Parser<'_>) -> Option<Expression> {
     //   (important for cases like `else` following an if-then block)
     // - if attrs were present, continue and let parse_expr produce diagnostics
     //   for invalid constructs (matches OCaml's parse_expr_block_item flow)
-    if attrs.is_empty() && !grammar::is_block_expr_start(&p.token) {
-        return None;
-    }
+
 
     // Upstream #8348: break/continue as block items.
     if matches!(p.token, Token::Break | Token::Continue) {
@@ -4658,77 +4671,13 @@ fn parse_block_body(p: &mut Parser<'_>) -> Option<Expression> {
             }
         }
         Token::Typ => {
-            // Type definitions are not allowed inside blocks/functions in ReScript
-            // OCaml: parse the type definition first to get the correct error location,
-            // then emit the error and continue parsing
+            // OCaml `parse_expr_block_item` (compiler/syntax/src/res_core.ml:3637-3646):
+            // parse the definition for a good error location, then report it.
             let type_start = p.start_pos.clone();
+            let type_start_idx = p.start_pos_idx();
             p.begin_region();
-            p.next(); // consume 'type'
-
-            // Skip the entire type definition to get its end position
-            // Type definition format: type [rec] name [<params>] = body [and ...]
-            // Skip 'rec' if present
-            if p.token == Token::Rec {
-                p.next();
-            }
-            // Skip type name (identifier)
-            if matches!(p.token, Token::Lident(_)) {
-                p.next();
-            }
-            // Skip type parameters <'a, 'b> if present
-            if p.token == Token::LessThan {
-                let mut depth = 1;
-                p.next();
-                while depth > 0 && p.token != Token::Eof {
-                    match p.token {
-                        Token::LessThan => depth += 1,
-                        Token::GreaterThan => depth -= 1,
-                        _ => {}
-                    }
-                    p.next();
-                }
-            }
-            // Skip = and the type body
-            if p.token == Token::Equal {
-                p.next();
-                // Skip until we hit a newline, semicolon, closing brace, or a new statement keyword
-                // The type body can contain identifiers, dots, angle brackets, etc.
-                let mut brace_depth = 0;
-                let mut paren_depth = 0;
-                let mut angle_depth = 0;
-                while p.token != Token::Eof {
-                    // Track nesting
-                    match &p.token {
-                        Token::Lbrace => brace_depth += 1,
-                        Token::Rbrace if brace_depth > 0 => brace_depth -= 1,
-                        Token::Rbrace => break, // End of enclosing block
-                        Token::Lparen => paren_depth += 1,
-                        Token::Rparen if paren_depth > 0 => paren_depth -= 1,
-                        Token::LessThan => angle_depth += 1,
-                        Token::GreaterThan if angle_depth > 0 => angle_depth -= 1,
-                        _ => {}
-                    }
-                    // Stop at statement boundaries (outside of nested structures)
-                    if brace_depth == 0 && paren_depth == 0 && angle_depth == 0 {
-                        match &p.token {
-                            Token::Let { .. }
-                            | Token::Module
-                            | Token::Open
-                            | Token::External
-                            | Token::Exception => break,
-                            _ => {}
-                        }
-                        // Stop at line break (implicit statement separator)
-                        // prev_end_pos.line < start_pos.line means there was a newline
-                        if p.prev_end_pos.line < p.start_pos.line {
-                            break;
-                        }
-                    }
-                    p.next();
-                }
-            }
+            let _ = super::module::parse_type_definition_or_extension(p, &attrs, type_start_idx);
             p.end_region();
-            // Emit error at the type definition location
             p.err_at(
                 type_start,
                 p.prev_end_pos.clone(),
@@ -4736,9 +4685,8 @@ fn parse_block_body(p: &mut Parser<'_>) -> Option<Expression> {
                     super::core::error_messages::TYPE_DEFINITION_IN_FUNCTION.to_string(),
                 ),
             );
-            // Parse the next semicolon/newline if present, then continue
             parse_newline_or_semicolon_expr_block(p);
-            return parse_block_body(p);
+            return parse_block_body_first(p);
         }
         _ => {
             let mut expr = parse_expr(p);
@@ -4796,7 +4744,6 @@ fn parse_let_in_block_with_continuation_and_attrs(
     } else {
         p.start_pos_idx()
     };
-    let start_pos_idx = p.start_pos_idx();
 
     // Consume let token
     let unwrap = match &p.token {
@@ -4816,158 +4763,27 @@ fn parse_let_in_block_with_continuation_and_attrs(
         RecFlag::Nonrecursive
     };
 
-    // Parse first binding
-    let mut bindings = vec![];
-    let first_pat = super::pattern::parse_pattern(p);
-
-    // Parse an ordinary pattern constraint or the current-Parsetree value
-    // constraint used by `let x: type a. t = expr`.
-    let (first_pat, first_constraint) = if p.token == Token::Colon {
-        p.next();
-        if p.token == Token::Typ {
-            p.next();
-            let pvc_newtypes = parse_lident_list(p);
-            p.expect(Token::Dot);
-            let pvc_type = super::typ::parse_typ_expr(p);
-            let pvc_type = p.arena_mut().push_core_type(pvc_type);
-            (
-                first_pat,
-                Some(crate::parser::ast::ValueConstraint {
-                    pvc_newtypes,
-                    pvc_type,
-                    pvc_pattern: None,
-                    pvc_expression: None,
-                }),
-            )
-        } else {
-            let typ = super::typ::parse_poly_type_expr(p);
-            let loc = p.mk_loc_spanning(first_pat.ppat_loc, typ.ptyp_loc);
-            let pat_idx = p.arena_mut().push_pat(first_pat);
-            let typ_idx = p.arena_mut().push_core_type(typ);
-            (
-                Pattern {
-                    ppat_desc: Box::new(PatternDesc::Ppat_constraint(Box::new((pat_idx, typ_idx)))),
-                    ppat_loc: loc,
-                    ppat_attributes: Attributes::new(),
-                },
-                None,
-            )
-        }
-    } else {
-        (first_pat, None)
-    };
-
-    p.expect(Token::Equal);
-    let first_value = parse_expr(p);
-    let first_loc = p.mk_loc_idx_to_prev_end(binding_start_pos_idx);
-
-    // Combine leading_attrs with let.unwrap attribute if this is let?
-    let first_attrs = if unwrap {
-        let mut attrs = leading_attrs;
-        let unwrap_loc = p.mk_loc_idx(start_pos_idx, let_end_pos_idx);
-        let unwrap_idx = p.arena_mut().intern("let.unwrap");
-        attrs.push((
-            with_loc(unwrap_idx, unwrap_loc),
-            Payload::PStr(Box::new(vec![])),
-        ));
-        attrs
-    } else {
-        leading_attrs
-    };
-
-    let first_pat_idx = p.arena_mut().push_pat(first_pat);
-    let first_value_idx = p.arena_mut().push_expr(first_value);
-    if let Some(first_constraint) = first_constraint
-        && let Err(loc) = p.arena_mut().set_value_constraint(
-            first_pat_idx,
-            first_constraint,
-            first_value_idx,
-            first_loc,
-        )
-    {
+    // OCaml `parse_let_bindings` (compiler/syntax/src/res_core.ml:2790-2825) is
+    // shared by structure items and block items.
+    if rec_flag == RecFlag::Recursive && unwrap {
+        let start = p.arena().get_position(binding_start_pos_idx).clone();
         p.err_at(
-            p.loc_start(loc),
-            p.loc_end(loc),
-            DiagnosticCategory::FatalSyntaxerr,
+            start,
+            p.start_pos.clone(),
+            DiagnosticCategory::Message(
+                "let? is not allowed to be recursive. Use a regular `let` or remove `rec`."
+                    .to_string(),
+            ),
         );
     }
-    bindings.push(ValueBinding {
-        pvb_pat: first_pat_idx,
-        pvb_expr: first_value_idx,
-        pvb_attributes: first_attrs,
-        pvb_loc: first_loc,
-    });
-
-    // Parse additional bindings with 'and'
-    while p.token == Token::And {
-        // Capture start position BEFORE consuming `and`
-        let binding_start_idx = p.start_pos_idx();
-        p.next();
-        let pat = super::pattern::parse_pattern(p);
-
-        let (pat, value_constraint) = if p.token == Token::Colon {
-            p.next();
-            if p.token == Token::Typ {
-                p.next();
-                let pvc_newtypes = parse_lident_list(p);
-                p.expect(Token::Dot);
-                let pvc_type = super::typ::parse_typ_expr(p);
-                let pvc_type = p.arena_mut().push_core_type(pvc_type);
-                (
-                    pat,
-                    Some(crate::parser::ast::ValueConstraint {
-                        pvc_newtypes,
-                        pvc_type,
-                        pvc_pattern: None,
-                        pvc_expression: None,
-                    }),
-                )
-            } else {
-                let typ = super::typ::parse_poly_type_expr(p);
-                let loc = p.mk_loc_spanning(pat.ppat_loc, typ.ptyp_loc);
-                let pat_idx = p.arena_mut().push_pat(pat);
-                let typ_idx = p.arena_mut().push_core_type(typ);
-                (
-                    Pattern {
-                        ppat_desc: Box::new(PatternDesc::Ppat_constraint(Box::new((
-                            pat_idx, typ_idx,
-                        )))),
-                        ppat_loc: loc,
-                        ppat_attributes: Attributes::new(),
-                    },
-                    None,
-                )
-            }
-        } else {
-            (pat, None)
-        };
-
-        p.expect(Token::Equal);
-        let value = parse_expr(p);
-        let binding_loc = p.mk_loc_idx_to_prev_end(binding_start_idx);
-        let pat_idx = p.arena_mut().push_pat(pat);
-        let value_idx = p.arena_mut().push_expr(value);
-        if let Some(value_constraint) = value_constraint
-            && let Err(loc) = p.arena_mut().set_value_constraint(
-                pat_idx,
-                value_constraint,
-                value_idx,
-                binding_loc,
-            )
-        {
-            p.err_at(
-                p.loc_start(loc),
-                p.loc_end(loc),
-                DiagnosticCategory::FatalSyntaxerr,
-            );
-        }
-        bindings.push(ValueBinding {
-            pvb_pat: pat_idx,
-            pvb_expr: value_idx,
-            pvb_attributes: Attributes::new(),
-            pvb_loc: binding_loc,
-        });
-    }
+    let (bindings, _) = super::module::parse_let_bindings(
+        p,
+        binding_start_pos_idx,
+        let_end_pos_idx,
+        rec_flag,
+        leading_attrs,
+        unwrap,
+    );
 
     // Check consecutive expressions
     parse_newline_or_semicolon_expr_block(p);
@@ -6076,6 +5892,11 @@ fn parse_switch_case_block(p: &mut Parser<'_>) -> Expression {
     // emits the unexpected-token diagnostic and performs generic recovery.
     let result = match parse_switch_case_body(p) {
         Some(expr) => expr,
+        // `parse_expr_block_item`'s `Typ` branch (res_core.ml:3637-3646) applies to
+        // the first RHS item too.
+        None if p.token == Token::Typ => {
+            parse_block_body_first(p).unwrap_or_else(|| recover::default_expr(p.arena_mut()))
+        }
         None => {
             let expr = parse_expr_with_context(p, ExprContext::SwitchCaseRhs);
             parse_newline_or_semicolon_expr_block(p);

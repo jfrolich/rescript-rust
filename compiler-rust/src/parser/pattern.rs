@@ -856,8 +856,8 @@ fn parse_atomic_pattern(p: &mut Parser<'_>) -> Pattern {
             // OCaml: | token -> Parser.err p ...; match skip_tokens_and_maybe_retry ...
             p.err_unexpected();
             if recover::skip_tokens_and_maybe_retry(p, grammar::is_atomic_pattern_start) {
-                // Found a valid pattern start after skipping, retry parsing
-                parse_atomic_pattern(p)
+                // OCaml retries with the full `parse_pattern` (res_core.ml:1349).
+                parse_pattern(p)
             } else {
                 recover::default_pattern(p.arena_mut())
             }
