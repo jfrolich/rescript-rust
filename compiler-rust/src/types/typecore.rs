@@ -1966,7 +1966,7 @@ fn path_from_longident_persistent(lid: &Longident, arena: &ParseArena) -> Path {
 fn lookup_type_decl_in_unforced_module_decl(
     md: &crate::types::decl::ModuleDeclaration,
     type_name: &str,
-) -> Option<(Ident, crate::types::decl::TypeDeclaration)> {
+) -> Option<(Ident, Arc<crate::types::decl::TypeDeclaration>)> {
     let crate::types::decl::ModuleType::MtySignature(sig) = &md.md_type else {
         return None;
     };
@@ -2131,7 +2131,7 @@ pub(crate) fn resolve_type_constructor_path(
                     // translation window, read the already-computed module
                     // signature without forcing env.ml:781-813's component
                     // table; the queued pattern force runs that lookup later.
-                    return (Path::pdot(module_path, type_name.to_string()), Some(decl));
+                    return (Path::pdot(module_path, type_name.to_string()), Some((*decl).clone()));
                 }
             }
             if let Some(Some((mod_path, decl))) = with_resolved_module_components_for_lid(
@@ -2149,7 +2149,7 @@ pub(crate) fn resolve_type_constructor_path(
                         return Some((cached_path, (*decl).clone()));
                     }
                     components.lookup_type(type_name).map(|(id, decl)| {
-                        let decl = Arc::new(decl.clone());
+                        let decl = decl.clone();
                         tctx.type_ctx.register_resolved_module_type(
                             env.id(),
                             &module_path,
@@ -25780,7 +25780,7 @@ where
                 crate::types::decl::SignatureItem::SigType(id, decl, rec_status) => {
                     crate::types::decl::SignatureItem::SigType(
                         new_id.unwrap_or_else(|| id.clone()),
-                        copy_lookup_type_decl_with_paths(decl, ctx, cache, type_path, module_path),
+                        std::sync::Arc::new(copy_lookup_type_decl_with_paths(decl, ctx, cache, type_path, module_path)),
                         *rec_status,
                     )
                 }
@@ -30508,7 +30508,7 @@ fn strengthen_sig_for_module_access_path<'a>(
                 // declarations by adding a self manifest at `Pdot(p, id)`.
                 strengthened.push(crate::types::decl::SignatureItem::SigType(
                     id.clone(),
-                    strengthen_type_decl_for_module_access_path(ctx, module_access_path, id, decl),
+                    std::sync::Arc::new(strengthen_type_decl_for_module_access_path(ctx, module_access_path, id, decl)),
                     *rec_status,
                 ));
             }
@@ -31602,7 +31602,7 @@ fn lookup_type_in_resolved_path_with_cache_mode<'a>(
                     Some((
                         parent_module_path.clone(),
                         sig_id.clone(),
-                        Arc::new(sig_decl.clone()),
+                        sig_decl.clone(),
                     ))
                 }
                 _ => None,
@@ -31669,7 +31669,7 @@ fn lookup_type_in_resolved_path_with_cache_mode<'a>(
                 let result = (
                     parent_module_path.clone(),
                     id.clone(),
-                    Arc::new(decl.clone()),
+                    decl.clone(),
                 );
                 // OCaml compiler/ml/env.ml:800-813 qualified type lookup reaches
                 // component tables through env.ml:781-793 `find_module_descr`, while
@@ -31714,7 +31714,7 @@ fn lookup_type_decl_in_resolved_path_with_cache_mode<'a>(
                 crate::types::decl::SignatureItem::SigType(sig_id, sig_decl, _)
                     if sig_id.name() == type_name =>
                 {
-                    Some((sig_id.clone(), Arc::new(sig_decl.clone())))
+                    Some((sig_id.clone(), sig_decl.clone()))
                 }
                 _ => None,
             })
@@ -31760,7 +31760,7 @@ fn lookup_type_decl_in_resolved_path_with_cache_mode<'a>(
         cache_mode,
         |components| {
             components.lookup_type(type_name).map(|(id, decl)| {
-                let decl = Arc::new(decl.clone());
+                let decl = decl.clone();
                 // OCaml compiler/ml/env.ml:800-813 type lookup uses component
                 // descriptors from env.ml:781-793; explicit Rust probe callers
                 // keep that descriptor view out of the normal lookup cache.
@@ -32744,7 +32744,7 @@ fn lookup_type_decl_for_path_with_cache_mode<'a>(
             |components| {
                 components
                     .lookup_type(type_name)
-                    .map(|(_, decl)| Arc::new(decl.clone()))
+                    .map(|(_, decl)| decl.clone())
             },
         )
         .flatten()
@@ -32911,7 +32911,7 @@ fn lookup_type_decl_for_path_with_cache_mode<'a>(
                     Some(found) => found,
                     None => return None,
                 };
-                let decl = Arc::new(decl.clone());
+                let decl = decl.clone();
                 let self_manifest = decl
                     .type_manifest
                     .and_then(|manifest| {
@@ -33056,7 +33056,7 @@ fn lookup_type_decl_for_path_with_cache_mode<'a>(
                                 cache_mode,
                                 |components| {
                                     components.lookup_type(type_name.as_str()).map(|(_, decl)| {
-                                        let decl = Arc::new(decl.clone());
+                                        let decl = decl.clone();
                                         if cache_mode.publishes()
                                             && let Some(cache_key) = cache_key.as_deref()
                                         {

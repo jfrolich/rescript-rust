@@ -1031,9 +1031,9 @@ impl Env {
     // ========================================================================
 
     /// Add a type binding.
-    pub fn add_type(&mut self, id: Ident, decl: TypeDeclaration) {
+    pub fn add_type(&mut self, id: Ident, decl: impl Into<Arc<TypeDeclaration>>) {
         self.bump_id();
-        let decl = Arc::new(decl);
+        let decl = decl.into();
         self.types.add(id, decl);
     }
 
@@ -1325,7 +1325,7 @@ impl Env {
         &mut self,
         root: Path,
         values: Vec<(Ident, ValueDescription, i32)>,
-        types: Vec<(Ident, TypeDeclaration)>,
+        types: Vec<(Ident, Arc<TypeDeclaration>)>,
         constructors: Vec<(Ident, ConstructorDescription)>,
         labels: Vec<(Ident, LabelDescription)>,
         modules: Vec<(Ident, ModuleDeclaration, i32)>,
@@ -1356,7 +1356,7 @@ impl Env {
             root.clone(),
             types
                 .into_iter()
-                .map(|(id, decl)| (id, Arc::new(decl), crate::types::path::NOPOS))
+                .map(|(id, decl)| (id, decl, crate::types::path::NOPOS))
                 .collect(),
         );
         self.constrs.add_open_layer(

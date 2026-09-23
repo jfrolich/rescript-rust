@@ -2214,7 +2214,7 @@ fn strengthen_signature_for_module_access_path<'a>(
             }
             SignatureItem::SigType(id, decl, rec_status) => SignatureItem::SigType(
                 id.clone(),
-                strengthen_type_decl_for_module_access_path(ctx, module_access_path, id, decl),
+                std::sync::Arc::new(strengthen_type_decl_for_module_access_path(ctx, module_access_path, id, decl)),
                 *rec_status,
             ),
             SignatureItem::SigTypext(id, ext, ext_status) => {
@@ -2263,7 +2263,7 @@ fn lookup_component_module_sig_type<'a>(
     env: &super::env::Env,
     module_path: &Path,
     type_name: &str,
-) -> Option<(crate::ident::Ident, super::decl::TypeDeclaration)> {
+) -> Option<(crate::ident::Ident, Arc<super::decl::TypeDeclaration>)> {
     use super::decl::SignatureItem;
 
     if matches!(module_path, Path::Pdot(..) | Path::Papply(..)) {
@@ -2323,7 +2323,7 @@ fn lookup_raw_module_sig_type<'a>(
     env: &super::env::Env,
     module_path: &Path,
     type_name: &str,
-) -> Option<(crate::ident::Ident, super::decl::TypeDeclaration)> {
+) -> Option<(crate::ident::Ident, Arc<super::decl::TypeDeclaration>)> {
     use super::decl::SignatureItem;
 
     if let Some((id, decl)) = lookup_component_module_sig_type(ctx, env, module_path, type_name) {
@@ -2460,7 +2460,7 @@ fn resolve_type_item_through_env<'a>(
             if let Some((raw_id, raw_decl)) =
                 lookup_raw_module_sig_type(ctx, env, raw_module_path, type_name)
             {
-                return Some((raw_id, super::decl::TypeDeclarationRef::owned(raw_decl)));
+                return Some((raw_id, super::decl::TypeDeclarationRef::Shared(raw_decl)));
             }
         }
         if let Some(target_path) = alias_target_for_strengthening.as_ref() {
@@ -11586,7 +11586,7 @@ mod tests {
         ModuleDeclaration {
             md_type: ModuleType::MtySignature(std::sync::Arc::new(vec![SignatureItem::SigType(
                 type_id,
-                type_decl,
+                std::sync::Arc::new(type_decl),
                 RecStatus::TrecNot,
             )])),
             md_attributes: vec![],
@@ -11881,8 +11881,8 @@ mod tests {
             module_id.clone(),
             ModuleDeclaration {
                 md_type: ModuleType::MtySignature(std::sync::Arc::new(vec![
-                    SignatureItem::SigType(sibling_id.clone(), sibling_decl, RecStatus::TrecNot),
-                    SignatureItem::SigType(type_id, type_decl, RecStatus::TrecNot),
+                    SignatureItem::SigType(sibling_id.clone(), std::sync::Arc::new(sibling_decl), RecStatus::TrecNot),
+                    SignatureItem::SigType(type_id, std::sync::Arc::new(type_decl), RecStatus::TrecNot),
                 ])),
                 md_attributes: vec![],
                 md_loc: crate::location::Location::none(),
@@ -11934,7 +11934,7 @@ mod tests {
             "Ownership",
             std::sync::Arc::new(vec![SignatureItem::SigType(
                 Ident::create_local("t"),
-                manifest_decl(manifest, Some(path.clone())),
+                std::sync::Arc::new(manifest_decl(manifest, Some(path.clone()))),
                 RecStatus::TrecNot,
             )]),
         );
@@ -11975,7 +11975,7 @@ mod tests {
             "ProbeOwnership",
             std::sync::Arc::new(vec![SignatureItem::SigType(
                 Ident::create_local("t"),
-                manifest_decl(manifest, None),
+                std::sync::Arc::new(manifest_decl(manifest, None)),
                 RecStatus::TrecNot,
             )]),
         );

@@ -775,7 +775,7 @@ impl<'a> TypeGraphSerializer<'a> {
     fn remap_sig_item(&mut self, item: &mut SignatureItem) {
         match item {
             SignatureItem::SigValue(_, vd) => self.remap_value_desc(vd),
-            SignatureItem::SigType(_, td, _) => self.remap_type_decl(td),
+            SignatureItem::SigType(_, td, _) => self.remap_type_decl(std::sync::Arc::make_mut(td)),
             SignatureItem::SigTypext(_, ec, _) => self.remap_ext_ctor(ec),
             SignatureItem::SigModule(_, md, _) => self.remap_module_decl(md),
             SignatureItem::SigModtype(_, mtd) => self.remap_modtype_decl(mtd),
@@ -1256,7 +1256,7 @@ fn remap_sig_item_refs(
 ) {
     match item {
         SignatureItem::SigValue(_, vd) => remap_value_desc_refs(vd, remap),
-        SignatureItem::SigType(_, td, _) => remap_type_decl_refs(td, remap, layout_remap),
+        SignatureItem::SigType(_, td, _) => remap_type_decl_refs(std::sync::Arc::make_mut(td), remap, layout_remap),
         SignatureItem::SigTypext(_, ec, _) => remap_ext_ctor_refs(ec, remap),
         SignatureItem::SigModule(_, md, _) => remap_module_decl_refs(md, remap, layout_remap),
         SignatureItem::SigModtype(_, mtd) => remap_modtype_decl_refs(mtd, remap, layout_remap),

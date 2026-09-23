@@ -100,7 +100,7 @@ impl<'a> SigReadContext<'a> {
                     let id = read_ident(&fields[0]);
                     let decl = self.read_type_declaration(&fields[1]);
                     let rec_status = read_rec_status(&fields[2]);
-                    SignatureItem::SigType(id, decl, rec_status)
+                    SignatureItem::SigType(id, std::sync::Arc::new(decl), rec_status)
                 }
                 2 => {
                     let id = read_ident(&fields[0]);

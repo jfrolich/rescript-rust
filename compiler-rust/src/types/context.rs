@@ -832,8 +832,8 @@ impl TypeContext {
 
     /// Register a type declaration for type alias expansion.
     /// Called when loading module signatures from CMI files.
-    pub fn register_type_decl(&self, name: &str, decl: super::decl::TypeDeclaration) {
-        self.register_shared_type_decl(name, Arc::new(decl));
+    pub fn register_type_decl(&self, name: &str, decl: impl Into<Arc<super::decl::TypeDeclaration>>) {
+        self.register_shared_type_decl(name, decl.into());
     }
 
     pub(crate) fn register_shared_type_decl(
@@ -847,8 +847,8 @@ impl TypeContext {
     }
 
     /// Register a type declaration by ident stamp for alias expansion.
-    pub fn register_type_decl_by_stamp(&self, stamp: i32, decl: super::decl::TypeDeclaration) {
-        self.register_shared_type_decl_by_stamp(stamp, Arc::new(decl));
+    pub fn register_type_decl_by_stamp(&self, stamp: i32, decl: impl Into<Arc<super::decl::TypeDeclaration>>) {
+        self.register_shared_type_decl_by_stamp(stamp, decl.into());
     }
 
     pub(crate) fn register_shared_type_decl_by_stamp(
@@ -902,8 +902,8 @@ impl TypeContext {
     }
 
     /// Register a type declaration by full qualified path string for alias expansion.
-    pub fn register_type_decl_by_path(&self, path: &str, decl: super::decl::TypeDeclaration) {
-        self.register_shared_type_decl_by_path(path, Arc::new(decl));
+    pub fn register_type_decl_by_path(&self, path: &str, decl: impl Into<Arc<super::decl::TypeDeclaration>>) {
+        self.register_shared_type_decl_by_path(path, decl.into());
     }
 
     pub(crate) fn register_shared_type_decl_by_path(
@@ -917,8 +917,8 @@ impl TypeContext {
     }
 
     /// Register a qualified declaration by exact Path identity.
-    pub fn register_type_decl_by_exact_path(&self, path: Path, decl: super::decl::TypeDeclaration) {
-        self.register_shared_type_decl_by_exact_path(path, Arc::new(decl));
+    pub fn register_type_decl_by_exact_path(&self, path: Path, decl: impl Into<Arc<super::decl::TypeDeclaration>>) {
+        self.register_shared_type_decl_by_exact_path(path, decl.into());
     }
 
     pub(crate) fn register_shared_type_decl_by_exact_path(

@@ -390,8 +390,9 @@ pub fn signature_mut(signature: &mut std::sync::Arc<Signature>) -> &mut Signatur
 pub enum SignatureItem {
     /// Value in signature
     SigValue(Ident, ValueDescription),
-    /// Type in signature
-    SigType(Ident, TypeDeclaration, RecStatus),
+    /// Type in signature. The declaration is shared like OCaml's immutable
+    /// record, so lookups can return it without copying.
+    SigType(Ident, std::sync::Arc<TypeDeclaration>, RecStatus),
     /// Type extension in signature
     SigTypext(Ident, ExtensionConstructor, ExtStatus),
     /// Module in signature

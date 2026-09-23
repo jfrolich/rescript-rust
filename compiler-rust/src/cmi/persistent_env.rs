@@ -2163,7 +2163,7 @@ fn register_sig_types_recursive<'a>(
                 let decl = if shared {
                     ctx.thread_store().shared_type_decl(decl)
                 } else {
-                    Arc::new(decl.clone())
+                    decl.clone()
                 };
                 ctx.register_shared_type_decl(id.name(), decl.clone());
                 // Also register by stamp for precise lookup when name is ambiguous (e.g., "t")
@@ -3161,7 +3161,7 @@ fn register_types_by_stamp_in_signature_recursive(
                     let decl = if shared {
                         ctx.thread_store().shared_type_decl(decl)
                     } else {
-                        Arc::new(decl.clone())
+                        decl.clone()
                     };
                     ctx.register_shared_type_decl_by_stamp(id.stamp(), decl);
                 }
@@ -3755,7 +3755,7 @@ fn substitute_sig_decl_paths_in_place_with_maps(sig_items: &mut [SignatureItem],
                 }
             }
             SignatureItem::SigType(_, decl, _) => {
-                if let Some(path) = decl.type_path.as_mut() {
+                if let Some(path) = std::sync::Arc::make_mut(decl).type_path.as_mut() {
                     *path = substitute_type_path(
                         path,
                         &maps.type_stamp_map,
@@ -4932,7 +4932,7 @@ pub fn rewrite_module_prefix_paths_in_sig(
                 }
             }
             SignatureItem::SigType(_, decl, _) => {
-                if let Some(path) = decl.type_path.as_mut() {
+                if let Some(path) = std::sync::Arc::make_mut(decl).type_path.as_mut() {
                     if let Some(rewritten) = rewrite_path_prefix(path, old_name, new_prefix) {
                         *path = rewritten;
                     }
@@ -4982,7 +4982,7 @@ pub fn rewrite_module_prefix_paths_in_sig_shallow(
                 }
             }
             SignatureItem::SigType(_, decl, _) => {
-                if let Some(path) = decl.type_path.as_mut()
+                if let Some(path) = std::sync::Arc::make_mut(decl).type_path.as_mut()
                     && let Some(rewritten) = rewrite_path_prefix(path, old_name, new_prefix)
                 {
                     *path = rewritten;
@@ -5343,7 +5343,7 @@ pub fn rewrite_sig_paths_by_path_prefix(
                 }
             }
             SignatureItem::SigType(_, decl, _) => {
-                if let Some(path) = decl.type_path.as_mut() {
+                if let Some(path) = std::sync::Arc::make_mut(decl).type_path.as_mut() {
                     if let Some(rewritten) =
                         rewrite_path_by_path_prefix(path, old_prefix, new_prefix)
                     {
@@ -5398,7 +5398,7 @@ pub fn rewrite_sig_paths_by_path_prefix_shallow(
                 }
             }
             SignatureItem::SigType(_, decl, _) => {
-                if let Some(path) = decl.type_path.as_mut()
+                if let Some(path) = std::sync::Arc::make_mut(decl).type_path.as_mut()
                     && let Some(rewritten) =
                         rewrite_path_by_path_prefix(path, old_prefix, new_prefix)
                 {
@@ -6138,8 +6138,9 @@ fn add_signature_to_env_with_options(
             }
             SignatureItem::SigType(id, decl, _rec_status) => {
                 // Add type binding with qualified path
-                let mut decl = decl.clone();
+                let mut decl = (**decl).clone();
                 decl.type_path = Some(Path::pdot(module_path.clone(), id.name()));
+                let decl = Arc::new(decl);
                 if as_opened {
                     opened_types.push((id.clone(), decl.clone()));
                 } else {
@@ -6148,11 +6149,10 @@ fn add_signature_to_env_with_options(
 
                 // Also register in global type store for alias expansion
                 if register_loaded_types {
-                    let shared_decl = Arc::new(decl.clone());
-                    ctx.register_shared_type_decl(id.name(), shared_decl.clone());
+                    ctx.register_shared_type_decl(id.name(), decl.clone());
                     // Register by stamp for types from CMI modules (non-zero stamp)
                     if id.stamp() != 0 {
-                        ctx.register_shared_type_decl_by_stamp(id.stamp(), shared_decl);
+                        ctx.register_shared_type_decl_by_stamp(id.stamp(), decl.clone());
                     }
                 }
 

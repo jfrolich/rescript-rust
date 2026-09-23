@@ -957,7 +957,7 @@ impl QualifiedModuleComponents {
         built
     }
 
-    pub(crate) fn lookup_type(&self, name: &str) -> Option<(&Ident, &TypeDeclaration)> {
+    pub(crate) fn lookup_type(&self, name: &str) -> Option<(&Ident, &Arc<TypeDeclaration>)> {
         let idx = self.cached_type_index(name)?;
         match &self.signature[idx] {
             SignatureItem::SigType(id, decl, _) => Some((id, decl)),

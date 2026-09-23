@@ -3008,7 +3008,7 @@ fn substitute_module_type_paths_no_freshen(
                     ),
                     SignatureItem::SigType(id, decl, rec_status) => SignatureItem::SigType(
                         id.clone(),
-                        substitute_type_declaration_paths(type_ctx, decl, subst),
+                        std::sync::Arc::new(substitute_type_declaration_paths(type_ctx, decl, subst)),
                         *rec_status,
                     ),
                     SignatureItem::SigTypext(id, ext, ext_status) => SignatureItem::SigTypext(
@@ -5088,7 +5088,7 @@ mod tests {
             ),
             SignatureItem::SigType(
                 impl_type_id.clone(),
-                abstract_type_decl(Some(Path::pident(impl_type_id))),
+                std::sync::Arc::new(abstract_type_decl(Some(Path::pident(impl_type_id)))),
                 RecStatus::TrecNot,
             ),
         ];
@@ -5106,7 +5106,7 @@ mod tests {
                 },
                 RecStatus::TrecNot,
             ),
-            SignatureItem::SigType(sig_type_id, abstract_type_decl(None), RecStatus::TrecNot),
+            SignatureItem::SigType(sig_type_id, std::sync::Arc::new(abstract_type_decl(None)), RecStatus::TrecNot),
         ];
 
         let result = signatures(&type_ctx, &env, &sig_impl, &sig_sig);
@@ -5245,7 +5245,7 @@ mod tests {
             ),
             SignatureItem::SigType(
                 Ident::create_local("t"),
-                TypeDeclaration {
+                std::sync::Arc::new(TypeDeclaration {
                     type_params: vec![],
                     type_arity: 0,
                     type_kind: TypeKind::TypeAbstract,
@@ -5259,7 +5259,7 @@ mod tests {
                     type_representation: TypeRepresentation::Boxed,
                     type_inlined_types: vec![],
                     type_path: None,
-                },
+                }),
                 RecStatus::TrecNot,
             ),
         ];

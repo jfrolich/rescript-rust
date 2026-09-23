@@ -1644,7 +1644,7 @@ fn rewrite_included_signature_paths_to_local(
                 rewrite_included_type_decl_paths_to_local(
                     ctx,
                     id,
-                    decl,
+                    std::sync::Arc::make_mut(decl),
                     include_root_path,
                     include_alias_heads,
                     local_type_ids,
@@ -2059,7 +2059,7 @@ fn substitute_functor_param_in_signature(
                 SignatureItem::SigValue(id.clone(), copied_vd)
             }
             SignatureItem::SigType(id, decl, rec_status) => {
-                let mut copied_decl = decl.clone();
+                let mut copied_decl = (**decl).clone();
                 copied_decl.type_params = decl
                     .type_params
                     .iter()
@@ -2102,7 +2102,7 @@ fn substitute_functor_param_in_signature(
                         )
                     })
                     .collect();
-                SignatureItem::SigType(id.clone(), copied_decl, *rec_status)
+                SignatureItem::SigType(id.clone(), std::sync::Arc::new(copied_decl), *rec_status)
             }
             SignatureItem::SigTypext(id, ext, ext_status) => {
                 let mut copied_ext = ext.clone();
@@ -2307,7 +2307,7 @@ fn nondep_sig(
                 // OCaml: Ctype.nondep_type_decl env mid id (va = Co) d
                 let new_decl =
                     crate::types::ctype::nondep_type_decl(ctx, env, mid, id, true, decl)?;
-                result.push(SignatureItem::SigType(id.clone(), new_decl, *rs));
+                result.push(SignatureItem::SigType(id.clone(), std::sync::Arc::new(new_decl), *rs));
             }
             SignatureItem::SigTypext(id, ext, es) => {
                 // Simplified: try to remove dep from extension constructor
@@ -2649,7 +2649,7 @@ fn substitute_functor_param_aliases_in_signature(
                 SignatureItem::SigValue(id.clone(), copied_vd)
             }
             SignatureItem::SigType(id, decl, rec_status) => {
-                let mut copied_decl = decl.clone();
+                let mut copied_decl = (**decl).clone();
                 copied_decl.type_params = decl
                     .type_params
                     .iter()
@@ -2692,7 +2692,7 @@ fn substitute_functor_param_aliases_in_signature(
                         )
                     })
                     .collect();
-                SignatureItem::SigType(id.clone(), copied_decl, *rec_status)
+                SignatureItem::SigType(id.clone(), std::sync::Arc::new(copied_decl), *rec_status)
             }
             SignatureItem::SigTypext(id, ext, ext_status) => {
                 let mut copied_ext = ext.clone();
@@ -2873,7 +2873,7 @@ fn find_type_decl_for_path(
                         for item in sig_items.iter() {
                             if let SignatureItem::SigType(id, decl, _) = item {
                                 if id.name() == type_name.as_str() {
-                                    return Some(decl.clone());
+                                    return Some((**decl).clone());
                                 }
                             }
                         }
@@ -12320,7 +12320,7 @@ fn freshen_package_type_ids_in_module_type(
                     crate::types::decl::SignatureItem::SigType(id, decl, _) => {
                         if let Some(new_id) = fresh_type_ids.get(&id.stamp()) {
                             *id = new_id.clone();
-                            decl.type_path = Some(Path::pident(new_id.clone()));
+                            std::sync::Arc::make_mut(decl).type_path = Some(Path::pident(new_id.clone()));
                         }
                         for param in &decl.type_params {
                             rewrite_package_freshened_type_expr(
@@ -12339,12 +12339,12 @@ fn freshen_package_type_ids_in_module_type(
                             );
                         }
                         rewrite_package_freshened_type_kind(
-                            &mut decl.type_kind,
+                            &mut std::sync::Arc::make_mut(decl).type_kind,
                             ctx,
                             fresh_type_ids,
                             visited,
                         );
-                        for inlined in &mut decl.type_inlined_types {
+                        for inlined in &mut std::sync::Arc::make_mut(decl).type_inlined_types {
                             rewrite_package_freshened_type_inlined(
                                 inlined,
                                 ctx,
@@ -12457,7 +12457,7 @@ fn apply_package_constraints_to_module_type<'b>(
                     rewritten_sig.push(SignatureItem::SigValue(id.clone(), vd.clone()))
                 }
                 SignatureItem::SigType(id, td, rec_status) => {
-                    let mut td = td.clone();
+                    let mut td = (**td).clone();
                     if td.type_params.is_empty() {
                         if let Some((_, manifest_ty)) = constraints
                             .iter()
@@ -12466,7 +12466,7 @@ fn apply_package_constraints_to_module_type<'b>(
                             td.type_manifest = Some(*manifest_ty);
                         }
                     }
-                    rewritten_sig.push(SignatureItem::SigType(id.clone(), td, *rec_status));
+                    rewritten_sig.push(SignatureItem::SigType(id.clone(), std::sync::Arc::new(td), *rec_status));
                 }
                 SignatureItem::SigModule(id, md, rec_status) => {
                     let nested = nested_package_constraints(id.name(), constraints);
@@ -12911,11 +12911,11 @@ fn apply_with_type_constraints_to_module_type<'b>(
                             type_substs.insert(id.name().to_string(), constraint.manifest);
                         }
                         Some(constraint) => {
-                            let mut td = td.clone();
+                            let mut td = (**td).clone();
                             if td.type_params.is_empty() {
                                 td.type_manifest = Some(constraint.manifest);
                             }
-                            rewritten_sig.push(SignatureItem::SigType(id.clone(), td, *rec_status));
+                            rewritten_sig.push(SignatureItem::SigType(id.clone(), std::sync::Arc::new(td), *rec_status));
                         }
                         None => rewritten_sig.push(item.clone()),
                     }
@@ -13335,7 +13335,7 @@ fn resolve_with_constraint_target_in_sig(
                 return Some(ResolvedWithConstraintTarget::Type {
                     path: resolved_constraint_path(prefix, id),
                     id: id.clone(),
-                    decl: decl.clone(),
+                    decl: (**decl).clone(),
                 });
             }
             SignatureItem::SigModule(id, md, _) if id.name() == head.as_str() => {
@@ -14683,7 +14683,7 @@ fn specialize_functor_result_value_types(
                         }
                         SignatureItem::SigType(id, decl, rec_status) => {
                             let mut local_copy_cache = HashMap::new();
-                            let mut specialized_decl = decl.clone();
+                            let mut specialized_decl = (**decl).clone();
                             specialized_decl.type_params = decl
                                 .type_params
                                 .iter()
@@ -14730,7 +14730,7 @@ fn specialize_functor_result_value_types(
                                     )
                                 })
                                 .collect();
-                            SignatureItem::SigType(id.clone(), specialized_decl, *rec_status)
+                            SignatureItem::SigType(id.clone(), std::sync::Arc::new(specialized_decl), *rec_status)
                         }
                         SignatureItem::SigTypext(id, ext, ext_status) => {
                             let mut local_copy_cache = HashMap::new();
@@ -16033,7 +16033,7 @@ fn translate_module_type_to_decl_with_typed_hint<'a>(
                             sig_env.add_type(type_id.clone(), type_decl.clone());
                             items.push(SigItem::SigType(
                                 type_id,
-                                type_decl,
+                                std::sync::Arc::new(type_decl),
                                 rec_status_for_index(decl_idx),
                             ));
                             tctx.type_variables = saved_type_variables;
@@ -16497,7 +16497,7 @@ fn approx_modtype<'a>(
                         .into_iter()
                         .enumerate()
                     {
-                        items.push(SigItem::SigType(id, decl, sig_rec_status(*rec_flag, idx)));
+                        items.push(SigItem::SigType(id, std::sync::Arc::new(decl), sig_rec_status(*rec_flag, idx)));
                     }
                 }
                 PSigDesc::Psig_module(pmd) => {
@@ -16822,7 +16822,7 @@ pub(crate) fn decl_signature_from_typed_signature(
                 for (decl, status) in decls.iter().zip(statuses) {
                     out.push(SigItem::SigType(
                         decl.typ_id.clone(),
-                        decl.typ_type.clone(),
+                        std::sync::Arc::new(decl.typ_type.clone()),
                         status,
                     ));
                 }
@@ -17910,7 +17910,7 @@ where
                         for decl in decls {
                             sig_items.push(SigItem::SigType(
                                 decl.typ_id.clone(),
-                                decl.typ_type.clone(),
+                                std::sync::Arc::new(decl.typ_type.clone()),
                                 rec_status,
                             ));
                             if let Some(env_mut) = local_env.as_mut() {
@@ -20453,7 +20453,7 @@ pub fn type_structure<'a>(
                 // Register in signature
                 sig_items.push(crate::types::decl::SignatureItem::SigType(
                     type_id.clone(),
-                    decl,
+                    std::sync::Arc::new(decl),
                     crate::types::decl::RecStatus::TrecNot,
                 ));
 
@@ -20991,7 +20991,7 @@ fn type_structure_item<'a>(
 
                         let sig_item = crate::types::decl::SignatureItem::SigType(
                             type_id.clone(),
-                            decl,
+                            std::sync::Arc::new(decl),
                             crate::types::decl::RecStatus::TrecNot,
                         );
 
@@ -21136,7 +21136,7 @@ fn type_structure_item<'a>(
 
                         let sig_item = crate::types::decl::SignatureItem::SigType(
                             type_id.clone(),
-                            decl,
+                            std::sync::Arc::new(decl),
                             crate::types::decl::RecStatus::TrecNot,
                         );
 
@@ -23088,7 +23088,7 @@ fn type_structure_item<'a>(
                 .map(|((rec_status, typed_decl), decl)| {
                     crate::types::decl::SignatureItem::SigType(
                         typed_decl.typ_id.clone(),
-                        decl.clone(),
+                        std::sync::Arc::new(decl.clone()),
                         rec_status,
                     )
                 })
