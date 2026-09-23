@@ -1,0 +1,175 @@
+"""Differential verdict runner: OCaml bsc (oracle) vs Rust bsc.
+
+A *case* is a dict of file name -> source text. Files are compiled in the
+order given (put `.resi` before its `.res`, dependencies before dependents),
+each compiler in its own scratch directory so artifacts never leak between
+the two compilers.
+
+The primary property is verdict agreement (exit status class). Diagnostic
+text is compared as a secondary property.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import os
+import re
+import shutil
+import subprocess
+import tempfile
+from dataclasses import dataclass, field
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[2]
+OCAML_BSC = Path(os.environ.get("OCAML_BSC", ROOT / "_build/install/default/bin/bsc"))
+RUST_BSC = Path(
+    os.environ.get(
+        "RUST_BSC",
+        ROOT / "compiler-rust/target" / os.environ.get("RUST_TARGET", "release") / "bsc",
+    )
+)
+BELT_LIB = ROOT / "packages/@rescript/belt/lib/ocaml"
+DEFAULT_FLAGS = ["-w", "+A", "-bs-jsx", "4", "-color", "never", "-I", str(BELT_LIB)]
+TIMEOUT = float(os.environ.get("FUZZ_TIMEOUT", "10"))
+
+ANSI = re.compile(r"\x1b\[[0-9;]*m")
+
+
+@dataclass
+class Run:
+    status: str  # ok | error | crash | timeout
+    code: int
+    stderr: str
+
+
+@dataclass
+class Result:
+    kind: str  # same | rust_accepts | rust_rejects | crash | msg_diff | warn_diff
+    ocaml: list[Run] = field(default_factory=list)
+    rust: list[Run] = field(default_factory=list)
+    signature: str = ""
+
+    @property
+    def interesting(self) -> bool:
+        return self.kind != "same"
+
+
+def _classify(code: int, timed_out: bool) -> str:
+    if timed_out:
+        return "timeout"
+    if code == 0:
+        return "ok"
+    if code in (1, 2):
+        return "error"
+    return "crash"
+
+
+def _run(exe: Path, cwd: Path, name: str, flags: list[str]) -> Run:
+    try:
+        p = subprocess.run(
+            [str(exe), *flags, name],
+            cwd=cwd,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+            timeout=TIMEOUT,
+        )
+        code, err, to = p.returncode, p.stderr, False
+    except subprocess.TimeoutExpired as e:
+        code, err, to = -1, e.stderr or b"", True
+    text = ANSI.sub("", err.decode("utf-8", "replace"))
+    # Rust panics exit with 101; treat any panic text as a crash too.
+    status = _classify(code, to)
+    # Rust panics exit with 101; OCaml uncaught exceptions print "Fatal error".
+    if "panicked at" in text or "RUST_BACKTRACE" in text or "Fatal error: exception" in text:
+        status = "crash"
+    return Run(status, code, text)
+
+
+def _compile_all(exe: Path, case: dict[str, str], flags: list[str]) -> list[Run]:
+    d = Path(tempfile.mkdtemp(prefix="fz-"))
+    try:
+        for name, src in case.items():
+            (d / name).write_text(src)
+        runs = []
+        for name in case:
+            r = _run(exe, d, name, flags)
+            runs.append(r)
+            if r.status != "ok":
+                break
+        return runs
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def overall(runs: list[Run]) -> str:
+    for r in runs:
+        if r.status != "ok":
+            return r.status
+    return "ok"
+
+
+_HEADLINE_SKIP = re.compile(
+    r"^\s*(We've found a bug for you!|Syntax error!|Warning number \d+|[\w./-]+\.resi?:\d+.*|\d+ │.*|│.*|\s*)$"
+)
+
+
+def signature(stderr: str) -> str:
+    """Coarse error identity: first message line, with names/numbers masked."""
+    for line in stderr.splitlines():
+        if _HEADLINE_SKIP.match(line):
+            continue
+        s = line.strip()
+        s = re.sub(r"\d+", "N", s)
+        s = re.sub(r'"[^"]*"', '"_"', s)
+        s = re.sub(r"`[^`']*[`']", "`_`", s)
+        s = re.sub(r"(?<![A-Za-z])'[a-z_]\w*", "'a", s)
+        # mask capitalised names except the leading word of the sentence
+        s = re.sub(r"(?<=\S )[A-Z][\w.']*", "M", s)
+        # mask identifiers that directly follow a noun keyword
+        s = re.sub(r"\b(value|field|label|constructor|name|type|module|variable|tag|argument|signature)\s+[\w.'#]+",
+                   r"\1 _", s)
+        return s[:160]
+    return "<no message>"
+
+
+def compare(case: dict[str, str], flags: list[str] | None = None, check_text: bool = True) -> Result:
+    flags = flags or DEFAULT_FLAGS
+    o = _compile_all(OCAML_BSC, case, flags)
+    r = _compile_all(RUST_BSC, case, flags)
+    ov, rv = overall(o), overall(r)
+    sig = signature(o[-1].stderr) if ov != "ok" else ""
+    if "crash" in (rv,) or rv == "timeout":
+        kind = "crash"
+        sig = f"rust-{rv}: " + (signature(r[-1].stderr) if r else "")
+    elif ov in ("crash", "timeout"):
+        kind = "ocaml_crash"
+    elif ov != "ok" and rv == "ok":
+        kind = "rust_accepts"
+    elif ov == "ok" and rv != "ok":
+        kind = "rust_rejects"
+        sig = "rust: " + signature(r[-1].stderr)
+    elif not check_text:
+        kind = "same"
+    elif ov != "ok":
+        kind = "same" if _norm(o[-1].stderr) == _norm(r[-1].stderr) else "msg_diff"
+    else:
+        ow = "".join(x.stderr for x in o)
+        rw = "".join(x.stderr for x in r)
+        kind = "same" if _norm(ow) == _norm(rw) else "warn_diff"
+        if kind == "warn_diff":
+            sig = "warn: " + signature(ow or rw)
+    return Result(kind, o, r, sig)
+
+
+def _norm(s: str) -> str:
+    return s.strip()
+
+
+def case_hash(case: dict[str, str]) -> str:
+    h = hashlib.sha1()
+    for k, v in case.items():
+        h.update(k.encode())
+        h.update(b"\0")
+        h.update(v.encode())
+        h.update(b"\0")
+    return h.hexdigest()[:12]

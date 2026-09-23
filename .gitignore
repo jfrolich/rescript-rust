@@ -131,3 +131,4 @@ tests/tests/src/**/*.js
 # Parity test cache (generated diffs/summaries, inspected by LLM agents)
 .parity-cache/
 .claude
+.fuzz/
