@@ -5203,7 +5203,7 @@ fn type_pattern_construct(
     };
 
     Ok(Pattern::new(
-        PatternDesc::Tpat_construct(lid.clone(), cstr_desc, typed_args),
+        PatternDesc::Tpat_construct(lid.clone(), Arc::new(cstr_desc), typed_args),
         loc.clone(),
         expected_ty,
         tctx.type_ctx.store_typed_env(env),
@@ -5587,7 +5587,7 @@ fn type_pattern_record(
             };
             let some_cstr = make_some_constructor(ctx);
             Pattern::new(
-                PatternDesc::Tpat_construct(some_lid, some_cstr, vec![typed_inner]),
+                PatternDesc::Tpat_construct(some_lid, Arc::new(some_cstr), vec![typed_inner]),
                 parsed_pat.ppat_loc,
                 field_ty,
                 tctx.type_ctx.store_typed_env(env),
@@ -5633,7 +5633,7 @@ fn type_pattern_record(
                 }
             }
         }
-        typed_fields.push((field.lid, label_desc, typed_pat, field.opt));
+        typed_fields.push((field.lid, Arc::new(label_desc), typed_pat, field.opt));
     }
 
     if !has_dict_pattern_attr {
@@ -6061,7 +6061,7 @@ fn type_record_pat_rest(
     record_ty: TypeExprRef,
     lbl_pat_list: &[(
         Located<LidentIdx>,
-        crate::types::LabelDescription,
+        std::sync::Arc<crate::types::LabelDescription>,
         Pattern,
         bool,
     )],
@@ -10412,7 +10412,7 @@ fn check_partial_simple_rows(
                     .iter()
                     .any(|existing| existing.lbl_pos == label.lbl_pos)
                 {
-                    labels.push(label.clone());
+                    labels.push((**label).clone());
                 }
             }
         }
@@ -11933,7 +11933,7 @@ fn materialize_pattern_of_type(
                                 EnvRef(0),
                                 Attributes::new(),
                             );
-                            Some((lid, label, field, false))
+                            Some((lid, Arc::new(label), field, false))
                         })
                         .collect::<Option<Vec<_>>>()?;
                     Pattern::new(
@@ -12037,7 +12037,7 @@ fn materialize_unused_witness_inner(
             let name = format!("#${}{}", constructor_desc.cstr_name, *fresh_counter);
             *fresh_counter += 1;
             tctx.generated_pattern_constructors
-                .push((name.clone(), constructor_desc.clone()));
+                .push((name.clone(), (**constructor_desc).clone()));
             let items = items
                 .iter()
                 .map(|item| materialize_unused_witness_inner(tctx, env, item, fresh_counter))
@@ -12075,7 +12075,7 @@ fn materialize_unused_witness_inner(
                     let name = format!("#${}{}", label_desc.lbl_name, *fresh_counter);
                     *fresh_counter += 1;
                     tctx.generated_pattern_labels
-                        .push((name.clone(), label_desc.clone()));
+                        .push((name.clone(), (**label_desc).clone()));
                     PatternRecordField {
                         lid: Located::new(tctx.arena.push_typecheck_lident(&name), witness.pat_loc),
                         pat: materialize_unused_witness_inner(tctx, env, field, fresh_counter),
@@ -13452,7 +13452,7 @@ fn pressure_matrix_simple_match(left: &Pattern, right: &Pattern) -> bool {
 
 type PressureRecordField = (
     crate::types::typedtree::Loc<LidentIdx>,
-    crate::types::LabelDescription,
+    std::sync::Arc<crate::types::LabelDescription>,
     Pattern,
     bool,
 );
@@ -14085,7 +14085,7 @@ fn pressure_matrix_constructor_pattern(
         template.pat_loc,
     );
     let mut pattern = template.clone();
-    pattern.pat_desc = PatternDesc::Tpat_construct(lid, constructor, args);
+    pattern.pat_desc = PatternDesc::Tpat_construct(lid, Arc::new(constructor), args);
     pattern
 }
 
@@ -14210,14 +14210,11 @@ fn pressure_matrix_satisfiables(
                     wild(tctx, pattern)
                 } else if matches!(
                     &branches[0].0.pat_desc,
-                    PatternDesc::Tpat_construct(
-                        _,
-                        crate::types::ConstructorDescription {
-                            cstr_kind: crate::types::ConstructorKind::Extension(_),
-                            ..
-                        },
-                        _
-                    )
+                    PatternDesc::Tpat_construct(_, constructor, _)
+                        if matches!(
+                            constructor.cstr_kind,
+                            crate::types::ConstructorKind::Extension(_)
+                        )
                 ) {
                     wild(tctx, pressure_matrix_omega_pat())
                 } else {

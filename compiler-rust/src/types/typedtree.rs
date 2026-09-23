@@ -29,6 +29,7 @@ use crate::types::{
     ConstructorDescription, LabelDescription, Path, RowDesc, TypeExprRef, ValueDescription,
 };
 use std::ops::Deref;
+use std::sync::Arc;
 
 /// A located value (convenience alias).
 pub type Loc<T> = Located<T>;
@@ -221,7 +222,9 @@ pub enum PatternDesc {
     Tpat_tuple(Vec<Pattern>),
 
     /// Constructor: `C`, `C(P)`, `C(P1, ..., Pn)`.
-    Tpat_construct(Loc<LidentIdx>, ConstructorDescription, Vec<Pattern>),
+    /// The description is shared like OCaml's physical `constructor_description`
+    /// record, so pattern copies in exhaustiveness and matching stay cheap.
+    Tpat_construct(Loc<LidentIdx>, Arc<ConstructorDescription>, Vec<Pattern>),
 
     /// Variant: `` `A ``, `` `A(P) ``.
     Tpat_variant(String, Option<Box<Pattern>>, RowDescRef),
@@ -229,7 +232,7 @@ pub enum PatternDesc {
     /// Record: `{l1: P1, ..., ln: Pn}` or `{l1: P1, ..., _}`.
     /// The bool indicates whether the field is optional.
     Tpat_record(
-        Vec<(Loc<LidentIdx>, LabelDescription, Pattern, bool)>,
+        Vec<(Loc<LidentIdx>, Arc<LabelDescription>, Pattern, bool)>,
         ClosedFlag,
         Option<RecordPatternRest>,
     ),

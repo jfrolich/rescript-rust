@@ -8161,7 +8161,7 @@ impl<'a> RawLambdaConverter<'a> {
         match &pat.pat_desc {
             PatternDesc::Tpat_construct(_, cstr, args) => {
                 if repr_cstr.is_none() {
-                    *repr_cstr = Some(cstr.clone());
+                    *repr_cstr = Some((**cstr).clone());
                 }
                 match cstr.cstr_kind {
                     crate::types::ConstructorKind::Ordinary(reference) => {
@@ -12545,7 +12545,7 @@ mod tests {
         };
         let case = Case::simple(
             Pattern::new(
-                PatternDesc::Tpat_construct(lid, constructor, Vec::new()),
+                PatternDesc::Tpat_construct(lid, std::sync::Arc::new(constructor), Vec::new()),
                 LocIdx::none(),
                 crate::types::TypeExprRef(0),
                 EnvRef(0),

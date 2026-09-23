@@ -330,7 +330,7 @@ fn same_constructor(c1: &ConstructorDescription, c2: &ConstructorDescription) ->
 
 type RecordPatternField = (
     crate::parse_arena::Located<crate::parse_arena::LidentIdx>,
-    crate::types::LabelDescription,
+    std::sync::Arc<crate::types::LabelDescription>,
     Pattern,
     bool,
 );
@@ -536,20 +536,20 @@ fn orlub(p1: &Pattern, p2: &Pattern, q: &Pattern) -> Result<Pattern, Empty> {
 fn record_lubs(
     l1: &[(
         crate::parse_arena::Located<crate::parse_arena::LidentIdx>,
-        crate::types::LabelDescription,
+        std::sync::Arc<crate::types::LabelDescription>,
         Pattern,
         bool,
     )],
     l2: &[(
         crate::parse_arena::Located<crate::parse_arena::LidentIdx>,
-        crate::types::LabelDescription,
+        std::sync::Arc<crate::types::LabelDescription>,
         Pattern,
         bool,
     )],
 ) -> Result<
     Vec<(
         crate::parse_arena::Located<crate::parse_arena::LidentIdx>,
-        crate::types::LabelDescription,
+        std::sync::Arc<crate::types::LabelDescription>,
         Pattern,
         bool,
     )>,
@@ -557,7 +557,7 @@ fn record_lubs(
 > {
     type RecordField = (
         crate::parse_arena::Located<crate::parse_arena::LidentIdx>,
-        crate::types::LabelDescription,
+        std::sync::Arc<crate::types::LabelDescription>,
         Pattern,
         bool,
     );
@@ -836,13 +836,13 @@ fn all_record_args(
     pat_env: EnvRef,
     lbls: &[(
         crate::parse_arena::Located<crate::parse_arena::LidentIdx>,
-        crate::types::LabelDescription,
+        std::sync::Arc<crate::types::LabelDescription>,
         Pattern,
         bool,
     )],
 ) -> Vec<(
     crate::parse_arena::Located<crate::parse_arena::LidentIdx>,
-    crate::types::LabelDescription,
+    std::sync::Arc<crate::types::LabelDescription>,
     Pattern,
     bool,
 )> {
@@ -906,7 +906,7 @@ fn all_record_args(
             };
             let mut result: Vec<_> = all_labels
                 .iter()
-                .map(|lbl| (dummy_loc.clone(), lbl.clone(), omega(), first_opt))
+                .map(|lbl| (dummy_loc.clone(), std::sync::Arc::new(lbl.clone()), omega(), first_opt))
                 .collect();
             // Fill in the actual patterns from the provided fields
             for (id, lbl, pat, opt) in lbls {
@@ -976,13 +976,13 @@ fn may_compats(ps: &[Pattern], qs: &[Pattern]) -> bool {
 fn may_compats_record(
     l1: &[(
         crate::parse_arena::Located<crate::parse_arena::LidentIdx>,
-        crate::types::LabelDescription,
+        std::sync::Arc<crate::types::LabelDescription>,
         Pattern,
         bool,
     )],
     l2: &[(
         crate::parse_arena::Located<crate::parse_arena::LidentIdx>,
-        crate::types::LabelDescription,
+        std::sync::Arc<crate::types::LabelDescription>,
         Pattern,
         bool,
     )],
@@ -4728,7 +4728,7 @@ fn make_field_args(
 
 /// Get the declared constructor from a constructor pattern.
 /// Equivalent to OCaml's `get_key_constr`.
-fn get_key_constr(p: &Pattern) -> ConstructorDescription {
+fn get_key_constr(p: &Pattern) -> std::sync::Arc<ConstructorDescription> {
     match &p.pat_desc {
         PatternDesc::Tpat_construct(_, cstr, _) => cstr.clone(),
         _ => panic!("get_key_constr: not a construct pattern"),
@@ -5010,10 +5010,10 @@ fn divide_constructor(
     ctx_ref: &TypeContext,
     ctx: &[Ctx],
     pm: &PatternMatching,
-) -> Vec<(ConstructorDescription, MatchCell)> {
+) -> Vec<(std::sync::Arc<ConstructorDescription>, MatchCell)> {
     divide(
         |p, def, ctx_inner, args| make_constr_matching(ctx_ref, p, def, ctx_inner, args),
-        same_constructor,
+        |left, right| same_constructor(left, right),
         get_key_constr,
         get_args_constr,
         ctx,
@@ -5354,7 +5354,7 @@ fn divide_tuple(
 /// Equivalent to OCaml's `record_matching_line`.
 fn record_matching_line(
     num_fields: usize,
-    lbl_pat_list: &[(impl std::any::Any, LabelDescription, Pattern, bool)],
+    lbl_pat_list: &[(impl std::any::Any, std::sync::Arc<LabelDescription>, Pattern, bool)],
 ) -> Vec<Pattern> {
     let mut patv: Vec<Pattern> = (0..num_fields).map(|_| omega()).collect();
     for (_, lbl, pat, _) in lbl_pat_list {
@@ -5369,7 +5369,7 @@ fn record_matching_line_from_fields(
     num_fields: usize,
     fields: &[(
         crate::types::typedtree::Loc<crate::parse_arena::LidentIdx>,
-        LabelDescription,
+        std::sync::Arc<LabelDescription>,
         Pattern,
         bool,
     )],
@@ -6748,7 +6748,7 @@ fn complete_pats_constrs(ctx_ref: &TypeContext, pats: &[Pattern]) -> Vec<Pattern
             if matches!(cstr.cstr_kind, crate::types::ConstructorKind::Extension(_)) {
                 return Vec::new();
             }
-            let seen_constrs: Vec<ConstructorDescription> =
+            let seen_constrs: Vec<std::sync::Arc<ConstructorDescription>> =
                 pats.iter().map(get_key_constr).collect();
 
             // Get all constructors of the type from the environment
@@ -6788,7 +6788,7 @@ fn pat_of_constr(ex_pat: &Pattern, cstr: &ConstructorDescription) -> Pattern {
                 txt: crate::parse_arena::LidentIdx(0), // dummy
                 loc: LocIdx::none(),
             },
-            cstr.clone(),
+            std::sync::Arc::new(cstr.clone()),
             omegas(cstr.cstr_arity as usize),
         ),
         ..ex_pat.clone()
@@ -6961,7 +6961,7 @@ fn mk_failaction_pos(
     defs: &DefaultEnv,
 ) -> (
     Option<RawLambda>,
-    Vec<(ConstructorDescription, RawLambda)>,
+    Vec<(std::sync::Arc<ConstructorDescription>, RawLambda)>,
     Jumps,
 ) {
     let fail_pats = complete_pats_constrs(ctx_ref, seen);
@@ -6988,14 +6988,14 @@ fn scan_def(
     env: Vec<(Vec<Pattern>, i32)>,
     to_test: Vec<(Pattern, Vec<Ctx>)>,
     defs: &[(Matrix, i32)],
-) -> (Vec<(ConstructorDescription, RawLambda)>, Jumps) {
+) -> (Vec<(std::sync::Arc<ConstructorDescription>, RawLambda)>, Jumps) {
     if to_test.is_empty() || defs.is_empty() {
         // Fold env to build (klist, jumps)
-        let mut klist: Vec<(ConstructorDescription, RawLambda)> = Vec::new();
+        let mut klist: Vec<(std::sync::Arc<ConstructorDescription>, RawLambda)> = Vec::new();
         let mut jumps = jumps_empty();
         for (pats, i) in &env {
             let action = RawLambda::LstaticRaise(*i, Vec::new());
-            let mut new_klist: Vec<(ConstructorDescription, RawLambda)> = pats
+            let mut new_klist: Vec<(std::sync::Arc<ConstructorDescription>, RawLambda)> = pats
                 .iter()
                 .map(|pat| (get_key_constr(pat), action.clone()))
                 .collect();
@@ -7202,10 +7202,10 @@ fn combine_constant(
 /// Split case list into constant and non-constant constructor cases.
 /// Equivalent to OCaml's `split_cases`.
 fn split_cases(
-    tag_lambda_list: Vec<(ConstructorDescription, RawLambda)>,
+    tag_lambda_list: Vec<(std::sync::Arc<ConstructorDescription>, RawLambda)>,
 ) -> (
-    Vec<(ConstructorDescription, RawLambda)>,
-    Vec<(ConstructorDescription, RawLambda)>,
+    Vec<(std::sync::Arc<ConstructorDescription>, RawLambda)>,
+    Vec<(std::sync::Arc<ConstructorDescription>, RawLambda)>,
 ) {
     let (mut consts, mut nonconsts): (Vec<_>, Vec<_>) =
         tag_lambda_list
@@ -7251,12 +7251,12 @@ fn split_variant_cases(
 /// Get extension constructor cases.
 /// Equivalent to OCaml's `get_extension_cases`.
 fn get_extension_cases(
-    tag_lambda_list: Vec<(ConstructorDescription, RawLambda)>,
+    tag_lambda_list: Vec<(std::sync::Arc<ConstructorDescription>, RawLambda)>,
 ) -> Vec<(crate::types::path::Path, RawLambda)> {
     tag_lambda_list
         .into_iter()
-        .map(|(cstr, act)| match cstr.cstr_kind {
-            crate::types::ConstructorKind::Extension(path) => (path, act),
+        .map(|(cstr, act)| match &cstr.cstr_kind {
+            crate::types::ConstructorKind::Extension(path) => (path.clone(), act),
             crate::types::ConstructorKind::Ordinary(_) => unreachable!("ordinary extension case"),
         })
         .collect()
@@ -7413,7 +7413,7 @@ fn combine_constructor(
     ctx: &[Ctx],
     def: &DefaultEnv,
     c_div: (
-        Vec<(ConstructorDescription, RawLambda)>,
+        Vec<(std::sync::Arc<ConstructorDescription>, RawLambda)>,
         Jumps,
         Vec<Pattern>,
     ),
@@ -7554,7 +7554,7 @@ fn combine_constructor(
                 // matching.ml:2190. Skipping that pure computation
                 // avoids normalizing/cloning switch actions without
                 // changing the emitted lambda.
-                let switch_cases = |cases: Vec<(ConstructorDescription, RawLambda)>| {
+                let switch_cases = |cases: Vec<(std::sync::Arc<ConstructorDescription>, RawLambda)>| {
                     cases
                         .into_iter()
                         .map(|(cstr, action)| {
@@ -8699,13 +8699,13 @@ fn compile_test_wrapper<K: Clone>(
 fn get_all_labels_from_record_fields(
     fields: &[(
         crate::types::typedtree::Loc<crate::parse_arena::LidentIdx>,
-        LabelDescription,
+        std::sync::Arc<LabelDescription>,
         Pattern,
         bool,
     )],
 ) -> Vec<LabelDescription> {
     let mut labels: Vec<LabelDescription> =
-        fields.iter().map(|(_, lbl, _, _)| lbl.clone()).collect();
+        fields.iter().map(|(_, lbl, _, _)| (**lbl).clone()).collect();
     labels.sort_by_key(|l| l.lbl_pos);
     labels
 }
@@ -8718,7 +8718,7 @@ fn resolve_all_record_labels(
     pat: &Pattern,
     fields: &[(
         crate::types::typedtree::Loc<crate::parse_arena::LidentIdx>,
-        LabelDescription,
+        std::sync::Arc<LabelDescription>,
         Pattern,
         bool,
     )],
@@ -8754,7 +8754,7 @@ fn record_labels_cover_pattern_fields(
     all_labels: &[LabelDescription],
     fields: &[(
         crate::types::typedtree::Loc<crate::parse_arena::LidentIdx>,
-        LabelDescription,
+        std::sync::Arc<LabelDescription>,
         Pattern,
         bool,
     )],
