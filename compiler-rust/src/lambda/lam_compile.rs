@@ -3263,10 +3263,16 @@ impl LambdaCompiler {
         bindings: &[Ident],
         handler: &Lambda,
     ) -> bool {
-        if self.try_body_depth > 0 {
-            return false;
-        }
-        if !self.fallthrough_return_handlers.is_empty() {
+        // The pseudo-jump arm of OCaml compile_staticcatch (lam_compile.ml:1052-1060)
+        // requires Tail_with_name {in_staticcatch = false}. A nested catch
+        // compiled in an enclosing catch body has in_staticcatch = true and
+        // must use the explicit exit dispatch instead of unconditionally
+        // falling through to its handler.
+        if self.try_body_depth > 0
+            || !self.fallthrough_return_handlers.is_empty()
+            || !self.static_handlers.is_empty()
+            || !self.static_jump_handlers.is_empty()
+        {
             return false;
         }
         // OCaml flattens nested staticcatch chains before deciding whether the
@@ -3419,7 +3425,11 @@ impl LambdaCompiler {
         bindings: &[Ident],
         handler: &Lambda,
     ) -> bool {
-        if self.try_body_depth > 0 {
+        if self.try_body_depth > 0
+            || !self.static_handlers.is_empty()
+            || !self.static_jump_handlers.is_empty()
+            || !self.fallthrough_return_handlers.is_empty()
+        {
             return false;
         }
         self.return_unit_stack.last().copied() == Some(true)

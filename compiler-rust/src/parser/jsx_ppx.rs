@@ -872,13 +872,25 @@ fn transform_react_component_binding(
         // Note: OCaml line 765 does NOT pass ~attrs, so this inner expression has no attributes
         let expression_idx = arena.push_expr(expression);
         let constrained_pattern_idx = arena.push_pat(constrained_pattern);
+        let arity = arena.push_arity(Some(total_arity as i32));
+        let unknown_arity = arena.push_arity(None);
+        arena.set_nary_fun_params(
+            arity,
+            vec![crate::parser::ast::FunParam {
+                p_attrs: Attributes::new(),
+                p_lbl: ArgLabel::Nolabel,
+                p_default: None,
+                p_pat: constrained_pattern_idx,
+            }],
+            unknown_arity,
+        );
         Expression {
             pexp_desc: Box::new(ExpressionDesc::Pexp_fun(Box::new(PexpFun {
                 arg_label: ArgLabel::Nolabel,
                 default: None,
                 lhs: constrained_pattern_idx,
                 rhs: expression_idx,
-                arity: arena.push_arity(Some(total_arity as i32)),
+                arity,
                 is_async,
             }))),
             // OCaml uses ghost location for the inner Pexp_fun

@@ -1631,13 +1631,10 @@ impl LambdaCompiler {
             return block_branch;
         };
 
-        if const_branch.is_empty() {
-            block_branch
-        } else if block_branch.is_empty() {
-            const_branch
-        } else {
-            self.compile_effect_if(dispatch_test, const_branch, block_branch)
-        }
+        // OCaml's mixed constructor dispatch always keeps the literal test
+        // (`lam_compile.ml:834-849`), even when the literal arm has no effect.
+        // Otherwise an unboxed payload action runs for a constant such as false.
+        self.compile_effect_if(dispatch_test, const_branch, block_branch)
     }
 
     pub(crate) fn bind_switch_scrutinee_once(

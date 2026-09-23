@@ -917,6 +917,21 @@ pub fn fun_expr<'a>(
                     if !found_first_pexp_fun {
                         is_async = is_async || inner.is_async;
                     }
+                    // OCaml res_parsetree_viewer.ml:209-216 puts the
+                    // function's newtypes before its regular parameters.
+                    // Attribute-bearing names start a new printable group.
+                    for (name, attrs) in arena.nary_fun_newtypes(inner) {
+                        if attrs.is_empty() {
+                            if let Some(FunParam::NewTypes { names, .. }) = params.last_mut() {
+                                names.push(name);
+                                continue;
+                            }
+                        }
+                        params.push(FunParam::NewTypes {
+                            attrs,
+                            names: vec![name],
+                        });
+                    }
                     for source in source_params {
                         params.push(FunParam::Parameter {
                             attrs: &source.p_attrs,
@@ -1404,7 +1419,28 @@ pub fn arrow_type<'a>(
     typ: &'a CoreType,
     max_arity: Option<usize>,
 ) -> (&'a Attributes, Vec<TypeParameter<'a>>, &'a CoreType) {
-    // Use isize to match OCaml's behavior where we stop when arity goes negative
+    // The current OCaml parsetree has one arrow containing all parameters
+    // (res_parsetree_viewer.ml:3-6). The arena stores that same n-ary shape
+    // beside the compact first argument used for frozen-v0 conversion.
+    if let CoreTypeDesc::Ptyp_arrow(inner) = &*typ.ptyp_desc {
+        let (first, ret, arity) = &**inner;
+        let args = arena.nary_arrow_args(first, *arity);
+        if let std::borrow::Cow::Borrowed(args) = args {
+            return (
+                &typ.ptyp_attributes,
+                args.iter()
+                    .map(|arg| TypeParameter {
+                        attrs: &arg.attrs,
+                        lbl: &arg.lbl,
+                        typ: arena.get_core_type(arg.typ),
+                    })
+                    .collect(),
+                arena.get_core_type(*ret),
+            );
+        }
+    }
+
+    // Legacy curried arrows still use the arity-limited traversal.
     let max_arity: isize = max_arity.map(|n| n as isize).unwrap_or(isize::MAX);
 
     fn process<'a>(

@@ -1,6 +1,39 @@
 use super::*;
 
 #[test]
+fn nested_return_staticcatch_preserves_exit_dispatch_in_enclosing_jump() {
+    let mut compiler = LambdaCompiler::new();
+    let outer_exit = Ident::create_local("outerExit");
+    let state = Ident::create_local("state");
+    let enabled = Ident::create_local("enabled");
+    let inner = Lambda::LstaticCatch(
+        Box::new(Lambda::LstringSwitch(
+            Box::new(Lambda::var(state)),
+            vec![("Initial".to_string(), Lambda::static_raise(2, vec![]))],
+            Some(Box::new(Lambda::if_(
+                Lambda::var(enabled.clone()),
+                Lambda::static_raise(1, vec![]),
+                Lambda::static_raise(2, vec![]),
+            ))),
+        )),
+        (2, vec![]),
+        Box::new(Lambda::if_(
+            Lambda::var(enabled),
+            Lambda::const_(Constant::JsTrue),
+            Lambda::const_(Constant::JsFalse),
+        )),
+    );
+    let block = compiler.with_static_jump_handler(1, &outer_exit, &[], |compiler| {
+        compiler.compile_return_block(&inner)
+    });
+    let rendered = print_block(&block);
+    assert!(
+        rendered.contains("let exit = 0;") && rendered.contains("if (exit === 2)"),
+        "a nested catch must dispatch only when its exit was raised:\n{rendered}"
+    );
+}
+
+#[test]
 fn staticcatch_trywith_return_keeps_bound_exit_effects_outside_try_like_ocaml() {
     let mut compiler = LambdaCompiler::new();
     let x = Ident::create_local("x");
