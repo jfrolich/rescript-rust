@@ -16318,14 +16318,12 @@ fn rewrite_structure_impl(
                             }
                         }
                         result.push(transformed_mb);
-                    } else if apply_spice {
+                    } else {
                         result.extend(try_rewrite_structure_item(
                             item,
                             arena,
                             spice_mapper_active,
                         )?);
-                    } else {
-                        result.extend(rewrite_structure_item_no_spice(item, arena));
                     }
                 }
                 StructureItemDesc::Pstr_value(inner) => {
@@ -16342,27 +16340,19 @@ fn rewrite_structure_impl(
                     result.extend(module_type_decls);
 
                     // Then process the structure item normally
-                    if apply_spice {
-                        result.extend(try_rewrite_structure_item(
-                            item,
-                            arena,
-                            spice_mapper_active,
-                        )?);
-                    } else {
-                        result.extend(rewrite_structure_item_no_spice(item, arena));
-                    }
+                    result.extend(try_rewrite_structure_item(
+                        item,
+                        arena,
+                        spice_mapper_active,
+                    )?);
                 }
                 _ => {
                     // Non-Pstr_value items: just process normally
-                    if apply_spice {
-                        result.extend(try_rewrite_structure_item(
-                            item,
-                            arena,
-                            spice_mapper_active,
-                        )?);
-                    } else {
-                        result.extend(rewrite_structure_item_no_spice(item, arena));
-                    }
+                    result.extend(try_rewrite_structure_item(
+                        item,
+                        arena,
+                        spice_mapper_active,
+                    )?);
                 }
             }
         }
@@ -16687,9 +16677,12 @@ fn try_rewrite_signature_items(
     let spice_mapper_active =
         arena.spice_mapper_enabled && spice_ppx::signature_uses_spice_mapper(items, arena);
     for item in items {
-        let expanded_items =
+        let expanded_items = if arena.spice_mapper_enabled {
             spice_ppx::expand_signature_item_with_mapper(item, arena, spice_mapper_active)
-                .map_err(PpxError::message)?;
+                .map_err(PpxError::message)?
+        } else {
+            vec![item.clone()]
+        };
         for expanded in expanded_items {
             if let SignatureItemDesc::Psig_value(vd) = &*expanded.psig_desc {
                 validate_external_attribute_errors(vd, arena)?;
@@ -16754,9 +16747,13 @@ fn try_rewrite_structure_item(
     spice_mapper_active: bool,
 ) -> PpxResult<Vec<StructureItem>> {
     let mut result = Vec::new();
-    for expanded in spice_ppx::expand_structure_item_with_mapper(item, arena, spice_mapper_active)
-        .map_err(PpxError::message)?
-    {
+    let expanded_items = if arena.spice_mapper_enabled {
+        spice_ppx::expand_structure_item_with_mapper(item, arena, spice_mapper_active)
+            .map_err(PpxError::message)?
+    } else {
+        vec![item.clone()]
+    };
+    for expanded in expanded_items {
         if let StructureItemDesc::Pstr_primitive(vd) = &*expanded.pstr_desc {
             validate_external_attribute_errors(vd, arena)?;
         }
@@ -17596,6 +17593,33 @@ let f = value => {
             classify_js_exp("({kind: \"app.created\"})"),
             JsExpClassification::JsLiteral { comment: None }
         );
+    }
+
+    #[test]
+    fn unconfigured_spice_still_validates_external_attributes() {
+        let source = "@val external f: (@as(\"a\") @as(\"b\") _) => unit = \"f\"";
+        let (mut arena, structure) = parse_structure(source);
+        assert!(rewrite_structure(&structure, &mut arena).is_err());
+    }
+
+    #[test]
+    fn signature_spice_requires_explicit_mapper_activation() {
+        let source = "@spice type person = {name: string}";
+        let mut parser = Parser::new("test.resi", source);
+        let signature = module::parse_signature(&mut parser);
+        assert!(
+            !parser.has_errors(),
+            "parser errors: {:?}",
+            parser.diagnostics()
+        );
+        let ordinary = rewrite_signature(&signature, parser.arena_mut()).expect("ordinary rewrite");
+        assert_eq!(ordinary.len(), 1);
+
+        let mut parser = Parser::new("test.resi", source);
+        let signature = module::parse_signature(&mut parser);
+        let configured = rewrite_signature_with_spice(&signature, parser.arena_mut())
+            .expect("configured rewrite");
+        assert!(configured.len() > ordinary.len());
     }
 
     #[test]
