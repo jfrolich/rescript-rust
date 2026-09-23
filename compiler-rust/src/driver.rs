@@ -6652,6 +6652,10 @@ fn format_expr_type_clash_report(
         }
     }
     append_extra_type_clash_help(type_ctx, arena, source, loc, context, trace, &mut message);
+    // Printtyp.super_unification_error uses a <hov 2> box for each heading
+    // and type (printtyp.ml). The break after the heading is taken when the
+    // complete type expansion cannot fit in the remaining line.
+    message = wrap_type_clash_headings(&message);
 
     if matches!(
         context,
@@ -6920,6 +6924,76 @@ fn append_pattern_option_type_clash_help(
         message.push_str(RESET);
         message.push_str(" to make it work.");
     }
+}
+
+// Format's default margin is 78. The Location reporter adds two columns
+// before the message; each <hov 2> heading box adds two more on a break.
+fn type_clash_visible_width(text: &str) -> usize {
+    let bytes = text.as_bytes();
+    let mut i = 0;
+    let mut width = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'\x1b' && bytes.get(i + 1) == Some(&b'[') {
+            i += 2;
+            while i < bytes.len() && bytes[i] != b'm' {
+                i += 1;
+            }
+            i += usize::from(i < bytes.len());
+        } else {
+            let ch = text[i..].chars().next().expect("valid UTF-8");
+            width += 1;
+            i += ch.len_utf8();
+        }
+    }
+    width
+}
+
+fn wrap_type_clash_headings(message: &str) -> String {
+    const MARGIN: usize = 78;
+    const ERROR: &str = "\x1b[1;31m";
+    const INFO: &str = "\x1b[1;33m";
+    let mut lines = message.splitn(3, '\n');
+    let Some(actual) = lines.next() else {
+        return message.to_string();
+    };
+    let Some(expected) = lines.next() else {
+        return message.to_string();
+    };
+    if !expected.starts_with("But ") {
+        return message.to_string();
+    }
+    let rest = lines.next();
+    let wrap = |line: &str, color: &str| {
+        let Some(at) = line.find(color) else {
+            return line.to_string();
+        };
+        let prefix = &line[..at];
+        let ty = &line[at..];
+        let mut result = if 2 + type_clash_visible_width(line) > MARGIN && prefix.ends_with(' ') {
+            format!("{}\n  {}", prefix.trim_end(), ty)
+        } else {
+            line.to_string()
+        };
+        // super_type_expansion prints aliases in a nested <2> box. If the
+        // expansion does not fit, break at the space following "defined as".
+        if let Some(marker) = result.find("(defined as\x1b[0m ") {
+            let expansion = marker + "(defined as\x1b[0m ".len();
+            let start = result[..expansion].rfind('\n').map_or(0, |pos| pos + 1);
+            let indent = if start == 0 { 2 } else { 4 };
+            if indent + type_clash_visible_width(&result[start..]) > MARGIN {
+                result.replace_range(expansion - 1..expansion, "\n    ");
+            }
+        }
+        result
+    };
+    let mut output = wrap(actual, ERROR);
+    output.push('\n');
+    output.push_str(&wrap(expected, INFO));
+    if let Some(rest) = rest {
+        output.push('\n');
+        output.push_str(rest);
+    }
+    output
 }
 
 fn append_type_clash_type(
