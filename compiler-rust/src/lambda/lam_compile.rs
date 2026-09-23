@@ -6282,6 +6282,40 @@ impl LambdaCompiler {
         }
     }
 
+    /// OCaml `compile_general_cases` groups equal Lambda bodies before
+    /// compiling the final arm of each group (lam_compile.ml:668-707).
+    /// Group the original handler lambdas, not their lowered JS statements:
+    /// distinct compilation of identical handlers can allocate different
+    /// temporaries and prevents their cases from sharing one body.
+    fn compile_grouped_staticcatch_handlers<'a>(
+        &mut self,
+        handlers: &'a [FlatHandler],
+        first_code: i32,
+        mut compile: impl FnMut(&mut Self, &Lambda) -> Block,
+    ) -> Vec<(i32, Block, bool, &'a Lambda)> {
+        let cases = handlers
+            .iter()
+            .enumerate()
+            .map(|(i, handler)| {
+                (
+                    first_code + i32::try_from(i).expect("exit handler index fits in i32"),
+                    &handler.handler,
+                )
+            })
+            .collect();
+        stable_group_switch_cases(cases, |_, _| true)
+            .into_iter()
+            .map(|(code, handler, is_last)| {
+                let block = if is_last {
+                    compile(self, handler)
+                } else {
+                    Vec::new()
+                };
+                (code, block, is_last, handler)
+            })
+            .collect()
+    }
+
     /// Emit the `compile_cases ~cxt ~switch_exp:exit_expr handlers` call at
     /// lam_compile.ml:987/996/1010/1017. For a single handler + NonComplete
     /// default this reduces to `if (exit === code) { handler_block }`
@@ -6290,48 +6324,33 @@ impl LambdaCompiler {
     fn compile_exit_dispatch(
         &self,
         exit_id: &Ident,
-        first_code: i32,
-        handler_blocks: Vec<Block>,
-        handler_lambdas: &[&Lambda],
+        handlers: Vec<(i32, Block, bool, &Lambda)>,
         is_return_context: bool,
     ) -> Option<Statement> {
-        if handler_blocks.is_empty() {
+        if handlers.is_empty() {
             return None;
         }
-        if handler_blocks.len() == 1 {
-            let handler_block = handler_blocks.into_iter().next().unwrap();
+        if handlers.len() == 1 {
+            let (code, handler_block, _, _) = handlers.into_iter().next().unwrap();
             if handler_block.is_empty() {
                 return None;
             }
             return Some(Statement::if_(
-                self.staticcatch_exit_test(exit_id, first_code),
+                self.staticcatch_exit_test(exit_id, code),
                 handler_block,
                 vec![],
             ));
         }
-        // Multi-handler: emit an Int_switch. Per OCaml's `compile_general_cases`
-        // (lam_compile.ml:607-624), every per-group last clause computes
-        // `should_break` from `Js_output.to_break_block` (~ `!block_terminates`)
-        // and, when the surrounding continuation `continuation_is_return`
-        // (lam_compile_context.ml:68-72), additionally ANDs with
-        // `Lam_exit_code.has_exit lam`. In `compile_exit_dispatch` each handler
-        // is its own group, so the same per-clause logic applies uniformly —
-        // including the trailing case (mario_game's `process_collision` case 3).
-        debug_assert_eq!(handler_blocks.len(), handler_lambdas.len());
-        let clauses: Vec<(i32, CaseClause)> = handler_blocks
+        // OCaml compile_general_cases (lam_compile.ml:668-707) emits empty
+        // clauses for all but the last case of an equal-Lambda group.
+        let clauses: Vec<(i32, CaseClause)> = handlers
             .into_iter()
-            .zip(handler_lambdas.iter())
-            .enumerate()
-            .map(|(i, (body, handler_lam))| {
-                let should_break = if block_terminates(&body) {
-                    false
-                } else if is_return_context {
-                    has_exit_code(handler_lam, |_| true)
-                } else {
-                    true
-                };
+            .map(|(code, body, is_last, handler_lam)| {
+                let should_break = is_last
+                    && !block_terminates(&body)
+                    && (!is_return_context || has_exit_code(handler_lam, |_| true));
                 (
-                    first_code + i32::try_from(i).expect("exit handler index fits in i32"),
+                    code,
                     CaseClause {
                         source_loc: None,
                         body,
@@ -6358,25 +6377,17 @@ impl LambdaCompiler {
         // If the body already terminates (e.g. every path returned), OCaml
         // would still emit the dispatch but it'd be dead. Match
         // `compile_staticcatch_return_block`'s current behavior: skip it.
-        let handler_blocks: Vec<Block> = if block_terminates(&body_block) {
+        let grouped_handlers = if block_terminates(&body_block) {
             Vec::new()
         } else {
-            handlers
-                .iter()
-                .map(|h| self.compile_return_block(&h.handler))
-                .collect()
+            self.compile_grouped_staticcatch_handlers(handlers, first_code, |this, handler| {
+                this.compile_return_block(handler)
+            })
         };
         self.pop_multi_staticcatch_handlers(handlers.len());
         block.extend(body_block);
         if !block_terminates(&block) {
-            let handler_lambdas: Vec<&Lambda> = handlers.iter().map(|h| &h.handler).collect();
-            if let Some(dispatch) = self.compile_exit_dispatch(
-                &exit_id,
-                first_code,
-                handler_blocks,
-                &handler_lambdas,
-                true,
-            ) {
+            if let Some(dispatch) = self.compile_exit_dispatch(&exit_id, grouped_handlers, true) {
                 block.push(dispatch);
             }
         }
@@ -6390,25 +6401,17 @@ impl LambdaCompiler {
     ) -> Block {
         let (exit_id, first_code, mut block) = self.emit_multi_staticcatch_prelude(handlers);
         let body_block = self.compile_effect_block(body);
-        let handler_blocks: Vec<Block> = if block_terminates(&body_block) {
+        let grouped_handlers = if block_terminates(&body_block) {
             Vec::new()
         } else {
-            handlers
-                .iter()
-                .map(|h| self.compile_effect_block(&h.handler))
-                .collect()
+            self.compile_grouped_staticcatch_handlers(handlers, first_code, |this, handler| {
+                this.compile_effect_block(handler)
+            })
         };
         self.pop_multi_staticcatch_handlers(handlers.len());
         block.extend(body_block);
         if !block_terminates(&block) {
-            let handler_lambdas: Vec<&Lambda> = handlers.iter().map(|h| &h.handler).collect();
-            if let Some(dispatch) = self.compile_exit_dispatch(
-                &exit_id,
-                first_code,
-                handler_blocks,
-                &handler_lambdas,
-                false,
-            ) {
+            if let Some(dispatch) = self.compile_exit_dispatch(&exit_id, grouped_handlers, false) {
                 block.push(dispatch);
             }
         }
@@ -6423,25 +6426,17 @@ impl LambdaCompiler {
     ) -> Block {
         let (exit_id, first_code, mut block) = self.emit_multi_staticcatch_prelude(handlers);
         let body_block = self.compile_assign_to_target_block(result, body);
-        let handler_blocks: Vec<Block> = if block_terminates(&body_block) {
+        let grouped_handlers = if block_terminates(&body_block) {
             Vec::new()
         } else {
-            handlers
-                .iter()
-                .map(|h| self.compile_assign_to_target_block(result, &h.handler))
-                .collect()
+            self.compile_grouped_staticcatch_handlers(handlers, first_code, |this, handler| {
+                this.compile_assign_to_target_block(result, handler)
+            })
         };
         self.pop_multi_staticcatch_handlers(handlers.len());
         block.extend(body_block);
         if !block_terminates(&block) {
-            let handler_lambdas: Vec<&Lambda> = handlers.iter().map(|h| &h.handler).collect();
-            if let Some(dispatch) = self.compile_exit_dispatch(
-                &exit_id,
-                first_code,
-                handler_blocks,
-                &handler_lambdas,
-                false,
-            ) {
+            if let Some(dispatch) = self.compile_exit_dispatch(&exit_id, grouped_handlers, false) {
                 block.push(dispatch);
             }
         }
@@ -6456,25 +6451,17 @@ impl LambdaCompiler {
     ) -> Block {
         let (exit_id, first_code, mut block) = self.emit_multi_staticcatch_prelude(handlers);
         let body_block = self.compile_tail_loop_return_block(body, tail_loop);
-        let handler_blocks: Vec<Block> = if block_terminates(&body_block) {
+        let grouped_handlers = if block_terminates(&body_block) {
             Vec::new()
         } else {
-            handlers
-                .iter()
-                .map(|h| self.compile_tail_loop_return_block(&h.handler, tail_loop))
-                .collect()
+            self.compile_grouped_staticcatch_handlers(handlers, first_code, |this, handler| {
+                this.compile_tail_loop_return_block(handler, tail_loop)
+            })
         };
         self.pop_multi_staticcatch_handlers(handlers.len());
         block.extend(body_block);
         if !block_terminates(&block) {
-            let handler_lambdas: Vec<&Lambda> = handlers.iter().map(|h| &h.handler).collect();
-            if let Some(dispatch) = self.compile_exit_dispatch(
-                &exit_id,
-                first_code,
-                handler_blocks,
-                &handler_lambdas,
-                true,
-            ) {
+            if let Some(dispatch) = self.compile_exit_dispatch(&exit_id, grouped_handlers, true) {
                 block.push(dispatch);
             }
         }

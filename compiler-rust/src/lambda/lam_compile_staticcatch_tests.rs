@@ -1,6 +1,50 @@
 use super::*;
 
 #[test]
+fn equal_flattened_staticcatch_handlers_share_one_switch_body() {
+    let mut compiler = LambdaCompiler::new();
+    let cond = Ident::create_local("cond");
+    let report = Ident::create_local("report");
+    let message = Ident::create_local("message");
+    let handler = Lambda::Lsequence(
+        Box::new(Lambda::apply(
+            Lambda::var(report),
+            vec![Lambda::var(message.clone())],
+            ApInfo {
+                loc: Location::none(),
+                inlined: InlineAttribute::Default,
+                status: ApplyStatus::Na,
+            },
+            false,
+        )),
+        Box::new(Lambda::var(message)),
+    );
+    let block = compiler.compile_return_block(&Lambda::LstaticCatch(
+        Box::new(Lambda::LstaticCatch(
+            Box::new(Lambda::if_(
+                Lambda::var(cond),
+                Lambda::static_raise(2, vec![]),
+                Lambda::static_raise(1, vec![]),
+            )),
+            (2, vec![]),
+            Box::new(handler.clone()),
+        )),
+        (1, vec![]),
+        Box::new(handler),
+    ));
+    let rendered = print_block(&block);
+    assert!(
+        rendered.contains("case 1 :") && rendered.contains("case 2 :"),
+        "both flattened exit codes must be dispatched:\n{rendered}"
+    );
+    assert_eq!(
+        rendered.matches("report(message)").count(),
+        1,
+        "equal Lambda handlers must share their compiled switch body:\n{rendered}"
+    );
+}
+
+#[test]
 fn nested_return_staticcatch_preserves_exit_dispatch_in_enclosing_jump() {
     let mut compiler = LambdaCompiler::new();
     let outer_exit = Ident::create_local("outerExit");
