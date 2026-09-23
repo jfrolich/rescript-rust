@@ -73,7 +73,12 @@ impl LambdaCompiler {
                 comment: Some(PointerInfo::Constructor(tag)),
             } => match &tag.runtime_tag {
                 Some(ConstructorRuntimeTag::Int(value)) => Self::compile_runtime_int(*value),
-                Some(ConstructorRuntimeTag::String(value)) => Expression::string(value.clone()),
+                // OCaml `Js_exp_make.tag_type` (js_exp_make.ml:1361) emits `@as`
+                // strings with `~delim:DStarJ`, printing the payload verbatim.
+                Some(ConstructorRuntimeTag::String(value)) => Expression::new(ExpressionDesc::Str {
+                    delim: Delim::StarJ,
+                    txt: value.clone(),
+                }),
                 Some(ConstructorRuntimeTag::Float(value)) => {
                     Expression::number(Number::float(value.clone()))
                 }
@@ -100,7 +105,10 @@ impl LambdaCompiler {
                     Expression::number(Number::int(*value))
                 }
                 Some(crate::types::VariantTagType::String(value)) => {
-                    Expression::string(value.clone())
+                    Expression::new(ExpressionDesc::Str {
+                        delim: Delim::StarJ,
+                        txt: value.clone(),
+                    })
                 }
                 Some(crate::types::VariantTagType::Float(value)) => {
                     Expression::number(Number::float(value.clone()))
