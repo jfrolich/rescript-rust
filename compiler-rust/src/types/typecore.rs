@@ -19119,13 +19119,15 @@ fn type_record(
             )
         });
 
+        let base_loc = typed_base_expr.exp_loc;
         if let Some(labels) = all_labels_for_unify {
             for (idx, env_label) in labels.iter().enumerate() {
                 let label_name = env_label.lbl_name.clone();
                 // Instance 1: connect to base expression
+                // (typecore.ml: `unify_exp_types ~context:None exp.exp_loc env ty_exp ty_res1`).
                 let (_poly1, ty_arg1, ty_res1) =
                     crate::types::ctype::instance_label(ctx, false, env_label);
-                let _ = crate::types::unify(ctx, &mut tctx.unify_state, ty_exp, ty_res1);
+                unify_expression_types(tctx, base_loc, ty_exp, ty_res1, None)?;
 
                 let is_overridden = overridden_positions.contains(&(idx as i32))
                     || overridden_positions.contains(&env_label.lbl_pos);
@@ -19135,10 +19137,10 @@ fn type_record(
                     let (_poly2, ty_arg2, ty_res2) =
                         crate::types::ctype::instance_label(ctx, false, env_label);
                     // Bridge the two instances through their arg types
-                    let _ = crate::types::unify(ctx, &mut tctx.unify_state, ty_arg1, ty_arg2);
+                    unify_expression_types(tctx, loc, ty_arg1, ty_arg2, None)?;
                     // Connect instance 2 to expected type
                     let expected_inst = crate::types::instance(ctx, expected_ty);
-                    let _ = crate::types::unify(ctx, &mut tctx.unify_state, expected_inst, ty_res2);
+                    unify_expression_types(tctx, loc, expected_inst, ty_res2, None)?;
                 }
             }
         } else {
