@@ -3639,14 +3639,17 @@ fn finish_in_process_js_inner(
         let codegen = timings.codegen;
         let overhead = wall.saturating_sub(codegen.saturating_add(write_duration));
         eprintln!(
-            "[module-js-timing] module={} package={} wall_ms={:.3} codegen_ms={:.3} write_ms={:.3} overhead_ms={:.3} outputs={}",
+            "[module-js-timing] module={} package={} wall_ms={:.3} codegen_ms={:.3} write_ms={:.3} overhead_ms={:.3} outputs={} end_epoch_ms={:.3}",
             module_name,
             package.name,
             duration_ms(wall),
             duration_ms(codegen),
             duration_ms(write_duration),
             duration_ms(overhead),
-            js_output_count
+            js_output_count,
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0.0, |elapsed| elapsed.as_secs_f64() * 1000.0)
         );
     }
 
