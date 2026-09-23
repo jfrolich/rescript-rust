@@ -17,6 +17,7 @@ use rescript::{
 };
 
 fn main() {
+    rescript_compiler::hash_seed::install_thread_local_hash_seeds();
     let telemetry_guard = telemetry::init_telemetry();
     let otel_enabled = telemetry_guard.otel_enabled();
     let exit_code = match run_main(otel_enabled) {

@@ -131,6 +131,7 @@ impl Options {
 }
 
 fn main() {
+    rescript_compiler::hash_seed::install_thread_local_hash_seeds();
     // Spawn the compiler in a thread with a large stack to avoid stack overflow
     // on deeply nested type structures in CMI files
     let builder = std::thread::Builder::new()

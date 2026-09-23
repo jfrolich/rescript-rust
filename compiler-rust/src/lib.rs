@@ -50,6 +50,7 @@ pub mod diagnostics;
 pub mod driver;
 /// GenType TypeScript emitter port.
 pub mod gentype;
+pub mod hash_seed;
 pub mod ident;
 pub mod intern;
 pub mod js_ir;
