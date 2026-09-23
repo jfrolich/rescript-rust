@@ -46,3 +46,4 @@ tests/js_output_parity/fixtures/constructor_tag_escapes.res
 tests/js_output_parity/fixtures/object_spread_literal.res
 tests/js_output_parity/fixtures/conditional_array_index.res
 tests/js_output_parity/fixtures/local_alias_option_representation.res
+tests/js_output_parity/fixtures/exported_constant_alias.res

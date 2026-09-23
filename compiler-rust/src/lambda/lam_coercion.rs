@@ -221,7 +221,12 @@ pub(crate) fn rewrite_toplevel_variable_initializers_through_rewriteable_aliases
                     | ExpressionDesc::Null
             ) {
                 if let Some(root) = materialized_root {
-                    if rewriteable_alias_root_has_other_toplevel_uses(&flattened, index, &root) {
+                    // Exported roots are uses too: the final export block is
+                    // counted by Lam_pass_count.collect_occurs. Export coercion
+                    // retains Lvar for a differently named export (lam_coercion.ml:112-121).
+                    if exported_idents.contains(&root)
+                        || rewriteable_alias_root_has_other_toplevel_uses(&flattened, index, &root)
+                    {
                         replacement = Expression::var(root);
                     }
                 }
