@@ -1937,7 +1937,9 @@ impl JsPrinter {
                 }
                 self.print_member_target_expression(arr, true);
                 self.write_char('[');
-                self.print_expression(idx, 0);
+                // The index sits inside both the outer `P.group f 1` and
+                // `P.bracket_group f 1` (js_dump.ml `Array_index`).
+                self.with_indent(2, |p| p.print_expression(idx, 0));
                 self.write_char(']');
                 if needs_paren {
                     self.write_char(')');
@@ -2439,16 +2441,18 @@ impl JsPrinter {
 
         self.write_char('{');
         let mut props = props.into_iter().peekable();
+        // OCaml `js_dump.ml` prints the spread through `J.Spread` at level 1,
+        // whose operand is printed at level 13 (so object literals get parens).
         if let (Some(spread), None) = (dup, props.peek()) {
             self.write("...");
-            self.print_expression(spread, 1);
+            self.print_expression(spread, 13);
         } else if dup.is_some() || props.peek().is_some() {
             self.indent();
 
             if let Some(spread) = dup {
                 self.newline();
                 self.write("...");
-                self.print_expression(spread, 1);
+                self.print_expression(spread, 13);
                 if props.peek().is_some() {
                     self.write_char(',');
                 }

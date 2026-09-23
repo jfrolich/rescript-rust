@@ -43,3 +43,5 @@ tests/js_output_parity/fixtures/jsx_external_component_patterns.res	-bs-jsx 4
 tests/js_output_parity/fixtures/react_component_edge_patterns.res	-bs-jsx 4
 tests/js_output_parity/fixtures/jsx_preserve_minimal.res	-bs-jsx 4 -bs-jsx-preserve
 tests/js_output_parity/fixtures/constructor_tag_escapes.res
+tests/js_output_parity/fixtures/object_spread_literal.res
+tests/js_output_parity/fixtures/conditional_array_index.res
