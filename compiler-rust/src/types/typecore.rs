@@ -9102,7 +9102,7 @@ fn translate_unified_ops(
                 },
                 loc.clone(),
                 result_ty,
-                EnvRef(0),
+                tctx.type_ctx.store_typed_env(env),
                 attributes.to_vec().into(),
             )))
         }
@@ -9149,7 +9149,7 @@ fn translate_unified_ops(
                 },
                 loc.clone(),
                 result_ty,
-                EnvRef(0),
+                tctx.type_ctx.store_typed_env(env),
                 attributes.to_vec().into(),
             )))
         }
@@ -9815,7 +9815,7 @@ fn type_application(
             ExpressionDesc::Texp_array(typed_interpolations),
             values.pexp_loc,
             ctx.new_constr(crate::types::predef::path_array(), vec![param_ty]),
-            EnvRef(0),
+            tctx.type_ctx.store_typed_env(env),
             values.pexp_attributes.clone(),
         );
         let typed_args = vec![
@@ -9841,7 +9841,7 @@ fn type_application(
             },
             loc,
             output_ty,
-            EnvRef(0),
+            tctx.type_ctx.store_typed_env(env),
             attributes.to_vec().into(),
         ));
     }
@@ -10177,7 +10177,7 @@ fn type_application(
                     ),
                     none_loc,
                     option_ty,
-                    EnvRef(0),
+                    tctx.type_ctx.store_typed_env(env),
                     Attributes::new(),
                 );
                 typed_args.push(ApplyArg {
@@ -10247,7 +10247,7 @@ fn type_application(
         },
         loc.clone(),
         result_ty,
-        EnvRef(0),
+        tctx.type_ctx.store_typed_env(env),
         attributes.to_vec().into(),
     ))
 }
@@ -15212,7 +15212,7 @@ fn type_match(
         ),
         loc.clone(),
         result_ty,
-        EnvRef(0),
+        tctx.type_ctx.store_typed_env(env),
         attributes.to_vec().into(),
     ))
 }
@@ -16195,7 +16195,7 @@ fn type_try(
         ExpressionDesc::Texp_try(Box::new(typed_body), typed_handlers),
         loc.clone(),
         result_ty,
-        EnvRef(0),
+        tctx.type_ctx.store_typed_env(env),
         attributes.to_vec().into(),
     ))
 }
@@ -16699,7 +16699,7 @@ fn type_function_nary(
             ExpressionDesc::Texp_let(RecFlag::Nonrecursive, typed_bindings, Box::new(typed_body)),
             loc,
             body_type,
-            EnvRef(0),
+            tctx.type_ctx.store_typed_env(env),
             vec![default_attr.clone()].into(),
         );
     }
@@ -16769,7 +16769,7 @@ fn type_function_nary(
         },
         loc,
         exp_type,
-        EnvRef(0),
+        tctx.type_ctx.store_typed_env(env),
         attributes.to_vec().into(),
     ))
 }
@@ -16900,7 +16900,7 @@ fn type_for(
         ),
         loc.clone(),
         result_unit_ty,
-        EnvRef(0),
+        tctx.type_ctx.store_typed_env(env),
         attributes.to_vec().into(),
     ))
 }
@@ -17070,7 +17070,7 @@ fn type_for_of(
         desc,
         loc,
         result_unit_ty,
-        EnvRef(0),
+        tctx.type_ctx.store_typed_env(env),
         attributes.to_vec().into(),
     ))
 }
@@ -17351,7 +17351,7 @@ fn type_construct(
         ExpressionDesc::Texp_construct(lid.clone(), cstr_desc, typed_args),
         loc.clone(),
         result_ty,
-        EnvRef(0),
+        tctx.type_ctx.store_typed_env(env),
         attributes.to_vec().into(),
     ))
 }
@@ -17441,7 +17441,7 @@ fn type_variant(
                 ExpressionDesc::Texp_variant(label.to_string(), Some(Box::new(typed_arg))),
                 loc.clone(),
                 expected_inst,
-                EnvRef(0),
+                tctx.type_ctx.store_typed_env(env),
                 attributes.to_vec().into(),
             ));
         }
@@ -17466,7 +17466,7 @@ fn type_variant(
             ExpressionDesc::Texp_variant(label.to_string(), Some(Box::new(typed_arg))),
             loc.clone(),
             variant_ty,
-            EnvRef(0),
+            tctx.type_ctx.store_typed_env(env),
             attributes.to_vec().into(),
         ));
     }
@@ -17489,7 +17489,7 @@ fn type_variant(
         ExpressionDesc::Texp_variant(label.to_string(), None),
         loc.clone(),
         variant_ty,
-        EnvRef(0),
+        tctx.type_ctx.store_typed_env(env),
         attributes.to_vec().into(),
     ))
 }
@@ -19237,7 +19237,7 @@ fn type_record(
         exp_desc,
         loc.clone(),
         record_exp_ty,
-        EnvRef(0),
+        tctx.type_ctx.store_typed_env(env),
         attributes.to_vec().into(),
     ))
 }
@@ -19772,7 +19772,7 @@ fn type_field(
         ExpressionDesc::Texp_field(Box::new(typed_record), field_lid.clone(), label_desc),
         loc,
         field_ty,
-        EnvRef(0),
+        tctx.type_ctx.store_typed_env(env),
         attributes.to_vec().into(),
     ))
 }
@@ -20011,7 +20011,7 @@ fn type_setfield(
         ),
         loc,
         unit_ty,
-        EnvRef(0),
+        tctx.type_ctx.store_typed_env(env),
         attributes.to_vec().into(),
     ))
 }
@@ -20467,7 +20467,7 @@ fn type_await(
         },
         loc.clone(),
         expected_ty,
-        EnvRef(0),
+        tctx.type_ctx.store_typed_env(env),
         attributes.to_vec().into(),
     ))
 }
@@ -20634,7 +20634,7 @@ fn type_send(
                     ),
                     loc.clone(),
                     expected_ty,
-                    EnvRef(0),
+                    tctx.type_ctx.store_typed_env(env),
                     attributes.to_vec().into(),
                 ));
             }
@@ -20659,7 +20659,7 @@ fn type_send(
             ),
             loc.clone(),
             expected_ty,
-            EnvRef(0),
+            tctx.type_ctx.store_typed_env(env),
             attributes.to_vec().into(),
         ));
     }
@@ -20672,7 +20672,7 @@ fn type_send(
         ),
         loc.clone(),
         method_result_ty,
-        EnvRef(0),
+        tctx.type_ctx.store_typed_env(env),
         attributes.to_vec().into(),
     ))
 }
@@ -20889,7 +20889,7 @@ fn type_letexception(
         ExpressionDesc::Texp_letexception(typed_ext_constr, Box::new(typed_body)),
         loc.clone(),
         body_ty,
-        EnvRef(0),
+        tctx.type_ctx.store_typed_env(env),
         attributes.to_vec().into(),
     ))
 }
@@ -22102,7 +22102,7 @@ fn type_letmodule(
         ),
         loc,
         letmodule_ty,
-        EnvRef(0),
+        tctx.type_ctx.store_typed_env(env),
         attributes.to_vec().into(),
     ))
 }
@@ -22514,7 +22514,7 @@ fn type_pack(
         ExpressionDesc::Texp_pack(Box::new(wrapped_module)),
         loc,
         packed_type,
-        EnvRef(0),
+        tctx.type_ctx.store_typed_env(env),
         attributes.to_vec().into(),
     ))
 }
@@ -22705,7 +22705,7 @@ fn type_expect_with_module_unpacks(
         ),
         body.pexp_loc,
         wrapped_ty,
-        EnvRef(0),
+        tctx.type_ctx.store_typed_env(env),
         modulepat_attrs.into(),
     ))
 }
@@ -24423,7 +24423,7 @@ fn report_let_partial_match_warnings<'a>(
             ExpressionDesc::Texp_constant(Constant::Int(0)),
             binding.vb_expr.exp_loc,
             binding.vb_expr.exp_type,
-            EnvRef(0),
+            tctx.type_ctx.store_typed_env(env),
             Vec::new().into(),
         );
         let cases = vec![crate::types::typedtree::Case::simple(
@@ -33556,7 +33556,7 @@ fn try_comptime_application(
                     ExpressionDesc::Texp_constant(Constant::Int(0)),
                     LocIdx(0),
                     ctx.new_var(None),
-                    EnvRef(0),
+                    tctx.type_ctx.store_typed_env(env),
                     Attributes::new(),
                 );
                 typed_args.push((param_name, dummy, true));
