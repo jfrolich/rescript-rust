@@ -14,7 +14,8 @@ use crate::types::typedtree::{
 };
 
 type InProcessTypeDeclarations = Vec<crate::gentype::code_item::TypeDeclaration>;
-type InProcessTypeDeclarationsCache = Mutex<HashMap<String, InProcessTypeDeclarations>>;
+type InProcessTypeDeclarationsCache =
+    Mutex<HashMap<String, std::sync::Arc<InProcessTypeDeclarations>>>;
 
 pub enum BinaryAnnots {
     Implementation(Structure),
@@ -87,6 +88,8 @@ fn has_in_process_type_declarations(cmt_file: &Path) -> bool {
     let Some(cmt_file) = cmt_file.to_str() else {
         return false;
     };
+    // Resolve the key (a filesystem canonicalize) before taking the shared
+    // lock, so parallel GenType workers do not serialize on the syscall.
     let key = normalize_cmt_cache_key(cmt_file);
     in_process_type_declarations_cache()
         .lock()
@@ -95,19 +98,25 @@ fn has_in_process_type_declarations(cmt_file: &Path) -> bool {
 }
 
 fn lookup_in_process_type_declarations(cmt_file: &str) -> Option<InProcessTypeDeclarations> {
-    in_process_type_declarations_cache()
+    let key = normalize_cmt_cache_key(cmt_file);
+    let shared = in_process_type_declarations_cache()
         .lock()
         .ok()
-        .and_then(|cache| cache.get(&normalize_cmt_cache_key(cmt_file)).cloned())
+        .and_then(|cache| cache.get(&key).cloned())?;
+    Some(shared.as_ref().clone())
 }
 
 fn register_in_process_type_declarations(
     cmt_file: &str,
     type_declarations: InProcessTypeDeclarations,
 ) {
-    if let Ok(mut cache) = in_process_type_declarations_cache().lock() {
-        cache.insert(normalize_cmt_cache_key(cmt_file), type_declarations);
-    }
+    let key = normalize_cmt_cache_key(cmt_file);
+    let type_declarations = std::sync::Arc::new(type_declarations);
+    let replaced = in_process_type_declarations_cache()
+        .lock()
+        .ok()
+        .and_then(|mut cache| cache.insert(key, type_declarations));
+    drop(replaced);
 }
 
 fn get_cmt_file_for_typed_artifact_import(project_root: &str, cmt: &str) -> String {
