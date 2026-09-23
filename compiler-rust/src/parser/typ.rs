@@ -708,41 +708,6 @@ fn parse_type_attributes(p: &mut Parser<'_>) -> Attributes {
     parse_attributes(p)
 }
 
-/// Parse an attribute id (name with optional path).
-fn parse_attribute_id(p: &mut Parser<'_>) -> StrIdx {
-    let mut id = String::new();
-    loop {
-        let name = match &p.token {
-            Token::Lident(name) | Token::Uident(name) => Some(name.to_string()),
-            // Keywords can also be used as attribute names
-            Token::As => Some("as".to_string()),
-            Token::String(s) => Some(s.to_string()),
-            _ => None,
-        };
-        match name {
-            Some(name) => {
-                if !id.is_empty() {
-                    id.push('.');
-                }
-                id.push_str(&name);
-                p.next();
-            }
-            None => break,
-        }
-        if p.token == Token::Dot {
-            p.next();
-        } else {
-            break;
-        }
-    }
-    if id.is_empty() {
-        p.err(DiagnosticCategory::Message(
-            "Expected attribute name".to_string(),
-        ));
-        id = "error".to_string();
-    }
-    p.arena_mut().push_string(id.to_string())
-}
 
 /// Parse an attribute payload (in type context).
 fn parse_payload(p: &mut Parser<'_>) -> Payload {
@@ -1600,6 +1565,9 @@ fn parse_lident(p: &mut Parser<'_>) -> (String, Location) {
 
 /// Parse attributes (including doc comments which become res.doc attributes).
 fn parse_attributes(p: &mut Parser<'_>) -> Attributes {
+    // OCaml `parse_attributes` = `parse_region ~grammar:Grammar.Attribute`
+    // (compiler/syntax/src/res_core.ml:7635-7636, 1177-1192).
+    p.leave_breadcrumb(super::grammar::Grammar::Attribute);
     let mut attrs = Attributes::new();
     loop {
         match &p.token {
@@ -1622,6 +1590,7 @@ fn parse_attributes(p: &mut Parser<'_>) -> Attributes {
             _ => break,
         }
     }
+    p.eat_breadcrumb();
     attrs
 }
 
@@ -1655,8 +1624,8 @@ fn parse_attribute(p: &mut Parser<'_>) -> Option<Attribute> {
     let start_pos_idx = p.start_pos_idx();
     p.next();
 
-    let attr_id_str = parse_attribute_id(p);
-    let attr_id = with_loc(attr_id_str, p.mk_loc_idx_to_prev_end(start_pos_idx));
+    // OCaml `parse_attribute_id` (compiler/syntax/src/res_core.ml:7531-7556).
+    let attr_id = super::module::parse_extension_id(p, start_pos_idx);
 
     // Only parse Lparen as payload if it's immediately adjacent to the attribute ID
     let is_adjacent = p.start_pos.cnum == p.prev_end_pos.cnum;

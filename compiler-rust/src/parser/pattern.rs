@@ -33,6 +33,9 @@ fn is_interval_constant(c: &Constant) -> bool {
 
 /// Parse attributes (including doc comments which become res.doc attributes).
 fn parse_attributes(p: &mut Parser<'_>) -> Attributes {
+    // OCaml `parse_attributes` = `parse_region ~grammar:Grammar.Attribute`
+    // (compiler/syntax/src/res_core.ml:7635-7636, 1177-1192).
+    p.leave_breadcrumb(super::grammar::Grammar::Attribute);
     let mut attrs = vec![];
     loop {
         match &p.token {
@@ -55,6 +58,7 @@ fn parse_attributes(p: &mut Parser<'_>) -> Attributes {
             _ => break,
         }
     }
+    p.eat_breadcrumb();
     Attributes::from_vec(attrs)
 }
 
@@ -87,33 +91,8 @@ fn parse_attribute(p: &mut Parser<'_>) -> Option<Attribute> {
 /// Parse an attribute identifier.
 /// The `start_pos_idx` parameter should be the position BEFORE the `@` was consumed.
 fn parse_attribute_id(p: &mut Parser<'_>, start_pos_idx: PosIdx) -> Located<StrIdx> {
-    let mut parts = vec![];
-
-    loop {
-        let name = match &p.token {
-            Token::Lident(name) | Token::Uident(name) => {
-                let name = name.to_string();
-                p.next();
-                name
-            }
-            _ if p.token.is_keyword() => {
-                let name = p.token.to_string();
-                p.next();
-                name
-            }
-            _ => break,
-        };
-        parts.push(name);
-        if p.token == Token::Dot {
-            p.next();
-        } else {
-            break;
-        }
-    }
-
-    let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
-    let str_idx = p.arena_mut().push_string(parts.join("."));
-    with_loc(str_idx, loc)
+    // OCaml `parse_attribute_id` (compiler/syntax/src/res_core.ml:7531-7556).
+    super::module::parse_extension_id(p, start_pos_idx)
 }
 
 /// Parse an attribute payload.

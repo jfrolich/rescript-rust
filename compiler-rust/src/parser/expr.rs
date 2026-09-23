@@ -1547,6 +1547,9 @@ fn parse_lident(p: &mut Parser<'_>) -> (String, Location) {
 
 /// Parse attributes (including doc comments which become res.doc attributes).
 fn parse_attributes(p: &mut Parser<'_>) -> Attributes {
+    // OCaml `parse_attributes` = `parse_region ~grammar:Grammar.Attribute`
+    // (compiler/syntax/src/res_core.ml:7635-7636, 1177-1192).
+    p.leave_breadcrumb(super::grammar::Grammar::Attribute);
     let mut attrs = Attributes::new();
     loop {
         match &p.token {
@@ -1569,6 +1572,7 @@ fn parse_attributes(p: &mut Parser<'_>) -> Attributes {
             _ => break,
         }
     }
+    p.eat_breadcrumb();
     attrs
 }
 
@@ -1602,56 +1606,8 @@ fn parse_attribute(p: &mut Parser<'_>) -> Option<Attribute> {
 /// Attribute identifiers can be regular identifiers or certain keywords like `as`, `type`, etc.
 /// The `start_pos_idx` parameter should be the PosIdx from BEFORE the `@` was consumed.
 fn parse_attribute_id(p: &mut Parser<'_>, start_pos_idx: PosIdx) -> StringLoc {
-    let mut parts = vec![];
-
-    loop {
-        let name = match &p.token {
-            Token::Lident(name) | Token::Uident(name) => Some(name.to_string()),
-            // Keywords that can be used as attribute names
-            Token::As => Some("as".to_string()),
-            Token::Typ => Some("type".to_string()),
-            Token::Module => Some("module".to_string()),
-            Token::Open => Some("open".to_string()),
-            Token::Private => Some("private".to_string()),
-            Token::External => Some("external".to_string()),
-            Token::Exception => Some("exception".to_string()),
-            Token::Include => Some("include".to_string()),
-            Token::Constraint => Some("constraint".to_string()),
-            Token::Let { .. } => Some("let".to_string()),
-            Token::Rec => Some("rec".to_string()),
-            Token::And => Some("and".to_string()),
-            Token::If => Some("if".to_string()),
-            Token::Else => Some("else".to_string()),
-            Token::Switch => Some("switch".to_string()),
-            Token::Try => Some("try".to_string()),
-            Token::For => Some("for".to_string()),
-            Token::In => Some("in".to_string()),
-            Token::While => Some("while".to_string()),
-            Token::True => Some("true".to_string()),
-            Token::False => Some("false".to_string()),
-            Token::Assert => Some("assert".to_string()),
-            Token::Mutable => Some("mutable".to_string()),
-            Token::Await => Some("await".to_string()),
-            _ => None,
-        };
-        match name {
-            Some(n) => {
-                parts.push(n);
-                p.next();
-                if p.token == Token::Dot {
-                    p.next();
-                } else {
-                    break;
-                }
-            }
-            None => break,
-        }
-    }
-
-    let name = parts.join(".");
-    let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
-    let str_idx = p.arena_mut().push_string(name);
-    with_loc(str_idx, loc)
+    // OCaml `parse_attribute_id` (compiler/syntax/src/res_core.ml:7531-7556).
+    super::module::parse_extension_id(p, start_pos_idx)
 }
 
 /// Parse an attribute payload.

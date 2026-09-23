@@ -5335,6 +5335,9 @@ fn parse_module_type_declaration(
 
 /// Parse attributes (including doc comments which become res.doc attributes).
 fn parse_attributes(p: &mut Parser<'_>) -> Attributes {
+    // OCaml `parse_attributes` = `parse_region ~grammar:Grammar.Attribute`
+    // (compiler/syntax/src/res_core.ml:7635-7636, 1177-1192).
+    p.leave_breadcrumb(super::grammar::Grammar::Attribute);
     let mut attrs = vec![];
     loop {
         match &p.token {
@@ -5358,39 +5361,15 @@ fn parse_attributes(p: &mut Parser<'_>) -> Attributes {
             _ => break,
         }
     }
+    p.eat_breadcrumb();
     Attributes::from_vec(attrs)
 }
 
 /// Parse an attribute body.
 /// `start_pos_idx` should be the position BEFORE the `@` or `@@` token was consumed.
 fn parse_attribute_body(p: &mut Parser<'_>, start_pos_idx: PosIdx) -> Attribute {
-    let mut parts = vec![];
-
-    // Parse attribute identifier
-    loop {
-        match &p.token {
-            Token::Lident(name) | Token::Uident(name) => {
-                parts.push(name.to_string());
-                p.next();
-            }
-            // Attributes can use keyword-like identifiers (e.g. `@module`, `@as`).
-            // Treat keywords as identifiers in this context.
-            token if token.is_keyword() => {
-                parts.push(token.to_string());
-                p.next();
-            }
-            _ => break,
-        }
-        if p.token == Token::Dot {
-            p.next();
-        } else {
-            break;
-        }
-    }
-
-    let name = parts.join(".");
-    let name_idx = p.arena_mut().push_string(name.to_string());
-    let name_loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
+    // OCaml `parse_attribute_id` (compiler/syntax/src/res_core.ml:7531-7556).
+    let attr_name = parse_extension_id(p, start_pos_idx);
 
     // Parse optional payload
     let is_adjacent = p.start_pos.cnum == p.prev_end_pos.cnum;
@@ -5403,7 +5382,7 @@ fn parse_attribute_body(p: &mut Parser<'_>, start_pos_idx: PosIdx) -> Attribute 
         Payload::PStr(Box::new(vec![]))
     };
 
-    (with_loc(name_idx, name_loc), payload)
+    (attr_name, payload)
 }
 
 /// Parse an attribute payload.
