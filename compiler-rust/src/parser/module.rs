@@ -619,27 +619,7 @@ pub(super) fn parse_type_definition_or_extension(
             } else {
                 PrivateFlag::Public
             };
-            let mut bar_start = if p.token == Token::Bar {
-                let pos_idx = p.start_pos_idx();
-                p.next();
-                Some(pos_idx)
-            } else {
-                None
-            };
-            let mut constructors = vec![];
-            while p.token != Token::Eof {
-                constructors.push(parse_extension_constructor(
-                    p,
-                    Attributes::new(),
-                    bar_start,
-                ));
-                if p.token == Token::Bar {
-                    bar_start = Some(p.start_pos_idx());
-                    p.next();
-                    continue;
-                }
-                break;
-            }
+            let constructors = parse_type_extension_constructors(p);
 
             let ext = TypeExtension {
                 ptyext_path: path,
@@ -2840,28 +2820,7 @@ fn parse_type_extension(p: &mut Parser<'_>, attrs: Attributes) -> TypeExtension 
 
     // Constructors (with optional leading `|`).
     // OCaml includes the `|` in the constructor location
-    let mut bar_start_idx = if p.token == Token::Bar {
-        let pos_idx = p.start_pos_idx();
-        p.next();
-        Some(pos_idx)
-    } else {
-        None
-    };
-
-    let mut constructors = vec![];
-    while p.token != Token::Eof {
-        constructors.push(parse_extension_constructor(
-            p,
-            Attributes::new(),
-            bar_start_idx,
-        ));
-        if p.token == Token::Bar {
-            bar_start_idx = Some(p.start_pos_idx());
-            p.next();
-            continue;
-        }
-        break;
-    }
+    let constructors = parse_type_extension_constructors(p);
 
     TypeExtension {
         ptyext_path: path,
@@ -3172,6 +3131,13 @@ fn parse_type_declaration_with_context(
         let mut kind = TypeKind::Ptype_abstract;
 
         match &p.token {
+            // OCaml `parse_private_eq_or_repr` (compiler/syntax/src/res_core.ml): after
+            // `private`, a token that starts a type expression (including `@`) is a
+            // manifest, not an attributed variant.
+            Token::At if private == PrivateFlag::Private => {
+                let typ = typ::parse_typ_expr(p);
+                manifest = Some(p.arena_mut().push_core_type(typ));
+            }
             Token::Bar => {
                 // Variant type starting with | (e.g., type t = | A | B)
                 kind = parse_type_kind(p, None, None);
@@ -4066,95 +4032,92 @@ fn parse_constructor_impl(
             p.expect(Token::Rparen);
             ConstructorArguments::Pcstr_record(labels)
         } else {
+            // OCaml `parse_constr_decl_args` (compiler/syntax/src/res_core.ml:5369-5520):
+            // a leading object type is parsed first (its location starts after `{`),
+            // followed by an optional comma; the remaining arguments use
+            // `parse_comma_delimited_region ~grammar:TypExprList ~closing:Rparen`.
             let mut args = vec![];
-            // OCaml's parse_constr_decl_args has special handling for object types
-            // ONLY for the first argument: it captures start_pos AFTER consuming `{`,
-            // so the object type location excludes the opening brace.
-            // Subsequent arguments use parse_comma_delimited_region with normal parse_typ_expr.
-            let mut is_first = true;
-            while p.token != Token::Rparen && p.token != Token::Eof {
-                let arg = if is_first && p.token == Token::Lbrace {
-                    // Check if this is an object type (has ., .., ..., or string keys)
-                    let is_object = p.lookahead(|state| {
-                        state.next(); // consume {
-                        // Skip any leading attributes
-                        while state.token == Token::At {
+            if p.token == Token::Lbrace {
+                let is_object = p.lookahead(|state| {
+                    state.next(); // consume {
+                    // Skip any leading attributes
+                    while state.token == Token::At {
+                        state.next();
+                        if matches!(
+                            state.token,
+                            Token::Lident(_) | Token::Uident(_) | Token::Module
+                        ) {
                             state.next();
-                            if matches!(
-                                state.token,
-                                Token::Lident(_) | Token::Uident(_) | Token::Module
-                            ) {
-                                state.next();
-                            }
-                            if state.token == Token::Lparen {
-                                let mut depth = 1;
-                                state.next();
-                                while depth > 0 && state.token != Token::Eof {
-                                    match state.token {
-                                        Token::Lparen => depth += 1,
-                                        Token::Rparen => depth -= 1,
-                                        _ => {}
-                                    }
-                                    state.next();
-                                }
-                            }
                         }
-                        // String, ".", or ".." indicate object type (NOT empty record)
-                        // DotDotDot (spread) needs further scanning to check for string fields
-                        if matches!(state.token, Token::String(_) | Token::Dot | Token::DotDot) {
-                            return true;
-                        }
-                        if state.token == Token::DotDotDot {
-                            // Scan past spread to check for string fields
-                            let mut depth = 0;
-                            loop {
+                        if state.token == Token::Lparen {
+                            let mut depth = 1;
+                            state.next();
+                            while depth > 0 && state.token != Token::Eof {
                                 match state.token {
-                                    Token::String(_) if depth == 0 => return true,
-                                    Token::Rbrace if depth == 0 => return false,
-                                    Token::Eof => return false,
-                                    Token::Lparen | Token::Lbrace | Token::Lbracket => depth += 1,
-                                    Token::Rparen | Token::Rbracket => {
-                                        if depth > 0 {
-                                            depth -= 1;
-                                        }
-                                    }
-                                    Token::Rbrace => {
-                                        if depth > 0 {
-                                            depth -= 1;
-                                        } else {
-                                            return false;
-                                        }
-                                    }
+                                    Token::Lparen => depth += 1,
+                                    Token::Rparen => depth -= 1,
                                     _ => {}
                                 }
                                 state.next();
                             }
                         }
-                        false
-                    });
-                    if is_object {
-                        // Consume `{` and capture start_pos AFTER (like OCaml)
-                        p.next();
-                        let start_pos_idx = p.start_pos_idx();
-                        typ::parse_object_type_body(p, start_pos_idx)
-                    } else {
-                        typ::parse_typ_expr(p)
                     }
-                } else {
-                    typ::parse_typ_expr(p)
-                };
-                let arg_idx = p.arena_mut().push_core_type(arg);
-                args.push(arg_idx);
-                is_first = false;
-                if p.optional(&Token::Comma) {
-                    continue;
-                }
-                if super::grammar::is_typ_expr_start(&p.token) || p.token == Token::LessThan {
-                    continue;
-                } else {
-                    break;
+                    // String, ".", or ".." indicate object type (NOT empty record)
+                    // DotDotDot (spread) needs further scanning to check for string fields
+                    if matches!(state.token, Token::String(_) | Token::Dot | Token::DotDot) {
+                        return true;
+                    }
+                    if state.token == Token::DotDotDot {
+                        // Scan past spread to check for string fields
+                        let mut depth = 0;
+                        loop {
+                            match state.token {
+                                Token::String(_) if depth == 0 => return true,
+                                Token::Rbrace if depth == 0 => return false,
+                                Token::Eof => return false,
+                                Token::Lparen | Token::Lbrace | Token::Lbracket => depth += 1,
+                                Token::Rparen | Token::Rbracket => {
+                                    if depth > 0 {
+                                        depth -= 1;
+                                    }
+                                }
+                                Token::Rbrace => {
+                                    if depth > 0 {
+                                        depth -= 1;
+                                    } else {
+                                        return false;
+                                    }
+                                }
+                                _ => {}
+                            }
+                            state.next();
+                        }
+                    }
+                    false
+                });
+                if is_object {
+                    p.next();
+                    let start_pos_idx = p.start_pos_idx();
+                    let obj = typ::parse_object_type_body(p, start_pos_idx);
+                    let obj_idx = p.arena_mut().push_core_type(obj);
+                    args.push(obj_idx);
+                    p.optional(&Token::Comma);
                 }
             }
+            let rest = super::core::parse_comma_delimited_region(
+                p,
+                Grammar::TypExprList,
+                Token::Rparen,
+                |p| {
+                    if super::grammar::is_typ_expr_start(&p.token) {
+                        let arg = typ::parse_typ_expr(p);
+                        Some(p.arena_mut().push_core_type(arg))
+                    } else {
+                        None
+                    }
+                },
+            );
+            args.extend(rest);
             p.expect(Token::Rparen);
             ConstructorArguments::Pcstr_tuple(args)
         }
@@ -4997,6 +4960,32 @@ pub fn parse_extension_constructor(
         pext_loc: p.mk_loc_idx_to_prev_end(start_pos_idx),
         pext_attributes: all_attrs,
     }
+}
+
+/// Constructors of a type extension, after `+=` and the optional `private`.
+/// OCaml `parse_type_extension` (compiler/syntax/src/res_core.ml:6429-6456): the
+/// first constructor is parsed unconditionally, after at most two leading `|`.
+fn parse_type_extension_constructors(p: &mut Parser<'_>) -> Vec<ExtensionConstructor> {
+    let constr_start_idx = p.start_pos_idx();
+    p.optional(&Token::Bar);
+    if p.token == Token::Bar {
+        p.next();
+    }
+    let mut constructors = vec![parse_extension_constructor(
+        p,
+        Attributes::new(),
+        Some(constr_start_idx),
+    )];
+    while p.token == Token::Bar {
+        let start_idx = p.start_pos_idx();
+        p.next();
+        constructors.push(parse_extension_constructor(
+            p,
+            Attributes::new(),
+            Some(start_idx),
+        ));
+    }
+    constructors
 }
 
 /// Parse a module definition.

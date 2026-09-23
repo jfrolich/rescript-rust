@@ -2706,7 +2706,38 @@ pub fn parse_primary_expr(p: &mut Parser<'_>, operand: Expression, no_call: bool
                             };
                         }
                     }
-                    _ => break,
+                    _ => {
+                        // OCaml `parse_value_path_after_dot` (res_core.ml:778-784):
+                        // report the token and use `_` as the field.
+                        let name_start_idx = p.start_pos_idx();
+                        p.err_unexpected();
+                        let name_loc = p.mk_loc_idx_to_prev_end(name_start_idx);
+                        let lid_idx = p.push_lident("_");
+                        let field = with_loc(lid_idx, name_loc);
+                        if p.token == Token::Equal && !no_call {
+                            p.leave_breadcrumb(Grammar::ExprSetField);
+                            p.next();
+                            let value = parse_expr(p);
+                            let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
+                            p.eat_breadcrumb();
+                            let e_idx = p.arena_mut().push_expr(expr);
+                            let v_idx = p.arena_mut().push_expr(value);
+                            return Expression {
+                                pexp_desc: Box::new(ExpressionDesc::Pexp_setfield(Box::new((
+                                    e_idx, field, v_idx,
+                                )))),
+                                pexp_loc: loc,
+                                pexp_attributes: Attributes::new(),
+                            };
+                        }
+                        let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
+                        let e_idx = p.arena_mut().push_expr(expr);
+                        expr = Expression {
+                            pexp_desc: Box::new(ExpressionDesc::Pexp_field(e_idx, field)),
+                            pexp_loc: loc,
+                            pexp_attributes: Attributes::new(),
+                        };
+                    }
                 }
             }
             Token::Lparen if !no_call => {
@@ -4302,6 +4333,16 @@ fn parse_block_body(p: &mut Parser<'_>) -> Option<Expression> {
     parse_block_body_first(p)
 }
 
+/// Body after `module`/`exception`/`open` block items: OCaml calls
+/// `parse_expr_block` unconditionally (compiler/syntax/src/res_core.ml:3605-3620),
+/// so a missing body is reported by `parse_expr` instead of becoming `()`.
+fn parse_block_body_required(p: &mut Parser<'_>) -> Expression {
+    if matches!(p.token, Token::Rbrace | Token::Eof) {
+        return parse_expr(p);
+    }
+    parse_block_body_first(p).unwrap_or_else(|| recover::default_expr(p.arena_mut()))
+}
+
 /// First item of a block: OCaml `parse_expr_block` parses one item unconditionally.
 fn parse_block_body_first(p: &mut Parser<'_>) -> Option<Expression> {
     // Skip leading semicolons
@@ -4441,12 +4482,7 @@ fn parse_block_body_first(p: &mut Parser<'_>) -> Option<Expression> {
             parse_newline_or_semicolon_expr_block(p);
 
             // Parse the rest of the block as the body
-            let rest = parse_block_body(p);
-            let body = rest.unwrap_or_else(|| {
-                // OCaml: when block ends without trailing expression, implicit () is at the } position
-                let loc = p.mk_loc_current();
-                ast_helper::make_unit(p, loc)
-            });
+            let body = parse_block_body_required(p);
 
             // OCaml uses p.prev_end_pos for Pexp_open location
             let loc = p.mk_loc_idx_to_prev_end(expr_start_idx);
@@ -4530,12 +4566,7 @@ fn parse_block_body_first(p: &mut Parser<'_>) -> Option<Expression> {
                 parse_newline_or_semicolon_expr_block(p);
 
                 // Parse the rest of the block as the body
-                let rest = parse_block_body(p);
-                let body = rest.unwrap_or_else(|| {
-                    // OCaml: when block ends without trailing expression, implicit () is at the } position
-                    let loc = p.mk_loc_current();
-                    ast_helper::make_unit(p, loc)
-                });
+                let body = parse_block_body_required(p);
 
                 // OCaml uses p.prev_end_pos for Pexp_letmodule location
                 let loc = p.mk_loc_idx_to_prev_end(expr_start_idx);
@@ -4568,12 +4599,7 @@ fn parse_block_body_first(p: &mut Parser<'_>) -> Option<Expression> {
             parse_newline_or_semicolon_expr_block(p);
 
             // Parse the rest of the block as the body
-            let rest = parse_block_body(p);
-            let body = rest.unwrap_or_else(|| {
-                // OCaml: when block ends without trailing expression, implicit () is at the } position
-                let loc = p.mk_loc_current();
-                ast_helper::make_unit(p, loc)
-            });
+            let body = parse_block_body_required(p);
 
             // OCaml uses p.prev_end_pos for Pexp_letexception location
             let loc = p.mk_loc_idx_to_prev_end(expr_start_idx);
@@ -5844,61 +5870,7 @@ fn parse_switch_expr(p: &mut Parser<'_>) -> Expression {
     let scrutinee = parse_expr_with_context(p, ExprContext::When);
     p.expect(Token::Lbrace);
 
-    let mut cases = vec![];
-    p.leave_breadcrumb(Grammar::PatternMatching);
-    while p.token != Token::Rbrace && p.token != Token::Eof {
-        // OCaml uses begin_region/end_region around each case
-        // This allows errors from different cases to all be reported
-        p.begin_region();
-        // OCaml: Parser.leave_breadcrumb p Grammar.PatternMatchCase
-        p.leave_breadcrumb(Grammar::PatternMatchCase);
-
-        if p.token == Token::Bar {
-            let bar_pos = Some(p.start_pos_idx());
-            p.next();
-            // OCaml: Parser.leave_breadcrumb p Grammar.Pattern
-            // OCaml uses parse_pattern (not parse_constrained_pattern) for switch case patterns.
-            // Constraints are only handled inside parenthesized/delimited patterns.
-            p.leave_breadcrumb(Grammar::Pattern);
-            let lhs = super::pattern::parse_pattern(p);
-            p.eat_breadcrumb();
-            let guard = if p.token == Token::When || (p.token == Token::If) {
-                p.next();
-                Some(parse_expr_with_context(p, ExprContext::When))
-            } else {
-                None
-            };
-            p.expect(Token::EqualGreater);
-            // Parse block of expressions for case RHS
-            let rhs = parse_switch_case_block(p);
-            let lhs_idx = p.arena_mut().push_pat(lhs);
-            let guard_idx = guard.map(|g| p.arena_mut().push_expr(g));
-            let rhs_idx = p.arena_mut().push_expr(rhs);
-            cases.push(Case {
-                pc_bar: bar_pos,
-                pc_lhs: lhs_idx,
-                pc_guard: guard_idx,
-                pc_rhs: rhs_idx,
-            });
-            p.end_region();
-            p.eat_breadcrumb();
-        } else {
-            p.end_region();
-            p.eat_breadcrumb();
-            break;
-        }
-    }
-    p.eat_breadcrumb();
-
-    // OCaml: emit error if switch has no cases
-    // OCaml uses end_pos (end of current token) as the error end, not start_pos
-    if cases.is_empty() {
-        p.err_at(
-            p.prev_end_pos.clone(),
-            p.end_pos.clone(),
-            DiagnosticCategory::Message("Pattern matching needs at least one case".to_string()),
-        );
-    }
+    let cases = parse_pattern_matching(p);
 
     p.expect(Token::Rbrace);
     let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
@@ -5911,6 +5883,69 @@ fn parse_switch_expr(p: &mut Parser<'_>) -> Expression {
         pexp_loc: loc,
         pexp_attributes: Attributes::new(),
     }
+}
+
+/// OCaml `parse_pattern_matching` (compiler/syntax/src/res_core.ml:3997-4009),
+/// shared by `switch` and `try ... catch`.
+fn parse_pattern_matching(p: &mut Parser<'_>) -> Vec<Case> {
+    let cases = super::core::parse_delimited_region(
+        p,
+        Grammar::PatternMatching,
+        Token::Rbrace,
+        parse_pattern_match_case,
+    );
+    if cases.is_empty() {
+        p.err_at(
+            p.prev_end_pos.clone(),
+            p.end_pos.clone(),
+            DiagnosticCategory::Message("Pattern matching needs at least one case".to_string()),
+        );
+    }
+    cases
+}
+
+/// OCaml `parse_pattern_match_case` (compiler/syntax/src/res_core.ml:3972-3995).
+fn parse_pattern_match_case(p: &mut Parser<'_>) -> Option<Case> {
+    p.begin_region();
+    p.leave_breadcrumb(Grammar::PatternMatchCase);
+    if p.token != Token::Bar {
+        p.end_region();
+        p.eat_breadcrumb();
+        return None;
+    }
+    let bar_pos = Some(p.start_pos_idx());
+    p.next();
+    p.leave_breadcrumb(Grammar::Pattern);
+    let lhs = super::pattern::parse_pattern(p);
+    p.eat_breadcrumb();
+    // OCaml `parse_pattern_guard` accepts both `when` and `if`.
+    let guard = if matches!(p.token, Token::When | Token::If) {
+        p.next();
+        Some(parse_expr_with_context(p, ExprContext::When))
+    } else {
+        None
+    };
+    if p.token == Token::EqualGreater {
+        p.next();
+    } else {
+        // OCaml `Recover.recover_equal_greater`.
+        p.expect(Token::EqualGreater);
+        if p.token == Token::MinusGreater {
+            p.next();
+        }
+    }
+    let rhs = parse_switch_case_block(p);
+    let lhs_idx = p.arena_mut().push_pat(lhs);
+    let guard_idx = guard.map(|g| p.arena_mut().push_expr(g));
+    let rhs_idx = p.arena_mut().push_expr(rhs);
+    p.end_region();
+    p.eat_breadcrumb();
+    Some(Case {
+        pc_bar: bar_pos,
+        pc_lhs: lhs_idx,
+        pc_guard: guard_idx,
+        pc_rhs: rhs_idx,
+    })
 }
 
 /// Parse a while expression.
@@ -6498,50 +6533,7 @@ fn parse_try_expr(p: &mut Parser<'_>) -> Expression {
     p.expect(Token::Lident(Cow::Owned("catch".to_string())));
     p.expect(Token::Lbrace);
 
-    let mut cases = vec![];
-    while p.token != Token::Rbrace && p.token != Token::Eof {
-        // OCaml uses begin_region/end_region around each case
-        p.begin_region();
-        // OCaml: Parser.leave_breadcrumb p Grammar.PatternMatchCase
-        p.leave_breadcrumb(Grammar::PatternMatchCase);
-
-        if p.token == Token::Bar {
-            let bar_pos = Some(p.start_pos_idx());
-            p.next();
-            // OCaml: Parser.leave_breadcrumb p Grammar.Pattern
-            p.leave_breadcrumb(Grammar::Pattern);
-            // OCaml parse_pattern_matching uses parse_pattern (not parse_constrained_pattern)
-            // for both switch and try/catch cases.
-            let lhs = super::pattern::parse_pattern(p);
-            p.eat_breadcrumb();
-            // OCaml parse_pattern_guard accepts both `when` and `if`.
-            let guard = if p.token == Token::When || p.token == Token::If {
-                p.next();
-                Some(parse_expr_with_context(p, ExprContext::When))
-            } else {
-                None
-            };
-            p.expect(Token::EqualGreater);
-            // Parse a block of expressions for catch case RHS (no braces),
-            // stopping at `|` (next case) or `}` (end of catch).
-            let rhs = parse_switch_case_block(p);
-            let lhs_idx = p.arena_mut().push_pat(lhs);
-            let guard_idx = guard.map(|g| p.arena_mut().push_expr(g));
-            let rhs_idx = p.arena_mut().push_expr(rhs);
-            cases.push(Case {
-                pc_bar: bar_pos,
-                pc_lhs: lhs_idx,
-                pc_guard: guard_idx,
-                pc_rhs: rhs_idx,
-            });
-            p.end_region();
-            p.eat_breadcrumb();
-        } else {
-            p.end_region();
-            p.eat_breadcrumb();
-            break;
-        }
-    }
+    let cases = parse_pattern_matching(p);
 
     p.expect(Token::Rbrace);
     let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);

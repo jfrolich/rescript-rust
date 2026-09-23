@@ -846,7 +846,6 @@ fn parse_atomic_typ_expr_with_start(
         }
         Token::Lbrace => parse_record_or_object_type(p),
         Token::Lbracket => parse_poly_variant_type(p),
-        Token::Hash => parse_poly_variant_type_simple(p),
         Token::Module => {
             p.next();
             parse_package_type_with_parens(p, start_pos_idx)
@@ -1133,8 +1132,12 @@ fn parse_function_type(p: &mut Parser<'_>, start_pos_idx: PosIdx) -> CoreType {
     let mut params: Vec<(TypeArg, crate::parse_arena::PosIdx)> = vec![];
     let mut is_first_param = true;
     let mut positional_index = 0usize;
+    // OCaml `parse_type_parameter` consumes a leading `.` and then requires a
+    // parameter, so `(.)` is not an empty parameter list.
+    let mut force_first_param = first_has_dot;
 
-    while p.token != Token::Rparen && p.token != Token::Eof {
+    while force_first_param || (p.token != Token::Rparen && p.token != Token::Eof) {
+        force_first_param = false;
         // Capture position before the uncurried marker - OCaml includes . in argument type location
         // Use identity-based position tracking to match OCaml's behavior.
         let uncurried_start_idx = if is_first_param {
@@ -2040,86 +2043,6 @@ fn parse_poly_variant_type(p: &mut Parser<'_>) -> CoreType {
     CoreType {
         ptyp_desc: Box::new(CoreTypeDesc::Ptyp_variant(Box::new((
             fields, closed, low_tags,
-        )))),
-        ptyp_loc: loc,
-        ptyp_attributes: Attributes::new(),
-    }
-}
-
-/// Parse a simple polymorphic variant type starting with #.
-fn parse_poly_variant_type_simple(p: &mut Parser<'_>) -> CoreType {
-    let start_pos_idx = p.start_pos_idx();
-    let hash_start_pos = p.start_pos;
-    p.expect(Token::Hash);
-
-    let tag: Label = match &p.token {
-        Token::Lident(name) | Token::Uident(name) => {
-            let name = extend_cow_lifetime(name.clone());
-            p.next();
-            name
-        }
-        Token::Int { i, suffix } => {
-            // Clone values before borrowing p mutably
-            let tag = i.to_string();
-            let has_suffix = suffix.is_some();
-            // OCaml: emit error if numeric poly variant has a suffix
-            if has_suffix {
-                p.err(DiagnosticCategory::Message(format!(
-                    "A numeric polymorphic variant cannot be followed by a letter. Did you mean `#{}`?",
-                    tag
-                )));
-            }
-            p.next();
-            Cow::Owned(tag)
-        }
-        Token::String(s) => {
-            let tag = extend_cow_lifetime(s.clone());
-            p.next();
-            tag
-        }
-        _ => {
-            err_invalid_variant_ident(p, hash_start_pos);
-            Cow::Borrowed("")
-        }
-    };
-
-    // Check for type arguments
-    let args = if p.token == Token::Lparen {
-        p.next();
-        let mut args = vec![];
-        while p.token != Token::Rparen && p.token != Token::Eof {
-            // Allow arrow types in polymorphic variant arguments (e.g., #Foo(string => unit))
-            args.push(parse_typ_expr_inner(p, true));
-            if !p.optional(&Token::Comma) {
-                break;
-            }
-        }
-        p.expect(Token::Rparen);
-        args
-    } else {
-        vec![]
-    };
-
-    let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
-    let tag_loc = loc.clone();
-
-    let is_constant = args.is_empty();
-    let args_idx: Vec<CoreTypeIdx> = args
-        .into_iter()
-        .map(|a| p.arena_mut().push_core_type(a))
-        .collect();
-    let fields = vec![RowField::Rtag(
-        with_loc(tag, tag_loc),
-        Attributes::new(),
-        is_constant,
-        args_idx,
-    )];
-
-    CoreType {
-        ptyp_desc: Box::new(CoreTypeDesc::Ptyp_variant(Box::new((
-            fields,
-            ClosedFlag::Closed,
-            None,
         )))),
         ptyp_loc: loc,
         ptyp_attributes: Attributes::new(),

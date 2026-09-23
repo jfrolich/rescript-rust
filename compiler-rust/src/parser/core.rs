@@ -195,6 +195,82 @@ pub mod recover {
     }
 }
 
+/// OCaml `parse_delimited_region` (compiler/syntax/src/res_core.ml:1158-1175).
+pub fn parse_delimited_region<'a, T>(
+    p: &mut Parser<'a>,
+    grammar: grammar::Grammar,
+    closing: Token<'static>,
+    mut f: impl FnMut(&mut Parser<'a>) -> Option<T>,
+) -> Vec<T> {
+    p.leave_breadcrumb(grammar);
+    let mut nodes = vec![];
+    loop {
+        match f(p) {
+            Some(node) => nodes.push(node),
+            None => {
+                if p.token == Token::Eof
+                    || p.token == closing
+                    || recover::should_abort_list_parse(p)
+                {
+                    break;
+                }
+                p.err_unexpected();
+                p.next();
+            }
+        }
+    }
+    p.eat_breadcrumb();
+    nodes
+}
+
+/// OCaml `parse_comma_delimited_region` (compiler/syntax/src/res_core.ml:1068-1105).
+pub fn parse_comma_delimited_region<'a, T>(
+    p: &mut Parser<'a>,
+    grammar: grammar::Grammar,
+    closing: Token<'static>,
+    mut f: impl FnMut(&mut Parser<'a>) -> Option<T>,
+) -> Vec<T> {
+    p.leave_breadcrumb(grammar.clone());
+    let mut nodes = vec![];
+    loop {
+        match f(p) {
+            Some(node) => {
+                nodes.push(node);
+                if p.token == Token::Comma {
+                    p.next();
+                } else if p.token == closing || p.token == Token::Eof {
+                    break;
+                } else if grammar::is_list_element(&grammar, &p.token) {
+                    // Missing comma, but the next token starts another element.
+                    p.expect(Token::Comma);
+                } else {
+                    if !(p.token == Token::Eof
+                        || p.token == closing
+                        || recover::should_abort_list_parse(p))
+                    {
+                        p.expect(Token::Comma);
+                    }
+                    if p.token == Token::Semicolon {
+                        p.next();
+                    }
+                }
+            }
+            None => {
+                if p.token == Token::Eof
+                    || p.token == closing
+                    || recover::should_abort_list_parse(p)
+                {
+                    break;
+                }
+                p.err_unexpected();
+                p.next();
+            }
+        }
+    }
+    p.eat_breadcrumb();
+    nodes
+}
+
 // ============================================================================
 // Error Messages
 // ============================================================================
