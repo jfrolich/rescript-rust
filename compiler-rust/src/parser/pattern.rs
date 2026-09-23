@@ -846,8 +846,9 @@ fn parse_atomic_pattern(p: &mut Parser<'_>) -> Pattern {
         }
         Token::Eof => {
             // EOF: just report error and return default (no skip_tokens_and_maybe_retry)
-            // OCaml: | Eof -> Parser.err ~start_pos:p.prev_end_pos p ...; Recover.default_pattern ()
-            p.err_unexpected_at(p.prev_end_pos.clone());
+            // OCaml `parse_pattern` (compiler/syntax/src/res_core.ml:1339-1341):
+            // | Eof -> Parser.err p ...; Recover.default_pattern ()
+            p.err_unexpected();
             recover::default_pattern(p.arena_mut())
         }
         _ => {

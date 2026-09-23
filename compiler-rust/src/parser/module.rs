@@ -3744,6 +3744,8 @@ fn parse_type_kind(
             // attaches them to the first field while forcing first-field loc_start to the
             // first attribute's loc_start.
             let leading_attrs = parse_attributes(p);
+            // OCaml `parse_record_or_object_decl` (res_core.ml:6041).
+            p.leave_breadcrumb(grammar::Grammar::RecordDecl);
             let labels = if leading_attrs.is_empty() {
                 parse_label_declarations(
                     p,
@@ -3760,6 +3762,7 @@ fn parse_type_kind(
                 )
             };
             p.expect(Token::Rbrace);
+            p.eat_breadcrumb();
             TypeKind::Ptype_record(labels)
         }
         _ => TypeKind::Ptype_abstract,
@@ -4198,9 +4201,23 @@ fn parse_label_declarations_with_first_state(
             continue;
         }
 
-        if let Some(l) = parse_label_declaration(p, inline_ctx, current_type_name_path, None, true)
-        {
-            labels.push(l);
+        match parse_label_declaration(p, inline_ctx, current_type_name_path, None, true) {
+            Some(l) => labels.push(l),
+            None => {
+                // OCaml `parse_comma_delimited_region`'s `None` branch
+                // (compiler/syntax/src/res_core.ml:1096-1102): stop on a
+                // closing token or abort point, otherwise report the token,
+                // skip it, and keep parsing the region.
+                if p.token == Token::Eof
+                    || p.token == Token::Rbrace
+                    || super::core::recover::should_abort_list_parse(p)
+                {
+                    break;
+                }
+                p.err_unexpected();
+                p.next();
+                continue;
+            }
         }
         is_first = false;
         if !p.optional(&Token::Comma) {
@@ -4422,15 +4439,15 @@ fn parse_label_declaration(
                 p.err_at(start_pos.clone(), p.end_pos.clone(), DiagnosticCategory::Message(
                     "Attributes and doc comments can only be used at the beginning of a field declaration".to_string(),
                 ));
-            } else if mutable == MutableFlag::Mutable {
+            }
+            if mutable == MutableFlag::Mutable {
                 p.err_at(start_pos.clone(), p.end_pos.clone(), DiagnosticCategory::Message(
                     "The `mutable` qualifier can only be used at the beginning of a field declaration".to_string(),
                 ));
-            } else {
-                p.err(DiagnosticCategory::Message(
-                    "Expected field name".to_string(),
-                ));
             }
+            // OCaml `parse_field_declaration_region` (res_core.ml) returns
+            // `None` without a diagnostic here; the enclosing comma-delimited
+            // region reports the unexpected token.
             return None;
         }
     };
