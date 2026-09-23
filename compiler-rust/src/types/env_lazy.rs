@@ -373,6 +373,9 @@ struct StructureComponentTables {
     // signature.
     child_components: RefCell<HashMap<String, Option<(usize, Arc<StoredModuleComponents>)>>>,
     child_component_scan: RefCell<ChildComponentScanState>,
+    // The component substitution for value lookups depends only on the
+    // signature and access path; build it once per component table.
+    value_subst_maps: RefCell<Option<Arc<crate::cmi::persistent_env::ValueSubstMaps>>>,
 }
 
 #[derive(Debug, Clone)]
@@ -621,6 +624,7 @@ impl QualifiedModuleComponents {
                 } else {
                     ChildComponentScanState::new()
                 }),
+                value_subst_maps: RefCell::new(None),
             }),
             compiler_counters_enabled: ctx.compiler_counters_enabled(),
             value_source_prefix: value_source_prefix.map(Arc::new),
@@ -862,8 +866,20 @@ impl QualifiedModuleComponents {
         // Keep the alias-strengthening boundary from compiler/ml/mtype.ml:41-49:
         // only the component substitution is applied here; alias target value
         // descriptions are not rewritten wholesale.
-        crate::cmi::persistent_env::substitute_type_paths_in_value_from_sig(
+        let value_maps = self
+            .tables
+            .value_subst_maps
+            .borrow_mut()
+            .get_or_insert_with(|| {
+                Arc::new(crate::cmi::persistent_env::build_value_subst_maps(
+                    self.signature.as_ref(),
+                    self.access_path(),
+                ))
+            })
+            .clone();
+        crate::cmi::persistent_env::substitute_type_paths_in_value_with_maps(
             &mut desc,
+            &value_maps,
             self.signature.as_ref(),
             self.access_path(),
             ctx,

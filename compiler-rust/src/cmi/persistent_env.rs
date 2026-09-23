@@ -3203,7 +3203,7 @@ fn nonpersistent_path_head(path: &Path) -> Option<(i32, String)> {
     }
 }
 
-#[derive(Default, Clone)]
+#[derive(Default, Clone, Debug)]
 struct SubstMaps {
     type_stamp_map: HashMap<i32, Path>,
     type_name_map: HashMap<String, Path>,
@@ -4129,7 +4129,7 @@ pub fn substitute_type_paths_in_sig(
             _ => {}
         }
     }
-    let type_name_map = &direct_type_name_map;
+    let type_name_map = direct_type_name_map;
     let module_stamp_map = &maps.module_stamp_map;
     let module_name_map = &maps.module_name_map;
     let protected_module_head = maps.protected_module_head.as_ref();
@@ -4552,14 +4552,17 @@ fn substitute_type_expr_path(
     }
 }
 
-pub fn substitute_type_paths_in_value_from_sig(
-    desc: &mut crate::types::decl::ValueDescription,
-    sig_items: &[SignatureItem],
-    module_path: &Path,
-    ctx: &TypeContext,
-) {
+/// Component substitution used by `substitute_type_paths_in_value_from_sig`.
+/// It depends only on the component signature and access path, so component
+/// tables can build it once and reuse it for every value lookup.
+#[derive(Debug)]
+pub struct ValueSubstMaps {
+    maps: SubstMaps,
+    direct_type_name_map: HashMap<String, Path>,
+}
+
+pub fn build_value_subst_maps(sig_items: &[SignatureItem], module_path: &Path) -> ValueSubstMaps {
     let maps = build_subst_maps_for_module(sig_items, module_path);
-    let type_stamp_map = &maps.type_stamp_map;
     // OCaml compiler/ml/env.ml:1530-1538 builds component substitutions with
     // `prefix_idents`, then compiler/ml/subst.ml:303-309 applies
     // `Subst.value_description`. In-process persistent signatures can preserve
@@ -4576,7 +4579,33 @@ pub fn substitute_type_paths_in_value_from_sig(
             _ => {}
         }
     }
-    let type_name_map = &direct_type_name_map;
+    ValueSubstMaps {
+        maps,
+        direct_type_name_map,
+    }
+}
+
+pub fn substitute_type_paths_in_value_from_sig(
+    desc: &mut crate::types::decl::ValueDescription,
+    sig_items: &[SignatureItem],
+    module_path: &Path,
+    ctx: &TypeContext,
+) {
+    let value_maps = build_value_subst_maps(sig_items, module_path);
+    substitute_type_paths_in_value_with_maps(desc, &value_maps, sig_items, module_path, ctx);
+}
+
+pub fn substitute_type_paths_in_value_with_maps(
+    desc: &mut crate::types::decl::ValueDescription,
+    value_maps: &ValueSubstMaps,
+    sig_items: &[SignatureItem],
+    module_path: &Path,
+    ctx: &TypeContext,
+) {
+    let maps = &value_maps.maps;
+    let direct_type_name_map = &value_maps.direct_type_name_map;
+    let type_stamp_map = &maps.type_stamp_map;
+    let type_name_map = direct_type_name_map;
     let module_stamp_map = &maps.module_stamp_map;
     let module_name_map = &maps.module_name_map;
     let protected_module_head = maps.protected_module_head.as_ref();
@@ -6087,6 +6116,22 @@ fn add_signature_to_env_with_options(
     let mut opened_modules = Vec::new();
     let mut opened_module_components = Vec::new();
     let mut opened_modtypes = Vec::new();
+    // `substitute_sig_path` rebuilds the component substitution for the whole
+    // signature on every call; build it once for this open instead of once per
+    // alias/extension item.
+    let mut sig_subst_maps: Option<SubstMaps> = None;
+    let mut substitute_path = |path: &Path| {
+        let maps = sig_subst_maps
+            .get_or_insert_with(|| build_subst_maps_for_module(sig_items, module_path));
+        substitute_type_path(
+            path,
+            &maps.type_stamp_map,
+            &maps.type_name_map,
+            &maps.module_stamp_map,
+            &maps.module_name_map,
+            maps.protected_module_head.as_ref(),
+        )
+    };
     for item in sig_items.iter() {
         let slot_path = |name: &str, p: i32| {
             Path::Pdot(
@@ -6396,11 +6441,11 @@ fn add_signature_to_env_with_options(
                 };
                 md.md_type = match md.md_type {
                     ModuleType::MtyAlias(alias_presence, alias_path) => {
-                        let rewritten = substitute_sig_path(&alias_path, sig_items, module_path);
+                        let rewritten = substitute_path(&alias_path);
                         ModuleType::MtyAlias(alias_presence, normalize_hidden_alias_path(rewritten))
                     }
                     ModuleType::MtyIdent(path) => {
-                        let rewritten = substitute_sig_path(&path, sig_items, module_path);
+                        let rewritten = substitute_path(&path);
                         ModuleType::MtyIdent(normalize_hidden_alias_path(rewritten))
                     }
                     other => other,
@@ -6468,7 +6513,7 @@ fn add_signature_to_env_with_options(
             SignatureItem::SigTypext(id, ext, _status) => {
                 let ext_slot = pos;
                 pos += 1; // Extension constructors occupy runtime slots
-                let ext_type_path = substitute_sig_path(&ext.ext_type_path, sig_items, module_path);
+                let ext_type_path = substitute_path(&ext.ext_type_path);
                 // Add extension constructor
                 let cstr_desc = ConstructorDescription {
                     cstr_name: id.name().to_string(),
