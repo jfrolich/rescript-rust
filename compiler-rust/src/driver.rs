@@ -1309,6 +1309,8 @@ pub struct CompilerOptions {
     pub transparent_modules: bool,
     /// Mirror `Js_config.no_builtin_ppx` / `-bs-no-builtin-ppx`.
     pub no_builtin_ppx: bool,
+    /// Enable the in-process Spice mapper only when the project configured its PPX.
+    pub spice_ppx: bool,
     /// External `-ppx` rewriters, in command-line order.
     pub external_ppxs: Vec<String>,
     /// When true, do not implicitly open Pervasives and Stdlib.
@@ -1372,6 +1374,7 @@ impl Default for CompilerOptions {
             noassert: false,
             transparent_modules: false,
             no_builtin_ppx: false,
+            spice_ppx: false,
             external_ppxs: Vec::new(),
             nopervasives: false,
             module_name: None,
@@ -1700,8 +1703,12 @@ fn preprocess_signature_for_typecheck_with_source(
     if options.no_builtin_ppx {
         Ok(signature)
     } else {
-        ppx::rewrite_signature(&signature, arena)
-            .map_err(|e| ppx_error_to_anyhow(e, arena, source, filename))
+        let rewrite = if options.spice_ppx {
+            ppx::rewrite_signature_with_spice
+        } else {
+            ppx::rewrite_signature
+        };
+        rewrite(&signature, arena).map_err(|e| ppx_error_to_anyhow(e, arena, source, filename))
     }
 }
 
@@ -11512,8 +11519,12 @@ fn compile_source_to_js_with_options_inner(
 
         // Rewrite expressions: desugar pipe (->), setter (#=), property access (##),
         // await, tagged templates, encode externals, and apply spice mapper rewrites.
-        // spice is handled here, so avoid running a second top-level spice expansion pass.
-        ppx::rewrite_structure(&structure, parser.arena_mut())
+        let rewrite = if options.spice_ppx {
+            ppx::rewrite_structure_with_spice
+        } else {
+            ppx::rewrite_structure
+        };
+        rewrite(&structure, parser.arena_mut())
             .map_err(|e| ppx_error_to_anyhow(e, parser.arena(), source, filename))?
     };
     parser.arena_mut().reserve_typecheck_synthetic_capacity();
@@ -12914,7 +12925,12 @@ pub fn typecheck_and_dump_sexp<W: std::io::Write>(
 
             let structure = ppx::expand_extensions(&structure, parser.arena_mut())
                 .map_err(|e| ppx_error_to_anyhow(e, parser.arena(), source, filename))?;
-            ppx::rewrite_structure(&structure, parser.arena_mut())
+            let rewrite = if options.spice_ppx {
+                ppx::rewrite_structure_with_spice
+            } else {
+                ppx::rewrite_structure
+            };
+            rewrite(&structure, parser.arena_mut())
                 .map_err(|e| ppx_error_to_anyhow(e, parser.arena(), source, filename))?
         };
         parser.arena_mut().reserve_typecheck_synthetic_capacity();
@@ -14159,8 +14175,12 @@ pub fn typecheck_stored_structure_and_dump_sexp<W: std::io::Write>(
     } else {
         let structure = ppx::expand_extensions(&structure, &mut arena)
             .map_err(|e| anyhow!("PPX rewrite failed: {e}"))?;
-        ppx::rewrite_structure(&structure, &mut arena)
-            .map_err(|e| anyhow!("PPX rewrite failed: {e}"))?
+        let rewrite = if options.spice_ppx {
+            ppx::rewrite_structure_with_spice
+        } else {
+            ppx::rewrite_structure
+        };
+        rewrite(&structure, &mut arena).map_err(|e| anyhow!("PPX rewrite failed: {e}"))?
     };
 
     crate::ident::Ident::set_current_time(OCAML_NON_PREDEF_STAMP_START);
@@ -14690,7 +14710,12 @@ pub fn compile_source_in_process(
     let structure = if options.no_builtin_ppx {
         structure
     } else {
-        ppx::rewrite_structure(&structure, parser.arena_mut())
+        let rewrite = if options.spice_ppx {
+            ppx::rewrite_structure_with_spice
+        } else {
+            ppx::rewrite_structure
+        };
+        rewrite(&structure, parser.arena_mut())
             .map_err(|e| ppx_error_to_anyhow(e, parser.arena(), source, filename))?
     };
     let structure =

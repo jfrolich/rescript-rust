@@ -619,6 +619,7 @@ fn generate_ast(
             jsx_version,
             let_unwrap_enabled,
             no_builtin_ppx,
+            &package.config.ppx_flags,
             store_ast,
             in_process,
         )
@@ -813,6 +814,7 @@ fn generate_ast_with_rust_parser(
     jsx_version: i32,
     let_unwrap_enabled: bool,
     no_builtin_ppx: bool,
+    ppx_flags: &Option<Vec<OneOrMore<String>>>,
     store_ast: bool,
     in_process: bool,
 ) -> anyhow::Result<(
@@ -824,6 +826,7 @@ fn generate_ast_with_rust_parser(
         let bytes = std::fs::read(source_file)
             .with_context(|| format!("Failed to read {}", source_file.display()))?;
         let source = source_bytes_to_latin1(bytes);
+        let spice_ppx = in_process && !no_builtin_ppx && configured_spice_ppx(ppx_flags, &source);
         let mut parser = Parser::new(source_path_for_ast.to_string(), &source);
         let mut warnings = String::new();
 
@@ -864,8 +867,12 @@ fn generate_ast_with_rust_parser(
                 let signature = if no_builtin_ppx {
                     signature
                 } else {
-                    ppx::rewrite_signature(&signature, parser.arena_mut())
-                        .map_err(|e| anyhow!("PPX rewrite failed: {e}"))?
+                    let rewrite = if spice_ppx {
+                        ppx::rewrite_signature_with_spice
+                    } else {
+                        ppx::rewrite_signature
+                    };
+                    rewrite(&signature, parser.arena_mut()).map_err(|e| anyhow!("PPX rewrite failed: {e}"))?
                 };
                 let mut deps = extract_signature_deps(parser.arena(), &signature);
                 deps.extend(extra_deps.iter().cloned());
@@ -929,8 +936,12 @@ fn generate_ast_with_rust_parser(
                 let structure = if no_builtin_ppx {
                     structure
                 } else {
-                    ppx::rewrite_structure(&structure, parser.arena_mut())
-                        .map_err(|e| anyhow!("PPX rewrite failed: {e}"))?
+                    let rewrite = if spice_ppx {
+                        ppx::rewrite_structure_with_spice
+                    } else {
+                        ppx::rewrite_structure
+                    };
+                    rewrite(&structure, parser.arena_mut()).map_err(|e| anyhow!("PPX rewrite failed: {e}"))?
                 };
                 let structure = rescript_compiler::binary_ast::writer::apply_no_export_config(
                     parser.arena_mut(),
@@ -970,6 +981,21 @@ fn generate_ast_with_rust_parser(
     })
 }
 
+fn configured_spice_ppx(ppx_flags: &Option<Vec<OneOrMore<String>>>, contents: &str) -> bool {
+    filter_ppx_flags(ppx_flags, contents).is_some_and(|flags| {
+        flags.iter().any(|flag| {
+            let command = match flag {
+                OneOrMore::Single(command) => command,
+                OneOrMore::Multiple(commands) => match commands.first() {
+                    Some(command) => command,
+                    None => return false,
+                },
+            };
+            command.contains("spice")
+        })
+    })
+}
+
 fn filter_ppx_flags(
     ppx_flags: &Option<Vec<OneOrMore<String>>>,
     contents: &str,
@@ -990,9 +1016,21 @@ fn filter_ppx_flags(
 #[cfg(test)]
 mod tests {
     use super::{
-        open_dependencies_from_bsc_flags, rust_parser_effective_jsx_version, rust_parser_let_unwrap_enabled,
+        configured_spice_ppx, open_dependencies_from_bsc_flags, rust_parser_effective_jsx_version,
+        rust_parser_let_unwrap_enabled,
     };
-    use crate::config::Config;
+    use crate::config::{Config, OneOrMore};
+
+    #[test]
+    fn spice_only_runs_when_ppx_is_configured_and_selected_for_source() {
+        let source = "@spice type person = {name: string}";
+        let spice = Some(vec![OneOrMore::Single("./node_modules/ppx_spice/ppx.exe".into())]);
+        assert!(!configured_spice_ppx(&None, source));
+        assert!(configured_spice_ppx(&spice, source));
+        assert!(!configured_spice_ppx(&spice, "type person = {name: string}"));
+        let unrelated = Some(vec![OneOrMore::Single("./ppx_other.exe".into())]);
+        assert!(!configured_spice_ppx(&unrelated, source));
+    }
 
     #[test]
     fn open_dependencies_extracts_and_dedups() {

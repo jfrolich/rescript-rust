@@ -16259,6 +16259,14 @@ pub fn rewrite_structure(
     structure: &[StructureItem],
     arena: &mut ParseArena,
 ) -> PpxResult<Vec<StructureItem>> {
+    rewrite_structure_impl(structure, arena, false, true)
+}
+
+/// Apply the built-in mapper with configured Spice support.
+pub fn rewrite_structure_with_spice(
+    structure: &[StructureItem],
+    arena: &mut ParseArena,
+) -> PpxResult<Vec<StructureItem>> {
     rewrite_structure_impl(structure, arena, true, true)
 }
 
@@ -16268,7 +16276,7 @@ pub fn rewrite_structure_for_parser_debug(
     structure: &[StructureItem],
     arena: &mut ParseArena,
 ) -> PpxResult<Vec<StructureItem>> {
-    rewrite_structure_impl(structure, arena, true, false)
+    rewrite_structure_impl(structure, arena, false, false)
 }
 
 fn rewrite_structure_impl(
@@ -16285,82 +16293,88 @@ fn rewrite_structure_impl(
         validate_structure_this_errors(structure, arena)?;
     }
 
-    // Context for tracking already-created module type names (per-structure scope)
-    let mut await_context = std::collections::HashSet::new();
-    let mut result = Vec::new();
-    let spice_mapper_active =
-        apply_spice && spice_ppx::structure_uses_spice_mapper(structure, arena);
+    // Nested signature mapping follows the same configured PPX scope.
+    let previous_spice = std::mem::replace(&mut arena.spice_mapper_enabled, apply_spice);
+    let result = (|| {
+        // Context for tracking already-created module type names (per-structure scope)
+        let mut await_context = std::collections::HashSet::new();
+        let mut result = Vec::new();
+        let spice_mapper_active =
+            apply_spice && spice_ppx::structure_uses_spice_mapper(structure, arena);
 
-    for item in structure {
-        match &*item.pstr_desc {
-            StructureItemDesc::Pstr_module(mb) => {
-                // OCaml structure_mapper handles module-level await here (not in structure_item mapper)
-                // and deduplicates generated module type declarations per structure.
-                if let Some((module_type_decl, transformed_mb)) =
-                    transform_module_await(mb, item.pstr_loc, arena)
-                {
-                    let mb_expr = arena.get_mod_expr(mb.pmb_expr);
-                    if let ModuleExprDesc::Pmod_ident(located_lid) = &*mb_expr.pmod_desc {
-                        let module_type_name = local_module_type_name(located_lid.txt, arena);
-                        if await_context.insert(module_type_name) {
-                            result.push(module_type_decl);
+        for item in structure {
+            match &*item.pstr_desc {
+                StructureItemDesc::Pstr_module(mb) => {
+                    // OCaml structure_mapper handles module-level await here (not in structure_item mapper)
+                    // and deduplicates generated module type declarations per structure.
+                    if let Some((module_type_decl, transformed_mb)) =
+                        transform_module_await(mb, item.pstr_loc, arena)
+                    {
+                        let mb_expr = arena.get_mod_expr(mb.pmb_expr);
+                        if let ModuleExprDesc::Pmod_ident(located_lid) = &*mb_expr.pmod_desc {
+                            let module_type_name = local_module_type_name(located_lid.txt, arena);
+                            if await_context.insert(module_type_name) {
+                                result.push(module_type_decl);
+                            }
                         }
+                        result.push(transformed_mb);
+                    } else if apply_spice {
+                        result.extend(try_rewrite_structure_item(
+                            item,
+                            arena,
+                            spice_mapper_active,
+                        )?);
+                    } else {
+                        result.extend(rewrite_structure_item_no_spice(item, arena));
                     }
-                    result.push(transformed_mb);
-                } else if apply_spice {
-                    result.extend(try_rewrite_structure_item(
-                        item,
-                        arena,
-                        spice_mapper_active,
-                    )?);
-                } else {
-                    result.extend(rewrite_structure_item_no_spice(item, arena));
                 }
-            }
-            StructureItemDesc::Pstr_value(inner) => {
-                let (ref _rec_flag, ref bindings) = **inner;
-                // Spelunk through the ORIGINAL bindings to find await module types
-                // (before expression rewriting transforms them)
-                let module_type_decls = spelunk_value_bindings_for_await_module_types(
-                    bindings,
-                    &mut await_context,
-                    arena,
-                );
-
-                // Add hoisted module type declarations first
-                result.extend(module_type_decls);
-
-                // Then process the structure item normally
-                if apply_spice {
-                    result.extend(try_rewrite_structure_item(
-                        item,
+                StructureItemDesc::Pstr_value(inner) => {
+                    let (ref _rec_flag, ref bindings) = **inner;
+                    // Spelunk through the ORIGINAL bindings to find await module types
+                    // (before expression rewriting transforms them)
+                    let module_type_decls = spelunk_value_bindings_for_await_module_types(
+                        bindings,
+                        &mut await_context,
                         arena,
-                        spice_mapper_active,
-                    )?);
-                } else {
-                    result.extend(rewrite_structure_item_no_spice(item, arena));
+                    );
+
+                    // Add hoisted module type declarations first
+                    result.extend(module_type_decls);
+
+                    // Then process the structure item normally
+                    if apply_spice {
+                        result.extend(try_rewrite_structure_item(
+                            item,
+                            arena,
+                            spice_mapper_active,
+                        )?);
+                    } else {
+                        result.extend(rewrite_structure_item_no_spice(item, arena));
+                    }
                 }
-            }
-            _ => {
-                // Non-Pstr_value items: just process normally
-                if apply_spice {
-                    result.extend(try_rewrite_structure_item(
-                        item,
-                        arena,
-                        spice_mapper_active,
-                    )?);
-                } else {
-                    result.extend(rewrite_structure_item_no_spice(item, arena));
+                _ => {
+                    // Non-Pstr_value items: just process normally
+                    if apply_spice {
+                        result.extend(try_rewrite_structure_item(
+                            item,
+                            arena,
+                            spice_mapper_active,
+                        )?);
+                    } else {
+                        result.extend(rewrite_structure_item_no_spice(item, arena));
+                    }
                 }
             }
         }
-    }
 
-    if validate_invariants {
-        validate_structure_builtin_type_redefinition_errors(&result, arena)?;
-    }
+        if validate_invariants {
+            validate_structure_builtin_type_redefinition_errors(&result, arena)?;
+        }
 
-    Ok(result)
+        Ok(result)
+    })();
+    arena.spice_mapper_enabled = previous_spice;
+    result
 }
 
 /// Lightweight extension expansion: only expands %%raw, %raw, %re, %%private.
@@ -16637,11 +16651,30 @@ pub fn rewrite_signature(
     signature: &[SignatureItem],
     arena: &mut ParseArena,
 ) -> PpxResult<Vec<SignatureItem>> {
+    rewrite_signature_impl(signature, arena, false)
+}
+
+/// Apply the built-in signature mapper with configured Spice support.
+pub fn rewrite_signature_with_spice(
+    signature: &[SignatureItem],
+    arena: &mut ParseArena,
+) -> PpxResult<Vec<SignatureItem>> {
+    rewrite_signature_impl(signature, arena, true)
+}
+
+fn rewrite_signature_impl(
+    signature: &[SignatureItem],
+    arena: &mut ParseArena,
+    apply_spice: bool,
+) -> PpxResult<Vec<SignatureItem>> {
     validate_signature_deriving_errors(signature, arena)?;
     validate_signature_method_attribute_errors(signature, arena)?;
     validate_signature_js_string_errors(signature, arena)?;
     validate_signature_await_errors(signature, arena, true)?;
-    let rewritten = try_rewrite_signature_items(signature, arena)?;
+    let previous_spice = std::mem::replace(&mut arena.spice_mapper_enabled, apply_spice);
+    let result = try_rewrite_signature_items(signature, arena);
+    arena.spice_mapper_enabled = previous_spice;
+    let rewritten = result?;
     validate_signature_builtin_type_redefinition_errors(&rewritten, arena)?;
     Ok(rewritten)
 }
@@ -16651,7 +16684,8 @@ fn try_rewrite_signature_items(
     arena: &mut ParseArena,
 ) -> PpxResult<Vec<SignatureItem>> {
     let mut rewritten = Vec::new();
-    let spice_mapper_active = spice_ppx::signature_uses_spice_mapper(items, arena);
+    let spice_mapper_active =
+        arena.spice_mapper_enabled && spice_ppx::signature_uses_spice_mapper(items, arena);
     for item in items {
         let expanded_items =
             spice_ppx::expand_signature_item_with_mapper(item, arena, spice_mapper_active)
@@ -16733,8 +16767,8 @@ fn try_rewrite_structure_item(
 
 /// Rewrite a structure item, potentially returning multiple items for @deriving.
 fn rewrite_structure_item(item: &StructureItem, arena: &mut ParseArena) -> Vec<StructureItem> {
-    let spice_mapper_active =
-        spice_ppx::structure_uses_spice_mapper(std::slice::from_ref(item), arena);
+    let spice_mapper_active = arena.spice_mapper_enabled
+        && spice_ppx::structure_uses_spice_mapper(std::slice::from_ref(item), arena);
     try_rewrite_structure_item(item, arena, spice_mapper_active)
         .unwrap_or_else(|_| rewrite_structure_item_no_spice(item, arena))
 }
@@ -17565,6 +17599,26 @@ let f = value => {
     }
 
     #[test]
+    fn spice_requires_explicit_mapper_activation() {
+        let source = "@spice type person = {name: string}";
+        let (mut arena, structure) = parse_structure(source);
+        let ordinary = rewrite_structure(&structure, &mut arena).expect("ordinary rewrite");
+        assert_eq!(
+            ordinary.len(),
+            1,
+            "unconfigured @spice must remain an attribute"
+        );
+
+        let (mut arena, structure) = parse_structure(source);
+        let configured =
+            rewrite_structure_with_spice(&structure, &mut arena).expect("configured Spice rewrite");
+        assert!(
+            configured.len() > ordinary.len(),
+            "configured Spice emits codecs"
+        );
+    }
+
+    #[test]
     fn spice_expands_nested_inline_record_variants_once() {
         let source = r#"
 module Story = {
@@ -17578,7 +17632,8 @@ module Story = {
 type envelope = Story(Story.event)
 "#;
         let (mut arena, structure) = parse_structure(source);
-        let rewritten = rewrite_structure(&structure, &mut arena).expect("rewrite should work");
+        let rewritten =
+            rewrite_structure_with_spice(&structure, &mut arena).expect("rewrite should work");
         let StructureItemDesc::Pstr_module(module) = &*rewritten[0].pstr_desc else {
             panic!("expected nested module");
         };

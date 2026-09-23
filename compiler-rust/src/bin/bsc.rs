@@ -467,6 +467,8 @@ fn run() -> Result<()> {
         noassert: opts.noassert,
         transparent_modules: opts.transparent_modules,
         no_builtin_ppx: opts.no_builtin_ppx,
+        // Standalone -ppx commands run externally, not through the in-process mapper.
+        spice_ppx: false,
         external_ppxs: opts.external_ppxs.clone(),
         nopervasives: opts.nopervasives,
         module_name: opts.module_name.clone(),

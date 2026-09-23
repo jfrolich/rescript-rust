@@ -659,6 +659,7 @@ pub struct ParseArena {
     dummy_loc: LocIdx,
     /// Spice PPX local caches for generated location/string/lident nodes.
     spice_cache: SpiceCache,
+    pub(crate) spice_mapper_enabled: bool,
     /// Literal strings that should be value-shared during marshalling.
     shareable_literal_strs: HashSet<String>,
     /// Explicit constant-string identity registration `(ptr,len) -> StrIdx`.
@@ -985,6 +986,7 @@ impl Default for ParseArena {
             rewritten_expr_locs: HashSet::new(),
             dummy_loc: LocIdx::default(),
             spice_cache: SpiceCache::new(),
+            spice_mapper_enabled: false,
             shareable_literal_strs: HashSet::new(),
             constant_string_identity_to_idx: HashMap::new(),
             tyvar_source_by_loc: HashMap::new(),
