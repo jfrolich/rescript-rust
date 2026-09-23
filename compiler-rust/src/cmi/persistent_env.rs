@@ -1056,7 +1056,7 @@ impl PersistentEnv {
         name: &str,
         ctx: &'a TypeContext,
     ) -> Option<Arc<PersStruct>> {
-        let debug_pers = std::env::var_os("RUST_DEBUG_PERS_STRUCT").is_some();
+        let debug_pers = crate::debug_flags::debug_pers_struct();
         if debug_pers {
             eprintln!("[pers] find {name}");
         }
@@ -1662,7 +1662,7 @@ impl PersistentEnv {
         let preferred_path = interface_path.as_deref().unwrap_or(source_path.as_path());
 
         let debug_source_fallback =
-            std::env::var_os("RUST_DEBUG_PERSISTENT_SOURCE_FALLBACK").is_some();
+            crate::debug_flags::debug_persistent_source_fallback();
         if debug_source_fallback {
             eprintln!(
                 "[persistent-source] module={} ast={} source={}",

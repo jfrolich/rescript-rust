@@ -973,7 +973,7 @@ pub fn internalize_pers_struct(pps: Arc<PortablePersStruct>, ctx: &TypeContext) 
     }
 
     let shareable = graph_is_shareable(&pps.type_graph);
-    if std::env::var_os("RUST_DEBUG_STORE").is_some() {
+    if crate::debug_flags::debug_store() {
         let non_generic = pps
             .type_graph
             .entries

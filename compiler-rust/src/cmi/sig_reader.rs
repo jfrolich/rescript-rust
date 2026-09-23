@@ -73,8 +73,7 @@ impl<'a> SigReadContext<'a> {
             OcamlValue::Block(tag, fields) => match tag {
                 0 => {
                     let id = read_ident(&fields[0]);
-                    let debug_sig_values = std::env::var("RUST_DEBUG_SIG_VALUE").ok();
-                    let debug_this_value = debug_sig_values.as_deref().is_some_and(|raw| {
+                    let debug_this_value = crate::debug_flags::debug_sig_value().is_some_and(|raw| {
                         raw.split(',')
                             .map(|part| part.trim())
                             .filter(|part| !part.is_empty())
