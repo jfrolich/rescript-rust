@@ -512,12 +512,14 @@ pub fn format_error(
 ) -> String {
     let mut result = String::new();
 
-    // Header
-    result.push_str("\n  Syntax error!\n");
+    // Header (OCaml `Res_diagnostics_printing_utils` colors it like other errors).
+    result.push_str("\n  ");
+    result.push_str(&colorize_intro("Syntax error!", true));
+    result.push('\n');
 
     // Location
     result.push_str("  ");
-    result.push_str(&format_location(filename, start_pos, end_pos));
+    result.push_str(&colorize_location(&format_location(filename, start_pos, end_pos)));
     result.push_str("\n\n");
 
     // Code frame

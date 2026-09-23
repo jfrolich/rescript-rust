@@ -1804,6 +1804,45 @@ fn emit_ppx_warnings(
     emit_ppx_warnings_with_config(arena, source, filename, &warning_config, warnings)
 }
 
+/// Parser warnings (e.g. the deprecated `(. ...)` syntax) are reported by OCaml
+/// through `Location.prerr_warning` while parsing, under the command-line warning
+/// settings (compiler/syntax/src/res_core.ml:291-298). Emit them before any syntax
+/// errors and report whether one was configured as an error.
+pub fn emit_parser_warnings(
+    parser: &mut Parser<'_>,
+    source: &str,
+    filename: &str,
+    options: &CompilerOptions,
+) -> bool {
+    let parser_warnings = parser.warnings().to_vec();
+    if parser_warnings.is_empty() {
+        return false;
+    }
+    let mut warnings = Vec::with_capacity(parser_warnings.len());
+    for warning in parser_warnings {
+        let message = match warning.kind {
+            crate::parser::ParserWarningKind::DeprecatedUncurriedDotSyntax => {
+                "The `(. ...)` uncurried syntax is deprecated. Uncurried is now the default in ReScript — remove the leading dot.".to_string()
+            }
+        };
+        let arena = parser.arena_mut();
+        let start = arena.push_position(warning.start_pos);
+        let end = arena.push_position(warning.end_pos);
+        let loc = arena.mk_loc(start, end);
+        let location = arena.to_location(loc);
+        warnings.push(ppx::PpxWarning {
+            loc,
+            warning: crate::diagnostics::Warning::Deprecated {
+                message,
+                def_loc: location.clone(),
+                use_loc: location,
+                can_be_automigrated: false,
+            },
+        });
+    }
+    emit_ppx_warnings(parser.arena(), source, filename, options, &warnings)
+}
+
 fn emit_ppx_warnings_with_config(
     arena: &ParseArena,
     source: &str,
@@ -11405,6 +11444,7 @@ fn compile_source_to_js_with_options_inner(
     // Parse
     let mut parser = Parser::new(filename, source);
     let structure = module::parse_structure(&mut parser);
+    let parser_warnings_have_errors = emit_parser_warnings(&mut parser, source, filename, options);
     if parser.has_errors() {
         return Err(parser_error_to_anyhow(&parser, source, filename));
     }
@@ -11424,7 +11464,7 @@ fn compile_source_to_js_with_options_inner(
         ppx::collect_leading_builtin_warning_attributes(&structure, parser.arena());
     let frontend_warning_specs =
         ppx::collect_leading_builtin_warning_attribute_specs(&structure, parser.arena());
-    let mut ppx_warnings_have_errors = emit_ppx_warnings(
+    let mut ppx_warnings_have_errors = parser_warnings_have_errors | emit_ppx_warnings(
         parser.arena(),
         source,
         filename,
@@ -12367,6 +12407,7 @@ pub fn typecheck_interface_source(
     // Parse as signature
     let mut parser = Parser::new(filename, source);
     let signature = module::parse_signature(&mut parser);
+    let parser_warnings_have_errors = emit_parser_warnings(&mut parser, source, filename, options);
     if parser.has_errors() {
         return Err(parser_error_to_anyhow(&parser, source, filename));
     }
@@ -12380,7 +12421,7 @@ pub fn typecheck_interface_source(
         ppx::collect_leading_builtin_warning_signature_attributes(&signature, parser.arena());
     let frontend_warning_specs =
         ppx::collect_leading_builtin_warning_signature_attribute_specs(&signature, parser.arena());
-    let mut ppx_warnings_have_errors = emit_ppx_warnings(
+    let mut ppx_warnings_have_errors = parser_warnings_have_errors | emit_ppx_warnings(
         parser.arena(),
         source,
         filename,

@@ -16,7 +16,8 @@ use rescript_compiler::binary_ast::{
 use rescript_compiler::cmi::cmi_format;
 use rescript_compiler::driver::{
     CompilerOptions, UserDiagnostic, apply_external_signature_ppxs, apply_external_structure_ppxs,
-    compile_file_to_js_with_options, enable_cli_cleanup_skip, parser_error_to_anyhow,
+    compile_file_to_js_with_options, emit_parser_warnings, enable_cli_cleanup_skip,
+    parser_error_to_anyhow,
     typecheck_interface_file,
 };
 use rescript_compiler::js_ir::ModuleFormat;
@@ -410,6 +411,11 @@ fn run() -> Result<()> {
             opts.dump_parsetree_sexp_locs,
             opts.no_builtin_ppx,
             &opts.external_ppxs,
+            &CompilerOptions {
+                warning_specs: opts.warning_specs.clone(),
+                warning_error_specs: opts.warning_error_specs.clone(),
+                ..CompilerOptions::default()
+            },
         );
     }
 
@@ -513,6 +519,7 @@ fn generate_ast(
     dump_parsetree_sexp_locs: bool,
     no_builtin_ppx: bool,
     external_ppxs: &[String],
+    warning_options: &CompilerOptions,
 ) -> Result<()> {
     // Read file as raw bytes, converting each byte to a char (Latin-1 encoding).
     // This matches OCaml's byte-level string handling where each byte is a character.
@@ -558,10 +565,14 @@ fn generate_ast(
     }
 
     let mut parser = Parser::new(&filename, &source);
+    let warnings_are_fatal;
 
     if is_interface {
         // Parse signature (interface file)
         let signature = module::parse_signature(&mut parser);
+        // OCaml prints parser warnings as they occur; a fatal one still writes
+        // the AST and then exits with status 2.
+        warnings_are_fatal = emit_parser_warnings(&mut parser, &source, &filename, warning_options);
         if parser.has_errors() {
             return Err(parser_error_to_anyhow(&parser, &source, &filename));
         }
@@ -591,6 +602,9 @@ fn generate_ast(
     } else {
         // Parse structure (implementation file)
         let structure = module::parse_structure(&mut parser);
+        // OCaml prints parser warnings as they occur; a fatal one still writes
+        // the AST and then exits with status 2.
+        warnings_are_fatal = emit_parser_warnings(&mut parser, &source, &filename, warning_options);
         if parser.has_errors() {
             return Err(parser_error_to_anyhow(&parser, &source, &filename));
         }
@@ -619,6 +633,9 @@ fn generate_ast(
         .with_context(|| format!("Failed to write {}", out_path.display()))?;
     }
 
+    if warnings_are_fatal {
+        return Err(UserDiagnostic::new(String::new(), 2).into());
+    }
     Ok(())
 }
 
