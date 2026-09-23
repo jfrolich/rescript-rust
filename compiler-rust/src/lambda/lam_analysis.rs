@@ -517,10 +517,11 @@ pub(crate) fn destruct_pattern(body: &Lambda, params: &[Ident], args: &[Lambda])
         }
         Lambda::LifThenElse(cond, then_, else_) => {
             if let Lambda::Lvar(v) = &**cond {
-                if let Some(Lambda::Lconst(_)) = find_arg(v, params, args) {
-                    // Would enable constant folding
+                if let Some(Lambda::Lconst(constant)) = find_arg(v, params, args) {
+                    // OCaml lam_analysis.ml:238-242 measures the folded branch,
+                    // not the original conditional with its parameter scrutinee.
                     return size(&Lambda::if_(
-                        (**cond).clone(),
+                        Lambda::Lconst(constant.clone()),
                         (**then_).clone(),
                         (**else_).clone(),
                     )) < SMALL_INLINE_SIZE;
@@ -833,6 +834,39 @@ mod tests {
             }),
             4
         );
+    }
+
+    #[test]
+    fn test_ok_to_inline_fun_when_app_measures_folded_if_branch() {
+        let checked = Ident::create_local("checked");
+        let value = Ident::create_local("value");
+        let branch = || {
+            Lambda::prim(
+                Primitive::Pdebugger,
+                vec![Lambda::var(value.clone())],
+                crate::location::Location::none(),
+            )
+        };
+        let func = LFunction {
+            arity: 1,
+            params: vec![checked.clone()],
+            body: Box::new(Lambda::if_(Lambda::var(checked), branch(), branch())),
+            attr: FunctionAttribute::default(),
+        };
+
+        assert!(size(&func.body) >= SMALL_INLINE_SIZE);
+        assert!(ok_to_inline_fun_when_app(
+            &func,
+            &[Lambda::const_(Constant::JsFalse)]
+        ));
+        assert!(ok_to_inline_fun_when_app(
+            &func,
+            &[Lambda::const_(Constant::JsTrue)]
+        ));
+        assert!(!ok_to_inline_fun_when_app(
+            &func,
+            &[Lambda::var(Ident::create_local("unknown"))]
+        ));
     }
 
     #[test]
