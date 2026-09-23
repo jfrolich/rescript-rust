@@ -4552,15 +4552,24 @@ fn format_repeated_name_report(
         arena.loc_start(repeated_loc),
         arena.loc_end(repeated_loc),
     );
-    let message = if "at ".len() + repeated.len() + 1 < 76 {
-        format!(
-            "Multiple definition of the {kind} name {name} \nat {repeated} \nNames must be unique in a given structure or signature."
-        )
-    } else {
-        format!(
-            "Multiple definition of the {kind} name {name} \nat {repeated}\n Names must be unique in a given structure or signature."
-        )
-    };
+    // OCaml compiler/ml/typemod.ml:1851-1855:
+    // "@[Multiple definition of the %s name %s @ at @{<loc>%a@}@ @ Names must be
+    //  unique in a given structure or signature.@]"
+    let mut buf = Vec::new();
+    {
+        let mut ppf = crate::parser::formatter::Formatter::new(&mut buf);
+        ppf.set_margin(76);
+        ppf.open_box(crate::parser::formatter::BoxKind::Box, 0);
+        ppf.print(format_args!("Multiple definition of the {kind} name {name} "));
+        ppf.space();
+        ppf.print(format_args!("at {repeated}"));
+        ppf.space();
+        ppf.space();
+        ppf.str("Names must be unique in a given structure or signature.");
+        ppf.close_box();
+        ppf.flush();
+    }
+    let message = String::from_utf8(buf).unwrap_or_default();
     format_compiler_error_report(arena, source, filename, loc, &message)
 }
 

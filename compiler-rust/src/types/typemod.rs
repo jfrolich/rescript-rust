@@ -5129,6 +5129,28 @@ fn check_name(
     Ok(())
 }
 
+/// OCaml `check_sig_item` (compiler/ml/typemod.ml:637-642): names bound by an
+/// included signature must not repeat names already in the structure/signature.
+fn check_included_signature_names(
+    names: &mut Names,
+    loc: LocIdx,
+    sig: &[crate::types::decl::SignatureItem],
+) -> TypeModResult<()> {
+    use crate::types::decl::SignatureItem as S;
+    for item in sig {
+        match item {
+            S::SigType(id, _, _) => check_name(&mut names.types, "type", loc, id.name())?,
+            S::SigModule(id, _, _) => check_name(&mut names.modules, "module", loc, id.name())?,
+            S::SigModtype(id, _) => check_name(&mut names.modtypes, "module type", loc, id.name())?,
+            S::SigTypext(id, _, _) => {
+                check_name(&mut names.typexts, "extension constructor", loc, id.name())?
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
 fn check_structure_item_names(
     names: &mut Names,
     arena: &ParseArena,
@@ -19556,6 +19578,29 @@ pub fn type_module_expr_with_alias_mode<'a>(
     type_module_expr_with_alias(tctx, env, arena, mod_expr, alias)
 }
 
+/// Failure path of OCaml `type_open_` (compiler/ml/typemod.ml:88-95) once every
+/// Rust open route failed: `Typetexp.lookup_module` raises for an unbound module,
+/// and `extract_sig_open` raises `Structure_expected` for a non-structure.
+pub(crate) fn open_failure_path(
+    tctx: &mut TypeCheckContext<'_>,
+    env: &Env,
+    arena: &ParseArena,
+    lid: &Longident,
+    lid_loc: LocIdx,
+) -> Result<Path, TypeModError> {
+    let Some(path) =
+        lookup_module_path_by_lid(lid, arena, env, &mut tctx.persistent_env, tctx.type_ctx)
+    else {
+        return Err(TypeModError::CoreError(
+            crate::types::typecore::unbound_module_lookup_error(tctx, env, lid_loc, lid),
+        ));
+    };
+    if let Some(err) = structure_expected_error_for_open(tctx, env, arena, lid, lid_loc) {
+        return Err(err);
+    }
+    Ok(path)
+}
+
 fn structure_expected_error_for_open(
     tctx: &mut TypeCheckContext<'_>,
     env: &Env,
@@ -20009,6 +20054,8 @@ pub fn transl_signature<'a>(
                     &typed_mty.mty_type,
                     arena.get_mod_type(incl.pincl_mod).pmty_loc,
                 )?;
+                // OCaml compiler/ml/typemod.ml:859.
+                check_included_signature_names(&mut names, item.psig_loc, &include_sig)?;
                 add_signature_items_to_env(&include_sig, &mut sig_env)?;
                 TSigDesc::Tsig_include(IncludeDescription {
                     incl_mod: typed_mty,
@@ -20059,14 +20106,7 @@ pub fn transl_signature<'a>(
                     );
                     resolved_path
                 } else {
-                    lookup_module_path_by_lid(
-                        &longident,
-                        arena,
-                        &sig_env,
-                        &mut tctx.persistent_env,
-                        tctx.type_ctx,
-                    )
-                    .unwrap_or_else(|| path_from_longident(&longident, |idx| arena.get_string(idx)))
+                    open_failure_path(tctx, &sig_env, arena, &longident, od.popen_lid.loc)?
                 };
                 TSigDesc::Tsig_open(crate::types::typedtree::OpenDeclaration {
                     open_path: path,
@@ -20268,6 +20308,10 @@ pub fn type_structure<'a>(
         tctx.set_unify_env(&current_env);
         let warnings_before_item = tctx.warnings.len();
         let (typed_item, item_sig, new_env) = type_structure_item(tctx, &current_env, arena, item)?;
+        if let StructureItemDesc::Tstr_include(incl) = &typed_item.str_desc {
+            // OCaml compiler/ml/typemod.ml:1579.
+            check_included_signature_names(&mut names, item.pstr_loc, &incl.incl_type)?;
+        }
         let item_index = typed_items.len();
         collect_top_level_value_use_checks(&typed_item, item_index, &mut unused_value_checks);
         if let StructureItemDesc::Tstr_open(open) = &typed_item.str_desc
@@ -20726,12 +20770,20 @@ fn type_structure_no_export<'a>(
     let mut sig_items = Vec::new();
     let mut current_env = env.clone_preserve_id();
     let mut unused_value_checks = Vec::new();
+    // OCaml applies no_export as a parsetree rewrite before the ordinary
+    // type_structure, so name uniqueness is still checked.
+    let mut names = Names::default();
 
     for item in items {
+        check_structure_item_names(&mut names, arena, item)?;
         let ctx = tctx.type_ctx;
         ctx.init_def(ctx.current_stamp());
         tctx.set_unify_env(&current_env);
         let (typed_item, item_sig, new_env) = type_structure_item(tctx, &current_env, arena, item)?;
+        if let StructureItemDesc::Tstr_include(incl) = &typed_item.str_desc {
+            // OCaml compiler/ml/typemod.ml:1579.
+            check_included_signature_names(&mut names, item.pstr_loc, &incl.incl_type)?;
+        }
         let item_index = typed_items.len();
         collect_top_level_value_use_checks(&typed_item, item_index, &mut unused_value_checks);
         if !rescript_hide_structure_item(&typed_item.str_desc, arena) {
@@ -23121,21 +23173,21 @@ fn type_structure_item<'a>(
         ParsedStructureItemDesc::Pstr_typext(ext) => {
             let ctx = tctx.type_ctx;
             // Type extension: type t += ...
-            let resolved_lid = tctx.resolve_lid(ext.ptyext_path.txt);
-            let path = match resolved_lid {
-                Longident::Lident(name_idx) => {
-                    let type_name = arena.get_string(*name_idx);
-                    match env.find_type_with_id(type_name) {
-                        Ok((type_id, _)) => Path::pident(type_id.clone()),
-                        Err(_) => path_from_longident(resolved_lid, |idx| arena.get_string(idx)),
-                    }
-                }
-                _ => path_from_longident(resolved_lid, |idx| arena.get_string(idx)),
-            };
+            let resolved_lid = tctx.resolve_lid(ext.ptyext_path.txt).clone();
+            // OCaml `transl_type_extension` (compiler/ml/typedecl.ml:1754-1757)
+            // resolves the target with `Typetexp.find_type`, which raises for an
+            // unbound type constructor.
+            let (path, found_decl) = crate::types::typecore::find_type_for_lid(
+                tctx,
+                env,
+                ext.ptyext_path.loc,
+                &resolved_lid,
+            )
+            .map_err(TypeModError::CoreError)?;
 
             // OCaml typedecl.ml transl_type_extension rejects incompatible
             // targets before translating any extension constructors.
-            let target_type_decl = env.lookup_type(&path).ok();
+            let target_type_decl = Some(env.lookup_type(&path).ok().cloned().unwrap_or(found_decl));
             if let Some(type_decl) = &target_type_decl {
                 if !matches!(type_decl.type_kind, crate::types::TypeKind::TypeOpen) {
                     return Err(TypeModError::NotExtensibleType {
@@ -24302,14 +24354,24 @@ fn type_structure_item<'a>(
         ParsedStructureItemDesc::Pstr_open(open_desc) => {
             // Open declaration: open M
             let longident = tctx.resolve_lid(open_desc.popen_lid.txt).clone();
-            let fallback_path = lookup_module_path_by_lid(
+            // OCaml `type_open_` (compiler/ml/typemod.ml:88-89) starts with
+            // `Typetexp.lookup_module ~load:true`, which raises for an unbound module.
+            let Some(fallback_path) = lookup_module_path_by_lid(
                 &longident,
                 arena,
                 env,
                 &mut tctx.persistent_env,
                 tctx.type_ctx,
-            )
-            .unwrap_or_else(|| path_from_longident(&longident, |idx| arena.get_string(idx)));
+            ) else {
+                return Err(TypeModError::CoreError(
+                    crate::types::typecore::unbound_module_lookup_error(
+                        tctx,
+                        env,
+                        open_desc.popen_lid.loc,
+                        &longident,
+                    ),
+                ));
+            };
 
             // Extend the environment with the opened module's bindings using the
             // same alias-rewritten module resolution path as value lookup.

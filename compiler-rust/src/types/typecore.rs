@@ -2421,22 +2421,7 @@ fn transl_type_inner(
                 }
             }
 
-            let (path, type_decl) = resolve_type_constructor_path(tctx, env, longident);
-            let Some(decl) = type_decl else {
-                if let Some(error) = unbound_module_prefix_error(tctx, env, lid.loc, longident) {
-                    return Err(error);
-                }
-                if let Some(error) =
-                    cannot_scrape_alias_type_constructor_error(tctx, env, lid.loc, longident)
-                {
-                    return Err(error);
-                }
-                return Err(TypeCoreError::UnboundTypeConstructor {
-                    loc: lid.loc,
-                    lid: longident.clone(),
-                    alternatives: unbound_type_constructor_alternatives(tctx, env, longident),
-                });
-            };
+            let (path, decl) = find_type_for_lid(tctx, env, lid.loc, longident)?;
             if let Some(warning) = deprecated_warning_for_type(&path, &decl) {
                 tctx.report_warning(lid.loc, warning);
             }
@@ -20477,7 +20462,12 @@ fn type_open(
         );
         resolved_path
     } else {
-        crate::types::typemod::path_from_longident(open_lid, |idx| tctx.arena.get_string(idx))
+        let open_lid = open_lid.clone();
+        match crate::types::typemod::open_failure_path(tctx, env, tctx.arena, &open_lid, lid.loc) {
+            Ok(path) => path,
+            Err(crate::types::typemod::TypeModError::CoreError(err)) => return Err(err),
+            Err(err) => return Err(TypeCoreError::ModuleError(Box::new(err))),
+        }
     };
 
     // Type check the body expression in the extended environment
@@ -21651,6 +21641,31 @@ fn unbound_value_module_suggestion(
     let candidate = capitalize_ascii(tctx.arena.get_string(*idx));
     let (path, _) = env.find_module_with_path(&candidate).ok()?;
     Some(format_arity_suggestion_path(&path))
+}
+
+/// OCaml `Typetexp.find_type` (compiler/ml/typetexp.ml): resolve a type
+/// constructor or raise the narrowed unbound-module / unbound-type error.
+pub(crate) fn find_type_for_lid(
+    tctx: &mut TypeCheckContext<'_>,
+    env: &Env,
+    loc: LocIdx,
+    longident: &Longident,
+) -> TypeCoreResult<(Path, crate::types::decl::TypeDeclaration)> {
+    let (path, type_decl) = resolve_type_constructor_path(tctx, env, longident);
+    let Some(decl) = type_decl else {
+        if let Some(error) = unbound_module_prefix_error(tctx, env, loc, longident) {
+            return Err(error);
+        }
+        if let Some(error) = cannot_scrape_alias_type_constructor_error(tctx, env, loc, longident) {
+            return Err(error);
+        }
+        return Err(TypeCoreError::UnboundTypeConstructor {
+            loc,
+            lid: longident.clone(),
+            alternatives: unbound_type_constructor_alternatives(tctx, env, longident),
+        });
+    };
+    Ok((path, decl))
 }
 
 fn unbound_module_prefix_error(
