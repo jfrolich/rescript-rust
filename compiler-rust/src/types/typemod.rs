@@ -1577,7 +1577,7 @@ fn rewrite_included_module_type_paths_to_local(
         crate::types::decl::ModuleType::MtySignature(sig) => {
             rewrite_included_signature_paths_to_local(
                 ctx,
-                sig,
+                crate::types::decl::signature_mut(sig),
                 include_root_path,
                 include_alias_heads,
                 local_type_ids,
@@ -2168,9 +2168,9 @@ fn substitute_functor_param_in_module_type(
     use crate::types::decl::ModuleType as DeclMty;
 
     match mty {
-        DeclMty::MtySignature(sig_items) => DeclMty::MtySignature(
+        DeclMty::MtySignature(sig_items) => DeclMty::MtySignature(std::sync::Arc::new(
             substitute_functor_param_in_signature(sig_items, old_param, arg_path, ctx),
-        ),
+        )),
         DeclMty::MtyIdent(path) => {
             DeclMty::MtyIdent(rewrite_module_path_prefix(path, old_param, arg_path))
         }
@@ -2248,7 +2248,7 @@ fn nondep_mty(
         }
         DeclMty::MtySignature(sig_items) => {
             let new_items = nondep_sig(ctx, env, mid, sig_items)?;
-            Some(DeclMty::MtySignature(new_items))
+            Some(DeclMty::MtySignature(std::sync::Arc::new(new_items)))
         }
         DeclMty::MtyFunctor {
             param,
@@ -2264,7 +2264,7 @@ fn nondep_mty(
                 let default_mty = param_type
                     .as_ref()
                     .map(|pt| (**pt).clone())
-                    .unwrap_or_else(|| DeclMty::MtySignature(vec![]));
+                    .unwrap_or_else(|| DeclMty::MtySignature(std::sync::Arc::new(vec![])));
                 e.add_module(
                     param.clone(),
                     crate::types::decl::ModuleDeclaration {
@@ -2766,9 +2766,9 @@ fn substitute_functor_param_aliases_in_module_type(
     use crate::types::decl::ModuleType as DeclMty;
 
     match mty {
-        DeclMty::MtySignature(sig_items) => DeclMty::MtySignature(
+        DeclMty::MtySignature(sig_items) => DeclMty::MtySignature(std::sync::Arc::new(
             substitute_functor_param_aliases_in_signature(sig_items, old_param, arg_aliases, ctx),
-        ),
+        )),
         DeclMty::MtyIdent(path) => DeclMty::MtyIdent(rewrite_module_path_prefix_with_aliases(
             path,
             old_param,
@@ -2870,7 +2870,7 @@ fn find_type_decl_for_path(
                         }
                     }
                     ModuleType::MtySignature(sig_items) => {
-                        for item in sig_items {
+                        for item in sig_items.iter() {
                             if let SignatureItem::SigType(id, decl, _) = item {
                                 if id.name() == type_name.as_str() {
                                     return Some(decl.clone());
@@ -6598,7 +6598,7 @@ fn collect_type_paths_from_module_type<'a>(
 ) {
     match mty {
         crate::types::decl::ModuleType::MtySignature(sig) => {
-            for item in sig {
+            for item in sig.iter() {
                 match item {
                     crate::types::decl::SignatureItem::SigType(id, decl, _) => {
                         paths.push((Path::pdot(prefix.clone(), id.name()), decl));
@@ -10264,7 +10264,7 @@ fn module_type_exported_names(
         };
 
         let mut names = ModuleTypeExportedNames::default();
-        for item in sig {
+        for item in sig.iter() {
             match item {
                 crate::types::decl::SignatureItem::SigValue(id, _) => {
                     names.values.insert(id.name().to_string());
@@ -10842,7 +10842,7 @@ fn report_unused_items_hidden_by_module_constraint(
                     env,
                     arena,
                     &binding.mb_expr,
-                    &crate::types::decl::ModuleType::MtySignature(Vec::new()),
+                    &crate::types::decl::ModuleType::MtySignature(std::sync::Arc::new(Vec::new())),
                 );
             }
             hidden_warnings.push(DelayedWarning {
@@ -11087,7 +11087,7 @@ fn decl_module_type_from_typed_module_expr_for_sig(
 ) -> Option<crate::types::decl::ModuleType> {
     match &mod_expr.mod_desc {
         ModuleExprDesc::Tmod_structure(structure) => Some(
-            crate::types::decl::ModuleType::MtySignature(structure.str_type.clone()),
+            crate::types::decl::ModuleType::MtySignature(std::sync::Arc::new(structure.str_type.clone())),
         ),
         ModuleExprDesc::Tmod_constraint(
             inner,
@@ -11097,7 +11097,7 @@ fn decl_module_type_from_typed_module_expr_for_sig(
         ) => match &inner.mod_desc {
             ModuleExprDesc::Tmod_structure(structure) => {
                 Some(crate::types::decl::ModuleType::MtySignature(
-                    crate::types::includemod::simplify_signature(&structure.str_type),
+                    std::sync::Arc::new(crate::types::includemod::simplify_signature(&structure.str_type)),
                 ))
             }
             _ => Some(mod_expr.mod_type.clone()),
@@ -11123,7 +11123,7 @@ pub(crate) fn decl_module_type_from_typed_module_expr_for_constraint_arg(
             Some(DeclMty::MtyAlias(AliasPresence::MtaAbsent, path.clone()))
         }
         ModuleExprDesc::Tmod_structure(structure) => {
-            Some(DeclMty::MtySignature(structure.str_type.clone()))
+            Some(DeclMty::MtySignature(std::sync::Arc::new(structure.str_type.clone())))
         }
         ModuleExprDesc::Tmod_constraint(
             _inner,
@@ -11590,7 +11590,7 @@ pub fn lookup_module_type_by_lid<'b>(
             }
             if let Some(pers) = pers_env.as_mut() {
                 if let Some(sig) = pers.get_renamed_sig(mod_name, ctx) {
-                    return Some(DeclMty::MtySignature(sig));
+                    return Some(DeclMty::MtySignature(std::sync::Arc::new(sig)));
                 }
             }
             None
@@ -11702,7 +11702,7 @@ fn freshened_signature_from_module_type<'a>(
         sig
     } else {
         match scrape_alias_module_type(mty, env, &mut tctx.persistent_env, tctx.type_ctx) {
-            Some(DeclMty::MtySignature(sig)) => sig,
+            Some(DeclMty::MtySignature(sig)) => std::sync::Arc::unwrap_or_clone(sig),
             Some(DeclMty::MtyAlias(_, path)) => {
                 return Err(TypeModError::CannotScrapeAlias { loc, path });
             }
@@ -11799,7 +11799,7 @@ fn resolve_mod_type_to_sig_impl<'b>(
 ) -> Option<crate::types::decl::Signature> {
     use crate::types::decl::ModuleType as DeclMty;
     match mty {
-        DeclMty::MtySignature(sig) => Some(sig.clone()),
+        DeclMty::MtySignature(sig) => Some((**sig).clone()),
         DeclMty::MtyAlias(_, path) => resolve_path_to_sig_impl(path, env, pers_env, ctx, visiting),
         DeclMty::MtyIdent(path) => {
             resolve_modtype_path_to_sig_impl(path, env, pers_env, ctx, visiting)
@@ -12256,7 +12256,7 @@ fn collect_package_fresh_type_ids_in_module_type(
 
     match mty {
         DeclMty::MtySignature(sig_items) => {
-            for item in sig_items {
+            for item in sig_items.iter() {
                 match item {
                     crate::types::decl::SignatureItem::SigType(id, _, _) => {
                         if id.stamp() != 0 {
@@ -12307,7 +12307,7 @@ fn freshen_package_type_ids_in_module_type(
 
     match mty {
         DeclMty::MtySignature(sig_items) => {
-            for item in sig_items {
+            for item in crate::types::decl::signature_mut(sig_items) {
                 match item {
                     crate::types::decl::SignatureItem::SigValue(_, desc) => {
                         rewrite_package_freshened_type_expr(
@@ -12417,12 +12417,12 @@ fn copy_signature_for_package_constraints(
     let dummy_path = Path::pident(Ident::create_local("__pkg_copy_path__"));
     let copied = substitute_functor_param_in_signature(sig_items, &dummy_param, &dummy_path, ctx);
     let mut fresh_type_ids = HashMap::new();
-    let mut copied_mty = crate::types::decl::ModuleType::MtySignature(copied);
+    let mut copied_mty = crate::types::decl::ModuleType::MtySignature(std::sync::Arc::new(copied));
     collect_package_fresh_type_ids_in_module_type(&copied_mty, ctx, &mut fresh_type_ids);
     let mut visited = HashSet::new();
     freshen_package_type_ids_in_module_type(&mut copied_mty, ctx, &fresh_type_ids, &mut visited);
     match copied_mty {
-        crate::types::decl::ModuleType::MtySignature(sig) => sig,
+        crate::types::decl::ModuleType::MtySignature(sig) => std::sync::Arc::unwrap_or_clone(sig),
         _ => unreachable!(),
     }
 }
@@ -12507,7 +12507,7 @@ fn apply_package_constraints_to_module_type<'b>(
             )?;
         }
 
-        Some(crate::types::decl::ModuleType::MtySignature(rewritten_sig))
+        Some(crate::types::decl::ModuleType::MtySignature(std::sync::Arc::new(rewritten_sig)))
     }
 
     fn resolve_path_package_constraints<'b>(
@@ -12780,7 +12780,7 @@ fn apply_with_type_constraints_to_module_type<'b>(
 
         match mty {
             DeclMty::MtySignature(sig) => {
-                for item in sig {
+                for item in crate::types::decl::signature_mut(sig) {
                     match item {
                         SignatureItem::SigValue(_, vd) => {
                             rewrite_type_with_substs(
@@ -12938,11 +12938,11 @@ fn apply_with_type_constraints_to_module_type<'b>(
             }
         }
 
-        let mut mty = DeclMty::MtySignature(rewritten_sig);
+        let mut mty = DeclMty::MtySignature(std::sync::Arc::new(rewritten_sig));
         let mut cache = HashMap::new();
         rewrite_module_type_with_substs(ctx, &mut mty, &type_substs, &mut cache);
         match mty {
-            DeclMty::MtySignature(sig) => Some(sig),
+            DeclMty::MtySignature(sig) => Some(std::sync::Arc::unwrap_or_clone(sig)),
             _ => unreachable!(),
         }
     }
@@ -12958,7 +12958,7 @@ fn apply_with_type_constraints_to_module_type<'b>(
         match mty {
             DeclMty::MtySignature(sig) => {
                 rewrite_signature_with_constraints(env, sig, constraints, pers_env, ctx)
-                    .map(DeclMty::MtySignature)
+                    .map(|signature| DeclMty::MtySignature(std::sync::Arc::new(signature)))
             }
             DeclMty::MtyIdent(path) | DeclMty::MtyAlias(_, path) => {
                 if !visiting.insert(path.clone()) {
@@ -12967,7 +12967,7 @@ fn apply_with_type_constraints_to_module_type<'b>(
                 let sig = resolve_mod_type_to_sig(mty, Some(env), pers_env, ctx)?;
                 let rewritten =
                     rewrite_signature_with_constraints(env, &sig, constraints, pers_env, ctx)
-                        .map(DeclMty::MtySignature);
+                        .map(|signature| DeclMty::MtySignature(std::sync::Arc::new(signature)));
                 visiting.remove(path);
                 rewritten
             }
@@ -13839,7 +13839,7 @@ fn check_destructive_substitution_alias_usage<'a>(
                                     let parent_path = path_concat(id, &child_path);
                                     paths.push(parent_path.clone());
                                     let mut new_md = md.clone();
-                                    new_md.md_type = DeclMty::MtySignature(new_child_signature);
+                                    new_md.md_type = DeclMty::MtySignature(std::sync::Arc::new(new_child_signature));
                                     rewritten.push(SignatureItem::SigModule(
                                         id.clone(),
                                         new_md,
@@ -14224,7 +14224,7 @@ fn collect_manifest_type_aliases_for_functor_arg(
     let mut manifests = HashMap::new();
 
     if let crate::types::decl::ModuleType::MtySignature(sig_items) = arg_mty {
-        for item in sig_items {
+        for item in sig_items.iter() {
             if let SignatureItem::SigType(id, decl, _) = item {
                 if decl.type_params.is_empty() {
                     if let Some(manifest) = decl.type_manifest {
@@ -14798,7 +14798,7 @@ fn specialize_functor_result_value_types(
                         _ => item.clone(),
                     })
                     .collect();
-                DeclMty::MtySignature(specialized_sig)
+                DeclMty::MtySignature(std::sync::Arc::new(specialized_sig))
             }
             DeclMty::MtyFunctor {
                 param,
@@ -14907,7 +14907,7 @@ pub(crate) fn scrape_alias_module_type<'b>(
                     pers_env
                         .as_mut()
                         .and_then(|pers| pers.get_renamed_sig(name, ctx))
-                        .map(|sig| anchored(&persistent_path, &DeclMty::MtySignature(sig)))
+                        .map(|sig| anchored(&persistent_path, &DeclMty::MtySignature(std::sync::Arc::new(sig))))
                 }
             }
             Path::Pdot(parent, submod, _) => {
@@ -15299,7 +15299,7 @@ fn remove_module_type_aliases_for_typeof<'b>(
         DeclMty::MtySignature(sig) => {
             let mut env = env.clone();
             let mut out = Vec::with_capacity(sig.len());
-            for item in sig {
+            for item in sig.iter() {
                 match item {
                     SigItem::SigModule(id, md, rs) => {
                         let child_mty = match &md.md_type {
@@ -15332,7 +15332,7 @@ fn remove_module_type_aliases_for_typeof<'b>(
                     _ => out.push(item.clone()),
                 }
             }
-            DeclMty::MtySignature(out)
+            DeclMty::MtySignature(std::sync::Arc::new(out))
         }
         DeclMty::MtyAlias(_, _) => match scrape_alias_module_type(mty, env, pers_env, ctx) {
             Some(scraped @ DeclMty::MtyAlias(_, _)) | Some(scraped @ DeclMty::MtyIdent(_)) => {
@@ -15619,9 +15619,9 @@ fn translate_module_type_to_decl_with_typed_hint<'a>(
                 // computes `sg.sig_type` once. Reusing the typed signature here
                 // avoids rewalking the parsed signature and recreating constructor
                 // identifiers after `transl_modtype`.
-                return Ok(DeclMty::MtySignature(decl_signature_from_typed_signature(
+                return Ok(DeclMty::MtySignature(std::sync::Arc::new(decl_signature_from_typed_signature(
                     sig, arena,
-                )));
+                ))));
             }
             for (sig_index, sig_item) in sig_items.iter().enumerate() {
                 let typed_sig_item = typed_sig_items.and_then(|items| items.get(sig_index));
@@ -16191,7 +16191,7 @@ fn translate_module_type_to_decl_with_typed_hint<'a>(
                 }
             }
             Ok(DeclMty::MtySignature(
-                crate::types::includemod::simplify_signature(&items),
+                std::sync::Arc::new(crate::types::includemod::simplify_signature(&items)),
             ))
         }
         PMtyDesc::Pmty_ident(lid) => {
@@ -16250,7 +16250,7 @@ fn translate_module_type_to_decl_with_typed_hint<'a>(
                     md_type: param_decl
                         .as_deref()
                         .cloned()
-                        .unwrap_or(crate::types::decl::ModuleType::MtySignature(vec![])),
+                        .unwrap_or(crate::types::decl::ModuleType::MtySignature(std::sync::Arc::new(vec![]))),
                     md_attributes: vec![],
                     md_loc: crate::location::Location::none(),
                     md_path: None,
@@ -16376,7 +16376,7 @@ fn translate_module_type_to_decl_with_typed_hint<'a>(
             })?;
             Ok(DeclMty::MtyAlias(AliasPresence::MtaAbsent, path))
         }
-        PMtyDesc::Pmty_extension(_) => Ok(DeclMty::MtySignature(vec![])),
+        PMtyDesc::Pmty_extension(_) => Ok(DeclMty::MtySignature(std::sync::Arc::new(vec![]))),
     }
 }
 
@@ -16403,7 +16403,7 @@ fn empty_module_decl(
 fn default_module_type(
     mty: Option<crate::types::decl::ModuleType>,
 ) -> crate::types::decl::ModuleType {
-    mty.unwrap_or_else(|| crate::types::decl::ModuleType::MtySignature(vec![]))
+    mty.unwrap_or_else(|| crate::types::decl::ModuleType::MtySignature(std::sync::Arc::new(vec![])))
 }
 
 fn add_decl_signature_item_to_env(item: &crate::types::decl::SignatureItem, env: &mut Env) {
@@ -16633,9 +16633,9 @@ fn approx_modtype<'a>(
             })?;
             Ok(DeclMty::MtyAlias(AliasPresence::MtaAbsent, path))
         }
-        PMtyDesc::Pmty_signature(sig_items) => Ok(DeclMty::MtySignature(approx_signature(
+        PMtyDesc::Pmty_signature(sig_items) => Ok(DeclMty::MtySignature(std::sync::Arc::new(approx_signature(
             tctx, env, arena, sig_items,
-        )?)),
+        )?))),
         PMtyDesc::Pmty_functor(args) => {
             let (name, param_type, result_type_idx) = &**args;
             let param_decl = param_type
@@ -16669,7 +16669,7 @@ fn approx_modtype<'a>(
             let (_typed_me, module_type) = type_module_type_of(tctx, env, arena, me)?;
             Ok(module_type)
         }
-        PMtyDesc::Pmty_extension(_) => Ok(DeclMty::MtySignature(vec![])),
+        PMtyDesc::Pmty_extension(_) => Ok(DeclMty::MtySignature(std::sync::Arc::new(vec![]))),
     }
 }
 
@@ -16701,7 +16701,7 @@ fn anchor_local_module_aliases_to_owner(
     fn qualify_local_module_type_paths(mty: &mut crate::types::decl::ModuleType) {
         match mty {
             DeclMty::MtySignature(sig) => {
-                for item in sig {
+                for item in crate::types::decl::signature_mut(sig) {
                     match item {
                         SigItem::SigModule(_, md, _) => {
                             qualify_local_module_type_paths(&mut md.md_type);
@@ -16738,7 +16738,7 @@ fn anchor_local_module_aliases_to_owner(
         DeclMty::MtySignature(sig) => {
             let qualify_local_paths = !path_contains_apply(owner_path);
 
-            for item in sig {
+            for item in crate::types::decl::signature_mut(sig) {
                 if let SigItem::SigModule(id, md, _) = item {
                     let child_owner_path = Path::pdot(owner_path.clone(), id.name());
                     md.md_path = Some(child_owner_path.clone());
@@ -16848,7 +16848,7 @@ pub(crate) fn decl_signature_from_typed_signature(
                     md.md_id.clone(),
                     ModuleDeclaration {
                         md_type: decl_module_type_from_typed(&md.md_type)
-                            .unwrap_or(crate::types::decl::ModuleType::MtySignature(vec![])),
+                            .unwrap_or(crate::types::decl::ModuleType::MtySignature(std::sync::Arc::new(vec![]))),
                         md_attributes: parser_attrs_to_decl_attrs(arena, &md.md_attributes),
                         md_loc: arena.to_location(md.md_loc),
                         md_path: None,
@@ -16862,7 +16862,7 @@ pub(crate) fn decl_signature_from_typed_signature(
                         md.md_id.clone(),
                         ModuleDeclaration {
                             md_type: decl_module_type_from_typed(&md.md_type)
-                                .unwrap_or(crate::types::decl::ModuleType::MtySignature(vec![])),
+                                .unwrap_or(crate::types::decl::ModuleType::MtySignature(std::sync::Arc::new(vec![]))),
                             md_attributes: parser_attrs_to_decl_attrs(arena, &md.md_attributes),
                             md_loc: arena.to_location(md.md_loc),
                             md_path: None,
@@ -17158,7 +17158,7 @@ fn localize_exported_structure_module_type(
         &Path::pident(local_id.clone()),
     );
     strip_self_module_prefix_in_sig(&sig, local_id, type_ctx);
-    DeclMty::MtySignature(sig)
+    DeclMty::MtySignature(std::sync::Arc::new(sig))
 }
 
 fn localize_alias_child_module_sig_paths_in_structure_sig(
@@ -17212,7 +17212,7 @@ fn localize_alias_child_module_sig_paths_in_structure_sig(
                     if let DeclMty::MtySignature(sub_sig) = &mut md.md_type {
                         let child_path = Path::pdot(module_path.clone(), id.name());
                         localize_alias_child_module_sig(
-                            sub_sig,
+                            crate::types::decl::signature_mut(sub_sig),
                             &child_path,
                             &mb.mb_expr,
                             type_ctx,
@@ -17235,7 +17235,7 @@ fn localize_alias_child_module_sig_paths_in_structure_sig(
                         if let DeclMty::MtySignature(sub_sig) = &mut md.md_type {
                             let child_path = Path::pdot(module_path.clone(), id.name());
                             localize_alias_child_module_sig(
-                                sub_sig,
+                                crate::types::decl::signature_mut(sub_sig),
                                 &child_path,
                                 &mb.mb_expr,
                                 type_ctx,
@@ -17596,7 +17596,7 @@ where
             visiting: &mut HashSet<Path>,
         ) -> Option<crate::types::decl::Signature> {
             match mty {
-                DeclMty::MtySignature(sig) => Some(sig.clone()),
+                DeclMty::MtySignature(sig) => Some((**sig).clone()),
                 DeclMty::MtyIdent(path) | DeclMty::MtyAlias(_, path) => {
                     resolve_path(path, env, type_ctx, visiting)
                 }
@@ -17786,7 +17786,7 @@ where
                 if let Some(type_ctx) = type_ctx {
                     localize_raw_unpack_modules_in_structure_sig(&sig, structure, type_ctx);
                 }
-                return Some(DeclMty::MtySignature(sig));
+                return Some(DeclMty::MtySignature(std::sync::Arc::new(sig)));
             }
 
             let mut sig_items = Vec::new();
@@ -17834,7 +17834,7 @@ where
                                     resolve_ident_sig,
                                 )
                             })
-                            .unwrap_or(DeclMty::MtySignature(vec![]));
+                            .unwrap_or(DeclMty::MtySignature(std::sync::Arc::new(vec![])));
                         let inner_mty = if matches!(inner_mty, DeclMty::MtyAlias(..)) {
                             inner_mty
                         } else {
@@ -17871,7 +17871,7 @@ where
                                         resolve_ident_sig,
                                     )
                                 })
-                                .unwrap_or(DeclMty::MtySignature(vec![]));
+                                .unwrap_or(DeclMty::MtySignature(std::sync::Arc::new(vec![])));
                             let inner_mty = if matches!(inner_mty, DeclMty::MtyAlias(..)) {
                                 inner_mty
                             } else {
@@ -17970,7 +17970,7 @@ where
                                 resolve_ident_sig,
                             ) {
                                 let inner_sig_opt = match inner_mty {
-                                    DeclMty::MtySignature(inner_sig) => Some(inner_sig),
+                                    DeclMty::MtySignature(inner_sig) => Some(std::sync::Arc::unwrap_or_clone(inner_sig)),
                                     other => current_env
                                         .and_then(|env| resolve_modtype_to_sig_in_env(&other, env, type_ctx))
                                         .or_else(|| match &other {
@@ -17981,7 +17981,7 @@ where
                                                         if id.name() == name =>
                                                     {
                                                         mtd.mtd_type.as_ref().and_then(|mty| match mty {
-                                                            DeclMty::MtySignature(sig) => Some(sig.clone()),
+                                                            DeclMty::MtySignature(sig) => Some((**sig).clone()),
                                                             other_mty => current_env.and_then(|env| {
                                                                 resolve_modtype_to_sig_in_env(
                                                                     other_mty,
@@ -18035,7 +18035,7 @@ where
                                                 if id.name() == mod_name.as_str() {
                                                     return match &md.md_type {
                                                         DeclMty::MtySignature(inner) => {
-                                                            Some(inner.clone())
+                                                            Some((**inner).clone())
                                                         }
                                                         other => current_env.and_then(|env| {
                                                             resolve_modtype_to_sig_in_env(
@@ -18079,7 +18079,7 @@ where
                     _ => {}
                 }
             }
-            Some(DeclMty::MtySignature(sig_items))
+            Some(DeclMty::MtySignature(std::sync::Arc::new(sig_items)))
         }
         ModuleExprDesc::Tmod_functor(param_id, _name, param_mty, body) => {
             let decl_param_mty = param_mty
@@ -18158,7 +18158,7 @@ where
                 crate::types::typedtree::ModuleTypeConstraint::Tmodtype_implicit => {
                     Some(constrained_mty.clone()).or_else(|| match &inner.mod_desc {
                         ModuleExprDesc::Tmod_structure(structure) => Some(DeclMty::MtySignature(
-                            crate::types::includemod::simplify_signature(&structure.str_type),
+                            std::sync::Arc::new(crate::types::includemod::simplify_signature(&structure.str_type)),
                         )),
                         _ => None,
                     })
@@ -18990,7 +18990,7 @@ fn type_module_expr_with_alias_inner<'a>(
             let (structure, _new_env) = type_structure(tctx, env, arena, items)?;
             let env_ref = tctx.type_ctx.store_typed_env(env);
             let structure_mty =
-                crate::types::decl::ModuleType::MtySignature(structure.str_type.clone());
+                crate::types::decl::ModuleType::MtySignature(std::sync::Arc::new(structure.str_type.clone()));
 
             // Match compiler/ml/typemod.ml:1263-1282. OCaml first builds the
             // raw `Tmod_structure`, then calls `simplify_signature`; if that
@@ -19008,7 +19008,7 @@ fn type_module_expr_with_alias_inner<'a>(
 
             if let Some(simplified_structure_sig) = simplified_structure_sig {
                 let simplified =
-                    crate::types::decl::ModuleType::MtySignature(simplified_structure_sig);
+                    crate::types::decl::ModuleType::MtySignature(std::sync::Arc::new(simplified_structure_sig));
                 let mut inclusion_warnings = Vec::new();
                 let coercion_result = crate::types::includemod::modtypes_with_warnings(
                     tctx.type_ctx,
@@ -19163,7 +19163,7 @@ fn type_module_expr_with_alias_inner<'a>(
                     let param_mty = param_type
                         .as_ref()
                         .map(|inner| (**inner).clone())
-                        .unwrap_or_else(|| crate::types::decl::ModuleType::MtySignature(vec![]));
+                        .unwrap_or_else(|| crate::types::decl::ModuleType::MtySignature(std::sync::Arc::new(vec![])));
                     let mut inclusion_warnings = Vec::new();
                     let coercion_result = crate::types::includemod::modtypes_with_warnings(
                         tctx.type_ctx,
@@ -19227,7 +19227,7 @@ fn type_module_expr_with_alias_inner<'a>(
                         }
                     }
                 }
-                _ => crate::types::decl::ModuleType::MtySignature(vec![]),
+                _ => crate::types::decl::ModuleType::MtySignature(std::sync::Arc::new(vec![])),
             };
             let typed_apply = ModuleExpr {
                 mod_desc: ModuleExprDesc::Tmod_apply(
@@ -19254,7 +19254,7 @@ fn type_module_expr_with_alias_inner<'a>(
             // `mty.mty_type` from the just-translated module type directly to
             // `wrap_constraint`; it does not re-run module-type translation.
             let decl_mty = decl_module_type_from_typed(&typed_mty)
-                .unwrap_or(crate::types::decl::ModuleType::MtySignature(vec![]));
+                .unwrap_or(crate::types::decl::ModuleType::MtySignature(std::sync::Arc::new(vec![])));
             let typed_mod_for_unused_check = typed_mod.clone();
             let constrained = wrap_constraint_with_decl_mty(
                 tctx,
@@ -19355,10 +19355,10 @@ fn wrap_constraint<'a>(
     mod_attributes: Attributes,
 ) -> TypeModResult<ModuleExpr> {
     let decl_mty = decl_module_type_from_typed(&mty)
-        .unwrap_or(crate::types::decl::ModuleType::MtySignature(vec![]));
+        .unwrap_or(crate::types::decl::ModuleType::MtySignature(std::sync::Arc::new(vec![])));
     let arg_mty = extract_module_type_from_mod_expr_with_ctx(&arg, Some(env), tctx.type_ctx)
         .or_else(|| Some(arg.mod_type.clone()))
-        .unwrap_or(crate::types::decl::ModuleType::MtySignature(vec![]));
+        .unwrap_or(crate::types::decl::ModuleType::MtySignature(std::sync::Arc::new(vec![])));
     wrap_constraint_with_decl_and_arg_mty(
         tctx,
         env,
@@ -19385,7 +19385,7 @@ fn wrap_constraint_with_decl_mty<'a>(
     let arg_mty = decl_module_type_from_typed_module_expr_for_constraint_arg(&arg)
         .or_else(|| extract_module_type_from_mod_expr_with_ctx(&arg, Some(env), tctx.type_ctx))
         .or_else(|| Some(arg.mod_type.clone()))
-        .unwrap_or(crate::types::decl::ModuleType::MtySignature(vec![]));
+        .unwrap_or(crate::types::decl::ModuleType::MtySignature(std::sync::Arc::new(vec![])));
     wrap_constraint_with_decl_and_arg_mty(
         tctx,
         env,
@@ -19717,7 +19717,7 @@ fn transl_modtype<'a>(
                 param_id.clone(),
                 crate::types::decl::ModuleDeclaration {
                     md_type: param_decl
-                        .unwrap_or(crate::types::decl::ModuleType::MtySignature(vec![])),
+                        .unwrap_or(crate::types::decl::ModuleType::MtySignature(std::sync::Arc::new(vec![]))),
                     md_attributes: vec![],
                     md_loc: crate::location::Location::none(),
                     md_path: None,
@@ -19787,14 +19787,14 @@ fn transl_modtype<'a>(
     };
     let mut typed = TMty {
         mty_desc: desc,
-        mty_type: crate::types::decl::ModuleType::MtySignature(vec![]),
+        mty_type: crate::types::decl::ModuleType::MtySignature(std::sync::Arc::new(vec![])),
         mty_env: env_ref,
         mty_loc: loc,
         mty_attributes: attrs,
     };
     typed.mty_type =
         translate_module_type_to_decl_with_typed_hint(tctx, env, arena, smty, Some(&typed))
-            .unwrap_or_else(|_| crate::types::decl::ModuleType::MtySignature(vec![]));
+            .unwrap_or_else(|_| crate::types::decl::ModuleType::MtySignature(std::sync::Arc::new(vec![])));
     Ok(typed)
 }
 
@@ -19934,7 +19934,7 @@ pub fn transl_signature<'a>(
                 // declaration's `md_type`. Re-translating here would repeat
                 // side effects such as `Mtype.freshen` for `Pmty_with`.
                 let decl_mty = decl_module_type_from_typed(&typed_mty)
-                    .unwrap_or(crate::types::decl::ModuleType::MtySignature(vec![]));
+                    .unwrap_or(crate::types::decl::ModuleType::MtySignature(std::sync::Arc::new(vec![])));
                 sig_env.add_module(
                     id.clone(),
                     crate::types::decl::ModuleDeclaration {
@@ -20614,7 +20614,7 @@ fn closed_modtype(
         | crate::types::decl::ModuleType::MtyAlias(_, _) => true,
         crate::types::decl::ModuleType::MtySignature(sig) => {
             let mut sig_env = env.clone_preserve_id();
-            for item in sig {
+            for item in sig.iter() {
                 add_decl_signature_item_to_env(item, &mut sig_env);
             }
             sig.iter()
@@ -20740,7 +20740,7 @@ fn type_structure_no_export<'a>(
     // (duplicate value names), wrap in Tmod_constraint implicit first
     let needs_implicit_constraint = simplified_structure_signature(&inner_structure).is_some();
     let structure_mty =
-        crate::types::decl::ModuleType::MtySignature(inner_structure.str_type.clone());
+        crate::types::decl::ModuleType::MtySignature(std::sync::Arc::new(inner_structure.str_type.clone()));
 
     let mod_structure = ModuleExpr {
         mod_desc: ModuleExprDesc::Tmod_structure(inner_structure),
@@ -20755,7 +20755,7 @@ fn type_structure_no_export<'a>(
         let simplified_mty = match &mod_structure.mod_type {
             crate::types::decl::ModuleType::MtySignature(sig) => {
                 crate::types::decl::ModuleType::MtySignature(
-                    crate::types::includemod::simplify_signature(sig),
+                    std::sync::Arc::new(crate::types::includemod::simplify_signature(sig)),
                 )
             }
             _ => unreachable!("structure modules always produce signatures"),
@@ -20781,7 +20781,7 @@ fn type_structure_no_export<'a>(
         mty_desc: crate::types::typedtree::ModuleTypeDesc::Tmty_signature(
             crate::types::typedtree::TypedSignature { sig_items: vec![] },
         ),
-        mty_type: crate::types::decl::ModuleType::MtySignature(vec![]),
+        mty_type: crate::types::decl::ModuleType::MtySignature(std::sync::Arc::new(vec![])),
         mty_env: tctx.type_ctx.store_typed_env(env),
         mty_loc: loc,
         mty_attributes: Attributes::new(),
@@ -23902,7 +23902,7 @@ fn type_structure_item<'a>(
             // Extend environment with the new module
             let mut new_env = env.clone();
             let mut decl_mod_type = decl_module_type_from_typed_module_expr_for_sig(&typed_mod)
-                .unwrap_or_else(|| crate::types::decl::ModuleType::MtySignature(vec![]));
+                .unwrap_or_else(|| crate::types::decl::ModuleType::MtySignature(std::sync::Arc::new(vec![])));
             anchor_local_module_aliases_to_owner(&mut decl_mod_type, &Path::pident(mod_id.clone()));
             // OCaml compiler/ml/typemod.ml:1451-1471 stores
             // `enrich_module_type anchor name modl.mod_type env` directly in the
@@ -23933,7 +23933,7 @@ fn type_structure_item<'a>(
                                 &Path::pident(mod_id.clone()),
                                 tctx.type_ctx,
                             );
-                            crate::types::decl::ModuleType::MtySignature(sig)
+                            crate::types::decl::ModuleType::MtySignature(std::sync::Arc::new(sig))
                         }
                     } else {
                         decl_mod_type.clone()

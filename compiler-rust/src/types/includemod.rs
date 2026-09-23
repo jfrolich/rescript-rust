@@ -1451,7 +1451,7 @@ fn modtypes_inner<'a>(
                         }
                         _ => return None,
                     };
-                    for item in &parent_sig {
+                    for item in parent_sig.iter() {
                         match item {
                             SigItem::SigModule(id, md, _) if id.name() == name.as_str() => {
                                 return Some(md.md_type.clone());
@@ -1648,7 +1648,7 @@ fn modtypes_inner<'a>(
             let param_binding_type = expected_param_type
                 .clone()
                 .or_else(|| param_type_impl.as_deref().cloned())
-                .unwrap_or_else(|| ModuleType::MtySignature(vec![]));
+                .unwrap_or_else(|| ModuleType::MtySignature(std::sync::Arc::new(vec![])));
             result_env.add_module(
                 param_impl.clone(),
                 ModuleDeclaration {
@@ -2999,7 +2999,7 @@ fn substitute_module_type_paths_no_freshen(
                 type_ctx, result, subst,
             )),
         },
-        ModuleType::MtySignature(sig) => ModuleType::MtySignature(
+        ModuleType::MtySignature(sig) => ModuleType::MtySignature(std::sync::Arc::new(
             sig.iter()
                 .map(|item| match item {
                     SignatureItem::SigValue(id, desc) => SignatureItem::SigValue(
@@ -3028,7 +3028,7 @@ fn substitute_module_type_paths_no_freshen(
                     _ => item.clone(),
                 })
                 .collect(),
-        ),
+        )),
     }
 }
 
@@ -5076,10 +5076,10 @@ mod tests {
             SignatureItem::SigModule(
                 impl_mod_id,
                 ModuleDeclaration {
-                    md_type: ModuleType::MtySignature(vec![SignatureItem::SigValue(
+                    md_type: ModuleType::MtySignature(std::sync::Arc::new(vec![SignatureItem::SigValue(
                         Ident::create_local("x"),
                         value_desc(impl_ty),
-                    )]),
+                    )])),
                     md_attributes: vec![],
                     md_loc: Location::none(),
                     md_path: None,
@@ -5096,10 +5096,10 @@ mod tests {
             SignatureItem::SigModule(
                 sig_mod_id,
                 ModuleDeclaration {
-                    md_type: ModuleType::MtySignature(vec![SignatureItem::SigValue(
+                    md_type: ModuleType::MtySignature(std::sync::Arc::new(vec![SignatureItem::SigValue(
                         Ident::create_local("x"),
                         value_desc(sig_ty),
-                    )]),
+                    )])),
                     md_attributes: vec![],
                     md_loc: Location::none(),
                     md_path: None,
@@ -5157,7 +5157,7 @@ mod tests {
         env.add_modtype(
             modtype_id.clone(),
             ModtypeDeclaration {
-                mtd_type: Some(ModuleType::MtySignature(sig.clone())),
+                mtd_type: Some(ModuleType::MtySignature(std::sync::Arc::new(sig.clone()))),
                 mtd_attributes: vec![],
                 mtd_loc: Location::none(),
             },
@@ -5166,7 +5166,7 @@ mod tests {
         let result = modtypes(
             &type_ctx,
             &env,
-            &ModuleType::MtySignature(sig),
+            &ModuleType::MtySignature(std::sync::Arc::new(sig)),
             &ModuleType::MtyIdent(Path::pident(modtype_id)),
         );
         assert!(matches!(result, Ok(ModuleCoercion::Tcoerce_none)));
@@ -5178,8 +5178,8 @@ mod tests {
         let type_ctx = TypeContext::new(std::sync::Arc::new(id_gen));
         let env = initial_env(&type_ctx);
 
-        let param_sig = ModuleType::MtySignature(vec![]);
-        let result_sig = ModuleType::MtySignature(vec![]);
+        let param_sig = ModuleType::MtySignature(std::sync::Arc::new(vec![]));
+        let result_sig = ModuleType::MtySignature(std::sync::Arc::new(vec![]));
 
         let mty_impl = ModuleType::MtyFunctor {
             param: Ident::create_local("X"),

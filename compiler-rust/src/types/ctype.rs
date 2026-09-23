@@ -1505,7 +1505,7 @@ pub(crate) fn resolve_module_signature_through_cmi_shared<'a>(
                                     parent,
                                     ctx,
                                 );
-                                Some(Arc::new(sig.clone()))
+                                Some(sig.clone())
                             }
                             ModuleType::MtyAlias(_, alias_path)
                             | ModuleType::MtyIdent(alias_path) => {
@@ -1583,7 +1583,7 @@ fn resolve_module_signature_through_persistent_env_shared<'a>(
                 if let SignatureItem::SigModule(id, md, _) = item {
                     if id.name() == module_name {
                         resolved = match &md.md_type {
-                            ModuleType::MtySignature(sig) => Some(Arc::new(sig.clone())),
+                            ModuleType::MtySignature(sig) => Some(sig.clone()),
                             ModuleType::MtyAlias(_, alias_path)
                             | ModuleType::MtyIdent(alias_path) => {
                                 resolve_module_signature_through_persistent_env_shared(
@@ -1820,7 +1820,7 @@ fn resolve_module_type_through_env_path<'a>(
                     .and_then(|pers| pers.find_pers_struct(name, ctx))
                     .map(|ps| ps.ps_sig.as_ref().clone())
                 {
-                    Some(super::decl::ModuleType::MtySignature(sig))
+                    Some(super::decl::ModuleType::MtySignature(std::sync::Arc::new(sig)))
                 } else {
                     let mut persistent_env = in_process_module_resolution_env(ctx);
                     crate::types::typecore::resolve_module_signature_for_path(
@@ -1829,7 +1829,7 @@ fn resolve_module_type_through_env_path<'a>(
                         &mut persistent_env,
                         ctx,
                     )
-                    .map(|(_, sig)| super::decl::ModuleType::MtySignature(sig))
+                    .map(|(_, sig)| super::decl::ModuleType::MtySignature(std::sync::Arc::new(sig)))
                     .or_else(|| {
                         let load_paths = ctx.load_paths();
                         if load_paths.is_empty() {
@@ -1846,7 +1846,9 @@ fn resolve_module_type_through_env_path<'a>(
                                 path,
                                 &mut cmi_visiting,
                             )
-                            .map(super::decl::ModuleType::MtySignature)
+                            .map(|signature| {
+                                super::decl::ModuleType::MtySignature(Arc::new(signature))
+                            })
                         }
                     })
                 }
@@ -1879,7 +1881,7 @@ fn resolve_module_type_through_env_path<'a>(
                     // the selected component signature and leave the
                     // module-declaration force to env.ml:865-882-equivalent
                     // callers that actually ask for `find_module`.
-                    return Some(super::decl::ModuleType::MtySignature(sig));
+                    return Some(super::decl::ModuleType::MtySignature(std::sync::Arc::new(sig)));
                 }
             }
             let mut persistent_env = in_process_module_resolution_env(ctx);
@@ -1933,7 +1935,7 @@ fn resolve_module_type_through_env_path<'a>(
                                 )
                             })
                         })
-                        .map(|(_, sig)| super::decl::ModuleType::MtySignature(sig))
+                        .map(|(_, sig)| super::decl::ModuleType::MtySignature(std::sync::Arc::new(sig)))
                     }
                     other => {
                         let child_mty = other.clone();
@@ -1991,7 +1993,7 @@ fn resolve_signature_through_env_module_type<'a>(
         // The env_lazy-backed signature view is already the qualified source of
         // truth for this access path. Reusing it preserves the same sharing
         // shape OCaml keeps in components_of_module_maker.
-        ModuleType::MtySignature(sig) => Some(sig.clone()),
+        ModuleType::MtySignature(sig) => Some((**sig).clone()),
         ModuleType::MtyAlias(_, path) | ModuleType::MtyIdent(path) => {
             let mut no_persistent_env = None;
             if let Some((_, sig)) = crate::types::typecore::resolve_module_signature_for_path(
@@ -2106,14 +2108,14 @@ fn strengthen_module_type_for_module_access_path<'a>(
 
     match &scraped {
         ModuleType::MtySignature(sig) => {
-            ModuleType::MtySignature(strengthen_signature_for_module_access_path(
+            ModuleType::MtySignature(std::sync::Arc::new(strengthen_signature_for_module_access_path(
                 ctx,
                 env,
                 aliasable,
                 module_access_path,
                 sig,
                 0,
-            ))
+            )))
         }
         ModuleType::MtyAlias(..) | ModuleType::MtyIdent(..) => scraped,
         ModuleType::MtyFunctor {
@@ -7488,7 +7490,7 @@ fn lower_nongen_module_type_rec(
     match mty {
         ModuleType::MtyIdent(_) | ModuleType::MtyAlias(_, _) => {}
         ModuleType::MtySignature(sig_items) => {
-            for item in sig_items {
+            for item in sig_items.iter() {
                 match item {
                     SignatureItem::SigValue(_, vd) => {
                         lower_nongen_type_expr_rec(ctx, nglev, vd.val_type, seen);
@@ -7565,7 +7567,7 @@ fn force_generalize_module_type_rec(
     match mty {
         ModuleType::MtyIdent(_) | ModuleType::MtyAlias(_, _) => {}
         ModuleType::MtySignature(sig_items) => {
-            for item in sig_items {
+            for item in sig_items.iter() {
                 match item {
                     SignatureItem::SigValue(_, vd) => {
                         force_generalize_sig_type_rec(ctx, vd.val_type, seen);
@@ -11582,11 +11584,11 @@ mod tests {
 
     fn module_with_t(type_id: Ident, type_decl: TypeDeclaration) -> ModuleDeclaration {
         ModuleDeclaration {
-            md_type: ModuleType::MtySignature(vec![SignatureItem::SigType(
+            md_type: ModuleType::MtySignature(std::sync::Arc::new(vec![SignatureItem::SigType(
                 type_id,
                 type_decl,
                 RecStatus::TrecNot,
-            )]),
+            )])),
             md_attributes: vec![],
             md_loc: crate::location::Location::none(),
             md_path: None,
@@ -11878,10 +11880,10 @@ mod tests {
         env.add_module(
             module_id.clone(),
             ModuleDeclaration {
-                md_type: ModuleType::MtySignature(vec![
+                md_type: ModuleType::MtySignature(std::sync::Arc::new(vec![
                     SignatureItem::SigType(sibling_id.clone(), sibling_decl, RecStatus::TrecNot),
                     SignatureItem::SigType(type_id, type_decl, RecStatus::TrecNot),
-                ]),
+                ])),
                 md_attributes: vec![],
                 md_loc: crate::location::Location::none(),
                 md_path: None,

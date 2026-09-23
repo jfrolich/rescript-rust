@@ -1989,7 +1989,7 @@ fn lookup_labels_in_unforced_module_decl(
     };
 
     let mut labels = Vec::new();
-    for item in sig {
+    for item in sig.iter() {
         let crate::types::decl::SignatureItem::SigType(type_id, decl, _) = item else {
             continue;
         };
@@ -2044,7 +2044,7 @@ fn select_record_type_in_unforced_module_decl(
     };
 
     let mut matching: Vec<(Path, TypeExprRef)> = Vec::new();
-    for item in sig {
+    for item in sig.iter() {
         let crate::types::decl::SignatureItem::SigType(type_id, decl, _) = item else {
             continue;
         };
@@ -21851,7 +21851,7 @@ fn type_letmodule(
 
         match mty {
             DeclMty::MtySignature(sig_items) => {
-                for item in sig_items {
+                for item in sig_items.iter() {
                     match item {
                         SignatureItem::SigType(id, decl, _) => {
                             if id.stamp() != 0 {
@@ -21997,7 +21997,7 @@ fn type_letmodule(
                 &mut tctx.persistent_env,
                 ctx,
             ) {
-                mod_sig = crate::types::decl::ModuleType::MtySignature(sig);
+                mod_sig = crate::types::decl::ModuleType::MtySignature(std::sync::Arc::new(sig));
             }
         }
 
@@ -22465,7 +22465,7 @@ fn type_pack(
                 ctx,
             )
         })
-        .unwrap_or(crate::types::decl::ModuleType::MtySignature(vec![]));
+        .unwrap_or(crate::types::decl::ModuleType::MtySignature(std::sync::Arc::new(vec![])));
     // OCaml compiler/ml/typemod.ml:1710-1719 calls `wrap_constraint` for
     // every packed module. Do not reuse a previous package coercion here:
     // Includemod expansion allocates/freshens hidden identifiers, and strict
@@ -22556,7 +22556,7 @@ fn module_type_from_package_binding(
             ctx,
         )
         .unwrap_or(crate::types::decl::ModuleType::MtyIdent(path)),
-        _ => crate::types::decl::ModuleType::MtySignature(vec![]),
+        _ => crate::types::decl::ModuleType::MtySignature(std::sync::Arc::new(vec![])),
     }
 }
 
@@ -25698,13 +25698,13 @@ where
             )),
         },
         crate::types::decl::ModuleType::MtySignature(sig_items) => {
-            crate::types::decl::ModuleType::MtySignature(copy_lookup_signature_with_paths(
+            crate::types::decl::ModuleType::MtySignature(std::sync::Arc::new(copy_lookup_signature_with_paths(
                 sig_items,
                 ctx,
                 cache,
                 type_path,
                 module_path,
-            ))
+            )))
         }
     }
 }
@@ -26834,7 +26834,7 @@ impl Env {
             cache_mode: ComponentLookupApi,
         ) -> Option<(crate::types::decl::Signature, Option<String>)> {
             match mty {
-                crate::types::decl::ModuleType::MtySignature(sig) => Some((sig.clone(), None)),
+                crate::types::decl::ModuleType::MtySignature(sig) => Some(((**sig).clone(), None)),
                 crate::types::decl::ModuleType::MtyAlias(_, path) => {
                     resolve_path(env, path, pers_env, ctx, visiting, cache_mode)
                 }
@@ -30846,7 +30846,7 @@ fn with_resolved_child_module_components<'a, R>(
 
     let components = match md.md_type {
         crate::types::decl::ModuleType::MtySignature(sig) => {
-            crate::types::env_lazy::QualifiedModuleComponents::new(access_path.clone(), sig, ctx)
+            crate::types::env_lazy::QualifiedModuleComponents::new(access_path.clone(), std::sync::Arc::unwrap_or_clone(sig), ctx)
         }
         _ => {
             let sig = build_qualified_signature_for_access_path(
@@ -31158,7 +31158,7 @@ fn build_module_components_from_parent_path<'a>(
             );
             match md.md_type {
                 crate::types::decl::ModuleType::MtySignature(sig) => Some(
-                    crate::types::env_lazy::QualifiedModuleComponents::new(access_path, sig, ctx),
+                    crate::types::env_lazy::QualifiedModuleComponents::new(access_path, std::sync::Arc::unwrap_or_clone(sig), ctx),
                 ),
                 _ => None,
             }
@@ -31209,7 +31209,7 @@ fn build_functor_application_components<'a>(
     };
 
     let (raw_sig, resolved_name) = match &applied_mty {
-        crate::types::decl::ModuleType::MtySignature(sig) => (sig.clone(), None),
+        crate::types::decl::ModuleType::MtySignature(sig) => ((**sig).clone(), None),
         _ => env.resolve_module_type(&applied_mty, pers_env, ctx, cache_mode)?,
     };
     let sig = qualify_resolved_signature_for_local_components(

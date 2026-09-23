@@ -885,7 +885,7 @@ impl<'a> TypeGraphSerializer<'a> {
 
     fn remap_module_type(&mut self, mt: &mut ModuleType) {
         match mt {
-            ModuleType::MtySignature(sig) => self.remap_signature(sig),
+            ModuleType::MtySignature(sig) => self.remap_signature(crate::types::decl::signature_mut(sig)),
             ModuleType::MtyFunctor {
                 param_type, result, ..
             } => {
@@ -1373,7 +1373,7 @@ fn remap_module_type_refs(
     layout_remap: &[crate::types::VariantLayoutRef],
 ) {
     match mt {
-        ModuleType::MtySignature(sig) => remap_signature_refs(sig, remap, layout_remap),
+        ModuleType::MtySignature(sig) => remap_signature_refs(crate::types::decl::signature_mut(sig), remap, layout_remap),
         ModuleType::MtyFunctor {
             param_type, result, ..
         } => {

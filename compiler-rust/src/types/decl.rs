@@ -355,8 +355,9 @@ pub struct LabelArrayRef(pub u32);
 pub enum ModuleType {
     /// Module type identifier
     MtyIdent(Path),
-    /// Signature
-    MtySignature(Signature),
+    /// Signature. Shared like OCaml's immutable signature list, so copying a
+    /// module type during lookup does not copy every item.
+    MtySignature(std::sync::Arc<Signature>),
     /// Functor
     MtyFunctor {
         param: Ident,
@@ -378,6 +379,11 @@ pub enum AliasPresence {
 
 /// A signature (list of signature items).
 pub type Signature = Vec<SignatureItem>;
+
+/// Copy-on-write access to a shared module-type signature.
+pub fn signature_mut(signature: &mut std::sync::Arc<Signature>) -> &mut Signature {
+    std::sync::Arc::make_mut(signature)
+}
 
 /// A signature item.
 #[derive(Debug, Clone, PartialEq, Eq)]

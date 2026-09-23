@@ -693,7 +693,7 @@ impl ModuleType {
     pub fn placeholder() -> Self {
         Self {
             mty_desc: ModuleTypeDesc::Tmty_placeholder,
-            mty_type: DeclModuleType::MtySignature(vec![]),
+            mty_type: DeclModuleType::MtySignature(std::sync::Arc::new(vec![])),
             mty_env: EnvRef(0),
             mty_loc: LocIdx(0),
             mty_attributes: Attributes::new(),

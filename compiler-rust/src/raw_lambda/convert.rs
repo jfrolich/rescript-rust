@@ -4472,7 +4472,7 @@ impl<'a> RawLambdaConverter<'a> {
                     return None;
                 }
                 match mty {
-                    ModuleType::MtySignature(sig) => sig.into_iter().find_map(|item| match item {
+                    ModuleType::MtySignature(sig) => std::sync::Arc::unwrap_or_clone(sig).into_iter().find_map(|item| match item {
                         SignatureItem::SigModule(id, md, _) if id.name() == name => {
                             Some(md.md_type)
                         }
@@ -4517,7 +4517,7 @@ impl<'a> RawLambdaConverter<'a> {
                             .persistent_env
                             .as_mut()?
                             .read_raw_sig(id.name(), this.type_ctx)?;
-                        Some(ModuleType::MtySignature(sig))
+                        Some(ModuleType::MtySignature(std::sync::Arc::new(sig)))
                     } else {
                         None
                     }
@@ -5727,7 +5727,7 @@ impl<'a> RawLambdaConverter<'a> {
             ModuleExprDesc::Tmod_structure(structure) => {
                 // Build MtySignature from the structure's str_type (which is decl::Signature)
                 return Some(crate::types::decl::ModuleType::MtySignature(
-                    structure.str_type.clone(),
+                    std::sync::Arc::new(structure.str_type.clone()),
                 ));
             }
             ModuleExprDesc::Tmod_ident(_, _) => {
@@ -12350,6 +12350,12 @@ fn ffi_marshaled_delim(value: &OcamlValue) -> Option<StringDelim> {
 
 #[cfg(test)]
 mod tests {
+    fn test_signature_module_type(
+        items: Vec<crate::types::SignatureItem>,
+    ) -> crate::types::decl::ModuleType {
+        crate::types::decl::ModuleType::MtySignature(std::sync::Arc::new(items))
+    }
+
     use super::*;
     use std::borrow::Cow;
 
@@ -13402,7 +13408,7 @@ external myJson: Js.Json.t = "default"
         env.add_module(
             original_module.clone(),
             crate::types::decl::ModuleDeclaration {
-                md_type: crate::types::decl::ModuleType::MtySignature(vec![
+                md_type: test_signature_module_type(vec![
                     crate::types::SignatureItem::SigModule(
                         local_n.clone(),
                         crate::types::decl::ModuleDeclaration {
@@ -13502,7 +13508,7 @@ external myJson: Js.Json.t = "default"
         env.add_module(
             pkg.clone(),
             crate::types::decl::ModuleDeclaration {
-                md_type: crate::types::decl::ModuleType::MtySignature(vec![
+                md_type: test_signature_module_type(vec![
                     crate::types::SignatureItem::SigModule(
                         Ident::create_local("List"),
                         crate::types::decl::ModuleDeclaration {
@@ -13524,7 +13530,7 @@ external myJson: Js.Json.t = "default"
         env.add_module(
             pkg_list.clone(),
             crate::types::decl::ModuleDeclaration {
-                md_type: crate::types::decl::ModuleType::MtySignature(vec![]),
+                md_type: test_signature_module_type(vec![]),
                 md_attributes: Vec::new(),
                 md_loc: Location::none(),
                 md_path: None,
@@ -13786,7 +13792,7 @@ external myJson: Js.Json.t = "default"
         env.add_module(
             pkg.clone(),
             crate::types::decl::ModuleDeclaration {
-                md_type: crate::types::decl::ModuleType::MtySignature(vec![
+                md_type: test_signature_module_type(vec![
                     crate::types::SignatureItem::SigModule(
                         Ident::create_local("List"),
                         crate::types::decl::ModuleDeclaration {
@@ -13808,7 +13814,7 @@ external myJson: Js.Json.t = "default"
         env.add_module(
             pkg_list.clone(),
             crate::types::decl::ModuleDeclaration {
-                md_type: crate::types::decl::ModuleType::MtySignature(vec![
+                md_type: test_signature_module_type(vec![
                     crate::types::SignatureItem::SigValue(
                         Ident::create_local("length"),
                         crate::types::decl::ValueDescription {
@@ -13872,7 +13878,7 @@ external myJson: Js.Json.t = "default"
         let main_path = crate::types::Path::pdot(subtitles_path.clone(), main.name().to_string());
 
         let main_decl = crate::types::decl::ModuleDeclaration {
-            md_type: crate::types::decl::ModuleType::MtySignature(vec![
+            md_type: test_signature_module_type(vec![
                 crate::types::SignatureItem::SigValue(
                     make.clone(),
                     crate::types::decl::ValueDescription {
@@ -13892,15 +13898,15 @@ external myJson: Js.Json.t = "default"
         env.add_module(
             icon.clone(),
             crate::types::decl::ModuleDeclaration {
-                md_type: crate::types::decl::ModuleType::MtySignature(vec![
+                md_type: test_signature_module_type(vec![
                     crate::types::SignatureItem::SigModule(
                         export.clone(),
                         crate::types::decl::ModuleDeclaration {
-                            md_type: crate::types::decl::ModuleType::MtySignature(vec![
+                            md_type: test_signature_module_type(vec![
                                 crate::types::SignatureItem::SigModule(
                                     subtitles.clone(),
                                     crate::types::decl::ModuleDeclaration {
-                                        md_type: crate::types::decl::ModuleType::MtySignature(
+                                        md_type: test_signature_module_type(
                                             vec![
                                                 crate::types::SignatureItem::SigModule(
                                                     main.clone(),
@@ -13982,11 +13988,11 @@ external myJson: Js.Json.t = "default"
         env.add_module(
             inner_define.clone(),
             crate::types::decl::ModuleDeclaration {
-                md_type: crate::types::decl::ModuleType::MtySignature(vec![
+                md_type: test_signature_module_type(vec![
                     crate::types::SignatureItem::SigModule(
                         runtime_n,
                         crate::types::decl::ModuleDeclaration {
-                            md_type: crate::types::decl::ModuleType::MtySignature(vec![]),
+                            md_type: test_signature_module_type(vec![]),
                             md_attributes: Vec::new(),
                             md_loc: Location::none(),
                             md_path: None,
@@ -13996,7 +14002,7 @@ external myJson: Js.Json.t = "default"
                     crate::types::SignatureItem::SigModtype(
                         modtype_s0,
                         crate::types::decl::ModtypeDeclaration {
-                            mtd_type: Some(crate::types::decl::ModuleType::MtySignature(vec![
+                            mtd_type: Some(test_signature_module_type(vec![
                                 crate::types::SignatureItem::SigValue(
                                     Ident::create_local("f1"),
                                     crate::types::decl::ValueDescription {
@@ -14030,7 +14036,7 @@ external myJson: Js.Json.t = "default"
                     crate::types::SignatureItem::SigModule(
                         runtime_n1,
                         crate::types::decl::ModuleDeclaration {
-                            md_type: crate::types::decl::ModuleType::MtySignature(vec![]),
+                            md_type: test_signature_module_type(vec![]),
                             md_attributes: Vec::new(),
                             md_loc: Location::none(),
                             md_path: None,

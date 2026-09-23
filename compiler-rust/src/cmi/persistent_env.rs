@@ -1583,13 +1583,15 @@ impl PersistentEnv {
             );
             let typed_module_type = TypedModuleType {
                 mty_desc: TypedModuleTypeDesc::Tmty_signature(typed_signature),
-                mty_type: crate::types::decl::ModuleType::MtySignature(decl_signature),
+                mty_type: crate::types::decl::ModuleType::MtySignature(std::sync::Arc::new(decl_signature)),
                 mty_env: crate::types::typedtree::EnvRef(0),
                 mty_loc: crate::parse_arena::LocIdx(0),
                 mty_attributes: crate::parser::ast::Attributes::new(),
             };
             let signature = match decl_module_type_from_typed(&typed_module_type)? {
-                crate::types::decl::ModuleType::MtySignature(signature) => signature,
+                crate::types::decl::ModuleType::MtySignature(signature) => {
+                    std::sync::Arc::unwrap_or_clone(signature)
+                }
                 _ => return None,
             };
             return Some((signature, fallback_pers));
@@ -2003,7 +2005,7 @@ impl PersistentEnv {
     ) -> Option<ModuleDeclaration> {
         let ps = self.find_pers_struct(name, ctx)?;
         Some(ModuleDeclaration {
-            md_type: ModuleType::MtySignature(ps.ps_sig.as_ref().clone()),
+            md_type: ModuleType::MtySignature(std::sync::Arc::new(ps.ps_sig.as_ref().clone())),
             md_attributes: vec![],
             md_loc: crate::location::Location::none(),
             md_path: None,
@@ -3352,7 +3354,7 @@ fn freshen_module_type_bound_idents_with_maps(
             }
         }
         ModuleType::MtySignature(sig) => {
-            freshen_signature_bound_idents_with_maps(sig, maps, ctx);
+            freshen_signature_bound_idents_with_maps(crate::types::decl::signature_mut(sig), maps, ctx);
         }
         ModuleType::MtyFunctor {
             param,
@@ -3720,7 +3722,7 @@ fn substitute_module_type_paths_with_maps(module_type: &mut ModuleType, maps: &S
             );
         }
         ModuleType::MtySignature(sig) => {
-            substitute_sig_decl_paths_in_place_with_maps(sig, maps);
+            substitute_sig_decl_paths_in_place_with_maps(crate::types::decl::signature_mut(sig), maps);
         }
         ModuleType::MtyFunctor {
             param_type, result, ..
@@ -4902,7 +4904,7 @@ fn rewrite_module_type_prefix_paths(
             }
         }
         ModuleType::MtySignature(sig) => {
-            rewrite_module_prefix_paths_in_sig(sig, old_name, new_prefix);
+            rewrite_module_prefix_paths_in_sig(crate::types::decl::signature_mut(sig), old_name, new_prefix);
         }
         ModuleType::MtyFunctor {
             param_type, result, ..
@@ -5311,7 +5313,7 @@ fn rewrite_module_type_by_path_prefix(
             }
         }
         ModuleType::MtySignature(sig) => {
-            rewrite_sig_paths_by_path_prefix(sig, old_prefix, new_prefix);
+            rewrite_sig_paths_by_path_prefix(crate::types::decl::signature_mut(sig), old_prefix, new_prefix);
         }
         ModuleType::MtyFunctor {
             param_type, result, ..

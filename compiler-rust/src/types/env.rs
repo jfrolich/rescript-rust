@@ -1114,7 +1114,7 @@ impl Env {
                         }
                         match mty {
                             super::decl::ModuleType::MtySignature(sig) => {
-                                for item in sig {
+                                for item in sig.iter() {
                                     if let super::decl::SignatureItem::SigType(id, decl, _) = item {
                                         if id.name() == name {
                                             return Some(decl);
@@ -1683,7 +1683,7 @@ impl Env {
                 });
                 if let Ok(parent_md) = parent_md {
                     if let super::decl::ModuleType::MtySignature(ref sig) = parent_md.md_type {
-                        for item in sig {
+                        for item in sig.iter() {
                             if let super::decl::SignatureItem::SigModtype(id, decl) = item {
                                 if id.name() == name {
                                     return Ok(decl);
@@ -2688,7 +2688,7 @@ mod tests {
         env.add_module(
             target_id.clone(),
             ModuleDeclaration {
-                md_type: ModuleType::MtySignature(vec![]),
+                md_type: ModuleType::MtySignature(std::sync::Arc::new(vec![])),
                 md_attributes: vec![],
                 md_loc: Location::none(),
                 md_path: None,
@@ -2715,7 +2715,7 @@ mod tests {
         env.add_module(
             alias_id,
             ModuleDeclaration {
-                md_type: ModuleType::MtySignature(vec![]),
+                md_type: ModuleType::MtySignature(std::sync::Arc::new(vec![])),
                 md_attributes: vec![],
                 md_loc: Location::none(),
                 md_path: None,

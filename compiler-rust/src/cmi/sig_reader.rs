@@ -604,7 +604,7 @@ impl<'a> SigReadContext<'a> {
             OcamlValue::Block(1, fields) => {
                 let sig_items: Vec<OcamlValue> = fields[0].as_list().into_iter().cloned().collect();
                 let signature = self.read_signature(&sig_items);
-                ModuleType::MtySignature(signature)
+                ModuleType::MtySignature(std::sync::Arc::new(signature))
             }
             OcamlValue::Block(2, fields) => {
                 let param = read_ident(&fields[0]);
@@ -625,7 +625,7 @@ impl<'a> SigReadContext<'a> {
             }
             _ => {
                 // Fallback: create an empty signature
-                ModuleType::MtySignature(vec![])
+                ModuleType::MtySignature(std::sync::Arc::new(vec![]))
             }
         }
     }

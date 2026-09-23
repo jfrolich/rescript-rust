@@ -649,7 +649,7 @@ fn scrape_direct_persistent_alias_for_gentype(
             // compiler/ml/env.ml:1441-1446. Prefer that raw persistent
             // signature so value descriptions keep their local type paths,
             // matching GenType's alias-signature translation.
-            DeclModuleType::MtySignature((*sig).clone())
+            DeclModuleType::MtySignature(std::sync::Arc::new((*sig).clone()))
         })
         .or_else(|| {
             env.lookup_module(&alias_path)

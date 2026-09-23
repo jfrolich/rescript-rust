@@ -12776,7 +12776,7 @@ pub fn load_pervasives<'a>(
             if !pers_env.is_in_process_mode() {
                 if let Some(md) = pers_env.get_module_declaration("Pervasives", ctx) {
                     if let crate::types::decl::ModuleType::MtySignature(ref sig) = md.md_type {
-                        ctx.register_raw_module_sig("Pervasives", std::sync::Arc::new(sig.clone()));
+                        ctx.register_raw_module_sig("Pervasives", sig.clone());
                     }
                 }
             }
@@ -12790,7 +12790,7 @@ pub fn load_pervasives<'a>(
             if !pers_env.is_in_process_mode() {
                 if let Some(md) = pers_env.get_module_declaration("Stdlib", ctx) {
                     if let crate::types::decl::ModuleType::MtySignature(ref sig) = md.md_type {
-                        ctx.register_raw_module_sig("Stdlib", std::sync::Arc::new(sig.clone()));
+                        ctx.register_raw_module_sig("Stdlib", sig.clone());
                     }
                 }
             }
@@ -12814,7 +12814,7 @@ pub fn load_pervasives<'a>(
             if !pers_env.is_in_process_mode() {
                 if let Some(md) = pers_env.get_module_declaration(module_name, ctx) {
                     if let crate::types::decl::ModuleType::MtySignature(ref sig) = md.md_type {
-                        ctx.register_raw_module_sig(module_name, std::sync::Arc::new(sig.clone()));
+                        ctx.register_raw_module_sig(module_name, sig.clone());
                     }
                 }
             }
@@ -15816,14 +15816,14 @@ pub fn typecheck_preprocessed_signature_in_process(
 
     let typed_module_type = crate::types::typedtree::ModuleType {
         mty_desc: crate::types::typedtree::ModuleTypeDesc::Tmty_signature(typed_signature),
-        mty_type: crate::types::decl::ModuleType::MtySignature(decl_signature),
+        mty_type: crate::types::decl::ModuleType::MtySignature(std::sync::Arc::new(decl_signature)),
         mty_env: crate::types::typedtree::EnvRef(0),
         mty_loc: crate::parse_arena::LocIdx(0),
         mty_attributes: crate::parser::ast::Attributes::new(),
     };
     let published_signature =
         match crate::types::typemod::decl_module_type_from_typed(&typed_module_type) {
-            Some(crate::types::decl::ModuleType::MtySignature(sig)) => sig,
+            Some(crate::types::decl::ModuleType::MtySignature(sig)) => std::sync::Arc::unwrap_or_clone(sig),
             _ => {
                 return Err(anyhow!(
                     "Failed to extract interface signature from typed tree"
