@@ -4076,7 +4076,10 @@ mod tests {
             Expression::not(cond), else_block, vec![],
         ))];
         expected.extend(then_block);
-        assert_eq!(print_block(&vec![stmt]), print_block(&expected));
+        assert_eq!(
+            print_block(&vec![stmt]),
+            print_block(&vec![Statement::block(expected)]),
+        );
     }
 
     #[test]
@@ -4172,7 +4175,10 @@ mod tests {
             Expression::not(dispatch), else_block, vec![],
         ))];
         expected.extend(then_block);
-        assert_eq!(print_block(&vec![stmt]), print_block(&expected));
+        assert_eq!(
+            print_block(&vec![stmt]),
+            print_block(&vec![Statement::block(expected)]),
+        );
     }
 
     #[test]
@@ -4226,7 +4232,10 @@ mod tests {
             Expression::not(dispatch), else_block, vec![],
         ))];
         expected.extend(then_block);
-        assert_eq!(print_block(&vec![stmt]), print_block(&expected));
+        assert_eq!(
+            print_block(&vec![stmt]),
+            print_block(&vec![Statement::block(expected)]),
+        );
     }
 
     #[test]
@@ -4310,7 +4319,10 @@ mod tests {
         // js_stmt_make.ml:270-274: terminal then arm precedes the else body.
         let mut expected = vec![Statement::new(StatementDesc::If(cond, then_block, vec![]))];
         expected.extend(else_block);
-        assert_eq!(print_block(&vec![stmt]), print_block(&expected));
+        assert_eq!(
+            print_block(&vec![stmt]),
+            print_block(&vec![Statement::block(expected)]),
+        );
     }
 
     #[test]
