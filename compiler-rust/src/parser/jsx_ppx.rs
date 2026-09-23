@@ -651,7 +651,7 @@ fn transform_react_component_binding(
             .filter_map(|nt| {
                 // For forwardRef, 'ref' param should be Ptyp_var "ref" when interior_type is Ptyp_any
                 // OCaml: if interior_type is Ptyp_any, use ref_type_var loc (actual location)
-                // Otherwise, strip Js.Nullable wrapper when has_forward_ref
+                // Otherwise, strip the nullable wrapper when has_forward_ref
                 if nt.label == "ref" && has_forward_ref {
                     match &*nt.interior_type.ptyp_desc {
                         CoreTypeDesc::Ptyp_any => {
@@ -665,8 +665,8 @@ fn transform_react_component_binding(
                             });
                         }
                         _ => {
-                            // Strip explicit Stdlib.Nullable.t in case of forwardRef
-                            return strip_js_nullable(arena, &nt.interior_type);
+                            // Strip explicit nullable wrapper in case of forwardRef
+                            return strip_nullable(arena, &nt.interior_type);
                         }
                     }
                 }
@@ -2768,32 +2768,30 @@ fn strip_option(arena: &ParseArena, core_type: &CoreType) -> Option<CoreType> {
     }
 }
 
-/// Strip `Stdlib.Nullable.t<T>` wrapper from a type, returning just `T`
-fn strip_js_nullable(arena: &ParseArena, core_type: &CoreType) -> Option<CoreType> {
-    match &*core_type.ptyp_desc {
-        CoreTypeDesc::Ptyp_constr(inner) if inner.1.len() == 1 => {
-            let (ref lid, ref args) = **inner;
-            // Check for Stdlib.Nullable.t
-            if let Longident::Ldot(outer, inner_idx) = arena.get_longident(lid.txt) {
-                let inner = arena.get_string(*inner_idx);
-                if inner == "t" {
-                    if let Longident::Ldot(js, nullable_idx) = outer.as_ref() {
-                        let nullable = arena.get_string(*nullable_idx);
-                        if nullable == "Nullable" {
-                            if let Longident::Lident(js_name_idx) = js.as_ref() {
-                                let js_name = arena.get_string(*js_name_idx);
-                                if js_name == "Js" {
-                                    return args.first().map(|t| arena.get_core_type(*t).clone());
-                                }
-                            }
-                        }
-                    }
+/// Strip a `nullable<T>`, `Nullable.t<T>` or `Stdlib.Nullable.t<T>` wrapper
+/// from a type, returning just `T`.
+///
+/// Mirrors `strip_nullable` in `compiler/syntax/src/jsx_v4.ml:120-131`.
+fn strip_nullable(arena: &ParseArena, core_type: &CoreType) -> Option<CoreType> {
+    if let CoreTypeDesc::Ptyp_constr(inner) = &*core_type.ptyp_desc {
+        let (ref lid, ref args) = **inner;
+        let is_nullable = match arena.get_longident(lid.txt) {
+            Longident::Lident(name) => arena.get_string(*name) == "nullable",
+            Longident::Ldot(prefix, t) if arena.get_string(*t) == "t" => match prefix.as_ref() {
+                Longident::Lident(m) => arena.get_string(*m) == "Nullable",
+                Longident::Ldot(root, m) => {
+                    arena.get_string(*m) == "Nullable"
+                        && matches!(root.as_ref(), Longident::Lident(r) if arena.get_string(*r) == "Stdlib")
                 }
-            }
-            Some(core_type.clone())
+                _ => false,
+            },
+            _ => false,
+        };
+        if is_nullable {
+            return args.first().map(|t| arena.get_core_type(*t).clone());
         }
-        _ => Some(core_type.clone()),
     }
+    Some(core_type.clone())
 }
 
 /// Create React.element type constraint
