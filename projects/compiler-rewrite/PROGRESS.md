@@ -20,7 +20,7 @@
 - Matched reference constructor-tag escaping, object-spread precedence, index indentation, export aliases, staticcatch dispatch/grouping, boolean-argument inlining, and short-circuit assignment continuations.
 - Removed Rust-only printer control-flow rewrites. The printer now follows `js_dump.ml:1743-1771`; conditional construction follows `js_stmt_make.ml:248-274` without await/nullish exceptions.
 - Activate built-in Spice only when configured, while preserving ordinary attribute validation. Long type-clash headings now use reference line breaks.
-- Release checks: **432/432** focused JS modes, **610/610** JS snapshots, and **1433/1433** diagnostic cases. New synthetic fixtures exercise each backend regression; JSX expected files remain unchanged.
+- Release checks: **432/432** focused JS modes, **610/610** JS snapshots, and **1433/1433** diagnostic cases. Release library tests: **1348 passed**, **104 ignored**, no failures. New synthetic fixtures exercise each backend regression; JSX expected files remain unchanged.
 
 ### Milestone: Strict Compiler Parity and External Build (August 2026)
 
