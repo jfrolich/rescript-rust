@@ -4902,6 +4902,36 @@ impl LambdaCompiler {
                 }
                 block
             }
+            Lambda::Lprim(info)
+                if short_circuit_primitive(&info.primitive, &info.args).is_some() =>
+            {
+                let (op, lhs, rhs) = short_circuit_primitive(&info.primitive, &info.args)
+                    .expect("matched short-circuit primitive");
+                let lhs = self.compile_expr(lhs);
+                let rhs = self.compile_expr(rhs);
+                let mut block = lhs.prelude;
+                // compile_sequand/compile_sequor Assign (lam_compile.ml:1153-1162,
+                // 1193-1202) write the existing target in both branches instead
+                // of creating a NeedValue temporary and assigning it afterwards.
+                if rhs.prelude.is_empty() {
+                    let operator = match op {
+                        ShortCircuitOp::And => BinOp::And,
+                        ShortCircuitOp::Or => BinOp::Or,
+                    };
+                    block.push(self.result_assignment(
+                        result, Expression::bin(operator, lhs.expr, rhs.expr),
+                    ));
+                } else {
+                    let mut body = rhs.prelude;
+                    body.push(self.result_assignment(result, rhs.expr));
+                    block.push(Statement::if_(
+                        op.test_expr(lhs.expr),
+                        body,
+                        vec![self.result_assignment(result, op.default_expr())],
+                    ));
+                }
+                block
+            }
             _ => {
                 let compiled = self.compile_expr(lam);
                 let mut block = compiled.prelude;

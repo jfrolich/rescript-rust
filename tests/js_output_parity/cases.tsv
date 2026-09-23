@@ -51,3 +51,4 @@ tests/js_output_parity/fixtures/staticcatch_shared_exit.res
 tests/js_output_parity/fixtures/exported_constant_alias.res
 tests/js_output_parity/fixtures/conditional_return_printing.res
 tests/js_output_parity/fixtures/callback_boolean_inline.res
+tests/js_output_parity/fixtures/short_circuit_assignment.res
