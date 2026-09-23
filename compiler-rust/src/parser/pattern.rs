@@ -7,7 +7,7 @@ use std::borrow::Cow;
 
 use super::ast::*;
 use super::core::{
-    ast_helper, err_invalid_variant_ident, mknoloc, recover, template_literal_attr, with_loc,
+    ast_helper, mknoloc, recover, template_literal_attr, with_loc,
 };
 use super::diagnostics::DiagnosticCategory;
 use super::grammar::{self, Grammar};
@@ -1635,36 +1635,7 @@ fn parse_poly_variant_pattern(p: &mut Parser<'_>) -> Pattern {
         };
     }
 
-    let tag: Label = match &p.token {
-        Token::Lident(name) | Token::Uident(name) => {
-            let name = extend_cow_lifetime(name.clone());
-            p.next();
-            name
-        }
-        Token::Int { i, suffix } => {
-            // Clone values before borrowing p mutably
-            let tag = i.to_string();
-            let has_suffix = suffix.is_some();
-            // OCaml: emit error if numeric poly variant has a suffix
-            if has_suffix {
-                p.err(DiagnosticCategory::Message(format!(
-                    "A numeric polymorphic variant cannot be followed by a letter. Did you mean `#{}`?",
-                    tag
-                )));
-            }
-            p.next();
-            Cow::Owned(tag)
-        }
-        Token::String(s) => {
-            let tag = extend_cow_lifetime(s.clone());
-            p.next();
-            tag
-        }
-        _ => {
-            err_invalid_variant_ident(p, hash_start_pos);
-            Cow::Borrowed("")
-        }
-    };
+    let tag: Label = Cow::Owned(super::core::parse_hash_ident(p, start_pos_idx).0);
 
     // Check for argument
     let arg: Option<PatIdx> = if p.token == Token::Lparen {

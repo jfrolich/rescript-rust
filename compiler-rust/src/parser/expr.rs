@@ -9,7 +9,7 @@ use crate::parse_arena::{ExprIdx, LidentIdx, LocIdx, Located, ParseArena, PosIdx
 
 use super::ast::*;
 use super::core::{
-    ExprContext, ast_helper, err_invalid_variant_ident, if_let_attr, make_braces_attr, mknoloc,
+    ExprContext, ast_helper, if_let_attr, make_braces_attr, mknoloc,
     recover, with_loc,
 };
 use super::diagnostics::DiagnosticCategory;
@@ -2048,38 +2048,10 @@ pub fn parse_atomic_expr(p: &mut Parser<'_>) -> Expression {
         }
         Token::Hash => {
             // Polyvariant: #tag or #tag(arg)
-            let hash_start_pos = p.start_pos;
+            // OCaml `parse_poly_variant_expr` uses `parse_hash_ident`.
+            let hash_start_idx = p.start_pos_idx();
             p.next();
-            let tag: Label = match &p.token {
-                Token::Lident(name) | Token::Uident(name) => {
-                    let name = extend_cow_lifetime(name.clone());
-                    p.next();
-                    name
-                }
-                Token::Int { i, suffix } => {
-                    // Clone values before borrowing p mutably
-                    let tag = i.to_string();
-                    let has_suffix = suffix.is_some();
-                    // OCaml: emit error if numeric poly variant has a suffix
-                    if has_suffix {
-                        p.err(DiagnosticCategory::Message(format!(
-                            "A numeric polymorphic variant cannot be followed by a letter. Did you mean `#{}`?",
-                            tag
-                        )));
-                    }
-                    p.next();
-                    Cow::Owned(tag)
-                }
-                Token::String(s) => {
-                    let tag = extend_cow_lifetime(s.clone());
-                    p.next();
-                    tag
-                }
-                _ => {
-                    err_invalid_variant_ident(p, hash_start_pos);
-                    Cow::Borrowed("")
-                }
-            };
+            let tag: Label = Cow::Owned(super::core::parse_hash_ident(p, hash_start_idx).0);
 
             // Check for argument
             let arg = if p.token == Token::Lparen && !p.has_newline_before() {
