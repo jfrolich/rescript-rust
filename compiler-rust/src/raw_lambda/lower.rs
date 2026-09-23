@@ -2038,7 +2038,7 @@ mod tests {
             Primitive::PjsCall {
                 prim_name: String::new(),
                 arg_types: vec![crate::lambda::lam_primitive::ExternalArgSpec::dummy()],
-                ffi: crate::lambda::lam_primitive::ExternalFfiSpec {
+                ffi: Box::new(crate::lambda::lam_primitive::ExternalFfiSpec {
                     kind: ExternalFfiKind::ObjCreate,
                     spec: None,
                     obj_params: Some(vec![crate::lambda::lam_primitive::ExternalObjSpec {
@@ -2049,7 +2049,7 @@ mod tests {
                     }]),
                     return_wrapper: ExternalReturnWrapper::Identity,
                     inline_constant: None,
-                },
+                }),
                 dynamic_import: false,
                 transformed_jsx: false,
             },
@@ -2070,7 +2070,7 @@ mod tests {
             Primitive::PjsCall {
                 prim_name: String::new(),
                 arg_types: vec![crate::lambda::lam_primitive::ExternalArgSpec::dummy()],
-                ffi: crate::lambda::lam_primitive::ExternalFfiSpec {
+                ffi: Box::new(crate::lambda::lam_primitive::ExternalFfiSpec {
                     kind: ExternalFfiKind::Default,
                     spec: None,
                     obj_params: Some(vec![crate::lambda::lam_primitive::ExternalObjSpec {
@@ -2081,7 +2081,7 @@ mod tests {
                     }]),
                     return_wrapper: ExternalReturnWrapper::Identity,
                     inline_constant: None,
-                },
+                }),
                 dynamic_import: false,
                 transformed_jsx: false,
             },
@@ -2143,13 +2143,13 @@ mod tests {
                     crate::lambda::lam_primitive::ExternalArgSpec::dummy(),
                     crate::lambda::lam_primitive::ExternalArgSpec::dummy(),
                 ],
-                ffi: crate::lambda::lam_primitive::ExternalFfiSpec {
+                ffi: Box::new(crate::lambda::lam_primitive::ExternalFfiSpec {
                     kind: ExternalFfiKind::Default,
                     spec: None,
                     obj_params: None,
                     return_wrapper: ExternalReturnWrapper::Identity,
                     inline_constant: None,
-                },
+                }),
                 dynamic_import: false,
                 transformed_jsx: false,
             },
@@ -2173,7 +2173,7 @@ mod tests {
             Primitive::PjsCall {
                 prim_name: String::new(),
                 arg_types: Vec::new(),
-                ffi: crate::lambda::lam_primitive::ExternalFfiSpec {
+                ffi: Box::new(crate::lambda::lam_primitive::ExternalFfiSpec {
                     kind: ExternalFfiKind::Default,
                     spec: None,
                     obj_params: None,
@@ -2182,7 +2182,7 @@ mod tests {
                         s: "hello".to_string(),
                         delim: Some(crate::lambda::lam_constant::StringDelim::StarJ),
                     }),
-                },
+                }),
                 dynamic_import: false,
                 transformed_jsx: false,
             },
@@ -2202,13 +2202,13 @@ mod tests {
             Primitive::PjsCall {
                 prim_name: "get".to_string(),
                 arg_types: vec![crate::lambda::lam_primitive::ExternalArgSpec::dummy()],
-                ffi: crate::lambda::lam_primitive::ExternalFfiSpec {
+                ffi: Box::new(crate::lambda::lam_primitive::ExternalFfiSpec {
                     kind: ExternalFfiKind::Default,
                     spec: None,
                     obj_params: None,
                     return_wrapper: ExternalReturnWrapper::NullToOpt,
                     inline_constant: None,
-                },
+                }),
                 dynamic_import: false,
                 transformed_jsx: false,
             },
@@ -2235,13 +2235,13 @@ mod tests {
             Primitive::PjsCall {
                 prim_name: "get".to_string(),
                 arg_types: vec![crate::lambda::lam_primitive::ExternalArgSpec::dummy()],
-                ffi: crate::lambda::lam_primitive::ExternalFfiSpec {
+                ffi: Box::new(crate::lambda::lam_primitive::ExternalFfiSpec {
                     kind: ExternalFfiKind::Default,
                     spec: None,
                     obj_params: None,
                     return_wrapper: ExternalReturnWrapper::NullUndefinedToOpt,
                     inline_constant: None,
-                },
+                }),
                 dynamic_import: false,
                 transformed_jsx: false,
             },
@@ -3018,13 +3018,13 @@ mod tests {
                 Primitive::PjsCall {
                     prim_name: "default".to_string(),
                     arg_types: Vec::new(),
-                    ffi: ExternalFfiSpec {
+                    ffi: Box::new(ExternalFfiSpec {
                         kind: ExternalFfiKind::Default,
                         spec: None,
                         obj_params: None,
                         return_wrapper: ExternalReturnWrapper::Identity,
                         inline_constant: None,
-                    },
+                    }),
                     dynamic_import: false,
                     transformed_jsx: false,
                 },

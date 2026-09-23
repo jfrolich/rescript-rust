@@ -449,14 +449,14 @@ impl RawLambda {
                 primitive: Primitive::PjsCall {
                     prim_name: format!("send{name}"),
                     arg_types: vec![crate::lambda::lam_primitive::ExternalArgSpec::dummy()],
-                    ffi: crate::lambda::lam_primitive::ExternalFfiSpec {
+                    ffi: Box::new(crate::lambda::lam_primitive::ExternalFfiSpec {
                         kind: crate::lambda::lam_primitive::ExternalFfiKind::Default,
                         spec: None,
                         obj_params: None,
                         return_wrapper:
                             crate::lambda::lam_primitive::ExternalReturnWrapper::Identity,
                         inline_constant: None,
-                    },
+                    }),
                     dynamic_import: false,
                     transformed_jsx: false,
                 },

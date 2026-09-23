@@ -847,14 +847,14 @@ mod tests {
                 Primitive::PjsCall {
                     prim_name: name.to_string(),
                     arg_types: vec![],
-                    ffi: crate::lambda::lam_primitive::ExternalFfiSpec {
+                    ffi: Box::new(crate::lambda::lam_primitive::ExternalFfiSpec {
                         kind: crate::lambda::lam_primitive::ExternalFfiKind::Default,
                         spec: None,
                         obj_params: None,
                         return_wrapper:
                             crate::lambda::lam_primitive::ExternalReturnWrapper::Identity,
                         inline_constant: None,
-                    },
+                    }),
                     dynamic_import: false,
                     transformed_jsx: false,
                 },
@@ -952,14 +952,14 @@ mod tests {
                 Primitive::PjsCall {
                     prim_name: "exec".to_string(),
                     arg_types: vec![],
-                    ffi: crate::lambda::lam_primitive::ExternalFfiSpec {
+                    ffi: Box::new(crate::lambda::lam_primitive::ExternalFfiSpec {
                         kind: crate::lambda::lam_primitive::ExternalFfiKind::Default,
                         spec: None,
                         obj_params: None,
                         return_wrapper:
                             crate::lambda::lam_primitive::ExternalReturnWrapper::Identity,
                         inline_constant: None,
-                    },
+                    }),
                     dynamic_import: false,
                     transformed_jsx: false,
                 },

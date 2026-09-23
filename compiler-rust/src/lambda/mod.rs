@@ -590,7 +590,7 @@ impl Lambda {
                         (
                             SwitchKey::Constructor(crate::types::VariantConstructorCase::Block(candidate)),
                             Some(runtime)
-                        ) if &candidate.runtime == runtime
+                        ) if &candidate.runtime == &**runtime
                     ))
                     .map(|(_, branch)| branch.clone())
                     .or_else(|| switch.sw_failaction.as_deref().cloned())
@@ -1562,5 +1562,18 @@ mod tests {
             Lambda::Lwhile(_, _) => {}
             _ => panic!("Expected Lwhile"),
         }
+    }
+}
+
+#[cfg(test)]
+mod node_size_tests {
+    // Every Lambda node is moved and boxed repeatedly by the optimization
+    // passes; keep rare large payloads (FFI specs, block runtimes) boxed.
+    #[test]
+    fn lambda_node_sizes_stay_compact() {
+        use std::mem::size_of;
+        assert_eq!(size_of::<super::Primitive>(), 88);
+        assert_eq!(size_of::<super::Constant>(), 104);
+        assert_eq!(size_of::<super::Lambda>(), 160);
     }
 }

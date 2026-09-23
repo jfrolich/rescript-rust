@@ -5991,14 +5991,14 @@ mod tests {
             TagInfo::RecordInlined {
                 name: "One".to_string(),
                 num_nonconst: 1,
-                runtime: crate::types::BlockRuntime {
+                runtime: Box::new(crate::types::BlockRuntime {
                     tag: crate::types::VariantTag {
                         name: "One".to_string(),
                         tag_type: None,
                     },
                     tag_name: None,
                     untagged: false,
-                },
+                }),
                 fields: vec![("name".to_string(), false)],
                 logical_field_count: None,
                 mutable_flag: crate::parser::ast::MutableFlag::Immutable,

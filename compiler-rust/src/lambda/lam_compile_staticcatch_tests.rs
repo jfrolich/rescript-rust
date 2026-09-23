@@ -355,14 +355,14 @@ fn nested_wrapped_staticcatch_trywith_tail_loops_lower_like_gpr_1701() {
             TagInfo::Constructor {
                 name: "::".to_string(),
                 num_nonconst: 1,
-                runtime: crate::types::BlockRuntime {
+                runtime: Box::new(crate::types::BlockRuntime {
                     tag: crate::types::VariantTag {
                         name: "::".to_string(),
                         tag_type: None,
                     },
                     tag_name: None,
                     untagged: false,
-                },
+                }),
             },
             Mutable::Immutable,
         ),

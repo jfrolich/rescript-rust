@@ -3309,11 +3309,11 @@ impl<'a> RawLambdaConverter<'a> {
                     &prim.prim_native_name,
                     prim.prim_arity.max(0) as usize,
                 ),
-                ffi: self.ffi_spec_for_primitive(
+                ffi: Box::new(self.ffi_spec_for_primitive(
                     prim,
                     self.applied_result_is_builtin_object(ty, prim.prim_arity.max(0) as usize),
                     self.applied_result_is_unit(ty, prim.prim_arity.max(0) as usize),
-                ),
+                )),
                 dynamic_import: false,
                 transformed_jsx: false,
             }
@@ -3426,11 +3426,11 @@ impl<'a> RawLambdaConverter<'a> {
                     &prim.prim_native_name,
                     prim.prim_arity.max(0) as usize,
                 ),
-                ffi: self.ffi_spec_for_primitive(
+                ffi: Box::new(self.ffi_spec_for_primitive(
                     prim,
                     self.applied_result_is_builtin_object(ty, args.len()),
                     self.applied_result_is_unit(ty, args.len()),
-                ),
+                )),
                 dynamic_import: false,
                 transformed_jsx,
             }
@@ -3638,7 +3638,7 @@ impl<'a> RawLambdaConverter<'a> {
                 TagInfo::Constructor {
                     name: cstr.cstr_name.clone(),
                     num_nonconst,
-                    runtime,
+                    runtime: Box::new(runtime),
                 }
             }
         }
@@ -3871,7 +3871,7 @@ impl<'a> RawLambdaConverter<'a> {
                         fields: fields_info,
                         logical_field_count,
                         mutable_flag,
-                        runtime: block.runtime,
+                        runtime: Box::new(block.runtime),
                     };
                     // OCaml: if mut = Mutable then raise Not_constant
                     if matches!(mutable_flag, ParserMutableFlag::Mutable) {
@@ -11736,11 +11736,11 @@ impl<'a> RawLambdaConverter<'a> {
                         &prim.prim_native_name,
                         prim.prim_arity.max(0) as usize,
                     ),
-                    ffi: self.ffi_spec_for_primitive(
+                    ffi: Box::new(self.ffi_spec_for_primitive(
                         prim,
                         self.applied_result_is_builtin_object(ty, prim.prim_arity.max(0) as usize),
                         self.applied_result_is_unit(ty, prim.prim_arity.max(0) as usize),
-                    ),
+                    )),
                     dynamic_import: false,
                     transformed_jsx: false,
                 }
@@ -11826,7 +11826,7 @@ impl<'a> RawLambdaConverter<'a> {
                     &prim.prim_native_name,
                     prim.prim_arity.max(0) as usize,
                 ),
-                ffi: self.ffi_spec_for_primitive(prim, false, false),
+                ffi: Box::new(self.ffi_spec_for_primitive(prim, false, false)),
                 dynamic_import: false,
                 transformed_jsx,
             }

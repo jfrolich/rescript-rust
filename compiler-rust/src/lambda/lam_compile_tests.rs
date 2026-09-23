@@ -178,7 +178,7 @@ fn js_var_external(name: &str, external_module_name: Option<ExternalModuleName>)
         Primitive::PjsCall {
             prim_name: name.to_string(),
             arg_types: vec![],
-            ffi: ExternalFfiSpec {
+            ffi: Box::new(ExternalFfiSpec {
                 kind: ExternalFfiKind::Default,
                 spec: Some(ExternalSpec::JsVar {
                     name: name.to_string(),
@@ -188,7 +188,7 @@ fn js_var_external(name: &str, external_module_name: Option<ExternalModuleName>)
                 obj_params: None,
                 return_wrapper: ExternalReturnWrapper::Identity,
                 inline_constant: None,
-            },
+            }),
             dynamic_import: false,
             transformed_jsx: false,
         },
@@ -341,13 +341,13 @@ fn console_log_effect(arg: Lambda) -> Lambda {
             Primitive::PjsCall {
                 prim_name: "console.log".to_string(),
                 arg_types: vec![],
-                ffi: ExternalFfiSpec {
+                ffi: Box::new(ExternalFfiSpec {
                     kind: ExternalFfiKind::Default,
                     spec: None,
                     obj_params: None,
                     return_wrapper: ExternalReturnWrapper::Identity,
                     inline_constant: None,
-                },
+                }),
                 dynamic_import: false,
                 transformed_jsx: false,
             },
@@ -7472,14 +7472,14 @@ fn js_flatten_and_mark_dead_keeps_pure_nested_immutable_caml_blocks_inline() {
                                 TagInfo::Constructor {
                                     name: "::".to_string(),
                                     num_nonconst: 1,
-                                    runtime: crate::types::BlockRuntime {
+                                    runtime: Box::new(crate::types::BlockRuntime {
                                         tag: crate::types::VariantTag {
                                             name: "::".to_string(),
                                             tag_type: None,
                                         },
                                         tag_name: None,
                                         untagged: false,
-                                    },
+                                    }),
                                 },
                             )),
                         ],
@@ -7487,14 +7487,14 @@ fn js_flatten_and_mark_dead_keeps_pure_nested_immutable_caml_blocks_inline() {
                         TagInfo::Constructor {
                             name: "::".to_string(),
                             num_nonconst: 1,
-                            runtime: crate::types::BlockRuntime {
+                            runtime: Box::new(crate::types::BlockRuntime {
                                 tag: crate::types::VariantTag {
                                     name: "::".to_string(),
                                     tag_type: None,
                                 },
                                 tag_name: None,
                                 untagged: false,
-                            },
+                            }),
                         },
                     ))),
                     property: LetKind::Strict,
@@ -9305,14 +9305,14 @@ fn lowers_cons_pfield_from_pure_caml_block_directly_like_ocaml() {
             TagInfo::Constructor {
                 name: "::".to_string(),
                 num_nonconst: 1,
-                runtime: crate::types::BlockRuntime {
+                runtime: Box::new(crate::types::BlockRuntime {
                     tag: crate::types::VariantTag {
                         name: "::".to_string(),
                         tag_type: None,
                     },
                     tag_name: None,
                     untagged: false,
-                },
+                }),
             },
         )),
     );
@@ -9325,14 +9325,14 @@ fn lowers_cons_pfield_from_pure_caml_block_directly_like_ocaml() {
             TagInfo::Constructor {
                 name: "::".to_string(),
                 num_nonconst: 1,
-                runtime: crate::types::BlockRuntime {
+                runtime: Box::new(crate::types::BlockRuntime {
                     tag: crate::types::VariantTag {
                         name: "::".to_string(),
                         tag_type: None,
                     },
                     tag_name: None,
                     untagged: false,
-                },
+                }),
             },
         )),
     );

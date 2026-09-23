@@ -2856,7 +2856,7 @@ fn decode_cmj_tag_info(value: &OcamlValue) -> Option<TagInfo> {
         OcamlValue::Block(0, fields) if fields.len() == 3 => Some(TagInfo::Constructor {
             name: fields[0].as_string().to_string(),
             num_nonconst: fields[1].as_int() as i32,
-            runtime: block_runtime(&fields[2])?,
+            runtime: Box::new(block_runtime(&fields[2])?),
         }),
         OcamlValue::Block(1, fields) if fields.len() == 5 => Some(TagInfo::RecordInlined {
             name: fields[0].as_string().to_string(),
@@ -2864,7 +2864,7 @@ fn decode_cmj_tag_info(value: &OcamlValue) -> Option<TagInfo> {
             fields: record_fields(&fields[2])?,
             logical_field_count: None,
             mutable_flag: mutable_flag(&fields[3])?,
-            runtime: block_runtime(&fields[4])?,
+            runtime: Box::new(block_runtime(&fields[4])?),
         }),
         OcamlValue::Block(2, fields) if fields.len() == 1 => {
             Some(TagInfo::PolyVar(fields[0].as_string().to_string()))
@@ -2937,7 +2937,7 @@ fn decode_cmj_primitive(value: &OcamlValue) -> Option<Primitive> {
         OcamlValue::Block(4, fields) if fields.len() == 5 => Some(Primitive::PjsCall {
             prim_name: fields[0].as_string().to_string(),
             arg_types: decode_cmj_list(&fields[1], decode_cmj_external_arg_spec)?,
-            ffi: decode_cmj_external_ffi_spec(&fields[2])?,
+            ffi: Box::new(decode_cmj_external_ffi_spec(&fields[2])?),
             dynamic_import: fields[3].as_bool(),
             transformed_jsx: fields[4].as_bool(),
         }),

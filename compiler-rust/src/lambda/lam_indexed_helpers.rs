@@ -617,7 +617,7 @@ pub(crate) fn append_rebuilt(store: &mut IndexedLambda, node: NodeSnapshot) -> N
                         crate::lambda::TagInfo::Constructor { runtime, .. } | crate::lambda::TagInfo::RecordInlined { runtime, .. } => Some(runtime),
                         _ => None,
                     };
-                    blocks.iter().find(|(key, _)| matches!((key, runtime), (crate::lambda::SwitchKey::Constructor(crate::types::VariantConstructorCase::Block(candidate)), Some(runtime)) if &candidate.runtime == runtime)).map(|(_, node)| *node)
+                    blocks.iter().find(|(key, _)| matches!((key, runtime), (crate::lambda::SwitchKey::Constructor(crate::types::VariantConstructorCase::Block(candidate)), Some(runtime)) if &candidate.runtime == &**runtime)).map(|(_, node)| *node)
                 }
                 _ => None,
             };
