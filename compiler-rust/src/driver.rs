@@ -12639,7 +12639,7 @@ fn build_load_path_with_display(options: &CompilerOptions) -> (Vec<PathBuf>, Vec
         .runtime_path
         .as_ref()
         .map(|runtime_path| runtime_path.join("lib").join("ocaml"));
-    let cwd = std::env::current_dir().ok();
+    let cwd = crate::process_cwd::current_dir().ok();
 
     let mut paths = Vec::new();
     let mut display_paths = Vec::new();

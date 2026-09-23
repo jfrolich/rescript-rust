@@ -59,6 +59,7 @@ pub mod parse_arena;
 pub mod parser;
 /// Optional aggregate compiler performance counters.
 pub mod perf_counters;
+pub mod process_cwd;
 pub mod raw_lambda;
 /// Source text decoding helpers.
 pub mod source_text;

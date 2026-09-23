@@ -71,7 +71,7 @@ fn normalize_cmt_cache_key(cmt_file: &str) -> String {
     // lexical no-op segments before comparing keys.
     let path = PathBuf::from(cmt_file);
     let path = if path.is_relative() {
-        std::env::current_dir()
+        crate::process_cwd::current_dir()
             .unwrap_or_else(|_| PathBuf::new())
             .join(path)
     } else {

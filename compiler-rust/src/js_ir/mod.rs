@@ -582,7 +582,7 @@ fn normalize_absolute_path(path: &FsPath) -> PathBuf {
     let base = if path.is_absolute() {
         path.to_path_buf()
     } else {
-        std::env::current_dir()
+        crate::process_cwd::current_dir()
             .unwrap_or_else(|_| PathBuf::from("."))
             .join(path)
     };
