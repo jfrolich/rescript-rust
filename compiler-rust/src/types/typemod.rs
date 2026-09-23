@@ -16376,7 +16376,11 @@ fn translate_module_type_to_decl_with_typed_hint<'a>(
             })?;
             Ok(DeclMty::MtyAlias(AliasPresence::MtaAbsent, path))
         }
-        PMtyDesc::Pmty_extension(_) => Ok(DeclMty::MtySignature(vec![])),
+        // OCaml `compiler/ml/typemod.ml:519-520` (approx_modtype) and
+        // `compiler/ml/typemod.ml:743-744` (transl_modtype_aux).
+        PMtyDesc::Pmty_extension(ext) => Err(TypeModError::CoreError(
+            crate::types::typecore::builtin_extension_error(arena, ext),
+        )),
     }
 }
 
@@ -16669,7 +16673,11 @@ fn approx_modtype<'a>(
             let (_typed_me, module_type) = type_module_type_of(tctx, env, arena, me)?;
             Ok(module_type)
         }
-        PMtyDesc::Pmty_extension(_) => Ok(DeclMty::MtySignature(vec![])),
+        // OCaml `compiler/ml/typemod.ml:519-520` (approx_modtype) and
+        // `compiler/ml/typemod.ml:743-744` (transl_modtype_aux).
+        PMtyDesc::Pmty_extension(ext) => Err(TypeModError::CoreError(
+            crate::types::typecore::builtin_extension_error(arena, ext),
+        )),
     }
 }
 
@@ -19783,7 +19791,12 @@ fn transl_modtype<'a>(
             })?;
             TMtyDesc::Tmty_alias(path, lid.clone())
         }
-        PMtyDesc::Pmty_extension(_) => TMtyDesc::Tmty_placeholder,
+        // OCaml `compiler/ml/typemod.ml:743-744`.
+        PMtyDesc::Pmty_extension(ext) => {
+            return Err(TypeModError::CoreError(
+                crate::types::typecore::builtin_extension_error(arena, ext),
+            ));
+        }
     };
     let mut typed = TMty {
         mty_desc: desc,
