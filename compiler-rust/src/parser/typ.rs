@@ -1643,59 +1643,8 @@ fn parse_attribute(p: &mut Parser<'_>) -> Option<Attribute> {
 
 /// Parse an attribute payload.
 fn parse_attribute_payload(p: &mut Parser<'_>) -> Payload {
-    match &p.token {
-        Token::String(s) => {
-            let value = extend_cow_lifetime(s.clone());
-            let tag = get_string_tag(p);
-            // Capture start_pos before consuming the token
-            let start_pos_idx = p.start_pos_idx();
-            p.next();
-            // IMPORTANT: Create separate locations for expression and structure_item
-            // to match OCaml's allocation pattern (each gets its own Location object).
-            // OCaml uses prev_end_pos after consuming the token, not end_pos before.
-            // Both locations share the same start and end positions via caching.
-            let pexp_loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
-            let pstr_loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
-            // Create Pstr_eval(Pexp_constant(Box::new(Pconst_string(s, tag))))
-            let expr = Expression {
-                pexp_desc: Box::new(ExpressionDesc::Pexp_constant(Box::new(Constant::String(
-                    value, tag,
-                )))),
-                pexp_loc,
-                pexp_attributes: Attributes::new(),
-            };
-            let expr_idx = p.arena_mut().push_expr(expr);
-            let item = StructureItem {
-                pstr_desc: Box::new(StructureItemDesc::Pstr_eval(Box::new((
-                    expr_idx,
-                    Attributes::new(),
-                )))),
-                pstr_loc,
-            };
-            Payload::PStr(Box::new(vec![item]))
-        }
-        Token::Rparen => {
-            // Empty payload
-            Payload::PStr(Box::new(vec![]))
-        }
-        _ => {
-            // Try to parse as an expression
-            // Capture start_pos BEFORE parsing, like OCaml does in parse_payload
-            let start_pos_idx = p.start_pos_idx();
-            let expr = super::expr::parse_expr(p);
-            let expr_idx = p.arena_mut().push_expr(expr);
-            // OCaml structure_item location spans from before expression to after
-            let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
-            let item = StructureItem {
-                pstr_desc: Box::new(StructureItemDesc::Pstr_eval(Box::new((
-                    expr_idx,
-                    Attributes::new(),
-                )))),
-                pstr_loc: loc,
-            };
-            Payload::PStr(Box::new(vec![item]))
-        }
-    }
+    // OCaml has a single `parse_payload` (compiler/syntax/src/res_core.ml:7568-7610).
+    super::module::parse_payload(p)
 }
 
 // ============================================================================

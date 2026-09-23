@@ -97,28 +97,8 @@ fn parse_attribute_id(p: &mut Parser<'_>, start_pos_idx: PosIdx) -> Located<StrI
 
 /// Parse an attribute payload.
 fn parse_payload(p: &mut Parser<'_>) -> Payload {
-    // For patterns, we mainly need to handle string payloads like @attr("value")
-    // and simple structure payloads
-    let mut items = vec![];
-
-    while p.token != Token::Rparen && p.token != Token::Eof {
-        // Try to parse an expression for the payload
-        let expr = super::expr::parse_expr(p);
-        let expr_idx = p.arena_mut().push_expr(expr);
-        items.push(StructureItem {
-            pstr_desc: Box::new(StructureItemDesc::Pstr_eval(Box::new((
-                expr_idx,
-                Attributes::new(),
-            )))),
-            pstr_loc: LocIdx::none(),
-        });
-
-        if !p.optional(&Token::Comma) && !p.optional(&Token::Semicolon) {
-            break;
-        }
-    }
-
-    Payload::PStr(Box::new(items))
+    // OCaml has a single `parse_payload` (compiler/syntax/src/res_core.ml:7568-7610).
+    super::module::parse_payload(p)
 }
 
 /// Parse a type longident (for #...type pattern).

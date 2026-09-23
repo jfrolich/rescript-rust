@@ -1657,29 +1657,40 @@ fn parse_functor_module_expr(p: &mut Parser<'_>) -> ModuleExpr {
 
 /// Parse structure items within braces.
 fn parse_structure_in_braces(p: &mut Parser<'_>) -> Vec<StructureItem> {
+    parse_structure_delimited(p, Token::Rbrace)
+}
+
+/// OCaml `parse_delimited_region ~grammar:Grammar.Structure ~closing
+/// ~f:(parse_structure_item_region pending_structure_items)`
+/// (compiler/syntax/src/res_core.ml:1158-1175, 6645-6651). Each region owns its
+/// pending items, so they are drained here rather than leaking outward.
+fn parse_structure_delimited(p: &mut Parser<'_>, closing: Token<'static>) -> Vec<StructureItem> {
     use super::core::recover::should_abort_list_parse;
 
-    // OCaml uses parse_delimited_region ~grammar:Grammar.Structure ~closing:Rbrace
-    // The Structure breadcrumb is needed so that error recovery (skip_tokens_and_maybe_retry)
-    // knows that Rbrace is a list terminator and shouldn't be consumed
+    let outer_pending = std::mem::take(&mut p.pending_structure_items);
     p.leave_breadcrumb(Grammar::Structure);
     let mut items = vec![];
 
-    while p.token != Token::Rbrace && p.token != Token::Eof {
+    loop {
+        if let Some(item) = p.pending_structure_items.pop() {
+            items.push(item);
+            continue;
+        }
+        if p.token == closing || p.token == Token::Eof {
+            break;
+        }
         if let Some(item) = parse_structure_item(p) {
             items.push(item);
-        } else if p.token == Token::Rbrace || p.token == Token::Eof || should_abort_list_parse(p) {
+        } else if p.token == closing || p.token == Token::Eof || should_abort_list_parse(p) {
             break;
         } else {
-            // OCaml compiler/syntax/src/res_core.ml:1194-1211 reports the
-            // unexpected token from parse_delimited_region, then advances
-            // exactly once before retrying.
             p.err_unexpected();
             p.next();
         }
     }
 
     p.eat_breadcrumb();
+    p.pending_structure_items = outer_pending;
     items
 }
 
@@ -5392,115 +5403,66 @@ fn parse_attribute_body(p: &mut Parser<'_>, start_pos_idx: PosIdx) -> Attribute 
 /// - Signature: `(: signature_items)` - indicated by leading colon followed by signature items
 /// - Pattern: `(? pattern)` or `(? pattern when guard)` - indicated by leading question mark
 pub fn parse_payload(p: &mut Parser<'_>) -> Payload {
-    // Check for type or signature payload: (: ...)
-    if p.token == Token::Colon {
-        p.next();
-        // Check if it's a signature payload (starts with let, type, etc.) or a type
-        if matches!(
-            p.token,
-            Token::Let { .. }
-                | Token::Typ
-                | Token::Module
-                | Token::External
-                | Token::Open
-                | Token::Include
-                | Token::Exception
-        ) {
-            // Parse as signature
-            let mut sig_items = vec![];
-            while p.token != Token::Rparen && p.token != Token::Eof {
-                if let Some(item) = parse_signature_item(p) {
-                    sig_items.push(item);
-                }
-                p.optional(&Token::Semicolon);
-            }
-            return Payload::PSig(Box::new(sig_items));
-        } else {
-            // Parse as type
-            let typ = super::typ::parse_typ_expr(p);
-            let typ_idx = p.arena_mut().push_core_type(typ);
-            return Payload::PTyp(typ_idx);
-        }
-    }
-
-    // Check for pattern payload: (? pattern) or (? pattern when guard)
-    if p.token == Token::Question {
-        p.next();
-        let pat = super::pattern::parse_pattern(p);
-        let pat_idx = p.arena_mut().push_pat(pat);
-        let guard = if p.token == Token::When {
+    // OCaml `parse_payload` (compiler/syntax/src/res_core.ml:7568-7610), after the
+    // opening `(` has been consumed by the caller.
+    match p.token {
+        Token::Colon => {
             p.next();
-            let guard_expr = super::expr::parse_expr(p);
-            Some(p.arena_mut().push_expr(guard_expr))
-        } else {
-            None
-        };
-        return Payload::PPat(Box::new((pat_idx, guard)));
-    }
-
-    // Otherwise, parse as structure items
-    let mut items = vec![];
-
-    // If the payload is empty, return early
-    if p.token == Token::Rparen || p.token == Token::Eof {
-        return Payload::PStr(Box::new(items));
-    }
-
-    // Parse structure items
-    loop {
-        let start_pos_idx = p.start_pos_idx();
-
-        // Check if this looks like a structure item (let, type, module, etc.)
-        let is_structure_item = matches!(
-            p.token,
-            Token::Let { .. }
-                | Token::Typ
-                | Token::Module
-                | Token::External
-                | Token::Open
-                | Token::Include
-                | Token::Exception
-                | Token::At
-                | Token::AtAt
-                | Token::Percent
-                | Token::PercentPercent
-                | Token::ModuleComment { .. }
-        );
-
-        if is_structure_item {
-            // Parse as structure item
-            if let Some(item) = parse_structure_item(p) {
-                items.push(item);
+            if super::grammar::is_signature_item_start(&p.token) {
+                Payload::PSig(Box::new(parse_signature_delimited(p)))
+            } else {
+                let typ = super::typ::parse_typ_expr(p);
+                let typ_idx = p.arena_mut().push_core_type(typ);
+                Payload::PTyp(typ_idx)
             }
-        } else {
-            // Parse as expression
-            let expr = super::expr::parse_expr(p);
-
-            // OCaml: parse_newline_or_semicolon_structure consumes the semicolon
-            // BEFORE computing the location, so structure item location includes the semicolon
-            p.optional(&Token::Semicolon);
-            let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
-            let expr_idx = p.arena_mut().push_expr(expr);
-
-            items.push(StructureItem {
-                pstr_desc: Box::new(StructureItemDesc::Pstr_eval(Box::new((
-                    expr_idx,
-                    Attributes::new(),
-                )))),
-                pstr_loc: loc,
-            });
         }
+        Token::Question => {
+            p.next();
+            let pat = super::pattern::parse_pattern(p);
+            let pat_idx = p.arena_mut().push_pat(pat);
+            let guard = if matches!(p.token, Token::When | Token::If) {
+                p.next();
+                let guard_expr = super::expr::parse_expr(p);
+                Some(p.arena_mut().push_expr(guard_expr))
+            } else {
+                None
+            };
+            Payload::PPat(Box::new((pat_idx, guard)))
+        }
+        _ => Payload::PStr(Box::new(parse_structure_delimited(p, Token::Rparen))),
+    }
+}
 
-        // For non-expression items, check for more items
-        // (Expression items already consumed the semicolon above)
+/// OCaml `parse_delimited_region ~grammar:Grammar.Signature ~closing:Rparen
+/// ~f:(parse_signature_item_region pending_signature_items)`.
+fn parse_signature_delimited(p: &mut Parser<'_>) -> Vec<SignatureItem> {
+    use super::core::recover::should_abort_list_parse;
 
-        // Stop if we hit the closing paren or EOF
-        if matches!(p.token, Token::Rparen | Token::Comma | Token::Eof) {
+    let outer_pending = std::mem::take(&mut p.pending_signature_items);
+    p.leave_breadcrumb(Grammar::Signature);
+    let mut items = vec![];
+    loop {
+        if let Some(item) = p.pending_signature_items.pop() {
+            items.push(item);
+            continue;
+        }
+        if p.token == Token::Rparen || p.token == Token::Eof {
             break;
         }
+        match parse_signature_item(p) {
+            Some(item) => items.push(item),
+            None => {
+                if p.token == Token::Rparen || p.token == Token::Eof || should_abort_list_parse(p) {
+                    break;
+                }
+                p.err_unexpected();
+                p.next();
+            }
+        }
     }
-
-    Payload::PStr(Box::new(items))
+    p.eat_breadcrumb();
+    p.pending_signature_items = outer_pending;
+    items
 }
 
 /// Parse an extension/attribute identifier, matching OCaml's `parse_attribute_id`.

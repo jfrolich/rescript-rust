@@ -1613,48 +1613,8 @@ fn parse_attribute_id(p: &mut Parser<'_>, start_pos_idx: PosIdx) -> StringLoc {
 /// Parse an attribute payload.
 /// Handles simple payloads like `("string")` or `(expression)`.
 fn parse_payload(p: &mut Parser<'_>) -> Payload {
-    // Simple case: just a string literal like @as("foo")
-    if let Token::String(s) = &p.token {
-        let s = extend_cow_lifetime(s.clone());
-        let tag = get_string_tag(p);
-        let start_pos_idx = p.start_pos_idx();
-        p.next();
-        // Create a structure item with the string expression
-        // In OCaml, both locations share the same start_pos variable, so we reuse the same PosIdx
-        let pexp_loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
-        let pstr_loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
-        let str_expr = Expression {
-            pexp_desc: Box::new(ExpressionDesc::Pexp_constant(Box::new(Constant::String(
-                s, tag,
-            )))),
-            pexp_loc,
-            pexp_attributes: Attributes::new(),
-        };
-        let str_expr_idx = p.arena_mut().push_expr(str_expr);
-        return Payload::PStr(Box::new(vec![StructureItem {
-            pstr_desc: Box::new(StructureItemDesc::Pstr_eval(Box::new((
-                str_expr_idx,
-                Attributes::new(),
-            )))),
-            pstr_loc,
-        }]));
-    }
-
-    if p.token == Token::Rparen {
-        return Payload::PStr(Box::new(vec![]));
-    }
-
-    let start_pos_idx = p.start_pos_idx();
-    let expr = parse_expr(p);
-    let expr_idx = p.arena_mut().push_expr(expr);
-    let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
-    Payload::PStr(Box::new(vec![StructureItem {
-        pstr_desc: Box::new(StructureItemDesc::Pstr_eval(Box::new((
-            expr_idx,
-            Attributes::new(),
-        )))),
-        pstr_loc: loc,
-    }]))
+    // OCaml has a single `parse_payload` (compiler/syntax/src/res_core.ml:7568-7610).
+    super::module::parse_payload(p)
 }
 
 // ============================================================================
