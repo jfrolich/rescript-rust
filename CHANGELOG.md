@@ -19,6 +19,10 @@
 - Move Belt into the separately installed `@rescript/belt` package. Projects using Belt must install the package and list it in their `rescript.json` dependencies. https://github.com/rescript-lang/rescript/pull/8554
 - Correct the structured function details produced by `rescript-tools doc` and exposed by `RescriptTools.Docgen`: parameters now retain labels and optionality, nested functions, tuples, variables, and generic arguments retain their type structure, return types are identified correctly, and non-function values no longer receive fake function details. This changes the published docgen detail schema. https://github.com/rescript-lang/rescript/pull/8576
 
+#### :bug: Bug Fix
+
+- Fix Rust compiler parity for nullable component refs, record spreads, optional values through local aliases, constructor string escapes, control-flow output, configured PPX activation, JSX type printing, and long type diagnostics. https://github.com/jfrolich/rescript-rust/pull/21
+
 #### :eyeglasses: Spec Compliance
 
 #### :rocket: New Feature

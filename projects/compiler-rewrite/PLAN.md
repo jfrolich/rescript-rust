@@ -25,6 +25,14 @@ The rewrite is driven by multiple factors:
 
 ---
 
+## Release parity regression coverage
+
+- [x] Cover record-spread rejection, local alias option representation, and constructor tag escapes with synthetic fixtures.
+- [x] Preserve reference JS control flow through short-circuit assignment, staticcatch grouping, and printer tail-return handling.
+- [x] Verify JSX newtypes/callback arrows against unchanged OCaml fixtures.
+- [x] Separate configured Spice expansion from mandatory built-in attribute validation.
+- [x] Keep release JS and diagnostic gates green after these fixes; see [PROGRESS.md](./PROGRESS.md).
+
 ## Current State Analysis
 
 ### Codebase Size by Component
