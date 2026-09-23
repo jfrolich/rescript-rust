@@ -22385,6 +22385,22 @@ fn type_structure_item<'a>(
                                         &temp_env,
                                         arena.get_core_type(*res_core_type),
                                     )?;
+                                    // OCaml `make_constructor` (compiler/ml/typedecl.ml:345-353):
+                                    // the result must be an instance of the declared type.
+                                    let is_instance = matches!(
+                                        &*ctx.get_desc(ctx.repr(res_ty)),
+                                        TypeDesc::Tconstr { path, .. } if path.same(&type_path)
+                                    );
+                                    if !is_instance {
+                                        return Err(TypeModError::ConstraintFailed {
+                                            loc: typed_res.ctyp_loc,
+                                            actual: res_ty,
+                                            expected: ctx.new_constr(
+                                                type_path.clone(),
+                                                internal_type_params.clone(),
+                                            ),
+                                        });
+                                    }
                                     (Some(typed_res), Some(res_ty))
                                 }
                                 None => (None, None),
@@ -25278,6 +25294,21 @@ fn transl_sig_type_declarations_with_ids_and_originals<'a>(
                             Some(res_type) => {
                                 let (typed, internal) =
                                     transl_type(tctx, &temp_env, arena.get_core_type(*res_type))?;
+                                // OCaml `make_constructor` (compiler/ml/typedecl.ml:345-353).
+                                let is_instance = matches!(
+                                    &*ctx.get_desc(ctx.repr(internal)),
+                                    TypeDesc::Tconstr { path, .. } if path.same(&type_path)
+                                );
+                                if !is_instance {
+                                    return Err(TypeModError::ConstraintFailed {
+                                        loc: typed.ctyp_loc,
+                                        actual: internal,
+                                        expected: ctx.new_constr(
+                                            type_path.clone(),
+                                            internal_type_params.clone(),
+                                        ),
+                                    });
+                                }
                                 (Some(typed), Some(internal))
                             }
                             None => (None, None),
