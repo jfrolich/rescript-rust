@@ -11621,9 +11621,9 @@ fn compile_source_to_js_with_options_inner(
 
     // Load Pervasives and extend the initial environment
     let mut pers_env = PersistentEnv::new();
-    let (load_path, load_path_display) = build_load_path_with_display(options);
-    type_ctx.set_load_paths(load_path.clone());
-    pers_env.set_load_path_with_display(load_path.clone(), load_path_display);
+    let (load_path, load_path_display) = shared_load_path_with_display(options);
+    type_ctx.set_load_paths_shared(load_path.clone());
+    pers_env.set_load_path_shared(load_path.clone(), load_path_display);
     pers_env.set_open_modules(options.open_modules.clone());
     pers_env.set_jsx_version(options.jsx_version);
     let current_unit_name = options.current_unit_name();
@@ -12525,9 +12525,9 @@ pub fn typecheck_interface_source(
 
     // Load Pervasives and extend the initial environment
     let mut pers_env = PersistentEnv::new();
-    let (load_path, load_path_display) = build_load_path_with_display(options);
-    type_ctx.set_load_paths(load_path.clone());
-    pers_env.set_load_path_with_display(load_path.clone(), load_path_display);
+    let (load_path, load_path_display) = shared_load_path_with_display(options);
+    type_ctx.set_load_paths_shared(load_path.clone());
+    pers_env.set_load_path_shared(load_path.clone(), load_path_display);
     pers_env.set_open_modules(options.open_modules.clone());
     pers_env.set_jsx_version(options.jsx_version);
     let current_unit_name = options.current_unit_name();
@@ -12632,6 +12632,39 @@ pub fn compile_file_to_js_with_options(
 /// - Appends `{runtime_path}/lib/ocaml` as the stdlib directory (unless no_stdlib)
 fn build_load_path(options: &CompilerOptions) -> Vec<PathBuf> {
     build_load_path_with_display(options).0
+}
+
+/// Load path shared by modules with the same compiler options, built once
+/// per worker thread. Normalizing every include path again for each
+/// in-process module allocated thousands of paths per module.
+fn shared_load_path_with_display(
+    options: &CompilerOptions,
+) -> (std::sync::Arc<Vec<PathBuf>>, std::sync::Arc<Vec<PathBuf>>) {
+    type Key = (Option<PathBuf>, Vec<PathBuf>, Option<PathBuf>);
+    thread_local! {
+        static CACHE: std::cell::RefCell<Vec<(Key, std::sync::Arc<Vec<PathBuf>>, std::sync::Arc<Vec<PathBuf>>)>> =
+            const { std::cell::RefCell::new(Vec::new()) };
+    }
+    let cwd = crate::process_cwd::current_dir().ok();
+    CACHE.with(|cache| {
+        let mut cache = cache.borrow_mut();
+        if let Some((_, paths, display)) = cache.iter().find(|((runtime, includes, entry_cwd), _, _)| {
+            runtime == &options.runtime_path && includes == &options.include_paths && entry_cwd == &cwd
+        }) {
+            return (paths.clone(), display.clone());
+        }
+        let (paths, display) = build_load_path_with_display(options);
+        let (paths, display) = (std::sync::Arc::new(paths), std::sync::Arc::new(display));
+        if cache.len() >= 64 {
+            cache.remove(0);
+        }
+        cache.push((
+            (options.runtime_path.clone(), options.include_paths.clone(), cwd),
+            paths.clone(),
+            display.clone(),
+        ));
+        (paths, display)
+    })
 }
 
 fn build_load_path_with_display(options: &CompilerOptions) -> (Vec<PathBuf>, Vec<PathBuf>) {
@@ -12901,9 +12934,9 @@ pub fn typecheck_and_dump_sexp<W: std::io::Write>(
         let mut env = initial_env(&type_ctx);
 
         let mut pers_env = PersistentEnv::new();
-        let (load_path, load_path_display) = build_load_path_with_display(options);
-        type_ctx.set_load_paths(load_path.clone());
-        pers_env.set_load_path_with_display(load_path, load_path_display);
+        let (load_path, load_path_display) = shared_load_path_with_display(options);
+        type_ctx.set_load_paths_shared(load_path.clone());
+        pers_env.set_load_path_shared(load_path, load_path_display);
         pers_env.set_open_modules(options.open_modules.clone());
         pers_env.set_jsx_version(options.jsx_version);
         let current_unit_name = options.current_unit_name();
@@ -13023,9 +13056,9 @@ pub fn typecheck_and_dump_sexp<W: std::io::Write>(
         let mut env = initial_env(&type_ctx);
 
         let mut pers_env = PersistentEnv::new();
-        let (load_path, load_path_display) = build_load_path_with_display(options);
-        type_ctx.set_load_paths(load_path.clone());
-        pers_env.set_load_path_with_display(load_path, load_path_display);
+        let (load_path, load_path_display) = shared_load_path_with_display(options);
+        type_ctx.set_load_paths_shared(load_path.clone());
+        pers_env.set_load_path_shared(load_path, load_path_display);
         pers_env.set_open_modules(options.open_modules.clone());
         pers_env.set_jsx_version(options.jsx_version);
         let current_unit_name = options.current_unit_name();
@@ -14273,9 +14306,9 @@ pub fn typecheck_stored_structure_and_dump_sexp<W: std::io::Write>(
     let mut env = initial_env(&type_ctx);
 
     let mut pers_env = PersistentEnv::new();
-    let (load_path, load_path_display) = build_load_path_with_display(options);
-    type_ctx.set_load_paths(load_path.clone());
-    pers_env.set_load_path_with_display(load_path, load_path_display);
+    let (load_path, load_path_display) = shared_load_path_with_display(options);
+    type_ctx.set_load_paths_shared(load_path.clone());
+    pers_env.set_load_path_shared(load_path, load_path_display);
     pers_env.set_open_modules(options.open_modules.clone());
     pers_env.set_jsx_version(options.jsx_version);
     let current_unit_name = options.current_unit_name();
@@ -14327,9 +14360,9 @@ pub fn typecheck_stored_signature_and_dump_sexp<W: std::io::Write>(
     let mut env = initial_env(&type_ctx);
 
     let mut pers_env = PersistentEnv::new();
-    let (load_path, load_path_display) = build_load_path_with_display(options);
-    type_ctx.set_load_paths(load_path.clone());
-    pers_env.set_load_path_with_display(load_path, load_path_display);
+    let (load_path, load_path_display) = shared_load_path_with_display(options);
+    type_ctx.set_load_paths_shared(load_path.clone());
+    pers_env.set_load_path_shared(load_path, load_path_display);
     pers_env.set_open_modules(options.open_modules.clone());
     pers_env.set_jsx_version(options.jsx_version);
     let current_unit_name = options.current_unit_name();
@@ -15159,9 +15192,9 @@ pub fn compile_preprocessed_structure_in_process_until_js(
     let mut env = initial_env(&type_ctx);
 
     let mut pers_env = PersistentEnv::from_registry(registry);
-    let (load_path, load_path_display) = build_load_path_with_display(options);
-    type_ctx.set_load_paths(load_path.clone());
-    pers_env.set_load_path_with_display(load_path.clone(), load_path_display);
+    let (load_path, load_path_display) = shared_load_path_with_display(options);
+    type_ctx.set_load_paths_shared(load_path.clone());
+    pers_env.set_load_path_shared(load_path.clone(), load_path_display);
     pers_env.set_open_modules(options.open_modules.clone());
     pers_env.set_jsx_version(options.jsx_version);
     pers_env.set_nopervasives(options.nopervasives);
@@ -15491,8 +15524,8 @@ pub fn finish_preprocessed_structure_in_process_from_js_boundary_with_metadata_h
     )
     .entered();
     let mut persistent_env_for_js = PersistentEnv::from_registry(registry);
-    let (load_path, load_path_display) = build_load_path_with_display(options);
-    persistent_env_for_js.set_load_path_with_display(load_path, load_path_display);
+    let (load_path, load_path_display) = shared_load_path_with_display(options);
+    persistent_env_for_js.set_load_path_shared(load_path, load_path_display);
     persistent_env_for_js.set_open_modules(options.open_modules.clone());
     persistent_env_for_js.set_jsx_version(options.jsx_version);
     persistent_env_for_js.set_nopervasives(options.nopervasives);
@@ -15764,9 +15797,9 @@ pub fn typecheck_preprocessed_signature_in_process(
     let mut env = initial_env(&type_ctx);
 
     let mut pers_env = PersistentEnv::from_registry(registry);
-    let (load_path, load_path_display) = build_load_path_with_display(options);
-    type_ctx.set_load_paths(load_path.clone());
-    pers_env.set_load_path_with_display(load_path, load_path_display);
+    let (load_path, load_path_display) = shared_load_path_with_display(options);
+    type_ctx.set_load_paths_shared(load_path.clone());
+    pers_env.set_load_path_shared(load_path, load_path_display);
     pers_env.set_open_modules(options.open_modules.clone());
     pers_env.set_jsx_version(options.jsx_version);
     pers_env.set_nopervasives(options.nopervasives);
@@ -15900,9 +15933,9 @@ pub fn typecheck_implementation_in_process(
     let mut env = initial_env(&type_ctx);
 
     let mut pers_env = PersistentEnv::from_registry(registry);
-    let (load_path, load_path_display) = build_load_path_with_display(options);
-    type_ctx.set_load_paths(load_path.clone());
-    pers_env.set_load_path_with_display(load_path, load_path_display);
+    let (load_path, load_path_display) = shared_load_path_with_display(options);
+    type_ctx.set_load_paths_shared(load_path.clone());
+    pers_env.set_load_path_shared(load_path, load_path_display);
     pers_env.set_open_modules(options.open_modules.clone());
     pers_env.set_jsx_version(options.jsx_version);
     pers_env.set_nopervasives(options.nopervasives);

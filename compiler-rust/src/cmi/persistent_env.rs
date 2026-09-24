@@ -980,6 +980,13 @@ impl PersistentEnv {
         self.set_load_path_with_display(paths.clone(), paths);
     }
 
+    /// Set the load path from lists shared with other compilations.
+    pub fn set_load_path_shared(&mut self, paths: Arc<Vec<PathBuf>>, display_paths: Arc<Vec<PathBuf>>) {
+        debug_assert_eq!(paths.len(), display_paths.len());
+        self.load_path = paths;
+        self.load_path_display = display_paths;
+    }
+
     pub fn set_load_path_with_display(&mut self, paths: Vec<PathBuf>, display_paths: Vec<PathBuf>) {
         debug_assert_eq!(paths.len(), display_paths.len());
         self.load_path = Arc::new(paths);

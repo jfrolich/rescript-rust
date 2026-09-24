@@ -429,7 +429,7 @@ pub struct TypeContext {
     forced_type_path_compare_cache: RefCell<ahash::AHashMap<(u64, Path, Path), bool>>,
 
     /// Load paths for resolving CMI files during type alias expansion.
-    load_paths: RefCell<Vec<std::path::PathBuf>>,
+    load_paths: RefCell<Arc<Vec<std::path::PathBuf>>>,
 
     /// In-process persistent environment used by abbreviation expansion when a
     /// persistent module root is not present in the local Env. OCaml resolves
@@ -679,7 +679,7 @@ impl TypeContext {
             normalized_path_full_cache: RefCell::new(ahash::AHashMap::new()),
             forced_normalized_path_full_cache: RefCell::new(ahash::AHashMap::new()),
             forced_type_path_compare_cache: RefCell::new(ahash::AHashMap::new()),
-            load_paths: RefCell::new(Vec::new()),
+            load_paths: RefCell::new(Arc::new(Vec::new())),
             persistent_env: RefCell::new(None),
             renamed_module_sigs: RefCell::new(ahash::AHashMap::new()),
             reserved_rename_stamps: Cell::new(None),
@@ -1475,12 +1475,17 @@ impl TypeContext {
 
     /// Set load paths for resolving CMI files.
     pub fn set_load_paths(&self, paths: Vec<std::path::PathBuf>) {
+        *self.load_paths.borrow_mut() = Arc::new(paths);
+    }
+
+    /// Set the load paths from a shared list.
+    pub fn set_load_paths_shared(&self, paths: Arc<Vec<std::path::PathBuf>>) {
         *self.load_paths.borrow_mut() = paths;
     }
 
     /// Get the load paths.
     pub fn load_paths(&self) -> std::cell::Ref<'_, Vec<std::path::PathBuf>> {
-        self.load_paths.borrow()
+        std::cell::Ref::map(self.load_paths.borrow(), |paths| paths.as_ref())
     }
 
     pub(crate) fn set_persistent_env(&self, env: crate::cmi::persistent_env::PersistentEnv) {
