@@ -44,6 +44,7 @@
 //! - [`deps`] - Module dependency extraction
 //! - [`writer`] - Binary AST file writer
 
+pub mod ast_iter;
 pub mod current_marshal;
 pub mod deps;
 pub mod ffi_types;

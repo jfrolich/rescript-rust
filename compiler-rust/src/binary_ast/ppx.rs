@@ -16646,6 +16646,49 @@ pub fn rewrite_signature(
     Ok(rewritten)
 }
 
+/// Externals nested below a top-level item (in submodules, module types, local
+/// modules, or functor bodies). OCaml's builtin mapper validates every external
+/// it reaches (compiler/frontend/bs_builtin_ppx.ml structure_item /
+/// signature_item mappers), not just top-level ones.
+#[derive(Default)]
+struct NestedExternals {
+    externals: Vec<ValueDescription>,
+}
+
+impl super::ast_iter::AstIter for NestedExternals {
+    fn structure_item(&mut self, arena: &ParseArena, item: &StructureItem) {
+        if let StructureItemDesc::Pstr_primitive(vd) = &*item.pstr_desc {
+            self.externals.push((**vd).clone());
+        }
+        super::ast_iter::walk_structure_item(self, arena, item);
+    }
+
+    fn signature_item(&mut self, arena: &ParseArena, item: &SignatureItem) {
+        if let SignatureItemDesc::Psig_value(vd) = &*item.psig_desc {
+            self.externals.push((**vd).clone());
+        }
+        super::ast_iter::walk_signature_item(self, arena, item);
+    }
+}
+
+fn validate_nested_structure_externals(item: &StructureItem, arena: &mut ParseArena) -> PpxResult<()> {
+    let mut nested = NestedExternals::default();
+    super::ast_iter::walk_structure_item(&mut nested, arena, item);
+    for vd in &nested.externals {
+        validate_external_attribute_errors(vd, arena)?;
+    }
+    Ok(())
+}
+
+fn validate_nested_signature_externals(item: &SignatureItem, arena: &mut ParseArena) -> PpxResult<()> {
+    let mut nested = NestedExternals::default();
+    super::ast_iter::walk_signature_item(&mut nested, arena, item);
+    for vd in &nested.externals {
+        validate_external_attribute_errors(vd, arena)?;
+    }
+    Ok(())
+}
+
 fn try_rewrite_signature_items(
     items: &[SignatureItem],
     arena: &mut ParseArena,
@@ -16660,6 +16703,7 @@ fn try_rewrite_signature_items(
             if let SignatureItemDesc::Psig_value(vd) = &*expanded.psig_desc {
                 validate_external_attribute_errors(vd, arena)?;
             }
+            validate_nested_signature_externals(&expanded, arena)?;
             let rewritten_item = rewrite_signature_item_no_spice(&expanded, arena);
             rewritten.extend(expand_signature_deriving_items(
                 &expanded,
@@ -16726,6 +16770,7 @@ fn try_rewrite_structure_item(
         if let StructureItemDesc::Pstr_primitive(vd) = &*expanded.pstr_desc {
             validate_external_attribute_errors(vd, arena)?;
         }
+        validate_nested_structure_externals(&expanded, arena)?;
         result.extend(rewrite_structure_item_no_spice(&expanded, arena));
     }
     Ok(result)
