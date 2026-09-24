@@ -4971,11 +4971,25 @@ fn parser_attrs_have_name(arena: &ParseArena, attrs: &Attributes, name: &str) ->
         .any(|(attr_name, _)| arena.get_string(attr_name.txt) == name)
 }
 
+/// OCaml `Builtin_attributes.has_unboxed` (builtin_attributes.ml:252).
+fn parser_attrs_have_unboxed(arena: &ParseArena, attrs: &Attributes) -> bool {
+    parser_attrs_have_name(arena, attrs, "ocaml.unboxed")
+        || parser_attrs_have_name(arena, attrs, "unboxed")
+}
+
+/// OCaml `Builtin_attributes.has_boxed` (builtin_attributes.ml:254).
+fn parser_attrs_have_boxed(arena: &ParseArena, attrs: &Attributes) -> bool {
+    parser_attrs_have_name(arena, attrs, "ocaml.boxed")
+        || parser_attrs_have_name(arena, attrs, "boxed")
+}
+
 fn check_untagged_variant_constructor_arities(
     arena: &ParseArena,
     decl: &crate::parser::ast::TypeDeclaration,
 ) -> TypeModResult<()> {
-    if !parser_attrs_have_name(arena, &decl.ptype_attributes, "unboxed") {
+    // Only checked when `get_representation_from_attributes` is `Unboxed`
+    // (typedecl.ml:396-413).
+    if !parser_attrs_have_unboxed(arena, &decl.ptype_attributes) {
         return Ok(());
     }
 
@@ -5023,8 +5037,8 @@ fn check_unboxed_type_attributes(
     arena: &ParseArena,
     decl: &crate::parser::ast::TypeDeclaration,
 ) -> TypeModResult<()> {
-    let has_unboxed = parser_attrs_have_name(arena, &decl.ptype_attributes, "unboxed");
-    let has_boxed = parser_attrs_have_name(arena, &decl.ptype_attributes, "boxed");
+    let has_unboxed = parser_attrs_have_unboxed(arena, &decl.ptype_attributes);
+    let has_boxed = parser_attrs_have_boxed(arena, &decl.ptype_attributes);
 
     if has_boxed && has_unboxed {
         return Err(TypeModError::BoxedAndUnboxed {
@@ -15991,10 +16005,7 @@ fn translate_module_type_to_decl_with_typed_hint<'a>(
                             };
                             let type_attributes =
                                 parser_attrs_to_decl_attrs(arena, &decl.ptype_attributes);
-                            let decl_has_unboxed_attr = decl
-                                .ptype_attributes
-                                .iter()
-                                .any(|attr| arena.get_string(attr.0.txt) == "unboxed");
+                            let decl_has_unboxed_attr = parser_attrs_have_unboxed(arena, &decl.ptype_attributes);
                             check_untagged_variant_constructor_arities(arena, decl)?;
                             let typed_type_decl_hint =
                                 typed_type_decls.and_then(|typed_decls| typed_decls.get(decl_idx));
@@ -21705,10 +21716,7 @@ fn type_structure_item<'a>(
                 check_unboxed_type_attributes(arena, decl)?;
 
                 // Check for @unboxed attribute (only applies to single-constructor variants)
-                let decl_has_unboxed_attr = decl
-                    .ptype_attributes
-                    .iter()
-                    .any(|attr| arena.get_string(attr.0.txt) == "unboxed");
+                let decl_has_unboxed_attr = parser_attrs_have_unboxed(arena, &decl.ptype_attributes);
 
                 // OCaml compiler/ml/typedecl.ml:449-607 translates the kind
                 // first, creating variant constructor identifiers at
@@ -25151,10 +25159,7 @@ fn transl_sig_type_declarations_with_ids_and_originals<'a>(
             check_type_declaration_constraint_on_gadt(tctx, decl);
 
             check_unboxed_type_attributes(arena, decl)?;
-            let decl_has_unboxed_attr = decl
-                .ptype_attributes
-                .iter()
-                .any(|attr| arena.get_string(attr.0.txt) == "unboxed");
+            let decl_has_unboxed_attr = parser_attrs_have_unboxed(arena, &decl.ptype_attributes);
 
             // Preserve signature type kind like OCaml transl_signature -> Typedecl.transl_type_decl.
             let type_variant_layout = matches!(
