@@ -189,6 +189,11 @@ impl Ident {
         &self.name
     }
 
+    /// The name as a shared string, for use as a cheap-to-clone map key.
+    pub fn name_smol(&self) -> &SmolStr {
+        &self.name
+    }
+
     /// Get the stamp of this identifier.
     #[inline]
     pub fn stamp(&self) -> i32 {

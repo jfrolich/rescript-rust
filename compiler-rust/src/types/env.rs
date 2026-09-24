@@ -31,6 +31,8 @@ use ahash::{AHashMap as HashMap, AHashSet as HashSet};
 use std::cell::RefCell;
 use std::sync::Arc;
 
+use smol_str::SmolStr;
+
 type PersistentHashMap<K, V> = im_rc::HashMap<K, V, ahash::RandomState>;
 type PersistentHashSet<T> = im_rc::HashSet<T, ahash::RandomState>;
 
@@ -202,9 +204,13 @@ struct IdOpened<T> {
 /// This matches OCaml `Env.IdTbl`: local bindings live in `current`, and each
 /// open is represented symbolically as an `opened` layer rather than flattening
 /// every opened binding into the same name map with an origin boolean.
+/// Same-name bindings in an Env table, oldest first. Shared so that copying a
+/// persistent-map node on insert only bumps reference counts.
+type IdBucket<T> = std::rc::Rc<Vec<(Ident, T)>>;
+
 #[derive(Debug, Clone)]
 pub struct IdTbl<T> {
-    current: PersistentHashMap<String, Vec<(Ident, T)>>,
+    current: PersistentHashMap<SmolStr, IdBucket<T>>,
     opened: Option<Arc<IdOpened<T>>>,
 }
 
@@ -217,11 +223,11 @@ impl<T: Clone> IdTbl<T> {
     }
 
     pub fn add(&mut self, id: Ident, value: T) {
-        let name = id.name().to_string();
-        match self.current.get_mut(&name) {
-            Some(entries) => entries.push((id, value)),
+        match self.current.get_mut(id.name()) {
+            Some(entries) => std::rc::Rc::make_mut(entries).push((id, value)),
             None => {
-                self.current.insert(name.clone(), vec![(id, value)]);
+                self.current
+                    .insert(id.name_smol().clone(), std::rc::Rc::new(vec![(id, value)]));
             }
         }
     }
@@ -356,7 +362,7 @@ impl<T: Clone> IdTbl<T> {
         F: FnMut(&T) -> T,
     {
         if let Some(entries) = self.current.get_mut(name)
-            && let Some((id, value)) = entries.last_mut()
+            && let Some((id, value)) = std::rc::Rc::make_mut(entries).last_mut()
         {
             let updated = f(value);
             *value = updated.clone();
@@ -457,7 +463,7 @@ struct TycompOpened<T> {
 /// as lists.
 #[derive(Debug, Clone)]
 pub struct TycompTbl<T> {
-    current: PersistentHashMap<String, Vec<(Ident, T)>>,
+    current: PersistentHashMap<SmolStr, IdBucket<T>>,
     opened: Option<Arc<TycompOpened<T>>>,
 }
 
@@ -470,11 +476,11 @@ impl<T: Clone> TycompTbl<T> {
     }
 
     pub fn add(&mut self, id: Ident, value: T) {
-        let name = id.name().to_string();
-        match self.current.get_mut(&name) {
-            Some(entries) => entries.push((id, value)),
+        match self.current.get_mut(id.name()) {
+            Some(entries) => std::rc::Rc::make_mut(entries).push((id, value)),
             None => {
-                self.current.insert(name.clone(), vec![(id, value)]);
+                self.current
+                    .insert(id.name_smol().clone(), std::rc::Rc::new(vec![(id, value)]));
             }
         }
     }
