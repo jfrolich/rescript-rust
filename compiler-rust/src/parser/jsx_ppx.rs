@@ -266,14 +266,15 @@ pub fn transform_signature_with_warnings_result(
     };
 
     let mut result = vec![];
+    let mut warnings = vec![];
     for item in signature {
-        let items = transform_signature_item_multi(item, &mut config, arena);
+        let items = transform_signature_item_multi(item, &mut config, arena, &mut warnings);
         if let Some(error) = config.fatal_error.take() {
             return Err(error);
         }
         result.extend(items);
     }
-    Ok((result, vec![]))
+    Ok((result, warnings))
 }
 
 // ============================================================================
@@ -1867,6 +1868,7 @@ fn transform_signature_item_multi(
     item: SignatureItem,
     config: &mut JsxConfig,
     arena: &mut ParseArena,
+    warnings: &mut Vec<JsxPreprocessorWarning>,
 ) -> Vec<SignatureItem> {
     // Check for @@jsxConfig attribute
     if let SignatureItemDesc::Psig_attribute(attr) = &*item.psig_desc {
@@ -1905,6 +1907,7 @@ fn transform_signature_item_multi(
             *item.psig_desc,
             config,
             arena,
+            warnings,
         )),
         psig_loc: item.psig_loc,
     }]
@@ -3686,7 +3689,7 @@ fn transform_structure_item_desc(
             StructureItemDesc::Pstr_recmodule(Box::new(result))
         }
         StructureItemDesc::Pstr_modtype(mt) => StructureItemDesc::Pstr_modtype(Box::new(
-            transform_module_type_declaration(*mt, config, arena),
+            transform_module_type_declaration(*mt, config, arena, warnings),
         )),
         StructureItemDesc::Pstr_include(incl) => {
             let mod_expr = arena.get_mod_expr(incl.pincl_mod).clone();
@@ -3705,23 +3708,37 @@ fn transform_module_type_declaration(
     mt: ModuleTypeDeclaration,
     config: &mut JsxConfig,
     arena: &mut ParseArena,
+    warnings: &mut Vec<JsxPreprocessorWarning>,
 ) -> ModuleTypeDeclaration {
     ModuleTypeDeclaration {
         pmtd_name: mt.pmtd_name,
-        pmtd_type: mt.pmtd_type.map(|mty| {
-            let mty_val = arena.get_mod_type(mty).clone();
-            let transformed = transform_module_type(mty_val, config, arena);
-            arena.push_mod_type(transformed)
-        }),
+        pmtd_type: mt
+            .pmtd_type
+            .map(|mty| transform_module_type_idx(mty, config, arena, warnings)),
         pmtd_attributes: mt.pmtd_attributes,
         pmtd_loc: mt.pmtd_loc,
     }
 }
 
+fn transform_module_type_idx(
+    mty: crate::parse_arena::ModTypeIdx,
+    config: &mut JsxConfig,
+    arena: &mut ParseArena,
+    warnings: &mut Vec<JsxPreprocessorWarning>,
+) -> crate::parse_arena::ModTypeIdx {
+    let mty_val = arena.get_mod_type(mty).clone();
+    let transformed = transform_module_type(mty_val, config, arena, warnings);
+    arena.push_mod_type(transformed)
+}
+
+/// `default_mapper.module_type` with the JSX `signature` override
+/// (compiler/syntax/src/jsx_ppx.ml:101-120): every nested module type and
+/// module expression is visited.
 fn transform_module_type(
     mty: ModuleType,
     config: &mut JsxConfig,
     arena: &mut ParseArena,
+    warnings: &mut Vec<JsxPreprocessorWarning>,
 ) -> ModuleType {
     ModuleType {
         pmty_desc: Box::new(match *mty.pmty_desc {
@@ -3732,15 +3749,30 @@ fn transform_module_type(
                 // Transform signature items
                 let mut result = vec![];
                 for item in *sig_items {
-                    let items = transform_signature_item_multi(item, config, arena);
+                    let items = transform_signature_item_multi(item, config, arena, warnings);
                     result.extend(items);
                 }
                 // Restore has_component
                 config.has_component = old_has_component;
                 ModuleTypeDesc::Pmty_signature(Box::new(result))
             }
-            ModuleTypeDesc::Pmty_functor(inner) => ModuleTypeDesc::Pmty_functor(inner),
-            ModuleTypeDesc::Pmty_with(inner) => ModuleTypeDesc::Pmty_with(inner),
+            ModuleTypeDesc::Pmty_functor(inner) => {
+                let (name, arg, body) = *inner;
+                // OCaml evaluates constructor arguments right to left.
+                let body = transform_module_type_idx(body, config, arena, warnings);
+                let arg = arg.map(|arg| transform_module_type_idx(arg, config, arena, warnings));
+                ModuleTypeDesc::Pmty_functor(Box::new((name, arg, body)))
+            }
+            ModuleTypeDesc::Pmty_with(inner) => {
+                let (body, constraints) = *inner;
+                let body = transform_module_type_idx(body, config, arena, warnings);
+                ModuleTypeDesc::Pmty_with(Box::new((body, constraints)))
+            }
+            ModuleTypeDesc::Pmty_typeof(mexpr) => {
+                let mexpr_val = arena.get_mod_expr(mexpr).clone();
+                let transformed = transform_module_expr(mexpr_val, config, arena, warnings);
+                ModuleTypeDesc::Pmty_typeof(arena.push_mod_expr(transformed))
+            }
             other => other,
         }),
         pmty_loc: mty.pmty_loc,
@@ -3752,15 +3784,12 @@ fn transform_signature_item_desc(
     desc: SignatureItemDesc,
     config: &mut JsxConfig,
     arena: &mut ParseArena,
+    warnings: &mut Vec<JsxPreprocessorWarning>,
 ) -> SignatureItemDesc {
     match desc {
         SignatureItemDesc::Psig_module(md) => {
             // Transform module declaration - recurse into the module type
-            let pmd_type = {
-                let mty_val = arena.get_mod_type(md.pmd_type).clone();
-                let transformed = transform_module_type(mty_val, config, arena);
-                arena.push_mod_type(transformed)
-            };
+            let pmd_type = transform_module_type_idx(md.pmd_type, config, arena, warnings);
             SignatureItemDesc::Psig_module(Box::new(ModuleDeclaration {
                 pmd_name: md.pmd_name,
                 pmd_type,
@@ -3774,11 +3803,7 @@ fn transform_signature_item_desc(
                 mds.into_iter()
                     .map(|md| ModuleDeclaration {
                         pmd_name: md.pmd_name,
-                        pmd_type: {
-                            let mty_val = arena.get_mod_type(md.pmd_type).clone();
-                            let transformed = transform_module_type(mty_val, config, arena);
-                            arena.push_mod_type(transformed)
-                        },
+                        pmd_type: transform_module_type_idx(md.pmd_type, config, arena, warnings),
                         pmd_attributes: md.pmd_attributes,
                         pmd_loc: md.pmd_loc,
                     })
@@ -3788,8 +3813,15 @@ fn transform_signature_item_desc(
         SignatureItemDesc::Psig_modtype(mtd) => {
             // Transform module type declaration
             SignatureItemDesc::Psig_modtype(Box::new(transform_module_type_declaration(
-                *mtd, config, arena,
+                *mtd, config, arena, warnings,
             )))
+        }
+        SignatureItemDesc::Psig_include(incl) => {
+            let incl = *incl;
+            SignatureItemDesc::Psig_include(Box::new(IncludeDescription {
+                pincl_mod: transform_module_type_idx(incl.pincl_mod, config, arena, warnings),
+                ..incl
+            }))
         }
         other => other,
     }
@@ -3854,6 +3886,8 @@ fn transform_module_expr(
                 let (arg, arg_ty, body) = *inner;
                 let body_expr = arena.get_mod_expr(body).clone();
                 let transformed_body = transform_module_expr(body_expr, config, arena, warnings);
+                let arg_ty =
+                    arg_ty.map(|arg_ty| transform_module_type_idx(arg_ty, config, arena, warnings));
                 ModuleExprDesc::Pmod_functor(Box::new((
                     arg,
                     arg_ty,
@@ -3871,9 +3905,17 @@ fn transform_module_expr(
                 )
             }
             ModuleExprDesc::Pmod_constraint(m, mt) => {
+                // OCaml evaluates constructor arguments right to left, so the
+                // module type is mapped before the module expression.
+                let mt = transform_module_type_idx(mt, config, arena, warnings);
                 let m_expr = arena.get_mod_expr(m).clone();
                 let m_transformed = transform_module_expr(m_expr, config, arena, warnings);
                 ModuleExprDesc::Pmod_constraint(arena.push_mod_expr(m_transformed), mt)
+            }
+            ModuleExprDesc::Pmod_unpack(expr) => {
+                let expr_val = arena.get_expr(expr).clone();
+                let transformed = transform_expression(expr_val, config, arena);
+                ModuleExprDesc::Pmod_unpack(arena.push_expr(transformed))
             }
             other => other,
         }),
