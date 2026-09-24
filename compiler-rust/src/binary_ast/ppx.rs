@@ -1021,7 +1021,6 @@ fn collect_raw_js_warnings_from_structure_item(
 ) {
     match &*item.pstr_desc {
         StructureItemDesc::Pstr_primitive(vd) => {
-            collect_obj_optional_as_warnings(vd, arena, warnings);
             collect_external_string_redundant_warnings(vd, arena, warnings);
         }
         StructureItemDesc::Pstr_eval(inner) => {
@@ -1242,21 +1241,227 @@ fn is_bs_unused_attribute_candidate(name: &str) -> bool {
 }
 
 fn collect_unused_bs_attributes_from_slice(
+    _attrs: &[Attribute],
+    _arena: &ParseArena,
+    _warnings: &mut Vec<PpxWarning>,
+) {
+    // Unused-attribute warnings are produced by the post-rewrite sweep
+    // (`collect_unused_attribute_warnings_*`), which consults the marks left
+    // by the builtin PPX like OCaml's `Bs_ast_invariant.emit_external_warnings`.
+}
+
+/// OCaml `Bs_ast_invariant.warn_unused_attribute` (bs_ast_invariant.ml:36-45).
+pub(crate) fn warn_unused_attribute(
+    attr: &Attribute,
+    arena: &ParseArena,
+    warnings: &mut Vec<PpxWarning>,
+) {
+    let (attr_name, _) = attr;
+    let name = arena.get_string(attr_name.txt);
+    if is_bs_unused_attribute_candidate(name)
+        && !arena.loc_ghost(attr_name.loc)
+        && !arena.is_used_attribute(attr_name.loc)
+    {
+        warnings.push(PpxWarning {
+            loc: attr_name.loc,
+            warning: Warning::BsUnusedAttribute {
+                name: name.to_string(),
+            },
+        });
+    }
+}
+
+/// OCaml `Bs_ast_invariant.warn_discarded_unused_attributes`.
+pub(crate) fn warn_discarded_unused_attributes(
     attrs: &[Attribute],
     arena: &ParseArena,
     warnings: &mut Vec<PpxWarning>,
 ) {
-    for (attr_name, _) in attrs {
-        let name = arena.get_string(attr_name.txt);
-        if is_bs_unused_attribute_candidate(name) && !arena.loc_ghost(attr_name.loc) {
-            warnings.push(PpxWarning {
-                loc: attr_name.loc,
-                warning: Warning::BsUnusedAttribute {
-                    name: name.to_string(),
-                },
-            });
+    for attr in attrs {
+        warn_unused_attribute(attr, arena, warnings);
+    }
+}
+
+/// Whether an `@as` payload is one `Ast_untagged_variants.process_tag_type`
+/// accepts (and therefore marks used): a string, number, bigint, bool, or the
+/// identifiers `null` / `undefined`.
+fn is_valid_tag_as_payload(payload: &Payload, arena: &ParseArena) -> bool {
+    let Payload::PStr(items) = payload else {
+        return false;
+    };
+    let [item] = items.as_slice() else {
+        return false;
+    };
+    let StructureItemDesc::Pstr_eval(inner) = &*item.pstr_desc else {
+        return false;
+    };
+    let expr = arena.get_expr(inner.0);
+    match &*expr.pexp_desc {
+        ExpressionDesc::Pexp_constant(_) => true,
+        ExpressionDesc::Pexp_construct(lid, None) => matches!(
+            arena.get_longident(lid.txt),
+            crate::parser::longident::Longident::Lident(idx)
+                if matches!(arena.get_string(*idx), "true" | "false")
+        ),
+        ExpressionDesc::Pexp_ident(lid) => matches!(
+            arena.get_longident(lid.txt),
+            crate::parser::longident::Longident::Lident(idx)
+                if matches!(arena.get_string(*idx), "null" | "undefined")
+        ),
+        _ => false,
+    }
+}
+
+/// OCaml `Ext_string.is_valid_hash_number`.
+fn is_valid_hash_number(value: &str) -> bool {
+    match value.as_bytes() {
+        [] => false,
+        [b'0'..=b'9'] => true,
+        [b'1'..=b'9', rest @ ..] => rest.iter().all(u8::is_ascii_digit),
+        _ => false,
+    }
+}
+
+/// The unused-attribute part of OCaml `Bs_ast_invariant.emit_external_warnings`
+/// (bs_ast_invariant.ml:68-160), run over the rewritten tree.
+struct UnusedAttributeSweep<'w> {
+    warnings: &'w mut Vec<PpxWarning>,
+    /// Set when OCaml's sweep would raise (invalid/duplicated constructor
+    /// `@as` in `process_tag_type`); later warnings are never reached. The
+    /// error itself is reported by the type checker.
+    stopped: bool,
+}
+
+impl super::ast_iter::AstIter for UnusedAttributeSweep<'_> {
+    fn attribute(&mut self, arena: &ParseArena, attr: &Attribute) {
+        // `attribute = fun _ attr -> warn_unused_attribute attr`: payloads are
+        // not traversed.
+        if !self.stopped {
+            warn_unused_attribute(attr, arena, self.warnings);
         }
     }
+
+    fn value_binding(&mut self, arena: &ParseArena, vb: &ValueBinding) {
+        // OCaml `Bs_builtin_ppx.mark_hoisted_function_attributes` marks
+        // `@res.hoistedFunction` on every let binding during mapping.
+        for attr in vb.pvb_attributes.iter() {
+            if arena.get_string(attr.0.txt) == "res.hoistedFunction" {
+                arena.mark_used_attribute(attr);
+            }
+        }
+        super::ast_iter::walk_value_binding(self, arena, vb);
+    }
+
+    fn expr(&mut self, arena: &ParseArena, idx: ExprIdx) {
+        // `Pexp_constant` and hash-number `Pexp_variant (s, None)` only run
+        // literal checks and do not call `super.expr`, so their attributes
+        // are never swept (bs_ast_invariant.ml:90-100).
+        match &*arena.get_expr(idx).pexp_desc {
+            ExpressionDesc::Pexp_constant(_) => {}
+            ExpressionDesc::Pexp_variant(inner)
+                if inner.1.is_none() && is_valid_hash_number(&inner.0) => {}
+            _ => super::ast_iter::walk_expr(self, arena, idx),
+        }
+    }
+
+    fn pat(&mut self, arena: &ParseArena, idx: PatIdx) {
+        // `Ppat_constant` only runs `check_constant` (bs_ast_invariant.ml:143-147).
+        if !matches!(&*arena.get_pat(idx).ppat_desc, PatternDesc::Ppat_constant(_)) {
+            super::ast_iter::walk_pat(self, arena, idx);
+        }
+    }
+
+    fn label_declaration(&mut self, arena: &ParseArena, ld: &LabelDeclaration) {
+        for attr in ld.pld_attributes.iter() {
+            if arena.get_string(attr.0.txt) == "as" {
+                arena.mark_used_attribute(attr);
+            }
+        }
+        super::ast_iter::walk_label_declaration(self, arena, ld);
+    }
+
+    fn constructor_declaration(&mut self, arena: &ParseArena, cd: &ConstructorDeclaration) {
+        if self.stopped {
+            return;
+        }
+        // `Ast_untagged_variants.process_tag_type` marks a valid `@as` and
+        // raises for an invalid payload or a second `@as`.
+        let as_attrs: Vec<&Attribute> = cd
+            .pcd_attributes
+            .iter()
+            .filter(|attr| arena.get_string(attr.0.txt) == "as")
+            .collect();
+        match as_attrs.as_slice() {
+            [] => {}
+            [attr] if is_valid_tag_as_payload(&attr.1, arena) => arena.mark_used_attribute(attr),
+            _ => {
+                self.stopped = true;
+                return;
+            }
+        }
+        super::ast_iter::walk_constructor_declaration(self, arena, cd);
+    }
+}
+
+/// OCaml `Ast_config.iter_on_config_str` marks the first leading `@@config`.
+fn mark_leading_config_structure(items: &[StructureItem], arena: &ParseArena) {
+    for item in items {
+        let StructureItemDesc::Pstr_attribute(attr) = &*item.pstr_desc else {
+            return;
+        };
+        if arena.get_string(attr.0.txt) == "config" {
+            arena.mark_used_attribute(attr);
+            return;
+        }
+    }
+}
+
+fn mark_leading_config_signature(items: &[SignatureItem], arena: &ParseArena) {
+    for item in items {
+        let SignatureItemDesc::Psig_attribute(attr) = &*item.psig_desc else {
+            return;
+        };
+        if arena.get_string(attr.0.txt) == "config" {
+            arena.mark_used_attribute(attr);
+            return;
+        }
+    }
+}
+
+/// Mark the leading `@@config` (OCaml `Ast_config.process_str`), which runs
+/// before the builtin mapper.
+pub fn mark_config_attributes_structure(items: &[StructureItem], arena: &ParseArena) {
+    mark_leading_config_structure(items, arena);
+}
+
+pub fn mark_config_attributes_signature(items: &[SignatureItem], arena: &ParseArena) {
+    mark_leading_config_signature(items, arena);
+}
+
+pub fn collect_unused_attribute_warnings_structure(
+    items: &[StructureItem],
+    arena: &ParseArena,
+) -> Vec<PpxWarning> {
+    let mut warnings = Vec::new();
+    let mut sweep = UnusedAttributeSweep {
+        warnings: &mut warnings,
+        stopped: false,
+    };
+    super::ast_iter::walk_structure(&mut sweep, arena, items);
+    warnings
+}
+
+pub fn collect_unused_attribute_warnings_signature(
+    items: &[SignatureItem],
+    arena: &ParseArena,
+) -> Vec<PpxWarning> {
+    let mut warnings = Vec::new();
+    let mut sweep = UnusedAttributeSweep {
+        warnings: &mut warnings,
+        stopped: false,
+    };
+    super::ast_iter::walk_signature(&mut sweep, arena, items);
+    warnings
 }
 
 fn collect_unused_bs_attributes(
@@ -1422,47 +1627,6 @@ fn collect_raw_js_warnings_from_value_binding(
     }
     collect_unused_bs_attributes_from_pat_idx(binding.pvb_pat, arena, warnings);
     collect_raw_js_warnings_from_expr_idx(binding.pvb_expr, arena, warnings);
-}
-
-fn collect_obj_optional_as_warnings(
-    vd: &ValueDescription,
-    arena: &ParseArena,
-    warnings: &mut Vec<PpxWarning>,
-) {
-    if !attr_named(vd.pval_attributes.as_slice(), "obj", arena) {
-        return;
-    }
-
-    let vd_type = arena.get_core_type(vd.pval_type);
-    let (args, _) = list_of_arrow(vd_type, arena);
-    for arg in args {
-        let arg_type = arena.get_core_type(arg.typ);
-        let warn_type_as = match arg.lbl {
-            // Rust collects warnings in a pre-pass, but OCaml reaches the same
-            // optional-arg helper before unused `@as` warnings can be reported.
-            ArgLabel::Optional(_) => get_opt_arg_type(false, arg_type, arena).is_ok(),
-            ArgLabel::Labelled(_) => !matches!(&*arg_type.ptyp_desc, CoreTypeDesc::Ptyp_any),
-            ArgLabel::Nolabel => false,
-        };
-        if !warn_type_as {
-            continue;
-        }
-        // OCaml leaves these @as payloads unused for @obj arguments, then
-        // warns once during FFI processing and once during the remaining
-        // unused-attribute sweep.
-        for _ in 0..2 {
-            for (attr_name, _) in arg_type.ptyp_attributes.iter() {
-                if arena.get_string(attr_name.txt) == "as" {
-                    warnings.push(PpxWarning {
-                        loc: attr_name.loc,
-                        warning: Warning::BsUnusedAttribute {
-                            name: "as".to_string(),
-                        },
-                    });
-                }
-            }
-        }
-    }
 }
 
 fn collect_external_string_redundant_warnings(
@@ -1729,7 +1893,6 @@ fn collect_signature_warnings_from_value_description(
     arena: &ParseArena,
     warnings: &mut Vec<PpxWarning>,
 ) {
-    collect_obj_optional_as_warnings(vd, arena, warnings);
     collect_external_string_redundant_warnings(vd, arena, warnings);
 
     if is_rs_external(&vd.pval_attributes, &vd.pval_prim, arena) {
@@ -2595,9 +2758,12 @@ fn refine_arg_type(nolabel: bool, typ: &CoreType, arena: &mut ParseArena) -> Att
     // For Ptyp_any with @as attribute, handle constant args
     if matches!(&*typ.ptyp_desc, CoreTypeDesc::Ptyp_any) {
         // Check for @as attribute on the type
-        for (attr_name, payload) in &typ.ptyp_attributes {
+        for attr in &typ.ptyp_attributes {
+            let (attr_name, payload) = attr;
             let name = arena.get_string(attr_name.txt).to_string();
             if name == "as" {
+                // OCaml `iter_process_bs_string_or_int_as` marks the first @as used.
+                arena.mark_used_attribute(attr);
                 // Try int first (mirrors OCaml's is_single_int check first)
                 if let Some(i) = get_payload_int(payload, arena) {
                     return Attr::ArgCst(Cst::ArgIntLit(i as i64));
@@ -2805,7 +2971,8 @@ fn payload_string_literals_or_error_loc(
 /// Extract @as("string") from attributes.
 /// Mirrors OCaml's iter_process_bs_string_as.
 fn get_as_string_attr(attrs: &[Attribute], arena: &ParseArena) -> Option<String> {
-    for (attr_name, payload) in attrs {
+    for attr in attrs {
+        let (attr_name, payload) = attr;
         let name = arena.get_string(attr_name.txt);
         if name == "as" {
             // Try to get string payload
@@ -2816,6 +2983,7 @@ fn get_as_string_attr(attrs: &[Attribute], arena: &ParseArena) -> Option<String>
                         if let ExpressionDesc::Pexp_constant(c) = &*arena.get_expr(*expr).pexp_desc
                         {
                             if let Constant::String(s, _) = &**c {
+                                arena.mark_used_attribute(attr);
                                 return Some(s.to_string());
                             }
                         }
@@ -2830,7 +2998,8 @@ fn get_as_string_attr(attrs: &[Attribute], arena: &ParseArena) -> Option<String>
 /// Extract @as(int) from attributes.
 /// Mirrors OCaml's iter_process_bs_int_as.
 fn get_as_int_attr(attrs: &[Attribute], arena: &ParseArena) -> Option<i64> {
-    for (attr_name, payload) in attrs {
+    for attr in attrs {
+        let (attr_name, payload) = attr;
         let name = arena.get_string(attr_name.txt);
         if name == "as" {
             // Try to get int payload
@@ -2845,7 +3014,11 @@ fn get_as_int_attr(attrs: &[Attribute], arena: &ParseArena) -> Option<i64> {
                                 if matches!(suffix, Some('n')) {
                                     return None;
                                 }
-                                return s.parse::<i64>().ok();
+                                let v = s.parse::<i64>().ok();
+                                if v.is_some() {
+                                    arena.mark_used_attribute(attr);
+                                }
+                                return v;
                             }
                         }
                     }
@@ -3131,8 +3304,28 @@ fn variant_can_unwrap(row_fields: &[RowField]) -> bool {
 
 /// Determine the arg type for a type expression.
 /// Mirrors OCaml's spec_of_ptyp.
+/// OCaml `Ast_attributes.iter_process_bs_string_int_unwrap_uncurry`
+/// (ast_attributes.ml:170-190) marks the attribute when exactly one of
+/// @string/@int/@ignore/@unwrap is present.
+fn mark_single_ffi_type_attr(typ: &CoreType, arena: &ParseArena) {
+    let found: Vec<&Attribute> = typ
+        .ptyp_attributes
+        .iter()
+        .filter(|attr| {
+            matches!(
+                arena.get_string(attr.0.txt),
+                "string" | "int" | "ignore" | "unwrap"
+            )
+        })
+        .collect();
+    if let [attr] = found.as_slice() {
+        arena.mark_used_attribute(attr);
+    }
+}
+
 fn spec_of_ptyp(nolabel: bool, typ: &CoreType, arena: &mut ParseArena) -> Attr {
     // Check for special attributes on the type (@string, @int, @unwrap, @ignore)
+    mark_single_ffi_type_attr(typ, arena);
     let attr_type = check_type_ffi_attrs(typ, arena);
 
     match attr_type {
@@ -3627,6 +3820,8 @@ fn get_opt_arg_type(nolabel: bool, typ: &CoreType, arena: &ParseArena) -> PpxRes
 
 /// Same classifier after the validation pass has already rejected Ptyp_any.
 fn get_opt_arg_type_unchecked(_nolabel: bool, typ: &CoreType, arena: &ParseArena) -> Attr {
+    // OCaml `get_opt_arg_type` calls `spec_of_ptyp`.
+    mark_single_ffi_type_attr(typ, arena);
     let attr_type = check_type_ffi_attrs(typ, arena);
     match attr_type {
         Some("ignore") => Attr::Ignore,
@@ -9976,7 +10171,8 @@ fn is_enum_polyvar<'a>(tdcl: &'a TypeDeclaration, arena: &'a ParseArena) -> Opti
 
 /// Get @as value from attributes (used for polyvariant tag string mapping)
 fn get_as_string_value(attrs: &[Attribute], arena: &ParseArena) -> Option<String> {
-    for (attr_name, payload) in attrs {
+    for attr in attrs {
+        let (attr_name, payload) = attr;
         let name = arena.get_string(attr_name.txt);
         if name == "as" {
             if let Some(items) = payload_str_items(payload) {
@@ -9987,6 +10183,7 @@ fn get_as_string_value(attrs: &[Attribute], arena: &ParseArena) -> Option<String
                         if let ExpressionDesc::Pexp_constant(c) = &*arena.get_expr(*expr).pexp_desc
                         {
                             if let Constant::String(txt_str, _delim) = &**c {
+                                arena.mark_used_attribute(attr);
                                 return Some(txt_str.to_string());
                             }
                         }
@@ -11745,6 +11942,22 @@ fn validate_deriving_accessors_for_tdcls(
     }
 
     let (actions, _remaining_attrs) = parse_deriving_actions(&last_tdcl.ptype_attributes, arena);
+    if actions
+        .iter()
+        .any(|action| matches!(action, DeriveAction::Abstract { .. }))
+    {
+        // `Ast_derive_abstract.handle_tdcls_in_str`/`handle_tdcl` fold right over
+        // the declarations and their record labels
+        // and reads each `@as` with `Ast_attributes.iter_process_bs_string_as`,
+        // which raises on a non-string payload or a second `@as`.
+        for tdcl in tdcls.iter().rev() {
+            if let TypeKind::Ptype_record(labels) = &tdcl.ptype_kind {
+                for label in labels.iter().rev() {
+                    validate_string_as_attrs(&label.pld_attributes, arena)?;
+                }
+            }
+        }
+    }
     if !actions
         .iter()
         .any(|action| matches!(action, DeriveAction::Accessors))
@@ -15274,9 +15487,13 @@ fn handle_abstract_tdcl(
                     label.pld_name.clone()
                 };
 
-                let is_optional = label.pld_attributes.iter().any(|(attr_name, _)| {
-                    let name = arena.get_string(attr_name.txt);
-                    name == "optional"
+                // OCaml `Ast_attributes.has_bs_optional` marks the attribute used.
+                let is_optional = label.pld_attributes.iter().any(|attr| {
+                    let is_opt = arena.get_string(attr.0.txt) == "optional";
+                    if is_opt {
+                        arena.mark_used_attribute(attr);
+                    }
+                    is_opt
                 });
 
                 // Build the argument for maker function
@@ -15637,7 +15854,8 @@ fn make_set_attr(loc: LocIdx, arena: &mut ParseArena) -> Attribute {
 
 /// Get the @as("...") attribute value
 fn get_bs_as_string(attrs: &[Attribute], arena: &ParseArena) -> Option<String> {
-    for (attr_name, payload) in attrs {
+    for attr in attrs {
+        let (attr_name, payload) = attr;
         let name = arena.get_string(attr_name.txt);
         if name == "as" {
             if let Some(items) = payload_str_items(payload) {
@@ -15647,6 +15865,7 @@ fn get_bs_as_string(attrs: &[Attribute], arena: &ParseArena) -> Option<String> {
                         if let ExpressionDesc::Pexp_constant(c) = &*arena.get_expr(*expr).pexp_desc
                         {
                             if let Constant::String(txt, _) = &**c {
+                                arena.mark_used_attribute(attr);
                                 return Some(txt.to_string());
                             }
                         }

@@ -11579,6 +11579,9 @@ fn compile_source_to_js_with_options_inner(
     let structure = if options.no_builtin_ppx {
         structure
     } else {
+        // OCaml `Ast_config.process_str` marks the leading `@@config` before
+        // the builtin mapper runs (compiler/frontend/ppx_entry.ml:48-50).
+        ppx::mark_config_attributes_structure(&structure, parser.arena());
         let ppx_warnings = ppx::collect_raw_js_warnings(&structure, parser.arena_mut());
         ppx_warnings_have_errors |= emit_ppx_warnings_with_config(
             parser.arena(),
@@ -11595,8 +11598,20 @@ fn compile_source_to_js_with_options_inner(
         // Rewrite expressions: desugar pipe (->), setter (#=), property access (##),
         // await, tagged templates, encode externals, and apply spice mapper rewrites.
         // spice is handled here, so avoid running a second top-level spice expansion pass.
-        ppx::rewrite_structure(&structure, parser.arena_mut())
-            .map_err(|e| ppx_error_to_anyhow(e, parser.arena(), source, filename))?
+        let rewritten = ppx::rewrite_structure(&structure, parser.arena_mut())
+            .map_err(|e| ppx_error_to_anyhow(e, parser.arena(), source, filename))?;
+        // OCaml `Bs_ast_invariant.emit_external_warnings_on_structure` runs over
+        // the rewritten structure (compiler/frontend/ppx_entry.ml:60-63).
+        let unused_attribute_warnings =
+            ppx::collect_unused_attribute_warnings_structure(&rewritten, parser.arena());
+        ppx_warnings_have_errors |= emit_ppx_warnings_with_config(
+            parser.arena(),
+            source,
+            filename,
+            &file_warning_config,
+            &unused_attribute_warnings,
+        );
+        rewritten
     };
     parser.arena_mut().reserve_typecheck_synthetic_capacity();
 
@@ -12502,6 +12517,17 @@ pub fn typecheck_interface_source(
             &file_warning_config,
             &ppx_warnings,
         );
+        // OCaml `Ast_config.process_sig` + `emit_external_warnings_on_signature`.
+        ppx::mark_config_attributes_signature(&signature, parser.arena());
+        let unused_attribute_warnings =
+            ppx::collect_unused_attribute_warnings_signature(&signature, parser.arena());
+        ppx_warnings_have_errors |= emit_ppx_warnings_with_config(
+            parser.arena(),
+            source,
+            filename,
+            &file_warning_config,
+            &unused_attribute_warnings,
+        );
     }
     parser.arena_mut().reserve_typecheck_synthetic_capacity();
 
@@ -12986,6 +13012,7 @@ pub fn typecheck_and_dump_sexp<W: std::io::Write>(
         let structure = if options.no_builtin_ppx {
             structure
         } else {
+            ppx::mark_config_attributes_structure(&structure, parser.arena());
             let ppx_warnings = ppx::collect_raw_js_warnings(&structure, parser.arena_mut());
             let _ = emit_ppx_warnings_with_config(
                 parser.arena(),
@@ -12997,8 +13024,18 @@ pub fn typecheck_and_dump_sexp<W: std::io::Write>(
 
             let structure = ppx::expand_extensions(&structure, parser.arena_mut())
                 .map_err(|e| ppx_error_to_anyhow(e, parser.arena(), source, filename))?;
-            ppx::rewrite_structure(&structure, parser.arena_mut())
-                .map_err(|e| ppx_error_to_anyhow(e, parser.arena(), source, filename))?
+            let rewritten = ppx::rewrite_structure(&structure, parser.arena_mut())
+                .map_err(|e| ppx_error_to_anyhow(e, parser.arena(), source, filename))?;
+            let unused_attribute_warnings =
+                ppx::collect_unused_attribute_warnings_structure(&rewritten, parser.arena());
+            let _ = emit_ppx_warnings_with_config(
+                parser.arena(),
+                source,
+                filename,
+                &file_warning_config,
+                &unused_attribute_warnings,
+            );
+            rewritten
         };
         parser.arena_mut().reserve_typecheck_synthetic_capacity();
 

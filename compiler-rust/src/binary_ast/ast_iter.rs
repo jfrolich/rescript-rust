@@ -123,8 +123,12 @@ pub fn walk_typ<V: AstIter + ?Sized>(v: &mut V, arena: &ParseArena, idx: CoreTyp
     match &*typ.ptyp_desc {
         CoreTypeDesc::Ptyp_any | CoreTypeDesc::Ptyp_var(_) => {}
         CoreTypeDesc::Ptyp_arrow(inner) => {
-            let (arg, ret, _) = &**inner;
-            v.typ(arena, arg.typ);
+            // `Ptyp_arrow {params; ret}`: every parameter lives in the
+            // arena's n-ary side table.
+            let (arg, ret, arity) = &**inner;
+            for param in arena.nary_arrow_args(arg, *arity).iter() {
+                v.typ(arena, param.typ);
+            }
             v.typ(arena, *ret);
         }
         CoreTypeDesc::Ptyp_tuple(types) => {

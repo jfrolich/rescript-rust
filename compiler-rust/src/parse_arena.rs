@@ -518,6 +518,10 @@ pub struct ParseArena {
     /// by the record pattern's `ppat_loc` (a stable arena index available both
     /// at parse time and during type checking).
     pat_record_rests: HashMap<LocIdx, crate::parser::ast::RecordPatRest>,
+    /// OCaml `Used_attributes` (compiler/ml/used_attributes.ml): attribute name
+    /// locations marked as consumed by the builtin PPX, consulted by the
+    /// unused-attribute sweep (`Bs_ast_invariant.warn_unused_attribute`).
+    used_attributes: std::sync::Mutex<HashSet<LocIdx>>,
     /// Sparse side table for if-then-else else branch expression, keyed by if ExprIdx.
     expr_if_else_branches: Vec<Option<ExprIdx>>,
     /// Sparse side table for `Pexp_coerce` source type annotation, keyed by coerce ExprIdx.
@@ -932,6 +936,7 @@ impl Default for ParseArena {
             expr_variant_args: Vec::new(),
             expr_record_spreads: Vec::new(),
             pat_record_rests: HashMap::new(),
+            used_attributes: std::sync::Mutex::new(HashSet::new()),
             expr_if_else_branches: Vec::new(),
             expr_coerce_from_types: Vec::new(),
             patterns: Arena::default(),
@@ -997,6 +1002,24 @@ impl ParseArena {
     ///
     /// This ensures that `LocIdx::default()` (which is `LocIdx(0)`) always refers to
     /// a valid "none" location, even without calling `none_loc()` first.
+    /// OCaml `Used_attributes.mark_used_attribute`: only non-ghost attributes.
+    pub fn mark_used_attribute(&self, attr: &crate::parser::ast::Attribute) {
+        if !self.loc_ghost(attr.0.loc) {
+            self.used_attributes
+                .lock()
+                .expect("used attributes lock")
+                .insert(attr.0.loc);
+        }
+    }
+
+    /// OCaml `Used_attributes.is_used_attribute`.
+    pub fn is_used_attribute(&self, loc: LocIdx) -> bool {
+        self.used_attributes
+            .lock()
+            .expect("used attributes lock")
+            .contains(&loc)
+    }
+
     pub fn new() -> Self {
         let mut arena = Self::default();
         // Pre-allocate none file name and position at index 0
