@@ -335,10 +335,11 @@ type RecordPatternField = (
     bool,
 );
 
-fn records_args_for_le_pats(
-    l1: &[RecordPatternField],
-    l2: &[RecordPatternField],
-) -> (Vec<Pattern>, Vec<Pattern>) {
+fn records_args_for_le_pats<'p>(
+    l1: &'p [RecordPatternField],
+    l2: &'p [RecordPatternField],
+    omega: &'p Pattern,
+) -> (Vec<&'p Pattern>, Vec<&'p Pattern>) {
     let mut ps = Vec::new();
     let mut qs = Vec::new();
     let mut i = 0;
@@ -350,28 +351,28 @@ fn records_args_for_le_pats(
         match (l1.get(i), l2.get(j)) {
             (Some((_, lbl1, p1, _)), Some((_, lbl2, p2, _))) => {
                 if lbl1.lbl_pos < lbl2.lbl_pos {
-                    ps.push(p1.clone());
-                    qs.push(omega());
+                    ps.push(p1);
+                    qs.push(omega);
                     i += 1;
                 } else if lbl1.lbl_pos > lbl2.lbl_pos {
-                    ps.push(omega());
-                    qs.push(p2.clone());
+                    ps.push(omega);
+                    qs.push(p2);
                     j += 1;
                 } else {
-                    ps.push(p1.clone());
-                    qs.push(p2.clone());
+                    ps.push(p1);
+                    qs.push(p2);
                     i += 1;
                     j += 1;
                 }
             }
             (Some((_, _, p1, _)), None) => {
-                ps.push(p1.clone());
-                qs.push(omega());
+                ps.push(p1);
+                qs.push(omega);
                 i += 1;
             }
             (None, Some((_, _, p2, _))) => {
-                ps.push(omega());
-                qs.push(p2.clone());
+                ps.push(omega);
+                qs.push(p2);
                 j += 1;
             }
             (None, None) => break,
@@ -412,8 +413,9 @@ fn le_pat(p: &Pattern, q: &Pattern) -> bool {
         (PatternDesc::Tpat_variant(..), PatternDesc::Tpat_variant(..)) => false,
         (PatternDesc::Tpat_tuple(ps), PatternDesc::Tpat_tuple(qs)) => le_pats(ps, qs),
         (PatternDesc::Tpat_record(l1, _, _), PatternDesc::Tpat_record(l2, _, _)) => {
-            let (ps, qs) = records_args_for_le_pats(l1, l2);
-            le_pats(&ps, &qs)
+            let omega = omega();
+            let (ps, qs) = records_args_for_le_pats(l1, l2, &omega);
+            ps.iter().zip(&qs).all(|(p, q)| le_pat(p, q))
         }
         (PatternDesc::Tpat_array(ps), PatternDesc::Tpat_array(qs)) => {
             ps.len() == qs.len() && le_pats(ps, qs)
@@ -436,22 +438,25 @@ fn le_pats(ps: &[Pattern], qs: &[Pattern]) -> bool {
 /// Get minimal elements under a partial order `le`.
 /// Equivalent to OCaml's `get_mins`.
 fn get_mins<T: Clone>(le: impl Fn(&T, &T) -> bool, ps: Vec<T>) -> Vec<T> {
-    fn select_rec<T: Clone>(le: &impl Fn(&T, &T) -> bool, r: Vec<T>, ps: &[T]) -> Vec<T> {
-        match ps.split_first() {
-            None => r,
-            Some((p, rest)) => {
-                if rest.iter().any(|p0| le(p0, p)) {
-                    select_rec(le, r, rest)
-                } else {
-                    let mut new_r = vec![p.clone()];
-                    new_r.extend(r);
-                    select_rec(le, new_r, rest)
-                }
-            }
-        }
+    // OCaml `select_rec` keeps `p` unless a later element is below it and
+    // conses kept elements onto the accumulator, so each pass returns the kept
+    // elements in reverse order. Select by reference and clone the survivors.
+    fn select_rec<'t, T>(le: &impl Fn(&T, &T) -> bool, ps: &[&'t T]) -> Vec<&'t T> {
+        let mut kept = ps
+            .iter()
+            .enumerate()
+            .filter(|(i, p)| !ps[i + 1..].iter().any(|p0| le(p0, p)))
+            .map(|(_, p)| *p)
+            .collect::<Vec<_>>();
+        kept.reverse();
+        kept
     }
-    let first_pass = select_rec(&le, Vec::new(), &ps);
-    select_rec(&le, Vec::new(), &first_pass)
+    let refs = ps.iter().collect::<Vec<_>>();
+    let first_pass = select_rec(&le, &refs);
+    select_rec(&le, &first_pass)
+        .into_iter()
+        .cloned()
+        .collect()
 }
 
 /// Raised when patterns are incompatible in lub.
@@ -2968,8 +2973,11 @@ pub fn what_is_cases(cases: &[Clause]) -> Pattern {
 /// Convert cases to a pattern matrix (taking the minimal rows under le_pats).
 /// Equivalent to OCaml's `as_matrix`.
 pub fn as_matrix(cases: &[Clause]) -> Matrix {
-    let rows: Vec<Vec<Pattern>> = cases.iter().map(|(ps, _)| ps.clone()).collect();
-    get_mins(|a: &Vec<Pattern>, b: &Vec<Pattern>| le_pats(a, b), rows)
+    let rows: Vec<&Vec<Pattern>> = cases.iter().map(|(ps, _)| ps).collect();
+    get_mins(|a: &&Vec<Pattern>, b: &&Vec<Pattern>| le_pats(a, b), rows)
+        .into_iter()
+        .cloned()
+        .collect()
 }
 
 /// Prepend a matrix entry to the default environment, skipping empty matrices.
