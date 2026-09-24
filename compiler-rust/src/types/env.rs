@@ -798,6 +798,16 @@ pub struct EnvFlags {
 impl Env {
     /// Create an empty environment.
     pub fn empty() -> Self {
+        // Cloning shares the empty persistent-map roots and assigns a fresh
+        // env id, so it is equivalent to building a new empty env without
+        // allocating a root node per table.
+        thread_local! {
+            static EMPTY_ENV: Env = Env::build_empty();
+        }
+        EMPTY_ENV.with(Env::clone)
+    }
+
+    fn build_empty() -> Self {
         Env {
             id: next_env_id(),
             values: IdTbl::new(),
