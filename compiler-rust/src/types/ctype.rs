@@ -12014,13 +12014,13 @@ mod tests {
         )
         .expect("probe");
         assert!(
-            ctx.find_resolved_module_type(env.id(), &parent, "t")
+            ctx.find_resolved_module_type(env.scope_id(), &parent, "t")
                 .is_none()
         );
         let path = Path::pdot(parent.clone(), "t");
         let first = lookup_type_decl_for_path(&ctx, &env, &path).expect("real lookup");
         assert!(
-            ctx.find_resolved_module_type(env.id(), &parent, "t")
+            ctx.find_resolved_module_type(env.scope_id(), &parent, "t")
                 .is_some()
         );
         let second = lookup_type_decl_for_path(&ctx, &env, &path)

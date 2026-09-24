@@ -31014,7 +31014,7 @@ fn module_path_requires_env_scoped_cache(env: &Env, module_path: &Path) -> bool 
 
 fn scope_local_module_cache_key(base_key: &str, module_path: &Path, env: &Env) -> String {
     if module_path_requires_env_scoped_cache(env, module_path) {
-        format!("{base_key}::env{}", env.id())
+        format!("{base_key}::env{}", env.scope_id())
     } else {
         base_key.to_string()
     }
@@ -31048,7 +31048,8 @@ fn module_components_cache_key(
         // different env ids while still pointing at the same local module
         // identity, so do not env-scope this cache key for a stamped Pident.
         Path::Pident(id) if !id.is_persistent() && id.stamp() != 0 => None,
-        _ => module_path_requires_env_scoped_cache(env, module_path).then_some(env.id()),
+        // Component resolution reads only module-level bindings.
+        _ => module_path_requires_env_scoped_cache(env, module_path).then_some(env.scope_id()),
     };
     Some(crate::types::context::QualifiedModuleComponentsCacheKey::new(module_path.clone(), env_id))
 }

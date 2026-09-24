@@ -677,6 +677,20 @@ fn next_env_id() -> u64 {
     })
 }
 
+/// Memo tables derived from an Env's module bindings (see `Env::scope_caches`).
+///
+/// Intentional Rust performance caches: OCaml walks the current Env tables
+/// when resolving module components (compiler/ml/env.ml:781-813, 1516-1538).
+/// Both tables stay derived from bindings only; they must not become a
+/// path-spelling alias-equivalence shortcut.
+#[derive(Debug, Default)]
+struct ScopeCaches {
+    /// Active local module aliases.
+    local_module_aliases: RefCell<Option<Vec<(Ident, Path)>>>,
+    /// Whether a module path needs an env-scoped component cache key.
+    module_path_requires_env_scoped: RefCell<HashMap<String, bool>>,
+}
+
 #[derive(Debug)]
 pub struct Env {
     /// Unique identity for this environment instance.
@@ -725,15 +739,9 @@ pub struct Env {
     /// Mirrors OCaml `Env.functor_args` and drives aliasability checks.
     functor_args: HashSet<Ident>,
 
-    local_module_aliases_cache: RefCell<Option<Vec<(Ident, Path)>>>,
-
-    /// Intentional Rust performance cache for env-scoped component cache keys.
-    ///
-    /// This preserves OCaml's lookup boundary from find_module_descr/find_type
-    /// into components_of_module_maker (compiler/ml/env.ml:781-813,
-    /// 1516-1538) but avoids recomputing the same alias-scope predicate for
-    /// every qualified component lookup.
-    module_path_requires_env_scoped_cache_cache: RefCell<HashMap<String, bool>>,
+    /// Memo tables derived from the module bindings. They are shared by every
+    /// clone with the same `scope_id` and replaced whenever the scope changes.
+    scope_caches: std::rc::Rc<ScopeCaches>,
 
     /// Persistent roots opened by the initial environment.
     ///
@@ -783,8 +791,7 @@ impl Clone for Env {
             // Do not duplicate them when creating a fresh Env identity; OCaml
             // Env snapshots carry semantic bindings, not copied memoized
             // lookup results.
-            local_module_aliases_cache: RefCell::new(None),
-            module_path_requires_env_scoped_cache_cache: RefCell::new(HashMap::new()),
+            scope_caches: self.scope_caches.clone(),
             implicit_open_roots: self.implicit_open_roots.clone(),
             summary: self.summary.clone(),
             local_constraints: self.local_constraints.clone(),
@@ -828,8 +835,7 @@ impl Env {
             module_components: IdTbl::new(),
             modtypes: IdTbl::new(),
             functor_args: HashSet::new(),
-            local_module_aliases_cache: RefCell::new(None),
-            module_path_requires_env_scoped_cache_cache: RefCell::new(HashMap::new()),
+            scope_caches: std::rc::Rc::default(),
             implicit_open_roots: PersistentHashSet::default(),
             summary: EnvSummary::Empty,
             local_constraints: PersistentHashMap::default(),
@@ -862,8 +868,7 @@ impl Env {
             // Do not duplicate them when snapshotting environments for unifier
             // state; OCaml Env snapshots carry semantic bindings, not copied
             // memoized lookup results.
-            local_module_aliases_cache: RefCell::new(None),
-            module_path_requires_env_scoped_cache_cache: RefCell::new(HashMap::new()),
+            scope_caches: self.scope_caches.clone(),
             implicit_open_roots: self.implicit_open_roots.clone(),
             summary: self.summary.clone(),
             local_constraints: self.local_constraints.clone(),
@@ -886,6 +891,7 @@ impl Env {
     fn bump_scope(&mut self) {
         self.bump_id();
         self.scope_id = self.id;
+        self.scope_caches = std::rc::Rc::default();
     }
 
     /// Identity of the module-level bindings (see the `scope_id` field).
@@ -893,14 +899,12 @@ impl Env {
         self.scope_id
     }
 
-    fn invalidate_module_alias_caches(&self) {
+    fn invalidate_module_alias_caches(&mut self) {
         // These caches are purely derived from visible bindings. Every Env
         // mutation that can change OCaml component lookup visibility must drop
-        // them before later lookups rebuild the same derived view.
-        self.local_module_aliases_cache.borrow_mut().take();
-        self.module_path_requires_env_scoped_cache_cache
-            .borrow_mut()
-            .clear();
+        // them before later lookups rebuild the same derived view. Clones that
+        // still share the previous scope keep the previous tables.
+        self.scope_caches = std::rc::Rc::default();
     }
 
     fn path_has_prefix(path: &Path, prefix: &Path) -> bool {
@@ -930,7 +934,7 @@ impl Env {
         &self,
         f: impl FnOnce(&[(Ident, Path)]) -> R,
     ) -> R {
-        if self.local_module_aliases_cache.borrow().is_none() {
+        if self.scope_caches.local_module_aliases.borrow().is_none() {
             let mut aliases: Vec<_> = self
                 .modules
                 .visible_local_entries()
@@ -949,10 +953,10 @@ impl Env {
                     .then_with(|| right_target.name().cmp(&left_target.name()))
                     .then_with(|| right_id.stamp().cmp(&left_id.stamp()))
             });
-            *self.local_module_aliases_cache.borrow_mut() = Some(aliases);
+            *self.scope_caches.local_module_aliases.borrow_mut() = Some(aliases);
         }
 
-        let cache = self.local_module_aliases_cache.borrow();
+        let cache = self.scope_caches.local_module_aliases.borrow();
         f(cache.as_deref().unwrap_or(&[]))
     }
 
@@ -966,7 +970,8 @@ impl Env {
         };
 
         if let Some(cached) = self
-            .module_path_requires_env_scoped_cache_cache
+            .scope_caches
+            .module_path_requires_env_scoped
             .borrow()
             .get(&cache_key)
             .copied()
@@ -981,7 +986,7 @@ impl Env {
                     && Self::path_has_prefix(module_path, target_path)
             })
         });
-        self.module_path_requires_env_scoped_cache_cache
+        self.scope_caches.module_path_requires_env_scoped
             .borrow_mut()
             .insert(cache_key, requires);
         requires
@@ -1497,6 +1502,7 @@ impl Env {
         self.implicit_open_roots.insert(name.to_string());
         // Only path resolution reads this, so keep `id` unchanged.
         self.scope_id = next_env_id();
+        self.scope_caches = std::rc::Rc::default();
     }
 
     pub(crate) fn path_starts_with_implicit_opened_component(&self, path: &Path) -> bool {
