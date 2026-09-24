@@ -3508,158 +3508,74 @@ fn fix_type_manifest_location(p: &mut Parser<'_>, typ_idx: CoreTypeIdx) -> CoreT
 
 /// Parse type parameters in angle bracket syntax: <'a, +'b, -'c, _>
 fn parse_type_params_angle(p: &mut Parser<'_>) -> Vec<(CoreTypeIdx, Variance)> {
-    let mut params = vec![];
-
-    if p.token != Token::LessThan {
-        return params;
+    // OCaml `parse_type_params` (compiler/syntax/src/res_core.ml), `<` form.
+    if p.token != Token::LessThan || p.start_pos.line != p.prev_end_pos.line {
+        return vec![];
     }
-    // Enter diamond mode to prevent >= from being tokenized as a single token
     p.set_diamond_mode();
-    p.next(); // consume <
-
-    while p.token != Token::GreaterThan && p.token != Token::Eof {
-        let param_start_idx = p.start_pos_idx();
-
-        // Parse optional variance: +, -, or nothing
-        let variance = match &p.token {
-            Token::Plus => {
-                p.next();
-                Variance::Covariant
-            }
-            Token::Minus => {
-                p.next();
-                Variance::Contravariant
-            }
-            _ => Variance::Invariant,
-        };
-
-        // Parse type variable: 'name or underscore _
-        if p.token == Token::SingleQuote {
-            p.next();
-            match &p.token {
-                Token::Lident(name) | Token::Uident(name) => {
-                    let name = extend_cow_lifetime(name.clone());
-                    let loc = p.mk_loc_current();
-                    p.next();
-                    let typ = CoreType {
-                        ptyp_desc: Box::new(CoreTypeDesc::Ptyp_var(Box::new(name))),
-                        ptyp_loc: loc,
-                        ptyp_attributes: Attributes::new(),
-                    };
-                    let typ_idx = p.arena_mut().push_core_type(typ);
-                    params.push((typ_idx, variance));
-                }
-                t if t.is_keyword() => {
-                    // Reserved keyword after singlequote: 'for, 'let, etc.
-                    let keyword = format!("{}", t);
-                    let keyword_start = p.start_pos;
-                    let keyword_end = p.end_pos;
-                    let keyword_start_idx = p.start_pos_idx();
-                    let keyword_end_idx = p.end_pos_idx();
-                    let loc = p.mk_loc_idx(keyword_start_idx, keyword_end_idx);
-                    p.err_multiple(
-                        keyword_start,
-                        keyword_end,
-                        DiagnosticCategory::Message(format!(
-                            "`{}` is a reserved keyword. Keywords need to be escaped: \\\"{}\"",
-                            keyword, keyword
-                        )),
-                    );
-                    p.next();
-                    // Still add a param for recovery
-                    let typ = CoreType {
-                        ptyp_desc: Box::new(CoreTypeDesc::Ptyp_var(Box::new(Cow::Owned(keyword)))),
-                        ptyp_loc: loc,
-                        ptyp_attributes: Attributes::new(),
-                    };
-                    let typ_idx = p.arena_mut().push_core_type(typ);
-                    params.push((typ_idx, variance));
-                }
-                Token::Underscore => {
-                    // '_ is not valid - type param needs a name
-                    // Report position at the underscore, not the quote
-                    p.err_multiple(
-                        p.start_pos.clone(),
-                        p.start_pos.clone(),
-                        DiagnosticCategory::Message(
-                            "A type param consists of a singlequote followed by a name like `'a` or `'A`".to_string()
-                        ),
-                    );
-                    p.next();
-                    // Add placeholder for recovery - use empty string for type var
-                    let typ = CoreType {
-                        ptyp_desc: Box::new(CoreTypeDesc::Ptyp_var(Box::new(Cow::Borrowed("")))),
-                        ptyp_loc: p.mk_loc_idx_to_prev_end(param_start_idx),
-                        ptyp_attributes: Attributes::new(),
-                    };
-                    let typ_idx = p.arena_mut().push_core_type(typ);
-                    params.push((typ_idx, variance));
-                }
-                _ => {
-                    // Something else after singlequote (like '+ )
-                    // Report position at the invalid token, not the quote
-                    p.err_multiple(
-                        p.start_pos.clone(),
-                        p.start_pos.clone(),
-                        DiagnosticCategory::Message(
-                            "A type param consists of a singlequote followed by a name like `'a` or `'A`".to_string()
-                        ),
-                    );
-                    // Skip to next comma or closing >
-                    while p.token != Token::Comma
-                        && p.token != Token::GreaterThan
-                        && p.token != Token::Eof
-                    {
-                        p.next();
-                    }
-                    // Add placeholder for recovery - use empty string for type var
-                    let typ = CoreType {
-                        ptyp_desc: Box::new(CoreTypeDesc::Ptyp_var(Box::new(Cow::Borrowed("")))),
-                        ptyp_loc: p.mk_loc_idx_to_prev_end(param_start_idx),
-                        ptyp_attributes: Attributes::new(),
-                    };
-                    let typ_idx = p.arena_mut().push_core_type(typ);
-                    params.push((typ_idx, variance));
-                }
-            }
-        } else if p.token == Token::Underscore {
-            // Anonymous/wildcard type parameter: _
-            let loc = p.mk_loc_current();
-            p.next();
-            let typ = CoreType {
-                ptyp_desc: Box::new(CoreTypeDesc::Ptyp_any),
-                ptyp_loc: loc,
-                ptyp_attributes: Attributes::new(),
-            };
-            let typ_idx = p.arena_mut().push_core_type(typ);
-            params.push((typ_idx, variance));
-        } else if let Token::Lident(name) | Token::Uident(name) = &p.token {
-            // Missing singlequote: foo instead of 'foo
-            let name = name.to_string();
-            p.err(DiagnosticCategory::Message(format!(
-                "Type params start with a singlequote: '{}",
-                name
-            )));
-            let loc = p.mk_loc_current();
-            p.next();
-            // Add for recovery
-            let typ = CoreType {
-                ptyp_desc: Box::new(CoreTypeDesc::Ptyp_var(Box::new(Cow::Owned(name)))),
-                ptyp_loc: loc,
-                ptyp_attributes: Attributes::new(),
-            };
-            let typ_idx = p.arena_mut().push_core_type(typ);
-            params.push((typ_idx, variance));
-        }
-
-        if !p.optional(&Token::Comma) {
-            break;
-        }
-    }
-
+    p.leave_breadcrumb(Grammar::TypeParams);
+    p.next();
+    let params = super::core::parse_comma_delimited_region(
+        p,
+        Grammar::TypeParams,
+        Token::GreaterThan,
+        parse_type_param,
+    );
     p.expect(Token::GreaterThan);
     p.pop_diamond_mode();
+    p.eat_breadcrumb();
     params
+}
+
+/// OCaml `parse_type_param` (compiler/syntax/src/res_core.ml).
+fn parse_type_param(p: &mut Parser<'_>) -> Option<(CoreTypeIdx, Variance)> {
+    const TYPE_PARAM: &str =
+        "A type param consists of a singlequote followed by a name like `'a` or `'A`";
+    let variance = match p.token {
+        Token::Plus => {
+            p.next();
+            Variance::Covariant
+        }
+        Token::Minus => {
+            p.next();
+            Variance::Contravariant
+        }
+        _ => Variance::Invariant,
+    };
+    let (desc, loc) = match &p.token {
+        Token::SingleQuote => {
+            p.next();
+            let start_pos_idx = p.start_pos_idx();
+            let (ident, loc) = if p.token == Token::Eof {
+                p.err_unexpected();
+                (String::new(), p.mk_loc_idx_to_prev_end(start_pos_idx))
+            } else {
+                super::core::parse_ident(p, TYPE_PARAM, start_pos_idx)
+            };
+            (CoreTypeDesc::Ptyp_var(Box::new(Cow::Owned(ident))), loc)
+        }
+        Token::Underscore => {
+            let loc = p.mk_loc_current();
+            p.next();
+            (CoreTypeDesc::Ptyp_any, loc)
+        }
+        Token::Uident(name) | Token::Lident(name) => {
+            let name = name.to_string();
+            p.err(DiagnosticCategory::Message(format!(
+                "Type params start with a singlequote: '{name}"
+            )));
+            let start_pos_idx = p.start_pos_idx();
+            let (ident, loc) = super::core::parse_ident(p, TYPE_PARAM, start_pos_idx);
+            (CoreTypeDesc::Ptyp_var(Box::new(Cow::Owned(ident))), loc)
+        }
+        _ => return None,
+    };
+    let typ = CoreType {
+        ptyp_desc: Box::new(desc),
+        ptyp_loc: loc,
+        ptyp_attributes: Attributes::new(),
+    };
+    Some((p.arena_mut().push_core_type(typ), variance))
 }
 
 /// Parse old OCaml-style type parameters: ('a, 'b)
@@ -4674,31 +4590,13 @@ fn parse_external_value_description(
     outer_attrs: Attributes,
     loc_start_idx: PosIdx,
 ) -> (ValueDescription, Vec<TypeDeclaration>) {
-    let inner_attrs = parse_attributes(p);
-    let attrs = outer_attrs.concat(inner_attrs);
-
-    let name = match &p.token {
-        Token::Lident(n) => {
-            let n = n.clone();
-            let loc = p.mk_loc_current();
-            p.next();
-            let n_idx = p.arena_mut().push_interned_string(&n);
-            with_loc(n_idx, loc)
-        }
-        Token::String(s) => {
-            let n = format!("\"{}\"", s);
-            let loc = p.mk_loc_current();
-            p.next();
-            let n_idx = p.arena_mut().push_string(n);
-            with_loc(n_idx, loc)
-        }
-        _ => {
-            p.err(DiagnosticCategory::Lident(p.token.clone().into_owned()));
-            let err_idx = p.arena_mut().intern("error");
-            mknoloc(err_idx)
-        }
-    };
-    let name_text = p.arena().get_string(name.txt).to_string();
+    // OCaml `parse_external_def` (compiler/syntax/src/res_core.ml): attributes
+    // only precede `external`; the name is a plain `parse_lident`.
+    p.leave_breadcrumb(Grammar::External);
+    let attrs = outer_attrs;
+    let (name_text, name_loc) = super::core::parse_lident(p);
+    let n_idx = p.arena_mut().push_interned_string(&name_text);
+    let name = with_loc(n_idx, name_loc);
 
     p.expect_with_grammar(Token::Colon, Some(Grammar::TypeExpression));
 
@@ -4776,6 +4674,7 @@ fn parse_external_value_description(
         })
         .collect();
 
+    p.eat_breadcrumb();
     (vd, inline_types)
 }
 

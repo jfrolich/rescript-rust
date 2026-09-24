@@ -462,6 +462,37 @@ where
 /// 1. If token is Lident/Uident: return it
 /// 2. If token is a keyword on the same line: emit "keyword reserved" error, return keyword
 /// 3. Otherwise: emit the custom msg, advance and return empty string
+/// OCaml `parse_lident` / `recover_lident` (compiler/syntax/src/res_core.ml:660-695).
+pub fn parse_lident(p: &mut Parser<'_>) -> (String, LocIdx) {
+    let start_pos_idx = p.start_pos_idx();
+    match &p.token {
+        Token::Lident(ident) => {
+            let ident = ident.to_string();
+            p.next();
+            (ident, p.mk_loc_idx_to_prev_end(start_pos_idx))
+        }
+        Token::Eof => {
+            p.err_unexpected();
+            ("_".to_string(), p.mk_loc_idx_to_prev_end(start_pos_idx))
+        }
+        _ => {
+            let same_line_keyword =
+                p.token.is_keyword() && p.prev_end_pos.line == p.start_pos.line;
+            p.err(DiagnosticCategory::Lident(p.token.clone().into_owned()));
+            p.next();
+            if !same_line_keyword {
+                while !recover::should_abort_list_parse(p) && p.token != Token::Eof {
+                    p.next();
+                }
+                if matches!(p.token, Token::Lident(_)) {
+                    return parse_lident(p);
+                }
+            }
+            ("_".to_string(), p.mk_loc_idx_to_prev_end(start_pos_idx))
+        }
+    }
+}
+
 /// OCaml `parse_hash_ident` (compiler/syntax/src/res_core.ml:720-739), called
 /// after the `#` has been consumed. `start_pos_idx` is the position of the `#`.
 pub fn parse_hash_ident(p: &mut Parser<'_>, start_pos_idx: PosIdx) -> (String, LocIdx) {
