@@ -8620,16 +8620,17 @@ fn desugar_pipe(
     arena: &mut ParseArena,
 ) -> Expression {
     match &*f.pexp_desc {
-        // a -> `Variant becomes `Variant(a)
-        ExpressionDesc::Pexp_variant(inner) => {
-            let (ref label, ref _none) = **inner;
+        // a -> `Variant becomes `Variant(a); `{f with pexp_desc; pexp_loc = e.pexp_loc}`
+        // (ast_exp_apply.ml:88-91) keeps `f`'s attributes.
+        ExpressionDesc::Pexp_variant(inner) if inner.1.is_none() => {
+            let label = inner.0.clone();
             Expression {
                 pexp_desc: Box::new(ExpressionDesc::Pexp_variant(Box::new((
-                    label.clone(),
+                    label,
                     Some(arena.push_expr(a)),
                 )))),
                 pexp_loc: original.pexp_loc,
-                pexp_attributes: original.pexp_attributes.clone(),
+                pexp_attributes: f.pexp_attributes.clone(),
             }
         }
 
@@ -8640,7 +8641,7 @@ fn desugar_pipe(
                 Some(arena.push_expr(a)),
             )),
             pexp_loc: original.pexp_loc,
-            pexp_attributes: original.pexp_attributes.clone(),
+            pexp_attributes: f.pexp_attributes.clone(),
         },
 
         // a -> f(b, c) becomes f(a, b, c)
