@@ -1057,6 +1057,11 @@ fn collect_raw_js_warnings_from_structure_item(
         StructureItemDesc::Pstr_include(include_decl) => {
             collect_raw_js_warnings_from_mod_expr_idx(include_decl.pincl_mod, arena, warnings);
         }
+        StructureItemDesc::Pstr_modtype(mtd) => {
+            if let Some(mty) = mtd.pmtd_type {
+                collect_signature_warnings_from_mod_type_idx(mty, arena, warnings);
+            }
+        }
         StructureItemDesc::Pstr_extension(inner) => {
             let (extension, attrs) = &**inner;
             collect_unused_bs_attributes(attrs, arena, warnings);
@@ -9615,74 +9620,65 @@ fn expr_lident_name(expr_idx: ExprIdx, arena: &ParseArena) -> Option<String> {
     Some(arena.get_string(*name_idx).to_string())
 }
 
-fn record_field_action_config(
-    field: &ExpressionRecordField,
+/// `Ast_payload.ident_or_record_as_config` for `@deriving`
+/// (compiler/ml/ast_payload.ml:168-209, via
+/// Ast_attributes.process_derive_type). Shapes other than a single
+/// unqualified identifier or a record without `...` produce no actions (their
+/// warnings are reported by `unrecognized_config_record_warning`).
+fn deriving_config_actions(
+    payload: &Payload,
     arena: &ParseArena,
-) -> PpxResult<DeriveActionConfig> {
-    let Longident::Lident(name_idx) = arena.get_longident(field.lid.txt) else {
-        return Err(PpxError::at_loc(
-            field.lid.loc,
-            "Qualified label is not allowed",
-        ));
+) -> PpxResult<Vec<DeriveActionConfig>> {
+    let Payload::PStr(items) = payload else {
+        return Ok(Vec::new());
     };
-    let name = arena.get_string(*name_idx).to_string();
-    let config = if expr_lident_name(field.expr, arena).as_deref() == Some(name.as_str()) {
-        None
-    } else {
-        Some(field.expr)
+    let [item] = items.as_slice() else {
+        return Ok(Vec::new());
     };
-    Ok(DeriveActionConfig {
-        name,
-        name_loc: field.lid.loc,
-        config,
-    })
-}
-
-fn collect_deriving_expr_actions(
-    expr_idx: ExprIdx,
-    arena: &ParseArena,
-    actions: &mut Vec<DeriveActionConfig>,
-) -> PpxResult<()> {
-    let expr = arena.get_expr(expr_idx);
+    let StructureItemDesc::Pstr_eval(inner) = &*item.pstr_desc else {
+        return Ok(Vec::new());
+    };
+    let expr = arena.get_expr(inner.0);
     match &*expr.pexp_desc {
-        ExpressionDesc::Pexp_ident(lid_loc) => {
-            let Longident::Lident(name_idx) = arena.get_longident(lid_loc.txt) else {
-                return Ok(());
-            };
-            actions.push(DeriveActionConfig {
+        ExpressionDesc::Pexp_record(record) => {
+            let (fields, with_obj) = &**record;
+            if with_obj.is_some() {
+                return Ok(Vec::new());
+            }
+            fields
+                .iter()
+                .map(|field| {
+                    let Longident::Lident(name_idx) = arena.get_longident(field.lid.txt) else {
+                        return Err(PpxError::at_loc(
+                            expr.pexp_loc,
+                            "Qualified label is not allowed",
+                        ));
+                    };
+                    let name = arena.get_string(*name_idx).to_string();
+                    let config = if expr_lident_name(field.expr, arena).as_deref()
+                        == Some(name.as_str())
+                    {
+                        None
+                    } else {
+                        Some(field.expr)
+                    };
+                    Ok(DeriveActionConfig {
+                        name,
+                        name_loc: field.lid.loc,
+                        config,
+                    })
+                })
+                .collect()
+        }
+        ExpressionDesc::Pexp_ident(lid_loc) => match arena.get_longident(lid_loc.txt) {
+            Longident::Lident(name_idx) => Ok(vec![DeriveActionConfig {
                 name: arena.get_string(*name_idx).to_string(),
                 name_loc: lid_loc.loc,
                 config: None,
-            });
-            Ok(())
-        }
-        ExpressionDesc::Pexp_tuple(exprs) => {
-            for expr_idx in exprs.iter() {
-                collect_deriving_expr_actions(*expr_idx, arena, actions)?;
-            }
-            Ok(())
-        }
-        ExpressionDesc::Pexp_record(inner) => {
-            let (fields, _base) = &**inner;
-            for field in fields {
-                actions.push(record_field_action_config(field, arena)?);
-            }
-            Ok(())
-        }
-        ExpressionDesc::Pexp_apply(inner) => {
-            let PexpApply { funct, args, .. } = &**inner;
-            let Some(name) = expr_lident_name(*funct, arena) else {
-                return Ok(());
-            };
-            let name_loc = arena.get_expr(*funct).pexp_loc;
-            actions.push(DeriveActionConfig {
-                name,
-                name_loc,
-                config: args.first().map(|(_, expr_idx)| *expr_idx),
-            });
-            Ok(())
-        }
-        _ => Ok(()),
+            }]),
+            _ => Ok(Vec::new()),
+        },
+        _ => Ok(Vec::new()),
     }
 }
 
@@ -9778,16 +9774,7 @@ fn validate_js_converter_config(expr_idx: ExprIdx, arena: &ParseArena) -> PpxRes
 }
 
 fn validate_deriving_attr_payload(payload: &Payload, arena: &ParseArena) -> PpxResult<()> {
-    let Some(items) = payload_str_items(payload) else {
-        return Ok(());
-    };
-    let mut actions = Vec::new();
-    for item in items {
-        if let StructureItemDesc::Pstr_eval(eval_inner) = &*item.pstr_desc {
-            let (expr_idx, _) = &**eval_inner;
-            collect_deriving_expr_actions(*expr_idx, arena, &mut actions)?;
-        }
-    }
+    let actions = deriving_config_actions(payload, arena)?;
 
     if actions.iter().any(|action| action.name == "abstract") && actions.len() > 1 {
         if let Some(action) = actions.iter().find(|action| action.name == "abstract") {
@@ -9901,6 +9888,22 @@ fn collect_deriving_not_applicable_warnings(
     warnings: &mut Vec<PpxWarning>,
     context: DerivingExpansionContext,
 ) {
+    // `Ast_attributes.process_derive_type` reads the first `@deriving` of the
+    // last declaration through `Ast_payload.ident_or_record_as_config`,
+    // which warns about payloads it cannot use (ast_payload.ml:194-209).
+    if let Some(attr) = tdcls.last().and_then(|tdcl| {
+        tdcl.ptype_attributes
+            .iter()
+            .find(|(name, _)| arena.get_string(name.txt) == "deriving")
+    }) && let Some((loc, message)) = return_wrapper_config_warning(&attr.1, arena, attr.0.loc)
+    {
+        warnings.push(PpxWarning {
+            loc,
+            warning: Warning::BsDeriveWarning {
+                message: message.to_string(),
+            },
+        });
+    }
     if validate_deriving_accessors_for_tdcls(tdcls, arena).is_err() {
         return;
     }
@@ -9952,15 +9955,20 @@ fn parse_deriving_actions(
         let name = arena.get_string(name_loc.txt);
 
         if name == "deriving" {
-            // Parse the payload to extract actions
-            if let Some(items) = payload_str_items(payload) {
-                // @deriving(accessors) or @deriving({jsConverter: newType})
-                for item in items {
-                    if let StructureItemDesc::Pstr_eval(eval_inner) = &*item.pstr_desc {
-                        let (ref expr, _) = **eval_inner;
-                        let expr_desc = arena.get_expr(*expr).pexp_desc.clone();
-                        parse_deriving_expr(&expr_desc, &mut actions, arena);
-                    }
+            for config in deriving_config_actions(payload, arena).unwrap_or_default() {
+                match config.name.as_str() {
+                    "accessors" => actions.push(DeriveAction::Accessors),
+                    "jsConverter" => actions.push(DeriveAction::JsConverter {
+                        new_type: config
+                            .config
+                            .is_some_and(|expr| check_new_type_config(arena.get_expr(expr), arena)),
+                    }),
+                    "abstract" => actions.push(DeriveAction::Abstract {
+                        light: config
+                            .config
+                            .is_some_and(|expr| check_abstract_light_config(arena.get_expr(expr), arena)),
+                    }),
+                    _ => {}
                 }
             }
         } else {
@@ -9973,87 +9981,6 @@ fn parse_deriving_actions(
     remaining_attrs.reverse();
 
     (actions, remaining_attrs)
-}
-
-/// Parse a deriving expression to extract actions
-fn parse_deriving_expr(
-    expr_desc: &ExpressionDesc,
-    actions: &mut Vec<DeriveAction>,
-    arena: &ParseArena,
-) {
-    match expr_desc {
-        // Simple identifier: @deriving(accessors)
-        ExpressionDesc::Pexp_ident(lid_loc) => {
-            let lid = arena.get_longident(lid_loc.txt);
-            if let Longident::Lident(s) = lid {
-                let name = arena.get_string(*s);
-                match name {
-                    "accessors" => actions.push(DeriveAction::Accessors),
-                    "jsConverter" => actions.push(DeriveAction::JsConverter { new_type: false }),
-                    "abstract" => actions.push(DeriveAction::Abstract { light: false }),
-                    _ => {}
-                }
-            }
-        }
-        // Tuple of identifiers: @deriving(accessors, jsConverter)
-        ExpressionDesc::Pexp_tuple(exprs) => {
-            for expr in exprs.iter() {
-                let expr_desc = arena.get_expr(*expr).pexp_desc.clone();
-                parse_deriving_expr(&expr_desc, actions, arena);
-            }
-        }
-        // Record: @deriving({jsConverter: newType})
-        ExpressionDesc::Pexp_record(inner) => {
-            let (ref fields, ref _none) = **inner;
-            for field in fields {
-                let lid = arena.get_longident(field.lid.txt);
-                if let Longident::Lident(s) = lid {
-                    let field_name = arena.get_string(*s);
-                    match field_name {
-                        "jsConverter" => {
-                            // Check if value is `newType` or `{newType: true/false}`
-                            let field_expr = arena.get_expr(field.expr).clone();
-                            let new_type = check_new_type_config(&field_expr, arena);
-                            actions.push(DeriveAction::JsConverter { new_type });
-                        }
-                        "abstract" => {
-                            let field_expr = arena.get_expr(field.expr).clone();
-                            let light = check_abstract_light_config(&field_expr, arena);
-                            actions.push(DeriveAction::Abstract { light });
-                        }
-                        "accessors" => {
-                            actions.push(DeriveAction::Accessors);
-                        }
-                        _ => {}
-                    }
-                }
-            }
-        }
-        // Constructor application for polymorphic variants like @deriving(jsConverter)
-        ExpressionDesc::Pexp_apply(inner) => {
-            let PexpApply {
-                ref funct,
-                ref args,
-                ..
-            } = **inner;
-            // Check if it's a simple ident being applied
-            let funct_expr = arena.get_expr(*funct);
-            if let ExpressionDesc::Pexp_ident(lid_loc) = &*funct_expr.pexp_desc {
-                let lid = arena.get_longident(lid_loc.txt);
-                if let Longident::Lident(s) = lid {
-                    let name = arena.get_string(*s);
-                    if name == "jsConverter" && !args.is_empty() {
-                        // @deriving(jsConverter({newType: true}))
-                        let (_, arg_expr) = &args[0];
-                        let cfg_expr = arena.get_expr(*arg_expr).clone();
-                        let new_type = check_new_type_config(&cfg_expr, arena);
-                        actions.push(DeriveAction::JsConverter { new_type });
-                    }
-                }
-            }
-        }
-        _ => {}
-    }
 }
 
 /// Check if abstract config is `light` in @deriving({abstract: light})
