@@ -4006,19 +4006,41 @@ fn collect_free_type_variables(
     result: &mut HashSet<TypeExprRef>,
     visited: &mut HashSet<TypeExprRef>,
 ) {
+    // `Ctype.free_vars_rec` (compiler/ml/ctype.ml:370-395) without an env.
     let ty = ctx.repr(ty);
     if !visited.insert(ty) {
         return;
     }
-    if matches!(*ctx.borrow_desc(ty), TypeDesc::Tvar(_)) {
-        result.insert(ty);
-        return;
-    }
-
-    let mut children = Vec::new();
-    crate::types::btype::iter_type_expr(ctx, ty, |child| children.push(child));
-    for child in children {
-        collect_free_type_variables(ctx, child, result, visited);
+    let desc = ctx.get_desc(ty).clone();
+    match desc {
+        TypeDesc::Tvar(_) => {
+            result.insert(ty);
+        }
+        TypeDesc::Tobject { fields, .. } => {
+            collect_free_type_variables(ctx, fields, result, visited);
+        }
+        TypeDesc::Tfield { typ, rest, .. } => {
+            collect_free_type_variables(ctx, typ, result, visited);
+            collect_free_type_variables(ctx, rest, result, visited);
+        }
+        TypeDesc::Tvariant(row) => {
+            let row = crate::types::btype::row_repr(ctx, &row);
+            let mut children = Vec::new();
+            crate::types::btype::iter_row(ctx, &row, |child| children.push(child));
+            for child in children {
+                collect_free_type_variables(ctx, child, result, visited);
+            }
+            if !crate::types::btype::static_row(ctx, &row) {
+                collect_free_type_variables(ctx, row.row_more, result, visited);
+            }
+        }
+        _ => {
+            let mut children = Vec::new();
+            crate::types::btype::iter_type_expr(ctx, ty, |child| children.push(child));
+            for child in children {
+                collect_free_type_variables(ctx, child, result, visited);
+            }
+        }
     }
 }
 
@@ -4160,7 +4182,12 @@ fn check_extension_constructor_variance_requirements(
             .get(&ctx.repr(param))
             .copied()
             .unwrap_or_else(TypesVariance::null);
-        let expected = required.get(idx).copied().unwrap_or((true, true, false));
+        // `compute_variance_type` treats a requirement with neither
+        // polarity as unrestricted (typedecl.ml:1123-1127).
+        let expected = match required.get(idx).copied().unwrap_or((true, true, false)) {
+            (false, false, i) => (true, true, i),
+            requirement => requirement,
+        };
         let (actual_co, actual_cn) = actual_variance.get_upper();
         let actual = (actual_co, actual_cn, actual_variance.is_injective());
         if (actual_co && !expected.0) || (actual_cn && !expected.1) || (!actual.2 && expected.2) {
@@ -18307,16 +18334,25 @@ fn find_unbound_type_var_name(
                 .or_else(|| find_unbound_type_var_name(ctx, *rest, allowed, visited))
         }
         TypeDesc::Tvariant(row) => {
-            let field_name = row.row_fields.iter().find_map(|(_, field)| match field {
-                crate::types::RowField::Rpresent(Some(ty)) => {
-                    find_unbound_type_var_name(ctx, *ty, allowed, visited)
+            // `free_vars_rec` skips the row variable of a static row
+            // (compiler/ml/ctype.ml:391-394).
+            let row = crate::types::btype::row_repr(ctx, row);
+            let field_name = row.row_fields.iter().find_map(|(_, field)| {
+                match crate::types::btype::row_field_repr(ctx, field) {
+                    crate::types::RowField::Rpresent(Some(ty)) => {
+                        find_unbound_type_var_name(ctx, ty, allowed, visited)
+                    }
+                    crate::types::RowField::Reither { types, .. } => types
+                        .iter()
+                        .find_map(|ty| find_unbound_type_var_name(ctx, *ty, allowed, visited)),
+                    _ => None,
                 }
-                crate::types::RowField::Reither { types, .. } => types
-                    .iter()
-                    .find_map(|ty| find_unbound_type_var_name(ctx, *ty, allowed, visited)),
-                _ => None,
             });
-            field_name.or_else(|| find_unbound_type_var_name(ctx, row.row_more, allowed, visited))
+            field_name.or_else(|| {
+                (!crate::types::btype::static_row(ctx, &row))
+                    .then(|| find_unbound_type_var_name(ctx, row.row_more, allowed, visited))
+                    .flatten()
+            })
         }
         TypeDesc::Tnil => None,
     }
