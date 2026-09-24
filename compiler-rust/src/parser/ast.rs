@@ -527,7 +527,9 @@ pub enum PatternDesc {
     /// Variant: `\`A` or `\`A(P)`.
     Ppat_variant(Box<(Label, Option<PatIdx>)>),
     /// Record: `{l1: P1, ..., ln: Pn}`.
-    Ppat_record(Box<(Vec<PatternRecordField>, ClosedFlag)>),
+    /// Record: `{l1: P1, ...}`, closed flag, and an optional `...Type.t as name` rest
+    /// (compiler/ml/parsetree.ml:164-168).
+    Ppat_record(Box<(Vec<PatternRecordField>, ClosedFlag, Option<RecordPatRest>)>),
     /// Array: `[P1, ..., Pn]`.
     Ppat_array(Box<Vec<PatIdx>>),
     /// Or-pattern: `P1 | P2`.
@@ -557,8 +559,7 @@ pub struct PatternRecordField {
     pub opt: bool,
 }
 
-/// Record-rest pattern binding (`...Type.t as name`), stored in a sparse
-/// arena side table keyed by the record pattern's location.
+/// Record-rest pattern binding (`...Type.t as name`).
 /// Mirrors OCaml compiler/ml/parsetree.ml:164-168 `record_pat_rest`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RecordPatRest {

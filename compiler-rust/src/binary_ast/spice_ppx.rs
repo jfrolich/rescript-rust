@@ -2588,6 +2588,7 @@ fn variants_generate_encoder_case(
                 ppat_desc: Box::new(PatternDesc::Ppat_record(Box::new((
                     pattern_fields,
                     ClosedFlag::Closed,
+                    None,
                 )))),
                 ppat_loc: pcd_loc,
                 ppat_attributes: Attributes::new(),
@@ -4426,18 +4427,9 @@ impl<'a> LocCloner<'a> {
     }
 
     fn pattern(&mut self, pat: &mut Pattern) {
-        let record_rest = self.arena.record_pat_rest(pat.ppat_loc).cloned();
         self.loc(&mut pat.ppat_loc);
         self.attributes(&mut pat.ppat_attributes);
         self.pattern_desc(&mut pat.ppat_desc);
-        if let Some(mut rest) = record_rest {
-            self.loc(&mut rest.rest_loc);
-            self.located(&mut rest.rest_name);
-            if let Some(typ) = &mut rest.rest_type {
-                self.core_type_idx(typ);
-            }
-            self.arena.set_record_pat_rest(pat.ppat_loc, rest);
-        }
     }
 
     fn pattern_desc(&mut self, desc: &mut PatternDesc) {
@@ -4468,9 +4460,16 @@ impl<'a> LocCloner<'a> {
                 }
             }
             PatternDesc::Ppat_record(inner) => {
-                let (ref mut fields, _) = **inner;
+                let (ref mut fields, _, ref mut record_rest) = **inner;
                 for field in fields.iter_mut() {
                     self.pattern_record_field(field);
+                }
+                if let Some(rest) = record_rest {
+                    self.loc(&mut rest.rest_loc);
+                    self.located(&mut rest.rest_name);
+                    if let Some(typ) = &mut rest.rest_type {
+                        self.core_type_idx(typ);
+                    }
                 }
             }
             PatternDesc::Ppat_or(lhs, rhs) => {

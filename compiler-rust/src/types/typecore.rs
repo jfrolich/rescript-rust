@@ -4181,7 +4181,7 @@ fn type_pattern_inner(
         }
 
         PD::Ppat_record(inner) => {
-            let (ref fields, ref closed_flag) = **inner;
+            let (ref fields, ref closed_flag, ref record_rest) = **inner;
             // Record pattern: {name, age}
             type_pattern_record(
                 tctx,
@@ -4189,6 +4189,7 @@ fn type_pattern_inner(
                 loc,
                 fields,
                 *closed_flag,
+                record_rest.as_ref(),
                 expected_ty,
                 mode,
                 allow_existentials,
@@ -5398,6 +5399,7 @@ fn type_pattern_record(
     loc: LocIdx,
     fields: &[crate::parser::ast::PatternRecordField],
     closed_flag: crate::parser::ast::ClosedFlag,
+    record_rest: Option<&crate::parser::ast::RecordPatRest>,
     expected_ty: TypeExprRef,
     mode: PatternMode,
     allow_existentials: bool,
@@ -5407,7 +5409,7 @@ fn type_pattern_record(
 ) -> TypeCoreResult<Pattern> {
     let ctx = tctx.type_ctx;
     let has_dict_pattern_attr = has_dict_pattern_attribute(tctx.arena, &pat.ppat_attributes);
-    let record_rest = tctx.arena.record_pat_rest(loc).cloned();
+    let record_rest = record_rest.cloned();
     let fields = qualify_unqualified_pattern_record_fields(tctx, fields);
 
     // OCaml: dict patterns are forced to type dict<'a>, independent of expected_ty shape.
@@ -12172,6 +12174,7 @@ fn materialize_unused_witness_inner(
                 ParsedPatternDesc::Ppat_record(Box::new((
                     fields,
                     crate::parser::ast::ClosedFlag::Open,
+                    None,
                 ))),
             )
         }
@@ -33590,7 +33593,7 @@ fn try_comptime_match(
                 let arg_pat = tctx.arena.get_pat(*arg_pat_idx);
                 // Record({fields, name, ...}) — the arg is a record pattern
                 if let crate::parser::ast::PatternDesc::Ppat_record(inner) = &*arg_pat.ppat_desc {
-                    let (ref fields, _) = **inner;
+                    let (ref fields, _, _) = **inner;
                     bind_comptime_record_fields(tctx, &mut body_env, fields, &type_info);
                 }
             }
@@ -34394,7 +34397,7 @@ pub fn evaluate_type_builder(
                             if let crate::parser::ast::PatternDesc::Ppat_record(rec_inner) =
                                 &*arg_pat.ppat_desc
                             {
-                                let (ref fields, _) = **rec_inner;
+                                let (ref fields, _, _) = **rec_inner;
                                 bind_comptime_record_fields(
                                     tctx,
                                     &mut branch_env,

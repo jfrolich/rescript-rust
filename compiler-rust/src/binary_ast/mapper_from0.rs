@@ -652,7 +652,7 @@ impl<'a> Mapper<'a> {
                         }
                     })
                     .collect();
-                current::PatternDesc::Ppat_record(Box::new((fields, map_closed_flag(closed))))
+                current::PatternDesc::Ppat_record(Box::new((fields, map_closed_flag(closed), None)))
             }
             pt0::PatternDesc::Array(pl) => current::PatternDesc::Ppat_array(Box::new(
                 pl.iter().map(|p| self.push_pat(p)).collect(),

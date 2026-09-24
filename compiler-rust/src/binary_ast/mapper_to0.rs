@@ -691,7 +691,7 @@ impl<'a> Mapper<'a> {
                 )
             }
             current::PatternDesc::Ppat_record(inner) => {
-                let (ref fields, ref flag) = **inner;
+                let (ref fields, ref flag, _) = **inner;
                 // Use RecordElement with 3 fields (lid, x, opt) for current parsetree format
                 pt0::PatternDesc::Record(
                     fields

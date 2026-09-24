@@ -849,7 +849,7 @@ impl<'a> DependencyCollector<'a> {
                 }
             }
             PatternDesc::Ppat_record(inner) => {
-                let (ref fields, ref _closed) = **inner;
+                let (ref fields, ref _closed, ref record_rest) = **inner;
                 for field in fields {
                     self.add_lident_idx(field.lid.txt);
                     // field.pat is PatIdx
@@ -857,9 +857,8 @@ impl<'a> DependencyCollector<'a> {
                 }
                 // OCaml Depend visits the rest pattern's type annotation
                 // (compiler/ml/depend.ml:187): `...M.t as rest` records a
-                // dependency on M. The rest row lives in a sparse side table
-                // keyed by the pattern location.
-                if let Some(rest) = self.arena.record_pat_rest(pat.ppat_loc)
+                // dependency on M.
+                if let Some(rest) = record_rest
                     && let Some(rest_type) = rest.rest_type
                 {
                     self.add_core_type_idx(rest_type);

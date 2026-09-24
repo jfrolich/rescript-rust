@@ -626,6 +626,7 @@ fn transform_react_component_binding(
             ppat_desc: Box::new(PatternDesc::Ppat_record(Box::new((
                 patterns_with_label,
                 ClosedFlag::Open,
+                None,
             )))),
             ppat_loc: empty_loc(),
             ppat_attributes: Attributes::new(),

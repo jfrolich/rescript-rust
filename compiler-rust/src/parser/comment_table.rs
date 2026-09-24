@@ -402,6 +402,7 @@ pub enum Node<'a> {
     Pattern(&'a Pattern),
     PatternIdx(PatIdx),
     PatternRecordRow(&'a Loc<LidentIdx>, PatIdx),
+    PatternRecordRest(&'a crate::parser::ast::RecordPatRest),
     RowField(&'a RowField),
     SignatureItem(&'a SignatureItem),
     StructureItem(&'a StructureItem),
@@ -478,6 +479,7 @@ impl<'a> Node<'a> {
             }
             Node::Pattern(p) => p.ppat_loc,
             Node::PatternIdx(idx) => arena.get_pat(*idx).ppat_loc,
+            Node::PatternRecordRest(rest) => rest.rest_loc,
             Node::PatternRecordRow(li, pat_idx) => {
                 let p = arena.get_pat(*pat_idx);
                 // For punned patterns, li.loc and p.ppat_loc are the same
@@ -775,6 +777,7 @@ fn walk_node(
             let p = arena.get_pat(*pat_idx).clone();
             walk_pattern_record_row(li, &p, t, comments, arena);
         }
+        Node::PatternRecordRest(rest) => walk_pattern_record_rest(rest, t, comments, arena),
         Node::RowField(rf) => walk_row_field(rf, t, comments, arena),
         Node::SignatureItem(si) => walk_signature_item(si, t, comments, arena),
         Node::StructureItem(si) => walk_structure_item(si, t, comments, arena),
@@ -3003,11 +3006,14 @@ fn walk_pattern(
             walk_list(&nodes, t, comments, arena);
         }
         PatternDesc::Ppat_record(inner) => {
-            let (ref fields, _) = **inner;
-            let nodes: Vec<Node<'_>> = fields
+            let (ref fields, _, ref record_rest) = **inner;
+            let mut nodes: Vec<Node<'_>> = fields
                 .iter()
                 .map(|f| Node::PatternRecordRow(&f.lid, f.pat))
                 .collect();
+            if let Some(rest) = record_rest {
+                nodes.push(Node::PatternRecordRest(rest));
+            }
             walk_list(&nodes, t, comments, arena);
         }
         PatternDesc::Ppat_or(_, _) => {
@@ -3087,6 +3093,39 @@ fn walk_pattern_record_row(
     t.attach_leading(pat.ppat_loc, before, arena);
     walk_pattern(&pat, t, inside, arena);
     t.attach_trailing(pat.ppat_loc, after, arena);
+}
+
+/// OCaml `walk_pattern_record_rest` (res_comments_table.ml:2115-2133).
+fn walk_pattern_record_rest(
+    rest: &crate::parser::ast::RecordPatRest,
+    t: &mut CommentTable,
+    comments: Vec<Comment>,
+    arena: &mut ParseArena,
+) {
+    fn attach_rest_name(
+        rest: &crate::parser::ast::RecordPatRest,
+        t: &mut CommentTable,
+        comments: Vec<Comment>,
+        arena: &mut ParseArena,
+    ) {
+        let (before_name, after_name) =
+            partition_leading_trailing(comments, rest.rest_name.loc, arena);
+        t.attach_leading(rest.rest_name.loc, before_name, arena);
+        t.attach_trailing(rest.rest_name.loc, after_name, arena);
+    }
+    match rest.rest_type {
+        None => attach_rest_name(rest, t, comments, arena),
+        Some(typ) => {
+            let typ = arena.get_core_type(typ).clone();
+            let (before_typ, inside_typ, after_typ) =
+                partition_by_loc(comments, typ.ptyp_loc, arena);
+            t.attach_leading(typ.ptyp_loc, before_typ, arena);
+            walk_core_type(&typ, t, inside_typ, arena);
+            let (after_typ, remaining) = partition_adjacent_trailing(typ.ptyp_loc, after_typ, arena);
+            t.attach_trailing(typ.ptyp_loc, after_typ, arena);
+            attach_rest_name(rest, t, remaining, arena);
+        }
+    }
 }
 
 fn walk_core_type(

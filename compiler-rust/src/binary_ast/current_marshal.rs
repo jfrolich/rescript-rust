@@ -1124,8 +1124,7 @@ impl Marshal for Pattern {
     fn marshal(&self, w: &mut MarshalWriter<'_>) {
         w.write_block_header(0, 3);
         if let PatternDesc::Ppat_record(inner) = &*self.ppat_desc {
-            let (fields, flag) = &**inner;
-            let rest = w.get_arena().record_pat_rest(self.ppat_loc).cloned();
+            let (fields, flag, rest) = &**inner;
             w.write_block_header(7, 3);
             fields.marshal(w);
             flag.marshal(w);
@@ -1211,10 +1210,11 @@ impl Marshal for PatternDesc {
                 pat.marshal(w);
             }
             PatternDesc::Ppat_record(inner) => {
-                let (ref fields, ref flag) = **inner;
-                w.write_block_header(7, 2);
+                let (ref fields, ref flag, ref rest) = **inner;
+                w.write_block_header(7, 3);
                 fields.marshal(w);
                 flag.marshal(w);
+                rest.marshal(w);
             }
             PatternDesc::Ppat_array(pats) => {
                 w.write_block_header(8, 1);

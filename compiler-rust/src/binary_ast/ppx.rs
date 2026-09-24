@@ -1585,7 +1585,7 @@ fn collect_unused_bs_attributes_from_pat_idx(
             }
         }
         PatternDesc::Ppat_record(inner) => {
-            let (fields, _) = &**inner;
+            let (fields, _, _) = &**inner;
             for field in fields.iter() {
                 collect_unused_bs_attributes_from_pat_idx(field.pat, arena, warnings);
             }
@@ -7909,7 +7909,7 @@ fn flatten_value_binding(vb: &ValueBinding, arena: &mut ParseArena) -> Vec<Value
     if let (PatternDesc::Ppat_record(record_inner), ExpressionDesc::Pexp_pack(mod_expr_idx)) =
         (&*pvb_pat.ppat_desc, &*pvb_expr.pexp_desc)
     {
-        let (ref lid_pats, _) = **record_inner;
+        let (ref lid_pats, _, _) = **record_inner;
         let mod_expr = arena.get_mod_expr(*mod_expr_idx);
         let module_lid = if let ModuleExprDesc::Pmod_ident(lid) = &*mod_expr.pmod_desc {
             *lid
@@ -8045,7 +8045,18 @@ fn rewrite_pattern(pat: &Pattern, arena: &mut ParseArena) -> Pattern {
 
         // Record pattern: recurse into all field patterns
         PatternDesc::Ppat_record(inner) => {
-            let (ref fields, ref flag) = **inner;
+            let (ref fields, ref flag, ref record_rest) = **inner;
+            let record_rest = record_rest.as_ref().map(|rest| {
+                let rest_type = rest.rest_type.map(|typ| {
+                    let typ = arena.get_core_type(typ).clone();
+                    let typ = rewrite_core_type(&typ, arena);
+                    arena.push_core_type(typ)
+                });
+                crate::parser::ast::RecordPatRest {
+                    rest_type,
+                    ..rest.clone()
+                }
+            });
             PatternDesc::Ppat_record(Box::new((
                 fields
                     .iter()
@@ -8060,6 +8071,7 @@ fn rewrite_pattern(pat: &Pattern, arena: &mut ParseArena) -> Pattern {
                     })
                     .collect(),
                 *flag,
+                record_rest,
             )))
         }
 
@@ -13276,7 +13288,7 @@ fn validate_pattern_method_attribute_errors(
             Ok(())
         }
         PatternDesc::Ppat_record(inner) => {
-            let (fields, _closed) = &**inner;
+            let (fields, _closed, _) = &**inner;
             for field in fields {
                 validate_pattern_idx_method_attribute_errors(field.pat, arena)?;
             }
@@ -13887,7 +13899,7 @@ fn validate_pattern_js_string_errors(pat_idx: PatIdx, arena: &mut ParseArena) ->
             Ok(())
         }
         PatternDesc::Ppat_record(inner) => {
-            let (fields, _) = &**inner;
+            let (fields, _, _) = &**inner;
             for field in fields {
                 validate_pattern_js_string_errors(field.pat, arena)?;
             }
@@ -14682,14 +14694,14 @@ fn validate_module_record_pattern_binding_error(
 
     // compiler/frontend/ast_tuple_pattern_flatten.ml rejects record-rest
     // module destructuring before attempting to project any module fields.
-    if let Some(rest) = arena.record_pat_rest(pat.ppat_loc) {
+    if let Some(rest) = &record_inner.2 {
         return Err(PpxError::at_loc(
             rest.rest_loc,
             "Record rest patterns are not supported when destructuring modules. Bind the module fields explicitly.",
         ));
     }
 
-    let (lid_pats, _) = &**record_inner;
+    let (lid_pats, _, _) = &**record_inner;
     for field in lid_pats {
         if !matches!(arena.get_longident(field.lid.txt), Longident::Lident(_)) {
             return Err(PpxError::at_loc(

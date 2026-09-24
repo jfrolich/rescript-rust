@@ -1032,7 +1032,7 @@ fn pattern_has_string_literal(
                 || pattern_has_string_literal(arena.get_pat(*rhs), value, arena)
         }
         PD::Ppat_record(inner) => {
-            let (rows, _) = &**inner;
+            let (rows, _, _) = &**inner;
             rows.iter()
                 .any(|row| pattern_has_string_literal(arena.get_pat(row.pat), value, arena))
         }

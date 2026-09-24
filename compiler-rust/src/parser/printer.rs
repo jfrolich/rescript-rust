@@ -5466,12 +5466,12 @@ pub fn print_pattern(
         }
         // {field1, field2: pat, ...spread} or dict{"key": pat}
         PatternDesc::Ppat_record(inner) => {
-            let (ref fields, ref closed) = **inner;
+            let (ref fields, ref closed, ref record_rest) = **inner;
             // Check if this is a dict pattern (has res.dictPattern attribute)
             if parsetree_viewer::has_dict_pattern_attribute(arena, &pat.ppat_attributes) {
                 print_dict_pattern(state, fields, cmt_tbl, arena)
             } else {
-                print_record_pattern(state, fields, &closed, cmt_tbl, arena)
+                print_record_pattern(state, fields, &closed, record_rest.as_ref(), cmt_tbl, arena)
             }
         }
         // p | p
@@ -5735,6 +5735,7 @@ fn print_record_pattern(
     state: &PrinterState,
     fields: &[PatternRecordField],
     closed: &ClosedFlag,
+    record_rest: Option<&RecordPatRest>,
     cmt_tbl: &mut CommentTable,
     arena: &ParseArena,
 ) -> Doc {
@@ -5802,9 +5803,30 @@ fn print_record_pattern(
             .collect(),
     );
 
-    let open_doc = match closed {
-        ClosedFlag::Closed => Doc::nil(),
-        ClosedFlag::Open => {
+    // res_printer.ml Ppat_record: a rest row replaces the `_` of an open pattern.
+    let open_doc = match (record_rest, closed) {
+        (Some(rest), _) => {
+            let rest_doc = match rest.rest_type {
+                Some(typ) => Doc::concat(vec![
+                    Doc::text("..."),
+                    print_typ_expr(state, arena.get_core_type(typ), cmt_tbl, arena),
+                    Doc::text(" as "),
+                    print_string_loc(&rest.rest_name, cmt_tbl, arena),
+                ]),
+                None => Doc::concat(vec![
+                    Doc::text("..."),
+                    print_string_loc(&rest.rest_name, cmt_tbl, arena),
+                ]),
+            };
+            let rest_doc = print_comments(rest_doc, cmt_tbl, rest.rest_loc, arena);
+            if fields.is_empty() {
+                rest_doc
+            } else {
+                Doc::concat(vec![Doc::text(","), Doc::line(), rest_doc])
+            }
+        }
+        (None, ClosedFlag::Closed) => Doc::nil(),
+        (None, ClosedFlag::Open) => {
             if fields.is_empty() {
                 Doc::text("_")
             } else {

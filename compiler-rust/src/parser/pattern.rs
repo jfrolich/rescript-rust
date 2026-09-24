@@ -1478,9 +1478,7 @@ fn parse_record_pattern(p: &mut Parser<'_>) -> Pattern {
     // OCaml folds the reversed row list: the last rest in source wins, and
     // earlier rests report errors from their own start through the current token.
     let mut record_rests = record_rests.into_iter().rev();
-    if let Some(record_rest) = record_rests.next() {
-        p.arena_mut().set_record_pat_rest(loc, record_rest);
-    }
+    let record_rest = record_rests.next();
     for duplicate in record_rests {
         p.err_at(
             p.loc_start(duplicate.rest_loc),
@@ -1530,7 +1528,7 @@ fn parse_record_pattern(p: &mut Parser<'_>) -> Pattern {
     }
 
     Pattern {
-        ppat_desc: Box::new(PatternDesc::Ppat_record(Box::new((fields, closed)))),
+        ppat_desc: Box::new(PatternDesc::Ppat_record(Box::new((fields, closed, record_rest)))),
         ppat_loc: loc,
         ppat_attributes: Attributes::new(),
     }
@@ -1582,6 +1580,7 @@ fn parse_dict_pattern(p: &mut Parser<'_>, start_pos_idx: PosIdx) -> Pattern {
         ppat_desc: Box::new(PatternDesc::Ppat_record(Box::new((
             fields,
             ClosedFlag::Open,
+            None,
         )))),
         ppat_loc: loc,
         ppat_attributes: Attributes::from_vec(vec![(

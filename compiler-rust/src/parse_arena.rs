@@ -516,11 +516,6 @@ pub struct ParseArena {
     /// Sparse side table for record-rest pattern bindings (`...T as r`),
     /// keyed by the record pattern's own location index.
     ///
-    /// OCaml compiler/ml/parsetree.ml:164-168 stores `record_pat_rest` inline
-    /// in `Ppat_record`. The arena parser keeps it in a sparse side table keyed
-    /// by the record pattern's `ppat_loc` (a stable arena index available both
-    /// at parse time and during type checking).
-    pat_record_rests: HashMap<LocIdx, crate::parser::ast::RecordPatRest>,
     /// OCaml `Used_attributes` (compiler/ml/used_attributes.ml): attribute name
     /// locations marked as consumed by the builtin PPX, consulted by the
     /// unused-attribute sweep (`Bs_ast_invariant.warn_unused_attribute`).
@@ -939,7 +934,6 @@ impl Default for ParseArena {
             expr_construct_args: Vec::new(),
             expr_variant_args: Vec::new(),
             expr_record_spreads: Vec::new(),
-            pat_record_rests: HashMap::new(),
             used_attributes: std::sync::Mutex::new(HashSet::new()),
             expr_if_else_branches: Vec::new(),
             expr_coerce_from_types: Vec::new(),
@@ -2742,23 +2736,6 @@ impl ParseArena {
     }
 
     /// Attach sparse record spread/base expression data to a record expression node.
-    /// Attach record-rest binding data to a record pattern, keyed by its location index.
-    pub fn set_record_pat_rest(&mut self, loc: LocIdx, rest: crate::parser::ast::RecordPatRest) {
-        self.pat_record_rests.insert(loc, rest);
-    }
-
-    /// Get sparse record-rest binding data for a record pattern node.
-    pub fn record_pat_rest(&self, loc: LocIdx) -> Option<&crate::parser::ast::RecordPatRest> {
-        self.pat_record_rests.get(&loc)
-    }
-
-    pub fn take_record_pat_rest(
-        &mut self,
-        loc: LocIdx,
-    ) -> Option<crate::parser::ast::RecordPatRest> {
-        self.pat_record_rests.remove(&loc)
-    }
-
     pub fn set_record_spread(&mut self, owner: ExprIdx, spread: Option<ExprIdx>) {
         let slot = owner.0 as usize;
         if slot >= self.expr_record_spreads.len() {

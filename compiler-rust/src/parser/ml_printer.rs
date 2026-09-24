@@ -2601,7 +2601,7 @@ fn print_pattern_inner<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, pat: 
             }
         }
         PatternDesc::Ppat_record(inner) => {
-            let (ref fields, ref closed) = **inner;
+            let (ref fields, ref closed, ref record_rest) = **inner;
             // OCaml closed: @[<2>{@;%a@;}@]  with sep ";@;"
             // OCaml open:   @[<2>{@;%a;_}@]  with sep ";@;"
             f.open_box(BoxKind::Box, 2);
@@ -2657,7 +2657,7 @@ fn print_pattern_inner<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, pat: 
                     f.close_box();
                 }
             }
-            if let Some(rest) = arena.record_pat_rest(pat.ppat_loc) {
+            if let Some(rest) = record_rest.as_ref() {
                 if !fields.is_empty() {
                     f.string(";");
                     f.space();

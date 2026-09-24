@@ -609,7 +609,7 @@ pub fn walk_pat<V: AstIter + ?Sized>(v: &mut V, arena: &ParseArena, idx: PatIdx)
             for field in &inner.0 {
                 v.pat(arena, field.pat);
             }
-            if let Some(rest) = arena.record_pat_rest(pat.ppat_loc)
+            if let Some(rest) = &inner.2
                 && let Some(rest_type) = rest.rest_type
             {
                 v.typ(arena, rest_type);
