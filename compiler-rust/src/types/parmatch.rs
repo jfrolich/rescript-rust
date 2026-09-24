@@ -92,6 +92,7 @@ pub(crate) enum ParmatchWarning {
     UnusedMatch,
     UnusedPat,
     UnreachableCase,
+    AmbiguousPattern(Vec<String>),
 }
 
 /// Which `partial_pred` the checks call back into.
@@ -224,6 +225,18 @@ impl<'a, O: Oracle> Parmatch<'a, O> {
 
     pub fn omega(&self) -> P {
         self.omega
+    }
+
+    /// `irrefutable pat` (parmatch.ml:2260): `le_pat pat omega`.
+    pub fn irrefutable(&mut self, pat: &'a Pattern) -> bool {
+        let p = self.import(pat);
+        let omega = self.omega;
+        self.le_pat(p, omega)
+    }
+
+    /// Whether the node is `Tpat_any`.
+    pub fn is_any(&self, p: P) -> bool {
+        matches!(self.desc(p), Desc::Any)
     }
 
     fn push(
@@ -1127,7 +1140,7 @@ impl<'a, O: Oracle> Parmatch<'a, O> {
     }
 
     /// `orify_many`: right-nested or-patterns.
-    fn orify_many(&mut self, xs: &[P]) -> P {
+    pub fn orify_many(&mut self, xs: &[P]) -> P {
         match xs {
             [] => panic!("Parmatch.orify_many"),
             [x] => *x,
@@ -2624,5 +2637,307 @@ pub(crate) fn contains_extension(pat: &Pattern) -> bool {
         PatternDesc::Tpat_variant(_, arg, _) => arg.as_deref().is_some_and(contains_extension),
         PatternDesc::Tpat_record(fields, _, _) => fields.iter().any(|(_, _, p, _)| contains_extension(p)),
         PatternDesc::Tpat_or(p1, p2, _) => contains_extension(p1) || contains_extension(p2),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Ambiguous variables in or-patterns under guards (parmatch.ml:2317-2581)
+// ---------------------------------------------------------------------------
+
+type IdSet = std::collections::BTreeSet<Ident>;
+
+/// `amb_row` (parmatch.ml:2370). `seen` is kept with the most recent
+/// binding set last (OCaml conses it on the front).
+#[derive(Clone)]
+struct AmbRow {
+    unseen: Vec<P>,
+    seen: Vec<IdSet>,
+}
+
+/// A guarded case for [`Parmatch::check_ambiguous_bindings`]: the pattern and
+/// `all_rhs_idents` of its guard.
+pub(crate) struct AmbiguousCase<'a> {
+    pub lhs: &'a Pattern,
+    pub guard_idents: Option<IdSet>,
+}
+
+impl<'a, O: Oracle> Parmatch<'a, O> {
+    fn bound_ident(&self, p: P) -> Option<Ident> {
+        match self.node(p).src.map(|src| &src.pat_desc) {
+            Some(PatternDesc::Tpat_var(id, _)) | Some(PatternDesc::Tpat_alias(_, id, _)) => {
+                Some(id.clone())
+            }
+            _ => None,
+        }
+    }
+
+    /// `do_push r p ps seen k` (parmatch.ml:2374-2381).
+    fn amb_do_push(&self, mut r: IdSet, p: P, ps: &[P], seen: &[IdSet], out: &mut Vec<(P, AmbRow)>) {
+        match self.desc(p) {
+            Desc::Alias(inner) => {
+                if let Some(x) = self.bound_ident(p) {
+                    r.insert(x);
+                }
+                self.amb_do_push(r, *inner, ps, seen, out);
+            }
+            Desc::Var(_) => {
+                if let Some(x) = self.bound_ident(p) {
+                    r.insert(x);
+                }
+                let mut seen = seen.to_vec();
+                seen.push(r);
+                out.push((
+                    self.omega,
+                    AmbRow {
+                        unseen: ps.to_vec(),
+                        seen,
+                    },
+                ));
+            }
+            Desc::Or(p1, p2) => {
+                let (p1, p2) = (*p1, *p2);
+                self.amb_do_push(r.clone(), p1, ps, seen, out);
+                self.amb_do_push(r, p2, ps, seen, out);
+            }
+            _ => {
+                let mut seen = seen.to_vec();
+                seen.push(r);
+                out.push((
+                    p,
+                    AmbRow {
+                        unseen: ps.to_vec(),
+                        seen,
+                    },
+                ));
+            }
+        }
+    }
+
+    /// `push_vars` (parmatch.ml:2383-2387).
+    fn amb_push_vars(&self, rows: &[AmbRow]) -> Vec<(P, AmbRow)> {
+        let mut out = Vec::new();
+        for row in rows {
+            let (&p, ps) = row
+                .unseen
+                .split_first()
+                .expect("Parmatch.push_vars: empty row");
+            self.amb_do_push(IdSet::new(), p, ps, &row.seen, &mut out);
+        }
+        out
+    }
+
+    /// `collect_stable` (parmatch.ml:2389-2400).
+    fn amb_collect_stable(rows: &[AmbRow]) -> IdSet {
+        let Some((first, rest)) = rows.split_first() else {
+            crate::misc::fatal_error("Parmatch.collect_stable")
+        };
+        let mut xss = first.seen.clone();
+        for row in rest {
+            for (x, y) in xss.iter_mut().zip(&row.seen) {
+                *x = x.intersection(y).cloned().collect();
+            }
+        }
+        xss.into_iter().fold(IdSet::new(), |mut acc, xs| {
+            acc.extend(xs);
+            acc
+        })
+    }
+
+    /// `discr_head` in `filter_all` (parmatch.ml:2428-2437).
+    fn amb_discr_head(&mut self, p: P) -> P {
+        if let Desc::Record {
+            fields,
+            closed,
+            has_rest,
+        } = self.desc(p).clone()
+        {
+            let env = self.node(p).env;
+            let fields = self.all_record_args(env, &fields);
+            let q = self.with_desc(
+                p,
+                Desc::Record {
+                    fields,
+                    closed,
+                    has_rest,
+                },
+            );
+            self.normalize_pat(q)
+        } else {
+            self.normalize_pat(p)
+        }
+    }
+
+    /// `filter_all` on ambiguity rows (parmatch.ml:2426-2481).
+    fn amb_filter_all(&mut self, rs: &[(P, AmbRow)]) -> Vec<(P, Vec<AmbRow>)> {
+        let mut env: Vec<(P, Vec<AmbRow>)> = Vec::new();
+        for (p, r) in rs {
+            match self.desc(*p) {
+                Desc::Var(_) | Desc::Alias(_) | Desc::Or(..) => {
+                    crate::misc::fatal_error("Parmatch.filter_all")
+                }
+                Desc::Any => {}
+                _ => {
+                    let p = *p;
+                    let mut found = None;
+                    for (i, (q0, _)) in env.iter().enumerate() {
+                        if self.simple_match(*q0, p) {
+                            found = Some(i);
+                            break;
+                        }
+                    }
+                    match found {
+                        Some(i) => {
+                            let q0 = env[i].0;
+                            let mut unseen = self.simple_match_args(q0, p);
+                            unseen.extend_from_slice(&r.unseen);
+                            env[i].1.insert(
+                                0,
+                                AmbRow {
+                                    unseen,
+                                    seen: r.seen.clone(),
+                                },
+                            );
+                        }
+                        None => {
+                            let p0 = self.amb_discr_head(p);
+                            let mut unseen = self.simple_match_args(p0, p);
+                            unseen.extend_from_slice(&r.unseen);
+                            env.push((
+                                p0,
+                                vec![AmbRow {
+                                    unseen,
+                                    seen: r.seen.clone(),
+                                }],
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+        for (p, r) in rs {
+            if matches!(self.desc(*p), Desc::Any) {
+                let omega = self.omega;
+                for (q0, rows) in env.iter_mut() {
+                    let mut unseen = self.simple_match_args(*q0, omega);
+                    unseen.extend_from_slice(&r.unseen);
+                    rows.insert(
+                        0,
+                        AmbRow {
+                            unseen,
+                            seen: r.seen.clone(),
+                        },
+                    );
+                }
+            }
+        }
+        env
+    }
+
+    /// `do_stable rs` (parmatch.ml:2485-2508).
+    fn amb_do_stable(&mut self, rs: &[AmbRow]) -> IdSet {
+        let Some(first) = rs.first() else {
+            crate::misc::fatal_error("Parmatch.do_stable")
+        };
+        if first.unseen.is_empty() {
+            return Self::amb_collect_stable(rs);
+        }
+        let rs = self.amb_push_vars(rs);
+        let column: Vec<P> = rs.iter().map(|(p, _)| *p).collect();
+        if !self.all_coherent(&column) {
+            let mut acc = IdSet::new();
+            for (_, row) in &rs {
+                for seen in &row.seen {
+                    acc.extend(seen.iter().cloned());
+                }
+            }
+            return acc;
+        }
+        let groups = self.amb_filter_all(&rs);
+        match groups.split_first() {
+            None => {
+                let rows: Vec<AmbRow> = rs.into_iter().map(|(_, row)| row).collect();
+                self.amb_do_stable(&rows)
+            }
+            Some(((_, first_rows), rest)) => {
+                let mut acc = self.amb_do_stable(first_rows);
+                for (_, rows) in rest {
+                    let st = self.amb_do_stable(rows);
+                    acc = acc.intersection(&st).cloned().collect();
+                }
+                acc
+            }
+        }
+    }
+
+    /// `check_ambiguous_bindings` (parmatch.ml:2563-2581).
+    pub fn check_ambiguous_bindings(&mut self, cases: &[AmbiguousCase<'a>]) {
+        if !self
+            .oracle
+            .is_active(&ParmatchWarning::AmbiguousPattern(Vec::new()))
+        {
+            return;
+        }
+        for case in cases {
+            let Some(guard_idents) = &case.guard_idents else {
+                continue;
+            };
+            let mut vars = IdSet::new();
+            pat_bound_idents(case.lhs, &mut vars);
+            let all: IdSet = vars.intersection(guard_idents).cloned().collect();
+            if all.is_empty() {
+                continue;
+            }
+            let p = self.import(case.lhs);
+            let st = self.amb_do_stable(&[AmbRow {
+                unseen: vec![p],
+                seen: Vec::new(),
+            }]);
+            let ambiguous: Vec<String> = all
+                .difference(&st)
+                .map(|id| id.name().to_string())
+                .collect();
+            if !ambiguous.is_empty() {
+                self.oracle
+                    .warn(case.lhs.pat_loc, ParmatchWarning::AmbiguousPattern(ambiguous));
+            }
+        }
+    }
+}
+
+/// `Typedtree.pat_bound_idents` (typedtree.ml:455-477) as a set.
+fn pat_bound_idents(pat: &Pattern, out: &mut IdSet) {
+    match &pat.pat_desc {
+        PatternDesc::Tpat_var(id, _) => {
+            out.insert(id.clone());
+        }
+        PatternDesc::Tpat_alias(p, id, _) => {
+            pat_bound_idents(p, out);
+            out.insert(id.clone());
+        }
+        PatternDesc::Tpat_or(p1, _, _) => pat_bound_idents(p1, out),
+        PatternDesc::Tpat_record(fields, _, rest) => {
+            if let Some(rest) = rest {
+                out.insert(rest.rest_ident.clone());
+            }
+            for (_, _, p, _) in fields {
+                pat_bound_idents(p, out);
+            }
+        }
+        PatternDesc::Tpat_any | PatternDesc::Tpat_constant(_) => {}
+        PatternDesc::Tpat_tuple(ps) | PatternDesc::Tpat_array(ps) => {
+            for p in ps {
+                pat_bound_idents(p, out);
+            }
+        }
+        PatternDesc::Tpat_construct(_, _, ps) => {
+            for p in ps {
+                pat_bound_idents(p, out);
+            }
+        }
+        PatternDesc::Tpat_variant(_, arg, _) => {
+            if let Some(p) = arg {
+                pat_bound_idents(p, out);
+            }
+        }
     }
 }

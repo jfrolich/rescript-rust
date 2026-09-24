@@ -6159,9 +6159,11 @@ impl<'a> RawLambdaConverter<'a> {
                     for binding in bindings {
                         match &binding.vb_pat.pat_desc {
                             PatternDesc::Tpat_var(_, _) | PatternDesc::Tpat_alias(_, _, _) => {}
-                            _ if !crate::types::typecore::pattern_is_irrefutable(
+                            _ if !crate::types::typecore::parmatch_irrefutable(
                                 self.type_ctx,
+                                self.arena,
                                 self.env,
+                                &mut self.persistent_env,
                                 &binding.vb_pat,
                             ) =>
                             {
