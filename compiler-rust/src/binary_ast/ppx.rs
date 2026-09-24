@@ -16506,80 +16506,205 @@ fn rewrite_structure_impl(
 
     // Context for tracking already-created module type names (per-structure scope)
     let mut await_context = std::collections::HashSet::new();
-    let mut result = Vec::new();
     let spice_mapper_active =
         apply_spice && spice_ppx::structure_uses_spice_mapper(structure, arena);
 
-    for item in structure {
-        match &*item.pstr_desc {
-            StructureItemDesc::Pstr_module(mb) => {
-                // OCaml structure_mapper handles module-level await here (not in structure_item mapper)
-                // and deduplicates generated module type declarations per structure.
-                if let Some((module_type_decl, transformed_mb)) =
-                    transform_module_await(mb, item.pstr_loc, arena)
-                {
-                    let mb_expr = arena.get_mod_expr(mb.pmb_expr);
-                    if let ModuleExprDesc::Pmod_ident(located_lid) = &*mb_expr.pmod_desc {
-                        let module_type_name = local_module_type_name(located_lid.txt, arena);
-                        if await_context.insert(module_type_name) {
-                            result.push(module_type_decl);
-                        }
+    // OCaml `Bs_builtin_ppx.structure_mapper` (bs_builtin_ppx.ml:676-802)
+    // recurses as `head :: structure_mapper rest`. Constructor arguments are
+    // evaluated right to left, so most items are mapped after the rest of the
+    // structure; `let` items and `@res.await` module aliases bind their mapped
+    // item first. A run of `%%private` items maps its payload items first and is
+    // wrapped by `expand_reverse` after the rest, which fixes the `local_N`
+    // numbering. Plan that order, run it, then assemble results by position.
+    enum Unit {
+        Item(usize),
+        Private(usize, usize),
+    }
+    enum Event {
+        Map(usize),
+        MapPrivate(usize),
+        WrapPrivate(usize),
+    }
+    let mut units = Vec::new();
+    let mut i = 0;
+    while i < structure.len() {
+        if is_private_extension(&structure[i], arena) {
+            let start = i;
+            while i < structure.len() && is_private_extension(&structure[i], arena) {
+                i += 1;
+            }
+            units.push(Unit::Private(start, i));
+        } else {
+            units.push(Unit::Item(i));
+            i += 1;
+        }
+    }
+    let mut order = std::collections::VecDeque::with_capacity(units.len());
+    for (unit_index, unit) in units.iter().enumerate().rev() {
+        match *unit {
+            Unit::Private(..) => {
+                order.push_front(Event::MapPrivate(unit_index));
+                order.push_back(Event::WrapPrivate(unit_index));
+            }
+            Unit::Item(index) => {
+                let head_first = match &*structure[index].pstr_desc {
+                    StructureItemDesc::Pstr_value(_) => true,
+                    StructureItemDesc::Pstr_module(mb) => {
+                        is_await_module_alias(mb, arena)
                     }
-                    result.push(transformed_mb);
-                } else if apply_spice {
-                    result.extend(try_rewrite_structure_item(
-                        item,
-                        arena,
-                        spice_mapper_active,
-                    )?);
+                    _ => false,
+                };
+                if head_first {
+                    order.push_front(Event::Map(unit_index));
                 } else {
-                    result.extend(rewrite_structure_item_no_spice(item, arena));
-                }
-            }
-            StructureItemDesc::Pstr_value(inner) => {
-                let (ref _rec_flag, ref bindings) = **inner;
-                // Spelunk through the ORIGINAL bindings to find await module types
-                // (before expression rewriting transforms them)
-                let module_type_decls = spelunk_value_bindings_for_await_module_types(
-                    bindings,
-                    &mut await_context,
-                    arena,
-                );
-
-                // Add hoisted module type declarations first
-                result.extend(module_type_decls);
-
-                // Then process the structure item normally
-                if apply_spice {
-                    result.extend(try_rewrite_structure_item(
-                        item,
-                        arena,
-                        spice_mapper_active,
-                    )?);
-                } else {
-                    result.extend(rewrite_structure_item_no_spice(item, arena));
-                }
-            }
-            _ => {
-                // Non-Pstr_value items: just process normally
-                if apply_spice {
-                    result.extend(try_rewrite_structure_item(
-                        item,
-                        arena,
-                        spice_mapper_active,
-                    )?);
-                } else {
-                    result.extend(rewrite_structure_item_no_spice(item, arena));
+                    order.push_back(Event::Map(unit_index));
                 }
             }
         }
     }
+
+    let mut slots: Vec<Vec<StructureItem>> = (0..units.len()).map(|_| Vec::new()).collect();
+    for event in order {
+        match event {
+            Event::Map(unit_index) => {
+                let Unit::Item(index) = units[unit_index] else {
+                    unreachable!("item event for a %%private run")
+                };
+                slots[unit_index] = rewrite_structure_unit(
+                    &structure[index],
+                    arena,
+                    apply_spice,
+                    spice_mapper_active,
+                    &mut await_context,
+                )?;
+            }
+            Event::MapPrivate(unit_index) => {
+                let Unit::Private(start, end) = units[unit_index] else {
+                    unreachable!("%%private event for an item")
+                };
+                let mut mapped = Vec::new();
+                for item in &structure[start..end] {
+                    let StructureItemDesc::Pstr_extension(inner) = &*item.pstr_desc else {
+                        unreachable!("%%private run holds extensions")
+                    };
+                    let ((ext_name, payload), _attrs) = &**inner;
+                    // `self.structure_item` on each payload item.
+                    for work in private_extension_structure_items(payload, ext_name.loc)? {
+                        if apply_spice {
+                            mapped.extend(try_rewrite_structure_item(
+                                work,
+                                arena,
+                                spice_mapper_active,
+                            )?);
+                        } else {
+                            mapped.extend(rewrite_structure_item_no_spice(work, arena));
+                        }
+                    }
+                }
+                slots[unit_index] = mapped;
+            }
+            Event::WrapPrivate(unit_index) => {
+                let Unit::Private(start, _) = units[unit_index] else {
+                    unreachable!("%%private event for an item")
+                };
+                let mapped = std::mem::take(&mut slots[unit_index]);
+                // `expand_reverse`: `Typemod_hide.check`, then a fresh `local_N`.
+                check_private_extension_items(&mapped, arena)?;
+                slots[unit_index] = wrap_in_local_module(mapped, structure[start].pstr_loc, arena);
+            }
+        }
+    }
+    let result: Vec<StructureItem> = slots.into_iter().flatten().collect();
 
     if validate_invariants {
         validate_structure_builtin_type_redefinition_errors(&result, arena)?;
     }
 
     Ok(result)
+}
+
+/// Map one structure item as `Bs_builtin_ppx.structure_mapper` does outside
+/// `%%private` runs: `@res.await` module aliases and `let` items may emit module
+/// type declarations (deduplicated per structure) ahead of the item.
+fn rewrite_structure_unit(
+    item: &StructureItem,
+    arena: &mut ParseArena,
+    apply_spice: bool,
+    spice_mapper_active: bool,
+    await_context: &mut std::collections::HashSet<String>,
+) -> PpxResult<Vec<StructureItem>> {
+    let mut result = Vec::new();
+    match &*item.pstr_desc {
+        StructureItemDesc::Pstr_module(mb) => {
+            // OCaml structure_mapper handles module-level await here (not in structure_item mapper)
+            // and deduplicates generated module type declarations per structure.
+            if let Some((module_type_decl, transformed_mb)) =
+                transform_module_await(mb, item.pstr_loc, arena)
+            {
+                let mb_expr = arena.get_mod_expr(mb.pmb_expr);
+                if let ModuleExprDesc::Pmod_ident(located_lid) = &*mb_expr.pmod_desc {
+                    let module_type_name = local_module_type_name(located_lid.txt, arena);
+                    if await_context.insert(module_type_name) {
+                        result.push(module_type_decl);
+                    }
+                }
+                result.push(transformed_mb);
+            } else if apply_spice {
+                result.extend(try_rewrite_structure_item(
+                    item,
+                    arena,
+                    spice_mapper_active,
+                )?);
+            } else {
+                result.extend(rewrite_structure_item_no_spice(item, arena));
+            }
+        }
+        StructureItemDesc::Pstr_value(inner) => {
+            let (ref _rec_flag, ref bindings) = **inner;
+            // Spelunk through the ORIGINAL bindings to find await module types
+            // (before expression rewriting transforms them)
+            let module_type_decls = spelunk_value_bindings_for_await_module_types(
+                bindings,
+                await_context,
+                arena,
+            );
+
+            // Add hoisted module type declarations first
+            result.extend(module_type_decls);
+
+            // Then process the structure item normally
+            if apply_spice {
+                result.extend(try_rewrite_structure_item(
+                    item,
+                    arena,
+                    spice_mapper_active,
+                )?);
+            } else {
+                result.extend(rewrite_structure_item_no_spice(item, arena));
+            }
+        }
+        _ => {
+            // Non-Pstr_value items: just process normally
+            if apply_spice {
+                result.extend(try_rewrite_structure_item(
+                    item,
+                    arena,
+                    spice_mapper_active,
+                )?);
+            } else {
+                result.extend(rewrite_structure_item_no_spice(item, arena));
+            }
+        }
+    }
+    Ok(result)
+}
+
+/// `module M = @res.await Path`, the structure_mapper case that maps its item
+/// before the rest of the structure (bs_builtin_ppx.ml:708-747).
+fn is_await_module_alias(mb: &current::ModuleBinding, arena: &ParseArena) -> bool {
+    let mod_expr = arena.get_mod_expr(mb.pmb_expr);
+    matches!(&*mod_expr.pmod_desc, ModuleExprDesc::Pmod_ident(_))
+        && has_await_attribute(&mod_expr.pmod_attributes, arena)
 }
 
 /// Lightweight extension expansion: only expands %%raw, %raw, %re, %%private.

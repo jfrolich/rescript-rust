@@ -114,6 +114,9 @@ fn should_share_singleton_attr_list(name: &str) -> bool {
     matches!(
         name,
         "react.component" | "jsx.component" | "react.componentWithProps" | "jsx.componentWithProps"
+    // `Typemod_hide.attrs` (compiler/frontend/typemod_hide.ml:26) is one global
+    // list that `expand_reverse` puts on every `%%private` local module.
+            | "internal.local"
     )
 }
 
