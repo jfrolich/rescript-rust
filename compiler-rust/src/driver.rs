@@ -4982,11 +4982,13 @@ fn format_typemod_module_type(
             param_type,
             result,
         } => {
-            let param_type = param_type
-                .as_ref()
-                .map(|mty| format_typemod_module_type(type_ctx, mty))
-                .unwrap_or_else(|| "_".to_string());
             let result = format_typemod_module_type(type_ctx, result);
+            // OCaml's outcome printer shows a generative functor
+            // (`Omty_functor (_, None, res)`) as `() => res`.
+            let Some(param_type) = param_type.as_ref() else {
+                return format!("() => {result}");
+            };
+            let param_type = format_typemod_module_type(type_ctx, param_type);
             if param_type.contains('\n') {
                 format!(
                     "(\n  {}: {},\n) => {}",

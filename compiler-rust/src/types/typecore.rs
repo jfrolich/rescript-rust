@@ -3226,7 +3226,12 @@ fn transl_type_inner(
                 tctx.arena,
                 &pack_path,
                 &package_lids,
-            );
+                loc,
+            )
+            .map_err(|err| match err {
+                crate::types::typemod::TypeModError::CoreError(err) => err,
+                err => TypeCoreError::ModuleError(Box::new(err)),
+            })?;
 
             let mut typed_fields = Vec::with_capacity(sorted_constraints.len());
             let mut lids = Vec::with_capacity(sorted_constraints.len());

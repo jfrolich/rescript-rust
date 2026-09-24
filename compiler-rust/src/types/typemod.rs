@@ -13178,7 +13178,8 @@ pub(crate) fn force_package_modtype_translation_for_core_type<'a>(
     arena: &'a ParseArena,
     package_path: &Path,
     package_lids: &[Longident],
-) {
+    loc: LocIdx,
+) -> TypeModResult<()> {
     use crate::types::decl::ModuleType as DeclMty;
 
     let Some(mut current_mty) = (match package_path {
@@ -13203,11 +13204,18 @@ pub(crate) fn force_package_modtype_translation_for_core_type<'a>(
         }
         Path::Papply(_, _) => None,
     }) else {
-        return;
+        return Ok(());
     };
 
     for lid in package_lids {
-        let _ = resolve_with_constraint_target(tctx, env, arena, Some(&current_mty), lid);
+        // OCaml `merge_constraint` raises `With_no_component` at the package
+        // type's location (create_package_mty builds `Mty.with_ ~loc`).
+        if resolve_with_constraint_target(tctx, env, arena, Some(&current_mty), lid).is_none() {
+            return Err(TypeModError::WithNoComponent {
+                loc,
+                lid: lid.clone(),
+            });
+        }
         // OCaml compiler/ml/typetexp.ml:547-562 builds a fake package
         // module type and calls `transl_modtype` before translating field
         // types. Each nested `Pmty_with` reaches compiler/ml/typemod.ml:727-737,
@@ -13223,6 +13231,7 @@ pub(crate) fn force_package_modtype_translation_for_core_type<'a>(
             );
         }
     }
+    Ok(())
 }
 
 fn collect_pmty_with_type_constraints<'a>(
@@ -24473,6 +24482,23 @@ fn type_structure_item<'a>(
                 with_warning_scope(tctx, arena, &incl.pincl_attributes, true, |tctx| {
                     type_module_expr(tctx, env, arena, arena.get_mod_expr(incl.pincl_mod))
                 })?;
+            // OCaml `extract_sig_open` (compiler/ml/typemod.ml:80-84) raises
+            // `Structure_expected` when the included module is a functor.
+            {
+                let scraped = scrape_alias_module_type(
+                    &typed_mod.mod_type,
+                    env,
+                    &mut tctx.persistent_env,
+                    tctx.type_ctx,
+                )
+                .unwrap_or_else(|| typed_mod.mod_type.clone());
+                if matches!(scraped, crate::types::decl::ModuleType::MtyFunctor { .. }) {
+                    return Err(TypeModError::StructureExpected {
+                        loc: arena.get_mod_expr(incl.pincl_mod).pmod_loc,
+                        mty: scraped,
+                    });
+                }
+            }
             let final_include_sig = resolve_mod_type_to_sig(
                 &typed_mod.mod_type,
                 Some(env),
