@@ -1058,6 +1058,9 @@ fn parse_function_type(p: &mut Parser<'_>, start_pos_idx: PosIdx) -> CoreType {
         false
     };
 
+    // `parse_type_parameters` builds the `unit` parameter only for `()`
+    // (res_core.ml:4915-4921).
+    let immediate_rparen = !first_has_dot && p.token == Token::Rparen;
     // Track both the TypeArg and its start position as PosIdx (for arrow location sharing)
     let mut params: Vec<(TypeArg, crate::parse_arena::PosIdx)> = vec![];
     let mut is_first_param = true;
@@ -1104,6 +1107,26 @@ fn parse_function_type(p: &mut Parser<'_>, start_pos_idx: PosIdx) -> CoreType {
                 loc,
                 content,
             ));
+        }
+
+        // OCaml `parse_type_parameter` returns `None` unless the token can
+        // start a parameter (`Tilde | Dot | is_typ_expr_start`,
+        // res_core.ml:4827-4831); `parse_comma_delimited_region` then stops at
+        // `)`/EOF/abort or reports the token and skips it
+        // (res_core.ml:1068-1105).
+        if !has_dot
+            && p.token != Token::Tilde
+            && !super::grammar::is_typ_expr_start(&p.token)
+        {
+            if p.token == Token::Eof
+                || p.token == Token::Rparen
+                || super::core::recover::should_abort_list_parse(p)
+            {
+                break;
+            }
+            p.err_unexpected();
+            p.next();
+            continue;
         }
 
         // Now capture the start position for the arrow - AFTER doc comments but BEFORE @-attrs
@@ -1410,6 +1433,15 @@ fn parse_function_type(p: &mut Parser<'_>, start_pos_idx: PosIdx) -> CoreType {
     // whose ptyp_loc doesn't include the closing ]
     // Note: arrow_end_pos_idx uses cached prev_end_pos to enable sharing with return type's loc_end
 
+    if params.is_empty() && !immediate_rparen {
+        // Every parameter was skipped during error recovery: OCaml returns the
+        // return type itself (res_core.ml:5002-5009).
+        let end_pos_idx = p.prev_end_pos_idx();
+        return CoreType {
+            ptyp_loc: p.mk_loc_idx(start_pos_idx, end_pos_idx),
+            ..return_type
+        };
+    }
     if params.is_empty() {
         // OCaml: Ast_helper.Typ.constr unit_constr []
         // No ~loc passed, so ptyp_loc defaults to Location.none (ghost)
