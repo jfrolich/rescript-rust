@@ -30720,13 +30720,21 @@ fn path_cache_key(path: &Path) -> Option<String> {
     // Match `Path.flatten` in compiler/ml/path.ml:63-69: any nested
     // `Papply` is `Contains_apply`, so cache keys that need a single head
     // identifier are only valid for regular dotted paths.
-    let (head, _) = path.flatten().ok()?;
-    let name = path.name();
-    if head.is_persistent() || head.stamp() == 0 {
-        Some(name)
-    } else {
-        Some(format!("{name}#{}", head.stamp()))
+    fn dotted_head(path: &Path) -> Option<&Ident> {
+        match path {
+            Path::Pident(id) => Some(id),
+            Path::Pdot(prefix, _, _) => dotted_head(prefix),
+            Path::Papply(_, _) => None,
+        }
     }
+    let head = dotted_head(path)?;
+    let mut key = String::with_capacity(48);
+    path.write_name_with_paren(&mut key, |_| false);
+    if !(head.is_persistent() || head.stamp() == 0) {
+        use std::fmt::Write as _;
+        let _ = write!(key, "#{}", head.stamp());
+    }
+    Some(key)
 }
 
 fn module_path_requires_env_scoped_cache(env: &Env, module_path: &Path) -> bool {

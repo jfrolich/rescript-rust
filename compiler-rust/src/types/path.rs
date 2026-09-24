@@ -150,23 +150,40 @@ impl Path {
 
     /// Get the string name with parenthesization for operators.
     pub fn name_with_paren(&self, paren: impl Fn(&str) -> bool + Copy) -> String {
+        let mut out = String::with_capacity(self.name_len_hint());
+        self.write_name_with_paren(&mut out, paren);
+        out
+    }
+
+    /// Append the (parenthesized) name to `out` without intermediate strings.
+    pub fn write_name_with_paren(&self, out: &mut String, paren: impl Fn(&str) -> bool + Copy) {
         match self {
-            Path::Pident(id) => id.name().to_string(),
+            Path::Pident(id) => out.push_str(id.name()),
             Path::Pdot(p, s, _) => {
-                let prefix = p.name_with_paren(paren);
+                p.write_name_with_paren(out, paren);
                 if paren(s) {
-                    format!("{}.( {} )", prefix, s)
+                    out.push_str(".( ");
+                    out.push_str(s);
+                    out.push_str(" )");
                 } else {
-                    format!("{}.{}", prefix, s)
+                    out.push('.');
+                    out.push_str(s);
                 }
             }
             Path::Papply(p1, p2) => {
-                format!(
-                    "{}({})",
-                    p1.name_with_paren(paren),
-                    p2.name_with_paren(paren)
-                )
+                p1.write_name_with_paren(out, paren);
+                out.push('(');
+                p2.write_name_with_paren(out, paren);
+                out.push(')');
             }
+        }
+    }
+
+    fn name_len_hint(&self) -> usize {
+        match self {
+            Path::Pident(id) => id.name().len(),
+            Path::Pdot(p, s, _) => p.name_len_hint() + 1 + s.len(),
+            Path::Papply(p1, p2) => p1.name_len_hint() + p2.name_len_hint() + 2,
         }
     }
 
