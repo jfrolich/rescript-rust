@@ -19922,43 +19922,27 @@ fn type_field(
         ) {
             return Err(err);
         }
+        // OCaml `type_label_access` (compiler/ml/typecore.ml:3848) calls
+        // `Typetexp.find_all_labels`, which raises `Unbound_label` when no
+        // label with this name is in scope, whatever the receiver type is.
         let ty_exp_repr = tctx.type_ctx.repr(ty_exp);
-        if matches!(
+        let from_type = matches!(
             &*tctx.type_ctx.get_desc(ty_exp_repr),
             TypeDesc::Tconstr { .. }
-        ) {
-            return Err(TypeCoreError::UnboundRecordField {
-                loc: field_lid.loc,
-                field_name: tctx.longident_to_string(&resolved_lid),
-                from_type: Some(ty_exp_repr),
-                alternatives: unbound_label_alternatives(
-                    tctx.arena,
-                    env,
-                    &mut tctx.persistent_env,
-                    tctx.type_ctx,
-                    &resolved_lid,
-                ),
-            });
-        }
-        let record_ty = tctx.type_ctx.new_var(None);
-        let field_ty = tctx.type_ctx.new_var(None);
-        (
-            crate::types::LabelDescription {
-                lbl_name: field_name,
-                lbl_res: record_ty,
-                lbl_arg: field_ty,
-                lbl_mut: crate::types::MutableFlag::Immutable,
-                lbl_optional: false,
-                lbl_pos: 0,
-                lbl_all: crate::types::LabelArrayRef(0),
-                lbl_repres: crate::types::RecordRepresentation::RecordRegular,
-                lbl_private: crate::types::PrivateFlag::Public,
-                lbl_loc: tctx.arena.to_location(field_lid.loc),
-                lbl_attributes: vec![],
-            },
-            field_ty,
-            record_ty,
         )
+        .then_some(ty_exp_repr);
+        return Err(TypeCoreError::UnboundRecordField {
+            loc: field_lid.loc,
+            field_name: tctx.longident_to_string(&resolved_lid),
+            from_type,
+            alternatives: unbound_label_alternatives(
+                tctx.arena,
+                env,
+                &mut tctx.persistent_env,
+                tctx.type_ctx,
+                &resolved_lid,
+            ),
+        });
     };
 
     // OCaml compiler/ml/typecore.ml:2993-3005 types `Pexp_field` by
@@ -20127,24 +20111,24 @@ fn type_setfield(
                 ) {
                     return Err(err);
                 }
-                let field_ty = ctx.new_var(None);
-                (
-                    crate::types::LabelDescription {
-                        lbl_name: field_name,
-                        lbl_res: record_ty,
-                        lbl_arg: field_ty,
-                        lbl_mut: crate::types::MutableFlag::Mutable,
-                        lbl_optional: false,
-                        lbl_pos: 0,
-                        lbl_all: crate::types::LabelArrayRef(0),
-                        lbl_repres: crate::types::RecordRepresentation::RecordRegular,
-                        lbl_private: crate::types::PrivateFlag::Public,
-                        lbl_loc: tctx.arena.to_location(field_lid.loc),
-                        lbl_attributes: vec![],
-                    },
-                    field_ty,
-                    vec![],
-                )
+                // OCaml `type_label_access` (compiler/ml/typecore.ml:3848):
+                // `Typetexp.find_all_labels` raises `Unbound_label`.
+                let ty_exp_repr = ctx.repr(ty_exp);
+                let from_type =
+                    matches!(&*ctx.get_desc(ty_exp_repr), TypeDesc::Tconstr { .. })
+                        .then_some(ty_exp_repr);
+                return Err(TypeCoreError::UnboundRecordField {
+                    loc: field_lid.loc,
+                    field_name: tctx.longident_to_string(&resolved_lid),
+                    from_type,
+                    alternatives: unbound_label_alternatives(
+                        tctx.arena,
+                        env,
+                        &mut tctx.persistent_env,
+                        tctx.type_ctx,
+                        &resolved_lid,
+                    ),
+                });
             };
 
             let field_context = Some(TypeClashContext::SetRecordField {
@@ -20827,19 +20811,8 @@ fn type_send(
     let method_result_ty = match method_result_ty {
         Ok(ty) => ty,
         Err(_) => {
-            if method.txt.ends_with("#=") {
-                return Ok(Expression::new(
-                    ExpressionDesc::Texp_send(
-                        Box::new(typed_obj),
-                        crate::types::typedtree::MethKind::Tmeth_name(method.txt.to_string()),
-                        None,
-                    ),
-                    loc.clone(),
-                    expected_ty,
-                    EnvRef(0),
-                    attributes.to_vec().into(),
-                ));
-            }
+            // OCaml `Pexp_send` (compiler/ml/typecore.ml:3304-3350) raises
+            // `Undefined_method` for every method, including `#=` setters.
             let alternatives =
                 collect_public_methods_from_object_type(ctx, env, typed_obj.exp_type);
             return Err(TypeCoreError::UndefinedMethod {
@@ -20851,20 +20824,8 @@ fn type_send(
         }
     };
 
-    // OCaml: rue { ... exp_type = method_result_ty; ... }
-    if rue_unify(tctx, loc, method_result_ty, expected_ty, None).is_err() {
-        return Ok(Expression::new(
-            ExpressionDesc::Texp_send(
-                Box::new(typed_obj),
-                crate::types::typedtree::MethKind::Tmeth_name(method.txt.to_string()),
-                None,
-            ),
-            loc.clone(),
-            expected_ty,
-            EnvRef(0),
-            attributes.to_vec().into(),
-        ));
-    }
+    // OCaml: rue { ... exp_type = method_result_ty; ... } raises on a clash.
+    rue_unify(tctx, loc, method_result_ty, expected_ty, context)?;
 
     Ok(Expression::new(
         ExpressionDesc::Texp_send(
