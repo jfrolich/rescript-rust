@@ -589,7 +589,11 @@ fn is_external_bare_arrow_type(p: &mut Parser<'_>) -> bool {
         match state.token {
             Token::Lparen | Token::Tilde | Token::DocComment { .. } => false,
             _ => {
-                let _ = parse_atomic_typ_expr(state, attrs, true);
+                // OCaml's lookahead calls `parse_atomic_typ_expr ~attrs state`
+                // without an inline-types context.
+                let _ = without_inline_record_context(state, |state| {
+                    parse_atomic_typ_expr(state, attrs, true)
+                });
                 matches!(state.token, Token::EqualGreater | Token::MinusGreater)
             }
         }
