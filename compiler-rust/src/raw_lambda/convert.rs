@@ -3477,12 +3477,12 @@ impl<'a> RawLambdaConverter<'a> {
         object_result: bool,
         returns_unit: bool,
     ) -> ExternalFfiSpec {
-        let ffi_marshaled = decode_marshaled_ffi_type(&prim.prim_native_name);
+        let ffi_marshaled_shared = decode_marshaled_ffi_type(&prim.prim_native_name);
+        let ffi_marshaled: Option<&OcamlValue> = ffi_marshaled_shared.as_deref();
         let kind = if !is_bs_primitive(&prim.prim_native_name) {
             ExternalFfiKind::Normal
         } else if object_result
             || ffi_marshaled
-                .as_ref()
                 .is_some_and(ffi_marshaled_is_obj_create)
         {
             ExternalFfiKind::ObjCreate
@@ -3490,7 +3490,6 @@ impl<'a> RawLambdaConverter<'a> {
             ExternalFfiKind::Default
         };
         let return_wrapper = ffi_marshaled
-            .as_ref()
             .and_then(ffi_marshaled_return_wrapper)
             .unwrap_or_else(|| {
                 if returns_unit {
@@ -3501,11 +3500,10 @@ impl<'a> RawLambdaConverter<'a> {
             });
         ExternalFfiSpec {
             kind,
-            spec: ffi_marshaled.as_ref().and_then(ffi_marshaled_external_spec),
-            obj_params: ffi_marshaled.as_ref().and_then(ffi_marshaled_obj_params),
+            spec: ffi_marshaled.and_then(ffi_marshaled_external_spec),
+            obj_params: ffi_marshaled.and_then(ffi_marshaled_obj_params),
             return_wrapper,
             inline_constant: ffi_marshaled
-                .as_ref()
                 .and_then(ffi_marshaled_inline_constant),
         }
     }
@@ -11840,18 +11838,37 @@ impl<'a> RawLambdaConverter<'a> {
 
 fn decoded_external_arg_types(encoded: &str, arity: usize) -> Vec<ExternalArgSpec> {
     decode_marshaled_ffi_type(encoded)
-        .as_ref()
+        .as_deref()
         .and_then(ffi_marshaled_arg_types)
         .unwrap_or_else(|| vec![ExternalArgSpec::dummy(); arity])
 }
 
-fn decode_marshaled_ffi_type(encoded: &str) -> Option<OcamlValue> {
+/// Decode the marshaled FFI description stored in an external's native name.
+///
+/// The same externals (e.g. JSX and stdlib bindings) are applied throughout a
+/// build, so decoded values are memoized per worker thread.
+fn decode_marshaled_ffi_type(encoded: &str) -> Option<std::rc::Rc<OcamlValue>> {
     if encoded.is_empty() {
         return None;
     }
+    thread_local! {
+        static DECODED: std::cell::RefCell<ahash::AHashMap<String, Option<std::rc::Rc<OcamlValue>>>> =
+            std::cell::RefCell::new(ahash::AHashMap::new());
+    }
+    if let Some(cached) = DECODED.with(|cache| cache.borrow().get(encoded).cloned()) {
+        return cached;
+    }
     let bytes = encoded.chars().map(|c| c as u32 as u8).collect::<Vec<_>>();
     let mut reader = MarshalReader::new();
-    reader.read_from_bytes(&bytes).ok()
+    let decoded = reader.read_from_bytes(&bytes).ok().map(std::rc::Rc::new);
+    DECODED.with(|cache| {
+        let mut cache = cache.borrow_mut();
+        if cache.len() >= 16384 {
+            cache.clear();
+        }
+        cache.insert(encoded.to_string(), decoded.clone());
+    });
+    decoded
 }
 
 fn is_bs_primitive(encoded: &str) -> bool {
