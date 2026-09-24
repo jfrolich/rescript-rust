@@ -6692,126 +6692,6 @@ fn check_recmod_type_declarations(
     Ok(())
 }
 
-fn touch_type_constraint_path(
-    ctx: &crate::types::context::TypeContext,
-    env: &Env,
-    pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
-    ty: TypeExprRef,
-    visited: &mut HashSet<TypeExprRef>,
-) {
-    let ty = ctx.repr(ty);
-    if !visited.insert(ty) {
-        return;
-    }
-
-    let constr = {
-        let desc = ctx.get_desc(ty);
-        match &*desc {
-            crate::types::type_expr::TypeDesc::Tconstr { path, args, .. } => {
-                Some((path.clone(), !args.is_empty()))
-            }
-            _ => None,
-        }
-    };
-
-    if let Some((path, has_args)) = constr {
-        // OCaml compiler/ml/typedecl.ml:767-781 checks every declaration
-        // constraint with `Ctype.enforce_constraints` followed by
-        // `Ctype.matches`; compiler/ml/ctype.ml:3187-3198 snapshots the
-        // mutations, but compiler/ml/ctype.ml:2338-2344 still expands both
-        // heads before backtracking. That expansion can force persistent
-        // signatures through env.ml:903-914 `normalize_path`.
-        // OCaml compiler/ml/env.ml:903-914 only reaches the persistent-module
-        // force through module paths while normalizing prefixes. A bare local
-        // type constructor has no module prefix; in the reference compiler it
-        // returns unchanged through env.ml:920-923's lax `normalize_path None`
-        // path rather than forcing a persistent signature.
-        if has_args && !matches!(path, Path::Pident(_)) {
-            // OCaml compiler/ml/typedecl.ml:767-781 reaches head expansion
-            // through `Ctype.matches`; compiler/ml/ctype.ml:2338-2344 expands
-            // the copied constructor heads that participate in that match. Keep
-            // this force tied to the actual parameterized constructor being
-            // checked, not to a Rust-side manifest/root-name scan.
-            crate::types::ctype::touch_constraint_match_head_expansion(ctx, env, ty);
-        }
-        // OCaml compiler/ml/typedecl.ml:767-785 checks each declaration
-        // `Tconstr` by building a fresh constructor, running
-        // `Ctype.enforce_constraints`, then calling `Ctype.matches` on the
-        // original node. It does not pre-expand every constructor before that
-        // match; expansion is only observed if unification needs it. Keeping
-        // this lazy avoids forcing persistent signatures for paths such as
-        // `Js.File.t` and `Stdlib_RegExp.t` before OCaml would.
-        if let Path::Pdot(parent, type_name, _) = &path {
-            // OCaml typedecl.ml:767-785 checks declaration constraints by
-            // calling Ctype.enforce_constraints on every Tconstr, and
-            // typedecl.ml:800-855 applies that traversal to record labels,
-            // constructor args/results, and manifests. For Pdot paths this
-            // reaches Env.find_type/env.ml:800-807 and can force a persistent
-            // signature after all label ids have been created.
-            // OCaml compiler/ml/typedecl.ml:767-779 runs
-            // `Ctype.enforce_constraints`/`Ctype.matches` on the current
-            // constructor and then recurses only into its arguments. For a
-            // zero-argument alias like `M.t`, `matches` can return before
-            // env.ml:1440-1446 scrapes and forces the alias target. Keep the
-            // The package-side-effect probe uses the explicit no-publish
-            // lookup mode, so it can ask whether the manifest is a package
-            // without advancing persistent signature lazies.
-            let resolved = crate::types::typecore::lookup_type_in_resolved_path_for_probe(
-                parent, type_name, env, pers_env, ctx,
-            );
-            if let Some((_, _, decl)) = resolved
-                && let Some(manifest) = decl.type_manifest
-            {
-                // OCaml compiler/ml/typedecl.ml:773-780 runs
-                // `Ctype.matches` after `enforce_constraints`; when
-                // compiler/ml/ctype.ml:2341-2344 expands an alias to a package,
-                // compiler/ml/ctype.ml:2497-2500 reaches `unify_package`.
-                touch_package_constraint_match_side_effects(ctx, env, manifest);
-            }
-        }
-    }
-
-    let mut children = Vec::new();
-    crate::types::btype::iter_type_expr(ctx, ty, |child| children.push(child));
-    for child in children {
-        touch_type_constraint_path(ctx, env, pers_env, child, visited);
-    }
-}
-
-fn touch_package_constraint_match_side_effects(
-    ctx: &crate::types::context::TypeContext,
-    env: &Env,
-    ty: TypeExprRef,
-) {
-    let ty = ctx.repr(ty);
-    let desc = ctx.get_desc(ty);
-    let crate::types::type_expr::TypeDesc::Tpackage { path, lids, .. } = &*desc else {
-        return;
-    };
-    let path = path.clone();
-    let lids = lids.clone();
-    drop(desc);
-
-    // OCaml compiler/ml/typedecl.ml:767-779 calls `Ctype.matches` after
-    // expanding declaration constraints. When the expansion is a package,
-    // compiler/ml/ctype.ml:2237-2238 calls `complete_type_list` twice, and
-    // compiler/ml/ctype.ml:2199-2201 allocates a hidden `Pkg` for each call.
-    let _ = crate::types::ctype::package_type_lists_have_ocaml_same_label_completion_side_effect(
-        ctx,
-        Some(env),
-        crate::types::decl::ModuleType::MtyIdent(path.clone()),
-        &lids,
-        &lids,
-    );
-    let _ = crate::types::ctype::package_type_lists_have_ocaml_same_label_completion_side_effect(
-        ctx,
-        Some(env),
-        crate::types::decl::ModuleType::MtyIdent(path),
-        &lids,
-        &lids,
-    );
-}
-
 fn path_non_apply_root_is_persistent_or_global(path: &Path) -> bool {
     fn root_ident(path: &Path) -> Option<&Ident> {
         match path {
@@ -6824,19 +6704,149 @@ fn path_non_apply_root_is_persistent_or_global(path: &Path) -> bool {
     root_ident(path).is_some_and(|id| id.is_persistent() || id.stamp() == 0)
 }
 
-fn touch_type_declaration_constraints(
+/// OCaml `Typedecl.check_constraints_rec` (typedecl.ml:758-779).
+fn check_constraints_rec(
     ctx: &crate::types::context::TypeContext,
     env: &Env,
     pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
-    decl: &crate::types::decl::TypeDeclaration,
-) {
-    let mut visited = HashSet::default();
-    crate::types::btype::iter_type_expr_kind(&decl.type_kind, |ty| {
-        touch_type_constraint_path(ctx, env, pers_env, ty, &mut visited);
-    });
-    if let Some(manifest) = decl.type_manifest {
-        touch_type_constraint_path(ctx, env, pers_env, manifest, &mut visited);
+    loc: LocIdx,
+    visited: &mut HashSet<TypeExprRef>,
+    ty: TypeExprRef,
+) -> TypeModResult<()> {
+    let ty = ctx.repr(ty);
+    if !visited.insert(ty) {
+        return Ok(());
     }
+    let desc = ctx.get_desc(ty).clone();
+    match desc {
+        crate::types::type_expr::TypeDesc::Tconstr { path, args, .. } => {
+            let fresh_args = args.iter().map(|_| ctx.new_var(None)).collect();
+            let expected = ctx.new_constr(path.clone(), fresh_args);
+            let decl = match &path {
+                Path::Pident(id) => env.find_type_by_ident(id).ok().cloned(),
+                Path::Pdot(parent, type_name, _) => {
+                    crate::types::typecore::lookup_type_in_resolved_path(
+                        parent,
+                        type_name.as_str(),
+                        env,
+                        pers_env,
+                        ctx,
+                    )
+                    .map(|(_, _, decl)| (*decl).clone())
+                }
+                Path::Papply(..) => None,
+            };
+            if let Some(decl) = decl {
+                crate::types::ctype::enforce_constraints(ctx, env, expected, &decl);
+            }
+            if !crate::types::ctype::matches(ctx, env, ty, expected) {
+                return Err(TypeModError::ConstraintFailed {
+                    loc,
+                    actual: ty,
+                    expected,
+                });
+            }
+            for arg in args {
+                check_constraints_rec(ctx, env, pers_env, loc, visited, arg)?;
+            }
+        }
+        crate::types::type_expr::TypeDesc::Tpoly { body, vars } => {
+            let (_, body) = crate::types::ctype::instance_poly(ctx, false, false, &vars, body);
+            check_constraints_rec(ctx, env, pers_env, loc, visited, body)?;
+        }
+        _ => {
+            let mut children = Vec::new();
+            crate::types::btype::iter_type_expr(ctx, ty, |child| children.push(child));
+            for child in children {
+                check_constraints_rec(ctx, env, pers_env, loc, visited, child)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// OCaml `Typedecl.check_constraints` (typedecl.ml:791-845): check every type
+/// written in the declaration at its source location.
+fn check_constraints(
+    ctx: &crate::types::context::TypeContext,
+    arena: &ParseArena,
+    env: &Env,
+    pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
+    type_record_as_object: bool,
+    sdecl: &crate::parser::ast::TypeDeclaration,
+    decl: &crate::types::decl::TypeDeclaration,
+) -> TypeModResult<()> {
+    use crate::parser::ast::ConstructorArguments as PArgs;
+    use crate::types::decl::ConstructorArguments as Args;
+    let mut visited = HashSet::default();
+    let check_labels = |visited: &mut HashSet<TypeExprRef>,
+                        pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
+                        labels: &[crate::types::decl::LabelDeclaration],
+                        slabels: &[crate::parser::ast::LabelDeclaration]|
+     -> TypeModResult<()> {
+        for label in labels {
+            let loc = slabels
+                .iter()
+                .find(|sl| arena.get_string(sl.pld_name.txt) == label.ld_id.name())
+                .map(|sl| arena.get_core_type(sl.pld_type).ptyp_loc)
+                .unwrap_or_else(|| arena.none_loc());
+            check_constraints_rec(ctx, env, pers_env, loc, visited, label.ld_type)?;
+        }
+        Ok(())
+    };
+    match (&decl.type_kind, &sdecl.ptype_kind) {
+        (
+            crate::types::TypeKind::TypeVariant(constructors, _),
+            crate::parser::ast::TypeKind::Ptype_variant(scstrs),
+        ) => {
+            for cd in constructors {
+                let Some(scd) = scstrs
+                    .iter()
+                    .find(|scd| arena.get_string(scd.pcd_name.txt) == cd.cd_id.name())
+                else {
+                    continue;
+                };
+                match (&cd.cd_args, &scd.pcd_args) {
+                    (Args::CstrTuple(tys), PArgs::Pcstr_tuple(stys)) => {
+                        for (sty, ty) in stys.iter().zip(tys) {
+                            let loc = arena.get_core_type(*sty).ptyp_loc;
+                            check_constraints_rec(ctx, env, pers_env, loc, &mut visited, *ty)?;
+                        }
+                    }
+                    (Args::CstrRecord(labels), PArgs::Pcstr_record(slabels)) => {
+                        check_labels(&mut visited, pers_env, labels, slabels)?;
+                    }
+                    // A single-spread record reinterpreted as an object argument.
+                    (Args::CstrTuple(tys), PArgs::Pcstr_record(slabels))
+                        if tys.len() == 1 && slabels.len() == 1 =>
+                    {
+                        let loc = arena.get_core_type(slabels[0].pld_type).ptyp_loc;
+                        check_constraints_rec(ctx, env, pers_env, loc, &mut visited, tys[0])?;
+                    }
+                    _ => {}
+                }
+                if let (Some(sres), Some(res)) = (scd.pcd_res, cd.cd_res) {
+                    let loc = arena.get_core_type(sres).ptyp_loc;
+                    check_constraints_rec(ctx, env, pers_env, loc, &mut visited, res)?;
+                }
+            }
+        }
+        (
+            crate::types::TypeKind::TypeRecord(labels, _),
+            crate::parser::ast::TypeKind::Ptype_record(slabels),
+        ) => {
+            check_labels(&mut visited, pers_env, labels, slabels)?;
+        }
+        _ => {}
+    }
+    if let Some(manifest) = decl.type_manifest
+        && !type_record_as_object
+        && let Some(smanifest) = sdecl.ptype_manifest
+    {
+        let loc = arena.get_core_type(smanifest).ptyp_loc;
+        check_constraints_rec(ctx, env, pers_env, loc, &mut visited, manifest)?;
+    }
+    Ok(())
 }
 
 fn compute_type_variance_fixpoint(
@@ -21474,6 +21484,10 @@ fn type_structure_item<'a>(
             let mut new_env = env.clone();
             let mut typed_tree_decls: Vec<TypedTypeDeclaration> = Vec::new();
             let mut internal_decls_for_generalize: Vec<crate::types::TypeDeclaration> = Vec::new();
+            // OCaml typedecl.ml:1500 `type_record_as_object`: set when a
+            // spread-only record becomes an object manifest; it then skips
+            // manifest constraint checks for the whole group.
+            let mut type_record_as_object = false;
             // Collect env-description TypeExprRefs (cstr_res, label ty_res) that
             // are separate from the TypeKind and need explicit generalization.
             let mut env_desc_types_for_generalize: Vec<crate::types::TypeExprRef> = Vec::new();
@@ -22747,6 +22761,7 @@ fn type_structure_item<'a>(
                                 (internal_labels, typed_tree_labels, None)
                             };
                         if let Some(object_manifest) = spread_only_object_manifest {
+                            type_record_as_object = true;
                             // OCaml compiler/ml/typedecl.ml:630-689 rewrites
                             // spread-only records to an abstract declaration
                             // with an object manifest, and that manifest is
@@ -23032,8 +23047,17 @@ fn type_structure_item<'a>(
             for decl in &internal_decls_for_generalize {
                 check_variant_declaration_well_formed(ctx, &new_env, decl)?;
             }
-            for decl in &internal_decls_for_generalize {
-                touch_type_declaration_constraints(ctx, &new_env, &mut tctx.persistent_env, decl);
+            // typedecl.ml:1603 `List.iter2 (check_constraints ...) sdecl_list decls`.
+            for (sdecl, decl) in decls.iter().zip(original_internal_decls_for_checks.iter()) {
+                check_constraints(
+                    ctx,
+                    arena,
+                    &new_env,
+                    &mut tctx.persistent_env,
+                    type_record_as_object,
+                    sdecl,
+                    decl,
+                )?;
             }
 
             // OCaml typedecl.ml compute_properties_fixpoint:
@@ -25578,8 +25602,16 @@ fn transl_sig_type_declarations_with_ids_and_originals<'a>(
     for decl in &internal_decls_for_generalize {
         check_variant_declaration_well_formed(ctx, &variance_env, decl)?;
     }
-    for decl in &internal_decls_for_generalize {
-        touch_type_declaration_constraints(ctx, &variance_env, &mut tctx.persistent_env, decl);
+    for (sdecl, decl) in decls.iter().zip(original_internal_decls_for_checks.iter()) {
+        check_constraints(
+            ctx,
+            arena,
+            &variance_env,
+            &mut tctx.persistent_env,
+            false,
+            sdecl,
+            decl,
+        )?;
     }
 
     if has_fixed_rows {

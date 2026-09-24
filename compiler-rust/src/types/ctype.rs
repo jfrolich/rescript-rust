@@ -4538,30 +4538,6 @@ fn label_declaration_as_name(label: &LabelDeclaration) -> Option<String> {
     })
 }
 
-pub(crate) fn touch_constraint_match_head_expansion(ctx: &TypeContext, env: &Env, ty: TypeExprRef) {
-    let ty = ctx.repr(ty);
-    let (path, arg_count) = {
-        let desc = ctx.get_desc(ty);
-        let TypeDesc::Tconstr { path, args, .. } = &*desc else {
-            return;
-        };
-        (path.clone(), args.len())
-    };
-
-    // OCaml compiler/ml/typedecl.ml:773-781 builds a fresh `ty'`,
-    // then compiler/ml/ctype.ml:3187-3198 runs `Ctype.matches`.
-    // `matches` snapshots/backtracks, but compiler/ml/ctype.ml:2338-2344
-    // still expands both heads before unification. Do the observable
-    // head-expansion work on copied types so lazy persistent-signature forcing
-    // happens at the same point without keeping mutations OCaml backtracks.
-    let mut cache = HashMap::default();
-    let ty_for_match = copy_type_deep(ctx, ty, &mut cache);
-    let ty_prime_args = (0..arg_count).map(|_| ctx.new_var(None)).collect();
-    let ty_prime = ctx.new_constr(path.clone(), ty_prime_args);
-    let _ = expand_head_unif(ctx, env, ty_for_match);
-    let _ = expand_head_unif(ctx, env, ty_prime);
-}
-
 fn expand_head_with_mode<'a>(
     ctx: &'a TypeContext,
     env: &Env,
@@ -5094,6 +5070,131 @@ pub fn unify<'a>(
         record_trace_expansions(ctx, env, trace);
     }
     result
+}
+
+/// OCaml `Ctype.enforce_constraints` (ctype.ml:1292-1301) for a constructor
+/// whose declaration `decl` was found: `subst` the declaration against the
+/// constructor's arguments, unifying them with the constrained parameters.
+pub(crate) fn enforce_constraints(
+    ctx: &TypeContext,
+    env: &Env,
+    ty: TypeExprRef,
+    decl: &crate::types::TypeDeclaration,
+) {
+    let ty = ctx.repr(ty);
+    let args = match &*ctx.get_desc(ty) {
+        TypeDesc::Tconstr { args, .. } => args.clone(),
+        _ => unreachable!("enforce_constraints expects a type constructor"),
+    };
+    let level = ctx.get_level(ty);
+    if decl.type_params.len() != args.len() {
+        return;
+    }
+    // `subst env level Public (ref Mnil) None decl.type_params args
+    // (newvar2 level)` (ctype.ml:1127-1149).
+    let body = new_var_at_level(ctx, level);
+    let old_level = ctx.current_level();
+    ctx.set_current_level(level);
+    let body0 = ctx.new_var(None);
+    let (params, body) = instance_parameterized_type(ctx, &decl.type_params, body);
+    let mut state = UnifyState::new();
+    state.set_env(env);
+    let unified = unify(ctx, &mut state, body0, body).and_then(|()| {
+        params
+            .iter()
+            .zip(args.iter())
+            .try_for_each(|(param, arg)| unify(ctx, &mut state, *param, *arg))
+    });
+    ctx.set_current_level(old_level);
+    // typedecl.ml:769 treats a failure here as impossible.
+    debug_assert!(unified.is_ok(), "enforce_constraints failed to unify");
+}
+
+/// OCaml `Ctype.rigidify` (ctype.ml:2926-2950): the variables of `ty`, with
+/// open polymorphic-variant rows fixed.
+fn rigidify(ctx: &TypeContext, ty: TypeExprRef) -> Vec<TypeExprRef> {
+    fn walk(
+        ctx: &TypeContext,
+        ty: TypeExprRef,
+        seen: &mut TypeExprRefSet,
+        vars: &mut Vec<TypeExprRef>,
+    ) {
+        let ty = ctx.repr(ty);
+        if !seen.insert(ty) {
+            return;
+        }
+        let desc = ctx.get_desc(ty).clone();
+        match desc {
+            TypeDesc::Tvar(_) => {
+                if !vars.contains(&ty) {
+                    vars.push(ty);
+                }
+            }
+            TypeDesc::Tvariant(row) => {
+                let row = crate::types::btype::row_repr(ctx, &row);
+                let more = ctx.repr(row.row_more);
+                if matches!(&*ctx.get_desc(more), TypeDesc::Tvar(_))
+                    && !crate::types::btype::row_fixed(ctx, &row)
+                {
+                    let more_prime = ctx.new_type(ctx.get_desc(more).clone());
+                    ctx.set_level(more_prime, ctx.get_level(more));
+                    let fixed_row = crate::types::type_expr::RowDesc {
+                        row_fields: Vec::new(),
+                        row_more: more_prime,
+                        row_fixed: true,
+                        ..row.clone()
+                    };
+                    let variant = ctx.new_type(TypeDesc::Tvariant(fixed_row));
+                    ctx.set_level(variant, ctx.get_level(ty));
+                    link_type(ctx, more, variant);
+                }
+                let mut children = Vec::new();
+                crate::types::btype::iter_row(ctx, &row, |child| children.push(child));
+                for child in children {
+                    walk(ctx, child, seen, vars);
+                }
+                if !crate::types::btype::static_row(ctx, &row) {
+                    let more = crate::types::btype::row_repr(ctx, &row).row_more;
+                    walk(ctx, more, seen, vars);
+                }
+            }
+            _ => {
+                let mut children = Vec::new();
+                iter_type_expr(ctx, ty, |child| children.push(child));
+                for child in children {
+                    walk(ctx, child, seen, vars);
+                }
+            }
+        }
+    }
+    let mut vars = Vec::new();
+    walk(ctx, ty, &mut TypeExprRefSet::new(), &mut vars);
+    vars
+}
+
+/// OCaml `Ctype.matches` (ctype.ml:2952-2974): `ty'` is an instance of `ty`
+/// without instantiating `ty`'s variables. All effects are undone except
+/// `cleanup_abbrev`, which OCaml does not log.
+pub(crate) fn matches(ctx: &TypeContext, env: &Env, ty: TypeExprRef, ty2: TypeExprRef) -> bool {
+    ctx.clear_abbrev_memos();
+    let snapshot = ctx.snapshot_type_state();
+    let vars = rigidify(ctx, ty);
+    let mut state = UnifyState::new();
+    state.set_env(env);
+    let ok = unify(ctx, &mut state, ty, ty2).is_ok() && {
+        let mut seen = Vec::new();
+        vars.iter().all(|&var| {
+            let expanded = expand_head(ctx, env, var);
+            if seen.contains(&expanded) {
+                false
+            } else {
+                seen.push(expanded);
+                matches!(&*ctx.get_desc(expanded), TypeDesc::Tvar(_))
+            }
+        })
+    };
+    ctx.restore_type_state(snapshot);
+    ok
 }
 
 /// OCaml `full_expand` (ctype.ml:1305-1310).
