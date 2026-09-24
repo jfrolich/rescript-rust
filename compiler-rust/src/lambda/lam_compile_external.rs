@@ -636,9 +636,15 @@ impl LambdaCompiler {
         arg_label: ExternalArgLabel,
         arg_type: &ExternalArgAttr,
     ) -> (Vec<Expression>, Option<Expression>) {
-        let arg = match arg_label {
-            ExternalArgLabel::Optional => self.external_optional_to_undefined_expr(raw_arg.clone()),
-            ExternalArgLabel::Label | ExternalArgLabel::Empty => raw_arg.clone(),
+        // Only `Unwrap` of an optional argument reads the raw argument again.
+        let keep_raw = matches!(arg_type, ExternalArgAttr::Unwrap)
+            && matches!(arg_label, ExternalArgLabel::Optional);
+        let (arg, raw_arg) = match arg_label {
+            ExternalArgLabel::Optional => {
+                let raw_copy = keep_raw.then(|| raw_arg.clone());
+                (self.external_optional_to_undefined_expr(raw_arg), raw_copy)
+            }
+            ExternalArgLabel::Label | ExternalArgLabel::Empty => (raw_arg, None),
         };
 
         match arg_type {
@@ -665,7 +671,9 @@ impl LambdaCompiler {
             }
             ExternalArgAttr::Unwrap => {
                 let value = match arg_label {
-                    ExternalArgLabel::Optional => self.external_option_unwrap_expr(raw_arg),
+                    ExternalArgLabel::Optional => self.external_option_unwrap_expr(
+                        raw_arg.expect("optional unwrap keeps the raw argument"),
+                    ),
                     ExternalArgLabel::Label | ExternalArgLabel::Empty => {
                         self.external_polyvar_unwrap_expr(arg)
                     }
