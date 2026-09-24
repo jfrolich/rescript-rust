@@ -383,6 +383,11 @@ pub struct TypeContext {
     /// cached component view without `PersistentEnv`; it must not be inferred
     /// from flattened module-name spelling.
     component_alias_sources: RefCell<ahash::AHashMap<SamePathKey, Vec<Path>>>,
+    /// Component-table name indexes of compilation-local signatures, keyed by
+    /// address; the entry keeps the signature alive so the key stays unique.
+    signature_indexes: RefCell<
+        ahash::AHashMap<usize, (Arc<super::decl::Signature>, Arc<super::env_lazy::SignatureIndex>)>,
+    >,
     component_paths_by_alias_source: RefCell<ahash::AHashMap<SamePathKey, Vec<Path>>>,
 
     /// Cached dotted value lookups keyed by resolved module access path.
@@ -670,6 +675,7 @@ impl TypeContext {
             resolved_module_sig_cache: RefCell::new(ahash::AHashMap::new()),
             qualified_module_components_cache: RefCell::new(ahash::AHashMap::new()),
             component_alias_sources: RefCell::new(ahash::AHashMap::new()),
+            signature_indexes: RefCell::new(ahash::AHashMap::new()),
             component_paths_by_alias_source: RefCell::new(ahash::AHashMap::new()),
             resolved_module_value_cache: RefCell::new(ahash::AHashMap::new()),
             resolved_module_type_cache: RefCell::new(ahash::AHashMap::new()),
@@ -1131,6 +1137,26 @@ impl TypeContext {
         self.qualified_module_components_cache
             .borrow()
             .contains_key(key)
+    }
+
+    /// Name index for the component tables of `sig`, shared by every table
+    /// built from the same signature.
+    pub(crate) fn signature_index(
+        &self,
+        sig: &Arc<super::decl::Signature>,
+    ) -> Arc<super::env_lazy::SignatureIndex> {
+        if self.store.owns_signature(sig) {
+            return self.store.signature_index(sig);
+        }
+        let key = Arc::as_ptr(sig) as usize;
+        if let Some((_, found)) = self.signature_indexes.borrow().get(&key) {
+            return found.clone();
+        }
+        let built = Arc::new(super::env_lazy::SignatureIndex::build(sig));
+        self.signature_indexes
+            .borrow_mut()
+            .insert(key, (sig.clone(), built.clone()));
+        built
     }
 
     pub(crate) fn register_component_alias_source(&self, component_path: Path, alias_source: Path) {

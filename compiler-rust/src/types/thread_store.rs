@@ -96,6 +96,9 @@ pub(crate) struct ThreadTypeStore {
     /// Per-unit type registrations of a store-owned signature under one module
     /// path, keyed by the signature's item address and that path.
     sig_type_registrations: RefCell<HashMap<(usize, Path), Arc<[SigTypeRegistration]>>>,
+    /// Component-table name indexes of store-owned signatures, keyed by the
+    /// signature's address (kept alive by `pers`).
+    signature_indexes: RefCell<HashMap<usize, Arc<crate::types::env_lazy::SignatureIndex>>>,
     /// Synthetic longident component names used by store `Tpackage` nodes.
     longident_names: RefCell<HashMap<u32, String>>,
     next_longident_idx: Cell<u32>,
@@ -115,6 +118,7 @@ impl ThreadTypeStore {
             shared_signatures: RefCell::new(HashSet::new()),
             type_decl_arcs: RefCell::new(HashMap::new()),
             sig_type_registrations: RefCell::new(HashMap::new()),
+            signature_indexes: RefCell::new(HashMap::new()),
             longident_names: RefCell::new(HashMap::new()),
             next_longident_idx: Cell::new(STORE_LONGIDENT_IDX_BASE),
             generation: BUILD_GENERATION.load(Ordering::SeqCst),
@@ -175,6 +179,21 @@ impl ThreadTypeStore {
         self.sig_type_registrations
             .borrow_mut()
             .insert(key, built.clone());
+        built
+    }
+
+    /// Name index of a store-owned signature (`owns_signature` must hold),
+    /// built once per store.
+    pub(crate) fn signature_index(
+        &self,
+        sig: &Arc<Signature>,
+    ) -> Arc<crate::types::env_lazy::SignatureIndex> {
+        let key = Arc::as_ptr(sig) as usize;
+        if let Some(found) = self.signature_indexes.borrow().get(&key) {
+            return found.clone();
+        }
+        let built = Arc::new(crate::types::env_lazy::SignatureIndex::build(sig));
+        self.signature_indexes.borrow_mut().insert(key, built.clone());
         built
     }
 

@@ -7,7 +7,7 @@
 //! module-resolution paths use as their source of truth.
 
 use ahash::AHashMap as HashMap;
-use std::cell::{Cell, OnceCell, RefCell};
+use std::cell::{OnceCell, RefCell};
 use std::sync::Arc;
 
 use crate::ident::Ident;
@@ -19,8 +19,59 @@ use super::decl::{
 };
 use super::path::Path;
 
-const ADAPTIVE_VALUE_INDEX_MIN_SIGNATURE_ITEMS: usize = 32;
-const ADAPTIVE_VALUE_INDEX_MIN_CACHED_NAMES: usize = 2;
+/// Name index of one signature's component tables.
+///
+/// OCaml compiler/ml/env.ml:1530-1578 fills `comp_values`, `comp_types` and
+/// `comp_modules` from the signature items in order, so later same-name items
+/// shadow earlier ones. The index depends only on the item list, so it is
+/// computed once per signature and shared by every component table built from
+/// it, instead of rebuilding three string-keyed maps on each build.
+#[derive(Debug, Default)]
+pub(crate) struct SignatureIndex {
+    values: HashMap<smol_str::SmolStr, (usize, usize)>,
+    types: HashMap<smol_str::SmolStr, usize>,
+    modules: HashMap<smol_str::SmolStr, (usize, usize)>,
+    /// Alias/ident module items, as (item index, runtime position), in order.
+    alias_modules: Vec<(usize, usize)>,
+    /// Module type items, in order.
+    modtypes: Vec<usize>,
+}
+
+impl SignatureIndex {
+    pub(crate) fn build(signature: &Signature) -> Self {
+        let mut index = SignatureIndex::default();
+        let mut runtime_pos = 0usize;
+        for (idx, item) in signature.iter().enumerate() {
+            match item {
+                SignatureItem::SigValue(id, desc) => {
+                    index.values.insert(id.name_smol().clone(), (idx, runtime_pos));
+                    if !matches!(desc.val_kind, ValueKind::ValPrim(_)) {
+                        runtime_pos += 1;
+                    }
+                }
+                SignatureItem::SigType(id, _, _) => {
+                    index.types.insert(id.name_smol().clone(), idx);
+                }
+                SignatureItem::SigTypext(_, _, _) | SignatureItem::SigClass => {
+                    runtime_pos += 1;
+                }
+                SignatureItem::SigModule(id, md, _) => {
+                    if matches!(
+                        md.md_type,
+                        ModuleType::MtyAlias(_, _) | ModuleType::MtyIdent(_)
+                    ) {
+                        index.alias_modules.push((idx, runtime_pos));
+                    }
+                    index.modules.insert(id.name_smol().clone(), (idx, runtime_pos));
+                    runtime_pos += 1;
+                }
+                SignatureItem::SigModtype(_, _) => index.modtypes.push(idx),
+                SignatureItem::SigClassType => {}
+            }
+        }
+        index
+    }
+}
 
 fn path_non_apply_root_is_persistent_or_global(path: &Path) -> bool {
     fn root_ident(path: &Path) -> Option<&Ident> {
@@ -349,15 +400,10 @@ impl ChildComponentScanState {
 
 #[derive(Debug, Clone)]
 struct StructureComponentTables {
-    values: RefCell<HashMap<String, Option<(usize, usize)>>>,
+    index: Arc<SignatureIndex>,
     component_values: RefCell<HashMap<String, Option<(usize, Ident, ValueDescription)>>>,
-    values_indexed: Cell<bool>,
     constructors: RefCell<HashMap<String, Arc<Vec<ConstructorDescription>>>>,
     labels: RefCell<HashMap<String, Arc<Vec<LabelDescription>>>>,
-    types: RefCell<HashMap<String, Option<usize>>>,
-    types_indexed: Cell<bool>,
-    modules: RefCell<HashMap<String, Option<(usize, usize)>>>,
-    modules_indexed: Cell<bool>,
     modtypes: HashMap<String, (Ident, ModtypeDeclaration)>,
     // OCaml compiler/ml/env.ml:1568-1578 stores `comp_modules` and
     // `comp_modtypes` declarations in EnvLazy-backed component tables, and
@@ -538,45 +584,39 @@ impl QualifiedModuleComponents {
         child_component_scan_complete: bool,
         ctx: &super::context::TypeContext,
     ) -> Self {
-        let mut values = HashMap::new();
-        let mut types = HashMap::new();
-        let mut modules = HashMap::new();
+        let index = ctx.signature_index(&signature);
         let mut component_modtypes = HashMap::new();
-        let mut runtime_pos = 0usize;
-
-        for (idx, item) in signature.iter().enumerate() {
-            match item {
-                SignatureItem::SigValue(id, desc) => {
-                    values.insert(id.name().to_string(), Some((idx, runtime_pos)));
-                    if !matches!(desc.val_kind, ValueKind::ValPrim(_)) {
-                        runtime_pos += 1;
-                    }
+        // Replay the per-item side effects in signature order.
+        let mut alias_items = index.alias_modules.iter().peekable();
+        let mut modtype_items = index.modtypes.iter().peekable();
+        loop {
+            let next_alias = alias_items.peek().map(|(idx, _)| *idx);
+            let next_modtype = modtype_items.peek().map(|idx| **idx);
+            let take_alias = match (next_alias, next_modtype) {
+                (Some(a), Some(m)) => a < m,
+                (Some(_), None) => true,
+                (None, Some(_)) => false,
+                (None, None) => break,
+            };
+            if take_alias {
+                let (idx, runtime_pos) = *alias_items.next().expect("peeked alias item");
+                if let SignatureItem::SigModule(id, md, _) = &signature[idx]
+                    && let super::decl::ModuleType::MtyAlias(_, alias_source)
+                    | super::decl::ModuleType::MtyIdent(alias_source) = &md.md_type
+                {
+                    let component_path =
+                        Path::pdot_pos(access_path.clone(), id.name(), runtime_pos as i32);
+                    // OCaml compiler/ml/env.ml:1517 `scrape_alias` follows
+                    // the module declaration's alias path through
+                    // env.ml:865-882 `find_module`, then env.ml:1530-1578
+                    // stores thunks under the selected component path.
+                    // Preserve the actual source path from the declaration
+                    // instead of recovering it from flattened spelling.
+                    ctx.register_component_alias_source(component_path, alias_source.clone());
                 }
-                SignatureItem::SigType(id, _, _) => {
-                    types.insert(id.name().to_string(), Some(idx));
-                }
-                SignatureItem::SigTypext(_, _, _) | SignatureItem::SigClass => {
-                    runtime_pos += 1;
-                }
-                SignatureItem::SigModule(id, _, _) => {
-                    if let SignatureItem::SigModule(_, md, _) = item
-                        && let super::decl::ModuleType::MtyAlias(_, alias_source)
-                        | super::decl::ModuleType::MtyIdent(alias_source) = &md.md_type
-                    {
-                        let component_path =
-                            Path::pdot_pos(access_path.clone(), id.name(), runtime_pos as i32);
-                        // OCaml compiler/ml/env.ml:1517 `scrape_alias` follows
-                        // the module declaration's alias path through
-                        // env.ml:865-882 `find_module`, then env.ml:1530-1578
-                        // stores thunks under the selected component path.
-                        // Preserve the actual source path from the declaration
-                        // instead of recovering it from flattened spelling.
-                        ctx.register_component_alias_source(component_path, alias_source.clone());
-                    }
-                    modules.insert(id.name().to_string(), Some((idx, runtime_pos)));
-                    runtime_pos += 1;
-                }
-                SignatureItem::SigModtype(id, mtd) => {
+            } else {
+                let idx = *modtype_items.next().expect("peeked modtype item");
+                if let SignatureItem::SigModtype(id, mtd) = &signature[idx] {
                     let mut component_mtd = mtd.clone();
                     // OCaml compiler/ml/env.ml:1513-1514 memoizes the component
                     // table being forced, then env.ml:1581-1585 applies
@@ -590,10 +630,8 @@ impl QualifiedModuleComponents {
                         &access_path,
                         ctx,
                     );
-                    let component_id = id.clone();
-                    component_modtypes.insert(id.name().to_string(), (component_id, component_mtd));
+                    component_modtypes.insert(id.name().to_string(), (id.clone(), component_mtd));
                 }
-                SignatureItem::SigClassType => {}
             }
         }
 
@@ -606,15 +644,10 @@ impl QualifiedModuleComponents {
             access_path: Arc::new(access_path),
             signature,
             tables: Arc::new(StructureComponentTables {
-                values: RefCell::new(values),
+                index,
                 component_values: RefCell::new(HashMap::new()),
-                values_indexed: Cell::new(true),
                 constructors: RefCell::new(HashMap::new()),
                 labels: RefCell::new(HashMap::new()),
-                types: RefCell::new(types),
-                types_indexed: Cell::new(true),
-                modules: RefCell::new(modules),
-                modules_indexed: Cell::new(true),
                 modtypes: component_modtypes,
                 qualified_modules: RefCell::new(HashMap::new()),
                 qualified_modtypes: RefCell::new(HashMap::new()),
@@ -648,193 +681,25 @@ impl QualifiedModuleComponents {
     }
 
     fn cached_value_index(&self, name: &str) -> Option<(usize, usize)> {
-        if let Some(cached) = self.tables.values.borrow().get(name).cloned() {
-            if self.compiler_counters_enabled {
-                crate::perf_counters::record_lazy_hit(crate::perf_counters::LazyLookupKind::Value);
-            }
-            return cached;
-        }
-        if self.tables.values_indexed.get() {
-            if self.compiler_counters_enabled {
-                crate::perf_counters::record_lazy_hit(crate::perf_counters::LazyLookupKind::Value);
-            }
-            return None;
-        }
-
-        if self.signature.len() >= ADAPTIVE_VALUE_INDEX_MIN_SIGNATURE_ITEMS
-            && self.tables.values.borrow().len() >= ADAPTIVE_VALUE_INDEX_MIN_CACHED_NAMES
-        {
-            return self.build_value_index_and_get(name);
-        }
-
-        // OCaml compiler/ml/env.ml:1513-1514 stores component tables lazily.
-        // Keep the canonical signature immutable and force only this env.ml:1132
-        // value lookup bucket instead of allocating indexes for every sibling.
-        let mut found = None;
-        let mut runtime_pos = 0usize;
-        for (idx, item) in self.signature.iter().enumerate() {
-            match item {
-                SignatureItem::SigValue(id, desc) => {
-                    if id.name() == name {
-                        found = Some((idx, runtime_pos));
-                    }
-                    if !matches!(desc.val_kind, ValueKind::ValPrim(_)) {
-                        runtime_pos += 1;
-                    }
-                }
-                SignatureItem::SigTypext(_, _, _) | SignatureItem::SigClass => {
-                    runtime_pos += 1;
-                }
-                SignatureItem::SigModule(_, _, _) => {
-                    runtime_pos += 1;
-                }
-                SignatureItem::SigType(_, _, _)
-                | SignatureItem::SigModtype(_, _)
-                | SignatureItem::SigClassType => {}
-            }
-        }
-        self.tables
-            .values
-            .borrow_mut()
-            .insert(name.to_string(), found);
         if self.compiler_counters_enabled {
-            crate::perf_counters::record_lazy_scan(
-                crate::perf_counters::LazyLookupKind::Value,
-                self.signature.len(),
-                usize::from(found.is_some()),
-            );
+            crate::perf_counters::record_lazy_hit(crate::perf_counters::LazyLookupKind::Value);
         }
-        found
+        self.tables.index.values.get(name).copied()
     }
 
-    fn build_value_index_and_get(&self, name: &str) -> Option<(usize, usize)> {
-        let mut values = self.tables.values.borrow_mut();
-        if !self.tables.values_indexed.get() {
-            let mut runtime_pos = 0usize;
-            let mut result_items = 0usize;
-            for (idx, item) in self.signature.iter().enumerate() {
-                match item {
-                    SignatureItem::SigValue(id, desc) => {
-                        values.insert(id.name().to_string(), Some((idx, runtime_pos)));
-                        result_items += 1;
-                        if !matches!(desc.val_kind, ValueKind::ValPrim(_)) {
-                            runtime_pos += 1;
-                        }
-                    }
-                    SignatureItem::SigTypext(_, _, _) | SignatureItem::SigClass => {
-                        runtime_pos += 1;
-                    }
-                    SignatureItem::SigModule(_, _, _) => {
-                        runtime_pos += 1;
-                    }
-                    SignatureItem::SigType(_, _, _)
-                    | SignatureItem::SigModtype(_, _)
-                    | SignatureItem::SigClassType => {}
-                }
-            }
-            self.tables.values_indexed.set(true);
-            if self.compiler_counters_enabled {
-                crate::perf_counters::record_lazy_scan(
-                    crate::perf_counters::LazyLookupKind::Value,
-                    self.signature.len(),
-                    result_items,
-                );
-            }
-        }
-        values.get(name).cloned().unwrap_or(None)
-    }
 
     fn cached_type_index(&self, name: &str) -> Option<usize> {
-        if let Some(cached) = self.tables.types.borrow().get(name).cloned() {
-            if self.compiler_counters_enabled {
-                crate::perf_counters::record_lazy_hit(crate::perf_counters::LazyLookupKind::Type);
-            }
-            return cached;
-        }
-        if self.tables.types_indexed.get() {
-            if self.compiler_counters_enabled {
-                crate::perf_counters::record_lazy_hit(crate::perf_counters::LazyLookupKind::Type);
-            }
-            return None;
-        }
-
-        // OCaml compiler/ml/env.ml:1542 stores type declarations in the
-        // component table, but the table itself is behind EnvLazy. Defer this
-        // per-name index until a type lookup actually asks for it.
-        let mut found = None;
-        for (idx, item) in self.signature.iter().enumerate() {
-            if let SignatureItem::SigType(id, _, _) = item
-                && id.name() == name
-            {
-                found = Some(idx);
-            }
-        }
-        self.tables
-            .types
-            .borrow_mut()
-            .insert(name.to_string(), found);
         if self.compiler_counters_enabled {
-            crate::perf_counters::record_lazy_scan(
-                crate::perf_counters::LazyLookupKind::Type,
-                self.signature.len(),
-                usize::from(found.is_some()),
-            );
+            crate::perf_counters::record_lazy_hit(crate::perf_counters::LazyLookupKind::Type);
         }
-        found
+        self.tables.index.types.get(name).copied()
     }
 
     fn cached_module_index(&self, name: &str) -> Option<(usize, usize)> {
-        if let Some(cached) = self.tables.modules.borrow().get(name).cloned() {
-            if self.compiler_counters_enabled {
-                crate::perf_counters::record_lazy_hit(crate::perf_counters::LazyLookupKind::Module);
-            }
-            return cached;
-        }
-        if self.tables.modules_indexed.get() {
-            if self.compiler_counters_enabled {
-                crate::perf_counters::record_lazy_hit(crate::perf_counters::LazyLookupKind::Module);
-            }
-            return None;
-        }
-
-        // OCaml compiler/ml/env.ml:1568 and 1573-1578 expose module
-        // declarations/components through separate lazy thunks. Force only the
-        // requested child name here; the full shared signature stays untouched.
-        let mut found = None;
-        let mut runtime_pos = 0usize;
-        for (idx, item) in self.signature.iter().enumerate() {
-            match item {
-                SignatureItem::SigValue(_, desc) => {
-                    if !matches!(desc.val_kind, ValueKind::ValPrim(_)) {
-                        runtime_pos += 1;
-                    }
-                }
-                SignatureItem::SigTypext(_, _, _) | SignatureItem::SigClass => {
-                    runtime_pos += 1;
-                }
-                SignatureItem::SigModule(id, _, _) => {
-                    if id.name() == name {
-                        found = Some((idx, runtime_pos));
-                    }
-                    runtime_pos += 1;
-                }
-                SignatureItem::SigType(_, _, _)
-                | SignatureItem::SigModtype(_, _)
-                | SignatureItem::SigClassType => {}
-            }
-        }
-        self.tables
-            .modules
-            .borrow_mut()
-            .insert(name.to_string(), found);
         if self.compiler_counters_enabled {
-            crate::perf_counters::record_lazy_scan(
-                crate::perf_counters::LazyLookupKind::Module,
-                self.signature.len(),
-                usize::from(found.is_some()),
-            );
+            crate::perf_counters::record_lazy_hit(crate::perf_counters::LazyLookupKind::Module);
         }
-        found
+        self.tables.index.modules.get(name).copied()
     }
 
     pub(crate) fn lookup_value(&self, name: &str) -> Option<(usize, &Ident, &ValueDescription)> {
