@@ -875,6 +875,91 @@ pub fn occurs(ctx: &TypeContext, needle: TypeExprRef, haystack: TypeExprRef) -> 
     occurs_rec(ctx, needle, haystack, &mut visited)
 }
 
+/// OCaml `occur` / `occur_rec` (compiler/ml/ctype.ml:1347-1395).
+///
+/// Fails when `ty0` occurs in `ty`. An occurrence found below a type
+/// constructor is retried after expanding the constructor head, so
+/// abbreviations such as `type t<'a> = int` do not count as recursion. In
+/// pattern mode, recursion through contractive (datatype) constructors and
+/// through structural nodes is allowed (`allow_recursive`).
+pub(crate) fn occur_check(
+    ctx: &TypeContext,
+    env: Option<&Env>,
+    mode: UnifyMode,
+    ty0: TypeExprRef,
+    ty: TypeExprRef,
+) -> TypeResult<()> {
+    fn occur_rec(
+        ctx: &TypeContext,
+        env: Option<&Env>,
+        allow_recursive: bool,
+        visited: &mut Vec<TypeExprRef>,
+        ty0: TypeExprRef,
+        ty: TypeExprRef,
+    ) -> Result<(), ()> {
+        let ty = ctx.repr(ty);
+        if ty == ty0 {
+            return Err(());
+        }
+        let desc = ctx.get_desc(ty);
+        match &*desc {
+            TypeDesc::Tconstr { path, .. } => {
+                let path = path.clone();
+                drop(desc);
+                if allow_recursive && env.is_some_and(|env| is_contractive(ctx, env, &path)) {
+                    return Ok(());
+                }
+                let direct = if visited.contains(&ty) {
+                    Err(())
+                } else {
+                    visited.push(ty);
+                    let mut children = Vec::new();
+                    iter_type_expr(ctx, ty, |child| children.push(child));
+                    let result = children
+                        .into_iter()
+                        .try_for_each(|child| occur_rec(ctx, env, allow_recursive, visited, ty0, child));
+                    visited.pop();
+                    result
+                };
+                match direct {
+                    Ok(()) => Ok(()),
+                    Err(()) => {
+                        // `try_expand_head try_expand_once env ty`, then retry.
+                        let expanded = env.and_then(|env| try_expand_head(ctx, env, ty));
+                        match expanded {
+                            Some(expanded) => {
+                                occur_rec(ctx, env, allow_recursive, visited, ty0, expanded)
+                            }
+                            None => Err(()),
+                        }
+                    }
+                }
+            }
+            TypeDesc::Tobject { .. } | TypeDesc::Tvariant(_) => Ok(()),
+            _ => {
+                drop(desc);
+                if allow_recursive || visited.contains(&ty) {
+                    return Ok(());
+                }
+                visited.push(ty);
+                let mut children = Vec::new();
+                iter_type_expr(ctx, ty, |child| children.push(child));
+                let result = children
+                    .into_iter()
+                    .try_for_each(|child| occur_rec(ctx, env, allow_recursive, visited, ty0, child));
+                visited.pop();
+                result
+            }
+        }
+    }
+
+    let allow_recursive = mode == UnifyMode::Pattern;
+    let ty0 = ctx.repr(ty0);
+    let mut visited = Vec::new();
+    occur_rec(ctx, env, allow_recursive, &mut visited, ty0, ty)
+        .map_err(|()| TypeError::Unify(vec![]))
+}
+
 /// Match OCaml's `occur_univar` pass before linking a type variable.
 ///
 /// OCaml compiler/ml/ctype.ml:1688-1724 walks the candidate type after the
@@ -4924,7 +5009,8 @@ pub fn unify_var<'a>(
             // performs `occur`, lowers levels, and links directly. It does
             // not call `occur_univar`; that check belongs to the full
             // `unify1_var` path at ctype.ml:2278-2286.
-            if occurs(ctx, t1, t2) {
+            // OCaml compiler/ml/ctype.ml:2618 `occur env t1 t2`.
+            if occur_check(ctx, state.env(), state.mode, t1, t2).is_err() {
                 return Err(TypeError::Unify(vec![(t1, t2)]));
             }
             let level = ctx.get_level(t1);
@@ -4979,9 +5065,6 @@ fn unify_after_expansion<'a>(
 ) -> TypeResult<()> {
     let t1_changed = t1_expanded != t1;
     let t2_changed = t2_expanded != t2;
-    if !t1_changed && !t2_changed {
-        return unify(ctx, state, t1_expanded, t2_expanded);
-    }
 
     // Match OCaml unify2 branching:
     //   if t1 == t1' || t2 != t2' then unify3(t1,t1',t2,t2')
@@ -5009,6 +5092,46 @@ fn unify_after_expansion<'a>(
         // OCaml ctype.ml:2348 returns immediately when the expanded heads are
         // physically equal; the unify3 relink at lines 2393-2397 is not run.
         return Ok(());
+    }
+    {
+        // OCaml `unify3` (compiler/ml/ctype.ml:2181-2192) handles type
+        // variables before anything else: `occur`, `occur_univar`, then link
+        // the expanded variable to the ORIGINAL opposite side. unify2 always
+        // reaches unify3, including when neither head was expanded.
+        let swap = t1_changed && !t2_changed;
+        let (left, left_exp, right, right_exp) = if swap {
+            (t2, ctx.repr(t2_expanded), t1, ctx.repr(t1_expanded))
+        } else {
+            (t1, ctx.repr(t1_expanded), t2, ctx.repr(t2_expanded))
+        };
+        let left_is_var = matches!(&*ctx.get_desc(left_exp), TypeDesc::Tvar(_));
+        let right_is_var = matches!(&*ctx.get_desc(right_exp), TypeDesc::Tvar(_));
+        let left_is_univar = matches!(&*ctx.get_desc(left_exp), TypeDesc::Tunivar(_));
+        let right_is_univar = matches!(&*ctx.get_desc(right_exp), TypeDesc::Tunivar(_));
+        if !(left_is_univar && right_is_univar) {
+            let var_link = if left_is_var {
+                Some((left_exp, ctx.repr(right)))
+            } else if right_is_var {
+                Some((right_exp, ctx.repr(left)))
+            } else {
+                None
+            };
+            if let Some((var, target)) = var_link {
+                if var == target {
+                    return Ok(());
+                }
+                // `occur` raises `Unify []`; the caller's `unify` adds (t1, t2).
+                occur_check(ctx, state.env(), state.mode, var, target)?;
+                if let Some(env) = state.env() {
+                    occur_univar(ctx, env, target)?;
+                }
+                link_type(ctx, var, target);
+                return Ok(());
+            }
+        }
+    }
+    if !t1_changed && !t2_changed {
+        return unify(ctx, state, t1_expanded, t2_expanded);
     }
 
     {
@@ -5038,6 +5161,9 @@ fn unify_after_expansion<'a>(
             drop(rhs_desc);
 
             if state.mode != crate::types::UnifyMode::Pattern {
+                // OCaml unify3 Expression mode (compiler/ml/ctype.ml:2198-2201):
+                // `occur !env t1' t2'` before `link_type t1' t2`.
+                occur_check(ctx, state.env(), state.mode, lhs, rhs)?;
                 // OCaml ctype.ml:2393-2414 links the selected expanded
                 // side to the original opposite side before unifying
                 // constructor arguments, so nested alias spelling follows
@@ -5226,7 +5352,7 @@ fn unify_types<'a>(
             // OCaml compiler/ml/ctype.ml:2280-2286 `unify1_var`
             // does not expand constructor heads after the
             // compiler/ml/ctype.ml:2302 deep-occur special case has failed.
-            if occurs(ctx, t1, t2) {
+            if occur_check(ctx, state.env(), state.mode, t1, t2).is_err() {
                 return Err(TypeError::Unify(vec![(t1, t2)]));
             }
             if let Some(env) = state.env() {
@@ -5245,7 +5371,7 @@ fn unify_types<'a>(
             drop(desc2);
 
             // Symmetric `unify1_var` case from compiler/ml/ctype.ml:2304.
-            if occurs(ctx, t2, t1) {
+            if occur_check(ctx, state.env(), state.mode, t2, t1).is_err() {
                 return Err(TypeError::Unify(vec![(t1, t2)]));
             }
             if let Some(env) = state.env() {
@@ -7008,9 +7134,7 @@ fn moregen(
         if matches!(&*desc1, TypeDesc::Tvar(_)) && moregen_may_instantiate(ctx, inst_nongen, t1) {
             drop(desc1);
             moregen_occur(ctx, env, ctx.get_level(t1), t2)?;
-            if occurs(ctx, t1, t2) {
-                return Err(TypeError::Unify(vec![]));
-            }
+            occur_check(ctx, Some(env), UnifyMode::Expression, t1, t2)?;
             link_type(ctx, t1, t2);
             return Ok(());
         }

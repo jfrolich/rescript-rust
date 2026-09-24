@@ -7693,6 +7693,14 @@ fn append_extra_type_clash_help(
         if !type_clash_top_actual_is_package(type_ctx, trace) {
             return;
         }
+    } else if let Some((var, ty)) = type_clash_occurs_pair(type_ctx, trace) {
+        // OCaml Printtyp.explanation (compiler/ml/printtyp.ml:1341-1345).
+        let mut printer = TypeExprPrinter::new(type_ctx);
+        message.push('\n');
+        message.push_str("The type variable ");
+        message.push_str(&printer.format(var));
+        message.push_str(" occurs inside ");
+        message.push_str(&printer.format(ty));
     }
 
     if matches!(context, Some(TypeClashContext::ArrayLiteral)) {
@@ -7979,6 +7987,25 @@ fn type_clash_escape_constructor_path(
         }
     }
     None
+}
+
+/// The deepest trace pair with a type variable, when that variable occurs in
+/// the other side (OCaml `Printtyp.mismatch` + `explanation`, printtyp.ml:1319-1345).
+fn type_clash_occurs_pair(
+    type_ctx: &TypeContext,
+    trace: &[(TypeExprRef, TypeExprRef)],
+) -> Option<(TypeExprRef, TypeExprRef)> {
+    let (a, b) = trace.iter().rev().find(|(a, b)| {
+        let a = type_ctx.repr(*a);
+        let b = type_ctx.repr(*b);
+        matches!(&*type_ctx.get_desc(a), TypeDesc::Tvar(_))
+            || matches!(&*type_ctx.get_desc(b), TypeDesc::Tvar(_))
+    })?;
+    let (a, b) = (type_ctx.repr(*a), type_ctx.repr(*b));
+    let (var, ty) = if matches!(&*type_ctx.get_desc(a), TypeDesc::Tvar(_)) { (a, b) } else { (b, a) };
+    crate::types::ctype::occur_check(type_ctx, None, crate::types::ctype::UnifyMode::Expression, var, ty)
+        .is_err()
+        .then_some((var, ty))
 }
 
 fn type_clash_top_actual_is_package(
