@@ -9704,18 +9704,18 @@ fn type_decl_manifest_for_path(
             .map(|manifest| (decl.type_params.clone(), manifest))
     };
 
+    // Once the declaration for `path` is found, its manifest (or lack of one)
+    // is the answer; falling back to another declaration with the same name
+    // would expand an unrelated type.
     if let crate::types::Path::Pident(id) = path
         && id.stamp() != 0
         && let Some(decl) = type_ctx.find_type_decl_by_stamp(id.stamp())
-        && let Some(result) = from_decl(decl)
     {
-        return Some(result);
+        return from_decl(decl);
     }
 
-    if let Some(decl) = type_ctx.find_type_decl_by_path(&path.name())
-        && let Some(result) = from_decl(decl)
-    {
-        return Some(result);
+    if let Some(decl) = type_ctx.find_type_decl_by_path(&path.name()) {
+        return from_decl(decl);
     }
 
     if let Some(decl) = type_ctx.find_type_decl(path.head_name())
