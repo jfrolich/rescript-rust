@@ -1352,58 +1352,43 @@ impl<'src> Scanner<'src> {
         let start_pos = self.position();
         let pattern_start = self.offset;
 
-        let mut escaped = false;
+        // OCaml `scan_regex` (compiler/syntax/src/res_scanner.ml:562-624).
         let mut in_char_class = false;
 
         let (pattern, flags) = loop {
             match self.ch {
-                '\n' | '\r' => {
-                    let end_pos = self.position();
-                    self.error(
-                        start_pos.clone(),
-                        end_pos,
-                        DiagnosticCategory::message("unterminated regex".to_string()),
-                    );
-                    break (Cow::Borrowed(""), Cow::Borrowed(""));
-                }
-                c if c == EOF_CHAR => {
-                    let end_pos = self.position();
-                    self.error(
-                        start_pos.clone(),
-                        end_pos,
-                        DiagnosticCategory::message("unterminated regex".to_string()),
-                    );
-                    break (Cow::Borrowed(""), Cow::Borrowed(""));
-                }
-                '\\' if !escaped => {
-                    escaped = true;
-                    self.next();
-                }
-                '[' if !escaped => {
-                    in_char_class = true;
-                    escaped = false;
-                    self.next();
-                }
-                ']' if !escaped && in_char_class => {
-                    in_char_class = false;
-                    self.next();
-                }
-                '/' if !escaped && !in_char_class => {
-                    // Closing /
+                '/' if !in_char_class => {
                     let pattern = Cow::Borrowed(self.substring(pattern_start, self.offset));
-                    self.next(); // consume closing '/'
-
+                    self.next();
                     let flags_start = self.offset;
-                    while self.ch.is_ascii_alphabetic() {
+                    while matches!(self.ch, 'd' | 'g' | 'i' | 'm' | 's' | 'u' | 'v' | 'y') {
                         self.next();
                     }
                     let flags = Cow::Borrowed(self.substring(flags_start, self.offset));
                     break (pattern, flags);
                 }
-                _ => {
-                    escaped = false;
+                c if c == '\n' || c == EOF_CHAR => {
+                    let end_pos = self.position();
+                    self.error(
+                        start_pos.clone(),
+                        end_pos,
+                        DiagnosticCategory::message("unterminated regex".to_string()),
+                    );
+                    break (Cow::Borrowed(""), Cow::Borrowed(""));
+                }
+                '\\' => {
+                    self.next();
                     self.next();
                 }
+                '[' if !in_char_class => {
+                    in_char_class = true;
+                    self.next();
+                }
+                ']' if in_char_class => {
+                    in_char_class = false;
+                    self.next();
+                }
+                _ => self.next(),
             }
         };
 
