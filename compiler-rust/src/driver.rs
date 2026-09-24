@@ -9954,7 +9954,11 @@ fn polyvariant_diagnostic_type_pair(
     trace: &[(TypeExprRef, TypeExprRef)],
 ) -> Option<(TypeExprRef, TypeExprRef)> {
     let mut fallback = None;
+    // OCaml `Printtyp.mismatch` reads the expanded trace (`expand_trace`), so a
+    // pair of variant abbreviations is explained through their expansions.
+    let expanded = |ty: TypeExprRef| type_ctx.trace_expansion(type_ctx.repr(ty)).unwrap_or(ty);
     for (actual, expected) in trace.iter().copied() {
+        let (actual, expected) = (expanded(actual), expanded(expected));
         if polyvariant_row_pair(type_ctx, actual, expected).is_none() {
             continue;
         }
