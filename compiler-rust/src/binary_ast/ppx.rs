@@ -2287,27 +2287,33 @@ fn validate_plain_obj_arg_type_errors(
     arena: &mut ParseArena,
 ) -> PpxResult<()> {
     let (args, _result) = list_of_arrow(vd_type, arena);
-    for arg in args {
+    // `Ast_external_process.process_obj` folds right over the arguments
+    // (ast_external_process.ml:440-590), so the last argument is checked first.
+    for arg in args.into_iter().rev() {
         let typ = arena.get_core_type(arg.typ).clone();
         match arg.lbl {
             ArgLabel::Labelled(label_loc) => {
-                if matches!(&*typ.ptyp_desc, CoreTypeDesc::Ptyp_any)
-                    && get_as_string_attr(&arg.attrs, arena).is_none()
-                    && get_as_int_attr(&arg.attrs, arena).is_none()
-                    // OCaml compiler/syntax/src/res_core.ml:5018-5026 keeps
-                    // labelled `@as(json`...`) _` external arguments as
-                    // arity-changing constants. The `@as` payload was already
-                    // validated by `validate_external_arg_type_errors`, so only
-                    // reject a truly bare `_` here.
-                    && !typ
+                // `Ast_attributes.iter_process_bs_string_as param_type.attrs`
+                // (ast_external_process.ml:459-464): an argument-level `@as`
+                // must be a single string.
+                validate_string_as_attrs(&arg.attrs, arena)?;
+                // `refine_obj_arg_type` (ast_external_process.ml:96-116): `_`
+                // needs a type-level `@as` constant; any other type goes
+                // through `spec_of_ptyp`.
+                if matches!(&*typ.ptyp_desc, CoreTypeDesc::Ptyp_any) {
+                    validate_string_or_int_as_attrs(&typ.ptyp_attributes, arena)?;
+                    if !typ
                         .ptyp_attributes
                         .iter()
                         .any(|(attr_name, _)| arena.get_string(attr_name.txt) == "as")
-                {
-                    return Err(PpxError::at_loc(
-                        typ.ptyp_loc,
-                        "_ is not allowed in combination with external optional type",
-                    ));
+                    {
+                        return Err(PpxError::at_loc(
+                            typ.ptyp_loc,
+                            "_ is not allowed in combination with external optional type",
+                        ));
+                    }
+                } else {
+                    validate_external_core_type_arg_errors(&typ, arena)?;
                 }
 
                 let label = arena.get_string(label_loc.txt).to_string();
@@ -2328,8 +2334,12 @@ fn validate_plain_obj_arg_type_errors(
                 }
             }
             ArgLabel::Optional(label_loc) => {
+                validate_string_as_attrs(&arg.attrs, arena)?;
                 let label = arena.get_string(label_loc.txt).to_string();
-                match get_opt_arg_type(false, &typ, arena)? {
+                // `get_opt_arg_type` (ast_external_process.ml:127-134).
+                let arg_type = get_opt_arg_type(false, &typ, arena)?;
+                validate_external_core_type_arg_errors(&typ, arena)?;
+                match arg_type {
                     Attr::PolyVar { .. } => {
                         return Err(PpxError::at_loc(
                             external_loc,
@@ -2475,82 +2485,88 @@ fn validate_return_wrapper_result_type(
     Ok(())
 }
 
-fn validate_variadic_arg_type_errors(
+/// The argument fold of the non-`@obj` branch of OCaml `handle_attributes`
+/// (compiler/frontend/ast_external_process.ml:927-983): arguments are visited
+/// right to left, the `@variadic` checks apply while no non-ignored argument
+/// has been seen, then each argument is classified by `get_opt_arg_type` or
+/// `refine_arg_type`.
+fn validate_non_obj_arg_type_errors(
     args: &[TypeArg],
+    splice: bool,
     external_loc: LocIdx,
     arena: &mut ParseArena,
 ) -> PpxResult<()> {
-    let Some(last_arg) = args.last() else {
-        return Ok(());
-    };
+    let mut i = 0;
+    for arg in args.iter().rev() {
+        let typ = arena.get_core_type(arg.typ).clone();
+        if i == 0 && splice {
+            validate_variadic_arg_type(arg, &typ, external_loc, arena)?;
+        }
+        let arg_type = match arg.lbl {
+            ArgLabel::Optional(label_loc) => {
+                let arg_type = get_opt_arg_type(false, &typ, arena)?;
+                validate_external_core_type_arg_errors(&typ, arena)?;
+                if matches!(arg_type, Attr::PolyVar { .. }) {
+                    let label = arena.get_string(label_loc.txt);
+                    return Err(PpxError::at_loc(
+                        external_loc,
+                        format!(
+                            "@string does not work with optional when it has arities in label {label}"
+                        ),
+                    ));
+                }
+                arg_type
+            }
+            ArgLabel::Labelled(_) | ArgLabel::Nolabel => {
+                validate_external_core_type_arg_errors(&typ, arena)?;
+                refine_arg_type(matches!(arg.lbl, ArgLabel::Nolabel), &typ, arena)
+            }
+        };
+        if !matches!(arg_type, Attr::Ignore) {
+            i += 1;
+        }
+    }
+    Ok(())
+}
 
-    if matches!(last_arg.lbl, ArgLabel::Optional(_)) {
+/// The `@variadic` checks of `handle_attributes` (ast_external_process.ml:934-950).
+fn validate_variadic_arg_type(
+    arg: &TypeArg,
+    typ: &CoreType,
+    external_loc: LocIdx,
+    arena: &mut ParseArena,
+) -> PpxResult<()> {
+    if matches!(arg.lbl, ArgLabel::Optional(_)) {
         return Err(PpxError::at_loc(
             external_loc,
             "@variadic expect the last type to be a non optional",
         ));
     }
-
-    let typ = arena.get_core_type(last_arg.typ).clone();
     let array_error = || {
         PpxError::at_loc(
             external_loc,
             "@variadic expect the last type to be an array",
         )
     };
-
     if matches!(&*typ.ptyp_desc, CoreTypeDesc::Ptyp_any) {
         return Err(array_error());
     }
-
-    if !matches!(refine_arg_type(true, &typ, arena), Attr::Nothing) {
+    if !matches!(refine_arg_type(true, typ, arena), Attr::Nothing) {
         return Err(array_error());
     }
-
     match &*typ.ptyp_desc {
         CoreTypeDesc::Ptyp_constr(inner) => {
             let (ref lid, ref args) = **inner;
-            if args.len() == 1 {
-                if let Longident::Lident(name) = arena.get_longident(lid.txt) {
-                    if arena.get_string(*name) == "array" {
-                        return Ok(());
-                    }
-                }
+            if args.len() == 1
+                && let Longident::Lident(name) = arena.get_longident(lid.txt)
+                && arena.get_string(*name) == "array"
+            {
+                return Ok(());
             }
             Err(array_error())
         }
         _ => Err(array_error()),
     }
-}
-
-fn validate_non_obj_optional_arg_type_errors(
-    args: &[TypeArg],
-    external_loc: LocIdx,
-    arena: &ParseArena,
-) -> PpxResult<()> {
-    for arg in args {
-        let ArgLabel::Optional(label_loc) = arg.lbl else {
-            continue;
-        };
-
-        let typ = arena.get_core_type(arg.typ);
-        if matches!(get_opt_arg_type(false, typ, arena)?, Attr::PolyVar { .. }) {
-            let label = arena.get_string(label_loc.txt);
-            return Err(PpxError::at_loc(
-                external_loc,
-                format!("@string does not work with optional when it has arities in label {label}"),
-            ));
-        }
-    }
-    Ok(())
-}
-
-fn validate_external_arg_type_errors(args: &[TypeArg], arena: &mut ParseArena) -> PpxResult<()> {
-    for arg in args {
-        let typ = arena.get_core_type(arg.typ).clone();
-        validate_external_core_type_arg_errors(&typ, arena)?;
-    }
-    Ok(())
 }
 
 fn validate_external_core_type_arg_errors(typ: &CoreType, arena: &mut ParseArena) -> PpxResult<()> {
@@ -2583,7 +2599,6 @@ fn validate_external_attribute_errors(
     let (args, result_type) = list_of_arrow(&vd_type, arena);
 
     validate_external_attribute_payload_errors(&vd.pval_attributes, prim_name.as_str(), arena)?;
-    validate_external_arg_type_errors(&args, arena)?;
 
     let desc = parse_external_attrs(
         &vd.pval_attributes,
@@ -2613,11 +2628,7 @@ fn validate_external_attribute_errors(
         ));
     }
 
-    if desc.splice {
-        validate_variadic_arg_type_errors(&args, vd.pval_loc, arena)?;
-    }
-
-    validate_non_obj_optional_arg_type_errors(&args, vd.pval_loc, arena)?;
+    validate_non_obj_arg_type_errors(&args, desc.splice, vd.pval_loc, arena)?;
 
     let (params, arity) = build_arg_type_specs(&vd_type, arena);
 
@@ -7851,9 +7862,7 @@ fn rewrite_value_binding_without_flattening(
             pvc_pattern: None,
             pvc_expression: None,
         };
-        arena
-            .set_value_constraint(pvb_pat, constraint, pvb_expr, vb.pvb_loc)
-            .expect("mapped value constraint remains well formed");
+        arena.set_value_constraint(pvb_pat, constraint, pvb_expr, vb.pvb_loc);
     }
     ValueBinding {
         pvb_pat,
