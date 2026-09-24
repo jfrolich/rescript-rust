@@ -18867,11 +18867,12 @@ fn type_module_expr_with_alias<'a>(
     arena: &'a ParseArena,
     mod_expr: &ParsedModuleExpr,
     alias: bool,
+    sttn: bool,
 ) -> TypeModResult<ModuleExpr> {
     // OCaml compiler/ml/typemod.ml:1222 wraps every `type_module` call in
     // `Builtin_attributes.warning_scope smod.pmod_attributes`.
     with_warning_scope(tctx, arena, &mod_expr.pmod_attributes, true, |tctx| {
-        type_module_expr_with_alias_inner(tctx, env, arena, mod_expr, alias)
+        type_module_expr_with_alias_inner(tctx, env, arena, mod_expr, alias, sttn)
     })
 }
 
@@ -18881,6 +18882,7 @@ fn type_module_expr_with_alias_inner<'a>(
     arena: &'a ParseArena,
     mod_expr: &ParsedModuleExpr,
     alias: bool,
+    sttn: bool,
 ) -> TypeModResult<ModuleExpr> {
     let loc = mod_expr.pmod_loc;
 
@@ -18973,16 +18975,21 @@ fn type_module_expr_with_alias_inner<'a>(
                 // Subst.modtype work before typemod.ml:1245-1255 does.
                 alias_mod_type.clone()
             } else {
+                // typemod.ml:1253-1256: strengthen only when `sttn`.
                 mod_type
                     .clone()
                     .map(|mty| {
-                        strengthen_semantic_ident_module_type(
-                            env,
-                            &path,
-                            mty,
-                            &mut tctx.persistent_env,
-                            tctx.type_ctx,
-                        )
+                        if sttn {
+                            strengthen_semantic_ident_module_type(
+                                env,
+                                &path,
+                                mty,
+                                &mut tctx.persistent_env,
+                                tctx.type_ctx,
+                            )
+                        } else {
+                            mty
+                        }
                     })
                     .unwrap_or_else(|| crate::types::decl::ModuleType::MtyIdent(path.clone()))
             };
@@ -19033,13 +19040,18 @@ fn type_module_expr_with_alias_inner<'a>(
                     tctx.type_ctx,
                 )
                 .unwrap_or_else(|| crate::types::decl::ModuleType::MtyIdent(alias_target.clone()));
-                let outer_mod_type = strengthen_semantic_ident_module_type(
-                    env,
-                    &alias_target,
-                    constrained_mod_type.clone(),
-                    &mut tctx.persistent_env,
-                    tctx.type_ctx,
-                );
+                // typemod.ml:1250-1251: strengthen only when `sttn`.
+                let outer_mod_type = if sttn {
+                    strengthen_semantic_ident_module_type(
+                        env,
+                        &alias_target,
+                        constrained_mod_type.clone(),
+                        &mut tctx.persistent_env,
+                        tctx.type_ctx,
+                    )
+                } else {
+                    constrained_mod_type.clone()
+                };
 
                 Ok(ModuleExpr {
                     mod_desc: ModuleExprDesc::Tmod_constraint(
@@ -19160,7 +19172,7 @@ fn type_module_expr_with_alias_inner<'a>(
                 tctx.applicative_functor_body_depth += 1;
             }
             let typed_body_result =
-                type_module_expr_with_alias(tctx, &functor_env, arena, body, false);
+                type_module_expr_with_alias(tctx, &functor_env, arena, body, false, sttn);
             tctx.applicative_functor_body_depth = previous_applicative_functor_body_depth;
             let typed_body = typed_body_result?;
             let functor_mty = crate::types::decl::ModuleType::MtyFunctor {
@@ -19197,9 +19209,16 @@ fn type_module_expr_with_alias_inner<'a>(
             // the functor. Keep that order because package/type-constraint
             // forcing during argument typing must happen before functor
             // substitution can allocate hidden identifiers.
-            let typed_arg = type_module_expr_with_alias(tctx, env, arena, arg, false)?;
+            let typed_arg = type_module_expr_with_alias(tctx, env, arena, arg, false, true)?;
             let arg_path = path_of_typed_module_expr(&typed_arg);
-            let typed_functor = type_module_expr_with_alias(tctx, env, arena, functor, false)?;
+            let typed_functor = type_module_expr_with_alias(
+                tctx,
+                env,
+                arena,
+                functor,
+                false,
+                sttn && arg_path.is_some(),
+            )?;
             let arg_mty = typed_arg.mod_type.clone();
             let functor_mty = typed_functor.mod_type.clone();
             let functor_mty = scrape_alias_module_type(
@@ -19325,7 +19344,8 @@ fn type_module_expr_with_alias_inner<'a>(
         ParsedModuleExprDesc::Pmod_constraint(mod_expr_inner_idx, mod_type_idx) => {
             // Constrained module: (ME: MT)
             let mod_expr_inner = arena.get_mod_expr(*mod_expr_inner_idx);
-            let typed_mod = type_module_expr_with_alias(tctx, env, arena, mod_expr_inner, alias)?;
+            let typed_mod =
+                type_module_expr_with_alias(tctx, env, arena, mod_expr_inner, alias, true)?;
             let typed_mty = transl_modtype(tctx, env, arena, arena.get_mod_type(*mod_type_idx))?;
             // OCaml compiler/ml/typemod.ml:1359-1367 passes
             // `mty.mty_type` from the just-translated module type directly to
@@ -19611,7 +19631,7 @@ pub fn type_module_expr<'a>(
     arena: &'a ParseArena,
     mod_expr: &ParsedModuleExpr,
 ) -> TypeModResult<ModuleExpr> {
-    type_module_expr_with_alias(tctx, env, arena, mod_expr, false)
+    type_module_expr_with_alias(tctx, env, arena, mod_expr, false, true)
 }
 
 /// Type check a module expression with explicit alias-preservation mode.
@@ -19622,7 +19642,7 @@ pub fn type_module_expr_with_alias_mode<'a>(
     mod_expr: &ParsedModuleExpr,
     alias: bool,
 ) -> TypeModResult<ModuleExpr> {
-    type_module_expr_with_alias(tctx, env, arena, mod_expr, alias)
+    type_module_expr_with_alias(tctx, env, arena, mod_expr, alias, true)
 }
 
 /// Failure path of OCaml `type_open_` (compiler/ml/typemod.ml:88-95) once every
@@ -24062,7 +24082,14 @@ fn type_structure_item<'a>(
             // OCaml compiler/ml/typemod.ml:1453-1456 scopes warnings from
             // module-binding attributes around module expression typing.
             let typed_mod = with_warning_scope(tctx, arena, &mb.pmb_attributes, true, |tctx| {
-                type_module_expr_with_alias(tctx, env, arena, arena.get_mod_expr(mb.pmb_expr), true)
+                type_module_expr_with_alias(
+                    tctx,
+                    env,
+                    arena,
+                    arena.get_mod_expr(mb.pmb_expr),
+                    true,
+                    true,
+                )
             })?;
 
             // Extend environment with the new module

@@ -11563,6 +11563,16 @@ fn nondep_type_rec<'a>(
                     // using the generic abbreviation cache first can preserve a
                     // stale self-manifest and fail to eliminate the dependency.
                     let decl = env.lookup_type(path).ok()?;
+                    // `Env.find_type_expansion` (compiler/ml/env.ml:944-956):
+                    // a private abstract abbreviation without a constructor
+                    // row cannot be expanded, so the dependency stays.
+                    if decl.type_manifest.is_some_and(|body| {
+                        decl.type_private == PrivateFlag::Private
+                            && matches!(decl.type_kind, super::TypeKind::TypeAbstract)
+                            && !super::btype::has_constr_row(ctx, body)
+                    }) {
+                        return None;
+                    }
                     if let Some(manifest) = decl.type_manifest {
                         let params = &decl.type_params;
                         if params.len() == args.len() {

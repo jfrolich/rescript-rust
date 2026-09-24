@@ -687,17 +687,49 @@ fn format_module_type_with_options(
                 format!("{{\n{items}\n}}")
             }
         }
-        ModuleType::MtyFunctor {
-            param,
-            param_type,
-            result,
-        } => {
-            let param_type = param_type
-                .as_ref()
-                .map(|mty| format_module_type_with_options(type_ctx, mty, weak_names, full_paths))
-                .unwrap_or_else(|| "_".to_string());
-            let result = format_module_type_with_options(type_ctx, result, weak_names, full_paths);
-            format!("({}: {}) => {}", param.name(), param_type, result)
+        ModuleType::MtyFunctor { .. } => {
+            // res_outcome_printer.ml:88-94 (`collect_functor_args`) and
+            // res_outcome_printer.ml:662-702: the parameters form one group
+            // that breaks (one per line, trailing comma) when a parameter
+            // type contains a forced break or the group does not fit.
+            let mut args = Vec::new();
+            let mut current = mty;
+            while let ModuleType::MtyFunctor {
+                param,
+                param_type,
+                result,
+            } = current
+            {
+                let param_type = param_type.as_ref().map(|mty| {
+                    format_module_type_with_options(type_ctx, mty, weak_names, full_paths)
+                });
+                args.push((param.name().to_string(), param_type));
+                current = result;
+            }
+            let result = format_module_type_with_options(type_ctx, current, weak_names, full_paths);
+            let args_doc = if args.len() == 1 && args[0].1.is_none() {
+                "()".to_string()
+            } else {
+                let items = args
+                    .into_iter()
+                    .map(|(label, param_type)| match param_type {
+                        Some(param_type) => format!("{label}: {param_type}"),
+                        None => label,
+                    })
+                    .collect::<Vec<_>>();
+                let flat = format!("({})", items.join(", "));
+                if flat.contains('\n') || flat.len() > 80 {
+                    let items = items
+                        .iter()
+                        .map(|item| indent_lines(item, "  "))
+                        .collect::<Vec<_>>()
+                        .join(",\n");
+                    format!("(\n{items},\n)")
+                } else {
+                    flat
+                }
+            };
+            format!("{args_doc} => {result}")
         }
     }
 }

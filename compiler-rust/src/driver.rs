@@ -4995,7 +4995,16 @@ fn format_cannot_eliminate_dependency_report(
 
     let rendered_module_type =
         crate::types::includemod::format_module_type_full_paths(type_ctx, mty);
-    output.push_str("  This functor has type ");
+    // typemod.ml:1819-1823 prints the module type after a break hint in a
+    // box. The outcome printer hands Format the rendered type as one string
+    // (res_outcome_printer.ml:1063-1065), so Format breaks when its whole
+    // length, newlines included, does not fit after column 24.
+    output.push_str("  This functor has type");
+    if rendered_module_type.len() + 24 > 80 {
+        output.push_str("\n  ");
+    } else {
+        output.push(' ');
+    }
     output.push_str(&rendered_module_type);
     output.push('\n');
     output.push_str("  The parameter cannot be eliminated in the result type.\n");
@@ -5030,33 +5039,7 @@ fn format_typemod_module_type(
     type_ctx: &TypeContext,
     mty: &crate::types::decl::ModuleType,
 ) -> String {
-    match mty {
-        crate::types::decl::ModuleType::MtySignature(sig) if sig.is_empty() => String::new(),
-        crate::types::decl::ModuleType::MtyFunctor {
-            param,
-            param_type,
-            result,
-        } => {
-            let result = format_typemod_module_type(type_ctx, result);
-            // OCaml's outcome printer shows a generative functor
-            // (`Omty_functor (_, None, res)`) as `() => res`.
-            let Some(param_type) = param_type.as_ref() else {
-                return format!("() => {result}");
-            };
-            let param_type = format_typemod_module_type(type_ctx, param_type);
-            if param_type.contains('\n') {
-                format!(
-                    "(\n  {}: {},\n) => {}",
-                    param.name(),
-                    param_type.replace('\n', "\n  "),
-                    result
-                )
-            } else {
-                format!("({}: {}) => {}", param.name(), param_type, result)
-            }
-        }
-        _ => crate::types::includemod::format_module_type(type_ctx, mty),
-    }
+    crate::types::includemod::format_module_type(type_ctx, mty)
 }
 
 fn format_with_mismatch_report(
