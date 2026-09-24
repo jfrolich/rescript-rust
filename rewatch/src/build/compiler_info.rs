@@ -199,15 +199,10 @@ pub fn write_compiler_info(build_state: &BuildCommandState) {
                         let _ = std::fs::remove_file(&tmp);
                         return;
                     }
-                    if let Err(err) = f.sync_all() {
-                        log::error!(
-                            "Failed to flush compiler-info for package {}: {}. Skipping rename.",
-                            package.name,
-                            err
-                        );
-                        let _ = std::fs::remove_file(&tmp);
-                        return;
-                    }
+                    // No fsync: the rename already keeps readers from seeing a
+                    // partial file when the process is interrupted, and a file
+                    // lost to a system crash only costs a rebuild. On macOS
+                    // `sync_all` is a full-device flush per package.
                     if let Err(err) = std::fs::rename(&tmp, &info_path) {
                         log::error!(
                             "Failed to atomically replace compiler-info for package {}: {}.",
