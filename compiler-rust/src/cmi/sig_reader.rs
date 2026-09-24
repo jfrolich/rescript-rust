@@ -735,7 +735,7 @@ impl<'a> SigReadContext<'a> {
                         .iter()
                         .map(|te| self.read_type_expr(te))
                         .collect();
-                    TypeDesc::Ttuple(types)
+                    TypeDesc::Ttuple(types.into())
                 }
                 3 => {
                     // Tconstr(Path.t, type_expr list, abbrev_memo ref)
@@ -747,7 +747,7 @@ impl<'a> SigReadContext<'a> {
                         .collect();
                     let abbrev = self.ctx.alloc_abbrev_nil();
 
-                    TypeDesc::Tconstr { path, args, abbrev }
+                    TypeDesc::Tconstr { path, args: args.into(), abbrev }
                 }
                 4 => {
                     // Tobject(type_expr, (Path.t * type_expr list) option ref)
@@ -799,7 +799,7 @@ impl<'a> SigReadContext<'a> {
                         .iter()
                         .map(|te| self.read_type_expr(te))
                         .collect();
-                    TypeDesc::Tpoly { body, vars }
+                    TypeDesc::Tpoly { body, vars: vars.into() }
                 }
                 11 => {
                     // Tpackage(Path.t, Longident.t list, type_expr list)
@@ -814,7 +814,7 @@ impl<'a> SigReadContext<'a> {
                         .iter()
                         .map(|te| self.read_type_expr(te))
                         .collect();
-                    TypeDesc::Tpackage { path, lids, args }
+                    TypeDesc::Tpackage { path, lids, args: args.into() }
                 }
                 _ => {
                     // Unknown type_desc tag, treat as Tvar

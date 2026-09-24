@@ -155,6 +155,213 @@ impl PartialOrd for TypeExpr {
     }
 }
 
+/// Number of type references a `TypeRefList` stores without allocating.
+const TYPE_REF_LIST_INLINE: usize = 3;
+
+/// Immutable list of type references in a type descriptor (constructor and
+/// package arguments, tuple components, polymorphic variables).
+///
+/// Intentional Rust performance representation of the OCaml `type_expr list`
+/// fields in `compiler/ml/types.ml:24-50`. Type-checking code snapshots
+/// descriptors constantly (`TypeContext::get_desc`); short lists are stored
+/// inline and longer ones share one allocation, so snapshots never allocate.
+/// Element order and physical identities are unchanged.
+#[derive(Clone)]
+pub enum TypeRefList {
+    Inline {
+        len: u8,
+        items: [TypeExprRef; TYPE_REF_LIST_INLINE],
+    },
+    Shared(std::sync::Arc<[TypeExprRef]>),
+}
+
+impl TypeRefList {
+    pub const fn new() -> Self {
+        TypeRefList::Inline {
+            len: 0,
+            items: [TypeExprRef(0); TYPE_REF_LIST_INLINE],
+        }
+    }
+
+    pub fn from_slice(items: &[TypeExprRef]) -> Self {
+        if items.len() <= TYPE_REF_LIST_INLINE {
+            let mut inline = [TypeExprRef(0); TYPE_REF_LIST_INLINE];
+            inline[..items.len()].copy_from_slice(items);
+            TypeRefList::Inline {
+                len: items.len() as u8,
+                items: inline,
+            }
+        } else {
+            TypeRefList::Shared(std::sync::Arc::from(items))
+        }
+    }
+
+    #[inline]
+    pub fn as_slice(&self) -> &[TypeExprRef] {
+        match self {
+            TypeRefList::Inline { len, items } => &items[..*len as usize],
+            TypeRefList::Shared(items) => items,
+        }
+    }
+}
+
+impl Default for TypeRefList {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl std::ops::Deref for TypeRefList {
+    type Target = [TypeExprRef];
+
+    #[inline]
+    fn deref(&self) -> &[TypeExprRef] {
+        self.as_slice()
+    }
+}
+
+impl std::fmt::Debug for TypeRefList {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_list().entries(self.as_slice()).finish()
+    }
+}
+
+impl PartialEq for TypeRefList {
+    fn eq(&self, other: &Self) -> bool {
+        self.as_slice() == other.as_slice()
+    }
+}
+
+impl Eq for TypeRefList {}
+
+impl<const N: usize> PartialEq<[TypeExprRef; N]> for TypeRefList {
+    fn eq(&self, other: &[TypeExprRef; N]) -> bool {
+        self.as_slice() == other.as_slice()
+    }
+}
+
+impl PartialEq<Vec<TypeExprRef>> for TypeRefList {
+    fn eq(&self, other: &Vec<TypeExprRef>) -> bool {
+        self.as_slice() == other.as_slice()
+    }
+}
+
+impl From<Vec<TypeExprRef>> for TypeRefList {
+    fn from(items: Vec<TypeExprRef>) -> Self {
+        if items.len() <= TYPE_REF_LIST_INLINE {
+            Self::from_slice(&items)
+        } else {
+            TypeRefList::Shared(std::sync::Arc::from(items))
+        }
+    }
+}
+
+impl From<&[TypeExprRef]> for TypeRefList {
+    fn from(items: &[TypeExprRef]) -> Self {
+        Self::from_slice(items)
+    }
+}
+
+impl<const N: usize> From<[TypeExprRef; N]> for TypeRefList {
+    fn from(items: [TypeExprRef; N]) -> Self {
+        Self::from_slice(&items)
+    }
+}
+
+impl FromIterator<TypeExprRef> for TypeRefList {
+    fn from_iter<I: IntoIterator<Item = TypeExprRef>>(iter: I) -> Self {
+        let items: smallvec::SmallVec<[TypeExprRef; 8]> = iter.into_iter().collect();
+        Self::from_slice(&items)
+    }
+}
+
+impl<'a> IntoIterator for &'a TypeRefList {
+    type Item = &'a TypeExprRef;
+    type IntoIter = std::slice::Iter<'a, TypeExprRef>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.as_slice().iter()
+    }
+}
+
+impl IntoIterator for TypeRefList {
+    type Item = TypeExprRef;
+    type IntoIter = smallvec::IntoIter<[TypeExprRef; 8]>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        smallvec::SmallVec::<[TypeExprRef; 8]>::from_slice(self.as_slice()).into_iter()
+    }
+}
+
+/// Immutable list of arrow parameters (see `TypeRefList`): cloning a
+/// descriptor shares it instead of copying parameters and their labels.
+#[derive(Clone)]
+pub struct TypeArgList(std::sync::Arc<[TypeArg]>);
+
+impl TypeArgList {
+    #[inline]
+    pub fn as_slice(&self) -> &[TypeArg] {
+        &self.0
+    }
+}
+
+impl Default for TypeArgList {
+    fn default() -> Self {
+        TypeArgList(std::sync::Arc::from(Vec::new()))
+    }
+}
+
+impl std::ops::Deref for TypeArgList {
+    type Target = [TypeArg];
+
+    #[inline]
+    fn deref(&self) -> &[TypeArg] {
+        &self.0
+    }
+}
+
+impl std::fmt::Debug for TypeArgList {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_list().entries(self.0.iter()).finish()
+    }
+}
+
+impl From<Vec<TypeArg>> for TypeArgList {
+    fn from(items: Vec<TypeArg>) -> Self {
+        TypeArgList(std::sync::Arc::from(items))
+    }
+}
+
+impl From<&[TypeArg]> for TypeArgList {
+    fn from(items: &[TypeArg]) -> Self {
+        TypeArgList(std::sync::Arc::from(items))
+    }
+}
+
+impl FromIterator<TypeArg> for TypeArgList {
+    fn from_iter<I: IntoIterator<Item = TypeArg>>(iter: I) -> Self {
+        TypeArgList(iter.into_iter().collect())
+    }
+}
+
+impl<'a> IntoIterator for &'a TypeArgList {
+    type Item = &'a TypeArg;
+    type IntoIter = std::slice::Iter<'a, TypeArg>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.0.iter()
+    }
+}
+
+impl IntoIterator for TypeArgList {
+    type Item = TypeArg;
+    type IntoIter = std::vec::IntoIter<TypeArg>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.0.to_vec().into_iter()
+    }
+}
+
 /// Type descriptor - the actual content of a type expression.
 #[derive(Debug, Clone)]
 pub enum TypeDesc {
@@ -167,20 +374,20 @@ pub enum TypeDesc {
     /// parameter list in one node rather than a chain of unary arrows.
     Tarrow {
         /// Arguments in source order.
-        args: Vec<TypeArg>,
+        args: TypeArgList,
         /// The return type.
         ret: TypeExprRef,
     },
 
     /// Tuple type: `(t1, t2, ...)`
-    Ttuple(Vec<TypeExprRef>),
+    Ttuple(TypeRefList),
 
     /// Type constructor: `int`, `list<'a>`, etc.
     Tconstr {
         /// The path to the type constructor
         path: Path,
         /// Type arguments
-        args: Vec<TypeExprRef>,
+        args: TypeRefList,
         /// Abbreviation memo (for expansion caching)
         abbrev: AbbrevMemoRef,
     },
@@ -225,7 +432,7 @@ pub enum TypeDesc {
         /// The body type
         body: TypeExprRef,
         /// Bound type variables
-        vars: Vec<TypeExprRef>,
+        vars: TypeRefList,
     },
 
     /// First-class module type (package)
@@ -235,7 +442,7 @@ pub enum TypeDesc {
         /// Longidents for package constraints
         lids: Vec<Longident>,
         /// Type arguments
-        args: Vec<TypeExprRef>,
+        args: TypeRefList,
     },
 }
 
@@ -563,16 +770,54 @@ struct DenseTypeExprRefSet {
     values: Vec<u8>,
 }
 
+/// Number of keys a `TypeExprRefSet` holds inline before it spills to the
+/// dense representation.
+const TYPE_EXPR_SET_INLINE: usize = 16;
+
 #[derive(Debug, Clone)]
 pub(crate) struct TypeExprRefSet {
+    /// Most traversals visit only a few nodes; keep those keys inline so the
+    /// set allocates nothing.
+    inline: [u32; TYPE_EXPR_SET_INLINE],
+    inline_len: u8,
+    spilled: bool,
     local: DenseTypeExprRefSet,
     // A separate span prevents the store tag from creating a 2 GiB gap.
     store: Option<Box<DenseTypeExprRefSet>>,
 }
 
+thread_local! {
+    /// Byte buffers of dropped spilled sets, reused by later traversals.
+    static DENSE_SET_POOL: std::cell::RefCell<Vec<Vec<u8>>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+const DENSE_SET_POOL_MAX: usize = 8;
+const DENSE_SET_POOL_MAX_BYTES: usize = 1 << 20;
+
+fn pooled_dense_set() -> DenseTypeExprRefSet {
+    let values = DENSE_SET_POOL.with(|pool| pool.borrow_mut().pop()).unwrap_or_default();
+    DenseTypeExprRefSet { offset: 0, values }
+}
+
+fn recycle_dense_set(mut set: DenseTypeExprRefSet) {
+    if set.values.capacity() == 0 || set.values.capacity() > DENSE_SET_POOL_MAX_BYTES {
+        return;
+    }
+    set.values.clear();
+    DENSE_SET_POOL.with(|pool| {
+        let mut pool = pool.borrow_mut();
+        if pool.len() < DENSE_SET_POOL_MAX {
+            pool.push(set.values);
+        }
+    });
+}
+
 impl TypeExprRefSet {
     pub(crate) fn new() -> Self {
         Self {
+            inline: [0; TYPE_EXPR_SET_INLINE],
+            inline_len: 0,
+            spilled: false,
             local: DenseTypeExprRefSet::default(),
             store: None,
         }
@@ -580,10 +825,50 @@ impl TypeExprRefSet {
 
     #[inline]
     pub(crate) fn insert(&mut self, key: TypeExprRef) -> bool {
+        if !self.spilled {
+            let len = self.inline_len as usize;
+            if self.inline[..len].contains(&key.0) {
+                return false;
+            }
+            if len < TYPE_EXPR_SET_INLINE {
+                self.inline[len] = key.0;
+                self.inline_len += 1;
+                return true;
+            }
+            self.spill();
+        }
+        self.insert_dense(key)
+    }
+
+    #[cold]
+    fn spill(&mut self) {
+        self.spilled = true;
+        self.local = pooled_dense_set();
+        let inline = self.inline;
+        for &raw in &inline[..self.inline_len as usize] {
+            self.insert_dense(TypeExprRef(raw));
+        }
+    }
+
+    #[inline]
+    fn insert_dense(&mut self, key: TypeExprRef) -> bool {
         if key.is_store() {
-            self.store.get_or_insert_with(Default::default).insert(key)
+            self.store
+                .get_or_insert_with(|| Box::new(pooled_dense_set()))
+                .insert(key)
         } else {
             self.local.insert(key)
+        }
+    }
+}
+
+impl Drop for TypeExprRefSet {
+    fn drop(&mut self) {
+        if self.spilled {
+            recycle_dense_set(std::mem::take(&mut self.local));
+            if let Some(store) = self.store.take() {
+                recycle_dense_set(*store);
+            }
         }
     }
 }
@@ -1236,7 +1521,7 @@ mod tests {
             }
             items.push(ctx.new_var(None));
         }
-        ctx.set_desc(cycle, TypeDesc::Ttuple(items.clone()));
+        ctx.set_desc(cycle, TypeDesc::Ttuple(items.clone().into()));
         let value = ValueDescription {
             val_type: cycle,
             val_kind: ValueKind::ValReg,

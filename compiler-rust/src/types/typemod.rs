@@ -2905,7 +2905,7 @@ fn extract_concrete_type_decl_for_record_spread(
 
         let decl = find_type_decl_for_path(env, ctx, &path)?;
         if !matches!(decl.type_kind, crate::types::TypeKind::TypeAbstract) {
-            return Some((path, args, decl));
+            return Some((path, args.to_vec(), decl));
         }
 
         if !seen.insert(path.name()) {
@@ -3250,7 +3250,7 @@ fn expand_record_spread_label(
                         ctx.new_type(crate::types::TypeDesc::Tpackage {
                             path: path.clone(),
                             lids: lids.clone(),
-                            args: new_args,
+                            args: new_args.into(),
                         }),
                     )
                 } else {
@@ -4096,7 +4096,7 @@ fn check_extension_constructor_variance_requirements(
         Some(ret_type) => {
             let ret_repr = ctx.repr(ret_type);
             match &*ctx.get_desc(ret_repr) {
-                crate::types::type_expr::TypeDesc::Tconstr { args, .. } => args.clone(),
+                crate::types::type_expr::TypeDesc::Tconstr { args, .. } => args.to_vec(),
                 _ => ext.ext_type_params.clone(),
             }
         }
@@ -13529,10 +13529,10 @@ fn check_usage_of_path_of_substituted_item(
             let desc = tctx.type_ctx.borrow_desc(ty);
             match &*desc {
                 TypeDesc::Tconstr { path, args, .. } => {
-                    TypeAction::Path(path.clone(), args.clone())
+                    TypeAction::Path(path.clone(), args.to_vec())
                 }
                 TypeDesc::Tpackage { path, args, .. } => {
-                    TypeAction::Path(path.clone(), args.clone())
+                    TypeAction::Path(path.clone(), args.to_vec())
                 }
                 TypeDesc::Tobject { fields, name } => TypeAction::Object(*fields, name.clone()),
                 TypeDesc::Tvariant(row) => TypeAction::Variant(row.clone()),

@@ -1608,7 +1608,7 @@ impl TypeContext {
                 _ => ret_type,
             }
         };
-        self.new_type(TypeDesc::Tarrow { args, ret })
+        self.new_type(TypeDesc::Tarrow { args: args.into(), ret })
     }
 
     /// Create an unlabeled arrow type.
@@ -1618,19 +1618,19 @@ impl TypeContext {
 
     /// Create a tuple type.
     pub fn new_tuple(&self, types: Vec<TypeExprRef>) -> TypeExprRef {
-        self.new_type(TypeDesc::Ttuple(types))
+        self.new_type(TypeDesc::Ttuple(types.into()))
     }
 
     /// Create a type constructor application.
     pub fn new_constr(&self, path: Path, args: Vec<TypeExprRef>) -> TypeExprRef {
         let abbrev = self.alloc_abbrev(AbbrevMemo::Mnil);
-        self.new_type(TypeDesc::Tconstr { path, args, abbrev })
+        self.new_type(TypeDesc::Tconstr { path, args: args.into(), abbrev })
     }
 
     /// Create a type constructor at generic level (for type schemes).
     pub fn new_generic_constr(&self, path: Path, args: Vec<TypeExprRef>) -> TypeExprRef {
         let abbrev = self.alloc_abbrev(AbbrevMemo::Mnil);
-        self.new_generic_type(TypeDesc::Tconstr { path, args, abbrev })
+        self.new_generic_type(TypeDesc::Tconstr { path, args: args.into(), abbrev })
     }
 
     /// Get or create a cached predef singleton helper.
@@ -1731,7 +1731,7 @@ impl TypeContext {
                 _ => ret_type,
             }
         };
-        self.new_generic_type(TypeDesc::Tarrow { args, ret })
+        self.new_generic_type(TypeDesc::Tarrow { args: args.into(), ret })
     }
 
     /// Create a link type (for unification).
@@ -1741,7 +1741,7 @@ impl TypeContext {
 
     /// Create a polymorphic type.
     pub fn new_poly(&self, body: TypeExprRef, vars: Vec<TypeExprRef>) -> TypeExprRef {
-        self.new_type(TypeDesc::Tpoly { body, vars })
+        self.new_type(TypeDesc::Tpoly { body, vars: vars.into() })
     }
 
     /// Create a universal type variable.
@@ -3198,7 +3198,7 @@ mod tests {
         assert_eq!(ctx.get_level(ty), GENERIC_LEVEL);
         // Writing after rollback cannot reuse a descriptor from the abandoned
         // snapshot (its arena allocation intentionally remains alive).
-        ctx.set_desc(ty, TypeDesc::Ttuple(vec![local]));
+        ctx.set_desc(ty, TypeDesc::Ttuple(vec![local].into()));
         assert!(matches!(*ctx.borrow_desc(ty), TypeDesc::Ttuple(ref ts) if ts == &[local]));
     }
 
@@ -3210,7 +3210,7 @@ mod tests {
         let stored_int = ctx.store.alloc_type(
             TypeDesc::Tconstr {
                 path: int_path.clone(),
-                args: vec![],
+                args: vec![].into(),
                 abbrev: ctx.store.alloc_abbrev(AbbrevMemo::Mnil),
             },
             GENERIC_LEVEL,

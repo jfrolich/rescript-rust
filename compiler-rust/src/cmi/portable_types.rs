@@ -1413,7 +1413,7 @@ mod type_arg_tests {
                 TypeArg::unlabeled(shared),
                 TypeArg::new(labels[1].clone(), shared),
                 TypeArg::new(labels[2].clone(), distinct),
-            ],
+            ].into(),
             ret: shared,
         });
         let mut ser = TypeGraphSerializer {

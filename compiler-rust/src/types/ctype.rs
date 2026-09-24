@@ -655,7 +655,7 @@ fn local_non_recursive_abbrev(
 
                 let params = lookup_type_decl_for_path(ctx, env, &path)
                     .map(|decl| decl.type_params.clone())
-                    .unwrap_or_else(|| args.clone());
+                    .unwrap_or_else(|| args.to_vec());
                 for (param, arg) in params.iter().zip(args.iter()) {
                     let strict = strict || !btype::is_tvar(ctx, ctx.repr(*param));
                     if !go(ctx, env, source, strict, visited, *arg) {
@@ -776,7 +776,7 @@ fn create_reified_constr(
     ctx.alloc_type_at_level(
         TypeDesc::Tconstr {
             path,
-            args: vec![],
+            args: vec![].into(),
             abbrev,
         },
         level,
@@ -919,7 +919,7 @@ fn occur_univar(ctx: &TypeContext, env: &Env, ty: TypeExprRef) -> TypeResult<()>
             TypeDesc::Tconstr { args, .. } if args.is_empty() => Ok(()),
             TypeDesc::Tconstr { path, args, .. } => {
                 let path = path.clone();
-                let args = args.clone();
+                let args: smallvec::SmallVec<[TypeExprRef; 8]> = args.iter().copied().collect();
                 drop(desc);
                 if let Some(decl) = lookup_type_decl_for_path(ctx, env, &path) {
                     for (arg, variance) in args.iter().zip(decl.type_variance.iter()) {
@@ -938,7 +938,7 @@ fn occur_univar(ctx: &TypeContext, env: &Env, ty: TypeExprRef) -> TypeResult<()>
             }
             _ => {
                 drop(desc);
-                let mut children = Vec::new();
+                let mut children: smallvec::SmallVec<[TypeExprRef; 8]> = smallvec::SmallVec::new();
                 iter_type_expr(ctx, ty, |child| children.push(child));
                 for child in children {
                     occur_rec(ctx, env, bound, visited, child)?;
@@ -4686,7 +4686,7 @@ fn subst_type(
                 ctx.new_type(TypeDesc::Tpackage {
                     path,
                     lids,
-                    args: new_args,
+                    args: new_args.into(),
                 })
             }
         }
@@ -5586,7 +5586,7 @@ fn unify_types<'a>(
                     if let TypeDesc::Tconstr { path, args, .. } = &*desc {
                         let path_norm = normalize_path_full(ctx, env, path);
                         if path_norm != *path {
-                            link_source = ctx.new_constr(path_norm, args.clone());
+                            link_source = ctx.new_constr(path_norm, args.to_vec());
                         } else if let Some(expanded) = try_expand_head(ctx, env, t1) {
                             let expanded = ctx.repr(expanded);
                             if expanded != t1 {
@@ -7299,7 +7299,7 @@ fn closed_schema_rec(
         let desc = ctx.get_desc(ty);
         match &*desc {
             TypeDesc::Tvar(_) => Action::Tvar,
-            TypeDesc::Tconstr { args, .. } => Action::Tconstr(args.clone()),
+            TypeDesc::Tconstr { args, .. } => Action::Tconstr(args.to_vec()),
             TypeDesc::Tfield {
                 kind, typ, rest, ..
             } => Action::Tfield {
@@ -7769,9 +7769,9 @@ fn generalize_expansive_rec(
         match &*desc {
             TypeDesc::Tconstr { path, args, .. } => Action::Constr {
                 path: path.clone(),
-                args: args.clone(),
+                args: args.to_vec(),
             },
-            TypeDesc::Tpackage { args, .. } => Action::Package { args: args.clone() },
+            TypeDesc::Tpackage { args, .. } => Action::Package { args: args.to_vec() },
             TypeDesc::Tarrow { args, ret } => Action::Arrow {
                 args: args.iter().map(|arg| arg.typ).collect(),
                 ret: *ret,
@@ -8510,7 +8510,7 @@ fn compute_variance_rec(
             } else {
                 Variance::MAY_INV
             };
-            let args: Vec<TypeExprRef> = args.clone();
+            let args: Vec<TypeExprRef> = args.to_vec();
             drop(desc);
             for t in &args {
                 compute_variance_rec(ctx, env, visited, v, *t, depth + 1);
@@ -9143,7 +9143,7 @@ fn copy_sep_inner(
                     &visited_poly,
                     delayed_copy,
                 ),
-                vars: fresh_vars,
+                vars: fresh_vars.into(),
             }
         }
         TypeDesc::Tpackage { path, lids, args } => TypeDesc::Tpackage {
@@ -9374,7 +9374,7 @@ pub fn remap_label_type_to_params(
                         if param == body {
                             return label_ty;
                         }
-                        let remapped = ctx.new_poly(param, vars);
+                        let remapped = ctx.new_poly(param, vars.to_vec());
                         let level = ctx.get_level(label_ty);
                         if ctx.get_level(remapped) != level {
                             ctx.set_level(remapped, level);
@@ -9705,7 +9705,7 @@ pub fn copy_type_deep(
             let result = ctx.new_type(TypeDesc::Tpackage {
                 path: path.clone(),
                 lids: lids.clone(),
-                args: new_args,
+                args: new_args.into(),
             });
             cache.insert(ty, result);
             result
@@ -10041,7 +10041,7 @@ fn subst_identity_copy_rec(
                             )
                         })
                         .collect();
-                    TypeDesc::Ttuple(types_copy)
+                    TypeDesc::Ttuple(types_copy.into())
                 }
                 TypeDesc::Tconstr { path, args, .. } => {
                     let path = path.clone();
@@ -10061,7 +10061,7 @@ fn subst_identity_copy_rec(
                         .collect();
                     TypeDesc::Tconstr {
                         path,
-                        args: args_copy,
+                        args: args_copy.into(),
                         abbrev: ctx.alloc_abbrev_nil(),
                     }
                 }
@@ -10159,7 +10159,7 @@ fn subst_identity_copy_rec(
                         .collect();
                     TypeDesc::Tpoly {
                         body: body_copy,
-                        vars: vars_copy,
+                        vars: vars_copy.into(),
                     }
                 }
                 TypeDesc::Tvariant(row) => {
@@ -10243,7 +10243,7 @@ fn subst_identity_copy_rec(
                             }
                         }
                         let marker_tuple =
-                            ctx.new_generic_type(TypeDesc::Ttuple(vec![more_copy, placeholder]));
+                            ctx.new_generic_type(TypeDesc::Ttuple(vec![more_copy, placeholder].into()));
                         // OCaml Subst.typexp keeps `more.desc <- Tsubst(Ttuple [...])`
                         // alive until the outer cleanup window, not just this
                         // single variant-copy branch. Keep the marker for the
@@ -10355,7 +10355,7 @@ fn subst_identity_copy_rec(
                     TypeDesc::Tpackage {
                         path,
                         lids,
-                        args: args_copy,
+                        args: args_copy.into(),
                     }
                 }
             };
@@ -10490,13 +10490,13 @@ pub(crate) fn copy_type_cached(
                 TypeDesc::Tvar(_) => CopyAction::NewVar(None),
                 TypeDesc::Tunivar(name) => CopyAction::NewUnivar(name.clone()),
                 TypeDesc::Tarrow { args, ret } => CopyAction::Arrow {
-                    args: args.clone(),
+                    args: args.to_vec(),
                     ret: *ret,
                 },
-                TypeDesc::Ttuple(types) => CopyAction::Tuple(types.clone()),
+                TypeDesc::Ttuple(types) => CopyAction::Tuple(types.to_vec()),
                 TypeDesc::Tconstr { path, args, .. } => CopyAction::Constr {
                     path: path.clone(),
-                    args: args.clone(),
+                    args: args.to_vec(),
                 },
                 TypeDesc::Tobject { fields, name } => CopyAction::Object {
                     fields: *fields,
@@ -10522,13 +10522,13 @@ pub(crate) fn copy_type_cached(
                 TypeDesc::Tnil => CopyAction::Nil,
                 TypeDesc::Tpoly { body, vars } => CopyAction::Poly {
                     body: *body,
-                    vars: vars.clone(),
+                    vars: vars.to_vec(),
                 },
                 TypeDesc::Tvariant(row) => CopyAction::Variant(row.clone()),
                 TypeDesc::Tpackage { path, lids, args } => CopyAction::Package {
                     path: path.clone(),
                     lids: lids.clone(),
-                    args: args.clone(),
+                    args: args.to_vec(),
                 },
                 TypeDesc::Tlink(target) | TypeDesc::Tsubst(target) => CopyAction::Link(*target),
             }
@@ -10576,7 +10576,7 @@ pub(crate) fn copy_type_cached(
                         .iter()
                         .map(|t| copy_type_cached(ctx, *t, cache))
                         .collect();
-                    TypeDesc::Ttuple(types_copy)
+                    TypeDesc::Ttuple(types_copy.into())
                 }
                 CopyAction::Constr { path, args } => {
                     let abbrevs = ctx.current_abbreviations();
@@ -10642,7 +10642,7 @@ pub(crate) fn copy_type_cached(
 
                     TypeDesc::Tconstr {
                         path,
-                        args: args_copy,
+                        args: args_copy.into(),
                         abbrev: copied_abbrev,
                     }
                 }
@@ -10685,7 +10685,7 @@ pub(crate) fn copy_type_cached(
                         .collect();
                     TypeDesc::Tpoly {
                         body: body_copy,
-                        vars: vars_copy,
+                        vars: vars_copy.into(),
                     }
                 }
                 CopyAction::Variant(row) => {
@@ -10770,7 +10770,7 @@ pub(crate) fn copy_type_cached(
                         }
                     }
                     let marker_tuple =
-                        ctx.new_generic_type(TypeDesc::Ttuple(vec![more_copy, placeholder]));
+                        ctx.new_generic_type(TypeDesc::Ttuple(vec![more_copy, placeholder].into()));
                     let prev_marker = cache.row_more_markers.insert(
                         more,
                         CopyRowMoreMarker {
@@ -10815,7 +10815,7 @@ pub(crate) fn copy_type_cached(
                     TypeDesc::Tpackage {
                         path,
                         lids,
-                        args: args_copy,
+                        args: args_copy.into(),
                     }
                 }
                 CopyAction::ReturnSelf
@@ -10926,7 +10926,7 @@ pub fn split_arrow(ctx: &TypeContext, ty: TypeExprRef) -> Option<(TypeExprRef, T
         ret
     } else {
         ctx.new_type(TypeDesc::Tarrow {
-            args: args[1..].to_vec(),
+            args: args[1..].to_vec().into(),
             ret,
         })
     };
@@ -10950,7 +10950,7 @@ pub fn split_arrow_with_label(
         ret
     } else {
         ctx.new_type(TypeDesc::Tarrow {
-            args: args[1..].to_vec(),
+            args: args[1..].to_vec().into(),
             ret,
         })
     };
@@ -10979,7 +10979,7 @@ pub fn tuple_elements(ctx: &TypeContext, ty: TypeExprRef) -> Option<Vec<TypeExpr
     let ty = ctx.repr(ty);
     let desc = ctx.borrow_desc(ty);
     match &*desc {
-        TypeDesc::Ttuple(types) => Some(types.clone()),
+        TypeDesc::Ttuple(types) => Some(types.to_vec()),
         _ => None,
     }
 }
@@ -11280,7 +11280,7 @@ fn nondep_type_rec<'a>(
                 let new_args = new_args?;
                 TypeDesc::Tconstr {
                     path: path.clone(),
-                    args: new_args,
+                    args: new_args.into(),
                     abbrev: ctx.alloc_abbrev(AbbrevMemo::Mnil),
                 }
             }
@@ -11296,14 +11296,14 @@ fn nondep_type_rec<'a>(
                 })
                 .collect::<Option<Vec<_>>>()?;
             let ret = nondep_type_rec(ctx, env, mid, *ret, cache)?;
-            TypeDesc::Tarrow { args, ret }
+            TypeDesc::Tarrow { args: args.into(), ret }
         }
         TypeDesc::Ttuple(types) => {
             let new_types: Option<Vec<_>> = types
                 .iter()
                 .map(|t| nondep_type_rec(ctx, env, mid, *t, cache))
                 .collect();
-            TypeDesc::Ttuple(new_types?)
+            TypeDesc::Ttuple(new_types?.into())
         }
         TypeDesc::Tpoly { body, vars } => {
             let new_vars: Option<Vec<_>> = vars
@@ -11313,7 +11313,7 @@ fn nondep_type_rec<'a>(
             let new_body = nondep_type_rec(ctx, env, mid, *body, cache)?;
             TypeDesc::Tpoly {
                 body: new_body,
-                vars: new_vars?,
+                vars: new_vars?.into(),
             }
         }
         TypeDesc::Tvariant(row) => {
@@ -11418,7 +11418,7 @@ fn nondep_type_rec<'a>(
             TypeDesc::Tpackage {
                 path: path.clone(),
                 lids: lids.clone(),
-                args: new_args?,
+                args: new_args?.into(),
             }
         }
         // Tlink should have been resolved by repr(), Tsubst shouldn't appear
@@ -11461,7 +11461,7 @@ fn unroll_abbrev<'a>(
 
     let constr = ctx.new_type(TypeDesc::Tconstr {
         path: Path::pident(id.clone()),
-        args: params.to_vec(),
+        args: params.to_vec().into(),
         abbrev: ctx.alloc_abbrev(AbbrevMemo::Mnil),
     });
     ctx.set_level(constr, level);

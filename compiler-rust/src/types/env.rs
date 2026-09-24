@@ -2549,7 +2549,7 @@ pub fn initial_env(ctx: &TypeContext) -> Env {
                     string_ty_for_exn,
                     int_ty_for_exn,
                     int_ty_for_exn,
-                ])),
+                ].into())),
             ],
             exn_ty,
         );
@@ -2561,7 +2561,7 @@ pub fn initial_env(ctx: &TypeContext) -> Env {
                     string_ty_for_exn,
                     int_ty_for_exn,
                     int_ty_for_exn,
-                ])),
+                ].into())),
             ],
             exn_ty,
         );
@@ -2587,7 +2587,7 @@ pub fn initial_env(ctx: &TypeContext) -> Env {
                     string_ty_for_exn,
                     int_ty_for_exn,
                     int_ty_for_exn,
-                ])),
+                ].into())),
             ],
             exn_ty,
         );

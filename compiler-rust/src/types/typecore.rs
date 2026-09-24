@@ -2354,7 +2354,7 @@ fn transl_type_inner(
             let (typed_ret, ret) =
                 transl_type_inner(tctx, env, tctx.arena.get_core_type(*ret_idx))?;
             let arrow = ctx.new_type(TypeDesc::Tarrow {
-                args: type_args,
+                args: type_args.into(),
                 ret,
             });
             Ok((
@@ -2682,7 +2682,7 @@ fn transl_type_inner(
             // occurring variable; this Rust loop already pushes in source order.
             let poly_ty = ctx.new_generic_type(TypeDesc::Tpoly {
                 body: body_ty,
-                vars: ty_list,
+                vars: ty_list.into(),
             });
             let scope_var = ctx.new_var(None);
             crate::types::ctype::unify_var(ctx, &mut tctx.unify_state, scope_var, poly_ty)
@@ -3032,7 +3032,7 @@ fn transl_type_inner(
                         let inherit_ty_repr = ctx.repr(inherit_ty);
                         let inherit_name = match &*ctx.get_desc(inherit_ty_repr) {
                             TypeDesc::Tconstr { path, args, .. } => {
-                                Some((path.clone(), args.clone()))
+                                Some((path.clone(), args.to_vec()))
                             }
                             _ => None,
                         };
@@ -3257,7 +3257,7 @@ fn transl_type_inner(
             let package_ty = ctx.new_type(TypeDesc::Tpackage {
                 path: pack_path.clone(),
                 lids,
-                args,
+                args: args.into(),
             });
             let ctyp = TypedCoreType {
                 ctyp_desc: TypedCoreTypeDesc::Ttyp_package(crate::types::typedtree::PackageType {
@@ -5952,7 +5952,7 @@ fn record_rest_extract_instantiated_concrete_typedecl(
             let ctx = tctx.type_ctx;
             let repr = ctx.repr(ty);
             let args = match &*ctx.get_desc(repr) {
-                TypeDesc::Tconstr { args, .. } => args.clone(),
+                TypeDesc::Tconstr { args, .. } => args.to_vec(),
                 _ => Vec::new(),
             };
             drop(ctx);
@@ -6474,7 +6474,7 @@ fn type_pattern_constraint_poly_var(
     match &*ctype_desc {
         TypeDesc::Tpoly { body, vars } => {
             let body = *body;
-            let vars: Vec<TypeExprRef> = vars.clone();
+            let vars: Vec<TypeExprRef> = vars.to_vec();
             drop(ctype_desc);
 
             // OCaml: begin_def (); let _, ty' = instance_poly ~keep_names:true false tyl body in end_def (); generalize ty'
@@ -9641,7 +9641,7 @@ fn type_application(
         // preserve the original arrow level and use a direct Cok commutable.
         ctx.alloc_type_at_level(
             TypeDesc::Tarrow {
-                args: vec![crate::types::TypeArg::new(label, arg_ty)],
+                args: vec![crate::types::TypeArg::new(label, arg_ty)].into(),
                 ret: ret_ty,
             },
             level,
@@ -15931,7 +15931,7 @@ fn shallow_copy_pattern_binding_type(
     let level = ctx.get_level(repr);
     drop(desc);
 
-    let copied = ctx.new_constr(path, args);
+    let copied = ctx.new_constr(path, args.to_vec());
     ctx.set_level(copied, level);
     copied
 }
@@ -16647,7 +16647,7 @@ fn type_function_nary(
         for (index, (param, label)) in params.iter().zip(&labels).enumerate() {
             if !label.same_label(expected_args[index].label()) {
                 let remainder = ctx.new_type(TypeDesc::Tarrow {
-                    args: expected_args[index..].to_vec(),
+                    args: expected_args[index..].to_vec().into(),
                     ret: expected_ret,
                 });
                 let param_loc = tctx.arena.get_pat(param.p_pat).ppat_loc;
@@ -16669,7 +16669,7 @@ fn type_function_nary(
         .collect::<Vec<_>>();
     let fun_ret = ctx.new_var(None);
     let fun_ty = ctx.new_type(TypeDesc::Tarrow {
-        args: fun_args,
+        args: fun_args.into(),
         ret: fun_ret,
     });
     unify_expression_types(tctx, loc, fun_ty, expected_ty, None)?;
@@ -20683,7 +20683,7 @@ fn type_send(
                     MethodSlotAction::PolyNoVars(*body)
                 }
                 TypeDesc::Tpoly { body, vars } => {
-                    MethodSlotAction::PolyWithVars(*body, vars.clone())
+                    MethodSlotAction::PolyWithVars(*body, vars.to_vec())
                 }
                 TypeDesc::Tvar(_) => MethodSlotAction::Var,
                 _ => MethodSlotAction::Other,
@@ -21274,7 +21274,7 @@ fn replace_letmodule_local_paths<'a>(
             let rewritten_path =
                 letmodule_replace_module_root_path(&local_path, module_id, &alias_root);
             if rewritten_path != local_path {
-                let rewritten_ty = ctx.new_constr(rewritten_path, local_args);
+                let rewritten_ty = ctx.new_constr(rewritten_path, local_args.to_vec());
                 crate::types::link_type(ctx, ty, rewritten_ty);
                 replace_letmodule_local_paths(ctx, env, pers_env, rewritten_ty, module_id, seen);
                 return;
@@ -22006,7 +22006,7 @@ fn type_letmodule(
             if let Some(alias_root) = resolve_letmodule_alias_root(env, module_id) {
                 let rewritten_path = replace_module_root_path(&local_path, module_id, &alias_root);
                 if rewritten_path != local_path {
-                    let rewritten_ty = ctx.new_constr(rewritten_path, local_args);
+                    let rewritten_ty = ctx.new_constr(rewritten_path, local_args.to_vec());
                     crate::types::link_type(ctx, ty, rewritten_ty);
                     replace_letmodule_local_paths(ctx, env, rewritten_ty, module_id, seen);
                     return;
@@ -22465,10 +22465,10 @@ fn type_pack(
         if can_rebuild && rebuilt_args.len() == pack_lids.len() {
             rebuilt_args
         } else {
-            expected_pack_args.clone()
+            expected_pack_args.to_vec()
         }
     } else {
-        expected_pack_args.clone()
+        expected_pack_args.to_vec()
     };
     // Matches compiler/ml/typemod.ml:1701-1709: build `tl'` while still inside
     // the package definition scope, then return to the original level before
@@ -22579,7 +22579,7 @@ fn type_pack(
     let packed_type = ctx.new_type(TypeDesc::Tpackage {
         path: pack_path,
         lids: pack_lids,
-        args: pack_args,
+        args: pack_args.into(),
     });
     // Matches compiler/ml/typecore.ml:3525-3531: `Pexp_pack` returns via
     // `rue`, whose helper at compiler/ml/typecore.ml:2408-2410 unifies the
@@ -23068,7 +23068,7 @@ fn check_univars_or_less_general(
     } else {
         let actual = ctx.new_generic_type(TypeDesc::Tpoly {
             body: ctx.repr(exp.exp_type),
-            vars: universal_vars,
+            vars: universal_vars.into(),
         });
         let expected = less_general_expected_type(ctx, ty_expected);
         Err(TypeCoreError::LessGeneral {
@@ -23094,7 +23094,7 @@ fn less_general_expected_type(ctx: &TypeContext, ty: TypeExprRef) -> TypeExprRef
     if vars.is_empty() {
         ty
     } else {
-        ctx.new_generic_type(TypeDesc::Tpoly { body: ty, vars })
+        ctx.new_generic_type(TypeDesc::Tpoly { body: ty, vars: vars.into() })
     }
 }
 
@@ -25290,13 +25290,13 @@ where
         match &*desc {
             TypeDesc::Tvar(name) => CopyTypeExprPlan::Tvar(name.clone()),
             TypeDesc::Tarrow { args, ret } => CopyTypeExprPlan::Tarrow {
-                args: args.clone(),
+                args: args.to_vec(),
                 ret: *ret,
             },
-            TypeDesc::Ttuple(types) => CopyTypeExprPlan::Ttuple(types.clone()),
+            TypeDesc::Ttuple(types) => CopyTypeExprPlan::Ttuple(types.to_vec()),
             TypeDesc::Tconstr { path, args, .. } => CopyTypeExprPlan::Tconstr {
                 path: type_path(path),
-                args: args.clone(),
+                args: args.to_vec(),
             },
             TypeDesc::Tobject { fields, name } => CopyTypeExprPlan::Tobject {
                 fields: *fields,
@@ -25347,12 +25347,12 @@ where
             TypeDesc::Tunivar(name) => CopyTypeExprPlan::Tunivar(name.clone()),
             TypeDesc::Tpoly { body, vars } => CopyTypeExprPlan::Tpoly {
                 body: *body,
-                vars: vars.clone(),
+                vars: vars.to_vec(),
             },
             TypeDesc::Tpackage { path, lids, args } => CopyTypeExprPlan::Tpackage {
                 path: type_path(path),
                 lids: lids.clone(),
-                args: args.clone(),
+                args: args.to_vec(),
             },
         }
     };
@@ -29328,7 +29328,7 @@ fn extract_concrete_record_type_info<'a>(
                     }
                 };
                 match decl.type_kind {
-                    crate::types::TypeKind::TypeRecord(_, _) => return Some((path, args, decl)),
+                    crate::types::TypeKind::TypeRecord(_, _) => return Some((path, args.to_vec(), decl)),
                     crate::types::TypeKind::TypeAbstract => {
                         let expanded = if let Some(manifest) = decl.type_manifest {
                             crate::types::ctype::subst_type_params(
@@ -29541,7 +29541,7 @@ fn lookup_label_by_expected_type<'a>(
         {
             let mut selected = (*env_label).clone();
             if !label_path.same(&visible_path) {
-                selected.lbl_res = ctx.new_generic_constr(visible_path.clone(), label_args);
+                selected.lbl_res = ctx.new_generic_constr(visible_path.clone(), label_args.to_vec());
             }
             if qualify_field_paths {
                 qualify_label_description_paths(&mut selected, env, pers_env, ctx);

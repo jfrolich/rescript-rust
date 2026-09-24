@@ -1755,6 +1755,7 @@ dependencies = [
  "rayon",
  "serde",
  "serde_json",
+ "smallvec",
  "smol_str",
  "tempfile",
  "thiserror 2.0.17",

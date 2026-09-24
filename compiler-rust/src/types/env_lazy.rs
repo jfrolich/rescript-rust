@@ -123,7 +123,7 @@ fn build_matching_type_constructors(
                             }
                         }
                     }
-                    ctx.new_generic_constr(type_path.clone(), args)
+                    ctx.new_generic_constr(type_path.clone(), args.to_vec())
                 }
                 _ => {
                     drop(desc);
