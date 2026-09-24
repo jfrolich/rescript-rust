@@ -109,7 +109,7 @@ def overall(runs: list[Run]) -> str:
 
 
 _HEADLINE_SKIP = re.compile(
-    r"^\s*(We've found a bug for you!|Syntax error!|Warning number \d+|[\w./-]+\.resi?:\d+.*|\d+ │.*|│.*|\s*)$"
+    r"^\s*(We've found a bug for you!|Syntax error!|Warning number \d+|[\w./-]+\.resi?:\d+.*|\d+ [│┆].*|[│┆].*|\. [│┆].*|\s*)$"
 )
 
 
@@ -138,7 +138,10 @@ def compare(case: dict[str, str], flags: list[str] | None = None, check_text: bo
     r = _compile_all(RUST_BSC, case, flags)
     ov, rv = overall(o), overall(r)
     sig = signature(o[-1].stderr) if ov != "ok" else ""
-    if "crash" in (rv,) or rv == "timeout":
+    if ov == "crash" and rv == "crash" and _norm(o[-1].stderr) == _norm(r[-1].stderr):
+        # Both print the same uncaught-exception report: that is parity.
+        kind = "same"
+    elif "crash" in (rv,) or rv == "timeout":
         kind = "crash"
         sig = f"rust-{rv}: " + (signature(r[-1].stderr) if r else "")
     elif ov in ("crash", "timeout"):
