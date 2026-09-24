@@ -5685,6 +5685,22 @@ fn type_pattern_record(
     // Matches OCaml typecore.ml: List.sort (fun (_, lbl1, _, _) (_, lbl2, _, _) -> compare lbl1.lbl_pos lbl2.lbl_pos)
     typed_fields.sort_by_key(|(_, label_desc, _, _)| label_desc.lbl_pos);
 
+    // OCaml `check_recordpat_labels` (compiler/ml/typecore.ml:1113-1133): a label
+    // bound twice is an error reported at the first field's label location.
+    if let Some((first_lid, _, _, _)) = typed_fields.first() {
+        let first_loc = first_lid.loc;
+        let mut defined = HashSet::new();
+        for (_, label_desc, _, _) in &typed_fields {
+            if !defined.insert(label_desc.lbl_pos) {
+                return Err(TypeCoreError::LabelMultiplyDefined {
+                    loc: first_loc,
+                    label: label_desc.lbl_name.clone(),
+                    jsx_component_info: None,
+                });
+            }
+        }
+    }
+
     // compiler/ml/typecore.ml uses Open for the missing-field check whenever a
     // rest binding is present, while retaining the parsed closed flag in the
     // typed tree.

@@ -1172,6 +1172,42 @@ fn parse_list_pattern(p: &mut Parser<'_>, start_pos_idx: PosIdx) -> Pattern {
     }
 }
 
+/// After a record-pattern row: the `Some node` arm of OCaml
+/// `parse_comma_delimited_reversed_list` (compiler/syntax/src/res_core.ml).
+/// Returns whether to parse another row.
+fn record_pattern_row_continue(p: &mut Parser<'_>) -> bool {
+    match &p.token {
+        Token::Comma => {
+            p.next();
+            true
+        }
+        Token::Rbrace | Token::Eof => false,
+        t if super::grammar::is_list_element(&Grammar::PatternRecord, t) => {
+            p.expect(Token::Comma);
+            true
+        }
+        _ => {
+            if !recover::should_abort_list_parse(p) {
+                p.expect(Token::Comma);
+            }
+            if p.token == Token::Semicolon {
+                p.next();
+            }
+            true
+        }
+    }
+}
+
+/// The `None` arm: stop at `}`/EOF/abort, otherwise report and skip the token.
+fn record_pattern_row_none(p: &mut Parser<'_>) -> bool {
+    if p.token == Token::Eof || p.token == Token::Rbrace || recover::should_abort_list_parse(p) {
+        return false;
+    }
+    p.err_unexpected();
+    p.next();
+    true
+}
+
 /// Parse a record pattern {field: pat, ...}.
 fn parse_record_pattern(p: &mut Parser<'_>) -> Pattern {
     let start_pos_idx = p.start_pos_idx();
@@ -1189,12 +1225,16 @@ fn parse_record_pattern(p: &mut Parser<'_>) -> Pattern {
     // the existing spread-error diagnostic path still fires.
     let mut spread_fallback = false;
 
+    // OCaml `parse_comma_delimited_reversed_list ~grammar:PatternRecord`.
+    p.leave_breadcrumb(Grammar::PatternRecord);
     while p.token != Token::Rbrace && p.token != Token::Eof {
+        spread_fallback = false;
         if p.token == Token::Underscore {
             p.next();
             raw_fields.push((false, None)); // PatUnderscore
-            // Allow trailing comma after underscore: {a, _,}
-            p.optional(&Token::Comma);
+            if !record_pattern_row_continue(p) {
+                break;
+            }
             continue;
         }
 
@@ -1256,7 +1296,7 @@ fn parse_record_pattern(p: &mut Parser<'_>) -> Pattern {
                 }
             }
             if !spread_fallback {
-                if !p.optional(&Token::Comma) {
+                if !record_pattern_row_continue(p) {
                     break;
                 }
                 continue;
@@ -1282,7 +1322,18 @@ fn parse_record_pattern(p: &mut Parser<'_>) -> Pattern {
         // (also needed for ambiguity disambiguation, mirroring OCaml syntax).
         // OCaml: Lident/Uident case in parse_record_pattern_row
         let mut parts: Vec<String> = vec![];
+        if spread_fallback && !matches!(p.token, Token::Lident(_) | Token::Uident(_)) {
+            // OCaml's fallback reads the label with `parse_value_path`, whose
+            // error branch reports the token, calls `next_unsafe`, and yields `_`
+            // (compiler/syntax/src/res_core.ml:771-774).
+            p.err_unexpected();
+            p.next_unsafe();
+            parts.push("_".to_string());
+        }
         loop {
+            if !parts.is_empty() && spread_fallback && parts[0] == "_" {
+                break;
+            }
             match &p.token {
                 Token::Lident(name) | Token::Uident(name) => {
                     parts.push(name.to_string());
@@ -1327,7 +1378,7 @@ fn parse_record_pattern(p: &mut Parser<'_>) -> Pattern {
                             opt,
                         }),
                     ));
-                    if !p.optional(&Token::Comma) {
+                    if !record_pattern_row_continue(p) {
                         break;
                     }
                     continue;
@@ -1337,8 +1388,14 @@ fn parse_record_pattern(p: &mut Parser<'_>) -> Pattern {
                         p,
                         super::core::error_messages::keyword_field_in_pattern,
                     );
+                    if record_pattern_row_none(p) {
+                        continue;
+                    }
                     break;
                 }
+            }
+            if record_pattern_row_none(p) {
+                continue;
             }
             break;
         }
@@ -1409,11 +1466,12 @@ fn parse_record_pattern(p: &mut Parser<'_>) -> Pattern {
             }),
         ));
 
-        if !p.optional(&Token::Comma) {
+        if !record_pattern_row_continue(p) {
             break;
         }
     }
 
+    p.eat_breadcrumb();
     p.expect(Token::Rbrace);
     let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
 
