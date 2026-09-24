@@ -1856,7 +1856,7 @@ fn is_js_regex_literal(s: &str) -> bool {
 /// Process args from list_of_arrow into FFI Param specs and compute arity.
 /// This mirrors OCaml's fold_right in handle_attributes which builds
 /// arg_type_specs and arg_type_specs_length.
-fn build_arg_type_specs(typ: &CoreType, arena: &mut ParseArena) -> (Params, usize) {
+fn build_arg_type_specs(typ: &CoreType, arena: &ParseArena) -> (Params, usize) {
     let (args, _result) = list_of_arrow(typ, arena);
 
     let mut param_specs: Vec<Param> = Vec::new();
@@ -2121,11 +2121,11 @@ fn external_desc_is_module_as_class(desc: &ExternalDesc) -> bool {
 fn validate_plain_obj_arg_type_errors(
     vd_type: &CoreType,
     external_loc: LocIdx,
-    arena: &mut ParseArena,
+    arena: &ParseArena,
 ) -> PpxResult<()> {
     let (args, _result) = list_of_arrow(vd_type, arena);
     for arg in args {
-        let typ = arena.get_core_type(arg.typ).clone();
+        let typ = arena.get_core_type(arg.typ);
         match arg.lbl {
             ArgLabel::Labelled(label_loc) => {
                 if matches!(&*typ.ptyp_desc, CoreTypeDesc::Ptyp_any)
@@ -2315,7 +2315,7 @@ fn validate_return_wrapper_result_type(
 fn validate_variadic_arg_type_errors(
     args: &[TypeArg],
     external_loc: LocIdx,
-    arena: &mut ParseArena,
+    arena: &ParseArena,
 ) -> PpxResult<()> {
     let Some(last_arg) = args.last() else {
         return Ok(());
@@ -2328,7 +2328,7 @@ fn validate_variadic_arg_type_errors(
         ));
     }
 
-    let typ = arena.get_core_type(last_arg.typ).clone();
+    let typ = arena.get_core_type(last_arg.typ);
     let array_error = || {
         PpxError::at_loc(
             external_loc,
@@ -2591,7 +2591,7 @@ fn validate_external_attribute_errors(
 
 /// Determine the arg type for a non-labeled argument type.
 /// Mirrors OCaml's refine_arg_type / spec_of_ptyp.
-fn refine_arg_type(nolabel: bool, typ: &CoreType, arena: &mut ParseArena) -> Attr {
+fn refine_arg_type(nolabel: bool, typ: &CoreType, arena: &ParseArena) -> Attr {
     // For Ptyp_any with @as attribute, handle constant args
     if matches!(&*typ.ptyp_desc, CoreTypeDesc::Ptyp_any) {
         // Check for @as attribute on the type
@@ -3131,7 +3131,7 @@ fn variant_can_unwrap(row_fields: &[RowField]) -> bool {
 
 /// Determine the arg type for a type expression.
 /// Mirrors OCaml's spec_of_ptyp.
-fn spec_of_ptyp(nolabel: bool, typ: &CoreType, arena: &mut ParseArena) -> Attr {
+fn spec_of_ptyp(nolabel: bool, typ: &CoreType, arena: &ParseArena) -> Attr {
     // Check for special attributes on the type (@string, @int, @unwrap, @ignore)
     let attr_type = check_type_ffi_attrs(typ, arena);
 
@@ -11768,7 +11768,7 @@ fn validate_deriving_accessors_for_tdcls(
     Ok(())
 }
 
-fn validate_payload_deriving_errors(payload: &Payload, arena: &mut ParseArena) -> PpxResult<()> {
+fn validate_payload_deriving_errors(payload: &Payload, arena: &ParseArena) -> PpxResult<()> {
     match payload {
         Payload::PStr(items) => validate_structure_deriving_errors(items, arena),
         Payload::PSig(items) => validate_signature_deriving_errors(items, arena),
@@ -11778,7 +11778,7 @@ fn validate_payload_deriving_errors(payload: &Payload, arena: &mut ParseArena) -
 
 fn validate_structure_deriving_errors(
     structure: &[StructureItem],
-    arena: &mut ParseArena,
+    arena: &ParseArena,
 ) -> PpxResult<()> {
     for item in structure {
         match &*item.pstr_desc {
@@ -11787,23 +11787,23 @@ fn validate_structure_deriving_errors(
                 validate_deriving_accessors_for_tdcls(tdcls, arena)?;
             }
             StructureItemDesc::Pstr_module(mb) => {
-                let mod_expr = arena.get_mod_expr(mb.pmb_expr).clone();
+                let mod_expr = arena.get_mod_expr(mb.pmb_expr);
                 validate_module_expr_deriving_errors(&mod_expr, arena)?;
             }
             StructureItemDesc::Pstr_recmodule(mbs) => {
                 for mb in mbs.iter() {
-                    let mod_expr = arena.get_mod_expr(mb.pmb_expr).clone();
+                    let mod_expr = arena.get_mod_expr(mb.pmb_expr);
                     validate_module_expr_deriving_errors(&mod_expr, arena)?;
                 }
             }
             StructureItemDesc::Pstr_modtype(mtd) => {
                 if let Some(mod_type_idx) = mtd.pmtd_type {
-                    let mod_type = arena.get_mod_type(mod_type_idx).clone();
+                    let mod_type = arena.get_mod_type(mod_type_idx);
                     validate_module_type_deriving_errors(&mod_type, arena)?;
                 }
             }
             StructureItemDesc::Pstr_include(incl) => {
-                let mod_expr = arena.get_mod_expr(incl.pincl_mod).clone();
+                let mod_expr = arena.get_mod_expr(incl.pincl_mod);
                 validate_module_expr_deriving_errors(&mod_expr, arena)?;
             }
             StructureItemDesc::Pstr_attribute(attr) => {
@@ -11827,7 +11827,7 @@ fn validate_structure_deriving_errors(
 
 fn validate_signature_deriving_errors(
     signature: &[SignatureItem],
-    arena: &mut ParseArena,
+    arena: &ParseArena,
 ) -> PpxResult<()> {
     for item in signature {
         match &*item.psig_desc {
@@ -11836,23 +11836,23 @@ fn validate_signature_deriving_errors(
                 validate_deriving_accessors_for_tdcls(tdcls, arena)?;
             }
             SignatureItemDesc::Psig_module(md) => {
-                let mod_type = arena.get_mod_type(md.pmd_type).clone();
+                let mod_type = arena.get_mod_type(md.pmd_type);
                 validate_module_type_deriving_errors(&mod_type, arena)?;
             }
             SignatureItemDesc::Psig_recmodule(mds) => {
                 for md in mds.iter() {
-                    let mod_type = arena.get_mod_type(md.pmd_type).clone();
+                    let mod_type = arena.get_mod_type(md.pmd_type);
                     validate_module_type_deriving_errors(&mod_type, arena)?;
                 }
             }
             SignatureItemDesc::Psig_modtype(mtd) => {
                 if let Some(mod_type_idx) = mtd.pmtd_type {
-                    let mod_type = arena.get_mod_type(mod_type_idx).clone();
+                    let mod_type = arena.get_mod_type(mod_type_idx);
                     validate_module_type_deriving_errors(&mod_type, arena)?;
                 }
             }
             SignatureItemDesc::Psig_include(incl) => {
-                let mod_type = arena.get_mod_type(incl.pincl_mod).clone();
+                let mod_type = arena.get_mod_type(incl.pincl_mod);
                 validate_module_type_deriving_errors(&mod_type, arena)?;
             }
             SignatureItemDesc::Psig_attribute(attr) => {
@@ -11874,29 +11874,29 @@ fn validate_signature_deriving_errors(
 
 fn validate_module_expr_deriving_errors(
     mod_expr: &current::ModuleExpr,
-    arena: &mut ParseArena,
+    arena: &ParseArena,
 ) -> PpxResult<()> {
     match &*mod_expr.pmod_desc {
         ModuleExprDesc::Pmod_structure(items) => validate_structure_deriving_errors(items, arena),
         ModuleExprDesc::Pmod_functor(inner) => {
             let (_name, param_type, body) = &**inner;
             if let Some(param_type_idx) = *param_type {
-                let mod_type = arena.get_mod_type(param_type_idx).clone();
+                let mod_type = arena.get_mod_type(param_type_idx);
                 validate_module_type_deriving_errors(&mod_type, arena)?;
             }
-            let body_expr = arena.get_mod_expr(*body).clone();
+            let body_expr = arena.get_mod_expr(*body);
             validate_module_expr_deriving_errors(&body_expr, arena)
         }
         ModuleExprDesc::Pmod_apply(left, right) => {
-            let left_expr = arena.get_mod_expr(*left).clone();
+            let left_expr = arena.get_mod_expr(*left);
             validate_module_expr_deriving_errors(&left_expr, arena)?;
-            let right_expr = arena.get_mod_expr(*right).clone();
+            let right_expr = arena.get_mod_expr(*right);
             validate_module_expr_deriving_errors(&right_expr, arena)
         }
         ModuleExprDesc::Pmod_constraint(inner, mod_type_idx) => {
-            let inner_expr = arena.get_mod_expr(*inner).clone();
+            let inner_expr = arena.get_mod_expr(*inner);
             validate_module_expr_deriving_errors(&inner_expr, arena)?;
-            let mod_type = arena.get_mod_type(*mod_type_idx).clone();
+            let mod_type = arena.get_mod_type(*mod_type_idx);
             validate_module_type_deriving_errors(&mod_type, arena)
         }
         ModuleExprDesc::Pmod_extension(extension) => {
@@ -11908,26 +11908,26 @@ fn validate_module_expr_deriving_errors(
 
 fn validate_module_type_deriving_errors(
     mod_type: &ModuleType,
-    arena: &mut ParseArena,
+    arena: &ParseArena,
 ) -> PpxResult<()> {
     match &*mod_type.pmty_desc {
         ModuleTypeDesc::Pmty_signature(items) => validate_signature_deriving_errors(items, arena),
         ModuleTypeDesc::Pmty_functor(inner) => {
             let (_name, param_type, result_type) = &**inner;
             if let Some(param_type_idx) = *param_type {
-                let param_type = arena.get_mod_type(param_type_idx).clone();
+                let param_type = arena.get_mod_type(param_type_idx);
                 validate_module_type_deriving_errors(&param_type, arena)?;
             }
-            let result_type = arena.get_mod_type(*result_type).clone();
+            let result_type = arena.get_mod_type(*result_type);
             validate_module_type_deriving_errors(&result_type, arena)
         }
         ModuleTypeDesc::Pmty_with(inner) => {
             let (mod_type_idx, _constraints) = &**inner;
-            let inner_type = arena.get_mod_type(*mod_type_idx).clone();
+            let inner_type = arena.get_mod_type(*mod_type_idx);
             validate_module_type_deriving_errors(&inner_type, arena)
         }
         ModuleTypeDesc::Pmty_typeof(mod_expr_idx) => {
-            let mod_expr = arena.get_mod_expr(*mod_expr_idx).clone();
+            let mod_expr = arena.get_mod_expr(*mod_expr_idx);
             validate_module_expr_deriving_errors(&mod_expr, arena)
         }
         ModuleTypeDesc::Pmty_extension(extension) => {
@@ -12008,7 +12008,7 @@ fn validate_value_description_identity_arity_error(
 
 fn validate_with_constraint_builtin_type_redefinition_errors(
     constraint: &WithConstraint,
-    arena: &mut ParseArena,
+    arena: &ParseArena,
 ) -> PpxResult<()> {
     match constraint {
         WithConstraint::Pwith_type(_, tdcl) | WithConstraint::Pwith_typesubst(_, tdcl) => {
@@ -12020,7 +12020,7 @@ fn validate_with_constraint_builtin_type_redefinition_errors(
 
 fn validate_payload_builtin_type_redefinition_errors(
     payload: &Payload,
-    arena: &mut ParseArena,
+    arena: &ParseArena,
 ) -> PpxResult<()> {
     match payload {
         Payload::PStr(items) => validate_structure_builtin_type_redefinition_errors(items, arena),
@@ -12031,7 +12031,7 @@ fn validate_payload_builtin_type_redefinition_errors(
 
 fn validate_structure_builtin_type_redefinition_errors(
     structure: &[StructureItem],
-    arena: &mut ParseArena,
+    arena: &ParseArena,
 ) -> PpxResult<()> {
     for item in structure {
         match &*item.pstr_desc {
@@ -12042,23 +12042,23 @@ fn validate_structure_builtin_type_redefinition_errors(
                 }
             }
             StructureItemDesc::Pstr_module(mb) => {
-                let mod_expr = arena.get_mod_expr(mb.pmb_expr).clone();
+                let mod_expr = arena.get_mod_expr(mb.pmb_expr);
                 validate_module_expr_builtin_type_redefinition_errors(&mod_expr, arena)?;
             }
             StructureItemDesc::Pstr_recmodule(mbs) => {
                 for mb in mbs.iter() {
-                    let mod_expr = arena.get_mod_expr(mb.pmb_expr).clone();
+                    let mod_expr = arena.get_mod_expr(mb.pmb_expr);
                     validate_module_expr_builtin_type_redefinition_errors(&mod_expr, arena)?;
                 }
             }
             StructureItemDesc::Pstr_modtype(mtd) => {
                 if let Some(mod_type_idx) = mtd.pmtd_type {
-                    let mod_type = arena.get_mod_type(mod_type_idx).clone();
+                    let mod_type = arena.get_mod_type(mod_type_idx);
                     validate_module_type_builtin_type_redefinition_errors(&mod_type, arena)?;
                 }
             }
             StructureItemDesc::Pstr_include(incl) => {
-                let mod_expr = arena.get_mod_expr(incl.pincl_mod).clone();
+                let mod_expr = arena.get_mod_expr(incl.pincl_mod);
                 validate_module_expr_builtin_type_redefinition_errors(&mod_expr, arena)?;
             }
             StructureItemDesc::Pstr_attribute(attr) => {
@@ -12091,7 +12091,7 @@ fn validate_structure_builtin_type_redefinition_errors(
 
 fn validate_signature_builtin_type_redefinition_errors(
     signature: &[SignatureItem],
-    arena: &mut ParseArena,
+    arena: &ParseArena,
 ) -> PpxResult<()> {
     for item in signature {
         match &*item.psig_desc {
@@ -12102,23 +12102,23 @@ fn validate_signature_builtin_type_redefinition_errors(
                 }
             }
             SignatureItemDesc::Psig_module(md) => {
-                let mod_type = arena.get_mod_type(md.pmd_type).clone();
+                let mod_type = arena.get_mod_type(md.pmd_type);
                 validate_module_type_builtin_type_redefinition_errors(&mod_type, arena)?;
             }
             SignatureItemDesc::Psig_recmodule(mds) => {
                 for md in mds.iter() {
-                    let mod_type = arena.get_mod_type(md.pmd_type).clone();
+                    let mod_type = arena.get_mod_type(md.pmd_type);
                     validate_module_type_builtin_type_redefinition_errors(&mod_type, arena)?;
                 }
             }
             SignatureItemDesc::Psig_modtype(mtd) => {
                 if let Some(mod_type_idx) = mtd.pmtd_type {
-                    let mod_type = arena.get_mod_type(mod_type_idx).clone();
+                    let mod_type = arena.get_mod_type(mod_type_idx);
                     validate_module_type_builtin_type_redefinition_errors(&mod_type, arena)?;
                 }
             }
             SignatureItemDesc::Psig_include(incl) => {
-                let mod_type = arena.get_mod_type(incl.pincl_mod).clone();
+                let mod_type = arena.get_mod_type(incl.pincl_mod);
                 validate_module_type_builtin_type_redefinition_errors(&mod_type, arena)?;
             }
             SignatureItemDesc::Psig_attribute(attr) => {
@@ -12141,7 +12141,7 @@ fn validate_signature_builtin_type_redefinition_errors(
 
 fn validate_module_expr_builtin_type_redefinition_errors(
     mod_expr: &ModuleExpr,
-    arena: &mut ParseArena,
+    arena: &ParseArena,
 ) -> PpxResult<()> {
     match &*mod_expr.pmod_desc {
         ModuleExprDesc::Pmod_structure(items) => {
@@ -12150,22 +12150,22 @@ fn validate_module_expr_builtin_type_redefinition_errors(
         ModuleExprDesc::Pmod_functor(inner) => {
             let (_name, param_type, body) = &**inner;
             if let Some(param_type_idx) = *param_type {
-                let param_type = arena.get_mod_type(param_type_idx).clone();
+                let param_type = arena.get_mod_type(param_type_idx);
                 validate_module_type_builtin_type_redefinition_errors(&param_type, arena)?;
             }
-            let body = arena.get_mod_expr(*body).clone();
+            let body = arena.get_mod_expr(*body);
             validate_module_expr_builtin_type_redefinition_errors(&body, arena)
         }
         ModuleExprDesc::Pmod_apply(left, right) => {
-            let left = arena.get_mod_expr(*left).clone();
+            let left = arena.get_mod_expr(*left);
             validate_module_expr_builtin_type_redefinition_errors(&left, arena)?;
-            let right = arena.get_mod_expr(*right).clone();
+            let right = arena.get_mod_expr(*right);
             validate_module_expr_builtin_type_redefinition_errors(&right, arena)
         }
         ModuleExprDesc::Pmod_constraint(inner, mod_type_idx) => {
-            let inner = arena.get_mod_expr(*inner).clone();
+            let inner = arena.get_mod_expr(*inner);
             validate_module_expr_builtin_type_redefinition_errors(&inner, arena)?;
-            let mod_type = arena.get_mod_type(*mod_type_idx).clone();
+            let mod_type = arena.get_mod_type(*mod_type_idx);
             validate_module_type_builtin_type_redefinition_errors(&mod_type, arena)
         }
         ModuleExprDesc::Pmod_extension(extension) => {
@@ -12180,9 +12180,9 @@ fn validate_module_expr_builtin_type_redefinition_errors(
 
 fn validate_expression_builtin_type_redefinition_errors(
     expr_idx: ExprIdx,
-    arena: &mut ParseArena,
+    arena: &ParseArena,
 ) -> PpxResult<()> {
-    let expr = arena.get_expr(expr_idx).clone();
+    let expr = arena.get_expr(expr_idx);
     match &*expr.pexp_desc {
         ExpressionDesc::Pexp_let(inner) => {
             let (_rec_flag, bindings, body) = &**inner;
@@ -12303,7 +12303,7 @@ fn validate_expression_builtin_type_redefinition_errors(
         }
         ExpressionDesc::Pexp_letmodule(inner) => {
             let (_name, mod_expr_idx, body) = &**inner;
-            let mod_expr = arena.get_mod_expr(*mod_expr_idx).clone();
+            let mod_expr = arena.get_mod_expr(*mod_expr_idx);
             validate_module_expr_builtin_type_redefinition_errors(&mod_expr, arena)?;
             validate_expression_builtin_type_redefinition_errors(*body, arena)
         }
@@ -12316,7 +12316,7 @@ fn validate_expression_builtin_type_redefinition_errors(
             validate_expression_builtin_type_redefinition_errors(*body, arena)
         }
         ExpressionDesc::Pexp_pack(mod_expr_idx) => {
-            let mod_expr = arena.get_mod_expr(*mod_expr_idx).clone();
+            let mod_expr = arena.get_mod_expr(*mod_expr_idx);
             validate_module_expr_builtin_type_redefinition_errors(&mod_expr, arena)
         }
         ExpressionDesc::Pexp_open(inner) => {
@@ -12355,7 +12355,7 @@ fn validate_expression_builtin_type_redefinition_errors(
 
 fn validate_module_type_builtin_type_redefinition_errors(
     mod_type: &ModuleType,
-    arena: &mut ParseArena,
+    arena: &ParseArena,
 ) -> PpxResult<()> {
     match &*mod_type.pmty_desc {
         ModuleTypeDesc::Pmty_signature(items) => {
@@ -12364,15 +12364,15 @@ fn validate_module_type_builtin_type_redefinition_errors(
         ModuleTypeDesc::Pmty_functor(inner) => {
             let (_name, param_type, result_type) = &**inner;
             if let Some(param_type_idx) = *param_type {
-                let param_type = arena.get_mod_type(param_type_idx).clone();
+                let param_type = arena.get_mod_type(param_type_idx);
                 validate_module_type_builtin_type_redefinition_errors(&param_type, arena)?;
             }
-            let result_type = arena.get_mod_type(*result_type).clone();
+            let result_type = arena.get_mod_type(*result_type);
             validate_module_type_builtin_type_redefinition_errors(&result_type, arena)
         }
         ModuleTypeDesc::Pmty_with(inner) => {
             let (mod_type_idx, constraints) = &**inner;
-            let mod_type = arena.get_mod_type(*mod_type_idx).clone();
+            let mod_type = arena.get_mod_type(*mod_type_idx);
             validate_module_type_builtin_type_redefinition_errors(&mod_type, arena)?;
             for constraint in constraints {
                 validate_with_constraint_builtin_type_redefinition_errors(constraint, arena)?;
@@ -12380,7 +12380,7 @@ fn validate_module_type_builtin_type_redefinition_errors(
             Ok(())
         }
         ModuleTypeDesc::Pmty_typeof(mod_expr_idx) => {
-            let mod_expr = arena.get_mod_expr(*mod_expr_idx).clone();
+            let mod_expr = arena.get_mod_expr(*mod_expr_idx);
             validate_module_expr_builtin_type_redefinition_errors(&mod_expr, arena)
         }
         ModuleTypeDesc::Pmty_extension(extension) => {
@@ -13330,7 +13330,7 @@ fn validate_expression_method_attribute_errors(
 
 fn validate_payload_await_errors(
     payload: &Payload,
-    arena: &mut ParseArena,
+    arena: &ParseArena,
     async_context: bool,
 ) -> PpxResult<()> {
     match payload {
@@ -13519,7 +13519,7 @@ fn attributes_have_template_marker(attrs: &[Attribute], arena: &ParseArena) -> b
 
 fn validate_attributes_js_string_errors(
     attrs: &[Attribute],
-    arena: &mut ParseArena,
+    arena: &ParseArena,
 ) -> PpxResult<()> {
     for attr in attrs {
         validate_payload_js_string_errors(&attr.1, arena)?;
@@ -13527,7 +13527,7 @@ fn validate_attributes_js_string_errors(
     Ok(())
 }
 
-fn validate_payload_js_string_errors(payload: &Payload, arena: &mut ParseArena) -> PpxResult<()> {
+fn validate_payload_js_string_errors(payload: &Payload, arena: &ParseArena) -> PpxResult<()> {
     match payload {
         Payload::PStr(items) => validate_structure_js_string_errors(items, arena),
         Payload::PSig(items) => validate_signature_js_string_errors(items, arena),
@@ -13545,9 +13545,9 @@ fn validate_payload_js_string_errors(payload: &Payload, arena: &mut ParseArena) 
 
 fn validate_core_type_js_string_errors(
     typ_idx: CoreTypeIdx,
-    arena: &mut ParseArena,
+    arena: &ParseArena,
 ) -> PpxResult<()> {
-    let typ = arena.get_core_type(typ_idx).clone();
+    let typ = arena.get_core_type(typ_idx);
     validate_attributes_js_string_errors(&typ.ptyp_attributes, arena)?;
     match &*typ.ptyp_desc {
         CoreTypeDesc::Ptyp_arrow(inner) => {
@@ -13623,8 +13623,8 @@ fn validate_core_type_js_string_errors(
     }
 }
 
-fn validate_pattern_js_string_errors(pat_idx: PatIdx, arena: &mut ParseArena) -> PpxResult<()> {
-    let pat = arena.get_pat(pat_idx).clone();
+fn validate_pattern_js_string_errors(pat_idx: PatIdx, arena: &ParseArena) -> PpxResult<()> {
+    let pat = arena.get_pat(pat_idx);
     validate_attributes_js_string_errors(&pat.ppat_attributes, arena)?;
     match &*pat.ppat_desc {
         PatternDesc::Ppat_constant(constant) => {
@@ -13696,7 +13696,7 @@ fn validate_pattern_js_string_errors(pat_idx: PatIdx, arena: &mut ParseArena) ->
 
 fn validate_value_bindings_js_string_errors(
     bindings: &[ValueBinding],
-    arena: &mut ParseArena,
+    arena: &ParseArena,
 ) -> PpxResult<()> {
     for vb in bindings {
         validate_pattern_js_string_errors(vb.pvb_pat, arena)?;
@@ -13706,7 +13706,7 @@ fn validate_value_bindings_js_string_errors(
     Ok(())
 }
 
-fn validate_cases_js_string_errors(cases: &[Case], arena: &mut ParseArena) -> PpxResult<()> {
+fn validate_cases_js_string_errors(cases: &[Case], arena: &ParseArena) -> PpxResult<()> {
     for case in cases {
         validate_pattern_js_string_errors(case.pc_lhs, arena)?;
         if let Some(guard) = case.pc_guard {
@@ -13719,15 +13719,15 @@ fn validate_cases_js_string_errors(cases: &[Case], arena: &mut ParseArena) -> Pp
 
 fn validate_expression_idx_js_string_errors(
     expr_idx: ExprIdx,
-    arena: &mut ParseArena,
+    arena: &ParseArena,
 ) -> PpxResult<()> {
-    let expr = arena.get_expr(expr_idx).clone();
+    let expr = arena.get_expr(expr_idx);
     validate_expression_js_string_errors(&expr, arena)
 }
 
 fn validate_jsx_element_js_string_errors(
     jsx: &JsxElement,
-    arena: &mut ParseArena,
+    arena: &ParseArena,
 ) -> PpxResult<()> {
     match jsx {
         JsxElement::Fragment(fragment) => {
@@ -13746,7 +13746,7 @@ fn validate_jsx_element_js_string_errors(
     Ok(())
 }
 
-fn validate_jsx_props_js_string_errors(props: &[JsxProp], arena: &mut ParseArena) -> PpxResult<()> {
+fn validate_jsx_props_js_string_errors(props: &[JsxProp], arena: &ParseArena) -> PpxResult<()> {
     for prop in props {
         match prop {
             JsxProp::Value { value, .. } => {
@@ -13763,7 +13763,7 @@ fn validate_jsx_props_js_string_errors(props: &[JsxProp], arena: &mut ParseArena
 
 fn validate_expression_js_string_errors(
     expr: &Expression,
-    arena: &mut ParseArena,
+    arena: &ParseArena,
 ) -> PpxResult<()> {
     validate_attributes_js_string_errors(&expr.pexp_attributes, arena)?;
     match &*expr.pexp_desc {
@@ -13890,7 +13890,7 @@ fn validate_expression_js_string_errors(
         }
         ExpressionDesc::Pexp_letmodule(inner) => {
             let (_, mod_expr, body) = &**inner;
-            let mod_expr = arena.get_mod_expr(*mod_expr).clone();
+            let mod_expr = arena.get_mod_expr(*mod_expr);
             validate_module_expr_js_string_errors(&mod_expr, arena)?;
             validate_expression_idx_js_string_errors(*body, arena)
         }
@@ -13904,7 +13904,7 @@ fn validate_expression_js_string_errors(
             validate_expression_idx_js_string_errors(*body, arena)
         }
         ExpressionDesc::Pexp_pack(mod_expr) => {
-            let mod_expr = arena.get_mod_expr(*mod_expr).clone();
+            let mod_expr = arena.get_mod_expr(*mod_expr);
             validate_module_expr_js_string_errors(&mod_expr, arena)
         }
         ExpressionDesc::Pexp_open(inner) => {
@@ -13952,7 +13952,7 @@ fn validate_expression_js_string_errors(
 
 fn validate_module_expr_js_string_errors(
     mod_expr: &ModuleExpr,
-    arena: &mut ParseArena,
+    arena: &ParseArena,
 ) -> PpxResult<()> {
     validate_attributes_js_string_errors(&mod_expr.pmod_attributes, arena)?;
     match &*mod_expr.pmod_desc {
@@ -13960,22 +13960,22 @@ fn validate_module_expr_js_string_errors(
         ModuleExprDesc::Pmod_functor(inner) => {
             let (_, param_type, body) = &**inner;
             if let Some(param_type) = param_type {
-                let param_type = arena.get_mod_type(*param_type).clone();
+                let param_type = arena.get_mod_type(*param_type);
                 validate_module_type_js_string_errors(&param_type, arena)?;
             }
-            let body = arena.get_mod_expr(*body).clone();
+            let body = arena.get_mod_expr(*body);
             validate_module_expr_js_string_errors(&body, arena)
         }
         ModuleExprDesc::Pmod_apply(left, right) => {
-            let left = arena.get_mod_expr(*left).clone();
+            let left = arena.get_mod_expr(*left);
             validate_module_expr_js_string_errors(&left, arena)?;
-            let right = arena.get_mod_expr(*right).clone();
+            let right = arena.get_mod_expr(*right);
             validate_module_expr_js_string_errors(&right, arena)
         }
         ModuleExprDesc::Pmod_constraint(inner, mod_type) => {
-            let inner = arena.get_mod_expr(*inner).clone();
+            let inner = arena.get_mod_expr(*inner);
             validate_module_expr_js_string_errors(&inner, arena)?;
-            let mod_type = arena.get_mod_type(*mod_type).clone();
+            let mod_type = arena.get_mod_type(*mod_type);
             validate_module_type_js_string_errors(&mod_type, arena)
         }
         ModuleExprDesc::Pmod_unpack(expr) => validate_expression_idx_js_string_errors(*expr, arena),
@@ -13988,7 +13988,7 @@ fn validate_module_expr_js_string_errors(
 
 fn validate_module_type_js_string_errors(
     mod_type: &ModuleType,
-    arena: &mut ParseArena,
+    arena: &ParseArena,
 ) -> PpxResult<()> {
     validate_attributes_js_string_errors(&mod_type.pmty_attributes, arena)?;
     match &*mod_type.pmty_desc {
@@ -13996,15 +13996,15 @@ fn validate_module_type_js_string_errors(
         ModuleTypeDesc::Pmty_functor(inner) => {
             let (_, param_type, result_type) = &**inner;
             if let Some(param_type) = param_type {
-                let param_type = arena.get_mod_type(*param_type).clone();
+                let param_type = arena.get_mod_type(*param_type);
                 validate_module_type_js_string_errors(&param_type, arena)?;
             }
-            let result_type = arena.get_mod_type(*result_type).clone();
+            let result_type = arena.get_mod_type(*result_type);
             validate_module_type_js_string_errors(&result_type, arena)
         }
         ModuleTypeDesc::Pmty_with(inner) => {
             let (mod_type, constraints) = &**inner;
-            let mod_type = arena.get_mod_type(*mod_type).clone();
+            let mod_type = arena.get_mod_type(*mod_type);
             validate_module_type_js_string_errors(&mod_type, arena)?;
             for constraint in constraints {
                 match constraint {
@@ -14020,7 +14020,7 @@ fn validate_module_type_js_string_errors(
             Ok(())
         }
         ModuleTypeDesc::Pmty_typeof(mod_expr) => {
-            let mod_expr = arena.get_mod_expr(*mod_expr).clone();
+            let mod_expr = arena.get_mod_expr(*mod_expr);
             validate_module_expr_js_string_errors(&mod_expr, arena)
         }
         ModuleTypeDesc::Pmty_extension(extension) => {
@@ -14032,7 +14032,7 @@ fn validate_module_type_js_string_errors(
 
 fn validate_type_declaration_js_string_errors(
     tdcl: &TypeDeclaration,
-    arena: &mut ParseArena,
+    arena: &ParseArena,
 ) -> PpxResult<()> {
     validate_attributes_js_string_errors(&tdcl.ptype_attributes, arena)?;
     for (param, _) in &tdcl.ptype_params {
@@ -14076,7 +14076,7 @@ fn validate_type_declaration_js_string_errors(
 
 fn validate_structure_js_string_errors(
     structure: &[StructureItem],
-    arena: &mut ParseArena,
+    arena: &ParseArena,
 ) -> PpxResult<()> {
     for item in structure {
         match &*item.pstr_desc {
@@ -14110,26 +14110,26 @@ fn validate_structure_js_string_errors(
             }
             StructureItemDesc::Pstr_module(mb) => {
                 validate_attributes_js_string_errors(&mb.pmb_attributes, arena)?;
-                let mod_expr = arena.get_mod_expr(mb.pmb_expr).clone();
+                let mod_expr = arena.get_mod_expr(mb.pmb_expr);
                 validate_module_expr_js_string_errors(&mod_expr, arena)?;
             }
             StructureItemDesc::Pstr_recmodule(mbs) => {
                 for mb in mbs.iter() {
                     validate_attributes_js_string_errors(&mb.pmb_attributes, arena)?;
-                    let mod_expr = arena.get_mod_expr(mb.pmb_expr).clone();
+                    let mod_expr = arena.get_mod_expr(mb.pmb_expr);
                     validate_module_expr_js_string_errors(&mod_expr, arena)?;
                 }
             }
             StructureItemDesc::Pstr_modtype(mtd) => {
                 validate_attributes_js_string_errors(&mtd.pmtd_attributes, arena)?;
                 if let Some(mod_type) = mtd.pmtd_type {
-                    let mod_type = arena.get_mod_type(mod_type).clone();
+                    let mod_type = arena.get_mod_type(mod_type);
                     validate_module_type_js_string_errors(&mod_type, arena)?;
                 }
             }
             StructureItemDesc::Pstr_include(incl) => {
                 validate_attributes_js_string_errors(&incl.pincl_attributes, arena)?;
-                let mod_expr = arena.get_mod_expr(incl.pincl_mod).clone();
+                let mod_expr = arena.get_mod_expr(incl.pincl_mod);
                 validate_module_expr_js_string_errors(&mod_expr, arena)?;
             }
             StructureItemDesc::Pstr_open(od) => {
@@ -14150,7 +14150,7 @@ fn validate_structure_js_string_errors(
 
 fn validate_signature_js_string_errors(
     signature: &[SignatureItem],
-    arena: &mut ParseArena,
+    arena: &ParseArena,
 ) -> PpxResult<()> {
     for item in signature {
         match &*item.psig_desc {
@@ -14175,26 +14175,26 @@ fn validate_signature_js_string_errors(
             }
             SignatureItemDesc::Psig_module(md) => {
                 validate_attributes_js_string_errors(&md.pmd_attributes, arena)?;
-                let mod_type = arena.get_mod_type(md.pmd_type).clone();
+                let mod_type = arena.get_mod_type(md.pmd_type);
                 validate_module_type_js_string_errors(&mod_type, arena)?;
             }
             SignatureItemDesc::Psig_recmodule(mds) => {
                 for md in mds.iter() {
                     validate_attributes_js_string_errors(&md.pmd_attributes, arena)?;
-                    let mod_type = arena.get_mod_type(md.pmd_type).clone();
+                    let mod_type = arena.get_mod_type(md.pmd_type);
                     validate_module_type_js_string_errors(&mod_type, arena)?;
                 }
             }
             SignatureItemDesc::Psig_modtype(mtd) => {
                 validate_attributes_js_string_errors(&mtd.pmtd_attributes, arena)?;
                 if let Some(mod_type) = mtd.pmtd_type {
-                    let mod_type = arena.get_mod_type(mod_type).clone();
+                    let mod_type = arena.get_mod_type(mod_type);
                     validate_module_type_js_string_errors(&mod_type, arena)?;
                 }
             }
             SignatureItemDesc::Psig_include(incl) => {
                 validate_attributes_js_string_errors(&incl.pincl_attributes, arena)?;
-                let mod_type = arena.get_mod_type(incl.pincl_mod).clone();
+                let mod_type = arena.get_mod_type(incl.pincl_mod);
                 validate_module_type_js_string_errors(&mod_type, arena)?;
             }
             SignatureItemDesc::Psig_open(od) => {
@@ -14215,7 +14215,7 @@ fn validate_signature_js_string_errors(
 
 fn validate_structure_await_errors(
     structure: &[StructureItem],
-    arena: &mut ParseArena,
+    arena: &ParseArena,
     async_context: bool,
 ) -> PpxResult<()> {
     for item in structure {
@@ -14255,7 +14255,7 @@ fn validate_structure_await_errors(
                 }
             }
             StructureItemDesc::Pstr_module(mb) => {
-                let mod_expr = arena.get_mod_expr(mb.pmb_expr).clone();
+                let mod_expr = arena.get_mod_expr(mb.pmb_expr);
                 validate_module_expr_await_context(&mod_expr, arena, async_context)?;
                 for attr in mb.pmb_attributes.iter() {
                     validate_payload_await_errors(&attr.1, arena, async_context)?;
@@ -14263,7 +14263,7 @@ fn validate_structure_await_errors(
             }
             StructureItemDesc::Pstr_recmodule(mbs) => {
                 for mb in mbs.iter() {
-                    let mod_expr = arena.get_mod_expr(mb.pmb_expr).clone();
+                    let mod_expr = arena.get_mod_expr(mb.pmb_expr);
                     validate_module_expr_await_context(&mod_expr, arena, async_context)?;
                     for attr in mb.pmb_attributes.iter() {
                         validate_payload_await_errors(&attr.1, arena, async_context)?;
@@ -14272,7 +14272,7 @@ fn validate_structure_await_errors(
             }
             StructureItemDesc::Pstr_modtype(mtd) => {
                 if let Some(mod_type_idx) = mtd.pmtd_type {
-                    let mod_type = arena.get_mod_type(mod_type_idx).clone();
+                    let mod_type = arena.get_mod_type(mod_type_idx);
                     validate_module_type_await_context(&mod_type, arena, async_context)?;
                 }
                 for attr in mtd.pmtd_attributes.iter() {
@@ -14280,7 +14280,7 @@ fn validate_structure_await_errors(
                 }
             }
             StructureItemDesc::Pstr_include(incl) => {
-                let mod_expr = arena.get_mod_expr(incl.pincl_mod).clone();
+                let mod_expr = arena.get_mod_expr(incl.pincl_mod);
                 validate_module_expr_await_context(&mod_expr, arena, async_context)?;
                 for attr in incl.pincl_attributes.iter() {
                     validate_payload_await_errors(&attr.1, arena, async_context)?;
@@ -14309,29 +14309,29 @@ fn validate_structure_await_errors(
 
 fn validate_signature_await_errors(
     signature: &[SignatureItem],
-    arena: &mut ParseArena,
+    arena: &ParseArena,
     async_context: bool,
 ) -> PpxResult<()> {
     for item in signature {
         match &*item.psig_desc {
             SignatureItemDesc::Psig_module(md) => {
-                let mod_type = arena.get_mod_type(md.pmd_type).clone();
+                let mod_type = arena.get_mod_type(md.pmd_type);
                 validate_module_type_await_context(&mod_type, arena, async_context)?;
             }
             SignatureItemDesc::Psig_recmodule(mds) => {
                 for md in mds.iter() {
-                    let mod_type = arena.get_mod_type(md.pmd_type).clone();
+                    let mod_type = arena.get_mod_type(md.pmd_type);
                     validate_module_type_await_context(&mod_type, arena, async_context)?;
                 }
             }
             SignatureItemDesc::Psig_modtype(mtd) => {
                 if let Some(mod_type_idx) = mtd.pmtd_type {
-                    let mod_type = arena.get_mod_type(mod_type_idx).clone();
+                    let mod_type = arena.get_mod_type(mod_type_idx);
                     validate_module_type_await_context(&mod_type, arena, async_context)?;
                 }
             }
             SignatureItemDesc::Psig_include(incl) => {
-                let mod_type = arena.get_mod_type(incl.pincl_mod).clone();
+                let mod_type = arena.get_mod_type(incl.pincl_mod);
                 validate_module_type_await_context(&mod_type, arena, async_context)?;
             }
             SignatureItemDesc::Psig_attribute(attr) => {
@@ -14357,7 +14357,7 @@ fn validate_signature_await_errors(
 
 fn validate_module_expr_await_context(
     mod_expr: &current::ModuleExpr,
-    arena: &mut ParseArena,
+    arena: &ParseArena,
     async_context: bool,
 ) -> PpxResult<()> {
     match &*mod_expr.pmod_desc {
@@ -14367,22 +14367,22 @@ fn validate_module_expr_await_context(
         ModuleExprDesc::Pmod_functor(inner) => {
             let (_name, param_type, body) = &**inner;
             if let Some(param_type_idx) = *param_type {
-                let mod_type = arena.get_mod_type(param_type_idx).clone();
+                let mod_type = arena.get_mod_type(param_type_idx);
                 validate_module_type_await_context(&mod_type, arena, async_context)?;
             }
-            let body_expr = arena.get_mod_expr(*body).clone();
+            let body_expr = arena.get_mod_expr(*body);
             validate_module_expr_await_context(&body_expr, arena, async_context)
         }
         ModuleExprDesc::Pmod_apply(left, right) => {
-            let left_expr = arena.get_mod_expr(*left).clone();
+            let left_expr = arena.get_mod_expr(*left);
             validate_module_expr_await_context(&left_expr, arena, async_context)?;
-            let right_expr = arena.get_mod_expr(*right).clone();
+            let right_expr = arena.get_mod_expr(*right);
             validate_module_expr_await_context(&right_expr, arena, async_context)
         }
         ModuleExprDesc::Pmod_constraint(inner, mod_type_idx) => {
-            let inner_expr = arena.get_mod_expr(*inner).clone();
+            let inner_expr = arena.get_mod_expr(*inner);
             validate_module_expr_await_context(&inner_expr, arena, async_context)?;
-            let mod_type = arena.get_mod_type(*mod_type_idx).clone();
+            let mod_type = arena.get_mod_type(*mod_type_idx);
             validate_module_type_await_context(&mod_type, arena, async_context)
         }
         ModuleExprDesc::Pmod_unpack(expr_idx) => {
@@ -14397,7 +14397,7 @@ fn validate_module_expr_await_context(
 
 fn validate_module_type_await_context(
     mod_type: &ModuleType,
-    arena: &mut ParseArena,
+    arena: &ParseArena,
     async_context: bool,
 ) -> PpxResult<()> {
     match &*mod_type.pmty_desc {
@@ -14407,19 +14407,19 @@ fn validate_module_type_await_context(
         ModuleTypeDesc::Pmty_functor(inner) => {
             let (_name, param_type, result_type) = &**inner;
             if let Some(param_type_idx) = *param_type {
-                let param_type = arena.get_mod_type(param_type_idx).clone();
+                let param_type = arena.get_mod_type(param_type_idx);
                 validate_module_type_await_context(&param_type, arena, async_context)?;
             }
-            let result_type = arena.get_mod_type(*result_type).clone();
+            let result_type = arena.get_mod_type(*result_type);
             validate_module_type_await_context(&result_type, arena, async_context)
         }
         ModuleTypeDesc::Pmty_with(inner) => {
             let (mod_type_idx, _constraints) = &**inner;
-            let inner_type = arena.get_mod_type(*mod_type_idx).clone();
+            let inner_type = arena.get_mod_type(*mod_type_idx);
             validate_module_type_await_context(&inner_type, arena, async_context)
         }
         ModuleTypeDesc::Pmty_typeof(mod_expr_idx) => {
-            let mod_expr = arena.get_mod_expr(*mod_expr_idx).clone();
+            let mod_expr = arena.get_mod_expr(*mod_expr_idx);
             validate_module_expr_await_context(&mod_expr, arena, async_context)
         }
         ModuleTypeDesc::Pmty_extension(extension) => {
@@ -14431,7 +14431,7 @@ fn validate_module_type_await_context(
 
 fn validate_value_bindings_await_context(
     bindings: &[ValueBinding],
-    arena: &mut ParseArena,
+    arena: &ParseArena,
     async_context: bool,
 ) -> PpxResult<()> {
     for vb in bindings {
@@ -14486,17 +14486,17 @@ fn validate_module_record_pattern_binding_error(
 
 fn validate_expression_idx_await_context(
     expr_idx: ExprIdx,
-    arena: &mut ParseArena,
+    arena: &ParseArena,
     async_context: bool,
     in_function_def: bool,
 ) -> PpxResult<()> {
-    let expr = arena.get_expr(expr_idx).clone();
+    let expr = arena.get_expr(expr_idx);
     validate_expression_await_context(&expr, arena, async_context, in_function_def)
 }
 
 fn validate_cases_await_context(
     cases: &[Case],
-    arena: &mut ParseArena,
+    arena: &ParseArena,
     async_context: bool,
 ) -> PpxResult<()> {
     for case in cases {
@@ -14523,7 +14523,7 @@ fn letmodule_expr_has_await_payload(mod_expr: &current::ModuleExpr, arena: &Pars
 
 fn validate_jsx_element_await_context(
     jsx: &JsxElement,
-    arena: &mut ParseArena,
+    arena: &ParseArena,
     async_context: bool,
 ) -> PpxResult<()> {
     match jsx {
@@ -14547,7 +14547,7 @@ fn validate_jsx_element_await_context(
 
 fn validate_jsx_props_await_context(
     props: &[JsxProp],
-    arena: &mut ParseArena,
+    arena: &ParseArena,
     async_context: bool,
 ) -> PpxResult<()> {
     for prop in props {
@@ -14663,7 +14663,7 @@ fn invalid_hash_set_assignment(expr: &Expression, arena: &ParseArena) -> bool {
 
 fn validate_expression_await_context(
     expr: &Expression,
-    arena: &mut ParseArena,
+    arena: &ParseArena,
     async_context: bool,
     in_function_def: bool,
 ) -> PpxResult<()> {
@@ -14787,7 +14787,7 @@ fn validate_expression_await_context(
         }
         ExpressionDesc::Pexp_letmodule(inner) => {
             let (_name, mod_expr_idx, body) = &**inner;
-            let mod_expr = arena.get_mod_expr(*mod_expr_idx).clone();
+            let mod_expr = arena.get_mod_expr(*mod_expr_idx);
             validate_module_expr_await_context(&mod_expr, arena, async_context)?;
             validate_expression_idx_await_context(*body, arena, async_context, false)?;
             if letmodule_expr_has_await_payload(&mod_expr, arena) && !async_context {
@@ -14806,7 +14806,7 @@ fn validate_expression_await_context(
             validate_expression_idx_await_context(*body, arena, async_context, false)?;
         }
         ExpressionDesc::Pexp_pack(mod_expr_idx) => {
-            let mod_expr = arena.get_mod_expr(*mod_expr_idx).clone();
+            let mod_expr = arena.get_mod_expr(*mod_expr_idx);
             validate_module_expr_await_context(&mod_expr, arena, async_context)?;
         }
         ExpressionDesc::Pexp_open(inner) => {
@@ -14863,7 +14863,7 @@ fn validate_expression_await_context(
 
 fn validate_structure_this_errors(
     structure: &[StructureItem],
-    arena: &mut ParseArena,
+    arena: &ParseArena,
 ) -> PpxResult<()> {
     for item in structure {
         match &*item.pstr_desc {
@@ -14878,17 +14878,17 @@ fn validate_structure_this_errors(
                 validate_expression_idx_this_errors(*expr, arena)?;
             }
             StructureItemDesc::Pstr_module(mb) => {
-                let mod_expr = arena.get_mod_expr(mb.pmb_expr).clone();
+                let mod_expr = arena.get_mod_expr(mb.pmb_expr);
                 validate_module_expr_this_errors(&mod_expr, arena)?;
             }
             StructureItemDesc::Pstr_recmodule(mbs) => {
                 for mb in mbs.iter() {
-                    let mod_expr = arena.get_mod_expr(mb.pmb_expr).clone();
+                    let mod_expr = arena.get_mod_expr(mb.pmb_expr);
                     validate_module_expr_this_errors(&mod_expr, arena)?;
                 }
             }
             StructureItemDesc::Pstr_include(include_decl) => {
-                let mod_expr = arena.get_mod_expr(include_decl.pincl_mod).clone();
+                let mod_expr = arena.get_mod_expr(include_decl.pincl_mod);
                 validate_module_expr_this_errors(&mod_expr, arena)?;
             }
             _ => {}
@@ -14899,23 +14899,23 @@ fn validate_structure_this_errors(
 
 fn validate_module_expr_this_errors(
     mod_expr: &ModuleExpr,
-    arena: &mut ParseArena,
+    arena: &ParseArena,
 ) -> PpxResult<()> {
     match &*mod_expr.pmod_desc {
         ModuleExprDesc::Pmod_structure(items) => validate_structure_this_errors(items, arena),
         ModuleExprDesc::Pmod_functor(inner) => {
             let (_name, _param, body) = &**inner;
-            let body = arena.get_mod_expr(*body).clone();
+            let body = arena.get_mod_expr(*body);
             validate_module_expr_this_errors(&body, arena)
         }
         ModuleExprDesc::Pmod_apply(left, right) => {
-            let left = arena.get_mod_expr(*left).clone();
+            let left = arena.get_mod_expr(*left);
             validate_module_expr_this_errors(&left, arena)?;
-            let right = arena.get_mod_expr(*right).clone();
+            let right = arena.get_mod_expr(*right);
             validate_module_expr_this_errors(&right, arena)
         }
         ModuleExprDesc::Pmod_constraint(inner, _mty) => {
-            let inner = arena.get_mod_expr(*inner).clone();
+            let inner = arena.get_mod_expr(*inner);
             validate_module_expr_this_errors(&inner, arena)
         }
         ModuleExprDesc::Pmod_extension(extension) => match &extension.1 {
@@ -14926,15 +14926,15 @@ fn validate_module_expr_this_errors(
     }
 }
 
-fn validate_expression_idx_this_errors(expr_idx: ExprIdx, arena: &mut ParseArena) -> PpxResult<()> {
-    let expr = arena.get_expr(expr_idx).clone();
+fn validate_expression_idx_this_errors(expr_idx: ExprIdx, arena: &ParseArena) -> PpxResult<()> {
+    let expr = arena.get_expr(expr_idx);
     validate_expression_this_errors(&expr, arena)
 }
 
 fn validate_method_callback_this_errors(
     expr: &Expression,
     fun: &PexpFun,
-    arena: &mut ParseArena,
+    arena: &ParseArena,
 ) -> PpxResult<()> {
     // Parser-created functions keep the current Parsetree's n-ary params and
     // newtypes in side tables; the inline Pexp_fun fields only describe the
@@ -14943,7 +14943,7 @@ fn validate_method_callback_this_errors(
     let _newtypes = arena.nary_fun_newtypes(fun);
     let body = arena.nary_fun_body(fun);
 
-    let self_pat = arena.get_pat(params[0].p_pat).clone();
+    let self_pat = arena.get_pat(params[0].p_pat);
     if single_var_pattern_name_conservative(&self_pat, arena).is_none() {
         return Err(PpxError::at_loc(
             self_pat.ppat_loc,
@@ -14964,7 +14964,7 @@ fn validate_method_callback_this_errors(
     validate_expression_idx_this_errors(body, arena)
 }
 
-fn validate_expression_this_errors(expr: &Expression, arena: &mut ParseArena) -> PpxResult<()> {
+fn validate_expression_this_errors(expr: &Expression, arena: &ParseArena) -> PpxResult<()> {
     match &*expr.pexp_desc {
         ExpressionDesc::Pexp_fun(inner) if has_this_attr(&expr.pexp_attributes, arena) => {
             validate_method_callback_this_errors(expr, inner, arena)
@@ -15072,7 +15072,7 @@ fn validate_expression_this_errors(expr: &Expression, arena: &mut ParseArena) ->
         }
         ExpressionDesc::Pexp_letmodule(inner) => {
             let (_name, mod_expr, body) = &**inner;
-            let mod_expr = arena.get_mod_expr(*mod_expr).clone();
+            let mod_expr = arena.get_mod_expr(*mod_expr);
             validate_module_expr_this_errors(&mod_expr, arena)?;
             validate_expression_idx_this_errors(*body, arena)
         }
