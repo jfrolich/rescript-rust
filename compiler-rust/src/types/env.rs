@@ -118,15 +118,15 @@ pub fn constructor_existentials(
 #[derive(Debug, Clone)]
 pub enum EnvError {
     /// Value not found.
-    ValueNotFound(String),
+    ValueNotFound(SmolStr),
     /// Type not found.
-    TypeNotFound(String),
+    TypeNotFound(SmolStr),
     /// Module not found.
-    ModuleNotFound(String),
+    ModuleNotFound(SmolStr),
     /// Constructor not found.
-    ConstructorNotFound(String),
+    ConstructorNotFound(SmolStr),
     /// Label not found.
-    LabelNotFound(String),
+    LabelNotFound(SmolStr),
     /// Inconsistent import.
     InconsistentImport {
         name: String,
@@ -1008,7 +1008,7 @@ impl Env {
         self.values
             .find_by_name(name)
             .map(|v| v.as_ref())
-            .ok_or_else(|| EnvError::ValueNotFound(name.to_string()))
+            .ok_or_else(|| EnvError::ValueNotFound(name.into()))
     }
 
     /// Find a value by name, returning both the identifier and description.
@@ -1016,7 +1016,7 @@ impl Env {
         self.values
             .find_by_name_with_id(name)
             .map(|(id, v)| (id, v.as_ref()))
-            .ok_or_else(|| EnvError::ValueNotFound(name.to_string()))
+            .ok_or_else(|| EnvError::ValueNotFound(name.into()))
     }
 
     /// Find a value by name with the path selected by OCaml `IdTbl.find_name`.
@@ -1027,7 +1027,7 @@ impl Env {
         self.values
             .find_by_name_with_path(name)
             .map(|(path, desc)| (path, desc.as_ref()))
-            .ok_or_else(|| EnvError::ValueNotFound(name.to_string()))
+            .ok_or_else(|| EnvError::ValueNotFound(name.into()))
     }
 
     /// Iterate over visible value bindings.
@@ -1063,9 +1063,9 @@ impl Env {
                 .values
                 .find_by_ident(id)
                 .map(|v| v.as_ref())
-                .ok_or_else(|| EnvError::ValueNotFound(id.name().to_string())),
+                .ok_or_else(|| EnvError::ValueNotFound(id.name().into())),
             Path::Pdot(_, name, _) => self.find_value(name),
-            Path::Papply(_, _) => Err(EnvError::ValueNotFound("(functor application)".to_string())),
+            Path::Papply(_, _) => Err(EnvError::ValueNotFound("(functor application)".into())),
         }
     }
 
@@ -1085,7 +1085,7 @@ impl Env {
         self.types
             .find_by_name(name)
             .map(|t| t.as_ref())
-            .ok_or_else(|| EnvError::TypeNotFound(name.to_string()))
+            .ok_or_else(|| EnvError::TypeNotFound(name.into()))
     }
 
     /// Find a type by name, returning the identifier and declaration.
@@ -1095,7 +1095,7 @@ impl Env {
         self.types
             .find_by_name_with_id(name)
             .map(|(id, decl)| (id, decl.as_ref()))
-            .ok_or_else(|| EnvError::TypeNotFound(name.to_string()))
+            .ok_or_else(|| EnvError::TypeNotFound(name.into()))
     }
 
     /// Find a type by name with the path selected by OCaml `IdTbl.find_name`.
@@ -1106,7 +1106,7 @@ impl Env {
         self.types
             .find_by_name_with_path(name)
             .map(|(path, decl)| (path, decl.as_ref()))
-            .ok_or_else(|| EnvError::TypeNotFound(name.to_string()))
+            .ok_or_else(|| EnvError::TypeNotFound(name.into()))
     }
 
     /// Iterate over visible type bindings.
@@ -1121,7 +1121,7 @@ impl Env {
         self.types
             .find_by_ident(id)
             .map(|t| t.as_ref())
-            .ok_or_else(|| EnvError::TypeNotFound(id.name().to_string()))
+            .ok_or_else(|| EnvError::TypeNotFound(id.name().into()))
     }
 
     /// Shared-declaration form of [`Env::find_type_by_ident`].
@@ -1152,7 +1152,7 @@ impl Env {
                     self.types.find_by_name(id.name())
                 })
                 .map(|t| t.as_ref())
-                .ok_or_else(|| EnvError::TypeNotFound(id.name().to_string())),
+                .ok_or_else(|| EnvError::TypeNotFound(id.name().into())),
             Path::Pdot(parent, name, _) => {
                 // Try to find the type through the parent module's signature first.
                 // Follow MtyIdent/MtyAlias to resolve the module type to a signature.
@@ -1211,7 +1211,7 @@ impl Env {
                 // Fallback to name-based lookup
                 self.find_type(name)
             }
-            Path::Papply(_, _) => Err(EnvError::TypeNotFound("(functor application)".to_string())),
+            Path::Papply(_, _) => Err(EnvError::TypeNotFound("(functor application)".into())),
         }
     }
 
@@ -1231,7 +1231,7 @@ impl Env {
         self.constrs
             .find_by_name(name)
             .map(|c| c.as_ref())
-            .ok_or_else(|| EnvError::ConstructorNotFound(name.to_string()))
+            .ok_or_else(|| EnvError::ConstructorNotFound(name.into()))
     }
 
     /// Find a constructor by name with its local/opened origin flag.
@@ -1242,7 +1242,7 @@ impl Env {
         self.constrs
             .find_by_name_with_origin(name)
             .map(|(id, c, is_local)| (id, c.as_ref(), is_local))
-            .ok_or_else(|| EnvError::ConstructorNotFound(name.to_string()))
+            .ok_or_else(|| EnvError::ConstructorNotFound(name.into()))
     }
 
     /// Find all constructors with a given name.
@@ -1275,7 +1275,7 @@ impl Env {
         self.labels
             .find_by_name(name)
             .map(|l| l.as_ref())
-            .ok_or_else(|| EnvError::LabelNotFound(name.to_string()))
+            .ok_or_else(|| EnvError::LabelNotFound(name.into()))
     }
 
     /// Find a label by name with its local/opened origin flag.
@@ -1286,7 +1286,7 @@ impl Env {
         self.labels
             .find_by_name_with_origin(name)
             .map(|(id, l, is_local)| (id, l.as_ref(), is_local))
-            .ok_or_else(|| EnvError::LabelNotFound(name.to_string()))
+            .ok_or_else(|| EnvError::LabelNotFound(name.into()))
     }
 
     /// Find all labels with a given name.
@@ -1450,7 +1450,7 @@ impl Env {
         self.modules
             .find_by_name(name)
             .map(|m| m.as_ref())
-            .ok_or_else(|| EnvError::ModuleNotFound(name.to_string()))
+            .ok_or_else(|| EnvError::ModuleNotFound(name.into()))
     }
 
     /// Find a module by name, returning both the identifier and declaration.
@@ -1458,7 +1458,7 @@ impl Env {
         self.modules
             .find_by_name_with_id(name)
             .map(|(id, m)| (id, m.as_ref()))
-            .ok_or_else(|| EnvError::ModuleNotFound(name.to_string()))
+            .ok_or_else(|| EnvError::ModuleNotFound(name.into()))
     }
 
     /// Find a module by name with the path selected by OCaml `IdTbl.find_name`.
@@ -1469,7 +1469,7 @@ impl Env {
         self.modules
             .find_by_name_with_path(name)
             .map(|(path, decl)| (path, decl.as_ref()))
-            .ok_or_else(|| EnvError::ModuleNotFound(name.to_string()))
+            .ok_or_else(|| EnvError::ModuleNotFound(name.into()))
     }
 
     fn first_dotted_component_path(path: &Path) -> Option<Path> {
@@ -1531,7 +1531,7 @@ impl Env {
         self.modules
             .find_by_ident(id)
             .map(|m| m.as_ref())
-            .ok_or_else(|| EnvError::ModuleNotFound(id.name().to_string()))
+            .ok_or_else(|| EnvError::ModuleNotFound(id.name().into()))
     }
 
     pub(crate) fn find_module_same(&self, id: &Ident) -> EnvResult<&ModuleDeclaration> {
@@ -1543,7 +1543,7 @@ impl Env {
         self.modules
             .find_local_by_ident(id)
             .map(|m| m.as_ref())
-            .ok_or_else(|| EnvError::ModuleNotFound(id.name().to_string()))
+            .ok_or_else(|| EnvError::ModuleNotFound(id.name().into()))
     }
 
     pub(crate) fn with_local_module_components<R>(
@@ -1578,7 +1578,7 @@ impl Env {
             env: &'a Env,
             mty: &'a ModuleType,
             name: &str,
-            visiting: &mut HashSet<Path>,
+            visiting: &mut smallvec::SmallVec<[Path; 4]>,
         ) -> Option<&'a ModuleDeclaration> {
             match mty {
                 ModuleType::MtySignature(sig) => sig.iter().find_map(|item| match item {
@@ -1596,11 +1596,12 @@ impl Env {
         fn lookup_module_inner<'a>(
             env: &'a Env,
             path: &Path,
-            visiting: &mut HashSet<Path>,
+            visiting: &mut smallvec::SmallVec<[Path; 4]>,
         ) -> EnvResult<&'a ModuleDeclaration> {
-            if !visiting.insert(path.clone()) {
-                return Err(EnvError::ModuleNotFound(path.name()));
+            if visiting.contains(path) {
+                return Err(EnvError::ModuleNotFound(path.name().into()));
             }
+            visiting.push(path.clone());
 
             match path {
                 Path::Pident(id) => {
@@ -1612,21 +1613,21 @@ impl Env {
                             env.modules.find_by_name(id.name())
                         })
                         .map(|m| m.as_ref())
-                        .ok_or_else(|| EnvError::ModuleNotFound(id.name().to_string()));
+                        .ok_or_else(|| EnvError::ModuleNotFound(id.name().into()));
                     result
                 }
                 Path::Pdot(parent, name, _) => {
                     let parent_md = lookup_module_inner(env, parent, visiting)?;
                     lookup_submodule_in_module_type(env, &parent_md.md_type, name, visiting)
-                        .ok_or_else(|| EnvError::ModuleNotFound(name.to_string()))
+                        .ok_or_else(|| EnvError::ModuleNotFound(name.clone()))
                 }
                 Path::Papply(_, _) => Err(EnvError::ModuleNotFound(
-                    "(functor application)".to_string(),
+                    "(functor application)".into(),
                 )),
             }
         }
 
-        let mut visiting = HashSet::new();
+        let mut visiting = smallvec::SmallVec::new();
         lookup_module_inner(self, path, &mut visiting)
     }
 
@@ -1698,7 +1699,7 @@ impl Env {
         self.modtypes
             .find_by_name(name)
             .map(|m| m.as_ref())
-            .ok_or_else(|| EnvError::ModuleNotFound(name.to_string()))
+            .ok_or_else(|| EnvError::ModuleNotFound(name.into()))
     }
 
     /// Find a module type by name, returning both the identifier and declaration.
@@ -1706,7 +1707,7 @@ impl Env {
         self.modtypes
             .find_by_name_with_id(name)
             .map(|(id, decl)| (id, decl.as_ref()))
-            .ok_or_else(|| EnvError::ModuleNotFound(name.to_string()))
+            .ok_or_else(|| EnvError::ModuleNotFound(name.into()))
     }
 
     /// Find a module type by name with the path selected by OCaml `IdTbl.find_name`.
@@ -1717,7 +1718,7 @@ impl Env {
         self.modtypes
             .find_by_name_with_path(name)
             .map(|(path, decl)| (path, decl.as_ref()))
-            .ok_or_else(|| EnvError::ModuleNotFound(name.to_string()))
+            .ok_or_else(|| EnvError::ModuleNotFound(name.into()))
     }
 
     /// Iterate over visible module type bindings.
@@ -1732,7 +1733,7 @@ impl Env {
                 .modtypes
                 .find_by_ident(id)
                 .map(|m| m.as_ref())
-                .ok_or_else(|| EnvError::ModuleNotFound(id.name().to_string())),
+                .ok_or_else(|| EnvError::ModuleNotFound(id.name().into())),
             Path::Pdot(parent, name, _) => {
                 // Try to find the modtype through the parent module's signature.
                 // First try ident-based lookup, then name-based for stamp mismatches.
@@ -1751,10 +1752,10 @@ impl Env {
                         }
                     }
                 }
-                Err(EnvError::ModuleNotFound(name.to_string()))
+                Err(EnvError::ModuleNotFound(name.clone()))
             }
             Path::Papply(_, _) => Err(EnvError::ModuleNotFound(
-                "(functor application)".to_string(),
+                "(functor application)".into(),
             )),
         }
     }
