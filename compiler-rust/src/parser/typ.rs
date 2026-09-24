@@ -637,18 +637,12 @@ fn parse_es6_arrow_type(p: &mut Parser<'_>, attrs: Attributes) -> CoreType {
         let name_idx = p.arena_mut().push_interned_string(&name);
         let mut lbl = ArgLabel::Labelled(Located::new(name_idx, name_loc));
 
-        // Optional labeled args: `~x: t=?`
+        // Optional labeled args: `~x: t=?` (res_core.ml:4960-4963).
         if p.token == Token::Equal {
             p.next();
-            if p.token == Token::Question {
-                p.next();
-                if let ArgLabel::Labelled(name) = lbl {
-                    lbl = ArgLabel::Optional(name);
-                }
-            } else {
-                p.err(DiagnosticCategory::Message(
-                    "Expected '?' after '=' in optional argument type".to_string(),
-                ));
+            p.expect(Token::Question);
+            if let ArgLabel::Labelled(name) = lbl {
+                lbl = ArgLabel::Optional(name);
             }
         }
 
@@ -811,7 +805,12 @@ fn parse_atomic_typ_expr_with_start(
                 ptyp_attributes: Attributes::new(),
             }
         }
+        Token::Eof => {
+            p.err_unexpected();
+            recover::default_type(p.arena_mut())
+        }
         _ => {
+            let token = p.token.clone().into_owned();
             p.err_unexpected();
             // Try to skip tokens and retry parsing if we find a valid start token
             // This matches OCaml's skip_tokens_and_maybe_retry behavior
@@ -819,8 +818,18 @@ fn parse_atomic_typ_expr_with_start(
                 // Eat our breadcrumb first, then recurse
                 // OCaml returns from match, then eat_breadcrumb runs
                 p.eat_breadcrumb();
-                return parse_atomic_typ_expr(p, attrs);
+                // The retry is `parse_atomic_typ_expr ~attrs p` (res_core.ml:4680):
+                // no inline-record context.
+                return without_inline_record_context(p, |p| parse_atomic_typ_expr(p, attrs));
             }
+            // res_core.ml:4679-4683: report the token again from the
+            // previous token's end before falling back to a default type.
+            let context = p.breadcrumbs().to_vec();
+            p.err_at(
+                p.prev_end_pos,
+                p.end_pos,
+                DiagnosticCategory::Unexpected { token, context },
+            );
             recover::default_type(p.arena_mut())
         }
     };
@@ -1313,18 +1322,12 @@ fn parse_function_type(p: &mut Parser<'_>, start_pos_idx: PosIdx) -> CoreType {
             }
         }
 
-        // Optional labeled args: `~x: t=?`
+        // Optional labeled args: `~x: t=?` (res_core.ml:4849-4853).
         if p.token == Token::Equal {
             p.next();
-            if p.token == Token::Question {
-                p.next();
-                if let ArgLabel::Labelled(name) = label {
-                    label = ArgLabel::Optional(name);
-                }
-            } else {
-                p.err(DiagnosticCategory::Message(
-                    "Expected '?' after '=' in optional argument type".to_string(),
-                ));
+            p.expect(Token::Question);
+            if let ArgLabel::Labelled(name) = label {
+                label = ArgLabel::Optional(name);
             }
         }
 
