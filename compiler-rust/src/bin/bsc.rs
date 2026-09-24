@@ -159,9 +159,9 @@ fn main() {
         .expect("Failed to spawn compiler thread");
 
     if let Err(payload) = handler.join() {
-        if payload.is::<rescript_compiler::misc::FatalError>() {
-            // OCaml's runtime report for the uncaught `Misc.Fatal_error`.
-            eprintln!("Fatal error: exception Misc.Fatal_error");
+        if let Some(report) = rescript_compiler::misc::uncaught_exception_report(&*payload) {
+            // OCaml's runtime report for an uncaught exception.
+            eprintln!("{report}");
             let _ = std::io::stderr().flush();
             std::process::exit(2);
         }

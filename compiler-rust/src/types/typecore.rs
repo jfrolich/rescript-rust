@@ -24833,6 +24833,15 @@ fn type_let_bindings(
     if rec_flag == RecFlag::Recursive {
         tctx.recursive_let_depth += 1;
     }
+    // OCaml typecore.ml:4503-4514 maps `Ast_helper.Typ.varify_constructors`
+    // over the bindings before `begin_def`; a type variable that names one of
+    // the locally abstract types escapes as an uncaught `Syntaxerr.Error`.
+    if bindings
+        .iter()
+        .any(|binding| tctx.arena.value_constraint_varify_error(binding.pvb_pat).is_some())
+    {
+        crate::misc::raise_uncaught("Syntaxerr.Error(_)");
+    }
     let result = (|| -> TypeCoreResult<(Vec<ValueBinding>, Env, Vec<PatternVariable>)> {
         let ctx = tctx.type_ctx;
 

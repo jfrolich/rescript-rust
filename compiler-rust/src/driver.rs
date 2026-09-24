@@ -2182,22 +2182,8 @@ fn is_valid_hash_number_label(value: &str) -> bool {
 }
 
 pub fn parser_error_to_anyhow(parser: &Parser<'_>, source: &str, filename: &str) -> anyhow::Error {
-    let is_fatal = |diagnostic: &&crate::parser::ParserDiagnostic| {
-        matches!(
-            diagnostic.category,
-            crate::parser::diagnostics::DiagnosticCategory::FatalSyntaxerr
-        )
-    };
-    // OCaml raises `Syntaxerr.Error` from `Ast_helper.Typ.varify_constructors`
-    // while type checking (compiler/ml/typecore.ml:4512), which only runs when
-    // parsing produced no diagnostics.
-    if parser.diagnostics().iter().all(|d| is_fatal(&d)) {
-        return UserDiagnostic::new("Fatal error: exception Syntaxerr.Error(_)\n".to_string(), 2)
-            .into();
-    }
-
     let mut output = String::new();
-    for diagnostic in parser.diagnostics().iter().filter(|d| !is_fatal(d)) {
+    for diagnostic in parser.diagnostics().iter() {
         output.push_str(&code_frame::format_error(
             filename,
             source,

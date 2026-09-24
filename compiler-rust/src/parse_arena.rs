@@ -501,6 +501,9 @@ pub struct ParseArena {
     nary_arrow_args_by_first_type: HashMap<CoreTypeIdx, Box<[crate::parser::ast::TypeArg]>>,
     /// Sparse current-Parsetree value constraints keyed by the binding pattern.
     value_constraints_by_pattern: HashMap<PatIdx, ValueConstraint>,
+    /// Bindings whose `Ast_helper.Typ.varify_constructors` raises
+    /// `Syntaxerr.Error`; OCaml only raises it when `type_let` reaches them.
+    value_constraint_varify_errors: HashMap<PatIdx, LocIdx>,
     /// Sparse side table for case guards, keyed by owning match/try ExprIdx.
     /// Value is a case-indexed list of optional guard expressions.
     expr_case_guards: Vec<Option<Box<[Option<ExprIdx>]>>>,
@@ -931,6 +934,7 @@ impl Default for ParseArena {
             nary_fun_newtypes_by_first_pattern: HashMap::new(),
             nary_arrow_args_by_first_type: HashMap::new(),
             value_constraints_by_pattern: HashMap::new(),
+            value_constraint_varify_errors: HashMap::new(),
             expr_case_guards: Vec::new(),
             expr_construct_args: Vec::new(),
             expr_variant_args: Vec::new(),
@@ -2482,14 +2486,23 @@ impl ParseArena {
         mut constraint: ValueConstraint,
         expression: ExprIdx,
         loc: LocIdx,
-    ) -> Result<(), LocIdx> {
+    ) {
         let names = constraint
             .pvc_newtypes
             .iter()
             .map(|name| self.get_string(name.txt).to_string())
             .collect::<std::collections::HashSet<_>>();
         let source = self.get_core_type(constraint.pvc_type).clone();
-        let body = crate::parser::typ::substitute_type_vars(self, source, &names)?;
+        let body = match crate::parser::typ::substitute_type_vars(self, source, &names) {
+            Ok(body) => body,
+            Err(error_loc) => {
+                // Keep the wire constraint; typing raises the error later.
+                self.value_constraint_varify_errors.insert(pattern, error_loc);
+                self.value_constraints_by_pattern.insert(pattern, constraint);
+                return;
+            }
+        };
+        self.value_constraint_varify_errors.remove(&pattern);
         let body = self.push_core_type(body);
         let poly = self.push_core_type(CoreType {
             ptyp_desc: Box::new(CoreTypeDesc::Ptyp_poly(Box::new((
@@ -2525,7 +2538,12 @@ impl ParseArena {
         constraint.pvc_expression = Some(wrapped);
         self.value_constraints_by_pattern
             .insert(pattern, constraint);
-        Ok(())
+    }
+
+    /// Whether `Ast_helper.Typ.varify_constructors` fails for this binding's
+    /// constraint (compiler/ml/ast_helper.ml:74-78).
+    pub fn value_constraint_varify_error(&self, pattern: PatIdx) -> Option<LocIdx> {
+        self.value_constraint_varify_errors.get(&pattern).copied()
     }
 
     /// Return a value binding's locally abstract constraint, when present.

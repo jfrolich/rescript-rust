@@ -4520,8 +4520,7 @@ impl<'a> LocCloner<'a> {
             }
             self.core_type_idx(&mut constraint.pvc_type);
             self.arena
-                .set_value_constraint(vb.pvb_pat, constraint, vb.pvb_expr, vb.pvb_loc)
-                .expect("cloning a valid value constraint must remain valid");
+                .set_value_constraint(vb.pvb_pat, constraint, vb.pvb_expr, vb.pvb_loc);
         }
     }
 
