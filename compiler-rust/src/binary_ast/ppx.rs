@@ -12042,6 +12042,10 @@ fn validate_payload_deriving_errors(payload: &Payload, arena: &mut ParseArena) -
     }
 }
 
+fn is_config_attribute(attr: &Attribute, arena: &ParseArena) -> bool {
+    arena.get_string(attr.0.txt) == "config"
+}
+
 fn validate_structure_deriving_errors(
     structure: &[StructureItem],
     arena: &mut ParseArena,
@@ -12072,6 +12076,9 @@ fn validate_structure_deriving_errors(
                 let mod_expr = arena.get_mod_expr(incl.pincl_mod).clone();
                 validate_module_expr_deriving_errors(&mod_expr, arena)?;
             }
+            // Bs_builtin_ppx.structure_item_mapper leaves `@@config`
+            // untouched (bs_builtin_ppx.ml:633).
+            StructureItemDesc::Pstr_attribute(attr) if is_config_attribute(attr, arena) => {}
             StructureItemDesc::Pstr_attribute(attr) => {
                 validate_payload_deriving_errors(&attr.1, arena)?;
             }
@@ -12327,6 +12334,9 @@ fn validate_structure_builtin_type_redefinition_errors(
                 let mod_expr = arena.get_mod_expr(incl.pincl_mod).clone();
                 validate_module_expr_builtin_type_redefinition_errors(&mod_expr, arena)?;
             }
+            // Bs_builtin_ppx.structure_item_mapper leaves `@@config`
+            // untouched (bs_builtin_ppx.ml:633).
+            StructureItemDesc::Pstr_attribute(attr) if is_config_attribute(attr, arena) => {}
             StructureItemDesc::Pstr_attribute(attr) => {
                 validate_payload_builtin_type_redefinition_errors(&attr.1, arena)?;
             }
@@ -13129,6 +13139,9 @@ fn validate_structure_method_attribute_errors(
                 let mod_expr = arena.get_mod_expr(incl.pincl_mod).clone();
                 validate_module_expr_method_attribute_errors(&mod_expr, arena)?;
             }
+            // Bs_builtin_ppx.structure_item_mapper leaves `@@config`
+            // untouched (bs_builtin_ppx.ml:633).
+            StructureItemDesc::Pstr_attribute(attr) if is_config_attribute(attr, arena) => {}
             StructureItemDesc::Pstr_attribute(attr) => {
                 validate_payload_method_attribute_errors(&attr.1, arena)?;
             }
@@ -14401,6 +14414,9 @@ fn validate_structure_js_string_errors(
             StructureItemDesc::Pstr_open(od) => {
                 validate_attributes_js_string_errors(&od.popen_attributes, arena)?;
             }
+            // Bs_builtin_ppx.structure_item_mapper leaves `@@config`
+            // untouched (bs_builtin_ppx.ml:633).
+            StructureItemDesc::Pstr_attribute(attr) if is_config_attribute(attr, arena) => {}
             StructureItemDesc::Pstr_attribute(attr) => {
                 validate_payload_js_string_errors(&attr.1, arena)?;
             }
@@ -14557,6 +14573,9 @@ fn validate_structure_await_errors(
                     validate_payload_await_errors(&attr.1, arena, async_context)?;
                 }
             }
+            // Bs_builtin_ppx.structure_item_mapper leaves `@@config`
+            // untouched (bs_builtin_ppx.ml:633).
+            StructureItemDesc::Pstr_attribute(attr) if is_config_attribute(attr, arena) => {}
             StructureItemDesc::Pstr_attribute(attr) => {
                 validate_payload_await_errors(&attr.1, arena, async_context)?;
             }
@@ -17506,6 +17525,11 @@ fn rewrite_structure_item_no_spice(
             }
         }
         // Handle floating attributes (@@attr) - need to transform strings in payload
+        // Bs_builtin_ppx.structure_item_mapper leaves `@@config` untouched
+        // (bs_builtin_ppx.ml:633).
+        StructureItemDesc::Pstr_attribute(attr) if is_config_attribute(attr, arena) => {
+            vec![item.clone()]
+        }
         StructureItemDesc::Pstr_attribute(attr) => {
             vec![StructureItem {
                 pstr_desc: Box::new(StructureItemDesc::Pstr_attribute(Box::new(
