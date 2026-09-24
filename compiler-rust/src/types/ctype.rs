@@ -8360,14 +8360,71 @@ pub(crate) fn equal_type_exprs_without_renaming(
     left: TypeExprRef,
     right: TypeExprRef,
 ) -> bool {
-    let mut type_pairs = HashSet::new();
+    let mut type_pairs = EqtypeState {
+        pairs: HashSet::new(),
+        subst: Vec::new(),
+        rename: false,
+    };
     equal_type_exprs_without_renaming_rec(ctx, env, &mut type_pairs, left, right).is_ok()
+}
+
+/// `type_pairs`, `subst` and `rename` of OCaml `eqtype`
+/// (compiler/ml/ctype.ml:2996-3165).
+pub(crate) struct EqtypeState {
+    pairs: HashSet<(TypeExprRef, TypeExprRef)>,
+    subst: Vec<(TypeExprRef, TypeExprRef)>,
+    rename: bool,
+}
+
+/// `Ctype.equal env rename tyl1 tyl2` (ctype.ml:3161-3165).
+pub(crate) fn equal(ctx: &TypeContext, env: &Env, rename: bool, left: &[TypeExprRef], right: &[TypeExprRef]) -> bool {
+    let mut state = EqtypeState {
+        pairs: HashSet::new(),
+        subst: Vec::new(),
+        rename,
+    };
+    equal_type_expr_lists_without_renaming(ctx, env, &mut state, left, right).is_ok()
+}
+
+/// The `Tvar _, Tvar _ when rename` case of `eqtype`: the renaming must stay
+/// a bijection.
+fn eqtype_rename_vars(
+    ctx: &TypeContext,
+    state: &mut EqtypeState,
+    left: TypeExprRef,
+    right: TypeExprRef,
+) -> TypeResult<()> {
+    // normalize_subst
+    if state
+        .subst
+        .iter()
+        .any(|(a, b)| ctx.repr(*a) != *a || ctx.repr(*b) != *b)
+    {
+        for (a, b) in state.subst.iter_mut() {
+            *a = ctx.repr(*a);
+            *b = ctx.repr(*b);
+        }
+    }
+    match state.subst.iter().find(|(a, _)| *a == left) {
+        Some((_, mapped)) => {
+            if *mapped != right {
+                return Err(TypeError::Unify(vec![]));
+            }
+        }
+        None => {
+            if state.subst.iter().any(|(_, b)| *b == right) {
+                return Err(TypeError::Unify(vec![]));
+            }
+            state.subst.insert(0, (left, right));
+        }
+    }
+    Ok(())
 }
 
 fn equal_type_exprs_without_renaming_rec(
     ctx: &TypeContext,
     env: &Env,
-    type_pairs: &mut HashSet<(TypeExprRef, TypeExprRef)>,
+    type_pairs: &mut EqtypeState,
     left: TypeExprRef,
     right: TypeExprRef,
 ) -> TypeResult<()> {
@@ -8379,6 +8436,13 @@ fn equal_type_exprs_without_renaming_rec(
     let right = ctx.repr(right);
     if left == right {
         return Ok(());
+    }
+
+    if type_pairs.rename
+        && matches!(*ctx.get_desc(left), TypeDesc::Tvar(_))
+        && matches!(*ctx.get_desc(right), TypeDesc::Tvar(_))
+    {
+        return eqtype_rename_vars(ctx, type_pairs, left, right);
     }
 
     {
@@ -8408,8 +8472,14 @@ fn equal_type_exprs_without_renaming_rec(
     if left_expanded == right_expanded {
         return Ok(());
     }
-    if !type_pairs.insert((left_expanded, right_expanded)) {
+    if !type_pairs.pairs.insert((left_expanded, right_expanded)) {
         return Ok(());
+    }
+    if type_pairs.rename
+        && matches!(*ctx.get_desc(left_expanded), TypeDesc::Tvar(_))
+        && matches!(*ctx.get_desc(right_expanded), TypeDesc::Tvar(_))
+    {
+        return eqtype_rename_vars(ctx, type_pairs, left_expanded, right_expanded);
     }
 
     let left_desc = ctx.get_desc(left_expanded);
@@ -8584,7 +8654,7 @@ fn equal_type_exprs_without_renaming_rec(
 fn equal_type_expr_lists_without_renaming(
     ctx: &TypeContext,
     env: &Env,
-    type_pairs: &mut HashSet<(TypeExprRef, TypeExprRef)>,
+    type_pairs: &mut EqtypeState,
     left: &[TypeExprRef],
     right: &[TypeExprRef],
 ) -> TypeResult<()> {
@@ -8600,7 +8670,7 @@ fn equal_type_expr_lists_without_renaming(
 fn equal_rows_without_renaming(
     ctx: &TypeContext,
     env: &Env,
-    type_pairs: &mut HashSet<(TypeExprRef, TypeExprRef)>,
+    type_pairs: &mut EqtypeState,
     left: &RowDesc,
     right: &RowDesc,
 ) -> TypeResult<()> {
@@ -8631,7 +8701,7 @@ fn equal_rows_without_renaming(
 fn equal_row_fields_without_renaming(
     ctx: &TypeContext,
     env: &Env,
-    type_pairs: &mut HashSet<(TypeExprRef, TypeExprRef)>,
+    type_pairs: &mut EqtypeState,
     left: &RowField,
     right: &RowField,
 ) -> TypeResult<()> {
@@ -8716,13 +8786,15 @@ fn equal_row_fields_without_renaming(
 fn equal_object_fields_without_renaming(
     ctx: &TypeContext,
     env: &Env,
-    type_pairs: &mut HashSet<(TypeExprRef, TypeExprRef)>,
+    type_pairs: &mut EqtypeState,
     left: TypeExprRef,
     right: TypeExprRef,
 ) -> TypeResult<()> {
     let (left_fields, left_rest) = flatten_fields(ctx, left);
     let (right_fields, right_rest) = flatten_fields(ctx, right);
-    let same_row = left_rest == right_rest || type_pairs.contains(&(left_rest, right_rest));
+    let same_row = left_rest == right_rest
+        || type_pairs.pairs.contains(&(left_rest, right_rest))
+        || (type_pairs.rename && type_pairs.subst.contains(&(left_rest, right_rest)));
     if !same_row {
         let right_rest_expanded = ctx.repr(expand_head(ctx, env, right_rest));
         if let TypeDesc::Tobject { fields, .. } = &*ctx.get_desc(right_rest_expanded) {

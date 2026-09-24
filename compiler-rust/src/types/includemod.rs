@@ -3784,22 +3784,15 @@ fn private_flags(impl_decl: &TypeDeclaration, sig_decl: &TypeDeclaration) -> boo
     }
 }
 
+/// `Ctype.equal env true decl1.type_params decl2.type_params`
+/// (compiler/ml/includecore.ml:324, 336).
 fn type_param_lists_equal_for_inclusion(
     type_ctx: &TypeContext,
     env: &Env,
     impl_params: &[TypeExprRef],
     sig_params: &[TypeExprRef],
 ) -> bool {
-    if impl_params.len() != sig_params.len() {
-        return false;
-    }
-    let empty_param_map = HashMap::default();
-    impl_params
-        .iter()
-        .zip(sig_params.iter())
-        .all(|(impl_ty, sig_ty)| {
-            type_exprs_equal_for_inclusion(type_ctx, Some(env), &empty_param_map, *impl_ty, *sig_ty)
-        })
+    crate::types::ctype::equal(type_ctx, env, true, impl_params, sig_params)
 }
 
 fn type_expr_lists_equal_for_inclusion(
