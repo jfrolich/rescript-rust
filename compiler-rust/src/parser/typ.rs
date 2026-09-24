@@ -902,43 +902,17 @@ fn parse_type_constr_with_start(
     // In OCaml, `let start_pos = p.Parser.start_pos` binds to same pointer.
     let start_pos_idx = outer_start_pos_idx.unwrap_or_else(|| p.start_pos_idx());
 
-    // Parse the path
-    let mut path_parts: Vec<String> = vec![];
-    loop {
-        match &p.token {
-            Token::Lident(name) => {
-                path_parts.push(name.to_string());
-                p.next();
-            }
-            Token::Uident(name) => {
-                let token_start = p.start_pos.clone();
-                let token_end = p.end_pos.clone();
-                let token = Token::Uident(Cow::Owned(name.to_string()));
-                path_parts.push(name.to_string());
-                p.next();
-                let token_after_ident = p.token.clone();
-                if p.token == Token::Dot {
-                    p.next();
-                    continue;
-                }
-                p.err_at(token_start, token_end, DiagnosticCategory::Lident(token));
-                p.next();
-                if token_after_ident == Token::Rparen && p.token == Token::Dot {
-                    p.next();
-                    if matches!(p.token, Token::Lident(_)) {
-                        p.next();
-                    }
-                }
-                break;
-            }
-            _ => break,
-        }
-        if p.token == Token::Dot {
+    // OCaml `parse_atomic_typ_expr` reads the constructor with `parse_value_path`
+    // (compiler/syntax/src/res_core.ml:742-776): a lowercase name ends the path
+    // immediately; an uppercase head goes through `aux` + `next_unsafe`.
+    let path_parts: Vec<String> = match &p.token {
+        Token::Lident(name) => {
+            let name = name.to_string();
             p.next();
-        } else {
-            break;
+            vec![name]
         }
-    }
+        _ => super::module::parse_value_path_for_type(p).0,
+    };
 
     let lid = super::core::build_longident(p.arena_mut(), &path_parts);
     let lid_idx = p.push_longident(lid);

@@ -2308,7 +2308,7 @@ fn parse_module_long_ident_with_lowercase(p: &mut Parser<'_>, lowercase: bool) -
 /// a standalone expression.
 ///
 /// Returns (path_parts, name_start_pos, name_end_pos).
-fn parse_value_path_for_type(p: &mut Parser<'_>) -> (Vec<String>, Position, Position) {
+pub(super) fn parse_value_path_for_type(p: &mut Parser<'_>) -> (Vec<String>, Position, Position) {
     let name_start = p.start_pos.clone();
 
     // Recursive aux function that mirrors OCaml's aux in parse_value_path
@@ -4979,7 +4979,8 @@ fn parse_module_definition(
 
     // Parse additional module bindings with `and`
     // Also handle attributes/doc comments before `and`: `@attr and M = ...` or `/** doc */ and M = ...`
-    loop {
+    // OCaml `parse_module_definition` only reads `and` bindings for `module rec`.
+    while rec_flag == RecFlag::Recursive {
         if p.token == Token::And {
             // Capture start position BEFORE consuming `and`
             let binding_start_idx = p.start_pos_idx();

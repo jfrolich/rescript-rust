@@ -4251,8 +4251,13 @@ fn parse_expr_block(p: &mut Parser<'_>) -> Expression {
 fn parse_block_expr(p: &mut Parser<'_>, start_pos_idx: PosIdx) -> Expression {
     // OCaml: leave_breadcrumb ExprBlock - critical for error recovery
     p.leave_breadcrumb(Grammar::ExprBlock);
-    // Parse the block body - this handles building the proper nesting for let/module/open/exception
-    let body = parse_block_body_first(p);
+    // OCaml `parse_braced_or_record_expr` handles `{}` itself and otherwise
+    // calls `parse_expr_block`, which always parses a first item.
+    let body = if p.token == Token::Rbrace {
+        None
+    } else {
+        Some(parse_block_body_required(p))
+    };
 
     p.eat_breadcrumb();
     p.expect(Token::Rbrace);
@@ -6180,6 +6185,25 @@ fn parse_jsx(p: &mut Parser<'_>) -> Expression {
         return result;
     }
 
+    // OCaml `parse_jsx` (compiler/syntax/src/res_core.ml): anything other than a
+    // name or `>` after `<` is read with `parse_jsx_name` and becomes a plain
+    // identifier expression, not a JSX element.
+    if !matches!(p.token, Token::Lident(_) | Token::Uident(_)) {
+        let tag_name = parse_jsx_tag_name(p);
+        let name = match tag_name {
+            JsxTagName::Invalid(name) | JsxTagName::Lower(name) => name,
+            _ => String::new(),
+        };
+        let lid_idx = p.push_lident(&name);
+        p.eat_breadcrumb();
+        p.jsx_depth -= 1;
+        return Expression {
+            pexp_desc: Box::new(ExpressionDesc::Pexp_ident(with_loc(lid_idx, LocIdx::none()))),
+            pexp_loc: LocIdx::none(),
+            pexp_attributes: Attributes::new(),
+        };
+    }
+
     // Parse tag name - the location starts at the identifier, not the '<'
     let tag_name_start_idx = p.start_pos_idx();
     let tag_name = parse_jsx_tag_name(p);
@@ -6485,7 +6509,8 @@ fn parse_jsx_tag_name(p: &mut Parser<'_>) -> JsxTagName {
             p.err(DiagnosticCategory::Message(
                 "A jsx name must be a lowercase or uppercase name, like: div in <div /> or Navbar in <Navbar />".to_string(),
             ));
-            JsxTagName::Invalid("error".to_string())
+            // OCaml `read_jsx_tag_name` returns `Error ""` (res_core.ml:901-904).
+            JsxTagName::Invalid(String::new())
         }
     }
 }
