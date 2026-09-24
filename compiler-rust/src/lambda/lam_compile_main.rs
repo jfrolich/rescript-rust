@@ -377,6 +377,31 @@ pub fn simplify_for_js_backend_with_external_inline_and_meta_owned(
 
 /// Direct port of `compiler/core/lam_coercion.ml:82-172` — `handle_exports`
 /// applied to the trailing module-export `Pmakeblock`.
+/// OCaml `Lam_coercion.handle_exports` (lam_coercion.ml:83-98) raises
+/// `Bs_duplicate_exports` for the first export name seen twice while folding
+/// the export list from the right.
+pub fn duplicate_export_name(lam: &Lambda) -> Option<String> {
+    let mut current = lam;
+    loop {
+        match current {
+            Lambda::Llet(_, _, _, body) | Lambda::Lletrec(_, body) => current = body,
+            Lambda::Lsequence(_, right) => current = right,
+            Lambda::Lprim(PrimInfo {
+                primitive: Primitive::Pmakeblock(TagInfo::ModuleExport(export_ids), _),
+                ..
+            }) => {
+                let mut seen = ahash::AHashSet::new();
+                return export_ids
+                    .iter()
+                    .rev()
+                    .find(|id| !seen.insert(id.name().to_string()))
+                    .map(|id| id.name().to_string());
+            }
+            _ => return None,
+        }
+    }
+}
+
 fn handle_exports(mut meta: LamStats, lam: Lambda) -> SimplifiedForJsBackend {
     let lambda = rewrite_export_makeblock(&mut meta, lam);
     SimplifiedForJsBackend { lambda, meta }

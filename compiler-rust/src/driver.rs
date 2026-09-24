@@ -4551,6 +4551,16 @@ fn push_compiler_report_location(output: &mut String, location: &str) {
     output.push_str("\n\n");
 }
 
+/// OCaml `Bs_exception.Bs_duplicate_exports` ("%s is exported twice",
+/// compiler/depends/bs_exception.ml:50), reported without a location.
+fn duplicate_export_error(filename: &str, name: &str) -> anyhow::Error {
+    UserDiagnostic::new(
+        format_compiler_error_report_for_file(filename, &format!("{name} is exported twice")),
+        2,
+    )
+    .into()
+}
+
 fn format_compiler_error_report_for_file(filename: &str, message: &str) -> String {
     let mut output = String::new();
     push_compiler_report_intro(&mut output, "We've found a bug for you!");
@@ -12105,6 +12115,9 @@ fn compile_source_to_js_with_options_inner(
         raw_lambda,
         raw_lambda_current_stamp,
     );
+    if let Some(name) = crate::lambda::lam_compile_main::duplicate_export_name(&lowered_lambda) {
+        return Err(duplicate_export_error(filename, &name));
+    }
 
     #[cfg(test)]
     if let Some(trace) = discriminator_trace.as_deref_mut() {
@@ -15588,6 +15601,9 @@ pub fn compile_preprocessed_structure_in_process_until_js(
             raw_lambda_current_stamp,
         )
     });
+    if let Some(name) = crate::lambda::lam_compile_main::duplicate_export_name(&lowered_lambda) {
+        return Err(duplicate_export_error(filename, &name));
+    }
     let mut possible_required_modules =
         crate::lambda::lam_compile::collect_possible_required_modules_for_lambda(&lowered_lambda);
     possible_required_modules.extend(raw_possible_required_modules);
