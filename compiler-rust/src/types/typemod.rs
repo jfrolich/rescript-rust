@@ -846,7 +846,7 @@ fn arity_from_arrow_core_type(arena: &ParseArena, core_type: &crate::parser::ast
     }
 }
 
-fn get_primitive_arity_from_type(
+pub(crate) fn get_primitive_arity_from_type(
     ctx: &crate::types::context::TypeContext,
     env: &Env,
     ty: TypeExprRef,
@@ -21470,6 +21470,8 @@ fn type_structure_item<'a>(
             };
             let sig_item =
                 crate::types::decl::SignatureItem::SigValue(id.clone(), val_desc_for_env.clone());
+            // `Env.enter_value` runs `check_value_name` (env.ml:1574-1591).
+            check_value_name_for_env(&id, &val_desc_for_env)?;
             new_env.add_value(id.clone(), val_desc_for_env);
 
             let desc =

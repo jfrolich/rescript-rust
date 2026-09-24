@@ -11836,7 +11836,7 @@ fn decoded_external_arg_types(encoded: &str, arity: usize) -> Vec<ExternalArgSpe
         .unwrap_or_else(|| vec![ExternalArgSpec::dummy(); arity])
 }
 
-fn decode_marshaled_ffi_type(encoded: &str) -> Option<OcamlValue> {
+pub(crate) fn decode_marshaled_ffi_type(encoded: &str) -> Option<OcamlValue> {
     if encoded.is_empty() {
         return None;
     }
@@ -11845,7 +11845,7 @@ fn decode_marshaled_ffi_type(encoded: &str) -> Option<OcamlValue> {
     reader.read_from_bytes(&bytes).ok()
 }
 
-fn is_bs_primitive(encoded: &str) -> bool {
+pub(crate) fn is_bs_primitive(encoded: &str) -> bool {
     let mut chars = encoded.chars();
     let first = chars.next().map(|c| c as u32 as u8);
     let second = chars.next().map(|c| c as u32 as u8);

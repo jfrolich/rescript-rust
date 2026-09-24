@@ -794,12 +794,32 @@ fn format_value_description_with_options(
     weak_names: bool,
     full_paths: bool,
 ) -> String {
-    format!(
-        "let {}: {}",
-        id.name(),
-        TypeExprErrorPrinter::new_with_options(type_ctx, weak_names, full_paths)
-            .format(desc.val_type)
-    )
+    let ty = TypeExprErrorPrinter::new_with_options(type_ctx, weak_names, full_paths)
+        .format(desc.val_type);
+    match &desc.val_kind {
+        // printtyp.ml:1053-1065 + primitive.ml:57-62: primitives print their
+        // name (and non-empty native name) through res_outcome_printer.ml:486-515,
+        // which hides marshalled FFI payloads as "#rescript-external".
+        ValueKind::ValPrim(prim) => {
+            let mut prims = vec![prim.prim_name.as_str()];
+            if !prim.prim_native_name.is_empty() {
+                prims.push(prim.prim_native_name.as_str());
+            }
+            let prims = prims
+                .into_iter()
+                .map(|prim| {
+                    if prim.chars().next().map(|c| c as u32) == Some(132) {
+                        "\"#rescript-external\"".to_string()
+                    } else {
+                        format!("\"{prim}\"")
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join(" ");
+            format!("external {}: {} = {}", id.name(), ty, prims)
+        }
+        _ => format!("let {}: {}", id.name(), ty),
+    }
 }
 
 fn format_type_declaration(type_ctx: &TypeContext, id: &Ident, decl: &TypeDeclaration) -> String {
@@ -2548,9 +2568,9 @@ fn value_descriptions<'a>(
     // manifest aliases up front changes Env.normalize_path side effects and
     // shifts subsequent Ident stamps.
     let moregeneral = ctype::moregeneral(type_ctx, env, true, impl_desc.val_type, expected_ty);
+    let mut expected_desc = sig_desc.clone();
+    expected_desc.val_type = expected_ty;
     if !moregeneral {
-        let mut expected_desc = sig_desc.clone();
-        expected_desc.val_type = expected_ty;
         let arity_mismatch = find_arity_mismatch(type_ctx, env, impl_desc.val_type, expected_ty);
         return Err(IncludeModError::ValueTypeMismatch {
             name: id,
@@ -2564,10 +2584,25 @@ fn value_descriptions<'a>(
     // | Val_prim p, _ -> Tcoerce_primitive { pc_desc = p; pc_type = vd2.val_type; ... }
     // | _, Val_prim _ -> raise Dont_match
     // | _, _ -> Tcoerce_none
+    let dont_match = || {
+        Err(IncludeModError::ValueTypeMismatch {
+            name: id.clone(),
+            actual: impl_desc.clone(),
+            expected: expected_desc.clone(),
+            arity_mismatch: None,
+        })
+    };
     match (&impl_desc.val_kind, &sig_desc.val_kind) {
-        (ValueKind::ValPrim(p1), ValueKind::ValPrim(_p2)) => {
-            // Both are primitives - check compatibility (simplified: just accept)
-            Ok(ModuleCoercion::Tcoerce_none)
+        (ValueKind::ValPrim(p1), ValueKind::ValPrim(p2)) => {
+            // includecore.ml:49-52: normalize both primitives against their
+            // types, then `!Primitive.coerce`.
+            let p1 = normalize_primitive(type_ctx, env, impl_desc.val_type, p1);
+            let p2 = normalize_primitive(type_ctx, env, expected_ty, p2);
+            if primitive_coerce(&p1, &p2) {
+                Ok(ModuleCoercion::Tcoerce_none)
+            } else {
+                dont_match()
+            }
         }
         (ValueKind::ValPrim(prim), _) => Ok(ModuleCoercion::Tcoerce_primitive(
             crate::types::typedtree::PrimitiveCoercion {
@@ -2577,13 +2612,100 @@ fn value_descriptions<'a>(
                 pc_id: id,
             },
         )),
-        (_, ValueKind::ValPrim(_)) => {
-            // Signature expects primitive but implementation is regular - mismatch
-            // OCaml raises Dont_match here but we'll allow it for now
-            Ok(ModuleCoercion::Tcoerce_none)
-        }
+        // includecore.ml:64: a primitive cannot be implemented by a value.
+        (_, ValueKind::ValPrim(_)) => dont_match(),
         _ => Ok(ModuleCoercion::Tcoerce_none),
     }
+}
+
+/// OCaml `Includecore.normalize_primitive` (includecore.ml:31-41).
+fn normalize_primitive(
+    type_ctx: &TypeContext,
+    env: &Env,
+    val_type: TypeExprRef,
+    prim: &crate::types::decl::PrimitiveDescription,
+) -> crate::types::decl::PrimitiveDescription {
+    match crate::types::typemod::get_primitive_arity_from_type(type_ctx, env, val_type) {
+        Some(prim_arity) => {
+            let is_constr = matches!(
+                &*type_ctx.get_desc(type_ctx.repr(val_type)),
+                TypeDesc::Tconstr { .. }
+            );
+            crate::types::decl::PrimitiveDescription {
+                prim_arity,
+                prim_from_constructor: is_constr || prim.prim_from_constructor,
+                ..prim.clone()
+            }
+        }
+        None => prim.clone(),
+    }
+}
+
+/// `Primitive.coerce` as set by External_ffi_types (external_ffi_types.ml:237-270).
+fn primitive_coerce(
+    p1: &crate::types::decl::PrimitiveDescription,
+    p2: &crate::types::decl::PrimitiveDescription,
+) -> bool {
+    use crate::cmi::marshal_reader::OcamlValue;
+    if p1.prim_name == p2.prim_name
+        && p1.prim_arity == p2.prim_arity
+        && p1.prim_native_name == p2.prim_native_name
+    {
+        return true;
+    }
+    fn ffi(native: &str) -> Option<OcamlValue> {
+        if crate::raw_lambda::convert::is_bs_primitive(native) {
+            crate::raw_lambda::convert::decode_marshaled_ffi_type(native)
+        } else {
+            None
+        }
+    }
+    fn list(value: &OcamlValue) -> Vec<&OcamlValue> {
+        let mut items = Vec::new();
+        let mut current = value;
+        while let Some((0, [head, tail])) = current.as_block_opt() {
+            items.push(head);
+            current = tail;
+        }
+        items
+    }
+    fn same(a: &OcamlValue, b: &OcamlValue) -> bool {
+        match (a, b) {
+            (OcamlValue::Int(x), OcamlValue::Int(y)) => x == y,
+            (OcamlValue::String(x), OcamlValue::String(y)) => x == y,
+            (OcamlValue::Float(x), OcamlValue::Float(y)) => x == y,
+            (OcamlValue::Block(t1, f1), OcamlValue::Block(t2, f2)) => {
+                t1 == t2 && f1.len() == f2.len() && f1.iter().zip(f2.iter()).all(|(x, y)| same(x, y))
+            }
+            _ => false,
+        }
+    }
+    // `Ffi_obj_create` is tag 1 with the parameter list.
+    let (Some(v1), Some(v2)) = (ffi(&p1.prim_native_name), ffi(&p2.prim_native_name)) else {
+        return false;
+    };
+    let (Some((1, [params1])), Some((1, [params2]))) = (v1.as_block_opt(), v2.as_block_opt())
+    else {
+        return false;
+    };
+    let (params1, params2) = (list(params1), list(params2));
+    params1.len() == params2.len()
+        && params1.iter().zip(params2.iter()).all(|(a, b)| {
+            let (Some((0, [a_type, a_label])), Some((0, [b_type, b_label]))) =
+                (a.as_block_opt(), b.as_block_opt())
+            else {
+                return false;
+            };
+            same(a_type, b_type)
+                && (same(a_label, b_label)
+                    // `Obj_optional {name; for_sure_no_nested_option}` (tag 1).
+                    || match (a_label.as_block_opt(), b_label.as_block_opt()) {
+                        (Some((1, [a_name, a_sure])), Some((1, [b_name, b_sure]))) => {
+                            same(a_name, b_name) && a_sure.as_int() <= b_sure.as_int()
+                        }
+                        _ => false,
+                    })
+        })
 }
 
 fn add_sig_item_to_env(item: &SignatureItem, env: &mut Env) {
