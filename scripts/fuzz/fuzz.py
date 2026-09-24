@@ -74,7 +74,12 @@ def record(kind: str, sig: str, name: str, src: str, origin: dict) -> bool:
         (b / f"{h}.res").write_text(src)
         meta["examples"].append({"file": f"{h}.res", **origin})
     if meta.get("status") == "fixed":
+        # Keep the case that reopened the bucket: the stored examples and the
+        # reduced case no longer reproduce, so regress must check this one too.
         meta["status"] = "reopened"
+        h = hashlib.sha1(src.encode()).hexdigest()[:12]
+        (b / f"reopen-{h}.res").write_text(src)
+        meta.setdefault("reopen_examples", []).append({"file": f"reopen-{h}.res", **origin})
     meta_p.write_text(json.dumps(meta, indent=2))
     return new_bucket
 
@@ -232,13 +237,19 @@ def _regress(bdir: str):
     f = b / "reduced.res"
     if not f.exists():
         f = b / meta["examples"][0]["file"]
-    r = compare({meta.get("name", "A.res"): f.read_text()},
-                check_text=meta["kind"] in ("msg_diff", "warn_diff"))
-    status = "open" if r.kind == meta["kind"] else "fixed"
+    files = [f] + [b / e["file"] for e in meta.get("reopen_examples", [])]
+    status, kind = "fixed", None
+    for f in files:
+        r = compare({meta.get("name", "A.res"): f.read_text()},
+                    check_text=meta["kind"] in ("msg_diff", "warn_diff"))
+        kind = r.kind
+        if r.kind == meta["kind"]:
+            status = "open"
+            break
     if meta.get("status") != status:
         meta["status"] = status
         (b / "meta.json").write_text(json.dumps(meta, indent=2))
-    return str(b), status, r.kind
+    return str(b), status, kind
 
 
 def cmd_regress(args):
