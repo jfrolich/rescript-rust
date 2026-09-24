@@ -904,7 +904,7 @@ impl<'a> SigReadContext<'a> {
         });
 
         RowDesc {
-            row_fields,
+            row_fields: row_fields.into(),
             row_more,
             row_closed,
             row_fixed,

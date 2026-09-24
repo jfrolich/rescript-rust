@@ -1022,8 +1022,9 @@ impl FieldKindRef {
 /// Row description for polymorphic variants.
 #[derive(Debug, Clone)]
 pub struct RowDesc {
-    /// The variant fields: (label, row_field)
-    pub row_fields: Vec<(Label, RowField)>,
+    /// The variant fields: (label, row_field). Shared copy-on-write, so
+    /// snapshots of variant descriptors do not copy the field list.
+    pub row_fields: super::decl::SharedVec<(Label, RowField)>,
     /// The row variable
     pub row_more: TypeExprRef,
     /// Is the row closed?
@@ -1502,7 +1503,7 @@ mod tests {
     #[test]
     fn test_row_desc() {
         let row = RowDesc {
-            row_fields: vec![],
+            row_fields: vec![].into(),
             row_more: TypeExprRef(1),
             row_closed: true,
             row_fixed: false,

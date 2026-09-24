@@ -3193,7 +3193,7 @@ fn expand_record_spread_label(
                         ctx,
                         ty,
                         ctx.new_variant(crate::types::RowDesc {
-                            row_fields: new_fields,
+                            row_fields: new_fields.into(),
                             row_more: new_more,
                             row_closed: row.row_closed,
                             row_fixed: row.row_fixed,

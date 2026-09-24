@@ -2934,14 +2934,14 @@ fn transl_type_inner(
                 if let Some(existing_field) = row_field_map.get(&label) {
                     let ctx = tctx.type_ctx;
                     let actual = ctx.new_variant(crate::types::type_expr::RowDesc {
-                        row_fields: vec![(label.clone(), field)],
+                        row_fields: vec![(label.clone(), field)].into(),
                         row_more: ctx.new_var(None),
                         row_closed: true,
                         row_fixed: false,
                         row_name: None,
                     });
                     let expected = ctx.new_variant(crate::types::type_expr::RowDesc {
-                        row_fields: vec![(label, existing_field.clone())],
+                        row_fields: vec![(label, existing_field.clone())].into(),
                         row_more: ctx.new_var(None),
                         row_closed: true,
                         row_fixed: false,
@@ -3140,7 +3140,7 @@ fn transl_type_inner(
             // polymorphic variant aliases in downstream application typing.
             let row_more = ctx.new_var(None);
             let variant_ty = ctx.new_variant(crate::types::type_expr::RowDesc {
-                row_fields,
+                row_fields: row_fields.into(),
                 row_more,
                 row_closed,
                 row_fixed: false,
@@ -3396,7 +3396,7 @@ fn build_or_pat(
 
     // Step 4: Create the variant type for the patterns
     let row = RowDesc {
-        row_fields: fields,
+        row_fields: fields.into(),
         row_more: ctx.new_var(None),
         row_closed: false,
         row_fixed: false,
@@ -4636,7 +4636,7 @@ fn build_as_type(
                 row_fields: vec![(
                     label.clone().into(),
                     crate::types::type_expr::RowField::Rpresent(opt_ty),
-                )],
+                )].into(),
                 row_more: ctx.new_var(None),
                 row_name: None,
                 row_fixed: false,
@@ -5277,7 +5277,7 @@ fn type_pattern_variant(
                 matched: true,
                 link: ctx.alloc_row_field(None),
             },
-        )],
+        )].into(),
         row_more: ctx.new_var(None),
         row_closed: false,
         row_fixed: false,
@@ -13977,7 +13977,7 @@ fn pressure_matrix_close_variant_type(tctx: &mut TypeCheckContext<'_>, env: &Env
 
     if !row.row_closed || row_name != row.row_name {
         let closed_row = crate::types::type_expr::RowDesc {
-            row_fields: vec![],
+            row_fields: vec![].into(),
             row_more: ctx.new_generic_var(None),
             row_closed: true,
             row_fixed: row.row_fixed,
@@ -17539,7 +17539,7 @@ fn type_variant(
             row_fields: vec![(
                 label.to_string().into(),
                 crate::types::type_expr::RowField::Rpresent(Some(typed_arg.exp_type)),
-            )],
+            )].into(),
             row_more: ctx.new_var(None),
             row_closed: false,
             row_fixed: false,
@@ -17561,7 +17561,7 @@ fn type_variant(
         row_fields: vec![(
             label.to_string().into(),
             crate::types::type_expr::RowField::Rpresent(None),
-        )],
+        )].into(),
         row_more: ctx.new_var(None),
         row_closed: false,
         row_fixed: false,

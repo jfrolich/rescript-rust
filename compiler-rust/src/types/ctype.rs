@@ -6213,7 +6213,7 @@ fn unify_rows<'a>(
         None
     };
     let row0 = RowDesc {
-        row_fields: vec![],
+        row_fields: vec![].into(),
         row_more: more,
         row_closed: closed,
         row_fixed: fixed,
@@ -6252,7 +6252,7 @@ fn unify_rows<'a>(
         }
 
         let ty = ctx.new_generic_type(TypeDesc::Tvariant(RowDesc {
-            row_fields: rest,
+            row_fields: rest.into(),
             ..row0.clone()
         }));
         update_level(ctx, ctx.get_level(rm), ty);
@@ -6920,7 +6920,7 @@ fn moregen_row(
             drop(rm1_desc);
             drop(rm2_desc);
             let ext = ctx.new_generic_type(TypeDesc::Tvariant(RowDesc {
-                row_fields: r2,
+                row_fields: r2.into(),
                 row_name: None,
                 ..row2.clone()
             }));
@@ -9639,7 +9639,7 @@ pub fn copy_type_deep(
                 (path.clone(), new_args)
             });
             let new_row = crate::types::type_expr::RowDesc {
-                row_fields: new_row_fields,
+                row_fields: new_row_fields.into(),
                 row_more: new_row_more,
                 row_closed: row.row_closed,
                 row_fixed: row.row_fixed,
@@ -10322,7 +10322,7 @@ fn subst_identity_copy_rec(
                             )
                         });
                         let row_copy = TypeDesc::Tvariant(RowDesc {
-                            row_fields: fields_copy,
+                            row_fields: fields_copy.into(),
                             row_more: more_copy,
                             row_closed: row.row_closed,
                             row_fixed: row.row_fixed,
@@ -11044,7 +11044,7 @@ pub fn normalize_all_types(ctx: &TypeContext) {
                 ctx.set_desc(
                     ty,
                     TypeDesc::Tvariant(RowDesc {
-                        row_fields: fields,
+                        row_fields: fields.into(),
                         row_more: row.row_more,
                         row_closed: row.row_closed,
                         row_fixed: row.row_fixed,
@@ -11114,7 +11114,7 @@ fn normalize_type_rec(ctx: &TypeContext, visited: &mut HashSet<TypeExprRef>, ty:
             ctx.set_desc(
                 ty,
                 TypeDesc::Tvariant(RowDesc {
-                    row_fields: fields,
+                    row_fields: fields.into(),
                     row_more: row.row_more,
                     row_closed: row.row_closed,
                     row_fixed: row.row_fixed,
@@ -11363,7 +11363,7 @@ fn nondep_type_rec<'a>(
                 _ => None,
             };
             TypeDesc::Tvariant(super::type_expr::RowDesc {
-                row_fields: new_fields?,
+                row_fields: new_fields?.into(),
                 row_more: new_more,
                 row_closed: row.row_closed,
                 row_fixed: row.row_fixed,

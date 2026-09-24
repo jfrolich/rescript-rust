@@ -9080,7 +9080,7 @@ fn extract_row_from_type(ctx_ref: &TypeContext, ty: TypeExprRef) -> RowDesc {
 
     // Fallback: empty row
     RowDesc {
-        row_fields: Vec::new(),
+        row_fields: Vec::new().into(),
         row_more: TypeExprRef(0),
         row_closed: true,
         row_fixed: false,
