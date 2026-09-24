@@ -242,31 +242,6 @@ fn char_to_byte_idx(s: &str, char_idx: usize) -> usize {
         .unwrap_or(s.len())
 }
 
-fn append_highlighted_segment(
-    buf: &mut String,
-    segment: &HighlightedString,
-    use_color: bool,
-    emphasis: Emphasis,
-) {
-    let segment_len = segment.s.chars().count();
-    let start_char = segment.start.min(segment_len);
-    let end_char = segment.end.min(segment_len);
-
-    if !use_color || end_char <= start_char {
-        buf.push_str(&segment.s);
-        return;
-    }
-
-    let start_byte = char_to_byte_idx(&segment.s, start_char);
-    let end_byte = char_to_byte_idx(&segment.s, end_char);
-
-    buf.push_str(&segment.s[..start_byte]);
-    buf.push_str(emphasis_ansi(emphasis));
-    buf.push_str(&segment.s[start_byte..end_byte]);
-    buf.push_str(ANSI_RESET);
-    buf.push_str(&segment.s[end_byte..]);
-}
-
 /// Print a code frame with source context around an error.
 ///
 /// This formats source code with:
@@ -421,67 +396,106 @@ fn print_impl(src: &str, start_pos: &Position, end_pos: &Position, emphasis: Emp
         })
         .collect();
 
-    // Build output string
-    let mut buf = String::with_capacity(1024);
+    // `Code_frame.print`'s drawing (compiler/ml/code_frame.ml:222-298): every
+    // character goes through `add_ch`, which emits an ANSI sequence only
+    // when the color differs from the previous character's (across lines).
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum FrameColor {
+        NoColor,
+        Dim,
+        Emphasis,
+    }
+    struct Frame {
+        buf: String,
+        last: FrameColor,
+        use_color: bool,
+        emphasis: &'static str,
+    }
+    impl Frame {
+        fn add_ch(&mut self, color: FrameColor, ch: char) {
+            if !self.use_color || self.last == color {
+                self.buf.push(ch);
+                return;
+            }
+            match (self.last, color) {
+                (FrameColor::NoColor, FrameColor::Dim) => self.buf.push_str(ANSI_DIM),
+                (FrameColor::NoColor, FrameColor::Emphasis) => self.buf.push_str(self.emphasis),
+                (_, FrameColor::NoColor) => self.buf.push_str(ANSI_RESET),
+                (_, FrameColor::Dim) => {
+                    self.buf.push_str(ANSI_RESET);
+                    self.buf.push_str(ANSI_DIM);
+                }
+                (_, FrameColor::Emphasis) => {
+                    self.buf.push_str(ANSI_RESET);
+                    self.buf.push_str(self.emphasis);
+                }
+            }
+            self.buf.push(ch);
+            self.last = color;
+        }
 
+        fn add_str(&mut self, color: FrameColor, s: &str) {
+            for ch in s.chars() {
+                self.add_ch(color, ch);
+            }
+        }
+
+        fn draw_gutter(&mut self, width: usize, color: FrameColor, s: &str, separator: &str) {
+            for _ in 0..width.saturating_sub(s.len()) {
+                self.add_ch(FrameColor::NoColor, ' ');
+            }
+            self.add_str(color, s);
+            self.add_ch(FrameColor::NoColor, ' ');
+            self.add_str(FrameColor::Dim, separator);
+            self.add_ch(FrameColor::NoColor, ' ');
+        }
+    }
+
+    let mut frame = Frame {
+        buf: String::with_capacity(1024),
+        last: FrameColor::NoColor,
+        use_color,
+        emphasis: emphasis_ansi(emphasis),
+    };
+    let gutter_width = max_line_digits + indent;
     for line in &processed_lines {
         match &line.gutter {
             Gutter::Elided => {
-                // Draw elided gutter
-                for _ in 0..(max_line_digits + indent - 1) {
-                    buf.push(' ');
-                }
-                if use_color {
-                    buf.push_str(ANSI_DIM);
-                }
-                buf.push_str(".");
-                buf.push(' ');
-                buf.push_str(separator);
-                if use_color {
-                    buf.push_str(ANSI_RESET);
-                }
-                buf.push_str(" ...\n");
+                frame.draw_gutter(gutter_width, FrameColor::Dim, ".", separator);
+                frame.add_str(FrameColor::Dim, "...");
+                frame.add_ch(FrameColor::NoColor, '\n');
             }
             Gutter::Number(line_number) => {
                 for (i, hs) in line.content.iter().enumerate() {
-                    // OCaml: first chunk shows line number, continuation chunks show empty gutter
                     let gutter_content = if i == 0 {
                         line_number.to_string()
                     } else {
                         String::new()
                     };
-                    for _ in 0..(max_line_digits + indent - gutter_content.len()) {
-                        buf.push(' ');
-                    }
-
-                    let is_highlighted_gutter = i == 0
+                    let gutter_color = if i == 0
                         && *line_number >= highlight_line_start
-                        && *line_number <= highlight_line_end;
-                    if use_color && is_highlighted_gutter {
-                        buf.push_str(emphasis_ansi(emphasis));
+                        && *line_number <= highlight_line_end
+                    {
+                        FrameColor::Emphasis
+                    } else {
+                        FrameColor::NoColor
+                    };
+                    frame.draw_gutter(gutter_width, gutter_color, &gutter_content, separator);
+                    for (ii, ch) in hs.s.chars().enumerate() {
+                        let color = if ii >= hs.start && ii < hs.end {
+                            FrameColor::Emphasis
+                        } else {
+                            FrameColor::NoColor
+                        };
+                        frame.add_ch(color, ch);
                     }
-                    buf.push_str(&gutter_content);
-                    if use_color && is_highlighted_gutter {
-                        buf.push_str(ANSI_RESET);
-                    }
-                    buf.push(' ');
-                    if use_color {
-                        buf.push_str(ANSI_DIM);
-                    }
-                    buf.push_str(separator);
-                    if use_color {
-                        buf.push_str(ANSI_RESET);
-                    }
-                    buf.push(' ');
-
-                    append_highlighted_segment(&mut buf, hs, use_color, emphasis);
-                    buf.push('\n');
+                    frame.add_ch(FrameColor::NoColor, '\n');
                 }
             }
         }
     }
 
-    buf
+    frame.buf
 }
 
 /// Format a location as "filename:line:col" or "filename:line:col-endcol"
