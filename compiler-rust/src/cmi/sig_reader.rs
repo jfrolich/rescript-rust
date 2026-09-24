@@ -246,7 +246,7 @@ impl<'a> SigReadContext<'a> {
                     .map(|ld| self.read_label_declaration(ld))
                     .collect();
                 let repr = self.read_record_representation(&fields[1]);
-                TypeKind::TypeRecord(labels, repr)
+                TypeKind::TypeRecord(crate::types::decl::SharedVec::from(labels), repr)
             }
             OcamlValue::Block(1, fields) => {
                 // Type_variant(constructor_declaration list, layout_ref)
@@ -260,7 +260,7 @@ impl<'a> SigReadContext<'a> {
                         .get(1)
                         .expect("variant type kind must carry a layout"),
                 );
-                TypeKind::TypeVariant(constrs, layout)
+                TypeKind::TypeVariant(crate::types::decl::SharedVec::from(constrs), layout)
             }
             _ => TypeKind::TypeAbstract, // fallback
         }

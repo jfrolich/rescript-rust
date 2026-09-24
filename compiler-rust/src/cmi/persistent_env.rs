@@ -6216,7 +6216,7 @@ fn add_signature_to_env_with_options(
                                         type_params: inline_params.clone(),
                                         type_arity: inline_params.len() as i32,
                                         type_kind: crate::types::TypeKind::TypeRecord(
-                                            labels.clone(),
+                                            crate::types::decl::SharedVec::from(labels.clone()),
                                             crate::types::RecordRepresentation::RecordInlined {
                                                 name: cd.cd_id.name().to_string(),
                                                 representation:

@@ -887,6 +887,13 @@ impl TypeContext {
     }
 
     /// Look up a type declaration by stamp from the global store.
+    pub(crate) fn find_type_decl_arc_by_stamp(
+        &self,
+        stamp: i32,
+    ) -> Option<Arc<super::decl::TypeDeclaration>> {
+        self.type_decl_by_stamp.borrow().get(&stamp).cloned()
+    }
+
     pub fn find_type_decl_by_stamp(
         &self,
         stamp: i32,

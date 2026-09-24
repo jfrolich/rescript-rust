@@ -25,7 +25,7 @@ pub fn translate_type_declaration_from_types(
     let declaration_kind = match &type_declaration.type_kind {
         TypeKind::TypeRecord(label_declarations, representation) => {
             crate::gentype::translate_type_declarations::DeclarationKind::RecordDeclarationFromTypes(
-                label_declarations.clone(),
+                label_declarations.to_vec(),
                 representation.clone(),
             )
         }
@@ -35,7 +35,7 @@ pub fn translate_type_declaration_from_types(
             ) =>
         {
             crate::gentype::translate_type_declarations::DeclarationKind::VariantDeclarationFromTypes(
-                constructor_declarations.clone(),
+                constructor_declarations.to_vec(),
                 ctx.variant_layout(*layout_ref),
                 type_declaration.type_representation,
             )

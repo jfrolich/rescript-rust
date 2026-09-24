@@ -425,7 +425,7 @@ fn rebind_constructor_arguments(
 ) -> crate::types::ConstructorArguments {
     if let Some(inlined) = &desc.cstr_inlined {
         if let crate::types::TypeKind::TypeRecord(labels, _) = &inlined.type_kind {
-            return crate::types::ConstructorArguments::CstrRecord(labels.clone());
+            return crate::types::ConstructorArguments::CstrRecord(labels.to_vec());
         }
     }
     crate::types::ConstructorArguments::CstrTuple(desc.cstr_args.clone())
@@ -15893,7 +15893,7 @@ fn translate_module_type_to_decl_with_typed_hint<'a>(
                                         });
                                     }
                                     crate::types::TypeKind::TypeVariant(
-                                        constructors,
+                                        crate::types::decl::SharedVec::from(constructors),
                                         type_variant_layout.expect("variant declaration layout"),
                                     )
                                 }
@@ -15937,7 +15937,7 @@ fn translate_module_type_to_decl_with_typed_hint<'a>(
                                         });
                                     }
                                     crate::types::TypeKind::TypeRecord(
-                                        record_labels,
+                                        crate::types::decl::SharedVec::from(record_labels),
                                         crate::types::RecordRepresentation::RecordRegular,
                                     )
                                 }
@@ -20370,7 +20370,7 @@ pub fn type_structure<'a>(
                 let decl = crate::types::TypeDeclaration {
                     type_params: vec![],
                     type_arity: 0,
-                    type_kind: crate::types::TypeKind::TypeVariant(constructors, layout),
+                    type_kind: crate::types::TypeKind::TypeVariant(crate::types::decl::SharedVec::from(constructors), layout),
                     type_private: crate::types::asttypes::PrivateFlag::Public,
                     type_manifest: None,
                     type_variance: vec![],
@@ -20908,7 +20908,7 @@ fn type_structure_item<'a>(
                         let decl = crate::types::TypeDeclaration {
                             type_params: vec![],
                             type_arity: 0,
-                            type_kind: crate::types::TypeKind::TypeVariant(constructors, layout),
+                            type_kind: crate::types::TypeKind::TypeVariant(crate::types::decl::SharedVec::from(constructors), layout),
                             type_private: crate::types::asttypes::PrivateFlag::Public,
                             type_manifest: None,
                             type_variance: vec![],
@@ -21041,7 +21041,7 @@ fn type_structure_item<'a>(
                             type_params: vec![],
                             type_arity: 0,
                             type_kind: crate::types::TypeKind::TypeRecord(
-                                labels.clone(),
+                                crate::types::decl::SharedVec::from(labels.clone()),
                                 crate::types::RecordRepresentation::RecordRegular,
                             ),
                             type_private: crate::types::asttypes::PrivateFlag::Public,
@@ -21722,7 +21722,7 @@ fn type_structure_item<'a>(
                                                         source_cstr.cd_id.name().to_string(),
                                                     );
                                                 }
-                                                Ok(source_cstrs)
+                                                Ok(source_cstrs.into_vec())
                                             };
                                         if let crate::parser::ast::CoreTypeDesc::Ptyp_constr(
                                             inner,
@@ -22022,7 +22022,7 @@ fn type_structure_item<'a>(
                                                 type_params: inline_params.clone(),
                                                 type_arity: inline_params.len() as i32,
                                                 type_kind: crate::types::TypeKind::TypeRecord(
-                                                    inline_lbls.clone(),
+                                                    crate::types::decl::SharedVec::from(inline_lbls.clone()),
                                                     crate::types::RecordRepresentation::RecordInlined {
                                                         name: sc_name.clone(),
                                                         representation: crate::types::ConstructorReference {
@@ -22360,7 +22360,7 @@ fn type_structure_item<'a>(
                                         type_params: inline_params.clone(),
                                         type_arity: inline_params.len() as i32,
                                         type_kind: crate::types::TypeKind::TypeRecord(
-                                            lbls.clone(),
+                                            crate::types::decl::SharedVec::from(lbls.clone()),
                                             inline_repres,
                                         ),
                                         type_private: crate::types::PrivateFlag::Public,
@@ -22476,7 +22476,7 @@ fn type_structure_item<'a>(
 
                         (
                             crate::types::TypeKind::TypeVariant(
-                                internal_cstrs,
+                                crate::types::decl::SharedVec::from(internal_cstrs),
                                 type_variant_layout.expect("variant declaration layout"),
                             ),
                             TypedTypeKind::Ttype_variant(typed_tree_cstrs),
@@ -22667,7 +22667,7 @@ fn type_structure_item<'a>(
                                 crate::types::RecordRepresentation::RecordRegular
                             };
                             (
-                                crate::types::TypeKind::TypeRecord(internal_labels, repres),
+                                crate::types::TypeKind::TypeRecord(crate::types::decl::SharedVec::from(internal_labels), repres),
                                 TypedTypeKind::Ttype_record(typed_tree_labels),
                                 vec![],
                             )
@@ -23318,7 +23318,7 @@ fn type_structure_item<'a>(
                                     type_params: vec![],
                                     type_arity: 0,
                                     type_kind: crate::types::TypeKind::TypeRecord(
-                                        decl_labels.clone(),
+                                        crate::types::decl::SharedVec::from(decl_labels.clone()),
                                         crate::types::RecordRepresentation::RecordExtension,
                                     ),
                                     type_private: crate::types::PrivateFlag::Public,
@@ -23683,7 +23683,7 @@ fn type_structure_item<'a>(
                                 type_params: vec![],
                                 type_arity: 0,
                                 type_kind: crate::types::TypeKind::TypeRecord(
-                                    decl_labels.clone(),
+                                    crate::types::decl::SharedVec::from(decl_labels.clone()),
                                     crate::types::RecordRepresentation::RecordExtension,
                                 ),
                                 type_private: crate::types::PrivateFlag::Public,
@@ -25067,7 +25067,7 @@ fn transl_sig_type_declarations_with_ids_and_originals<'a>(
                     )?;
                     (
                         crate::types::TypeKind::TypeRecord(
-                            internal_labels,
+                            crate::types::decl::SharedVec::from(internal_labels),
                             crate::types::RecordRepresentation::RecordRegular,
                         ),
                         TypedTypeKind::Ttype_record(typed_tree_labels),
@@ -25238,7 +25238,7 @@ fn transl_sig_type_declarations_with_ids_and_originals<'a>(
 
                     (
                         crate::types::TypeKind::TypeVariant(
-                            internal_cstrs,
+                            crate::types::decl::SharedVec::from(internal_cstrs),
                             type_variant_layout.expect("variant declaration layout"),
                         ),
                         TypedTypeKind::Ttype_variant(typed_tree_cstrs),

@@ -8737,7 +8737,7 @@ fn record_fields_for_type(
     let decl = type_decl_for_path(type_ctx, path)?;
     match decl.type_kind {
         crate::types::decl::TypeKind::TypeRecord(fields, record_repr) => {
-            Some((record_repr, fields))
+            Some((record_repr, fields.into_vec()))
         }
         _ => None,
     }
@@ -8848,7 +8848,7 @@ fn variant_constructors_for_type(
                 || layout.configuration().unboxed;
             Some((
                 path.clone(),
-                constructors,
+                constructors.into_vec(),
                 decl.type_params,
                 layout,
                 unboxed,
@@ -9064,7 +9064,7 @@ fn concrete_variant_constructors(
                 let decl = type_decl_for_path(type_ctx, path)?;
                 match decl.type_kind {
                     crate::types::decl::TypeKind::TypeVariant(constructors, layout_ref) => {
-                        return Some((constructors, type_ctx.variant_layout(layout_ref)));
+                        return Some((constructors.into_vec(), type_ctx.variant_layout(layout_ref)));
                     }
                     crate::types::decl::TypeKind::TypeAbstract => {
                         current = type_ctx.repr(decl.type_manifest?);

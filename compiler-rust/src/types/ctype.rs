@@ -11507,7 +11507,7 @@ fn nondep_type_kind<'a>(
                     })
                 })
                 .collect();
-            Some(super::decl::TypeKind::TypeRecord(new_labels?, repr.clone()))
+            Some(super::decl::TypeKind::TypeRecord(crate::types::decl::SharedVec::from(new_labels?), repr.clone()))
         }
         super::decl::TypeKind::TypeVariant(constructors, layout) => {
             let new_constructors: Option<Vec<_>> = constructors
@@ -11547,7 +11547,7 @@ fn nondep_type_kind<'a>(
                 })
                 .collect();
             Some(super::decl::TypeKind::TypeVariant(
-                new_constructors?,
+                crate::types::decl::SharedVec::from(new_constructors?),
                 *layout,
             ))
         }

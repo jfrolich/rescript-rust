@@ -12468,7 +12468,7 @@ mod tests {
                 type_params: vec![],
                 type_arity: 0,
                 type_kind: crate::types::decl::TypeKind::TypeRecord(
-                    vec![],
+                    crate::types::decl::SharedVec::from(vec![]),
                     crate::types::decl::RecordRepresentation::RecordInlined {
                         name: "B".to_string(),
                         representation,

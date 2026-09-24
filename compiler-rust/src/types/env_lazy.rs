@@ -65,7 +65,7 @@ fn build_matching_type_constructors(
                     type_params: inline_params.clone(),
                     type_arity: inline_params.len() as i32,
                     type_kind: super::decl::TypeKind::TypeRecord(
-                        labels.clone(),
+                        crate::types::decl::SharedVec::from(labels.clone()),
                         if decl.type_representation == crate::types::TypeRepresentation::Unboxed {
                             super::decl::RecordRepresentation::RecordUnboxed(false)
                         } else {
@@ -245,7 +245,7 @@ fn build_constructors_for_name(
                             type_params: inline_params.clone(),
                             type_arity: inline_params.len() as i32,
                             type_kind: super::decl::TypeKind::TypeRecord(
-                                labels.clone(),
+                                crate::types::decl::SharedVec::from(labels.clone()),
                                 super::decl::RecordRepresentation::RecordExtension,
                             ),
                             type_private: ext.ext_private,

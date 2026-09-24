@@ -1081,6 +1081,18 @@ impl Env {
             .ok_or_else(|| EnvError::TypeNotFound(id.name().to_string()))
     }
 
+    /// Shared-declaration form of [`Env::find_type_by_ident`].
+    pub(crate) fn find_type_arc_by_ident(&self, id: &Ident) -> Option<&Arc<TypeDeclaration>> {
+        self.types.find_by_ident(id)
+    }
+
+    /// Shared-declaration form of [`Env::lookup_type`] for `Pident` paths.
+    pub(crate) fn lookup_type_arc_by_ident(&self, id: &Ident) -> Option<&Arc<TypeDeclaration>> {
+        self.types
+            .find_by_ident(id)
+            .or_else(|| self.types.find_by_name(id.name()))
+    }
+
     /// Find a type by path.
     pub fn lookup_type(&self, path: &Path) -> EnvResult<&TypeDeclaration> {
         match path {
@@ -1820,7 +1832,7 @@ pub fn initial_env(ctx: &TypeContext) -> Env {
                 )
             }),
         );
-        TypeKind::TypeVariant(constructors, layout)
+        TypeKind::TypeVariant(crate::types::decl::SharedVec::from(constructors), layout)
     };
 
     // Helper: add a type with its constructors to the environment
@@ -2107,7 +2119,7 @@ pub fn initial_env(ctx: &TypeContext) -> Env {
                 type_params: vec![tvar],
                 type_arity: 1,
                 type_kind: TypeKind::TypeRecord(
-                    vec![dict_label],
+                    crate::types::decl::SharedVec::from(vec![dict_label]),
                     crate::types::decl::RecordRepresentation::RecordRegular,
                 ),
                 type_variance: vec![crate::types::variance::Variance::full()],
@@ -2365,7 +2377,7 @@ pub fn initial_env(ctx: &TypeContext) -> Env {
             predef::ident_field_info(),
             TypeDeclaration {
                 type_kind: TypeKind::TypeRecord(
-                    vec![
+                    crate::types::decl::SharedVec::from(vec![
                         LabelDeclaration {
                             ld_id: predef::ident_fi_name(),
                             ld_mutable: MutableFlag::Immutable,
@@ -2398,7 +2410,7 @@ pub fn initial_env(ctx: &TypeContext) -> Env {
                             ld_loc: Location::none(),
                             ld_attributes: vec![],
                         },
-                    ],
+                    ]),
                     RecordRepresentation::RecordRegular,
                 ),
                 ..decl_abstr(0, false)
@@ -2411,7 +2423,7 @@ pub fn initial_env(ctx: &TypeContext) -> Env {
             predef::ident_constructor_info(),
             TypeDeclaration {
                 type_kind: TypeKind::TypeRecord(
-                    vec![
+                    crate::types::decl::SharedVec::from(vec![
                         LabelDeclaration {
                             ld_id: predef::ident_ci_name(),
                             ld_mutable: MutableFlag::Immutable,
@@ -2428,7 +2440,7 @@ pub fn initial_env(ctx: &TypeContext) -> Env {
                             ld_loc: Location::none(),
                             ld_attributes: vec![],
                         },
-                    ],
+                    ]),
                     RecordRepresentation::RecordRegular,
                 ),
                 ..decl_abstr(0, false)

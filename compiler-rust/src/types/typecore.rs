@@ -3502,7 +3502,7 @@ fn extract_type_from_pat_variant_spread(
         },
     })?;
 
-    Ok((spread_path, constructors, spread_ty))
+    Ok((spread_path, constructors.into_vec(), spread_ty))
 }
 
 fn build_ppat_or_for_variant_spread(
@@ -6023,7 +6023,7 @@ fn record_rest_source_fields_and_repr(
                     },
                     _ => None,
                 };
-                Ok((labels.clone(), tag_exclusion))
+                Ok((labels.to_vec(), tag_exclusion))
             }
         }
         // OCaml raises assert false here; callers only pass record declarations.
@@ -6192,7 +6192,7 @@ fn type_record_pat_rest(
         ) => {
             return rest_err(rest_type_lid.loc, RecordRestError::UnboxedRecord);
         }
-        crate::types::TypeKind::TypeRecord(labels, _) => labels.clone(),
+        crate::types::TypeKind::TypeRecord(labels, _) => labels.to_vec(),
         _ => {
             return rest_err(
                 rest_type_lid.loc,
@@ -13002,7 +13002,7 @@ fn variant_constructors_for_type(
     drop(desc);
     let decl = lookup_type_decl_for_path(&path, env, &mut tctx.persistent_env, ctx)?;
     match &decl.type_kind {
-        crate::types::TypeKind::TypeVariant(constructors, _) => Some(constructors.clone()),
+        crate::types::TypeKind::TypeVariant(constructors, _) => Some(constructors.to_vec()),
         _ => None,
     }
 }
@@ -19403,7 +19403,7 @@ fn get_record_labels<'a>(
                 })
                 .collect();
             ctx.register_record_labels(&cache_key, cache_entries);
-            return Some(labels.clone());
+            return Some(labels.to_vec());
         }
     }
 
@@ -19443,7 +19443,7 @@ fn get_record_labels<'a>(
             if matches_inline_record_path(cstr) {
                 if let Some(ref inlined) = cstr.cstr_inlined {
                     if let crate::types::TypeKind::TypeRecord(ref labels, _) = inlined.type_kind {
-                        return Some(labels.clone());
+                        return Some(labels.to_vec());
                     }
                 }
             }
@@ -19530,7 +19530,7 @@ fn inline_record_decl_from_variant_type<'a>(
             return Some(crate::types::TypeDeclaration {
                 type_params: inline_params.clone(),
                 type_arity: inline_params.len() as i32,
-                type_kind: crate::types::TypeKind::TypeRecord(labels.clone(), inline_repr),
+                type_kind: crate::types::TypeKind::TypeRecord(crate::types::decl::SharedVec::from(labels.clone()), inline_repr),
                 type_private: type_decl.type_private,
                 type_manifest: None,
                 type_variance: inline_params
@@ -20767,7 +20767,7 @@ fn type_letexception(
                         type_params: vec![],
                         type_arity: 0,
                         type_kind: crate::types::TypeKind::TypeRecord(
-                            decl_labels.clone(),
+                            crate::types::decl::SharedVec::from(decl_labels.clone()),
                             crate::types::RecordRepresentation::RecordExtension,
                         ),
                         type_private: crate::types::PrivateFlag::Public,
@@ -30302,7 +30302,7 @@ fn lookup_constructor_by_expected_type<'b>(
                             type_params: inline_params.clone(),
                             type_arity: inline_params.len() as i32,
                             type_kind: crate::types::TypeKind::TypeRecord(
-                                copied_labels,
+                                crate::types::decl::SharedVec::from(copied_labels),
                                 if concrete_type_decl.type_representation
                                     == crate::types::TypeRepresentation::Unboxed
                                 {
@@ -32766,8 +32766,8 @@ fn lookup_type_decl_for_path_with_cache_mode<'a>(
         // `IdTbl.find_same`. Keep this exact here too, so a same-name local
         // alias cannot mask the imported identifier whose stamp is being
         // expanded by ctype.ml:1367-1372.
-        if let Ok(decl) = env.find_type_by_ident(id) {
-            return Some(Arc::new(decl.clone()));
+        if let Some(decl) = env.find_type_arc_by_ident(id) {
+            return Some(decl.clone());
         }
     }
 
@@ -32777,8 +32777,8 @@ fn lookup_type_decl_for_path_with_cache_mode<'a>(
     // collide with local constructor stamps.
     if let Path::Pident(id) = type_path {
         if id.stamp() != 0 {
-            if let Ok(decl) = env.find_type_by_ident(id) {
-                return Some(Arc::new(decl.clone()));
+            if let Some(decl) = env.find_type_arc_by_ident(id) {
+                return Some(decl.clone());
             }
         }
 
@@ -32792,8 +32792,8 @@ fn lookup_type_decl_for_path_with_cache_mode<'a>(
                 crate::types::path::Typath::Regular(_)
             )
         {
-            if let Some(decl) = ctx.find_type_decl_by_stamp(id.stamp()) {
-                return Some(Arc::new(decl.clone()));
+            if let Some(decl) = ctx.find_type_decl_arc_by_stamp(id.stamp()) {
+                return Some(decl);
             }
         }
     }
@@ -32801,9 +32801,9 @@ fn lookup_type_decl_for_path_with_cache_mode<'a>(
     // Only use env.lookup_type directly for simple identifiers after exact/stamp
     // lookup. For qualified paths, env.lookup_type currently resolves by leaf
     // name and can return an unrelated declaration with the same type name.
-    if let Path::Pident(_) = type_path {
-        if let Ok(decl) = env.lookup_type(type_path) {
-            return Some(Arc::new(decl.clone()));
+    if let Path::Pident(id) = type_path {
+        if let Some(decl) = env.lookup_type_arc_by_ident(id) {
+            return Some(decl.clone());
         }
     }
 
@@ -32869,7 +32869,7 @@ fn lookup_type_decl_for_path_with_cache_mode<'a>(
                                 type_params: inline_params.clone(),
                                 type_arity: inline_params.len() as i32,
                                 type_kind: crate::types::TypeKind::TypeRecord(
-                                    labels.clone(),
+                                    crate::types::decl::SharedVec::from(labels.clone()),
                                     if parent_decl.type_representation
                                         == crate::types::TypeRepresentation::Unboxed
                                     {
