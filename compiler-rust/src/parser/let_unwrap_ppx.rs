@@ -27,11 +27,20 @@ enum LetUnwrapKind {
     OptionNone,
 }
 
+/// The rewrite only acts on `let.unwrap` attributes. When the arena holds no
+/// such string, no node can carry one and the rewrite would only copy the tree.
+fn arena_mentions_let_unwrap(arena: &ParseArena) -> bool {
+    arena.find_string_idx(LET_UNWRAP_ATTR).is_some()
+}
+
 pub fn rewrite_structure(
     structure: &[StructureItem],
     arena: &mut ParseArena,
     let_unwrap_enabled: bool,
 ) -> Result<Vec<StructureItem>, String> {
+    if !arena_mentions_let_unwrap(arena) {
+        return Ok(structure.to_vec());
+    }
     structure
         .iter()
         .map(|item| rewrite_structure_item(item, arena, let_unwrap_enabled))
@@ -43,6 +52,9 @@ pub fn rewrite_signature(
     arena: &mut ParseArena,
     let_unwrap_enabled: bool,
 ) -> Result<Vec<SignatureItem>, String> {
+    if !arena_mentions_let_unwrap(arena) {
+        return Ok(signature.to_vec());
+    }
     signature
         .iter()
         .map(|item| rewrite_signature_item(item, arena, let_unwrap_enabled))
