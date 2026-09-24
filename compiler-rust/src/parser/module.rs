@@ -475,7 +475,7 @@ pub fn parse_structure_item(p: &mut Parser<'_>) -> Option<StructureItem> {
         }
         _ => {
             // Could be an expression
-            if is_expr_start(&p.token) {
+            if grammar::is_expr_start(&p.token) {
                 let expr = expr::parse_expr(p);
                 parse_newline_or_semicolon_structure(p);
                 let expr_idx = p.arena_mut().push_expr(expr);
@@ -2167,42 +2167,6 @@ fn parse_with_constraint(p: &mut Parser<'_>) -> Option<WithConstraint> {
 // Helper Functions
 // ============================================================================
 
-/// Check if a token can start an expression.
-fn is_expr_start(token: &Token<'_>) -> bool {
-    matches!(
-        token,
-        Token::True
-            | Token::False
-            | Token::Int { .. }
-            | Token::Float { .. }
-            | Token::String(_)
-            | Token::Codepoint { .. }
-            | Token::Lident(_)
-            | Token::Uident(_)
-            | Token::Lparen
-            | Token::Lbracket
-            | Token::Lbrace
-            | Token::If
-            | Token::Switch
-            | Token::While
-            | Token::For
-            | Token::Try
-            | Token::LessThan
-            | Token::Minus
-            | Token::Plus
-            | Token::Bang
-            | Token::Await
-            | Token::Assert
-            | Token::List
-            | Token::Dict
-            | Token::Hash
-            | Token::Backtick
-            | Token::Percent
-            | Token::Forwardslash
-            | Token::ForwardslashDot
-            | Token::Underscore
-    )
-}
 
 /// Parse a module long identifier.
 /// Handles both module paths (Foo.Bar.Baz) and module type paths (Foo.Bar.t).
