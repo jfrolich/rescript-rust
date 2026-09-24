@@ -278,7 +278,11 @@ fn check_type_variable_name(loc: LocIdx, name: &str) -> TypeModResult<()> {
     }
 }
 
-fn report_inclusion_warnings(tctx: &mut TypeCheckContext<'_>, loc: LocIdx, warnings: Vec<Warning>) {
+pub(crate) fn report_inclusion_warnings(
+    tctx: &mut TypeCheckContext<'_>,
+    loc: LocIdx,
+    warnings: Vec<Warning>,
+) {
     for warning in warnings {
         tctx.report_warning(loc, warning);
     }
@@ -7467,10 +7471,6 @@ fn collect_open_shadow_identifier_use_checks(
         if matches!(opened_path, Path::Pident(_)) {
             continue;
         }
-        let Ok((opened_id, _)) = env_after_open.find_modtype_with_id(name) else {
-            continue;
-        };
-        let opened_path = Path::pident(opened_id.clone());
         out.push(OpenShadowIdentifierUseCheck {
             kind: "module type",
             name: name.to_string(),
@@ -11339,9 +11339,11 @@ pub fn lookup_modtype_path_by_lid<'b>(
     match lid {
         Longident::Lident(modtype_idx) => {
             let modtype_name = arena.get_string(*modtype_idx);
-            env.find_modtype_with_id(modtype_name)
+            // OCaml `Env.lookup_modtype` uses `IdTbl.find_name`: a local binding
+            // is `Pident id`, an opened one `Pdot (root, name, pos)`.
+            env.find_modtype_with_path(modtype_name)
                 .ok()
-                .map(|(id, _)| Path::pident(id.clone()))
+                .map(|(path, _)| path)
         }
         Longident::Ldot(prefix, submodtype_idx) => {
             let submodtype_name = arena.get_string(*submodtype_idx);

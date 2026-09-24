@@ -243,6 +243,28 @@ pub(crate) fn format_error_without_signature_header(
     output
 }
 
+/// OCaml `Includemod.show_loc` (includemod.ml:489-490):
+/// `@\n@[<2>%a:@ %s@]`, which stays on one line when it fits the 78-column
+/// margin and otherwise breaks with a 2-space indent.
+fn push_show_loc(output: &mut String, location: &str, message: &str) {
+    // Width is measured on the plain text; colour codes are Format tags.
+    let fits = 2 + location.len() + 2 + message.len() <= 77;
+    let location = code_frame::colorize_location(location);
+    if fits {
+        output.push_str("  ");
+        output.push_str(&location);
+        output.push_str(": ");
+        output.push_str(message);
+        output.push('\n');
+    } else {
+        output.push_str("  ");
+        output.push_str(&location);
+        output.push_str(":\n    ");
+        output.push_str(message);
+        output.push('\n');
+    }
+}
+
 fn format_include_error(
     type_ctx: &TypeContext,
     filename: &str,
@@ -372,22 +394,24 @@ fn format_include_error(
                 output.push_str(&format_type_declaration(type_ctx, name, expected));
                 output.push('\n');
             }
-            output.push_str("  ");
-            output.push_str(&code_frame::format_location(
+            push_show_loc(
+                output,
+                &code_frame::format_location(
                 &location_filename(type_ctx, filename, &expected.type_loc),
                 &expected.type_loc.loc_start,
                 &expected.type_loc.loc_end,
-            ));
-            output.push_str(":\n");
-            output.push_str("    Expected declaration\n");
-            output.push_str("  ");
-            output.push_str(&code_frame::format_location(
+                ),
+                "Expected declaration",
+            );
+            push_show_loc(
+                output,
+                &code_frame::format_location(
                 &location_filename(type_ctx, filename, &actual.type_loc),
                 &actual.type_loc.loc_start,
                 &actual.type_loc.loc_end,
-            ));
-            output.push_str(":\n");
-            output.push_str("    Actual declaration\n");
+                ),
+                "Actual declaration",
+            );
             for line in detail.message().lines() {
                 output.push_str("  ");
                 output.push_str(line);
@@ -407,22 +431,24 @@ fn format_include_error(
             output.push_str("    ");
             output.push_str(&format_extension_constructor(type_ctx, name, expected));
             output.push('\n');
-            output.push_str("  ");
-            output.push_str(&code_frame::format_location(
+            push_show_loc(
+                output,
+                &code_frame::format_location(
                 &location_filename(type_ctx, filename, &expected.ext_loc),
                 &expected.ext_loc.loc_start,
                 &expected.ext_loc.loc_end,
-            ));
-            output.push_str(":\n");
-            output.push_str("    Expected declaration\n");
-            output.push_str("  ");
-            output.push_str(&code_frame::format_location(
+                ),
+                "Expected declaration",
+            );
+            push_show_loc(
+                output,
+                &code_frame::format_location(
                 &location_filename(type_ctx, filename, &actual.ext_loc),
                 &actual.ext_loc.loc_start,
                 &actual.ext_loc.loc_end,
-            ));
-            output.push_str(":\n");
-            output.push_str("    Actual declaration\n");
+                ),
+                "Actual declaration",
+            );
         }
         IncludeModError::MissingField { id, loc, kind } => {
             output.push_str("  The ");
@@ -430,14 +456,15 @@ fn format_include_error(
             output.push_str(" `");
             output.push_str(id.name());
             output.push_str("' is required but not provided\n");
-            output.push_str("  ");
-            output.push_str(&code_frame::format_location(
+            push_show_loc(
+                output,
+                &code_frame::format_location(
                 &location_filename(type_ctx, filename, loc),
                 &loc.loc_start,
                 &loc.loc_end,
-            ));
-            output.push_str(":\n");
-            output.push_str("    Expected declaration\n");
+                ),
+                "Expected declaration",
+            );
         }
         IncludeModError::ValueTypeMismatch {
             name,
@@ -478,22 +505,24 @@ fn format_include_error(
                 output.push_str(&arguments(*expected_arity));
                 output.push_str(".\n");
             }
-            output.push_str("  ");
-            output.push_str(&code_frame::format_location(
+            push_show_loc(
+                output,
+                &code_frame::format_location(
                 &location_filename(type_ctx, filename, &expected.val_loc),
                 &expected.val_loc.loc_start,
                 &expected.val_loc.loc_end,
-            ));
-            output.push_str(":\n");
-            output.push_str("    Expected declaration\n");
-            output.push_str("  ");
-            output.push_str(&code_frame::format_location(
+                ),
+                "Expected declaration",
+            );
+            push_show_loc(
+                output,
+                &code_frame::format_location(
                 &location_filename(type_ctx, filename, &actual.val_loc),
                 &actual.val_loc.loc_start,
                 &actual.val_loc.loc_end,
-            ));
-            output.push_str(":\n");
-            output.push_str("    Actual declaration\n");
+                ),
+                "Actual declaration",
+            );
         }
         IncludeModError::TypeMismatch { name, reason } => {
             output.push_str("  Type declarations do not match: ");
@@ -637,7 +666,10 @@ fn format_module_type_with_options(
     full_paths: bool,
 ) -> String {
     match mty {
-        ModuleType::MtyIdent(path) | ModuleType::MtyAlias(_, path) => path.name(),
+        ModuleType::MtyIdent(path) => path.name(),
+        // Res_outcome_printer prints a bare `Omty_alias` as nothing
+        // (res_outcome_printer.ml:713); signature items print their alias.
+        ModuleType::MtyAlias(_, _) => String::new(),
         ModuleType::MtySignature(sig) => {
             if sig.is_empty() {
                 String::new()
@@ -1694,37 +1726,9 @@ fn modtypes_inner<'a>(
             }
         }
 
-        // Signature implementation matches identifier signature
-        (ModuleType::MtySignature(sig_impl), ModuleType::MtyIdent(path)) => {
-            if let Some(result) = with_local_pident_module_type(env, path, |expanded| {
-                modtypes_inner(
-                    type_ctx,
-                    env,
-                    subst,
-                    mty_impl,
-                    expanded,
-                    sig_access_path,
-                    aliasable,
-                    warnings,
-                )
-            }) {
-                return result;
-            }
-            if let Some(expanded) = expand_module_type_in_env(type_ctx, env, path) {
-                modtypes_inner(
-                    type_ctx,
-                    env,
-                    subst,
-                    mty_impl,
-                    &expanded,
-                    sig_access_path,
-                    aliasable,
-                    warnings,
-                )
-            } else {
-                Ok(ModuleCoercion::Tcoerce_none)
-            }
-        }
+        // A signature against an identifier goes through the generic
+        // `_, Mty_ident _` case below, which substitutes the expected path
+        // first (includemod.ml:237, 262-273).
 
         // Identifier implementation matches signature
         (ModuleType::MtyIdent(path), ModuleType::MtySignature(sig_sig)) => {
@@ -1754,7 +1758,12 @@ fn modtypes_inner<'a>(
                     warnings,
                 )
             } else {
-                Ok(ModuleCoercion::Tcoerce_none)
+                // includemod.ml `try_modtypes`: an identifier that cannot be
+                // expanded does not match a signature (`Dont_match`).
+                Err(IncludeModError::ModuleTypeMismatch {
+                    name: Ident::create_local("module"),
+                    reason: "incompatible module types".to_string(),
+                })
             }
         }
 

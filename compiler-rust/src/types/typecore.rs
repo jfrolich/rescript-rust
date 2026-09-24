@@ -22769,9 +22769,25 @@ fn type_pack(
     // Component-table probes now carry `ComponentLookupApi::ProbeModuleDescr`
     // explicitly, so package wrapping can call inclusion directly without
     // changing global lazy-forcing state.
-    let coercion =
-        crate::types::includemod::modtypes(ctx, &package_env, &arg_mty, &decl_package_mty)
-            .map_err(|err| TypeCoreError::Other(format!("pack: {err:?}")))?;
+    // typemod.ml `wrap_constraint`: an inclusion failure is `Not_included`
+    // at the packed module expression.
+    let mut inclusion_warnings = Vec::new();
+    let coercion_result = crate::types::includemod::modtypes_with_warnings(
+        ctx,
+        &package_env,
+        &arg_mty,
+        &decl_package_mty,
+        &mut inclusion_warnings,
+    );
+    crate::types::typemod::report_inclusion_warnings(tctx, typed_module_loc, inclusion_warnings);
+    let coercion = coercion_result.map_err(|error| {
+        TypeCoreError::ModuleError(Box::new(
+            crate::types::typemod::TypeModError::SignatureMismatch {
+                loc: typed_module_loc,
+                error,
+            },
+        ))
+    })?;
     let wrapped_module = crate::types::typedtree::ModuleExpr {
         mod_desc: crate::types::typedtree::ModuleExprDesc::Tmod_constraint(
             Box::new(typed_module),
