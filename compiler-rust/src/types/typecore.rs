@@ -12344,21 +12344,23 @@ fn report_unused_match_cases<'case>(
                 || previous_unguarded_cases
                     .iter()
                     .any(|previous| typed_pattern_contains_dict_pattern(tctx.arena, previous.lhs));
+            let patterns = typed_arena::Arena::new();
+            let arena = PressureArena::new(&patterns);
             let previous = previous_unguarded_cases
                 .iter()
                 .filter(|previous| {
                     !contains_dict || !typed_pattern_contains_dict_pattern(tctx.arena, previous.lhs)
                 })
-                .map(|previous| vec![previous.lhs.clone()])
+                .map(|previous| vec![previous.lhs])
                 .collect::<Vec<_>>();
             let query = if contains_dict {
-                opaque_dict_patterns(tctx.arena, &case.c_lhs)
+                arena.alloc(opaque_dict_patterns(tctx.arena, &case.c_lhs))
             } else {
-                case.c_lhs.clone()
+                &case.c_lhs
             };
-            let witnesses = pressure_matrix_satisfiables(tctx, env, &previous, vec![query])
+            let witnesses = pressure_matrix_satisfiables(tctx, env, arena, &previous, vec![query])
                 .into_iter()
-                .filter_map(|mut row| (row.len() == 1).then(|| row.remove(0)))
+                .filter_map(|row| (row.len() == 1).then(|| row[0].clone()))
                 .collect::<Vec<_>>();
             if let Some(witness) = pressure_matrix_orify_many(witnesses) {
                 useful_witnesses.push(witness);
@@ -13380,59 +13382,87 @@ fn pressure_matrix_omega_list(len: usize) -> Vec<Pattern> {
     (0..len).map(|_| pressure_matrix_omega_pat()).collect()
 }
 
-fn pressure_matrix_normalize_pat(pat: &Pattern) -> Pattern {
-    match &pat.pat_desc {
-        PatternDesc::Tpat_any | PatternDesc::Tpat_constant(_) => pat.clone(),
-        PatternDesc::Tpat_var(_, _) => {
-            let mut normalized = pat.clone();
-            normalized.pat_desc = PatternDesc::Tpat_any;
-            normalized
+/// A row of a pressure matrix. OCaml's `Parmatch` matrices are lists of
+/// shared pattern pointers; rows here borrow the typed patterns and the
+/// patterns synthesized during the check, which live in a [`PressureArena`].
+type PressureRow<'a> = Vec<&'a Pattern>;
+
+/// Owner of the patterns synthesized while checking one match, so matrix rows
+/// can hold references instead of cloning pattern trees.
+#[derive(Clone, Copy)]
+struct PressureArena<'a> {
+    patterns: &'a typed_arena::Arena<Pattern>,
+    omega: &'a Pattern,
+    zero: &'a Pattern,
+}
+
+impl<'a> PressureArena<'a> {
+    fn new(patterns: &'a typed_arena::Arena<Pattern>) -> Self {
+        let omega = &*patterns.alloc(pressure_matrix_omega_pat());
+        let zero = &*patterns.alloc(pressure_matrix_zero_pat());
+        Self {
+            patterns,
+            omega,
+            zero,
         }
-        PatternDesc::Tpat_alias(inner, _, _) => pressure_matrix_normalize_pat(inner),
-        PatternDesc::Tpat_tuple(items) => {
-            let mut normalized = pat.clone();
-            normalized.pat_desc = PatternDesc::Tpat_tuple(pressure_matrix_omega_list(items.len()));
-            normalized
-        }
-        PatternDesc::Tpat_construct(lid, cstr, args) => {
-            let mut normalized = pat.clone();
-            normalized.pat_desc = PatternDesc::Tpat_construct(
-                lid.clone(),
-                cstr.clone(),
-                pressure_matrix_omega_list(args.len()),
-            );
-            normalized
-        }
-        PatternDesc::Tpat_variant(label, arg, row) => {
-            let mut normalized = pat.clone();
-            normalized.pat_desc = PatternDesc::Tpat_variant(
-                label.clone(),
-                arg.as_ref().map(|_| Box::new(pressure_matrix_omega_pat())),
-                *row,
-            );
-            normalized
-        }
-        PatternDesc::Tpat_array(items) => {
-            let mut normalized = pat.clone();
-            normalized.pat_desc = PatternDesc::Tpat_array(pressure_matrix_omega_list(items.len()));
-            normalized
-        }
-        PatternDesc::Tpat_record(fields, closed, _) => {
-            let mut normalized = pat.clone();
-            normalized.pat_desc = PatternDesc::Tpat_record(
-                fields
-                    .iter()
-                    .map(|(lid, lbl, _, opt)| {
-                        (lid.clone(), lbl.clone(), pressure_matrix_omega_pat(), *opt)
-                    })
-                    .collect(),
-                *closed,
-                None,
-            );
-            normalized
-        }
-        PatternDesc::Tpat_or(_, _, _) => unreachable!("or-patterns must be expanded first"),
     }
+
+    fn alloc(&self, pattern: Pattern) -> &'a Pattern {
+        self.patterns.alloc(pattern)
+    }
+
+    fn omega_list(&self, len: usize) -> PressureRow<'a> {
+        vec![self.omega; len]
+    }
+}
+
+/// `pat` with its description replaced, keeping the node's location, type,
+/// environment, extras and attributes.
+fn pressure_matrix_with_desc(pat: &Pattern, desc: PatternDesc) -> Pattern {
+    Pattern {
+        pat_desc: desc,
+        pat_loc: pat.pat_loc,
+        pat_extra: pat.pat_extra.clone(),
+        pat_type: pat.pat_type,
+        pat_env: pat.pat_env,
+        pat_attributes: pat.pat_attributes.clone(),
+    }
+}
+
+fn pressure_matrix_normalize_pat<'a>(arena: PressureArena<'a>, pat: &'a Pattern) -> &'a Pattern {
+    let desc = match &pat.pat_desc {
+        PatternDesc::Tpat_any | PatternDesc::Tpat_constant(_) => return pat,
+        PatternDesc::Tpat_alias(inner, _, _) => return pressure_matrix_normalize_pat(arena, inner),
+        PatternDesc::Tpat_var(_, _) => PatternDesc::Tpat_any,
+        PatternDesc::Tpat_tuple(items) => {
+            PatternDesc::Tpat_tuple(pressure_matrix_omega_list(items.len()))
+        }
+        PatternDesc::Tpat_construct(lid, cstr, args) => PatternDesc::Tpat_construct(
+            lid.clone(),
+            cstr.clone(),
+            pressure_matrix_omega_list(args.len()),
+        ),
+        PatternDesc::Tpat_variant(label, arg, row) => PatternDesc::Tpat_variant(
+            label.clone(),
+            arg.as_ref().map(|_| Box::new(pressure_matrix_omega_pat())),
+            *row,
+        ),
+        PatternDesc::Tpat_array(items) => {
+            PatternDesc::Tpat_array(pressure_matrix_omega_list(items.len()))
+        }
+        PatternDesc::Tpat_record(fields, closed, _) => PatternDesc::Tpat_record(
+            fields
+                .iter()
+                .map(|(lid, lbl, _, opt)| {
+                    (lid.clone(), lbl.clone(), pressure_matrix_omega_pat(), *opt)
+                })
+                .collect(),
+            *closed,
+            None,
+        ),
+        PatternDesc::Tpat_or(_, _, _) => unreachable!("or-patterns must be expanded first"),
+    };
+    arena.alloc(pressure_matrix_with_desc(pat, desc))
 }
 
 fn pressure_matrix_simple_match(left: &Pattern, right: &Pattern) -> bool {
@@ -13457,68 +13487,83 @@ type PressureRecordField = (
     bool,
 );
 
-fn pressure_matrix_record_arg(pat: &Pattern) -> Vec<PressureRecordField> {
+fn pressure_matrix_record_arg(pat: &Pattern) -> &[PressureRecordField] {
     match &pat.pat_desc {
-        PatternDesc::Tpat_any => vec![],
-        PatternDesc::Tpat_record(fields, _, _) => fields.clone(),
+        PatternDesc::Tpat_any => &[],
+        PatternDesc::Tpat_record(fields, _, _) => fields,
         _ => panic!("Parmatch.record_arg"),
     }
 }
 
-fn pressure_matrix_extract_fields(
+fn pressure_matrix_extract_fields<'a>(
+    arena: PressureArena<'a>,
     omegas: &[PressureRecordField],
-    args: &[PressureRecordField],
-) -> Vec<Pattern> {
+    args: &'a [PressureRecordField],
+) -> PressureRow<'a> {
     omegas
         .iter()
         .map(|(_, lbl, _, _)| {
             args.iter()
                 .find(|(_, field_lbl, _, _)| lbl.lbl_pos == field_lbl.lbl_pos)
-                .map(|(_, _, field_pat, _)| field_pat.clone())
-                .unwrap_or_else(pressure_matrix_omega_pat)
+                .map_or(arena.omega, |(_, _, field_pat, _)| field_pat)
         })
         .collect()
 }
 
-fn pressure_matrix_simple_match_args(left: &Pattern, right: &Pattern) -> Vec<Pattern> {
+fn pressure_matrix_simple_match_args<'a>(
+    arena: PressureArena<'a>,
+    left: &'a Pattern,
+    right: &'a Pattern,
+) -> PressureRow<'a> {
     match &right.pat_desc {
-        PatternDesc::Tpat_alias(inner, _, _) => pressure_matrix_simple_match_args(left, inner),
-        PatternDesc::Tpat_construct(_, _, args) => args.clone(),
-        PatternDesc::Tpat_variant(_, Some(arg), _) => vec![(*arg.clone())],
-        PatternDesc::Tpat_tuple(args) => args.clone(),
-        PatternDesc::Tpat_record(args, _, _) => {
-            pressure_matrix_extract_fields(&pressure_matrix_record_arg(left), args)
+        PatternDesc::Tpat_alias(inner, _, _) => {
+            pressure_matrix_simple_match_args(arena, left, inner)
         }
-        PatternDesc::Tpat_array(args) => args.clone(),
+        PatternDesc::Tpat_construct(_, _, args)
+        | PatternDesc::Tpat_tuple(args)
+        | PatternDesc::Tpat_array(args) => args.iter().collect(),
+        PatternDesc::Tpat_variant(_, Some(arg), _) => vec![&**arg],
+        PatternDesc::Tpat_record(args, _, _) => {
+            pressure_matrix_extract_fields(arena, pressure_matrix_record_arg(left), args)
+        }
         PatternDesc::Tpat_any | PatternDesc::Tpat_var(_, _) => match &left.pat_desc {
             PatternDesc::Tpat_construct(_, _, args)
             | PatternDesc::Tpat_tuple(args)
-            | PatternDesc::Tpat_array(args) => pressure_matrix_omega_list(args.len()),
-            PatternDesc::Tpat_variant(_, Some(_), _) => vec![pressure_matrix_omega_pat()],
-            PatternDesc::Tpat_record(args, _, _) => pressure_matrix_omega_list(args.len()),
+            | PatternDesc::Tpat_array(args) => arena.omega_list(args.len()),
+            PatternDesc::Tpat_variant(_, Some(_), _) => vec![arena.omega],
+            PatternDesc::Tpat_record(args, _, _) => arena.omega_list(args.len()),
             _ => vec![],
         },
         _ => vec![],
     }
 }
 
-fn pressure_matrix_simplify_head_pat(pat: &Pattern, out: &mut Vec<Pattern>) {
+fn pressure_matrix_simplify_head_pat<'a>(
+    arena: PressureArena<'a>,
+    pat: &'a Pattern,
+    out: &mut PressureRow<'a>,
+) {
     match &pat.pat_desc {
-        PatternDesc::Tpat_alias(inner, _, _) => pressure_matrix_simplify_head_pat(inner, out),
-        PatternDesc::Tpat_var(_, _) => out.push(pressure_matrix_omega_pat()),
-        PatternDesc::Tpat_or(left, right, _) => {
-            pressure_matrix_simplify_head_pat(left, out);
-            pressure_matrix_simplify_head_pat(right, out);
+        PatternDesc::Tpat_alias(inner, _, _) => {
+            pressure_matrix_simplify_head_pat(arena, inner, out)
         }
-        _ => out.push(pat.clone()),
+        PatternDesc::Tpat_var(_, _) => out.push(arena.omega),
+        PatternDesc::Tpat_or(left, right, _) => {
+            pressure_matrix_simplify_head_pat(arena, left, out);
+            pressure_matrix_simplify_head_pat(arena, right, out);
+        }
+        _ => out.push(pat),
     }
 }
 
-fn pressure_matrix_simplified_first_col(rows: &[Vec<Pattern>]) -> Vec<Pattern> {
+fn pressure_matrix_simplified_first_col<'a>(
+    arena: PressureArena<'a>,
+    rows: &[PressureRow<'a>],
+) -> PressureRow<'a> {
     let mut column = Vec::new();
     for row in rows {
         if let Some(head) = row.first() {
-            pressure_matrix_simplify_head_pat(head, &mut column);
+            pressure_matrix_simplify_head_pat(arena, head, &mut column);
         }
     }
     column
@@ -13616,7 +13661,7 @@ fn pressure_matrix_coherent_heads(left: &Pattern, right: &Pattern) -> bool {
     }
 }
 
-fn pressure_matrix_all_coherent(column: &[Pattern]) -> bool {
+fn pressure_matrix_all_coherent(column: &[&Pattern]) -> bool {
     let Some(discriminant) = column
         .iter()
         .find(|pat| !matches!(pat.pat_desc, PatternDesc::Tpat_any))
@@ -13628,32 +13673,46 @@ fn pressure_matrix_all_coherent(column: &[Pattern]) -> bool {
         .all(|pat| pressure_matrix_coherent_heads(discriminant, pat))
 }
 
-fn pressure_matrix_discr_pat(q: &Pattern, rows: &[Vec<Pattern>]) -> Pattern {
-    fn acc_pat(mut acc: Pattern, rows: &[Vec<Pattern>]) -> Pattern {
-        let mut stack: Vec<Vec<Pattern>> = rows.to_vec();
+/// Push `row` with its head replaced by `head`.
+fn pressure_matrix_push_row<'a>(
+    stack: &mut Vec<PressureRow<'a>>,
+    head: &'a Pattern,
+    tail: &[&'a Pattern],
+) {
+    let mut row = Vec::with_capacity(tail.len() + 1);
+    row.push(head);
+    row.extend_from_slice(tail);
+    stack.push(row);
+}
+
+fn pressure_matrix_discr_pat<'a>(
+    arena: PressureArena<'a>,
+    q: &'a Pattern,
+    rows: &[PressureRow<'a>],
+) -> &'a Pattern {
+    fn acc_pat<'a>(
+        arena: PressureArena<'a>,
+        mut acc: &'a Pattern,
+        rows: &[PressureRow<'a>],
+    ) -> &'a Pattern {
+        let mut stack: Vec<PressureRow<'a>> = rows.to_vec();
         while let Some(row) = stack.pop() {
             let Some((head, tail)) = row.split_first() else {
                 continue;
             };
+            let head: &'a Pattern = head;
             match &head.pat_desc {
                 PatternDesc::Tpat_alias(inner, _, _) => {
-                    let mut expanded = vec![(**inner).clone()];
-                    expanded.extend_from_slice(tail);
-                    stack.push(expanded);
+                    pressure_matrix_push_row(&mut stack, inner, tail);
                 }
                 PatternDesc::Tpat_or(left, right, _) => {
-                    let mut left_row = vec![(**left).clone()];
-                    left_row.extend_from_slice(tail);
-                    stack.push(left_row);
-                    let mut right_row = vec![(**right).clone()];
-                    right_row.extend_from_slice(tail);
-                    stack.push(right_row);
+                    pressure_matrix_push_row(&mut stack, left, tail);
+                    pressure_matrix_push_row(&mut stack, right, tail);
                 }
                 PatternDesc::Tpat_any | PatternDesc::Tpat_var(_, _) => {}
-                PatternDesc::Tpat_tuple(_) => return pressure_matrix_normalize_pat(head),
+                PatternDesc::Tpat_tuple(_) => return pressure_matrix_normalize_pat(arena, head),
                 PatternDesc::Tpat_record(fields, closed, _) => {
-                    let existing = pressure_matrix_record_arg(&acc);
-                    let mut merged = existing.clone();
+                    let mut merged = pressure_matrix_record_arg(acc).to_vec();
                     for (lid, lbl, _, opt) in fields.iter().rev() {
                         if !merged
                             .iter()
@@ -13665,9 +13724,10 @@ fn pressure_matrix_discr_pat(q: &Pattern, rows: &[Vec<Pattern>]) -> Pattern {
                             );
                         }
                     }
-                    let mut updated = head.clone();
-                    updated.pat_desc = PatternDesc::Tpat_record(merged, *closed, None);
-                    acc = updated;
+                    acc = arena.alloc(pressure_matrix_with_desc(
+                        head,
+                        PatternDesc::Tpat_record(merged, *closed, None),
+                    ));
                 }
                 _ => {}
             }
@@ -13675,37 +13735,38 @@ fn pressure_matrix_discr_pat(q: &Pattern, rows: &[Vec<Pattern>]) -> Pattern {
         acc
     }
 
-    let normalized = pressure_matrix_normalize_pat(q);
+    let normalized = pressure_matrix_normalize_pat(arena, q);
     match normalized.pat_desc {
-        PatternDesc::Tpat_any | PatternDesc::Tpat_record(_, _, _) => acc_pat(normalized, rows),
+        PatternDesc::Tpat_any | PatternDesc::Tpat_record(_, _, _) => {
+            acc_pat(arena, normalized, rows)
+        }
         _ => normalized,
     }
 }
 
-fn pressure_matrix_filter_one(q: &Pattern, rows: &[Vec<Pattern>]) -> Vec<Vec<Pattern>> {
+fn pressure_matrix_filter_one<'a>(
+    arena: PressureArena<'a>,
+    q: &'a Pattern,
+    rows: &[PressureRow<'a>],
+) -> Vec<PressureRow<'a>> {
     let mut out = Vec::new();
-    let mut stack: Vec<Vec<Pattern>> = rows.to_vec();
+    let mut stack: Vec<PressureRow<'a>> = rows.to_vec();
     while let Some(row) = stack.pop() {
         let Some((head, tail)) = row.split_first() else {
             continue;
         };
+        let head: &'a Pattern = head;
         match &head.pat_desc {
             PatternDesc::Tpat_alias(inner, _, _) => {
-                let mut expanded = vec![(**inner).clone()];
-                expanded.extend_from_slice(tail);
-                stack.push(expanded);
+                pressure_matrix_push_row(&mut stack, inner, tail);
             }
             PatternDesc::Tpat_or(left, right, _) => {
-                let mut left_row = vec![(**left).clone()];
-                left_row.extend_from_slice(tail);
-                stack.push(left_row);
-                let mut right_row = vec![(**right).clone()];
-                right_row.extend_from_slice(tail);
-                stack.push(right_row);
+                pressure_matrix_push_row(&mut stack, left, tail);
+                pressure_matrix_push_row(&mut stack, right, tail);
             }
             _ => {
                 if pressure_matrix_simple_match(q, head) {
-                    let mut specialized = pressure_matrix_simple_match_args(q, head);
+                    let mut specialized = pressure_matrix_simple_match_args(arena, q, head);
                     specialized.extend_from_slice(tail);
                     out.push(specialized);
                 }
@@ -13715,26 +13776,21 @@ fn pressure_matrix_filter_one(q: &Pattern, rows: &[Vec<Pattern>]) -> Vec<Vec<Pat
     out
 }
 
-fn pressure_matrix_filter_extra(rows: &[Vec<Pattern>]) -> Vec<Vec<Pattern>> {
+fn pressure_matrix_filter_extra<'a>(rows: &[PressureRow<'a>]) -> Vec<PressureRow<'a>> {
     let mut out = Vec::new();
-    let mut stack: Vec<Vec<Pattern>> = rows.to_vec();
+    let mut stack: Vec<PressureRow<'a>> = rows.to_vec();
     while let Some(row) = stack.pop() {
         let Some((head, tail)) = row.split_first() else {
             continue;
         };
+        let head: &'a Pattern = head;
         match &head.pat_desc {
             PatternDesc::Tpat_alias(inner, _, _) => {
-                let mut expanded = vec![(**inner).clone()];
-                expanded.extend_from_slice(tail);
-                stack.push(expanded);
+                pressure_matrix_push_row(&mut stack, inner, tail);
             }
             PatternDesc::Tpat_or(left, right, _) => {
-                let mut left_row = vec![(**left).clone()];
-                left_row.extend_from_slice(tail);
-                stack.push(left_row);
-                let mut right_row = vec![(**right).clone()];
-                right_row.extend_from_slice(tail);
-                stack.push(right_row);
+                pressure_matrix_push_row(&mut stack, left, tail);
+                pressure_matrix_push_row(&mut stack, right, tail);
             }
             PatternDesc::Tpat_any | PatternDesc::Tpat_var(_, _) => out.push(tail.to_vec()),
             _ => {}
@@ -13743,80 +13799,75 @@ fn pressure_matrix_filter_extra(rows: &[Vec<Pattern>]) -> Vec<Vec<Pattern>> {
     out
 }
 
-fn pressure_matrix_filter_all(
-    pat0: &Pattern,
-    rows: &[Vec<Pattern>],
-) -> Vec<(Pattern, Vec<Vec<Pattern>>)> {
-    fn insert(pat: &Pattern, tail: &[Pattern], env: &mut Vec<(Pattern, Vec<Vec<Pattern>>)>) {
-        let normalized = pressure_matrix_normalize_pat(pat);
+type PressureBranch<'a> = (&'a Pattern, Vec<PressureRow<'a>>);
+
+fn pressure_matrix_filter_all<'a>(
+    arena: PressureArena<'a>,
+    pat0: &'a Pattern,
+    rows: &[PressureRow<'a>],
+) -> Vec<PressureBranch<'a>> {
+    fn insert<'a>(
+        arena: PressureArena<'a>,
+        pat: &'a Pattern,
+        tail: &[&'a Pattern],
+        env: &mut Vec<PressureBranch<'a>>,
+    ) {
+        let normalized = pressure_matrix_normalize_pat(arena, pat);
+        let mut specialized = pressure_matrix_simple_match_args(arena, normalized, pat);
+        specialized.extend_from_slice(tail);
         if let Some((_, matrices)) = env
             .iter_mut()
             .find(|(existing, _)| pressure_matrix_simple_match(existing, pat))
         {
-            let mut specialized = pressure_matrix_simple_match_args(&normalized, pat);
-            specialized.extend_from_slice(tail);
             matrices.push(specialized);
         } else {
-            let mut specialized = pressure_matrix_simple_match_args(&normalized, pat);
-            specialized.extend_from_slice(tail);
             env.push((normalized, vec![specialized]));
         }
     }
 
     let mut env = match pat0.pat_desc {
         PatternDesc::Tpat_record(_, _, _) | PatternDesc::Tpat_tuple(_) => {
-            vec![(pat0.clone(), vec![])]
+            vec![(pat0, vec![])]
         }
         _ => vec![],
     };
 
-    let mut stack: Vec<Vec<Pattern>> = rows.to_vec();
+    let mut stack: Vec<PressureRow<'a>> = rows.to_vec();
     while let Some(row) = stack.pop() {
         let Some((head, tail)) = row.split_first() else {
             continue;
         };
+        let head: &'a Pattern = head;
         match &head.pat_desc {
             PatternDesc::Tpat_alias(inner, _, _) => {
-                let mut expanded = vec![(**inner).clone()];
-                expanded.extend_from_slice(tail);
-                stack.push(expanded);
+                pressure_matrix_push_row(&mut stack, inner, tail);
             }
             PatternDesc::Tpat_or(left, right, _) => {
-                let mut left_row = vec![(**left).clone()];
-                left_row.extend_from_slice(tail);
-                stack.push(left_row);
-                let mut right_row = vec![(**right).clone()];
-                right_row.extend_from_slice(tail);
-                stack.push(right_row);
+                pressure_matrix_push_row(&mut stack, left, tail);
+                pressure_matrix_push_row(&mut stack, right, tail);
             }
             PatternDesc::Tpat_any | PatternDesc::Tpat_var(_, _) => {}
-            _ => insert(head, tail, &mut env),
+            _ => insert(arena, head, tail, &mut env),
         }
     }
 
-    let mut stack: Vec<Vec<Pattern>> = rows.to_vec();
+    let mut stack: Vec<PressureRow<'a>> = rows.to_vec();
     while let Some(row) = stack.pop() {
         let Some((head, tail)) = row.split_first() else {
             continue;
         };
+        let head: &'a Pattern = head;
         match &head.pat_desc {
             PatternDesc::Tpat_alias(inner, _, _) => {
-                let mut expanded = vec![(**inner).clone()];
-                expanded.extend_from_slice(tail);
-                stack.push(expanded);
+                pressure_matrix_push_row(&mut stack, inner, tail);
             }
             PatternDesc::Tpat_or(left, right, _) => {
-                let mut left_row = vec![(**left).clone()];
-                left_row.extend_from_slice(tail);
-                stack.push(left_row);
-                let mut right_row = vec![(**right).clone()];
-                right_row.extend_from_slice(tail);
-                stack.push(right_row);
+                pressure_matrix_push_row(&mut stack, left, tail);
+                pressure_matrix_push_row(&mut stack, right, tail);
             }
             PatternDesc::Tpat_any | PatternDesc::Tpat_var(_, _) => {
                 for (q, matrices) in env.iter_mut() {
-                    let mut specialized =
-                        pressure_matrix_simple_match_args(q, &pressure_matrix_omega_pat());
+                    let mut specialized = pressure_matrix_simple_match_args(arena, q, arena.omega);
                     specialized.extend_from_slice(tail);
                     matrices.push(specialized);
                 }
@@ -13828,32 +13879,36 @@ fn pressure_matrix_filter_all(
     env
 }
 
-fn pressure_matrix_mark_partial(rows: &[Vec<Pattern>]) -> Vec<Vec<Pattern>> {
+fn pressure_matrix_mark_partial<'a>(
+    arena: PressureArena<'a>,
+    rows: &[PressureRow<'a>],
+) -> Vec<PressureRow<'a>> {
     rows.iter()
         .flat_map(|row| {
             let Some((head, tail)) = row.split_first() else {
                 return vec![vec![]];
             };
+            let head: &'a Pattern = head;
             match &head.pat_desc {
                 PatternDesc::Tpat_alias(inner, _, _) => {
-                    let mut expanded = vec![(**inner).clone()];
+                    let mut expanded = vec![&**inner];
                     expanded.extend_from_slice(tail);
-                    pressure_matrix_mark_partial(&[expanded])
+                    pressure_matrix_mark_partial(arena, &[expanded])
                 }
                 PatternDesc::Tpat_or(left, right, _) => {
-                    let mut left_row = vec![(**left).clone()];
+                    let mut left_row = vec![&**left];
                     left_row.extend_from_slice(tail);
-                    let mut right_row = vec![(**right).clone()];
+                    let mut right_row = vec![&**right];
                     right_row.extend_from_slice(tail);
-                    let mut out = pressure_matrix_mark_partial(&[left_row]);
-                    out.extend(pressure_matrix_mark_partial(&[right_row]));
+                    let mut out = pressure_matrix_mark_partial(arena, &[left_row]);
+                    out.extend(pressure_matrix_mark_partial(arena, &[right_row]));
                     out
                 }
                 PatternDesc::Tpat_any | PatternDesc::Tpat_var(_, _) => vec![row.clone()],
                 _ => {
                     let mut updated = row.clone();
                     if let Some(last) = updated.last_mut() {
-                        *last = pressure_matrix_zero_pat();
+                        *last = arena.zero;
                     }
                     vec![updated]
                 }
@@ -13941,7 +13996,7 @@ fn pressure_matrix_full_match(
     tctx: &mut TypeCheckContext<'_>,
     env: &Env,
     closing: bool,
-    branches: &[(Pattern, Vec<Vec<Pattern>>)],
+    branches: &[PressureBranch<'_>],
 ) -> bool {
     let Some((pat, _)) = branches.first() else {
         return false;
@@ -14000,67 +14055,77 @@ fn pressure_matrix_full_match(
     }
 }
 
-fn pressure_matrix_has_instances(patterns: &[Pattern]) -> bool {
-    patterns.iter().all(|pattern| match &pattern.pat_desc {
-        PatternDesc::Tpat_alias(inner, _, _) => {
-            pressure_matrix_has_instances(std::slice::from_ref(inner.as_ref()))
-        }
+fn pressure_matrix_has_instances<'p>(patterns: impl IntoIterator<Item = &'p Pattern>) -> bool {
+    patterns.into_iter().all(pressure_matrix_has_instance)
+}
+
+fn pressure_matrix_has_instance(pattern: &Pattern) -> bool {
+    match &pattern.pat_desc {
+        PatternDesc::Tpat_alias(inner, _, _) => pressure_matrix_has_instance(inner),
         PatternDesc::Tpat_or(left, right, _) => {
-            pressure_matrix_has_instances(std::slice::from_ref(left.as_ref()))
-                || pressure_matrix_has_instances(std::slice::from_ref(right.as_ref()))
+            pressure_matrix_has_instance(left) || pressure_matrix_has_instance(right)
         }
         PatternDesc::Tpat_construct(_, _, args)
         | PatternDesc::Tpat_tuple(args)
-        | PatternDesc::Tpat_array(args) => pressure_matrix_has_instances(args),
-        PatternDesc::Tpat_record(fields, _, _) => pressure_matrix_has_instances(
-            &fields
-                .iter()
-                .map(|(_, _, field, _)| field.clone())
-                .collect::<Vec<_>>(),
-        ),
-        PatternDesc::Tpat_variant(_, Some(argument), _) => {
-            pressure_matrix_has_instances(std::slice::from_ref(argument.as_ref()))
-        }
+        | PatternDesc::Tpat_array(args) => args.iter().all(pressure_matrix_has_instance),
+        PatternDesc::Tpat_record(fields, _, _) => fields
+            .iter()
+            .all(|(_, _, field, _)| pressure_matrix_has_instance(field)),
+        PatternDesc::Tpat_variant(_, Some(argument), _) => pressure_matrix_has_instance(argument),
         PatternDesc::Tpat_any
         | PatternDesc::Tpat_var(_, _)
         | PatternDesc::Tpat_constant(_)
         | PatternDesc::Tpat_variant(_, None, _) => true,
-    })
+    }
 }
 
-fn pressure_matrix_set_args(mut pattern: Pattern, args: Vec<Pattern>) -> Pattern {
-    pattern.pat_desc = match pattern.pat_desc {
-        PatternDesc::Tpat_construct(lid, desc, _) => PatternDesc::Tpat_construct(lid, desc, args),
-        PatternDesc::Tpat_tuple(_) => PatternDesc::Tpat_tuple(args),
-        PatternDesc::Tpat_array(_) => PatternDesc::Tpat_array(args),
+/// `pattern` with its arguments replaced by copies of `args`.
+fn pressure_matrix_set_args<'a>(
+    arena: PressureArena<'a>,
+    pattern: &Pattern,
+    args: &[&Pattern],
+) -> &'a Pattern {
+    let mut args = args.iter().map(|arg| (*arg).clone());
+    let desc = match &pattern.pat_desc {
+        PatternDesc::Tpat_construct(lid, desc, _) => {
+            PatternDesc::Tpat_construct(lid.clone(), desc.clone(), args.collect())
+        }
+        PatternDesc::Tpat_tuple(_) => PatternDesc::Tpat_tuple(args.collect()),
+        PatternDesc::Tpat_array(_) => PatternDesc::Tpat_array(args.collect()),
         PatternDesc::Tpat_variant(label, argument, row) => PatternDesc::Tpat_variant(
-            label,
-            argument.map(|_| Box::new(args.into_iter().next().expect("variant argument"))),
-            row,
+            label.clone(),
+            argument
+                .as_ref()
+                .map(|_| Box::new(args.next().expect("variant argument"))),
+            *row,
         ),
         PatternDesc::Tpat_record(fields, closed, rest) => {
             debug_assert_eq!(fields.len(), args.len());
             PatternDesc::Tpat_record(
                 fields
-                    .into_iter()
+                    .iter()
                     .zip(args)
-                    .map(|((lid, label, _, optional), argument)| (lid, label, argument, optional))
+                    .map(|((lid, label, _, optional), argument)| {
+                        (lid.clone(), label.clone(), argument, *optional)
+                    })
                     .collect(),
-                closed,
-                rest,
+                *closed,
+                rest.clone(),
             )
         }
-        desc => desc,
+        desc => desc.clone(),
     };
-    pattern
+    arena.alloc(pressure_matrix_with_desc(pattern, desc))
 }
 
 fn pressure_matrix_orify_many(mut patterns: Vec<Pattern>) -> Option<Pattern> {
     let first = patterns.pop()?;
     Some(patterns.into_iter().rev().fold(first, |right, left| {
-        let mut pattern = left.clone();
-        pattern.pat_desc = PatternDesc::Tpat_or(Box::new(left), Box::new(right), None);
-        pattern
+        let shell = pressure_matrix_with_desc(&left, PatternDesc::Tpat_any);
+        pressure_matrix_with_desc(
+            &shell,
+            PatternDesc::Tpat_or(Box::new(left), Box::new(right), None),
+        )
     }))
 }
 
@@ -14084,15 +14149,16 @@ fn pressure_matrix_constructor_pattern(
         tctx.arena.push_typecheck_lident(&constructor.cstr_name),
         template.pat_loc,
     );
-    let mut pattern = template.clone();
-    pattern.pat_desc = PatternDesc::Tpat_construct(lid, Arc::new(constructor), args);
-    pattern
+    pressure_matrix_with_desc(
+        template,
+        PatternDesc::Tpat_construct(lid, Arc::new(constructor), args),
+    )
 }
 
 fn pressure_matrix_other_constructors(
     tctx: &mut TypeCheckContext<'_>,
     env: &Env,
-    branches: &[(Pattern, Vec<Vec<Pattern>>)],
+    branches: &[PressureBranch<'_>],
     template: &Pattern,
 ) -> Option<Pattern> {
     let constructors = variant_constructor_descriptions_for_type(tctx, env, template.pat_type)?;
@@ -14115,85 +14181,86 @@ fn pressure_matrix_other_constructors(
 /// OCaml `Parmatch.satisfiables`: return the portions of `query` that remain
 /// after the rows in `previous`. The returned rows are converted back to one
 /// witness by `orify_many` before delayed GADT retyping.
-fn pressure_matrix_satisfiables(
+fn pressure_matrix_satisfiables<'a>(
     tctx: &mut TypeCheckContext<'_>,
     env: &Env,
-    previous: &[Vec<Pattern>],
-    query: Vec<Pattern>,
-) -> Vec<Vec<Pattern>> {
+    arena: PressureArena<'a>,
+    previous: &[PressureRow<'a>],
+    query: PressureRow<'a>,
+) -> Vec<PressureRow<'a>> {
     if previous.is_empty() {
-        return pressure_matrix_has_instances(&query)
+        return pressure_matrix_has_instances(query.iter().copied())
             .then_some(query)
             .into_iter()
             .collect();
     }
-    let Some((head, tail)) = query.split_first() else {
+    let Some((&head, tail)) = query.split_first() else {
         return Vec::new();
     };
 
     match &head.pat_desc {
         PatternDesc::Tpat_or(left, right, _) => {
-            let mut left_query = vec![(**left).clone()];
+            let mut left_query = vec![&**left];
             left_query.extend_from_slice(tail);
-            let mut right_query = vec![(**right).clone()];
+            let mut right_query = vec![&**right];
             right_query.extend_from_slice(tail);
-            let mut witnesses = pressure_matrix_satisfiables(tctx, env, previous, left_query);
+            let mut witnesses = pressure_matrix_satisfiables(tctx, env, arena, previous, left_query);
             witnesses.extend(pressure_matrix_satisfiables(
                 tctx,
                 env,
+                arena,
                 previous,
                 right_query,
             ));
             witnesses
         }
         PatternDesc::Tpat_alias(inner, _, _) => {
-            let mut query = vec![(**inner).clone()];
+            let mut query = vec![&**inner];
             query.extend_from_slice(tail);
-            pressure_matrix_satisfiables(tctx, env, previous, query)
+            pressure_matrix_satisfiables(tctx, env, arena, previous, query)
         }
         PatternDesc::Tpat_any | PatternDesc::Tpat_var(_, _) => {
-            let first_column = pressure_matrix_simplified_first_col(previous);
+            let first_column = pressure_matrix_simplified_first_col(arena, previous);
             if !pressure_matrix_all_coherent(&first_column) {
                 return Vec::new();
             }
-            let q0 = pressure_matrix_discr_pat(&pressure_matrix_omega_pat(), previous);
-            let branches = pressure_matrix_filter_all(&q0, previous);
-            let wild = |tctx: &mut TypeCheckContext<'_>, pattern: Pattern| {
+            let q0 = pressure_matrix_discr_pat(arena, arena.omega, previous);
+            let branches = pressure_matrix_filter_all(arena, q0, previous);
+            let wild = |tctx: &mut TypeCheckContext<'_>, pattern: &'a Pattern| {
                 pressure_matrix_satisfiables(
                     tctx,
                     env,
+                    arena,
                     &pressure_matrix_filter_extra(previous),
                     tail.to_vec(),
                 )
                 .into_iter()
                 .map(|mut row| {
-                    row.insert(0, pattern.clone());
+                    row.insert(0, pattern);
                     row
                 })
                 .collect::<Vec<_>>()
             };
             if branches.is_empty() {
-                return wild(tctx, pressure_matrix_omega_pat());
+                return wild(tctx, arena.omega);
             }
 
             let for_constructors = |tctx: &mut TypeCheckContext<'_>| {
                 let mut witnesses = Vec::new();
                 for (pattern, matrix) in &branches {
+                    let pattern: &'a Pattern = pattern;
                     if pressure_matrix_is_absent_pat(tctx, env, pattern) {
                         continue;
                     }
                     let mut specialized_query =
-                        pressure_matrix_simple_match_args(pattern, &pressure_matrix_omega_pat());
+                        pressure_matrix_simple_match_args(arena, pattern, arena.omega);
+                    let arity = specialized_query.len();
                     specialized_query.extend_from_slice(tail);
-                    for row in pressure_matrix_satisfiables(tctx, env, matrix, specialized_query) {
-                        let arity = pressure_matrix_simple_match_args(
-                            pattern,
-                            &pressure_matrix_omega_pat(),
-                        )
-                        .len();
+                    for row in
+                        pressure_matrix_satisfiables(tctx, env, arena, matrix, specialized_query)
+                    {
                         let (args, rest) = row.split_at(arity);
-                        let mut restored =
-                            vec![pressure_matrix_set_args(pattern.clone(), args.to_vec())];
+                        let mut restored = vec![pressure_matrix_set_args(arena, pattern, args)];
                         restored.extend_from_slice(rest);
                         witnesses.push(restored);
                     }
@@ -14205,9 +14272,9 @@ fn pressure_matrix_satisfiables(
                 for_constructors(tctx)
             } else if matches!(branches[0].0.pat_desc, PatternDesc::Tpat_construct(_, _, _)) {
                 let other =
-                    pressure_matrix_other_constructors(tctx, env, &branches, &branches[0].0);
+                    pressure_matrix_other_constructors(tctx, env, &branches, branches[0].0);
                 let mut witnesses = if let Some(pattern) = other {
-                    wild(tctx, pattern)
+                    wild(tctx, arena.alloc(pattern))
                 } else if matches!(
                     &branches[0].0.pat_desc,
                     PatternDesc::Tpat_construct(_, constructor, _)
@@ -14216,14 +14283,14 @@ fn pressure_matrix_satisfiables(
                             crate::types::ConstructorKind::Extension(_)
                         )
                 ) {
-                    wild(tctx, pressure_matrix_omega_pat())
+                    wild(tctx, arena.omega)
                 } else {
                     Vec::new()
                 };
                 witnesses.extend(for_constructors(tctx));
                 witnesses
             } else {
-                wild(tctx, pressure_matrix_omega_pat())
+                wild(tctx, arena.omega)
             }
         }
         PatternDesc::Tpat_variant(label, _, _)
@@ -14240,26 +14307,27 @@ fn pressure_matrix_satisfiables(
             Vec::new()
         }
         _ => {
-            let mut column = vec![head.clone()];
-            column.extend(pressure_matrix_simplified_first_col(previous));
+            let mut column = vec![head];
+            column.extend(pressure_matrix_simplified_first_col(arena, previous));
             if !pressure_matrix_all_coherent(&column) {
                 return Vec::new();
             }
-            let q0 = pressure_matrix_discr_pat(head, previous);
-            let args = pressure_matrix_simple_match_args(&q0, head);
+            let q0 = pressure_matrix_discr_pat(arena, head, previous);
+            let args = pressure_matrix_simple_match_args(arena, q0, head);
             let arity = args.len();
             let mut specialized_query = args;
             specialized_query.extend_from_slice(tail);
             pressure_matrix_satisfiables(
                 tctx,
                 env,
-                &pressure_matrix_filter_one(&q0, previous),
+                arena,
+                &pressure_matrix_filter_one(arena, q0, previous),
                 specialized_query,
             )
             .into_iter()
             .map(|row| {
                 let (args, rest) = row.split_at(arity);
-                let mut restored = vec![pressure_matrix_set_args(q0.clone(), args.to_vec())];
+                let mut restored = vec![pressure_matrix_set_args(arena, q0, args)];
                 restored.extend_from_slice(rest);
                 restored
             })
@@ -14284,11 +14352,12 @@ fn pressure_variants_result(
     }
 }
 
-fn pressure_variants_match_matrix(
+fn pressure_variants_match_matrix<'a>(
     tctx: &mut TypeCheckContext<'_>,
     env: &Env,
+    arena: PressureArena<'a>,
     can_close_variants: bool,
-    rows: &[Vec<Pattern>],
+    rows: &[PressureRow<'a>],
 ) -> PressureVariantsResult {
     if rows.is_empty() {
         return pressure_variants_result(false, false);
@@ -14297,17 +14366,18 @@ fn pressure_variants_match_matrix(
         return pressure_variants_result(true, false);
     }
 
-    let first_col = pressure_matrix_simplified_first_col(rows);
+    let first_col = pressure_matrix_simplified_first_col(arena, rows);
     if !pressure_matrix_all_coherent(&first_col) {
         return pressure_variants_result(true, false);
     }
 
-    let q0 = pressure_matrix_discr_pat(&pressure_matrix_omega_pat(), rows);
-    let constrs = pressure_matrix_filter_all(&q0, rows);
+    let q0 = pressure_matrix_discr_pat(arena, arena.omega, rows);
+    let constrs = pressure_matrix_filter_all(arena, q0, rows);
     if constrs.is_empty() {
         let child = pressure_variants_match_matrix(
             tctx,
             env,
+            arena,
             can_close_variants,
             &pressure_matrix_filter_extra(rows),
         );
@@ -14317,9 +14387,9 @@ fn pressure_variants_match_matrix(
     let try_non_omega = |tctx: &mut TypeCheckContext<'_>,
                          env: &Env,
                          can_close_variants: bool,
-                         branches: &[(Pattern, Vec<Vec<Pattern>>)]| {
+                         branches: &[PressureBranch<'a>]| {
         branches.iter().all(|(_, matrix)| {
-            pressure_variants_match_matrix(tctx, env, can_close_variants, matrix).exhaustive
+            pressure_variants_match_matrix(tctx, env, arena, can_close_variants, matrix).exhaustive
         })
     };
 
@@ -14331,8 +14401,13 @@ fn pressure_variants_match_matrix(
     }
 
     if !can_close_variants {
-        let child =
-            pressure_variants_match_matrix(tctx, env, false, &pressure_matrix_filter_extra(rows));
+        let child = pressure_variants_match_matrix(
+            tctx,
+            env,
+            arena,
+            false,
+            &pressure_matrix_filter_extra(rows),
+        );
         return pressure_variants_result(child.exhaustive, false);
     }
 
@@ -14340,7 +14415,8 @@ fn pressure_variants_match_matrix(
     let ok = if full {
         try_non_omega(tctx, env, true, &constrs)
     } else {
-        let partial = pressure_matrix_filter_all(&q0, &pressure_matrix_mark_partial(rows));
+        let partial =
+            pressure_matrix_filter_all(arena, q0, &pressure_matrix_mark_partial(arena, rows));
         try_non_omega(tctx, env, true, &partial)
     };
 
@@ -14349,13 +14425,19 @@ fn pressure_variants_match_matrix(
         .first()
         .filter(|(pat, _)| matches!(pat.pat_desc, PatternDesc::Tpat_variant(_, _, _)))
     {
+        let variant_pat: &'a Pattern = variant_pat;
         let row = pressure_matrix_row_of_pat(tctx, env, variant_pat);
         let row_is_fixed = row
             .as_ref()
             .map(|row| crate::types::btype::row_fixed(tctx.type_ctx, row))
             .unwrap_or(true);
-        let default_result =
-            pressure_variants_match_matrix(tctx, env, false, &pressure_matrix_filter_extra(rows));
+        let default_result = pressure_variants_match_matrix(
+            tctx,
+            env,
+            arena,
+            false,
+            &pressure_matrix_filter_extra(rows),
+        );
         if !row_is_fixed && !default_result.exhaustive {
             pressure_matrix_close_variant(tctx, env, variant_pat);
             closed_current_variant = true;
@@ -14388,16 +14470,19 @@ fn typed_pattern_has_variant(pat: &Pattern) -> bool {
     }
 }
 
+
 fn pressure_variants_on_match_cases(
     tctx: &mut TypeCheckContext<'_>,
     env: &Env,
     pending_cases: &[PendingMatchCase<'_>],
 ) -> bool {
-    let matrix: Vec<Vec<Pattern>> = pending_cases
+    let patterns = typed_arena::Arena::new();
+    let arena = PressureArena::new(&patterns);
+    let matrix: Vec<PressureRow<'_>> = pending_cases
         .iter()
-        .map(|pending| vec![pending.typed_pat.clone(), pressure_matrix_omega_pat()])
+        .map(|pending| vec![&pending.typed_pat, arena.omega])
         .collect();
-    pressure_variants_match_matrix(tctx, env, true, &matrix).closed_current_variant
+    pressure_variants_match_matrix(tctx, env, arena, true, &matrix).closed_current_variant
 }
 
 fn pressure_matrix_close_match_scrutinee_variants(
