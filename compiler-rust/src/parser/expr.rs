@@ -4322,6 +4322,7 @@ fn parse_expr_block_item(p: &mut Parser<'_>) -> Expression {
                 p,
                 attrs,
                 Some(exception_start_idx),
+                false,
             );
             parse_newline_or_semicolon_expr_block(p);
             let block_expr = parse_expr_block(p);

@@ -376,7 +376,7 @@ pub fn parse_structure_item(p: &mut Parser<'_>) -> Option<StructureItem> {
             // Capture start position BEFORE consuming 'exception' for accurate location
             let exception_start_idx = p.start_pos_idx();
             p.next();
-            let ext = parse_extension_constructor(p, attrs.clone(), Some(exception_start_idx));
+            let ext = parse_extension_constructor(p, attrs.clone(), Some(exception_start_idx), false);
             parse_newline_or_semicolon_structure(p);
             Some(StructureItemDesc::Pstr_exception(Box::new(ext)))
         }
@@ -886,7 +886,7 @@ pub fn parse_signature_item(p: &mut Parser<'_>) -> Option<SignatureItem> {
             // Capture start position BEFORE consuming 'exception' for accurate location
             let exception_start_idx = p.start_pos_idx();
             p.next();
-            let ext = parse_extension_constructor(p, attrs.clone(), Some(exception_start_idx));
+            let ext = parse_extension_constructor(p, attrs.clone(), Some(exception_start_idx), false);
             parse_newline_or_semicolon_signature(p);
             Some(SignatureItemDesc::Psig_exception(Box::new(ext)))
         }
@@ -3101,7 +3101,19 @@ fn parse_constructors(p: &mut Parser<'_>) -> Vec<ConstructorDeclaration> {
         constructors.push(c);
     }
 
-    // Remaining constructors must be introduced by `|` (or doc comment followed by `|`).
+    parse_constructor_declarations_with_bar(p, &mut constructors);
+    constructors
+}
+
+/// `parse_region ~grammar:Grammar.ConstructorDeclaration
+/// ~f:parse_type_constructor_declaration_with_bar` (res_core.ml:5566-5627).
+/// A `None` row always aborts the region: every non-`|` token terminates
+/// `ConstructorDeclaration` lists.
+fn parse_constructor_declarations_with_bar(
+    p: &mut Parser<'_>,
+    constructors: &mut Vec<ConstructorDeclaration>,
+) {
+    p.leave_breadcrumb(Grammar::ConstructorDeclaration);
     loop {
         if !is_bar_or_doc_comment_then_bar(p) {
             break;
@@ -3133,8 +3145,7 @@ fn parse_constructors(p: &mut Parser<'_>) -> Vec<ConstructorDeclaration> {
             constructors.push(c);
         }
     }
-
-    constructors
+    p.eat_breadcrumb();
 }
 
 /// Check if current token is `|` or doc-comment followed by `|`.
@@ -3150,25 +3161,28 @@ fn is_bar_or_doc_comment_then_bar(p: &mut Parser<'_>) -> bool {
     }
 }
 
-/// Parse variant constructors where the first doesn't have a leading |.
+/// The `Uident` constructor branch of OCaml `parse_type_equation_or_constr_decl`
+/// (res_core.ml:5855-5871): the first constructor has no attributes and no
+/// breadcrumb, then `parse_type_constructor_declarations ?first`.
 fn parse_constructors_without_leading_bar(p: &mut Parser<'_>) -> Vec<ConstructorDeclaration> {
-    let mut constructors = vec![];
-
-    // Parse the first constructor (no leading |)
-    if let Some(c) = parse_constructor(p) {
-        constructors.push(c);
-    }
-
-    // Parse remaining constructors (with leading |)
-    while p.token == Token::Bar {
-        // Capture start position BEFORE consuming the bar (like OCaml)
-        let bar_start_idx = p.start_pos_idx();
-        p.next();
-        if let Some(c) = parse_constructor_with_start(p, bar_start_idx) {
-            constructors.push(c);
-        }
-    }
-
+    let start_pos_idx = p.start_pos_idx();
+    let Token::Uident(n) = &p.token else {
+        unreachable!("parse_constructors_without_leading_bar: expected Uident");
+    };
+    let n = n.clone();
+    let name_loc = p.mk_loc_current();
+    p.next();
+    let n_idx = p.arena_mut().push_interned_string(&n);
+    let (args, res) = parse_constr_decl_args(p);
+    let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
+    let mut constructors = vec![ConstructorDeclaration {
+        pcd_name: with_loc(n_idx, name_loc),
+        pcd_args: args,
+        pcd_res: res,
+        pcd_loc: loc,
+        pcd_attributes: Attributes::new(),
+    }];
+    parse_constructor_declarations_with_bar(p, &mut constructors);
     constructors
 }
 
@@ -3186,22 +3200,22 @@ fn parse_constructor(p: &mut Parser<'_>) -> Option<ConstructorDeclaration> {
     parse_constructor_impl(p, start_pos_idx)
 }
 
-/// Implementation of constructor parsing with a given start position.
+/// OCaml `parse_type_constructor_declaration ~start_pos`
+/// (compiler/syntax/src/res_core.ml:5586-5605). Like OCaml, the
+/// `ConstructorDeclaration` breadcrumb is only eaten on the `Uident` path.
 fn parse_constructor_impl(
     p: &mut Parser<'_>,
     start_pos_idx: PosIdx,
 ) -> Option<ConstructorDeclaration> {
+    p.leave_breadcrumb(Grammar::ConstructorDeclaration);
     let attrs = parse_attributes(p);
 
-    // Check for spread syntax: ...typeName
     if p.token == Token::DotDotDot {
         p.next();
-        // OCaml uses start_pos (which may include |) for name location as well
         let name_loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
-        let spread_type = typ::parse_typ_expr(p);
+        let spread_type = typ::parse_poly_type_expr(p);
+        let loc = p.mk_loc_idx_to_end_of(start_pos_idx, spread_type.ptyp_loc);
         let spread_type_idx = p.arena_mut().push_core_type(spread_type);
-        // Declaration location includes type
-        let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
         let ellipsis_idx = p.arena_mut().intern("...");
         return Some(ConstructorDeclaration {
             pcd_name: with_loc(ellipsis_idx, name_loc),
@@ -3233,6 +3247,20 @@ fn parse_constructor_impl(
         }
     };
 
+    let (args, res) = parse_constr_decl_args(p);
+    p.eat_breadcrumb();
+    let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
+    Some(ConstructorDeclaration {
+        pcd_name: name,
+        pcd_args: args,
+        pcd_res: res,
+        pcd_loc: loc,
+        pcd_attributes: attrs,
+    })
+}
+
+/// OCaml `parse_constr_decl_args` (compiler/syntax/src/res_core.ml:5369-5558).
+fn parse_constr_decl_args(p: &mut Parser<'_>) -> (ConstructorArguments, Option<CoreTypeIdx>) {
     // Parse constructor arguments
     let args = if p.token == Token::Lparen {
         p.next();
@@ -3399,12 +3427,6 @@ fn parse_constructor_impl(
             p.expect(Token::Rparen);
             ConstructorArguments::Pcstr_tuple(args)
         }
-    } else if p.token == Token::Lbrace {
-        let lbrace_pos_idx = p.start_pos_idx();
-        p.next();
-        let labels = parse_constructor_record_labels(p, Some(lbrace_pos_idx));
-        p.expect(Token::Rbrace);
-        ConstructorArguments::Pcstr_record(labels)
     } else {
         ConstructorArguments::Pcstr_tuple(vec![])
     };
@@ -3418,14 +3440,7 @@ fn parse_constructor_impl(
         None
     };
 
-    let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
-    Some(ConstructorDeclaration {
-        pcd_name: name,
-        pcd_args: args,
-        pcd_res: res,
-        pcd_loc: loc,
-        pcd_attributes: attrs,
-    })
+    (args, res)
 }
 
 /// Parse record label declarations.
@@ -4062,37 +4077,61 @@ pub fn parse_extension_constructor(
     p: &mut Parser<'_>,
     attrs: Attributes,
     exception_start: Option<PosIdx>,
+    parse_attrs: bool,
 ) -> ExtensionConstructor {
-    // Use provided start position (before 'exception') or current position
     let start_pos_idx = exception_start.unwrap_or_else(|| p.start_pos_idx());
-    let error_idx = p.arena_mut().intern("Error");
-    let constructor = parse_constructor(p).unwrap_or_else(|| ConstructorDeclaration {
-        pcd_name: mknoloc(error_idx),
-        pcd_args: ConstructorArguments::Pcstr_tuple(vec![]),
-        pcd_res: None,
-        pcd_loc: p.mk_loc_idx_to_prev_end(start_pos_idx),
-        pcd_attributes: Attributes::new(),
-    });
-
-    let mut kind = ExtensionConstructorKind::Pext_decl(constructor.pcd_args, constructor.pcd_res);
-
-    // Rebind: Constructor = Other
-    if p.token == Token::Equal {
-        p.next();
-        let lid = parse_module_long_ident(p);
-        kind = ExtensionConstructorKind::Pext_rebind(lid);
-    }
-
-    // Combine outer attributes with constructor attributes
+    let (def_attrs, name, kind) = parse_constr_def(p, parse_attrs);
     let mut all_attrs = attrs;
-    all_attrs.extend(constructor.pcd_attributes);
-
+    all_attrs.extend(def_attrs);
     ExtensionConstructor {
-        pext_name: constructor.pcd_name,
+        pext_name: name,
         pext_kind: kind,
         pext_loc: p.mk_loc_idx_to_prev_end(start_pos_idx),
         pext_attributes: all_attrs,
     }
+}
+
+/// OCaml `parse_constr_def ~parse_attrs` (compiler/syntax/src/res_core.ml:6590-6617).
+fn parse_constr_def(
+    p: &mut Parser<'_>,
+    parse_attrs: bool,
+) -> (Attributes, Located<StrIdx>, ExtensionConstructorKind) {
+    let attrs = if parse_attrs {
+        parse_attributes(p)
+    } else {
+        Attributes::new()
+    };
+    let name = match &p.token {
+        Token::Uident(n) => {
+            let n = n.clone();
+            let loc = p.mk_loc_current();
+            p.next();
+            let n_idx = p.arena_mut().push_interned_string(&n);
+            with_loc(n_idx, loc)
+        }
+        _ => {
+            p.err(DiagnosticCategory::Uident(p.token.clone().into_owned()));
+            mknoloc(p.arena_mut().intern("_"))
+        }
+    };
+    let kind = match p.token {
+        Token::Lparen => {
+            let (args, res) = parse_constr_decl_args(p);
+            ExtensionConstructorKind::Pext_decl(args, res)
+        }
+        Token::Equal => {
+            p.next();
+            ExtensionConstructorKind::Pext_rebind(parse_module_long_ident(p))
+        }
+        Token::Colon => {
+            p.next();
+            let typ = typ::parse_typ_expr(p);
+            let typ_idx = p.arena_mut().push_core_type(typ);
+            ExtensionConstructorKind::Pext_decl(ConstructorArguments::Pcstr_tuple(vec![]), Some(typ_idx))
+        }
+        _ => ExtensionConstructorKind::Pext_decl(ConstructorArguments::Pcstr_tuple(vec![]), None),
+    };
+    (attrs, name, kind)
 }
 
 /// Constructors of a type extension, after `+=` and the optional `private`.
@@ -4108,6 +4147,7 @@ fn parse_type_extension_constructors(p: &mut Parser<'_>) -> Vec<ExtensionConstru
         p,
         Attributes::new(),
         Some(constr_start_idx),
+        true,
     )];
     while p.token == Token::Bar {
         let start_idx = p.start_pos_idx();
@@ -4116,6 +4156,7 @@ fn parse_type_extension_constructors(p: &mut Parser<'_>) -> Vec<ExtensionConstru
             p,
             Attributes::new(),
             Some(start_idx),
+            true,
         ));
     }
     constructors
