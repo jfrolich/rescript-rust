@@ -1343,50 +1343,47 @@ thread_local! {
     static MODTYPES_DEPTH: Cell<usize> = Cell::new(0);
 }
 
+/// Which Env table a path names: `Mty_alias` paths are modules
+/// (`Env.find_module`), `Mty_ident` paths are module types
+/// (`Env.find_modtype_expansion`, compiler/ml/env.ml:970-973).
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+enum PathNamespace {
+    Module,
+    ModuleType,
+}
+
 fn with_local_pident_module_type<R>(
     env: &Env,
     path: &Path,
+    namespace: PathNamespace,
     f: impl FnOnce(&ModuleType) -> R,
 ) -> Option<R> {
-    let mut current = path;
+    let mut current = path.clone();
+    let mut namespace = namespace;
     let mut visiting = HashSet::new();
-    let f = f;
 
     loop {
-        let Path::Pident(id) = current else {
+        let Path::Pident(id) = &current else {
             return None;
         };
-
-        if id.is_persistent() || id.stamp() == 0 || !visiting.insert(current.clone()) {
+        if id.is_persistent() || id.stamp() == 0 || !visiting.insert((current.clone(), namespace)) {
             return None;
         }
-
-        if let Ok(md) = env.lookup_module(&Path::pident(id.clone())) {
-            match &md.md_type {
-                ModuleType::MtyIdent(alias_path) | ModuleType::MtyAlias(_, alias_path)
-                    if !alias_path.same(current) =>
-                {
-                    current = alias_path;
-                    continue;
-                }
-                _ => return Some(f(&md.md_type)),
+        let mty = match namespace {
+            PathNamespace::Module => env.lookup_module(&current).ok()?.md_type.clone(),
+            PathNamespace::ModuleType => env.lookup_modtype(&current).ok()?.mtd_type.clone()?,
+        };
+        match &mty {
+            ModuleType::MtyIdent(next) if !(next.same(&current) && namespace == PathNamespace::ModuleType) => {
+                current = next.clone();
+                namespace = PathNamespace::ModuleType;
             }
-        }
-
-        if let Ok(mtd) = env.lookup_modtype(&Path::pident(id.clone())) {
-            let mty = mtd.mtd_type.as_ref()?;
-            match mty {
-                ModuleType::MtyIdent(alias_path) | ModuleType::MtyAlias(_, alias_path)
-                    if !alias_path.same(current) =>
-                {
-                    current = alias_path;
-                    continue;
-                }
-                _ => return Some(f(mty)),
+            ModuleType::MtyAlias(_, next) if !(next.same(&current) && namespace == PathNamespace::Module) => {
+                current = next.clone();
+                namespace = PathNamespace::Module;
             }
+            _ => return Some(f(&mty)),
         }
-
-        return None;
     }
 }
 
@@ -1469,6 +1466,7 @@ fn modtypes_inner<'a>(
         type_ctx: &TypeContext,
         env: &Env,
         path: &Path,
+        namespace: PathNamespace,
     ) -> Option<ModuleType> {
         use crate::types::decl::SignatureItem as SigItem;
 
@@ -1483,72 +1481,64 @@ fn modtypes_inner<'a>(
         fn expand_local(
             env: &Env,
             path: &Path,
-            visiting: &mut HashSet<Path>,
+            namespace: PathNamespace,
+            visiting: &mut HashSet<(Path, PathNamespace)>,
         ) -> Option<ModuleType> {
-            if !visiting.insert(path.clone()) {
+            if !visiting.insert((path.clone(), namespace)) {
                 return None;
             }
 
-            match path {
-                Path::Pident(id) => {
-                    if let Ok(md) = env.lookup_module(&Path::pident(id.clone())) {
-                        match &md.md_type {
-                            ModuleType::MtyIdent(alias_path)
-                            | ModuleType::MtyAlias(_, alias_path)
-                                if !alias_path.same(path) =>
-                            {
-                                if let Some(expanded) = expand_local(env, alias_path, visiting) {
-                                    return Some(expanded);
-                                }
-                            }
-                            _ => return Some(md.md_type.clone()),
-                        }
+            let mty = match path {
+                Path::Pident(id) => match namespace {
+                    PathNamespace::Module => {
+                        env.lookup_module(&Path::pident(id.clone())).ok()?.md_type.clone()
                     }
-                    if let Ok(mtd) = env.lookup_modtype(&Path::pident(id.clone())) {
-                        if let Some(mty) = &mtd.mtd_type {
-                            match mty {
-                                ModuleType::MtyIdent(alias_path)
-                                | ModuleType::MtyAlias(_, alias_path)
-                                    if !alias_path.same(path) =>
-                                {
-                                    if let Some(expanded) = expand_local(env, alias_path, visiting)
-                                    {
-                                        return Some(expanded);
-                                    }
-                                }
-                                _ => return Some(mty.clone()),
-                            }
-                        }
+                    PathNamespace::ModuleType => {
+                        env.lookup_modtype(&Path::pident(id.clone())).ok()?.mtd_type.clone()?
                     }
-                    None
-                }
+                },
                 Path::Pdot(parent, name, _) => {
-                    let parent_mty = expand_local(env, parent, visiting)?;
+                    let parent_mty = expand_local(env, parent, PathNamespace::Module, visiting)?;
                     let parent_sig = match &parent_mty {
                         ModuleType::MtySignature(sig) => sig.clone(),
-                        ModuleType::MtyIdent(parent_path)
-                        | ModuleType::MtyAlias(_, parent_path) => {
-                            match expand_local(env, parent_path, visiting)? {
+                        ModuleType::MtyIdent(parent_path) => {
+                            match expand_local(env, parent_path, PathNamespace::ModuleType, visiting)? {
+                                ModuleType::MtySignature(sig) => sig,
+                                _ => return None,
+                            }
+                        }
+                        ModuleType::MtyAlias(_, parent_path) => {
+                            match expand_local(env, parent_path, PathNamespace::Module, visiting)? {
                                 ModuleType::MtySignature(sig) => sig,
                                 _ => return None,
                             }
                         }
                         _ => return None,
                     };
-                    for item in &parent_sig {
-                        match item {
-                            SigItem::SigModule(id, md, _) if id.name() == name.as_str() => {
-                                return Some(md.md_type.clone());
-                            }
-                            SigItem::SigModtype(id, mtd) if id.name() == name.as_str() => {
-                                return mtd.mtd_type.clone();
-                            }
-                            _ => {}
+                    parent_sig.iter().find_map(|item| match (item, namespace) {
+                        (SigItem::SigModule(id, md, _), PathNamespace::Module)
+                            if id.name() == name.as_str() =>
+                        {
+                            Some(md.md_type.clone())
                         }
-                    }
-                    None
+                        (SigItem::SigModtype(id, mtd), PathNamespace::ModuleType)
+                            if id.name() == name.as_str() =>
+                        {
+                            mtd.mtd_type.clone()
+                        }
+                        _ => None,
+                    })?
                 }
-                Path::Papply(_, _) => None,
+                Path::Papply(_, _) => return None,
+            };
+            match &mty {
+                ModuleType::MtyIdent(next) => {
+                    expand_local(env, next, PathNamespace::ModuleType, visiting).or(Some(mty))
+                }
+                ModuleType::MtyAlias(_, next) => {
+                    expand_local(env, next, PathNamespace::Module, visiting).or(Some(mty))
+                }
+                _ => Some(mty),
             }
         }
 
@@ -1561,7 +1551,7 @@ fn modtypes_inner<'a>(
         }
 
         let mut visiting = HashSet::new();
-        expand_local(env, path, &mut visiting)
+        expand_local(env, path, namespace, &mut visiting)
     }
 
     fn normalized_alias_path(type_ctx: &TypeContext, env: &Env, path: &Path) -> Path {
@@ -1623,7 +1613,7 @@ fn modtypes_inner<'a>(
         (ModuleType::MtyAlias(pres_impl, impl_path), mty_sig) => {
             let impl_path = strict_normalized_alias_path(type_ctx, env, impl_path)?;
             let coercion = if let Some(coercion) =
-                with_local_pident_module_type(env, &impl_path, |expanded| {
+                with_local_pident_module_type(env, &impl_path, PathNamespace::Module, |expanded| {
                     let expanded = ctype::strengthen_module_type_for_inclusion_path(
                         type_ctx, env, &impl_path, expanded,
                     );
@@ -1640,7 +1630,7 @@ fn modtypes_inner<'a>(
                 }) {
                 coercion?
             } else {
-                let expanded = expand_module_type_in_env(type_ctx, env, &impl_path)
+                let expanded = expand_module_type_in_env(type_ctx, env, &impl_path, PathNamespace::Module)
                     .map(|mty| {
                         ctype::strengthen_module_type_for_inclusion_path(
                             type_ctx, env, &impl_path, &mty,
@@ -1784,7 +1774,7 @@ fn modtypes_inner<'a>(
 
         // Identifier implementation matches signature
         (ModuleType::MtyIdent(path), ModuleType::MtySignature(sig_sig)) => {
-            if let Some(result) = with_local_pident_module_type(env, path, |expanded| {
+            if let Some(result) = with_local_pident_module_type(env, path, PathNamespace::ModuleType, |expanded| {
                 modtypes_inner(
                     type_ctx,
                     env,
@@ -1798,7 +1788,7 @@ fn modtypes_inner<'a>(
             }) {
                 return result;
             }
-            if let Some(expanded) = expand_module_type_in_env(type_ctx, env, path) {
+            if let Some(expanded) = expand_module_type_in_env(type_ctx, env, path, PathNamespace::ModuleType) {
                 modtypes_inner(
                     type_ctx,
                     env,
@@ -1822,7 +1812,7 @@ fn modtypes_inner<'a>(
         (ModuleType::MtyIdent(path), mty_sig) => {
             // compiler/ml/includemod.ml:235-236 expands an implementation-side
             // identifier only when Env says that module type path is manifest.
-            if let Some(result) = with_local_pident_module_type(env, path, |expanded| {
+            if let Some(result) = with_local_pident_module_type(env, path, PathNamespace::ModuleType, |expanded| {
                 modtypes_inner(
                     type_ctx,
                     env,
@@ -1836,7 +1826,7 @@ fn modtypes_inner<'a>(
             }) {
                 return result;
             }
-            if let Some(expanded) = expand_module_type_in_env(type_ctx, env, path) {
+            if let Some(expanded) = expand_module_type_in_env(type_ctx, env, path, PathNamespace::ModuleType) {
                 modtypes_inner(
                     type_ctx,
                     env,
@@ -1857,7 +1847,7 @@ fn modtypes_inner<'a>(
                     .same(&env.normalize_path_prefix(&sig_path))
                 {
                     Ok(ModuleCoercion::Tcoerce_none)
-                } else if let Some(expanded) = expand_module_type_in_env(type_ctx, env, &sig_path) {
+                } else if let Some(expanded) = expand_module_type_in_env(type_ctx, env, &sig_path, PathNamespace::ModuleType) {
                     let identity = InclusionSubst::default();
                     modtypes_inner(
                         type_ctx,
@@ -1896,7 +1886,7 @@ fn modtypes_inner<'a>(
                 return Ok(ModuleCoercion::Tcoerce_none);
             }
             let identity = InclusionSubst::default();
-            if let Some(result) = with_local_pident_module_type(env, &path, |expanded| {
+            if let Some(result) = with_local_pident_module_type(env, &path, PathNamespace::ModuleType, |expanded| {
                 modtypes_inner(
                     type_ctx,
                     env,
@@ -1910,7 +1900,7 @@ fn modtypes_inner<'a>(
             }) {
                 return result;
             }
-            if let Some(expanded) = expand_module_type_in_env(type_ctx, env, &path) {
+            if let Some(expanded) = expand_module_type_in_env(type_ctx, env, &path, PathNamespace::ModuleType) {
                 modtypes_inner(
                     type_ctx,
                     env,
