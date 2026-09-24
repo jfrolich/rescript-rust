@@ -3566,13 +3566,8 @@ fn build_ppat_or_for_variant_spread(
     );
     let mut synthetic_pattern_idxs = Vec::with_capacity(constructors.len());
     for cstr in constructors {
-        let cstr_name = cstr.cd_id.name();
-        let Some(cstr_lid_idx) = find_existing_lident_idx(tctx.arena, cstr_name) else {
-            return Err(TypeCoreError::NotAVariantType {
-                loc: lident.loc,
-                lid: tctx.resolve_lid(lident.txt).clone(),
-            });
-        };
+        // typecore.ml:655-657 builds a fresh `Longident.Lident (Ident.name c.cd_id)`.
+        let cstr_lid_idx = tctx.arena.push_typecheck_lident(cstr.cd_id.name());
         let cstr_lid = Located {
             txt: cstr_lid_idx,
             loc: lident.loc,

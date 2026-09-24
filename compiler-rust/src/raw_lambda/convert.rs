@@ -2887,6 +2887,15 @@ impl<'a> RawLambdaConverter<'a> {
         };
 
         Some(match prim_name {
+            // unified_ops.ml:60-71: unary `+` is the identity on every
+            // supported operand type.
+            "%plus" => choose(
+                Primitive::Pidentity,
+                None,
+                Some(Primitive::Pidentity),
+                Some(Primitive::Pidentity),
+                None,
+            ),
             "%neg" => choose(
                 Primitive::Pnegint,
                 None,

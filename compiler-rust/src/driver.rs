@@ -14429,15 +14429,15 @@ pub fn extract_file_config_from_structure(
     structure: &Structure,
     arena: &crate::parse_arena::ParseArena,
 ) -> FileConfigOverrides {
+    // `Ast_config.iter_on_config_str`/`iter_on_config_sig`: only the first
+    // `@@config` among the leading attributes is processed.
     for item in structure {
-        if let StructureItemDesc::Pstr_attribute(attr) = &*item.pstr_desc {
-            let name = arena.get_string(attr.0.txt);
-            if name == "config" {
-                let flags = extract_flags_from_config_payload(&attr.1, arena);
-                if !flags.is_empty() {
-                    return parse_config_flags(&flags);
-                }
-            }
+        let StructureItemDesc::Pstr_attribute(attr) = &*item.pstr_desc else {
+            break;
+        };
+        if arena.get_string(attr.0.txt) == "config" {
+            let flags = extract_flags_from_config_payload(&attr.1, arena);
+            return parse_config_flags(&flags);
         }
     }
     FileConfigOverrides::default()
@@ -14448,15 +14448,15 @@ pub fn extract_file_config_from_signature(
     signature: &Signature,
     arena: &crate::parse_arena::ParseArena,
 ) -> FileConfigOverrides {
+    // `Ast_config.iter_on_config_str`/`iter_on_config_sig`: only the first
+    // `@@config` among the leading attributes is processed.
     for item in signature {
-        if let SignatureItemDesc::Psig_attribute(attr) = &*item.psig_desc {
-            let name = arena.get_string(attr.0.txt);
-            if name == "config" {
-                let flags = extract_flags_from_config_payload(&attr.1, arena);
-                if !flags.is_empty() {
-                    return parse_config_flags(&flags);
-                }
-            }
+        let SignatureItemDesc::Psig_attribute(attr) = &*item.psig_desc else {
+            break;
+        };
+        if arena.get_string(attr.0.txt) == "config" {
+            let flags = extract_flags_from_config_payload(&attr.1, arena);
+            return parse_config_flags(&flags);
         }
     }
     FileConfigOverrides::default()

@@ -20308,8 +20308,10 @@ fn has_no_export_config(arena: &ParseArena, items: &[ParsedStructureItem]) -> bo
                             }
                         }
                     }
+                    // `Ast_config.iter_on_config_str` only processes the first
+                    // leading `@@config`.
+                    return false;
                 }
-                // Continue checking (@@config might not be the first attribute)
             }
             _ => break, // Stop at first non-attribute item
         }
