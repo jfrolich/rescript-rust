@@ -2373,7 +2373,35 @@ fn lookup_raw_module_sig_type<'a>(
     })
 }
 
+/// Resolve a dotted type path to its declaration, memoized per module scope.
+///
+/// OCaml `Env.find_type` (compiler/ml/env.ml:800-813) reads the declaration
+/// from the module's lazily built component table
+/// (compiler/ml/env.ml:1516-1552), so repeated lookups of one path under the
+/// same module-level bindings return the same declaration. The result only
+/// depends on those bindings (`Env::scope_id`), so later lookups reuse the
+/// first result instead of re-walking the component tables.
 fn resolve_type_item_through_env<'a>(
+    ctx: &'a TypeContext,
+    env: &super::env::Env,
+    path: &Path,
+    strengthen_alias_types: bool,
+) -> Option<(crate::ident::Ident, super::decl::TypeDeclarationRef<'a>)> {
+    let scope_id = env.scope_id();
+    if let Some((id, decl)) = ctx.find_resolved_type_item(scope_id, path, strengthen_alias_types) {
+        return Some((id, super::decl::TypeDeclarationRef::Shared(decl)));
+    }
+    let (id, decl) = resolve_type_item_through_env_uncached(ctx, env, path, strengthen_alias_types)?;
+    let decl = match decl {
+        super::decl::TypeDeclarationRef::Borrowed(decl) => Arc::new(decl.clone()),
+        super::decl::TypeDeclarationRef::Shared(decl) => decl,
+        super::decl::TypeDeclarationRef::Owned(decl) => Arc::new(*decl),
+    };
+    ctx.register_resolved_type_item(scope_id, path, strengthen_alias_types, id.clone(), decl.clone());
+    Some((id, super::decl::TypeDeclarationRef::Shared(decl)))
+}
+
+fn resolve_type_item_through_env_uncached<'a>(
     ctx: &'a TypeContext,
     env: &super::env::Env,
     path: &Path,
@@ -2507,7 +2535,8 @@ fn resolve_type_through_env<'a>(
 /// 2. Looks up the module at the path (checking env + CMI)
 /// 3. If the module is an alias (`MtyAlias`), follows it
 pub(crate) fn normalize_path_full<'a>(ctx: &'a TypeContext, env: &Env, path: &Path) -> Path {
-    let env_id = env.id();
+    // Normalization only reads module-level bindings (see `Env::scope_id`).
+    let env_id = env.scope_id();
     if let Some(cached) = ctx.find_normalized_path_full(env_id, path) {
         return cached;
     }
@@ -2592,7 +2621,7 @@ pub(crate) fn force_normalize_path_full_side_effects<'a>(
     // from normal structural normalization: the first lookup still performs
     // those side effects at the OCaml compare point, while repeated label
     // disambiguation compares observe the already-forced lazy state.
-    let env_id = env.id();
+    let env_id = env.scope_id();
     if let Some(cached) = ctx.find_forced_normalized_path_full(env_id, path) {
         return cached;
     }

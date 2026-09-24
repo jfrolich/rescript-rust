@@ -413,6 +413,12 @@ pub struct TypeContext {
         >,
     >,
 
+    /// Resolved dotted type paths keyed by `Env::scope_id`, path, and whether
+    /// alias targets were strengthened (see `ctype::resolve_type_item_through_env`).
+    resolved_type_item_cache: RefCell<
+        ahash::AHashMap<(u64, Path, bool), (Ident, Arc<super::decl::TypeDeclaration>)>,
+    >,
+
     /// Cached full normalize_path results keyed by environment identity.
     normalized_path_full_cache: RefCell<ahash::AHashMap<(u64, Path), Path>>,
 
@@ -669,6 +675,7 @@ impl TypeContext {
             resolved_module_type_cache: RefCell::new(ahash::AHashMap::new()),
             resolved_child_module_path_cache: RefCell::new(ahash::AHashMap::new()),
             qualified_module_decl_cache: RefCell::new(ahash::AHashMap::new()),
+            resolved_type_item_cache: RefCell::new(ahash::AHashMap::new()),
             normalized_path_full_cache: RefCell::new(ahash::AHashMap::new()),
             forced_normalized_path_full_cache: RefCell::new(ahash::AHashMap::new()),
             forced_type_path_compare_cache: RefCell::new(ahash::AHashMap::new()),
@@ -1284,6 +1291,31 @@ impl TypeContext {
     }
 
     /// Look up a cached dotted type lookup for a resolved module access path.
+    pub(crate) fn find_resolved_type_item(
+        &self,
+        scope_id: u64,
+        path: &Path,
+        strengthen_alias_types: bool,
+    ) -> Option<(Ident, Arc<super::decl::TypeDeclaration>)> {
+        self.resolved_type_item_cache
+            .borrow()
+            .get(&(scope_id, path.clone(), strengthen_alias_types))
+            .cloned()
+    }
+
+    pub(crate) fn register_resolved_type_item(
+        &self,
+        scope_id: u64,
+        path: &Path,
+        strengthen_alias_types: bool,
+        id: Ident,
+        decl: Arc<super::decl::TypeDeclaration>,
+    ) {
+        self.resolved_type_item_cache
+            .borrow_mut()
+            .insert((scope_id, path.clone(), strengthen_alias_types), (id, decl));
+    }
+
     pub(crate) fn find_resolved_module_type(
         &self,
         env_id: u64,

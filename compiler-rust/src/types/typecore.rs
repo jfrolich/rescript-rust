@@ -2144,14 +2144,14 @@ pub(crate) fn resolve_type_constructor_path(
                     let module_path = components.access_path().clone();
                     if let Some((cached_path, _, decl)) =
                         tctx.type_ctx
-                            .find_resolved_module_type(env.id(), &module_path, type_name)
+                            .find_resolved_module_type(env.scope_id(), &module_path, type_name)
                     {
                         return Some((cached_path, (*decl).clone()));
                     }
                     components.lookup_type(type_name).map(|(id, decl)| {
                         let decl = decl.clone();
                         tctx.type_ctx.register_resolved_module_type(
-                            env.id(),
+                            env.scope_id(),
                             &module_path,
                             type_name,
                             module_path.clone(),
@@ -28020,7 +28020,7 @@ fn compare_type_paths_for_disambiguation_impl<'a>(
     if !force_env_normalize && left.same(right) {
         return true;
     }
-    let env_id = env.id();
+    let env_id = env.scope_id();
     if force_env_normalize
         && let Some(cached) = ctx.find_forced_type_path_compare(env_id, left, right)
     {
@@ -28498,13 +28498,13 @@ fn qualify_label_description_paths<'a>(
             return QualifiedRecordLabelCacheKeyResult::Other;
         };
         if path_non_apply_root_is_persistent(path) {
-            QualifiedRecordLabelCacheKeyResult::Key(env.id(), path.clone(), label.lbl_pos)
+            QualifiedRecordLabelCacheKeyResult::Key(env.scope_id(), path.clone(), label.lbl_pos)
         } else if path_non_apply_root_ident(path)
             .is_some_and(|id| !id.is_persistent() && id.stamp() != 0)
         {
-            QualifiedRecordLabelCacheKeyResult::Key(env.id(), path.clone(), label.lbl_pos)
+            QualifiedRecordLabelCacheKeyResult::Key(env.scope_id(), path.clone(), label.lbl_pos)
         } else if path_non_apply_root_ident(path).is_some() {
-            QualifiedRecordLabelCacheKeyResult::Key(env.id(), path.clone(), label.lbl_pos)
+            QualifiedRecordLabelCacheKeyResult::Key(env.scope_id(), path.clone(), label.lbl_pos)
         } else {
             QualifiedRecordLabelCacheKeyResult::Other
         }
@@ -31866,7 +31866,7 @@ fn lookup_type_in_resolved_path_with_cache_mode<'a>(
     ctx: &'a crate::types::context::TypeContext,
     cache_mode: ComponentLookupApi,
 ) -> Option<(Path, Ident, Arc<crate::types::decl::TypeDeclaration>)> {
-    if let Some(cached) = ctx.find_resolved_module_type(env.id(), parent_module_path, type_name) {
+    if let Some(cached) = ctx.find_resolved_module_type(env.scope_id(), parent_module_path, type_name) {
         return Some(cached);
     }
 
@@ -31914,7 +31914,7 @@ fn lookup_type_in_resolved_path_with_cache_mode<'a>(
             // CMI declaration.
             if cache_mode.publishes() {
                 ctx.register_resolved_module_type(
-                    env.id(),
+                    env.scope_id(),
                     parent_module_path,
                     type_name,
                     found.0.clone(),
@@ -31956,7 +31956,7 @@ fn lookup_type_in_resolved_path_with_cache_mode<'a>(
                 // descriptor without publishing Rust's selected lookup cache.
                 if cache_mode.publishes() {
                     ctx.register_resolved_module_type(
-                        env.id(),
+                        env.scope_id(),
                         parent_module_path,
                         type_name,
                         result.0.clone(),
@@ -31980,7 +31980,7 @@ fn lookup_type_decl_in_resolved_path_with_cache_mode<'a>(
     cache_mode: ComponentLookupApi,
 ) -> Option<Arc<crate::types::decl::TypeDeclaration>> {
     if let Some((_, _, decl)) =
-        ctx.find_resolved_module_type(env.id(), parent_module_path, type_name)
+        ctx.find_resolved_module_type(env.scope_id(), parent_module_path, type_name)
     {
         return Some(decl);
     }
@@ -32019,7 +32019,7 @@ fn lookup_type_decl_in_resolved_path_with_cache_mode<'a>(
             // signature directly without forcing child-module component views.
             if cache_mode.publishes() {
                 ctx.register_resolved_module_type(
-                    env.id(),
+                    env.scope_id(),
                     parent_module_path,
                     type_name,
                     parent_module_path.clone(),
@@ -32045,7 +32045,7 @@ fn lookup_type_decl_in_resolved_path_with_cache_mode<'a>(
                 // keep that descriptor view out of the normal lookup cache.
                 if cache_mode.publishes() {
                     ctx.register_resolved_module_type(
-                        env.id(),
+                        env.scope_id(),
                         parent_module_path,
                         type_name,
                         parent_module_path.clone(),

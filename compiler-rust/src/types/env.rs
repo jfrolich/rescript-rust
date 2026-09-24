@@ -683,6 +683,13 @@ pub struct Env {
     /// Incremented when bindings are added, to detect env changes.
     id: u64,
 
+    /// Identity of the bindings that module-path resolution reads: modules
+    /// and their component tables, module types, types, opens, functor
+    /// arguments, and local constraints. Unlike `id`, clones keep it and
+    /// value/constructor/label bindings do not change it, so caches of
+    /// resolved dotted paths stay valid across ordinary `let` bindings.
+    scope_id: u64,
+
     /// Value bindings.
     values: IdTbl<Arc<ValueDescription>>,
 
@@ -763,6 +770,7 @@ impl Clone for Env {
             // default. Callers that are only snapshotting the same logical env
             // must opt into `clone_preserve_id()`.
             id: next_env_id(),
+            scope_id: self.scope_id,
             values: self.values.clone(),
             types: self.types.clone(),
             constrs: self.constrs.clone(),
@@ -808,8 +816,10 @@ impl Env {
     }
 
     fn build_empty() -> Self {
+        let id = next_env_id();
         Env {
-            id: next_env_id(),
+            id,
+            scope_id: id,
             values: IdTbl::new(),
             types: IdTbl::new(),
             constrs: TycompTbl::new(),
@@ -839,6 +849,7 @@ impl Env {
     pub fn clone_preserve_id(&self) -> Self {
         Env {
             id: self.id,
+            scope_id: self.scope_id,
             values: self.values.clone(),
             types: self.types.clone(),
             constrs: self.constrs.clone(),
@@ -869,6 +880,17 @@ impl Env {
     /// Mark this environment as changed.
     fn bump_id(&mut self) {
         self.id = next_env_id();
+    }
+
+    /// Mark a change to the bindings that module-path resolution reads.
+    fn bump_scope(&mut self) {
+        self.bump_id();
+        self.scope_id = self.id;
+    }
+
+    /// Identity of the module-level bindings (see the `scope_id` field).
+    pub fn scope_id(&self) -> u64 {
+        self.scope_id
     }
 
     fn invalidate_module_alias_caches(&self) {
@@ -1048,7 +1070,7 @@ impl Env {
 
     /// Add a type binding.
     pub fn add_type(&mut self, id: Ident, decl: impl Into<Arc<TypeDeclaration>>) {
-        self.bump_id();
+        self.bump_scope();
         let decl = decl.into();
         self.types.add(id, decl);
     }
@@ -1321,7 +1343,7 @@ impl Env {
                 parent_context,
             ),
         );
-        self.bump_id();
+        self.bump_scope();
         self.invalidate_module_alias_caches();
         let decl = Arc::new(decl);
         self.modules.add(id.clone(), decl);
@@ -1336,6 +1358,7 @@ impl Env {
     /// Add a functor-parameter module binding.
     pub fn add_module_arg(&mut self, id: Ident, decl: ModuleDeclaration) {
         self.add_module(id.clone(), decl);
+        // `add_module` above already started a new scope.
         self.functor_args.insert(id);
     }
 
@@ -1371,7 +1394,7 @@ impl Env {
             return;
         }
 
-        self.bump_id();
+        self.bump_scope();
         self.invalidate_module_alias_caches();
         self.values.add_open_layer(
             root.clone(),
@@ -1472,6 +1495,8 @@ impl Env {
 
     pub(crate) fn mark_implicit_open_root(&mut self, name: &str) {
         self.implicit_open_roots.insert(name.to_string());
+        // Only path resolution reads this, so keep `id` unchanged.
+        self.scope_id = next_env_id();
     }
 
     pub(crate) fn path_starts_with_implicit_opened_component(&self, path: &Path) -> bool {
@@ -1657,7 +1682,7 @@ impl Env {
 
     /// Add a module type binding.
     pub fn add_modtype(&mut self, id: Ident, decl: ModtypeDeclaration) {
-        self.bump_id();
+        self.bump_scope();
         let decl = Arc::new(decl);
         self.modtypes.add(id, decl);
     }
@@ -1739,7 +1764,7 @@ impl Env {
 
     /// Add a local constraint.
     pub fn add_local_constraint(&mut self, path: Path, decl: TypeDeclaration) {
-        self.bump_id();
+        self.bump_scope();
         self.local_constraints.insert(path, Arc::new(decl));
     }
 
@@ -1755,7 +1780,7 @@ impl Env {
 
     /// Add a GADT instance level.
     pub fn add_gadt_instance_level(&mut self, level: i32, types: Vec<TypeExprRef>) {
-        self.bump_id();
+        self.bump_scope();
         self.gadt_instances.push((level, types));
     }
 
