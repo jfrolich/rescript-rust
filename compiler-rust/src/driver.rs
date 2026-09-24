@@ -5722,7 +5722,13 @@ fn format_compiler_warning_report(
         let location = code_frame::format_location(filename, start_pos, end_pos);
         output.push_str(&code_frame::colorize_location(&location));
         output.push_str("\n\n");
-        output.push_str(&code_frame::print_warning(source, start_pos, end_pos));
+        // OCaml `Location.print ~message_kind`: `Code_frame.print ~is_warning`
+        // is false for a warning configured as an error (location.ml:143-155).
+        output.push_str(&if warning.is_error {
+            code_frame::print(source, start_pos, end_pos)
+        } else {
+            code_frame::print_warning(source, start_pos, end_pos)
+        });
         output.push('\n');
     }
 
