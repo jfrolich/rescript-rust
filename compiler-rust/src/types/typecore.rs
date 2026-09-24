@@ -23450,47 +23450,83 @@ fn typed_signature_item_uses_ident(item: &TypedSignatureItem, target: &Ident) ->
 }
 
 fn collect_typed_expression_pident_uses(expr: &Expression, used: &mut HashSet<Ident>) {
+    walk_typed_expression_pident_uses(expr, &mut |id| {
+        used.insert(id.clone());
+        false
+    });
+}
+
+fn walk_typed_expression_pident_uses(
+    expr: &Expression,
+    sink: &mut dyn FnMut(&Ident) -> bool,
+) -> bool {
     match &expr.exp_desc {
         ExpressionDesc::Texp_ident(Path::Pident(id), _, _) => {
-            used.insert(id.clone());
+            if sink(id) {
+                return true;
+            }
         }
         ExpressionDesc::Texp_ident(_, _, _) => {}
         ExpressionDesc::Texp_let(_, bindings, body) => {
             for binding in bindings {
-                collect_typed_expression_pident_uses(&binding.vb_expr, used);
+                if walk_typed_expression_pident_uses(&binding.vb_expr, sink) {
+                    return true;
+                }
             }
-            collect_typed_expression_pident_uses(body, used);
+            if walk_typed_expression_pident_uses(body, sink) {
+                return true;
+            }
         }
         ExpressionDesc::Texp_function { body, .. } => {
-            collect_typed_expression_pident_uses(body, used);
+            if walk_typed_expression_pident_uses(body, sink) {
+                return true;
+            }
         }
         ExpressionDesc::Texp_apply { funct, args, .. } => {
-            collect_typed_expression_pident_uses(funct, used);
+            if walk_typed_expression_pident_uses(funct, sink) {
+                return true;
+            }
             for arg in args {
                 if let Some(expr) = &arg.expression {
-                    collect_typed_expression_pident_uses(expr, used);
+                    if walk_typed_expression_pident_uses(expr, sink) {
+                        return true;
+                    }
                 }
             }
         }
         ExpressionDesc::Texp_match(scrutinee, value_cases, exn_cases, _) => {
-            collect_typed_expression_pident_uses(scrutinee, used);
-            collect_typed_case_pident_uses(value_cases, used);
-            collect_typed_case_pident_uses(exn_cases, used);
+            if walk_typed_expression_pident_uses(scrutinee, sink) {
+                return true;
+            }
+            if walk_typed_case_pident_uses(value_cases, sink) {
+                return true;
+            }
+            if walk_typed_case_pident_uses(exn_cases, sink) {
+                return true;
+            }
         }
         ExpressionDesc::Texp_try(body, cases) => {
-            collect_typed_expression_pident_uses(body, used);
-            collect_typed_case_pident_uses(cases, used);
+            if walk_typed_expression_pident_uses(body, sink) {
+                return true;
+            }
+            if walk_typed_case_pident_uses(cases, sink) {
+                return true;
+            }
         }
         ExpressionDesc::Texp_tuple(items)
         | ExpressionDesc::Texp_array(items)
         | ExpressionDesc::Texp_construct(_, _, items) => {
             for item in items {
-                collect_typed_expression_pident_uses(item, used);
+                if walk_typed_expression_pident_uses(item, sink) {
+                    return true;
+                }
             }
         }
         ExpressionDesc::Texp_variant(_, payload) => {
             if let Some(expr) = payload {
-                collect_typed_expression_pident_uses(expr, used);
+                if walk_typed_expression_pident_uses(expr, sink) {
+                    return true;
+                }
             }
         }
         ExpressionDesc::Texp_record {
@@ -23506,146 +23542,235 @@ fn collect_typed_expression_pident_uses(expr: &Expression, used: &mut HashSet<Id
                 if let crate::types::typedtree::RecordLabelDefinition::Overridden(_, expr) =
                     definition
                 {
-                    collect_typed_expression_pident_uses(expr, used);
+                    if walk_typed_expression_pident_uses(expr, sink) {
+                        return true;
+                    }
                 }
             }
             if let Some(expr) = extended_expression {
-                collect_typed_expression_pident_uses(expr, used);
+                if walk_typed_expression_pident_uses(expr, sink) {
+                    return true;
+                }
             }
         }
         ExpressionDesc::Texp_field(base, _, _) | ExpressionDesc::Texp_assert(base) => {
-            collect_typed_expression_pident_uses(base, used);
+            if walk_typed_expression_pident_uses(base, sink) {
+                return true;
+            }
         }
         ExpressionDesc::Texp_setfield(base, _, _, value) => {
-            collect_typed_expression_pident_uses(base, used);
-            collect_typed_expression_pident_uses(value, used);
+            if walk_typed_expression_pident_uses(base, sink) {
+                return true;
+            }
+            if walk_typed_expression_pident_uses(value, sink) {
+                return true;
+            }
         }
         ExpressionDesc::Texp_ifthenelse(cond, then_expr, else_expr) => {
-            collect_typed_expression_pident_uses(cond, used);
-            collect_typed_expression_pident_uses(then_expr, used);
+            if walk_typed_expression_pident_uses(cond, sink) {
+                return true;
+            }
+            if walk_typed_expression_pident_uses(then_expr, sink) {
+                return true;
+            }
             if let Some(expr) = else_expr {
-                collect_typed_expression_pident_uses(expr, used);
+                if walk_typed_expression_pident_uses(expr, sink) {
+                    return true;
+                }
             }
         }
         ExpressionDesc::Texp_sequence(first, second)
         | ExpressionDesc::Texp_while(first, second)
         | ExpressionDesc::Texp_for_of(_, _, first, second)
         | ExpressionDesc::Texp_for_await_of(_, _, first, second) => {
-            collect_typed_expression_pident_uses(first, used);
-            collect_typed_expression_pident_uses(second, used);
+            if walk_typed_expression_pident_uses(first, sink) {
+                return true;
+            }
+            if walk_typed_expression_pident_uses(second, sink) {
+                return true;
+            }
         }
         ExpressionDesc::Texp_for(_, _, start, stop, _, body) => {
-            collect_typed_expression_pident_uses(start, used);
-            collect_typed_expression_pident_uses(stop, used);
-            collect_typed_expression_pident_uses(body, used);
+            if walk_typed_expression_pident_uses(start, sink) {
+                return true;
+            }
+            if walk_typed_expression_pident_uses(stop, sink) {
+                return true;
+            }
+            if walk_typed_expression_pident_uses(body, sink) {
+                return true;
+            }
         }
         ExpressionDesc::Texp_send(receiver, _, arg) => {
-            collect_typed_expression_pident_uses(receiver, used);
+            if walk_typed_expression_pident_uses(receiver, sink) {
+                return true;
+            }
             if let Some(expr) = arg {
-                collect_typed_expression_pident_uses(expr, used);
+                if walk_typed_expression_pident_uses(expr, sink) {
+                    return true;
+                }
             }
         }
         ExpressionDesc::Texp_letmodule(_, _, module_expr, body) => {
-            collect_typed_module_expr_pident_uses(module_expr, used);
-            collect_typed_expression_pident_uses(body, used);
+            if walk_typed_module_expr_pident_uses(module_expr, sink) {
+                return true;
+            }
+            if walk_typed_expression_pident_uses(body, sink) {
+                return true;
+            }
         }
         ExpressionDesc::Texp_letexception(_, body) => {
-            collect_typed_expression_pident_uses(body, used);
+            if walk_typed_expression_pident_uses(body, sink) {
+                return true;
+            }
         }
         ExpressionDesc::Texp_pack(module_expr) => {
-            collect_typed_module_expr_pident_uses(module_expr, used);
+            if walk_typed_module_expr_pident_uses(module_expr, sink) {
+                return true;
+            }
         }
         ExpressionDesc::Texp_constant(_)
         | ExpressionDesc::Texp_break
         | ExpressionDesc::Texp_continue
         | ExpressionDesc::Texp_extension_constructor(_, _) => {}
     }
+    false
 }
 
-fn collect_typed_case_pident_uses(
+fn walk_typed_case_pident_uses(
     cases: &[crate::types::typedtree::Case],
-    used: &mut HashSet<Ident>,
-) {
+    sink: &mut dyn FnMut(&Ident) -> bool,
+) -> bool {
     for case in cases {
         if let Some(guard) = &case.c_guard {
-            collect_typed_expression_pident_uses(guard, used);
+            if walk_typed_expression_pident_uses(guard, sink) {
+                return true;
+            }
         }
-        collect_typed_expression_pident_uses(&case.c_rhs, used);
+        if walk_typed_expression_pident_uses(&case.c_rhs, sink) {
+            return true;
+        }
     }
+    false
 }
 
-fn collect_typed_module_expr_pident_uses(module_expr: &ModuleExpr, used: &mut HashSet<Ident>) {
+fn walk_typed_module_expr_pident_uses(
+    module_expr: &ModuleExpr,
+    sink: &mut dyn FnMut(&Ident) -> bool,
+) -> bool {
     match &module_expr.mod_desc {
         ModuleExprDesc::Tmod_structure(structure) => {
             for item in &structure.str_items {
-                collect_typed_structure_item_pident_uses(item, used);
+                if walk_typed_structure_item_pident_uses(item, sink) {
+                    return true;
+                }
             }
         }
         ModuleExprDesc::Tmod_apply(func, arg, _) => {
-            collect_typed_module_expr_pident_uses(func, used);
-            collect_typed_module_expr_pident_uses(arg, used);
+            if walk_typed_module_expr_pident_uses(func, sink) {
+                return true;
+            }
+            if walk_typed_module_expr_pident_uses(arg, sink) {
+                return true;
+            }
         }
         ModuleExprDesc::Tmod_functor(_, _, arg, body) => {
             if let Some(arg) = arg {
-                collect_typed_module_type_pident_uses(arg, used);
+                if walk_typed_module_type_pident_uses(arg, sink) {
+                    return true;
+                }
             }
-            collect_typed_module_expr_pident_uses(body, used);
+            if walk_typed_module_expr_pident_uses(body, sink) {
+                return true;
+            }
         }
         ModuleExprDesc::Tmod_constraint(inner, _, constraint, _) => {
-            collect_typed_module_expr_pident_uses(inner, used);
+            if walk_typed_module_expr_pident_uses(inner, sink) {
+                return true;
+            }
             if let ModuleTypeConstraint::Tmodtype_explicit(module_type) = constraint {
-                collect_typed_module_type_pident_uses(module_type, used);
+                if walk_typed_module_type_pident_uses(module_type, sink) {
+                    return true;
+                }
             }
         }
         ModuleExprDesc::Tmod_unpack(expr, _) => {
-            collect_typed_expression_pident_uses(expr, used);
+            if walk_typed_expression_pident_uses(expr, sink) {
+                return true;
+            }
         }
         ModuleExprDesc::Tmod_ident(_, _) => {}
     }
+    false
 }
 
-fn collect_typed_module_type_pident_uses(module_type: &ModuleType, used: &mut HashSet<Ident>) {
+fn walk_typed_module_type_pident_uses(
+    module_type: &ModuleType,
+    sink: &mut dyn FnMut(&Ident) -> bool,
+) -> bool {
     match &module_type.mty_desc {
         ModuleTypeDesc::Tmty_typeof(module_expr) => {
-            collect_typed_module_expr_pident_uses(module_expr, used);
+            if walk_typed_module_expr_pident_uses(module_expr, sink) {
+                return true;
+            }
         }
         ModuleTypeDesc::Tmty_functor(_, _, arg, body) => {
             if let Some(arg) = arg {
-                collect_typed_module_type_pident_uses(arg, used);
+                if walk_typed_module_type_pident_uses(arg, sink) {
+                    return true;
+                }
             }
-            collect_typed_module_type_pident_uses(body, used);
+            if walk_typed_module_type_pident_uses(body, sink) {
+                return true;
+            }
         }
         ModuleTypeDesc::Tmty_with(inner, _) => {
-            collect_typed_module_type_pident_uses(inner, used);
+            if walk_typed_module_type_pident_uses(inner, sink) {
+                return true;
+            }
         }
         ModuleTypeDesc::Tmty_signature(signature) => {
             for item in &signature.sig_items {
-                collect_typed_signature_item_pident_uses(item, used);
+                if walk_typed_signature_item_pident_uses(item, sink) {
+                    return true;
+                }
             }
         }
         ModuleTypeDesc::Tmty_ident(_, _)
         | ModuleTypeDesc::Tmty_alias(_, _)
         | ModuleTypeDesc::Tmty_placeholder => {}
     }
+    false
 }
 
-fn collect_typed_signature_item_pident_uses(item: &TypedSignatureItem, used: &mut HashSet<Ident>) {
+fn walk_typed_signature_item_pident_uses(
+    item: &TypedSignatureItem,
+    sink: &mut dyn FnMut(&Ident) -> bool,
+) -> bool {
     match &item.sig_desc {
         TypedSignatureItemDesc::Tsig_module(decl) => {
-            collect_typed_module_type_pident_uses(&decl.md_type, used);
+            if walk_typed_module_type_pident_uses(&decl.md_type, sink) {
+                return true;
+            }
         }
         TypedSignatureItemDesc::Tsig_recmodule(decls) => {
             for decl in decls {
-                collect_typed_module_type_pident_uses(&decl.md_type, used);
+                if walk_typed_module_type_pident_uses(&decl.md_type, sink) {
+                    return true;
+                }
             }
         }
         TypedSignatureItemDesc::Tsig_modtype(decl) => {
             if let Some(module_type) = &decl.mtd_type {
-                collect_typed_module_type_pident_uses(module_type, used);
+                if walk_typed_module_type_pident_uses(module_type, sink) {
+                    return true;
+                }
             }
         }
         TypedSignatureItemDesc::Tsig_include(include) => {
-            collect_typed_module_type_pident_uses(&include.incl_mod, used);
+            if walk_typed_module_type_pident_uses(&include.incl_mod, sink) {
+                return true;
+            }
         }
         TypedSignatureItemDesc::Tsig_value(_)
         | TypedSignatureItemDesc::Tsig_type(_, _)
@@ -23654,33 +23779,49 @@ fn collect_typed_signature_item_pident_uses(item: &TypedSignatureItem, used: &mu
         | TypedSignatureItemDesc::Tsig_open(_)
         | TypedSignatureItemDesc::Tsig_attribute(_) => {}
     }
+    false
 }
 
-fn collect_typed_structure_item_pident_uses(item: &StructureItem, used: &mut HashSet<Ident>) {
+fn walk_typed_structure_item_pident_uses(
+    item: &StructureItem,
+    sink: &mut dyn FnMut(&Ident) -> bool,
+) -> bool {
     match &item.str_desc {
         StructureItemDesc::Tstr_eval(expr, _) => {
-            collect_typed_expression_pident_uses(expr, used);
+            if walk_typed_expression_pident_uses(expr, sink) {
+                return true;
+            }
         }
         StructureItemDesc::Tstr_value(_, bindings) => {
             for binding in bindings {
-                collect_typed_expression_pident_uses(&binding.vb_expr, used);
+                if walk_typed_expression_pident_uses(&binding.vb_expr, sink) {
+                    return true;
+                }
             }
         }
         StructureItemDesc::Tstr_module(binding) => {
-            collect_typed_module_expr_pident_uses(&binding.mb_expr, used);
+            if walk_typed_module_expr_pident_uses(&binding.mb_expr, sink) {
+                return true;
+            }
         }
         StructureItemDesc::Tstr_recmodule(bindings) => {
             for binding in bindings {
-                collect_typed_module_expr_pident_uses(&binding.mb_expr, used);
+                if walk_typed_module_expr_pident_uses(&binding.mb_expr, sink) {
+                    return true;
+                }
             }
         }
         StructureItemDesc::Tstr_modtype(decl) => {
             if let Some(module_type) = &decl.mtd_type {
-                collect_typed_module_type_pident_uses(module_type, used);
+                if walk_typed_module_type_pident_uses(module_type, sink) {
+                    return true;
+                }
             }
         }
         StructureItemDesc::Tstr_include(include) => {
-            collect_typed_module_expr_pident_uses(&include.incl_mod, used);
+            if walk_typed_module_expr_pident_uses(&include.incl_mod, sink) {
+                return true;
+            }
         }
         StructureItemDesc::Tstr_primitive(_)
         | StructureItemDesc::Tstr_type(_, _)
@@ -23689,6 +23830,7 @@ fn collect_typed_structure_item_pident_uses(item: &StructureItem, used: &mut Has
         | StructureItemDesc::Tstr_open(_)
         | StructureItemDesc::Tstr_attribute(_) => {}
     }
+    false
 }
 
 fn typed_structure_item_uses_ident(item: &StructureItem, target: &Ident) -> bool {
@@ -24331,6 +24473,33 @@ fn is_fake_optional_arg_let(
     )
 }
 
+/// Mark which of `targets` occur as `Texp_ident (Pident _)` in the given
+/// expressions, stopping as soon as every target has been seen.
+fn mark_typed_pident_uses<'e>(
+    targets: &[&Ident],
+    exprs: impl IntoIterator<Item = &'e Expression>,
+    found: &mut [bool],
+) {
+    let mut remaining = found.iter().filter(|seen| !**seen).count();
+    if remaining == 0 {
+        return;
+    }
+    let mut sink = |id: &Ident| {
+        for (target, seen) in targets.iter().zip(found.iter_mut()) {
+            if !*seen && *target == id {
+                *seen = true;
+                remaining -= 1;
+            }
+        }
+        remaining == 0
+    };
+    for expr in exprs {
+        if walk_typed_expression_pident_uses(expr, &mut sink) {
+            return;
+        }
+    }
+}
+
 fn report_unused_local_let_warnings(
     tctx: &mut TypeCheckContext<'_>,
     insert_index: usize,
@@ -24339,25 +24508,35 @@ fn report_unused_local_let_warnings(
     typed_body: &Expression,
 ) {
     let mut warning_index = insert_index;
-    let mut body_uses = HashSet::default();
-    collect_typed_expression_pident_uses(typed_body, &mut body_uses);
-    let mut recursive_rhs_uses = HashSet::default();
+    let bound_per_binding = typed_bindings
+        .iter()
+        .map(|binding| {
+            let mut bound = Vec::new();
+            collect_typed_pattern_idents(&binding.vb_pat, &mut bound);
+            bound
+        })
+        .collect::<Vec<_>>();
+    let targets = bound_per_binding
+        .iter()
+        .flatten()
+        .map(|(id, _, _)| *id)
+        .collect::<Vec<_>>();
+    let mut used_flags = vec![false; targets.len()];
+    mark_typed_pident_uses(&targets, std::iter::once(typed_body), &mut used_flags);
     if rec_flag == RecFlag::Recursive {
-        for binding in typed_bindings {
-            collect_typed_expression_pident_uses(&binding.vb_expr, &mut recursive_rhs_uses);
-        }
+        mark_typed_pident_uses(
+            &targets,
+            typed_bindings.iter().map(|binding| &binding.vb_expr),
+            &mut used_flags,
+        );
     }
-    for binding in typed_bindings {
-        let mut bound = Vec::new();
-        collect_typed_pattern_idents(&binding.vb_pat, &mut bound);
+    let mut used_flags = used_flags.into_iter();
+    for bound in bound_per_binding {
         if bound.is_empty() {
             continue;
         }
 
-        let used = bound
-            .iter()
-            .map(|(id, _, _)| body_uses.contains(id) || recursive_rhs_uses.contains(id))
-            .collect::<Vec<_>>();
+        let used = used_flags.by_ref().take(bound.len()).collect::<Vec<_>>();
         let some_used = used.iter().any(|used| *used);
 
         for ((_, name, loc), used) in bound.into_iter().zip(used.into_iter()) {
@@ -24397,13 +24576,17 @@ fn report_unused_rec_flag_warning(
         return;
     }
 
-    let mut recursive_rhs_uses = HashSet::default();
+    // `rec` is needed as soon as any bound name occurs in a right-hand side.
+    let mut rec_needed = false;
+    let mut sink = |id: &Ident| {
+        rec_needed = bound.iter().any(|(bound_id, _, _)| *bound_id == id);
+        rec_needed
+    };
     for binding in typed_bindings {
-        collect_typed_expression_pident_uses(&binding.vb_expr, &mut recursive_rhs_uses);
+        if walk_typed_expression_pident_uses(&binding.vb_expr, &mut sink) {
+            break;
+        }
     }
-    let rec_needed = bound
-        .iter()
-        .any(|(id, _, _)| recursive_rhs_uses.contains(id));
     if !rec_needed {
         tctx.report_warning(first_binding.vb_pat.pat_loc, Warning::UnusedRecFlag);
     }
