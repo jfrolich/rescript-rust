@@ -1570,22 +1570,27 @@ fn parse_attribute_payload(p: &mut Parser<'_>) -> Payload {
 // Tuple Type
 // ============================================================================
 
+/// OCaml `parse_typ_expr_region` (compiler/syntax/src/res_core.ml:5076-5078).
+fn parse_typ_expr_region(p: &mut Parser<'_>) -> Option<CoreType> {
+    if grammar::is_typ_expr_start(&p.token) {
+        Some(parse_typ_expr(p))
+    } else {
+        None
+    }
+}
+
 /// Parse a tuple type.
 fn parse_tuple_type(p: &mut Parser<'_>, start_pos_idx: PosIdx, first: CoreType) -> CoreType {
+    // OCaml `parse_tuple_type` (compiler/syntax/src/res_core.ml:5112-5127);
+    // the caller has consumed the first comma.
+    p.expect(Token::Comma);
     let mut types = vec![first];
-
-    while p.token == Token::Comma {
-        p.next();
-        // Handle trailing comma
-        if p.token == Token::Rparen {
-            break;
-        }
-        // Allow arrow types and type aliases in tuple elements
-        let elem_typ = parse_typ_expr_inner(p, true);
-        let elem_typ = parse_type_alias(p, elem_typ);
-        types.push(elem_typ);
-    }
-
+    types.extend(super::core::parse_comma_delimited_region(
+        p,
+        Grammar::TypExprList,
+        Token::Rparen,
+        parse_typ_expr_region,
+    ));
     p.expect(Token::Rparen);
 
     // OCaml: A tuple needs at least two elements
