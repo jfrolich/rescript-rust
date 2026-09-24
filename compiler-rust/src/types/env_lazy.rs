@@ -42,13 +42,68 @@ fn build_matching_type_constructors(
     constructor_name: &str,
     ctx: &super::context::TypeContext,
 ) {
+    let type_path = Path::pdot(access_path.clone(), type_name);
+    build_type_constructors(out, &type_path, decl, Some(constructor_name), ctx);
+}
+
+/// `fst (Env.find_type_descrs path env)` for a variant declaration whose
+/// descriptors live at `type_path` (compiler/ml/datarepr.ml:111-172 via
+/// compiler/ml/env.ml:1542-1547), in declaration order.
+pub(crate) fn constructors_of_type_path(
+    type_path: &Path,
+    decl: &TypeDeclaration,
+    ctx: &super::context::TypeContext,
+) -> Vec<ConstructorDescription> {
+    let mut out = Vec::new();
+    build_type_constructors(&mut out, type_path, decl, None, ctx);
+    out.reverse();
+    out
+}
+
+/// `snd (Env.find_type_descrs path env)` for a record declaration, in label
+/// position order (compiler/ml/datarepr.ml:174-188).
+pub(crate) fn labels_of_type_path(
+    type_path: &Path,
+    decl: &TypeDeclaration,
+    ctx: &super::context::TypeContext,
+) -> Vec<LabelDescription> {
+    let super::decl::TypeKind::TypeRecord(labels, repr) = &decl.type_kind else {
+        return Vec::new();
+    };
+    let res_ty = ctx.new_generic_constr(type_path.clone(), decl.type_params.clone());
+    labels
+        .iter()
+        .enumerate()
+        .map(|(pos, ld)| LabelDescription {
+            lbl_name: ld.ld_id.name().to_string(),
+            lbl_res: res_ty,
+            lbl_arg: super::ctype::remap_label_type_to_params(ctx, ld.ld_type, &decl.type_params),
+            lbl_mut: ld.ld_mutable,
+            lbl_optional: ld.ld_optional,
+            lbl_pos: pos as i32,
+            lbl_all: super::decl::LabelArrayRef(0),
+            lbl_repres: repr.clone(),
+            lbl_private: decl.type_private,
+            lbl_loc: ld.ld_loc,
+            lbl_attributes: ld.ld_attributes.clone(),
+        })
+        .collect()
+}
+
+fn build_type_constructors(
+    out: &mut Vec<ConstructorDescription>,
+    type_path: &Path,
+    decl: &TypeDeclaration,
+    constructor_name: Option<&str>,
+    ctx: &super::context::TypeContext,
+) {
     let super::decl::TypeKind::TypeVariant(cstrs, layout) = &decl.type_kind else {
         return;
     };
 
-    let type_path = Path::pdot(access_path.clone(), type_name);
+    let type_path = type_path.clone();
     for (position, cd) in cstrs.iter().enumerate() {
-        if cd.cd_id.name() != constructor_name {
+        if constructor_name.is_some_and(|name| cd.cd_id.name() != name) {
             continue;
         }
 

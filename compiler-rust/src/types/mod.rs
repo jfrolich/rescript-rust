@@ -41,6 +41,7 @@ pub mod decl;
 pub mod env;
 pub(crate) mod env_lazy;
 pub mod includemod;
+pub(crate) mod parmatch;
 pub mod path;
 pub mod predef;
 pub mod sexp_typedtree;

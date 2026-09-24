@@ -6742,7 +6742,8 @@ fn unify_row_field<'a>(
             // existing link is already present, retry on the linked representatives.
             // Match OCaml when rigid variants are enabled for this path:
             // singleton payload arity alone should not force the redo path.
-            let active = *m1 || *m2 || fixed1 || fixed2;
+            // `not !passive_variants && ...` (ctype.ml:2522).
+            let active = !ctx.passive_variants() && (*m1 || *m2 || fixed1 || fixed2);
             if active {
                 let mut all_types: Vec<TypeExprRef> =
                     Vec::with_capacity(types1.len() + types2.len());

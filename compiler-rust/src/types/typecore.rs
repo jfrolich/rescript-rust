@@ -1154,11 +1154,19 @@ impl Default for PatternState {
 // Type Checking Context
 // ============================================================================
 
+/// A `Delayed_checks.add_delayed_check unused_check` closure from
+/// `type_cases`/`type_function` (typecore.ml:3792-3798, 4483-4490).
 struct DelayedUnusedCheck {
     env: Env,
     level: i32,
-    expected_ty: TypeExprRef,
-    witnesses: Vec<Pattern>,
+    ty_arg_check: TypeExprRef,
+    cases: Vec<ParmatchCase>,
+    /// `Warnings.backup ()` taken when the check was registered.
+    warning_config: WarningConfig,
+    /// `Parmatch.check_ambiguous_bindings` results.
+    ambiguous: Vec<(LocIdx, Vec<String>)>,
+    /// Registration order among all delayed checks.
+    seq: u64,
 }
 
 /// Context for type checking.
@@ -1180,8 +1188,11 @@ pub struct TypeCheckContext<'a> {
     /// Mirrors OCaml Env.check_usage/Delayed_checks: lookup marks a binding as
     /// used, and the warning is emitted only when delayed checks are forced.
     value_usage_checks: Vec<ValueUsageCheck>,
-    /// Useful match witnesses retyped when delayed checks are flushed.
-    delayed_unused_witnesses: Vec<DelayedUnusedCheck>,
+    /// Unused-case checks run when delayed checks are flushed.
+    delayed_unused_checks: Vec<DelayedUnusedCheck>,
+    /// Registration counter shared by all delayed checks, so they are forced
+    /// in registration order like `Delayed_checks.force_delayed_checks`.
+    delayed_check_seq: u64,
     generated_pattern_constructors: Vec<(String, crate::types::ConstructorDescription)>,
     generated_pattern_labels: Vec<(String, crate::types::LabelDescription)>,
     /// Current warning configuration.
@@ -1277,6 +1288,7 @@ struct ValueUsageCheck {
     warning: Warning,
     is_error: bool,
     used: bool,
+    seq: u64,
 }
 
 impl<'a> TypeCheckContext<'a> {
@@ -1291,7 +1303,8 @@ impl<'a> TypeCheckContext<'a> {
             diagnostics: Vec::new(),
             warnings: Vec::new(),
             value_usage_checks: Vec::new(),
-            delayed_unused_witnesses: Vec::new(),
+            delayed_unused_checks: Vec::new(),
+            delayed_check_seq: 0,
             generated_pattern_constructors: Vec::new(),
             generated_pattern_labels: Vec::new(),
             warning_config: WarningConfig::new(),
@@ -1390,6 +1403,7 @@ impl<'a> TypeCheckContext<'a> {
         }
 
         let is_error = self.warning_config.is_error(&warning);
+        let seq = self.next_delayed_check_seq();
         self.value_usage_checks.push(ValueUsageCheck {
             name: name.to_string(),
             val_loc,
@@ -1397,6 +1411,7 @@ impl<'a> TypeCheckContext<'a> {
             warning,
             is_error,
             used: false,
+            seq,
         });
     }
 
@@ -1408,19 +1423,38 @@ impl<'a> TypeCheckContext<'a> {
         }
     }
 
-    pub fn flush_value_usage_checks(&mut self) {
-        for check in std::mem::take(&mut self.value_usage_checks) {
-            if !check.used {
-                self.warnings.push(TypeCoreWarning {
-                    loc: check.warning_loc,
-                    warning: check.warning,
-                    is_error: check.is_error,
-                });
-            }
-        }
+    fn next_delayed_check_seq(&mut self) -> u64 {
+        self.delayed_check_seq += 1;
+        self.delayed_check_seq
+    }
 
-        for check in std::mem::take(&mut self.delayed_unused_witnesses) {
-            retype_unused_witnesses(self, check);
+    /// `Delayed_checks.force_delayed_checks`: run value-usage and unused-case
+    /// checks in registration order.
+    pub fn flush_value_usage_checks(&mut self) {
+        let mut usage = std::mem::take(&mut self.value_usage_checks).into_iter().peekable();
+        let mut unused = std::mem::take(&mut self.delayed_unused_checks)
+            .into_iter()
+            .peekable();
+        loop {
+            let take_usage = match (usage.peek(), unused.peek()) {
+                (Some(u), Some(c)) => u.seq < c.seq,
+                (Some(_), None) => true,
+                (None, Some(_)) => false,
+                (None, None) => break,
+            };
+            if take_usage {
+                let check = usage.next().expect("peeked");
+                if !check.used {
+                    self.warnings.push(TypeCoreWarning {
+                        loc: check.warning_loc,
+                        warning: check.warning,
+                        is_error: check.is_error,
+                    });
+                }
+            } else {
+                let check = unused.next().expect("peeked");
+                run_delayed_unused_check(self, check);
+            }
         }
     }
 
@@ -5622,7 +5656,18 @@ fn type_pattern_record(
         // wrap the pattern in Some(...) before type checking.
         // This matches OCaml's typecore.ml process_optional_label behavior.
         let parsed_pat = tctx.arena.get_pat(field.pat);
-        let typed_pat = if label_desc.lbl_optional && !field.opt {
+        // `is_from_pamatch` (typecore.ml:1522-1526): Parmatch counter-examples
+        // already carry the optional layer as a `#$` constructor.
+        let is_from_pamatch = match &*parsed_pat.ppat_desc {
+            crate::parser::ast::PatternDesc::Ppat_construct(lid, _) => {
+                match tctx.arena.get_longident(lid.txt) {
+                    Longident::Lident(name) => tctx.arena.get_string(*name).starts_with("#$"),
+                    _ => false,
+                }
+            }
+            _ => false,
+        };
+        let typed_pat = if label_desc.lbl_optional && !field.opt && !is_from_pamatch {
             // field_ty is option<T> — extract T to type-check the inner pattern
             let inner_ty =
                 crate::types::ctype::extract_option_type(ctx, field_ty).unwrap_or(field_ty);
@@ -11383,10 +11428,15 @@ fn finish_non_gadt_type_cases<'a>(
         unused_check_level = lev;
         unused_expected_ty = crate::types::ctype::subst_identity_copy(ctx, ty_arg);
         let partial = if partial_flag {
-            let partial = check_partial_simple(ctx, env, typed_cases);
-            report_all_clauses_guarded_if_needed(tctx, loc, typed_cases, partial);
-            report_fragile_match_if_needed(tctx, ctx, env, loc, typed_cases, partial);
-            partial
+            parmatch_check_partial(
+                tctx,
+                env,
+                lev,
+                None,
+                unused_expected_ty,
+                loc,
+                &case_refs(typed_cases),
+            )
         } else {
             crate::types::typedtree::Partial::Partial
         };
@@ -11400,23 +11450,32 @@ fn finish_non_gadt_type_cases<'a>(
         )?;
         partial
     } else if partial_flag {
-        let partial = check_partial_simple(ctx, env, typed_cases);
-        report_all_clauses_guarded_if_needed(tctx, loc, typed_cases, partial);
-        report_fragile_match_if_needed(tctx, ctx, env, loc, typed_cases, partial);
-        partial
+        parmatch_check_partial(
+            tctx,
+            env,
+            unused_check_level,
+            None,
+            ty_arg,
+            loc,
+            &case_refs(typed_cases),
+        )
     } else {
         crate::types::typedtree::Partial::Partial
     };
 
     // type_cases always schedules check_unused, including try handlers where
     // partial_flag is false (typecore.ml:4483-4496).
+    let contains_polyvars = parsed_cases.iter().any(|case| {
+        parsed_pattern_contains_polymorphic_variant(tctx.arena, tctx.arena.get_pat(case.pc_lhs))
+    });
     report_unused_match_cases(
         tctx,
         env,
         typed_cases,
-        needs_exhaust_check,
+        needs_exhaust_check || contains_polyvars,
         unused_check_level,
         unused_expected_ty,
+        Vec::new(),
     );
     Ok(partial)
 }
@@ -12201,36 +12260,6 @@ fn materialize_unused_witness_inner(
     }
 }
 
-fn retype_unused_witnesses(tctx: &mut TypeCheckContext<'_>, check: DelayedUnusedCheck) {
-    let expected_ty = crate::types::instance(tctx.type_ctx, check.expected_ty);
-    for witness in check.witnesses {
-        tctx.generated_pattern_constructors.clear();
-        tctx.generated_pattern_labels.clear();
-        let parsed = materialize_unused_witness(tctx, &check.env, &witness);
-        let type_snapshot = tctx.type_ctx.snapshot_type_state();
-        let unify_snapshot = tctx.unify_state.snapshot_backtrack_state();
-        let warning_len = tctx.warnings.len();
-        let diagnostic_len = tctx.diagnostics.len();
-        let mut state = PatternState::new();
-        let _ = type_pattern_with_existentials_at_level(
-            tctx,
-            &check.env,
-            tctx.arena.get_pat(parsed),
-            expected_ty,
-            PatternMode::SplitOr,
-            true,
-            &mut state,
-            check.level,
-            5,
-        );
-        tctx.type_ctx.restore_type_state(type_snapshot);
-        tctx.unify_state.restore_backtrack_state(unify_snapshot);
-        tctx.warnings.truncate(warning_len);
-        tctx.diagnostics.truncate(diagnostic_len);
-    }
-    tctx.generated_pattern_constructors.clear();
-    tctx.generated_pattern_labels.clear();
-}
 
 fn opaque_dict_patterns(arena: &ParseArena, pattern: &Pattern) -> Pattern {
     if pattern
@@ -12511,201 +12540,66 @@ fn pressure_minimal_compatible_rows(
     select(tctx, env, selected)
 }
 
-fn report_unused_match_cases<'case>(
+fn report_unused_match_cases(
     tctx: &mut TypeCheckContext<'_>,
     env: &Env,
-    cases: &'case [crate::types::typedtree::Case],
-    delay_witness_typing: bool,
+    cases: &[crate::types::typedtree::Case],
+    delayed: bool,
     level: i32,
-    expected_ty: TypeExprRef,
+    ty_arg_check: TypeExprRef,
+    ambiguous: Vec<(LocIdx, Vec<String>)>,
 ) {
-    if !tctx.warning_config.is_active(&Warning::UnusedMatch) {
+    // `unused_check ()` (typecore.ml:4483-4490): delayed when the match
+    // contains polymorphic variants or needed `init_env`.
+    if !tctx.warning_config.is_active(&Warning::UnusedMatch) && ambiguous.is_empty() {
         return;
     }
-
-    // OCaml typecore.ml runs this after check_partial/check_fragile and before
-    // Parmatch.check_ambiguous_bindings:
-    // Typecore.check_unused -> Parmatch.check_unused.
-    let ctx = tctx.type_ctx;
-    let mut previous_unguarded_cases: Vec<PartialCheckCase<'case>> = Vec::new();
-    let mut covered_keys: HashSet<String> = HashSet::default();
-    let mut covered_by_catch_all = false;
-    let mut useful_witnesses = Vec::new();
-
-    for case in cases {
-        let has_dict_pattern = typed_pattern_contains_dict_pattern(tctx.arena, &case.c_lhs)
-            || previous_unguarded_cases
-                .iter()
-                .any(|previous| typed_pattern_contains_dict_pattern(tctx.arena, previous.lhs));
-        if has_dict_pattern && !previous_unguarded_cases.is_empty() {
-            // compiler/ml/parmatch.ml:2017-2035, 2211-2223: dict rows are
-            // opaque for warning-56 satisfiability. Exclude prior dict rows so
-            // record-field expansion cannot multiply the pattern matrix.
-            let non_dict_previous = previous_unguarded_cases
-                .iter()
-                .filter(|previous| !typed_pattern_contains_dict_pattern(tctx.arena, previous.lhs))
-                .cloned()
-                .collect::<Vec<_>>();
-            if !non_dict_previous.is_empty()
-                && (check_partial_simple_rows(ctx, env, &non_dict_previous)
-                    == crate::types::typedtree::Partial::Total
-                    || generalized_tuple_space_is_covered(
-                        tctx,
-                        env,
-                        &non_dict_previous,
-                        &case.c_lhs,
-                    ))
-            {
-                tctx.report_warning(case.c_lhs.pat_loc, Warning::UnreachableCase);
-                if case.c_guard.is_none() {
-                    previous_unguarded_cases.push(PartialCheckCase {
-                        lhs: &case.c_lhs,
-                        has_guard: false,
-                    });
-                }
-                continue;
-            }
-        }
-
-        let previous_cases_are_simple = previous_unguarded_cases.iter().all(|previous| {
-            simple_pattern_keys(tctx.arena, previous.lhs).is_some()
-                || pattern_is_simple_catch_all(previous.lhs)
-        });
-        if previous_cases_are_simple
-            && !previous_unguarded_cases.is_empty()
-            && check_partial_simple_rows(ctx, env, &previous_unguarded_cases)
-                == crate::types::typedtree::Partial::Total
-        {
-            // OCaml compiler/ml/parmatch.ml:2179-2217 runs the full
-            // satisfiability check for unused clauses. Rust's fast path only
-            // applies to simple key/catch-all rows; payload-bearing rows must
-            // stay on the more conservative per-key path below.
-            tctx.report_warning(case.c_lhs.pat_loc, Warning::UnusedMatch);
-            if case.c_guard.is_none() {
-                previous_unguarded_cases.push(PartialCheckCase {
-                    lhs: &case.c_lhs,
-                    has_guard: false,
-                });
-            }
-            continue;
-        }
-
-        if report_unreachable_gadt_catch_all_if_needed(tctx, env, &previous_unguarded_cases, case) {
-            if case.c_guard.is_none() {
-                previous_unguarded_cases.push(PartialCheckCase {
-                    lhs: &case.c_lhs,
-                    has_guard: false,
-                });
-            }
-            continue;
-        }
-
-        let pattern_keys = simple_pattern_keys(tctx.arena, &case.c_lhs);
-        if pattern_keys.is_none() {
-            let mut redundant = Vec::new();
-            collect_redundant_nested_or_patterns(tctx.arena, &case.c_lhs, &mut redundant);
-            for loc in redundant {
-                tctx.report_warning(loc, Warning::UnusedPat);
-            }
-        }
-        let mut keys_in_case: HashSet<String> = HashSet::default();
-        let mut unused_subpatterns = Vec::new();
-        if let Some(keys) = &pattern_keys {
-            for key in keys {
-                if covered_by_catch_all
-                    || covered_keys.contains(&key.key)
-                    || !keys_in_case.insert(key.key.clone())
-                {
-                    unused_subpatterns
-                        .push((key.loc, key.from_variant_spread || key.from_generated_or));
-                }
-            }
-        }
-
-        let is_unused = if covered_by_catch_all {
-            true
-        } else if let Some(keys) = &pattern_keys {
-            keys.len() == unused_subpatterns.len()
-        } else {
-            false
-        };
-
-        if !is_unused
-            && !previous_unguarded_cases.is_empty()
-            && tctx.warning_config.is_active(&Warning::UnreachableCase)
-        {
-            let contains_dict = typed_pattern_contains_dict_pattern(tctx.arena, &case.c_lhs)
-                || previous_unguarded_cases
-                    .iter()
-                    .any(|previous| typed_pattern_contains_dict_pattern(tctx.arena, previous.lhs));
-            // OCaml Parmatch.check_unused first keeps only rows compatible
-            // with the query and then removes rows subsumed by another row
-            // (compiler/ml/parmatch.ml:1779-1786, 2193-2196).
-            let previous =
-                pressure_minimal_compatible_rows(tctx, env, &previous_unguarded_cases, &case.c_lhs)
-                    .into_iter()
-                    .filter(|row| {
-                        !contains_dict
-                            || !row.iter().any(|pattern| {
-                                typed_pattern_contains_dict_pattern(tctx.arena, pattern)
-                            })
-                    })
-                    .collect::<Vec<_>>();
-            let query = if contains_dict {
-                opaque_dict_patterns(tctx.arena, &case.c_lhs)
-            } else {
-                case.c_lhs.clone()
-            };
-            let witnesses = pressure_matrix_satisfiables(tctx, env, &previous, vec![query])
-                .into_iter()
-                .filter_map(|mut row| (row.len() == 1).then(|| row.remove(0)))
-                .collect::<Vec<_>>();
-            if let Some(witness) = pressure_matrix_orify_many(witnesses) {
-                useful_witnesses.push(witness);
-            }
-        }
-
-        if is_unused {
-            tctx.report_warning(case.c_lhs.pat_loc, Warning::UnusedMatch);
-        } else {
-            // OCaml compiler/ml/parmatch.ml:2211-2215 filters
-            // `Variant_type_spread.is_pat_from_variant_spread_attr` before
-            // reporting Warning 12 for partially redundant spread expansions.
-            for (loc, from_variant_spread) in unused_subpatterns {
-                if !from_variant_spread {
-                    tctx.report_warning(loc, Warning::UnusedPat);
-                }
-            }
-        }
-
-        if case.c_guard.is_none() {
-            if let Some(keys) = pattern_keys {
-                for key in keys {
-                    covered_keys.insert(key.key);
-                }
-            } else if pattern_is_simple_catch_all(&case.c_lhs) {
-                covered_by_catch_all = true;
-            }
-            previous_unguarded_cases.push(PartialCheckCase {
-                lhs: &case.c_lhs,
-                has_guard: false,
-            });
-        }
-    }
-
-    if !useful_witnesses.is_empty() {
-        let check = DelayedUnusedCheck {
+    if delayed {
+        let seq = tctx.next_delayed_check_seq();
+        tctx.delayed_unused_checks.push(DelayedUnusedCheck {
             env: env.clone(),
             level,
-            expected_ty,
-            witnesses: useful_witnesses,
-        };
-        if delay_witness_typing {
-            tctx.delayed_unused_witnesses.push(check);
-        } else {
-            retype_unused_witnesses(tctx, check);
-        }
+            ty_arg_check,
+            cases: cases
+                .iter()
+                .map(|case| ParmatchCase {
+                    lhs: case.c_lhs.clone(),
+                    guarded: case.c_guard.is_some(),
+                })
+                .collect(),
+            warning_config: tctx.warning_config.clone(),
+            ambiguous,
+            seq,
+        });
+    } else {
+        let expected_ty = crate::types::instance(tctx.type_ctx, ty_arg_check);
+        parmatch_check_unused(tctx, env, level, expected_ty, &case_refs(cases));
+        report_ambiguous_bindings(tctx, ambiguous);
     }
+}
+
+/// `Parmatch.check_ambiguous_bindings` warnings, reported after
+/// `check_unused` (typecore.ml:4483-4486).
+fn report_ambiguous_bindings(tctx: &mut TypeCheckContext<'_>, ambiguous: Vec<(LocIdx, Vec<String>)>) {
+    for (loc, vars) in ambiguous {
+        tctx.report_warning(loc, Warning::AmbiguousPattern { vars });
+    }
+}
+
+fn run_delayed_unused_check(tctx: &mut TypeCheckContext<'_>, check: DelayedUnusedCheck) {
+    let saved = std::mem::replace(&mut tctx.warning_config, check.warning_config);
+    let expected_ty = crate::types::instance(tctx.type_ctx, check.ty_arg_check);
+    let refs: Vec<_> = check
+        .cases
+        .iter()
+        .map(|case| crate::types::parmatch::CaseRef {
+            lhs: &case.lhs,
+            guarded: case.guarded,
+        })
+        .collect();
+    parmatch_check_unused(tctx, &check.env, check.level, expected_ty, &refs);
+    report_ambiguous_bindings(tctx, check.ambiguous);
+    tctx.warning_config = saved;
 }
 
 fn pattern_variable_paths(pat: &Pattern) -> HashMap<String, Vec<Vec<usize>>> {
@@ -13039,10 +12933,10 @@ fn collect_ambiguous_or_pattern_vars(pat: &Pattern, vars: &mut HashSet<String>) 
     }
 }
 
-fn report_ambiguous_guarded_or_patterns(
-    tctx: &mut TypeCheckContext<'_>,
+fn ambiguous_guarded_or_pattern_warnings(
     cases: &[crate::types::typedtree::Case],
-) {
+) -> Vec<(LocIdx, Vec<String>)> {
+    let mut warnings = Vec::new();
     for case in cases {
         if case.c_guard.is_none() {
             continue;
@@ -13075,8 +12969,9 @@ fn report_ambiguous_guarded_or_patterns(
         if vars.is_empty() {
             continue;
         }
-        tctx.report_warning(case.c_lhs.pat_loc, Warning::AmbiguousPattern { vars });
+        warnings.push((case.c_lhs.pat_loc, vars));
     }
+    warnings
 }
 
 /// Collect poly variant tag names from top-level patterns, handling or-patterns
@@ -15412,16 +15307,20 @@ fn type_match(
         val_caselist.as_slice(),
         [case] if is_simple_variable_pattern(tctx.arena, tctx.arena.get_pat(case.pc_lhs))
     );
-    let mut all_clauses_guarded = false;
     let mut unused_check_level = ctx.current_level();
     let mut unused_expected_ty = ty_arg;
     let partial = if has_generalized_value_patterns {
         unused_check_level = gadt_lev;
         unused_expected_ty = crate::types::ctype::subst_identity_copy(ctx, ty_arg);
-        let partial = check_partial_simple(ctx, val_case_env, &typed_val_cases);
-        all_clauses_guarded =
-            report_all_clauses_guarded_if_needed(tctx, loc, &typed_val_cases, partial);
-        report_fragile_match_if_needed(tctx, ctx, val_case_env, loc, &typed_val_cases, partial);
+        let partial = parmatch_check_partial(
+            tctx,
+            val_case_env,
+            gadt_lev,
+            None,
+            unused_expected_ty,
+            loc,
+            &case_refs(&typed_val_cases),
+        );
         ctx.end_def();
         unify_expression_types(
             tctx,
@@ -15445,10 +15344,15 @@ fn type_match(
         ctx.init_def(lev + 1000);
         unused_check_level = lev;
         unused_expected_ty = crate::types::ctype::subst_identity_copy(ctx, ty_arg);
-        let partial = check_partial_simple(ctx, val_case_env, &typed_val_cases);
-        all_clauses_guarded =
-            report_all_clauses_guarded_if_needed(tctx, loc, &typed_val_cases, partial);
-        report_fragile_match_if_needed(tctx, ctx, val_case_env, loc, &typed_val_cases, partial);
+        let partial = parmatch_check_partial(
+            tctx,
+            val_case_env,
+            lev,
+            None,
+            unused_expected_ty,
+            loc,
+            &case_refs(&typed_val_cases),
+        );
         ctx.end_def();
         unify_expression_types(
             tctx,
@@ -15459,29 +15363,26 @@ fn type_match(
         )?;
         partial
     } else {
-        let partial = check_partial_simple(ctx, val_case_env, &typed_val_cases);
-        all_clauses_guarded =
-            report_all_clauses_guarded_if_needed(tctx, loc, &typed_val_cases, partial);
-        report_fragile_match_if_needed(tctx, ctx, val_case_env, loc, &typed_val_cases, partial);
-        partial
+        parmatch_check_partial(
+            tctx,
+            val_case_env,
+            unused_check_level,
+            None,
+            ty_arg,
+            loc,
+            &case_refs(&typed_val_cases),
+        )
     };
+    let ambiguous = ambiguous_guarded_or_pattern_warnings(&typed_val_cases);
     report_unused_match_cases(
         tctx,
         val_case_env,
         &typed_val_cases,
-        has_generalized_value_patterns || needs_exhaust_check,
+        has_generalized_value_patterns || needs_exhaust_check || contains_polyvars,
         unused_check_level,
         unused_expected_ty,
+        ambiguous,
     );
-    report_ambiguous_guarded_or_patterns(tctx, &typed_val_cases);
-    if partial == crate::types::typedtree::Partial::Partial
-        && !all_clauses_guarded
-        && let Some(example) = optional_record_field_missing_example(&typed_val_cases)
-            .or_else(|| polymorphic_variant_missing_example(ctx, val_case_env, &typed_val_cases))
-            .or_else(|| simple_partial_missing_example(tctx, val_case_env, &typed_val_cases))
-    {
-        tctx.report_warning(loc, Warning::PartialMatch { example });
-    }
 
     // Keep sharing: match OCaml's `exp_type = instance env ty_expected`
     let result_ty = crate::types::instance(ctx, expected_ty);
@@ -16999,23 +16900,57 @@ fn type_function_nary(
     let needs_exhaust_check = params
         .iter()
         .any(|source| !is_simple_variable_pattern(tctx.arena, tctx.arena.get_pat(source.p_pat)));
+    let contains_polyvars = params.iter().any(|source| {
+        parsed_pattern_contains_polymorphic_variant(tctx.arena, tctx.arena.get_pat(source.p_pat))
+    });
+    let mut check_level = ctx.current_level();
     if needs_exhaust_check {
         ctx.begin_def();
         ctx.set_current_time(ctx.current_level());
         let level = ctx.current_stamp();
         ctx.init_def(level + 1000);
+        check_level = level;
     }
     let mut typed_params = Vec::with_capacity(params.len());
-    for ((source, typed), label) in params.iter().zip(typed_patterns).zip(labels.iter()) {
+    for (((source, typed), label), ty_arg_c) in params
+        .iter()
+        .zip(typed_patterns)
+        .zip(labels.iter())
+        .zip(parameter_types.iter().copied())
+    {
         let partial = if is_simple_variable_pattern(tctx.arena, tctx.arena.get_pat(source.p_pat)) {
             Partial::Total
         } else {
+            // typecore.ml:3782-3798.
+            let ty_arg_check = if needs_exhaust_check {
+                crate::types::ctype::subst_identity_copy(ctx, ty_arg_c)
+            } else {
+                ty_arg_c
+            };
             let case = crate::types::typedtree::Case {
                 c_lhs: typed.clone(),
                 c_guard: None,
                 c_rhs: typed_body.clone(),
             };
-            check_partial_simple(ctx, env, &[case])
+            let partial = parmatch_check_partial(
+                tctx,
+                env,
+                check_level,
+                None,
+                ty_arg_check,
+                loc,
+                &case_refs(std::slice::from_ref(&case)),
+            );
+            report_unused_match_cases(
+                tctx,
+                env,
+                std::slice::from_ref(&case),
+                needs_exhaust_check || contains_polyvars,
+                check_level,
+                ty_arg_check,
+                Vec::new(),
+            );
+            partial
         };
         typed_params.push(FunctionParam {
             fp_lbl: label.clone(),
@@ -24761,75 +24696,40 @@ fn report_let_partial_match_warnings<'a>(
 ) {
     let ctx = tctx.type_ctx;
     for binding in bindings {
-        let rhs_stub = Expression::new(
-            ExpressionDesc::Texp_constant(Constant::Int(0)),
-            binding.vb_expr.exp_loc,
-            binding.vb_expr.exp_type,
-            EnvRef(0),
-            Vec::new().into(),
-        );
-        let cases = vec![crate::types::typedtree::Case::simple(
-            binding.vb_pat.clone(),
-            rhs_stub,
-        )];
-        // OCaml compiler/ml/typecore.ml:4695-4710 computes the LetUnwrap
+        // OCaml compiler/ml/typecore.ml:4680-4700 computes the LetUnwrap
         // partial-match warning hint before calling `check_partial`, and before
         // typecore.ml:4715 `end_def ()`. That `Ctype.expand_head` side effect
         // is observable because persistent type aliases may be forced while
         // identifiers for later bindings have not been allocated.
-        let let_unwrap_example = if tctx.experimental_let_unwrap {
+        let hint = if tctx.experimental_let_unwrap {
             let expanded = crate::types::ctype::expand_head(ctx, env, binding.vb_pat.pat_type);
             let desc = ctx.get_desc(ctx.repr(expanded));
-            let kind = match &*desc {
+            match &*desc {
                 TypeDesc::Tconstr { path, .. }
-                    if path.same(&crate::types::predef::path_option()) =>
+                    if path.same(&crate::types::predef::path_option())
+                        || path.same(&crate::types::predef::path_result()) =>
                 {
-                    Some("option")
-                }
-                TypeDesc::Tconstr { path, .. }
-                    if path.same(&crate::types::predef::path_result()) =>
-                {
-                    Some("result")
+                    Some("Hint: You can use `let?` to automatically unwrap this expression.")
                 }
                 _ => None,
-            };
-            drop(desc);
-            let_unwrap_partial_match_example(&binding.vb_pat, kind)
+            }
         } else {
             None
         };
-
-        let partial = check_partial_simple(ctx, env, &cases);
-        if partial != crate::types::typedtree::Partial::Partial {
-            report_fragile_match_if_needed(tctx, ctx, env, binding.vb_pat.pat_loc, &cases, partial);
-            continue;
-        }
-
-        let example = let_unwrap_example
-            .or_else(|| optional_record_field_missing_example(&cases))
-            .or_else(|| polymorphic_variant_missing_example(ctx, env, &cases))
-            .or_else(|| simple_partial_missing_example(tctx, env, &cases))
-            .unwrap_or_default();
-        tctx.report_warning(binding.vb_pat.pat_loc, Warning::PartialMatch { example });
+        let case = crate::types::parmatch::CaseRef {
+            lhs: &binding.vb_pat,
+            guarded: false,
+        };
+        parmatch_check_partial(
+            tctx,
+            env,
+            ctx.current_level(),
+            hint,
+            binding.vb_pat.pat_type,
+            binding.vb_pat.pat_loc,
+            &[case],
+        );
     }
-}
-
-fn let_unwrap_partial_match_example(pat: &Pattern, kind: Option<&str>) -> Option<String> {
-    let kind = kind?;
-    let PatternDesc::Tpat_construct(_, cstr_desc, _) = &pat.pat_desc else {
-        return None;
-    };
-    let missing = match (kind, cstr_desc.cstr_name.as_str()) {
-        ("option", "Some") => "| None",
-        ("option", "None") => "| Some(_)",
-        ("result", "Ok") => "| Error(_)",
-        ("result", "Error") => "| Ok(_)",
-        _ => return None,
-    };
-    let mut example = missing.to_string();
-    example.push_str("\n\n");
-    example.push_str("Hint: You can use `let?` to automatically unwrap this expression.");
-    Some(example)
 }
 
 /// Type check let bindings.
@@ -35445,6 +35345,7 @@ mod tests {
                 warning: Warning::UnusedArgument,
                 is_error: false,
                 used: false,
+                seq: 0,
             });
         }
 
@@ -35710,4 +35611,666 @@ mod tests {
             vec!["Pair".to_string(), "String".to_string(), "Int".to_string(),]
         );
     }
+}
+
+// ============================================================================
+// Parmatch bridge (typecore.ml:1741-1776, pattern_printer.ml)
+// ============================================================================
+
+/// The type checker side of [`crate::types::parmatch::Oracle`].
+struct TypecoreParmatchOracle<'t, 'c> {
+    tctx: &'t mut TypeCheckContext<'c>,
+    env: &'t Env,
+    /// `expected_ty` passed to `partial_pred`.
+    expected_ty: TypeExprRef,
+    /// `~lev` passed to `partial_pred`.
+    level: i32,
+    /// `~explode` for `check_partial` (typecore.ml:1763-1767).
+    partial_explode: i32,
+    none_type: Option<TypeExprRef>,
+}
+
+fn parmatch_warning(warning: &crate::types::parmatch::ParmatchWarning) -> Warning {
+    use crate::types::parmatch::ParmatchWarning as W;
+    match warning {
+        W::AllClausesGuarded => Warning::AllClausesGuarded,
+        W::PartialMatch(example) => Warning::PartialMatch {
+            example: example.clone(),
+        },
+        W::FragileMatch(typ) => Warning::FragileMatch { typ: typ.clone() },
+        W::UnusedMatch => Warning::UnusedMatch,
+        W::UnusedPat => Warning::UnusedPat,
+        W::UnreachableCase => Warning::UnreachableCase,
+    }
+}
+
+impl crate::types::parmatch::Oracle for TypecoreParmatchOracle<'_, '_> {
+    fn ctx(&self) -> &TypeContext {
+        self.tctx.type_ctx
+    }
+
+    fn expand_head(&mut self, _env: EnvRef, ty: TypeExprRef) -> TypeExprRef {
+        let ctx = self.tctx.type_ctx;
+        ctx.repr(crate::types::ctype::expand_head(ctx, self.env, ty))
+    }
+
+    fn variant_constructors(
+        &mut self,
+        _env: EnvRef,
+        ty: TypeExprRef,
+    ) -> Vec<crate::types::ConstructorDescription> {
+        // get_variant_constructors (parmatch.ml:490-501).
+        let ctx = self.tctx.type_ctx;
+        let mut ty = ctx.repr(ty);
+        loop {
+            let path = match &*ctx.get_desc(ty) {
+                TypeDesc::Tconstr { path, .. } => path.clone(),
+                _ => crate::misc::fatal_error("Parmatch.get_variant_constructors"),
+            };
+            let Some(decl) =
+                lookup_type_decl_for_path(&path, self.env, &mut self.tctx.persistent_env, ctx)
+            else {
+                crate::misc::fatal_error("Parmatch.get_variant_constructors")
+            };
+            match &decl.type_kind {
+                crate::types::TypeKind::TypeVariant(..) => {
+                    return crate::types::env_lazy::constructors_of_type_path(&path, &decl, ctx);
+                }
+                _ if decl.type_manifest.is_some() => {
+                    match crate::types::ctype::expand_head_once(ctx, self.env, ty) {
+                        Some(expanded) => ty = expanded,
+                        None => crate::misc::fatal_error("Parmatch.get_variant_constructors"),
+                    }
+                }
+                _ => crate::misc::fatal_error("Parmatch.get_variant_constructors"),
+            }
+        }
+    }
+
+    fn record_labels(
+        &mut self,
+        _env: EnvRef,
+        record_ty: TypeExprRef,
+    ) -> Vec<crate::types::LabelDescription> {
+        let ctx = self.tctx.type_ctx;
+        let ty = ctx.repr(record_ty);
+        let path = match &*ctx.get_desc(ty) {
+            TypeDesc::Tconstr { path, .. } => path.clone(),
+            _ => return Vec::new(),
+        };
+        match lookup_type_decl_for_path(&path, self.env, &mut self.tctx.persistent_env, ctx) {
+            Some(decl) => crate::types::env_lazy::labels_of_type_path(&path, &decl, ctx),
+            None => Vec::new(),
+        }
+    }
+
+    fn type_shape(
+        &mut self,
+        _env: EnvRef,
+        ty: TypeExprRef,
+        always: bool,
+    ) -> crate::types::parmatch::TypeShape {
+        use crate::types::parmatch::TypeShape;
+        // pats_of_type (parmatch.ml:942-966).
+        let ctx = self.tctx.type_ctx;
+        let expanded = ctx.repr(crate::types::ctype::expand_head(ctx, self.env, ty));
+        let path = match &*ctx.get_desc(expanded) {
+            TypeDesc::Tconstr { path, .. } => path.clone(),
+            TypeDesc::Ttuple(items) => return TypeShape::Tuple(items.len()),
+            _ => return TypeShape::Other,
+        };
+        let Some(decl) =
+            lookup_type_decl_for_path(&path, self.env, &mut self.tctx.persistent_env, ctx)
+        else {
+            return TypeShape::Other;
+        };
+        match &decl.type_kind {
+            crate::types::TypeKind::TypeVariant(cl, _)
+                if always || cl.len() == 1 || cl.iter().all(|cd| cd.cd_res.is_some()) =>
+            {
+                TypeShape::Variant(crate::types::env_lazy::constructors_of_type_path(
+                    &path, &decl, ctx,
+                ))
+            }
+            crate::types::TypeKind::TypeRecord(..) => {
+                TypeShape::Record(crate::types::env_lazy::labels_of_type_path(&path, &decl, ctx))
+            }
+            _ => TypeShape::Other,
+        }
+    }
+
+    fn create_ident(&mut self, name: &str) -> Ident {
+        self.tctx.type_ctx.create_ident(name)
+    }
+
+    fn close_variant(&mut self, _env: EnvRef, _pat_env: EnvRef, ty: TypeExprRef) {
+        pressure_matrix_close_variant_type(self.tctx, self.env, ty);
+    }
+
+    fn warn(&mut self, loc: LocIdx, warning: crate::types::parmatch::ParmatchWarning) {
+        self.tctx.report_warning(loc, parmatch_warning(&warning));
+    }
+
+    fn is_active(&self, warning: &crate::types::parmatch::ParmatchWarning) -> bool {
+        self.tctx
+            .warning_config
+            .is_active(&parmatch_warning(warning))
+    }
+
+    fn is_ghost(&self, loc: LocIdx) -> bool {
+        self.tctx.arena.loc_ghost(loc)
+    }
+
+    fn print_pattern(&mut self, v: &Pattern) -> String {
+        print_counter_example(self.tctx.arena, v)
+    }
+
+    fn pred(
+        &mut self,
+        kind: crate::types::parmatch::PredKind,
+        u: Pattern,
+        loc: Option<LocIdx>,
+    ) -> Option<Pattern> {
+        let (mode, explode) = match kind {
+            crate::types::parmatch::PredKind::Partial => {
+                (PatternMode::Normal, self.partial_explode)
+            }
+            crate::types::parmatch::PredKind::Unused => (PatternMode::SplitOr, 5),
+        };
+        partial_pred(
+            self.tctx,
+            self.env,
+            self.level,
+            mode,
+            explode,
+            self.expected_ty,
+            &u,
+            loc,
+        )
+    }
+
+    fn is_non_extendable_predef_path(&self, path: &Path) -> bool {
+        !extendable_fragile_match_path(path)
+    }
+
+    fn placeholder_lid(&self) -> LidentIdx {
+        self.tctx.arena.push_typecheck_lident("?temp?")
+    }
+
+    fn none_type(&mut self) -> TypeExprRef {
+        let ctx = self.tctx.type_ctx;
+        *self
+            .none_type
+            .get_or_insert_with(|| ctx.new_type(TypeDesc::Ttuple(Vec::new())))
+    }
+
+    fn has_dict_pattern_attribute(&self, pat: &Pattern) -> bool {
+        pat.pat_attributes
+            .iter()
+            .any(|attr| self.tctx.arena.get_string(attr.0.txt) == DICT_PATTERN_ATTRIBUTE)
+    }
+
+    fn is_pat_from_variant_spread(&self, pat: &Pattern) -> bool {
+        pattern_from_variant_spread_attr(self.tctx.arena, pat)
+    }
+
+    fn is_predef_some_lid(&self, lid: LidentIdx) -> bool {
+        let arena = self.tctx.arena;
+        match arena.get_longident(lid) {
+            Longident::Ldot(prefix, name) => {
+                arena.get_string(*name) == "Some"
+                    && matches!(prefix.as_ref(), Longident::Lident(p) if arena.get_string(*p) == "*predef*")
+            }
+            _ => false,
+        }
+    }
+
+    fn is_block_that_cannot_be_undefined(&self, cstr: &crate::types::ConstructorDescription) -> bool {
+        use crate::types::variant_runtime::{BlockType, ConstructorCase};
+        let crate::types::ConstructorKind::Ordinary(reference) = cstr.cstr_kind else {
+            return false;
+        };
+        match reference.representation(self.tctx.type_ctx) {
+            // Ast_untagged_variants.block_type_can_be_undefined
+            // (ast_untagged_variants.ml:89-93).
+            ConstructorCase::Block(block) => {
+                matches!(block.block_type, Some(ref block_type) if *block_type != BlockType::Unknown)
+            }
+            ConstructorCase::Constant(_) => false,
+        }
+    }
+
+    fn variant_length(&self, cstr: &crate::types::ConstructorDescription) -> usize {
+        match cstr.cstr_kind {
+            crate::types::ConstructorKind::Ordinary(reference) => self
+                .tctx
+                .type_ctx
+                .with_variant_layout(reference.variant, |layout| layout.constructors.len()),
+            crate::types::ConstructorKind::Extension(_) => 0,
+        }
+    }
+
+    fn type_path(&mut self, _env: EnvRef, ty: TypeExprRef) -> Path {
+        let ctx = self.tctx.type_ctx;
+        let ty = ctx.repr(crate::types::ctype::expand_head(ctx, self.env, ty));
+        match &*ctx.get_desc(ty) {
+            TypeDesc::Tconstr { path, .. } => path.clone(),
+            _ => crate::misc::fatal_error("Parmatch.get_type_path"),
+        }
+    }
+
+    fn row_of(&mut self, _env: EnvRef, ty: TypeExprRef) -> crate::types::type_expr::RowDesc {
+        let ctx = self.tctx.type_ctx;
+        let ty = ctx.repr(crate::types::ctype::expand_head(ctx, self.env, ty));
+        match &*ctx.get_desc(ty) {
+            TypeDesc::Tvariant(row) => crate::types::btype::row_repr(ctx, row),
+            _ => crate::misc::fatal_error("Parmatch.row_of_pat"),
+        }
+    }
+}
+
+/// `partial_pred ~lev ?mode ?explode env expected_ty constrs labels p`
+/// (typecore.ml:1743-1759) applied to `Conv.conv u` (parmatch.ml:1961-2001).
+#[allow(clippy::too_many_arguments)]
+fn partial_pred(
+    tctx: &mut TypeCheckContext<'_>,
+    env: &Env,
+    level: i32,
+    mode: PatternMode,
+    explode: i32,
+    expected_ty: TypeExprRef,
+    u: &Pattern,
+    loc: Option<LocIdx>,
+) -> Option<Pattern> {
+    let ctx = tctx.type_ctx;
+    let old_constructors = std::mem::take(&mut tctx.generated_pattern_constructors);
+    let old_labels = std::mem::take(&mut tctx.generated_pattern_labels);
+    let parsed = conv_counter_example(tctx, u, loc);
+    let type_snapshot = ctx.snapshot_type_state();
+    let unify_snapshot = tctx.unify_state.snapshot_backtrack_state();
+    let diagnostic_len = tctx.diagnostics.len();
+    let mut state = PatternState::new();
+    // Ctype.with_passive_variants (ctype.ml:2061-2072).
+    let passive = ctx.set_passive_variants(true);
+    let result = type_pattern_with_existentials_at_level(
+        tctx,
+        env,
+        tctx.arena.get_pat(parsed),
+        expected_ty,
+        mode,
+        true,
+        &mut state,
+        level,
+        explode,
+    );
+    ctx.set_passive_variants(passive);
+    ctx.restore_type_state(type_snapshot);
+    tctx.unify_state.restore_backtrack_state(unify_snapshot);
+    tctx.diagnostics.truncate(diagnostic_len);
+    tctx.generated_pattern_constructors = old_constructors;
+    tctx.generated_pattern_labels = old_labels;
+    result.ok()
+}
+
+fn untype_constant(constant: &Constant) -> ParsedConstant {
+    // Untypeast.constant (untypeast.ml:19-27).
+    match constant {
+        Constant::Int(value) => ParsedConstant::Integer(value.to_string().into(), None),
+        Constant::Char(value) => ParsedConstant::Char(*value),
+        Constant::String(value, delimiter) => {
+            ParsedConstant::String(value.clone().into(), delimiter.clone().map(Into::into))
+        }
+        Constant::Float(value) => ParsedConstant::Float(value.clone().into(), None),
+        Constant::BigInt(positive, digits) => {
+            let value = if *positive {
+                digits.clone()
+            } else {
+                format!("-{digits}")
+            };
+            ParsedConstant::Integer(value.into(), Some('n'))
+        }
+    }
+}
+
+fn push_parsed_pattern(
+    arena: &ParseArena,
+    loc: LocIdx,
+    desc: crate::parser::ast::PatternDesc,
+) -> crate::parse_arena::PatIdx {
+    arena.push_typecheck_pattern(ParsedPattern {
+        ppat_desc: Box::new(desc),
+        ppat_loc: loc,
+        ppat_attributes: Attributes::new(),
+    })
+}
+
+/// `Conv.conv` (parmatch.ml:1961-2001): the counter-example as a parsetree
+/// pattern whose constructors and labels are the fresh `#$name<n>` entries of
+/// `generated_pattern_constructors`/`generated_pattern_labels`.
+fn conv_counter_example(
+    tctx: &mut TypeCheckContext<'_>,
+    typed: &Pattern,
+    top_loc: Option<LocIdx>,
+) -> crate::parse_arena::PatIdx {
+    use crate::parser::ast::{PatternDesc as P, PatternRecordField};
+
+    fn fresh(counter: &mut u32, name: &str) -> String {
+        let current = *counter;
+        *counter += 1;
+        format!("#${name}{current}")
+    }
+
+    fn lp(
+        tctx: &mut TypeCheckContext<'_>,
+        pat: &Pattern,
+        counter: &mut u32,
+        loc: LocIdx,
+    ) -> crate::parse_arena::PatIdx {
+        let arena = tctx.arena;
+        let none = LocIdx::none();
+        match &pat.pat_desc {
+            PatternDesc::Tpat_or(left, right, _) => {
+                let left = lp(tctx, left, counter, none);
+                let right = lp(tctx, right, counter, none);
+                push_parsed_pattern(arena, loc, P::Ppat_or(left, right))
+            }
+            PatternDesc::Tpat_var(_, name) if name.txt == "*extension*" => {
+                let txt = arena.push_typecheck_string(name.txt.clone());
+                push_parsed_pattern(arena, loc, P::Ppat_var(Located::new(txt, name.loc)))
+            }
+            PatternDesc::Tpat_any | PatternDesc::Tpat_var(_, _) => {
+                push_parsed_pattern(arena, loc, P::Ppat_any)
+            }
+            PatternDesc::Tpat_constant(constant) => push_parsed_pattern(
+                arena,
+                loc,
+                P::Ppat_constant(Box::new(untype_constant(constant))),
+            ),
+            PatternDesc::Tpat_alias(inner, _, _) => lp(tctx, inner, counter, loc),
+            PatternDesc::Tpat_tuple(items) => {
+                let items = items.iter().map(|item| lp(tctx, item, counter, none)).collect();
+                push_parsed_pattern(arena, loc, P::Ppat_tuple(Box::new(items)))
+            }
+            PatternDesc::Tpat_construct(cstr_lid, cstr, args) => {
+                let id = fresh(counter, &cstr.cstr_name);
+                tctx.generated_pattern_constructors
+                    .push((id.clone(), cstr.clone()));
+                let lid = Located::new(arena.push_typecheck_lident(&id), cstr_lid.loc);
+                let mut items: Vec<_> = args.iter().map(|arg| lp(tctx, arg, counter, none)).collect();
+                let arg = match items.len() {
+                    0 => None,
+                    1 => items.pop(),
+                    _ => Some(push_parsed_pattern(arena, none, P::Ppat_tuple(Box::new(items)))),
+                };
+                push_parsed_pattern(arena, loc, P::Ppat_construct(lid, arg))
+            }
+            PatternDesc::Tpat_variant(label, arg, _) => {
+                let arg = arg.as_deref().map(|arg| lp(tctx, arg, counter, none));
+                push_parsed_pattern(
+                    arena,
+                    loc,
+                    P::Ppat_variant(Box::new((label.clone().into(), arg))),
+                )
+            }
+            PatternDesc::Tpat_record(fields, _, _) => {
+                let fields = fields
+                    .iter()
+                    .map(|(_, lbl, p, optional)| {
+                        let id = fresh(counter, &lbl.lbl_name);
+                        tctx.generated_pattern_labels.push((id.clone(), lbl.clone()));
+                        PatternRecordField {
+                            lid: Located::new(arena.push_typecheck_lident(&id), none),
+                            pat: lp(tctx, p, counter, none),
+                            opt: *optional,
+                        }
+                    })
+                    .collect();
+                // TODO: Conv.conv_record_rest (parmatch.ml:1948-1959) keeps the
+                // rest binding with a `Typ.constr` annotation.
+                push_parsed_pattern(
+                    arena,
+                    loc,
+                    P::Ppat_record(Box::new((fields, crate::parser::ast::ClosedFlag::Open, None))),
+                )
+            }
+            PatternDesc::Tpat_array(items) => {
+                let items = items.iter().map(|item| lp(tctx, item, counter, none)).collect();
+                push_parsed_pattern(arena, loc, P::Ppat_array(Box::new(items)))
+            }
+        }
+    }
+
+    let mut counter = 0;
+    lp(tctx, typed, &mut counter, top_loc.unwrap_or(LocIdx::none()))
+}
+
+/// `Pattern_printer.print_pattern` (compiler/common/pattern_printer.ml).
+fn print_counter_example(arena: &ParseArena, typed: &Pattern) -> String {
+    use crate::parser::ast::{PatternDesc as P, PatternRecordField};
+
+    fn is_generated_optional_constructor(arena: &ParseArena, lid: LidentIdx) -> bool {
+        match arena.get_longident(lid) {
+            Longident::Lident(name) => arena.get_string(*name).starts_with("#$"),
+            _ => false,
+        }
+    }
+
+    enum FieldState {
+        Normal,
+        Missing,
+        PresentNone,
+    }
+
+    fn classify(arena: &ParseArena, pat: &Pattern) -> FieldState {
+        match &pat.pat_desc {
+            PatternDesc::Tpat_construct(lid, cstr, args)
+                if args.is_empty()
+                    && is_generated_optional_constructor(arena, lid.txt)
+                    && cstr.cstr_name == "None" =>
+            {
+                FieldState::Missing
+            }
+            PatternDesc::Tpat_construct(lid, cstr, args)
+                if args.len() == 1
+                    && is_generated_optional_constructor(arena, lid.txt)
+                    && cstr.cstr_name == "Some" =>
+            {
+                match classify(arena, &args[0]) {
+                    FieldState::Missing | FieldState::PresentNone => FieldState::PresentNone,
+                    FieldState::Normal => FieldState::Normal,
+                }
+            }
+            _ => FieldState::Normal,
+        }
+    }
+
+    fn strip_synthetic_some<'p>(arena: &ParseArena, pat: &'p Pattern) -> &'p Pattern {
+        match &pat.pat_desc {
+            PatternDesc::Tpat_construct(lid, cstr, args)
+                if args.len() == 1
+                    && is_generated_optional_constructor(arena, lid.txt)
+                    && cstr.cstr_name == "Some" =>
+            {
+                &args[0]
+            }
+            _ => pat,
+        }
+    }
+
+    fn untype(arena: &ParseArena, pat: &Pattern) -> crate::parse_arena::PatIdx {
+        let none = LocIdx::none();
+        match &pat.pat_desc {
+            PatternDesc::Tpat_or(p1, inner, r_o) => {
+                if let PatternDesc::Tpat_or(p2, p3, r_i) = &inner.pat_desc {
+                    // A | (B | C) prints as (A | B) | C.
+                    let mut new_inner = pat.clone();
+                    new_inner.pat_desc = PatternDesc::Tpat_or(p1.clone(), p2.clone(), r_i.clone());
+                    let mut new_outer = pat.clone();
+                    new_outer.pat_desc =
+                        PatternDesc::Tpat_or(Box::new(new_inner), p3.clone(), r_o.clone());
+                    return untype(arena, &new_outer);
+                }
+                let left = untype(arena, p1);
+                let right = untype(arena, inner);
+                push_parsed_pattern(arena, none, P::Ppat_or(left, right))
+            }
+            PatternDesc::Tpat_any | PatternDesc::Tpat_var(_, _) => {
+                push_parsed_pattern(arena, none, P::Ppat_any)
+            }
+            PatternDesc::Tpat_constant(constant) => push_parsed_pattern(
+                arena,
+                none,
+                P::Ppat_constant(Box::new(untype_constant(constant))),
+            ),
+            PatternDesc::Tpat_alias(inner, _, _) => untype(arena, inner),
+            PatternDesc::Tpat_tuple(items) => {
+                let items = items.iter().map(|item| untype(arena, item)).collect();
+                push_parsed_pattern(arena, none, P::Ppat_tuple(Box::new(items)))
+            }
+            PatternDesc::Tpat_construct(cstr_lid, cstr, args) => {
+                let lid = Located::new(arena.push_typecheck_lident(&cstr.cstr_name), cstr_lid.loc);
+                let mut items: Vec<_> = args.iter().map(|arg| untype(arena, arg)).collect();
+                let arg = match items.len() {
+                    0 => None,
+                    1 => items.pop(),
+                    _ => Some(push_parsed_pattern(arena, none, P::Ppat_tuple(Box::new(items)))),
+                };
+                push_parsed_pattern(arena, none, P::Ppat_construct(lid, arg))
+            }
+            PatternDesc::Tpat_variant(label, arg, _) => {
+                let arg = arg.as_deref().map(|arg| untype(arena, arg));
+                push_parsed_pattern(
+                    arena,
+                    none,
+                    P::Ppat_variant(Box::new((label.clone().into(), arg))),
+                )
+            }
+            PatternDesc::Tpat_record(subpatterns, closed_flag, rest) => {
+                let mut saw_optional_rewrite = false;
+                let fields = subpatterns
+                    .iter()
+                    .map(|(_, lbl, p, opt)| {
+                        let state = if lbl.lbl_optional {
+                            classify(arena, p)
+                        } else {
+                            FieldState::Normal
+                        };
+                        let (opt, pat) = match state {
+                            FieldState::Missing => {
+                                saw_optional_rewrite = true;
+                                let none_lid =
+                                    Located::new(arena.push_typecheck_lident("None"), none);
+                                (true, push_parsed_pattern(arena, none, P::Ppat_construct(none_lid, None)))
+                            }
+                            FieldState::PresentNone => {
+                                saw_optional_rewrite = true;
+                                (*opt, untype(arena, strip_synthetic_some(arena, p)))
+                            }
+                            FieldState::Normal => (*opt, untype(arena, p)),
+                        };
+                        PatternRecordField {
+                            lid: Located::new(arena.push_typecheck_lident(&lbl.lbl_name), none),
+                            pat,
+                            opt,
+                        }
+                    })
+                    .collect();
+                let closed_flag = if saw_optional_rewrite {
+                    crate::parser::ast::ClosedFlag::Closed
+                } else {
+                    *closed_flag
+                };
+                let rest = rest.as_ref().map(|rest| crate::parser::ast::RecordPatRest {
+                    rest_loc: rest.rest_name.loc,
+                    rest_name: Located::new(
+                        arena.push_typecheck_string(rest.rest_name.txt.clone()),
+                        rest.rest_name.loc,
+                    ),
+                    rest_type: None,
+                });
+                push_parsed_pattern(
+                    arena,
+                    none,
+                    P::Ppat_record(Box::new((fields, closed_flag, rest))),
+                )
+            }
+            PatternDesc::Tpat_array(items) => {
+                let items = items.iter().map(|item| untype(arena, item)).collect();
+                push_parsed_pattern(arena, none, P::Ppat_array(Box::new(items)))
+            }
+        }
+    }
+
+    let parsed = untype(arena, typed);
+    let doc = crate::parser::printer::print_pattern(
+        &crate::parser::printer::PrinterState::init(),
+        arena.get_pat(parsed),
+        &mut crate::parser::comment_table::CommentTable::new(),
+        arena,
+    );
+    doc.to_string(80)
+}
+
+/// A match case for the Parmatch checks.
+#[derive(Clone)]
+struct ParmatchCase {
+    lhs: Pattern,
+    guarded: bool,
+}
+
+/// `check_partial ~lev ?partial_match_warning_hint env expected_ty loc cases`
+/// (typecore.ml:1761-1770).
+#[allow(clippy::too_many_arguments)]
+fn parmatch_check_partial(
+    tctx: &mut TypeCheckContext<'_>,
+    env: &Env,
+    level: i32,
+    hint: Option<&str>,
+    expected_ty: TypeExprRef,
+    loc: LocIdx,
+    cases: &[crate::types::parmatch::CaseRef<'_>],
+) -> crate::types::typedtree::Partial {
+    let oracle = TypecoreParmatchOracle {
+        tctx,
+        env,
+        expected_ty,
+        level,
+        partial_explode: if cases.len() == 1 { 5 } else { 0 },
+        none_type: None,
+    };
+    let mut pm = crate::types::parmatch::Parmatch::new(oracle);
+    match pm.check_partial(hint, loc, cases) {
+        crate::types::parmatch::Partiality::Partial => crate::types::typedtree::Partial::Partial,
+        crate::types::parmatch::Partiality::Total => crate::types::typedtree::Partial::Total,
+    }
+}
+
+fn case_refs(cases: &[crate::types::typedtree::Case]) -> Vec<crate::types::parmatch::CaseRef<'_>> {
+    cases
+        .iter()
+        .map(|case| crate::types::parmatch::CaseRef {
+            lhs: &case.c_lhs,
+            guarded: case.c_guard.is_some(),
+        })
+        .collect()
+}
+
+/// `check_unused ~lev env expected_ty cases` (typecore.ml:1772-1776).
+fn parmatch_check_unused(
+    tctx: &mut TypeCheckContext<'_>,
+    env: &Env,
+    level: i32,
+    expected_ty: TypeExprRef,
+    cases: &[crate::types::parmatch::CaseRef<'_>],
+) {
+    let oracle = TypecoreParmatchOracle {
+        tctx,
+        env,
+        expected_ty,
+        level,
+        partial_explode: 0,
+        none_type: None,
+    };
+    let mut pm = crate::types::parmatch::Parmatch::new(oracle);
+    pm.check_unused(cases);
 }
