@@ -6296,8 +6296,20 @@ fn private_extension_structure_items<'a>(
     }
 }
 
+/// `%%raw`/`%%private`: the structure items `Bs_builtin_ppx.structure_mapper`
+/// expands itself (bs_builtin_ppx.ml:681-705).
+fn is_structure_mapper_extension(item: &StructureItem, arena: &ParseArena) -> bool {
+    matches!(
+        &*item.pstr_desc,
+        StructureItemDesc::Pstr_extension(inner)
+            if matches!(arena.get_string(inner.0.0.txt), "raw" | "private")
+    )
+}
+
+/// OCaml `Typemod_hide.check` (typemod_hide.ml:53-57). `expand_reverse` passes
+/// the accumulated items in reverse, so the last offending item is reported.
 fn check_private_extension_items(items: &[StructureItem], arena: &ParseArena) -> PpxResult<()> {
-    for item in items {
+    for item in items.iter().rev() {
         if !private_extension_item_allowed(item, arena) {
             return Err(PpxError::at_loc(
                 item.pstr_loc,
@@ -16616,9 +16628,14 @@ fn rewrite_structure_impl(
                         unreachable!("%%private run holds extensions")
                     };
                     let ((ext_name, payload), _attrs) = &**inner;
-                    // `self.structure_item` on each payload item.
+                    // `self.structure_item` on each payload item. `%%raw` and
+                    // `%%private` are only expanded by `structure_mapper`, so
+                    // here they stay extensions (and `Typemod_hide.check`
+                    // rejects them).
                     for work in private_extension_structure_items(payload, ext_name.loc)? {
-                        if apply_spice {
+                        if is_structure_mapper_extension(work, arena) {
+                            mapped.push(work.clone());
+                        } else if apply_spice {
                             mapped.extend(try_rewrite_structure_item(
                                 work,
                                 arena,
