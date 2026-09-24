@@ -10314,6 +10314,19 @@ impl<'p> PatternCaseRef for PartialCheckCase<'p> {
 /// Returns `Total` if the patterns are obviously exhaustive, `Partial` otherwise.
 /// This is a simplified version of OCaml's `Parmatch.check_partial` that handles
 /// the most common cases.
+/// OCaml `Parmatch.irrefutable` (parmatch.ml:2260): `le_pat pat omega`, i.e.
+/// the single unguarded pattern is exhaustive.
+pub(crate) fn pattern_is_irrefutable(ctx: &TypeContext, env: &Env, pat: &Pattern) -> bool {
+    let rows = [PartialCheckCase {
+        lhs: pat,
+        has_guard: false,
+    }];
+    matches!(
+        check_partial_simple_rows(ctx, env, &rows),
+        crate::types::typedtree::Partial::Total
+    )
+}
+
 fn check_partial_simple(
     ctx: &TypeContext,
     env: &Env,

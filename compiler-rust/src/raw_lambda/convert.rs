@@ -6167,7 +6167,12 @@ impl<'a> RawLambdaConverter<'a> {
                     for binding in bindings {
                         match &binding.vb_pat.pat_desc {
                             PatternDesc::Tpat_var(_, _) | PatternDesc::Tpat_alias(_, _, _) => {}
-                            _ if !self.is_irrefutable_pattern(&binding.vb_pat) => {
+                            _ if !crate::types::typecore::pattern_is_irrefutable(
+                                self.type_ctx,
+                                self.env,
+                                &binding.vb_pat,
+                            ) =>
+                            {
                                 self.report_diagnostic(
                                     self.loc(binding.vb_pat.pat_loc),
                                     "This pattern can fail to match, so it is not allowed in a top-level `let` binding.".to_string(),
@@ -9702,9 +9707,12 @@ impl<'a> RawLambdaConverter<'a> {
         match &pat.pat_desc {
             PatternDesc::Tpat_any | PatternDesc::Tpat_var(_, _) => true,
             PatternDesc::Tpat_alias(inner, _, _) => self.is_irrefutable_pattern(inner),
-            PatternDesc::Tpat_tuple(items) | PatternDesc::Tpat_array(items) => {
+            PatternDesc::Tpat_tuple(items) => {
                 items.iter().all(|pat| self.is_irrefutable_pattern(pat))
             }
+            // OCaml `Parmatch.irrefutable` = `le_pat pat omega`, which falls back to
+            // `satisfiable` for arrays: an array pattern never covers every length.
+            PatternDesc::Tpat_array(_) => false,
             PatternDesc::Tpat_record(fields, _, _) => fields
                 .iter()
                 .all(|(_, _, pat, _)| self.is_irrefutable_pattern(pat)),
