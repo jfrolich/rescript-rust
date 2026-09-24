@@ -913,7 +913,7 @@ pub fn parse_signature_item(p: &mut Parser<'_>) -> Option<SignatureItem> {
                 Some(SignatureItemDesc::Psig_recmodule(Box::new(mds)))
             } else {
                 // For non-recursive modules, location starts at name (not 'module')
-                let md = parse_module_declaration(p, attrs.clone(), None);
+                let md = parse_module_declaration(p, attrs.clone());
                 parse_newline_or_semicolon_signature(p);
                 Some(SignatureItemDesc::Psig_module(Box::new(md)))
             };
@@ -1017,8 +1017,6 @@ pub fn parse_signature_item(p: &mut Parser<'_>) -> Option<SignatureItem> {
 
 /// Parse a module expression.
 pub fn parse_module_expr(p: &mut Parser<'_>) -> ModuleExpr {
-    let start_pos_idx = p.start_pos_idx();
-
     // Handle await keyword
     // OCaml lines 6622-6629: capture await start_pos BEFORE consuming, end_pos AFTER consuming
     // NOTE: OCaml uses p.end_pos after consuming await, which is the end of the NEXT token
@@ -1069,22 +1067,6 @@ pub fn parse_module_expr(p: &mut Parser<'_>) -> ModuleExpr {
         expr.pmod_loc = p.mk_loc_idx_to_prev_end(primary_start_idx);
     }
 
-    // Handle module constraint: M : S
-    let expr = if p.token == Token::Colon {
-        p.next();
-        let mod_type = parse_module_type(p);
-        let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
-        let expr_idx = p.arena_mut().push_mod_expr(expr);
-        let mod_type_idx = p.arena_mut().push_mod_type(mod_type);
-        ModuleExpr {
-            pmod_desc: Box::new(ModuleExprDesc::Pmod_constraint(expr_idx, mod_type_idx)),
-            pmod_loc: loc,
-            pmod_attributes: Attributes::new(),
-        }
-    } else {
-        expr
-    };
-
     // Attach attributes to the module expression
     if attrs.is_empty() {
         expr
@@ -1095,6 +1077,33 @@ pub fn parse_module_expr(p: &mut Parser<'_>) -> ModuleExpr {
             pmod_attributes: combined_attrs,
             ..expr
         }
+    }
+}
+
+/// OCaml `parse_constrained_mod_expr` (res_core.ml:6955-6963).
+fn parse_constrained_mod_expr(p: &mut Parser<'_>) -> ModuleExpr {
+    let mod_expr = parse_module_expr(p);
+    if p.token != Token::Colon {
+        return mod_expr;
+    }
+    p.next();
+    let mod_type = parse_module_type(p);
+    let loc = p.mk_loc_spanning(mod_expr.pmod_loc, mod_type.pmty_loc);
+    let expr_idx = p.arena_mut().push_mod_expr(mod_expr);
+    let mod_type_idx = p.arena_mut().push_mod_type(mod_type);
+    ModuleExpr {
+        pmod_desc: Box::new(ModuleExprDesc::Pmod_constraint(expr_idx, mod_type_idx)),
+        pmod_loc: loc,
+        pmod_attributes: Attributes::new(),
+    }
+}
+
+/// OCaml `parse_constrained_mod_expr_region` (res_core.ml:6965-6968).
+fn parse_constrained_mod_expr_region(p: &mut Parser<'_>) -> Option<ModuleExpr> {
+    if grammar::is_mod_expr_start(&p.token) {
+        Some(parse_constrained_mod_expr(p))
+    } else {
+        None
     }
 }
 
@@ -1211,7 +1220,7 @@ fn parse_primary_module_expr(p: &mut Parser<'_>) -> ModuleExpr {
                         pmod_attributes: Attributes::new(),
                     }
                 } else {
-                    let inner = parse_module_expr(p);
+                    let inner = parse_constrained_mod_expr(p);
                     p.expect(Token::Rparen);
                     // OCaml: parse_atomic_module_expr does NOT update the location to include parens.
                     // It just returns mod_expr as-is, keeping the inner expression's original location.
@@ -1304,14 +1313,17 @@ fn parse_module_apply(p: &mut Parser<'_>, func: ModuleExpr) -> ModuleExpr {
     while p.token == Token::Lparen && p.prev_end_pos.line >= p.start_pos.line {
         // OCaml: let start_pos = p.Parser.start_pos in
         // Capture lparen position before consuming it
+        // OCaml `parse_module_application` (res_core.ml:6970-6993).
         let lparen_pos_idx = p.start_pos_idx();
-        p.next();
-
-        let args = if p.token == Token::Rparen {
-            // Empty argument: F()
-            p.next();
-            // OCaml: let loc = mk_loc start_pos p.prev_end_pos in
-            // For empty args, loc spans from lparen to after rparen
+        p.expect(Token::Lparen);
+        let args = super::core::parse_comma_delimited_region(
+            p,
+            Grammar::ModExprList,
+            Token::Rparen,
+            parse_constrained_mod_expr_region,
+        );
+        p.expect(Token::Rparen);
+        let args = if args.is_empty() {
             let loc = p.mk_loc_idx_to_prev_end(lparen_pos_idx);
             vec![ModuleExpr {
                 pmod_desc: Box::new(ModuleExprDesc::Pmod_structure(Box::new(vec![]))),
@@ -1319,20 +1331,6 @@ fn parse_module_apply(p: &mut Parser<'_>, func: ModuleExpr) -> ModuleExpr {
                 pmod_attributes: Attributes::new(),
             }]
         } else {
-            let mut args = vec![];
-            loop {
-                args.push(parse_module_expr(p));
-                if p.token == Token::Comma {
-                    p.next();
-                    // Trailing comma.
-                    if p.token == Token::Rparen {
-                        break;
-                    }
-                    continue;
-                }
-                break;
-            }
-            p.expect(Token::Rparen);
             args
         };
 
@@ -2507,16 +2505,9 @@ fn parse_let_binding_body(
 
     let pat_idx = p.arena_mut().push_pat(pat);
     let expr_idx = p.arena_mut().push_expr(expr);
-    if let Some(value_constraint) = value_constraint
-        && let Err(loc) =
-            p.arena_mut()
-                .set_value_constraint(pat_idx, value_constraint, expr_idx, vb_loc)
-    {
-        p.err_at(
-            p.loc_start(loc),
-            p.loc_end(loc),
-            DiagnosticCategory::FatalSyntaxerr,
-        );
+    if let Some(value_constraint) = value_constraint {
+        p.arena_mut()
+            .set_value_constraint(pat_idx, value_constraint, expr_idx, vb_loc);
     }
     let binding = ValueBinding {
         pvb_pat: pat_idx,
@@ -4295,151 +4286,146 @@ fn parse_module_definition(
         p.start_pos_idx()
     };
 
-    let mut bindings = vec![];
-
-    let parse_binding = |p: &mut Parser<'_>,
-                         binding_start_idx: PosIdx,
-                         attrs: Attributes|
-     -> Option<ModuleBinding> {
-        let name = match &p.token {
-            Token::Uident(n) => {
-                let n = n.clone();
-                let loc = p.mk_loc_current();
-                p.next();
-                let n_idx = p.arena_mut().push_interned_string(&n);
-                with_loc(n_idx, loc)
-            }
-            _ => {
-                p.err(DiagnosticCategory::Uident(p.token.clone().into_owned()));
-                let error_idx = p.arena_mut().intern("_");
-                mknoloc(error_idx)
-            }
-        };
-
-        // Optional module type annotation (constraint)
-        let mod_type = if p.token == Token::Colon {
-            p.next();
-            Some(parse_module_type(p))
-        } else {
-            None
-        };
-
-        p.expect(Token::Equal);
-        let mut mod_expr = parse_module_expr(p);
-
-        if let Some(mod_type) = mod_type {
-            // Location spans from module type start to module expr end
-            let loc = p.mk_loc_spanning(mod_type.pmty_loc, mod_expr.pmod_loc);
-            let mod_expr_idx = p.arena_mut().push_mod_expr(mod_expr);
-            let mod_type_idx = p.arena_mut().push_mod_type(mod_type);
-            mod_expr = ModuleExpr {
-                pmod_desc: Box::new(ModuleExprDesc::Pmod_constraint(mod_expr_idx, mod_type_idx)),
-                pmod_loc: loc,
-                pmod_attributes: Attributes::new(),
-            };
-        }
-
-        let mod_expr_idx = p.arena_mut().push_mod_expr(mod_expr);
-        Some(ModuleBinding {
-            pmb_name: name,
-            pmb_expr: mod_expr_idx,
-            pmb_attributes: attrs,
-            pmb_loc: p.mk_loc_idx_to_prev_end(binding_start_idx),
-        })
-    };
-
-    if let Some(binding) = parse_binding(p, start_pos_idx, attrs) {
-        bindings.push(binding);
-    } else {
-        return None;
-    }
-
-    // Parse additional module bindings with `and`
-    // Also handle attributes/doc comments before `and`: `@attr and M = ...` or `/** doc */ and M = ...`
-    // OCaml `parse_module_definition` only reads `and` bindings for `module rec`.
-    while rec_flag == RecFlag::Recursive {
-        if p.token == Token::And {
-            // Capture start position BEFORE consuming `and`
-            let binding_start_idx = p.start_pos_idx();
-            p.next();
-            let binding_attrs = parse_attributes(p);
-            if let Some(binding) = parse_binding(p, binding_start_idx, binding_attrs) {
-                bindings.push(binding);
-            }
-        } else if matches!(p.token, Token::At | Token::AtAt | Token::DocComment { .. }) {
-            // Look ahead to see if attributes/doc comments are followed by And
-            let has_and_after = p.lookahead(|state| {
-                // Skip attributes and doc comments
-                while matches!(
-                    state.token,
-                    Token::At | Token::AtAt | Token::DocComment { .. }
-                ) {
-                    if matches!(state.token, Token::DocComment { .. }) {
-                        state.next();
-                    } else {
-                        state.next(); // @
-                        // Skip the attribute identifier and any payload
-                        while !matches!(
-                            state.token,
-                            Token::At
-                                | Token::AtAt
-                                | Token::DocComment { .. }
-                                | Token::And
-                                | Token::Eof
-                                | Token::Let { .. }
-                                | Token::Typ
-                                | Token::Module
-                                | Token::External
-                                | Token::Open
-                                | Token::Include
-                        ) {
-                            state.next();
-                        }
-                    }
-                }
-                state.token == Token::And
-            });
-            if !has_and_after {
-                break;
-            }
-            // Parse the attributes, then the `and` keyword
-            let binding_start_idx = p.start_pos_idx();
-            let binding_attrs = parse_attributes(p);
-            if p.token == Token::And {
-                p.next();
-            }
-            if let Some(binding) = parse_binding(p, binding_start_idx, binding_attrs) {
-                bindings.push(binding);
-            }
-        } else {
-            break;
-        }
-    }
-
     if rec_flag == RecFlag::Recursive {
-        Some(StructureItemDesc::Pstr_recmodule(Box::new(bindings)))
-    } else if bindings.len() == 1 {
-        Some(StructureItemDesc::Pstr_module(Box::new(bindings.remove(0))))
-    } else {
-        Some(StructureItemDesc::Pstr_recmodule(Box::new(bindings)))
+        return Some(StructureItemDesc::Pstr_recmodule(Box::new(parse_module_bindings(
+            p,
+            attrs,
+            start_pos_idx,
+        ))));
+    }
+    Some(StructureItemDesc::Pstr_module(Box::new(parse_module_binding(
+        p,
+        attrs,
+        start_pos_idx,
+    ))))
+}
+
+/// OCaml `parse_module_binding` (compiler/syntax/src/res_core.ml:7046-7060).
+fn parse_module_binding(
+    p: &mut Parser<'_>,
+    attrs: Attributes,
+    start_pos_idx: PosIdx,
+) -> ModuleBinding {
+    let name = match &p.token {
+        Token::Uident(n) => {
+            let n = n.clone();
+            let loc = p.mk_loc_current();
+            p.next();
+            let n_idx = p.arena_mut().push_interned_string(&n);
+            with_loc(n_idx, loc)
+        }
+        _ => {
+            p.err(DiagnosticCategory::Uident(p.token.clone().into_owned()));
+            let error_idx = p.arena_mut().intern("_");
+            mknoloc(error_idx)
+        }
+    };
+    let body = parse_module_binding_body(p);
+    let mod_expr_idx = p.arena_mut().push_mod_expr(body);
+    ModuleBinding {
+        pmb_name: name,
+        pmb_expr: mod_expr_idx,
+        pmb_attributes: attrs,
+        pmb_loc: p.mk_loc_idx_to_prev_end(start_pos_idx),
     }
 }
 
-/// Parse a module declaration (for signature).
-/// Parse a module declaration.
-/// If `start_pos_idx` is Some, use it for the location (for recursive modules where it includes 'module rec' or 'and').
-/// If `start_pos_idx` is None, capture it at the current position (for non-recursive modules where loc starts at name).
-fn parse_module_declaration(
-    p: &mut Parser<'_>,
-    outer_attrs: Attributes,
-    start_pos_idx: Option<PosIdx>,
-) -> ModuleDeclaration {
-    let start_pos_idx = start_pos_idx.unwrap_or_else(|| p.start_pos_idx());
-    let inner_attrs = parse_attributes(p);
-    // Merge outer (signature item level) attrs with inner (name level) attrs
-    let attrs = outer_attrs.concat(inner_attrs);
+/// OCaml `parse_module_binding_body` (compiler/syntax/src/res_core.ml:7062-7078).
+fn parse_module_binding_body(p: &mut Parser<'_>) -> ModuleExpr {
+    let mod_type = if p.token == Token::Colon {
+        p.next();
+        Some(parse_module_type(p))
+    } else {
+        None
+    };
+    p.expect(Token::Equal);
+    let mod_expr = parse_module_expr(p);
+    match mod_type {
+        Some(mod_type) => {
+            let loc = p.mk_loc_spanning(mod_type.pmty_loc, mod_expr.pmod_loc);
+            let mod_expr_idx = p.arena_mut().push_mod_expr(mod_expr);
+            let mod_type_idx = p.arena_mut().push_mod_type(mod_type);
+            ModuleExpr {
+                pmod_desc: Box::new(ModuleExprDesc::Pmod_constraint(mod_expr_idx, mod_type_idx)),
+                pmod_loc: loc,
+                pmod_attributes: Attributes::new(),
+            }
+        }
+        None => mod_expr,
+    }
+}
 
-    let name = match &p.token {
+/// OCaml `parse_module_bindings` (compiler/syntax/src/res_core.ml:7082-7103):
+/// attributes (and one doc comment) are read before `and`, never after it.
+fn parse_module_bindings(
+    p: &mut Parser<'_>,
+    attrs: Attributes,
+    start_pos_idx: PosIdx,
+) -> Vec<ModuleBinding> {
+    let mut bindings = vec![parse_module_binding(p, attrs, start_pos_idx)];
+    loop {
+        let start_pos_idx = p.start_pos_idx();
+        let doc_attr = if let Token::DocComment { loc, content } = &p.token {
+            let loc = loc.clone();
+            let content = content.clone();
+            p.next();
+            let loc = p.from_location(&loc);
+            Some(super::core::doc_comment_to_attribute(p.arena_mut(), loc, content))
+        } else {
+            None
+        };
+        let mut attrs = Attributes::from_vec(doc_attr.into_iter().collect());
+        attrs.extend(parse_attributes_and_binding(p).into_vec());
+        if p.token != Token::And {
+            return bindings;
+        }
+        p.next();
+        p.optional(&Token::Module);
+        bindings.push(parse_module_binding(p, attrs, start_pos_idx));
+    }
+}
+
+/// OCaml `parse_module_declaration_or_alias` (compiler/syntax/src/res_core.ml:7459-7490).
+fn parse_module_declaration(p: &mut Parser<'_>, attrs: Attributes) -> ModuleDeclaration {
+    let start_pos_idx = p.start_pos_idx();
+    let name = parse_module_declaration_name(p);
+    let mod_type = match p.token {
+        Token::Colon => {
+            p.next();
+            parse_module_type(p)
+        }
+        Token::Equal => {
+            p.next();
+            if p.token == Token::Lbrace {
+                // Parse `module M = {` as `module M : {`.
+                parse_module_type(p)
+            } else {
+                // `Ast_helper.Mty.alias` without `~loc`: the default location.
+                let lid = parse_module_long_ident(p);
+                ModuleType {
+                    pmty_desc: Box::new(ModuleTypeDesc::Pmty_alias(lid)),
+                    pmty_loc: Location::none(),
+                    pmty_attributes: Attributes::new(),
+                }
+            }
+        }
+        _ => {
+            p.err_unexpected();
+            recover::default_module_type()
+        }
+    };
+    let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
+    let mod_type_idx = p.arena_mut().push_mod_type(mod_type);
+    ModuleDeclaration {
+        pmd_name: name,
+        pmd_type: mod_type_idx,
+        pmd_attributes: attrs,
+        pmd_loc: loc,
+    }
+}
+
+fn parse_module_declaration_name(p: &mut Parser<'_>) -> Located<StrIdx> {
+    match &p.token {
         Token::Uident(n) => {
             let n_clone = n.clone();
             let n_idx = p.arena_mut().push_interned_string(&n_clone);
@@ -4452,31 +4438,18 @@ fn parse_module_declaration(
             let error_idx = p.arena_mut().intern("_");
             mknoloc(error_idx)
         }
-    };
+    }
+}
 
-    // Handle both `module X: T` (type annotation) and `module X = M` (alias)
-    // In signatures, `=` can be followed by a module type or a module alias
-    let mod_type = if p.token == Token::Equal {
-        p.next();
-        // Check if this is `= { ... }` (module type) or `= ModuleName` (alias)
-        if p.token == Token::Lbrace {
-            // Module type: module X = { ... }
-            parse_module_type(p)
-        } else {
-            // Module alias: module X = M
-            // OCaml uses a ghost location for Pmty_alias in module declarations
-            let lid = parse_module_long_ident(p);
-            ModuleType {
-                pmty_desc: Box::new(ModuleTypeDesc::Pmty_alias(lid)),
-                pmty_loc: Location::none(),
-                pmty_attributes: Attributes::new(),
-            }
-        }
-    } else {
-        p.expect(Token::Colon);
-        parse_module_type(p)
-    };
-
+/// OCaml `parse_rec_module_declaration` (compiler/syntax/src/res_core.ml:7444-7457).
+fn parse_rec_module_declaration(
+    p: &mut Parser<'_>,
+    attrs: Attributes,
+    start_pos_idx: PosIdx,
+) -> ModuleDeclaration {
+    let name = parse_module_declaration_name(p);
+    p.expect(Token::Colon);
+    let mod_type = parse_module_type(p);
     let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
     let mod_type_idx = p.arena_mut().push_mod_type(mod_type);
     ModuleDeclaration {
@@ -4513,40 +4486,23 @@ fn parse_attributes_and_binding(p: &mut Parser<'_>) -> Attributes {
     }
 }
 
-/// Parse recursive module declarations (for signature).
-/// Parse recursive module declarations (for signature).
-/// `start_pos_idx` is the position before `module rec`, captured by the caller.
+/// OCaml `parse_rec_module_spec` (compiler/syntax/src/res_core.ml:7422-7441),
+/// after `rec` has been consumed.
 fn parse_rec_module_declarations(
     p: &mut Parser<'_>,
     outer_attrs: Attributes,
     start_pos_idx: PosIdx,
 ) -> Vec<ModuleDeclaration> {
-    let mut decls = vec![];
-
-    // Parse first declaration (gets the outer attrs and start_pos from caller)
-    // For recursive modules, location includes 'module rec'
-    decls.push(parse_module_declaration(
-        p,
-        outer_attrs,
-        Some(start_pos_idx),
-    ));
-
-    // Parse additional declarations with `and`
-    // Uses parse_attributes_and_binding which backtracks if attrs aren't followed by `and`
+    let mut decls = vec![parse_rec_module_declaration(p, outer_attrs, start_pos_idx)];
     loop {
-        // Capture start_pos BEFORE consuming `and` (like OCaml)
-        let and_start_pos_idx = p.start_pos_idx();
+        let start_pos_idx = p.start_pos_idx();
         let attrs = parse_attributes_and_binding(p);
-        if p.token == Token::And {
-            p.next();
-            // For 'and' declarations, location includes 'and'
-            decls.push(parse_module_declaration(p, attrs, Some(and_start_pos_idx)));
-        } else {
-            break;
+        if p.token != Token::And {
+            return decls;
         }
+        p.expect(Token::And);
+        decls.push(parse_rec_module_declaration(p, attrs, start_pos_idx));
     }
-
-    decls
 }
 
 /// Parse a module type declaration.
@@ -4557,10 +4513,10 @@ fn parse_module_type_declaration(
     outer_attrs: Attributes,
     in_structure: bool,
 ) -> ModuleTypeDeclaration {
+    // OCaml `parse_module_type_impl` / `parse_module_type_declaration`
+    // (res_core.ml:7007-7032, 7492-7516) read no attributes after `type`.
     let name_start_idx = p.start_pos_idx();
-    let inner_attrs = parse_attributes(p);
-    // Merge outer (signature item level) attrs with inner (name level) attrs
-    let attrs = outer_attrs.concat(inner_attrs);
+    let attrs = outer_attrs;
 
     let name = match &p.token {
         Token::Uident(n) | Token::Lident(n) => {
@@ -4578,14 +4534,9 @@ fn parse_module_type_declaration(
     };
 
     let typ = if in_structure {
-        if p.token == Token::Equal {
-            p.next();
-            let mt = parse_module_type(p);
-            Some(p.arena_mut().push_mod_type(mt))
-        } else {
-            p.expect(Token::Equal);
-            Some(p.arena_mut().push_mod_type(recover::default_module_type()))
-        }
+        p.expect(Token::Equal);
+        let mt = parse_module_type(p);
+        Some(p.arena_mut().push_mod_type(mt))
     } else if p.token == Token::Equal {
         p.next();
         let mt = parse_module_type(p);
