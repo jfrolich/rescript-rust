@@ -337,7 +337,7 @@ pub struct TypeContext {
     /// Global type declaration store, indexed by type name.
     /// Populated when loading CMI module signatures so that type alias
     /// expansion can find declarations for types not directly in the env.
-    type_decl_store: RefCell<ahash::AHashMap<String, Arc<super::decl::TypeDeclaration>>>,
+    type_decl_store: RefCell<ahash::AHashMap<smol_str::SmolStr, Arc<super::decl::TypeDeclaration>>>,
 
     /// Global type declaration store, indexed by ident stamp.
     /// Used for looking up CMI-loaded type declarations by their stamp
@@ -346,7 +346,7 @@ pub struct TypeContext {
 
     /// Global type declaration store, indexed by full qualified path string.
     /// Used for looking up types via Pdot paths (e.g., "Js.Promise.t").
-    type_decl_by_path: RefCell<ahash::AHashMap<String, Arc<super::decl::TypeDeclaration>>>,
+    type_decl_by_path: RefCell<ahash::AHashMap<smol_str::SmolStr, Arc<super::decl::TypeDeclaration>>>,
     /// Qualified declarations keyed by Path identity, preserving local stamps.
     type_decl_by_exact_path: RefCell<ahash::AHashMap<Path, Arc<super::decl::TypeDeclaration>>>,
     type_item_by_path: RefCell<ahash::AHashMap<String, (Ident, super::decl::TypeDeclaration)>>,
@@ -860,7 +860,28 @@ impl TypeContext {
     ) {
         self.type_decl_store
             .borrow_mut()
-            .insert(name.to_string(), decl);
+            .insert(smol_str::SmolStr::new(name), decl);
+    }
+
+    /// Install the type registrations of a store-owned signature, in order.
+    /// Equivalent to calling the four `register_shared_type_decl*` methods for
+    /// each entry.
+    pub(crate) fn register_sig_type_registrations(
+        &self,
+        registrations: &[super::thread_store::SigTypeRegistration],
+    ) {
+        let mut by_name = self.type_decl_store.borrow_mut();
+        let mut by_stamp = self.type_decl_by_stamp.borrow_mut();
+        let mut by_path = self.type_decl_by_path.borrow_mut();
+        let mut by_exact_path = self.type_decl_by_exact_path.borrow_mut();
+        for registration in registrations {
+            by_name.insert(registration.name.clone(), registration.decl.clone());
+            if registration.stamp != 0 {
+                by_stamp.insert(registration.stamp, registration.decl.clone());
+            }
+            by_path.insert(registration.qualified_name.clone(), registration.decl.clone());
+            by_exact_path.insert(registration.qualified_path.clone(), registration.decl.clone());
+        }
     }
 
     /// Register a type declaration by ident stamp for alias expansion.
@@ -937,7 +958,7 @@ impl TypeContext {
     ) {
         self.type_decl_by_path
             .borrow_mut()
-            .insert(path.to_string(), decl);
+            .insert(smol_str::SmolStr::new(path), decl);
     }
 
     /// Register a qualified declaration by exact Path identity.

@@ -17,6 +17,7 @@
 
 use super::context::TypeArena;
 use super::decl::{Signature, TypeDeclaration};
+use super::path::Path;
 use super::type_expr::{
     AbbrevMemo, AbbrevMemoRef, FieldKind, FieldKindRef, RowField, RowFieldRef, TypeDesc, TypeExpr,
     TypeExprRef,
@@ -60,6 +61,16 @@ struct PersEntry {
     ps: Arc<PersStruct>,
 }
 
+/// One type declaration of a store-owned signature, with the keys a unit's
+/// `TypeContext` registers it under.
+pub(crate) struct SigTypeRegistration {
+    pub(crate) name: smol_str::SmolStr,
+    pub(crate) stamp: i32,
+    pub(crate) qualified_name: smol_str::SmolStr,
+    pub(crate) qualified_path: Path,
+    pub(crate) decl: Arc<TypeDeclaration>,
+}
+
 /// Shared dependency state for one worker thread.
 pub(crate) struct ThreadTypeStore {
     types: TypeArena,
@@ -82,6 +93,9 @@ pub(crate) struct ThreadTypeStore {
     /// declaration's address, so per-unit registries share an allocation
     /// instead of cloning every dependency declaration for every compilation.
     type_decl_arcs: RefCell<HashMap<usize, Arc<TypeDeclaration>>>,
+    /// Per-unit type registrations of a store-owned signature under one module
+    /// path, keyed by the signature's item address and that path.
+    sig_type_registrations: RefCell<HashMap<(usize, Path), Arc<[SigTypeRegistration]>>>,
     /// Synthetic longident component names used by store `Tpackage` nodes.
     longident_names: RefCell<HashMap<u32, String>>,
     next_longident_idx: Cell<u32>,
@@ -100,6 +114,7 @@ impl ThreadTypeStore {
             pers: RefCell::new(HashMap::new()),
             shared_signatures: RefCell::new(HashSet::new()),
             type_decl_arcs: RefCell::new(HashMap::new()),
+            sig_type_registrations: RefCell::new(HashMap::new()),
             longident_names: RefCell::new(HashMap::new()),
             next_longident_idx: Cell::new(STORE_LONGIDENT_IDX_BASE),
             generation: BUILD_GENERATION.load(Ordering::SeqCst),
@@ -143,6 +158,24 @@ impl ThreadTypeStore {
         let shared = Arc::new(decl.clone());
         self.type_decl_arcs.borrow_mut().insert(key, shared.clone());
         shared
+    }
+
+    /// Registrations for `sig` under `module_path`, built once per store.
+    pub(crate) fn sig_type_registrations(
+        &self,
+        sig: &Signature,
+        module_path: &Path,
+        build: impl FnOnce() -> Vec<SigTypeRegistration>,
+    ) -> Arc<[SigTypeRegistration]> {
+        let key = (sig.as_ptr() as usize, module_path.clone());
+        if let Some(found) = self.sig_type_registrations.borrow().get(&key) {
+            return found.clone();
+        }
+        let built: Arc<[SigTypeRegistration]> = build().into();
+        self.sig_type_registrations
+            .borrow_mut()
+            .insert(key, built.clone());
+        built
     }
 
     pub(crate) fn pers_struct_count(&self) -> usize {

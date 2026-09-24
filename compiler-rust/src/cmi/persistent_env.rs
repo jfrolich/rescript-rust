@@ -2152,6 +2152,16 @@ fn register_sig_types_recursive<'a>(
     ctx: &'a TypeContext,
     shared: bool,
 ) {
+    if shared {
+        let store = ctx.thread_store();
+        let registrations = store.sig_type_registrations(sig, module_path, || {
+            let mut registrations = Vec::new();
+            collect_sig_type_registrations(sig, module_path, ctx, &mut registrations);
+            registrations
+        });
+        ctx.register_sig_type_registrations(&registrations);
+        return;
+    }
     for item in sig {
         match item {
             SignatureItem::SigType(id, decl, _) => {
@@ -2182,6 +2192,38 @@ fn register_sig_types_recursive<'a>(
                     // Module-alias type lookup goes through module resolution later.
                     ModuleType::MtyAlias(_, _) => {}
                     _ => {}
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// The registrations `register_sig_types_recursive` installs for a
+/// store-owned signature, in installation order.
+fn collect_sig_type_registrations(
+    sig: &Signature,
+    module_path: &Path,
+    ctx: &TypeContext,
+    out: &mut Vec<crate::types::thread_store::SigTypeRegistration>,
+) {
+    for item in sig {
+        match item {
+            SignatureItem::SigType(id, decl, _) => {
+                let decl = ctx.thread_store().shared_type_decl(decl);
+                let qualified_path = Path::pdot(module_path.clone(), id.name());
+                out.push(crate::types::thread_store::SigTypeRegistration {
+                    name: id.name_smol().clone(),
+                    stamp: id.stamp(),
+                    qualified_name: smol_str::SmolStr::new(qualified_path.name()),
+                    qualified_path,
+                    decl,
+                });
+            }
+            SignatureItem::SigModule(id, md, _) => {
+                if let ModuleType::MtySignature(sub_sig) = &md.md_type {
+                    let sub_path = Path::pdot(module_path.clone(), id.name());
+                    collect_sig_type_registrations(sub_sig, &sub_path, ctx, out);
                 }
             }
             _ => {}
