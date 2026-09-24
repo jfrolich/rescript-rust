@@ -147,22 +147,25 @@ pub fn substitute_type_vars(
             CoreTypeDesc::Ptyp_constr(Box::new((lid, new_args)))
         }
         CoreTypeDesc::Ptyp_arrow(inner) => {
+            // `Ptyp_arrow {params; ret}`: the record's `ret` is evaluated
+            // before `List.map` over the params (left to right).
             let (arg, ret, arity) = *inner;
+            let params = arena.nary_arrow_args(&arg, arity).into_owned();
             let ret_type = arena.get_core_type(ret).clone();
             let substituted_ret = substitute_type_vars(arena, ret_type, vars)?;
             let new_ret = arena.push_core_type(substituted_ret);
-            let arg_type = arena.get_core_type(arg.typ).clone();
-            let substituted_arg = substitute_type_vars(arena, arg_type, vars)?;
-            let new_arg_typ = arena.push_core_type(substituted_arg);
-            CoreTypeDesc::Ptyp_arrow(Box::new((
-                Box::new(TypeArg {
-                    attrs: arg.attrs.clone(),
-                    lbl: arg.lbl.clone(),
-                    typ: new_arg_typ,
-                }),
-                new_ret,
-                arity,
-            )))
+            let mut new_params = Vec::with_capacity(params.len());
+            for param in params {
+                let param_type = arena.get_core_type(param.typ).clone();
+                let substituted = substitute_type_vars(arena, param_type, vars)?;
+                new_params.push(TypeArg {
+                    typ: arena.push_core_type(substituted),
+                    ..param
+                });
+            }
+            let first = new_params[0].clone();
+            arena.set_nary_arrow_args(arity, new_params);
+            CoreTypeDesc::Ptyp_arrow(Box::new((Box::new(first), new_ret, arity)))
         }
         CoreTypeDesc::Ptyp_tuple(elements) => CoreTypeDesc::Ptyp_tuple(Box::new(
             (*elements)
