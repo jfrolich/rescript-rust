@@ -982,7 +982,11 @@ pub fn print_constant(template_literal: bool, c: &Constant) -> Doc {
                 '\r' => "\\r".to_string(),
                 '\x08' => "\\b".to_string(),
                 ' '..='~' => ch.to_string(),
-                _ => format!("\\u{{{:x}}}", c),
+                // `Res_utf8.encode_code_point c` (res_printer.ml:603).
+                _ => match char::from_u32(*c as u32) {
+                    Some(ch) => ch.to_string(),
+                    None => format!("\\u{{{:x}}}", c),
+                },
             };
             Doc::text(format!("'{}'", s))
         }

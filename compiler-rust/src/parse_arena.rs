@@ -1537,7 +1537,7 @@ impl ParseArena {
 
     /// Get an interned string by index.
     pub fn get_interned(&self, idx: StrIdx) -> &str {
-        self.strings.get(idx)
+        self.get_string(idx)
     }
 
     // ========================================================================
@@ -2124,7 +2124,7 @@ impl ParseArena {
     /// Check if a longident is a simple Lident with the given name.
     pub fn is_lident(&self, idx: LidentIdx, name: &str) -> bool {
         match self.get_longident(idx) {
-            Longident::Lident(str_idx) => self.strings.get(*str_idx) == name,
+            Longident::Lident(str_idx) => self.get_string(*str_idx) == name,
             _ => false,
         }
     }
@@ -2142,7 +2142,7 @@ impl ParseArena {
     /// Get the last component of a longident as a string.
     pub fn lident_last(&self, idx: LidentIdx) -> &str {
         let str_idx = self.get_longident(idx).last_idx();
-        self.strings.get(str_idx)
+        self.get_string(str_idx)
     }
 
     /// Convert a Located<LidentIdx> to Located<Longident>.
