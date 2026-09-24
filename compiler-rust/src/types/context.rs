@@ -382,8 +382,8 @@ pub struct TypeContext {
     /// declaration-derived source path available when Rust later reaches a
     /// cached component view without `PersistentEnv`; it must not be inferred
     /// from flattened module-name spelling.
-    component_alias_sources: RefCell<ahash::AHashMap<Path, Vec<Path>>>,
-    component_paths_by_alias_source: RefCell<ahash::AHashMap<Path, Vec<Path>>>,
+    component_alias_sources: RefCell<ahash::AHashMap<SamePathKey, Vec<Path>>>,
+    component_paths_by_alias_source: RefCell<ahash::AHashMap<SamePathKey, Vec<Path>>>,
 
     /// Cached dotted value lookups keyed by resolved module access path.
     resolved_module_value_cache: RefCell<
@@ -561,6 +561,48 @@ pub struct TypeContext {
 
     /// Reuse EnvRefs for identical logical environments.
     typed_envs_by_id: RefCell<ahash::AHashMap<u64, EnvRef>>,
+}
+
+/// A map key that compares paths with `Path::same` (ignoring `Pdot`
+/// positions and comparing identifiers by stamp, or by name when persistent).
+#[derive(Clone, Debug)]
+pub(crate) struct SamePathKey(Path);
+
+impl PartialEq for SamePathKey {
+    fn eq(&self, other: &Self) -> bool {
+        self.0.same(&other.0)
+    }
+}
+
+impl Eq for SamePathKey {}
+
+impl std::hash::Hash for SamePathKey {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        fn hash_path<H: std::hash::Hasher>(path: &Path, state: &mut H) {
+            match path {
+                Path::Pident(id) => {
+                    if id.stamp() != 0 {
+                        state.write_u8(0);
+                        state.write_i32(id.stamp());
+                    } else {
+                        state.write_u8(1);
+                        state.write(id.name().as_bytes());
+                    }
+                }
+                Path::Pdot(parent, name, _) => {
+                    state.write_u8(2);
+                    state.write(name.as_bytes());
+                    hash_path(parent, state);
+                }
+                Path::Papply(functor, argument) => {
+                    state.write_u8(3);
+                    hash_path(functor, state);
+                    hash_path(argument, state);
+                }
+            }
+        }
+        hash_path(&self.0, state);
+    }
 }
 
 fn push_unique_path(paths: &mut Vec<Path>, path: Path) {
@@ -1100,31 +1142,18 @@ impl TypeContext {
         }
 
         for alias_source in alias_sources {
-            let component_key = {
-                let by_component = self.component_alias_sources.borrow();
-                by_component
-                    .keys()
-                    .find(|existing| existing.same(&component_path))
-                    .cloned()
-                    .unwrap_or_else(|| component_path.clone())
-            };
-            let mut by_component = self.component_alias_sources.borrow_mut();
             push_unique_path(
-                by_component.entry(component_key).or_default(),
+                self.component_alias_sources
+                    .borrow_mut()
+                    .entry(SamePathKey(component_path.clone()))
+                    .or_default(),
                 alias_source.clone(),
             );
-
-            let source_key = {
-                let by_source = self.component_paths_by_alias_source.borrow();
-                by_source
-                    .keys()
-                    .find(|existing| existing.same(&alias_source))
-                    .cloned()
-                    .unwrap_or_else(|| alias_source.clone())
-            };
-            let mut by_source = self.component_paths_by_alias_source.borrow_mut();
             push_unique_path(
-                by_source.entry(source_key).or_default(),
+                self.component_paths_by_alias_source
+                    .borrow_mut()
+                    .entry(SamePathKey(alias_source))
+                    .or_default(),
                 component_path.clone(),
             );
         }
@@ -1164,15 +1193,11 @@ impl TypeContext {
     }
 
     pub(crate) fn component_paths_for_alias_source(&self, alias_source: &Path) -> Vec<Path> {
-        let mut paths = Vec::new();
-        for (source, component_paths) in self.component_paths_by_alias_source.borrow().iter() {
-            if source.same(alias_source) {
-                for component_path in component_paths {
-                    push_unique_path(&mut paths, component_path.clone());
-                }
-            }
-        }
-        paths
+        self.component_paths_by_alias_source
+            .borrow()
+            .get(&SamePathKey(alias_source.clone()))
+            .cloned()
+            .unwrap_or_default()
     }
 
     /// Return alias source paths that back a selected component path.
@@ -1181,15 +1206,11 @@ impl TypeContext {
     /// through `scrape_alias`, while env.ml:1573-1578 stores child
     /// declaration/component thunks under the selected access path.
     pub(crate) fn alias_sources_for_component_path(&self, component_path: &Path) -> Vec<Path> {
-        let mut sources = Vec::new();
-        for (path, alias_sources) in self.component_alias_sources.borrow().iter() {
-            if path.same(component_path) {
-                for alias_source in alias_sources {
-                    push_unique_path(&mut sources, alias_source.clone());
-                }
-            }
-        }
-        sources
+        self.component_alias_sources
+            .borrow()
+            .get(&SamePathKey(component_path.clone()))
+            .cloned()
+            .unwrap_or_default()
     }
 
     /// Look up a module alias target from the qualified module components cache.
