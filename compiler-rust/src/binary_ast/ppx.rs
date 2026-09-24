@@ -6676,160 +6676,143 @@ fn create_await_module_expression(
 /// For each found, creates a module type declaration to hoist to structure level.
 /// Uses a context HashSet to track already-created module type names to avoid duplicates.
 ///
-/// OCaml: bs_builtin_ppx.ml lines 706-752 (spelunk_vbs and aux)
+/// OCaml `aux` in bs_builtin_ppx.ml `spelunk_vbs` (lines 752-793). OCaml
+/// evaluates the right operand of `@` first, so side effects on `context`
+/// happen right to left while results keep source order.
 fn spelunk_expression_for_await_module_types(
     expr: &Expression,
     context: &mut std::collections::HashSet<String>,
     arena: &mut ParseArena,
 ) -> Vec<StructureItem> {
     match &*expr.pexp_desc {
-        // Main case: Pexp_letmodule with Pmod_ident and @res.await
         ExpressionDesc::Pexp_letmodule(inner) => {
             let (_, ref mod_expr, ref body) = **inner;
-            let mut results = Vec::new();
             let mod_expr_val = arena.get_mod_expr(*mod_expr).clone();
-
-            // Check for Pmod_ident with @res.await
-            if let ModuleExprDesc::Pmod_ident(located_lid) = &*mod_expr_val.pmod_desc {
-                if has_await_attribute(&mod_expr_val.pmod_attributes, arena) {
-                    let module_type_name = local_module_type_name(located_lid.txt, arena);
-
-                    // Only create if not already in context
-                    if !context.contains(&module_type_name) {
-                        context.insert(module_type_name.clone());
-
-                        // Create module type declaration:
-                        // module type __ME__ = module type of ME
-                        let module_type_name_idx = arena.intern_string(&module_type_name);
-                        let lid_loc = located_lid.loc;
-
-                        let typeof_mod_expr_idx = arena.push_mod_expr(current::ModuleExpr {
-                            pmod_desc: Box::new(ModuleExprDesc::Pmod_ident(Located {
-                                txt: located_lid.txt,
-                                loc: lid_loc,
-                            })),
-                            // OCaml: Mty.typeof_ ~loc me - `me` keeps its original
-                            // pmod_loc allocation (distinct from the lid location).
-                            pmod_loc: mod_expr_val.pmod_loc,
-                            // OCaml: Mty.typeof_ ~loc me uses original `me` attrs.
-                            pmod_attributes: mod_expr_val.pmod_attributes.clone(),
-                        });
-                        let module_type_idx = arena.push_mod_type(current::ModuleType {
-                            pmty_desc: Box::new(ModuleTypeDesc::Pmty_typeof(typeof_mod_expr_idx)),
-                            pmty_loc: lid_loc,
-                            pmty_attributes: Attributes::new(),
-                        });
-                        let module_type_decl = StructureItem {
-                            pstr_desc: Box::new(StructureItemDesc::Pstr_modtype(Box::new(
-                                current::ModuleTypeDeclaration {
-                                    pmtd_name: Located {
-                                        txt: module_type_name_idx,
-                                        loc: lid_loc,
-                                    },
-                                    pmtd_type: Some(module_type_idx),
-                                    pmtd_attributes: Attributes::new(),
-                                    pmtd_loc: lid_loc,
-                                },
-                            ))),
-                            pstr_loc: lid_loc,
-                        };
-
-                        results.push(module_type_decl);
-                    }
-                }
+            let ModuleExprDesc::Pmod_ident(located_lid) = &*mod_expr_val.pmod_desc else {
+                return vec![];
+            };
+            if !has_await_attribute(&mod_expr_val.pmod_attributes, arena) {
+                return vec![];
             }
-
-            // Continue spelunking into body (body is ExprIdx)
+            let module_type_name = local_module_type_name(located_lid.txt, arena);
             let body_expr = arena.get_expr(*body).clone();
-            results.extend(spelunk_expression_for_await_module_types(
-                &body_expr, context, arena,
-            ));
+            if context.contains(&module_type_name) {
+                return spelunk_expression_for_await_module_types(&body_expr, context, arena);
+            }
+            context.insert(module_type_name.clone());
+            let rest = spelunk_expression_for_await_module_types(&body_expr, context, arena);
+            // module type __ME__ = module type of ME
+            let module_type_name_idx = arena.intern_string(&module_type_name);
+            let lid_loc = located_lid.loc;
+
+            let typeof_mod_expr_idx = arena.push_mod_expr(current::ModuleExpr {
+                pmod_desc: Box::new(ModuleExprDesc::Pmod_ident(Located {
+                    txt: located_lid.txt,
+                    loc: lid_loc,
+                })),
+                // OCaml: Mty.typeof_ ~loc me - `me` keeps its original
+                // pmod_loc allocation (distinct from the lid location).
+                pmod_loc: mod_expr_val.pmod_loc,
+                // OCaml: Mty.typeof_ ~loc me uses original `me` attrs.
+                pmod_attributes: mod_expr_val.pmod_attributes.clone(),
+            });
+            let module_type_idx = arena.push_mod_type(current::ModuleType {
+                pmty_desc: Box::new(ModuleTypeDesc::Pmty_typeof(typeof_mod_expr_idx)),
+                pmty_loc: lid_loc,
+                pmty_attributes: Attributes::new(),
+            });
+            let module_type_decl = StructureItem {
+                pstr_desc: Box::new(StructureItemDesc::Pstr_modtype(Box::new(
+                    current::ModuleTypeDeclaration {
+                        pmtd_name: Located {
+                            txt: module_type_name_idx,
+                            loc: lid_loc,
+                        },
+                        pmtd_type: Some(module_type_idx),
+                        pmtd_attributes: Attributes::new(),
+                        pmtd_loc: lid_loc,
+                    },
+                ))),
+                pstr_loc: lid_loc,
+            };
+
+            let mut results = vec![module_type_decl];
+            results.extend(rest);
             results
         }
-
-        // Recursively traverse other expression forms (matching OCaml's aux function)
         ExpressionDesc::Pexp_let(inner) => {
             let (_, ref bindings, ref body) = **inner;
+            let binding_results = spelunk_value_bindings_for_await_module_types(bindings, context, arena);
             let body_expr = arena.get_expr(*body).clone();
             let mut results = spelunk_expression_for_await_module_types(&body_expr, context, arena);
-            for vb in bindings {
-                let vb_expr = arena.get_expr(vb.pvb_expr).clone();
-                results.extend(spelunk_expression_for_await_module_types(
-                    &vb_expr, context, arena,
-                ));
-            }
+            results.extend(binding_results);
             results
         }
-
         ExpressionDesc::Pexp_ifthenelse(inner) => {
             let (_, ref then_idx, ref else_idx) = **inner;
+            let Some(else_idx) = else_idx else {
+                return vec![];
+            };
+            let else_expr = arena.get_expr(*else_idx).clone();
+            let else_results = spelunk_expression_for_await_module_types(&else_expr, context, arena);
             let then_expr = arena.get_expr(*then_idx).clone();
             let mut results = spelunk_expression_for_await_module_types(&then_expr, context, arena);
-            if let Some(else_e_idx) = else_idx {
-                let else_expr = arena.get_expr(*else_e_idx).clone();
-                results.extend(spelunk_expression_for_await_module_types(
-                    &else_expr, context, arena,
-                ));
-            }
+            results.extend(else_results);
             results
         }
-
         ExpressionDesc::Pexp_construct(_, Some(e_idx)) => {
             let e_expr = arena.get_expr(*e_idx).clone();
             spelunk_expression_for_await_module_types(&e_expr, context, arena)
         }
-
         ExpressionDesc::Pexp_fun(inner) => {
             let PexpFun { rhs: ref body, .. } = **inner;
             let body_expr = arena.get_expr(*body).clone();
             spelunk_expression_for_await_module_types(&body_expr, context, arena)
         }
-
+        // OCaml keeps newtypes on `Pexp_fun`; Rust wraps them in `Pexp_newtype`.
         ExpressionDesc::Pexp_newtype(inner) => {
             let (_, ref body) = **inner;
             let body_expr = arena.get_expr(*body).clone();
             spelunk_expression_for_await_module_types(&body_expr, context, arena)
         }
-
         ExpressionDesc::Pexp_constraint(inner) => {
             let (ref e_idx, _) = **inner;
             let e_expr = arena.get_expr(*e_idx).clone();
             spelunk_expression_for_await_module_types(&e_expr, context, arena)
         }
-
         ExpressionDesc::Pexp_match(inner) => {
             let (ref scrut_idx, ref cases) = **inner;
-            let scrut_expr = arena.get_expr(*scrut_idx).clone();
-            let mut results =
-                spelunk_expression_for_await_module_types(&scrut_expr, context, arena);
+            // `List.fold_left (fun acc case -> aux case.pc_rhs @ acc) [] cases`
+            let mut case_results = Vec::new();
             for case in cases {
                 let case_rhs = arena.get_expr(case.pc_rhs).clone();
-                results.extend(spelunk_expression_for_await_module_types(
-                    &case_rhs, context, arena,
-                ));
+                let mut results = spelunk_expression_for_await_module_types(&case_rhs, context, arena);
+                results.extend(case_results);
+                case_results = results;
             }
+            let scrut_expr = arena.get_expr(*scrut_idx).clone();
+            let mut results = spelunk_expression_for_await_module_types(&scrut_expr, context, arena);
+            results.extend(case_results);
             results
         }
-
         _ => vec![],
     }
 }
 
-/// Spelunk through value bindings to collect module type declarations for hoisting.
-///
-/// OCaml: bs_builtin_ppx.ml spelunk_vbs
+/// OCaml `spelunk_vbs` (bs_builtin_ppx.ml:752-795):
+/// `aux pvb_expr @ spelunk_vbs acc tl`, whose tail is evaluated first.
 fn spelunk_value_bindings_for_await_module_types(
     bindings: &[ValueBinding],
     context: &mut std::collections::HashSet<String>,
     arena: &mut ParseArena,
 ) -> Vec<StructureItem> {
-    let mut results = Vec::new();
-    for vb in bindings {
-        let vb_expr = arena.get_expr(vb.pvb_expr).clone();
-        results.extend(spelunk_expression_for_await_module_types(
-            &vb_expr, context, arena,
-        ));
-    }
+    let Some((first, rest)) = bindings.split_first() else {
+        return vec![];
+    };
+    let rest_results = spelunk_value_bindings_for_await_module_types(rest, context, arena);
+    let first_expr = arena.get_expr(first.pvb_expr).clone();
+    let mut results = spelunk_expression_for_await_module_types(&first_expr, context, arena);
+    results.extend(rest_results);
     results
 }
 
