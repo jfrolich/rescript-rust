@@ -94,7 +94,7 @@ pub fn generate_asts(
                         debug!("Generating AST for module: {module_name}");
                         inc();
                         let ast_result = generate_ast(
-                            package.to_owned(),
+                            package,
                             &source_file.implementation.path.to_owned(),
                             build_state,
                             build_state.get_warn_error_override(),
@@ -108,7 +108,7 @@ pub fn generate_asts(
                         let iast_result = match source_file.interface.as_ref().map(|i| i.path.to_owned()) {
                             Some(interface_file_path) => {
                                 match generate_ast(
-                                    package.to_owned(),
+                                    package,
                                     &interface_file_path.to_owned(),
                                     build_state,
                                     build_state.get_warn_error_override(),
@@ -560,7 +560,7 @@ fn make_parse_file_span(
 }
 
 fn generate_ast(
-    package: Package,
+    package: &Package,
     filename: &Path,
     build_state: &BuildState,
     warn_error_override: Option<String>,
@@ -598,7 +598,7 @@ fn generate_ast(
     };
 
     let _parse_span = if tracing::enabled!(tracing::Level::INFO) {
-        make_parse_file_span(filename, &package, &parser_args, build_state, parent_span).entered()
+        make_parse_file_span(filename, package, &parser_args, build_state, parent_span).entered()
     } else {
         tracing::Span::none().entered()
     };
