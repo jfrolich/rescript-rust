@@ -528,25 +528,7 @@ pub fn parse_expr_with_operand(p: &mut Parser<'_>, operand: Expression) -> Expre
     let expr = parse_primary_expr(p, operand, false);
     // Then binary and ternary
     let expr = parse_binary_expr(p, expr, 1, ExprContext::Ordinary);
-    let expr = parse_ternary_expr(p, expr);
-    // Handle coercion
-    if p.token == Token::ColonGreaterThan {
-        p.next();
-        let typ = super::typ::parse_typ_expr(p);
-        let expr_start_idx = p.loc_start_idx(expr.pexp_loc);
-        let loc = p.mk_loc_idx_to_prev_end(expr_start_idx);
-        let expr_idx = p.arena_mut().push_expr(expr);
-        let typ_idx = p.arena_mut().push_core_type(typ);
-        Expression {
-            pexp_desc: Box::new(ExpressionDesc::Pexp_coerce(Box::new((
-                expr_idx, None, typ_idx,
-            )))),
-            pexp_loc: loc,
-            pexp_attributes: Attributes::new(),
-        }
-    } else {
-        expr
-    }
+    parse_ternary_expr(p, expr)
 }
 
 /// Parse an expression with a specific context.
@@ -562,25 +544,9 @@ pub fn parse_expr_with_context(p: &mut Parser<'_>, context: ExprContext) -> Expr
 
     let expr = parse_operand_expr(p, context);
     let expr = parse_binary_expr(p, expr, 1, context);
-    let expr = parse_ternary_expr(p, expr);
-    // Handle coercion: expr :> type
-    let result = if p.token == Token::ColonGreaterThan {
-        p.next();
-        let typ = super::typ::parse_typ_expr(p);
-        let expr_start_idx = p.loc_start_idx(expr.pexp_loc);
-        let loc = p.mk_loc_idx_to_prev_end(expr_start_idx);
-        let expr_idx = p.arena_mut().push_expr(expr);
-        let typ_idx = p.arena_mut().push_core_type(typ);
-        Expression {
-            pexp_desc: Box::new(ExpressionDesc::Pexp_coerce(Box::new((
-                expr_idx, None, typ_idx,
-            )))),
-            pexp_loc: loc,
-            pexp_attributes: Attributes::new(),
-        }
-    } else {
-        expr
-    };
+    // OCaml `parse_expr` (res_core.ml:1780-1783) stops after the ternary;
+    // coercions are only parsed by the callers that expect them.
+    let result = parse_ternary_expr(p, expr);
 
     p.dec_parse_depth();
     result
