@@ -338,162 +338,177 @@ fn parse_value_path_after_dot(p: &mut Parser<'_>) -> Located<LidentIdx> {
     }
 }
 
-/// Parse a value or constructor expression.
+/// OCaml `parse_value_or_constructor` (compiler/syntax/src/res_core.ml:4212-4267).
 pub fn parse_value_or_constructor(p: &mut Parser<'_>) -> Expression {
     let start_pos_idx = p.start_pos_idx();
-
-    match &p.token {
-        Token::Uident(name) => {
-            // Module path or constructor
-            let mut path_parts = vec![name.clone()];
-            p.next();
-
-            // Collect the full path
-            while p.token == Token::Dot {
+    let mut acc: Vec<String> = Vec::new();
+    loop {
+        match p.token.clone() {
+            Token::Uident(ident) => {
+                let end_pos_lident = p.end_pos_idx();
                 p.next();
-                match &p.token {
-                    Token::Uident(name) => {
-                        path_parts.push(name.clone());
+                match p.token {
+                    Token::Dot => {
                         p.next();
+                        acc.push(ident.to_string());
                     }
-                    Token::Lident(name) => {
-                        path_parts.push(name.clone());
-                        p.next();
-                        break;
+                    Token::Lparen if p.prev_end_pos.line == p.start_pos.line => {
+                        let lparen = p.start_pos_idx();
+                        let args = parse_constructor_args(p);
+                        let rparen = p.prev_end_pos_idx();
+                        acc.push(ident.to_string());
+                        let lid_idx = super::core::build_longident_idx(p, &acc);
+                        let tail = match args.len() {
+                            0 => None,
+                            1 => {
+                                let arg = args.into_iter().next().unwrap();
+                                if matches!(*arg.pexp_desc, ExpressionDesc::Pexp_tuple(_))
+                                    && p.mode != ParserMode::ParseForTypeChecker
+                                {
+                                    // Some((1, 2)) for printer
+                                    let loc = p.mk_loc_idx(lparen, rparen);
+                                    let arg_idx = p.arena_mut().push_expr(arg);
+                                    Some(Expression {
+                                        pexp_desc: Box::new(ExpressionDesc::Pexp_tuple(
+                                            Box::new(vec![arg_idx]),
+                                        )),
+                                        pexp_loc: loc,
+                                        pexp_attributes: Attributes::new(),
+                                    })
+                                } else {
+                                    Some(arg)
+                                }
+                            }
+                            _ => {
+                                let loc = p.mk_loc_idx(lparen, rparen);
+                                let args_idx: Vec<ExprIdx> = args
+                                    .into_iter()
+                                    .map(|e| p.arena_mut().push_expr(e))
+                                    .collect();
+                                Some(Expression {
+                                    pexp_desc: Box::new(ExpressionDesc::Pexp_tuple(Box::new(
+                                        args_idx,
+                                    ))),
+                                    pexp_loc: loc,
+                                    pexp_attributes: Attributes::new(),
+                                })
+                            }
+                        };
+                        let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
+                        let ident_loc = p.mk_loc_idx(start_pos_idx, end_pos_lident);
+                        let tail_idx = tail.map(|e| p.arena_mut().push_expr(e));
+                        return Expression {
+                            pexp_desc: Box::new(ExpressionDesc::Pexp_construct(
+                                with_loc(lid_idx, ident_loc),
+                                tail_idx,
+                            )),
+                            pexp_loc: loc,
+                            pexp_attributes: Attributes::new(),
+                        };
                     }
-                    Token::String(name) => {
-                        // Quoted identifiers (used for keywords): `Module.\"switch\"`
-                        path_parts.push(name.clone());
-                        p.next();
-                        break;
+                    _ => {
+                        let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
+                        acc.push(ident.to_string());
+                        let lid_idx = super::core::build_longident_idx(p, &acc);
+                        return Expression {
+                            pexp_desc: Box::new(ExpressionDesc::Pexp_construct(
+                                with_loc(lid_idx, loc),
+                                None,
+                            )),
+                            pexp_loc: loc,
+                            pexp_attributes: Attributes::new(),
+                        };
                     }
-                    _ => break,
                 }
             }
-
-            let lid = super::core::build_longident(p.arena_mut(), &path_parts);
-            let lid_idx = p.push_longident(lid);
-            let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
-
-            // Check if it's a constructor (all uppercase components)
-            if path_parts
-                .last()
-                .map(|s| s.chars().next().map(|c| c.is_uppercase()).unwrap_or(false))
-                .unwrap_or(false)
-            {
-                // Constructor - check for argument
-                let arg = parse_constructor_arg(p);
-                let has_arg = arg.is_some();
-                let arg_idx = arg.map(|a| p.arena_mut().push_expr(a));
-                Expression {
-                    pexp_desc: Box::new(ExpressionDesc::Pexp_construct(
-                        with_loc(lid_idx, loc.clone()),
-                        arg_idx,
-                    )),
-                    pexp_loc: if has_arg {
-                        p.mk_loc_idx_to_prev_end(start_pos_idx)
-                    } else {
-                        loc
-                    },
-                    pexp_attributes: Attributes::new(),
-                }
-            } else {
-                // Regular identifier
-                ast_helper::make_ident_idx(lid_idx, loc)
+            Token::Lident(ident) => {
+                p.next();
+                let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
+                acc.push(ident.to_string());
+                let lid_idx = super::core::build_longident_idx(p, &acc);
+                return ast_helper::make_ident_idx(lid_idx, loc);
             }
-        }
-        Token::Lident(name) => {
-            let name = name.clone();
-            p.next();
-            let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
-            let lid_idx = p.push_lident(&*name);
-            ast_helper::make_ident_idx(lid_idx, loc)
-        }
-        _ => {
-            p.err(DiagnosticCategory::Message(
-                "Expected identifier".to_string(),
-            ));
-            recover::default_expr(p.arena_mut())
+            token => {
+                let token = token.into_owned();
+                if acc.is_empty() {
+                    p.next_unsafe();
+                    let context = p.breadcrumbs().to_vec();
+                    p.err(DiagnosticCategory::Unexpected { token, context });
+                    return recover::default_expr(p.arena_mut());
+                }
+                let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
+                let context = p.breadcrumbs().to_vec();
+                p.err(DiagnosticCategory::Unexpected { token, context });
+                acc.push("_".to_string());
+                let lid_idx = super::core::build_longident_idx(p, &acc);
+                return ast_helper::make_ident_idx(lid_idx, loc);
+            }
         }
     }
 }
 
-/// Parse an optional constructor argument.
-fn parse_constructor_arg(p: &mut Parser<'_>) -> Option<Expression> {
-    match &p.token {
-        // If there's a newline before the `(`, it's not a constructor argument
-        // but the start of a new statement
-        Token::Lparen if !p.has_newline_before() => {
-            let start_pos_idx = p.start_pos_idx();
+/// OCaml `parse_coerced_expr` (compiler/syntax/src/res_core.ml:2042-2046).
+fn parse_coerced_expr(p: &mut Parser<'_>, expr: Expression) -> Expression {
+    p.expect(Token::ColonGreaterThan);
+    let typ = super::typ::parse_typ_expr(p);
+    let expr_start_idx = p.loc_start_idx(expr.pexp_loc);
+    let loc = p.mk_loc_idx_to_prev_end(expr_start_idx);
+    let expr_idx = p.arena_mut().push_expr(expr);
+    let typ_idx = p.arena_mut().push_core_type(typ);
+    Expression {
+        pexp_desc: Box::new(ExpressionDesc::Pexp_coerce(Box::new((expr_idx, None, typ_idx)))),
+        pexp_loc: loc,
+        pexp_attributes: Attributes::new(),
+    }
+}
+
+/// OCaml `parse_constrained_expr_region` (compiler/syntax/src/res_core.ml:2064-2076).
+pub(super) fn parse_constrained_expr_region(p: &mut Parser<'_>) -> Option<Expression> {
+    if !super::grammar::is_expr_start(&p.token) {
+        return None;
+    }
+    let expr = parse_expr(p);
+    match p.token {
+        Token::ColonGreaterThan => Some(parse_coerced_expr(p, expr)),
+        Token::Colon => {
             p.next();
-            if p.token == Token::Rparen {
-                // Empty constructor args: Rgb()
-                p.next();
-                let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
-                let lid_idx = p.push_lident_static("()");
-                Some(Expression {
-                    pexp_desc: Box::new(ExpressionDesc::Pexp_construct(
-                        with_loc(lid_idx, loc.clone()),
-                        None,
-                    )),
-                    pexp_loc: loc,
-                    pexp_attributes: Attributes::new(),
-                })
-            } else {
-                let first_expr = parse_constrained_or_coerced_expr(p);
-                if p.token == Token::Comma {
-                    // Multiple arguments: Rgb(r, g, b) -> tuple
-                    // OCaml includes the ( in the tuple location - reuse start_pos_idx
-                    let mut exprs = vec![first_expr];
-                    while p.token == Token::Comma {
-                        p.next();
-                        if p.token == Token::Rparen {
-                            break; // Trailing comma
-                        }
-                        exprs.push(parse_constrained_or_coerced_expr(p));
-                    }
-                    p.expect(Token::Rparen);
-                    // Only create a tuple if there's more than one expression
-                    // A single expression with trailing comma is NOT a tuple
-                    if exprs.len() == 1 {
-                        Some(exprs.into_iter().next().unwrap())
-                    } else {
-                        let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
-                        let exprs_idx: Vec<ExprIdx> = exprs
-                            .into_iter()
-                            .map(|e| p.arena_mut().push_expr(e))
-                            .collect();
-                        Some(Expression {
-                            pexp_desc: Box::new(ExpressionDesc::Pexp_tuple(Box::new(exprs_idx))),
-                            pexp_loc: loc,
-                            pexp_attributes: Attributes::new(),
-                        })
-                    }
-                } else {
-                    p.expect(Token::Rparen);
-                    // In type-checker mode, a single tuple arg is passed through directly:
-                    // C((1,2)) = Pexp_construct(C, Some(Pexp_tuple(Box::new([1,2]))))
-                    // In printer mode, wrap it in another tuple to distinguish from multi-arg:
-                    // C((1,2)) = Pexp_construct(C, Some(Pexp_tuple(Box::new([Pexp_tuple([1,2])]))))
-                    if matches!(*first_expr.pexp_desc, ExpressionDesc::Pexp_tuple(_))
-                        && p.mode != ParserMode::ParseForTypeChecker
-                    {
-                        let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
-                        let first_expr_idx = p.arena_mut().push_expr(first_expr);
-                        Some(Expression {
-                            pexp_desc: Box::new(ExpressionDesc::Pexp_tuple(Box::new(vec![
-                                first_expr_idx,
-                            ]))),
-                            pexp_loc: loc,
-                            pexp_attributes: Attributes::new(),
-                        })
-                    } else {
-                        Some(first_expr)
-                    }
-                }
-            }
+            let typ = super::typ::parse_typ_expr(p);
+            let loc = p.mk_loc_spanning(expr.pexp_loc, typ.ptyp_loc);
+            let expr_idx = p.arena_mut().push_expr(expr);
+            let typ_idx = p.arena_mut().push_core_type(typ);
+            Some(Expression {
+                pexp_desc: Box::new(ExpressionDesc::Pexp_constraint(Box::new((
+                    expr_idx, typ_idx,
+                )))),
+                pexp_loc: loc,
+                pexp_attributes: Attributes::new(),
+            })
         }
-        _ => None,
+        _ => Some(expr),
+    }
+}
+
+/// OCaml `parse_constructor_args` (compiler/syntax/src/res_core.ml:4299-4315).
+fn parse_constructor_args(p: &mut Parser<'_>) -> Vec<Expression> {
+    let lparen = p.start_pos_idx();
+    p.expect(Token::Lparen);
+    let args = super::core::parse_comma_delimited_region(
+        p,
+        Grammar::ExprList,
+        Token::Rparen,
+        parse_constrained_expr_region,
+    );
+    p.expect(Token::Rparen);
+    if args.is_empty() {
+        let loc = p.mk_loc_idx_to_prev_end(lparen);
+        let lid_idx = p.push_lident_static("()");
+        vec![Expression {
+            pexp_desc: Box::new(ExpressionDesc::Pexp_construct(with_loc(lid_idx, loc), None)),
+            pexp_loc: loc,
+            pexp_attributes: Attributes::new(),
+        }]
+    } else {
+        args
     }
 }
 
@@ -3094,14 +3109,14 @@ fn parse_argument(p: &mut Parser<'_>) -> (ArgLabel, Expression) {
 
 /// Parse a tuple expression.
 fn parse_tuple_expr(p: &mut Parser<'_>, start_pos_idx: PosIdx, first: Expression) -> Expression {
+    // OCaml `parse_tuple_expr` (compiler/syntax/src/res_core.ml:4317-4333).
     let mut elements = vec![first];
-
-    while p.token != Token::Rparen && p.token != Token::Eof {
-        elements.push(parse_constrained_or_coerced_expr(p));
-        if !p.optional(&Token::Comma) {
-            break;
-        }
-    }
+    elements.extend(super::core::parse_comma_delimited_region(
+        p,
+        Grammar::ExprList,
+        Token::Rparen,
+        parse_constrained_expr_region,
+    ));
 
     p.expect(Token::Rparen);
     let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
