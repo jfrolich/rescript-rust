@@ -1711,22 +1711,22 @@ fn get_dependency_paths(
         .concat()
 }
 
-struct InProcessCompilerFlags {
-    nopervasives: bool,
-    no_version_header: bool,
-    check_div_by_zero: bool,
-    cross_module_inline: bool,
-    no_assert_false: bool,
-    noassert: bool,
-    no_builtin_ppx: bool,
-    make_runtime: bool,
-    debug: bool,
-    jsx_preserve: bool,
-    jsx_version: Option<i32>,
-    experimental_let_unwrap: bool,
-    open_modules: Vec<String>,
-    warning_specs: Vec<String>,
-    warning_error_specs: Vec<String>,
+pub(crate) struct InProcessCompilerFlags {
+    pub(crate) nopervasives: bool,
+    pub(crate) no_version_header: bool,
+    pub(crate) check_div_by_zero: bool,
+    pub(crate) cross_module_inline: bool,
+    pub(crate) no_assert_false: bool,
+    pub(crate) noassert: bool,
+    pub(crate) no_builtin_ppx: bool,
+    pub(crate) make_runtime: bool,
+    pub(crate) debug: bool,
+    pub(crate) jsx_preserve: bool,
+    pub(crate) jsx_version: Option<i32>,
+    pub(crate) experimental_let_unwrap: bool,
+    pub(crate) open_modules: Vec<String>,
+    pub(crate) warning_specs: Vec<String>,
+    pub(crate) warning_error_specs: Vec<String>,
 }
 
 impl Default for InProcessCompilerFlags {
@@ -1751,7 +1751,7 @@ impl Default for InProcessCompilerFlags {
     }
 }
 
-fn parse_in_process_compiler_flags(flags: &[String]) -> InProcessCompilerFlags {
+pub(crate) fn parse_in_process_compiler_flags(flags: &[String]) -> InProcessCompilerFlags {
     let mut parsed = InProcessCompilerFlags::default();
     let mut iter = flags.iter();
     while let Some(flag) = iter.next() {
