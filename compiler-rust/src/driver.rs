@@ -1430,11 +1430,12 @@ fn apply_file_config_warning_options(
     tctx: &mut TypeCheckContext<'_>,
     config: &FileConfigOverrides,
 ) {
-    for spec in &config.warning_specs {
-        tctx.apply_warning_spec(spec);
-    }
-    for spec in &config.warning_error_specs {
-        tctx.apply_warning_error_spec(spec);
+    for (as_error, spec) in &config.warning_ops {
+        if *as_error {
+            tctx.apply_warning_error_spec(spec);
+        } else {
+            tctx.apply_warning_spec(spec);
+        }
     }
 }
 
@@ -1461,6 +1462,24 @@ fn warning_config_for_options(options: &CompilerOptions) -> WarningConfig {
     config
 }
 
+/// The warning state when `Ast_config.process_str` first runs: command-line
+/// options plus the leading `@@warning` attributes applied by
+/// `Bs_ast_invariant.iter_warnings_on_stru` (compiler/frontend/ppx_entry.ml:46-48).
+fn warning_config_for_options_and_leading_attrs(
+    options: &CompilerOptions,
+    leading_specs: &[ppx::WarningAttributeSpec],
+) -> WarningConfig {
+    let mut config = warning_config_for_options(options);
+    for spec in leading_specs {
+        if spec.as_error {
+            let _ = config.parse_as_error(&spec.spec);
+        } else {
+            let _ = config.parse(&spec.spec);
+        }
+    }
+    config
+}
+
 fn warning_config_for_options_file_config_and_leading_attrs(
     options: &CompilerOptions,
     file_config: &FileConfigOverrides,
@@ -1478,12 +1497,18 @@ fn warning_config_for_options_file_config_and_leading_attrs(
             let _ = config.parse(&spec.spec);
         }
     }
-    apply_warning_specs_to_config(
-        &mut config,
-        &file_config.warning_specs,
-        &file_config.warning_error_specs,
-    );
+    apply_file_config_warning_ops(&mut config, file_config);
     config
+}
+
+fn apply_file_config_warning_ops(config: &mut WarningConfig, file_config: &FileConfigOverrides) {
+    for (as_error, spec) in &file_config.warning_ops {
+        if *as_error {
+            let _ = config.parse_as_error(spec);
+        } else {
+            let _ = config.parse(spec);
+        }
+    }
 }
 
 fn shell_quote_path(path: &std::path::Path) -> String {
@@ -11625,21 +11650,29 @@ pub fn run_implementation_frontend(
             &frontend_warnings,
             out,
         );
-    let config_warnings = validate_file_config_from_structure(&structure, parser.arena())
-        .map_err(|err| config_payload_error_to_anyhow(err, parser.arena(), source, filename))?;
-    let file_config = extract_file_config_from_structure(&structure, parser.arena());
+    let config_processing = validate_file_config_from_structure(
+        &structure,
+        parser.arena(),
+        &warning_config_for_options_and_leading_attrs(options, &frontend_warning_specs),
+    );
+    for (warning, config) in &config_processing.warnings {
+        ppx_warnings_have_errors |= format_ppx_warnings_with_config(
+            parser.arena(),
+            source,
+            filename,
+            config,
+            std::slice::from_ref(warning),
+            out,
+        );
+    }
+    if let Some(err) = config_processing.error {
+        return Err(config_payload_error_to_anyhow(err, parser.arena(), source, filename));
+    }
+    let file_config = config_processing.overrides;
     let file_warning_config = warning_config_for_options_file_config_and_leading_attrs(
         options,
         &file_config,
         &frontend_warning_specs,
-    );
-    ppx_warnings_have_errors |= format_ppx_warnings_with_config(
-        parser.arena(),
-        source,
-        filename,
-        &file_warning_config,
-        &config_warnings,
-        out,
     );
     let file_directives = extract_file_directives_from_structure(&structure, parser.arena())
         .map_err(|err| directive_payload_error_to_anyhow(err, parser.arena(), source, filename))?;
@@ -11768,7 +11801,18 @@ fn compile_source_to_js_with_options_inner(
         jsx_preserve,
         experimental_let_unwrap,
     } = frontend?;
-    let ppx_warnings_have_errors = ppx_warnings_have_errors && !options.frontend_already_reported;
+    let ppx_warnings_have_errors = if options.frontend_already_reported {
+        report_stored_ast_config_warnings(
+            first_config_attribute_of_structure(&structure, parser.arena()),
+            true,
+            parser.arena(),
+            source,
+            filename,
+            options,
+        )
+    } else {
+        ppx_warnings_have_errors
+    };
     parser.arena_mut().reserve_typecheck_synthetic_capacity();
 
     // Type check
@@ -12659,21 +12703,29 @@ pub fn run_interface_frontend(
             &frontend_warnings,
             out,
         );
-    let config_warnings = validate_file_config_from_signature(&signature, parser.arena())
-        .map_err(|err| config_payload_error_to_anyhow(err, parser.arena(), source, filename))?;
-    let file_config = extract_file_config_from_signature(&signature, parser.arena());
+    let config_processing = validate_file_config_from_signature(
+        &signature,
+        parser.arena(),
+        &warning_config_for_options_and_leading_attrs(options, &frontend_warning_specs),
+    );
+    for (warning, config) in &config_processing.warnings {
+        ppx_warnings_have_errors |= format_ppx_warnings_with_config(
+            parser.arena(),
+            source,
+            filename,
+            config,
+            std::slice::from_ref(warning),
+            out,
+        );
+    }
+    if let Some(err) = config_processing.error {
+        return Err(config_payload_error_to_anyhow(err, parser.arena(), source, filename));
+    }
+    let file_config = config_processing.overrides;
     let file_warning_config = warning_config_for_options_file_config_and_leading_attrs(
         options,
         &file_config,
         &frontend_warning_specs,
-    );
-    ppx_warnings_have_errors |= format_ppx_warnings_with_config(
-        parser.arena(),
-        source,
-        filename,
-        &file_warning_config,
-        &config_warnings,
-        out,
     );
     let experimental_let_unwrap = options.experimental_let_unwrap || file_config.let_unwrap;
     let signature = preprocess_signature_for_typecheck_with_source(
@@ -12742,7 +12794,18 @@ pub fn typecheck_interface_source(
         file_config,
         experimental_let_unwrap,
     } = frontend?;
-    let ppx_warnings_have_errors = ppx_warnings_have_errors && !options.frontend_already_reported;
+    let ppx_warnings_have_errors = if options.frontend_already_reported {
+        report_stored_ast_config_warnings(
+            first_config_attribute_of_signature(&signature, parser.arena()),
+            false,
+            parser.arena(),
+            source,
+            filename,
+            options,
+        )
+    } else {
+        ppx_warnings_have_errors
+    };
     parser.arena_mut().reserve_typecheck_synthetic_capacity();
 
     // Type check
@@ -13097,21 +13160,24 @@ pub fn typecheck_and_dump_sexp<W: std::io::Write>(
             options,
             &frontend_warnings,
         );
-        let config_warnings = validate_file_config_from_signature(&signature, parser.arena())
-            .map_err(|err| config_payload_error_to_anyhow(err, parser.arena(), source, filename))?;
-        let file_config = extract_file_config_from_signature(&signature, parser.arena());
-        let file_warning_config = warning_config_for_options_file_config_and_leading_attrs(
-            options,
-            &file_config,
-            &frontend_warning_specs,
-        );
-        let _ = emit_ppx_warnings_with_config(
+        let config_processing = validate_file_config_from_signature(
+            &signature,
             parser.arena(),
-            source,
-            filename,
-            &file_warning_config,
-            &config_warnings,
+            &warning_config_for_options_and_leading_attrs(options, &frontend_warning_specs),
         );
+        for (warning, config) in &config_processing.warnings {
+            let _ = emit_ppx_warnings_with_config(
+                parser.arena(),
+                source,
+                filename,
+                config,
+                std::slice::from_ref(warning),
+            );
+        }
+        if let Some(err) = config_processing.error {
+            return Err(config_payload_error_to_anyhow(err, parser.arena(), source, filename));
+        }
+        let file_config = config_processing.overrides;
         let experimental_let_unwrap = options.experimental_let_unwrap || file_config.let_unwrap;
         let signature = preprocess_signature_for_typecheck_with_source(
             signature,
@@ -13894,95 +13960,120 @@ fn moregen_link_impl(
 }
 
 /// Per-file configuration overrides extracted from `@@config({flags: [...]})`.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct FileConfigOverrides {
     pub let_unwrap: bool,
     pub jsx_version: Option<i32>,
-    pub warning_specs: Vec<String>,
-    pub warning_error_specs: Vec<String>,
+    /// `-w`/`-warn-error` specs in application order (`true` = `-warn-error`).
+    pub warning_ops: Vec<(bool, String)>,
 }
 
-fn parse_config_flags(flags: &[String]) -> FileConfigOverrides {
-    let mut overrides = FileConfigOverrides::default();
+#[derive(Clone, Copy)]
+enum BscFlagArity {
+    Unit,
+    String,
+}
+
+/// The arity of a `command_line_flags` entry
+/// (compiler/bsc/rescript_compiler_main.ml:233-499), or `None` for an
+/// unknown option.
+fn bsc_flag_arity(flag: &str) -> Option<BscFlagArity> {
+    Some(match flag {
+        "-I" | "-w" | "-o" | "-ppx" | "-open" | "-bs-jsx" | "-bs-jsx-module" | "-bs-jsx-mode"
+        | "-bs-source-map" | "-bs-source-map-sources-content" | "-bs-source-map-root"
+        | "-bs-package-output" | "-bs-project-root" | "-bs-package-name" | "-bs-ns"
+        | "-bs-gentype-module" | "-bs-gentype-module-resolution"
+        | "-bs-gentype-generated-extension" | "-bs-gentype-suffix" | "-bs-gentype-shim"
+        | "-bs-gentype-debug" | "-bs-gentype-dep" | "-bs-gentype-source-dir"
+        | "-bs-gentype-dep-path" | "-bs-gentype-bsb-project-root" | "-color" | "-e"
+        | "-reprint-source" | "-format" | "-pp" | "-enable-experimental" | "-runtime-path"
+        | "-warn-error" => BscFlagArity::String,
+        "-bs-read-cmi" | "-bs-jsx-preserve" | "-bs-ast" | "-bs-test-ast-conversion"
+        | "-bs-syntax-only" | "-bs-g" | "-as-pp" | "-no-alias-deps" | "-bs-gentype"
+        | "-bs-gentype-export-interfaces" | "-nostdlib" | "-bs-cmi-only" | "-bs-cmi"
+        | "-bs-cmj" | "-bs-no-version-header" | "-bs-no-builtin-ppx" | "-bs-cross-module-opt"
+        | "-bs-no-cross-module-opt" | "-debug-ir" | "-check-lam" | "-bs-no-check-div-by-zero"
+        | "-bs-noassertfalse" | "-noassert" | "-bs-loc" | "-dtypedtree" | "-dtyped-sexp"
+        | "-dtyped-sexp-locs" | "-dparsetree" | "-dparsetree-sexp-locs" | "-drawlambda"
+        | "-dlambda-sexp" | "-dlambda-sexp-locs" | "-dsource" | "-only-parse" | "-editor-mode"
+        | "-ignore-parse-errors" | "-verbose" | "-keep-locs" | "-no-keep-locs"
+        | "-nopervasives" | "-v" | "-version" | "-absname" | "-bs-no-bin-annot"
+        | "-short-paths" | "-unsafe" | "-warn-help" | "-make-runtime" => BscFlagArity::Unit,
+        _ => return None,
+    })
+}
+
+/// `file_level_flags_handler` on a string array: `Bsc_args.parse_exn`
+/// (compiler/ext/bsc_args.ml) applying each option in order. Returns `false`
+/// when parsing raises, after the options before the failure were applied.
+fn run_file_level_flags(
+    flags: &[String],
+    overrides: &mut FileConfigOverrides,
+    state: &mut WarningConfig,
+) -> bool {
     let mut i = 0;
     while i < flags.len() {
-        match flags[i].as_str() {
-            "-enable-experimental" => {
-                if i + 1 < flags.len() && flags[i + 1] == "LetUnwrap" {
-                    overrides.let_unwrap = true;
-                    i += 2;
-                    continue;
+        let flag = flags[i].as_str();
+        i += 1;
+        // Anything not starting with `-` is an anonymous argument.
+        if !flag.starts_with('-') {
+            continue;
+        }
+        let Some(arity) = bsc_flag_arity(flag) else {
+            return false;
+        };
+        let BscFlagArity::String = arity else {
+            continue;
+        };
+        let Some(arg) = flags.get(i) else {
+            return false;
+        };
+        i += 1;
+        match flag {
+            // `Warnings.parse_options` commits only a well-formed list
+            // (compiler/ext/warnings.ml:250-254).
+            "-w" | "-warn-error" => {
+                let as_error = flag == "-warn-error";
+                let mut next = state.clone();
+                let parsed = if as_error {
+                    next.parse_as_error(arg)
+                } else {
+                    next.parse(arg)
+                };
+                if parsed.is_err() {
+                    return false;
                 }
+                *state = next;
+                overrides.warning_ops.push((as_error, arg.clone()));
             }
             "-bs-jsx" => {
-                if i + 1 < flags.len() {
-                    if let Ok(v) = flags[i + 1].parse::<i32>() {
-                        overrides.jsx_version = Some(v);
-                    }
-                    i += 2;
-                    continue;
+                if arg != "4" {
+                    return false;
+                }
+                overrides.jsx_version = Some(4);
+            }
+            "-enable-experimental" => {
+                if arg == "LetUnwrap" {
+                    overrides.let_unwrap = true;
                 }
             }
-            "-w" => {
-                if i + 1 < flags.len() {
-                    overrides.warning_specs.push(flags[i + 1].clone());
-                    i += 2;
-                    continue;
+            "-bs-source-map" => {
+                if !matches!(
+                    arg.to_ascii_lowercase().as_str(),
+                    "linked" | "inline" | "hidden" | "false" | "none"
+                ) {
+                    return false;
                 }
             }
-            "-warn-error" => {
-                if i + 1 < flags.len() {
-                    overrides.warning_error_specs.push(flags[i + 1].clone());
-                    i += 2;
-                    continue;
+            "-bs-source-map-sources-content" => {
+                if !matches!(arg.to_ascii_lowercase().as_str(), "true" | "false") {
+                    return false;
                 }
             }
             _ => {}
         }
-        i += 1;
     }
-    overrides
-}
-
-fn extract_flags_from_config_payload(
-    payload: &Payload,
-    arena: &crate::parse_arena::ParseArena,
-) -> Vec<String> {
-    use crate::parser::ast::ExpressionDesc as ED;
-    use crate::parser::longident::Longident;
-    let mut result = Vec::new();
-    if let Payload::PStr(items) = payload {
-        for item in items.iter() {
-            if let StructureItemDesc::Pstr_eval(inner) = &*item.pstr_desc {
-                let (expr_idx, _attrs) = &**inner;
-                let expr = arena.get_expr(*expr_idx);
-                if let ED::Pexp_record(inner) = &*expr.pexp_desc {
-                    let (fields, _spread) = &**inner;
-                    for field in fields {
-                        let lid = arena.get_longident(field.lid.txt);
-                        let is_flags = match lid {
-                            Longident::Lident(str_idx) => arena.get_string(*str_idx) == "flags",
-                            _ => false,
-                        };
-                        if is_flags {
-                            let field_expr = arena.get_expr(field.expr);
-                            if let ED::Pexp_array(elements) = &*field_expr.pexp_desc {
-                                for elem_idx in elements.iter() {
-                                    let elem = arena.get_expr(*elem_idx);
-                                    if let ED::Pexp_constant(c) = &*elem.pexp_desc {
-                                        if let Constant::String(s, _) = &**c {
-                                            result.push(s.to_string());
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-    result
+    true
 }
 
 fn extract_single_string_payload(
@@ -14085,15 +14176,7 @@ fn push_config_warning(
     loc: LocIdx,
     warning: crate::diagnostics::Warning,
 ) {
-    // OCaml runs Ast_config processing twice on the direct bsc path
-    // (frontend rewrite and js_implementation), so warning-only config
-    // diagnostics are printed twice before compilation continues.
-    for _ in 0..2 {
-        warnings.push(ppx::PpxWarning {
-            loc,
-            warning: warning.clone(),
-        });
-    }
+    warnings.push(ppx::PpxWarning { loc, warning });
 }
 
 fn push_invalid_config_record_warning(warnings: &mut Vec<ppx::PpxWarning>, loc: LocIdx) {
@@ -14212,117 +14295,51 @@ fn validate_config_bool_literal(
     }
 }
 
-fn config_bsc_flags_parse_ok(flags: &[String]) -> bool {
-    let mut i = 0;
-    while i < flags.len() {
-        let flag = flags[i].as_str();
-        match flag {
-            "-bs-jsx" => {
-                if i + 1 >= flags.len() || flags[i + 1] != "4" {
-                    return false;
-                }
-                i += 2;
-            }
-            "-enable-experimental" => {
-                if i + 1 >= flags.len() || flags[i + 1] != "LetUnwrap" {
-                    return false;
-                }
-                i += 2;
-            }
-            "-w"
-            | "-o"
-            | "-output"
-            | "-ppx"
-            | "-open"
-            | "-bs-jsx-module"
-            | "-bs-jsx-mode"
-            | "-bs-package-output"
-            | "-bs-project-root"
-            | "-bs-package-name"
-            | "-bs-ns"
-            | "-bs-gentype-module"
-            | "-bs-gentype-module-resolution"
-            | "-bs-gentype-generated-extension"
-            | "-bs-gentype-suffix"
-            | "-bs-gentype-shim"
-            | "-bs-gentype-debug"
-            | "-bs-gentype-dep"
-            | "-bs-gentype-source-dir"
-            | "-bs-gentype-dep-path"
-            | "-bs-gentype-bsb-project-root"
-            | "-color"
-            | "-e"
-            | "-reprint-source"
-            | "-format"
-            | "-pp"
-            | "-runtime-path"
-            | "-warn-error" => {
-                if i + 1 >= flags.len() {
-                    return false;
-                }
-                i += 2;
-            }
-            "-bs-read-cmi"
-            | "-bs-jsx-preserve"
-            | "-bs-ast"
-            | "-bs-test-ast-conversion"
-            | "-bs-syntax-only"
-            | "-bs-g"
-            | "-as-pp"
-            | "-no-alias-deps"
-            | "-bs-gentype"
-            | "-bs-gentype-export-interfaces"
-            | "-unboxed-types"
-            | "-nostdlib"
-            | "-bs-cmi-only"
-            | "-bs-cmi"
-            | "-bs-cmj"
-            | "-bs-no-version-header"
-            | "-bs-no-builtin-ppx"
-            | "-bs-cross-module-opt"
-            | "-bs-no-cross-module-opt"
-            | "-bs-diagnose"
-            | "-bs-no-check-div-by-zero"
-            | "-bs-noassertfalse"
-            | "-noassert"
-            | "-bs-loc"
-            | "-dtypedtree"
-            | "-dtyped-sexp"
-            | "-dtyped-sexp-locs"
-            | "-dparsetree"
-            | "-dparsetree-sexp-locs"
-            | "-drawlambda"
-            | "-dlambda-sexp"
-            | "-dlambda-sexp-locs"
-            | "-dsource"
-            | "-only-parse"
-            | "-editor-mode"
-            | "-ignore-parse-errors"
-            | "-verbose"
-            | "-keep-locs"
-            | "-no-keep-locs"
-            | "-nopervasives"
-            | "-v"
-            | "-version"
-            | "-absname"
-            | "-bs-no-bin-annot"
-            | "-short-paths"
-            | "-unsafe"
-            | "-warn-help"
-            | "-make-runtime" => i += 1,
-            _ => return false,
-        }
+/// Compiling a stored `.ast`/`.iast`: `Js_implementation.after_parsing_impl`
+/// (and `interface_mliast`) run `Ast_config.process_str`/`process_sig` once
+/// more under the command-line warning state
+/// (compiler/core/js_implementation.ml:38, 129). Returns whether a reported
+/// warning is an error.
+fn report_stored_ast_config_warnings(
+    attr: Option<&crate::parser::ast::Attribute>,
+    allow_no_export: bool,
+    arena: &ParseArena,
+    source: &str,
+    filename: &str,
+    options: &CompilerOptions,
+) -> bool {
+    let processing = process_file_config(
+        attr,
+        allow_no_export,
+        arena,
+        &warning_config_for_options(options),
+        1,
+    );
+    let mut out = String::new();
+    let mut has_error = false;
+    for (warning, config) in &processing.warnings {
+        has_error |= format_ppx_warnings_with_config(
+            arena,
+            source,
+            filename,
+            config,
+            std::slice::from_ref(warning),
+            &mut out,
+        );
     }
-    true
+    write_stderr(&out);
+    has_error
 }
 
-fn validate_config_flags(
+/// The string array of a `flags` field, or the error
+/// `file_level_flags_handler` raises before parsing
+/// (compiler/bsc/rescript_compiler_main.ml:502-514).
+fn config_flags_strings(
     expr_idx: Option<ExprIdx>,
     arena: &ParseArena,
-    warnings: &mut Vec<ppx::PpxWarning>,
-) -> Result<(), ConfigPayloadError> {
+) -> Result<Option<(Vec<String>, LocIdx)>, ConfigPayloadError> {
     let Some(expr_idx) = expr_idx else {
-        return Ok(());
+        return Ok(None);
     };
     let expr = arena.get_expr(expr_idx);
     let ExpressionDesc::Pexp_array(elements) = &*expr.pexp_desc else {
@@ -14334,93 +14351,149 @@ fn validate_config_flags(
     let mut flags = Vec::with_capacity(elements.len());
     for elem_idx in elements.iter() {
         let elem = arena.get_expr(*elem_idx);
-        let ExpressionDesc::Pexp_constant(constant) = &*elem.pexp_desc else {
-            return Err(ConfigPayloadError {
-                loc: elem.pexp_loc,
-                message: "string literal expected".to_string(),
-            });
-        };
-        let Constant::String(value, _) = &**constant else {
-            return Err(ConfigPayloadError {
-                loc: elem.pexp_loc,
-                message: "string literal expected".to_string(),
-            });
-        };
-        flags.push(value.to_string());
-    }
-    if !config_bsc_flags_parse_ok(&flags) {
-        push_config_warning(
-            warnings,
-            expr.pexp_loc,
-            crate::diagnostics::Warning::Preprocessor {
-                message: "invalid flags for bsc".to_string(),
+        let value = match &*elem.pexp_desc {
+            ExpressionDesc::Pexp_constant(constant) => match &**constant {
+                Constant::String(value, _) => Some(value.to_string()),
+                _ => None,
             },
-        );
+            _ => None,
+        };
+        let Some(value) = value else {
+            return Err(ConfigPayloadError {
+                loc: elem.pexp_loc,
+                message: "string literal expected".to_string(),
+            });
+        };
+        flags.push(value);
     }
-    Ok(())
+    Ok(Some((flags, expr.pexp_loc)))
 }
 
-fn validate_config_payload(
-    payload: &Payload,
-    default_loc: LocIdx,
+/// `Ast_config.process_str`/`process_sig` (compiler/frontend/ast_config.ml),
+/// run `runs` times like the direct bsc path (Ppx_entry, then
+/// Js_implementation.after_parsing_impl).
+#[derive(Default)]
+struct FileConfigProcessing {
+    overrides: FileConfigOverrides,
+    /// Warnings together with the warning state they were emitted under.
+    warnings: Vec<(ppx::PpxWarning, WarningConfig)>,
+    error: Option<ConfigPayloadError>,
+}
+
+fn process_file_config(
+    attr: Option<&crate::parser::ast::Attribute>,
     allow_no_export: bool,
     arena: &ParseArena,
-    warnings: &mut Vec<ppx::PpxWarning>,
-) -> Result<(), ConfigPayloadError> {
-    let actions = config_payload_actions(payload, default_loc, arena, warnings)?;
-    for action in actions {
-        match arena.get_string(action.name) {
-            "no_export" if allow_no_export => {
-                if let Some(expr_idx) = action.expr {
-                    validate_config_bool_literal(expr_idx, arena)?;
-                }
+    base: &WarningConfig,
+    runs: usize,
+) -> FileConfigProcessing {
+    let mut result = FileConfigProcessing::default();
+    let Some(attr) = attr else {
+        return result;
+    };
+    let mut state = base.clone();
+    for _ in 0..runs {
+        let mut overrides = FileConfigOverrides::default();
+        let mut payload_warnings = Vec::new();
+        let actions = config_payload_actions(&attr.1, attr.0.loc, arena, &mut payload_warnings);
+        for warning in payload_warnings {
+            result.warnings.push((warning, state.clone()));
+        }
+        let actions = match actions {
+            Ok(actions) => actions,
+            Err(err) => {
+                result.error = Some(err);
+                return result;
             }
-            "flags" => validate_config_flags(action.expr, arena, warnings)?,
-            name => {
-                return Err(ConfigPayloadError {
+        };
+        // `Ast_payload.table_dispatch` (compiler/ml/ast_payload.ml).
+        for action in actions {
+            let outcome = match arena.get_string(action.name) {
+                "no_export" if allow_no_export => match action.expr {
+                    Some(expr_idx) => validate_config_bool_literal(expr_idx, arena),
+                    None => Ok(()),
+                },
+                "flags" => match config_flags_strings(action.expr, arena) {
+                    Ok(Some((flags, loc))) => {
+                        if !run_file_level_flags(&flags, &mut overrides, &mut state) {
+                            result.warnings.push((
+                                ppx::PpxWarning {
+                                    loc,
+                                    warning: crate::diagnostics::Warning::Preprocessor {
+                                        message: "invalid flags for bsc".to_string(),
+                                    },
+                                },
+                                state.clone(),
+                            ));
+                        }
+                        Ok(())
+                    }
+                    Ok(None) => Ok(()),
+                    Err(err) => Err(err),
+                },
+                name => Err(ConfigPayloadError {
                     loc: action.loc,
                     message: format!("{name} is not supported"),
-                });
+                }),
+            };
+            if let Err(err) = outcome {
+                result.overrides = overrides;
+                result.error = Some(err);
+                return result;
             }
         }
+        result.overrides = overrides;
     }
-    Ok(())
+    result
+}
+
+/// `iter_on_config_str`: only the first `@@config` among the leading
+/// attributes is processed (compiler/frontend/ast_config.ml:55-65).
+fn first_config_attribute_of_structure<'s>(
+    structure: &'s Structure,
+    arena: &ParseArena,
+) -> Option<&'s crate::parser::ast::Attribute> {
+    for item in structure {
+        let StructureItemDesc::Pstr_attribute(attr) = &*item.pstr_desc else {
+            return None;
+        };
+        if arena.get_string(attr.0.txt) == "config" {
+            return Some(attr);
+        }
+    }
+    None
+}
+
+/// `iter_on_config_sig` (compiler/frontend/ast_config.ml:72-81).
+fn first_config_attribute_of_signature<'s>(
+    signature: &'s Signature,
+    arena: &ParseArena,
+) -> Option<&'s crate::parser::ast::Attribute> {
+    for item in signature {
+        let SignatureItemDesc::Psig_attribute(attr) = &*item.psig_desc else {
+            return None;
+        };
+        if arena.get_string(attr.0.txt) == "config" {
+            return Some(attr);
+        }
+    }
+    None
 }
 
 fn validate_file_config_from_structure(
     structure: &Structure,
     arena: &ParseArena,
-) -> Result<Vec<ppx::PpxWarning>, ConfigPayloadError> {
-    let mut warnings = Vec::new();
-    for item in structure {
-        match &*item.pstr_desc {
-            StructureItemDesc::Pstr_attribute(attr) => {
-                if arena.get_string(attr.0.txt) == "config" {
-                    validate_config_payload(&attr.1, attr.0.loc, true, arena, &mut warnings)?;
-                }
-            }
-            _ => break,
-        }
-    }
-    Ok(warnings)
+    base: &WarningConfig,
+) -> FileConfigProcessing {
+    process_file_config(first_config_attribute_of_structure(structure, arena), true, arena, base, 2)
 }
 
 fn validate_file_config_from_signature(
     signature: &Signature,
     arena: &ParseArena,
-) -> Result<Vec<ppx::PpxWarning>, ConfigPayloadError> {
-    let mut warnings = Vec::new();
-    for item in signature {
-        match &*item.psig_desc {
-            SignatureItemDesc::Psig_attribute(attr) => {
-                if arena.get_string(attr.0.txt) == "config" {
-                    validate_config_payload(&attr.1, attr.0.loc, false, arena, &mut warnings)?;
-                }
-            }
-            _ => break,
-        }
-    }
-    Ok(warnings)
+    base: &WarningConfig,
+) -> FileConfigProcessing {
+    process_file_config(first_config_attribute_of_signature(signature, arena), false, arena, base, 2)
 }
 
 /// Extract `@@config({flags: [...]})` overrides from a parsed structure.
@@ -14428,18 +14501,14 @@ pub fn extract_file_config_from_structure(
     structure: &Structure,
     arena: &crate::parse_arena::ParseArena,
 ) -> FileConfigOverrides {
-    // `Ast_config.iter_on_config_str`/`iter_on_config_sig`: only the first
-    // `@@config` among the leading attributes is processed.
-    for item in structure {
-        let StructureItemDesc::Pstr_attribute(attr) = &*item.pstr_desc else {
-            break;
-        };
-        if arena.get_string(attr.0.txt) == "config" {
-            let flags = extract_flags_from_config_payload(&attr.1, arena);
-            return parse_config_flags(&flags);
-        }
-    }
-    FileConfigOverrides::default()
+    process_file_config(
+        first_config_attribute_of_structure(structure, arena),
+        true,
+        arena,
+        &WarningConfig::new(),
+        1,
+    )
+    .overrides
 }
 
 /// Extract `@@config({flags: [...]})` overrides from a parsed signature.
@@ -14447,18 +14516,14 @@ pub fn extract_file_config_from_signature(
     signature: &Signature,
     arena: &crate::parse_arena::ParseArena,
 ) -> FileConfigOverrides {
-    // `Ast_config.iter_on_config_str`/`iter_on_config_sig`: only the first
-    // `@@config` among the leading attributes is processed.
-    for item in signature {
-        let SignatureItemDesc::Psig_attribute(attr) = &*item.psig_desc else {
-            break;
-        };
-        if arena.get_string(attr.0.txt) == "config" {
-            let flags = extract_flags_from_config_payload(&attr.1, arena);
-            return parse_config_flags(&flags);
-        }
-    }
-    FileConfigOverrides::default()
+    process_file_config(
+        first_config_attribute_of_signature(signature, arena),
+        false,
+        arena,
+        &WarningConfig::new(),
+        1,
+    )
+    .overrides
 }
 
 /// Typecheck a stored structure AST (from parse phase) and dump sexp.
@@ -15859,21 +15924,24 @@ pub fn typecheck_interface_in_process(
         options,
         &frontend_warnings,
     );
-    let config_warnings = validate_file_config_from_signature(&signature, parser.arena())
-        .map_err(|err| config_payload_error_to_anyhow(err, parser.arena(), source, filename))?;
-    let file_config = extract_file_config_from_signature(&signature, parser.arena());
-    let file_warning_config = warning_config_for_options_file_config_and_leading_attrs(
-        options,
-        &file_config,
-        &frontend_warning_specs,
-    );
-    let _ = emit_ppx_warnings_with_config(
+    let config_processing = validate_file_config_from_signature(
+        &signature,
         parser.arena(),
-        source,
-        filename,
-        &file_warning_config,
-        &config_warnings,
+        &warning_config_for_options_and_leading_attrs(options, &frontend_warning_specs),
     );
+    for (warning, config) in &config_processing.warnings {
+        let _ = emit_ppx_warnings_with_config(
+            parser.arena(),
+            source,
+            filename,
+            config,
+            std::slice::from_ref(warning),
+        );
+    }
+    if let Some(err) = config_processing.error {
+        return Err(config_payload_error_to_anyhow(err, parser.arena(), source, filename));
+    }
+    let file_config = config_processing.overrides;
     let signature = preprocess_signature_for_typecheck_with_source(
         signature,
         options,
