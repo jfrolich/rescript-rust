@@ -5390,6 +5390,11 @@ fn type_pattern_record(
                 )
             })
             .or_else(|| {
+                // OCaml `lookup_from_type` (typecore.ml:852-891) only matches
+                // unqualified labels; a qualified miss stays unbound.
+                if matches!(resolved_lid, Longident::Ldot(..)) {
+                    return None;
+                }
                 disambiguate_label(
                     &field_name,
                     record_ty,
@@ -5482,7 +5487,10 @@ fn type_pattern_record(
             (env_label, ty_arg, vars, true)
         } else {
             if !has_dict_pattern_attr {
-                if let Some(path) = extract_type_path_from_expected_with_persistent_env(
+                // A qualified label that is not in its module is unbound
+                // (OCaml `lookup_from_type` only matches unqualified labels).
+                if !matches!(field_lid_for_error, Longident::Ldot(..))
+                    && let Some(path) = extract_type_path_from_expected_with_persistent_env(
                     record_ty,
                     env,
                     &mut tctx.persistent_env,
@@ -5513,7 +5521,7 @@ fn type_pattern_record(
                 }
                 return Err(TypeCoreError::UnboundRecordField {
                     loc: field.lid.loc,
-                    field_name: field.field_name,
+                    field_name: tctx.longident_to_string(&field_lid_for_error),
                     from_type: None,
                     // OCaml compiler/ml/typecore.ml:1118-1119 raises the
                     // unbound-label error from label disambiguation; spelling
@@ -18384,7 +18392,10 @@ fn type_record(
                 // label, typecore.ml:942-967 `lookup_from_type` falls back to the
                 // expected record type. Keep this fallback after the scope lookup in
                 // every mode so typedtree output and normal compilation share the same
-                // lazy force order.
+                // lazy force order. `lookup_from_type` only matches unqualified labels.
+                if matches!(resolved_lid, Longident::Ldot(..)) {
+                    return None;
+                }
                 qualified_record_label_from_info(
                     disambiguation_label_descriptions.as_ref(),
                     field_name,
@@ -18394,6 +18405,9 @@ fn type_record(
                 )
             })
             .or_else(|| {
+                if matches!(resolved_lid, Longident::Ldot(..)) {
+                    return None;
+                }
                 disambiguate_label(
                     field_name,
                     disambiguation_ty,
@@ -18665,7 +18679,8 @@ fn type_record(
                     let resolved_lid = tctx.arena.get_longident(field.lid.txt);
                     return Err(TypeCoreError::UnboundRecordField {
                         loc: field.lid.loc,
-                        field_name: field_name.to_string(),
+                        // OCaml prints the label as written (`B.x`).
+                        field_name: tctx.longident_to_string(resolved_lid),
                         from_type: None,
                         // OCaml compiler/ml/typecore.ml:1107-1125 performs
                         // record-label disambiguation while typing, but
@@ -19848,6 +19863,26 @@ fn type_field(
         None,
     ) {
         (Some(label), false)
+    } else if matches!(resolved_lid, Longident::Ldot(..)) {
+        // OCaml `find_all_labels` on a qualified label only reads that module's
+        // labels, and `Name_choice.lookup_from_type` (typecore.ml:852-891) only
+        // matches unqualified names, so a miss is `Unbound_label (lid, Some ty)`.
+        if let Some(err) = unbound_module_prefix_error(tctx, env, field_lid.loc, &resolved_lid) {
+            return Err(err);
+        }
+        let ty_exp_repr = tctx.type_ctx.repr(ty_exp);
+        return Err(TypeCoreError::UnboundRecordField {
+            loc: field_lid.loc,
+            field_name: tctx.longident_to_string(&resolved_lid),
+            from_type: Some(ty_exp_repr),
+            alternatives: unbound_label_alternatives(
+                tctx.arena,
+                env,
+                &mut tctx.persistent_env,
+                tctx.type_ctx,
+                &resolved_lid,
+            ),
+        });
     } else {
         (
             disambiguate_label(
