@@ -342,6 +342,10 @@ pub mod error_messages {
     pub const TYPE_VAR: &str =
         "A type variable consists of a singlequote followed by a name like `'a` or `'A`";
 
+    /// OCaml `Error_messages.record_type_field_missing_colon`.
+    pub const RECORD_TYPE_FIELD_MISSING_COLON: &str =
+        "Record fields in type declarations use `:`. Example: `{field: string}`";
+
     /// Error message for record field missing colon.
     pub const RECORD_FIELD_MISSING_COLON: &str =
         "Records use `:` when assigning fields. Example: `{field: value}`";

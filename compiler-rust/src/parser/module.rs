@@ -2746,19 +2746,8 @@ fn parse_type_declaration_body(
             Token::Lbrace => {
                 // Record type OR object type ({"x": int})
                 if looks_like_object_type_after_lbrace(p) {
-                    // Detect if this is a spread-first CLOSED object: `{...spread, fields}`
-                    // (not `{.. ...spread}` or `{. ...spread}`)
-                    // OCaml uses ghost location for this specific case
-                    let is_spread_first = p.lookahead(|state| {
-                        state.next(); // consume {
-                        // Check if first token is DotDotDot (not Dot or DotDot)
-                        state.token == Token::DotDotDot
-                    });
-                    let typ = typ::parse_typ_expr(p);
-                    let typ_idx = p.arena_mut().push_core_type(typ);
-                    // Apply ghost location fix for spread-first closed objects
-                    let typ_idx = fix_spread_first_object_manifest(p, typ_idx, is_spread_first).0;
-                    manifest = Some(typ_idx);
+                    let typ = typ::parse_object_decl(p);
+                    manifest = Some(p.arena_mut().push_core_type(typ));
                 } else {
                     kind = parse_type_kind(p, inline_ctx, inline_ctx.map(|_| &current_type_name_path));
                 }
@@ -2932,104 +2921,6 @@ fn parse_type_declaration_body(
         ptype_attributes: attrs,
         ptype_loc: loc,
     })
-}
-
-/// Fix the location of a direct spread-first object type manifest.
-/// ONLY applies to the outermost level when the type starts with `{...spread`
-/// (not `{.. ...spread}` or `{. ...spread}` - those use real locations).
-/// Also propagates ghost loc_start to alias wrappers.
-///
-/// Returns the fixed type and whether the fix was applied.
-fn fix_spread_first_object_manifest(
-    p: &mut Parser<'_>,
-    typ_idx: CoreTypeIdx,
-    is_spread_first: bool,
-) -> (CoreTypeIdx, bool) {
-    if !is_spread_first {
-        return (typ_idx, false);
-    }
-
-    let typ = p.arena().get_core_type(typ_idx).clone();
-    match *typ.ptyp_desc {
-        CoreTypeDesc::Ptyp_object(inner) => {
-            // Only for CLOSED objects where first field is Oinherit (spread)
-            // Open objects (from {.. ...spread}) should NOT use ghost location
-            let first_is_spread = inner
-                .0
-                .first()
-                .map_or(false, |f| matches!(f, ObjectField::Oinherit(_)));
-            if first_is_spread && inner.1 == ClosedFlag::Closed {
-                let fixed = CoreType {
-                    ptyp_desc: Box::new(CoreTypeDesc::Ptyp_object(inner)),
-                    ptyp_loc: Location::none(),
-                    ptyp_attributes: typ.ptyp_attributes,
-                };
-                (p.arena_mut().push_core_type(fixed), true)
-            } else {
-                let fixed = CoreType {
-                    ptyp_desc: Box::new(CoreTypeDesc::Ptyp_object(inner)),
-                    ptyp_loc: typ.ptyp_loc,
-                    ptyp_attributes: typ.ptyp_attributes,
-                };
-                (p.arena_mut().push_core_type(fixed), false)
-            }
-        }
-        CoreTypeDesc::Ptyp_alias(alias_inner) => {
-            let (ct_idx, alias) = *alias_inner;
-            // Recurse into inner type
-            let (fixed_inner_idx, applied) = fix_spread_first_object_manifest(p, ct_idx, true);
-            if applied {
-                // OCaml uses inner type's loc_start for alias, so if inner is ghost, alias start is ghost too
-                // Create a spanning location from fixed_inner start to typ end
-                let fixed_inner = p.arena().get_core_type(fixed_inner_idx);
-                let new_loc = p.mk_loc_spanning(fixed_inner.ptyp_loc, typ.ptyp_loc);
-                let fixed = CoreType {
-                    ptyp_desc: Box::new(CoreTypeDesc::Ptyp_alias(Box::new((
-                        fixed_inner_idx,
-                        alias,
-                    )))),
-                    ptyp_loc: new_loc,
-                    ptyp_attributes: typ.ptyp_attributes,
-                };
-                (p.arena_mut().push_core_type(fixed), true)
-            } else {
-                let fixed = CoreType {
-                    ptyp_desc: Box::new(CoreTypeDesc::Ptyp_alias(Box::new((
-                        fixed_inner_idx,
-                        alias,
-                    )))),
-                    ..typ
-                };
-                (p.arena_mut().push_core_type(fixed), false)
-            }
-        }
-        CoreTypeDesc::Ptyp_arrow(arrow_inner) => {
-            let (arg, ret_idx, arity) = *arrow_inner;
-            let args = p.arena().nary_arrow_args(&arg, arity).into_owned();
-            // Recurse into every argument when this is the direct manifest level.
-            let mut fixed_args = args
-                .into_iter()
-                .map(|arg| {
-                    let (typ, _) = fix_spread_first_object_manifest(p, arg.typ, true);
-                    TypeArg { typ, ..arg }
-                })
-                .collect::<Vec<_>>();
-            let first = fixed_args[0].clone();
-            if fixed_args.len() > 1 {
-                p.arena_mut().set_nary_arrow_args(arity, fixed_args.clone());
-            }
-            let fixed = CoreType {
-                ptyp_desc: Box::new(CoreTypeDesc::Ptyp_arrow(Box::new((
-                    Box::new(first),
-                    ret_idx,
-                    arity,
-                )))),
-                ..typ
-            };
-            (p.arena_mut().push_core_type(fixed), false)
-        }
-        _ => (typ_idx, false),
-    }
 }
 
 /// Fix the location of a Ptyp_constr in a type manifest context.

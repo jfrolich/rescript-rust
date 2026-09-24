@@ -1520,11 +1520,6 @@ fn parse_attributes(p: &mut Parser<'_>) -> Attributes {
     attrs
 }
 
-/// Parse attributes for field declarations (attributes before field name).
-fn parse_field_attributes(p: &mut Parser<'_>) -> Attributes {
-    parse_attributes(p)
-}
-
 /// Parse only @-style attributes (NOT doc comments).
 /// Used when doc comments need to be handled separately for location purposes.
 fn parse_regular_attributes(p: &mut Parser<'_>) -> Attributes {
@@ -1626,8 +1621,6 @@ fn parse_record_or_object_type(p: &mut Parser<'_>) -> CoreType {
     let start_pos_idx = p.start_pos_idx();
     p.expect(Token::Lbrace);
 
-    // Check for object type: {. ... } or {.. ... }
-    let is_object = p.token == Token::Dot || p.token == Token::DotDot;
     let closed = if p.token == Token::DotDot {
         p.next();
         ClosedFlag::Open
@@ -1683,35 +1676,26 @@ fn parse_record_or_object_type(p: &mut Parser<'_>) -> CoreType {
             ptyp_attributes: Attributes::new(),
         }
     } else {
-        // Check for inline record syntax in wrong position: { name: ... } where object type expected.
-        // Object markers (`{. ...}` / `{.. ...}`) go through OCaml's object-field parser instead.
-        if !has_inline_context
-            && !p.in_external
-            && !is_object
-            && matches!(p.token, Token::Lident(_))
-        {
-            // OCaml compiler/syntax/src/res_core.ml:5137-5155 parses
-            // non-arrow externals without an inline context, so `{x: int}`
-            // remains an object type there instead of a generated inline type.
+        // OCaml res_core.ml:4777-4800: a lowercase name here is an inline
+        // record in the wrong place; the fields are object fields.
+        if matches!(p.token, Token::Lident(_)) {
             p.err(DiagnosticCategory::Message(
                 "An inline record type declaration is only allowed in a variant constructor's declaration or nested inside of a record type declaration".to_string(),
             ));
         }
-
-        let allow_record_lidents_after_spread = !is_object && p.token == Token::DotDotDot;
-        let fields = parse_object_fields(p, allow_record_lidents_after_spread);
+        let fields = super::core::parse_comma_delimited_region(
+            p,
+            Grammar::StringFieldDeclarations,
+            Token::Rbrace,
+            parse_string_field_declaration,
+        );
         p.expect(Token::Rbrace);
         let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
-        let typ = CoreType {
+        CoreType {
             ptyp_desc: Box::new(CoreTypeDesc::Ptyp_object(Box::new((fields, closed)))),
             ptyp_loc: loc,
             ptyp_attributes: Attributes::new(),
-        };
-        // Handle type alias: {...} as 'name
-        let typ = parse_type_alias(p, typ);
-        // Note: Don't parse arrow rest here - let the caller (parse_typ_expr_inner) handle it.
-        // This is important for correct precedence of arrows in function return types.
-        typ
+        }
     }
 }
 
@@ -1722,7 +1706,6 @@ pub fn parse_object_type_body(p: &mut Parser<'_>, start_pos_idx: PosIdx) -> Core
     // The caller provides the PosIdx directly for identity-based position sharing.
 
     // Check for open/closed markers: {. ... } or {.. ... }
-    let starts_with_object_marker = matches!(p.token, Token::Dot | Token::DotDot);
     let closed = if p.token == Token::DotDot {
         p.next();
         ClosedFlag::Open
@@ -1733,9 +1716,12 @@ pub fn parse_object_type_body(p: &mut Parser<'_>, start_pos_idx: PosIdx) -> Core
         ClosedFlag::Closed
     };
 
-    let allow_record_lidents_after_spread =
-        !starts_with_object_marker && p.token == Token::DotDotDot;
-    let fields = parse_object_fields(p, allow_record_lidents_after_spread);
+    let fields = super::core::parse_comma_delimited_region(
+        p,
+        Grammar::StringFieldDeclarations,
+        Token::Rbrace,
+        parse_string_field_declaration,
+    );
     p.expect(Token::Rbrace);
     let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
     let typ = CoreType {
@@ -1754,100 +1740,252 @@ pub fn parse_object_type_body(p: &mut Parser<'_>, start_pos_idx: PosIdx) -> Core
     }
 }
 
-/// Parse object fields.
-fn parse_object_fields(
-    p: &mut Parser<'_>,
-    allow_record_lidents_after_spread: bool,
-) -> Vec<ObjectField> {
-    // Leave breadcrumb matching OCaml's parse_comma_delimited_region ~grammar:StringFieldDeclarations
-    p.leave_breadcrumb(Grammar::StringFieldDeclarations);
-    let mut fields = vec![];
-    let mut in_spread_tail = false;
-
-    while p.token != Token::Rbrace && p.token != Token::Eof {
-        // Optional attributes on the field.
-        let field_attrs = parse_field_attributes(p);
-
-        // Handle spread: ...typ
-        if p.token == Token::DotDotDot {
-            p.next();
-            let typ = parse_typ_expr(p);
-            let typ_idx = p.arena_mut().push_core_type(typ);
-            fields.push(ObjectField::Oinherit(typ_idx));
-            if allow_record_lidents_after_spread {
-                in_spread_tail = true;
-            }
-            if !p.optional(&Token::Comma) {
-                break;
-            }
-            continue;
-        }
-
-        // Handle optional field: name?: typ
-        let name = match &p.token {
-            Token::Lident(n) => {
-                let name = n.to_string();
-                if !in_spread_tail && !p.in_external {
-                    // OCaml compiler/syntax/src/res_core.ml:5232-5267 still
-                    // builds an object field for lowercase names. For external
-                    // object types, keep the AST path non-fatal so `-bs-ast`
-                    // matches the reference parser output.
-                    p.err(DiagnosticCategory::Message(
-                        super::core::error_messages::object_quoted_field_name(&name),
-                    ));
-                }
-                Some(name)
-            }
-            Token::String(s) => Some(s.to_string()),
-            _ => None,
-        };
-        match name {
-            Some(name) => {
-                let field_start_idx = p.start_pos_idx();
-                p.next();
-                // OCaml's Otag location only includes the field name, not the type
-                let name_loc = p.mk_loc_idx_to_prev_end(field_start_idx);
-                // Check for optional field marker
-                let _is_optional = p.optional(&Token::Question);
-                // Pass grammar context for error message: "Did you forget a `:` here? It signals the start of a type"
-                p.expect_with_grammar(Token::Colon, Some(Grammar::TypeExpression));
-                // OCaml uses parse_poly_type_expr for object field types
-                let typ = parse_poly_type_expr(p);
-                let typ_idx = p.arena_mut().push_core_type(typ);
-                let name_idx = p.arena_mut().push_interned_string(&name);
-                fields.push(ObjectField::Otag(
-                    with_loc(name_idx, name_loc),
-                    field_attrs,
-                    typ_idx,
-                ));
-            }
-            None => {
-                p.err(DiagnosticCategory::Message(
-                    "Expected field name".to_string(),
-                ));
-                break;
-            }
-        }
-
-        if !p.optional(&Token::Comma) {
-            if super::grammar::is_list_element(&Grammar::StringFieldDeclarations, &p.token) {
-                p.expect(Token::Comma);
-            } else if p.token != Token::Eof
-                && p.token != Token::Rbrace
-                && !super::core::recover::should_abort_list_parse(p)
-            {
-                p.expect(Token::Comma);
-                if p.token == Token::Semicolon {
-                    p.next();
-                }
+/// The object-producing branches of OCaml `parse_record_or_object_decl`
+/// (compiler/syntax/src/res_core.ml:6030-6120): `{. ...}`/`{.. ...}`,
+/// `{...spread, "field": t}` and `{"field": t}`. Each is followed by an
+/// optional alias and arrow.
+pub(crate) fn parse_object_decl(p: &mut Parser<'_>) -> CoreType {
+    let start_pos_idx = p.start_pos_idx();
+    p.expect(Token::Lbrace);
+    let typ = match p.token {
+        Token::Dot | Token::DotDot => {
+            let closed = if p.token == Token::DotDot {
+                ClosedFlag::Open
             } else {
-                break;
+                ClosedFlag::Closed
+            };
+            p.next();
+            let fields = super::core::parse_comma_delimited_region(
+                p,
+                Grammar::StringFieldDeclarations,
+                Token::Rbrace,
+                parse_string_field_declaration,
+            );
+            p.expect(Token::Rbrace);
+            CoreType {
+                ptyp_desc: Box::new(CoreTypeDesc::Ptyp_object(Box::new((fields, closed)))),
+                ptyp_loc: p.mk_loc_idx_to_prev_end(start_pos_idx),
+                ptyp_attributes: Attributes::new(),
             }
+        }
+        Token::DotDotDot => {
+            p.next();
+            let spread = parse_typ_expr(p);
+            p.expect(Token::Comma);
+            let mut fields = vec![ObjectField::Oinherit(p.arena_mut().push_core_type(spread))];
+            fields.extend(super::core::parse_comma_delimited_region(
+                p,
+                Grammar::RecordDecl,
+                Token::Rbrace,
+                parse_object_decl_field,
+            ));
+            p.expect(Token::Rbrace);
+            // `Ast_helper.Typ.object_` without `~loc`: the default location.
+            CoreType {
+                ptyp_desc: Box::new(CoreTypeDesc::Ptyp_object(Box::new((
+                    fields,
+                    ClosedFlag::Closed,
+                )))),
+                ptyp_loc: Location::none(),
+                ptyp_attributes: Attributes::new(),
+            }
+        }
+        _ => {
+            let attrs = parse_attributes(p);
+            let fields = if attrs.is_empty() {
+                super::core::parse_comma_delimited_region(
+                    p,
+                    Grammar::StringFieldDeclarations,
+                    Token::Rbrace,
+                    parse_string_field_declaration,
+                )
+            } else {
+                p.leave_breadcrumb(Grammar::StringFieldDeclarations);
+                let first = parse_string_field_declaration(p)
+                    .expect("object declaration starts with a string field");
+                match p.token {
+                    Token::Rbrace | Token::Eof => {}
+                    Token::Comma => p.next(),
+                    _ => p.expect(Token::Comma),
+                }
+                p.eat_breadcrumb();
+                let first = match first {
+                    ObjectField::Otag(label, _, typ) => ObjectField::Otag(label, attrs, typ),
+                    inherit => inherit,
+                };
+                let mut fields = vec![first];
+                fields.extend(super::core::parse_comma_delimited_region(
+                    p,
+                    Grammar::StringFieldDeclarations,
+                    Token::Rbrace,
+                    parse_string_field_declaration,
+                ));
+                fields
+            };
+            p.expect(Token::Rbrace);
+            CoreType {
+                ptyp_desc: Box::new(CoreTypeDesc::Ptyp_object(Box::new((
+                    fields,
+                    ClosedFlag::Closed,
+                )))),
+                ptyp_loc: p.mk_loc_idx_to_prev_end(start_pos_idx),
+                ptyp_attributes: Attributes::new(),
+            }
+        }
+    };
+    let typ = parse_type_alias(p, typ);
+    if matches!(p.token, Token::EqualGreater | Token::MinusGreater) {
+        parse_arrow_type_rest(p, typ, start_pos_idx)
+    } else {
+        typ
+    }
+}
+
+/// OCaml `parse_field_declaration_region ~found_object_field` for a spread
+/// object declaration, with each label then read back as an object field
+/// (`"..."` becomes `Oinherit`, anything else `Otag`).
+fn parse_object_decl_field(p: &mut Parser<'_>) -> Option<ObjectField> {
+    let start_pos_idx = p.start_pos_idx();
+    let attrs = parse_attributes(p);
+    let is_mutable = p.optional(&Token::Mutable);
+    match &p.token {
+        Token::DotDotDot => {
+            p.next();
+            let typ = parse_poly_type_expr(p);
+            Some(ObjectField::Oinherit(p.arena_mut().push_core_type(typ)))
+        }
+        Token::String(name) => {
+            let name = name.to_string();
+            p.next();
+            let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
+            p.expect(Token::Colon);
+            let typ = parse_poly_type_expr(p);
+            let typ_idx = p.arena_mut().push_core_type(typ);
+            let name_idx = p.arena_mut().push_interned_string(&name);
+            Some(ObjectField::Otag(with_loc(name_idx, loc), attrs, typ_idx))
+        }
+        Token::Lident(_) => {
+            let (name, loc) = super::core::parse_lident(p);
+            // The punned type `{name with txt = Lident name.txt}` and the label
+            // share the name string.
+            let name_idx = p.arena_mut().push_interned_string(&name);
+            p.optional(&Token::Question);
+            let typ = match p.token {
+                Token::Colon => {
+                    p.next();
+                    parse_poly_type_expr(p)
+                }
+                Token::Equal => {
+                    p.err(DiagnosticCategory::Message(
+                        super::core::error_messages::RECORD_TYPE_FIELD_MISSING_COLON.to_string(),
+                    ));
+                    p.next();
+                    parse_poly_type_expr(p)
+                }
+                _ => {
+                    let lid_idx = p.push_lident_from_idx(name_idx);
+                    CoreType {
+                        ptyp_desc: Box::new(CoreTypeDesc::Ptyp_constr(Box::new((
+                            with_loc(lid_idx, loc),
+                            vec![],
+                        )))),
+                        ptyp_loc: loc,
+                        ptyp_attributes: attrs.clone(),
+                    }
+                }
+            };
+            let typ_idx = p.arena_mut().push_core_type(typ);
+            Some(ObjectField::Otag(with_loc(name_idx, loc), attrs, typ_idx))
+        }
+        _ if p.token.is_keyword() => {
+            match super::core::recover_keyword_field_name_if_probably_field(
+                p,
+                super::core::error_messages::keyword_field_in_type,
+            ) {
+                Some((name, name_loc)) => {
+                    p.optional(&Token::Question);
+                    p.expect(Token::Colon);
+                    let typ = parse_poly_type_expr(p);
+                    let typ_idx = p.arena_mut().push_core_type(typ);
+                    let name_idx = p.arena_mut().push_interned_string(&name);
+                    Some(ObjectField::Otag(with_loc(name_idx, name_loc), attrs, typ_idx))
+                }
+                None => {
+                    super::core::emit_keyword_field_error(
+                        p,
+                        super::core::error_messages::keyword_field_in_type,
+                    );
+                    None
+                }
+            }
+        }
+        _ => {
+            if !attrs.is_empty() {
+                let start = p.arena().get_position(start_pos_idx).clone();
+                let end = p.end_pos.clone();
+                p.err_at(
+                    start,
+                    end,
+                    DiagnosticCategory::Message(
+                        "Attributes and doc comments can only be used at the beginning of a field declaration".to_string(),
+                    ),
+                );
+            }
+            if is_mutable {
+                let start = p.arena().get_position(start_pos_idx).clone();
+                let end = p.end_pos.clone();
+                p.err_at(
+                    start,
+                    end,
+                    DiagnosticCategory::Message(
+                        "The `mutable` qualifier can only be used at the beginning of a field declaration".to_string(),
+                    ),
+                );
+            }
+            None
         }
     }
+}
 
-    p.eat_breadcrumb();
-    fields
+/// OCaml `parse_string_field_declaration` (compiler/syntax/src/res_core.ml:5186-5222).
+fn parse_string_field_declaration(p: &mut Parser<'_>) -> Option<ObjectField> {
+    let attrs = parse_attributes(p);
+    let (name, name_loc) = match &p.token {
+        Token::String(name) => {
+            let name = name.to_string();
+            let loc = p.mk_loc_current();
+            (name, loc)
+        }
+        Token::DotDotDot => {
+            p.next();
+            let typ = parse_typ_expr(p);
+            return Some(ObjectField::Oinherit(p.arena_mut().push_core_type(typ)));
+        }
+        Token::Lident(name) => {
+            let name = name.to_string();
+            let loc = p.mk_loc_current();
+            p.err(DiagnosticCategory::Message(
+                super::core::error_messages::object_quoted_field_name(&name),
+            ));
+            (name, loc)
+        }
+        _ => return None,
+    };
+    p.next();
+    match p.token {
+        Token::Colon => p.next(),
+        Token::Equal => {
+            p.err(DiagnosticCategory::Message(
+                super::core::error_messages::RECORD_TYPE_FIELD_MISSING_COLON.to_string(),
+            ));
+            p.next();
+        }
+        _ => p.expect_with_grammar(Token::Colon, Some(Grammar::TypeExpression)),
+    }
+    let typ = parse_poly_type_expr(p);
+    let typ_idx = p.arena_mut().push_core_type(typ);
+    let name_idx = p.arena_mut().push_interned_string(&name);
+    Some(ObjectField::Otag(with_loc(name_idx, name_loc), attrs, typ_idx))
 }
 
 // ============================================================================
