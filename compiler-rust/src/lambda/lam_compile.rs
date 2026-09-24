@@ -674,7 +674,7 @@ impl LambdaCompiler {
             &simplified_result.lambda,
             &simplified_result.meta,
         );
-        let simplified = simplified_result.lambda;
+        let simplified = drop_toplevel_pure_sequence_heads(simplified_result.lambda);
         // OCaml's `Ext_ident.create` allocations in lam_compile.ml share the
         // same global `Ident.currentstamp` as the Lambda identifiers entering
         // this phase. See compiler/core/lam_compile.ml:60, 771-782, 911 and
@@ -8364,3 +8364,27 @@ mod input_js_tests;
 
 #[path = "lam_compile_indexed.rs"]
 mod indexed_consumer;
+
+/// `Lam_coercion.flatten` groups the top-level spine and `Lam_group.nop_cons`
+/// drops sequence heads that are a variable, constant or function
+/// (compiler/core/lam_coercion.ml:179-194, lam_group.ml:36-39), so such
+/// heads are never compiled.
+fn drop_toplevel_pure_sequence_heads(lam: Lambda) -> Lambda {
+    match lam {
+        Lambda::Llet(kind, id, value, body) => {
+            Lambda::Llet(kind, id, value, Box::new(drop_toplevel_pure_sequence_heads(*body)))
+        }
+        Lambda::Lletrec(bindings, body) => {
+            Lambda::Lletrec(bindings, Box::new(drop_toplevel_pure_sequence_heads(*body)))
+        }
+        Lambda::Lsequence(first, second) => {
+            let second = drop_toplevel_pure_sequence_heads(*second);
+            if matches!(*first, Lambda::Lvar(_) | Lambda::Lconst(_) | Lambda::Lfunction(_)) {
+                second
+            } else {
+                Lambda::Lsequence(first, Box::new(second))
+            }
+        }
+        lam => lam,
+    }
+}

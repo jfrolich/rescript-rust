@@ -317,7 +317,10 @@ pub fn deep_flatten_owned_with_id_gen(lam: Lambda, id_gen: &IdGenerator) -> Lamb
             }
             Lambda::Lsequence(first, second) => {
                 let res = flatten(acc, *first, id_gen);
-                acc.push(FlattenGroup::Nop(res));
+                // `Lam_group.nop_cons` drops pure heads (lam_group.ml:36-39).
+                if !matches!(res, Lambda::Lvar(_) | Lambda::Lconst(_) | Lambda::Lfunction(_)) {
+                    acc.push(FlattenGroup::Nop(res));
+                }
                 flatten(acc, *second, id_gen)
             }
             _ => aux(lam, id_gen),
