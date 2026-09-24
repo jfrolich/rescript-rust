@@ -504,6 +504,10 @@ pub struct ParseArena {
     /// Bindings whose `Ast_helper.Typ.varify_constructors` raises
     /// `Syntaxerr.Error`; OCaml only raises it when `type_let` reaches them.
     value_constraint_varify_errors: HashMap<PatIdx, LocIdx>,
+    /// The first error raised by a nested builtin-ppx rewrite whose caller
+    /// cannot return a `Result`; OCaml's mapper raises it immediately, so the
+    /// public rewrite entry points report it before any later error.
+    ppx_deferred_error: Option<crate::binary_ast::ppx::PpxError>,
     /// Sparse side table for case guards, keyed by owning match/try ExprIdx.
     /// Value is a case-indexed list of optional guard expressions.
     expr_case_guards: Vec<Option<Box<[Option<ExprIdx>]>>>,
@@ -930,6 +934,7 @@ impl Default for ParseArena {
             nary_arrow_args_by_first_type: HashMap::new(),
             value_constraints_by_pattern: HashMap::new(),
             value_constraint_varify_errors: HashMap::new(),
+            ppx_deferred_error: None,
             expr_case_guards: Vec::new(),
             expr_construct_args: Vec::new(),
             expr_variant_args: Vec::new(),
@@ -2532,6 +2537,18 @@ impl ParseArena {
         constraint.pvc_expression = Some(wrapped);
         self.value_constraints_by_pattern
             .insert(pattern, constraint);
+    }
+
+    /// Record a nested builtin-ppx error unless an earlier one is pending.
+    pub fn defer_ppx_error(&mut self, error: crate::binary_ast::ppx::PpxError) {
+        if self.ppx_deferred_error.is_none() {
+            self.ppx_deferred_error = Some(error);
+        }
+    }
+
+    /// Take the first deferred builtin-ppx error.
+    pub fn take_ppx_deferred_error(&mut self) -> Option<crate::binary_ast::ppx::PpxError> {
+        self.ppx_deferred_error.take()
     }
 
     /// Whether `Ast_helper.Typ.varify_constructors` fails for this binding's

@@ -16523,7 +16523,17 @@ pub fn rewrite_structure(
     structure: &[StructureItem],
     arena: &mut ParseArena,
 ) -> PpxResult<Vec<StructureItem>> {
-    rewrite_structure_impl(structure, arena, true, true)
+    let result = rewrite_structure_impl(structure, arena, true, true);
+    with_deferred_ppx_error(result, arena)
+}
+
+/// A nested rewrite error was raised before any error returned directly, so
+/// it takes precedence (OCaml's mapper raises at the first failure).
+fn with_deferred_ppx_error<T>(result: PpxResult<T>, arena: &mut ParseArena) -> PpxResult<T> {
+    match arena.take_ppx_deferred_error() {
+        Some(error) => Err(error),
+        None => result,
+    }
 }
 
 /// Apply the built-in mapper for parser-debug output. OCaml's `res_parser`
@@ -16532,7 +16542,8 @@ pub fn rewrite_structure_for_parser_debug(
     structure: &[StructureItem],
     arena: &mut ParseArena,
 ) -> PpxResult<Vec<StructureItem>> {
-    rewrite_structure_impl(structure, arena, true, false)
+    let result = rewrite_structure_impl(structure, arena, true, false);
+    with_deferred_ppx_error(result, arena)
 }
 
 fn rewrite_structure_impl(
@@ -17035,7 +17046,7 @@ pub fn rewrite_signature(
     validate_signature_method_attribute_errors(signature, arena)?;
     validate_signature_js_string_errors(signature, arena)?;
     validate_signature_await_errors(signature, arena, true)?;
-    let rewritten = try_rewrite_signature_items(signature, arena)?;
+    let rewritten = with_deferred_ppx_error(try_rewrite_signature_items(signature, arena), arena)?;
     validate_signature_builtin_type_redefinition_errors(&rewritten, arena)?;
     Ok(rewritten)
 }
@@ -17110,7 +17121,8 @@ fn try_rewrite_signature_items(
 }
 
 fn rewrite_signature_items(items: &[SignatureItem], arena: &mut ParseArena) -> Vec<SignatureItem> {
-    try_rewrite_signature_items(items, arena).unwrap_or_else(|_| {
+    try_rewrite_signature_items(items, arena).unwrap_or_else(|error| {
+        arena.defer_ppx_error(error);
         items
             .iter()
             .flat_map(|item| {
@@ -17174,8 +17186,10 @@ fn try_rewrite_structure_item(
 fn rewrite_structure_item(item: &StructureItem, arena: &mut ParseArena) -> Vec<StructureItem> {
     let spice_mapper_active =
         spice_ppx::structure_uses_spice_mapper(std::slice::from_ref(item), arena);
-    try_rewrite_structure_item(item, arena, spice_mapper_active)
-        .unwrap_or_else(|_| rewrite_structure_item_no_spice(item, arena))
+    try_rewrite_structure_item(item, arena, spice_mapper_active).unwrap_or_else(|error| {
+        arena.defer_ppx_error(error);
+        rewrite_structure_item_no_spice(item, arena)
+    })
 }
 
 fn rewrite_structure_item_no_spice(
@@ -17439,7 +17453,10 @@ fn rewrite_structure_item_no_spice(
                 vec![handle_raw_structure(item, payload, arena, ext_name.loc)]
             } else if name == "private" {
                 // %%private(let x = ...) -> module local_N = { let x = ... } ; open! local_N
-                handle_private_extension(payload, ext_name.loc, arena).unwrap_or_default()
+                handle_private_extension(payload, ext_name.loc, arena).unwrap_or_else(|error| {
+                    arena.defer_ppx_error(error);
+                    Vec::new()
+                })
             } else {
                 // Rewrite payload for string transformation
                 vec![StructureItem {
@@ -17542,7 +17559,8 @@ fn rewrite_module_expr(
     let new_desc = match &*mod_expr.pmod_desc {
         current::ModuleExprDesc::Pmod_structure(items) => {
             let rewritten_items =
-                rewrite_structure_impl(items, arena, false, true).unwrap_or_else(|_| {
+                rewrite_structure_impl(items, arena, false, true).unwrap_or_else(|error| {
+                    arena.defer_ppx_error(error);
                     items
                         .iter()
                         .flat_map(|item| rewrite_structure_item_no_spice(item, arena))
