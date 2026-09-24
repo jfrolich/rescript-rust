@@ -63,6 +63,31 @@ fn normalize_cmt_path_lexically(path: PathBuf) -> PathBuf {
         })
 }
 
+/// `std::fs::canonicalize(path).ok()`, resolving the parent directory once
+/// per thread. For an existing file that is not a symlink, the canonical path
+/// is the canonical parent joined with the file name.
+fn canonicalize_with_cached_parent(path: &Path) -> Option<PathBuf> {
+    thread_local! {
+        static CANONICAL_DIRS: std::cell::RefCell<HashMap<PathBuf, PathBuf>> =
+            std::cell::RefCell::new(HashMap::new());
+    }
+    let (Some(parent), Some(name)) = (path.parent(), path.file_name()) else {
+        return std::fs::canonicalize(path).ok();
+    };
+    let metadata = std::fs::symlink_metadata(path).ok()?;
+    if metadata.file_type().is_symlink() {
+        return std::fs::canonicalize(path).ok();
+    }
+    if let Some(dir) = CANONICAL_DIRS.with(|dirs| dirs.borrow().get(parent).cloned()) {
+        return Some(dir.join(name));
+    }
+    let dir = std::fs::canonicalize(parent).ok()?;
+    CANONICAL_DIRS.with(|dirs| {
+        dirs.borrow_mut().insert(parent.to_path_buf(), dir.clone());
+    });
+    Some(dir.join(name))
+}
+
 fn normalize_cmt_cache_key(cmt_file: &str) -> String {
     // Keep the in-process cache key on the same absolute path base that
     // compiler/gentype/Paths.ml:61-64 applies before selecting .cmti/.cmt
@@ -78,8 +103,8 @@ fn normalize_cmt_cache_key(cmt_file: &str) -> String {
     } else {
         path
     };
-    std::fs::canonicalize(&path)
-        .unwrap_or_else(|_| normalize_cmt_path_lexically(path))
+    canonicalize_with_cached_parent(&path)
+        .unwrap_or_else(|| normalize_cmt_path_lexically(path))
         .to_string_lossy()
         .to_string()
 }
