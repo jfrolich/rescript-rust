@@ -22240,6 +22240,17 @@ fn type_structure_item<'a>(
                             let cstr_name_str = arena.get_string(cstr.pcd_name.txt);
                             let cstr_id = ctx.create_ident(cstr_name_str);
                             let is_constant = matches!(cstr.pcd_args, crate::parser::ast::ConstructorArguments::Pcstr_tuple(ref args) if args.is_empty());
+                            // OCaml `make_constructor` (compiler/ml/typedecl.ml:337-356):
+                            // a generalized constructor is translated after
+                            // `narrow ()` and `reset_type_variables ()`, so its type
+                            // variables are fresh rather than the declaration's
+                            // parameters, and `widen` restores both afterwards.
+                            let gadt_scope = cstr.pcd_res.is_some().then(|| {
+                                let global_level = ctx.increase_global_level();
+                                let type_variables = std::mem::take(&mut tctx.type_variables);
+                                tctx.reset_type_variables();
+                                (global_level, type_variables)
+                            });
 
                             // Convert constructor arguments using transl_type
                             let (cstr_args, internal_cd_args, typed_tree_cd_args) = match &cstr
@@ -22488,6 +22499,10 @@ fn type_structure_item<'a>(
                                 }
                                 None => (None, None),
                             };
+                            if let Some((global_level, type_variables)) = gadt_scope {
+                                ctx.restore_global_level(global_level);
+                                tctx.type_variables = type_variables;
+                            }
 
                             let mut combined_parser_attrs = tag_attrs.clone();
                             combined_parser_attrs.extend(cstr.pcd_attributes.iter().cloned());
@@ -25318,6 +25333,14 @@ fn transl_sig_type_declarations_with_ids_and_originals<'a>(
                         // the constructor id before make_constructor
                         // translates inline record labels.
                         let cstr_id = ctx.create_ident(cstr_name);
+                        // OCaml `make_constructor` (compiler/ml/typedecl.ml:337-356): narrow,
+                        // reset the type variables for a generalized constructor, then widen.
+                        let gadt_scope = cstr.pcd_res.is_some().then(|| {
+                            let global_level = ctx.increase_global_level();
+                            let type_variables = std::mem::take(&mut tctx.type_variables);
+                            tctx.reset_type_variables();
+                            (global_level, type_variables)
+                        });
                         let (internal_args, typed_args) = match &cstr.pcd_args {
                             crate::parser::ast::ConstructorArguments::Pcstr_tuple(args) => {
                                 let mut internal_tuple_args = Vec::with_capacity(args.len());
@@ -25447,6 +25470,10 @@ fn transl_sig_type_declarations_with_ids_and_originals<'a>(
                             }
                             None => (None, None),
                         };
+                        if let Some((global_level, type_variables)) = gadt_scope {
+                            ctx.restore_global_level(global_level);
+                            tctx.type_variables = type_variables;
+                        }
 
                         internal_cstrs.push(crate::types::ConstructorDeclaration {
                             cd_id: cstr_id.clone(),
