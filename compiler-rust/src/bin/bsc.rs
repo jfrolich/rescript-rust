@@ -10,15 +10,13 @@
 
 use anyhow::{Context, Result, anyhow};
 use rescript_compiler::binary_ast::{
-    ppx, write_signature_ast_current_with_extra_deps_and_builtin_ppx,
+    write_signature_ast_current_with_extra_deps_and_builtin_ppx,
     write_structure_ast_current_with_extra_deps_and_builtin_ppx,
 };
 use rescript_compiler::cmi::cmi_format;
 use rescript_compiler::driver::{
-    CompilerOptions, UserDiagnostic, apply_external_signature_ppxs, apply_external_structure_ppxs,
-    compile_file_to_js_with_options, emit_parser_warnings, enable_cli_cleanup_skip,
-    parser_error_to_anyhow,
-    typecheck_interface_file,
+    CompilerOptions, UserDiagnostic, compile_file_to_js_with_options, enable_cli_cleanup_skip,
+    run_implementation_frontend, run_interface_frontend, typecheck_interface_file,
 };
 use rescript_compiler::js_ir::ModuleFormat;
 use rescript_compiler::js_ir::source_map::SourceMapMode;
@@ -405,15 +403,21 @@ fn run() -> Result<()> {
     code_frame::set_color_mode(opts.color_mode);
 
     if opts.bs_ast {
+        // `-bs-ast` runs the whole frontend (parser warnings, external and
+        // builtin PPXs, JSX) before writing, like OCaml
+        // compiler/core/js_implementation.ml:172-186.
         return generate_ast(
             &input,
             opts.output,
             opts.dump_parsetree_sexp_locs,
-            opts.no_builtin_ppx,
-            &opts.external_ppxs,
             &CompilerOptions {
                 warning_specs: opts.warning_specs.clone(),
                 warning_error_specs: opts.warning_error_specs.clone(),
+                jsx_version: opts.jsx_version,
+                experimental_let_unwrap: opts.experimental_let_unwrap,
+                jsx_preserve: opts.jsx_preserve,
+                no_builtin_ppx: opts.no_builtin_ppx,
+                external_ppxs: opts.external_ppxs.clone(),
                 ..CompilerOptions::default()
             },
         );
@@ -424,7 +428,8 @@ fn run() -> Result<()> {
         return read_cmi_input(&input);
     }
 
-    let source_path = if ext == "ast" || ext == "iast" {
+    let from_ast = ext == "ast" || ext == "iast";
+    let source_path = if from_ast {
         read_ast_source_path(&input)?
     } else {
         input
@@ -489,6 +494,7 @@ fn run() -> Result<()> {
         capture_intermediates: false,
         skip_js_render: false,
         publish_in_process_signature: true,
+        frontend_already_reported: from_ast,
     };
 
     if is_interface {
@@ -517,9 +523,7 @@ fn generate_ast(
     input: &Path,
     output: Option<PathBuf>,
     dump_parsetree_sexp_locs: bool,
-    no_builtin_ppx: bool,
-    external_ppxs: &[String],
-    warning_options: &CompilerOptions,
+    options: &CompilerOptions,
 ) -> Result<()> {
     // Read file as raw bytes, converting each byte to a char (Latin-1 encoding).
     // This matches OCaml's byte-level string handling where each byte is a character.
@@ -565,70 +569,67 @@ fn generate_ast(
     }
 
     let mut parser = Parser::new(&filename, &source);
+    let mut frontend_output = String::new();
     let warnings_are_fatal;
 
     if is_interface {
-        // Parse signature (interface file)
         let signature = module::parse_signature(&mut parser);
-        // OCaml prints parser warnings as they occur; a fatal one still writes
-        // the AST and then exits with status 2.
-        warnings_are_fatal = emit_parser_warnings(&mut parser, &source, &filename, warning_options);
-        if parser.has_errors() {
-            return Err(parser_error_to_anyhow(&parser, &source, &filename));
-        }
-        apply_external_signature_ppxs(external_ppxs, &filename, parser.arena_mut(), &signature)?;
+        let frontend = run_interface_frontend(
+            &mut parser,
+            signature,
+            &source,
+            &filename,
+            options,
+            &mut frontend_output,
+        );
+        eprint!("{frontend_output}");
+        let frontend = frontend?;
+        warnings_are_fatal = frontend.warnings_fatal;
 
         if dump_parsetree_sexp_locs {
-            let rewritten = if no_builtin_ppx {
-                signature.clone()
-            } else {
-                ppx::rewrite_signature(&signature, parser.arena_mut())
-                    .map_err(|e| anyhow!("PPX rewrite failed: {e}"))?
-            };
             let mut stderr = std::io::stderr();
-            sexp_locs::print_signature(&rewritten, parser.arena(), &mut stderr);
+            sexp_locs::print_signature(&frontend.signature, parser.arena(), &mut stderr);
             let _ = stderr.write_all(b"\n");
         }
 
+        // The frontend already applied the builtin PPX.
         write_signature_ast_current_with_extra_deps_and_builtin_ppx(
             &out_path,
             &source_path,
             parser.arena_mut(),
-            &signature,
+            &frontend.signature,
             &[],
-            !no_builtin_ppx,
+            false,
         )
         .with_context(|| format!("Failed to write {}", out_path.display()))?;
     } else {
-        // Parse structure (implementation file)
         let structure = module::parse_structure(&mut parser);
-        // OCaml prints parser warnings as they occur; a fatal one still writes
-        // the AST and then exits with status 2.
-        warnings_are_fatal = emit_parser_warnings(&mut parser, &source, &filename, warning_options);
-        if parser.has_errors() {
-            return Err(parser_error_to_anyhow(&parser, &source, &filename));
-        }
-        apply_external_structure_ppxs(external_ppxs, &filename, parser.arena_mut(), &structure)?;
+        let frontend = run_implementation_frontend(
+            &mut parser,
+            structure,
+            &source,
+            &filename,
+            options,
+            &mut frontend_output,
+        );
+        eprint!("{frontend_output}");
+        let frontend = frontend?;
+        warnings_are_fatal = frontend.warnings_fatal;
 
         if dump_parsetree_sexp_locs {
-            let rewritten = if no_builtin_ppx {
-                structure.clone()
-            } else {
-                ppx::rewrite_structure(&structure, parser.arena_mut())
-                    .map_err(|e| anyhow!("PPX rewrite failed: {e}"))?
-            };
             let mut stderr = std::io::stderr();
-            sexp_locs::print_structure(&rewritten, parser.arena(), &mut stderr);
+            sexp_locs::print_structure(&frontend.structure, parser.arena(), &mut stderr);
             let _ = stderr.write_all(b"\n");
         }
 
+        // The frontend already applied the builtin PPX.
         write_structure_ast_current_with_extra_deps_and_builtin_ppx(
             &out_path,
             &source_path,
             parser.arena_mut(),
-            &structure,
+            &frontend.structure,
             &[],
-            !no_builtin_ppx,
+            false,
         )
         .with_context(|| format!("Failed to write {}", out_path.display()))?;
     }

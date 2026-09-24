@@ -1339,6 +1339,11 @@ pub struct CompilerOptions {
     /// this only skips the Rust-only portable registry extraction when no
     /// downstream lookup can observe it.
     pub publish_in_process_signature: bool,
+    /// The input is a `.ast`/`.iast` written by `bsc -bs-ast`. OCaml reads the
+    /// already-preprocessed tree (compiler/core/js_implementation.ml:189-196),
+    /// so frontend warnings were reported by the `-bs-ast` run and are not
+    /// repeated. Rust re-runs the frontend from source, silently.
+    pub frontend_already_reported: bool,
 }
 
 impl Default for CompilerOptions {
@@ -1383,6 +1388,7 @@ impl Default for CompilerOptions {
             capture_intermediates: false,
             skip_js_render: false,
             publish_in_process_signature: true,
+            frontend_already_reported: false,
         }
     }
 }
@@ -1814,6 +1820,28 @@ pub fn emit_parser_warnings(
     filename: &str,
     options: &CompilerOptions,
 ) -> bool {
+    let mut out = String::new();
+    let has_error = format_parser_warnings(parser, source, filename, options, &mut out);
+    write_stderr(&out);
+    has_error
+}
+
+fn write_stderr(output: &str) {
+    if !output.is_empty() {
+        let mut stderr = std::io::stderr();
+        let _ = std::io::Write::write_all(&mut stderr, output.as_bytes());
+        let _ = std::io::Write::flush(&mut stderr);
+    }
+}
+
+/// Like [`emit_parser_warnings`], appending the reports to `out`.
+fn format_parser_warnings(
+    parser: &mut Parser<'_>,
+    source: &str,
+    filename: &str,
+    options: &CompilerOptions,
+    out: &mut String,
+) -> bool {
     let parser_warnings = parser.warnings().to_vec();
     if parser_warnings.is_empty() {
         return false;
@@ -1840,7 +1868,15 @@ pub fn emit_parser_warnings(
             },
         });
     }
-    emit_ppx_warnings(parser.arena(), source, filename, options, &warnings)
+    let warning_config = warning_config_for_options(options);
+    format_ppx_warnings_with_config(
+        parser.arena(),
+        source,
+        filename,
+        &warning_config,
+        &warnings,
+        out,
+    )
 }
 
 fn emit_ppx_warnings_with_config(
@@ -1850,19 +1886,30 @@ fn emit_ppx_warnings_with_config(
     warning_config: &WarningConfig,
     warnings: &[ppx::PpxWarning],
 ) -> bool {
-    if warnings.is_empty() {
-        return false;
-    }
+    let mut out = String::new();
+    let has_error =
+        format_ppx_warnings_with_config(arena, source, filename, warning_config, warnings, &mut out);
+    write_stderr(&out);
+    has_error
+}
 
+/// Append the active warnings' reports to `out`; returns whether one is an error.
+fn format_ppx_warnings_with_config(
+    arena: &ParseArena,
+    source: &str,
+    filename: &str,
+    warning_config: &WarningConfig,
+    warnings: &[ppx::PpxWarning],
+    out: &mut String,
+) -> bool {
     let mut has_error = false;
-    let mut stderr = std::io::stderr();
     for warning in warnings {
         if !warning_config.is_active(&warning.warning) {
             continue;
         }
         let is_error = warning_config.is_error(&warning.warning);
         has_error |= is_error;
-        let output = format_compiler_warning_report(
+        out.push_str(&format_compiler_warning_report(
             arena,
             source,
             filename,
@@ -1871,10 +1918,8 @@ fn emit_ppx_warnings_with_config(
                 warning: warning.warning.clone(),
                 is_error,
             },
-        );
-        let _ = std::io::Write::write_all(&mut stderr, output.as_bytes());
+        ));
     }
-    let _ = std::io::Write::flush(&mut stderr);
     has_error
 }
 
@@ -11477,16 +11522,36 @@ fn compile_source_to_js_with_trace(
     )
 }
 
-fn compile_source_to_js_with_options_inner(
+/// Output of [`run_implementation_frontend`]: the rewritten structure plus the
+/// file-level settings later phases read from the source structure.
+pub struct ImplementationFrontend {
+    pub structure: Structure,
+    /// A frontend warning was configured as an error.
+    pub warnings_fatal: bool,
+    pub frontend_warning_specs: Vec<ppx::WarningAttributeSpec>,
+    pub file_config: FileConfigOverrides,
+    pub file_directives: Vec<String>,
+    pub debug: bool,
+    pub jsx_preserve: bool,
+    pub experimental_let_unwrap: bool,
+}
+
+/// Everything OCaml runs between parsing and type checking an implementation:
+/// parser warnings, external PPXs (`Cmd_ppx_apply.apply_rewriters`) and
+/// `Ppx_entry.rewrite_implementation` (compiler/frontend/ppx_entry.ml:45-60),
+/// together with the frontend checks Rust performs around them. This is also
+/// what `bsc -bs-ast` does before writing the AST
+/// (compiler/core/js_implementation.ml:172-186). Warning reports are appended
+/// to `out` in emission order; the caller prints or captures them.
+pub fn run_implementation_frontend(
+    parser: &mut Parser<'_>,
+    structure: Structure,
     source: &str,
     filename: &str,
     options: &CompilerOptions,
-    #[cfg(test)] mut discriminator_trace: Option<&mut PreJsDiscriminatorTrace>,
-) -> Result<String> {
-    // Parse
-    let mut parser = Parser::new(filename, source);
-    let structure = module::parse_structure(&mut parser);
-    let parser_warnings_have_errors = emit_parser_warnings(&mut parser, source, filename, options);
+    out: &mut String,
+) -> Result<ImplementationFrontend> {
+    let parser_warnings_have_errors = format_parser_warnings(parser, source, filename, options, out);
     if parser.has_errors() {
         return Err(parser_error_to_anyhow(&parser, source, filename));
     }
@@ -11506,13 +11571,15 @@ fn compile_source_to_js_with_options_inner(
         ppx::collect_leading_builtin_warning_attributes(&structure, parser.arena());
     let frontend_warning_specs =
         ppx::collect_leading_builtin_warning_attribute_specs(&structure, parser.arena());
-    let mut ppx_warnings_have_errors = parser_warnings_have_errors | emit_ppx_warnings(
-        parser.arena(),
-        source,
-        filename,
-        options,
-        &frontend_warnings,
-    );
+    let mut ppx_warnings_have_errors = parser_warnings_have_errors
+        | format_ppx_warnings_with_config(
+            parser.arena(),
+            source,
+            filename,
+            &warning_config_for_options(options),
+            &frontend_warnings,
+            out,
+        );
     let config_warnings = validate_file_config_from_structure(&structure, parser.arena())
         .map_err(|err| config_payload_error_to_anyhow(err, parser.arena(), source, filename))?;
     let file_config = extract_file_config_from_structure(&structure, parser.arena());
@@ -11521,12 +11588,13 @@ fn compile_source_to_js_with_options_inner(
         &file_config,
         &frontend_warning_specs,
     );
-    ppx_warnings_have_errors |= emit_ppx_warnings_with_config(
+    ppx_warnings_have_errors |= format_ppx_warnings_with_config(
         parser.arena(),
         source,
         filename,
         &file_warning_config,
         &config_warnings,
+        out,
     );
     let file_directives = extract_file_directives_from_structure(&structure, parser.arena())
         .map_err(|err| directive_payload_error_to_anyhow(err, parser.arena(), source, filename))?;
@@ -11564,12 +11632,13 @@ fn compile_source_to_js_with_options_inner(
         )
         .map_err(|e| jsx_ppx_error_to_anyhow(e, parser.arena(), source, filename))?;
         let jsx_warnings = jsx_preprocessor_warnings_to_ppx(parser.arena_mut(), jsx_warnings);
-        ppx_warnings_have_errors |= emit_ppx_warnings_with_config(
+        ppx_warnings_have_errors |= format_ppx_warnings_with_config(
             parser.arena(),
             source,
             filename,
             &file_warning_config,
             &jsx_warnings,
+            out,
         );
         structure
     } else {
@@ -11583,17 +11652,14 @@ fn compile_source_to_js_with_options_inner(
         // the builtin mapper runs (compiler/frontend/ppx_entry.ml:48-50).
         ppx::mark_config_attributes_structure(&structure, parser.arena());
         let ppx_warnings = ppx::collect_raw_js_warnings(&structure, parser.arena_mut());
-        ppx_warnings_have_errors |= emit_ppx_warnings_with_config(
+        ppx_warnings_have_errors |= format_ppx_warnings_with_config(
             parser.arena(),
             source,
             filename,
             &file_warning_config,
             &ppx_warnings,
+            out,
         );
-
-        // Expand extension points (%%raw, %raw, %re, %%private) without touching externals
-        let structure = ppx::expand_extensions(&structure, parser.arena_mut())
-            .map_err(|e| ppx_error_to_anyhow(e, parser.arena(), source, filename))?;
 
         // Rewrite expressions: desugar pipe (->), setter (#=), property access (##),
         // await, tagged templates, encode externals, and apply spice mapper rewrites.
@@ -11604,15 +11670,60 @@ fn compile_source_to_js_with_options_inner(
         // the rewritten structure (compiler/frontend/ppx_entry.ml:60-63).
         let unused_attribute_warnings =
             ppx::collect_unused_attribute_warnings_structure(&rewritten, parser.arena());
-        ppx_warnings_have_errors |= emit_ppx_warnings_with_config(
+        ppx_warnings_have_errors |= format_ppx_warnings_with_config(
             parser.arena(),
             source,
             filename,
             &file_warning_config,
             &unused_attribute_warnings,
+            out,
         );
         rewritten
     };
+    Ok(ImplementationFrontend {
+        structure,
+        warnings_fatal: ppx_warnings_have_errors,
+        frontend_warning_specs,
+        file_config,
+        file_directives,
+        debug,
+        jsx_preserve,
+        experimental_let_unwrap,
+    })
+}
+
+fn compile_source_to_js_with_options_inner(
+    source: &str,
+    filename: &str,
+    options: &CompilerOptions,
+    #[cfg(test)] mut discriminator_trace: Option<&mut PreJsDiscriminatorTrace>,
+) -> Result<String> {
+    // Parse
+    let mut parser = Parser::new(filename, source);
+    let structure = module::parse_structure(&mut parser);
+    let mut frontend_output = String::new();
+    let frontend = run_implementation_frontend(
+        &mut parser,
+        structure,
+        source,
+        filename,
+        options,
+        &mut frontend_output,
+    );
+    if !options.frontend_already_reported {
+        write_stderr(&frontend_output);
+    }
+    let ImplementationFrontend {
+        structure,
+        warnings_fatal: ppx_warnings_have_errors,
+        frontend_warning_specs,
+        file_config,
+        file_directives,
+        debug,
+        jsx_preserve,
+        experimental_let_unwrap,
+    } = frontend?;
+    let ppx_warnings_have_errors = ppx_warnings_have_errors && !options.frontend_already_reported;
     parser.arena_mut().reserve_typecheck_synthetic_capacity();
 
     // Type check
@@ -12456,15 +12567,28 @@ fn compute_raw_implementation_coercion(
 
 /// Type-check an interface file and dump typed sexp if requested.
 /// Interface files (.resi) don't produce JS output, only .cmi files.
-pub fn typecheck_interface_source(
+/// Output of [`run_interface_frontend`].
+pub struct InterfaceFrontend {
+    pub signature: Signature,
+    /// A frontend warning was configured as an error.
+    pub warnings_fatal: bool,
+    pub frontend_warning_specs: Vec<ppx::WarningAttributeSpec>,
+    pub file_config: FileConfigOverrides,
+    pub experimental_let_unwrap: bool,
+}
+
+/// The interface counterpart of [`run_implementation_frontend`]: parser
+/// warnings, external PPXs and `Ppx_entry.rewrite_signature`
+/// (compiler/frontend/ppx_entry.ml:27-43). Warning reports go to `out`.
+pub fn run_interface_frontend(
+    parser: &mut Parser<'_>,
+    signature: Signature,
     source: &str,
     filename: &str,
     options: &CompilerOptions,
-) -> Result<()> {
-    // Parse as signature
-    let mut parser = Parser::new(filename, source);
-    let signature = module::parse_signature(&mut parser);
-    let parser_warnings_have_errors = emit_parser_warnings(&mut parser, source, filename, options);
+    out: &mut String,
+) -> Result<InterfaceFrontend> {
+    let parser_warnings_have_errors = format_parser_warnings(parser, source, filename, options, out);
     if parser.has_errors() {
         return Err(parser_error_to_anyhow(&parser, source, filename));
     }
@@ -12478,13 +12602,15 @@ pub fn typecheck_interface_source(
         ppx::collect_leading_builtin_warning_signature_attributes(&signature, parser.arena());
     let frontend_warning_specs =
         ppx::collect_leading_builtin_warning_signature_attribute_specs(&signature, parser.arena());
-    let mut ppx_warnings_have_errors = parser_warnings_have_errors | emit_ppx_warnings(
-        parser.arena(),
-        source,
-        filename,
-        options,
-        &frontend_warnings,
-    );
+    let mut ppx_warnings_have_errors = parser_warnings_have_errors
+        | format_ppx_warnings_with_config(
+            parser.arena(),
+            source,
+            filename,
+            &warning_config_for_options(options),
+            &frontend_warnings,
+            out,
+        );
     let config_warnings = validate_file_config_from_signature(&signature, parser.arena())
         .map_err(|err| config_payload_error_to_anyhow(err, parser.arena(), source, filename))?;
     let file_config = extract_file_config_from_signature(&signature, parser.arena());
@@ -12493,12 +12619,13 @@ pub fn typecheck_interface_source(
         &file_config,
         &frontend_warning_specs,
     );
-    ppx_warnings_have_errors |= emit_ppx_warnings_with_config(
+    ppx_warnings_have_errors |= format_ppx_warnings_with_config(
         parser.arena(),
         source,
         filename,
         &file_warning_config,
         &config_warnings,
+        out,
     );
     let experimental_let_unwrap = options.experimental_let_unwrap || file_config.let_unwrap;
     let signature = preprocess_signature_for_typecheck_with_source(
@@ -12510,25 +12637,64 @@ pub fn typecheck_interface_source(
     )?;
     if !options.no_builtin_ppx {
         let ppx_warnings = ppx::collect_signature_warnings(&signature, parser.arena());
-        ppx_warnings_have_errors |= emit_ppx_warnings_with_config(
+        ppx_warnings_have_errors |= format_ppx_warnings_with_config(
             parser.arena(),
             source,
             filename,
             &file_warning_config,
             &ppx_warnings,
+            out,
         );
         // OCaml `Ast_config.process_sig` + `emit_external_warnings_on_signature`.
         ppx::mark_config_attributes_signature(&signature, parser.arena());
         let unused_attribute_warnings =
             ppx::collect_unused_attribute_warnings_signature(&signature, parser.arena());
-        ppx_warnings_have_errors |= emit_ppx_warnings_with_config(
+        ppx_warnings_have_errors |= format_ppx_warnings_with_config(
             parser.arena(),
             source,
             filename,
             &file_warning_config,
             &unused_attribute_warnings,
+            out,
         );
     }
+    Ok(InterfaceFrontend {
+        signature,
+        warnings_fatal: ppx_warnings_have_errors,
+        frontend_warning_specs,
+        file_config,
+        experimental_let_unwrap,
+    })
+}
+
+pub fn typecheck_interface_source(
+    source: &str,
+    filename: &str,
+    options: &CompilerOptions,
+) -> Result<()> {
+    // Parse as signature
+    let mut parser = Parser::new(filename, source);
+    let signature = module::parse_signature(&mut parser);
+    let mut frontend_output = String::new();
+    let frontend = run_interface_frontend(
+        &mut parser,
+        signature,
+        source,
+        filename,
+        options,
+        &mut frontend_output,
+    );
+    if !options.frontend_already_reported {
+        write_stderr(&frontend_output);
+    }
+    let InterfaceFrontend {
+        signature,
+        warnings_fatal: ppx_warnings_have_errors,
+        frontend_warning_specs,
+        file_config,
+        experimental_let_unwrap,
+    } = frontend?;
+    let ppx_warnings_have_errors = ppx_warnings_have_errors && !options.frontend_already_reported;
     parser.arena_mut().reserve_typecheck_synthetic_capacity();
 
     // Type check
