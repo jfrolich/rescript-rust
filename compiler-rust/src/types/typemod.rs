@@ -21478,9 +21478,8 @@ fn type_structure_item<'a>(
             // are separate from the TypeKind and need explicit generalization.
             let mut env_desc_types_for_generalize: Vec<crate::types::TypeExprRef> = Vec::new();
 
-            // OCaml: reset_type_variables() + Ctype.begin_def() before translating type declarations
+            // OCaml: reset_type_variables() before translating type declarations.
             tctx.type_variables.clear();
-            ctx.begin_def();
 
             // OCaml typedecl.ml:1447-1484 prepends synthetic `t#row`
             // declarations for fixed private rows, allocates their identifiers
@@ -21534,6 +21533,11 @@ fn type_structure_item<'a>(
                 }
                 declared_type_ids.push(type_id);
             }
+            // OCaml typedecl.ml:1467-1475: with the fresh identifiers created,
+            // raise the definition level to at least their binding time, then
+            // `begin_def` for the declarations.
+            ctx.init_def(ctx.current_stamp());
+            ctx.begin_def();
 
             // OCaml: temp_env is the environment used for translating type bodies.
             // For Recursive, it has abstract placeholders so types can self-reference.
@@ -24934,7 +24938,10 @@ fn transl_sig_type_declarations_with_ids_and_originals<'a>(
     }
 
     // Match OCaml Typedecl.transl_type_decl flow for signatures:
-    // translate inside begin_def/end_def, then generalize declarations.
+    // `init_def (Ident.current_time ())` once the identifiers exist
+    // (typedecl.ml:1467-1475), translate inside begin_def/end_def, then
+    // generalize declarations.
+    ctx.init_def(ctx.current_stamp());
     ctx.begin_def();
     let loop_result: TypeModResult<()> = (|| {
         for row_id in &fixed_row_type_ids {

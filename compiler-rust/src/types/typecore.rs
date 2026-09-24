@@ -22910,6 +22910,14 @@ fn type_expect_with_module_unpacks(
     };
 
     let decl_mty = module_type_from_package_binding(tctx, env, unpack.ty);
+    // `wrap_unpacks` builds a real `Pexp_letmodule` (typecore.ml:2097-2108),
+    // typed with its level scoping (typecore.ml:3352-3375): a result
+    // variable at the outer level, `begin_def`, the ident clock set to that
+    // level, and `init_def (Ident.current_time ())` once the module is bound.
+    let ctx = tctx.type_ctx;
+    let letmodule_ty = ctx.new_var(None);
+    ctx.begin_def();
+    ctx.set_current_time(ctx.get_level(letmodule_ty));
     // Match OCaml Env.enter_module: create one fresh ident used for
     // both the body environment binding and the Texp_letmodule node.
     let letmod_id = tctx.type_ctx.create_ident(unpack.id.name());
@@ -22930,8 +22938,11 @@ fn type_expect_with_module_unpacks(
             md_path: None,
         },
     );
+    ctx.init_def(ctx.current_stamp());
     let typed_body =
-        type_expect_with_module_unpacks(tctx, &body_env, body, expected_ty, rest, context)?;
+        type_expect_with_module_unpacks(tctx, &body_env, body, expected_ty, rest, context);
+    ctx.end_def();
+    let typed_body = typed_body?;
     apply_letmodule_local_path_cleanup(
         tctx.type_ctx,
         env,
@@ -22988,7 +22999,22 @@ fn type_expect_with_module_unpacks(
         },
         crate::parser::ast::Payload::PStr(Box::new(vec![])),
     )];
-    let wrapped_ty = typed_body.exp_type;
+    // typecore.ml:3373-3375: the body type must not mention the module.
+    tctx.set_unify_env(&body_env);
+    if crate::types::ctype::unify_var(
+        tctx.type_ctx,
+        &mut tctx.unify_state,
+        letmodule_ty,
+        typed_body.exp_type,
+    )
+    .is_err()
+    {
+        return Err(TypeCoreError::ScopingLetModule(
+            unpack.name.txt.clone(),
+            typed_body.exp_type,
+        ));
+    }
+    let wrapped_ty = letmodule_ty;
     Ok(Expression::new(
         crate::types::typedtree::ExpressionDesc::Texp_letmodule(
             letmod_id.clone(),
