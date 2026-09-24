@@ -5700,7 +5700,7 @@ fn type_pattern_record(
     };
 
     Ok(Pattern::new(
-        PatternDesc::Tpat_record(typed_fields, closed_flag, typed_rest),
+        PatternDesc::Tpat_record(typed_fields, closed_flag, typed_rest.map(Box::new)),
         loc.clone(),
         expected_ty,
         tctx.type_ctx.store_typed_env(env),

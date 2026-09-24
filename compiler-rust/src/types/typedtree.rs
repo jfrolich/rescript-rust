@@ -234,7 +234,7 @@ pub enum PatternDesc {
     Tpat_record(
         Vec<(Loc<LidentIdx>, Arc<LabelDescription>, Pattern, bool)>,
         ClosedFlag,
-        Option<RecordPatternRest>,
+        Option<Box<RecordPatternRest>>,
     ),
 
     /// Array: `[| P1, ..., Pn |]`.
@@ -242,7 +242,7 @@ pub enum PatternDesc {
 
     /// Or-pattern: `P1 | P2`.
     /// The RowDesc is Some when translating type patterns.
-    Tpat_or(Box<Pattern>, Box<Pattern>, Option<RowDesc>),
+    Tpat_or(Box<Pattern>, Box<Pattern>, Option<Box<RowDesc>>),
 }
 
 /// Typed record-rest binding (compiler/ml/typedtree.ml:38-43).
