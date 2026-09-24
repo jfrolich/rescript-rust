@@ -4434,6 +4434,32 @@ fn compare_definition_record_labels(
                 actual_label.ld_id.name()
             ));
         }
+        // includecore.ml:288-299: mutability, optionality, then the `@as`
+        // runtime names (Record_attributes_check.check_bs_attributes_inclusion).
+        if expected_label.ld_mutable != actual_label.ld_mutable {
+            return Some(format!(
+                "The mutability of field {} is different.",
+                expected_label.ld_id.name()
+            ));
+        }
+        if expected_label.ld_optional != actual_label.ld_optional {
+            return Some(format!(
+                "The optional attribute of field {} is different.",
+                expected_label.ld_id.name()
+            ));
+        }
+        let expected_runtime_name =
+            crate::types::includemod::label_declaration_runtime_name(expected_label);
+        let actual_runtime_name =
+            crate::types::includemod::label_declaration_runtime_name(actual_label);
+        if expected_runtime_name != actual_runtime_name {
+            return Some(format!(
+                "Fields number {} have different names, {} and {}.",
+                idx + 1,
+                expected_runtime_name,
+                actual_runtime_name
+            ));
+        }
         if !crate::types::includemod::type_exprs_equal_for_type_declaration(
             ctx,
             expected_params,

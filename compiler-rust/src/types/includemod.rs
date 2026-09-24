@@ -4136,7 +4136,7 @@ fn compare_variant_declarations(
     None
 }
 
-fn label_declaration_runtime_name(label: &LabelDeclaration) -> String {
+pub(crate) fn label_declaration_runtime_name(label: &LabelDeclaration) -> String {
     label_declaration_as_name(label).unwrap_or_else(|| label.ld_id.name().to_string())
 }
 
