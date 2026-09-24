@@ -21944,6 +21944,21 @@ fn type_structure_item<'a>(
                                 std::mem::drop(
                                     ctx.create_ident(arena.get_string(cstr.pcd_name.txt)),
                                 );
+                                // `make_constructor` still translates the spread's
+                                // argument (typedecl.ml:477-481), which reports
+                                // arity errors such as `...bool<bool>`.
+                                if let crate::parser::ast::ConstructorArguments::Pcstr_tuple(
+                                    types,
+                                ) = &cstr.pcd_args
+                                {
+                                    for core_type in types {
+                                        transl_type(
+                                            tctx,
+                                            &temp_env,
+                                            arena.get_core_type(*core_type),
+                                        )?;
+                                    }
+                                }
                                 // Expand the source type's constructors into this type
                                 // The spread marker itself is NOT included in any output
                                 for source_cstr in source_cstrs {
