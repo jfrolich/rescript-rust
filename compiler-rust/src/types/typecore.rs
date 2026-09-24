@@ -5489,6 +5489,7 @@ fn type_pattern_record(
                     None,
                 )
             })
+            .map(|label| (label, false))
             .or_else(|| {
                 // OCaml `lookup_from_type` (typecore.ml:852-891) only matches
                 // unqualified labels; a qualified miss stays unbound.
@@ -5509,10 +5510,12 @@ fn type_pattern_record(
                     // deferred field-path forces after pattern typing.
                     false,
                 )
+                // `disambiguate_label` already appended the dict label.
+                .map(|label| (label, true))
             });
 
-        let label = disambiguated.map(|env_label| {
-            if has_dict_pattern_attr {
+        let label = disambiguated.map(|(env_label, materialized)| {
+            if has_dict_pattern_attr && !materialized {
                 materialize_dict_pattern_label(ctx, &env_label, &field_name)
             } else {
                 env_label
@@ -25788,10 +25791,11 @@ fn disambiguate_label<'a>(
             ctx,
             qualify_lookup_from_type_label,
         );
+        // `unsafe_do_not_use__add_with_name` (typecore.ml:960-975): the
+        // renamed magic label is appended to the shared `lbl_all`.
         if let Some(override_name) = override_name {
-            if let Some(label) = selected.as_mut() {
-                label.lbl_name = override_name;
-            }
+            selected = selected
+                .map(|label| materialize_dict_pattern_label(ctx, &label, &override_name));
         }
         return selected;
     }
@@ -25891,9 +25895,8 @@ fn disambiguate_label<'a>(
     }
 
     if let Some(override_name) = override_name {
-        if let Some(label) = selected.as_mut() {
-            label.lbl_name = override_name;
-        }
+        selected =
+            selected.map(|label| materialize_dict_pattern_label(ctx, &label, &override_name));
     }
 
     if opath.is_some()
