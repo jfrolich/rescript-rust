@@ -201,8 +201,8 @@ impl TailcallInlineState {
                     source_loc,
                     desc: StatementDesc::ForRange(
                         label,
-                        start.map(|expr| self.transform_expression(expr)),
-                        self.transform_expression(finish),
+                        start.map(|expr| Box::new(self.transform_expression(*expr))),
+                        Box::new(self.transform_expression(*finish)),
                         ident,
                         direction,
                         self.transform_block(body),
@@ -215,7 +215,7 @@ impl TailcallInlineState {
                 desc: StatementDesc::ForOf(
                     label,
                     ident,
-                    self.transform_expression(iterable),
+                    Box::new(self.transform_expression(*iterable)),
                     self.transform_block(body),
                 ),
                 comment,
@@ -225,7 +225,7 @@ impl TailcallInlineState {
                 desc: StatementDesc::ForAwaitOf(
                     label,
                     ident,
-                    self.transform_expression(iterable),
+                    Box::new(self.transform_expression(*iterable)),
                     self.transform_block(body),
                 ),
                 comment,
@@ -1212,8 +1212,8 @@ fn substitute_inline_statement(stmt: Statement, substitution: &HashMap<Ident, Id
             let body_substitution = prune_inline_substitution(substitution, [&ident]);
             StatementDesc::ForRange(
                 label,
-                start.map(|expr| substitute_inline_expression(expr, substitution)),
-                substitute_inline_expression(finish, substitution),
+                start.map(|expr| Box::new(substitute_inline_expression(*expr, substitution))),
+                Box::new(substitute_inline_expression(*finish, substitution)),
                 ident,
                 direction,
                 substitute_inline_block(body, &body_substitution),
@@ -1224,7 +1224,7 @@ fn substitute_inline_statement(stmt: Statement, substitution: &HashMap<Ident, Id
             StatementDesc::ForOf(
                 label,
                 ident,
-                substitute_inline_expression(iterable, substitution),
+                Box::new(substitute_inline_expression(*iterable, substitution)),
                 substitute_inline_block(body, &body_substitution),
             )
         }
@@ -1233,7 +1233,7 @@ fn substitute_inline_statement(stmt: Statement, substitution: &HashMap<Ident, Id
             StatementDesc::ForAwaitOf(
                 label,
                 ident,
-                substitute_inline_expression(iterable, substitution),
+                Box::new(substitute_inline_expression(*iterable, substitution)),
                 substitute_inline_block(body, &body_substitution),
             )
         }

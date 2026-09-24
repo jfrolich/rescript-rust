@@ -1956,14 +1956,14 @@ impl LambdaCompiler {
         }
 
         let push_loop = |block: &mut Block, init: Option<Expression>, finish: Expression| {
-            block.push(Statement::new(StatementDesc::ForRange(
+            block.push(Statement::for_range(
                 loop_label.clone(),
                 init,
                 finish,
                 var.clone(),
                 direction,
                 body_block.clone(),
-            )));
+            ));
         };
 
         if finish_compiled.prelude.is_empty() {
@@ -8261,7 +8261,7 @@ fn collect_modules_from_expression(expr: &Expression, modules: &mut OcamlModuleS
     match &expr.desc {
         ExpressionDesc::Var(crate::js_ir::VIdent::Qualified(module, _)) => {
             if !module.dynamic_import {
-                modules.insert(module.clone());
+                modules.insert((**module).clone());
             }
         }
         ExpressionDesc::Length(inner, _)

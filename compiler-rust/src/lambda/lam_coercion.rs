@@ -343,7 +343,7 @@ pub(crate) fn max_ident_stamp_in_statement(stmt: &Statement) -> i32 {
             max_ident_stamp_in_expression(cond).max(max_ident_stamp_in_block(body))
         }
         StatementDesc::ForRange(_, start, finish, ident, _, body) => start
-            .as_ref()
+            .as_deref()
             .map(max_ident_stamp_in_expression)
             .unwrap_or(0)
             .max(max_ident_stamp_in_expression(finish))

@@ -1276,17 +1276,17 @@ impl LambdaCompiler {
     ) -> Option<(ModuleId, Option<String>)> {
         match &expr.desc {
             ExpressionDesc::Var(crate::js_ir::VIdent::Qualified(module, member)) => {
-                Some((module.clone(), member.clone()))
+                Some(((**module).clone(), member.clone()))
             }
             ExpressionDesc::StaticIndex(target, field, _) => match &target.desc {
                 ExpressionDesc::Var(crate::js_ir::VIdent::Qualified(module, None)) => {
-                    Some((module.clone(), Some(field.clone())))
+                    Some(((**module).clone(), Some(field.clone())))
                 }
                 _ => None,
             },
             ExpressionDesc::Call(func, _, _) => match &func.desc {
                 ExpressionDesc::Var(crate::js_ir::VIdent::Qualified(module, member)) => {
-                    Some((module.clone(), member.clone()))
+                    Some(((**module).clone(), member.clone()))
                 }
                 _ => None,
             },

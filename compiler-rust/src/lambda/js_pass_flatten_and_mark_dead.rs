@@ -281,9 +281,9 @@ fn flatten_and_mark_dead_statement(
             desc: StatementDesc::ForRange(
                 label,
                 start.map(|expr| {
-                    flatten_and_mark_dead_expression(expr, id_gen, substitution, jsx_preserve)
+                    Box::new(flatten_and_mark_dead_expression(*expr, id_gen, substitution, jsx_preserve))
                 }),
-                flatten_and_mark_dead_expression(finish, id_gen, substitution, jsx_preserve),
+                Box::new(flatten_and_mark_dead_expression(*finish, id_gen, substitution, jsx_preserve)),
                 ident,
                 direction,
                 flatten_and_mark_dead_block(body, id_gen, substitution, jsx_preserve),
@@ -295,7 +295,7 @@ fn flatten_and_mark_dead_statement(
             desc: StatementDesc::ForOf(
                 label,
                 ident,
-                flatten_and_mark_dead_expression(iterable, id_gen, substitution, jsx_preserve),
+                Box::new(flatten_and_mark_dead_expression(*iterable, id_gen, substitution, jsx_preserve)),
                 flatten_and_mark_dead_block(body, id_gen, substitution, jsx_preserve),
             ),
             comment,
@@ -305,7 +305,7 @@ fn flatten_and_mark_dead_statement(
             desc: StatementDesc::ForAwaitOf(
                 label,
                 ident,
-                flatten_and_mark_dead_expression(iterable, id_gen, substitution, jsx_preserve),
+                Box::new(flatten_and_mark_dead_expression(*iterable, id_gen, substitution, jsx_preserve)),
                 flatten_and_mark_dead_block(body, id_gen, substitution, jsx_preserve),
             ),
             comment,
@@ -1542,8 +1542,8 @@ fn flatten_statement(stmt: Statement) -> Statement {
             source_loc,
             desc: StatementDesc::ForRange(
                 label,
-                start.map(flatten_expression),
-                flatten_expression(finish),
+                start.map(|expr| Box::new(flatten_expression(*expr))),
+                Box::new(flatten_expression(*finish)),
                 ident,
                 direction,
                 flatten_block(body),
@@ -1555,7 +1555,7 @@ fn flatten_statement(stmt: Statement) -> Statement {
             desc: StatementDesc::ForOf(
                 label,
                 ident,
-                flatten_expression(iterable),
+                Box::new(flatten_expression(*iterable)),
                 flatten_block(body),
             ),
             comment,
@@ -1565,7 +1565,7 @@ fn flatten_statement(stmt: Statement) -> Statement {
             desc: StatementDesc::ForAwaitOf(
                 label,
                 ident,
-                flatten_expression(iterable),
+                Box::new(flatten_expression(*iterable)),
                 flatten_block(body),
             ),
             comment,

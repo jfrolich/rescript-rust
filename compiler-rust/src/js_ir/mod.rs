@@ -673,7 +673,7 @@ pub enum VIdent {
     /// Local identifier
     Id(Ident),
     /// Qualified identifier (module.member)
-    Qualified(ModuleId, Option<String>),
+    Qualified(Box<ModuleId>, Option<String>),
 }
 
 /// String delimiter type
@@ -923,8 +923,8 @@ impl Expression {
     }
 
     /// Create a qualified variable expression
-    pub fn qualified(module: ModuleId, member: Option<String>) -> Self {
-        Self::new(ExpressionDesc::Var(VIdent::Qualified(module, member)))
+    pub fn qualified(module: impl Into<Box<ModuleId>>, member: Option<String>) -> Self {
+        Self::new(ExpressionDesc::Var(VIdent::Qualified(module.into(), member)))
     }
 
     /// Create a string expression
@@ -1706,8 +1706,8 @@ pub enum StatementDesc {
     /// For loop (label, init, end, ident, direction, body).
     ForRange(
         Option<String>,
-        Option<Expression>,
-        Expression,
+        Option<Box<Expression>>,
+        Box<Expression>,
         Ident,
         ForDirection,
         Block,
@@ -1716,11 +1716,11 @@ pub enum StatementDesc {
     /// `for (let ident of iterable) { body }` (upstream #7887).
     /// The optional label is lazily attached when a nested switch needs to
     /// emit a labeled `break`/`continue` targeting this loop.
-    ForOf(Option<String>, Ident, Expression, Block),
+    ForOf(Option<String>, Ident, Box<Expression>, Block),
 
     /// `for await (let ident of iterable) { body }` (upstream #7887).
     /// Only emitted inside async functions.
-    ForAwaitOf(Option<String>, Ident, Expression, Block),
+    ForAwaitOf(Option<String>, Ident, Box<Expression>, Block),
 
     /// Continue statement (optional target label)
     Continue(Option<String>),
@@ -1818,11 +1818,30 @@ impl Statement {
         Self::new(StatementDesc::While(label, cond, body))
     }
 
+    /// Create a counted `for` loop statement.
+    pub fn for_range(
+        label: Option<String>,
+        init: Option<Expression>,
+        finish: Expression,
+        ident: Ident,
+        direction: ForDirection,
+        body: Block,
+    ) -> Self {
+        Self::new(StatementDesc::ForRange(
+            label,
+            init.map(Box::new),
+            Box::new(finish),
+            ident,
+            direction,
+            body,
+        ))
+    }
+
     /// Create a `for (let id of iterable) { body }` statement.
     /// Port of OCaml `S.for_of`. The optional label is lazily attached when
     /// a nested switch requires a labeled break/continue target.
     pub fn for_of(label: Option<String>, ident: Ident, iterable: Expression, body: Block) -> Self {
-        Self::new(StatementDesc::ForOf(label, ident, iterable, body))
+        Self::new(StatementDesc::ForOf(label, ident, Box::new(iterable), body))
     }
 
     /// Create a `for await (let id of iterable) { body }` statement.
@@ -1833,7 +1852,7 @@ impl Statement {
         iterable: Expression,
         body: Block,
     ) -> Self {
-        Self::new(StatementDesc::ForAwaitOf(label, ident, iterable, body))
+        Self::new(StatementDesc::ForAwaitOf(label, ident, Box::new(iterable), body))
     }
 
     /// Create a return statement
@@ -3056,13 +3075,13 @@ fn dispose_statement_nonrecursive(statement: Statement, stack: &mut Vec<DisposeI
             stack.push(DisposeItem::Block(body));
         }
         StatementDesc::ForRange(_, start, finish, _, _, body) => {
-            push_optional_expression(start, stack);
-            stack.push(DisposeItem::Expression(finish));
+            push_optional_expression(start.map(|expr| *expr), stack);
+            stack.push(DisposeItem::Expression(*finish));
             stack.push(DisposeItem::Block(body));
         }
         StatementDesc::ForOf(_, _, iterable, body)
         | StatementDesc::ForAwaitOf(_, _, iterable, body) => {
-            stack.push(DisposeItem::Expression(iterable));
+            stack.push(DisposeItem::Expression(*iterable));
             stack.push(DisposeItem::Block(body));
         }
         StatementDesc::IntSwitch(expr, clauses, default) => {

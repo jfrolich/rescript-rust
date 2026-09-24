@@ -3826,7 +3826,7 @@ mod tests {
     #[test]
     #[ignore = "stale internal shape expectation; covered by strict lambda/JS parity gates"]
     fn test_for_range_finish_binding_suffix_persists_across_sibling_loops_like_ocaml() {
-        let first = Statement::new(StatementDesc::ForRange(
+        let first = Statement::for_range(
             None,
             Some(Expression::number(Number::int(0))),
             Expression::call(
@@ -3837,9 +3837,9 @@ mod tests {
             Ident::create_local("i"),
             ForDirection::Up,
             vec![],
-        ));
+        );
 
-        let second = Statement::new(StatementDesc::ForRange(
+        let second = Statement::for_range(
             None,
             Some(Expression::number(Number::int(0))),
             Expression::call(
@@ -3850,7 +3850,7 @@ mod tests {
             Ident::create_local("i"),
             ForDirection::Up,
             vec![],
-        ));
+        );
 
         let rendered = print_block(&vec![first, second]);
 
@@ -4716,14 +4716,14 @@ mod tests {
             Box::new(Expression::var(xs)),
             LengthObject::Array,
         ));
-        let stmt = Statement::new(StatementDesc::ForRange(
+        let stmt = Statement::for_range(
             None,
             Some(Expression::number(Number::int(0))),
             finish,
             i,
             ForDirection::Up,
             vec![],
-        ));
+        );
         assert_eq!(
             print_block(&vec![stmt]),
             "for (let i = 0, i_finish = xs.length; i < i_finish; ++i) {}"
@@ -4739,14 +4739,14 @@ mod tests {
             Box::new(Expression::var(xs)),
             LengthObject::Array,
         ));
-        let stmt = Statement::new(StatementDesc::ForRange(
+        let stmt = Statement::for_range(
             None,
             None,
             finish,
             i,
             ForDirection::Upto,
             vec![],
-        ));
+        );
         assert_eq!(
             print_block(&vec![stmt]),
             "for (let i_finish = xs.length; i <= i_finish; ++i) {}"
@@ -4771,14 +4771,14 @@ mod tests {
             Box::new(Expression::var(xs)),
             LengthObject::Array,
         ));
-        let stmt = Statement::new(StatementDesc::ForRange(
+        let stmt = Statement::for_range(
             None,
             Some(init),
             finish,
             i,
             ForDirection::Upto,
             vec![],
-        ));
+        );
         assert_eq!(
             print_block(&vec![stmt]),
             "for (let i = (sideEffect(), 0), i_finish = xs.length; i <= i_finish; ++i) {}"
@@ -5250,14 +5250,14 @@ mod tests {
                         vec![Statement::return_(Expression::undefined(true))],
                         vec![],
                     )),
-                    Statement::new(StatementDesc::ForRange(
+                    Statement::for_range(
                         None,
                         Some(Expression::number(Number::int(0))),
                         Expression::number(Number::int(1)),
                         k,
                         ForDirection::Up,
                         vec![],
-                    )),
+                    ),
                 ],
                 env: Default::default(),
                 return_unit: true,

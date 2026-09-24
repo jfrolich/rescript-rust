@@ -2028,7 +2028,7 @@ fn js_statement_no_side_effects(stmt: &Statement) -> bool {
             js_expr_no_side_effects(cond) && js_block_no_side_effects(body)
         }
         StatementDesc::ForRange(_, start, finish, _, _, body) => {
-            start.as_ref().is_none_or(js_expr_no_side_effects)
+            start.as_deref().is_none_or(js_expr_no_side_effects)
                 && js_expr_no_side_effects(finish)
                 && js_block_no_side_effects(body)
         }

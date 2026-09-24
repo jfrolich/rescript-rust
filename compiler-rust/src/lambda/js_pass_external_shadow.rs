@@ -95,8 +95,8 @@ fn rewrite_statement(stmt: Statement, shadowed_globals: &HashSet<String>) -> Sta
         ),
         StatementDesc::ForRange(label, init, end, id, direction, body) => StatementDesc::ForRange(
             label,
-            init.map(|expr| rewrite_global_static_index_expr(expr, shadowed_globals)),
-            rewrite_global_static_index_expr(end, shadowed_globals),
+            init.map(|expr| Box::new(rewrite_global_static_index_expr(*expr, shadowed_globals))),
+            Box::new(rewrite_global_static_index_expr(*end, shadowed_globals)),
             id,
             direction,
             rewrite_block(body, shadowed_globals),
@@ -104,13 +104,13 @@ fn rewrite_statement(stmt: Statement, shadowed_globals: &HashSet<String>) -> Sta
         StatementDesc::ForOf(label, id, iterable, body) => StatementDesc::ForOf(
             label,
             id,
-            rewrite_global_static_index_expr(iterable, shadowed_globals),
+            Box::new(rewrite_global_static_index_expr(*iterable, shadowed_globals)),
             rewrite_block(body, shadowed_globals),
         ),
         StatementDesc::ForAwaitOf(label, id, iterable, body) => StatementDesc::ForAwaitOf(
             label,
             id,
-            rewrite_global_static_index_expr(iterable, shadowed_globals),
+            Box::new(rewrite_global_static_index_expr(*iterable, shadowed_globals)),
             rewrite_block(body, shadowed_globals),
         ),
         StatementDesc::Continue(label) => StatementDesc::Continue(label),
@@ -391,8 +391,8 @@ fn rewrite_statement_exprs(
         }
         StatementDesc::ForRange(label, init, end, id, direction, body) => StatementDesc::ForRange(
             label,
-            init.map(&mut *rewrite),
-            rewrite(end),
+            init.map(|expr| Box::new(rewrite(*expr))),
+            Box::new(rewrite(*end)),
             id,
             direction,
             rewrite_block_exprs(body, rewrite),
@@ -400,13 +400,13 @@ fn rewrite_statement_exprs(
         StatementDesc::ForOf(label, id, iterable, body) => StatementDesc::ForOf(
             label,
             id,
-            rewrite(iterable),
+            Box::new(rewrite(*iterable)),
             rewrite_block_exprs(body, rewrite),
         ),
         StatementDesc::ForAwaitOf(label, id, iterable, body) => StatementDesc::ForAwaitOf(
             label,
             id,
-            rewrite(iterable),
+            Box::new(rewrite(*iterable)),
             rewrite_block_exprs(body, rewrite),
         ),
         StatementDesc::Continue(label) => StatementDesc::Continue(label),

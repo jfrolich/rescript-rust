@@ -190,17 +190,17 @@ fn rewrite_statement(mut statement: Statement) -> Statement {
         }
         StatementDesc::ForRange(label, init, end, ident, dir, body) => StatementDesc::ForRange(
             label,
-            init.map(rewrite_expression),
-            rewrite_expression(end),
+            init.map(|expr| Box::new(rewrite_expression(*expr))),
+            Box::new(rewrite_expression(*end)),
             ident,
             dir,
             rewrite_block(body),
         ),
         StatementDesc::ForOf(label, ident, expr, body) => {
-            StatementDesc::ForOf(label, ident, rewrite_expression(expr), rewrite_block(body))
+            StatementDesc::ForOf(label, ident, Box::new(rewrite_expression(*expr)), rewrite_block(body))
         }
         StatementDesc::ForAwaitOf(label, ident, expr, body) => {
-            StatementDesc::ForAwaitOf(label, ident, rewrite_expression(expr), rewrite_block(body))
+            StatementDesc::ForAwaitOf(label, ident, Box::new(rewrite_expression(*expr)), rewrite_block(body))
         }
         StatementDesc::IntSwitch(expr, clauses, default) => StatementDesc::IntSwitch(
             rewrite_expression(expr),

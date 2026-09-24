@@ -178,15 +178,14 @@ fn lowers_module_external_calls_to_namespace_imports() {
             assert!(matches!(
                 func.as_ref(),
                 Expression {
-                    desc: ExpressionDesc::Var(crate::js_ir::VIdent::Qualified(
-                        ModuleId {
-                            kind: Kind::External { name, default, .. },
-                            ..
-                        },
-                        Some(field),
-                    )),
+                    desc: ExpressionDesc::Var(crate::js_ir::VIdent::Qualified(module, Some(field))),
                     ..
-                } if field == "describe" && name == "mocha" && !default
+                } if field == "describe"
+                    && matches!(
+                        &**module,
+                        ModuleId { kind: Kind::External { name, default, .. }, .. }
+                            if name == "mocha" && !default
+                    )
             ));
         }
         other => panic!("expected external module call, got {other:?}"),
@@ -206,19 +205,14 @@ fn translates_external_module_values_to_qualified_members_like_ocaml() {
     assert!(matches!(
         expr,
         Expression {
-            desc: ExpressionDesc::Var(crate::js_ir::VIdent::Qualified(
-                ModuleId {
-                    kind: Kind::External {
-                        name: ref name,
-                        default,
-                        ..
-                    },
-                    ..
-                },
-                Some(ref member),
-            )),
+            desc: ExpressionDesc::Var(crate::js_ir::VIdent::Qualified(ref module, Some(ref member))),
             ..
-        } if name == "react/jsx-runtime" && !default && member == "jsx"
+        } if member == "jsx"
+            && matches!(
+                &**module,
+                ModuleId { kind: Kind::External { name, default, .. }, .. }
+                    if name == "react/jsx-runtime" && !default
+            )
     ));
     assert_eq!(print_expression(&expr), "JsxRuntime.jsx");
 }

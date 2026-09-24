@@ -152,14 +152,14 @@ impl IndexedJsConsumer<'_> {
             prelude.extend(finish.prelude);
             None
         };
-        prelude.push(Statement::new(StatementDesc::ForRange(
+        prelude.push(Statement::for_range(
             frame.label(),
             init,
             finish.expr,
             id,
             direction,
             body,
-        )));
+        ));
         Compiled {
             prelude,
             expr: Expression::undefined(true),
