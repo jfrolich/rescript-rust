@@ -521,212 +521,219 @@ pub fn parse_structure_item(p: &mut Parser<'_>) -> Option<StructureItem> {
     })
 }
 
-/// OCaml `parse_type_definition_or_extension` (compiler/syntax/src/res_core.ml:6487).
-/// Expects the current token to be `type`. The caller owns the error region and
-/// the trailing newline/semicolon handling.
+/// OCaml `TypeDef`/`TypeExt` (compiler/syntax/src/res_core.ml:311-315).
+pub(super) enum TypeDefOrExt {
+    TypeDef(RecFlag, Vec<TypeDeclaration>),
+    TypeExt(TypeExtension),
+}
+
+/// OCaml `parse_type_definition_or_extension` (compiler/syntax/src/res_core.ml:6487-6535).
+/// `type_start_idx` is the position of the `type` keyword.
+pub(super) fn parse_type_definition_or_extension_item(
+    p: &mut Parser<'_>,
+    attrs: &Attributes,
+    type_start_idx: crate::parse_arena::PosIdx,
+) -> TypeDefOrExt {
+    p.expect(Token::Typ);
+    let rec_flag = match &p.token {
+        Token::Rec => {
+            p.next();
+            RecFlag::Recursive
+        }
+        Token::Lident(s) if s == "nonrec" => {
+            p.next();
+            RecFlag::Nonrecursive
+        }
+        _ => RecFlag::Nonrecursive,
+    };
+    let (path, name_loc) = parse_value_path(p);
+    let params = parse_type_params(p, &path);
+    if p.token == Token::PlusEqual {
+        let lid_idx = super::core::build_longident_idx(p, &path);
+        let name = with_loc(lid_idx, name_loc);
+        return TypeDefOrExt::TypeExt(parse_type_extension(p, params, attrs.clone(), name));
+    }
+    // The shape of a type name should be `Lident`: `t` is accepted, `User.t` is not.
+    let last = path.last().cloned().unwrap_or_default();
+    if path.len() > 1 {
+        let loc = p.arena().to_location(name_loc);
+        p.err_at(
+            loc.loc_start,
+            loc.loc_end,
+            DiagnosticCategory::Message(format!(
+                "A type declaration's name cannot contain a module access. Did you mean `{last}`?"
+            )),
+        );
+    }
+    let (decls, has_inline_types) = parse_type_definitions(
+        p,
+        attrs.clone(),
+        with_loc(last, name_loc),
+        params,
+        type_start_idx,
+    );
+    let rec_flag = if has_inline_types {
+        RecFlag::Recursive
+    } else {
+        rec_flag
+    };
+    TypeDefOrExt::TypeDef(rec_flag, decls)
+}
+
 pub(super) fn parse_type_definition_or_extension(
     p: &mut Parser<'_>,
     attrs: &Attributes,
     type_start_idx: crate::parse_arena::PosIdx,
 ) -> Option<StructureItemDesc> {
-    p.expect(Token::Typ);
-
-    // OCaml's parse_type_definition_or_extension:
-    // 1. Parse rec/nonrec
-    // 2. Call parse_value_path (which accepts Uident and consumes extra token)
-    // 3. Parse type params
-    // 4. Check for PlusEqual -> type extension or type declaration
-    //
-    // When the name starts with Uident, parse_value_path's next_unsafe
-    // consumes an extra token (potentially = or +=), fundamentally changing
-    // the parsing behavior. We replicate this for Uident names.
-
-    // Check if name starts with Uident and the path does NOT end with
-    // a lowercase ident. This detects error cases like `type T1 = D1` or
-    // `type M.T2 += D2` where OCaml's parse_value_path quirk changes behavior.
-    // Valid type extensions like `type Foo.Bar.t += ...` end with lident
-    // and should use the normal path.
-    let use_value_path_quirk = {
-        let check_uident_path = |state: &mut crate::parser::state::Parser<'_>| {
-            if !matches!(state.token, Token::Uident(_)) {
-                return false;
+    Some(
+        match parse_type_definition_or_extension_item(p, attrs, type_start_idx) {
+            TypeDefOrExt::TypeDef(rec_flag, decls) => {
+                StructureItemDesc::Pstr_type(Box::new((rec_flag, decls)))
             }
-            // Walk the dotted path
-            loop {
-                match &state.token {
-                    Token::Uident(_) => {
-                        state.next();
-                        if state.token == Token::Dot {
-                            state.next();
-                            continue;
-                        }
-                        // Path ended with Uident (no dot after) - this is the error case
-                        return true;
-                    }
-                    Token::Lident(_) => {
-                        // Path ends with lowercase - valid, use normal path
-                        return false;
-                    }
-                    _ => {
-                        // Something else - use value_path quirk
-                        return true;
-                    }
-                }
-            }
-        };
+            TypeDefOrExt::TypeExt(ext) => StructureItemDesc::Pstr_typext(Box::new(ext)),
+        },
+    )
+}
 
-        if p.token == Token::Rec || matches!(&p.token, Token::Lident(s) if s == "nonrec") {
-            p.lookahead(|state| {
-                state.next(); // consume rec/nonrec
-                check_uident_path(state)
-            })
-        } else {
-            p.lookahead(check_uident_path)
+/// OCaml `parse_value_path` (compiler/syntax/src/res_core.ml:742-776). An
+/// uppercase path is followed by `next_unsafe`, which consumes one more token.
+pub(super) fn parse_value_path(p: &mut Parser<'_>) -> (Vec<String>, LocIdx) {
+    let start_pos_idx = p.start_pos_idx();
+    let path = match &p.token {
+        Token::Lident(ident) => {
+            let ident = ident.to_string();
+            p.next();
+            vec![ident]
+        }
+        Token::Uident(_) => parse_value_path_for_type(p).0,
+        _ => {
+            p.err_unexpected();
+            p.next_unsafe();
+            vec!["_".to_string()]
         }
     };
+    (path, p.mk_loc_idx_to_prev_end(start_pos_idx))
+}
 
-    if use_value_path_quirk {
-        // OCaml's parse_value_path + next_unsafe behavior for Uident names
-        let rec_flag = if p.token == Token::Rec {
-            p.next();
-            RecFlag::Recursive
-        } else if matches!(&p.token, Token::Lident(s) if s == "nonrec") {
-            p.next();
-            RecFlag::Nonrecursive
-        } else {
-            RecFlag::Nonrecursive
-        };
+/// OCaml `parse_type_params ~parent` (compiler/syntax/src/res_core.ml:5749-5790).
+fn parse_type_params(p: &mut Parser<'_>, parent: &[String]) -> Vec<(CoreTypeIdx, Variance)> {
+    let opening = p.token.clone().into_owned();
+    if !matches!(opening, Token::LessThan | Token::Lparen)
+        || p.start_pos.line != p.prev_end_pos.line
+    {
+        return vec![];
+    }
+    p.set_diamond_mode();
+    let opening_start = p.start_pos.clone();
+    p.leave_breadcrumb(Grammar::TypeParams);
+    p.next();
+    let params = super::core::parse_comma_delimited_region(
+        p,
+        Grammar::TypeParams,
+        Token::GreaterThan,
+        parse_type_param,
+    );
+    if p.token == Token::Rparen && opening == Token::Lparen {
+        let suggested = format_type_with_angle_brackets(p, &parent.join("."), &params);
+        let end = p.end_pos.clone();
+        p.err_at(
+            opening_start,
+            end,
+            DiagnosticCategory::Message(format!(
+                "Type parameters require angle brackets:\n  {suggested}"
+            )),
+        );
+        p.next();
+    } else {
+        p.expect(Token::GreaterThan);
+    }
+    p.pop_diamond_mode();
+    p.eat_breadcrumb();
+    params
+}
 
-        let (path_parts, vp_name_start, _vp_name_end) = parse_value_path_for_type(p);
-        let vp_name_start_idx = p.push_pos(vp_name_start.clone());
-
-        // Parse type params (if any survive after parse_value_path consumed tokens)
-        let params = if p.token == Token::LessThan {
-            parse_type_params_angle(p)
-        } else {
-            vec![]
-        };
-
-        let result = if p.token == Token::PlusEqual {
-            // Type extension - build path and parse extension body
-            let lid_idx = super::core::build_longident_idx(p, &path_parts);
-            let path = with_loc(lid_idx, p.mk_loc_idx_to_prev_end(vp_name_start_idx));
-
-            p.expect(Token::PlusEqual);
-            let private = if p.token == Token::Private {
-                p.next();
-                PrivateFlag::Private
-            } else {
-                PrivateFlag::Public
-            };
-            let constructors = parse_type_extension_constructors(p);
-
-            let ext = TypeExtension {
-                ptyext_path: path,
-                ptyext_params: params,
-                ptyext_constructors: constructors,
-                ptyext_private: private,
-                ptyext_attributes: attrs.clone(),
-            };
-            Some(StructureItemDesc::Pstr_typext(Box::new(ext)))
-        } else {
-            // Type declaration - check for module path errors
-            if path_parts.len() > 1 {
-                // Module path already has error from parse_value_path_for_type
-                // OCaml emits the module path error here
-                let last = path_parts.last().cloned().unwrap_or_default();
-                p.err_at(
-                    vp_name_start.clone(),
-                    p.prev_end_pos.clone(),
-                    DiagnosticCategory::Message(format!(
-                        "A type declaration's name cannot contain a module access. Did you mean `{}`?",
-                        last
-                    )),
-                );
-            }
-            // OCaml: parse_value_path already consumed = or +=,
-            // so parse_type_equation_and_representation sees whatever comes after.
-            // It won't match Equal or Bar, so it returns (None, Public, Ptype_abstract).
-            let last = path_parts
-                .last()
-                .cloned()
-                .unwrap_or_else(|| "_".to_string());
-            let name_loc = p.mk_loc_idx_to_prev_end(vp_name_start_idx);
-            let last_idx = p.arena_mut().push_string(last);
-            let name = with_loc(last_idx, name_loc);
-            let type_loc = p.mk_loc_idx_to_prev_end(type_start_idx);
-            let decl = TypeDeclaration {
-                ptype_name: name,
-                ptype_params: params,
+/// OCaml `parse_type_definitions` (compiler/syntax/src/res_core.ml:6459-6481):
+/// the first declaration continues after the already parsed name and params;
+/// each `and` declaration goes through `parse_type_def`. Returns the inline
+/// record declarations found in the first declaration ahead of the others.
+fn parse_type_definitions(
+    p: &mut Parser<'_>,
+    attrs: Attributes,
+    name: Located<String>,
+    params: Vec<(CoreTypeIdx, Variance)>,
+    start_idx: crate::parse_arena::PosIdx,
+) -> (Vec<TypeDeclaration>, bool) {
+    let inline_ctx = RefCell::new(InlineTypesContext::new(vec![], Location::none()));
+    let first =
+        parse_type_declaration_body(p, attrs, Some(&inline_ctx), start_idx, name, params);
+    let mut decls = vec![];
+    let ctx = inline_ctx.into_inner();
+    let has_inline_types = !ctx.found_inline_types.is_empty();
+    if has_inline_types {
+        let inline_str_idx = p.arena_mut().intern("res.inlineRecordDefinition");
+        let inline_attr: Attribute = (mknoloc(inline_str_idx), Payload::PStr(Box::new(vec![])));
+        for (inline_name_idx, loc, type_kind, params) in ctx.found_inline_types.iter() {
+            decls.push(TypeDeclaration {
+                ptype_name: with_loc(*inline_name_idx, ctx.outer_name_loc.clone()),
+                ptype_params: params.clone(),
                 ptype_cstrs: vec![],
-                ptype_kind: TypeKind::Ptype_abstract,
+                ptype_kind: type_kind.clone(),
                 ptype_private: PrivateFlag::Public,
                 ptype_manifest: None,
-                ptype_attributes: attrs.clone(),
-                ptype_loc: type_loc,
-            };
-            Some(StructureItemDesc::Pstr_type(Box::new((
-                rec_flag,
-                vec![decl],
-            ))))
-        };
-
-        result
-    } else {
-        // Normal case: name starts with Lident (or something else)
-        // Use the original lookahead-based approach
-        let is_type_extension = p.token != Token::Rec
-            && p.lookahead(|state| {
-                loop {
-                    match &state.token {
-                        Token::Lident(_) | Token::Uident(_) => {
-                            state.next();
-                            if state.token == Token::Dot {
-                                state.next();
-                                continue;
-                            }
-                        }
-                        _ => {}
-                    }
-                    break;
-                }
-                if state.token == Token::LessThan {
-                    let mut depth = 1;
-                    state.next();
-                    while depth > 0 && state.token != Token::Eof {
-                        match state.token {
-                            Token::LessThan => depth += 1,
-                            Token::GreaterThan => depth -= 1,
-                            _ => {}
-                        }
-                        state.next();
-                    }
-                }
-                state.token == Token::PlusEqual
+                ptype_attributes: Attributes::from_vec(vec![inline_attr.clone()]),
+                ptype_loc: loc.clone(),
             });
+        }
+    }
+    decls.extend(first);
+    loop {
+        let start_idx = p.start_pos_idx();
+        let attrs = parse_attributes_and_binding(p);
+        if p.token != Token::And {
+            break;
+        }
+        p.next();
+        decls.extend(parse_type_def(p, attrs, start_idx));
+    }
+    (decls, has_inline_types)
+}
 
-        let result = if is_type_extension {
-            let ext = parse_type_extension(p, attrs.clone());
-            Some(StructureItemDesc::Pstr_typext(Box::new(ext)))
-        } else {
-            let mut rec_flag = if p.token == Token::Rec {
-                p.next();
-                RecFlag::Recursive
-            } else if matches!(&p.token, Token::Lident(s) if s == "nonrec") {
-                p.next();
-                RecFlag::Nonrecursive
-            } else {
-                RecFlag::Nonrecursive
-            };
-            let (decls, has_inline_types) =
-                parse_type_declarations(p, attrs.clone(), type_start_idx);
-            if has_inline_types {
-                rec_flag = RecFlag::Recursive;
-            }
-            Some(StructureItemDesc::Pstr_type(Box::new((rec_flag, decls))))
-        };
+/// OCaml `parse_type_def` (compiler/syntax/src/res_core.ml:6402-6421).
+fn parse_type_def(
+    p: &mut Parser<'_>,
+    attrs: Attributes,
+    start_idx: crate::parse_arena::PosIdx,
+) -> Option<TypeDeclaration> {
+    p.leave_breadcrumb(Grammar::TypeDef);
+    p.leave_breadcrumb(Grammar::TypeConstrName);
+    let (name, loc) = super::core::parse_lident(p);
+    p.eat_breadcrumb();
+    let params = parse_type_params(p, std::slice::from_ref(&name));
+    let decl = parse_type_declaration_body(p, attrs, None, start_idx, with_loc(name, loc), params);
+    p.eat_breadcrumb();
+    decl
+}
 
-        result
+/// OCaml `parse_type_extension ~params ~attrs ~name` (compiler/syntax/src/res_core.ml:6423-6457).
+fn parse_type_extension(
+    p: &mut Parser<'_>,
+    params: Vec<(CoreTypeIdx, Variance)>,
+    attrs: Attributes,
+    name: Loc<LidentIdx>,
+) -> TypeExtension {
+    p.expect(Token::PlusEqual);
+    let private = if p.optional(&Token::Private) {
+        PrivateFlag::Private
+    } else {
+        PrivateFlag::Public
+    };
+    let constructors = parse_type_extension_constructors(p);
+    TypeExtension {
+        ptyext_path: name,
+        ptyext_params: params,
+        ptyext_constructors: constructors,
+        ptyext_private: private,
+        ptyext_attributes: attrs,
     }
 }
 
@@ -843,62 +850,15 @@ pub fn parse_signature_item(p: &mut Parser<'_>) -> Option<SignatureItem> {
             } else {
                 p.start_pos_idx()
             };
-            p.next();
-            let is_type_extension = p.token != Token::Rec
-                && p.lookahead(|state| {
-                    loop {
-                        match &state.token {
-                            Token::Lident(_) | Token::Uident(_) => {
-                                state.next();
-                                if state.token == Token::Dot {
-                                    state.next();
-                                    continue;
-                                }
-                            }
-                            _ => {}
-                        }
-                        break;
-                    }
-
-                    if state.token == Token::LessThan {
-                        let mut depth = 1;
-                        state.next();
-                        while depth > 0 && state.token != Token::Eof {
-                            match state.token {
-                                Token::LessThan => depth += 1,
-                                Token::GreaterThan => depth -= 1,
-                                _ => {}
-                            }
-                            state.next();
-                        }
-                    }
-
-                    state.token == Token::PlusEqual
-                });
-
-            let result = if is_type_extension {
-                let ext = parse_type_extension(p, attrs.clone());
-                parse_newline_or_semicolon_signature(p);
-                Some(SignatureItemDesc::Psig_typext(Box::new(ext)))
-            } else {
-                let mut rec_flag = if p.token == Token::Rec {
-                    p.next();
-                    RecFlag::Recursive
-                } else if matches!(&p.token, Token::Lident(s) if s == "nonrec") {
-                    // Handle `type nonrec t = ...` - nonrec is a keyword in this context
-                    p.next();
-                    RecFlag::Nonrecursive
-                } else {
-                    RecFlag::Nonrecursive
-                };
-                let (decls, has_inline_types) =
-                    parse_type_declarations(p, attrs.clone(), type_start_idx);
-                // Inline record types require the type to be recursive
-                if has_inline_types {
-                    rec_flag = RecFlag::Recursive;
+            let result = match parse_type_definition_or_extension_item(p, &attrs, type_start_idx) {
+                TypeDefOrExt::TypeExt(ext) => {
+                    parse_newline_or_semicolon_signature(p);
+                    Some(SignatureItemDesc::Psig_typext(Box::new(ext)))
                 }
-                parse_newline_or_semicolon_signature(p);
-                Some(SignatureItemDesc::Psig_type(Box::new((rec_flag, decls))))
+                TypeDefOrExt::TypeDef(rec_flag, decls) => {
+                    parse_newline_or_semicolon_signature(p);
+                    Some(SignatureItemDesc::Psig_type(Box::new((rec_flag, decls))))
+                }
             };
             p.end_region();
             result
@@ -2134,12 +2094,15 @@ fn parse_with_constraint(p: &mut Parser<'_>) -> Option<WithConstraint> {
             let type_name_idx = p.arena().get_longident(lid.txt).last_idx();
             let type_loc = lid.loc.clone();
 
-            // Parse type parameters if present (angle bracket syntax: <'a, 'b>)
-            let params = if p.token == Token::LessThan {
-                parse_type_params_angle(p)
-            } else {
-                vec![]
-            };
+            // OCaml `parse_type_params ~parent:type_constr` (res_core.ml:7239).
+            let parent: Vec<String> = p
+                .arena()
+                .get_longident(lid.txt)
+                .flatten_idx()
+                .into_iter()
+                .map(|part| p.arena().get_string(part).to_string())
+                .collect();
+            let params = parse_type_params(p, &parent);
 
             // Check for destructive substitution (:=) vs regular type equation (=)
             let is_substitution = p.token == Token::ColonEqual;
@@ -2626,385 +2589,23 @@ pub(super) fn parse_let_bindings(
     }
 }
 
-/// Parse type declarations. Returns the declarations and a flag indicating if inline types were found.
-/// `type_keyword_start_idx` is the PosIdx of the `type` keyword for accurate location tracking
-/// and position sharing with the structure item.
-fn parse_type_declarations(
+
+
+/// The part of a type declaration after its name and parameters: OCaml
+/// `parse_type_equation_and_representation` plus `parse_type_constraints`
+/// (compiler/syntax/src/res_core.ml:6402-6421, 6459-6470). Only the first
+/// declaration of a `type` item gets an inline-types context; `and`
+/// declarations are parsed without one.
+fn parse_type_declaration_body(
     p: &mut Parser<'_>,
-    outer_attrs: Attributes,
-    type_keyword_start_idx: crate::parse_arena::PosIdx,
-) -> (Vec<TypeDeclaration>, bool) {
-    let mut decls = vec![];
-    let mut next_attrs = outer_attrs;
-    let mut has_inline_types = false;
-
-    // Create shared context for inline record desugaring
-    // Note: For simplicity, we create a new context for each type declaration
-    // The OCaml parser shares the context across `and` chains, but the inline types
-    // are processed per-declaration anyway.
-
-    // Track start position (as PosIdx) for type declarations
-    // First declaration uses type_keyword_start_idx, subsequent `and` declarations push a new PosIdx
-    let mut decl_start_idx = type_keyword_start_idx;
-    let mut is_first_decl = true;
-
-    loop {
-        // Create context for this declaration
-        let inline_ctx = RefCell::new(InlineTypesContext::new(vec![], Location::none()));
-        if let Some(decl) =
-            parse_type_declaration_with_context(
-                p,
-                next_attrs,
-                &inline_ctx,
-                decl_start_idx,
-                std::mem::replace(&mut is_first_decl, false),
-            )
-        {
-            // Collect inline types from the context
-            let ctx = inline_ctx.borrow();
-            if !ctx.found_inline_types.is_empty() {
-                has_inline_types = true;
-                // Create type declarations for inline types with @res.inlineRecordDefinition attribute
-                let inline_str_idx = p.arena_mut().intern("res.inlineRecordDefinition");
-                let inline_attr: Attribute =
-                    (mknoloc(inline_str_idx), Payload::PStr(Box::new(vec![])));
-                for (inline_name_idx, loc, type_kind, params) in ctx.found_inline_types.iter() {
-                    // OCaml uses the outer type's name location for inline type ptype_name,
-                    // not the inline type's location
-                    let inline_decl = TypeDeclaration {
-                        ptype_name: with_loc(*inline_name_idx, ctx.outer_name_loc.clone()),
-                        ptype_params: params.clone(),
-                        ptype_cstrs: vec![],
-                        ptype_kind: type_kind.clone(),
-                        ptype_private: PrivateFlag::Public,
-                        ptype_manifest: None,
-                        ptype_attributes: Attributes::from_vec(vec![inline_attr.clone()]),
-                        ptype_loc: loc.clone(),
-                    };
-                    decls.push(inline_decl);
-                }
-            }
-            decls.push(decl);
-        }
-        next_attrs = Attributes::new();
-
-        // Check for `and` to continue with more type declarations.
-        // Also handle attributes/doc comments before `and`: `/** doc */ and type t = ...`
-        if p.token == Token::And {
-            decl_start_idx = p.start_pos_idx(); // Capture 'and' position as PosIdx
-            p.next();
-        } else if matches!(p.token, Token::At | Token::AtAt | Token::DocComment { .. }) {
-            // Look ahead to see if attributes/doc comments are followed by And
-            let has_and_after = p.lookahead(|state| {
-                // Skip attributes and doc comments
-                while matches!(
-                    state.token,
-                    Token::At | Token::AtAt | Token::DocComment { .. }
-                ) {
-                    if matches!(state.token, Token::DocComment { .. }) {
-                        state.next();
-                    } else {
-                        state.next(); // @
-                        // Skip the attribute identifier and any payload
-                        while !matches!(
-                            state.token,
-                            Token::At
-                                | Token::AtAt
-                                | Token::DocComment { .. }
-                                | Token::And
-                                | Token::Eof
-                                | Token::Let { .. }
-                                | Token::Typ
-                                | Token::Module
-                                | Token::External
-                                | Token::Open
-                                | Token::Include
-                        ) {
-                            state.next();
-                        }
-                    }
-                }
-                state.token == Token::And
-            });
-            if !has_and_after {
-                break;
-            }
-            // Capture start position BEFORE parsing attributes/doc comments as PosIdx
-            // OCaml does: let start_pos = p.Parser.start_pos in let attrs = parse_attributes_and_binding p in
-            // So the location should include the doc comment
-            decl_start_idx = p.start_pos_idx();
-            // Parse the attributes/doc comments, then consume `and`
-            next_attrs = parse_attributes(p);
-            if p.token == Token::And {
-                p.next();
-            }
-        } else {
-            break;
-        }
-    }
-
-    (decls, has_inline_types)
-}
-
-/// Parse a type extension: `type t += ...`.
-fn parse_type_extension(p: &mut Parser<'_>, attrs: Attributes) -> TypeExtension {
-    let start_pos_idx = p.start_pos_idx();
-
-    // Parse the extended type path (e.g. t or M.t).
-    // OCaml's parse_value_path expects the last segment to be lowercase.
-    // If an Uident is seen without a following dot, emit Lident diagnostic.
-    let mut parts: Vec<String> = vec![];
-    let mut last_was_uident = false;
-    let mut last_uident_name = String::new();
-    let mut last_uident_start = p.start_pos.clone();
-    let mut last_uident_end = p.end_pos.clone();
-    loop {
-        match &p.token {
-            Token::Lident(name) => {
-                parts.push(name.to_string());
-                last_was_uident = false;
-                p.next();
-            }
-            Token::Uident(name) => {
-                last_uident_name = name.to_string();
-                last_uident_start = p.start_pos.clone();
-                last_uident_end = p.end_pos.clone();
-                parts.push(name.to_string());
-                last_was_uident = true;
-                p.next();
-            }
-            _ => break,
-        }
-        if p.token == Token::Dot {
-            last_was_uident = false; // After a dot, the Uident is fine (it's a module)
-            p.next();
-            continue;
-        }
-        break;
-    }
-
-    // If the last segment was an Uident (not followed by a dot), emit error
-    if last_was_uident && !parts.is_empty() {
-        p.err_at(
-            last_uident_start,
-            last_uident_end,
-            DiagnosticCategory::Lident(Token::Uident(last_uident_name.into())),
-        );
-    }
-
-    if parts.is_empty() {
-        p.err(DiagnosticCategory::Message(
-            "Expected type name for type extension".to_string(),
-        ));
-        parts.push("Error".to_string());
-    }
-
-    let lid_idx = super::core::build_longident_idx(p, &parts);
-    let path = with_loc(lid_idx, p.mk_loc_idx_to_prev_end(start_pos_idx));
-
-    // Optional type params: <'a, +'b, -'c>
-    let params = if p.token == Token::LessThan {
-        parse_type_params_angle(p)
-    } else {
-        vec![]
-    };
-
-    p.expect(Token::PlusEqual);
-
-    let private = if p.token == Token::Private {
-        p.next();
-        PrivateFlag::Private
-    } else {
-        PrivateFlag::Public
-    };
-
-    // Constructors (with optional leading `|`).
-    // OCaml includes the `|` in the constructor location
-    let constructors = parse_type_extension_constructors(p);
-
-    TypeExtension {
-        ptyext_path: path,
-        ptyext_params: params,
-        ptyext_constructors: constructors,
-        ptyext_private: private,
-        ptyext_attributes: attrs,
-    }
-}
-
-/// Parse a single type declaration with inline record desugaring context.
-/// `decl_start_idx` is the PosIdx of the `type` or `and` keyword that starts this declaration,
-/// enabling position sharing with the structure item.
-fn parse_type_declaration_with_context(
-    p: &mut Parser<'_>,
-    outer_attrs: Attributes,
-    inline_ctx: &RefCell<InlineTypesContext>,
+    attrs: Attributes,
+    inline_ctx: Option<&RefCell<InlineTypesContext>>,
     decl_start_idx: crate::parse_arena::PosIdx,
-    is_first: bool,
+    name: Located<String>,
+    params: Vec<(CoreTypeIdx, Variance)>,
 ) -> Option<TypeDeclaration> {
-    let inner_attrs = parse_attributes(p);
-    // Prepend outer attributes to inner ones
-    let attrs = outer_attrs.concat(inner_attrs);
-
-    // Parse type name first (ReScript uses t<'a> not 'a t syntax)
-    // OCaml's approach: parse a value_path first, then check if it's a simple Lident.
-    // If it's a dotted path (Foo.bar), emit "A type declaration's name cannot contain a module access".
-    // If it's just an Uident (T1), emit "Did you mean `t1` instead of `T1`?"
-    let name = match &p.token {
-        Token::Lident(n) => {
-            let n = n.to_string();
-            let loc = p.mk_loc_current();
-            p.next();
-            // Check for module path after the name (e.g., `foo.bar`)
-            // Type declarations cannot have module paths - but we should parse them to give better errors
-            if p.token == Token::Dot {
-                // This is a dotted path like `foo.bar` - type names can't have module access
-                let mut parts = vec![n.clone()];
-                while p.token == Token::Dot {
-                    p.next();
-                    match &p.token {
-                        Token::Lident(s) | Token::Uident(s) => {
-                            parts.push(s.to_string());
-                            p.next();
-                        }
-                        _ => break,
-                    }
-                }
-                let last = parts.last().cloned().unwrap_or_default();
-                p.err(DiagnosticCategory::Message(format!(
-                    "A type declaration's name cannot contain a module access. Did you mean `{}`?",
-                    last
-                )));
-                // Use the last part as the name for error recovery
-                with_loc(last, loc)
-            } else {
-                with_loc(n, loc)
-            }
-        }
-        Token::Uident(n) => {
-            // Parse the full path to give a better error message
-            let n = n.to_string();
-            let name_start = p.start_pos.clone();
-            let name_start_idx = p.start_pos_idx();
-            p.next();
-            let name_end_idx = p.prev_end_pos_idx();
-
-            // Check for module path
-            let is_dotted = p.token == Token::Dot;
-            let mut last_name = n.clone();
-            if is_dotted {
-                while p.token == Token::Dot {
-                    p.next();
-                    match &p.token {
-                        Token::Lident(s) | Token::Uident(s) => {
-                            last_name = s.to_string();
-                            p.next();
-                        }
-                        _ => break,
-                    }
-                }
-            }
-
-            let loc = p.mk_loc_idx(name_start_idx, name_end_idx);
-            if is_dotted {
-                // Dotted path like Foo.bar - type names can't have module access
-                p.err_at(
-                    name_start.clone(),
-                    p.prev_end_pos.clone(),
-                    DiagnosticCategory::Message(format!(
-                        "A type declaration's name cannot contain a module access. Did you mean `{}`?",
-                        last_name
-                    )),
-                );
-            } else {
-                // Just an uppercase name - suggest lowercase
-                p.err_at(
-                    name_start.clone(),
-                    p.prev_end_pos.clone(),
-                    DiagnosticCategory::Lident(Token::Uident(n.clone().into())),
-                );
-            }
-            // Use lowercase version for error recovery
-            let lower = last_name
-                .chars()
-                .next()
-                .map(|c| c.to_lowercase().collect::<String>() + &last_name[1..])
-                .unwrap_or(last_name);
-            with_loc(lower, loc)
-        }
-        Token::Eof => {
-            // EOF uses Unexpected diagnostic like OCaml's parse_lident
-            p.err_unexpected();
-            // OCaml: returns ("_", loc) for error recovery, creating a placeholder type
-            let loc = p.mk_loc_idx_to_prev_end(decl_start_idx);
-            with_loc("_".to_string(), loc)
-        }
-        _ if is_first => {
-            // The first name goes through OCaml `parse_value_path`
-            // (compiler/syntax/src/res_core.ml:771-774): report the token, then
-            // `next_unsafe`.
-            let name_start_idx = p.start_pos_idx();
-            p.err_unexpected();
-            p.next_unsafe();
-            let loc = p.mk_loc_idx_to_prev_end(name_start_idx);
-            with_loc("_".to_string(), loc)
-        }
-        _ => {
-            // `and` names go through OCaml `parse_lident` / `recover_lident`
-            // (compiler/syntax/src/res_core.ml:660-695).
-            let name_start_idx = p.start_pos_idx();
-            p.err(DiagnosticCategory::Lident(p.token.clone().into_owned()));
-            let same_line_keyword =
-                p.token.is_keyword() && p.prev_end_pos.line == p.start_pos.line;
-            p.next();
-            if !same_line_keyword {
-                while !super::core::recover::should_abort_list_parse(p) && p.token != Token::Eof {
-                    p.next();
-                }
-            }
-            match &p.token {
-                Token::Lident(n) if !same_line_keyword => {
-                    let n = n.to_string();
-                    let loc = p.mk_loc_current();
-                    p.next();
-                    with_loc(n, loc)
-                }
-                _ => {
-                    let loc = p.mk_loc_idx_to_prev_end(name_start_idx);
-                    with_loc("_".to_string(), loc)
-                }
-            }
-        }
-    };
-
-    // Parse type parameters after name (e.g., t<'a, 'b> or t<+'a, -'b>)
-    let params = if p.token == Token::LessThan {
-        parse_type_params_angle(p)
-    } else if p.token == Token::Lparen {
-        // Detect old OCaml-style type parameters: type t('a) = ...
-        // Give a helpful error message about using angle brackets instead
-        let paren_start = p.start_pos.clone();
-        let params = parse_type_params_old_style(p, name.txt.clone());
-        let paren_end = p.prev_end_pos.clone();
-
-        // Emit helpful error about angle bracket syntax
-        // Use err_at (not err_multiple) so the region is silenced after this error,
-        // matching OCaml's behavior where only one error per region is reported.
-        let suggested = format_type_with_angle_brackets(p, &name.txt, &params);
-        p.err_at(
-            paren_start,
-            paren_end,
-            DiagnosticCategory::Message(format!(
-                "Type parameters require angle brackets:\n  {}",
-                suggested
-            )),
-        );
-        params
-    } else {
-        vec![]
-    };
-
     // Store params and outer name location in context for inline type declarations
-    {
+    if let Some(inline_ctx) = inline_ctx {
         let mut ctx = inline_ctx.borrow_mut();
         ctx.params = params.clone();
         ctx.outer_name_loc = name.loc.clone();
@@ -3159,7 +2760,7 @@ fn parse_type_declaration_with_context(
                     let typ_idx = fix_spread_first_object_manifest(p, typ_idx, is_spread_first).0;
                     manifest = Some(typ_idx);
                 } else {
-                    kind = parse_type_kind(p, Some(inline_ctx), Some(&current_type_name_path));
+                    kind = parse_type_kind(p, inline_ctx, inline_ctx.map(|_| &current_type_name_path));
                 }
             }
             Token::Uident(_) => {
@@ -3250,8 +2851,8 @@ fn parse_type_declaration_with_context(
                             } else {
                                 kind = parse_type_kind(
                                     p,
-                                    Some(inline_ctx),
-                                    Some(&current_type_name_path),
+                                    inline_ctx,
+                                    inline_ctx.map(|_| &current_type_name_path),
                                 );
                             }
                         }
@@ -3287,7 +2888,7 @@ fn parse_type_declaration_with_context(
             kind = match &p.token {
                 Token::Bar => parse_type_kind(p, None, None),
                 Token::Lbrace => {
-                    parse_type_kind(p, Some(inline_ctx), Some(&current_type_name_path))
+                    parse_type_kind(p, inline_ctx, inline_ctx.map(|_| &current_type_name_path))
                 }
                 Token::Uident(_) => {
                     TypeKind::Ptype_variant(parse_constructors_without_leading_bar(p))
@@ -3506,26 +3107,6 @@ fn fix_type_manifest_location(p: &mut Parser<'_>, typ_idx: CoreTypeIdx) -> CoreT
     }
 }
 
-/// Parse type parameters in angle bracket syntax: <'a, +'b, -'c, _>
-fn parse_type_params_angle(p: &mut Parser<'_>) -> Vec<(CoreTypeIdx, Variance)> {
-    // OCaml `parse_type_params` (compiler/syntax/src/res_core.ml), `<` form.
-    if p.token != Token::LessThan || p.start_pos.line != p.prev_end_pos.line {
-        return vec![];
-    }
-    p.set_diamond_mode();
-    p.leave_breadcrumb(Grammar::TypeParams);
-    p.next();
-    let params = super::core::parse_comma_delimited_region(
-        p,
-        Grammar::TypeParams,
-        Token::GreaterThan,
-        parse_type_param,
-    );
-    p.expect(Token::GreaterThan);
-    p.pop_diamond_mode();
-    p.eat_breadcrumb();
-    params
-}
 
 /// OCaml `parse_type_param` (compiler/syntax/src/res_core.ml).
 fn parse_type_param(p: &mut Parser<'_>) -> Option<(CoreTypeIdx, Variance)> {
@@ -3578,67 +3159,6 @@ fn parse_type_param(p: &mut Parser<'_>) -> Option<(CoreTypeIdx, Variance)> {
     Some((p.arena_mut().push_core_type(typ), variance))
 }
 
-/// Parse old OCaml-style type parameters: ('a, 'b)
-/// This is for error recovery - ReScript requires angle brackets.
-fn parse_type_params_old_style(
-    p: &mut Parser<'_>,
-    _type_name: String,
-) -> Vec<(CoreTypeIdx, Variance)> {
-    let mut params = vec![];
-
-    if p.token != Token::Lparen {
-        return params;
-    }
-    p.next(); // consume (
-
-    while p.token != Token::Rparen && p.token != Token::Eof {
-        if p.token == Token::SingleQuote {
-            p.next();
-            match &p.token {
-                Token::Lident(name) | Token::Uident(name) => {
-                    let name = extend_cow_lifetime(name.clone());
-                    let loc = p.mk_loc_current();
-                    p.next();
-                    let typ = CoreType {
-                        ptyp_desc: Box::new(CoreTypeDesc::Ptyp_var(Box::new(name))),
-                        ptyp_loc: loc,
-                        ptyp_attributes: Attributes::new(),
-                    };
-                    let typ_idx = p.arena_mut().push_core_type(typ);
-                    params.push((typ_idx, Variance::Invariant));
-                }
-                t if t.is_keyword() => {
-                    // Reserved keyword as type param (e.g., 'for)
-                    let name = Cow::Owned(format!("{}", t));
-                    let loc = p.mk_loc_current();
-                    p.next();
-                    let typ = CoreType {
-                        ptyp_desc: Box::new(CoreTypeDesc::Ptyp_var(Box::new(name))),
-                        ptyp_loc: loc,
-                        ptyp_attributes: Attributes::new(),
-                    };
-                    let typ_idx = p.arena_mut().push_core_type(typ);
-                    params.push((typ_idx, Variance::Invariant));
-                }
-                _ => {
-                    // Skip unknown token
-                    p.next();
-                }
-            }
-        } else {
-            // Skip non-quote token
-            p.next();
-        }
-        if !p.optional(&Token::Comma) {
-            break;
-        }
-    }
-
-    if p.token == Token::Rparen {
-        p.next();
-    }
-    params
-}
 
 /// Format a type with angle bracket syntax for error suggestions.
 fn format_type_with_angle_brackets(
@@ -3651,9 +3171,17 @@ fn format_type_with_angle_brackets(
     } else {
         let param_strs: Vec<String> = params
             .iter()
-            .map(|(t, _)| match &*p.arena().get_core_type(*t).ptyp_desc {
-                CoreTypeDesc::Ptyp_var(v) => format!("'{}", v),
-                _ => "_".to_string(),
+            .map(|(t, variance)| {
+                // `Res_printer.print_type_params`: variance, then the type.
+                let variance = match variance {
+                    Variance::Covariant => "+",
+                    Variance::Contravariant => "-",
+                    Variance::Invariant => "",
+                };
+                match &*p.arena().get_core_type(*t).ptyp_desc {
+                    CoreTypeDesc::Ptyp_var(v) => format!("{variance}'{v}"),
+                    _ => format!("{variance}_"),
+                }
             })
             .collect();
         format!("{}<{}>", name, param_strs.join(", "))
