@@ -969,7 +969,7 @@ pub fn deep_occur(ctx: &TypeContext, needle: TypeExprRef, haystack: TypeExprRef)
             return false;
         }
 
-        let desc = ctx.get_desc(haystack);
+        let desc = ctx.borrow_desc(haystack);
         match &*desc {
             TypeDesc::Tconstr { args, .. } => args
                 .iter()
@@ -9941,7 +9941,7 @@ fn subst_identity_copy_rec(
         return cached;
     }
 
-    let desc = ctx.get_desc(ty);
+    let desc = ctx.borrow_desc(ty);
     match &*desc {
         // OCaml Subst.typexp returns identity for Tvar/Tunivar
         // (when not for_saving and id >= 0)
@@ -9957,7 +9957,7 @@ fn subst_identity_copy_rec(
             let placeholder = ctx.new_generic_var(None);
             seen.insert(ty, placeholder);
 
-            let desc = ctx.get_desc(ty);
+            let desc = ctx.borrow_desc(ty);
             let new_desc = match &*desc {
                 TypeDesc::Tvar(_) | TypeDesc::Tunivar(_) | TypeDesc::Tnil => unreachable!(),
                 TypeDesc::Tlink(target) | TypeDesc::Tsubst(target) => {

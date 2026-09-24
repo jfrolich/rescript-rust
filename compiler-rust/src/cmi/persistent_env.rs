@@ -4500,7 +4500,8 @@ fn substitute_type_expr_path(
             continue; // Already visited (cycle detection)
         }
 
-        let desc = ctx.get_desc(ty_ref);
+        let desc = ctx.borrow_desc(ty_ref);
+        let mut replacement = None;
 
         match &*desc {
             TypeDesc::Tconstr { path, args, .. } => {
@@ -4517,7 +4518,7 @@ fn substitute_type_expr_path(
                     if let TypeDesc::Tconstr { ref mut path, .. } = new_desc {
                         *path = new_path;
                     }
-                    ctx.set_desc(ty_ref, new_desc);
+                    replacement = Some(new_desc);
                 }
 
                 // Push type arguments onto work stack
@@ -4569,7 +4570,7 @@ fn substitute_type_expr_path(
                         {
                             *path = new_path;
                         }
-                        ctx.set_desc(ty_ref, new_desc);
+                        replacement = Some(new_desc);
                     }
                 }
                 if let Some((_, args)) = &row.row_name {
@@ -4608,13 +4609,17 @@ fn substitute_type_expr_path(
                     if let TypeDesc::Tpackage { ref mut path, .. } = new_desc {
                         *path = new_path;
                     }
-                    ctx.set_desc(ty_ref, new_desc);
+                    replacement = Some(new_desc);
                 }
                 for &arg in args {
                     work_stack.push(arg);
                 }
             }
             TypeDesc::Tvar(_) | TypeDesc::Tunivar(_) | TypeDesc::Tnil => {}
+        }
+        drop(desc);
+        if let Some(new_desc) = replacement {
+            ctx.set_desc(ty_ref, new_desc);
         }
     }
 }
