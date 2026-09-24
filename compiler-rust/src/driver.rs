@@ -14905,95 +14905,28 @@ pub fn compile_source_in_process(
 ) -> Result<InProcessCompileResult> {
     let mut parser = Parser::new(filename, source);
     let structure = module::parse_structure(&mut parser);
-    if parser.has_errors() {
-        return Err(anyhow!(
-            "Parse failed with {} error(s)",
-            parser.diagnostics().len()
-        ));
-    }
-    let frontend_warnings =
-        ppx::collect_leading_builtin_warning_attributes(&structure, parser.arena());
-    let frontend_warning_specs =
-        ppx::collect_leading_builtin_warning_attribute_specs(&structure, parser.arena());
-    let _ = emit_ppx_warnings(
-        parser.arena(),
+    let mut frontend_output = String::new();
+    let frontend = run_implementation_frontend(
+        &mut parser,
+        structure,
         source,
         filename,
         options,
-        &frontend_warnings,
+        &mut frontend_output,
     );
-    let config_warnings = validate_file_config_from_structure(&structure, parser.arena())
-        .map_err(|err| config_payload_error_to_anyhow(err, parser.arena(), source, filename))?;
-    let file_config = extract_file_config_from_structure(&structure, parser.arena());
-    let file_warning_config = warning_config_for_options_file_config_and_leading_attrs(
-        options,
-        &file_config,
-        &frontend_warning_specs,
-    );
-    let _ = emit_ppx_warnings_with_config(
-        parser.arena(),
-        source,
-        filename,
-        &file_warning_config,
-        &config_warnings,
-    );
-    let experimental_let_unwrap = options.experimental_let_unwrap || file_config.let_unwrap;
-    if !options.no_builtin_ppx {
-        reject_disabled_let_unwrap_in_structure(
-            experimental_let_unwrap,
-            &structure,
-            parser.arena(),
-            source,
-            filename,
-        )?;
-        reject_enabled_invalid_let_unwrap_in_structure(
-            experimental_let_unwrap,
-            &structure,
-            parser.arena(),
-            source,
-            filename,
-        )?;
-    }
-    let jsx_version = options.jsx_version.or(file_config.jsx_version);
-    let structure = if let Some(jsx_version) = jsx_version {
-        reject_invalid_react_component_destructure_in_structure(
-            &structure,
-            parser.arena(),
-            filename,
-        )?;
-        let (structure, jsx_warnings) = jsx_ppx::transform_structure_with_warnings_result(
-            structure,
-            jsx_version,
-            parser.arena_mut(),
-        )
-        .map_err(|e| jsx_ppx_error_to_anyhow(e, parser.arena(), source, filename))?;
-        let jsx_warnings = jsx_preprocessor_warnings_to_ppx(parser.arena_mut(), jsx_warnings);
-        let _ = emit_ppx_warnings_with_config(
-            parser.arena(),
-            source,
-            filename,
-            &file_warning_config,
-            &jsx_warnings,
-        );
-        structure
-    } else {
-        structure
-    };
-    let structure = if options.no_builtin_ppx {
-        structure
-    } else {
-        ppx::rewrite_structure(&structure, parser.arena_mut())
-            .map_err(|e| ppx_error_to_anyhow(e, parser.arena(), source, filename))?
-    };
+    write_stderr(&frontend_output);
+    let frontend = frontend?;
+    let warnings_fatal = frontend.warnings_fatal;
+    let experimental_let_unwrap = frontend.experimental_let_unwrap;
     let structure =
-        crate::binary_ast::writer::apply_no_export_config(parser.arena_mut(), structure);
+        crate::binary_ast::writer::apply_no_export_config(parser.arena_mut(), frontend.structure);
     parser.arena_mut().reserve_typecheck_synthetic_capacity();
 
     let mut effective_options = options.clone();
     effective_options.experimental_let_unwrap = experimental_let_unwrap;
 
     crate::types::typecore::prepare_typecheck_arena(parser.arena_mut());
-    compile_preprocessed_structure_in_process(
+    let result = compile_preprocessed_structure_in_process(
         parser.arena(),
         &structure,
         filename,
@@ -15001,7 +14934,13 @@ pub fn compile_source_in_process(
         &effective_options,
         registry,
         has_interface,
-    )
+    )?;
+    // Like the direct compile: a frontend warning configured as an error fails
+    // the compilation once type checking has reported its own diagnostics.
+    if warnings_fatal {
+        return Err(UserDiagnostic::new(String::new(), 2).into());
+    }
+    Ok(result)
 }
 
 fn module_format_for_output_path(path: &FsPath) -> ModuleFormat {
