@@ -479,18 +479,18 @@ pub fn import_from_string(import_string: &str) -> Import {
     }
 }
 
-pub fn update_config_for_module(
+pub fn update_config_for_module<'c>(
     arena: &ParseArena,
-    config: &crate::gentype::config::T,
+    config: &'c crate::gentype::config::T,
     attributes: &Attributes,
-) -> crate::gentype::config::T {
+) -> std::borrow::Cow<'c, crate::gentype::config::T> {
     // Mirrors compiler/gentype/Annotation.ml:292-295.
     if has_attribute(arena, tag_is_gentype, attributes) {
         let mut config = config.clone();
         config.everything = true;
-        config
+        std::borrow::Cow::Owned(config)
     } else {
-        config.clone()
+        std::borrow::Cow::Borrowed(config)
     }
 }
 

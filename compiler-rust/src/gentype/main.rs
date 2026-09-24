@@ -691,7 +691,6 @@ pub fn process_typed_artifact(
     // The OCaml call site is compiler/core/js_implementation.ml:33-34 and
     // compiler/core/js_implementation.ml:170 after Typemod saved the CMT at
     // compiler/ml/typemod.ml:1763-1764 or compiler/ml/typemod.ml:1785-1787.
-    let mut config = config.clone();
     if crate::gentype::debug::basic.load(std::sync::atomic::Ordering::Relaxed) {
         crate::gentype::log_::item(&format!(
             "Typed artifact {}\n",
@@ -754,6 +753,9 @@ pub fn process_typed_artifact(
             translate_typed_artifact(&config, &output_file_relative, resolver, &artifact);
         let project_root = config.project_root.clone();
         let get_cmt_file = |cmt: &str| get_cmt_file_for_typed_artifact_import(&project_root, cmt);
+        // Only emitting mutates the config; modules without GenType
+        // annotations skip the copy.
+        let mut config = config.clone();
         emit_translation(
             &mut config,
             &artifact.file_name,
