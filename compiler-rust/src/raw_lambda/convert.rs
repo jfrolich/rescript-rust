@@ -1698,12 +1698,24 @@ impl<'a> RawLambdaConverter<'a> {
         lam: &RawLambda,
         target_loc: LocIdx,
     ) {
-        let Some((attr_name, payload)) = attrs
+        // `Translattribute.find_attribute` (translattribute.ml:28-38): a
+        // repeated attribute reports warning 54 at the second one and counts
+        // as absent.
+        let mut matching = attrs
             .iter()
-            .find(|(name, _)| self.arena.get_string(name.txt) == "res.hoistedFunction")
-        else {
+            .filter(|(name, _)| self.arena.get_string(name.txt) == "res.hoistedFunction");
+        let Some((attr_name, payload)) = matching.next() else {
             return;
         };
+        if let Some((second, _)) = matching.next() {
+            self.report_warning(
+                second.loc,
+                Warning::DuplicatedAttribute {
+                    name: "res.hoistedFunction".to_string(),
+                },
+            );
+            return;
+        }
         let warning_loc = attr_name.loc;
         if !matches!(payload, crate::parser::ast::Payload::PStr(items) if items.is_empty()) {
             self.report_warning(
