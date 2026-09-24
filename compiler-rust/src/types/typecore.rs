@@ -6910,7 +6910,7 @@ fn type_expect_with_recarg_unscoped<'a>(
             rue_unify(tctx, loc, ty, expected_ty, context)?;
 
             Ok(Expression::new(
-                ExpressionDesc::Texp_ident(path, lid.clone(), desc),
+                ExpressionDesc::Texp_ident(path, lid.clone(), Box::new(desc)),
                 loc,
                 ty,
                 tctx.type_ctx.store_typed_env(env),
@@ -7907,7 +7907,7 @@ fn type_expect_with_recarg_unscoped<'a>(
                                         txt: crate::parse_arena::LidentIdx(0),
                                         loc: crate::parse_arena::LocIdx::none(),
                                     },
-                                    void_cstr,
+                                    std::sync::Arc::new(void_cstr),
                                     vec![],
                                 ),
                                 loc,
@@ -7973,7 +7973,7 @@ fn type_expect_with_recarg_unscoped<'a>(
                                     txt: crate::parse_arena::LidentIdx(0),
                                     loc: crate::parse_arena::LocIdx::none(),
                                 },
-                                void_cstr,
+                                std::sync::Arc::new(void_cstr),
                                 vec![],
                             ),
                             loc,
@@ -8216,7 +8216,7 @@ fn type_expect_with_recarg_unscoped<'a>(
                         ExpressionDesc::Texp_field(
                             Box::new(typed_value),
                             lid_loc,
-                            label_desc.clone(),
+                            std::sync::Arc::new(label_desc.clone()),
                         ),
                         loc,
                         field_ty,
@@ -8338,7 +8338,7 @@ fn type_expect_with_recarg_unscoped<'a>(
                 loc: crate::parse_arena::LocIdx::none(),
             };
             Ok(Expression::new(
-                ExpressionDesc::Texp_construct(lid_loc, cstr_desc, typed_args),
+                ExpressionDesc::Texp_construct(lid_loc, std::sync::Arc::new(cstr_desc), typed_args),
                 loc,
                 result_ty,
                 ctx.store_typed_env(env),
@@ -10148,7 +10148,7 @@ fn type_application(
                                 txt: tctx.arena.plain_some_lid(),
                                 loc: wrapped_loc,
                             },
-                            make_some_constructor(ctx),
+                            std::sync::Arc::new(make_some_constructor(ctx)),
                             vec![typed_arg],
                         ),
                         wrapped_loc,
@@ -10172,7 +10172,7 @@ fn type_application(
                             txt: tctx.arena.none_lid(),
                             loc: none_loc,
                         },
-                        make_none_constructor(ctx),
+                        std::sync::Arc::new(make_none_constructor(ctx)),
                         vec![],
                     ),
                     none_loc,
@@ -17345,7 +17345,7 @@ fn type_construct(
     }
 
     Ok(Expression::new(
-        ExpressionDesc::Texp_construct(lid.clone(), cstr_desc, typed_args),
+        ExpressionDesc::Texp_construct(lid.clone(), std::sync::Arc::new(cstr_desc), typed_args),
         loc.clone(),
         result_ty,
         tctx.type_ctx.store_typed_env(env),
@@ -18533,7 +18533,7 @@ fn type_record(
             let wrapped_loc = typed_expr.exp_loc;
             let wrapped_env = typed_expr.exp_env;
             Expression::new(
-                ExpressionDesc::Texp_construct(some_lid.clone(), some_cstr, vec![typed_expr]),
+                ExpressionDesc::Texp_construct(some_lid.clone(), std::sync::Arc::new(some_cstr), vec![typed_expr]),
                 wrapped_loc,
                 label_desc.lbl_arg,
                 wrapped_env,
@@ -19766,7 +19766,7 @@ fn type_field(
     // `ty_arg` without recursively forcing paths inside the field argument type.
     unify_expression_types(tctx, typed_record.exp_loc, ty_exp, ty_res, None)?;
     Ok(Expression::new(
-        ExpressionDesc::Texp_field(Box::new(typed_record), field_lid.clone(), label_desc),
+        ExpressionDesc::Texp_field(Box::new(typed_record), field_lid.clone(), std::sync::Arc::new(label_desc)),
         loc,
         field_ty,
         tctx.type_ctx.store_typed_env(env),
@@ -20003,7 +20003,7 @@ fn type_setfield(
         ExpressionDesc::Texp_setfield(
             Box::new(typed_record),
             field_lid.clone(),
-            label_desc,
+            std::sync::Arc::new(label_desc),
             Box::new(typed_value),
         ),
         loc,
@@ -20883,7 +20883,7 @@ fn type_letexception(
     let body_ty = typed_body.exp_type;
 
     Ok(Expression::new(
-        ExpressionDesc::Texp_letexception(typed_ext_constr, Box::new(typed_body)),
+        ExpressionDesc::Texp_letexception(Box::new(typed_ext_constr), Box::new(typed_body)),
         loc.clone(),
         body_ty,
         tctx.type_ctx.store_typed_env(env),
@@ -21033,7 +21033,7 @@ fn type_extension_expr(
             loc: extension.0.loc,
         };
         let throw_expr = Expression::new(
-            ExpressionDesc::Texp_ident(throw_path, throw_lid, throw_desc),
+            ExpressionDesc::Texp_ident(throw_path, throw_lid, Box::new(throw_desc)),
             extension.0.loc,
             throw_ty,
             ctx.store_typed_env(env),
@@ -22666,7 +22666,7 @@ fn type_expect_with_module_unpacks(
     // which calls instance() on the looked-up type. Match that by instancing here.
     let unpack_inst_ty = crate::types::instance(tctx.type_ctx, unpack.ty);
     let unpack_expr = Expression::new(
-        ExpressionDesc::Texp_ident(Path::pident(unpack.id.clone()), located_lid, value_desc),
+        ExpressionDesc::Texp_ident(Path::pident(unpack.id.clone()), located_lid, Box::new(value_desc)),
         unpack.loc_idx,
         unpack_inst_ty,
         tctx.type_ctx.store_typed_env(env),
@@ -34682,7 +34682,7 @@ fn make_comptime_call(
     };
 
     let func_expr = Expression::new(
-        ExpressionDesc::Texp_ident(func_path, lid_loc, func_vd),
+        ExpressionDesc::Texp_ident(func_path, lid_loc, Box::new(func_vd)),
         LocIdx(0),
         func_type,
         EnvRef(0),

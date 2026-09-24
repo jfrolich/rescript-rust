@@ -705,7 +705,7 @@ pub fn type_info_to_typed_expr<'a>(
     };
 
     Some(typedtree::Expression::new(
-        typedtree::ExpressionDesc::Texp_construct(lid_loc, cstr_desc, args),
+        typedtree::ExpressionDesc::Texp_construct(lid_loc, std::sync::Arc::new(cstr_desc), args),
         loc,
         type_info_ty,
         env_ref,
@@ -789,7 +789,7 @@ pub fn make_bool_expr<'a>(
         loc: crate::parse_arena::LocIdx::none(),
     };
     typedtree::Expression::new(
-        typedtree::ExpressionDesc::Texp_construct(lid_loc, cstr_desc, vec![]),
+        typedtree::ExpressionDesc::Texp_construct(lid_loc, std::sync::Arc::new(cstr_desc), vec![]),
         loc,
         bool_ty,
         env_ref,

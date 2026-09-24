@@ -16010,13 +16010,13 @@ mod tests {
             exp_desc: ExpressionDesc::Texp_ident(
                 TypePath::pident(expr_path_id),
                 Located::mknoloc(LidentIdx(0)),
-                ValueDescription {
+                Box::new(ValueDescription {
                     val_type: TypeExprRef::null(),
                     val_kind: ValueKind::ValReg,
                     val_loc: Location::none(),
                     val_attributes: Vec::new(),
                     val_path: None,
-                },
+                }),
             ),
             exp_loc: LocIdx::none(),
             exp_extra: Default::default(),
