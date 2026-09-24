@@ -4100,7 +4100,10 @@ fn check_extension_constructor_variance_requirements(
         Some(ret_type) => {
             let ret_repr = ctx.repr(ret_type);
             match &*ctx.get_desc(ret_repr) {
-                crate::types::type_expr::TypeDesc::Tconstr { args, .. } => args.clone(),
+                // `let tyl = List.map Ctype.repr tyl` (typedecl.ml:1246).
+                crate::types::type_expr::TypeDesc::Tconstr { args, .. } => {
+                    args.iter().map(|arg| ctx.repr(*arg)).collect()
+                }
                 _ => ext.ext_type_params.clone(),
             }
         }
