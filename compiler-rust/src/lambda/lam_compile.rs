@@ -4694,8 +4694,6 @@ impl LambdaCompiler {
         let mut block = cond_compiled.prelude;
         block.extend(self.compile_test_return_block_with_fallback(
             cond_compiled.expr,
-            then_block_raw.clone(),
-            else_block_raw.clone(),
             then_block_raw,
             else_block_raw,
         ));
@@ -4708,13 +4706,7 @@ impl LambdaCompiler {
         then_block: Block,
         else_block: Block,
     ) -> Block {
-        self.compile_test_return_block_with_fallback(
-            cond,
-            then_block.clone(),
-            else_block.clone(),
-            then_block,
-            else_block,
-        )
+        self.compile_test_return_block_with_fallback(cond, then_block, else_block)
     }
 
     /// Separate the raw blocks used for rule-4 folding
@@ -4726,8 +4718,6 @@ impl LambdaCompiler {
     fn compile_test_return_block_with_fallback(
         &self,
         cond: Expression,
-        then_for_fold: Block,
-        else_for_fold: Block,
         then_fallback: Block,
         else_fallback: Block,
     ) -> Block {
@@ -4759,51 +4749,50 @@ impl LambdaCompiler {
         // `if (typeof ty !== "object") { ... } else { ... }` because the inner
         // flip produces a Block-wrapped 3-statement sequence; Rust's aggressive
         // fold lost that shape.)
-        let folded = match (
-            strict_single_return_expr(&then_for_fold),
-            strict_single_return_expr(&else_for_fold),
-        ) {
-            (Some(then_expr), Some(else_expr)) => Some((then_expr.clone(), else_expr.clone())),
-            _ => None,
-        };
-        match folded {
-            Some((then_expr, else_expr)) => {
-                // Go through `S.if_` instead of calling `E.econd` directly:
-                // OCaml applies the `Js_not` branch swap before the
-                // single-Return fold (compiler/core/js_stmt_make.ml:237-246).
-                vec![Statement::if_(
-                    cond,
-                    vec![Statement::return_(then_expr)],
-                    vec![Statement::return_(else_expr)],
-                )]
-            }
-            None => {
-                // OCaml S.if_ rule 5 (js_stmt_make.ml:247-248): when the
-                // else branch is *exactly* `[Return _]`, flip to
-                // `if (!cond) { return _; }` and emit the then branch as
-                // sibling statements. This matches the `if (cond) { return; }
-                // body;` early-return shape OCaml produces for function
-                // bodies like `if cond then body else ()` in return context.
-                if matches!(
-                    else_fallback.as_slice(),
-                    [stmt] if matches!(stmt.desc, StatementDesc::Return(_))
-                ) {
-                    let mut out =
-                        vec![Statement::if_(Expression::not(cond), else_fallback, vec![])];
-                    out.extend(then_fallback);
-                    // OCaml wraps the rule-5 result with `block
-                    // ({If ...} :: ifso)` (compiler/core/js_stmt_make.ml:
-                    // 247-248, with `block` at lines 37-42). That block
-                    // boundary is observable by an outer `S.if_`: it hides the
-                    // trailing return until `js_pass_flatten` runs later.
-                    return vec![Statement::block(out)];
-                }
-                // Use the normalized fallback blocks when we can't collapse
-                // to `Return(Cond)`, matching the previous behavior for
-                // non-both-single-return cases.
-                vec![Statement::if_(cond, then_fallback, else_fallback)]
-            }
+        // The fold inspects the same raw blocks that are used as the
+        // fallback; move the single return expressions out instead of
+        // cloning both branches.
+        if strict_single_return_expr(&then_fallback).is_some()
+            && strict_single_return_expr(&else_fallback).is_some()
+        {
+            let take_return = |block: Block| match block.into_iter().next().map(|stmt| stmt.desc) {
+                Some(StatementDesc::Return(expr)) => expr,
+                _ => unreachable!("strict single return block"),
+            };
+            let then_expr = take_return(then_fallback);
+            let else_expr = take_return(else_fallback);
+            // Go through `S.if_` instead of calling `E.econd` directly:
+            // OCaml applies the `Js_not` branch swap before the
+            // single-Return fold (compiler/core/js_stmt_make.ml:237-246).
+            return vec![Statement::if_(
+                cond,
+                vec![Statement::return_(then_expr)],
+                vec![Statement::return_(else_expr)],
+            )];
         }
+        // OCaml S.if_ rule 5 (js_stmt_make.ml:247-248): when the
+        // else branch is *exactly* `[Return _]`, flip to
+        // `if (!cond) { return _; }` and emit the then branch as
+        // sibling statements. This matches the `if (cond) { return; }
+        // body;` early-return shape OCaml produces for function
+        // bodies like `if cond then body else ()` in return context.
+        if matches!(
+            else_fallback.as_slice(),
+            [stmt] if matches!(stmt.desc, StatementDesc::Return(_))
+        ) {
+            let mut out = vec![Statement::if_(Expression::not(cond), else_fallback, vec![])];
+            out.extend(then_fallback);
+            // OCaml wraps the rule-5 result with `block
+            // ({If ...} :: ifso)` (compiler/core/js_stmt_make.ml:
+            // 247-248, with `block` at lines 37-42). That block
+            // boundary is observable by an outer `S.if_`: it hides the
+            // trailing return until `js_pass_flatten` runs later.
+            return vec![Statement::block(out)];
+        }
+        // Use the normalized fallback blocks when we can't collapse
+        // to `Return(Cond)`, matching the previous behavior for
+        // non-both-single-return cases.
+        vec![Statement::if_(cond, then_fallback, else_fallback)]
     }
 
     pub(crate) fn compile_switch_value_block(&mut self, result: &Ident, lam: &Lambda) -> Block {
@@ -4918,9 +4907,12 @@ impl LambdaCompiler {
                         ShortCircuitOp::And => BinOp::And,
                         ShortCircuitOp::Or => BinOp::Or,
                     };
-                    block.push(self.result_assignment(
-                        result, Expression::bin(operator, lhs.expr, rhs.expr),
-                    ));
+                    block.push(
+                        self.result_assignment(
+                            result,
+                            Expression::bin(operator, lhs.expr, rhs.expr),
+                        ),
+                    );
                 } else {
                     let mut body = rhs.prelude;
                     body.push(self.result_assignment(result, rhs.expr));
