@@ -39,27 +39,6 @@ use crate::parser::ast::{
 };
 use crate::parser::longident::Longident;
 
-/// Key for position deduplication.
-/// Two positions with the same (file_name, line, bol, cnum) are the same position.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-struct PosKey {
-    file_name: StrIdx,
-    line: i32,
-    bol: i32,
-    cnum: i32,
-}
-
-impl PosKey {
-    fn from_position(pos: &Position) -> Self {
-        Self {
-            file_name: pos.file_name,
-            line: pos.line,
-            bol: pos.bol,
-            cnum: pos.cnum,
-        }
-    }
-}
-
 // Re-export StrIdx for convenience
 pub use crate::intern::StrIdx;
 
@@ -452,6 +431,8 @@ pub struct ParseArena {
     /// Arena of positions (returns PosIdx).
     positions: Arena<Position, PosIdx>,
     position_file_names: HashMap<StrIdx, String>,
+    /// Most recent file name recorded in `position_file_names`.
+    last_position_file_name: Option<StrIdx>,
     /// Arena of locations (returns LocIdx).
     locations: Arena<InternedLocation, LocIdx>,
     /// Arena of longidents (returns LidentIdx).
@@ -601,8 +582,6 @@ pub struct ParseArena {
     static_pat_from_variant_spread_attr_str: StrIdx,
     /// Pre-allocated static longidents used by `%external` rewrite helpers.
     static_ppx_lidents: StaticPpxLidents,
-    /// Position deduplication table - maps position content to its index.
-    position_dedup: HashMap<PosKey, PosIdx>,
     /// Simple Lident deduplication table - maps StrIdx to its LidentIdx.
     /// This enables sharing of common identifiers like "()", "::", etc.
     lident_dedup: HashMap<StrIdx, LidentIdx>,
@@ -915,6 +894,7 @@ impl Default for ParseArena {
         Self {
             positions: Arena::default(),
             position_file_names: HashMap::new(),
+            last_position_file_name: None,
             locations: Arena::default(),
             longidents,
             synthetic_longidents: elsa::sync::FrozenVec::new(),
@@ -968,7 +948,6 @@ impl Default for ParseArena {
             static_constructor_from_spread_attr_str,
             static_pat_from_variant_spread_attr_str,
             static_ppx_lidents,
-            position_dedup: HashMap::new(),
             lident_dedup,
             longident_shareable_strs: HashSet::new(),
             ldot_prefix_idx_table,
@@ -1116,10 +1095,16 @@ impl ParseArena {
     // ========== Position methods ==========
 
     fn record_position_file_name(&mut self, file_name: StrIdx) {
+        // Almost every position in a parse shares one file name, so check the
+        // most recent one before hashing.
+        if self.last_position_file_name == Some(file_name) {
+            return;
+        }
         if !self.position_file_names.contains_key(&file_name) {
             self.position_file_names
                 .insert(file_name, self.get_string(file_name).to_string());
         }
+        self.last_position_file_name = Some(file_name);
     }
 
     /// Push a position into the arena and return its index.
@@ -1127,32 +1112,7 @@ impl ParseArena {
     /// PosIdx through code paths (reference sharing), not by value deduplication.
     pub fn push_position(&mut self, pos: Position) -> PosIdx {
         self.record_position_file_name(pos.file_name);
-        let key = PosKey::from_position(&pos);
-        let idx = self.positions.push(pos);
-        // Register in dedup table only if not already there (for lookup purposes)
-        self.position_dedup.entry(key).or_insert(idx);
-        idx
-    }
-
-    /// Get the index of a position if it exists in the dedup table.
-    /// Returns None if this position content hasn't been seen before.
-    #[allow(dead_code)]
-    pub fn get_position_idx(&self, pos: &Position) -> Option<PosIdx> {
-        let key = PosKey::from_position(pos);
-        self.position_dedup.get(&key).copied()
-    }
-
-    /// Push a position with deduplication - reuses an existing index if the position
-    /// content matches.
-    pub fn push_position_dedup(&mut self, pos: Position) -> PosIdx {
-        self.record_position_file_name(pos.file_name);
-        let key = PosKey::from_position(&pos);
-        if let Some(&idx) = self.position_dedup.get(&key) {
-            return idx;
-        }
-        let idx = self.positions.push(pos);
-        self.position_dedup.insert(key, idx);
-        idx
+        self.positions.push(pos)
     }
 
     /// Push a position from components.
