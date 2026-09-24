@@ -1730,13 +1730,13 @@ mod tests {
                 superseded_nodes: 25,
                 hot_node_occupied_bytes: 208,
                 hot_node_capacity_bytes: 256,
-                side_payload_shallow_occupied_bytes: 6628,
-                side_payload_shallow_capacity_bytes: 8896,
+                side_payload_shallow_occupied_bytes: 2492,
+                side_payload_shallow_capacity_bytes: 3584,
                 nested_heap_bytes_included: false,
                 current_live_side_payload_shallow_bytes: 0,
-                backend_retained_only_side_payload_shallow_bytes: 184,
+                backend_retained_only_side_payload_shallow_bytes: 104,
                 metadata_retained_only_side_payload_shallow_bytes: 0,
-                superseded_unreachable_side_payload_shallow_bytes: 6444,
+                superseded_unreachable_side_payload_shallow_bytes: 2388,
             }
         );
     }
@@ -2396,13 +2396,13 @@ mod tests {
                 superseded_nodes: 14,
                 hot_node_occupied_bytes: 112,
                 hot_node_capacity_bytes: 128,
-                side_payload_shallow_occupied_bytes: 5908,
-                side_payload_shallow_capacity_bytes: 7360,
+                side_payload_shallow_occupied_bytes: 1852,
+                side_payload_shallow_capacity_bytes: 2368,
                 nested_heap_bytes_included: false,
                 current_live_side_payload_shallow_bytes: 0,
                 backend_retained_only_side_payload_shallow_bytes: 0,
                 metadata_retained_only_side_payload_shallow_bytes: 0,
-                superseded_unreachable_side_payload_shallow_bytes: 5908,
+                superseded_unreachable_side_payload_shallow_bytes: 1852,
             }
         );
     }
