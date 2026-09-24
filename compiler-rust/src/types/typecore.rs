@@ -16725,12 +16725,15 @@ fn type_function_nary(
         let partial = if is_simple_variable_pattern(tctx.arena, tctx.arena.get_pat(source.p_pat)) {
             Partial::Total
         } else {
-            let case = crate::types::typedtree::Case {
-                c_lhs: typed.clone(),
-                c_guard: None,
-                c_rhs: typed_body.clone(),
-            };
-            check_partial_simple(ctx, env, &[case])
+            // The partiality check reads only the case pattern and guard.
+            check_partial_simple_rows(
+                ctx,
+                env,
+                &[PartialCheckCase {
+                    lhs: &typed,
+                    has_guard: false,
+                }],
+            )
         };
         typed_params.push(FunctionParam {
             fp_lbl: label.clone(),
